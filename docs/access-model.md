@@ -1,26 +1,23 @@
 # Access model — three tiers at the perimeter
 
-Status: **draft (2026-08-22, DL-146).** Designed in a three-way round: the
-user's constraints and two independent sketches, then two adversarial
-rounds to convergence. A post-build conformance round (2026-08-22) was
-folded by DL-147; a second round (2026-08-22..23) by DL-148; the code
-follow-ups and three amended passages by DL-149; the §6 code follow-ups
-and their two amended passages by DL-151; the one-resolution
-`socket_group` follow-up and its four amended passages by DL-152. Once
-frozen, each change to a frozen item requires a decision-log entry, the
-same rule as `docs/control-protocol.md`. This document retires the RBAC
-non-goal of `docs/runner-design.md` §1 and §12 and closes the
-authorization half of control-protocol §7 gap 2. The authentication half
-closes only for local peers; the web session keeps a named seam (§9).
+Status: draft (DL-146; amended by DL-147, DL-148, DL-149, DL-150, DL-151,
+DL-152 and DL-158). It is the design of record for `runner_access.py`, the
+control-plane gate and the served web TUI. It freezes when the §12
+obligations are green (DL-146); once frozen, each change to a frozen item
+requires a decision-log entry, the same rule as `docs/control-protocol.md`.
+This document retires the RBAC non-goal of `docs/runner-design.md` §1 and
+§12 and closes the authorization half of control-protocol §7 gap 2. The
+authentication half closes only for local peers; the web session keeps a
+named seam (§9).
 
 ## 0. The problem
 
-The control socket's `0600` mode is the entire access-control model today
-(control-protocol §7 gap 2). Any process running as the invoking user holds
-full `sendevent` authority. The envelope's actor field is named
-`claimed_actor` because it is a claim: a breadcrumb in the log, never an
-authorization. Operators want three grades of access: look, operate,
-administer.
+Without an access map, the control socket's `0600` mode is the entire
+access-control model (control-protocol §7 gap 2): any process running as
+the invoking user holds full `sendevent` authority. The envelope's actor
+field is named `claimed_actor` because it is a claim: a breadcrumb in the
+log, never an authorization. Operators need three grades of access: look,
+operate, administer.
 
 ## 1. The model
 
@@ -34,11 +31,11 @@ matrix.
 - **ops** — read, plus every mutating socket verb: all `sendevent` verbs,
   `host` activate/drain/evict, `seal`. Ops is destructive by design:
   `FORCE_STARTJOB`, `CHANGE_STATUS`, forced eviction and `force_seal` are
-  in it (user ruling, 2026-08-22). There is no fourth "break-glass" tier
+  in it (DL-146). There is no fourth "break-glass" tier
   and no per-verb deny overlay — that would be a second policy axis and a
   sparse flag matrix. Break-glass is a receipt category (§6), not an
   authorization dimension.
-- **adm** — ops, plus configuration. Every configuration surface today is
+- **adm** — ops, plus configuration. Every configuration surface is
   filesystem: profiles, timezone maps, anchors, the role map, retention,
   `estate prune`/`reclaim`. So adm has **no socket verbs of its own** —
   over the wire, adm and ops admit the same set. The tier exists in the
@@ -63,7 +60,7 @@ Not guarded, by ruling:
   The exemption is the filesystem path alone: a CLI request that
   arrives through `control.sock` passes the same gate as every other
   client (§5) — there is no client identity, only the peer credential.
-- **`supervisor.sock` is governed but not tiered** (v1 ruling): it
+- **`supervisor.sock` is governed but not tiered** (DL-146): it
   keeps both supervisor-protocol §5 controls — owner-`0600` and the
   same-uid peer-cred check on every accept. That check refuses a peer
   uid that differs from the owner's and admits a peer the platform
@@ -74,8 +71,8 @@ Not guarded, by ruling:
   is adm by definition (previous bullet), which contains every lower
   tier — including when the run root opens to `0710` traversal (§8).
   `supervise shutdown` can kill every managed command; it remains an
-  owner-only act. A later version may put it behind the same gate;
-  nothing in this model blocks that.
+  owner-only act. It may later be put behind the same gate; nothing in
+  this model blocks that.
 
 ## 3. Local authentication: kernel peer credentials
 
@@ -147,12 +144,15 @@ Resolution, in order:
    section.
 
 Validation refuses: duplicate subjects, unknown fields, unknown tiers,
-wildcards, a subject without a realm, a map over the loader's 1 MiB
-ceiling (DL-149), and a `socket_group` this host does not know — the
-loader resolves the named group to a gid and carries it on the loaded
-policy, so the group is looked up exactly once and an unusable one
-refuses like any other unusable field *(Amended by DL-152.)*. The
-loader opens the file without following symlinks (and non-blocking: a
+wildcards, a subject without a realm, a `format_version` that is not the
+integer 1, an `unmapped` outside deny/read, a `socket_group` that is not a
+non-empty string, a `binding` that is not an array, a row that does not
+hold exactly `subject` and `tier`, a map over the loader's 1 MiB ceiling
+(DL-149), and a `socket_group` this host does not know: the loader
+resolves the named group to a gid and carries it on the loaded policy, so
+the group is looked up exactly once and an unusable one refuses like any
+other unusable field (DL-152). The loader opens the file without
+following symlinks (and non-blocking: a
 FIFO refuses instead of parking startup) and checks four predicates —
 the parent before the open, the file on the opened descriptor:
 
@@ -172,9 +172,10 @@ place the map under a root-owned path (`/etc`, or the estate owner's
 home) rather than under a world-writable tree. The map lives outside
 the sealed estate artifacts; it is policy, not evidence.
 
-**Configured vs absent is explicit.** No `access_map` configured: today's
-model stands — socket `0600`, owner-only, nothing changes for zero-config
-estates. `access_map` configured but the file is missing, unreadable, or
+**Configured vs absent is explicit.** No `access_map` configured: the
+zero-config model stands, socket `0600`, owner-only, and nothing changes
+for such estates. `access_map` configured but the file is missing,
+unreadable, or
 invalid: **startup refuses**; on reload, the old policy stays and the
 refused candidate gets a best-effort failure receipt — descriptor I/O
 errors and parser errors of every kind are wrapped into the same
@@ -183,8 +184,8 @@ one. A configured path
 never silently falls back to owner-wide authority. The preflight
 refusal writes nothing: the same loader that arming runs is called
 read-only first — `socket_group` resolution is part of that load —
-before the run root is claimed or the WAL opened *(Amended by
-DL-152.)*. Arming re-validates after the root is claimed; a failure
+before the run root is claimed or the WAL opened (DL-152). Arming
+re-validates after the root is claimed; a failure
 there — re-validation, journal
 recovery, the arming receipt's sync, the group grant — still refuses,
 but the claimed root and its WAL already exist by then. The receipt
@@ -209,11 +210,11 @@ was `0700` until this moment.
 
 The gate sits in `ControlServer._handle`, before the `cmd` split — the
 one place both `_respond` and `_subscribe` pass through (`subscribe`
-owns its connection and skips `_respond`; DL-90 already taught this
-lesson for the version check). Nothing reaches `Engine.submit`
+owns its connection and skips `_respond`, for the same reason as the
+version check, DL-90). Nothing reaches `Engine.submit`
 unauthorized. The engine, oracle and journal stay authz-free.
 
-Two doors precede the gate, in the shipped order: the line must decode
+Two doors precede the gate, in this order: the line must decode
 to a JSON object, and the request must name `v: 3` (control-protocol
 §2). A malformed or wrong-version request is answered before
 classification; it reaches neither the policy nor the perimeter
@@ -225,9 +226,8 @@ Per request:
 2. One immutable policy snapshot (§7) with its generation number.
 3. Classify `cmd` against the closed table (§10). Unknown or unlisted →
    denied. The verb inside `sendevent`/`host` is deliberately NOT a
-   second classification axis (one gate — the dispatcher already owns
-   verb validity, DL-145 defect-2's lesson); it rides in the receipt
-   label only.
+   second classification axis (one gate; the dispatcher already owns
+   verb validity, DL-145 defect 2); it appears in the receipt label only.
 4. Compare granted tier with required tier.
 5. Denied → perimeter receipt (§6), answer `ok: false, refused: true`
    with prose naming the tier gap. A denial consumes no engine index and
@@ -235,7 +235,7 @@ Per request:
    malformed line, the version refusal, the credential refusal — the
    denial carries no read header: the header is stamped only on the
    answer of a request that passed routing and the lineage proof
-   (control-protocol §2 as amended by DL-148), and a perimeter denial
+   (control-protocol §2, DL-148), and a perimeter denial
    is sent before either.
 6. Admitted → stamp the authenticated principal, continue to the
    existing dispatcher unchanged.
@@ -340,7 +340,7 @@ not know; an incompatible change takes a NEW kind name, the same move
 the WAL makes for record kinds. Unknown kinds are skipped, not refused:
 no engine dispatches this journal (seq recovery reads only `access_seq`;
 everything else reads it as an audit trail), so there is no per-record
-version field to refuse on. There is no physical roll in v1: the
+version field to refuse on. There is no physical roll: the
 journal is one append-only file for the life of its run root, pruned
 only with that root — truncating it in place would restart `access_seq`
 and forge duplicate keys. The writer trusts the path it owns:
@@ -375,8 +375,8 @@ effort); reload does not raise. Startup with a configured but
 invalid map, or one whose arming receipt cannot be synced, refuses
 (§4).
 
-`socket_group` is fixed at arming — the name AND the gid it resolved
-to *(Amended by DL-152.)*: a reload that names a different group, or
+`socket_group` is fixed at arming, the name AND the gid it resolved to
+(DL-152): a reload that names a different group, or
 whose group has been re-numbered under this engine, is refused whole
 (`policy_reload_failed`) — the kernel side of the grant cannot follow
 a map edit, and a half-applied change is worse than a restart. When
@@ -401,19 +401,20 @@ Connections are **kept** across reload:
 
 ## 8. Filesystem modes
 
-The run root is forced `0700` today (`runner_startup`), so a `0660`
-socket alone is unreachable — parent traversal must be granted
-deliberately. Arming has two modes, chosen by the map:
+The run root is forced `0700` (`runner_startup`), so a `0660` socket
+alone is unreachable; parent traversal must be granted deliberately.
+Arming has two modes, chosen by the map:
 
 - **Armed, owner-only** (`socket_group` absent): the gate, the
   receipts and the actor overwrite are all live, and every mode stays
-  exactly as today (`0700` root, `0600` socket, children untouched).
+  as in the zero-config model (`0700` root, `0600` socket, children
+  untouched).
   Nobody but the owner reaches the socket; the perimeter is an audit
   and policy layer for the owner's own connections, and a staging step
   before a group grant.
 - **Armed, group-open** (`socket_group` named): run root `0710`, group
   = `socket_group`, resolved to its gid by the loader (§4) and applied
-  here *(Amended by DL-152.)* — execute-only traversal, no listing.
+  here (DL-152): execute-only traversal, no listing.
   `control.sock` becomes `0660`, owner unchanged (the run-root owner),
   group `socket_group`. The `0700` root was the fence for its children
   (`logs/` and `runs/` are born under the process umask, `0755` by
@@ -424,8 +425,8 @@ deliberately. Arming has two modes, chosen by the map:
   changes, §4); later artifacts land inside those directories.
   A test asserts nothing but the socket is group-accessible after
   arming. `supervisor.sock` stays `0600` (§2).
-- Access not configured: everything stays exactly as today (`0700`,
-  `0600`). No gate or actor overwrite is active, and no new perimeter
+- Access not configured: everything stays as in the zero-config model
+  (`0700`, `0600`). No gate or actor overwrite is active, and no new perimeter
   receipt is attempted (§4); a `perimeter.jsonl` left by an earlier
   armed incarnation stays where it is, for the life of the root (§6).
 - Sockets are created owner-only (`0600`, from the umask at bind), the
@@ -446,7 +447,7 @@ deliberately. Arming has two modes, chosen by the map:
 
 ## 9. The web tier
 
-v1 ships **per-tier serve instances**: one `textual-serve` under a
+The web tier is **per-tier serve instances**: one `textual-serve` under a
 dedicated OS service account per exposed tier (`svc-dsl41-web-read`,
 `svc-dsl41-web-ops`). The corporate proxy authenticates the browser —
 PAM, LDAP, Entra, client certs, whatever the estate runs — and routes
@@ -468,11 +469,10 @@ Consequences, stated plainly:
   perimeter never widens logs itself. The OS account is the
   containment; grant per tier.
 - Receipts identify the tier's service account, not the human in the
-  browser. That loss is accepted for v1; the proxy's own log carries the
-  human. The deferred seam is named **`web-session-principal-v2`**: a
+  browser. That loss is accepted; the proxy's own log carries the human.
+  The deferred seam is named **`web-session-principal-v2`**: a
   per-session principal asserted by a broker over an explicitly trusted
-  channel (the round-1 broker sketch is the reference design). No v1 code
-  anticipates it.
+  channel (reference design in DL-146). No code anticipates it.
 
 ## 10. The verb table
 
@@ -503,8 +503,8 @@ CLI semantic tiers (enforcement is the filesystem, §2): `query *`,
 `rehearse`, and every pure-compiler verb are read-shaped; `sendevent`,
 `host activate`/`drain`/`evict`, `supervise shutdown` are ops;
 `run`, `serve`, `audit` (writes attestations and registry state),
-`seal` (stages C2 files before the ops verb — a later slice may split
-staging from committing), `estate prune`, `estate reclaim` are adm.
+`seal` (stages C2 files before the ops verb; staging may later be split
+from committing), `estate prune`, `estate reclaim` are adm.
 `supervise shutdown` is ops-shaped — it operates, it configures
 nothing — while its only door is the owner-`0600` supervisor socket
 (§2), so the enforcement (owner = adm by definition) exceeds the tier
@@ -523,14 +523,14 @@ courtesy; the server refusal is the authority either way.
 - No plugin API. The seam is the role map and, later, the asserted
   principal — protocol seams, not loader seams.
 - `web-session-principal-v2` (§9): per-session web identity.
-- Supervisor socket under the gate: possible later, out of v1 (§2).
+- Supervisor socket under the gate: possible later (§2).
 - Splitting CLI `seal` staging (adm) from committing (ops) (§10).
 - Error codes on denials (control-protocol §7 gap 4 stands).
 
 ## 12. Test obligations
 
-Tests are named `test_access_*`. The set that must exist before this
-document freezes:
+Tests are named `test_access_*`. The set that must be green before this
+document freezes (DL-146):
 
 1. Zero-config estates: no behavior change anywhere (the whole existing
    suite is the fixture).
