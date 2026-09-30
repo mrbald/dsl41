@@ -45,6 +45,11 @@ tag (branch point if there is no such tag) exceeds 800 changed lines. That
 is the whole trigger: signal, not calendar. Reviewing unchanged code on a
 schedule is waste.
 
+It also reports, per specification under docs/, whether a spec review is
+due: a document with no `spec-review/<stem>/*` tag, or with more than 800
+lines changed under src/ since its newest one, is due. Advisory only;
+`--spec-status` prints the table. It stays silent in a shallow clone.
+
 Usage:
     python scripts/arch_check.py                 # gate
     python scripts/arch_check.py --update-baseline
@@ -882,14 +887,77 @@ def changed_lines_since_review() -> tuple[int, str] | None:
     return changed, ref
 
 
+#: the first two are logs, the third is dated evidence, none is a
+#: specification.
+SPEC_EXCLUDED = ("decision-log.md", "citation-index.md", "agent-harness-review.md")
+
+
+def spec_documents(root: Path = ROOT) -> list[Path]:
+    """docs/*.md files eligible for a spec review, excluding SPEC_EXCLUDED."""
+    return sorted(p for p in (root / "docs").glob("*.md") if p.name not in SPEC_EXCLUDED)
+
+
+class SpecStatus(NamedTuple):
+    doc: str
+    tag: str | None
+    changed: int | None
+    due: bool
+
+
+def spec_review_status(root: Path = ROOT) -> list[SpecStatus] | None:
+    """The per-document counterpart of changed_lines_since_review(): the newest
+    spec-review/<stem>/* tag, and lines changed under src/ since it. No tag,
+    or a git failure reading the diff, both count as due. Returns None when
+    git is unavailable or the clone is shallow, so a checkout that cannot see
+    tags stays silent."""
+    shallow = _git("rev-parse", "--is-shallow-repository")
+    if shallow is None or shallow == "true":
+        return None
+    statuses: list[SpecStatus] = []
+    for doc in spec_documents(root):
+        rel = str(doc.relative_to(root))
+        tags = _git("tag", "--list", f"spec-review/{doc.stem}/*", "--sort=-creatordate")
+        tag = tags.splitlines()[0] if tags else None
+        changed: int | None = None
+        if tag is not None:
+            stat = _git("diff", "--shortstat", tag, "HEAD", "--", "src")
+            if stat is not None:
+                changed = sum(int(n) for n in re.findall(r"(\d+) (?:insertion|deletion)", stat))
+        due = tag is None or changed is None or changed > REVIEW_DIFF_LINES
+        statuses.append(SpecStatus(rel, tag, changed, due))
+    return statuses
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument(
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
         "--update-baseline",
         action="store_true",
         help="rewrite scripts/arch_baseline.json from the current tree",
     )
+    group.add_argument(
+        "--spec-status",
+        action="store_true",
+        help="print per-document spec review status and exit",
+    )
     args = parser.parse_args(argv)
+
+    if args.spec_status:
+        statuses = spec_review_status()
+        if statuses is None:
+            print(
+                "spec review status unavailable: not a git repository, or a shallow clone without tags"
+            )
+            return 0
+        doc_width = max((len(s.doc) for s in statuses), default=0)
+        tag_width = max((len(s.tag or "never") for s in statuses), default=0)
+        for status in statuses:
+            tag = status.tag or "never"
+            changed = "-" if status.changed is None else str(status.changed)
+            due = "due" if status.due else "ok"
+            print(f"{status.doc:<{doc_width}}  {tag:<{tag_width}}  {changed:>5}  {due}")
+        return 0
 
     src_files = sorted(SRC.glob("*.py"))
 
@@ -951,6 +1019,16 @@ def main(argv: list[str] | None = None) -> int:
         reasons.append(f"{drift[0]} lines changed since {drift[1]}")
     if reasons:
         print(f"architecture review due -- run /arch-review ({'; '.join(reasons)})")
+
+    spec_statuses = spec_review_status()
+    if spec_statuses is not None:
+        due_specs = sum(1 for s in spec_statuses if s.due)
+        if due_specs:
+            print(
+                f"spec review due -- run /spec-review "
+                f"({due_specs} of {len(spec_statuses)} documents; see --spec-status)"
+            )
+
     return 1 if blocking else 0
 
 

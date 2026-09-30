@@ -312,6 +312,9 @@ def _tree(
     monkeypatch.setattr(arch_check, "SRC", src)
     monkeypatch.setattr(arch_check, "BASELINE_PATH", tmp_path / "missing-baseline.json")
     monkeypatch.setattr(arch_check, "changed_lines_since_review", lambda: (drift, "arch-review/x"))
+    # keep the pre-existing main() tests off real git; the tests that care
+    # about spec review status set their own patch after calling _tree.
+    monkeypatch.setattr(arch_check, "spec_review_status", lambda: None)
 
 
 def test_main_exits_0_and_says_nothing_when_the_tree_is_clean(
@@ -363,6 +366,191 @@ def test_main_escalates_on_accumulated_diff_alone(
     out = capsys.readouterr().out
     assert "arch_check: clean" in out
     assert f"{arch_check.REVIEW_DIFF_LINES + 1} lines changed since arch-review/x" in out
+
+
+# ------------------------------------------------------------- spec review due
+
+
+def test_spec_documents_excludes_logs_and_sorts(tmp_path: Path) -> None:
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    for name in ["zebra.md", "alpha.md", "decision-log.md", "citation-index.md"]:
+        _write(docs / name, "x")
+    assert [p.name for p in arch_check.spec_documents(tmp_path)] == ["alpha.md", "zebra.md"]
+
+
+def test_spec_review_status_reports_per_document_due_states(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    names = ["never.md", "below.md", "exact.md", "over.md", "empty.md", "brokendiff.md", "two.md"]
+    for name in names:
+        _write(docs / name, "x")
+
+    tags = {
+        "never": "",
+        "below": "spec-review/below/2026-01-01",
+        "exact": "spec-review/exact/2026-01-01",
+        "over": "spec-review/over/2026-01-01",
+        "empty": "spec-review/empty/2026-01-01",
+        "brokendiff": "spec-review/brokendiff/2026-01-01",
+        "two": "spec-review/two/2026-02-01\nspec-review/two/2026-01-01",
+    }
+    diffs = {
+        "spec-review/below/2026-01-01": " 2 files changed, 3 insertions(+), 4 deletions(-)",
+        "spec-review/exact/2026-01-01": (
+            f" 1 file changed, {arch_check.REVIEW_DIFF_LINES} insertions(+)"
+        ),
+        "spec-review/over/2026-01-01": (
+            f" 1 file changed, {arch_check.REVIEW_DIFF_LINES + 1} insertions(+)"
+        ),
+        "spec-review/empty/2026-01-01": "",
+        "spec-review/two/2026-02-01": " 1 file changed, 1 insertion(+)",
+    }
+
+    def fake_git(*args: str) -> str | None:
+        if args == ("rev-parse", "--is-shallow-repository"):
+            return "false"
+        if args[0] == "tag":
+            stem = args[2].split("/")[1]
+            expected = ("tag", "--list", f"spec-review/{stem}/*", "--sort=-creatordate")
+            assert args == expected, args
+            return tags[stem]
+        if args[0] == "diff":
+            tag = args[2]
+            expected = ("diff", "--shortstat", tag, "HEAD", "--", "src")
+            assert args == expected, args
+            if tag == "spec-review/brokendiff/2026-01-01":
+                return None
+            if tag == "spec-review/two/2026-01-01":
+                raise AssertionError("must diff against the newest tag only")
+            return diffs[tag]
+        raise AssertionError(args)
+
+    monkeypatch.setattr(arch_check, "_git", fake_git)
+    statuses = {s.doc: s for s in arch_check.spec_review_status(tmp_path)}
+
+    never = statuses["docs/never.md"]
+    assert never.tag is None
+    assert never.changed is None
+    assert never.due
+
+    below = statuses["docs/below.md"]
+    assert below.tag == "spec-review/below/2026-01-01"
+    assert below.changed == 7
+    assert not below.due
+
+    exact = statuses["docs/exact.md"]
+    assert exact.changed == arch_check.REVIEW_DIFF_LINES
+    assert not exact.due
+
+    over = statuses["docs/over.md"]
+    assert over.changed == arch_check.REVIEW_DIFF_LINES + 1
+    assert over.due
+
+    empty = statuses["docs/empty.md"]
+    assert empty.changed == 0
+    assert not empty.due
+
+    broken = statuses["docs/brokendiff.md"]
+    assert broken.changed is None
+    assert broken.due
+
+    two = statuses["docs/two.md"]
+    assert two.tag == "spec-review/two/2026-02-01"
+    assert two.changed == 1
+    assert not two.due
+
+
+def test_spec_review_status_is_none_when_git_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(arch_check, "_git", lambda *args: None)
+    assert arch_check.spec_review_status(tmp_path) is None
+
+
+def test_spec_review_status_is_none_when_the_clone_is_shallow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_git(*args: str) -> str | None:
+        if args == ("rev-parse", "--is-shallow-repository"):
+            return "true"
+        raise AssertionError(args)  # a shallow clone can't see tags, so ask nothing else
+
+    monkeypatch.setattr(arch_check, "_git", fake_git)
+    assert arch_check.spec_review_status(tmp_path) is None
+
+
+def test_main_advises_a_spec_review_for_the_due_fraction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _tree(tmp_path, monkeypatch, "X = 1\n", drift=10)
+    statuses = [
+        arch_check.SpecStatus("docs/a.md", "spec-review/a/x", 5, False),
+        arch_check.SpecStatus("docs/b.md", None, None, True),
+    ]
+    monkeypatch.setattr(arch_check, "spec_review_status", lambda: statuses)
+    assert arch_check.main([]) == 0
+    out = capsys.readouterr().out
+    assert "spec review due -- run /spec-review (1 of 2 documents; see --spec-status)" in out
+
+
+def test_main_says_nothing_about_spec_review_when_none_are_due(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _tree(tmp_path, monkeypatch, "X = 1\n", drift=10)
+    statuses = [arch_check.SpecStatus("docs/a.md", "spec-review/a/x", 5, False)]
+    monkeypatch.setattr(arch_check, "spec_review_status", lambda: statuses)
+    assert arch_check.main([]) == 0
+    assert "spec review due" not in capsys.readouterr().out
+
+
+def test_main_says_nothing_about_spec_review_when_status_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _tree(tmp_path, monkeypatch, "X = 1\n", drift=10)
+    monkeypatch.setattr(arch_check, "spec_review_status", lambda: None)
+    assert arch_check.main([]) == 0
+    assert "spec review due" not in capsys.readouterr().out
+
+
+def test_main_spec_status_prints_the_table_and_skips_other_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _tree(tmp_path, monkeypatch, "from dsl41.oracle import _TERMINAL\n", drift=10)
+    statuses = [
+        arch_check.SpecStatus("docs/a.md", None, None, True),
+        arch_check.SpecStatus("docs/b.md", "spec-review/b/x", 5, False),
+    ]
+    monkeypatch.setattr(arch_check, "spec_review_status", lambda: statuses)
+    assert arch_check.main(["--spec-status"]) == 0
+    out = capsys.readouterr().out
+    assert "docs/a.md" in out
+    assert "never" in out
+    assert "docs/b.md" in out
+    assert "spec-review/b/x" in out
+    assert "ok" in out
+    assert "BLOCK" not in out  # the blocking src/ import was never scanned
+
+
+def test_main_spec_status_reports_when_status_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _tree(tmp_path, monkeypatch, "X = 1\n", drift=10)
+    monkeypatch.setattr(arch_check, "spec_review_status", lambda: None)
+    assert arch_check.main(["--spec-status"]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "spec review status unavailable: not a git repository, or a shallow clone without tags"
+        in out
+    )
+
+
+def test_main_rejects_spec_status_and_update_baseline_together() -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        arch_check.main(["--spec-status", "--update-baseline"])
+    assert excinfo.value.code == 2
 
 
 # ------------------------------------------------------ 5. state-owner bypasses (DL-82)
