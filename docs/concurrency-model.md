@@ -1,6 +1,9 @@
 # Concurrency model — the frozen contract
 
-Status: frozen (2026-08-14, DL-84). Normative for every input that reaches
+Status: frozen (DL-84; amended by DL-86, DL-90, DL-94, DL-95, DL-96,
+DL-97, DL-100, DL-101, DL-102, DL-103, DL-109, DL-111, DL-112, DL-118,
+DL-120, DL-130, DL-138, DL-147, DL-150, DL-151 and DL-210, each cited where
+it applies). Normative for every input that reaches
 the oracle and every effect that leaves the engine, in the same way
 `docs/control-protocol.md` is normative for the control plane and
 `docs/supervisor-protocol.md` for the lifecycle tier. Each change to a
@@ -10,40 +13,16 @@ This document is stage S0 of the programme in §10. It exists because §4
 and §5 cannot be built against an open storage or identity question
 without being rebuilt when it closes.
 
-Proving ground: `examples/nightbank`. Its own test file recorded the gap
-this programme closes — *"the live-engine path is exercised manually via
-the RUNBOOK; these tests pin what CI can pin."* Every property here is a
-property of that estate under injected faults, not an assertion in prose.
-
-*(Amended by DL-109, at build — stage S7b.* The virtual-clock half of that
-sentence is now false, which was the point of writing it down. CM-14 and
+Proving ground: `examples/nightbank`. Every property here is a property of
+that estate under injected faults, not an assertion in prose. CM-14 and
 CM-09 are checked over the real 82-job night under seeded interleavings of
-every fault one host can suffer — §9's "property of that estate under
-injected faults", held rather than promised. The real-PROCESS half stands:
-§9 calls it a separate tier and it is S7c.*)*
-
-*(Amended by DL-112, at build — stage S7c.* That half is now held for the
-layers that had none. S0–S4 each got a process tier as they landed; S5 and
-S6 did not, so the mutex, the fence, the barrier's re-drive and the routing
-table were all proved by one interpreter talking to itself. They are now
-proved by two OS processes, or by one and the kernel:
-`tests/test_runner_leadership.py`. What stays deliberately virtual is
-arithmetic — waiting out §8's real `T_kill` proves nothing a controlled
-clock does not.*)*
-
-*(Amended by DL-150 — a conformance round against the shipped runner.*
-Thirty-six findings held. Every one was a defect in this document, not in
-the code, and no code changed. The corrections are folded **in place**
-rather than added as blocks below: they repair sentences that had gone
-stale, and a block per repair would bury the rule it repairs. §0 through
-§11 all moved. The four largest: the log's unit is one estate of
-period-bounded segments, not one run root (§2); the semantic projection is
-stated for all three entity kinds (§3); the wire is v3 and `expect` has a
-third namespace (§6); the catalog is immutable per PERIOD (§11). The code
-follow-ups the round found are recorded in that entry, not here.*)*
-
-Already landed: DL-82 (state ownership), DL-83 (the spawn-window signal
-fix and the derived-field gate).
+every fault one host can suffer (S7b, DL-109). Where the mechanism is the
+kernel's, the property is held by two OS processes, or by one and the
+kernel: the mutex, the fence, the barrier's re-drive and the routing table
+are proved in `tests/test_runner_leadership.py` (S7c, DL-112). What stays
+deliberately virtual is arithmetic: waiting out §8's real `T_kill` proves
+nothing a controlled clock does not. DL-150's conformance round against
+the runner corrected this document in place, not the code.
 
 ## 0. The invariant
 
@@ -56,8 +35,8 @@ observations are ordered *consequences* of applying an input, not
 independent writes, and are outside the rule by design — an operator
 cannot hold a revision on a state that only the semantics may change.
 
-*(Amended by DL-90, at build.* The consequence sentence above has a
-sharper edge than it reads. A timer firing inside an input's **own**
+The consequence sentence above has a
+sharper edge than it reads (DL-90). A timer firing inside an input's **own**
 batch — a `term_run_time` deadline due at exactly that input's timestamp
 — does not invalidate that input's precondition: §3 gives one input one
 increment, applied at commit, so everything an input causes shares its
@@ -68,7 +47,7 @@ unsatisfiable. The same deadline due strictly earlier fires as its own
 input, bumps the revision, and does invalidate them — which is the case
 an operator meets. What stands between an operator and a job that ended a
 moment ago is the semantics, not concurrency control. Both halves are
-tested.*)*
+tested.
 
 **Enforcement point.** The mandate is one function
 (`runner_admission.parse_envelope`), not a rule each transport
@@ -112,10 +91,9 @@ Kafka alone does not satisfy this. It supplies the ordered log and leaves
 election and the outbox transaction beside it — two consistency stories
 where the model needs one.
 
-*(Amended by DL-100, at build — stage S6a.* What provides the contract
-today, and where that stops.
+What provides the contract, and where that stops (DL-100, S6a).
 
-**Two of these five landed with S2 without being named.** Decision lookup
+**Two of these five are S2's.** Decision lookup
 by `request_id` IS the `DecisionIndex`; atomic multi-record commit IS the
 one-line attempt record, a batch no crash can tear in half because it is a
 single append. S6a is the other three, on the substrate that exists: an
@@ -142,7 +120,7 @@ socket file, not an election.
 host and for nothing else: a lock on a local filesystem is not a
 linearizable leader record for a second machine, and on NFS it is not one
 at all. The relay DL-97 deferred still waits on the shared store this
-section describes. What it gets from S6a is a fencing token that moves.*)*
+section describes. What it gets from S6a is a fencing token that moves.
 
 ## 2. Identity
 
@@ -153,8 +131,7 @@ section describes. What it gets from S6a is a fencing token that moves.*)*
 | effects | one effect | `effect_id` **bound to** `executor_id` and `generation` |
 | execution host | one relay | `host_id`, `generation` (§8) |
 
-The log's unit was one run root before the period model. It is one
-estate now: a lineage of period-bounded segments that may share a run
+The log's unit is one estate: a lineage of period-bounded segments that may share a run
 root, each period carrying its own `baseline_id` (`docs/period-model.md`
 §1, §2.1). `epoch` and the two indices stay monotone across a boundary.
 
@@ -175,12 +152,13 @@ form and is replaced here — this evolves it, it does not undo it. Note
 that `model_copy(update=)` does **not** validate, so the owner needs a
 validating construction path.
 
-*(Amended by DL-86, at build.* This paragraph listed a `cancel_timer`
-alongside `enqueue_timer`. There is no caller and cannot be one yet: the
-oracle discards a superseded timer at FIRE time, and a fire advances the
+There is no `cancel_timer` beside `enqueue_timer` (DL-86): there is no
+caller and cannot be one, because the oracle discards a superseded timer
+at FIRE time, and a fire advances the
 clock and runs the lazy checks on its way past, so dropping the entry
-early is not behaviour-preserving. It arrives if S2's decision index needs
-it, with a trace test for the clock difference — not as dead code now.*)*
+early is not behaviour-preserving. It arrives only if a decision index
+ever needs it, with a trace test for the clock difference, never as dead
+code.
 
 **Cardinality.** One increment per entity per committed input, and only
 when that entity's semantic projection differs from its pre-input value.
@@ -215,37 +193,29 @@ accompanies a projected entity change: `_CapacityPool`, its waiter order,
 `_box_ran`, and `_run_started_at`. An untested invariant here is the
 thing this document exists to remove.
 
-*(Settled by DL-86, at build.* `_box_ran` MOVED — it is
-`JobRuntime.ran_members` on the box row, projected with the entity it
-describes. `_run_started_at` was write-only: assigned on every start and
-read nowhere, so it was never state and is deleted. `_CapacityPool` and
-its waiter order STAYED, under two tested invariants — the waiter set is
-exactly the QUE_WAIT jobs, and only a starting or running job holds units
-— so no pool change is constructible without a row change to carry it.
-The waiter ORDER needs no token of its own, unlike the timer heap: a
-waiter's rank is fixed at its QUE_WAIT transition, which is itself a
-projected change, so replaying the transitions replays the order. A timer
-can be armed by an input that changes no row at all — a second schedule
-tick arms a second `must_start` deadline and finds the job already armed —
-which is exactly why the heap carries a token and the queue does not.*)*
-
-*(Amended by DL-120, at build — U1.* The pool did not stay. DL-86's
-argument — "replaying the transitions replays the order" — is true only while
-replay starts at genesis, and a seal does not; and `_bucket_used` summed units
-held by live runs with units permanently spent (DL-50), so a checkpoint
-recomputing usage from holders would have refunded every depletable. The
-inventory is now closed: `reservations` and `waiter_seq` are `JobRuntime`
+Of the four: `_box_ran` is `JobRuntime.ran_members` on the box row,
+projected with the entity it describes, and `_run_started_at` does not
+exist, because it was write-only and never state (DL-86). The capacity
+pool and its waiter order do not stay outside (DL-120): DL-86's argument
+for leaving them there, "replaying the transitions replays the order", is
+true only while replay starts at genesis, and a seal does not; and a pool
+that summed units held by live runs with units permanently spent (DL-50)
+would let a checkpoint recomputing usage from holders refund every
+depletable. A timer can be armed by an input that changes no row at all
+(a second schedule tick arms a second `must_start` deadline and finds the
+job already armed), which is why the heap carries a token. The
+inventory is closed: `reservations` and `waiter_seq` are `JobRuntime`
 fields, projected with the row; `consumed` and `enqueue_counter` are under
 `RuntimeState`; `CapacityPool` is a pure function of (catalog, rows,
-consumed). `docs/period-model.md` §5 is normative.*)*
+consumed). `docs/period-model.md` §5 is normative.
 
 **Completeness is structural, not statistical.** One feed mutates several
 fields, so a missed site hides behind a sibling's write — `_run` sets
 `armed`, `run_number` and `started_by` and then sets status twice, so one
 touch inside `_set_status` masks every missed site in that feed and the
 property test still passes. The guard is therefore the owner plus the
-blocking gate in `scripts/arch_check.py` (landed; DL-83 derives its
-watched set from the model's AST so it cannot silently narrow when
+blocking gate in `scripts/arch_check.py` (DL-83 derives its watched set
+from the model's AST so it cannot silently narrow when
 `state_rev` is added). The property test stays as corroboration, carrying
 the safety direction and a cardinality assertion, with its generator
 widened past its current STATUS / SET_GLOBAL focus.
@@ -285,7 +255,7 @@ Steps 5–7 must not yield to another state-changing input.
 
 **Worked example — one operator kill, three lines.** A job running at run 1,
 revision 1. An operator sends `KILLJOB` naming that revision. This is what
-the log gets from a run of the shipped code, with the hashes elided and
+the log gets from a run, with the hashes elided and
 the keys in reading order rather than the sorted order the writer emits:
 
 ```jsonl
@@ -308,15 +278,14 @@ different questions: *what was asked* (with the revision it was asked
 against), *what was decided* (and which revisions moved), *what that
 implied* (before it was attempted), and *what came of it*.
 
-*(Amended by DL-118, period-model §2.3.* The decision and its effects were
-two records here — `result`, then one `effect` per intent — each its own
-fsync. Step 7 says "atomically"; two fsyncs are not that (CM-17). They are
-now one `decision` line. The effect also gained two fields: `run_id` — the
+The decision and its effects are one `decision` line (DL-118; period-model
+§2.3): step 7 says "atomically", and two fsyncs are not that (CM-17). The
+effect carries two fields beyond the intent: `run_id` — the
 KILL names the identity its run's SPAWN minted in its own decision
 transaction (PR-36a), which closes the "`run_id` is not bound before the
 attempt" deviation DL-96 recorded in §5 below for the local engine — and
 `generation`, the host row's value at birth (PR-16). Nothing else in the
-example moved.*)
+example is different.
 
 Now change one thing at a time:
 
@@ -336,21 +305,19 @@ Now change one thing at a time:
   own verbless input, takes the index, moves the revision — and the
   operator's command, composed against the old one, is rejected on
   arrival. Due at the *same* instant instead, it fires inside this input's
-  own batch and does not invalidate it (§0's amendment; both halves are
+  own batch and does not invalidate it (§0, DL-90; both halves are
   pinned).
 
-*(Amended by DL-111, at build.* Step 4 above says the batch is
-"`TimeAdvanced(at)` + `InputAttempt`" — two records. It is one: the `input`
-line's own `at` IS the time observation, and `Journal.admit` makes a single
-`_write` call. That is the stronger form of what step 4 asks for, and the
-code says so where it lives ("one line, so the batch it carries cannot be
-torn in half by a crash"); §1's own DL-100 amendment already describes it
-that way — "atomic multi-record commit IS the one-line attempt record".
-The `advance` record is a different thing and still exists: a time
-observation with no verb, which is the other half of the input alphabet
-(DL-44). The code comments this amendment called wrong have been
-corrected: they now describe `TimeAdvanced` and the attempt as two
-logical halves carried by one record.*)*
+Step 4's batch, "`TimeAdvanced(at)` + `InputAttempt`", is one record, not
+two (DL-111): the `input` line's own `at` IS the time observation, and
+`Journal.admit` makes a single `_write` call. That is the stronger form of
+what step 4 asks for, and the code says so where it lives ("one line, so
+the batch it carries cannot be torn in half by a crash"); §1 describes it
+the same way (DL-100): "atomic multi-record commit IS the one-line attempt
+record". The `advance` record is a different thing and still exists: a
+time observation with no verb, which is the other half of the input
+alphabet (DL-44). The code comments describe `TimeAdvanced` and the
+attempt as two logical halves carried by one record.
 
 **Replay is two-pass.** `ApplyResult` is appended *after* `InputAttempt`,
 so replay cannot meet an attempt and skip it by kind: it builds the
@@ -408,8 +375,8 @@ run N is still "current" after run N has been TERMINATED.
   epoch.
 
 Per-run effect ordering is mandatory. The SPAWN→SIGNAL race this depends
-on is already closed (DL-83): a live wrapper with no spawn record answers
-`not_ready`, so a kill can no longer be persisted as an applied no-op.
+on is closed (DL-83): a live wrapper with no spawn record answers
+`not_ready`, so a kill cannot be persisted as an applied no-op.
 
 **Worked example — the delayed spawn that outlives its own run.**
 Supersession by exact desired state reads as an arbitrary choice until you
@@ -464,8 +431,7 @@ invent. The effect leaves `pending()`, so no later drain re-drives it
 blindly: *nothing was tried* and *something was tried and cannot be
 reported on* stay different facts.
 
-*(Amended by DL-111, at build.* Writing those examples put three of this
-section's own sentences against the code, and the code won all three.
+Three corrections to this section follow from the examples (DL-111).
 
 **The states are FOUR, not three.** `EffectOutcome.state` is
 `applied | indeterminate | retired`, plus `pending` as the absence of one.
@@ -482,37 +448,21 @@ obviously needed either, which is why it went unnoticed: DL-96 made
 cannot share an id unless the log itself is inconsistent, which is a
 corruption case and not a client one. Left unbuilt, named here rather than
 quietly dropped; it becomes real if an id is ever minted rather than
-derived — which is exactly what the relay would need. *(This paragraph
-also said `Outbox.record` overwrites a differing effect under one id.
-Since DL-118 it does not: an exact repeat is a no-op, a differing record
-is refused as a log that disagrees with itself, and the same method
-refuses either direction of a broken `(job, run_number)`-to-`run_id`
-binding.)*
+derived — which is exactly what the relay would need. `Outbox.record`
+does not overwrite a differing effect under one id (DL-118): an exact
+repeat is a no-op, a differing record is refused as a log that disagrees
+with itself, and the same method refuses either direction of a broken
+`(job, run_number)`-to-`run_id` binding.
 
-**DL-96's amendment overstates the live path.** It defends dropping §5's
-pre-attempt `run_id` binding with "the outbox records the process identity
-the spool reports, when it reports it". On the live path it never does:
-`_apply_spawn` and `_apply_kill` both resolve with `run_id` left at its
-`None` default and never revise it. `run_id` is populated only on the two
-*resume* paths. The deviation still holds for the reason DL-96 gave — the
-run directory is the identity locally — but the sentence describes a
-recording that does not happen. Since DL-118 the deviation itself is closed
-— `run_id` is bound at effect birth; see the amendment in the DL-96 block
-below.*)*
-
-*(Amended by DL-96, at build — stage S5c.* Four deviations, each bounded and
-each because the thing it defers against does not exist yet.
-
-**`run_id` is not bound before the attempt.** This section binds it
-atomically for a reason a RELAY has and a local engine does not: a relay
-sees only ids. Locally `(job, run_number)` IS the identity —
+Two deviations stand, each bounded and each because the thing it defers
+against does not exist (DL-96, S5c). Two others are closed: the pending
+SPAWN re-drive, by §7's takeover barrier (DL-102, below), and the
+pre-attempt `run_id` binding (DL-118): the seal needed the binding first, so a
+SPAWN's `run_id` is minted in the step-7 decision transaction, rides in
+the durable effect, and the wrapper spec carries it (period-model §2.3,
+PR-36a). Locally `(job, run_number)` is the identity too:
 `runs/<job>.<run_number>` is created with `mkdir()` and no `exist_ok`, so a
-second spawn of one run fails loudly rather than doubling — so the outbox
-records the process identity the spool reports, when it reports it. Binding
-it earlier arrives with the relay that needs it. *(Closed by DL-118 before
-any relay: the seal needed the binding first. A SPAWN's `run_id` is minted
-in the step-7 decision transaction, rides in the durable effect, and the
-wrapper spec carries it — period-model §2.3, PR-36a.)*
+second spawn of one run fails loudly rather than doubling.
 
 **TERM and KILL are one effect, not two staged ids.** The split exists so a
 relay can tell a retried TERM from a retried KILL. The adapter's ladder
@@ -520,25 +470,23 @@ never yields to the engine between its stages, so there is no
 engine-visible state between them for a second id to name; a re-driven kill
 re-runs the whole ladder, and TERM to a dead group is a no-op.
 
-**SHUTDOWN is not an effect yet.** It binds to a supervisor incarnation and
-a scheduler epoch. Both are allocated now — the incarnation by the
+**SHUTDOWN is not an effect.** It binds to a supervisor incarnation and
+a scheduler epoch. Both are allocated — the incarnation by the
 supervisor at start (DL-80), the epoch by S6a — so what defers it is no
 longer a missing identity. It is that nothing needs it: the shutdown path
 speaks to the supervisor directly and leaves no intent for an outbox to
 carry.
 
-**A pending SPAWN is not re-driven at resume.** `docs/runner-design.md` §7
-fails a start with no spool trace rather than re-running it, which DL-41a
-decided deliberately. The outbox makes re-driving expressible; whether §7's
-takeover barrier should re-drive rather than fail is that barrier's
-question, and it belongs where leader election gives it a context. A
-pending SPAWN that DOES have a spool trace is reconciled as applied — the
-engine died in the window between launching and recording, and the spool is
-the record.
+**A pending SPAWN is re-driven at resume** (DL-102; §7 below): a pending
+intent the previous leader recorded and never delivered is re-driven at
+the run_number the oracle decided, and a start with no pending intent and
+no spool trace fails, as `docs/runner-design.md` §7 says. A pending SPAWN
+that DOES have a spool trace is reconciled as applied: the engine died in
+the window between launching and recording, and the spool is the record.
 
 A recorded KILL, by contrast, IS re-driven at resume, and that is not a new
 licence: §7 of runner-design already permits exactly one side effect there,
-and names it "recorded kills".*)*
+and names it "recorded kills".
 
 ## 6. The envelope and reads
 
@@ -549,10 +497,10 @@ and names it "recorded kills".*)*
 ```
 
 No client-supplied `at`: a future stamp is a timer fast-forward and a
-backdated one breaks monotonicity. `epoch` shipped in v2 while it was
-still inert on one host, because adding it after the CLI and TUI migrate
-is a second wire break; it is required in v3 and S6 allocates it for
-real. The wire is **v3** (`docs/control-protocol.md`); v1 and v2 are
+backdated one breaks monotonicity. `epoch` is required (v2 introduced it
+while it was inert on one host, DL-90, because adding it after the CLI and
+TUI migrate would be a second wire break; S6 allocates it for real). The
+wire is **v3** (`docs/control-protocol.md`); v1 and v2 are
 retired and refused by version. `expect` names only the addressed entity,
 with keys namespaced `job:` / `global:` / `host:` (DL-93).
 `claimed_actor` is a client hint — **the leader stamps the authenticated
@@ -610,12 +558,12 @@ inference, and with the relay in place that is the only context in which
 it is still used (supervisor-protocol §5's own constraint on any
 non-local transport).
 
-*(Amended by DL-97, at build — stage S5d.* The **relay is not built**, and
-the reason is worth recording rather than leaving as an omission.
+The **relay is not built**, and
+the reason is worth recording rather than leaving as an omission (DL-97, S5d).
 
-Every remaining part of this section rests on one of two things that do not
-exist yet. The barrier begins at ACQUIRE, and there is no election until S6.
-The relay is a network transport with mutually authenticated principals, and
+The relay rests on what does not exist: a second execution host. The
+barrier begins at ACQUIRE, and election is S6's (built, DL-99). The relay
+is a network transport with mutually authenticated principals, and
 this section does not say — because it could not usefully — how those
 principals are named, issued or rotated; that design wants one real
 deployment to answer it, and freezing it now would freeze the least
@@ -624,11 +572,12 @@ applied to the same seam from the other side. There is also no second
 machine to test one against, and a loopback relay proves the handshake, not
 the thing the relay exists for.
 
-**Trigger**: build it when there is a second execution host to route to —
-which in practice means alongside S6, since a leader that can be superseded
-is what makes a second host's fencing meaningful.
+**Trigger**: build it when there is a second execution host to route to
+(DL-97). A leader that can be superseded is what makes a second host's
+fencing meaningful, so S6 was the expected occasion for one; it was not
+the condition, and S6 is built without a second host (DL-103, §10).
 
-What DID land, because it is real on one host: quarantine with a producer,
+What is built, because it is real on one host: quarantine with a producer,
 and the fence stated as a refusal. A host the leader cannot reach is
 quarantined, so new work is HELD rather than failing against a supervisor
 that is not there — which is worth having on a single host on its own
@@ -641,7 +590,7 @@ overriding it. And reaching an evicted host again does **not** un-evict it:
 the returning host must re-register at the new generation and self-fence
 first, which is the relay's act to perform — so what stands here is the rule
 and the refusal that names it, not an engine that kills someone else's
-wrappers on a hunch.*)*
+wrappers on a hunch.
 
 **Worked example — one failover, in order.** Engine A is running three
 jobs; `fast` has finished, `slow_one` and `slow_two` are mid-run. A dies by
@@ -696,23 +645,21 @@ different revisions from identical inputs, and the supervisor holds no
 job definitions — a SPAWN spec is a resolved literal command string — so
 nothing downstream can detect that two leaders disagree about the estate.
 
-*(Amended by DL-100, at build — stage S6a.* Two things this section left
-implicit, settled by the code that took its first ACQUIRE.
+Two things this section states explicitly (DL-100, S6a).
 
 **ACQUIRE precedes every act, not merely every append.** The barrier begins
-there for a reason that was live in this build: `dsl41 run --resume`
-replayed the log, reconciled the estate, re-drove recorded kills and
-appended — and only then claimed the control socket that was supposed to
-exclude a second engine. Two of them therefore both acted, in full, before
-either was refused. A mutex taken after the first side effect is not a
-mutex. The rule reaches further than the engine's own entry points: the CLI
+there for a reason a resume shows: without it, `dsl41 run --resume` would
+replay the log, reconcile the estate, re-drive recorded kills and append,
+and only then claim the control socket that is supposed to exclude a
+second engine, so two of them could both act, in full, before either is
+refused. A mutex taken after the first side effect is not a mutex. The rule reaches further than the engine's own entry points: the CLI
 takes leadership before it starts a supervisor and takes its lease, because
 that is an act on an estate this process may turn out not to lead.
 
-*(Amended by DL-210.)* This ordering applies to `run` and resume. The
-independent `supervise start` service takes the supervisor's root lock,
-but takes neither engine leadership nor a controller lease. The engine
-still takes leadership before acquiring that supervisor's lease.
+This ordering applies to `run` and resume (DL-210). The independent
+`supervise start` service takes the supervisor's root lock, but takes
+neither engine leadership nor a controller lease. The engine still takes
+leadership before acquiring that supervisor's lease.
 
 **The state-machine version is a number of its own,** not `dsl41_version`.
 The package version moves for a docs typo, and refusing to resume a live
@@ -720,12 +667,11 @@ estate after a patch release would be an outage manufactured by
 bookkeeping. What this section means is the version of the derivation from
 inputs to state — oracle transitions, condition evaluation, timer ordering,
 the §3 projection — bumped deliberately when one of those moves, and
-nothing a replay cannot see. A header that pins none was written before the
-gate existed and reads as version 1, on the courtesy S2 gave a journal with
-no `request_id`.*)*
+nothing a replay cannot see. A header that pins none cannot arrive: the
+`header` record is a retired dialect (DL-138, below).
 
-*(Amended by DL-101, at build — stage S6b.* Where the re-check goes, and
-what it can and cannot do.
+Where the re-check goes, and
+what it can and cannot do (DL-101, S6b).
 
 **Every append, and again before dispatch.** The re-check is one `stat`
 at the top of the WAL append, before the write, so a leader that cannot
@@ -752,14 +698,14 @@ recorded incident.
 existing tethered/detached contract decides what becomes of its wrappers.
 An engine that killed processes on losing proof would be reaching for the
 relay's act (§7, DL-97) from a position where it cannot know whether the
-new leader has already adopted them.*)*
+new leader has already adopted them.
 
-*(Amended by DL-102, at build — stage S6c.* The barrier's four steps, as
-built, and the one question this section deferred to it.
+The barrier's four steps, as
+built, and the one question this section deferred to it (DL-102, S6c).
 
 **"Re-drive pending" is the answer DL-96 sent here.** `docs/runner-design.md`
 §7 fails a start with no spool trace rather than re-running it, and that was
-one rule because the log held one kind of evidence. It now holds two. A
+one rule because the log held one kind of evidence; it holds two. A
 start whose SPAWN is still *pending* is an intent the previous leader
 recorded and never delivered — nothing anywhere ran — so the barrier
 re-drives it at the run_number the oracle already decided. A start with no
@@ -783,32 +729,28 @@ no second process, and the guard is mutation-tested.
 **The barrier ends in a dispatch,** as written. Without it the outbox is
 drained only on the way out of the next admitted input, so a re-driven start
 would wait on unrelated traffic to arrive: hours on a quiet estate, and
-never on one whose only remaining work was the run that was lost.*)*
+never on one whose only remaining work was the run that was lost.
 
-*(Amended by DL-130, at build.* **`catalog_hash` is v2, and it is
-versioned.** v1 hashed the whole `CatalogIR`, `CatalogMeta.tool_version`
-included, so a patch release that changed nothing else moved the hash and
-this gate refused to resume a live estate — the outage DL-100 already
-refused to manufacture for the state-machine version, arriving by the other
-door. v2 is sha256 over the §3.2 canonical form of `CatalogIR` with `meta`
-projected to `{source_files}` only: `tool_version` and `parsed_at` are
-diagnostic and leave, and **spans stay** — a relocated or reordered estate
-is still a different estate (`docs/period-model.md` §1.1). The version is
+**`catalog_hash` is v2, and it is versioned** (DL-130). v2 is sha256 over
+the §3.2 canonical form of `CatalogIR` with `meta` projected to
+`{source_files}` only: `tool_version` and `parsed_at` are diagnostic and
+excluded, so a patch release that changes nothing else cannot move the
+hash and refuse to resume a live estate (the outage DL-100 refuses to
+manufacture for the state-machine version); **spans stay**, so a relocated
+or reordered estate is still a different estate (`docs/period-model.md`
+§1.1). The version is
 carried explicitly as `catalog_hash_version` on the opening record and on
 the period manifest, never inferred, and **the gate recomputes under the
 recipe the log itself names**: a `segment` pins v2. What eligibility means is
-unchanged: two pins, both exact.*)*
+unchanged: two pins, both exact.
 
-*(Amended by DL-138.* **Version 1 is retired.** The sentence above used to add
-"a legacy `header` pins v1 and is compared under v1 for the rest of its life",
-because comparing across recipes would have refused every journal then in
-existence. No such journal exists: the `header` record and `catalog_hash`
+**Version 1 is retired** (DL-138): the `header` record and `catalog_hash`
 version 1 are retired dialects, refused by name at one dispatcher
-(`docs/protocol-evolution.md`). The gate reads one recipe, and a record naming
-version 1 is refused rather than compared. The same entry closes the DL-100
-courtesy above: a `header` "that pins none" cannot arrive, so nothing reads
-as state-machine version 1 by default. The record at position zero is a
-`segment`, and it pins both.*)*
+(`docs/protocol-evolution.md`). The gate reads one recipe, and a record
+naming version 1 is refused rather than compared. A `header` "that pins
+none" cannot arrive, so nothing reads as state-machine version 1 by
+default. The record at position zero is a
+`segment`, and it pins both.
 
 ## 8. Host lifecycle: active, passive, quarantined, evicted
 
@@ -838,8 +780,8 @@ wrappers by lifeline"), not a new kill path. The deadman is one number
 and one exit; it adds no policy to the tier and so does not breach
 DL-42's counter-fence.
 
-It is **opt-in per period**, because it costs something real: today a
-supervisor tolerates an absent controller indefinitely, which is what
+It is **opt-in per period**, because it costs something real: without
+it a supervisor tolerates an absent controller indefinitely, which is what
 lets an engine crash and resume with its runs intact (DL-79).
 `RuntimeProfile.deadman_us` pins what a period asks for, and the bound
 uses the value read back into the host row, so successive periods in one
@@ -858,17 +800,17 @@ million over the interval it is added to, which is
 the standard lease argument and depends only on bounded drift. A refusal
 reports the remaining wait, so the operator waits rather than guesses.
 
-*(Amended by DL-151.)* **`T_kill` is DERIVED from the grace the period
-runs**, not a constant: `2 × cmd_grace + 10s`, over the grace the leader's
+**`T_kill` is DERIVED from the grace the period runs** (DL-151), not a
+constant: `2 × cmd_grace + 10s`, over the grace the leader's
 own CMD adapter is wired with — which resume holds to
 `RuntimeProfile.cmd_grace_us`, so the wiring and the pin are the same number
 on any estate this engine may lead. Two graces because two waits stack — the
 wrapper's own TERM-to-KILL wait, then the supervisor's wait for its
 wrappers — plus a margin for the supervisor's exit. The grace is per
-period and unbounded above while `T_kill` was fixed at 30 s, so a period
-running a grace over roughly 15 s had a bound that no longer covered the
-kill it exists to cover, and `evict` could be permitted while the old
-command was still inside its TERM grace: the double run this gate is for.
+period and unbounded above; a fixed `T_kill` of 30 s would not cover a
+period running a grace over roughly 15 s, and `evict` could be permitted
+while the old command was still inside its TERM grace: the double run this
+gate is for.
 At the 10 s default the derivation is 30 s, so the worked example below
 and every default estate are unmoved.
 
@@ -879,8 +821,8 @@ one path in this document that can produce a double run. It exists
 because an operator with out-of-band knowledge — the machine is
 physically powered off, the disk is out — is sometimes right, and waiting
 out a deadman is then pure loss. It is loud, durable and attributable;
-that is the whole of its safety story. *(Amended by DL-151.)* Which is why
-a force that names NOBODY is refused: an unattributed force writes
+that is the whole of its safety story. Which is why a force that names
+NOBODY is refused (DL-151): an unattributed force writes
 `forced_by: null`, and the row then reads exactly like a proof-gated
 eviction — the one thing that field exists to tell apart. `claimed_actor` is
 required on `--force` and on nothing else. There is no flag for it and no
@@ -935,23 +877,16 @@ preconditions unmet — returns no reason and writes
 `forced_by="alice@ops-laptop"` into the row
 (`test_cm11_the_force_that_skips_the_proof_carries_the_claim_that_asked_for_it`).
 
-*(Amended by DL-111, at build.* Working that example through the shipped
-code corrected this section twice.
-
-**"Recorded with the authenticated principal" is not what happens, and
-cannot be yet.** What `forced_by` holds is the envelope's `claimed_actor` —
-whose own docstring calls it "a CLAIM: the control socket has no
-authentication (control-protocol §7 gap 2) … never an authorization". So
-force's safety story is *attributable* rather than *authenticated*: the row
+**`forced_by` holds the envelope's `claimed_actor`** (DL-111). On an
+unconfigured estate that is a claim, never an authorization: force's
+safety story is *attributable* rather than *authenticated*, the row
 records who said they were asking, durably and loudly, and a socket anyone
-with the uid can reach is what stands behind that. §6 already says the
-leader stamps an authenticated principal and that no leader can do that
-yet; this section wrote the end state as though it were the current one.
-The word here is now "claimed", and it goes back when there is an
-authenticated principal to stamp.
+with the uid can reach is what stands behind that. On an armed estate the
+server overwrites the claim with the authenticated spelling before the
+row is written (below, DL-146, DL-147).
 
-**A one-host table makes half this section unreproducible today,** which is
-worth saying plainly because the example above had to be written against
+**A one-host table makes half this section unreproducible,** which is
+worth saying plainly because the example above is written against
 `local`. `register_host` has one caller, `seed_local_executor`, and every
 caller of that passes `LOCAL_EXECUTOR_ID`: no CLI or startup path can set
 `executor_id`. So the routing table holds exactly one row, and
@@ -962,31 +897,29 @@ which is the relay's business (DL-97, DL-103).
 
 **Two things are missing, not one.** Beside the second row there is the map
 from a ROLE to an executor. `seal.RouteRuntime` freezes that row's shape and
-`implicit_routes` projects the only honest value today: one route whose role
+`implicit_routes` projects the only honest value: one route whose role
 IS the local executor's id, at revision 0, because no verb that could move it
 exists. The storage under §3's owner and the `host: {verb: "route", id,
 executor_id}` wire record both arrive with the relay
 (`docs/period-model.md` §3.3).
 
-**And one latent bug, fixed rather than documented.** `evict_host` left
-`state_before_quarantine` set, while the field documents itself as non-null
-only while the row is `quarantined` — and a gated eviction can only start
-FROM quarantined, so every gated eviction falsified the invariant. Harmless
-today, because `reinstate_host` refuses to act on a row that is not
-quarantined. It is a loaded gun for whoever writes the next transition, so
-eviction now clears it.*)*
+**Eviction clears `state_before_quarantine`** (DL-111). The field is
+non-null only while the row is `quarantined`, and a gated eviction can only
+start FROM quarantined; leaving it set would falsify the invariant,
+harmlessly while `reinstate_host` refuses to act on a row that is not
+quarantined, and dangerously for the next transition anyone writes.
 
-*(Amended by DL-147.* DL-146 built the missing principal for local peers:
+DL-146 built the missing principal for local peers:
 with an access map configured, the control server authenticates the peer
 by kernel credential and overwrites `claimed_actor` with the canonical
 spelling before the row is written, so `forced_by` holds an authenticated
 identity on an armed estate — and remains the bare claim on an
-unconfigured one. The word "claimed" stays, because arming is optional;
+unconfigured one (DL-147). The word "claimed" stays, because arming is optional;
 the web session's per-user identity is still open under
-`web-session-principal-v2` (`docs/access-model.md` §3, §9).*)*
+`web-session-principal-v2` (`docs/access-model.md` §3, §9).
 
-*(Amended by DL-94, at build — stage S5a.* Four things this section left
-implicit, settled by the code that implements it.
+Four things this section left
+implicit, settled by the code that implements it (DL-94, S5a).
 
 **Precondition 1 is the `quarantined` state, not a probe.** "Unreachable
 from the leader" has exactly one durable form, and it is the row the leader
@@ -1024,10 +957,9 @@ is wrong — there was no crash — so those jobs stay held. A drain whose
 state survived while its work was failed would be a drain in name only.
 
 The three operator verbs are `activate`, `drain` and `evict`.
-`quarantined` is the leader's, and its producer is S5d.*)*
+`quarantined` is the leader's, and its producer is S5d.
 
-*(Amended by DL-95, at build — stage S5b.* Two more, from wiring the
-deadman.
+Two more rules, from the deadman (DL-95, S5b).
 
 **`last_contact` is outside §3's semantic projection.** An engine renews its
 supervisor lease every twenty seconds. Admitting that as an input would move
@@ -1045,7 +977,7 @@ reattaching engine meets a supervisor it did not start, possibly one launched
 with a different interval or none at all. The bound has to describe the host,
 so the row records what the supervisor reports over the lease exchange. A
 wrong value here is not cosmetic: it is the length of the wait standing
-between an operator and a double run.*)*
+between an operator and a double run.
 
 ## 9. The proving ground
 
@@ -1058,8 +990,8 @@ whole interleaving — that is what makes the double-run failure testable
 rather than argued. Real-process chaos is a separate tier, in which
 nightbank's manual RUNBOOK path becomes automated.
 
-*(Amended by DL-112, at build — S7c.* "A separate tier" understates what
-separates them. The model harness answers *which interleavings are safe*,
+"A separate tier" understates what
+separates them (DL-112, S7c). The model harness answers *which interleavings are safe*,
 which is a question about orderings and needs one interpreter that can
 hold them all. The process tier answers *whether the mechanism is the one
 described*, which is a question about the kernel: an `flock` is only a
@@ -1069,7 +1001,7 @@ actually die inside it. Neither tier can be asked the other's question,
 so neither substitutes. What the process tier must NOT do is re-derive
 arithmetic: waiting out §8's real bound would add a minute per run and
 prove a sum. `tests/test_runner_leadership.py` holds S5/S6; S0–S4's live
-in the supervisor and lifecycle tiers.*)*
+in the supervisor and lifecycle tiers.
 
 Obligations. Tests are named `test_cmNN_*`, on the house convention of
 `test_semXX_*`.
@@ -1121,23 +1053,17 @@ S6  ledger + election (S6a-c landed, DL-99: election, the fence, the
 S7  failover / partition / double-run matrix over nightbank
 ```
 
-*(Amended by DL-103, at build — closing S6.* DL-97 deferred the relay with
-the trigger "build it when there is a second execution host to route to,
-which in practice means alongside S6". S6 has landed and the relay has not,
-so the distinction that sentence packed into "in practice" is worth
-unpacking: the trigger is a **second execution host**, and S6 was the
-expected occasion for one, not the condition. Nothing in election, the fence
-or the barrier produces a second machine or answers §7's open question of
-how mutually authenticated principals are named, issued and rotated. The
-barrier that S6c did build is the local half — it reconciles every host in
-the routing table, and today that table has one row.
+The relay's trigger is a **second execution host** (DL-97, DL-103), not
+S6: nothing in election, the fence or the barrier produces a second
+machine or answers §7's open question of how mutually authenticated
+principals are named, issued and rotated. The barrier S6c built is the
+local half: it reconciles every host in the routing table, and that table
+has one row. What S6 hands the relay is an epoch that is allocated,
+monotone, and re-checked on every append, so "a relay rejects any dispatch
+carrying an epoch below the highest it has seen" names a value that moves
+rather than a constant.
 
-What S6 does hand the relay is the thing it was missing: an epoch that is
-allocated, monotone, and re-checked on every append, so "a relay rejects any
-dispatch carrying an epoch below the highest it has seen" now names a value
-that moves rather than a constant. The trigger stands unchanged.*)*
-
-Two dependencies were inverted in earlier drafts and are pinned here: S2
+Two dependencies are pinned here: S2
 persists `InputAttempt`, so the envelope and `ApplyResult` types must be
 frozen first (S0); and S2's admission and S5's effects both depend on
 storage, election and relay contracts, which is why those are S0 text and
