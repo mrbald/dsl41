@@ -1,21 +1,20 @@
-# Live-instance runbook — closing the DL-58 residue
+# Live-instance runbook — probes for the open questions
 
 Purpose: this runbook gives anyone with shell access all that is
-necessary to close the remaining AutoSys-behavior questions on a box that
-has Workload Automation AE installed. It also gives the source catalog
-that the DL-58 citation sweep used, so that future document research does
-not start cold. This runbook is a companion to the §9 ledger of the
-dossier (docs/autosys-semantics.md) and to the live-instance section of
-CLAUDE.md.
+necessary to close the open AutoSys-behavior questions on a box that has
+Workload Automation AE installed. It also gives the source catalog behind
+the dossier's citations, so that document research does not start cold.
+This runbook is a companion to the §9 register of the dossier
+(docs/autosys-semantics.md) and to the live-instance route in CLAUDE.md.
 
 Scope: the questions here are the AutoSys ones. Two groups sit outside
 it. U1, U3b and U6b need a Universal Controller instance, not an AE box;
-docs/stonebranch-semantics.md Part III states all three, and the
-live-instance section of CLAUDE.md gives the work order for U3b only.
+docs/stonebranch-semantics.md Part III states all three, and
+docs/uc-edge-schema.md states U3b's write-path test.
 The runner's own parity defaults E5, E6, E7, E9 and E10 have no probe
 here (docs/runner-design.md ss15 states each default).
 
-Ground rules (constitutional, see CLAUDE.md):
+Ground rules (corpus hygiene per CLAUDE.md and LICENSING.md):
 - Give each object that you create on the instance the prefix `dsl41_`.
   If a schedule is involved, use a future date. Delete each object the
   same day.
@@ -33,11 +32,10 @@ Ground rules (constitutional, see CLAUDE.md):
   LICENSING.md).
 - Record each answer as: a dossier SEM amendment that quotes the
   observation, a DL entry, and trace/fixture tests. Then retire the
-  `# PENDING:` marker if the item has one (DL-06 protocol — a resolution
-  deletes its switch/marker). Q6 is dossier-only and carries no code
-  marker.
+  `# PENDING:` marker if the item has one (DL-06: a resolution deletes
+  its switch or marker). Q6 is dossier-only and carries no code marker.
 
-## 1. Source catalog (verified in DL-58/DL-62/DL-154/DL-155; re-fetch before relying on one)
+## 1. Source catalog (re-fetch before relying on one)
 
 Fetch technique: get TechDocs and KB pages with a raw `curl` that has a
 browser User-Agent (`-A "Mozilla/5.0 ..."`). Then strip the HTML. A
@@ -77,9 +75,9 @@ URL patterns:
 
 A second-opinion pass helps: hand a brief that contains the pins and
 the leans to an independent reviewer. Before you move any pin, RE-FETCH
-each citation that the review returns. Make sure that each citation is
-correct. In DL-58, two candidate claims did not match the re-fetched
-sources.
+each citation that the review returns and check it against the bytes; a
+summary is not a source, and two candidate claims failed that check in
+DL-58's sweep.
 
 ## 2. Protocols, cheapest first
 
@@ -106,8 +104,8 @@ admin-added entries (`autotimezone -a/-c`), only the export knows them.
 
 ### Q9 — export bytes — **CLOSED (DL-60, [F])**
 
-One observed export sample resolved Q9 on 2026-07-30. SEM-36/37 carry
-the verdicts: `extended_calendar:` spelling, fixed attribute order with
+One observed export sample closed Q9 (DL-60). SEM-36/37 carry the
+verdicts: `extended_calendar:` spelling, fixed attribute order with
 empty-valued keys, `workday: all`, braces as grouping, `WORKD#L`,
 `holiday: S` without holcal, and `HH:MM:SS` row tails. They sit at the
 **[F]** tier, so a byte-exact check is still worth running. If shell
@@ -180,33 +178,33 @@ What each August/December 2026 observation means:
   (17, 17) = shift-then-replace · (15, 18) = replace-then-shift ·
   (15, 16) = action ignored · (14, 17) = adjust ignored ·
   import/definition refused = vendor refuses the combination.
-  Since DL-59, dsl41 IMPLEMENTS replace-then-shift — (15, 18) — as its
-  pinned default. Thus this probe makes sure that the vendor and dsl41
-  agree. The probe does not choose our behavior. If the pair is
-  different, record the divergence, then correct it.
+  dsl41 implements replace-then-shift, (15, 18), as its pinned default
+  (DL-59). This probe checks that the vendor and dsl41 agree; it does not
+  choose dsl41's behavior. If the pair is different, record the
+  divergence, then correct it.
 - **Q8c_1** (does the N walk skip holidays? Mon Aug 17 is a holiday, and
   holiday action S keeps holcal dates out of non-workday treatment):
   Saturdays map to Mondays 3, 10, ?, 24, 31 — the `?` decides:
-  Aug 18 = holiday-free walk (our pin) · Aug 17 = plain next-workday,
+  Aug 18 = holiday-free walk (dsl41's pin) · Aug 17 = plain next-workday,
   holidays not skipped.
 - **Q8c_2** (holiday-N chaining — Dec 24+25 are both holidays): output
-  Dec 25 = verbatim one-shot (our pin, current doc text) · Dec 26 = the
+  Dec 25 = verbatim one-shot (dsl41's pin, the current doc text) · Dec 26 = the
   target is re-processed by N (the 825395 hint) — this result flips the
   single-shot corner. Any other date (Dec 28, for example) means N walks
   like W; record it verbatim, it is a third behavior.
 - **Q8d_1** (`mon | wed & fri`): Mondays in the output = `&` binds
-  tighter · empty/no-valid-dates = flat left-to-right (our pin).
+  tighter · empty/no-valid-dates = flat left-to-right (dsl41's pin).
 - **Q8d_2** (`NOT mon` line then `mon` line): empty = order-free
-  union-minus-exclusions (our pin) · Mondays = sequential accumulation
+  union-minus-exclusions (dsl41's pin) · Mondays = sequential accumulation
   (later include resurrects).
 - **Q8d_3** (`xtue | xwed`): record verbatim the vendor refusal or the
-  generated dates (every day vs nothing). Since DL-59, dsl41 evaluates
-  it literally as an include (every day) as its pinned default.
+  generated dates (every day vs nothing). dsl41 evaluates it literally
+  as an include (every day) as its pinned default (DL-59).
 - **Q8d_4** (`mon OR wed`): every Monday and every Wednesday in the
   output shows that the OR word unions like `|` (AND is already cited,
   KB 442457).
 - **Q8d_5** (`NOT mon` alone — the only rule): every non-Monday = an
-  exclusion-only rule list subtracts from the DAILY default (our pin) ·
+  exclusion-only rule list subtracts from the DAILY default (dsl41's pin) ·
   empty = it subtracts from nothing. This is a separate pinned default
   from Q8d_2, which mixes an exclusion with an include.
 
@@ -237,7 +235,7 @@ sendevent -E FORCE_STARTJOB -J dsl41_q6_box
 sleep 60; autorep -J dsl41_q6_box%
 ```
 
-If the final box status is SUCCESS, ice satisfies box_success (our
+If the final box status is SUCCESS, ice satisfies box_success (dsl41's
 SEM-05/DL-13 pin — Q6 closes as pinned). If the box stays RUNNING after
 `dsl41_q6_n` completes, box_success does NOT read the iced member as
 success (flip: the "not scheduled" clause wins). If the final box status
@@ -280,20 +278,20 @@ sleep 60; autorep -J dsl41_q3c%
 ```
 
 If `dsl41_q3c_m` runs in box run 2 with NO new tick, the latch survives
-box runs (this result flips our DL-54 box-scoped arm — Q3c closes
+box runs (this result flips the DL-54 box-scoped arm — Q3c closes
 flipped). If `dsl41_q3c_m` does not run, the arm dies with its box run
-(our pin holds). Delete all three jobs the same day (the schedule ticks
+(dsl41's pin holds). Delete all three jobs the same day (the schedule ticks
 daily).
 
 ### Q3d — does ON_ICE discard a latched tick (arm × ice)
 
-DL-54's adversarial round pinned "a pre-existing arm survives
-ON_ICE/OFF_ICE untouched" without a citation; DL-69 registers the
-residue as Q3d (`# PENDING: Q3d`, oracle.py — the survive-pin stands
-as the deterministic default until this runs). If the vendor instead
-discards the queued start on ice, ON_ICE is the latch-*discharge* verb —
-the one thing the sendevent set otherwise lacks (nightbank exercise 13
-step 4 documents the gap). Same shape as Q3c, standalone job, ~3 min:
+The pin "a pre-existing arm survives ON_ICE/OFF_ICE untouched" (SEM-32,
+DL-54) is uncited; Q3d (DL-69) opens the question (`# PENDING: Q3d`,
+oracle.py), and the pin stands as the deterministic default until this
+runs. If the vendor instead discards the queued start on ice, ON_ICE is
+the vendor's latch-*discharge* verb; the vendor sendevent set has no
+other, and dsl41's own `DISARM` control (DL-158) has no vendor
+counterpart. Same shape as Q3c, standalone job, ~3 min:
 
 ```
 jil <<'EOF'
@@ -320,12 +318,13 @@ sleep 60; autorep -J dsl41_q3ice%
 ```
 
 If `dsl41_q3ice` runs on the edge, the arm survived the ice round-trip
-(our pin holds — and note the tension with SEM-20's "conditions must
+(dsl41's pin holds — and note the tension with SEM-20's "conditions must
 reoccur": the tick, not the condition, is what carried over). If it does
 not run, ice discards the queued start: amend SEM-20/SEM-32, clear
 `armed` in the oracle's ON_ICE handler (`SCHED_DISARM` trace record),
-and exercise 13's "no discharge verb" caveat gets rewritten — ON_ICE
-becomes the discharge, with its downstream-satisfaction cost stated.
+and rewrite nightbank exercise 13's note on discharge verbs: ON_ICE
+becomes the vendor's discharge, with its downstream-satisfaction cost
+stated.
 Delete both jobs the same day (the schedule ticks daily).
 
 ### E8 — external kill verdict (+ the mechanism discriminator)
@@ -359,14 +358,14 @@ sleep 30; autorep -J dsl41_e8b
 ```
 
 Reading: e8 decides E8 on its own. If e8=FA, an external signal death is
-FAILURE. Flip our TERMINATED default for the EXTERNAL death ONLY: a
+FAILURE. Flip the TERMINATED default for the EXTERNAL death ONLY: a
 `signaled` record produced by a kill the engine itself asked for must
 stay TERMINATED, because `_kill_outcome_from_spool` (runner_startup.py)
 reads `outcome_from_status`'s `Terminated` as the proof that a recorded
 kill landed — a blanket flip in `outcome_from_status`
 (runner_adapters.py) would retire live kills. Retire the
 `# PENDING: E8` marker with the flip. If e8=TE, the agent reports signal
-deaths, TERMINATED is mechanism-agnostic, and our mapping stands.
+deaths, TERMINATED is mechanism-agnostic, and the mapping stands.
 
 e8b answers a second question — the KILLJOB mechanism — and never gates
 the E8 verdict. TE means the scheduler marks TERMINATED from its own
@@ -403,8 +402,8 @@ revisit DL-161. Delete the job afterwards (`delete_job: dsl41_r5`).
 
 - `autorep -q -J ALL` — the estate JIL dump. Inspect it only. Never
   commit it.
-- `job_depends -c -J <job>` — current condition satisfaction. This
-  command showed that the Q2b reasoning was correct. It also gives
-  useful spot checks for lookback shapes.
+- `job_depends -c -J <job>` — current condition satisfaction. It gives
+  spot checks for lookback shapes, the zero-lookback anchor (Q2a) and the
+  never-ended case (Q2b).
 - The scheduler log around a historical OOM/kill incident. If the estate
   already had such an incident, this log can answer E8 at no cost.
