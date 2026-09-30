@@ -107,8 +107,6 @@ them, and several of them shadow a real namespace.
   readings at once: row `E9` is break-glass supervisor shutdown, while row
   `C4`, two sections earlier, cites `E9` the runner question. §5 says so
   where its tables start.
-- `period-model.md` §0a, the revision history: draft and review labels
-  (`D25`, `R31`) naming one round of one draft.
 - `period-model.md` §14, the worked estate: `B1` is the boundary that
   commits and `B2` the one that refuses — two worked scenarios, not the two
   `baseline_id`s of the row above.
