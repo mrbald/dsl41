@@ -1,16 +1,18 @@
 # Control protocol — the engine's public contract
 
-Status: frozen at **v3** (2026-08-20, DL-118; v2 2026-08-15, DL-90; first
-frozen 2026-08-13, DL-78). This document is normative for the runner's §10
-control plane in the same way `docs/supervisor-protocol.md` is normative for
-the §6a lifecycle tier. Each change to a frozen item requires a
-decision-log entry.
+Status: frozen at **v3** (DL-118; v2 was DL-90, v1 DL-78; amended by
+DL-133, DL-135, DL-146, DL-147, DL-148, DL-150, DL-151, DL-158, DL-189,
+DL-216 and DL-217). This
+document is normative for the runner's §10 control plane in the same way
+`docs/supervisor-protocol.md` is normative for the §6a lifecycle tier. Each
+change to a frozen item requires a decision-log entry, and each amendment
+is cited where it applies.
 
 **An older version is gone, not deprecated.** `docs/concurrency-model.md`
 §0 refuses a caller that does not name a version, and accepting unversioned
 requests "for compatibility" is exactly the opt-out it forbids. An engine at
 this version answers a v1 or v2 client with a refusal naming the version it
-speaks. v2 went that way at DL-118, on the precedent v1 set.
+speaks (DL-118).
 
 The two protocols sit on opposite sides of the engine:
 
@@ -25,7 +27,7 @@ statuses, sendevent verbs), which runner-design §11's scope fence assigns
 to dsl41 permanently.
 
 Implementation: `src/dsl41/runner_control.py` owns both ends — the server,
-the wire vocabulary, and both clients.
+the wire vocabulary, and the three clients.
 
 ## 1. Roles
 
@@ -38,27 +40,33 @@ the wire vocabulary, and both clients.
 - **sync client** (`roundtrip`): one-shot blocking request/response for
   callers outside an event loop. Drives `dsl41 sendevent`, `dsl41 host`
   and `dsl41 query`.
+- **blocking subscription client** (`subscribe_lines`, DL-172): one
+  connection held open for the life of a `subscribe`, yielding the ack
+  and then journal records. Drives `dsl41 query subscribe`. It lets a
+  transport `OSError` propagate and raises `ControlClientError` for a
+  protocol failure.
 
-Both clients raise `ControlClientError` on any transport or decode
-failure. Neither maps errors to exit codes — that is the CLI's job.
+The async and sync clients raise `ControlClientError` on any transport or
+decode failure. None of the three maps errors to exit codes — that is the
+CLI's job.
 
 ## 2. Transport and framing (frozen)
 
 - A **unix domain socket** at `<run_root>/control.sock`, mode `0600`
   (set via umask at bind, re-chmod'd after, because some platforms ignore
-  umask on bind). *(Amended by DL-147: when an access map names a
-  `socket_group`, the socket keeps its owner, takes that group, and is
-  re-set to `0660`; the run root opens to `0710` traversal — `docs/access-model.md`
-  §8, DL-146. Estates without a configured map keep `0600` exactly.)*
+  umask on bind). When an access map names a `socket_group`, the socket
+  keeps its owner, takes that group, and is re-set to `0660`; the run root
+  opens to `0710` traversal (`docs/access-model.md` §8, DL-146, DL-147).
+  Estates without a configured map keep `0600` exactly.
 - **JSON lines**, both directions. One request object per line; one
   response object per line. The stream buffer limit is `LINE_LIMIT`
   (16 MiB): one `status` response covers every job on a single line and
   overruns asyncio's 64 KiB default at roughly 300 jobs.
-  *(Amended by DL-216.)* A line ends at its `\n`. A request fragment
-  that reaches EOF without one is dropped unanswered and never parsed:
-  its client died mid-write, and a truncated command must not run.
-- *(Amended by DL-216.)* **A client that attempted a write cannot prove
-  the request did not arrive.** A write can fail after the peer took
+  A line ends at its `\n` (DL-216). A request fragment that reaches EOF
+  without one is dropped unanswered and never parsed: its client died
+  mid-write, and a truncated command must not run.
+- **A client that attempted a write cannot prove the request did not
+  arrive** (DL-216). A write can fail after the peer took
   every byte, or part of them. So a client treats any failure from its
   first write attempt on as an unknown outcome (`delivered`), never as
   "not sent". Only a failure before any write, such as a refused
@@ -75,16 +83,15 @@ failure. Neither maps errors to exit codes — that is the CLI's job.
 - Responses carry the **read header**: `baseline_id`, `epoch` and
   `applied_index` (`docs/concurrency-model.md` §6). A revision means
   nothing without the log it was read from, and a client that cannot
-  name the log cannot be told it is holding a stale one. *(Amended by
-  DL-148 — the headerless answers enumerated.)* The header is stamped
+  name the log cannot be told it is holding a stale one. The header is
+  stamped (DL-148)
   in one place: on the answer of a request that passed routing and the
   §4 lineage proof. Everything else is headerless — an answer sent
   before routing (the malformed line, the version refusal, the DL-146
   perimeter's credential refusal and denial), the lineage refusal
   itself (§4, PR-03), the internal-error answer of a handler that
   raised, and every line `subscribe` writes on its own connection
-  (§5). None of them names a revision. This enumerates what the
-  shipped v3 server has always done.
+  (§5). None of them names a revision.
 - A malformed line answers `{"ok": false, "error": "bad request: …"}` and
   the stream stays in sync. That holds for invalid JSON **within**
   `LINE_LIMIT`. A line over the limit is a framing failure the reader
@@ -105,9 +112,6 @@ DL-99); this probe is cleanup of a stale socket file, and a second refusal
 door in front of it — see §7.
 
 **The version handshake** is `"v": 3` on every request (DL-90, DL-118).
-This was listed here as a known gap through v1; it closed in the same break
-that made preconditions mandatory, because two wire breaks would have cost
-every client twice.
 
 **No controller lease.** Deliberate (DL-41a). `sendevent` is multi-writer
 by AutoSys nature, and the engine's single-writer loop serializes every
@@ -131,9 +135,8 @@ WAL is the audit trail of engine decisions, and no second log carries them.
 A run started without a journal has no WAL and therefore no audit trail —
 the same run `subscribe` refuses in §5, and not a configuration an operator
 meets.
-*(Narrowed by DL-148:)* access decisions at the DL-146 perimeter —
-admissions and denials at the
-boundary — go to the perimeter journal (`docs/access-model.md` §6) and
+Access decisions at the DL-146 perimeter (admissions and denials at the
+boundary) go to the perimeter journal (DL-148) (`docs/access-model.md` §6) and
 never enter the WAL.
 
 | verb | `payload` | notes |
@@ -146,7 +149,7 @@ unpaired surrogate is refused at the door, because one admitted would leave
 the estate unsealable (PR-10a, period-model §3.2).
 | `CHANGE_STATUS` | `job`, `status`, optional int `exit_code` | injected as `STATUS`, keeping overwrite parity |
 
-*(Amended by DL-158:)* `DISARM` is the explicit journaled disarm
+`DISARM` (DL-158) is the explicit journaled disarm
 period-model §10.4 names. It clears the job's SEM-32 armed latch and does
 nothing else: no status move, no start, no wake, no timer touched. A target
 with no latch is an accepted, journaled no-op — the `OFF_HOLD` shape — and
@@ -170,16 +173,16 @@ consumed, and the log says nothing about it.
 `request_id` is required. Without one a timed-out command cannot be
 retried safely, because nothing could recognise the retry as one. An
 exact retry — same id, same fingerprint — is answered from its original
-decision and takes no second index. *(Amended by DL-147:)* with an access
-map configured, that is what happens **after** the perimeter admits the
+decision and takes no second index. With an access map configured
+(DL-147), that is what happens **after** the perimeter admits the
 request: admission decides under the current policy, so a caller who has
 since lost the tier is denied at the boundary before the retry route is
 reached (`docs/access-model.md` §5, §7). A reused id under a *different*
 command is refused as a collision. `expect` participates in the
 fingerprint, so the same verb at two revisions is two commands.
 
-*(Amended by DL-217.)* **A `sendevent` or `host` collision refusal
-carries the id's earlier decision.** When the id already holds one, the
+**A `sendevent` or `host` collision refusal carries the id's earlier
+decision** (DL-217). When the id already holds one, the
 refusal adds
 `"original_decision": {index, request_id, decision, reason, revisions}`,
 the decision's own fields. The answer stays a refusal of this request:
@@ -216,18 +219,19 @@ period whose decision index holds the id.
 `baseline_id` must match the engine's. A revision read from another
 baseline names nothing here.
 
-`epoch` is required and inert on a single host; it is checked **after**
-deduplication, so an exact old-epoch retry recovers its original result
-while an unseen old-epoch request is refused.
+`epoch` is required; it is checked **after** deduplication, so an exact
+old-epoch retry recovers its original result while an unseen old-epoch
+request is refused as stale (DL-99: with no election, an engine accepts
+epoch 0 as inert).
 
 `claimed_actor` is optional and is exactly what it says: there is no
 authentication at this tier (§7), so it is recorded as the caller's claim
-about itself and is never treated as a principal. *(Amended by DL-147:
-with an access map configured, the server authenticates the peer by
+about itself and is never treated as a principal. With an access map
+configured (DL-147), the server authenticates the peer by
 kernel credential and OVERWRITES this field with the canonical spelling
 `os/<name>` before anything is fingerprinted or logged —
 `docs/access-model.md` §3, DL-146. On unconfigured estates the sentence
-above stands unchanged.)*
+above stands unchanged.
 
 **The response is the decision, not the receipt:**
 
@@ -254,8 +258,8 @@ neither marker means uncertainty rather than a fourth kind of no. Two
 answers land there: the no-decision timeout below, and the internal-error
 answer of a handler that raised (§2). A client reads both as `unknown`.
 `dsl41 sendevent` spends a
-distinct exit code on each (0/2/3/4). *(Amended by DL-217.)* It prints its
-`request_id` and pins on stderr before every write, and repeats them as
+distinct exit code on each (0/2/3/4). It prints its `request_id` and pins
+on stderr before every write (DL-217), and repeats them as
 retry advice when the answer is `unknown`; they are the only thing that
 makes that retry safe.
 
@@ -296,10 +300,10 @@ One change to `docs/concurrency-model.md` §8's routing table: which
 execution hosts take new work. `verb` is `activate` | `drain` | `evict`,
 and `payload` is `{id, force?}`.
 
-*(Amended by DL-118, at build of period-model §2.2.)* **v3 carries a fourth
-host verb, `route`, and its query — both specified and neither built.**
-DL-118 put them in v3 beside the `seal` verb and the gap marker, and the
-shape is frozen so that two implementations cannot choose incompatible JSON
+**v3 carries a fourth host verb, `route`, and its query; both are
+specified and neither is built** (DL-118; period-model §2.2). They sit in
+v3 beside the `seal` verb and the gap marker, and the shape is frozen so
+that two implementations cannot choose incompatible JSON
 for one fact:
 
 ```json
@@ -323,7 +327,7 @@ table. The WAL record is `host: {verb: "route", id, executor_id}`, and the
 answer is the same decision shape and the same four outcomes as every host
 verb.
 
-**None of it exists today.** There is no `route` verb, no `routes` query, no
+**None of it is built.** There is no `route` verb, no `routes` query, no
 `RuntimeState` route storage and no `route:` namespace; the shipped table is
 the one implicit row period-model §3.3 describes, projected from the single
 local executor at revision 0. The unit that adds the storage builds this
@@ -367,9 +371,8 @@ decide differently the second time.
 
 ### `seal` (DL-133, period-model §2.2)
 
-*(Amended by DL-133, at build of period-model §7.)* A third mutating verb,
-and it is unlike the two above in three ways — each one a consequence of
-what a boundary is.
+A third mutating verb (DL-133; period-model §7), and it is unlike the two
+above in three ways, each one a consequence of what a boundary is.
 
 ```json
 {"cmd": "seal", "v": 3, "baseline_id": "…", "epoch": 7, "request_id": "…",
@@ -387,10 +390,10 @@ caller asserting what they read about an entity; a boundary reads no
 entity. Making it optional would turn the one command with no precondition
 into the door every other command could slip through, so the envelope
 parser takes "this command addresses no row" as an explicit input and
-rejects an `expect` that arrives anyway. *(Amended by DL-151: what arrives
-is the KEY. `"expect": null` is an `expect` and not its absence, and the
-seal door refuses it — just behind the retry route below, which answers a
-committed seal whatever rides beside it.)*
+rejects an `expect` that arrives anyway. What arrives is the KEY (DL-151):
+`"expect": null` is an `expect` and not its absence, and the seal door
+refuses it, just behind the retry route below, which answers a committed
+seal whatever rides beside it.
 
 **Its decision is a `seal` record, not a `decision` record.** Before the
 seal, a durable "applied" would name a boundary that never happened; after
@@ -436,8 +439,8 @@ unresolved KILL ladder out; a timeout is `unknown`, never a refusal.
 
 ## 4. Query verbs (frozen response shapes)
 
-*(Amended by DL-133, at build of period-model §1.3.)* **A read is refused
-when this engine can no longer prove it leads the estate's LINEAGE.** Every
+**A read is refused when this engine cannot prove it leads the estate's
+LINEAGE** (DL-133; period-model §1.3). Every
 answer below carries the §2 read header (headerless exceptions enumerated
 there, DL-148) — a baseline, an epoch and a log
 position — and those are exactly the coordinates a displaced leader may no
@@ -449,7 +452,7 @@ admission's first append rather than at this door — refusing there would
 leave a displaced leader answering nothing and stopping never, and would
 also refuse the read a client composes its `expect` from, so the very
 mutation that stops the engine could never be sent (CM-14). A `subscribe`
-response is a read and is refused on the same rule — *(DL-148:)* the same
+response is a read and is refused on the same rule (DL-148): the same
 lineage proof, not the same header: no `subscribe` line — the ack, a
 refusal, a marker or a record — carries the read header (§2), and a
 subscription is not a `concurrency-model.md` §6 revision-bearing read.
@@ -466,10 +469,9 @@ an internal-error answer (both headerless, §2 DL-148) — carries the
 read header in addition to the fields listed below. These are the reads an
 `expect` is composed from: per-job `state_rev` in `status`,
 `global`/`globals` for a named global, and `hosts` for a routing row.
-Revision-bearing reads have been
-leader-only since v2 — one engine per run root *is* the leader until S6
-introduces election, and `leader.lock` is what enforces it
-(`docs/concurrency-model.md` §1).
+Revision-bearing reads are leader-only (v2, DL-90): one engine per run
+root *is* the leader, there is no election, and `leader.lock` is what
+enforces it (`docs/concurrency-model.md` §1).
 
 ### `status [job]`
 
@@ -546,7 +548,7 @@ downward.
 
 `{"ok": true, "timers": [{due, job, kind, detail?}]}` — every pending
 oracle timer plus each scheduled job's next calendar tick, due-ordered
-(DL-65). `due` is **nullable** since DL-68: live filewatches join as
+(DL-65). `due` is **nullable** (DL-68): live filewatches join as
 trailing rows with `due: null` and a `detail` string, because they fire on
 a file, not a clock.
 
@@ -614,24 +616,21 @@ Delivery guarantees, exactly as implemented:
 - `since` cuts positionally: everything after the last record whose seq is
   at or below it.
 
-*(Amended by DL-118, at build.* `decision` replaces `result` and the
-standalone `effect` record on this stream: one line carrying the decision,
-its revisions and the effects it planned. The seam behaviour is
-**unchanged** — it keys on the presence of `seq`, not on a record name, so
-`decision` inherits `result`'s at-least-once guarantee and needed no code
-change beyond the name. `effect_result` is unchanged. This is the wire break
-that took the protocol to v3.*)
+The stream carries `decision` records, one line carrying the decision, its
+revisions and the effects it planned (DL-118, the v3 wire break: `decision`
+replaces `result` and the standalone `effect` record). The seam keys on the
+presence of `seq`, not on a record name, so `decision` carries the
+at-least-once guarantee. `effect_result` is a stream record too.
 
-*(Amended by DL-135, at build of period-model §11.* **The backfill spans
-segments.** An estate's records live in `wal/<segment_no>.jsonl`, one
-segment per period, and the backfill reads every segment this root retains,
-oldest first. It used to read the active one alone, so a subscriber that
-resumed with a cursor taken before a boundary was answered with the new
-period's records and no sign that anything came before them — the gap it
-was resuming to avoid. Nothing else moved: `since` is still an index, the
-cut is still positional, and the seam still keys on the presence of `seq`,
-so the exactly-once and at-least-once guarantees above are word for word
-the ones that held before.
+**The backfill spans segments** (DL-135; period-model §11). An estate's
+records live in `wal/<segment_no>.jsonl`, one segment per period, and the
+backfill covers every retained segment from the one holding the cursor
+onward, delivering records oldest first, so a subscriber that resumes with
+a cursor taken before a boundary sees the records before it (the walk
+itself is bounded; see below). `since` is an index, the cut is positional,
+and the seam
+keys on the presence of `seq`, so the exactly-once and at-least-once
+guarantees above hold across segments.
 
 **A cursor below the earliest retained record gets a gap marker.** The
 server sends one line, `{"gap": true, "earliest_retained": <index>}`,
@@ -651,14 +650,14 @@ is what it already does with any record kind it has no case for. The marker
 is a response like any
 other, so the leader re-proves the lineage in front of it (PR-03).
 
-**The backfill can now refuse on the stream.** It reads files this
+**The backfill can refuse on the stream** (DL-135). It reads files this
 subscription's own period did not write, so it can meet a foreign name
 under `wal/` or a closed segment whose tail is missing. Either is
 `{"ok": false, "error": …}` sent *after* the ack and then a hangup —
 never a hangup with no answer, and never a stream that silently skips the
 records it could not read. The read is bounded: it walks segments newest
 first and stops at the one holding the cursor, so a cursor inside the live
-period costs one segment however long the lineage is.*)
+period costs one segment however long the lineage is.
 
 ## 6. Client obligations
 
@@ -666,8 +665,8 @@ period costs one segment however long the lineage is.*)
   a **cancelled** exchange hands the unread response line to the next
   request and offsets every reply after it (DL-46). `ControlClient` drops
   on `OSError` and on any `BaseException` including `CancelledError`.
-- *(Amended by DL-216.)* A failure after a write was attempted is
-  `delivered` (§2). Both clients serialize the request before they touch
+- A failure after a write was attempted is `delivered` (§2, DL-216). Both
+  clients serialize the request before they touch
   the connection, so an unencodable request is the caller's error and
   never a transport outcome.
 - Open every connection with an explicit `LINE_LIMIT`; the default
@@ -680,16 +679,14 @@ period costs one segment however long the lineage is.*)
 These are honest limits of the frozen protocol, listed because the
 multihost track (`docs/decision-log.md` DL-78) has to address each one.
 
-1. ~~No version handshake~~ — **closed** by v2 (DL-90, §2); v3 since
-   DL-118.
+1. ~~No version handshake~~ — **closed** by v2 (DL-90, §2); v3 is DL-118.
 2. **No authentication or authorization — on an estate with no access
    map.** There the socket's `0600` mode plus filesystem ownership is the
    entire access-control model, and any process running as the invoking
-   user has full `sendevent` authority. That was the §12 RBAC non-goal
-   made concrete, and it is why the envelope's actor field is named
-   `claimed_actor`: the log records an assertion, and
+   user has full `sendevent` authority. That is why the envelope's actor
+   field is named `claimed_actor`: the log records an assertion, and
    `docs/concurrency-model.md` §6's "the leader stamps the authenticated
-   principal" waited on a leader that could authenticate one.
+   principal" applies only where a leader can authenticate one.
    **Closed for a configured estate (DL-146):** authorization and
    *local* authentication close with `docs/access-model.md` — kernel
    peer credentials, one principal→tier map, a closed verb table gated
