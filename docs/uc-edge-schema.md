@@ -1,15 +1,16 @@
 # UC workflow record schema — U3a doc-frozen base subset
 
-Status: FROZEN (base subset) 2026-07-28 · DL-55. We made sure that this
-document agrees with the current docs.stonebranch.com site (product
-selector "8.0", footer build stamp "v2026.07.5"). We fetched the pages raw
-on 2026-07-28 and quoted from the saved bytes. Two OSS clients
-(gomleksiz/uac-api, OptionMetrics/terraform-provider-stonebranch) agree
-with this document. We did NOT do a test against a live controller. The
-write path (one live POST + GET readback) is the U3b residue
-(`# PENDING: U3b` in backend_uc.py).
+Status: FROZEN (base subset), DL-55. A frozen item changes meaning only
+through a new decision-log entry. This document was checked against the
+docs.stonebranch.com site at product selector "8.0", footer build stamp
+"v2026.07.5", fetched raw on 2026-07-28 and quoted from the saved bytes,
+and agrees with it.
+Two OSS clients (gomleksiz/uac-api,
+OptionMetrics/terraform-provider-stonebranch) agree with this document. It
+is not tested against a live controller: the write path (one live POST +
+GET readback) is the U3b residue (`# PENDING: U3b` in backend_uc.py).
 
-## Scope — the U3 split (DL-55, the U6/Q2 pattern)
+## Scope — the U3 split (DL-55)
 
 - **U3a (this document):** This document freezes the CREATE-ONLY
   whole-record JSON shape for a workflow task whose edges carry one of the
@@ -18,9 +19,9 @@ write path (one live POST + GET readback) is the U3b residue
 - **U3b (open):** U3b includes the rich condition forms (Exit Code /
   Step Condition / Variable + `variableCondition`, vertex-level
   `conditionExpression`), the live `/resources/openapi.json` pull, and the
-  write-path test. DL-08 continues to apply: we generate the API *client*
-  from OpenAPI and never write it by hand. This document freezes records,
-  not calls.
+  write-path test. DL-08 applies: the API *client* is generated from
+  OpenAPI and never written by hand. This document freezes records, not
+  calls.
 
 ## The record (create shape)
 
@@ -58,7 +59,7 @@ bundle's `records` array has this shape:
   hard-codes `Type: "taskWorkflow"` (task_workflow.go).
 - **`name`**: This field is necessary ("Y" in the All Tasks Properties
   table). The docs give NO character-set or length constraint for the task
-  `name` field. We searched the property tables (NOT FOUND). This is
+  `name` field; the property tables were searched (NOT FOUND). This is
   unlike calendar names, for example, which carry
   "Maximum 100 alphanumeric". As a result, the backend copies names into
   the record verbatim. Every vertex `task` value is the job name. A record
@@ -94,10 +95,10 @@ bundle's `records` array has this shape:
   one catalog always serializes to the same record.
   `alias`/`conditionExpression` are nullable, and the
   records omit them. Aliases exist for duplicate tasks in one canvas.
-  Exact duplicates are impossible in v1: job names are unique in the set,
-  and each job goes into one workflow only. Names that differ by case
-  alone are L014's business — UC name addressing treats them as one task
-  (UCS-12) — and `dsl41 uc` does not run the linter itself.
+  Exact duplicates cannot occur: job names are unique in the set, and each
+  job goes into one workflow only. Names that differ by case alone are
+  L014's rule to refuse, because UC name addressing treats them as one task
+  (UCS-12); `dsl41 uc` does not run the linter itself.
   Note: for the *incremental* endpoint
   (`POST /resources/workflow/vertices`), the server assigns the vertexId.
   The whole-record create carries explicit ids. The base serializer uses
@@ -114,7 +115,7 @@ bundle's `records` array has this shape:
 ## Base condition tokens (the frozen enum)
 
 This is the dependency-services condition property. The tokens are
-verbatim, but we reflowed the table's multi-line list to one
+verbatim; the table's multi-line list is reflowed here to one
 slash-separated line: "Valid values:" Success / Failure / Success/Failure /
 Approved / Approval Required / Exit Code … / Step Condition … / Variable.
 "Default is Success." The third base token is spelled **`Success/Failure`**
@@ -131,11 +132,11 @@ t() mapping) has no base wire encoding. Such edges quarantine their
 workflow (see below).
 
 Caveat, verbatim: "Success/Failure and Failure are not valid for Workflow,
-Timer, and Manual tasks." Our interpretation (inference, not quote): this
-is a source-task-type constraint. It agrees with resolved U2 (a workflow
-instance is never Failed). The Workflow half is unreachable in v1 output,
-because v1 emits only flattened leaf-task vertices (DL-16 M18 v1). When
-sub-workflow nesting is added, that half becomes applicable. The Timer and
+Timer, and Manual tasks." Interpretation (inference, not quote): this is a
+source-task-type constraint. It agrees with closed U2 (DL-53; a workflow
+instance is never Failed). The Workflow half is unreachable in the emitted output,
+because the backend emits only flattened leaf-task vertices (DL-16, M18).
+When sub-workflow nesting is added, that half becomes applicable. The Timer and
 Manual halves are an apply-time constraint. A vertex names a task the
 estate already created, and this freeze does not cover task bodies or task
 types, so the serializer cannot check the source task's type. A `Failure`
@@ -154,14 +155,14 @@ controller at create time.
   (`firstValue` / `operator` / `secondValue`).
 - Vertex-level `conditionExpression` (boolean AND/OR over upstream vertex
   conditions, with `logicalOperator` and nested `conditions[]`).
-- We flagged a schema-shape conflict for a live test: the community
+- A schema-shape conflict is flagged for the live test: the community
   openapi.yaml (7.9.1.0, reverse-engineered, PARTIAL confidence) declares
   `ConditionWsData` as `{vertexId, type}` with no `value` field. This does
-  not agree with the doc's `{"value": "Success"}` example, which we quoted
-  from the saved bytes. The doc is the authority here. When the live
-  OpenAPI pull occurs, do this test again.
+  not agree with the doc's `{"value": "Success"}` example, quoted from the
+  saved bytes. The doc is the authority here. Run this test when the live
+  OpenAPI pull occurs.
 
-## Quarantine (the safe-freeze rule, 2026-07-12 audit)
+## Quarantine (the safe-freeze rule)
 
 Each edge outside the three base tokens — this includes the twin's
 `cancelled` and each `var_condition` — QUARANTINES its whole workflow. The
@@ -203,11 +204,14 @@ the same file as the records.
   bundle list every referenced name.
 - Each record needs one `POST /uc/resources/task`. The bundle is an
   artifact of dsl41, not a UC bulk-import file.
-- An edge that carried an AutoSys lookback window (M03) has a base wire
-  form — the plain condition token — so its workflow emits. The window
-  itself is not a record field, and the base subset stays frozen, so the
-  bundle carries it as one apply note per edge (DL-151): rebuild that edge
-  as a Task Monitor with Time Scope at cutover.
+- An edge that carried an AutoSys lookback window (M03) emits with its
+  workflow when its condition has a base wire form, the plain `Success`,
+  `Failure` or `Success/Failure` token. A lookback `t()` edge is a
+  `cancelled` condition and quarantines its workflow (above); a lookback
+  `n()` edge is a `notrunning` edge and is excluded at lowering. For the
+  emitted edges the window itself is not a record field, and the base
+  subset stays frozen, so the bundle carries it as one apply note per edge
+  (DL-151): rebuild that edge as a Task Monitor with Time Scope at cutover.
 - The records pin `retainSysIds: false` and contain no sysIds. As a
   result, the controller autogenerates every sysId, and the records are
   environment-portable. The `vertexId` values are a different thing. They
@@ -216,18 +220,18 @@ the same file as the records.
 
 ## Sources
 
-We fetched these pages raw (curl, tags stripped, grepped against the saved
-bytes) on 2026-07-28 from docs.stonebranch.com (UC 8.0 selector, build
-v2026.07.5): Workflow Task Web Services, Workflow Task and Dependency Web
-Services, Task Web Services, and All Tasks Properties.
+These pages were fetched raw (curl, tags stripped, grepped against the
+saved bytes) on 2026-07-28 from docs.stonebranch.com (UC 8.0 selector,
+build v2026.07.5): Workflow Task Web Services, Workflow Task and Dependency
+Web Services, Task Web Services, and All Tasks Properties.
 
 Two OSS clients agree with the docs: gomleksiz/uac-api
 `uac_api/workflows.py` (add_vertex/add_edge payload fields), and
 OptionMetrics/terraform-provider-stonebranch `workflow_edge.go` /
-`workflow_vertex.go` / `task_workflow.go`. We fetched the
-`Type: "taskWorkflow"` literal again on 2026-07-28 and made sure that the
-bytes are identical (line 422 at the time of capture). The provider's
-community openapi.yaml has PARTIAL confidence only.
+`workflow_vertex.go` / `task_workflow.go`, whose `Type: "taskWorkflow"`
+literal (line 422 at capture) was fetched again on 2026-07-28 and matched
+byte for byte. The provider's community openapi.yaml has PARTIAL confidence
+only.
 
 Legacy Confluence (UC 7.4/7.6) pages did not load for a fetcher. The
 freeze is based only on the current-version site.
