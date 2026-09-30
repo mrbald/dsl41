@@ -86,23 +86,23 @@ pairs (DL-46/47); do not force older ones.
 ```
 
 The run root is created by `dsl41 run` and is self-contained: `journal.jsonl`
-(then the WAL, now the one-line sentinel — see the amendment below),
+(the one-line sentinel),
 `catalogs/<source_bundle_hash>/` (the post-placeholder JIL this
 run actually loaded + `sources.json` with the original paths and the
 sha256 of the stored — post-placeholder — text, which is not the checksum
 of the file you passed when `-p` resolved anything in it), `periods/000001/manifest.json` (catalog hash and its
 version, bundle address, the runtime profile and its hash, state-machine
 version, and the period's own `baseline_id`/`first_index`), `runs/` + logs,
-`control.sock`, and `supervisor.sock` when detached. *(Amended by DL-133
-and DL-134.)* Since the periodized layout the records live in
-`wal/<segment_no>.jsonl` and `journal.jsonl` is a one-line sentinel; the
-root also holds `seals/<period>.json`, `seals/<period>.audit.json` and
-`periods/<period>/manifest.json`, and the LINEAGE anchor lives OUTSIDE it,
-at `<run-root>.anchor` by default — deliberately, so `tar`ing a root never
-carries the fence away with it. Back both up. *(Amended by DL-138.)* A run root
-written before DL-130 has `manifest/` instead of `catalogs/` + `periods/`. That
-layout is retired: it is refused by name, not read, and there is no path from
-such a root into a lineage (`docs/protocol-evolution.md`).
+`control.sock`, and `supervisor.sock` when detached. The records live in
+`wal/<segment_no>.jsonl` and `journal.jsonl` is a one-line sentinel
+(DL-133, DL-134); the root also holds `seals/<period>.json`,
+`seals/<period>.audit.json` and `periods/<period>/manifest.json`, and the
+LINEAGE anchor lives OUTSIDE it, at `<run-root>.anchor` by default,
+deliberately, so `tar`ing a root never carries the fence away with it.
+Back both up. A run root with `manifest/` (DL-66) instead of `catalogs/` +
+`periods/` is a retired layout (DL-138): it is refused by name, not read,
+and there is no path from such a root into a lineage
+(`docs/protocol-evolution.md`).
 Run roots are `0700`; journals and job output are created `0600` — the WAL
 carries globals and every control input, so keep the service account's
 home to itself. `0600` is a CREATE mode: a `std_out_file` that already
@@ -115,8 +115,8 @@ night: retention is a business decision, not a cleanup script's — see
 
 ## 2a. Retention — the floors, and the prune verb
 
-*(Added by DL-135, at build of period-model §11a and §12.)* An estate root
-grows: one WAL segment per period, one spool directory per dispatched CMD
+An estate root (DL-135; period-model §11a and §12) grows: one WAL segment
+per period, one spool directory per dispatched CMD
 or FW run (a box gets none), a `runs/.by_run_id/<run_id>` entry for each
 DETACHED CMD run, logs beside them. Nothing here removes any of
 it on a timer.
@@ -253,8 +253,8 @@ reason alone.
 
 ## 2b. Quiescent backup and restore
 
-*(Added by DL-219, derived from `tests/test_restore_drill.py`.)* Everything
-below is a rehearsal, not a new verb: there is no `dsl41 backup` or `dsl41
+Everything below (DL-219; rehearsed by `tests/test_restore_drill.py`) is a
+rehearsal, not a new verb: there is no `dsl41 backup` or `dsl41
 restore`. Back up and restore with your own file copier, against the
 inventory, the precondition and the constraints below.
 
@@ -327,16 +327,12 @@ realpath into a physical roll's successor-claim digest, but only an
 INTERRUPTED roll's claim recovery ever recomputes and compares it
 (`test_nightbank_boundary.py`'s
 `test_reclaim_frees_a_lineage_a_crashed_roll_left_claimed`); an ordinary,
-already-completed period's resume never revisits it. *(Amended by DL-224.*
-This sentence used to end "it just reads the registry row and opens what is
-at the path it names". That was wrong: resume opens the `--run-root` it is
-given. Since DL-224 it then checks that the anchor names that root, and
-refuses a root it does not name.)*
+already-completed period's resume never revisits it. Resume opens the
+`--run-root` it is given, then checks that the anchor names that root, and
+refuses a root it does not name (DL-224).
 
-**Resume on a relocated copy is refused.** *(Amended by DL-224.* This
-paragraph recorded an open gap, DL-219's open item: `dsl41 run --resume`
-pointed directly at a relocated copy, with its own copied anchor, was not
-refused. DL-224 closes it.)* Resume applies period-model §1.3's resume rule:
+**Resume on a relocated copy is refused (DL-224, closing DL-219's open
+item).** Resume applies period-model §1.3's resume rule:
 the anchor must name the `--run-root` given, and the registry row for the
 period of the root's newest OPENED segment must name it too. With no row for
 that period yet, the head must be this root's own claim: that is the window
@@ -351,7 +347,7 @@ they repair or stage anything or wire a supervisor, so no supervisor starts.
 That holds for a root that fails the rule when the command starts; if the
 lineage changes under it, for instance by an `estate reclaim` run at the
 same moment, the refusal can come after the supervisor is wired. A missing
-anchor or another estate's anchor keeps its earlier refusal and order.
+anchor or another estate's anchor keeps its refusal and order.
 There is no override: restore at the recorded path. A roll that stopped
 before its claim is also refused; run the opener (`--open-from`) again. The
 recorded path, a symlink left there that leads to the restored root, a
@@ -391,6 +387,10 @@ dsl41 run /srv/dsl41/estate/*.jil \
     [--timezone-map tz-aliases.json] [-p site.properties]
 ```
 
+In a unit or launcher, name the files explicitly rather than by glob: a
+shell glob's order is the locale's, and the file order is part of the
+catalog hash (the worked example below does this).
+
 Decisions to make once, per site:
 
 - **Tethered vs detached.** Tethered (default): engine death kills all
@@ -417,13 +417,12 @@ Decisions to make once, per site:
   `<root>/journal.jsonl` exists — a crash-restart must resume the same
   run root, while the first start of a new baseline must not. Never
   automate the *choice* of run root: new baselines are operator actions
-  (§6). *(Amended by DL-134.)* **3** joined the list above: a sealed
-  engine exits 3 and the next period is opened by an operator, not by a
-  restart loop (§6a). A unit that still says `=2` alone restart-loops
-  every boundary.
+  (§6). **3** is in the list above (DL-134): a sealed engine exits 3 and
+  the next period is opened by an operator, not by a restart loop (§6a).
+  A unit that says `=2` alone restart-loops every boundary.
 
-*(Amended by DL-210.)* A detached supervisor stays in the cgroup of the
-process that started it. `setsid` does not move it out. Choose one of these
+A detached supervisor stays in the cgroup of the process that started it
+(DL-210). `setsid` does not move it out. Choose one of these
 two service shapes before relying on engine restarts to preserve jobs.
 
 **Shape 1: a separate supervisor unit.** Start the supervisor in its own
@@ -496,8 +495,8 @@ survive into operation.
 
 ### A worked example: `examples/nightbank/deploy/`
 
-*(Added by DL-218.)* The repository holds a complete shape-1 deployment
-of the nightbank training estate. The files are examples to copy. They are
+The repository holds a complete shape-1 deployment of the nightbank
+training estate (DL-218). The files are examples to copy. They are
 not package data, and the wheel does not ship them. Every path and name in
 them is synthetic.
 
@@ -528,10 +527,11 @@ loop, and a sealed engine that stays stopped until the next period is
 opened. The access-map refusals, their messages and what they leave
 untouched are the claim of `tests/test_nightbank_deploy.py`, which runs in
 CI; the drill's claim is that systemd does not restart a refusal.
-The drill passed every step on 2026-09-29 on GitHub's Ubuntu 24.04 runner
-(DL-223); no other distribution or systemd version has been observed. It
-is not part of the default gate: dispatch it again after a change to the
-units, the launcher or the drill.
+The drill passed every step on GitHub's Ubuntu 24.04 runner at d886679
+(DL-223); no other distribution or systemd version has been observed, and
+the workflow has changed since (the setup-uv bump) without a recorded
+re-run. It is not part of the default gate: dispatch it again after a
+change to the units, the launcher or the drill.
 
 ## 4. UI surfaces
 
@@ -567,9 +567,8 @@ units, the launcher or the drill.
   changes the actor the envelope carries, and the retry is then refused as
   a collision that shows what the original decided, not replayed.
 - Offline audit: `dsl41 journal <root> [estate files]` replays the WAL
-  with no engine. *(Amended by DL-142.)* **The estate files are
-  optional.** Omit them and every period's catalog is loaded from that
-  period's own bundle under `<root>/catalogs/<source_bundle_hash>/`,
+  with no engine. **The estate files are optional (DL-142).** Omit them
+  and every period's catalog is loaded from that period's own bundle under `<root>/catalogs/<source_bundle_hash>/`,
   by the hash its opening `segment` pins — the bundle re-parses under the
   ORIGINAL paths `sources.json` records, so it reproduces that hash
   exactly. Give them and they are the FIRST replayed period's catalog,
@@ -603,18 +602,18 @@ units, the launcher or the drill.
 - Offline history: `dsl41 runs <root>... [--job NAME] [--since ISO8601]
   [--format table|json|csv]` folds one or more run roots' journal +
   manifest + spool into one row per job run — "how long did it take, run
-  after run, and did it change" (DL-113). Like `dsl41 journal` since
-  DL-142, it needs no estate-file argument: it rebuilds the catalog from
-  the run root's own stored inputs — DL-130's bundle, and since DL-138 only that:
-  DL-66's `manifest/` layout is retired and refused rather than read. Name
-  several run roots on one command line to carry a series across a
-  baseline change — the default table marks the break rather than
-  blending two catalogs into one misleading line. *(Amended by DL-136.)*
-  A root that has crossed a boundary holds one WAL segment per period, and
-  every retained one is read: each period is folded under its own
-  catalog, so a series crosses a seal exactly as it crosses a run root.
-  *(Amended at the build of PR-02f.)* Name the lineage ANCHOR directory
-  in place of the roots and the list comes from the registry: one table
+  after run, and did it change" (DL-113). Like `dsl41 journal` (DL-142), it
+  needs no estate-file argument: it rebuilds the catalog from the run
+  root's own stored inputs, the DL-130 bundle and only that; the retired
+  `manifest/` layout is refused rather than read (DL-138). Name several
+  run roots on one command line to carry a series across a baseline
+  change; the default table marks the break rather than blending two
+  catalogs into one misleading line. A root that has crossed a boundary
+  holds one WAL segment per period, and every retained one is read
+  (DL-136): each period is folded under its own catalog, so a series
+  crosses a seal exactly as it crosses a run root. Name the lineage
+  ANCHOR directory in place of the roots and the list comes from the
+  registry: one table
   across every root
   of the estate, in period order, and a root that holds two periods is
   folded once. Name it alone — mixing it with roots is refused.
@@ -634,7 +633,7 @@ profile is `--timezone`, `--timezone-map`, `--as-machine`,
 the profile and is not gated: omit it and the run comes back with no
 perimeter (§4). Keep the whole line in the launcher (§3's worked
 example); the unit calls the launcher.
-*(Amended by DL-218.)* A detached engine prints that line on its way out:
+A detached engine prints that line on its way out (DL-218):
 its own argv, shell-quoted, with `--resume` and `--detached` once each and
 `--open-from X` turned into `--estate-anchor X`.
 
@@ -645,22 +644,17 @@ jobs afterwards with explicit, journaled `FORCE_STARTJOB`s.
 
 ## 6. JIL rollout — updating the estate
 
-*(Amended by DL-133, at build of period-model §7; the operator surface
-landed with DL-134.)* **There is a second cycle, and it is the one this
-model is built around: seal → swap → open IN PLACE.** The window below
-still applies to the fresh-run-root cycle, and a fresh run root is still a
-correct thing to do; what it is no longer is the only way to change an
-estate. A boundary closes the running period at a chosen instant T and
-commits the next one, and `dsl41 run --resume` on the SAME root opens it.
-The verbs are in §6a below. State does not reset: runtime globals, operator holds,
-`last_end_at`, armed latches, every box's `ran_members` and `run_number`
-all cross the boundary, because the boundary is a record rather than a
-directory. Two sentences in this section were true only of the old cycle
-and are corrected where they stand: **"latches die with the old
-baseline" is false across a seal** (step 1), and step 6's "new run root"
-is one of two openers (period-model §7). Both corrections stand whether or
-not the CLI verb exists, because the state they are about is the record's,
-not the directory's.
+**There are two cycles. The one this model is built around is seal → swap →
+open IN PLACE (DL-133, DL-134).** The window below applies to the
+fresh-run-root cycle, which is also correct; a fresh run root is not the
+only way to change an estate. A boundary closes the running period at a
+chosen instant T and commits the next one, and `dsl41 run --resume` on
+the SAME root opens it. The verbs are in §6a below. State does not reset:
+runtime globals, operator holds, `last_end_at`, armed latches, every
+box's `ran_members` and `run_number` all cross the boundary, because the
+boundary is a record rather than a directory. Two steps below say where
+the cycles differ: latches die with the run root, not with a seal (step
+1), and step 6's "new run root" is one of two openers (period-model §7).
 
 There is no mid-run reload, by design: the running catalog is the truth
 until the engine stops, resume gates on the exact catalog hash, and a
@@ -694,20 +688,16 @@ swapping files, not discovering problems.
    again). Holds satisfy nothing downstream;
    `ON_ICE` would — it marks the job satisfied immediately. Ticks
    landing on held jobs latch (flag `A` in `query status --brief`),
-   which is fine: latches are run-root state and die with the old
-   baseline. *(Corrected by DL-133.* They die with the old **run root**,
-   and a seal does not create one. Across a seal an armed latch
-   **survives**, deliberately: dropping it at the boundary would be an
-   implicit transition with no admitted input. So the operator's
-   `OFF_HOLD` in the new period produces exactly one start — that is the
-   whole point of the hold.
-   The old sentence stays true of the fresh-run-root cycle below, where
-   the state is genuinely thrown away.)*
-   *(Amended by DL-158.* This entry's earlier "no verb for it today"
-   sentence is gone. An operator who does NOT want that start has the
-   verb for it: `dsl41 sendevent DISARM -J job` drops the latch and does
-   nothing else — send it before the `OFF_HOLD`, on either side of the
-   seal.)*
+   which is fine: latches are run-root state and die with the old **run
+   root** (DL-133), and a seal does not create one. Across a seal an armed
+   latch **survives**, deliberately: dropping it at the boundary would be
+   an implicit transition with no admitted input. So the operator's
+   `OFF_HOLD` in the new period produces exactly one start, which is the
+   whole point of the hold. In the fresh-run-root cycle below the state
+   is genuinely thrown away. An operator who does NOT want that start has
+   the verb for it (DL-158): `dsl41 sendevent DISARM -J job` drops the
+   latch and does nothing else; send it before the `OFF_HOLD`, on either
+   side of the seal.
 2. **Drain**: let RUNNING work finish (`query status --brief -S $S`), or
    `KILLJOB` what the window cannot wait for — kill command jobs, not
    boxes (only `job_terminator` members die with a box).
@@ -736,8 +726,8 @@ though with placeholders already resolved, so prefer the tag.
 
 ## 6a. The boundary — sealing a period and opening the next
 
-*(Added by DL-134, at build of period-model §7 and §11.)* The cycle §6
-describes, as commands. It keeps the state: runtime globals, operator
+The cycle §6 describes, as commands (DL-134; period-model §7 and §11). It
+keeps the state: runtime globals, operator
 holds, `last_end_at`, armed latches, every box's `ran_members` and
 `run_number` all cross, because the boundary is a record rather than a
 directory.
@@ -789,10 +779,10 @@ with a bare `--next` therefore commits a tethered successor. And
 `--next-deadman` needs `--next-detached`; alone it exits 2 before C2 is
 staged, exactly as `--deadman` needs `--detached` on `dsl41 run`.
 
-**Open, in place.** *(Amended by DL-151.)* One command, whatever the
-boundary moved. The FILES are C2's and so are the OPTIONS: state every
-`--next-*` the seal staged again on the opener, without the `--next-`
-prefix (`--next-timezone Europe/Zurich` → `--timezone Europe/Zurich`).
+**Open, in place.** One command, whatever the boundary moved (DL-151).
+The FILES are C2's and so are the OPTIONS: state every `--next-*` the
+seal staged again on the opener, without the `--next-` prefix
+(`--next-timezone Europe/Zurich` → `--timezone Europe/Zurich`).
 A catalog-only boundary therefore repeats the closing period's options,
 because that is what it staged.
 
@@ -800,10 +790,8 @@ Wrong options refuse and write NOTHING: the successor's segment is not
 created, the lineage head does not move, and the refusal names the fields
 that disagree (`runtime-profile mismatch on <field>`), so the corrected
 command opens the same committed boundary. That holds for the fields the
-engine wires and for the two it cannot see — `--next-as-machine`,
-`--next-machine-policy` — alike; before DL-151 the first pair took two
-commands to open and the second pair opened silently under the OLD
-machine identity.
+engine wires and for the two it cannot see, `--next-as-machine` and
+`--next-machine-policy`, alike (DL-151).
 
 ```sh
 dsl41 run --resume --run-root /srv/dsl41/runs/<id> \
@@ -889,22 +877,18 @@ folded through its seal, the next period's catalog comes from its own
 bundle, and the crossing is printed. It needs no estate-file argument, for the
 same reason `runs` does not — the estate holds its own catalogs.
 
-**Adoption is retired (DL-138).** `dsl41 estate adopt` took a run root
-written before the periodized layout — a `header` journal and `manifest/` —
-and translated it into period 1 of a new lineage. No dsl41 estate ran in
-production, so the verb had nothing to adopt. It is gone, and so are the read
-paths it fed: a `header` journal, a `catalog_hash_version` of 1, a `result` or
-standalone `effect` record and a `manifest/manifest.json` layout are each
-refused by name, citing DL-138.
+**There is no adoption verb (DL-138).** A `header` journal, a
+`catalog_hash_version` of 1, a `result` or standalone `effect` record and a
+`manifest/manifest.json` layout are each refused by name, citing DL-138.
 
 **A run root written before the boundary era is not adoptable.** There is no
 supported path from one into a lineage. Start a new estate with `dsl41 run`
 and let the old root stand as the archive of the nights it holds.
-`docs/protocol-evolution.md` is the contract that governs a retirement like
-this one — what each protocol tolerates, how long its instances live, and what
+`docs/protocol-evolution.md` is the contract that governs a retired
+dialect: what each protocol tolerates, how long its instances live, and what
 has to be true before a reader may drop a dialect.
 
-The `estate` group keeps its other verbs: `reclaim` (below) and `prune` (§2a).
+The `estate` group's verbs are `reclaim` (below) and `prune` (§2a).
 
 A roll that is refused **after** it wrote the target root's sentinel
 leaves that directory owned by the claim it was attempting. Period-model
@@ -933,8 +917,8 @@ dsl41 estate reclaim --estate-anchor $A --force
 It is recorded in the anchor and again in the next `segment` record with
 the actor who claimed to authorize it.
 
-**Day 2.** *(Added by DL-135.)* The things that go wrong after the first
-boundary, and the move for each.
+**Day 2 (DL-135).** The things that go wrong after the first boundary, and
+the move for each.
 
 *A seal exited 4.* The outcome is UNKNOWN — the seal may or may not have
 committed. **Read the estate before you send anything.** A committed
@@ -944,11 +928,10 @@ boundary is done and the next move is to OPEN it, never to seal again.
 If they are not, re-send the SAME request with the `--request-id` the
 command printed — a retry the still-open period recognises is answered
 from its own decision and applies nothing twice. Never compose a fresh
-`request_id` for a retry: a new id is a new command. *(Amended by
-DL-151.)* A retry that finds the boundary ALREADY committed is answered
-from the seal it committed — the same digest, the same next period, and no
-second boundary — whether the root is live or offline; before DL-151 that
-route existed in the engine and the CLI could not reach it.
+`request_id` for a retry: a new id is a new command. A retry that finds
+the boundary ALREADY committed is answered from the seal it committed
+(DL-151): the same digest, the same next period, and no second boundary,
+whether the root is live or offline.
 
 *The engine exited 3 and the init system restarted it.* It will loop.
 Exit 3 is "sealed; period N+1 is ready to open", and the opening is an
@@ -1002,14 +985,14 @@ on a timer.
 
 ## 7. Upgrading dsl41 itself
 
-*(Amended by DL-133, at build of period-model §1.1.)* **The upgrade keeps
-the state.** `catalog_hash` v2 excludes `meta.tool_version`, and
-`dsl41_version` is not on the `segment` record at all, so a patch release
-does not move a period's pins and the conservative cycle below no longer
-needs a fresh run root to be safe about the format. Step 3's rollback is
-still the symlink; step 2's "fresh run root" becomes "stop, flip the
-symlink, `run --resume`" wherever the release notes do not say the WAL
-format moved. What still requires a full drain and a new estate is a
+**The upgrade keeps the state (DL-133; period-model §1.1).** `catalog_hash`
+v2 excludes `meta.tool_version`, and `dsl41_version` is not on the
+`segment` record at all, so a patch release does not move a period's
+pins, and the conservative cycle below does not need a fresh run root to
+be safe about the format. Step 3's rollback is the symlink; step 2's
+"fresh run root" reads "stop, flip the symlink, `run --resume`" wherever
+the release notes do not say the WAL format moved. What requires a full
+drain and a new estate is a
 **state-machine version** bump: one executable implements exactly one, and
 a seal whose `next_period` names a different one is refused at readiness
 (period-model §2.1).
