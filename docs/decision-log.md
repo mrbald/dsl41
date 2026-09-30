@@ -14309,3 +14309,58 @@ relitigate an entry; append a new one.
   reclaims. Admission is still refused under both locks. Reopen on a
   second anchor-mutating verb that can run beside a resume, or on a stray
   supervisor from this window seen in operation.
+
+- DL-225 Specification review: one document per pass, present state only,
+  reconciled with the code; per-document stamps and an advisory gate line
+  (2026-09-30)
+  Ruling: the shelf under `docs/` is reviewed one document per pass by the
+  `spec-review` skill (`.claude/skills/spec-review/SKILL.md`, discovered by
+  Codex through `.agents/skills/spec-review`). A pass rewrites the document
+  to state the present design in plain dry English, paragraph by paragraph,
+  then chapter by chapter, then whole. It works from a delegated fact sheet
+  and ends with a fresh adversarial review of the text against the code.
+  Section numbers and citation tokens are kept: docstrings, other documents
+  and this log cite both, and no gate checks section numbers.
+  Reconciliation rule: where the specification and the code disagree, this
+  log decides. A later entry that rules for the code moves the
+  specification and cites the entry. With no entry, the code is wrong; the
+  pass changes neither and lists the finding in its pull request. A frozen
+  contract (period-model, concurrency-model, control-protocol,
+  supervisor-protocol, protocol-evolution, and the U3a record schema in
+  uc-edge-schema) changes meaning only through a new entry here, and so
+  does any rule an entry doc-froze. A pass that changes nothing has no
+  pull request; it is stamped once accepted.
+  Scope: every `docs/*.md` except `decision-log.md` (append-only history),
+  `citation-index.md` (a registry), and `agent-harness-review.md` (dated
+  evidence). `simulation-coverage.md` is held to the register by its test;
+  a pass edits its prose only.
+  Trigger and stamp: `scripts/arch_check.py` reports, per document, whether
+  a review is due -- no `spec-review/<stem>/*` tag, or more than
+  `REVIEW_DIFF_LINES` (800) lines changed under `src/` since the newest
+  one, the same rule the arch-review drift check applies -- as one advisory
+  line, with `--spec-status` for the table. The exit code is unchanged. A
+  shallow clone has no tags, so the check stays silent there; CI's checkout
+  is shallow. An accepted pass is stamped, after its pull request merges
+  when it has one, with an annotated tag `spec-review/<stem>/<UTC
+  timestamp>` on `main`, never on a branch commit, so the counted diff is
+  main's. The tag message states the pass's
+  outcome: `no change`, `wording`, or `ruling DL-NNN`.
+  Why per document: seventeen documents from 129 to 2777 lines; one stamp
+  for all of them would mark a document reviewed that was not. Why lines
+  under `src/` for every document alike: a per-document module map would
+  be a second thing to keep true, and the fact sheet at the start of a
+  pass is where "nothing changed for this document" is cheap to find; the
+  stamp then costs one tag.
+  Why after the README: the README pass of the same day (pull request 44)
+  settled the method, and its review showed the failure mode this entry
+  guards against: the rewrite dropped "from a branch" from the release
+  rehearsal step, and the sentence then said that a manual run from a tag
+  with `publish` set publishes nothing, which is false. Specifications
+  differ from the README on three points, all above: citations stay,
+  section numbers stay, and a disagreement is a code finding by default
+  because `docs/` is normative.
+  Calibration order for the first pass over the shelf: `ir-design.md`,
+  then the two semantics dossiers, then the unfrozen documents, then the
+  frozen contracts, `period-model.md` last.
+  Not built: a per-document module map for the trigger. Re-find trigger:
+  a document whose last three stamps all carry `outcome: no change`.

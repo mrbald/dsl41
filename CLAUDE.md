@@ -71,6 +71,11 @@ All ten compiler phases in DL-03 are implemented; their order remains normative.
   `arch-review`. Its shared body is
   `.claude/skills/arch-review/SKILL.md`; Codex discovers the same body
   through `.agents/skills/arch-review`.
+- When `scripts/arch_check.py` reports a spec review due, or a
+  specification under `docs/` needs reconciling with the code, use
+  `spec-review` with the document path (DL-225). Its shared body is
+  `.claude/skills/spec-review/SKILL.md`; Codex discovers it through
+  `.agents/skills/spec-review`.
 
 ## Boss and peer work
 
