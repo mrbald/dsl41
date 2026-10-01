@@ -14732,3 +14732,40 @@ relitigate an entry; append a new one.
   Tests: one DISARM over an armed target and one over an unarmed target
   read the two reasons from the trace; the unarmed case with a timer of
   the target's own due at the same instant still reads `(no latch)`.
+- DL-234 Supersession is decided before the routing hold, and a run has
+  its one identity from the instant its SPAWN is planned (2026-10-01;
+  concurrency-model.md ss5; runner.py, runner_effects.py; amends DL-232's
+  implementation)
+  GATE ORDER. ss5's worked example read the dispatch gates as routing
+  first, supersession at activation. Under that order a held SPAWN whose
+  job left STARTING or RUNNING stayed pending until the host was
+  activated, and an injected STATUS back to RUNNING before activation
+  launched a run whose reservations the earlier edge had released (one
+  SLOT, two live runs, the stale one holding nothing). Ruling:
+  `superseded_reason` is decided before the routing hold on every dispatch
+  pass, and a dispatch pass follows every admitted input, so a held SPAWN
+  is retired in the pass after the edge that ended its run, while the host
+  is still drained. The `effect_result` record is unchanged in content; it
+  lands after that edge's decision instead of after the activation's.
+  KILLs are never held, so their order does not move. ss5's example reads
+  under this entry.
+  ONE IDENTITY FROM THE PLAN. The ghost-run gate (`plan_effects`,
+  `runs > dispatched`) plans no second SPAWN for a run the engine already
+  dispatched, and DL-232 made a retired SPAWN count as dispatched. A SPAWN
+  that is merely HELD did not count, so a `CHANGE_STATUS STARTING`
+  overwrite on a job whose SPAWN sat behind a drained host planned a
+  second SPAWN for the same run and the outbox refused it ("one run, one
+  identity", DL-118) after the decision was journaled. Ruling:
+  `_dispatched` advances when a SPAWN is planned, not when it launches: a
+  run has its one identity from its plan. Resume already rebuilds the map
+  from every row with `run_number > 0`, which `start_run` sets at the
+  plan, so the in-memory rule now matches the rebuild rule; DL-232's
+  advance on retirement is subsumed.
+  A journal written before DL-232 that holds two KILLs under one effect
+  id is a crash artifact; replay keeps refusing it with the outbox's
+  "recorded twice with different content", under the pre-production reset
+  clause (`docs/protocol-evolution.md`, DL-138). No migration.
+  Tests: the SLOT scenario above; a held SPAWN followed by a STARTING
+  overwrite (no second SPAWN, no identity error, resume agrees); the
+  existing retirement-at-activation test restated to retirement at the
+  edge.

@@ -52,7 +52,7 @@ import pytest
 
 from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
-from dsl41.oracle_state import Event
+from dsl41.oracle_state import CarriedRows, Event
 from dsl41.runner import Engine
 from dsl41.runner_startup import start_run
 from dsl41.runner_adapters import FakeAdapter
@@ -374,6 +374,232 @@ def test_a_timer_inside_this_inputs_own_batch_does_not_invalidate_it() -> None:
 
     engine = asyncio.run(scenario())
     assert engine.oracle.store.job["x"].status == "TERMINATED"
+
+
+class _SteppedClock:
+    """A real-domain clock (`virtual = False`) whose wall time the test sets.
+    It lets the loop reach its next decision after a deadline was due, which
+    the virtual clock never does."""
+
+    virtual = False
+
+    def __init__(self, start: datetime) -> None:
+        self.t = start
+
+    def now(self) -> datetime:
+        return self.t
+
+    def next_sleeper_due(self) -> datetime | None:
+        return None
+
+    def pending_sleepers(self) -> int:
+        return 0
+
+    async def wait_until(self, t: datetime, interrupt: asyncio.Event | None = None) -> None:
+        if t != datetime.max and t > self.t:
+            self.t = t
+
+    async def sleep_until(self, t: datetime) -> None:
+        await asyncio.Event().wait()  # a run that never ends on its own
+
+
+async def _decided_late(engine: Engine, clock: _SteppedClock, kind: str, minutes: float):
+    """STARTJOB x at T0 (deadline T0+2), then a command stamped at `minutes`
+    against the revision read at T0, decided with the wall clock at T0+3:
+    the loop reaches the decision a minute after the deadline was due."""
+    engine.inject(_ev("STARTJOB", 0, job="x"))
+    await engine.run_until_quiescent(T0)
+    read = engine.oracle.store.revision("job:x")
+    clock.t = T0 + timedelta(minutes=3)
+    future = engine.submit(
+        _ev(kind, minutes, job="x"),
+        Envelope(request_id="r1", expect={"job:x": read}, epoch=engine.epoch),
+    )
+    await engine.run_until_quiescent(T0 + timedelta(minutes=3))
+    return read, await future
+
+
+@pytest.mark.parametrize("verb", ["ON_HOLD", "FORCE_STARTJOB"])
+def test_a_deadline_due_before_a_late_decision_still_invalidates_a_stale_command(
+    verb: str,
+) -> None:
+    """ss0 in the real domain. The command is stamped at T0+2:30, half a
+    minute after the deadline, but the loop decides it at T0+3. The deadline
+    still fires first, as its own input stamped at its due instant, so the
+    command's revision is stale and it is rejected (DL-232). Before, the
+    command's own batch fired the deadline and the gate read the pre-batch
+    revision: the ON_HOLD landed and the FORCE_STARTJOB started run 2."""
+
+    async def scenario() -> Engine:
+        clock = _SteppedClock(T0)
+        engine = Engine(
+            lower_source(_TERM_JIL), clock=clock, adapters={"CMD": FakeAdapter(default=None)}
+        )
+        _, result = await _decided_late(engine, clock, verb, 2.5)
+        assert result.decision == "rejected"
+        assert "precondition failed" in (result.reason or "")
+        await engine.shutdown()
+        return engine
+
+    engine = asyncio.run(scenario())
+    row = engine.oracle.store.job["x"]
+    assert (row.status, row.run_number, row.on_hold) == ("TERMINATED", 1, False)
+    assert [(t.at, t.transition) for t in engine.oracle.trace()][-1] == (
+        T0 + timedelta(minutes=2),
+        "RUNNING->TERMINATED",
+    )
+
+
+def test_a_late_decision_still_shares_a_batch_with_a_deadline_due_at_its_instant() -> None:
+    """The boundary of the rule above, in the real domain: stamped exactly at
+    the deadline, the command's own batch fires it, one input takes one
+    increment, and the command applies however late the loop decides it."""
+
+    async def scenario() -> None:
+        clock = _SteppedClock(T0)
+        engine = Engine(
+            lower_source(_TERM_JIL), clock=clock, adapters={"CMD": FakeAdapter(default=None)}
+        )
+        read, result = await _decided_late(engine, clock, "ON_HOLD", 2)
+        assert result.decision == "applied"
+        assert result.revisions == {"job:x": read + 1}
+        assert engine.oracle.store.job["x"].status == "TERMINATED"
+        await engine.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_a_late_status_after_a_deadline_records_one_kill_and_replays(tmp_path: Path) -> None:
+    """The same interleaving with an ungated `CHANGE_STATUS SUCCESS` used to
+    put two terminal transitions of one live run in one batch, and
+    `Outbox.record` raised on the second KILL after the decision was
+    journaled. The deadline now fires as its own input, and the log replays
+    (DL-232)."""
+    catalog = lower_source(_TERM_JIL)
+    clock = _SteppedClock(T0)
+    engine = start_run(
+        catalog, tmp_path / "run", clock=clock, adapters={"CMD": FakeAdapter(default=None)}
+    )
+
+    async def scenario() -> None:
+        engine.inject(_ev("STARTJOB", 0, job="x"))
+        await engine.run_until_quiescent(T0)
+        clock.t = T0 + timedelta(minutes=3)
+        engine.inject(_ev("STATUS", 2.5, job="x", status="SUCCESS"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=3))
+        await engine.shutdown()
+
+    asyncio.run(scenario())
+    assert engine.oracle.store.job["x"].status == "SUCCESS"
+    [kill] = [e for e in engine.outbox.effects() if e.kind == "KILL"]
+    assert (kill.job, kill.run_number, kill.at) == ("x", 1, T0 + timedelta(minutes=2))
+    assert engine.journal is not None
+    engine.journal.close()
+
+    records = read_journal(tmp_path / "run" / "journal.jsonl")
+    # the deadline is its own verbless input, stamped at its due instant
+    assert [(r["rec"], r["at"]) for r in records if r["rec"] in ("input", "advance")][-2:] == [
+        ("advance", (T0 + timedelta(minutes=2)).isoformat()),
+        ("input", (T0 + timedelta(minutes=2.5)).isoformat()),
+    ]
+    fresh = Oracle(catalog)
+    replay = replay_inputs(fresh, records)
+    assert [e.effect_id for e in replay.outbox.effects() if e.kind == "KILL"] == [kill.effect_id]
+    assert fresh.store.job["x"].status == "SUCCESS"
+
+
+#: a negative term_run_time arms a deadline already past due at the start
+_PAST_DUE_JIL = "insert_job: x\njob_type: c\ncommand: sleep 300\nterm_run_time: -1\n"
+
+
+def test_a_timer_due_before_the_last_admitted_instant_is_stamped_at_that_instant(
+    tmp_path: Path,
+) -> None:
+    """The stamp's floor (DL-232). The deadline is due at T0-1, before the
+    STARTJOB admitted at T0 that armed it, and a command stamped T0+0:30
+    waits behind it. The deadline fires as its own input at T0, the later
+    instant, so admission never sees time go backwards."""
+    # a second past the first horizon: a real clock is never exactly at it,
+    # and this one would otherwise wait on an instant that has already passed
+    clock = _SteppedClock(T0 + timedelta(seconds=1))
+    engine = start_run(
+        lower_source(_PAST_DUE_JIL),
+        tmp_path / "run",
+        clock=clock,
+        adapters={"CMD": FakeAdapter(default=None)},
+    )
+
+    async def scenario() -> None:
+        engine.inject(_ev("STARTJOB", 0, job="x"))
+        await engine.run_until_quiescent(T0)
+        assert engine.oracle.store.job["x"].status == "RUNNING"  # the deadline waits
+        read = engine.oracle.store.revision("job:x")
+        clock.t = T0 + timedelta(minutes=1)
+        future = engine.submit(
+            _ev("ON_HOLD", 0.5, job="x"),
+            Envelope(request_id="r1", expect={"job:x": read}, epoch=engine.epoch),
+        )
+        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+        assert (await future).decision == "rejected"
+        await engine.shutdown()
+
+    asyncio.run(scenario())
+    assert engine.journal is not None
+    engine.journal.close()
+    records = read_journal(tmp_path / "run" / "journal.jsonl")
+    assert [(r["rec"], r["at"]) for r in records if r["rec"] in ("input", "advance")] == [
+        ("input", T0.isoformat()),
+        ("advance", T0.isoformat()),
+        ("input", (T0 + timedelta(seconds=30)).isoformat()),
+    ]
+    assert engine.oracle.store.job["x"].status == "TERMINATED"
+
+
+def test_a_carried_timer_due_before_the_seal_instant_fires_at_that_instant() -> None:
+    """A segment opened from a seal has admitted nothing, but its oracle
+    starts at the seal instant T. A carried deadline due before T fires as
+    its own input stamped at T, not at its due instant, which the oracle
+    would refuse as time going backwards (DL-232). The command behind it is
+    refused at admission for its epoch, so it takes no index and the
+    frontier is the timer's own stamp."""
+    catalog = lower_source(_TERM_JIL)
+    seal_at = T0 + timedelta(minutes=3)
+
+    async def scenario() -> Engine:
+        closing = Engine(
+            catalog, clock=VirtualClock(start=T0), adapters={"CMD": FakeAdapter(default=None)}
+        )
+        closing.inject(_ev("STARTJOB", 0, job="x"))
+        await closing.run_until_quiescent(T0)
+        store = closing.oracle.store
+        carried = CarriedRows(
+            jobs=dict(store.job),
+            timers=tuple(store.timers()),
+            timer_seq=store.timer_seq,
+            period_id=2,
+            now=seal_at,
+        )
+        await closing.shutdown()
+
+        clock = _SteppedClock(seal_at + timedelta(minutes=1))
+        opened = Engine(
+            catalog, clock=clock, adapters={"CMD": FakeAdapter(default=None)}, carried=carried
+        )
+        assert [due for due, _, _ in opened.oracle.store.timers()] == [T0 + timedelta(minutes=2)]
+        future = opened.submit(
+            _ev("ON_HOLD", 3.5, job="x"),
+            Envelope(request_id="r1", expect={"job:x": 1}, epoch=opened.epoch + 1),
+        )
+        await opened.run_until_quiescent(seal_at + timedelta(minutes=1))
+        with pytest.raises(AdmissionRefused):
+            await future
+        await opened.shutdown()
+        return opened
+
+    opened = asyncio.run(scenario())
+    assert opened.frontiers.at == seal_at
+    assert opened.frontiers.applied_index == opened.frontiers.committed_index == 1
+    assert opened.oracle.store.job["x"].status == "TERMINATED"
 
 
 def test_revision_zero_is_the_conditional_create() -> None:

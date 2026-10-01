@@ -528,12 +528,13 @@ class DecisionIndex:
 def precondition_reason(oracle: Oracle, expect: Mapping[str, int]) -> str | None:
     """The ss0 check: did the entity move since the caller read it?
 
-    Read AFTER the batch's time half has applied (ss4 orders step 5 before
-    step 6), which is not a detail. A term_run_time kill firing on this
-    input's own clock observation bumps the job it kills, so an operator's
-    command composed against the pre-kill revision is refused BY that kill --
-    the same ordering CM-04 pins for the completion gate, reaching the
-    precondition for free."""
+    Read after the batch's time half has applied (ss4 orders step 5 before
+    step 6), but revisions move at commit, so the gate reads the revision
+    from before this input. A term_run_time kill firing inside this input's
+    own batch therefore does not refuse it: everything one input causes
+    shares one increment (ss0, DL-90). A deadline due strictly earlier fires
+    as its own input first and does bump the job, so a command composed
+    against the pre-kill revision is refused (DL-232)."""
     for key, want in expect.items():
         actual = oracle.store.revision(key)
         if actual != want:

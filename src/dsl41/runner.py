@@ -1108,13 +1108,18 @@ class Engine:
 
           E  a queued input is takeable -- the queue head is at or before
              the horizon, no later than any timer, no later than any tick,
-             and (real domain only) already due;
+             and (real domain only) already due. The real domain compares
+             the head with the timer's raw due instant (DL-232);
           S  a calendar tick is takeable -- admission is not frozen, the
              tick is at or before the horizon, STRICTLY before the queue
              head, no later than any timer, and (real domain) already due;
           T  a timer firing is takeable -- something is due, its effective
              instant is at or before the horizon, it is not held lazy by the
-             frontier rule, and (real domain) already due.
+             frontier rule, and (real domain) already due. In the real
+             domain a timer due strictly before a due queue head is also
+             takeable. It fires as its own input, stamped at the latest of
+             its due instant, the last admitted instant and the oracle's
+             clock (ss0, DL-232).
 
         The old chain is then exactly the priority order E > S > T:
 
@@ -1165,10 +1170,15 @@ class Engine:
         raw_due = min(due) if due else None
         eff_due = max(raw_due, now) if raw_due is not None else None
         sched_due = self.scheduler.next_occurrence() if self.scheduler is not None else None
+        # the instant a queued input must not pass: the effective due instant
+        # in the virtual domain (the frontier rule), the raw one in the real
+        # domain, where the loop can reach its decision after a timer was due
+        # (DL-232)
+        head_gate = eff_due if self.clock.virtual else raw_due
         if (
             head_at is not None
             and head_at <= horizon
-            and (eff_due is None or head_at <= eff_due)
+            and (head_gate is None or head_at <= head_gate)
             and (sched_due is None or head_at <= sched_due)
             and (self.clock.virtual or head_at <= now)
         ):
@@ -1182,6 +1192,22 @@ class Engine:
             and (self.clock.virtual or sched_due <= now)
         ):
             return _Work(_Do.TICK, at=sched_due)
+        if (
+            not self.clock.virtual
+            and raw_due is not None
+            and head_at is not None
+            and raw_due < head_at
+            and head_at <= horizon
+            and head_at <= now
+        ):
+            # concurrency-model ss0 (DL-232): a timer due strictly before a
+            # due input fires as its own input, so the revision it moves is
+            # one the input's gate reads. Stamped at the latest of its due
+            # instant, the last admitted instant and the oracle's clock: a
+            # segment opened from a seal has no admitted instant yet but
+            # starts at T, and neither check may see time go backwards
+            floors = (self.frontiers.at, self.oracle._now)
+            return _Work(_Do.TIMER, at=max([raw_due, *(t for t in floors if t is not None)]))
         if (
             raw_due is not None
             and eff_due is not None
@@ -1434,6 +1460,14 @@ class Engine:
             self.journal.decision(applied.result, effects)
         for effect in effects:
             self.outbox.record(effect)
+            if effect.kind == "SPAWN":
+                # a run has its one identity from its plan (DL-234): a held
+                # or retired SPAWN still counts, so a STARTING overwrite at
+                # the same run number plans no second one -- the rule resume
+                # rebuilds `_dispatched` by
+                self._dispatched[effect.job] = max(
+                    self._dispatched.get(effect.job, 0), effect.run_number
+                )
         if applied.result.decision == "rejected" and ev is not None:
             assert applied.result.reason is not None
             self.drops.append((ev, applied.result.reason))
@@ -1534,11 +1568,22 @@ class Engine:
         """One effect, at-most-once (concurrency-model ss5, CM-09).
 
         Three gates before anything happens, and each keeps out a different
-        wrong act: a host that routes nothing leaves the effect PENDING (ss8
-        -- held, not failed and not rerouted); an effect the world has moved
-        past is RETIRED rather than applied; and only then is it attempted.
-        The outcome is recorded either way, because "attempted and we cannot
-        say" is a fact that has to survive a crash (ss5's third state)."""
+        wrong act: an effect the world has moved past is RETIRED rather than
+        applied; a host that routes nothing leaves the effect PENDING (ss8
+        -- held, not failed and not rerouted); and only then is it attempted.
+        Supersession comes first (DL-234). Every input ends in a dispatch
+        pass, so a held SPAWN is retired in the pass after the status edge
+        that ended its run, not at activation. The outcome is recorded either
+        way, because "attempted and we cannot say" is a fact that has to
+        survive a crash (ss5's third state)."""
+        reason = superseded_reason(
+            effect,
+            self.oracle.store.job.get(effect.job),
+            self._live[effect.job].run_number if effect.job in self._live else None,
+        )
+        if reason is not None:
+            self._retire(effect, reason)
+            return
         if effect.kind == "SPAWN" and not routes_new_effects(
             self.oracle.store.host(effect.executor_id)
         ):
@@ -1553,20 +1598,17 @@ class Engine:
             # work ends. Holding kills during a drain would make KILLJOB stop
             # working exactly while an operator is most likely to reach for it.
             return
-        reason = superseded_reason(
-            effect,
-            self.oracle.store.job.get(effect.job),
-            self._live[effect.job].run_number if effect.job in self._live else None,
-        )
-        if reason is not None:
-            self._resolve_effect(
-                EffectOutcome(effect_id=effect.effect_id, state="retired", detail=reason)
-            )
-            return
         if effect.kind == "SPAWN":
             self._apply_spawn(effect)
         else:
             self._apply_kill(effect)
+
+    def _retire(self, effect: Effect, detail: str) -> None:
+        """Record an effect as retired. Its run already counts as dispatched,
+        from the plan (DL-234)."""
+        self._resolve_effect(
+            EffectOutcome(effect_id=effect.effect_id, state="retired", detail=detail)
+        )
 
     def _resolve_effect(self, outcome: EffectOutcome) -> None:
         self.outbox.resolve(outcome)
@@ -1583,13 +1625,7 @@ class Engine:
             # kept, not deleted, because what it guards is a DISAGREEMENT
             # between catalog and log -- the one thing that would make the
             # alternative a KeyError in the middle of dispatch.
-            self._resolve_effect(
-                EffectOutcome(
-                    effect_id=effect.effect_id,
-                    state="retired",
-                    detail=f"{effect.job} has no dispatch row in this catalog",
-                )
-            )
+            self._retire(effect, f"{effect.job} has no dispatch row in this catalog")
             return
         self._dispatched[effect.job] = effect.run_number
         stale = self._live.pop(effect.job, None)

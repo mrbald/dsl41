@@ -328,8 +328,15 @@ def plan_effects(
     but it now decides whether an EFFECT exists rather than whether a task
     is created, which is the honest place for it: the shell never intended
     to act. And a terminal status for a job with no live run needs no kill;
-    planning one would write an effect that could only ever be superseded."""
+    planning one would write an effect that could only ever be superseded.
+
+    One call plans at most one effect per `(kind, job, run_number)` and
+    keeps the first (DL-232). Two terminal transitions of one live run in
+    one batch, such as a deadline firing inside a `CHANGE_STATUS SUCCESS`
+    batch, would otherwise plan two KILLs under one id with different
+    instants. The first is the run's actual kill."""
     effects: list[Effect] = []
+    planned: set[tuple[EffectKind, str, int]] = set()
     for ev in emitted:
         if ev.kind != "STATUS":
             continue  # alarms are journal + UI surface only (runner-design ss4)
@@ -343,8 +350,9 @@ def plan_effects(
             kind, run_number = "SPAWN", runs.get(job, 0)
         elif status in TERMINAL and job in live:
             kind, run_number = "KILL", live[job]
-        if kind is None:
+        if kind is None or (kind, job, run_number) in planned:
             continue
+        planned.add((kind, job, run_number))
         effects.append(
             Effect(
                 effect_id=effect_id_for(index, kind, job, run_number),
@@ -378,6 +386,13 @@ def superseded_reason(effect: Effect, row: JobRuntime | None, live_run: int | No
     if effect.kind == "SPAWN":
         if row.status in TERMINAL:
             return f"{effect.job} is already {row.status}: the run this spawn was for has ended"
+        if row.status not in ("STARTING", "RUNNING"):
+            # ss5's "still desired running": an injected INACTIVE while the
+            # spawn was held sets the run aside without ending it (DL-232)
+            return (
+                f"{effect.job} is {row.status}: the run this spawn was for is no longer"
+                " desired running"
+            )
         if row.run_number != effect.run_number:
             return (
                 f"{effect.job} is at run {row.run_number}, not the {effect.run_number}"
