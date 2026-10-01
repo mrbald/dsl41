@@ -97,7 +97,8 @@ claude --print --effort xhigh --permission-mode manual \
 Run from the repository root and verify the returned model.
 Use the configured model explicitly when launching from another directory: a
 probe of the installed CLI from a nested directory selected a different model,
-and the cause is not established (`docs/agent-harness-review.md`).
+and the cause is not established (the harness review of 2026-09-07, now in
+the git history before DL-230).
 Do not infer settings loading from memory loading.
 The restricted tool list excludes skill invocation; add `Skill` only when needed.
 If the brief names evidence outside the checkout, grant that specific directory

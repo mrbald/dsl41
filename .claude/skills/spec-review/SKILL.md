@@ -21,9 +21,9 @@ both stay silent in a shallow clone, where tags are absent.
 
 ## Which document
 
-In scope: every `docs/*.md` except `decision-log.md` (append-only history),
-`citation-index.md` (a registry), and `agent-harness-review.md` (dated
-evidence). `simulation-coverage.md` is held to the coverage register by
+In scope: every `docs/*.md` except `decision-log.md`, the append-only
+history, and `citation-index.md`, a registry (DL-230).
+`simulation-coverage.md` is held to the coverage register by
 `tests/test_simulation_register.py`: edit its prose only, never its table.
 
 Calibration order for the first pass over the shelf: `ir-design.md` first

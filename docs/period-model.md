@@ -2,8 +2,8 @@
 
 Status: **frozen (DL-114).** Normative in the way `docs/concurrency-model.md`
 and `docs/control-protocol.md` are: each change to a frozen item requires a
-decision-log entry. It is the only home of the boundary mechanism;
-`docs/ops-model.md` is the ops-view plan and points here.
+decision-log entry. It is the only home of the boundary mechanism; the operator's view
+of it is `docs/deployment-runbook.md` §6a and §8 (DL-230).
 
 Nothing ships incrementally. Correctness is carried by §13's obligations and
 §14's worked estate, not by staged exposure. An obligation weak enough to let a
@@ -11,8 +11,8 @@ broken implementation pass is a defect of the same rank as a wrong mechanism.
 
 ## 0. The problem
 
-Without periods, a run root carries four lifetimes and forces them to end
-together (`ops-model.md` §0). An estate change is stop → swap → **new run root**, and a
+Without periods, a run root carries four lifetimes (§1 names them) and
+forces them to end together. An estate change is stop → swap → **new run root**, and a
 new run root is a new log, a new baseline and a fresh oracle. So every release
 silently resets every runtime global, every operator hold, every `last_end_at`
 that lookback reads, every `armed` latch, every box's `ran_members` and every
@@ -2191,6 +2191,27 @@ alone; `runs` names the coverage it does not have; `estate prune` re-plans an
 archived root without refusing, including a root whose every period is
 archived.
 
+**The closed book** (DL-230). An investigator or an auditor is handed, for a
+closed period: the seal that closed it and, for every period but the first,
+the seal that opened it, chained by digest; every input between them,
+unless the period's inputs were archived under `archive-inputs`; the catalog
+it ran under, as the post-placeholder JIL bytes stored in the period's own
+root under `catalogs/<source_bundle_hash>/`, content-addressed (DL-130);
+and the principal who asked for each externally requested input, the
+authenticated one when the access map was armed, a claim otherwise
+(`docs/access-model.md`). `dsl41 journal` loads the stored bundle when the
+caller supplies no estate files and gates it against the `catalog_hash` the
+period's `segment` record pins, parsing each file under the path
+`sources.json` recorded, because the hash covers spans and a span names its
+file. A bundle that no longer reproduces the pinned hash refuses as
+corruption; a supplied catalog that disagrees refuses as a checkout at the
+wrong revision; the two sentences differ. An archived period whose inputs
+are gone contributes nothing to a replay, and `dsl41 runs` and `journal`
+name it rather than answering shorter; a segment still on disk under a
+receipt (the crash window before the deletions, or a restored file) is
+read at the attestation-verified tier, and `journal` names it before it
+replays it.
+
 ## 13. Obligations
 
 House convention `test_prNN_*` and `test_prNNx_*` for a suffixed id — the
@@ -2495,6 +2516,6 @@ Closed, kept because the decision log and the code cite them:
   class, with a durable receipt before any deletion, an itemized eligibility
   list, three artifacts on a permanent floor, and readers that name the gap.
   §11's "verified" is two named tiers, and an archived period stands at
-  *attestation-verified*. E20 in `ops-model.md` §11 closes with it.
+  *attestation-verified*. E20 (`docs/runner-design.md` §15) closes with it.
 - **PR-Q4** — audit runs the interpreter that produced the period, and old
   versions stay installable (§11).

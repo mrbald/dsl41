@@ -1017,3 +1017,90 @@ resume-safe, nothing else. It installs from the new release's assets as §1
 does, not with `pip install -U`, which would resolve dependencies afresh:
 `pip install --require-hashes -r requirements-<profile>.txt` from the new
 release, then `pip install --no-deps` of its wheel, then `pip check`.
+
+## 8. Operator scenarios
+
+One row per situation an operator meets, with the verbs that exist. A row
+that says "not built" names where the plan is recorded. Every control-plane intervention is an adjusting entry: recorded
+in the WAL, attributed to its actor, replayed identically, never an edit to
+what is already written. `supervise shutdown` is the one exception: it
+speaks to the supervisor, not the engine, and leaves no WAL record.
+
+### Installation and lifecycle
+
+| scenario | procedure |
+| --- | --- |
+| initial install, one host | §1 to §3 |
+| engine version upgrade | §7: a patch release marked resume-safe resumes in place; any other release starts on a fresh run root at a boundary. A `state_machine_version` bump is always a new estate (period-model §2.1) |
+| OS patching, host maintenance | `host drain` lets running work finish while the engine keeps leading (control-protocol §3). With one executor row the engine's own host is the executor, so patching that host is a stop and a resume (§3). A second executor is not built (DL-230): there is no flag for an `executor_id` (`--as-machine` names the machine identity only), and `journal` reads the one local executor |
+| several estates on one host | each estate is its own run root, control socket, `serve` port and capacity pool; nothing is shared between them |
+| standby provisioning, readiness check | not built: follower mode and `standby check` (DL-230) |
+| estate decommission | a final seal, then §2a's floors, `estate prune` and the archive class (DL-135, DL-144). There is no decommission procedure and no retire verb |
+
+### Estate content
+
+| scenario | procedure |
+| --- | --- |
+| initial JIL release | native genesis opens period 1; there is no opening seal (§3) |
+| incremental change, emergency hotfix mid-cycle | seal, classified diff, open under the new catalog (§6a; DL-131, DL-133). The R-gate refuses only while something in the changed closure is live. Tethered mode drains, because a transition is a restart |
+| rollback | a transition back to the previous catalog (§6a), or a fresh run root (§6) |
+| calendar or holiday change | a catalog change: firing dates move, the hash moves, §6a applies |
+| properties or placeholder change | a catalog change: it changes the post-placeholder JIL, so the hash moves and §6a applies |
+| affinity role remap | not built: the `route` verb is specified in period-model §2.2 |
+
+### Running the cycle
+
+| scenario | procedure |
+| --- | --- |
+| ordinary night | §5 |
+| closing the books | `dsl41 seal` at the estate's own cutoff, in the estate's own zone (§6a, SEM-35). Each boundary is an operator act; automatic sealing on a timer is a period-model §12 non-goal. The cadence is E16 (runner-design §15) |
+| cutoff with live runs | the seal waits out an unresolved KILL ladder and carries every live execution; the opener reconciles them in the new period (period-model §3.3, §7) |
+| missed ticks over downtime | skip-and-report (E9): resume drops each missed tick and journals a `drop` record; nothing fires late (runner-design §15) |
+| deliberate catch-up after downtime | explicit `FORCE_STARTJOB`s; the period's `drop` records say what was skipped |
+
+### Investigation
+
+| question | procedure |
+| --- | --- |
+| why has X not started? | the `explain`, `deps`, `timers` and `plan` queries (§4; control-protocol §4) |
+| post-hoc, current period | `dsl41 journal` replay (§4) |
+| post-hoc, closed period | the closed book (period-model §12a): the seal chain, the inputs unless archived, and the period's own catalog bundle stored in its root. `dsl41 journal` replays from the stored bundle with no checkout |
+| across a physical roll | one ledger per estate: the registry names every root and `journal`, `audit` and `runs` cross them (DL-141) |
+| what ran, when, under which definition, on whose authority | the closed book and `dsl41 runs` answer the first three. Authority is the authenticated principal when the access map is armed (access-model), the caller's claim otherwise |
+| is this job degrading? | `dsl41 runs --job X`: the series breaks where the job's definition moved (runner-design §7) |
+| what did last night cost, per box or per wave? | export the `dsl41 runs` rows and aggregate them outside dsl41. A row carries no period key and no wave key |
+
+### Manual intervention
+
+| intervention | verb | reversible | note |
+| --- | --- | --- | --- |
+| status correction | `CHANGE_STATUS` | no: it is history | takes `expect`; a ghost is legal for `JOB^INST` (SEM-07) |
+| force a run | `FORCE_STARTJOB` | no | |
+| hold or ice for a window | `ON_HOLD`, `ON_ICE` | yes | an iced predecessor satisfies its dependents' atoms, a held one does not (SEM-05) |
+| kill a runaway | `KILLJOB` | no | kill members, not boxes |
+| set a global | `SET_GLOBAL` | by another set | survives a boundary |
+| drain or activate an executor | `host drain`, `host activate` | yes | asserts nothing about reachability |
+| evict an executor | `host evict` | no | gated on concurrency-model §8's preconditions |
+| break glass: forced eviction | `host evict --force` | no | the one path that can double-run; authenticated when the access map is armed, attributed otherwise |
+| break glass: supervisor shutdown | `supervise shutdown` | no | needs no live leaseholder: an expired lease, or an unexpired one whose holder's connection is gone, is grantable (DL-79) |
+| break glass: reclaim a lineage | `estate reclaim --force` | no | the one path that can fork a lineage (period-model §1.3) |
+
+Break-glass survives the seal as facts: a forced eviction's `forced_by`
+rides on the carried host row, a forced boundary is `force_seal` on the
+`seal` record with the gate's numbers in `forced_gate`, and every
+undelivered effect is in `outbox_pending`. The perimeter's own receipts
+(`privileged_admitted`, best effort, unsynced) go to
+`<run_root>/perimeter.jsonl` and never enter the WAL, because a policy
+decision is not an engine input (access-model §6); the admission stands when
+the receipt write fails. `supervise shutdown` goes to the owner-only
+supervisor socket and emits no perimeter receipt. There is no
+acknowledgement latch, and whether a second pair of eyes is required on
+break-glass is the site's control framework's call, not dsl41's.
+
+### Failover
+
+An engine crash on the same host resumes inside the open period
+(runner-design §7). Everything across hosts or sites, the planned site
+switch, an unplanned primary loss, a database failover under a live engine,
+a partition, and failback, waits for the relay that concurrency-model §7
+names and is not built (DL-189, DL-230).

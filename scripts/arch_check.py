@@ -887,9 +887,8 @@ def changed_lines_since_review() -> tuple[int, str] | None:
     return changed, ref
 
 
-#: the first two are logs, the third is dated evidence, none is a
-#: specification.
-SPEC_EXCLUDED = ("decision-log.md", "citation-index.md", "agent-harness-review.md")
+#: a log and a registry, not specifications (DL-225, DL-230).
+SPEC_EXCLUDED = ("decision-log.md", "citation-index.md")
 
 
 def spec_documents(root: Path = ROOT) -> list[Path]:
