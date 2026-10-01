@@ -58,10 +58,12 @@ signaled/terminated -> STATUS TERMINATED (a kill that actually happened);
 spawn_failed -> STATUS FAILURE. A missing status.json is the one thing this
 process can never produce -- that absence IS the E7 unobservable case.
 
-The wrapper ignores SIGTERM/SIGINT/SIGHUP/SIGQUIT: only SIGKILL (or the
-machine) can silence the recorder, which pins the residual crash matrix to
-exactly the DL-41a accepted cases (-9 of the wrapper alone, or of the whole
-tree at once -- both detected at reconciliation and reported truthfully).
+The wrapper ignores the signals `_RECORDER_IGNORED` lists: SIGTERM, SIGINT,
+SIGHUP, SIGQUIT and the two user signals (DL-229). SIGKILL, SIGABRT, any
+other signal whose default action terminates and that the wrapper does not
+ignore, or machine death silences the recorder; E7 then reports the run.
+The DL-41a accepted cases (-9 of the wrapper alone, or of the whole tree
+at once) are detected at reconciliation and reported truthfully.
 
 Test scaffolding: the DSL41_WRAPPER_TEST_PAUSE env var names comma-separated
 pause points ({pre_spawn, post_spawn_pre_record, post_record,
@@ -84,6 +86,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import select
 import signal
@@ -149,6 +152,18 @@ _IO_FAILURE = (OSError, ValueError)
 #: pause-point env var; see module docstring (test scaffolding, inert in prod)
 PAUSE_ENV = "DSL41_WRAPPER_TEST_PAUSE"
 
+#: the signals the recorder ignores (supervisor-protocol ss4 duty 2, DL-229):
+#: the ones an operator or a tool sends by hand. The command child restores
+#: each to its default before exec.
+_RECORDER_IGNORED = (
+    signal.SIGTERM,
+    signal.SIGINT,
+    signal.SIGHUP,
+    signal.SIGQUIT,
+    signal.SIGUSR1,
+    signal.SIGUSR2,
+)
+
 
 # ------------------------------------------------------------------- the shim
 
@@ -210,11 +225,11 @@ def _drain(fd: int) -> None:
 
 def _restore_default_signals() -> None:
     """Child-side (post-fork pre-exec) reset. The wrapper ignores
-    TERM/INT/HUP/QUIT to protect the recorder, but SIG_IGN dispositions are
+    `_RECORDER_IGNORED` to protect the recorder, but SIG_IGN dispositions are
     inherited ACROSS exec (and non-interactive sh keeps them for its own
     children) -- without this reset the command silently ignores the graceful
     SIGTERM and every kill escalates to SIGKILL (found by the 11b smoke)."""
-    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT):
+    for sig in _RECORDER_IGNORED:
         signal.signal(sig, signal.SIG_DFL)
 
 
@@ -245,21 +260,56 @@ def _await_exit_after_kill(
         _drain(self_pipe_r)
 
 
+def _is_wire_int(value: object) -> bool:
+    """A JSON integer: `true` is not one (DL-151)."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _spec_refusal(spec: dict[str, Any]) -> str | None:
+    """The ss4 step 6 refusal (exit 2, before anything spawns), or None.
+
+    `version` must be the integer 1, so `true` and `1.0` are refused. A
+    present `lifeline_fd` must be an integer, and a present `grace_seconds`
+    a finite number of zero or more; a boolean is neither (DL-229). An
+    integer too large for a float is out of range and refused too. A
+    mistyped value fails here, before `spawn.json` exists, not after it. An
+    absent `lifeline_fd` stays the exit-1 missing key of ss4 step 6."""
+    version = spec.get("version")
+    if not (_is_wire_int(version) and version == SPOOL_VERSION):
+        return f"unsupported spec version {version!r}"
+    if "lifeline_fd" in spec and not _is_wire_int(spec["lifeline_fd"]):
+        return f"lifeline_fd is not an integer: {spec['lifeline_fd']!r}"
+    if "grace_seconds" in spec:
+        grace = spec["grace_seconds"]
+        refusal = f"grace_seconds is not a finite number of zero or more: {grace!r}"
+        if not isinstance(grace, int | float) or isinstance(grace, bool):
+            return refusal
+        try:
+            grace_s = float(grace)  # OverflowError: an integer past float range
+        except OverflowError:
+            return refusal
+        if not (math.isfinite(grace_s) and grace_s >= 0):
+            return refusal
+    return None
+
+
 def main() -> int:
     spec = json.load(sys.stdin)
     # repoint stdin at /dev/null: nothing downstream may re-read the spec fd
     devnull = os.open(os.devnull, os.O_RDONLY)
     os.dup2(devnull, 0)
     os.close(devnull)
-    if spec.get("version") != SPOOL_VERSION:
-        print(f"runner_wrapper: unsupported spec version {spec.get('version')!r}", file=sys.stderr)
+    refusal = _spec_refusal(spec)
+    if refusal is not None:
+        print(f"runner_wrapper: {refusal}", file=sys.stderr)
         return 2
 
     # duty 1: own session; tolerate a spawner that already made us a leader
     if os.getsid(0) != os.getpid():
         os.setsid()
-    # only SIGKILL (or the machine) may silence the recorder
-    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT):
+    # ss4 duty 2: SIGKILL, SIGABRT, a terminating signal not listed here, or
+    # the machine may silence the recorder; E7 then reports the run
+    for sig in _RECORDER_IGNORED:
         signal.signal(sig, signal.SIG_IGN)
 
     run_dir: str = spec["run_dir"]

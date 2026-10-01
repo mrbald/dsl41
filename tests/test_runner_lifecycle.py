@@ -315,6 +315,93 @@ def test_wrapper_survives_external_group_kill_and_records_signal(tmp_path: Path)
     assert status["signal"] == signal.SIGKILL
 
 
+@pytest.mark.parametrize("group_signal", [signal.SIGUSR1, signal.SIGUSR2])
+def test_wrapper_survives_sigusr1_and_sigusr2_and_still_records(
+    tmp_path: Path, group_signal: signal.Signals
+) -> None:
+    """supervisor-protocol ss4 duty 2 (DL-229): the recorder ignores SIGUSR1
+    and SIGUSR2, whose default action would end it with no `status.json`.
+    The command does not inherit either disposition: each signal, sent to
+    its group, ends it, and the wrapper lives to record that signal."""
+    run_dir = tmp_path / "j1.1"
+    run_dir.mkdir()
+    proc, lifeline_w = spawn_wrapper(run_dir, "sleep 30")
+    wait_for(lambda: (run_dir / "spawn.json").exists())
+    spawn = read_json(run_dir / "spawn.json")
+    os.kill(proc.pid, signal.SIGUSR1)
+    os.kill(proc.pid, signal.SIGUSR2)
+    os.killpg(spawn["command_pgid"], group_signal)
+    assert proc.wait(timeout=10) == 0  # the wrapper lived to record
+    os.close(lifeline_w)
+    status = read_json(run_dir / "status.json")
+    assert status["outcome"] == "signaled"
+    assert status["signal"] == group_signal
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("version", True),
+        ("version", 1.0),
+        ("version", "1"),
+        ("lifeline_fd", "3"),
+        ("lifeline_fd", True),
+        ("lifeline_fd", 3.0),
+        ("grace_seconds", -1.0),
+        ("grace_seconds", True),
+        ("grace_seconds", "10"),
+        ("grace_seconds", float("inf")),
+        ("grace_seconds", float("nan")),
+        pytest.param("grace_seconds", 10**400, id="grace_seconds-huge-int"),
+        pytest.param("grace_seconds", -(10**400), id="grace_seconds-huge-negative-int"),
+    ],
+)
+def test_wrapper_refuses_mistyped_spec_field_before_spawning(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    """supervisor-protocol ss4 step 6 (DL-229): a mistyped `version`,
+    `lifeline_fd` or `grace_seconds` exits 2 before anything spawns. Before,
+    `true` and `1.0` passed as version 1, and the other two failed only after
+    `spawn.json` existed."""
+    run_dir = tmp_path / "j1.1"
+    run_dir.mkdir()
+    marker = run_dir / "ran.txt"
+    lifeline_r, lifeline_w = os.pipe()
+    spec = {
+        "version": runner_wrapper.SPOOL_VERSION,
+        "run_id": "test-run",
+        "job": "j1",
+        "run_number": 1,
+        "command": f"echo ran > {marker}",
+        "run_dir": str(run_dir),
+        "lifeline_fd": lifeline_r,
+        "stdout_path": str(run_dir / "out.log"),
+        "stderr_path": str(run_dir / "err.log"),
+        "stdin_path": None,
+        "grace_seconds": 1.0,
+        field: value,
+    }
+    env = {k: v for k, v in os.environ.items() if k != runner_wrapper.PAUSE_ENV}
+    try:
+        done = subprocess.run(
+            [sys.executable, str(WRAPPER)],
+            input=json.dumps(spec).encode(),
+            pass_fds=(lifeline_r,),
+            env=env,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    finally:
+        os.close(lifeline_r)
+        os.close(lifeline_w)
+    assert done.returncode == 2, done.stderr
+    assert field.encode() in done.stderr  # the refusal names the field
+    assert not (run_dir / "spawn.json").exists()
+    assert not (run_dir / "status.json").exists()
+    assert not marker.exists()
+
+
 def test_wrapper_graceful_sigterm_reaches_command_on_parent_loss(tmp_path: Path) -> None:
     """The SIG_IGN-inheritance regression (found by the 11b smoke): the
     wrapper ignores SIGTERM for itself, but the command must NOT inherit
@@ -485,6 +572,37 @@ def test_kill_after_spawn_record_survivor_killed_at_resume(tmp_path: Path) -> No
     assert result == Terminated("wrapper lost; killed at resume")
     assert ended_at is None
     wait_for(lambda: not pid_alive(spawn["command_pid"]))
+
+
+def test_resume_kill_reaches_a_member_that_ignores_sigterm(tmp_path: Path) -> None:
+    """DL-226: the resume kill sends SIGKILL to the command pgid after the
+    SIGTERM wait, also when the leader died on SIGTERM. Here the leader dies
+    on SIGTERM while a member ignores it; the run resolves TERMINATED and the
+    member dies of the SIGKILL. Before DL-226 the leader's death skipped the
+    SIGKILL and the member outlived the record."""
+    run_dir = tmp_path / "j1.1"
+    run_dir.mkdir()
+    member_pid_file = run_dir / "member.pid"
+    command = (
+        f'sh -c \'trap "" TERM; echo $$ > {member_pid_file}.tmp;'
+        f" mv {member_pid_file}.tmp {member_pid_file}; exec sleep 120' & wait"
+    )
+    proc, lifeline_w = spawn_wrapper(run_dir, command, pause="post_record")
+    member_pid = None
+    try:
+        wait_for(lambda: (run_dir / "spawn.json").exists())
+        _kill_stopped_wrapper(proc)
+        os.close(lifeline_w)
+        member_pid = int(wait_for(lambda: member_pid_file.exists() and member_pid_file.read_text()))
+        spawn = read_json(run_dir / "spawn.json")
+        assert pid_alive(spawn["command_pid"])  # the leader, verified at resume
+        result, ended_at = _resolve(run_dir, grace_seconds=2.0)
+        assert result == Terminated("wrapper lost; killed at resume")
+        assert ended_at is None
+        wait_for(lambda: not pid_alive(member_pid), timeout_s=5.0)
+    finally:
+        if member_pid is not None and pid_alive(member_pid):
+            os.kill(member_pid, signal.SIGKILL)
 
 
 def test_kill_between_wait_and_status_write_is_unobservable(tmp_path: Path) -> None:

@@ -53,8 +53,8 @@ thing here that is not purely reactive, and it is deliberately the smallest
 possible addition: one interval, one exit. With `--deadman-seconds N`, a
 supervisor that has had no LIVE leaseholder for N seconds stops its loop and
 returns -- and its death EOFs every lifeline it owns, which is the kill path
-ss5 already relies on ("supervisor death kills all wrappers by lifeline"),
-not a new one. It adds no policy: the supervisor still decides nothing about
+ss5 already relies on, not a new one: each wrapper survives it, takes EOF,
+kills its group and records in its own time (DL-205). It adds no policy: the supervisor still decides nothing about
 what should run, only that nobody is watching it any more.
 
 It exists because ss8's `evict` -- the only state that lets another host run
@@ -813,7 +813,10 @@ class Supervisor:
 
     def _answer(self, conn: _Conn, line: bytes) -> dict[str, Any]:
         try:
-            req = json.loads(line)
+            # strict UTF-8 first: `json.loads` on bytes would detect and
+            # accept UTF-16 and UTF-32 (DL-229); a UnicodeDecodeError is a
+            # ValueError, so it answers `malformed_json` like any other
+            req = json.loads(line.decode("utf-8"))
             if not isinstance(req, dict):
                 raise ValueError("request must be a JSON object")
         except (ValueError, RecursionError):
@@ -892,8 +895,9 @@ class Supervisor:
         """Every mutating verb: the request must name THIS incarnation (DL-80)
         and its token must match a live lease. Incarnation is checked first and
         answers separately: a token from a dead supervisor is not a lost
-        election, it is a vanished world -- that controller's wrappers all died
-        by lifeline, so it must re-acquire AND reconcile from the spool, which
+        election, it is a vanished world -- that controller's wrappers lost
+        their lifeline and kill their groups and record in their own time
+        (DL-205), so it must re-acquire AND reconcile from the spool, which
         is the opposite of what stale_token asks for."""
         if req.get("incarnation") != self.incarnation:
             return {"ok": False, "error": "wrong_incarnation", "incarnation": self.incarnation}
@@ -1687,16 +1691,18 @@ def _load_json(path: str) -> dict[str, Any] | None:
     and reading that as absence would erase evidence (ss11a).
 
     Bytes that are not UTF-8 are the same kind of unreadable and take the
-    same answer: `json.load` raises `UnicodeDecodeError` for them, which is
-    not a `JSONDecodeError`, so before DL-151 it escaped to the dispatcher's
-    belt and answered `internal:`."""
+    same answer (DL-151). The bytes are decoded as strict UTF-8 before they
+    are parsed: `json.load` on a binary handle detects UTF-16 and UTF-32 and
+    accepts them, so only the explicit decode refuses them (DL-229)."""
     try:
         with open(path, "rb") as f:
-            loaded = json.load(f)
+            raw = f.read()
     except FileNotFoundError:
         return None
     except OSError:
         return _INVALID
+    try:
+        loaded = json.loads(raw.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError):
         return _INVALID
     if not isinstance(loaded, dict) or not spool_version_supported(loaded):

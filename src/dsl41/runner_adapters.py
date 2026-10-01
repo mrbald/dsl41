@@ -284,8 +284,9 @@ def load_json(path: Path) -> dict[str, Any] | None:
     A record carrying an unpaired surrogate is unreadable in the same sense
     (PR-10a): it decodes, but nothing downstream can canonicalize it, so it
     takes the same path rather than a new one. Bytes that are not UTF-8 at
-    all join them (DL-151): `json.load` raises `UnicodeDecodeError` for
-    those, which is not a `JSONDecodeError`, so they used to escape.
+    all join them (DL-151). They are decoded as strict UTF-8 before they are
+    parsed: `json.load` on a binary handle detects UTF-16 and UTF-32 and
+    accepts them, so only the explicit decode refuses them (DL-229).
 
     A `version` this binary does not implement is unreadable too -- the
     `Wrapper-owned spool files` row of docs/protocol-evolution.md is
@@ -296,7 +297,7 @@ def load_json(path: Path) -> dict[str, Any] | None:
     is a group this engine will not signal."""
     try:
         with path.open("rb") as f:
-            loaded = json.load(f)
+            loaded = json.loads(f.read().decode("utf-8"))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return None
     if not isinstance(loaded, dict) or not is_scalar_json(loaded):
@@ -1581,10 +1582,11 @@ class SupervisorClient:
                         if resp.get("error") == "wrong_incarnation":
                             # DL-80: the supervisor restarted under us. Our token
                             # belongs to a world that no longer exists, and every
-                            # wrapper it held died by lifeline. Drop the pair so
-                            # the re-ACQUIRE below takes the free path instead of
-                            # replaying a credential that can now COLLIDE with the
-                            # new incarnation's counter.
+                            # wrapper it held lost its lifeline: each kills its
+                            # group and records in its own time (DL-205). Drop the
+                            # pair so the re-ACQUIRE below takes the free path
+                            # instead of replaying a credential that can now
+                            # COLLIDE with the new incarnation's counter.
                             self.token, self.incarnation = None, None
                         # stale_token (fenced by a reconnect's own re-ACQUIRE,
                         # or lapsed): same controller re-acquires, fresh token
@@ -2086,15 +2088,17 @@ async def resolve_spool(
                 and _procid.verify_alive(command_pid, command_token)
             ):
                 # command group survived its recorder: kill the verified
-                # leader's group -- TERMINATED is truthful (a kill happened)
+                # leader's group -- TERMINATED is truthful (a kill happened).
+                # SIGKILL follows once the leader has died or the grace has
+                # passed, whichever is first: a member that ignores SIGTERM
+                # must not outlive the record (DL-226).
                 _procid.killpg_quiet(command_pgid, signal.SIGTERM)
                 deadline = time.monotonic() + grace_seconds
                 while time.monotonic() < deadline:
                     if not _procid.verify_alive(command_pid, command_token):
                         break
                     await asyncio.sleep(0.1)
-                else:
-                    _procid.killpg_quiet(command_pgid, signal.SIGKILL)
+                _procid.killpg_quiet(command_pgid, signal.SIGKILL)
                 return Terminated("wrapper lost; killed at resume"), None
     if status is not None:
         ended_at = status.get("ended_at")

@@ -1160,9 +1160,8 @@ def test_dl151_an_unsupported_spool_version_is_refused_by_both_readers(tmp_path:
     """docs/protocol-evolution.md's `Wrapper-owned spool files` row: tolerant
     on fields, STRICT on versions. Nothing read the field before.
 
-    An ABSENT version passes both readers: the matrix has no column for a
-    missing version and no document rules one, so refusing it would pick a
-    side by guess."""
+    An ABSENT version passes both readers: this is the one row of the
+    matrix that lets a missing version through (DL-157, DL-227)."""
     path = tmp_path / "status.json"
 
     def written(record: dict) -> None:
@@ -1180,6 +1179,49 @@ def test_dl151_an_unsupported_spool_version_is_refused_by_both_readers(tmp_path:
         written({"version": foreign, "outcome": "exited", "exit_code": 0})
         assert runner_supervisor._load_json(str(path)) is runner_supervisor._INVALID, foreign
         assert load_json(path) is None, foreign
+
+
+def test_utf16_status_json_is_unreadable_in_both_spool_readers(tmp_path: Path) -> None:
+    """`json.load` on a binary handle detects UTF-16 and UTF-32 and accepts
+    them, so a well-formed record in either encoding used to read as valid.
+    Both spool readers decode strict UTF-8 first (DL-229): the supervisor
+    answers PRESENT-BUT-UNREADABLE, the adapter answers unread. A UTF-8
+    document behind a byte-order mark is refused too: `json.load` would
+    strip the mark, and a byte-order mark is not UTF-8 JSON."""
+    path = tmp_path / "status.json"
+    record = {"version": 1, "run_id": "r", "outcome": "exited", "exit_code": 0}
+    for encoding in ("utf-16", "utf-16-le", "utf-32", "utf-8-sig"):
+        path.write_bytes(json.dumps(record).encode(encoding))
+        assert runner_supervisor._load_json(str(path)) is runner_supervisor._INVALID, encoding
+        assert load_json(path) is None, encoding
+    path.write_bytes(json.dumps(record).encode("utf-8"))  # the control
+    assert runner_supervisor._load_json(str(path)) == record
+    assert load_json(path) == record
+
+
+def test_utf16_pid_record_refuses_startup_instead_of_reclaiming(short_root: Path) -> None:
+    """The supervisor's own pid record goes through the strict-UTF-8 spool
+    reader too (DL-229). A UTF-16 record naming a dead pid used to read as a
+    valid record, and a dead owner is reclaimable. Unreadable, it names no
+    provable owner, so startup refuses and the record stays."""
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    record = short_root / "supervisor.pid"
+    raw = json.dumps(
+        {
+            "pid": dead.pid,
+            "boot_id": runner_procid.current_boot_id(),
+            "incarnation": "0" * 32,
+            "started_at": "2026-10-01T00:00:00+00:00",
+        }
+    ).encode("utf-16")
+    record.write_bytes(raw)
+    argv = [sys.executable, str(SUPERVISOR), "--run-root", str(short_root)]
+    result = subprocess.run(argv, capture_output=True, text=True, timeout=10, check=False)
+    assert result.returncode == 1, result.stderr
+    assert result.stderr.strip() == "another supervisor owns this root"
+    assert record.read_bytes() == raw
+    assert not (short_root / "supervisor.sock").exists()
 
 
 def test_dl151_a_future_status_record_never_becomes_a_success(short_root: Path) -> None:
@@ -1943,6 +1985,25 @@ def test_dl210_deep_json_and_invalid_utf8_leave_supervisor_alive(short_root: Pat
         assert cli.raw(b"[" * 2000 + b"]" * 2000 + b"\n")["error"] == "malformed_json"
         assert cli.raw(b'"\xff"\n')["error"] == "malformed_json"
         assert cli.send({"v": 1, "cmd": "PING"})["ok"]
+    finally:
+        cli.close()
+        teardown_supervisor(short_root, proc)
+
+
+def test_utf16_request_line_answers_malformed_json(short_root: Path) -> None:
+    """A well-formed PING encoded as UTF-16 or UTF-32 holds no newline byte,
+    so it frames as one line, and `json.loads` on bytes would accept it, as
+    it would a UTF-8 PING behind a byte-order mark. The request reader
+    decodes strict UTF-8 first (DL-229)."""
+    proc = start_supervisor(short_root)
+    cli = RawClient(short_root)
+    try:
+        ping = json.dumps({"v": 1, "cmd": "PING"})
+        for encoding in ("utf-16", "utf-16-le", "utf-32", "utf-8-sig"):
+            line = ping.encode(encoding)
+            assert b"\n" not in line
+            assert cli.raw(line + b"\n")["error"] == "malformed_json", encoding
+        assert cli.raw(ping.encode("utf-8") + b"\n")["ok"] is True  # the control
     finally:
         cli.close()
         teardown_supervisor(short_root, proc)
