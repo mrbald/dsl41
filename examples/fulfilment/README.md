@@ -157,5 +157,6 @@ Later drills remain unbuilt: competing orders for the last item; an external kil
 at the commit boundary; post-dispatch cancellation and a corrective shipment;
 supervisor reattachment; a business operation spanning scheduler periods;
 repeated waves; hold/release and access-role refusals; UC migration evidence;
-and installed-artifact, capacity, and soak qualification. Formal regression tests
-and CI integration are a separate slice.
+and installed-artifact, capacity, and soak qualification. The opt-in
+integration lane in `examples/workflows/tests` runs this launcher and its
+checker; see the Integration lane section of `../workflows/README.md`.
