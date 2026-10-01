@@ -528,6 +528,32 @@ an earlier durable verdict or the pre-completion RUNNING, and it carries
 `undecided`, so the operator is told the newest completion did not decide
 it. Only an explicit or recovered `rejected` is skipped.
 
+The row is `{job, run_number, catalog_hash, job_hash, started_at,
+ended_at, duration_s, status, exit_code, started_by, executor_id, run_dir,
+box_name, clock_source, fidelity, undecided}` (DL-113, DL-136, DL-141). `clock_source` says whether the timing came from
+the wrapper's spool or fell back to the journal; `fidelity` says how much of
+the row could be established when the period's manifest is gone. The
+caller names the run roots, or names the lineage anchor alone and the
+registry supplies every root in period order. The stable key across a
+lineage is `(estate, job, run_number)`, with the estate supplied by the
+lineage named, not by a field. An open run gets a row with a null
+`ended_at` and a null duration, never a fabricated one. A run that spans a
+boundary keeps its row in the period that dispatched it and stays RUNNING
+there, because its terminal input is in the next segment. A box gets no
+`dispatch` record, so its row comes from the replay, as does a leaf run that
+KILLJOB or a `term_run_time` kill ended. A duration series breaks where
+the row's `job_hash` moved, falling back to `catalog_hash` only when either
+row lacks a job hash; both ride on every row in the JSON and CSV formats,
+so an external consumer can segment either way; the table shows
+`catalog_hash` and marks a break where `job_hash` moved, or where
+`catalog_hash` moved for a row without a job hash. A start that produced
+no run is not a row: a dropped tick, a held job and a refused command are
+`drop` records and trace entries, and "why did it not run" is a different
+question from "how long did it take". dsl41 emits these facts and
+decides nothing about them: trends, thresholds and paging are the site's
+monitoring (§12). Whether a migrated estate expects parity with the
+vendor's own run-history surface is E22 (§15).
+
 **Inputs-only principle**: emitted events and the trace are pure functions
 of the input sequence, external events plus time observations (oracle
 determinism). Thus they are never journaled. `dsl41 journal` replays
@@ -1128,6 +1154,34 @@ code. None is guess-resolved.
   >366 days out (KB 442457). That is a vendor operational artifact
   (resolution: regenerate the calendar) deliberately NOT replicated: the
   generator computes occurrences directly.
+- **E12** to **E15** — opened by the HA plan and withdrawn with it
+  (DL-189). Not open.
+- **E16** — seal cadence. Every boundary is an operator act (automatic
+  sealing on a timer is a period-model §12 non-goal) and costs a restart,
+  so whether the boundary is per estate, per booking centre or per
+  regulatory period is the estate's choice; the answer sets the replay
+  bound and with it the takeover time. Open (DL-230).
+- **E17** — what a standby readiness check must assert before continuity
+  governance accepts a green. Open; waits for follower mode (DL-230).
+- **E18** — whether an A-classified boundary truth flip needs an operator
+  acknowledgement before the period opens, or reporting it is enough. The
+  classification and every A assumption are carried in the seal
+  (period-model §3.1), so the record exists either way. Open (DL-230).
+- **E19** — closed by period-model §10.3 (PR-42): a member changed while
+  its box executes is R, even when the member is INACTIVE.
+- **E20** — closed by period-model §12a (DL-144), by policy: a seal-only
+  archive may stand in for pruned inputs.
+- **E21** — whether a follower can run on the file substrate by tailing
+  the WAL another process appends. The WAL is append-only and
+  line-framed, so the proposal is yes. Open; waits for follower mode
+  (DL-230).
+- **E22** — whether a migrated estate expects parity with the vendor's own
+  run-history surface (`autorep -r`, and the average-run-time notion
+  behind its runtime alarms). A dossier question with a citation sweep in
+  front of it [?] (DL-230).
+- **E23** — closed by period-model §11: audit runs the interpreter that
+  produced the period and old versions stay installable; an SM bump is
+  not a transition (period-model §2.1).
 - Inherited from the oracle: Q3 (SEM-32 arm-and-wait, DL-58; the Q3c
   box-arm-scope residue is oracle-side) and Q4 (n_retrys, DL-53, kept
   deliberately unmodeled by scope decision). The runner implements the
