@@ -52,7 +52,8 @@ from dsl41.runner_admission import Envelope
 from dsl41.runner_clock import VirtualClock
 from dsl41.runner_hosts import HostCommand
 from dsl41.oracle_state import RuntimeState
-from dsl41.period import active_wal
+from dsl41.period import active_wal, wal_path
+from dsl41.runner_journal import read_journal
 
 if TYPE_CHECKING:
     from dsl41.ir import JobIR
@@ -623,3 +624,25 @@ class FaultSchedule:
             return
         if await getattr(run, f"fault_{fault}")():
             self.fired.append(f"{step}:{fault}")
+
+
+def _lose_the_decision_for(run_root: Path, source: str) -> None:
+    """Delete the decision that answered the one STATUS input from
+    `source` -- the crash the window is named for: the absence of a
+    decision is exactly how replay recognises it (`Journal.decision`), so
+    nothing else in the segment moves."""
+    records = read_journal(wal_path(run_root, 1))
+    [seq] = [
+        r["seq"]
+        for r in records
+        if r.get("rec") == "input" and r.get("kind") == "STATUS" and r.get("source") == source
+    ]
+    wal = wal_path(run_root, 1)
+    lines = wal.read_text().splitlines()
+    kept = [
+        line
+        for line in lines
+        if not (json.loads(line).get("rec") == "decision" and json.loads(line).get("index") == seq)
+    ]
+    assert len(kept) == len(lines) - 1  # exactly one verdict lost
+    wal.write_text("\n".join(kept) + "\n")

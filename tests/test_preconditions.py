@@ -1628,3 +1628,65 @@ def test_the_stale_gate_passes_a_completion_that_names_no_job() -> None:
     is a precondition, not a validator."""
     oracle = Oracle(lower_source(_SOLO_JIL))
     assert stale_reason(oracle, Event(at=T0, kind="STATUS", payload={"status": "SUCCESS"})) is None
+
+
+def test_the_stale_gate_rejects_a_completion_for_a_row_an_operator_set_inactive() -> None:
+    """DL-235: an injected INACTIVE plans no KILL, so the process the operator
+    reset runs on and its exit still reports in. The gate must reject it by
+    name -- `rt.status` is read straight from the row the operator left --
+    rather than let it rewrite INACTIVE back to SUCCESS or FAILURE."""
+    oracle = Oracle(lower_source(_SOLO_JIL))
+    oracle.feed(Event(at=T0, kind="STARTJOB", payload={"job": "j"}))
+    assert (oracle.store.job["j"].status, oracle.store.job["j"].run_number) == ("RUNNING", 1)
+    oracle.feed(Event(at=T0, kind="STATUS", payload={"job": "j", "status": "INACTIVE"}))
+    run_number = oracle.store.job["j"].run_number
+    ev = Event(at=T0, kind="STATUS", payload={"job": "j", "run_number": run_number, "exit_code": 0})
+    assert stale_reason(oracle, ev) == "job not live: INACTIVE"
+
+
+def test_the_stale_gate_passes_a_completion_for_a_starting_or_a_running_row() -> None:
+    """The two LIVE statuses, both unrejected: a completion for a row the
+    oracle still holds live is exactly what the gate exists to let through."""
+    starting = Oracle(lower_source(_SOLO_JIL))
+    starting.feed(Event(at=T0, kind="STATUS", payload={"job": "j", "status": "STARTING"}))
+    assert starting.store.job["j"].status == "STARTING"
+    run_number = starting.store.job["j"].run_number
+    ev = Event(at=T0, kind="STATUS", payload={"job": "j", "run_number": run_number, "exit_code": 0})
+    assert stale_reason(starting, ev) is None
+
+    running = Oracle(lower_source(_SOLO_JIL))
+    running.feed(Event(at=T0, kind="STARTJOB", payload={"job": "j"}))
+    assert running.store.job["j"].status == "RUNNING"
+    run_number = running.store.job["j"].run_number
+    ev = Event(at=T0, kind="STATUS", payload={"job": "j", "run_number": run_number, "exit_code": 0})
+    assert stale_reason(running, ev) is None
+
+
+def test_the_stale_gate_still_names_a_terminal_row_already_terminal() -> None:
+    """The pre-DL-235 reason is unchanged for the case it already covered --
+    only the row a terminal status leaves behind is not LIVE either, but the
+    more specific reason wins."""
+    oracle = Oracle(lower_source(_SOLO_JIL))
+    oracle.feed(Event(at=T0, kind="STARTJOB", payload={"job": "j"}))
+    assert oracle.store.job["j"].status == "RUNNING"
+    oracle.feed(Event(at=T0, kind="STATUS", payload={"job": "j", "status": "TERMINATED"}))
+    run_number = oracle.store.job["j"].run_number
+    ev = Event(at=T0, kind="STATUS", payload={"job": "j", "run_number": run_number, "exit_code": 0})
+    assert stale_reason(oracle, ev) == "job already terminal"
+
+
+def test_the_stale_gate_checks_run_number_before_liveness() -> None:
+    """A moved run_number is refused on its own grounds even when the row it
+    names is also not LIVE: "run_number mismatch" must not be shadowed by
+    the new, more specific check that sits after it."""
+    oracle = Oracle(lower_source(_SOLO_JIL))
+    oracle.feed(Event(at=T0, kind="STARTJOB", payload={"job": "j"}))
+    assert oracle.store.job["j"].status == "RUNNING"
+    oracle.feed(Event(at=T0, kind="STATUS", payload={"job": "j", "status": "INACTIVE"}))
+    stale_run_number = oracle.store.job["j"].run_number + 1
+    ev = Event(
+        at=T0,
+        kind="STATUS",
+        payload={"job": "j", "run_number": stale_run_number, "exit_code": 0},
+    )
+    assert stale_reason(oracle, ev) == "run_number mismatch"

@@ -102,7 +102,7 @@ def _closing() -> Manifest:
         source_bundle_hash=EMPTY_BUNDLE_HASH,
         runtime_profile=PROFILE,
         runtime_hash=runtime_hash(PROFILE),
-        state_machine_version=1,
+        state_machine_version=1,  # golden vector (PR-08): frozen, not this build's version
     ).commit(
         period_id=2,
         # a later period's baseline is DERIVED (ss4): the fixture derives it
@@ -124,7 +124,7 @@ def _staged() -> StagedNextPeriod:
         catalog_hash=catalog_hash_v2(CATALOG),
         source_bundle_hash=EMPTY_BUNDLE_HASH,
         runtime_hash=runtime_hash(PROFILE),
-        state_machine_version=1,
+        state_machine_version=1,  # golden vector (PR-08): frozen, not this build's version
     )
 
 
@@ -1328,7 +1328,7 @@ def _clock_domain_change(document: dict[str, Any]) -> None:
 
 @_case("a state-machine bump", "SM bump")
 def _sm_version_change(document: dict[str, Any]) -> None:
-    document["next_period"]["state_machine_version"] = 2
+    document["next_period"]["state_machine_version"] = 2  # any value != the golden seal's 1
     _rederive_baseline(document)
 
 

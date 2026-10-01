@@ -64,15 +64,16 @@ ON_NOEXEC bypass never emits STARTING, so nothing spawns by construction.
 MUST_START/MUST_COMPLETE alarms are journal + UI surface only (11b/11d) --
 no engine action here.
 
-Stale-completion gate (ss4, DL-41 decision 4): completions carry
-(job, run_number); the engine drops -- recorded on Engine.drops, the WAL in
-11b -- any completion whose run_number mismatches the current one or whose
-job is already terminal. The gate guards ONLY engine-made completions:
+Stale-completion gate (ss4, DL-41 decision 4): completions carry (job,
+run_number); the engine drops -- recorded on Engine.drops, the WAL in 11b --
+any completion whose run_number mismatches the current one or whose row is
+no longer STARTING or RUNNING (terminal, or INACTIVE or QUE_WAIT after an
+injected INACTIVE; DL-235). The gate guards ONLY engine-made completions:
 externally injected STATUS keeps sendevent CHANGE_STATUS parity (it may
 legally overwrite terminal statuses; oracle module docstring). Which
-completions those are is read off `Event.source` (DL-68) rather than
-carried beside it: a record in the log has its provenance and nothing else,
-so replay must be able to reach the same verdict from the same field.
+completions those are is read off `Event.source` (DL-68) rather than carried
+beside it: a record in the log has its provenance and nothing else, so
+replay must be able to reach the same verdict from the same field.
 
 Stage S2 (docs/concurrency-model.md ss4, DL-89) put ONE admission order in
 front of the loop, and every input in this module now goes through it --
@@ -1629,14 +1630,16 @@ class Engine:
             return
         self._dispatched[effect.job] = effect.run_number
         stale = self._live.pop(effect.job, None)
-        if stale is not None:  # pragma: no cover -- see below
-            # One live attempt per job. Unreachable while the ORACLE refuses to
-            # start a job that is STARTING/RUNNING/QUE_WAIT (DL-81), which is
-            # what stops run_number advancing under a live task; the guard is
-            # kept because that refusal lives two modules away, and a change to
-            # it would otherwise leak a task rather than fail. A report from
-            # the old task would be gate-dropped anyway (run_number mismatch)
-            # -- cancelling is the tidy half, not the safety half.
+        if stale is not None:
+            # One live attempt per job. Reached when an injected INACTIVE
+            # (DL-235) leaves the earlier run live in the shell while the
+            # oracle's row is no longer STARTING/RUNNING/QUE_WAIT, so the
+            # ORACLE's DL-81 refusal no longer blocks a restart: the job
+            # goes through STARTJOB again and this SPAWN is for the new
+            # run. The shell holds one live run per job, so the earlier
+            # task is cancelled through the adapter's own ladder, and the
+            # second SPAWN is the record of the supersession; the vendor
+            # would run both.
             stale.task.cancel()
             self._reaping.append(stale.task)
         self._launch(job_ir, effect.run_number, adapter, run_id=effect.run_id)

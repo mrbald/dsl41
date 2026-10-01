@@ -14769,3 +14769,73 @@ relitigate an entry; append a new one.
   overwrite (no second SPAWN, no identity error, resume agrees); the
   existing retirement-at-activation test restated to retirement at the
   edge.
+- DL-235 CHANGE_STATUS INACTIVE on a launched run: no KILL, the
+  stale-completion gate rejects a completion whose row is not STARTING or
+  RUNNING, and the state-machine version moves to 2 (2026-10-01;
+  runner_admission.py, runner_effects.py, runner_ledger.py, runner.py,
+  runner_startup.py, oracle_state.py, oracle.py; runner-design ss4;
+  closes the two questions DL-232 left open)
+  THE VENDOR. The sendevent reference (24.0, "Change the Status of a Job")
+  lists INACTIVE among the statuses CHANGE_STATUS may assign, says the
+  event changes the job's status in the database and does not execute the
+  job, and covers a job "in progress (with a status of RUNNING)": set to
+  FAILURE, SUCCESS or TERMINATED it is rescheduled for its next start
+  time; set to INACTIVE or STARTING it is not. KILLJOB is the vendor's
+  kill verb. The page does not say what the scheduler does with the exit
+  of a process whose job was set INACTIVE while it ran.
+  NO KILL. Ruling: an injected INACTIVE on a launched run plans no KILL.
+  The row changes, the process runs on, and its reservations are released
+  at that edge (DL-120), as the vendor's database write would leave them.
+  Pinned by a test. The run is then an orphan: live in the shell, gone
+  from the oracle's view. Three consequences are recorded, not fixed.
+  The oracle's KILLJOB acts on a STARTING, RUNNING or QUE_WAIT row only,
+  so an operator stops the orphan with a terminal CHANGE_STATUS, which
+  plans the KILL because the run is live in the shell, or by restarting
+  the job. A restart (STARTJOB on the INACTIVE row) supersedes the orphan:
+  the shell holds one live run per job, the earlier adapter task is
+  cancelled through the adapter's own ladder, and the second SPAWN is the
+  record; no KILL effect is written. The vendor would run both. The
+  `_apply_spawn` branch that does this was commented unreachable; it is
+  reached this way, and a test now pins it. Resume re-reconciles the
+  orphan on every start until the job restarts, and the run's history
+  window stays open, because the recovery ladder and the history fold
+  key on the outbox and on terminal transitions. Both are visible and
+  bounded; aligning them to the live edge is a separate decision.
+  THE GATE. Three places decide that a run is over. Reservations release
+  on leaving STARTING or RUNNING (DL-120). A held SPAWN retires on leaving
+  STARTING or RUNNING at its run number (DL-232). The stale-completion
+  gate (runner-design ss4) rejected only a moved run number or a terminal
+  row, so a completion for a row an operator had set INACTIVE at the same
+  run number was applied: INACTIVE became SUCCESS or FAILURE and the
+  dependents started, undoing the operator's reset. Worse, a restart
+  queued behind a reservation leaves the row QUE_WAIT at the orphan's run
+  number, since the number moves at admission, and the orphan's exit
+  then overwrote QUE_WAIT and dropped the waiter's rank: the queued run
+  dropped, with only the QUE_WAIT to SUCCESS transition in the trace to
+  show for it. Ruling: the gate rejects a completion whose row is
+  not STARTING or RUNNING, naming the status ("job not live: INACTIVE",
+  "job not live: QUE_WAIT"); "run_number mismatch" and "job already
+  terminal" are unchanged. `LIVE` in oracle_state.py names the pair
+  beside `TERMINAL`; the release edge, the SPAWN edge and the completion
+  gate read it. ON_HOLD, ON_ICE and ON_NOEXEC set flags and leave a live
+  row's status alone, so an injected INACTIVE, and QUE_WAIT after it, are
+  the two statuses that reach the new branch.
+  THE COMPATIBILITY STATEMENT. A decided attempt replays from its durable
+  verdict and never meets the gate again, so a decided log replays
+  unchanged on both builds. An attempt in the ss4 crash window --
+  admitted, verdict not durable -- is re-decided by the gate on recovery
+  (DL-156), and this build rejects where the old one applied: different
+  state from an identical log, the BUMP-IT rule in runner_ledger.py.
+  `STATE_MACHINE_VERSION` moves from 1 to 2, the first move since the
+  pin landed. A v1 log is refused at every door this build has
+  (period-model ss2.1); a live v1 estate drains and a new estate is
+  created, audited by the binary that produced it (period-model ss11).
+  Pinned by a crash-cut regression: a journal holding STARTJOB, an
+  injected INACTIVE and the run's admitted completion with no decision
+  record recovers as rejected, row INACTIVE, dependent never started.
+  Assumption, recorded: the vendor's handling of the orphan's exit is
+  undocumented. If a live probe shows the exit overwrites the manual
+  INACTIVE, reopen this as a parity gap; until then the runner keeps one
+  edge and loses no queued run. Rejected alternative: keep the old gate
+  for parity with a vendor behaviour nobody has verified, at the price of
+  the QUE_WAIT loss above and a third definition of "over".

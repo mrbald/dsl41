@@ -408,7 +408,7 @@ def test_the_pinned_state_machine_version_is_read_as_an_exact_integer() -> None:
     )
     with pytest.raises(EngineError, match="state-machine version mismatch"):
         check_leader_eligibility(record, catalog=catalog)  # absent: refuses since DL-189
-    for wrong in (True, 1.0, "1", None):
+    for wrong in (True, float(STATE_MACHINE_VERSION), str(STATE_MACHINE_VERSION), None):
         with pytest.raises(EngineError, match="state-machine version mismatch"):
             check_leader_eligibility({**record, "state_machine_version": wrong}, catalog=catalog)
 
@@ -432,7 +432,13 @@ def test_state_machine_version_modes_split_on_absent_and_agree_when_present() ->
     right = {"state_machine_version": STATE_MACHINE_VERSION}
     check_state_machine_version(right, mode="lead")
     check_state_machine_version(right, mode="replay")
-    for wrong in (True, 1.0, "1", None, STATE_MACHINE_VERSION + 1):
+    for wrong in (
+        True,
+        float(STATE_MACHINE_VERSION),
+        str(STATE_MACHINE_VERSION),
+        None,
+        STATE_MACHINE_VERSION + 1,
+    ):
         opening = {"state_machine_version": wrong}
         with pytest.raises(EngineError):
             check_state_machine_version(opening, mode="lead")
