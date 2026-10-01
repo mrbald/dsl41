@@ -79,6 +79,7 @@ from dsl41.canon import (
     digest,
     hash_over,
     is_canonical_file,
+    require_artifact_version,
     with_digest,
 )
 from dsl41.classify import Classification, Verdict
@@ -86,6 +87,7 @@ from dsl41.ir import CatalogIR
 from dsl41.oracle_state import CarriedRows, Event, GlobalRuntime, HostRuntime, HostState, JobRuntime
 from dsl41.period import (
     CATALOG_HASH_VERSION,
+    RETIRED_CATALOG_HASH_VERSIONS,
     Manifest,
     check_addresses,
     check_manifest_self_consistent,
@@ -105,10 +107,12 @@ def _current_recipe(value: int) -> int:
     still the wrong pin here, and would stay wrong in a future where two
     recipes are readable at once."""
     if value != CATALOG_HASH_VERSION:
+        retired = RETIRED_CATALOG_HASH_VERSIONS.get(value)
+        retired_clause = f" (retired by name, {retired})" if retired is not None else ""
         raise ValueError(
-            f"catalog_hash_version {value}: a seal pins the current recipe"
-            f" ({CATALOG_HASH_VERSION}) -- an unauditable version is unauditable"
-            " on both sides of the boundary (ss1.1)"
+            f"catalog_hash_version {value}{retired_clause}: a seal pins the current"
+            f" recipe ({CATALOG_HASH_VERSION}) -- an unauditable version is"
+            " unauditable on both sides of the boundary (ss1.1)"
         )
     return value
 
@@ -846,10 +850,17 @@ class Seal(BaseModel):
         reader that validated first would name the schema and never reach
         the tamper. The second check is the canonical form: a document
         whose own digest is right but whose bytes are not ss3.2's is not
-        this artifact either (ss3.2, PR-13)."""
+        this artifact either (ss3.2, PR-13).
+
+        A seal is a closed estate artifact: an absent `artifact_format_version`
+        refuses by field name here, before the digest is read, as the DL-157
+        readers do (`period.read_sentinel` and `boundary.py`'s four). `check_artifact_version`
+        passes absence by design -- it only checks a version that IS there --
+        so `require_artifact_version` is the one that requires the key (DL-227)."""
         if not isinstance(payload, Mapping):
             raise EngineError(f"seal artifact: expected an object, got {type(payload).__name__}")
         try:
+            require_artifact_version(payload)
             check_artifact_version(payload)
         except CanonError as exc:
             raise EngineError(f"seal artifact: {exc}") from exc

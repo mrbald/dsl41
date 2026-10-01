@@ -393,6 +393,22 @@ def test_read_journal_refuses_a_non_object_json_line(tmp_path: Path) -> None:
         read_journal(path)
 
 
+@pytest.mark.parametrize("bad_kind", [[], {}])
+def test_an_unhashable_rec_refuses_as_an_unknown_kind(tmp_path: Path, bad_kind: object) -> None:
+    """(check_record docstring, DL-227): `rec` may hold any JSON value. An
+    unhashable one -- a JSON array or object -- takes the same unknown-kind
+    refusal as any other non-current kind, rather than raising a TypeError
+    out of `kind not in CURRENT_RECS`."""
+    path = _write_two_input_journal(tmp_path)
+    lines = path.read_bytes().split(b"\n")
+    record = json.loads(lines[1])
+    record["rec"] = bad_kind
+    lines[1] = json.dumps(record).encode("utf-8")
+    path.write_bytes(b"\n".join(lines))
+    with pytest.raises(EngineError, match="unknown record kind"):
+        read_journal(path)
+
+
 def test_read_journal_refuses_missing_header(tmp_path: Path) -> None:
     """(read_journal docstring): every journal must open with a header
     record; a file that starts with anything else is refused."""

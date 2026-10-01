@@ -1,7 +1,7 @@
 # Protocol evolution — how a dialect enters service, and how it leaves
 
 Status: **normative (DL-138; amended by DL-147, DL-150, DL-151, DL-157,
-DL-158, DL-168, DL-170 and DL-217).** A change to what this document fixes
+DL-158, DL-168, DL-170, DL-217 and DL-227).** A change to what this document fixes
 requires a decision-log entry, and each amendment is cited where it
 applies. This
 document is the contract that every versioned protocol and every durable
@@ -69,14 +69,19 @@ archive receipt's place in the closed row, the request-scoped lifetime of
 both socket rows, and the closed-artifact carriers and gates of
 `catalog_hash_version` and `state_machine_version`.
 
-The **absent VERSION** column (DL-157) is ruled per class, not per row. A
-row already strict on an unknown field is strict on a missing version too:
-the closed-artifact row's own logic, that §3.2 puts every typed field on
-the wire so an unknown field is corruption, applies to an absent field the
-same way, because no retained instance omits one. A row already tolerant
-of an unknown field stays tolerant of a missing version, and that is one
-row: the wrapper-owned spool files (`runner_procid.spool_version_supported`).
-The closed row refuses absence uniformly, `staged_manifest.json` included.
+The **absent VERSION** column (DL-157) is refused on every row that
+carries a version but one (DL-227). A row already strict on an unknown field is strict on a missing
+version too: the closed-artifact row's own logic, that §3.2 puts every
+typed field on the wire so an unknown field is corruption, applies to an
+absent field the same way, because no retained instance omits one. The one
+row that passes an absent version is the wrapper-owned spool files, whose
+reader is `runner_procid.spool_version_supported`: it passes an absent
+`version` because the Tier-0 wrapper writes the file before any reader
+exists to require it (DL-227). Tolerance of unknown fields decides nothing
+about the version column: the supervisor's evidence files, `sources.json`
+and `watch.jsonl` all tolerate an unknown field and still require the
+version. The closed row refuses absence uniformly, `staged_manifest.json`
+included.
 
 ### Notes on the rows
 
@@ -114,13 +119,12 @@ The same logic rules an absent field, not only an unrecognised one
 (DL-157): §3.2's canonical form has no optional `artifact_format_version`,
 so a retained instance missing the key is not a narrower dialect this
 binary declines to read; it is not this artifact. Sentinel, Anchor, Claim,
-Candidate and `staged_manifest.json` require the key before validating the
-rest of the document, in the sentinel reader's own style (`period.py`'s
-`read_sentinel`, `boundary.py`'s `EstateAnchor.read`,
-`EstateAnchor.read_claim`, `read_candidate` and `read_staged_manifest`);
-the seal sidecar and the attestation refuse an absent version by
-construction, the seal through its digest, the attestation through its own
-explicit check.
+Candidate, `staged_manifest.json` and the seal sidecar require the key
+before validating the rest of the document, in the sentinel reader's own
+style (`period.py`'s `read_sentinel`, `boundary.py`'s `EstateAnchor.read`,
+`EstateAnchor.read_claim`, `read_candidate` and `read_staged_manifest`,
+`seal.py`'s `Seal.from_payload`, DL-227); the attestation refuses an absent
+version through its own explicit check.
 
 A third gate (DL-168), beside unknown and absent: a field
 of the WRONG TYPE is refused too, never coerced. **A closed artifact or
@@ -176,13 +180,12 @@ PRESENT AND UNREADABLE, never as absence, because in its §11a table absence
 authorizes a spawn. `true` and `1.0` are not the integer 1 on either side.
 An **absent** `version` is refused by neither.
 
-An absent `version` on this row is ruled by class, not by a reason invented
-for the row (DL-157): `spawn.json` and `status.json` are the **tolerant**
-case, the shape the general rule takes for a row already tolerant of an
-unknown field. An absent `version` passes here for the same reason an
-unknown field does, and this is the one row in the whole matrix where that
-is true, because it is the one row whose version-shaped discriminator is
-not `artifact_format_version`.
+An absent `version` on this row passes, and the two spool files are the
+one row in the whole matrix where that is true (DL-157, DL-227).
+Tolerance of an unknown field does not explain it: the supervisor's own
+evidence files tolerate an unknown field and still require the version.
+This row passes an absent `version` because the Tier-0 wrapper writes the
+file before any reader exists to require it.
 
 **The wrapper input spec is strict on fields, beside a spool it writes
 tolerantly, and the fingerprint is why.** A spool file is read for the fields a

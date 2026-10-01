@@ -620,7 +620,12 @@ def check_record(record: Mapping[str, Any], *, where: str) -> None:
             f" {retired} -- nothing has written one since DL-118/DL-130 and no root"
             " holding one exists (docs/protocol-evolution.md ss6, ss8)"
         )
-    if kind not in CURRENT_RECS:
+    # `kind` may be any JSON value, including an unhashable array or object
+    # (DL-227): `isinstance` first keeps `in CURRENT_RECS` from raising a
+    # TypeError, so every non-current kind -- string or not -- takes the
+    # same unknown-kind refusal by name (ss1: "an unknown kind refuses by
+    # name").
+    if not isinstance(kind, str) or kind not in CURRENT_RECS:
         raise EngineError(
             f"{where}: unknown record kind {kind!r} -- this binary reads"
             f" {', '.join(sorted(CURRENT_RECS))}; an unrecognised kind inside a"

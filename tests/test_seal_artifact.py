@@ -731,6 +731,33 @@ def test_pr08d_a_foreign_artifact_version_is_refused_by_name() -> None:
         Seal(**{**body, "artifact_format_version": 99})
 
 
+def test_a_retired_catalog_hash_version_names_dl138() -> None:
+    """DL-227: `catalog_hash_version` 1 is a RETIRED dialect (DL-138,
+    period.py's `RETIRED_CATALOG_HASH_VERSIONS`), not merely an
+    unimplemented one. `_current_recipe`'s refusal names both the
+    retirement and the current-recipe reasoning it already gave for any
+    other unimplemented version."""
+    document = _document()
+    document["catalog_hash_version"] = 1
+    with pytest.raises(EngineError, match="DL-138") as excinfo:
+        _open(_restamped(document))
+    assert "retired" in str(excinfo.value)
+    assert "pins the current recipe" in str(excinfo.value)
+
+
+def test_an_absent_artifact_format_version_refuses_by_name() -> None:
+    """DL-227: a seal is a closed estate artifact, so an absent
+    `artifact_format_version` refuses by field name before the digest is
+    even read -- `check_artifact_version` passes absence by design, so
+    `require_artifact_version` is the gate that requires the key, the same
+    discipline the DL-157 readers (`period.read_sentinel` and boundary's) keep."""
+    document = _document()
+    del document["artifact_format_version"]
+    with pytest.raises(EngineError, match="missing artifact_format_version") as excinfo:
+        _open(document)
+    assert "digest" not in str(excinfo.value)
+
+
 def test_ss3_2_an_aware_datetime_is_refused() -> None:
     """The artifact is stricter than the encoder: `canon` would convert an
     aware datetime, and a seal refuses it -- the field is named, and the
