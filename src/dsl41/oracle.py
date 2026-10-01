@@ -720,8 +720,10 @@ class Oracle:
             # convention above -- and deliberately NOT `SCHED_DISARM`, which
             # stays the ENGINE's marker for scheduler-caused drops (the Q3c
             # box fold), so an audit reader can tell the two apart.
+            was_armed = self._runtime(job).armed
             self.store.set_armed(job, False)
-            self._record(job, "DISARM", "sendevent DISARM")
+            reason = "sendevent DISARM" if was_armed else "sendevent DISARM (no latch)"
+            self._record(job, "DISARM", reason)
 
     # -------------------------------------------------------- condition evaluation
 

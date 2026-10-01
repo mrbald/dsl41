@@ -1680,8 +1680,9 @@ start already out of the latch — a QUE_WAIT attempt stays queued and a
 deferred run-window start still fires. Across the boundary an old-baseline
 `DISARM` is refused exactly as every stale-baseline command is; a newly
 composed C2 command may drop a carried C1 latch, and the WAL shows who did
-(the input's source and actor, and the decision's moved revisions — an
-empty revisions map is the audit mark of the no-op). PR-26 reads
+(the input's source and actor) and the trace shows which: `sendevent
+DISARM` for a drop, `sendevent DISARM (no latch)` for a no-op (DL-233).
+PR-26 reads
 accordingly: one held tick under C1 → exactly one start after C2, or none
 if an admitted `DISARM` dropped the latch in between.
 

@@ -3469,6 +3469,32 @@ def test_dl158_disarm_leaves_timers_alone_the_must_start_alarm_still_fires() -> 
     assert "MUST_START_ALARM" in transitions(o, "ms158")
 
 
+def test_dl233_second_disarm_at_its_own_deadline_still_reads_no_latch() -> None:
+    """DL-233: the revisions map is not the audit discriminator. A
+    must_start deadline due at the SAME instant as a second DISARM fires
+    inside that DISARM's own batch (one input covers the fired timers and
+    the feed, concurrency-model ss0), moving the job's revision even
+    though the first DISARM already dropped the latch. The trace reason
+    on the second DISARM still reads '(no latch)'."""
+    text = (
+        "insert_job: ms233\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n'
+        "must_start_times: +30\ncondition: s(gate_ms233)\n\n"
+        "insert_job: gate_ms233\njob_type: c\ncommand: y\nmachine: m1\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="ms233"))  # arms latch + must_start deadline at t+30
+    assert o.store.job["ms233"].armed
+    o.feed(ev("DISARM", 5, job="ms233"))  # first DISARM: the real drop
+    assert not o.store.job["ms233"].armed
+    rev = o.store.revision("job:ms233")
+    o.feed(ev("DISARM", 30, job="ms233"))  # second DISARM, at the deadline's own due instant
+    assert "MUST_START_ALARM" in transitions(o, "ms233")  # the deadline fired in this batch
+    assert o.store.revision("job:ms233") == rev + 1  # moved by the alarm, not by the DISARM
+    disarms = [t for t in o.trace() if t.job == "ms233" and t.transition == "DISARM"]
+    assert disarms[-1].cause == "sendevent DISARM (no latch)"
+
+
 def test_dl158_disarm_does_not_cancel_a_run_window_deferred_start() -> None:
     """DL-158: a deferred start is already out of the latch -- it rides a
     RUN_WINDOW_DEFER timer, and the disarm drops only the latch visible at

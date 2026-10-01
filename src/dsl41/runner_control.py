@@ -96,7 +96,7 @@ import uuid
 
 from collections.abc import AsyncIterator, Awaitable, Iterator, Mapping
 from pathlib import Path
-from typing import Any, get_args
+from typing import Any, cast, get_args
 
 from pydantic import ValidationError
 
@@ -118,7 +118,7 @@ from dsl41.runner_admission import (
     parse_envelope,
 )
 from dsl41.runner_clock import EngineError
-from dsl41.runner_hosts import HOST_VERBS, HostCommand
+from dsl41.runner_hosts import HOST_VERBS, HostCommand, HostVerb
 from dsl41.seal import StagedNextPeriod
 from dsl41.runner_journal import read_backfill
 from dsl41.runner_preflight import and_success_skeleton
@@ -728,7 +728,7 @@ class ControlServer:
         payload = request.get("payload")
         if not isinstance(payload, dict):
             return {"ok": False, "error": f"payload must be an object, got {payload!r}"}
-        if verb not in HOST_VERBS:
+        if not (isinstance(verb, str) and verb in HOST_VERBS):
             return {
                 "ok": False,
                 "error": f"unknown host verb {verb!r} (one of {sorted(HOST_VERBS)})",
@@ -741,7 +741,11 @@ class ControlServer:
         force = payload.get("force", False)
         if not isinstance(force, bool):
             return {"ok": False, "error": f"force must be a boolean, got {force!r}"}
-        return HostCommand(verb=verb, host_id=host_id, force=force)
+        # the membership check above already proved `verb` is one of
+        # HOST_VERBS's members, a subset of HostVerb's literals; mypy only
+        # sees `str` past an isinstance guard, so the cast states what the
+        # check already decided.
+        return HostCommand(verb=cast(HostVerb, verb), host_id=host_id, force=force)
 
     def _hosts(self, request: dict[str, Any]) -> dict[str, Any]:
         """The ss8 routing table, and the read a `host` command's `expect` is
@@ -792,7 +796,7 @@ class ControlServer:
         if not isinstance(payload, dict):
             return {"ok": False, "error": f"payload must be an object, got {payload!r}"}
         at = self.engine.clock.now()
-        if verb in JOB_EVENT_VERBS:
+        if isinstance(verb, str) and verb in JOB_EVENT_VERBS:
             job = payload.get("job")
             if (error := self._check_job(job)) is not None:
                 return error
@@ -818,7 +822,7 @@ class ControlServer:
                 name, sep, inst = job.rpartition("^") if isinstance(job, str) else ("", "", "")
                 if not (sep and name and inst in self.engine.oracle.catalog.external_instances):
                     return error
-            if status not in STATUSES:
+            if not (isinstance(status, str) and status in STATUSES):
                 return {
                     "ok": False,
                     "error": f"unknown status {status!r} (one of {sorted(STATUSES)})",
