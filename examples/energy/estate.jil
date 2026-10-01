@@ -1,0 +1,46 @@
+/* Synthetic UTC interval processing. Both waves are explicitly started. */
+insert_job: ENERGY_INITIAL_B
+job_type: b
+
+insert_job: ENERGY_INITIAL_INGEST
+job_type: c
+box_name: ENERGY_INITIAL_B
+command: ~{$WORKER}~ ingest initial
+profile: ~{$PROFILE}~
+
+insert_job: ENERGY_INITIAL_CALCULATE
+job_type: c
+box_name: ENERGY_INITIAL_B
+condition: s(ENERGY_INITIAL_INGEST)
+command: ~{$WORKER}~ calculate initial
+profile: ~{$PROFILE}~
+
+insert_job: ENERGY_INITIAL_PUBLISH
+job_type: c
+box_name: ENERGY_INITIAL_B
+condition: s(ENERGY_INITIAL_CALCULATE)
+command: ~{$WORKER}~ publish initial
+profile: ~{$PROFILE}~
+
+insert_job: ENERGY_CORRECTION_B
+job_type: b
+
+insert_job: ENERGY_CORRECTION_INGEST
+job_type: c
+box_name: ENERGY_CORRECTION_B
+command: ~{$WORKER}~ ingest correction
+profile: ~{$PROFILE}~
+
+insert_job: ENERGY_CORRECTION_CALCULATE
+job_type: c
+box_name: ENERGY_CORRECTION_B
+condition: s(ENERGY_CORRECTION_INGEST)
+command: ~{$WORKER}~ calculate correction
+profile: ~{$PROFILE}~
+
+insert_job: ENERGY_CORRECTION_PUBLISH
+job_type: c
+box_name: ENERGY_CORRECTION_B
+condition: s(ENERGY_CORRECTION_CALCULATE)
+command: ~{$WORKER}~ publish correction
+profile: ~{$PROFILE}~
