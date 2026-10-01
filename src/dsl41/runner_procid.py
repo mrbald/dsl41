@@ -54,9 +54,9 @@ def spool_version_supported(doc: Mapping[str, Any]) -> bool:
     binary does not implement must stop the reader, because the field exists
     to say the meaning changed. `true` and `1.0` are not the integer 1.
 
-    An ABSENT `version` passes. The matrix has no column for a missing
-    version and no document rules one, so refusing here would pick a side by
-    guess; the split is recorded in the round's ledger instead.
+    An ABSENT `version` passes: this is the one row of the matrix that lets
+    a missing version through (DL-157, DL-227), because the Tier-0 wrapper
+    writes the file before any reader exists to require it.
 
     The type check is spelled out rather than borrowed from `canon.is_wire_int`:
     this module imports nothing from dsl41, which is what lets the Tier-0

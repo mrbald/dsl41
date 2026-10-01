@@ -334,12 +334,11 @@ def outcome_from_status(status: dict[str, Any]) -> AdapterResult:
         )
         # PENDING: E8 -- an EXTERNAL signal death (engine alive, no oracle
         # kill decision) maps to TERMINATED per the DL-41a recorded-signal
-        # reading; vendor parity unverified (real AutoSys may mark FAILURE).
-        # Swept 2026-07-28 (DL-53): publicly undocumented. Re-swept
-        # 2026-07-30 (DL-58): one agent KB shows a spawn-path signal-9 abort
-        # reported as FAILED -- directional evidence for FAILURE, but it is
-        # not the mid-run kill scenario; TERMINATED stands until a live
-        # one-kill test (trap-TERM variant discriminates the mechanism).
+        # reading. The vendor's status definition names the UNIX kill
+        # command among what makes a job TERMINATED (DL-226), so the
+        # operator-kill case is documented; open: recorded intent versus
+        # wait status (the trap-TERM live test), and the signal deaths no
+        # operator sent (segfault, OOM kill).
         return Terminated(cause)
     if outcome == "terminated":
         return Terminated(str(status.get("cause", "terminated")))

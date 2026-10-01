@@ -639,10 +639,13 @@ unchanged.
      through SEM-09 as usual, recorded signal/parent-lost → TERMINATED).
      Inject it at `max(ended_at, last journal at)`, with the true
      `ended_at` carried in the payload (feed times are non-decreasing).
-   - Command group alive, wrapper dead → kill the members that pass the
-     (pid, start-time) check, SIGTERM → SIGKILL. Inject
-     `STATUS TERMINATED` cause `wrapper lost; killed at resume` (a kill
-     that actually happened; TERMINATED is truthful).
+   - Command group alive after the settle window — its wrapper dead, or
+     alive and silent past the settle window plus the grace → verify the
+     group leader's (pid, start-time), SIGTERM the pgid, then SIGKILL the
+     pgid once the leader has died or the grace has passed (DL-226; the
+     vendor's default cancel signals the process group too). A group
+     whose leader is already dead is not signalled: E7. Inject `STATUS TERMINATED` cause `wrapper lost; killed at resume` (a
+     kill that actually happened; TERMINATED is truthful).
    - A SUPERVISED run whose durable effect bound a `run_id` and whose spool
      holds neither `spawn.json` nor `status.json` → the SPAWN is
      **replayed** (DL-129): period-model §11a made it idempotent, so the
@@ -1062,23 +1065,30 @@ code. None is guess-resolved.
   Default: two stable polls, 60s (§6).
 - **E7** — verdict for an unobservable exit status (§7). Default: FAILURE
   with cause `exit_status_unobservable`. TERMINATED is reserved for kills
-  that actually happened. If an estate shows t()-conditioned recovery
-  paths that are intended to fire instead, revisit this default.
+  that actually happened. The vendor's "Lost Control" is the same
+  verdict: a job whose PID the agent can no longer find, and whose exit
+  it never recorded, fails with a JOBFAILURE alarm (KB 11501, DL-226). If
+  an estate shows t()-conditioned recovery paths that are intended to
+  fire instead, revisit this default.
 - **E8** — verdict for an EXTERNAL signal death (the wrapper records
   `signaled`, the engine is alive, no oracle kill decision: segfault,
   OOM kill, operator `kill -9` of the command). Default: TERMINATED,
-  uniform with the DL-41a recorded-signal reading. Real AutoSys can
-  instead mark FAILURE (128+signum through the SEM-09 boundary). If it
-  does, t()/f() routing flips (opened by DL-44). The vendor behaviour is
-  publicly undocumented (DL-53). KB 230562 (DL-58) shows an agent-side spawn-path
-  signal-9 abort reported as `State FAILED … Status(Aborted, Signal 9)`:
-  directional evidence for FAILURE, but spawn-time (no PID ever existed),
-  not the mid-run kill. The evidence leans toward FAILURE; the pinned
-  default stands. One live test closes it: a kill test, plus the trap-TERM
-  variant (KILLJOB
-  against a command that traps SIGTERM and exits 0) to discriminate
-  recorded-intent vs wait-status mechanisms
-  (`docs/live-instance-runbook.md`).
+  uniform with the DL-41a recorded-signal reading. The vendor's status
+  definition lists "you issue the kill command (UNIX)" among the
+  situations that make a job TERMINATED, beside the KILLJOB event, the
+  job_terminator and the maximum run time (TechDocs, AutoSys 12.0 and
+  24.1.01, System States > Status), and its scheduler KillSignals page
+  says the default `2,9` "usually" returns TERMINATED (DL-226). The
+  operator-kill case is therefore documented. `# PENDING: E8` stays for
+  what is not: the mechanism "usually" leaves open, recorded intent
+  versus wait status, which the trap-TERM live test discriminates
+  (KILLJOB against a command that traps SIGTERM and exits 0,
+  `docs/live-instance-runbook.md`), and the signal deaths no operator
+  sent (segfault, OOM kill). If a live instance marks those FAILURE
+  (128+signum through the SEM-09 boundary), t()/f() routing flips
+  (DL-44). KB 230562 (DL-58) shows a spawn-path signal-9 abort as
+  agent-level FAILED: spawn-time, no PID ever existed, not the mid-run
+  kill.
 - **E9** — scheduler ticks missed across engine DOWNTIME (crash/stop →
   resume) (DL-45). Default: skip-and-report. Resume drops each missed tick
   AND journals it (a WAL `drop` record), and it never fires the tick late.
