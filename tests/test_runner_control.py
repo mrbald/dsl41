@@ -310,6 +310,87 @@ def test_change_status_bad_status_rejected_valid_status_updates_the_store(short_
     asyncio.run(scenario())
 
 
+def test_non_string_job_verb_is_refused_as_unknown_verb_wal_unchanged(short_root: Path) -> None:
+    # DL-228: a verb that is not a string (here a JSON array) is unhashable
+    # against JOB_EVENT_VERBS, so `_event_for` must guard with isinstance
+    # before the membership test rather than let it raise.
+    text = "insert_job: nv_job\njob_type: c\ncommand: x\nmachine: m1\n"
+    run_root = short_root / "run"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(run_root, text)
+        try:
+            before = (run_root / "journal.jsonl").read_bytes()
+            resp = await _control_call(
+                server.path,
+                {"cmd": "sendevent", "verb": [], "payload": {"job": "nv_job"}},
+            )
+            assert resp["ok"] is False
+            assert resp["refused"] is True
+            assert "unknown verb" in resp["error"]
+            assert (run_root / "journal.jsonl").read_bytes() == before
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_non_string_host_verb_is_refused_as_unknown_host_verb_wal_unchanged(
+    short_root: Path,
+) -> None:
+    # DL-228: the host path's `verb not in HOST_VERBS` check needs the same
+    # isinstance guard as the job path.
+    text = "insert_job: hv_job\njob_type: c\ncommand: x\nmachine: m1\n"
+    run_root = short_root / "run"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(run_root, text)
+        try:
+            before = (run_root / "journal.jsonl").read_bytes()
+            resp = await _control_call(
+                server.path,
+                {"cmd": "host", "verb": {}, "payload": {"id": "local"}},
+            )
+            assert resp["ok"] is False
+            assert resp["refused"] is True
+            assert "unknown host verb" in resp["error"]
+            assert (run_root / "journal.jsonl").read_bytes() == before
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_non_string_change_status_status_is_refused_as_unknown_status_wal_unchanged(
+    short_root: Path,
+) -> None:
+    # DL-228: CHANGE_STATUS's `status not in STATUSES` check needs the same
+    # isinstance guard; an array status must not raise a TypeError.
+    text = "insert_job: cs2_job\njob_type: c\ncommand: x\nmachine: m1\n"
+    run_root = short_root / "run"
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(run_root, text)
+        try:
+            before = (run_root / "journal.jsonl").read_bytes()
+            resp = await _control_call(
+                server.path,
+                {
+                    "cmd": "sendevent",
+                    "verb": "CHANGE_STATUS",
+                    "payload": {"job": "cs2_job", "status": []},
+                },
+            )
+            assert resp["ok"] is False
+            assert resp["refused"] is True
+            assert "unknown status" in resp["error"]
+            assert (run_root / "journal.jsonl").read_bytes() == before
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
 def test_every_accepted_control_event_is_journaled_with_source_control(short_root: Path) -> None:
     text = "insert_job: jr_job\njob_type: c\ncommand: x\nmachine: m1\n"
     run_root = short_root / "run"
@@ -377,8 +458,9 @@ def test_sendevent_disarm_roundtrip_expect_gated_and_journaled(short_root: Path)
     the revision), applying nothing; the well-composed one applies, drops
     the latch, answers with the moved revision, and sits in the WAL with
     source=control; a second DISARM on the now-unarmed job applies as the
-    journaled no-op whose decision carries an EMPTY revisions map -- the
-    audit discriminator both frozen docs name."""
+    journaled no-op. The durable audit distinction is the trace reason
+    (DL-233), not the decision's revisions map: `sendevent DISARM` for the
+    drop, `sendevent DISARM (no latch)` for the no-op."""
     now = RealClock().now()
     far_tick = (now + timedelta(hours=2)).replace(second=0, microsecond=0)
     text = (
@@ -433,11 +515,22 @@ def test_sendevent_disarm_roundtrip_expect_gated_and_journaled(short_root: Path)
             assert after["jobs"]["arm_ctl"]["armed"] is False
             assert after["jobs"]["arm_ctl"]["status"] == "INACTIVE"  # the drop is the whole effect
 
-            # the no-op on the unarmed job: applied, and its decision's
-            # revisions map is EMPTY -- the audit mark of the no-op
+            # the no-op on the unarmed job: applied. Its decision's revisions
+            # map happens to be empty here, but DL-233 is clear the map is
+            # not the discriminator -- the trace reason is
             noop = await _sendevent(server.path, "DISARM", job="arm_ctl")
             assert noop["ok"] is True and noop["decision"] == "applied"
             assert noop["revisions"] == {}
+
+            # DL-233: the trace reason, not the revisions map, tells the
+            # drop from the no-op
+            trace = await _control_call(server.path, {"cmd": "trace"})
+            disarm_causes = [
+                e["cause"]
+                for e in trace["entries"]
+                if e["job"] == "arm_ctl" and e["transition"] == "DISARM"
+            ]
+            assert disarm_causes == ["sendevent DISARM", "sendevent DISARM (no latch)"]
         finally:
             await _teardown(engine, server, loop_task)
 
@@ -451,9 +544,11 @@ def test_sendevent_disarm_roundtrip_expect_gated_and_journaled(short_root: Path)
     # record at all.
     assert len(disarms) == 3
     assert all(r.get("source") == "control" for r in disarms)
-    # the durable audit discriminator, read from the artifact itself: the
-    # decision records of the three admitted DISARMs are rejected/empty,
-    # applied/one-moved-revision, applied/empty -- in that order
+    # the decision records of the three admitted DISARMs, read from the
+    # artifact itself -- rejected/empty, applied/one-moved-revision,
+    # applied/empty, in that order. Per DL-233 these revisions are not the
+    # audit discriminator (the trace reason is, asserted above); recorded
+    # here only as the shape this run happens to produce
     decisions = {r["index"]: r for r in records if r.get("rec") == "decision"}
     verdicts = [
         (decisions[r["seq"]]["decision"], decisions[r["seq"]]["revisions"]) for r in disarms

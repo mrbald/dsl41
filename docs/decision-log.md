@@ -14703,3 +14703,32 @@ relitigate an entry; append a new one.
   Not changed: `Event` stays mutable and `timers()` returns live
   references; no writer mutates a timer's payload, so no rule is needed
   until one appears.
+- DL-233 The DISARM audit distinction is the trace reason, not the
+  revisions map (2026-10-01; control-protocol.md ss3, period-model.md
+  ss10.4, oracle.py; corrects DL-228)
+  THE CORNER. DL-228 ruled that a real drop is told from a no-op by the
+  target's entry in the decision's revisions map. Two independent reviews
+  of the slice that implemented it found the same hole: a timer of the
+  target's own, due at or before the DISARM's instant, fires in the same
+  batch and moves the target's revision (`pop_timer_due` touches the job;
+  `InputBatch` fires due timers before the feed), so a DISARM that dropped
+  nothing can still carry its target in the map. Reproduced with a
+  `must_start` deadline due at the instant of a second DISARM: `applied`,
+  `revisions={'job:j': 3}`, latch already false. DL-232's ordering rule
+  does not close it, because a timer due exactly at the input's instant
+  shares the batch by design (concurrency-model ss0).
+  THE RULING. The durable distinction is the trace, which is a pure
+  function of the inputs and is what `dsl41 journal` prints. The oracle
+  records a `DISARM` marker for both outcomes today, with one reason,
+  `sendevent DISARM`. It now records `sendevent DISARM` when the target
+  was armed and `sendevent DISARM (no latch)` when it was not. The
+  decision's revisions map is not a discriminator and the specifications
+  stop calling it one: control-protocol ss3's sentence and period-model
+  ss10.4's "an empty revisions map is the audit mark of the no-op" read
+  under this entry, as does DL-228's "read the target" and DL-158's
+  "EMPTY revisions map". The map itself, `batch.revisions`, replay's
+  comparison of it, and `SCHED_DISARM` (the engine's own marker for
+  scheduler-caused drops) do not change.
+  Tests: one DISARM over an armed target and one over an unarmed target
+  read the two reasons from the trace; the unarmed case with a timer of
+  the target's own due at the same instant still reads `(no latch)`.
