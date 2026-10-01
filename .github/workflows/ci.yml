@@ -40,7 +40,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: uv sync --locked --extra dev
-      - run: uv run ruff check src tests
+      - run: uv run ruff check src tests examples
       - run: uv run ruff format --check src tests scripts examples
       # DL-193: tests/uc_oracle.py is named because it is a fully annotated
       # executable spec (stonebranch Part IV) that left src/ with DL-189, and
@@ -75,7 +75,7 @@ jobs:
         with:
           python-version: "3.14"
       - run: uv sync --locked --extra dev
-      - run: uv run ruff check src tests
+      - run: uv run ruff check src tests examples
       - run: uv run ruff format --check src tests scripts examples
       # DL-193: tests/uc_oracle.py is named because it is a fully annotated
       # executable spec (stonebranch Part IV) that left src/ with DL-189, and

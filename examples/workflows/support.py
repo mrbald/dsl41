@@ -37,7 +37,12 @@ def cli(
     return result
 
 
-def new_run(name: str, requested: Path | None = None) -> Path:
+def new_run(name: str, requested: Path | None = None, engine: str = "engine") -> Path:
+    """Create a fresh private run directory.
+
+    `engine` is the deepest engine root the example creates below it; its
+    supervisor socket must fit the Unix socket path limit.
+    """
     if requested is None:
         base = Path(os.environ.get("EXAMPLE_RUNS", "/tmp/dsl41-examples"))
         base.mkdir(parents=True, exist_ok=True)
@@ -48,7 +53,7 @@ def new_run(name: str, requested: Path | None = None) -> Path:
             raise ValueError(f"refusing to reuse run directory: {path}")
         path.mkdir(parents=True, mode=0o700)
     os.chmod(path, 0o700)
-    if len(os.fsencode(path / "engine" / "supervisor.sock")) >= 100:
+    if len(os.fsencode(path / engine / "supervisor.sock")) >= 100:
         raise ValueError("run path is too long for a Unix socket; choose a short --run-dir")
     return path
 
@@ -221,11 +226,10 @@ class Engine:
             row = self.job(name)
             if row["status"] == status:
                 return row
-            if row["status"] in {"FAILURE", "TERMINATED"} and status not in {
-                "FAILURE",
-                "TERMINATED",
-            }:
-                raise RuntimeError(f"{name} ended {row['status']}; inspect {self.run}/engine/logs")
+            if row["status"] in {"SUCCESS", "FAILURE", "TERMINATED"}:
+                raise RuntimeError(
+                    f"{name} ended {row['status']}, not {status}; inspect {self.run}/engine/logs"
+                )
             time.sleep(0.1)
         raise TimeoutError(f"{name} did not reach {status}: {self.job(name)}")
 

@@ -121,6 +121,16 @@ def main() -> None:
         revision=3,
         readings=[{"meter": "meter_a", "revision": 1, "units": 11}, readings[1]],
     )
+    # The same conflicting reading under an equivalent, non-canonical spelling.
+    fixture(
+        feed,
+        "respelled",
+        start="2026-1-15T0:0:0Z",
+        revision=4,
+        readings=[{"meter": "meter_a", "revision": 1, "units": 11}, readings[1]],
+    )
+    # An unseen snapshot whose meter_a reading is older than the accepted correction.
+    fixture(feed, "stale", start="2026-01-15T00:00:00Z", revision=5, readings=readings)
     # A stable, valid JSON fragment still fails the full immutable manifest.
     (feed / "initial.readings.json").write_text(json.dumps(readings[:1]))
     server = ThreadingHTTPServer(
@@ -142,15 +152,19 @@ def main() -> None:
         engine.wait_job("ENERGY_INITIAL_INGEST", "FAILURE")
         failed = engine.status()
         error_log = Path(failed["jobs"]["ENERGY_INITIAL_INGEST"]["log_err"])
-        assert "manifest length/hash differs" in error_log.read_text()
-        assert failed["jobs"]["ENERGY_INITIAL_CALCULATE"]["run_number"] == 0
-        assert failed["jobs"]["ENERGY_INITIAL_PUBLISH"]["run_number"] == 0
+        if "manifest length/hash differs" not in error_log.read_text():
+            raise RuntimeError(f"ingest failed for another reason; see {error_log}")
+        for job in ("ENERGY_INITIAL_CALCULATE", "ENERGY_INITIAL_PUBLISH"):
+            if failed["jobs"][job]["run_number"] != 0:
+                raise RuntimeError(f"{job} ran after the incomplete input was refused")
         with psycopg.connect(
             database_url, connect_timeout=3, options="-c statement_timeout=10000"
         ) as conn:
             conn.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(config["schema"])))
-            assert conn.execute("SELECT count(*) FROM readings").fetchone()[0] == 0
-            assert conn.execute("SELECT count(*) FROM publications").fetchone()[0] == 0
+            for table in ("readings", "publications"):
+                query = sql.SQL("SELECT count(*) FROM {}").format(sql.Identifier(table))
+                if conn.execute(query).fetchone()[0] != 0:
+                    raise RuntimeError(f"incomplete input reached the {table} table")
         write_json(run / "incomplete-refusal.json", failed)
         temporary = feed / "complete.tmp"
         temporary.write_bytes(full)
@@ -160,7 +174,8 @@ def main() -> None:
         observe(run, "initial", "initial-check")
         worker(run, "ingest", "initial")  # duplicate delivery
         worker(run, "ingest", "conflict", refused="conflicting reading revision")
-        observe(run, "initial", "duplicate-conflict-check")
+        worker(run, "ingest", "respelled", refused="non-canonical interval_start")
+        observe(run, "initial", "initial-probes-check")
         if not args.force_seal:
             manifest = read_json(engine.root / "periods" / "000001" / "manifest.json")
             horizon = manifest["runtime_profile"]["retry_horizon_us"] / 1_000_000
@@ -175,12 +190,13 @@ def main() -> None:
         engine.start(resume=True)
         engine.event("STARTJOB", "ENERGY_CORRECTION_B")
         engine.wait_job("ENERGY_CORRECTION_B")
-        observe(run, "corrected", "correction-check")
+        observe(run, "corrected", "corrected-check")
         worker(run, "ingest", "correction")
         worker(run, "publish", "correction")
         worker(run, "ingest", "initial")  # stale delivery of the accepted old revision
         worker(run, "publish", "initial")
-        observe(run, "corrected", "final-check")
+        worker(run, "ingest", "stale", refused="stale reading in a new snapshot")
+        observe(run, "corrected", "corrected-probes-check")
         write_json(run / "final-status.json", engine.status())
     finally:
         engine.stop()
@@ -189,8 +205,12 @@ def main() -> None:
         thread.join(timeout=5)
     history = cli("runs", str(engine.root), "--format", "json")
     write_json(run / "run-history.json", json.loads(history.stdout))
-    observe(run, "complete", "final-check")
-    print(json.dumps(read_json(run / "final-check.json"), indent=2))
+    # Re-derive the sealed period from its own evidence and keep the attestation
+    # beside its seal; the checker verifies it with `dsl41 verify`.
+    audit = cli("audit", "--run-root", str(engine.root), "--period", "1", timeout=60)
+    write_json(run / "audit.json", {"stdout": audit.stdout, "stderr": audit.stderr})
+    observe(run, "complete", "complete-check")
+    print(json.dumps(read_json(run / "complete-check.json"), indent=2))
 
 
 if __name__ == "__main__":

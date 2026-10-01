@@ -41,11 +41,20 @@ def check(run: Path, phase: str = "complete", offline_carrier: bool = False) -> 
         stock = conn.execute("SELECT initial,available,reserved,dispatched FROM stock").fetchall()
         orders = dict(conn.execute("SELECT id,state FROM orders").fetchall())
         parcels = dict(conn.execute("SELECT id,state FROM parcels").fetchall())
-        operations = dict(conn.execute("SELECT key,result FROM operations").fetchall())
+        operations = {
+            key: (payload, result)
+            for key, payload, result in conn.execute("SELECT key,payload,result FROM operations")
+        }
         receipts = conn.execute(
             "SELECT key,payload,receipt FROM carrier_receipts ORDER BY key"
         ).fetchall()
-        movements = conn.execute(
+        movements = {
+            key: (available, reserved, dispatched)
+            for key, available, reserved, dispatched in conn.execute(
+                "SELECT key,available,reserved,dispatched FROM movements"
+            )
+        }
+        movement_sums = conn.execute(
             "SELECT sum(available),sum(reserved),sum(dispatched),count(*) FROM movements"
         ).fetchone()
         attempts = dict(conn.execute("SELECT job,count(*) FROM attempts GROUP BY job").fetchall())
@@ -96,10 +105,35 @@ def check(run: Path, phase: str = "complete", offline_carrier: bool = False) -> 
     for key, payload, receipt in receipts:
         assert by_key[key]["payload"] == payload and by_key[key]["receipt"] == receipt
         assert receipt["key"] == key and receipt["kind"] == payload["action"]
-    assert operations[f"{wave}/CANCEL/1/cancel"] == {"state": "cancelled"}
-    assert operations[f"{wave}/SPLIT/1/cancel"] == {
-        "state": "refused",
-        "reason": "packing cutoff passed",
+    # Every operation the worker replays from: exact keys, payloads and results.
+    # Label and manifest results are the receipts recorded for the same key.
+    local_receipts = {key: receipt for key, _, receipt in receipts}
+
+    def operation(target: str, action: str, result: dict) -> tuple[str, tuple[dict, dict]]:
+        key = f"{wave}/{target}/1/{action}"
+        payload = {"wave": wave, "target": target, "revision": 1, "action": action}
+        return key, (payload, result)
+
+    def receipted(target: str, action: str) -> tuple[str, tuple[dict, dict]]:
+        key = f"{wave}/{target}/1/{action}"
+        assert key in local_receipts, f"no carrier receipt recorded for {key}"
+        return operation(target, action, local_receipts[key])
+
+    done = {"state": "done"}
+    expected_operations = dict(
+        [
+            operation("WAVE", "reserve", done),
+            operation("CANCEL", "cancel", {"state": "cancelled"}),
+            operation("SPLIT", "pack", done),
+            operation("SPLIT", "cancel", {"state": "refused", "reason": "packing cutoff passed"}),
+            receipted("P1", "label"),
+        ]
+    )
+    # Each stock movement, attributed to the operation that made it.
+    expected_movements = {
+        f"{wave}/WAVE/1/reserve": (-3, 3, 0),
+        f"{wave}/CANCEL/1/cancel": (1, -1, 0),
+        f"{wave}/P1/1/label": (0, -1, 1),
     }
     if phase == "incident":
         assert config["incident"] is True
@@ -107,15 +141,17 @@ def check(run: Path, phase: str = "complete", offline_carrier: bool = False) -> 
         assert orders == {"SPLIT": "packed", "CANCEL": "cancelled"}
         assert parcels == {"P1": "dispatched", "P2": "packed", "P3": "cancelled"}
         assert [row[0] for row in receipts] == keys[:1]
-        assert movements == (-2, 1, 1, 3)
-        assert len(operations) == 5
+        assert movement_sums == (-2, 1, 1, 3)
     else:
         assert stock == [(3, 1, 0, 2)]
         assert orders == {"SPLIT": "fulfilled", "CANCEL": "cancelled"}
         assert parcels == {"P1": "dispatched", "P2": "dispatched", "P3": "cancelled"}
         assert {row[0] for row in receipts} == set(expected_payloads)
-        assert movements == (-2, 0, 2, 4)
-        assert len(operations) == 7
+        assert movement_sums == (-2, 0, 2, 4)
+        expected_operations.update([receipted("P2", "label"), receipted("WAVE", "manifest")])
+        expected_movements[f"{wave}/P2/1/label"] = (0, -1, 1)
+    assert operations == expected_operations, operations
+    assert movements == expected_movements, movements
     if phase == "complete":
         history = json.loads((run / "runs.json").read_text())
         leaves = [row for row in history if row["job"] != "FF_WAVE_B"]
@@ -134,10 +170,20 @@ def check(run: Path, phase: str = "complete", offline_carrier: bool = False) -> 
         expected["FF_LABEL_2_C"] += int(config["incident"])
         assert attempts == expected == dict(Counter(row["job"] for row in leaves))
         assert all(row["fidelity"] == "full" and not row["undecided"] for row in history)
-        failed = [row for row in leaves if row["status"] != "SUCCESS"]
-        assert [(row["job"], row["run_number"], row["status"]) for row in failed] == (
-            [("FF_LABEL_2_C", 1, "FAILURE")] if config["incident"] else []
+        # The complete execution history: the box, every run number, status and exit code.
+        executions = sorted(
+            (row["job"], row["run_number"], row["status"], row["exit_code"]) for row in history
         )
+        expected_executions = [("FF_WAVE_B", 1, "SUCCESS", None)] + [
+            (job, 1, "SUCCESS", 0) for job in expected
+        ]
+        if config["incident"]:
+            expected_executions.remove(("FF_LABEL_2_C", 1, "SUCCESS", 0))
+            expected_executions += [
+                ("FF_LABEL_2_C", 1, "FAILURE", 1),
+                ("FF_LABEL_2_C", 2, "SUCCESS", 0),
+            ]
+        assert executions == sorted(expected_executions), executions
         assert json.loads((run / "identity-conflict.json").read_text())["http_status"] == 409
     return {
         "phase": phase,

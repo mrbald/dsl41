@@ -14839,7 +14839,6 @@ relitigate an entry; append a new one.
   edge and loses no queued run. Rejected alternative: keep the old gate
   for parity with a vendor behaviour nobody has verified, at the price of
   the QUE_WAIT loss above and a third definition of "over".
-||||||| parent of d178f78 (DL-236: opt-in integration lane for the fulfilment, energy and media examples)
 - DL-236 The workflow examples get an opt-in integration lane at the
   operator's interfaces (2026-10-01; examples/workflows/tests,
   .github/workflows/workflow-examples.yml; examples/workflows/README.md)
@@ -14876,3 +14875,61 @@ relitigate an entry; append a new one.
   detached-worker recovery, control-response loss, database restart,
   concurrent scarce stock, concurrent publication). Each is a named
   boundary with its own observable outcome and arrives as its own slice.
+- DL-237 Joint review of the workflow examples: what was fixed and what
+  stands (2026-10-01; examples/fulfilment, examples/energy, examples/media,
+  examples/workflows, tests/test_docs_hygiene.py, tests/test_examples.py,
+  .github/workflows/ci.yml; follows DL-236)
+  THE REVIEW. Opus (twenty findings) and Codex (fifteen, in four runs) read
+  the examples at 5451adc independently, then each read the other's
+  findings and the rulings and disputed by number. One blocker: both base
+  images were pinned by their arm64 manifest digest, not the multi-arch
+  index, so the runner image cannot build on amd64, and the first dispatch
+  of the lane on GitHub failed in twenty-five seconds with every test
+  erroring by name, as DL-236 intends. One major of the boss's making: a
+  diff3 marker left in this log by a scripted rebase resolution.
+  FIXED. Images: both pins are index digests; an allowlist .dockerignore
+  admits the three example directories and the files the Dockerfile
+  copies, so .git, the venv and scratch outside them stay out.
+  Fulfilment: the checker asserts the exact operation keys, payloads,
+  results and movement tuples per phase and the complete execution tuples
+  including the box; the carrier logs the reply it drops. Energy: the
+  worker refuses a timestamp not spelled YYYY-MM-DDTHH:MM:SSZ, so an
+  equivalent spelling cannot evade the revision conflict; the demo writes
+  an attestation with `dsl41 audit` and the checker proves the period
+  crossing with `dsl41 verify` and recomputes history with `dsl41 runs`,
+  instead of trusting an export, keeping the first-line checks as extra
+  checks; the demo adds two probes, an equivalent timestamp spelling and
+  a stale snapshot, both refused by name; worker tags are matched to
+  spawn identities and the expected action and wave; bare asserts became
+  raises; each phase writes its own check file. Media: the
+  encoder binds its output to the admitted input through a sidecar, and
+  reuse and staging refuse a file without a matching one; the checker
+  measures decoded audio duration; each real encode writes a unique
+  partial path. Lane: teardown always reaches `down`; the database is dumped
+  before postgres is killed; volumes are deleted only when both the dump
+  and the run-volume export succeeded, else they are kept and named; the
+  forced-gate assertion accepts a seal that landed after the horizon;
+  the session records the versions inside the image; two damage tests
+  were added, a corrupt fulfilment payload and an older media rendition
+  with recomputed hashes. Default gate: a test lowers the three estates,
+  a test fails on conflict-marker lines in the docs, and ruff checks
+  examples. Support: wait_job fails fast on any other terminal status; the
+  socket-length guard measures the deepest engine path.
+  AMENDED BY THE EXCHANGE. Three rulings changed when the other reviewer
+  read them: the database dump moved before the kill, not after; the
+  energy proof uses the public audit and verify verbs instead of parsing
+  the seal record; the media tone oracle stays only in the checker, so
+  publish and verify never share one oracle. A fourth was tightened: both
+  exports, not one, gate the deletion of a lane's volumes.
+  STANDS. ffmpeg and its Debian dependencies resolve at build time, and
+  psycopg and uv are version-pinned, not hash-pinned: a reproducibility
+  limit the README discloses. Exact replay needs the built image retained
+  separately, which nothing here does. The shared image tag (DL-236).
+  Energy has one documented run; its two lane tests read it from the
+  business side and the scheduler side. Energy's publish-time stale
+  guard is defence in depth: with these fixtures every stale reading is
+  refused at ingest, so the guard is never reached, and the README names
+  only the ingest refusal.
+  LESSONS. A digest from a pull on one platform is that platform's
+  manifest, not the index: pin the index digest and check the media type.
+  A scripted conflict resolution must handle diff3 markers.

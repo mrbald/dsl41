@@ -25,7 +25,10 @@ WAVES = {
     "initial": ("initial", "neighbor"),
     "correction": ("correction",),
     "conflict": ("conflict",),
+    "respelled": ("respelled",),
+    "stale": ("stale",),
 }
+UTC_START = "%Y-%m-%dT%H:%M:%SZ"
 METERS = {"meter_a", "meter_b"}
 DDL = """
 CREATE TABLE readings (
@@ -97,7 +100,15 @@ def bundle(run: Path, key: str):
         "count",
     }:
         raise ValueError("manifest fields differ from the declared schema")
-    start = datetime.strptime(manifest["interval_start"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    # One spelling per instant: the text is the SQL key, so an equivalent
+    # spelling must never reach the database as a different interval.
+    spelled = manifest["interval_start"]
+    try:
+        start = datetime.strptime(spelled, UTC_START).replace(tzinfo=UTC)
+    except (TypeError, ValueError):
+        start = None
+    if start is None or start.strftime(UTC_START) != spelled:
+        raise ValueError(f"non-canonical interval_start {spelled!r}: expected YYYY-MM-DDTHH:MM:SSZ")
     if start.timestamp() % 900 or manifest["duration"] != 900:
         raise ValueError("expected a UTC quarter-hour business interval")
     if type(manifest["revision"]) is not int or manifest["revision"] < 1:
@@ -145,7 +156,8 @@ def ingest(conn, item) -> None:
         if old and old[0] != row["units"]:
             raise ValueError(f"conflicting reading revision: {identity}")
         newest = conn.execute(
-            "SELECT max(revision) FROM readings WHERE interval_start=%s AND duration=%s AND meter=%s",
+            "SELECT max(revision) FROM readings"
+            " WHERE interval_start=%s AND duration=%s AND meter=%s",
             (*interval, row["meter"]),
         ).fetchone()[0]
         if newest is not None and row["revision"] < newest:
@@ -260,7 +272,8 @@ def main() -> None:
                 conn.execute(DDL)
             else:
                 conn.execute(
-                    "LOCK TABLE readings,snapshots,members,calculations,publications,adjustments IN EXCLUSIVE MODE"
+                    "LOCK TABLE readings,snapshots,members,calculations,publications,adjustments"
+                    " IN EXCLUSIVE MODE"
                 )
                 if args.action == "ingest":
                     for item in items:

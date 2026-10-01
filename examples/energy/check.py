@@ -8,10 +8,26 @@ from collections import Counter
 import json
 import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import psycopg
 from psycopg import sql
+
+# The worker action and wave each scheduled job must run.
+ACTIONS = {
+    f"ENERGY_{wave.upper()}_{action.upper()}": (action, wave)
+    for wave in ("initial", "correction")
+    for action in ("ingest", "calculate", "publish")
+}
+
+
+def dsl41(*args: str) -> subprocess.CompletedProcess[str]:
+    """One read-only public CLI verb against the stopped engine root."""
+    return subprocess.run(
+        [sys.executable, "-m", "dsl41", *args], capture_output=True, text=True, timeout=60
+    )
 
 
 def check(run: Path, phase: str) -> dict:
@@ -107,13 +123,33 @@ def check(run: Path, phase: str) -> dict:
     assert publications == sorted(expected_publications), publications
     attempt_counts = None
     if phase == "complete":
-        history = json.loads((run / "run-history.json").read_text())
+        root = run / "engine"
+        # The seal record is the commit point. `dsl41 audit` re-derived period 1
+        # from its own evidence after the engine stopped; verify that attestation
+        # and that it names the seal the successor segment opened from.
+        verified = dsl41("verify", "--run-root", str(root), "--period", "1")
+        assert verified.returncode == 0, verified.stderr
+        assert f"verifies: seal {seal['digest']}," in verified.stdout, verified.stdout
+        # Recompute the history from the engine's own records, never from an export.
+        runs = dsl41("runs", str(root), "--format", "json")
+        assert runs.returncode == 0, runs.stderr
+        history = json.loads(runs.stdout)
         leaves = [row for row in history if not row["job"].endswith("_B")]
         attempts = [json.loads(path.read_text()) for path in (run / "attempts").glob("*.json")]
         scheduled = [row for row in attempts if row["origin"] == "scheduler"]
         identities = [
             json.loads(base64.urlsafe_b64decode(row["scheduler_run"])) for row in scheduled
         ]
+        # Each worker's tag must name the execution the wrapper recorded at spawn
+        # (documented spool layout runs/<job>.<run_number>/spawn.json), and the
+        # worker must have run that job's action and wave.
+        for row, tag in zip(scheduled, identities, strict=True):
+            spool = root / "runs" / f"{tag['job']}.{tag['run_number']}" / "spawn.json"
+            spawn = json.loads(spool.read_text())
+            assert {key: spawn[key] for key in ("job", "run_number", "run_id", "boot_id")} == {
+                key: tag[key] for key in ("job", "run_number", "run_id", "boot_id")
+            }, (spool, tag)
+            assert (row["action"], row["wave"]) == ACTIONS[tag["job"]], (row, tag)
         expected_jobs = Counter(
             {
                 "ENERGY_INITIAL_INGEST": 2,
@@ -144,12 +180,14 @@ def check(run: Path, phase: str) -> dict:
                 ("init", "initial"): 1,
                 ("ingest", "initial"): 2,
                 ("ingest", "conflict"): 1,
+                ("ingest", "respelled"): 1,
                 ("ingest", "correction"): 1,
                 ("publish", "correction"): 1,
                 ("publish", "initial"): 1,
+                ("ingest", "stale"): 1,
             }
         )
-        assert len(attempts) == 14
+        assert len(attempts) == 16
         attempt_counts = dict(expected_jobs)
     return {
         "phase": phase,

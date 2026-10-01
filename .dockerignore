@@ -1,0 +1,19 @@
+# Allowlist: the build context is the repository root, so nothing enters it
+# unless named here (examples/workflows/Dockerfile).
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!LICENSING.md
+!COMMERCIAL.md
+!THIRD_PARTY_LICENSES
+!src/
+!grammars/
+!examples/workflows/requirements.txt
+!examples/workflows/support.py
+!examples/fulfilment/
+!examples/energy/
+!examples/media/
+**/__pycache__
+**/*.pyc

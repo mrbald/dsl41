@@ -34,7 +34,11 @@ belong only to this local database. Never point an example at a production datab
 The runner image contains this checkout, its locked runtime dependencies,
 FFmpeg, and an example-only PostgreSQL driver. The driver does not change the
 package dependencies or root lockfile. Python and PostgreSQL image references
-include digests. Debian packages, including FFmpeg, resolve at build time.
+include digests. Each pin is the multi-platform index digest, never one
+platform's manifest, so the pins resolve on amd64 and arm64 alike.
+A root `.dockerignore` admits only the three example directories and the
+files the Dockerfile copies.
+Debian packages, including FFmpeg, resolve at build time.
 Record the resulting image ID and package versions when retaining evidence:
 
 ```sh
@@ -45,6 +49,9 @@ docker --context "$WORKFLOW_CONTEXT" compose -f examples/workflows/compose.yaml 
 
 Python's locked environment need not contain pip; the command above reports
 the image's system pip and uses uv to inspect the application environment.
+The integration lane records this command's output in its `session.json`.
+Exact replay needs the built image itself, retained separately; nothing here
+retains it.
 
 ## Run
 
@@ -104,7 +111,7 @@ SQLite database belongs to its fulfilment run directory.
 After launchers have stopped, copy the run volume out for inspection:
 
 ```sh
-docker --context "$WORKFLOW_CONTEXT" compose -f examples/workflows/compose.yaml run --rm --no-deps runner tar -C /runs -cf - . > /tmp/dsl41-workflow-evidence.tar
+docker --context "$WORKFLOW_CONTEXT" compose -f examples/workflows/compose.yaml run --rm --no-deps -T runner tar -C /runs -cf - . > /tmp/dsl41-workflow-evidence.tar
 docker --context "$WORKFLOW_CONTEXT" compose -f examples/workflows/compose.yaml exec -T postgres pg_dump -U example examples > /tmp/dsl41-workflow-database.sql
 ```
 
@@ -135,20 +142,29 @@ WORKFLOW_CONTEXT=podman uv run pytest -q -o faulthandler_timeout=0 examples/work
 
 Leave `WORKFLOW_CONTEXT` unset to use the Docker CLI's current context.
 The lane builds the runner image once. Each test owns a Compose project named
-`dsl41-wf-<test>-<suffix>` and deletes it with `down --volumes`.
+`dsl41-wf-<test>-<suffix>`. Teardown stops any runner container still running,
+dumps the database, kills the project's containers, copies the run volume out,
+and runs `down`. It deletes the volumes with `down --volumes` only when both the
+dump and the copy succeeded. Otherwise it keeps them, and the test errors with
+their names and the command that removes them.
 A missing engine, Compose, or image build fails every test. Nothing is skipped.
 
-For each business the lane runs the happy path and the demonstrated incident.
-It asserts the checker's result, the scheduler history, and the real worker
-attempts separately. It reruns each checker after damaging one result the
-checker reads and requires a failure. The energy tests pass `--force-seal`;
+For fulfilment and media the lane runs the happy path and the demonstrated
+incident. Energy has one documented run; its two tests read that run from the
+business side and the scheduler side.
+Each test asserts the checker's result, the scheduler history, and the real
+worker attempts separately. Damage tests rerun a checker after changing a result
+it reads and require a failure: fulfilment's stock and one operation payload,
+energy's adjustment, and media's served file and an older rendition served with
+recomputed hashes. The energy tests pass `--force-seal`;
 the seal records that override, and the correction still crosses a period.
 
 Evidence goes to `WORKFLOW_EVIDENCE`, or to pytest's temporary directory when
 that is unset. The summary prints the path. `session.json` records the context
-endpoint, Docker and Compose versions, the runner image ID, and the PostgreSQL
-digest. Each test directory holds `command.json` with every command's exit
-code, duration, stdout, and stderr, plus the run volume as numbered
+endpoint, Docker and Compose versions, the runner image ID, the PostgreSQL
+digest, and the versions inside the image. Each test directory holds
+`command.json` with every command's exit code, duration, stdout, and stderr,
+`database.sql` from `pg_dump`, plus the run volume as numbered
 `runs-N.tar` archives and the extracted copy of the last one. The lane is
 opt-in in CI too: the `workflow-examples` workflow
 runs only on manual dispatch and uploads the evidence.

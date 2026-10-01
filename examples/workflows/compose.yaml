@@ -2,7 +2,7 @@ name: dsl41-workflows
 
 services:
   postgres:
-    image: docker.io/library/postgres:17@sha256:86fa57b44a1d38f09970f64ac71eb492f7a9cf94d08b85e1c8f07bb0fc0a1761
+    image: docker.io/library/postgres:17@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f
     environment:
       POSTGRES_DB: examples
       POSTGRES_USER: example

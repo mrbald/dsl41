@@ -22,6 +22,22 @@ def fetch(url: str) -> bytes:
     return content
 
 
+# The fixture is two seconds of audio. AAC priming and padding add a few
+# tens of milliseconds when the whole stream is decoded; nothing removes audio.
+AUDIO_SECONDS = (1.99, 2.1)
+
+
+def decoded_audio_seconds(path: Path) -> float:
+    """Decode the whole first audio stream and measure what it holds."""
+    args = ["ffmpeg", "-v", "error", "-xerror", "-i", str(path)]
+    args += ["-map", "0:a:0", "-ac", "1", "-ar", "8000", "-f", "f32le", "-"]
+    data = subprocess.run(args, capture_output=True, check=True, timeout=30).stdout
+    seconds = len(data) / 4 / 8000
+    if not AUDIO_SECONDS[0] <= seconds <= AUDIO_SECONDS[1]:
+        raise ValueError(f"decoded audio is not two seconds: {path.name}: {seconds:.3f} s")
+    return seconds
+
+
 def fixture_tone(path: Path, expected_hz: float) -> dict[str, float]:
     args = ["ffmpeg", "-v", "error", "-xerror", "-i", str(path)]
     args += ["-ss", "0.5", "-t", "0.5", "-map", "0:a:0", "-ac", "1", "-ar", "8000"]
@@ -69,6 +85,7 @@ def check(url: str, revision: int, source: Path, evidence: Path) -> dict[str, An
     if set(manifest["files"]) != set(expected):
         raise ValueError("manifest does not contain exactly the three required artifacts")
     tones = {"source": fixture_tone(source, 440 * revision)}
+    audio_seconds = {"source": decoded_audio_seconds(source)}
     actual = {}
     for name, dimensions in expected.items():
         content = fetch(f"{url}/releases/r{revision}/{name}")
@@ -126,6 +143,7 @@ def check(url: str, revision: int, source: Path, evidence: Path) -> dict[str, An
                 or abs(duration - metadata["duration"]) > 0.001
             ):
                 raise ValueError(f"wrong streams or duration: {name}")
+            audio_seconds[name] = decoded_audio_seconds(output)
             tones[name] = fixture_tone(output, 440 * revision)
             if abs(tones[name]["frequency_hz"] - tones["source"]["frequency_hz"]) > 5:
                 raise ValueError(f"served audio tone differs from source: {name}")
@@ -160,6 +178,7 @@ def check(url: str, revision: int, source: Path, evidence: Path) -> dict[str, An
         "retrieved": sorted(actual),
         "probes": actual,
         "audio_tones": tones,
+        "decoded_audio_seconds": audio_seconds,
     }
     (evidence / "result.json").write_text(json.dumps(result, indent=2) + "\n")
     return result

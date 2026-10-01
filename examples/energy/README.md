@@ -32,9 +32,9 @@ The HTTP feed binds only to loopback in the runner container.
 | Incomplete input must not authorize publication | A stable one-row JSON file fails the full manifest's byte count and SHA256. The ingest job fails. Calculate and publish remain at run number zero. No reading or publication reaches PostgreSQL. |
 | A failed member can be rerun | The launcher supplies the complete file and uses `FORCE_STARTJOB ENERGY_INITIAL_INGEST`. Its box remains running while the member is failed. Rerunning the member lets the JIL dependency chain complete. |
 | Duplicate data changes nothing | Repeated ingest keeps the same readings, snapshots, and row counts. |
-| Different values under one meter revision are refused | A separately hashed feed attempts 11 under the accepted revision for 10. The worker refuses the transaction. |
-| An old revision cannot roll the current result back | After correction, the launcher replays the original ingest and publication. The current result remains 32. |
-| A historical correction crosses a real period | The checker observes publications in periods 1 and 2, distinct baselines, one estate ID, and a successor segment naming the committed seal. |
+| Different values under one meter revision are refused | A separately hashed feed attempts 11 under the accepted revision for 10. The worker refuses the transaction. The same reading under an equivalent spelling of the interval start is refused before database access: the worker accepts only `YYYY-MM-DDTHH:MM:SSZ`. |
+| An old revision cannot roll the current result back | After correction, the launcher replays the original ingest and publication. The current result remains 32. An unseen snapshot carrying the older `meter_a` reading is refused as stale. |
+| A historical correction crosses a real period | The checker observes publications in periods 1 and 2, distinct baselines, one estate ID, and a successor segment naming the committed seal. After the engine stops, `dsl41 audit` re-derives period 1 and writes its attestation. The checker runs `dsl41 verify` on it and requires the seal the successor segment names. |
 | Publication and adjustment are one logical effect | One PostgreSQL transaction inserts both. Repeating correction publication adds no row. |
 
 The first incomplete file is replaced before it is accepted. Accepted reading
@@ -55,21 +55,30 @@ a business transaction runs is outside this example's attribution guarantee.
 ## Inspect the result
 
 The launcher prints its retained run path. It stops the engine and feed before
-exiting. `initial-check.json`, `correction-check.json`, and `final-check.json`
-contain independent SQL observations. `check.py` imports no worker code and uses
+exiting. Each check writes one file named for its phase: `initial-check.json`
+and `initial-probes-check.json` before the seal, `corrected-check.json` and
+`corrected-probes-check.json` after the correction, and `complete-check.json`
+after the engine stops. They contain independent SQL observations.
+`check.py` imports no worker code and uses
 literal expected rows and totals. It checks every reading's duration and revision,
 each snapshot's interval and revision, its exact meter membership, and all stored
 calculations. It also checks both publications, the adjustment, row counts, and
 the neighboring interval.
 
 `incomplete-refusal.json` records the failed job and blocked descendants.
-`worker-probes.jsonl` contains duplicate, conflicting, and stale delivery results.
+`worker-probes.jsonl` contains duplicate, conflicting, respelled, and stale
+delivery results.
 `commands.jsonl` contains control replies and retry pins.
 `boundary.json`, `engine/wal/`, `engine/seals/`, and `engine/periods/` retain the
-actual period evidence. `run-history.json` records scheduler attempts after stop.
-The final checker compares that history with seven real worker invocations in
-`attempts/`, using the documented `DSL41_RUN` forensic tag. The seven direct
-application probes are counted separately. The tag is evidence, not authority.
+actual period evidence. `audit.json` holds the audit's output, and
+`engine/seals/000001.audit.json` is the attestation it wrote.
+`run-history.json` records scheduler attempts after stop. The final checker does
+not trust that export: it recomputes the history with `dsl41 runs` and compares
+it with seven real worker invocations in `attempts/`, using the documented
+`DSL41_RUN` forensic tag. Each tag must name the execution in that run's
+`engine/runs/<job>.<run_number>/spawn.json`, and each worker must have run its
+job's action and wave. The nine direct application probes are counted
+separately. The tag is evidence, not authority.
 The private `profile.sh` contains the database URL. Keep run data outside Git.
 
 With the retained PostgreSQL volume still available, run the independent checker:
@@ -141,8 +150,6 @@ This is a synthetic integer calculation, not market settlement or billing.
 It uses fixed UTC quarter-hours. It does not prove local daylight-saving trigger
 counts, repeated-hour completeness, or an industry settlement policy.
 
-An unseen stale snapshot containing old reading revisions needs a separate
-refusal drill. The present replay reuses an already accepted snapshot.
 Worker death between calculation and publication, database restart, concurrent
 corrections, engine loss, detached reattachment, control reply loss, and manual
 handback are future drills. Compiler migration and UC emission are also outside

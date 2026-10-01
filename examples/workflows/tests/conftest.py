@@ -19,6 +19,11 @@ import pytest
 from lane import Lane, Result, compose, docker, execute, now, write_json
 
 EVIDENCE = pytest.StashKey[Path]()
+# The README's version command (Container setup), run once in the built image.
+VERSIONS = (
+    "python --version; ffmpeg -version; /usr/local/bin/python -m pip --version;"
+    " /usr/local/bin/uv pip freeze --python /app/.venv/bin/python"
+)
 
 
 def _required(record: dict[str, Any], name: str, args: list[str], timeout: float) -> Result:
@@ -93,6 +98,15 @@ def workflow_session(
             [*docker(), "image", "inspect", runner, "-f", "{{.Id}}"],
             60,
         ).stdout.strip()
+        # Versions inside the image. Exact replay needs the image itself, which
+        # the lane does not retain.
+        record["image_versions"] = _required(
+            record,
+            "image versions",
+            [*docker(), "run", "--rm", "--pull", "never", "--network", "none", runner]
+            + ["sh", "-c", VERSIONS],
+            120,
+        ).stdout
     except Exception as exc:
         record.setdefault("failure", repr(exc))
         raise
