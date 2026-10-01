@@ -43,6 +43,7 @@ import pytest
 from pydantic import ValidationError
 
 from dsl41.ir import lower_source
+from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event, JobRuntime
 from dsl41.runner import Engine
 from dsl41.runner_clock import EngineError
@@ -58,7 +59,7 @@ from dsl41.runner_effects import (
     superseded_reason,
 )
 from dsl41.runner_clock import VirtualClock
-from dsl41.runner_journal import read_journal, read_outbox
+from dsl41.runner_journal import read_journal, read_outbox, replay_inputs
 
 T0 = datetime(2026, 7, 1, 8, 0)
 
@@ -282,6 +283,27 @@ def test_a_terminal_with_no_live_run_plans_no_kill() -> None:
     assert (kill.kind, kill.run_number) == ("KILL", 1)
 
 
+def test_two_terminal_transitions_of_one_live_run_plan_one_kill() -> None:
+    """A deadline firing inside a `CHANGE_STATUS SUCCESS` batch ends one live
+    run twice, at two instants. One derived id cannot carry two contents, so
+    the planner keeps the first: the run's actual kill (DL-232)."""
+    emitted = [
+        _ev("STATUS", 2, job="j", status="TERMINATED"),
+        _ev("STATUS", 2.5, job="j", status="SUCCESS"),
+    ]
+    [kill] = plan_effects(
+        emitted,
+        index=3,
+        executor_id="local",
+        runs={"j": 1},
+        dispatched={"j": 1},
+        live={"j": 1},
+        dispatchable=frozenset({"j"}),
+        **_IDENTITY,
+    )
+    assert (kill.kind, kill.run_number, kill.at) == ("KILL", 1, T0 + timedelta(minutes=2))
+
+
 def test_boxes_and_ghosts_get_no_effects() -> None:
     """`dispatchable` is the catalog jobs with a registered adapter. A box
     folds from its members and a CHANGE_STATUS-invented entity has no
@@ -387,6 +409,16 @@ def test_a_spawn_for_a_superseded_run_number_is_superseded() -> None:
     effect = _effect("SPAWN", run_number=1)
     reason = superseded_reason(effect, JobRuntime(status="RUNNING", run_number=2), None)
     assert reason is not None and "at run 2, not the 1" in reason
+
+
+def test_a_spawn_for_a_job_set_inactive_is_superseded() -> None:
+    """ss5 asks whether the run is still desired running, not only whether it
+    has ended. An injected INACTIVE sets the run aside without ending it or
+    moving its `run_number`, so only the status can tell (DL-232)."""
+    effect = _effect("SPAWN", run_number=1)
+    assert superseded_reason(effect, JobRuntime(status="STARTING", run_number=1), None) is None
+    reason = superseded_reason(effect, JobRuntime(status="INACTIVE", run_number=1), None)
+    assert reason == "j is INACTIVE: the run this spawn was for is no longer desired running"
 
 
 def test_a_kill_names_the_run_it_was_decided_for() -> None:
@@ -633,9 +665,10 @@ def test_a_recorded_kill_is_resolved_from_the_spool_three_ways(short_root: Path)
 def test_a_held_spawn_whose_run_has_since_ended_is_retired_not_applied() -> None:
     """ss5's supersession, delivered rather than merely decided. Held work is
     the case that makes it reachable on one host: the drain parks a SPAWN in
-    the outbox, the operator kills the job while it waits, and the effect is
-    still sitting there when the host comes back. Dispatching it then would
-    start a run the estate has already ended.
+    the outbox and the operator kills the job while it waits. Supersession
+    is decided before the routing hold (DL-234), so the dispatch pass after
+    the kill retires the effect while the host is still drained. Applying it
+    when the host comes back would start a run the estate has already ended.
 
     `superseded_reason` is proven as a function elsewhere; this is the wiring
     that acts on it, which is a different claim (DL-105)."""
@@ -661,6 +694,7 @@ def test_a_held_spawn_whose_run_has_since_ended_is_retired_not_applied() -> None
         engine.inject(_ev("KILLJOB", 2, job="j"))
         await engine.run_until_quiescent(T0 + timedelta(minutes=3))
         assert engine.oracle.store.job["j"].status == "TERMINATED"
+        assert engine.outbox.state_of(held.effect_id) == "retired"  # before activate
 
         back = engine.submit_host(
             HostCommand(verb="activate", host_id="local"),
@@ -676,3 +710,294 @@ def test_a_held_spawn_whose_run_has_since_ended_is_retired_not_applied() -> None
     assert result is not None and result.state == "retired"
     assert result.detail == "j is already TERMINATED: the run this spawn was for has ended"
     assert engine.outbox.pending() == []
+
+
+#: a renewable slot, so a run that holds capacity shows it on its row
+_SLOT_JIL = (
+    "insert_resource: SLOT\nres_type: R\namount: 1\n\n"
+    "insert_job: j\njob_type: c\ncommand: x\nresources: (SLOT, QUANTITY=1)\n"
+)
+
+
+def test_a_held_spawn_whose_job_was_set_inactive_is_retired_not_applied() -> None:
+    """The TERMINATED case above, with `CHANGE_STATUS INACTIVE` instead of a
+    kill. INACTIVE is not terminal and leaves `run_number` alone, so before
+    DL-232 the spawn passed both checks and launched a run that held no
+    capacity: the INACTIVE edge had already released the slot."""
+    from dsl41.runner_admission import Envelope
+    from dsl41.runner_hosts import HostCommand
+
+    engine = _engine(_SLOT_JIL)
+
+    async def scenario() -> None:
+        drained = engine.submit_host(
+            HostCommand(verb="drain", host_id="local"),
+            Envelope(request_id="r1", expect={"host:local": 1}, epoch=engine.epoch),
+        )
+        await engine.run_until_quiescent(T0 + timedelta(seconds=10))
+        assert (await drained).decision == "applied"
+
+        engine.inject(_ev("STARTJOB", 0.5, job="j"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+        [held] = engine.outbox.pending()
+        assert (held.kind, held.job, held.run_number) == ("SPAWN", "j", 1)
+        assert engine.oracle.store.job["j"].reservations != ()  # the slot is held
+
+        engine.inject(_ev("STATUS", 2, job="j", status="INACTIVE"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=3))
+        row = engine.oracle.store.job["j"]
+        assert (row.status, row.run_number, row.reservations) == ("INACTIVE", 1, ())
+
+        back = engine.submit_host(
+            HostCommand(verb="activate", host_id="local"),
+            Envelope(request_id="r2", expect={"host:local": 2}, epoch=engine.epoch),
+        )
+        await engine.run_until_quiescent(T0 + timedelta(minutes=4))
+        assert (await back).decision == "applied"
+
+    asyncio.run(scenario())
+    assert engine.live_jobs() == frozenset()  # no process behind the INACTIVE row
+    row = engine.oracle.store.job["j"]
+    assert (row.status, row.run_number, row.reservations) == ("INACTIVE", 1, ())
+    result = engine.outbox.result_for("e2:SPAWN:j.1")
+    assert result is not None and result.state == "retired"
+    assert result.detail == "j is INACTIVE: the run this spawn was for is no longer desired running"
+    assert engine.outbox.pending() == []
+
+
+#: a negative term_run_time arms a deadline already past due, which the
+#: frontier rule fires inside the next input's batch, back-dated to its due
+#: instant: two terminal transitions of one live run, at two instants, in one
+#: batch
+_PAST_DUE_JIL = "insert_job: x\njob_type: c\ncommand: sleep 300\nterm_run_time: -1\n"
+
+
+def test_a_deadline_and_a_status_ending_one_run_in_one_batch_record_one_kill(
+    tmp_path: Path,
+) -> None:
+    """Before DL-232 the batch planned two KILLs under one id with different
+    instants, and `Outbox.record` raised after the decision was journaled. The
+    replay of that log re-records effects through the same path, so resume
+    met the same error. Now the loop records one KILL, and the log replays."""
+    catalog = lower_source(_PAST_DUE_JIL)
+    engine = start_run(
+        catalog,
+        tmp_path / "run",
+        clock=VirtualClock(start=T0),
+        adapters={"CMD": FakeAdapter(default=None)},
+    )
+
+    async def scenario() -> None:
+        engine.inject(_ev("STARTJOB", 0, job="x"))
+        await engine.run_until_quiescent(T0)
+        assert engine.oracle.store.job["x"].status == "RUNNING"  # the deadline waits
+        assert engine.live_jobs() == frozenset({"x"})
+        engine.inject(_ev("STATUS", 0, job="x", status="SUCCESS"))
+        await engine.run_until_quiescent(T0)
+
+    asyncio.run(scenario())
+    assert [(t.at, t.transition) for t in engine.oracle.trace()][-2:] == [
+        (T0 - timedelta(minutes=1), "RUNNING->TERMINATED"),
+        (T0, "TERMINATED->SUCCESS"),
+    ]
+    [kill] = [e for e in engine.outbox.effects() if e.kind == "KILL"]
+    assert (kill.job, kill.run_number, kill.at) == ("x", 1, T0 - timedelta(minutes=1))
+    assert engine.journal is not None
+    engine.journal.close()
+
+    records = read_journal(tmp_path / "run" / "journal.jsonl")
+    fresh = Oracle(catalog)
+    replay = replay_inputs(fresh, records)
+    assert [e.effect_id for e in replay.outbox.effects() if e.kind == "KILL"] == [kill.effect_id]
+    assert fresh.store.job["x"].status == "SUCCESS"
+
+
+async def _drained(engine: Engine) -> None:
+    from dsl41.runner_admission import Envelope
+    from dsl41.runner_hosts import HostCommand
+
+    drained = engine.submit_host(
+        HostCommand(verb="drain", host_id="local"),
+        Envelope(
+            request_id="drain",
+            expect={"host:local": engine.oracle.store.revision("host:local")},
+            epoch=engine.epoch,
+        ),
+    )
+    await engine.run_until_quiescent(engine.clock.now() + timedelta(seconds=10))
+    assert (await drained).decision == "applied"
+
+
+async def _activated(engine: Engine, minutes: float) -> None:
+    from dsl41.runner_admission import Envelope
+    from dsl41.runner_hosts import HostCommand
+
+    back = engine.submit_host(
+        HostCommand(verb="activate", host_id="local"),
+        Envelope(
+            request_id="activate",
+            expect={"host:local": engine.oracle.store.revision("host:local")},
+            epoch=engine.epoch,
+        ),
+    )
+    await engine.run_until_quiescent(T0 + timedelta(minutes=minutes))
+    assert (await back).decision == "applied"
+
+
+@pytest.mark.parametrize("ending", ["INACTIVE", "TERMINATED"])
+def test_a_starting_overwrite_after_a_retired_spawn_launches_nothing(
+    tmp_path: Path, ending: str
+) -> None:
+    """DL-232: a retired effect stays retired. Retirement counts the run as
+    dispatched, so a `CHANGE_STATUS STARTING` at the same run number meets
+    the ghost-run gate and plans nothing. Before, the gate planned a second
+    SPAWN with a second identity and the engine died on DL-118's
+    one-run-one-identity check. The log replays, and a resume agrees."""
+    from dsl41.runner_startup import resume_run
+
+    root = tmp_path / "run"
+    catalog = lower_source(_SOLO_JIL)
+
+    async def scenario() -> None:
+        engine = start_run(
+            catalog, root, clock=VirtualClock(start=T0), adapters={"CMD": FakeAdapter(default=None)}
+        )
+        await _drained(engine)
+        engine.inject(_ev("STARTJOB", 0.5, job="j"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+        if ending == "TERMINATED":
+            engine.inject(_ev("KILLJOB", 2, job="j"))
+        else:
+            engine.inject(_ev("STATUS", 2, job="j", status="INACTIVE"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=3))
+        await _activated(engine, 4)
+        engine.inject(_ev("STATUS", 5, job="j", status="STARTING"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=6))
+
+        assert engine.live_jobs() == frozenset()
+        row = engine.oracle.store.job["j"]
+        assert (row.status, row.run_number) == ("STARTING", 1)
+        [spawn] = [e for e in engine.outbox.effects() if e.kind == "SPAWN"]
+        assert engine.outbox.state_of(spawn.effect_id) == "retired"
+        await engine.shutdown()
+        assert engine.journal is not None
+        engine.journal.close()
+
+        records = read_journal(root / "journal.jsonl")
+        planned = [e for r in records if r["rec"] == "decision" for e in r["effects"]]
+        assert [(e["kind"], e["job"], e["run_number"]) for e in planned] == [("SPAWN", "j", 1)]
+
+        # resume replays the same log and rebuilds `_dispatched` from the rows
+        resumed = await resume_run(
+            catalog,
+            root,
+            clock=VirtualClock(start=T0 + timedelta(minutes=6)),
+            adapters={"CMD": FakeAdapter(default=None)},
+        )
+        assert resumed.oracle.store.job["j"].model_dump() == row.model_dump()
+        assert resumed.outbox.state_of(spawn.effect_id) == "retired"
+        assert resumed._dispatched == engine._dispatched == {"j": 1}
+        await resumed.run_until_quiescent(T0 + timedelta(minutes=7))
+        assert resumed.live_jobs() == frozenset()
+        assert [e.effect_id for e in resumed.outbox.effects() if e.kind == "SPAWN"] == [
+            spawn.effect_id
+        ]
+        await resumed.shutdown()
+        assert resumed.journal is not None
+        resumed.journal.close()
+
+    asyncio.run(scenario())
+
+
+#: two jobs that share one renewable slot
+_ONE_SLOT_JIL = (
+    "insert_resource: SLOT\nres_type: R\namount: 1\n\n"
+    "insert_job: j\njob_type: c\ncommand: x\nresources: (SLOT, QUANTITY=1)\n\n"
+    "insert_job: k\njob_type: c\ncommand: x\nresources: (SLOT, QUANTITY=1)\n"
+)
+
+
+def test_a_held_spawn_is_retired_at_the_edge_that_ends_its_run_not_at_activation() -> None:
+    """DL-232: supersession is decided before the routing hold. The INACTIVE
+    edge releases j's slot and retires j's held SPAWN in the dispatch pass
+    that follows it. A later `CHANGE_STATUS RUNNING` cannot re-arm it, so
+    at activation only k launches, and k holds the slot. Before, the spawn
+    waited behind the hold, read RUNNING at activation, and launched j with
+    no reservation beside k."""
+    engine = _engine(_ONE_SLOT_JIL)
+
+    async def scenario() -> None:
+        await _drained(engine)
+        engine.inject(_ev("STARTJOB", 0.5, job="j"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+        [held] = engine.outbox.pending()
+        assert (held.kind, held.job) == ("SPAWN", "j")
+
+        engine.inject(_ev("STATUS", 2, job="j", status="INACTIVE"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=2))
+        assert engine.outbox.state_of(held.effect_id) == "retired"  # still drained
+
+        engine.inject(_ev("STATUS", 2.5, job="j", status="RUNNING"))
+        engine.inject(_ev("STARTJOB", 3, job="k"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=3))
+        await _activated(engine, 4)
+
+    asyncio.run(scenario())
+    assert engine.live_jobs() == frozenset({"k"})
+    j, k = engine.oracle.store.job["j"], engine.oracle.store.job["k"]
+    assert (j.status, j.run_number, j.reservations) == ("RUNNING", 1, ())
+    assert k.status == "RUNNING" and k.reservations != ()
+
+
+def test_a_starting_overwrite_while_a_spawn_is_held_plans_no_second_spawn(
+    tmp_path: Path,
+) -> None:
+    """DL-234: a run has its one identity from its plan. A held SPAWN already
+    counts as dispatched, so a `CHANGE_STATUS STARTING` at the same run
+    number meets the ghost-run gate and plans nothing. Before, it planned a
+    second SPAWN for run 1 with a second identity, and the outbox refused it
+    ("one run, one identity", DL-118) after the decision was journaled. The
+    log stays consistent, and a resume agrees."""
+    from dsl41.runner_startup import resume_run
+
+    root = tmp_path / "run"
+    catalog = lower_source(_SOLO_JIL)
+
+    async def scenario() -> None:
+        engine = start_run(
+            catalog, root, clock=VirtualClock(start=T0), adapters={"CMD": FakeAdapter(default=None)}
+        )
+        await _drained(engine)
+        engine.inject(_ev("STARTJOB", 0.5, job="j"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+        [held] = engine.outbox.pending()
+        assert (held.kind, held.job, held.run_number) == ("SPAWN", "j", 1)
+
+        engine.inject(_ev("STATUS", 2, job="j", status="STARTING"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=3))
+        row = engine.oracle.store.job["j"]
+        assert (row.status, row.run_number) == ("STARTING", 1)
+        assert engine.outbox.pending() == [held]  # still current, still held
+        assert engine.live_jobs() == frozenset()
+        await engine.shutdown()
+        assert engine.journal is not None
+        engine.journal.close()
+
+        records = read_journal(root / "journal.jsonl")
+        planned = [e for r in records if r["rec"] == "decision" for e in r["effects"]]
+        assert [e["effect_id"] for e in planned] == [held.effect_id]
+
+        resumed = await resume_run(
+            catalog,
+            root,
+            clock=VirtualClock(start=T0 + timedelta(minutes=3)),
+            adapters={"CMD": FakeAdapter(default=None)},
+        )
+        assert resumed.oracle.store.job["j"].model_dump() == row.model_dump()
+        assert [e.effect_id for e in resumed.outbox.pending()] == [held.effect_id]
+        assert resumed._dispatched == engine._dispatched == {"j": 1}
+        await resumed.shutdown()
+        assert resumed.journal is not None
+        resumed.journal.close()
+
+    asyncio.run(scenario())

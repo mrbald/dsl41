@@ -389,18 +389,21 @@ see the run where the obvious guard fails, so here is that run. Held by
    job reaches RUNNING. One effect is planned:
    `e2:SPAWN:j.1` — the id is *derived*, `f"e{index}:{kind}:{job}.{run_number}"`,
    not minted, so replay reconstructs it rather than trusting a uuid.
-3. Dispatch reaches `_apply_effect`, whose first gate is routing. The
-   effect is left **pending** — no outcome recorded — and that pending
-   entry *is* the held set. Nothing launched.
+3. Dispatch reaches `_apply_effect`. Its first gate is supersession,
+   decided before the routing hold on every dispatch pass (DL-234): the
+   row is RUNNING at run 1, so the effect is still current. Its second
+   gate is routing. The effect is left **pending** — no outcome recorded —
+   and that pending entry *is* the held set. Nothing launched.
 4. `KILLJOB j`. The job goes TERMINATED. **`run_number` does not move**:
    `transition` writes `status`, `status_at`, `last_end_at` and maybe
    `exit_code`, and the only writer of `run_number` in the whole store is
    `start_run`. The row is now TERMINATED at run 1 — the same 1 that
    `e2:SPAWN:j.1` names. The kill plans no effect of its own, because a
    terminal for a job with no *live* run needs no kill.
-5. `activate local`. The held effect now gets past the routing gate and
-   reaches `superseded_reason` — the first moment anything compares it to
-   the world.
+5. The dispatch pass after the kill reaches `superseded_reason` before
+   the routing gate, while the host is still drained (DL-234). It is the
+   first pass to compare the effect with a world that has moved on.
+   `activate local` later finds nothing held.
 
 A guard that compared generations would be asked `1 != 1` and would say
 "still current". It is never even asked: the terminal arm short-circuits
