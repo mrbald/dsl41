@@ -67,7 +67,9 @@ from dsl41.runner_clock import EngineError
 #: is deliberately not `dsl41_version`, which moves for a docs typo --
 #: refusing to resume a live estate after a patch release would be an outage
 #: manufactured by bookkeeping.
-STATE_MACHINE_VERSION = 1
+#: 2 since DL-235: the ss4 stale-completion gate rejects a non-live row, so
+#: an undecided crash-window completion recovers differently from v1.
+STATE_MACHINE_VERSION = 2
 
 LOCK_NAME = "leader.lock"
 

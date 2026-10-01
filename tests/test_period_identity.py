@@ -72,6 +72,7 @@ from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.runner_history import read_run_root
 from dsl41.runner_journal import read_journal
+from dsl41.runner_ledger import STATE_MACHINE_VERSION
 from dsl41.runner_startup import resume_run, start_run
 from test_runner_leadership import engine
 
@@ -549,7 +550,7 @@ def _staged(catalog: CatalogIR, **kwargs: Any) -> StagedManifest:
         catalog,
         source_bundle_hash=kwargs.get("source_bundle_hash", EMPTY_BUNDLE_HASH),
         profile=kwargs.get("profile", RuntimeProfile()),
-        state_machine_version=kwargs.get("state_machine_version", 1),
+        state_machine_version=kwargs.get("state_machine_version", STATE_MACHINE_VERSION),
     )
 
 
@@ -824,7 +825,7 @@ _DISAGREEMENTS: dict[str, Any] = {
     "catalog_hash_version": 1,
     "source_bundle_hash": "sha256:another",
     "runtime_hash": "sha256:another",
-    "state_machine_version": 2,
+    "state_machine_version": STATE_MACHINE_VERSION + 1,
     "period_id": 2,
     "baseline_id": "someone-elses-baseline",
     "clock_domain": "real",
@@ -1028,7 +1029,9 @@ def test_a_tampered_profile_beside_the_original_hash_refuses(tmp_path: Path) -> 
     comparison while the period runs different semantics. The manifest must
     agree with itself."""
     catalog = lower_source(_SOLO_JIL)
-    manifest = genesis_manifest(catalog, clock_domain="virtual", state_machine_version=1)
+    manifest = genesis_manifest(
+        catalog, clock_domain="virtual", state_machine_version=STATE_MACHINE_VERSION
+    )
     write_period_manifest(tmp_path, manifest)
     path = period_dir(tmp_path, 1) / "manifest.json"
     payload = json.loads(path.read_bytes())
@@ -1043,7 +1046,9 @@ def test_an_unreadable_manifest_is_never_read_as_absent(tmp_path: Path) -> None:
     a root that has none, and degrading on it would resume past a pin that
     is right there."""
     catalog = lower_source(_SOLO_JIL)
-    manifest = genesis_manifest(catalog, clock_domain="virtual", state_machine_version=1)
+    manifest = genesis_manifest(
+        catalog, clock_domain="virtual", state_machine_version=STATE_MACHINE_VERSION
+    )
     path = write_period_manifest(tmp_path, manifest)
     path.chmod(0o000)
     try:
@@ -1118,12 +1123,12 @@ def test_a_resume_with_different_launch_options_refuses(tmp_path: Path) -> None:
     manifest = genesis_manifest(
         catalog,
         clock_domain="real",
-        state_machine_version=1,
+        state_machine_version=STATE_MACHINE_VERSION,
         staged=stage_manifest(
             catalog,
             source_bundle_hash=EMPTY_BUNDLE_HASH,
             profile=pinned,
-            state_machine_version=1,
+            state_machine_version=STATE_MACHINE_VERSION,
         ),
     )
     write_period_manifest(tmp_path, manifest)
@@ -1176,7 +1181,7 @@ def test_the_pin_is_derived_from_the_wiring_not_the_flags(tmp_path: Path) -> Non
         catalog,
         source_bundle_hash=EMPTY_BUNDLE_HASH,
         profile=runtime_profile_from_cli(timezone="UTC"),
-        state_machine_version=1,
+        state_machine_version=STATE_MACHINE_VERSION,
     )
     with pytest.raises(EngineError, match="default_tz"):
         start_run(
@@ -1278,7 +1283,9 @@ def test_a_manifest_with_a_coerced_or_missing_field_refuses(tmp_path: Path) -> N
     field, and a MISSING field must not silently take the model's default
     -- a defaulted pin is no pin."""
     catalog = lower_source(_SOLO_JIL)
-    manifest = genesis_manifest(catalog, clock_domain="virtual", state_machine_version=1)
+    manifest = genesis_manifest(
+        catalog, clock_domain="virtual", state_machine_version=STATE_MACHINE_VERSION
+    )
     path = write_period_manifest(tmp_path, manifest)
     payload = json.loads(path.read_bytes())
 
@@ -1387,7 +1394,7 @@ def test_a_staged_spawn_window_or_sm_version_fiction_refuses(tmp_path: Path) -> 
         catalog,
         source_bundle_hash=EMPTY_BUNDLE_HASH,
         profile=RuntimeProfile(spawn_window_us=0),
-        state_machine_version=1,
+        state_machine_version=STATE_MACHINE_VERSION,
     )
     with pytest.raises(EngineError, match="spawn_window_us"):
         start_run(
@@ -1419,7 +1426,9 @@ def test_a_nested_profile_field_restored_from_its_default_refuses(tmp_path: Path
     would be restored by pydantic, hash back to the recorded runtime_hash,
     and pass every gate while pinning nothing."""
     catalog = lower_source(_SOLO_JIL)
-    manifest = genesis_manifest(catalog, clock_domain="virtual", state_machine_version=1)
+    manifest = genesis_manifest(
+        catalog, clock_domain="virtual", state_machine_version=STATE_MACHINE_VERSION
+    )
     path = write_period_manifest(tmp_path, manifest)
     payload = json.loads(path.read_bytes())
     del payload["runtime_profile"]["cmd_grace_us"]
@@ -1434,7 +1443,9 @@ def test_a_segment_with_an_unknown_key_refuses(tmp_path: Path) -> None:
     from dsl41.period import check_segment_record
 
     catalog = lower_source(_SOLO_JIL)
-    manifest = genesis_manifest(catalog, clock_domain="virtual", state_machine_version=1)
+    manifest = genesis_manifest(
+        catalog, clock_domain="virtual", state_machine_version=STATE_MACHINE_VERSION
+    )
     record = segment_record(manifest, estate_id="e", at=datetime(2026, 7, 1, 8, 0))
     check_segment_record(record)  # the real writer's shape passes
     with pytest.raises(EngineError, match="unknown surprise"):
@@ -1449,7 +1460,9 @@ def test_a_profile_mutated_after_hashing_refuses_at_the_write(tmp_path: Path) ->
     tz_aliases entry added after the hash was taken would commit a false pin
     that refuses its own resume. The write re-checks."""
     catalog = lower_source(_SOLO_JIL)
-    manifest = genesis_manifest(catalog, clock_domain="virtual", state_machine_version=1)
+    manifest = genesis_manifest(
+        catalog, clock_domain="virtual", state_machine_version=STATE_MACHINE_VERSION
+    )
     manifest.runtime_profile.tz_aliases["sneaky"] = "Europe/Zurich"
     with pytest.raises(EngineError, match="disagrees with itself"):
         write_period_manifest(tmp_path, manifest)
@@ -1495,7 +1508,9 @@ def test_an_unimplemented_manifest_artifact_version_refuses(tmp_path: Path) -> N
     binary does not implement (PR-08d) -- version 2 never reaches the
     identity checks at all."""
     catalog = lower_source(_SOLO_JIL)
-    manifest = genesis_manifest(catalog, clock_domain="virtual", state_machine_version=1)
+    manifest = genesis_manifest(
+        catalog, clock_domain="virtual", state_machine_version=STATE_MACHINE_VERSION
+    )
     path = write_period_manifest(tmp_path, manifest)
     payload = json.loads(path.read_bytes())
     payload["artifact_format_version"] = 2
@@ -1524,7 +1539,7 @@ def test_journal_create_refuses_the_retired_recipe_by_name(tmp_path: Path) -> No
         source_bundle_hash=EMPTY_BUNDLE_HASH,
         runtime_profile=RuntimeProfile(),
         runtime_hash=runtime_hash(RuntimeProfile()),
-        state_machine_version=1,
+        state_machine_version=STATE_MACHINE_VERSION,
         period_id=1,
         segment_no=1,
         baseline_id="sha256:" + "0" * 64,
@@ -1549,7 +1564,7 @@ def test_journal_create_refuses_the_retired_recipe_by_name(tmp_path: Path) -> No
         source_bundle_hash=EMPTY_BUNDLE_HASH,
         runtime_profile=RuntimeProfile(),
         runtime_hash=runtime_hash(RuntimeProfile()),
-        state_machine_version=1,
+        state_machine_version=STATE_MACHINE_VERSION,
     )
     with pytest.raises(EngineError, match="RETIRED") as caught:
         start_run(
@@ -1597,7 +1612,7 @@ def test_a_staged_wrong_artifact_version_refuses_at_the_write(tmp_path: Path) ->
     resume refuses it at the ingress -- caught at the write instead."""
     catalog = lower_source(_SOLO_JIL)
     manifest = genesis_manifest(
-        catalog, clock_domain="virtual", state_machine_version=1
+        catalog, clock_domain="virtual", state_machine_version=STATE_MACHINE_VERSION
     ).model_copy(update={"artifact_format_version": 2})
     with pytest.raises(EngineError, match="artifact_format_version 2"):
         write_period_manifest(tmp_path, manifest)
@@ -1752,7 +1767,9 @@ def test_a_float_spelled_version_never_passes_the_segment_schema() -> None:
     from dsl41.period import check_segment_record
 
     catalog = lower_source(_SOLO_JIL)
-    manifest = genesis_manifest(catalog, clock_domain="virtual", state_machine_version=1)
+    manifest = genesis_manifest(
+        catalog, clock_domain="virtual", state_machine_version=STATE_MACHINE_VERSION
+    )
     record = segment_record(manifest, estate_id="e", at=datetime(2026, 7, 1, 8, 0))
     with pytest.raises(EngineError, match="catalog_hash_version"):
         check_segment_record({**record, "catalog_hash_version": 2.0})
@@ -1766,7 +1783,7 @@ def test_an_address_outside_the_grammar_refuses_at_the_write(tmp_path: Path) -> 
         catalog,
         source_bundle_hash=EMPTY_BUNDLE_HASH,
         profile=RuntimeProfile(),
-        state_machine_version=1,
+        state_machine_version=STATE_MACHINE_VERSION,
     ).model_copy(update={"source_bundle_hash": "x"})
     manifest = bad.commit(
         period_id=1, baseline_id="b", clock_domain="virtual", segment_no=1, first_index=1
@@ -2042,12 +2059,12 @@ def test_an_early_refusal_after_the_wiring_gives_back_the_lease_and_the_lock(
         genesis_manifest(
             catalog,
             clock_domain="real",
-            state_machine_version=1,
+            state_machine_version=STATE_MACHINE_VERSION,
             staged=stage_manifest(
                 catalog,
                 source_bundle_hash=EMPTY_BUNDLE_HASH,
                 profile=pinned,
-                state_machine_version=1,
+                state_machine_version=STATE_MACHINE_VERSION,
             ),
         ),
     )

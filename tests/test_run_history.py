@@ -50,7 +50,9 @@ from dsl41.runner_history import (
 )
 from dsl41.period import read_period_manifest, runtime_profile_from_cli, wal_path
 from dsl41.runner_journal import read_journal, read_outbox
+from dsl41.runner_ledger import STATE_MACHINE_VERSION
 from dsl41.runner_startup import resume_run, start_run
+from model_harness import _lose_the_decision_for
 
 T0 = datetime(2026, 7, 1, 8, 0)
 
@@ -78,7 +80,7 @@ def _header(catalog_hash: str = "h1", started_at: datetime = T0) -> dict[str, An
         "catalog_hash_version": 2,
         "source_bundle_hash": "sha256:bundle",
         "runtime_hash": "sha256:runtime",
-        "state_machine_version": 1,
+        "state_machine_version": STATE_MACHINE_VERSION,
         "clock_domain": "real",
         "first_index": 1,
         "opens_from_seal": None,
@@ -1205,28 +1207,6 @@ async def _kill_once_spawned(
         assert time.monotonic() < deadline, f"{job} never spawned within {timeout_s}s"
         await asyncio.sleep(0.02)
     engine.inject(Event(at=clock.now(), kind="KILLJOB", payload={"job": job}))
-
-
-def _lose_the_decision_for(run_root: Path, source: str) -> None:
-    """Delete the decision that answered the one STATUS input from
-    `source` -- the crash the window is named for: the absence of a
-    decision is exactly how replay recognises it (`Journal.decision`), so
-    nothing else in the segment moves."""
-    records = read_journal(wal_path(run_root, 1))
-    [seq] = [
-        r["seq"]
-        for r in records
-        if r.get("rec") == "input" and r.get("kind") == "STATUS" and r.get("source") == source
-    ]
-    wal = wal_path(run_root, 1)
-    lines = wal.read_text().splitlines()
-    kept = [
-        line
-        for line in lines
-        if not (json.loads(line).get("rec") == "decision" and json.loads(line).get("index") == seq)
-    ]
-    assert len(kept) == len(lines) - 1  # exactly one verdict lost
-    wal.write_text("\n".join(kept) + "\n")
 
 
 def test_a_lost_rejection_is_recovered_by_the_replayed_gate_and_still_skipped(

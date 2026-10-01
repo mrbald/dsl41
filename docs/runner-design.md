@@ -137,7 +137,9 @@ advancing the run number, and vendor parity launches nothing.
 **Stale-completion gate.** Completions carry `(job, run_number)`. Every
 completion enters the common admission order first, so it is durable before
 it is judged (§7). The gate then rejects one whose run_number does not match
-the current one, or whose job is already terminal. The rejection is that
+the current one, or whose row is no longer STARTING or RUNNING: a terminal
+status, a status an operator injected, such as INACTIVE, or QUE_WAIT after
+a restart queued behind a reservation (DL-235). The rejection is that
 attempt's `decision` record with its reason; no `drop` record is written.
 This gate closes the race between a natural exit and a concurrent
 KILLJOB/term_run_time kill. The gate must live in the shell. The oracle

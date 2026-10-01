@@ -51,7 +51,7 @@ from typing import Any, cast
 
 from dsl41 import runner_procid as _procid
 from dsl41.ir import CatalogIR, JobIR
-from dsl41.oracle_state import Event, TERMINAL
+from dsl41.oracle_state import LIVE, Event, TERMINAL
 from dsl41.runner import Engine
 from dsl41.runner_adapters import (
     JobAdapter,
@@ -1313,7 +1313,7 @@ def _resume_untraced_starts(
     the ladder above, which asks how runs that DID leave a trace ended; this
     one asks what to do about a decision that left none."""
     for job, rt in engine.oracle.store.job.items():
-        if rt.status not in ("STARTING", "RUNNING") or (job, rt.run_number) in candidates:
+        if rt.status not in LIVE or (job, rt.run_number) in candidates:
             continue
         job_ir = engine.oracle.catalog.jobs.get(job)
         if job_ir is None or job_ir.job_type == "BOX":

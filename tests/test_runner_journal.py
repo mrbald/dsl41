@@ -37,6 +37,7 @@ from dsl41.runner_startup import start_run
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import ApplyResult, Attempt, fingerprint
 from dsl41.runner_clock import EngineError, VirtualClock
+from dsl41.runner_ledger import STATE_MACHINE_VERSION
 from dsl41.runner_scheduler import Scheduler
 from dsl41.period import catalog_hash_v2
 from dsl41.runner_journal import (
@@ -90,7 +91,7 @@ def test_segment_record_carries_the_period_identity_domain_and_instant(
     assert segment["estate_id"] and segment["baseline_id"]
     assert segment["source_bundle_hash"].startswith("sha256:")
     assert segment["runtime_hash"].startswith("sha256:")
-    assert segment["state_machine_version"] == 1
+    assert segment["state_machine_version"] == STATE_MACHINE_VERSION
     assert "dsl41_version" not in segment
 
 

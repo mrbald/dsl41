@@ -190,6 +190,7 @@ from dsl41.conditions import (
 from dsl41.ir import CatalogIR, JobIR, Semantics, Time
 
 from dsl41.oracle_state import (
+    LIVE,
     TERMINAL,
     CarriedRows,
     Event,
@@ -566,7 +567,7 @@ class Oracle:
         # exactly while STARTING or RUNNING (period-model ss5), so the release
         # is on that same edge; a non-SUCCESS exit spends what FREE=N and a
         # depletable were always going to spend.
-        released = new not in ("STARTING", "RUNNING") and self._pool.holds(self._runtime(job))
+        released = new not in LIVE and self._pool.holds(self._runtime(job))
         if released:
             self.store.release_reservations(job, new)
         # SEM-01/dossier ss0: the transition wakes exactly the jobs whose

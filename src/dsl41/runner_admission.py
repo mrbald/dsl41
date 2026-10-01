@@ -96,7 +96,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 from dsl41.oracle import Oracle
 from dsl41.canon import is_scalar_string, is_wire_int
 from dsl41.period import CMD_GRACE_S
-from dsl41.oracle_state import Event, EventKind, RuntimeState, TERMINAL
+from dsl41.oracle_state import LIVE, TERMINAL, Event, EventKind, RuntimeState
 from dsl41.runner_clock import EngineError
 from dsl41.runner_hosts import HostCommand, apply_host_command, host_rejection_reason
 
@@ -550,9 +550,10 @@ def stale_reason(oracle: Oracle, ev: Event) -> str | None:
 
     It is the only precondition the estate has today, and it guards ONLY
     engine-made completions: a completion whose run has moved on, or whose
-    job the oracle has already ended, is a report about a run that no
-    longer exists. Pure, so replay reaches the same verdict the live engine
-    did without an Engine to ask (S3 puts `expect` beside it)."""
+    row the oracle no longer holds live -- a terminal status, or a status
+    an operator injected, such as INACTIVE (DL-235) -- is a report about a
+    run that no longer exists. Pure, so replay reaches the same verdict the
+    live engine did without an Engine to ask (S3 puts `expect` beside it)."""
     job = ev.job()
     if job is None:
         return None
@@ -561,6 +562,8 @@ def stale_reason(oracle: Oracle, ev: Event) -> str | None:
         return "run_number mismatch"
     if rt.status in TERMINAL:
         return "job already terminal"
+    if rt.status not in LIVE:
+        return f"job not live: {rt.status}"
     return None
 
 

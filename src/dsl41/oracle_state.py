@@ -68,6 +68,10 @@ JobStatus = Literal[
 ]
 
 TERMINAL: frozenset[str] = frozenset({"SUCCESS", "FAILURE", "TERMINATED"})
+# Reservations exist exactly while a row is in LIVE (period-model ss5); the
+# release edge (DL-120), the SPAWN edge (DL-232) and the completion gate
+# (DL-235) read it.
+LIVE: frozenset[str] = frozenset({"STARTING", "RUNNING"})
 
 EventKind = Literal[
     "STATUS",
@@ -609,7 +613,7 @@ class RuntimeState:
             row = self._jobs.get(name)
             if row is None:
                 continue
-            live = row.status in ("STARTING", "RUNNING")
+            live = row.status in LIVE
             if row.reservations and not live:
                 raise OracleError(f"{name!r} holds capacity at status {row.status}")
             if (row.waiter_seq is not None) != (row.status == "QUE_WAIT"):

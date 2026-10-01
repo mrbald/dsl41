@@ -74,7 +74,7 @@ from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from dsl41.oracle_state import TERMINAL, Event, JobRuntime
+from dsl41.oracle_state import LIVE, TERMINAL, Event, JobRuntime
 from dsl41.runner_clock import EngineError
 
 #: ss5's effect alphabet. SHUTDOWN is not here, and what defers it is no
@@ -386,7 +386,7 @@ def superseded_reason(effect: Effect, row: JobRuntime | None, live_run: int | No
     if effect.kind == "SPAWN":
         if row.status in TERMINAL:
             return f"{effect.job} is already {row.status}: the run this spawn was for has ended"
-        if row.status not in ("STARTING", "RUNNING"):
+        if row.status not in LIVE:
             # ss5's "still desired running": an injected INACTIVE while the
             # spawn was held sets the run aside without ending it (DL-232)
             return (

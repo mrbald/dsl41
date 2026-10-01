@@ -45,6 +45,7 @@ from pydantic import ValidationError
 from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event, JobRuntime
+from dsl41.period import wal_path
 from dsl41.runner import Engine
 from dsl41.runner_clock import EngineError
 from dsl41.runner_startup import start_run
@@ -60,6 +61,7 @@ from dsl41.runner_effects import (
 )
 from dsl41.runner_clock import VirtualClock
 from dsl41.runner_journal import read_journal, read_outbox, replay_inputs
+from model_harness import _lose_the_decision_for
 
 T0 = datetime(2026, 7, 1, 8, 0)
 
@@ -437,6 +439,24 @@ def test_an_effect_for_a_job_with_no_row_is_superseded() -> None:
     assert reason is not None and "no runtime row" in reason
 
 
+def test_an_injected_inactive_on_a_running_job_plans_no_kill() -> None:
+    """DL-235: CHANGE_STATUS INACTIVE on a launched run plans no KILL -- the
+    process runs on and only its reservations release (DL-120), as the
+    vendor's database write would leave them. The contrasting case, a
+    terminal CHANGE_STATUS on the same live run, does plan one
+    (`test_a_terminal_with_no_live_run_plans_no_kill` above)."""
+    emitted = [_ev("STATUS", 0, job="j", status="INACTIVE")]
+    common = dict(
+        index=1,
+        executor_id="local",
+        runs={"j": 1},
+        dispatched={"j": 1},
+        dispatchable=frozenset({"j"}),
+        **_IDENTITY,
+    )
+    assert plan_effects(emitted, live={"j": 1}, **common) == []  # type: ignore[arg-type]
+
+
 # ---------------------------------------------- 4. the engine drives the outbox
 
 
@@ -763,6 +783,171 @@ def test_a_held_spawn_whose_job_was_set_inactive_is_retired_not_applied() -> Non
     assert result is not None and result.state == "retired"
     assert result.detail == "j is INACTIVE: the run this spawn was for is no longer desired running"
     assert engine.outbox.pending() == []
+
+
+#: j's dependent, so a completion wrongly applied to an INACTIVE row would
+#: be visible one hop downstream too
+_INACTIVE_GATE_JIL = (
+    "insert_job: j\njob_type: c\ncommand: x\n\n"
+    "insert_job: dep\njob_type: c\ncommand: y\ncondition: s(j)\n"
+)
+
+
+def test_a_completion_for_a_job_an_operator_set_inactive_is_rejected_not_applied(
+    tmp_path: Path,
+) -> None:
+    """DL-235's other gate. A `CHANGE_STATUS INACTIVE` on a launched run
+    plans no KILL, so the process runs on and its natural exit still
+    arrives -- the test above holds a SPAWN; this one holds nothing, and the
+    completion comes in through the stale-completion gate (ss4) instead of
+    ss5's supersession. Applying it would turn the operator's INACTIVE into
+    SUCCESS or FAILURE and start `dep`, undoing the reset. Mirrors
+    `test_a_held_spawn_whose_job_was_set_inactive_is_retired_not_applied`
+    above and `test_cm06_a_result_from_a_superseded_run_is_not_applied`
+    (test_model_harness.py), whose live-vs-replayed check this restates
+    with an injected INACTIVE in place of a fresh overwriting run."""
+    catalog = lower_source(_INACTIVE_GATE_JIL)
+    engine = start_run(
+        catalog,
+        tmp_path / "run",
+        clock=VirtualClock(start=T0),
+        adapters={"CMD": FakeAdapter(default=None)},  # inert: no natural exit of its own
+    )
+
+    async def scenario() -> None:
+        engine.inject(_ev("STARTJOB", 0, job="j"))
+        await engine.run_until_quiescent(T0)
+        assert engine.oracle.store.job["j"].status == "RUNNING"
+
+        engine.inject(_ev("STATUS", 1, job="j", status="INACTIVE"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+        assert engine.oracle.store.job["j"].status == "INACTIVE"
+
+        engine._enqueue(  # forge the late natural exit as a COMPLETION
+            _ev("STATUS", 2, job="j", run_number=1, exit_code=0), source="adapter"
+        )
+        await engine.run_until_quiescent(T0 + timedelta(minutes=2))
+
+    asyncio.run(scenario())
+    row = engine.oracle.store.job["j"]
+    assert (row.status, row.run_number) == ("INACTIVE", 1)
+    assert engine.oracle.store.job["dep"].status == "INACTIVE"  # never started
+    assert engine.live_jobs() == {"j"}  # the process is still live in the shell
+    assert all(e.kind != "KILL" for e in engine.outbox.effects())  # no KILL planned
+    assert engine.drops and engine.drops[-1][1] == "job not live: INACTIVE"
+    rejected = engine.decisions.for_index(engine.frontiers.applied_index)
+    assert rejected is not None and rejected.decision == "rejected"
+    assert rejected.reason == "job not live: INACTIVE"
+    assert engine.journal is not None
+    engine.journal.close()
+
+    records = read_journal(tmp_path / "run" / "journal.jsonl")
+    # a decision record with its reason, not the resume sweep's "drop" rec
+    assert [r for r in records if r.get("rec") == "drop"] == []
+    fresh = Oracle(catalog)
+    replay = replay_inputs(fresh, records)
+    assert (fresh.store.job["j"].status, fresh.store.job["j"].run_number) == ("INACTIVE", 1)
+    assert fresh.store.job["dep"].status == engine.oracle.store.job["dep"].status
+    assert [e.effect_id for e in replay.outbox.effects()] == [
+        e.effect_id for e in engine.outbox.effects()
+    ]
+
+
+def test_a_restart_on_an_inactive_row_cancels_the_orphan_and_spawns_again() -> None:
+    """DL-235's M1. An injected INACTIVE leaves the earlier run live in the
+    shell (no KILL), and the oracle's DL-81 refusal only blocks STARTJOB on
+    a STARTING/RUNNING/QUE_WAIT row, so a restart on the INACTIVE row is
+    admitted. `_apply_spawn`'s "one live attempt per job" branch -- marked
+    unreachable before DL-235 -- is reached this way: the shell holds one
+    live run per job, so the earlier adapter task is cancelled, and the
+    second SPAWN is the record of the supersession. A real CMD adapter
+    runs its kill ladder on that cancel (runner_adapters.py); this
+    FakeAdapter test pins the cancel, not the ladder. The vendor would run
+    both."""
+    engine = _engine(_SOLO_JIL)
+    orphan: asyncio.Task[None] | None = None
+
+    async def scenario() -> None:
+        nonlocal orphan
+        engine.inject(_ev("STARTJOB", 0, job="j"))
+        await engine.run_until_quiescent(T0)
+        assert engine.oracle.store.job["j"].status == "RUNNING"
+        orphan = engine._live["j"].task
+
+        engine.inject(_ev("STATUS", 1, job="j", status="INACTIVE"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+        assert engine.oracle.store.job["j"].status == "INACTIVE"
+        assert not orphan.done()  # still live in the shell, no KILL
+
+        engine.inject(_ev("STARTJOB", 2, job="j"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=2))
+
+    asyncio.run(scenario())
+    assert orphan is not None and orphan.cancelled()  # the earlier task is gone
+    row = engine.oracle.store.job["j"]
+    assert (row.status, row.run_number) == ("RUNNING", 2)
+    assert engine.live_jobs() == {"j"}
+    assert engine._live["j"].run_number == 2  # run 2 only, nothing left of run 1
+    kinds = [(e.kind, e.job, e.run_number) for e in engine.outbox.effects()]
+    assert kinds == [("SPAWN", "j", 1), ("SPAWN", "j", 2)]  # two SPAWNs, no KILL
+
+
+def test_a_crash_window_completion_on_an_inactive_row_recovers_as_rejected(
+    tmp_path: Path,
+) -> None:
+    """DL-235's compatibility statement, pinned. The admitted run-1
+    completion for a row an operator set INACTIVE crashes before its
+    rejection is durable (the ss4 gate's crash window, DL-156); replay
+    re-decides it through the same gate and must reach the SAME verdict
+    the live engine did -- `STATE_MACHINE_VERSION` moved to 2 exactly
+    because v1 re-derives a different verdict here. `dep` pins that
+    the recovered rejection, not an accepted completion, is what reaches
+    the dependent."""
+    catalog = lower_source(_INACTIVE_GATE_JIL)
+    engine = start_run(
+        catalog,
+        tmp_path / "run",
+        clock=VirtualClock(start=T0),
+        adapters={"CMD": FakeAdapter(default=None)},
+    )
+
+    async def scenario() -> None:
+        engine.inject(_ev("STARTJOB", 0, job="j"))
+        await engine.run_until_quiescent(T0)
+        assert engine.oracle.store.job["j"].status == "RUNNING"
+
+        engine.inject(_ev("STATUS", 1, job="j", status="INACTIVE"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+        assert engine.oracle.store.job["j"].status == "INACTIVE"
+
+        engine._enqueue(  # the admitted run-1 completion, about to lose its decision
+            _ev("STATUS", 2, job="j", run_number=1, exit_code=0), source="adapter"
+        )
+        await engine.run_until_quiescent(T0 + timedelta(minutes=2))
+
+    asyncio.run(scenario())
+    assert engine.journal is not None
+    engine.journal.close()
+    _lose_the_decision_for(tmp_path / "run", "adapter")
+
+    path = wal_path(tmp_path / "run", 1)
+    records = read_journal(path)
+    fresh = Oracle(catalog)
+    replay = replay_inputs(fresh, records)
+    [seq] = [
+        r["seq"]
+        for r in records
+        if r.get("rec") == "input" and r.get("kind") == "STATUS" and r.get("source") == "adapter"
+    ]
+    recovered = replay.decisions.for_index(seq)
+    assert recovered is not None
+    assert recovered.decision == "rejected"
+    assert recovered.reason == "job not live: INACTIVE"
+    assert replay.recovered == [
+        recovered
+    ]  # reached through the recovery path, not a durable record
+    assert (fresh.store.job["j"].status, fresh.store.job["j"].run_number) == ("INACTIVE", 1)
+    assert fresh.store.job["dep"].status == "INACTIVE"  # never started
 
 
 #: a negative term_run_time arms a deadline already past due, which the
