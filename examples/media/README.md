@@ -180,4 +180,6 @@ detached survival and reattachment with process identity evidence, and kill the
 engine during publication.
 Lease/deadman limits, long encodes, concurrent readers during replacement,
 physical resource limits, and throughput need separate drills.
-No CI or regression-suite integration is included in this slice.
+The opt-in integration lane in `examples/workflows/tests` runs this
+launcher and its checker; see the Integration lane section of
+`../workflows/README.md`.

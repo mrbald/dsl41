@@ -1,0 +1,41 @@
+# DL-236: the opt-in integration lane for the fulfilment, energy and media
+# examples (examples/workflows/tests). It drives docker compose on the runner
+# the way an operator does: one compose project per test, torn down with its
+# volumes. A missing engine or a failed image build errors every test; the
+# lane never skips.
+#
+# Manual only (workflow_dispatch). It is not part of the default gate; the
+# owner decides when it runs. Evidence (per-test commands, outputs and the
+# run volume, plus the session's provider record) is uploaded whether the
+# lane passes or fails.
+
+name: workflow-examples
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lane:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - run: uv sync --locked --extra dev
+      - name: workflow examples lane
+        env:
+          WORKFLOW_EVIDENCE: ${{ runner.temp }}/workflow-evidence
+        run: >-
+          uv run pytest -q -o faulthandler_timeout=0 examples/workflows/tests
+          --junitxml=workflow-junit.xml
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: workflow-evidence
+          path: |
+            ${{ runner.temp }}/workflow-evidence
+            workflow-junit.xml
+          if-no-files-found: error

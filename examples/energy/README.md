@@ -146,4 +146,6 @@ refusal drill. The present replay reuses an already accepted snapshot.
 Worker death between calculation and publication, database restart, concurrent
 corrections, engine loss, detached reattachment, control reply loss, and manual
 handback are future drills. Compiler migration and UC emission are also outside
-this demonstration. Formal pytest and CI integration follow this runnable slice.
+this demonstration. The opt-in integration lane in `examples/workflows/tests`
+runs this launcher and its checker; see the Integration lane section of
+`../workflows/README.md`.

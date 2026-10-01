@@ -14839,3 +14839,40 @@ relitigate an entry; append a new one.
   edge and loses no queued run. Rejected alternative: keep the old gate
   for parity with a vendor behaviour nobody has verified, at the price of
   the QUE_WAIT loss above and a third definition of "over".
+||||||| parent of d178f78 (DL-236: opt-in integration lane for the fulfilment, energy and media examples)
+- DL-236 The workflow examples get an opt-in integration lane at the
+  operator's interfaces (2026-10-01; examples/workflows/tests,
+  .github/workflows/workflow-examples.yml; examples/workflows/README.md)
+  THE LANE. The fulfilment, energy and media examples run through the
+  public CLI inside the compose runner (examples/workflows/README.md).
+  The lane is pytest under examples/workflows/tests, outside `testpaths`,
+  so the default suite never collects it; it runs as
+  `uv run pytest -q examples/workflows/tests` on the host and drives
+  `docker compose` the way an operator does. One compose project per
+  test, named after the test with a random suffix, so each test owns its
+  database, network and run volume and tears them down with
+  `down --volumes`. The runner image builds once per session under the
+  compose file's tag; two lanes on one host share that tag. Recorded,
+  not solved.
+  FAIL, NEVER SKIP. A missing engine, a missing compose, or a failed
+  image build fails the session fixture, so every test errors by name.
+  The lane has no skip of any kind: a skipped example is not coverage.
+  WHAT IS ASSERTED. For each business, the happy path and the demonstrated
+  incident, on three surfaces kept apart: the checker's JSON on stdout (the
+  business result), the run's scheduler rows (job, run number, status), and
+  the real worker attempts, so a scheduler that retried is not mistaken for
+  a worker that did. Energy runs with `--force-seal`: the seal records the
+  forced retry-horizon gate and the test asserts it, the late correction
+  still crosses the sealed period, and the run takes seven seconds instead
+  of seventy. The default path that waits out the horizon is not exercised
+  by the lane. Each checker also runs against a deliberately damaged result
+  and must fail, so a green checker is not its own evidence. Evidence per
+  test: command, exit code, duration, stdout, stderr and the run volume as
+  a tar; per session: provider endpoint, versions, image id and the
+  postgres digest. CI uploads it all as an artifact.
+  CI. workflow-examples.yml runs on dispatch only, with the same pinned
+  actions as ci.yml. The owner decides when it runs.
+  Not built: the fault drills the README lists (engine loss,
+  detached-worker recovery, control-response loss, database restart,
+  concurrent scarce stock, concurrent publication). Each is a named
+  boundary with its own observable outcome and arrives as its own slice.

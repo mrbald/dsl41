@@ -8,9 +8,10 @@ Three synthetic businesses run through the public dsl41 CLI:
 | [Energy](../energy/README.md) | Meter files, an HTTP feed, and PostgreSQL settlement records | A late correction crosses a sealed period |
 | [Media](../media/README.md) | FFmpeg workers and files served over HTTP | One rendition fails before publication |
 
-These are runnable examples with independent result checks. They do not yet
-form a pytest or CI regression lane. They complement [Nightbank](../nightbank/README.md),
-which covers a larger operator estate. They do not establish production readiness.
+These are runnable examples with independent result checks. An opt-in pytest
+lane runs them through Docker Compose (see "Integration lane"). They
+complement [Nightbank](../nightbank/README.md), which covers a larger
+operator estate. They do not establish production readiness.
 
 ## Container setup
 
@@ -122,27 +123,46 @@ After all launchers have stopped and the evidence is no longer needed,
 deletes this example project's database and run volumes. Do not remove a live
 engine root. A run's lineage anchor and root must remain together.
 
+## Integration lane
+
+`examples/workflows/tests` runs each launcher and checker as an operator does
+(DL-236). It sits outside the default `testpaths`, so `uv run pytest` never
+collects it. Run it from the repository root:
+
+```sh
+WORKFLOW_CONTEXT=podman uv run pytest -q -o faulthandler_timeout=0 examples/workflows/tests
+```
+
+Leave `WORKFLOW_CONTEXT` unset to use the Docker CLI's current context.
+The lane builds the runner image once. Each test owns a Compose project named
+`dsl41-wf-<test>-<suffix>` and deletes it with `down --volumes`.
+A missing engine, Compose, or image build fails every test. Nothing is skipped.
+
+For each business the lane runs the happy path and the demonstrated incident.
+It asserts the checker's result, the scheduler history, and the real worker
+attempts separately. It reruns each checker after damaging one result the
+checker reads and requires a failure. The energy tests pass `--force-seal`;
+the seal records that override, and the correction still crosses a period.
+
+Evidence goes to `WORKFLOW_EVIDENCE`, or to pytest's temporary directory when
+that is unset. The summary prints the path. `session.json` records the context
+endpoint, Docker and Compose versions, the runner image ID, and the PostgreSQL
+digest. Each test directory holds `command.json` with every command's exit
+code, duration, stdout, and stderr, plus the run volume as numbered
+`runs-N.tar` archives and the extracted copy of the last one. The lane is
+opt-in in CI too: the `workflow-examples` workflow
+runs only on manual dispatch and uploads the evidence.
+
 ## Next regression slice
 
-First review the business invariants and recovery procedures in these examples.
-Then add an opt-in integration lane that runs the same launchers and checkers.
-Give every test its own Compose project, database schema, and run directory.
-Capture provider endpoint, image IDs, versions, exit codes, and failure artifacts.
-Fail when required services are absent; do not silently count skipped examples
-as integration coverage.
-
-Start with one happy path and the demonstrated incident for each business.
-Assert business results separately from scheduler history. Count real worker
-attempts as well as scheduler runs. Test the checkers against a deliberately
-damaged result so a green checker is not its only evidence.
-
-Add engine loss, detached-worker recovery, control-response loss, database
-restart, concurrent scarce-stock orders, and concurrent publication as separate
-drills. The present examples make no claims about those faults. Keep each fault
-at a named boundary with an observable outcome and a bounded wait.
+The fault drills are not built: engine loss, detached-worker recovery,
+control-response loss, database restart, concurrent scarce-stock orders, and
+concurrent publication. The present examples make no claims about those faults.
+Each drill is a separate slice. Keep each fault at a named boundary with an
+observable outcome and a bounded wait.
 
 `support.py` contains CLI invocation, private properties, atomic JSON writes,
 and owned-process lifecycle only. Business operations and checks stay in each
 example. No example imports dsl41 internals. The examples use the public CLI and
 documented run-root layout, including manifests, journals, and the leader lock.
-This keeps the eventual integration lane at the interfaces an operator uses.
+This keeps the integration lane at the interfaces an operator uses.

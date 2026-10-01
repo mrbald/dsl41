@@ -57,6 +57,8 @@ The coverage report enforces the scoped branch-coverage requirement.
 Keep this list aligned with `.github/workflows/ci.yml`. The one CI check not in
 it is `systemd-analyze verify` over `examples/nightbank/deploy/*.service`
 (DL-218); it needs Linux.
+The workflow examples lane is opt-in and needs a container engine (DL-236):
+`WORKFLOW_CONTEXT=<context> uv run pytest -q -o faulthandler_timeout=0 examples/workflows/tests`.
 `scripts/arch_check.py --spec-status` prints every specification with its spec
 review status (DL-225); it is advisory, and the `spec-review` skill runs one pass
 per document.
