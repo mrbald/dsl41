@@ -76,17 +76,31 @@ def request(root: Path, revision: int) -> tuple[dict[str, Any], Path]:
     return value, source
 
 
-def encode(root: Path, revision: int, action: str, source: Path) -> None:
+def binding(output: Path) -> Path:
+    return output.with_name(f"{output.name}.binding.json")
+
+
+def require_binding(output: Path, admitted: dict[str, Any]) -> None:
+    """Refuse an output not encoded from the admitted input, or changed since."""
+    sidecar = binding(output)
+    if not sidecar.exists():
+        raise ValueError(f"rendition has no input binding: {output}")
+    bound = read_json(sidecar)
+    if bound != {"input_sha256": admitted["input_sha256"], "output_sha256": digest(output)}:
+        raise ValueError(f"rendition is not bound to the admitted input: {output}")
+
+
+def encode(root: Path, revision: int, action: str, source: Path, admitted: dict[str, Any]) -> None:
     work = root / "work" / f"r{revision}"
     work.mkdir(parents=True, exist_ok=True)
     name = "poster.png" if action == "poster" else f"{action}.mp4"
     output = work / name
     if output.exists():
+        require_binding(output, admitted)
         inspect_media(output, OUTPUTS[name], action == "poster")
         return
     fault = root / "faults" / f"r{revision}-{action}.armed"
     fired = fault.with_suffix(".fired")
-    partial = work / f"{action}.partial{output.suffix}"
     args = ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(source)]
     if action == "poster":
         args.extend(["-frames:v", "1", "-threads", "1"])
@@ -121,13 +135,26 @@ def encode(root: Path, revision: int, action: str, source: Path) -> None:
             },
         )
         raise SystemExit(23)
+    # A unique partial per invocation: an overlapping attempt never writes this file.
+    handle, partial_name = tempfile.mkstemp(
+        prefix=f"{action}-", suffix=f".partial{output.suffix}", dir=work
+    )
+    os.close(handle)
+    partial = Path(partial_name)
     command([*args, str(partial)])
     inspect_media(partial, OUTPUTS[name], action == "poster")
+    # Bind the output to the admitted input before it becomes visible.
+    write_json(
+        binding(output),
+        {"input_sha256": admitted["input_sha256"], "output_sha256": digest(partial)},
+    )
     os.replace(partial, output)
 
 
 def stage(root: Path, revision: int, admitted: dict[str, Any]) -> None:
     work = root / "work" / f"r{revision}"
+    for name in OUTPUTS:
+        require_binding(work / name, admitted)
     entries = {
         name: inspect_media(work / name, size, name.endswith(".png"))
         for name, size in OUTPUTS.items()
@@ -207,7 +234,7 @@ def main() -> None:
     if args.action == "input":
         inspect_media(source, (320, 180))
     elif args.action in {"low", "high", "poster"}:
-        encode(root, revision, args.action, source)
+        encode(root, revision, args.action, source, admitted)
     elif args.action == "verify":
         command(
             [

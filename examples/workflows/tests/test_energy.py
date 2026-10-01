@@ -2,7 +2,9 @@
 
 Every run passes `--force-seal`. The seal records that override, and the
 correction still crosses a committed period boundary; the default would only
-add a one-minute wait for the control retry horizon.
+add a one-minute wait for the control retry horizon. A seal that lands after
+the horizon has passed records `forced_gate` null (period-model ss3.1), so the
+gate is checked only when the seal records one.
 """
 
 from __future__ import annotations
@@ -58,6 +60,7 @@ def test_energy_publishes_both_periods_from_the_documented_run(lane: Lane) -> No
     assert business["counts"] == COUNTS
     assert business["calculations"] == [["correction", 32], ["initial", 30], ["neighbor", 12]]
     initial = read_json(run / "initial-check.json")
+    assert read_json(run / "complete-check.json") == business
     assert initial["calculations"] == [["initial", 30], ["neighbor", 12]]
     assert [row[:3] for row in initial["publications"]] == [["initial", 30, 1], ["neighbor", 12, 1]]
 
@@ -76,7 +79,7 @@ def test_energy_publishes_both_periods_from_the_documented_run(lane: Lane) -> No
     assert all(row["fidelity"] == "full" for row in read_json(run / "run-history.json"))
 
     records = attempts(run)
-    assert Counter(row["origin"] for row in records) == {"scheduler": 7, "probe": 7}
+    assert Counter(row["origin"] for row in records) == {"scheduler": 7, "probe": 9}
     assert sorted({job for job, _ in scheduled_runs(run)}) == LEAVES
 
 
@@ -99,9 +102,9 @@ def test_energy_late_correction_crosses_the_sealed_period(lane: Lane) -> None:
     )
     seal = read_json(run / "engine" / "seals" / "000001.json")
     assert seal["boundary_request"]["force_seal"] is True
-    forced_gate = seal["forced_gate"]
-    assert forced_gate is not None, "no forced gate: age already past the 60s retry horizon"
-    assert forced_gate["gate"] == "retry_horizon"
+    if seal["forced_gate"] is not None:
+        assert seal["forced_gate"]["gate"] == "retry_horizon"
+    assert (run / "engine" / "seals" / "000001.audit.json").is_file()
 
     rows = scheduler_rows(run / "run-history.json")
     assert [row for row in rows if row[0] == "ENERGY_INITIAL_INGEST"] == [
@@ -118,9 +121,15 @@ def test_energy_late_correction_crosses_the_sealed_period(lane: Lane) -> None:
         {(job, 1): 1 for job in LEAVES} | {("ENERGY_INITIAL_INGEST", 2): 1}
     )
     probes = [json.loads(line) for line in (run / "worker-probes.jsonl").read_text().splitlines()]
-    conflict = [probe for probe in probes if probe["args"] == ["ingest", "conflict"]]
-    assert [probe["exit"] for probe in conflict] == [1]
-    assert "conflicting reading revision" in conflict[0]["stderr"]
+    refusals = {
+        "conflict": "conflicting reading revision",
+        "respelled": "non-canonical interval_start",
+        "stale": "stale reading in a new snapshot",
+    }
+    for wave, refusal in refusals.items():
+        refused = [probe for probe in probes if probe["args"] == ["ingest", wave]]
+        assert [probe["exit"] for probe in refused] == [1], wave
+        assert refusal in refused[0]["stderr"], refused[0]["stderr"]
 
     again = lane.exec("python", "examples/energy/check.py", "--run", result.run_dir()).require()
     assert again.final_json() == business

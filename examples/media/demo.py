@@ -198,7 +198,7 @@ def main() -> None:
         "--scenario", choices=["happy", "failed-rendition"], default="failed-rendition"
     )
     args = parser.parse_args()
-    run = new_run("media", args.run_dir)
+    run = new_run("media", args.run_dir, engine="r2/engine")
     print(f"retained run: {run}", flush=True)
     root = run / "business"
     for name in ["inputs", "faults", "public"]:

@@ -27,7 +27,8 @@ Each path must be new. An omitted `--run-dir` creates a unique short path under
 paths and can be invoked from another working directory.
 
 The default incident commits the `P2` label and a fault marker at the carrier,
-then drops the HTTP connection. The worker exits with failure. Its warehouse
+then drops the HTTP connection. The carrier log names the dropped reply.
+The worker exits with failure. Its warehouse
 transaction rolls back. The demo observes that failure and checks the split
 order is still incomplete. It then sends one explicit `FORCE_STARTJOB` for
 `FF_LABEL_2_C`. That worker queries the existing business operation, records its
@@ -46,13 +47,18 @@ of the worker calculations. At the incident boundary it requires one dispatched
 parcel, one packed parcel, two external labels, and an unfulfilled split order.
 At completion it requires initial stock 3, available 1, reserved 0, dispatched 2,
 two labels, and one manifest. It also checks the cancellation decisions and
-matching local and external receipt payloads.
+matching local and external receipt payloads. It compares every recorded
+operation's exact key, payload, and result; label and manifest results must
+equal the receipts recorded for the same key. Each stock movement must belong to
+the operation that made it, and the movements must still sum to zero.
 
 Each worker commits a separate attempt row before its business transaction.
 After the engine stops, `dsl41 runs --format json` supplies `runs.json`.
 The checker compares its execution counts with the attempt rows and exact expected
-counts. The incident has two executions of `FF_LABEL_2_C`; every other command
-runs once. Database uniqueness alone cannot conceal an extra worker execution.
+counts. It also requires the exact history rows: the box and every command, with
+run numbers, statuses, and exit codes. The incident has two executions of
+`FF_LABEL_2_C`, the first failed with exit 1; every other command runs once.
+Database uniqueness alone cannot conceal an extra worker execution.
 The demo also attempts conflicting reuse of a carrier identity and requires
 HTTP 409. Final checks require the original payload to remain intact.
 

@@ -106,3 +106,22 @@ def test_fulfilment_checker_rejects_damaged_stock(lane: Lane) -> None:
     assert refused.exit not in (0, None), refused.describe()
     assert "AssertionError" in refused.stderr, refused.describe()
     assert "assert stock == [(3, 1, 0, 2)]" in refused.stderr, refused.describe()
+
+
+def test_fulfilment_checker_rejects_damaged_operation_payload(lane: Lane) -> None:
+    run_dir = lane.run("fulfilment", "--no-incident", timeout=TIMEOUT).require().run_dir()
+    run = lane.collected(run_dir)
+    recheck(lane, run_dir).require()
+
+    # A rerun of FF_PACK_C would replay from this record; the schema still accepts it.
+    damaged = lane.psql(
+        f'UPDATE "{schema(run)}".operations'
+        " SET payload = jsonb_set(payload, '{revision}', '2')"
+        " WHERE key LIKE '%/SPLIT/1/pack' RETURNING payload->>'revision'"
+    )
+    assert damaged == "2"
+
+    refused = recheck(lane, run_dir)
+    assert refused.exit not in (0, None), refused.describe()
+    assert "AssertionError" in refused.stderr, refused.describe()
+    assert "assert operations == expected_operations" in refused.stderr, refused.describe()

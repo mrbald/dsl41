@@ -33,6 +33,10 @@ MEDIA_INPUT
   └── MEDIA_POSTER ─┘
 ```
 
+`MEDIA_STAGE`'s `s(JOB,0)` zero lookback asks for a rendition success since
+staging's own last end (SEM-04); each revision runs in a fresh engine root where
+staging has never ended, so the qualifier is plain success there (Q2b).
+
 `MEDIA_ENCODE` has one renewable admission slot.
 The three media jobs compete for it.
 The demo checks engine transitions for queued work and nonoverlapping admission.
@@ -45,8 +49,16 @@ The input request binds a business revision to the source file's SHA-256.
 Workers require a 320×180 source and produce 160×90 and 320×180 videos.
 They check stream codecs, dimensions, duration within 0.15 seconds of two seconds,
 and complete decoding before accepting an output.
+Each encode writes to its own unique partial file, so overlapping attempts never
+share one, and moves the checked file into place atomically.
+Beside each accepted output the encoder writes a `.binding.json` sidecar with the
+admitted input's SHA-256 and the output's SHA-256.
+A rerun reuses an existing output, and staging copies one, only when its sidecar
+names the admitted input and the file's current hash; otherwise it refuses.
 The HTTP checker independently checks the three required manifest members,
 downloaded bytes and hashes, metadata, 48 decoded video frames, and full decoding.
+It decodes the whole audio stream of the source and both served videos and
+requires 1.99 to 2.1 seconds, which allows for AAC padding and rejects truncation.
 It also decodes audio from 0.5 to 1.0 seconds in the source and both served videos.
 That segment must be non-silent and contain the fixture's `440 × revision` Hz tone.
 Frequency estimates use interpolated positive zero crossings with a 5 Hz tolerance.
@@ -60,8 +72,8 @@ The example makes its files read-only and never modifies that release again.
 Under an exclusive publication lock, a worker checks the expected previous
 revision and atomically replaces `public/current.json`.
 The pointer names one immutable manifest and its hash.
-Each manifest names paths within that revision's immutable release.
-Clients fetch the pointer once and use those paths for the whole retrieval.
+Each manifest lists the file names within that revision's immutable release.
+Clients fetch the pointer once and use that release for the whole retrieval.
 The application enforces this rule; scheduler success alone cannot authorize it.
 
 ## Failed rendition drill
@@ -138,7 +150,8 @@ For an actual engine outage, use these steps only after proving the process fenc
    python examples/media/worker.py --run /runs/media-example/r2 publish
    ```
 
-   Completed renditions are validated and reused.
+   Completed renditions are reused only when their binding sidecar names the
+   admitted input and their current hash, and are validated again.
    Existing releases must match the proposed manifest exactly.
    Publishing the same current release is idempotent.
    Publishing an older revision refuses.

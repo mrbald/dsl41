@@ -104,6 +104,7 @@ def serve(ledger: Path, ready: Path, drop_key: str) -> None:
                     conn.execute("INSERT INTO receipts VALUES (?,?,?,?)", row)
             # The transaction and fault marker committed before the connection closes.
             if dropped:
+                self.log_message("dropping the reply to POST /operations for %s", key)
                 self.close_connection = True
                 self.connection.shutdown(socket.SHUT_RDWR)
                 return

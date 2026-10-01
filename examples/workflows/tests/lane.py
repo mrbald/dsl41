@@ -194,6 +194,7 @@ class Lane:
         with archive.open("wb") as handle:
             command = ["tar", "-C", "/runs", "-cf", "-", "."]
             self.exec(*command, timeout=300, stdout=handle).require()
+        assert archive.stat().st_size > 0, f"{archive} is empty"
         target = self.evidence / "runs"
         if target.exists():
             shutil.rmtree(target, onexc=_force_remove)
@@ -207,20 +208,111 @@ class Lane:
         assert path.is_dir(), f"{run_dir} is not in the collected run volume"
         return path
 
+    def dump_database(self) -> Path:
+        """Export the examples database as SQL beside the test's evidence."""
+        path = self.evidence / "database.sql"
+        with path.open("wb") as handle:
+            args = ["exec", "-T", "postgres", "pg_dump", "-U", "example", "examples"]
+            self.compose(*args, timeout=120, stdout=handle).require()
+        assert path.stat().st_size > 0, f"{path} is empty"
+        return path
+
+    def stop_runners(self) -> None:
+        """Stop runner containers a timed-out `compose run` client left running."""
+        found = execute(
+            [
+                *docker(),
+                "ps",
+                "-q",
+                "--filter",
+                f"label=com.docker.compose.project={self.project}",
+                "--filter",
+                "label=com.docker.compose.service=runner",
+            ],
+            60,
+        )
+        self.commands.append(found)
+        running = found.require().stdout.split()
+        if running:
+            self.commands.append(execute([*docker(), "stop", "--time", "10", *running], 120))
+
+    def volumes(self) -> list[str]:
+        """The project's volumes that still exist."""
+        found = execute(
+            [
+                *docker(),
+                "volume",
+                "ls",
+                "-q",
+                "--filter",
+                f"label=com.docker.compose.project={self.project}",
+            ],
+            60,
+        )
+        self.commands.append(found)
+        return sorted(found.require().stdout.split())
+
     def write_commands(self) -> None:
         write_json(self.evidence / "command.json", [asdict(result) for result in self.commands])
 
     def close(self) -> None:
-        """Always collect evidence and record commands, then delete the project."""
-        problems = []
-        self.compose("kill", "--remove-orphans", timeout=60)
+        """Export the evidence, record every command, then delete the project.
+
+        Order: stop runner writers, dump PostgreSQL while it is up, kill the
+        project's containers, collect the run volume, then `down`. The volumes
+        are deleted only when both exports succeeded. Otherwise `down` keeps
+        them, and the failure names them with the command that removes them.
+        `down` runs whatever else fails.
+        """
+        export: list[str] = []
+        record: list[str] = []
+        cleanup: list[str] = []
+        exported = False
         try:
-            self.collect()
-        except Exception as exc:  # the project must still come down
-            problems.append(f"evidence collection failed: {exc!r}")
-        self.write_commands()
-        down = self.compose("down", "--volumes", "--remove-orphans", timeout=300)
-        self.write_commands()
-        if down.exit != 0:
-            problems.append(down.describe())
+            try:
+                self.stop_runners()
+            except Exception as exc:  # the dump and the collection still run
+                export.append(f"stopping runner containers failed: {exc!r}")
+            try:
+                self.dump_database()
+                dumped = True
+            except Exception as exc:  # reported; teardown continues
+                export.append(f"database dump failed: {exc!r}")
+                dumped = False
+            self.compose("kill", "--remove-orphans", timeout=60)
+            try:
+                self.collect()
+                exported = dumped
+            except Exception as exc:  # reported; teardown continues
+                export.append(f"run volume collection failed: {exc!r}")
+        finally:
+            try:
+                self.write_commands()
+            except Exception as exc:
+                record.append(f"writing command.json failed: {exc!r}")
+            volumes = ["--volumes"] if exported else []
+            down = self.compose("down", *volumes, "--remove-orphans", timeout=300)
+            if down.exit != 0:
+                cleanup.append(down.describe())
+            if not exported:
+                try:
+                    retained = self.volumes()
+                except Exception as exc:
+                    cleanup.append(f"listing retained volumes failed: {exc!r}")
+                else:
+                    if retained:
+                        command = " ".join([*docker(), "volume", "rm", *retained])
+                        export.append(
+                            f"volumes retained for inspection: {', '.join(retained)}\n"
+                            f"remove them with: {command}"
+                        )
+            try:
+                self.write_commands()
+            except Exception as exc:
+                record.append(f"writing command.json failed: {exc!r}")
+        problems = [
+            *(f"evidence export: {line}" for line in export),
+            *(f"evidence record: {line}" for line in record),
+            *(f"cleanup: {line}" for line in cleanup),
+        ]
         assert not problems, "\n".join(problems)

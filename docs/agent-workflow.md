@@ -40,7 +40,7 @@ Repeat a check after a relevant edit, a failure, or inadequate evidence.
 Before marking an implementation complete, run the full local gates:
 
 ```sh
-uv run ruff check src tests
+uv run ruff check src tests examples
 uv run ruff format --check src tests scripts examples
 uv run mypy src tests/uc_oracle.py
 uv run python scripts/arch_check.py

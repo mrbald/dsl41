@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -119,3 +120,40 @@ def test_media_checker_rejects_damaged_served_file(lane: Lane) -> None:
     refused = recheck(lane, run_dir, 1, "lane-damaged-check")
     assert refused.exit not in (0, None), refused.describe()
     assert "served file differs from manifest: low.mp4" in refused.stderr, refused.describe()
+
+
+# Serve revision 1's low rendition as revision 2's, with the manifest entry and
+# the pointer hash rewritten to match: every byte count and hash agrees.
+OLDER_RENDITION = """
+import hashlib, json, os, shutil, sys
+from pathlib import Path
+
+public = Path(sys.argv[1]) / "business" / "public"
+r1, r2 = public / "releases" / "r1", public / "releases" / "r2"
+manifest_path, pointer_path = r2 / "manifest.json", public / "current.json"
+os.chmod(r2, 0o755)
+for path in (r2 / "low.mp4", manifest_path):
+    os.chmod(path, 0o644)
+shutil.copyfile(r1 / "low.mp4", r2 / "low.mp4")
+manifest = json.loads(manifest_path.read_text())
+older = json.loads((r1 / "manifest.json").read_text())["files"]["low.mp4"]
+manifest["files"]["low.mp4"] = older
+manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\\n")
+pointer = json.loads(pointer_path.read_text())
+pointer["manifest_sha256"] = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+pointer_path.write_text(json.dumps(pointer, indent=2, sort_keys=True) + "\\n")
+print(older["sha256"])
+"""
+
+
+def test_media_checker_rejects_older_rendition_with_recomputed_hashes(lane: Lane) -> None:
+    run_dir = lane.run("media", timeout=TIMEOUT).require().run_dir()
+    recheck(lane, run_dir, 2, "lane-recheck").require()
+
+    swapped = lane.exec("python", "-c", OLDER_RENDITION, run_dir).require()
+    assert re.fullmatch(r"[0-9a-f]{64}", swapped.stdout.strip()), swapped.describe()
+
+    refused = recheck(lane, run_dir, 2, "lane-older-check")
+    assert refused.exit not in (0, None), refused.describe()
+    assert "fixture audio tone mismatch: low.mp4" in refused.stderr, refused.describe()
+    assert "expected 880.00 Hz" in refused.stderr, refused.describe()
