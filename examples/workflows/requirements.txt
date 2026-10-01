@@ -1,0 +1,3 @@
+# Example-only database driver. The package's dependencies and uv.lock are unchanged.
+psycopg==3.3.6
+psycopg-binary==3.3.6

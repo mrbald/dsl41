@@ -1,0 +1,48 @@
+/* Synthetic media publication. Resource slots govern admission, not CPU or RAM. */
+insert_resource: MEDIA_ENCODE
+res_type: R
+amount: 1
+
+insert_job: MEDIA_INPUT
+job_type: c
+command: ~{$WORKER}~ input
+profile: ~{$PROFILE}~
+
+insert_job: MEDIA_LOW
+job_type: c
+condition: s(MEDIA_INPUT)
+command: ~{$WORKER}~ low
+profile: ~{$PROFILE}~
+resources: (MEDIA_ENCODE, QUANTITY=1)
+
+insert_job: MEDIA_HIGH
+job_type: c
+condition: s(MEDIA_INPUT)
+command: ~{$WORKER}~ high
+profile: ~{$PROFILE}~
+resources: (MEDIA_ENCODE, QUANTITY=1)
+
+insert_job: MEDIA_POSTER
+job_type: c
+condition: s(MEDIA_INPUT)
+command: ~{$WORKER}~ poster
+profile: ~{$PROFILE}~
+resources: (MEDIA_ENCODE, QUANTITY=1)
+
+insert_job: MEDIA_STAGE
+job_type: c
+condition: s(MEDIA_LOW,0) & s(MEDIA_HIGH,0) & s(MEDIA_POSTER,0)
+command: ~{$WORKER}~ stage
+profile: ~{$PROFILE}~
+
+insert_job: MEDIA_PUBLISH
+job_type: c
+condition: s(MEDIA_STAGE)
+command: ~{$WORKER}~ publish
+profile: ~{$PROFILE}~
+
+insert_job: MEDIA_VERIFY
+job_type: c
+condition: s(MEDIA_PUBLISH)
+command: ~{$WORKER}~ verify
+profile: ~{$PROFILE}~

@@ -1,0 +1,51 @@
+/* One fixed synthetic wave. Every command has one business operation. */
+insert_job: FF_WAVE_B
+job_type: b
+
+insert_job: FF_RESERVE_C
+job_type: c
+box_name: FF_WAVE_B
+command: ~{$WORKER}~ --job FF_RESERVE_C reserve WAVE
+profile: ~{$PROFILE}~
+
+insert_job: FF_CANCEL_EARLY_C
+job_type: c
+box_name: FF_WAVE_B
+condition: s(FF_RESERVE_C)
+command: ~{$WORKER}~ --job FF_CANCEL_EARLY_C cancel CANCEL
+profile: ~{$PROFILE}~
+
+insert_job: FF_PACK_C
+job_type: c
+box_name: FF_WAVE_B
+condition: s(FF_CANCEL_EARLY_C)
+command: ~{$WORKER}~ --job FF_PACK_C pack SPLIT
+profile: ~{$PROFILE}~
+
+insert_job: FF_CANCEL_LATE_C
+job_type: c
+box_name: FF_WAVE_B
+condition: s(FF_PACK_C)
+command: ~{$WORKER}~ --job FF_CANCEL_LATE_C cancel SPLIT
+profile: ~{$PROFILE}~
+
+insert_job: FF_LABEL_1_C
+job_type: c
+box_name: FF_WAVE_B
+condition: s(FF_CANCEL_LATE_C)
+command: ~{$WORKER}~ --job FF_LABEL_1_C label P1
+profile: ~{$PROFILE}~
+
+insert_job: FF_LABEL_2_C
+job_type: c
+box_name: FF_WAVE_B
+condition: s(FF_LABEL_1_C)
+command: ~{$WORKER}~ --job FF_LABEL_2_C label P2
+profile: ~{$PROFILE}~
+
+insert_job: FF_MANIFEST_C
+job_type: c
+box_name: FF_WAVE_B
+condition: s(FF_LABEL_1_C) & s(FF_LABEL_2_C)
+command: ~{$WORKER}~ --job FF_MANIFEST_C manifest WAVE
+profile: ~{$PROFILE}~
