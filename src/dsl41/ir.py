@@ -565,7 +565,7 @@ class CatalogMeta(BaseModel):
     parsed_at: str | None = None  # caller-stamped; None keeps dumps deterministic
 
 
-_BOX_DEPTH_SANITY = 64  # ir-design ss4 "<= depth sanity"; SEM-17: nesting is legal
+_BOX_DEPTH_SANITY = 64  # ir-design ss4: depth at most 64; SEM-17: nesting is legal
 
 
 def _box_tree_problems(jobs: dict[str, JobIR]) -> list[tuple[str, str]]:

@@ -14364,3 +14364,342 @@ relitigate an entry; append a new one.
   frozen contracts, `period-model.md` last.
   Not built: a per-document module map for the trigger. Re-find trigger:
   a document whose last three stamps all carry `outcome: no change`.
+- DL-226 Resume kill of a surviving command group is a verified-leader
+  group kill, and E8's TERMINATED pin is vendor-cited (2026-10-01;
+  runner-design.md ss7 and ss15, runner_adapters.py; the finding
+  spec-review pass 11 listed; the code half ships in the pull request
+  that cites this entry)
+  THE FINDING. Pass 11 (pull request 57) listed one disagreement for a
+  ruling. runner-design ss7's resume ladder says "command group alive,
+  wrapper dead: kill the members that pass the (pid, start-time) check",
+  and DL-41a item (6) says "kill verified survivors of a dead wrapper".
+  `runner_adapters.resolve_spool` waits one settle window plus the grace
+  for a live wrapper's `status.json`; then, with no status, it verifies
+  the group LEADER's (pid, start-time) alone and signals the command pgid
+  SIGTERM, grace, SIGKILL, whether or not the wrapper is still alive.
+  THE VENDOR RULE, taken as the guide. The System Agent cancels a UNIX job
+  by signalling the script's process group: `oscomponent.killsignals`
+  (default 9) lists the signals sent in turn,
+  `oscomponent.killsignals.interval` (default 5 s) the wait between them,
+  `oscomponent.terminate.wait` an optional SIGTERM-then-wait before them,
+  and `oscomponent.terminate.subtree` (default false) the opt-in that
+  assembles the process subtree and kills each process with SIGKILL
+  instead (TechDocs, Workload Automation System Agent 24.1, agent
+  parameters). The default is the group, by pgid, with no per-process
+  identity check. A killed job is TERMINATED (TechDocs, AutoSys 12.0 and
+  24.1.01, System States > Status).
+  THE RULING. The code's rule is the specification's. A command group
+  found alive at resume -- its wrapper dead, or alive and silent past the
+  settle window plus the grace -- is killed as a group: the leader's (pid,
+  start-time) is verified (ss6a duty 3's PID-reuse guard, applied to the
+  pgid through its leader), the pgid gets SIGTERM, then SIGKILL when the
+  leader has died or the grace has passed, whichever is first, and the
+  run is recorded TERMINATED with cause `wrapper lost; killed at resume`.
+  The SIGKILL is unconditional: a member that ignores SIGTERM must not
+  outlive the record, and the vendor's default signal is 9 alone. (The
+  code sent SIGKILL only when the leader outlived the grace; that is the
+  one change.) Per-member verification is not required: a pgid names the
+  group the wrapper created and nothing else, and the vendor's default
+  verifies no member either. A group whose leader is already dead has no
+  identity left to verify and is not signalled; its run is E7's
+  (`exit_status_unobservable`), and a member still running there is the
+  containment limit ss6a already names. A live wrapper past its settle
+  window is not waited for further: its own parent-loss kill is the same
+  signal sequence on the same group, whichever recorder lands first
+  writes the status file resume reads, and a wrapper that records after
+  the kill records a kill that happened. ss7's bullet is restated to this
+  rule. DL-41a is not edited; its "survivors of a dead wrapper" reads
+  under this entry.
+  E8. The Status page lists, among the situations that make a job
+  TERMINATED, "You issue the kill command (UNIX)", beside the KILLJOB
+  event, the job_terminator and the maximum run time. The scheduler's
+  KillSignals page (TechDocs, AutoSys 12.0, Configure a Scheduler) says
+  the default `2,9` "usually" returns TERMINATED and recommends `9` alone
+  when it does not. E8's default, TERMINATED for an external signal
+  death, is therefore vendor-documented for the operator-kill case; ss15's
+  "publicly undocumented" and "the evidence leans toward FAILURE"
+  sentences go. KB 230562's spawn-path FAILED stays what DL-58 called it:
+  spawn-time, not a mid-run kill. Open under the E8 marker: the mechanism
+  question "usually" leaves, recorded intent versus wait status, which the
+  trap-TERM live test (`docs/live-instance-runbook.md`) discriminates; and
+  the signal deaths no operator sent (segfault, OOM kill), which no vendor
+  sentence names. The `# PENDING: E8` marker in `runner_adapters.py`
+  stays for those.
+  E7, corroborated. KB 11501: a job whose PID the agent can no longer
+  find, and whose exit it never recorded, fails with "Lost Control" and a
+  JOBFAILURE alarm. That is E7's FAILURE `exit_status_unobservable`. The
+  same article: a warm-started agent (`oscomponent.noguardianprocess`
+  false, the default) resumes tracking the jobs that were active and
+  reports their real status, which is the reattachment E4 closed on
+  (DL-41a, DL-48). Neither default moves.
+  Not changed: the settle window, the leader check, E7's default.
+- DL-227 protocol-evolution reconciliation: the absent-version rule is
+  restated per row, and three readers get the refusals the matrix
+  promises (2026-10-01; protocol-evolution.md ss1 and ss8; seal.py,
+  runner_journal.py, runner_procid.py; the findings spec-review pass 12
+  listed)
+  THE CLASS RULE. DL-157 ruled the absent `artifact_format_version`
+  column "per class, not per row": strict on an unknown field means
+  strict on a missing version, tolerant on an unknown field means
+  tolerant on a missing version, "and today that is one row: the
+  wrapper-owned spool files". The second half is wider than the readers. The
+  supervisor's evidence files (`receipt.json`, `reply.json`, the run_id
+  index: `runner_supervisor._VERSIONED`, which DL-157 recorded as having
+  "already chosen refuse-absent on its own"), `sources.json` (`period.py`)
+  and `watch.jsonl` (`runner_adapters.read_watch_log`) tolerate an
+  unknown field and REQUIRE the version. Ruling: an
+  absent version is refused on every row but one. The one row is the
+  wrapper-owned spool files, whose reader is the stdlib-only
+  `runner_procid.spool_version_supported` (DL-152), and it passes an
+  absent `version` because the Tier-0 wrapper writes the file before any
+  reader exists to require it. Tolerance of unknown fields decides
+  nothing about the version column. supervisor-protocol ss3's sentence
+  that restates the retired class rule for `spawn.json` and `status.json`
+  reads under this entry (DL-229 item 9). ss1's sentence calling the
+  spool "the one row whose version-shaped discriminator is not
+  `artifact_format_version`" goes: the wrapper input spec, the access map
+  and both socket dialects carry other discriminators too, and the row is
+  named by its reader, not by its field name.
+  THREE REFUSALS. (1) `seal._current_recipe` refuses `catalog_hash_version`
+  1 with its current-recipe message; ss8's table says version 1 is refused
+  by name and names DL-138 on every closed artifact that carries the
+  field, the seal included. The message names both; the recipe reasoning
+  stays. (2) `Seal.from_payload` lets an absent `artifact_format_version`
+  through `canon.check_artifact_version` (which passes absence by design)
+  and fails it at the digest comparison with a digest message. The seal
+  is a closed artifact: it refuses absence by field name before the
+  digest is read, as DL-157's five readers do. (3)
+  `runner_journal.check_record` tests `kind not in CURRENT_RECS` and
+  raises TypeError on an unhashable `rec` (an array, an object); ss1
+  promises "an unknown kind refuses by name". Every value that is not
+  a current kind, strings and non-strings alike, gets that refusal.
+  DOCSTRING. `spool_version_supported` says no document rules a missing
+  version; DL-157 does, and this entry restates it. The docstring cites
+  both.
+  Not changed: `_TOMBSTONE_SCHEMAS`, `check_artifact_version`, every
+  writer's stamp, the canonical forms and digests.
+- DL-228 control-protocol reconciliation: the DISARM audit distinction
+  reads the target's revision, the scalar-string rule covers the fields a
+  verb reads, and a non-string verb or status is refused (2026-10-01;
+  control-protocol.md ss3; runner_control.py; the findings spec-review
+  pass 13 listed)
+  DISARM. control-protocol ss3 (DL-158) says the decision's revisions map
+  "tells a real drop (one moved revision) from the no-op (an empty
+  map)", and DL-158 itself says a no-op "carries an EMPTY revisions
+  map". A decision's revisions map carries every revision the batch
+  moved, and a batch fires the timers due at its instant before it feeds
+  the input (concurrency-model ss4 step 5; `runner_admission`'s
+  `batch.revisions`), so a DISARM admitted at an instant where a timer
+  is due answers with that timer's revisions beside its own, and a
+  no-op's map is not empty. Replay compares the recorded map against the re-derived batch,
+  so the map cannot be filtered per verb without making the record mean
+  one thing for DISARM and another for every other verb. Ruling: the
+  distinction is read on the TARGET. A real drop moves the target job's
+  revision and the map carries it; a no-op moves nothing of the target's
+  and the map has no entry for it. The sentence is restated; the map and
+  the code do not change. DL-158's "EMPTY revisions map" reads under
+  this entry. (The pass's recommendation was to filter the map; this
+  entry overrides it, for the replay reason above.)
+  SCALAR STRINGS. ss3: "Every string a payload carries must be a Unicode
+  scalar string: an unpaired surrogate is refused at the door, because
+  one admitted would leave the estate unsealable." `_event_for` builds
+  the admitted payload from the fields the verb reads and checks that
+  payload; a field the verb does not read is never copied, never
+  journaled, and cannot reach a seal. Ruling: the rule covers the
+  strings a verb reads. The sentence says so. Code unchanged.
+  NON-STRING VERB OR STATUS. ss3's refusal table lists "an unknown verb"
+  among refusals, and `_event_for` answers an unknown status with the
+  same shape. `runner_control` tests `verb in JOB_EVENT_VERBS`
+  (`_event_for`), `verb not in HOST_VERBS` (the host path) and `status
+  not in STATUSES`; an unhashable value (an array, an object) raises
+  TypeError at the first test it meets and is answered as an internal
+  error with no `refused`. Ruling: a verb or status that is not
+  a string is an unknown one and gets the table's refusal. Code fix,
+  with a test per site.
+- DL-229 supervisor-protocol reconciliation: nine items ruled
+  (2026-10-01; supervisor-protocol.md ss3, ss4, ss5; runner_wrapper.py,
+  runner_supervisor.py, runner_adapters.py; the findings spec-review
+  pass 14 listed)
+  (1) RECORD BEFORE REAP, with one exception. ss3 heads `status.json`
+  "written by the wrapper before reaping". When the `spawn.json` write
+  itself fails, the wrapper kills what it started, reaps, then attempts
+  the status write and exits 3 (`runner_wrapper`, the `_IO_FAILURE` arm).
+  Ruling: the order holds on every path where `spawn.json` landed; on the
+  path where it did not, nothing durable names the run yet, the status
+  write is best effort, and E7 covers its absence. ss3 states the
+  exception (the `spawn.json` arm; the other `_IO_FAILURE` arms are not
+  on the reap path). Code unchanged.
+  (2) BYTES THAT ARE NOT UTF-8. ss5 says invalid UTF-8 on the socket
+  answers `malformed_json`, and ss5's evidence list says bytes that are
+  not UTF-8 are unreadable. `json.loads` on bytes detects UTF-16 and
+  UTF-32 and accepts them, so the socket request reader
+  (`runner_supervisor`, the `json.loads(line)` site), the supervisor's
+  spool reader (`json.load` on a binary handle) and the adapter's spool
+  reader (`runner_adapters`, the same) accept a UTF-16 document. Ruling:
+  each decodes UTF-8 strictly before it parses; a decode failure is the
+  refusal the section already names. `canon.decode` already does this
+  for the tombstones. Code fix, with a UTF-16 fixture per reader.
+  (3) A SUPERVISOR RESTART PROVES NOTHING ABOUT WRAPPERS. ss5 says "a
+  supervisor restart implies that all prior wrappers received EOF and
+  recorded". DL-205: a supervisor killed with -9 does not take its
+  wrappers with it; each survives, takes lifeline EOF, kills its group
+  and records in its own time. A restarted supervisor's LIST is empty
+  while that is still happening. Ruling: the sentence, and any sentence
+  that reads the same, is restated to DL-205's rule; the spool stays the
+  cross-restart truth.
+  (4) ABSENCE AUTHORIZES A SPAWN, qualified. ss3 and ss5 say the absence
+  of an index entry authorizes a spawn. The supervisor answers from the
+  directory when no index exists but a `receipt.json` at the computed
+  path names the same run_id, and calls a different run_id a collision
+  (`runner_supervisor`, DL-151). Ruling: absence means no index entry
+  AND no receipt at the path. The sentences say so, citing DL-151.
+  (5) A MISSING STATUS, qualified. ss3 reports every absence of
+  `status.json` as FAILURE `exit_status_unobservable`. DL-226: a command
+  group verified alive at resume is killed and recorded TERMINATED.
+  Ruling: absence is reported as FAILURE once no verified survivor
+  remains; the survivor rule is DL-226's. ss3 says so.
+  (6) SIGNALS THAT SILENCE THE RECORDER. ss4 duty 2 says the wrapper
+  ignores SIGTERM, SIGINT, SIGHUP and SIGQUIT and "only SIGKILL or
+  machine death silences the recorder". Every other default-terminating
+  signal silences it too. Ruling: the wrapper also ignores SIGUSR1 and
+  SIGUSR2, the two an operator or a tool sends by hand; duty 2 then
+  reads: the wrapper ignores SIGTERM, SIGINT, SIGHUP, SIGQUIT, SIGUSR1
+  and SIGUSR2; SIGKILL, SIGABRT, any other signal whose default action
+  terminates and that the wrapper does not ignore (SIGALRM, the fault
+  signals, the platform's others), or machine death silences it, which
+  E7 then reports.
+  Code fix for the two signals, with a test that the wrapper survives
+  each.
+  (7) SIGNATURES. ss5's mutating-verb preamble requires `incarnation` and
+  `token` and says the incarnation is checked first (DL-80); the SPAWN,
+  SIGNAL and SHUTDOWN signature lines list only `token`. Ruling: each
+  signature line names `incarnation`. Wording.
+  (8) THE WRAPPER'S OWN INPUT CHECKS. `spec.get("version") !=
+  SPOOL_VERSION` accepts `true` and `1.0` as 1; `lifeline_fd` is read
+  untyped and `grace_seconds` is coerced with `float()` after the spawn,
+  so a mistyped value fails after `spawn.json` exists. Ruling: ss4 step 6
+  (the spec refusal, exit 2, before anything spawns) also refuses a
+  `version` that is not the integer 1, a `lifeline_fd` that is not an
+  integer, and a `grace_seconds` that is not a non-negative number. Code
+  fix, one test per field.
+  (9) THE ABSENT-VERSION SENTENCE. ss3 says `spawn.json` and
+  `status.json` pass an absent `version` because "a row tolerant of an
+  unknown field is tolerant of a missing version". DL-227 retires that
+  class rule; the row passes absence because it is the wrapper-owned
+  spool row, and the sentence says so, citing DL-227.
+  Not changed: the spool file shapes, the tombstone schemas, the
+  idempotency protocol, E7's default.
+- DL-230 The documentation audit lands: ops-model.md is folded and
+  deleted, agent-harness-review.md is deleted (2026-10-01; docs/,
+  scripts/arch_check.py, the spec-review skill)
+  OPS-MODEL. Its mechanism is frozen in period-model (DL-114) and built;
+  DL-189 removed its argument sections; what remains is a plan document
+  whose "today" statements predate what shipped, listed in its own
+  preamble. Ruling: fold what is still live and delete the file. The
+  scenario catalogue (ss5, rows A1 to F6) moves to deployment-runbook as
+  an operator section, restated against the verbs that exist. Run
+  history (ss6a) and the closed book (ss6) are built (DL-113, DL-136,
+  DL-141): their present-state sentences move to runner-design's
+  `runner_history.py` paragraph and period-model's ss12a, where the
+  mechanism lives; their argument goes. Retention (ss7) is period-model
+  ss12a (DL-135, DL-144); nothing moves. Authority (ss8) is
+  access-model (DL-146 to DL-148); nothing moves. The open questions of
+  ss11 that are still open move to runner-design ss15 under their E
+  numbers, which `docs/citation-index.md` binds to the runner series;
+  closed ones are listed there as closed, one line each. Follower mode,
+  `standby check` (ss4) and the multi-executor rig (ss4a) are not built:
+  their gist is recorded here and nowhere else. Follower mode: a second
+  engine on the same estate that replays the leader's WAL, holds no
+  lease, admits nothing, and answers read-only queries; `standby check`
+  asks it whether it could take the lease now. The rig: the same
+  semantics at three scales (one host, one host with several executors,
+  several hosts), chosen by the kernel each sits on, with two mutexes
+  (the lease and the anchor) and not one. Both wait for the relay
+  concurrency-model ss7 names.
+  AGENT-HARNESS-REVIEW. A dated review record (2026-09-07 and 08) whose
+  decisions are in CLAUDE.md, the skills and agent-workflow.md. Ruling:
+  deleted. agent-workflow.md's one citation points at this entry instead.
+  CONSEQUENCES. `scripts/arch_check.py`'s `SPEC_EXCLUDED` loses the
+  deleted name; the spec-review skill's scope line reads "every
+  `docs/*.md` except `decision-log.md` and `citation-index.md`";
+  citation-index's shadow-label note for ops-model ss5 goes, its CM row
+  cites this entry for the draft CM-24 to CM-38 set, and its E row cites
+  runner-design ss15 for E16 to E23; period-model ss0 and ss16 and the
+  status line cite deployment-runbook or this entry where they cited
+  ops-model. DL-225's scope sentence reads under this
+  entry.
+- DL-231 access-model.md is frozen (2026-10-01; access-model.md status
+  line; CLAUDE.md; the spec-review skill)
+  DL-146 said the document freezes when its ss12 obligations are green.
+  They are: the eleven obligations are held by the `test_access_*` tests
+  of `tests/test_access.py`, `runner_access.py` sits under the 100%
+  branch-coverage gate, and
+  spec-review pass 8 (pull request 54) reconciled every tier, resolution
+  step, file predicate, credential rule, gate position, verb-table row,
+  receipt kind and durability rule with the code. Ruling: frozen, under
+  the rule the other contracts carry: each change to a frozen item
+  requires an entry here. The status line says so; CLAUDE.md's "Runner
+  changes must preserve" list and the spec-review skill's frozen list
+  name it. The open seam stays open: the web session's authentication
+  half (ss9) is not frozen by this entry, and the status line says so.
+- DL-232 concurrency-model reconciliation: a strictly earlier timer goes
+  before a later command, one KILL per run per batch, and a held SPAWN
+  applies only to a job still STARTING or RUNNING (2026-10-01;
+  runner.py, runner_effects.py, runner_admission.py; the two gaps
+  spec-review pass 15 listed, located)
+  THE TIMER ORDER. ss0 and ss4's worked example: a deadline due strictly
+  before a command fires as its own input, bumps the revision, and the
+  command composed against the old revision is rejected on arrival. In
+  the real-clock domain the loop can reach its next decision after the
+  deadline's due instant; `_next_work` then takes a queued command
+  stamped between the due instant and now (`eff_due = max(raw_due,
+  now)`, `head_at <= eff_due`), and the command's batch fires the earlier
+  timer first (`InputBatch`, timers due at or before the batch instant).
+  Revisions move at commit, so the gate reads the pre-batch revision and
+  the stale command is applied: an `ON_HOLD` or a `FORCE_STARTJOB`
+  composed against RUNNING lands on a job `term_run_time` ended thirty
+  seconds earlier. The existing tests, all on the virtual clock, do not
+  reach it. Ruling: a timer whose due instant is strictly before the
+  queue head goes first, as its own input, stamped at the later of its
+  due instant and the last admitted instant -- monotone, so the batch's
+  backwards-time check holds. The virtual frontier rule is untouched.
+  `precondition_reason`'s docstring, which says the in-batch kill bumps
+  the job and refuses the command, is corrected: the bump is at commit.
+  Test: a stepped non-virtual clock that reaches the decision late, one
+  case per verb above, plus the bisimulation pins unchanged.
+  ONE KILL PER RUN. `plan_effects` plans a KILL for every terminal STATUS
+  of a live run in the batch, with an id derived from `(index, kind,
+  job, run_number)` and content carrying the transition's instant. Two
+  terminal transitions of one live run at different instants in one
+  batch -- a deadline firing inside a `CHANGE_STATUS SUCCESS` batch, the
+  interleaving above -- produce two KILLs under one id with different
+  content, and `Outbox.record` raises "recorded twice with different
+  content" after the decision is journaled; replay re-records effects
+  through the same path, so resume meets the same error. Ruling:
+  `plan_effects` plans at most one effect per `(kind, job, run_number)`
+  per call and keeps the first, the run's actual kill. Test: the
+  interleaving, through the loop and through replay.
+  THE HELD SPAWN. ss5: "SPAWN applies only if exactly `(job, run_number,
+  run_id)` is still desired running and not terminal". `superseded_reason`
+  retires a held SPAWN on a terminal status or a changed `run_number`
+  only; INACTIVE passes. A `CHANGE_STATUS INACTIVE` while the SPAWN is
+  held (a drained host, a routing hold) leaves the row INACTIVE with its
+  run number, releases the reservations, and plans no KILL; the spawn
+  then launches a run that holds no capacity, and its exit moves the job
+  INACTIVE to SUCCESS and starts the dependents. Ruling: a held SPAWN
+  applies only while the row is STARTING or RUNNING at the effect's
+  `run_number`; any other status retires it, naming the status. A retired
+  effect stays retired: an injected STATUS back to STARTING or RUNNING
+  at the same run number launches nothing, which is the ghost-run gate's
+  parity. Tests: the unit arm and a wiring case mirroring the TERMINATED
+  one, with `CHANGE_STATUS INACTIVE`.
+  Not ruled, recorded as open: whether `CHANGE_STATUS INACTIVE` on a run
+  already launched should plan a KILL (runner-design ss4 parity; the
+  DL-120 comment in `oracle.py` on an injected STATUS INACTIVE on a live
+  holder), and whether `stale_reason`
+  should refuse a completion whose row is neither STARTING nor RUNNING.
+  Both change CHANGE_STATUS parity and wait for an estate that needs
+  them.
+  Not changed: `Event` stays mutable and `timers()` returns live
+  references; no writer mutates a timer's payload, so no rule is needed
+  until one appears.

@@ -50,7 +50,8 @@ Read a small contract whole when that gives needed context at lower cost.
 
 Runner changes must preserve `docs/period-model.md`,
 `docs/concurrency-model.md`, `docs/control-protocol.md`,
-`docs/supervisor-protocol.md`, and `docs/protocol-evolution.md`.
+`docs/supervisor-protocol.md`, `docs/protocol-evolution.md`, and
+`docs/access-model.md`.
 Read the affected contracts before changing their behavior.
 All ten compiler phases in DL-03 are implemented; their order remains normative.
 

@@ -1,10 +1,11 @@
 # Access model — three tiers at the perimeter
 
-Status: draft (DL-146; amended by DL-147, DL-148, DL-149, DL-150, DL-151,
-DL-152 and DL-158). It is the design of record for `runner_access.py`, the
-control-plane gate and the served web TUI. It freezes when the §12
-obligations are green (DL-146); once frozen, each change to a frozen item
-requires a decision-log entry, the same rule as `docs/control-protocol.md`.
+Status: **frozen (DL-231; design DL-146, amended by DL-147, DL-148, DL-149,
+DL-150, DL-151, DL-152 and DL-158).** It is the design of record for
+`runner_access.py`, the control-plane gate and the served web TUI. Each
+change to a frozen item requires a decision-log entry, the same rule as
+`docs/control-protocol.md`. The web session's authentication half (§9) is
+a named seam, not a frozen item.
 This document retires the RBAC non-goal of `docs/runner-design.md` §1 and
 §12 and closes the authorization half of control-protocol §7 gap 2. The
 authentication half closes only for local peers; the web session keeps a

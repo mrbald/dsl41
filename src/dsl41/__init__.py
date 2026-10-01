@@ -8,7 +8,7 @@ six sibling modules since DL-74, docs/runner-design.md ss14):
   ir         - IR-F Pydantic models + AST->IR-F lowering (docs/ir-design.md ss3-4)
   autocal    - extended-calendar rule interpreter: CalendarIR/CycleIR carry ->
                day sets per the SEM-36..39 doc-freeze (DL-57, DL-60)
-  lint       - Violation model + rules L001..L019 (docs/ir-design.md ss9)
+  lint       - Violation model + rules L001..L022 (docs/ir-design.md ss9)
   derive     - IR-F -> IR-G analysis passes (docs/ir-design.md ss5)
   viz        - IR-G -> Markdown report of per-workflow Mermaid charts (DL-35)
   viz_html   - the same report content as one offline HTML page, and the
