@@ -339,9 +339,13 @@ Derivation passes (pure functions IR-F → IR-G, ordered):
 ## 6. Canonical form & equivalence (validator tier a/b)
 
 Canonicalization `C(IR-F)`:
-- Expand all atom abbreviations. Normalize the lookback: the raw token is deleted, and an
-  explicit indefinite (`9999`) becomes no qualifier at all, so only `window` and `zero`
-  survive.
+- Expand all atom abbreviations. Normalize the lookback: the raw token is deleted, but an
+  explicit indefinite (`9999`) stays a DISTINCT qualifier from a bare atom with no lookback at
+  all (DL-243) -- the open Q10 pin reads the two differently against an iced predecessor (a
+  lookback atom of any kind, 9999 included, keeps the blanket-true reading; a bare atom follows
+  the narrower vendor ON_ICE table), so collapsing them would hide that divergence from tier a.
+  `s()`/`d()`/`n()` atoms stay condition-equivalent with and without the qualifier otherwise
+  (tier b, `conds_equivalent`): only the iced-predecessor state tells the two apart.
 - Erase `Paren`. Flatten nested And/And, Or/Or. Sort operand lists by a stable structural key,
   drop duplicate operands, and collapse a one-operand And/Or to that operand.
 - Normalize schedule lists (sorted times, dedup). The trigger lists sort on their own, with
@@ -473,7 +477,7 @@ SEM/M row:
 | L017 | warn | dangling machine reference, only when the set defines at least one machine (job-only slices stay quiet; comma lists checked per name; DL-25) | hygiene |
 | L018 | warn | dangling calendar reference: run_calendar/exclude_calendar, and holcal/cyccal inside extended-calendar definitions, name no definition in the set; only when the set carries at least one calendar/cycle (DL-36) | M24 |
 | L019 | warn | date_conditions + `condition` composition: arm-and-wait start semantics (Q3, DL-58) have no UC-side arm concept; a per-estate migration-attention item | SEM-32/M02 |
-| L020 | warn | iced consumer: EVERY immediate predecessor translates to a UC Skip (ON_ICE under M19, ON_NOEXEC under M21). AutoSys runs the consumer, because an iced producer satisfies its atoms, while UC cascades the skip. One live predecessor converges; box-override edges and global gates are not start gates and do not count (DL-151) | M19/UCS-02 |
+| L020 | warn | iced consumer, two directions (DL-151, split by DL-243). (1) EVERY immediate predecessor translates to a UC Skip (ON_ICE under M19, ON_NOEXEC under M21) and each is read as ice-satisfied (an ordinary success/done/notrunning atom, or any lookback-qualified atom): AutoSys runs the consumer while UC cascades the skip. One live predecessor converges. (2) at least one iced predecessor is gated only by an ordinary failure/terminated/exitcode atom, which reads false while iced: AutoSys can never run the consumer through it, while UC's skip cascade may still resolve the dependency and run it. Box-override edges and global gates are not start gates and do not count either way | M19/UCS-02 |
 | L021 | warn | condition-only multi-fire: an unscheduled, unboxed consumer with at least two wake sources and at least one unqualified latching atom can fire more than once per cycle, up to once per source when every latch is unqualified: the `s(A)&s(B)` double fire, and a bare `n()` guard doubling as a trigger. Wake sources are start-gate edges (undefined local producers dropped) and the consumer's own bare `n()` targets (`bare_notrunning`, self included). Scheduled consumers (SEM-32 arm) and box members (SEM-10 once-per-execution) are exempt; lookback-qualified atoms and `n()` atoms (local or cross-instance) wake but never latch; global gates are outside the rule both ways, because flag staleness is reset discipline the catalog cannot see (DL-180) | SEM-01/DL-13 |
 | L022 | info | stranded-on-failure consumer, L021's counterpart: a condition-only, unboxed consumer misses at least one cycle when a producer it cannot do without fails and no start gate in the estate reads that failure; release waits for that producer's next SUCCESS (its own next tick, a rerun, or an operator; indefinite only for an unscheduled producer). "Cannot do without" is tier-b: the producer's status pinned to FAILURE, the condition asked whether any state still satisfies it, so OR escapes and `f()`/`d()`/`e()` gates stay quiet. "Reads that failure" is a live consumer's start-gate `f`/`d`/`t`/`e` edge from the producer or an ancestor box (SEM-11 default fold; overrides can defeat it, an accepted quiet-direction approximation; box-override edges classify a fold and start nothing, so they do not count). Alarms cannot exempt: observability, not control flow (DL-32); SEM-14 terminators kill, they release nothing. Scheduled consumers (L019's arm case), box members (the hung-box family), skip-translated jobs on either side, and cross-instance producers are out of scope. Info: an inventory of where control flow ends, not a defect list (DL-181) | SEM-01/SEM-11 |
 

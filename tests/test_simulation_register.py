@@ -1153,12 +1153,12 @@ def test_bounded_rows_state_their_bound() -> None:
             assert row.bound in row.effect, f"{row.id}: effect does not mention {row.bound!r}"
 
 
-LABEL_RE = re.compile(r"^(Q\d[a-z]?|Qr\d|E\d{1,2})$")
+LABEL_RE = re.compile(r"^(Q\d{1,2}[a-z]?|Qr\d|E\d{1,2})$")
 #: `docs/citation-index.md`'s marker shape. U-labels are excluded from the
 #: counterpart check below: U1/U3b are UC-BACKEND markers (`backend_uc.py`,
 #: `derive.py`), and the UC compiler is not the simulation this register
 #: covers -- its refusals are the migration report's, not a runtime default.
-MARKER_RE = re.compile(r"PENDING: (Q\d[a-z]?|Qr\d|U\d[a-z]?|E\d{1,2})")
+MARKER_RE = re.compile(r"PENDING: (Q\d{1,2}[a-z]?|Qr\d|U\d[a-z]?|E\d{1,2})")
 #: Labels the counterpart check skips: the U-series (above) and `Q8x`, which
 #: the citation index defines as "the Q8 family" -- `autocal.py`'s module
 #: docstring cites it to describe the convention, not to pin one default.

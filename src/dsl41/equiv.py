@@ -13,8 +13,10 @@ Decisions pinned here (each with a test; recorded as DL-14 + amendment):
   ss6 sketch says "truth-table over the atom alphabet", but independent
   atoms cannot detect L006's own flagship contradiction s(x)&f(x). Each
   referenced job scope contributes (status in NEVER_RAN/RUNNING/SUCCESS/
-  FAILURE/TERMINATED) x (iced flag -- SEM-05 makes every atom true for an
-  iced non-running job, oracle parity) x (age bucket cut by the referenced
+  FAILURE/TERMINATED) x (iced flag -- a LOOKBACK-qualified atom on an iced
+  non-running job is true regardless of kind, SEM-05; an ORDINARY atom
+  (no lookback) instead follows SEM-20's narrower vendor table, DL-243;
+  oracle parity either way) x (age bucket cut by the referenced
   lookback windows) x (zero-freshness flag when zero-lookbacks appear --
   "the Q2a since-last-end anchor test passes", DL-54) x (last exit code
   over comparison cutpoints, None == never completed); each referenced
@@ -130,8 +132,18 @@ def _canon(cond: Cond) -> Cond:
 
 
 def _canon_lookback(lookback: Lookback | None) -> Lookback | None:
-    if lookback is None or lookback.kind == "indefinite":
-        return None  # explicit 9999 == no qualifier (SEM-04)
+    # DL-243 (R2): an explicit `9999` (kind="indefinite") and a bare atom
+    # (lookback is None) used to canonicalize identically ("explicit 9999
+    # == no qualifier", SEM-04) because `_lookback_ok`/`_eval_cond` read
+    # them the same way everywhere else. The ON_ICE split changed that: an
+    # atom WITH a lookback qualifier -- indefinite included -- keeps the
+    # blanket-true pin on an iced predecessor (Q10), while a bare atom
+    # follows the narrower vendor table. Collapsing the two here made
+    # f(x)/f(x,9999) hash identically and let the CLI's tier-a short-circuit
+    # (cli_compile.py) report two behaviorally different catalogs
+    # equivalent without ever reaching tier c. Only `raw` is dropped now.
+    if lookback is None:
+        return None
     return Lookback(kind=lookback.kind, minutes=lookback.minutes, raw="")
 
 
@@ -511,7 +523,9 @@ class _State(BaseModel):
     index, zero-freshness flag, last exit code) + global values."""
 
     job_status: dict[str, str]
-    job_iced: dict[str, bool]  # SEM-05/SEM-20: iced satisfies every atom
+    job_iced: dict[str, bool]  # SEM-05/SEM-20: iced satisfies a lookback atom
+    # of any kind, or an ordinary success/done/notrunning atom; an ordinary
+    # failure/terminated/exitcode atom reads false there instead (DL-243)
     job_age_bucket: dict[str, int]  # index into windows; len(windows) == beyond all
     job_zero_fresh: dict[str, bool]  # zero-lookback anchor test passes (Q2, DL-54)
     job_exit: dict[str, int | None]
@@ -579,9 +593,18 @@ def _eval_cond(cond: Cond, state: _State, alphabet: _Alphabet) -> bool:
     key = _job_key(cond)
     status = state.job_status.get(key, "NEVER_RAN")
     if state.job_iced.get(key, False) and status != "RUNNING":
-        # SEM-05/SEM-20 oracle parity: an iced job satisfies EVERY atom kind,
-        # lookback ignored; ice on a running job takes effect at completion.
-        return True
+        # SEM-05/SEM-20 oracle parity (DL-243): ice on a running job takes
+        # effect at completion (handled by the status != RUNNING guard
+        # above). For a non-live iced job, a LOOKBACK atom (any kind, zero
+        # included) still satisfies every atom kind, lookback ignored
+        # (SEM-05's blanket pin). An ORDINARY atom (no lookback qualifier
+        # at all) instead follows SEM-20's narrower vendor truth table:
+        # success/done/notrunning true, failure/terminated/exitcode false.
+        if cond.lookback is not None:
+            return True
+        if isinstance(cond, ExitCodeAtom):
+            return False
+        return cond.status in ("SUCCESS", "DONE", "NOTRUNNING")
     if isinstance(cond, ExitCodeAtom):
         code = state.job_exit.get(key)
         if code is None or not _lookback_holds(cond.lookback, key, state, alphabet):

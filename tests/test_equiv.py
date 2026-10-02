@@ -131,11 +131,34 @@ def test_lookback_raw_dropped_two_spellings_of_the_same_60_minute_window_are_equ
     assert canonical_cond(dotted) == canonical_cond(colon)
 
 
-def test_indefinite_9999_lookback_folds_to_no_qualifier_at_all() -> None:
-    """Explicit s(x, 9999) (SEM-04 legacy indefinite) canonicalizes to the
-    same form as a bare s(x): _canon_lookback maps kind=="indefinite" to
-    None, same as an absent lookback token."""
-    assert canonical_cond(parse_condition("s(x, 9999)")) == canonical_cond(parse_condition("s(x)"))
+def test_indefinite_9999_lookback_stays_a_distinct_qualifier() -> None:
+    """DL-243 REWRITE: s(x, 9999) (SEM-04 legacy indefinite) no longer
+    canonicalizes to the same form as a bare s(x) -- the two are NOT
+    behaviorally interchangeable under the ON_ICE split (Q10): only the
+    qualified atom keeps the blanket-true pin on an iced predecessor, the
+    bare one follows the narrower vendor table. Collapsing them in
+    `_canon_lookback` used to make f(x) and f(x,9999) hash identically."""
+    nine = parse_condition("f(x, 9999)")
+    bare = parse_condition("f(x)")
+    assert canonical_cond(nine) != canonical_cond(bare)
+
+
+def test_indefinite_9999_lookback_distinguishes_catalogs_under_ice() -> None:
+    """DL-243: the two catalogs below differ only in f(x) vs f(x,9999)
+    -- not equivalent (Q10's ice split), and no longer hash identically, so
+    the CLI's tier-a short-circuit (cli_compile.py) cannot claim equivalence
+    without reaching tier c."""
+    template = (
+        "insert_job: x\njob_type: c\ncommand: a\nmachine: m1\n\n"
+        "insert_job: cons\njob_type: c\ncommand: b\nmachine: m1\ncondition: {}\n"
+    )
+    bare = lower_source(template.format("f(x)"))
+    qualified = lower_source(template.format("f(x, 9999)"))
+    assert catalog_hash(bare) != catalog_hash(qualified)
+    at = datetime(2026, 1, 1, 8, 0)
+    script = [Event(at=at, kind="ON_ICE", payload={"job": "x"})]
+    result = equivalent_tier_c(bare, qualified, [script])
+    assert not result.equivalent  # f(x) ordinary-false, f(x,9999) lookback-true (Q10)
 
 
 def test_zero_lookback_survives_canonicalization_as_a_distinct_kind() -> None:
@@ -517,9 +540,14 @@ def test_window_nesting_the_wider_window_absorbs_the_narrower_one_in_an_or() -> 
 
 
 def test_success_vs_failure_diverges_with_a_counterexample_naming_the_job() -> None:
+    """DL-243 REWRITE: the enumerator now finds a divergent witness earlier
+    than plain SUCCESS -- a non-live iced NEVER_RAN job, where the vendor's
+    ON_ICE table reads s() true and f() false for these ordinary atoms
+    (the pre-DL-243 blanket-true pin made both true there, so this state
+    used to agree and the search continued on to SUCCESS)."""
     result = conds_equivalent(parse_condition("s(x)"), parse_condition("f(x)"))
     assert result.verdict == "divergent"
-    assert result.counterexample == {"x": "SUCCESS"}
+    assert result.counterexample == {"x": "NEVER_RAN,ON_ICE"}
 
 
 def test_distributivity_and_over_or() -> None:
@@ -1034,23 +1062,35 @@ def test_string_global_ordering_tier_c_parity() -> None:
 
 
 def test_iced_state_distinguishes_contradictions_on_different_jobs() -> None:
-    """Without the ice dimension, s(x)&f(x) and s(y)&f(y)
-    were both 'unsatisfiable' hence equivalent -- but icing x (SEM-05 makes
-    every atom true) starts one consumer and not the other."""
-    result = conds_equivalent(parse_condition("s(x) & f(x)"), parse_condition("s(y) & f(y)"))
+    """DL-243 REWRITE: an ORDINARY atom pair (no lookback) no longer
+    distinguishes here -- the vendor's ON_ICE table reads an iced
+    predecessor's f() as false, so s(x)&f(x) stays unsatisfiable whether or
+    not x is iced, same as s(y)&f(y); the two are genuinely equivalent now (see
+    test_iced_contradiction_matches_oracle_end_to_end's own rewrite). A
+    LOOKBACK-qualified pair keeps the old blanket-true-when-iced pin
+    (SEM-05, Q10) and still demonstrates the ice dimension: without it,
+    s(x,0)&f(x,0) and s(y,0)&f(y,0) were both 'unsatisfiable' hence
+    equivalent -- but icing x makes every lookback atom true, starting one
+    consumer and not the other."""
+    result = conds_equivalent(
+        parse_condition("s(x, 0) & f(x, 0)"), parse_condition("s(y, 0) & f(y, 0)")
+    )
     assert result.verdict == "divergent"
     assert result.counterexample is not None
     assert any("ON_ICE" in v for v in result.counterexample.values())
 
 
 def test_iced_contradiction_matches_oracle_end_to_end() -> None:
+    """DL-243 REWRITE: the lookback-qualified pair (not the ordinary pair
+    the old version used) is the one that still distinguishes under ice --
+    see the companion tier-b test's docstring."""
     template = (
         "insert_job: x\njob_type: c\ncommand: a\nmachine: m1\n\n"
         "insert_job: y\njob_type: c\ncommand: b\nmachine: m1\n\n"
         "insert_job: consumer\njob_type: c\ncommand: c\nmachine: m1\ncondition: {}\n"
     )
-    a = lower_source(template.format("s(x) & f(x)"))
-    b = lower_source(template.format("s(y) & f(y)"))
+    a = lower_source(template.format("s(x, 0) & f(x, 0)"))
+    b = lower_source(template.format("s(y, 0) & f(y, 0)"))
     at = datetime(2026, 1, 1, 8, 0)
     script = [
         Event(at=at, kind="ON_ICE", payload={"job": "x"}),

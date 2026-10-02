@@ -517,7 +517,7 @@ fails the suite.
 | id | class | cite | label | marker | protocol | bound | detector | effect |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | event:DISARM | supported | ir-design ss7 | - |  |  |  | generic | drops a latched tick; no status moves, nothing wakes |
-| event:FORCE_STARTJOB | supported | ir-design ss7 | - |  |  |  | generic | starts a job past its condition gate |
+| event:FORCE_STARTJOB | supported | ir-design ss7 | - |  |  |  | generic | starts a job past its condition gate; on a non-live ON_ICE or ON_HOLD job it clears that flag first, like an OFF_ICE/OFF_HOLD, then starts it (DL-243) |
 | event:KILLJOB | supported | ir-design ss7 | - |  |  |  | generic | terminates a running job, or dequeues and terminates a queued one |
 | event:KILLJOB#queued | provisional | DL-50, oracle.Oracle._dispatch | Qr5 |  |  |  | none | killing a queued job dequeues it, consumes its arm and TERMINATEs it |
 | event:MUST_COMPLETE_ALARM | supported | SEM-34 | - |  |  |  | generic | emitted when a must_complete deadline passes with the run still live |
@@ -526,8 +526,9 @@ fails the suite.
 | event:OFF_ICE | supported | ir-design ss7 | - |  |  |  | generic | un-ices a job; conditions are deliberately NOT re-evaluated |
 | event:OFF_NOEXEC | supported | ir-design ss7 | - |  |  |  | generic | clears the noexec flag |
 | event:ON_HOLD | supported | ir-design ss7 | - |  |  |  | generic | holds a job: it stays startable but does not start |
-| event:ON_ICE | supported | ir-design ss7 | - |  |  |  | generic | ices a job: downstream conditions read it as satisfied and it never runs |
+| event:ON_ICE | supported | ir-design ss7 | - |  |  |  | generic | ices a job: an ordinary downstream atom follows the vendor ON_ICE table (s/d/n true, f/t/exitcode false), a lookback-qualified atom reads satisfied regardless, and it never runs on a plain start (DL-243) |
 | event:ON_ICE#armed | provisional | SEM-20, oracle.Oracle._handle_oob | Q3d | yes | Q3d |  | none | a pre-existing arm survives the ice round trip untouched |
+| event:ON_ICE#lookback atom | provisional | SEM-20, DL-243, oracle.Oracle._atom_true | Q10 | yes |  |  | none | a LOOKBACK-qualified atom on a non-live iced job keeps the pre-DL-243 blanket-true reading; an ORDINARY atom (no lookback) follows the narrower vendor table instead -- the vendor text does not address the lookback case, so this corner stays pinned rather than cited |
 | event:ON_ICE#queued | provisional | DL-50, oracle.Oracle._handle_oob | Qr5 |  |  |  | none | icing a queued job dequeues it and settles it INACTIVE now, rather than leaving it in QUE_WAIT |
 | event:ON_ICE#running | provisional | SEM-05, SEM-20, DL-13, oracle.Oracle._atom_true | - |  |  |  | none | icing a STARTING or RUNNING job does NOT make its atoms read as satisfied: the in-flight run is real, so conditions keep reading the live status until it completes (DL-13); no label was opened for the exception |
 | event:ON_NOEXEC | supported | ir-design ss7 | - |  |  |  | generic | marks a job as not executing; it completes without running |
@@ -631,7 +632,7 @@ fails the suite.
 | trace_marker:OFF_ICE | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | the ice is cleared; conditions are deliberately NOT re-evaluated |
 | trace_marker:OFF_NOEXEC | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | the noexec flag is cleared |
 | trace_marker:ON_HOLD | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | the job is held: it stays startable but no start goes through |
-| trace_marker:ON_ICE | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | the job is iced: downstream conditions read it as satisfied and it never runs |
+| trace_marker:ON_ICE | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | the job is iced: an ordinary downstream atom follows the vendor ON_ICE table (s/d/n true, f/t/exitcode false), a lookback-qualified atom reads satisfied regardless, and it never runs on a plain start (DL-243) |
 | trace_marker:ON_NOEXEC | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | the job is marked not-executing; it completes without running |
 | trace_marker:RUN_WINDOW_DEFER | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | a start outside the run_window, closer to the next opening, was queued for it |
 | trace_marker:RUN_WINDOW_SKIP | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | a start outside the run_window, closer to the previous close, was dropped |

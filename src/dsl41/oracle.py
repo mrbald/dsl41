@@ -78,26 +78,50 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
   and the atom is satisfied -- CA support: "working as designed. When a new
   job is inserted it has no initial/previous end time", with the epoch-0
   effect observed exactly as modeled.
-- ON_ICE (SEM-05/SEM-20): every status/exitcode atom whose job is currently
-  ON_ICE evaluates TRUE -- f()/t()/e() included, per SEM-05's blanket
-  wording over SEM-20's "as though it succeeded" (DL-13, Q6-adjacent; the
-  lookback-ignored half is cited since DL-58: KB 438836, "the system
-  ignores the look-back condition") --
-  with lookback ignored; the iced job itself never starts (FORCE included);
-  OFF_ICE does not re-evaluate (conditions must REOCCUR). Ice on a RUNNING
-  job takes effect at completion: atoms read the real in-flight status
-  until then ([?] unverified corner, documented).
+- ON_ICE (SEM-05/SEM-20, DL-243): split by whether the atom carries a
+  lookback qualifier. An atom WITH one -- any kind, the zero form included
+  -- keeps the blanket pin: every status/exitcode atom on an iced
+  predecessor evaluates TRUE, f()/t()/e() included, lookback ignored
+  (DL-13, Q6-adjacent; cited since DL-58: KB 438836, "the system ignores
+  the look-back condition"). An ORDINARY atom (`atom.lookback is None`, no
+  qualifier at all) follows the vendor's own ON_ICE truth table instead
+  (Start Conditions, AutoSys 24.2, ON_ICE downstream-conditions row):
+  success/done/notrunning TRUE, failure/terminated/exitcode FALSE -- a
+  narrower reading than the blanket-true pin, and the two tables disagree
+  on f()/t()/exitcode. The lookback-atom corner stays an open pin (Q10,
+  section 9), not a citation: the vendor text does not separately address
+  a lookback-qualified atom against an iced job. Ice on a RUNNING job takes
+  effect at completion either way: atoms read the real in-flight status
+  until then ([?] unverified corner, documented). The iced job itself
+  never starts on a plain STARTJOB; FORCE_STARTJOB on a non-live iced job
+  now clears the flag first (SEM-23 below) -- DL-13's "FORCE included"
+  reading no longer holds for that case. OFF_ICE does not re-evaluate
+  (conditions must REOCCUR).
 - ON_HOLD (SEM-21): the held job does not start; nothing else changes;
   OFF_HOLD immediately re-evaluates that job's start (missed runs collapse
   to at most one).
-- ON_NOEXEC (SEM-22): when the job would start, it bypasses to SUCCESS
-  (STARTING/RUNNING skipped) and downstream runs normally. A BOX does not
-  bypass: it goes RUNNING and its members bypass as their conditions are
-  met, box level by box level, so a member box walks its own members too.
-  A member bypasses on its own flag or on any containing box's. The bypass
-  joins the box's ran set like a real start, so the SEM-11 fold waits for
-  it and the once-per-box-run gate holds; it also counts as the tick's run
-  (the Q3/DL-54 reading), so no MUST_START_ALARM follows a bypass.
+- ON_NOEXEC (SEM-22, DL-243): when the job would start, it bypasses to
+  SUCCESS (STARTING/RUNNING skipped) and downstream runs normally. A BOX
+  does not bypass: it goes RUNNING and its members bypass as their
+  conditions are met, box level by box level, so a member box walks its
+  own members too. A member bypasses on its own flag or on any containing
+  box's. The bypass joins the box's ran set like a real start, so the
+  SEM-11 fold waits for it and the once-per-box-run gate holds; it also
+  counts as the tick's run (the Q3/DL-54 reading), so no MUST_START_ALARM
+  follows a bypass. A FAILURE or TERMINATED (non-live, non-BOX) job that is
+  put ON_NOEXEC is moved to INACTIVE through DL-242's operator-INACTIVE
+  path, exit code cleared (Job States page: "the effect is the same as
+  sending the CHANGE_STATUS event to INACTIVE for the job"). This is an
+  EVENT-TIME transition, not a read-time projection: the stored row
+  changes, a RUNNING box member resolves the same way an operator's
+  CHANGE_STATUS INACTIVE would, and the transition wakes referencers
+  normally -- f()/t()/d()/exitcode now read false, n() reads true, s()
+  stays false, same as any other INACTIVE job. SUCCESS is the documented
+  exception and is left alone. A job still live (STARTING/RUNNING/QUE_WAIT)
+  when ON_NOEXEC arrives is untouched by this rule -- a real failure that
+  follows it later is not retroactively hidden. A BOX target also keeps
+  the flag-only behavior: descendant propagation of this rule is not
+  modeled.
 - initial_status (SEM-24, DL-18): definition-time ON_HOLD/ON_ICE/ON_NOEXEC
   seeds the corresponding flag before the first event; no trace entry
   (definition state, not a transition). INACTIVE is the default anyway.
@@ -125,9 +149,17 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
   recurse; the ACTIVATED label is unmodeled -- a waiting member reads
   INACTIVE), SEM-18 (an injected INACTIVE on a box cascades to every job it
   contains, DL-242).
-- FORCE_STARTJOB (SEM-23): overrides false conditions, ON_HOLD, and the
-  box-RUNNING gate ("regardless of conditions"), but never ON_ICE
-  (SEM-20's "removed from all logic" wins; DL-13). Forced runs emit normal
+- FORCE_STARTJOB (SEM-23, DL-243): overrides false conditions, ON_HOLD, and
+  the box-RUNNING gate ("regardless of conditions"). A non-live job that is
+  ON_ICE or ON_HOLD is a non-executable state the force clears first
+  (sendevent Start Jobs page: "it returns to an executable state, runs,
+  and does not revert to the previous ... state"), recorded the same way
+  as an OFF_ICE/OFF_HOLD sendevent with a cause naming FORCE_STARTJOB; the
+  flag stays cleared even if a later gate (`run_window`) still refuses the
+  start, because the event's own effect is the return to an executable
+  state. A job that is already STARTING/RUNNING/QUE_WAIT is still refused
+  (concurrent runs of one job are unsupported). ON_NOEXEC is not named in
+  that vendor sentence and is untouched by FORCE. Forced runs emit normal
   statuses and satisfy downstream latches.
 - Injected STATUS may overwrite a terminal status (the CHANGE_STATUS
   analog): script-authoring hazard, documented not guarded.
@@ -520,10 +552,16 @@ class Oracle:
         return self.store.runtime(job)  # DL-82: the store owns creation too
 
     def _set_status(
-        self, job: str, status: JobStatus, cause: str, exit_code: int | None = None
+        self,
+        job: str,
+        status: JobStatus,
+        cause: str,
+        exit_code: int | None = None,
+        *,
+        clear_exit_code: bool = False,
     ) -> None:
         old = self._runtime(job).status
-        self.store.transition(job, status, self._now, exit_code)
+        self.store.transition(job, status, self._now, exit_code, clear_exit_code=clear_exit_code)
         self._record(job, f"{old}->{status}", cause)
         self._emit("STATUS", job=job, status=status)
         self._after_transition(job, old, status)
@@ -757,9 +795,19 @@ class Oracle:
     def _status(self, job: str) -> str:
         return self._runtime(job).status
 
-    def _inject_inactive(self, job_ir: JobIR, code: int | None) -> None:
+    def _inject_inactive(
+        self,
+        job_ir: JobIR,
+        code: int | None,
+        *,
+        clear_exit_code: bool = False,
+        cause: str = "injected STATUS",
+    ) -> None:
         """An operator's CHANGE_STATUS INACTIVE (DL-242). Three vendor rules
         ride on it, besides DL-235's no-kill ruling for a launched run.
+        DL-243 reuses this path for ON_NOEXEC on a completed FAILURE/
+        TERMINATED job (`cause` names that call instead; `clear_exit_code`
+        drops the previous run's code, same as the SEM-10 box-start reset).
 
         In a RUNNING box the member resolves: "affects the box's completion
         status as if the INACTIVE job returned a status of SUCCESS"
@@ -783,9 +831,13 @@ class Oracle:
         if box is not None and parent is not None and parent.status == "RUNNING":
             self.store.record_resolution(box, job)
         if job_ir.job_type != "BOX":
-            self._set_status(job, "INACTIVE", cause="injected STATUS", exit_code=code)
+            self._set_status(
+                job, "INACTIVE", cause=cause, exit_code=code, clear_exit_code=clear_exit_code
+            )
         else:
-            cause = f"box {job!r} set INACTIVE: cascades to every job it contains (SEM-18, DL-242)"
+            cascade_cause = (
+                f"box {job!r} set INACTIVE: cascades to every job it contains (SEM-18, DL-242)"
+            )
             inner = [
                 j for j in self._contained(job, skip_live=False) if self._status(j) != "INACTIVE"
             ]
@@ -797,8 +849,9 @@ class Oracle:
                     self._disarm_members(each)
 
             self._set_inactive_batch(
-                [(job, "injected STATUS")] + [(j, cause) for j in inner],
+                [(job, cause)] + [(j, cascade_cause) for j in inner],
                 exit_code=code,
+                clear_exit_code=clear_exit_code,
                 between=disarm,
             )
         if box is None or parent is None:
@@ -857,9 +910,42 @@ class Oracle:
         elif kind == "ON_NOEXEC":
             self.store.set_flags(job, on_noexec=True)
             self._record(job, "ON_NOEXEC", "sendevent ON_NOEXEC")
+            job_ir = self.catalog.jobs.get(job)
+            # DL-243 (Job States page): "the scheduler places the job in the
+            # ON_NOEXEC status and the effect is the same as sending the
+            # CHANGE_STATUS event to INACTIVE for the job" -- for a job that
+            # already completed FAILURE/TERMINATED, materialize that through
+            # DL-242's operator-INACTIVE path (exit code cleared) instead of
+            # a read-time projection. A BOX target keeps the flag-only
+            # behavior here: descendant propagation of this rule is not
+            # modeled. A live job is untouched (the bypass governs its own
+            # eventual start, SEM-22). An ICED job is also untouched (DL-243,
+            # "Change the Executable Status of a Job" page): "The scheduler
+            # ignores the JOB_ON_NOEXEC event, if sent to: A non-box job that
+            # is in the STARTING, RUNNING, or ON_ICE status" -- the flag
+            # still gets set here regardless (pre-existing, unchanged by this
+            # decision; the vendor's "ignores" reading is narrower than this
+            # oracle's flag-always-sets model).
+            if (
+                job_ir is not None
+                and job_ir.job_type != "BOX"
+                and status in ("FAILURE", "TERMINATED")
+                and not self._runtime(job).on_ice
+            ):
+                self._inject_inactive(
+                    job_ir,
+                    None,
+                    clear_exit_code=True,
+                    cause="ON_NOEXEC settles a completed job to INACTIVE (DL-243)",
+                )
         elif kind == "OFF_NOEXEC":
             self.store.set_flags(job, on_noexec=False)
             self._record(job, "OFF_NOEXEC", "sendevent OFF_NOEXEC")
+            # DL-243: a job ON_NOEXEC'd after FAILURE/TERMINATED was already
+            # moved to INACTIVE at that event (above); OFF_NOEXEC here is a
+            # plain flag clear on an already-INACTIVE row, same as the
+            # vendor's "places the job in the INACTIVE ... status" (Events
+            # page, JOB_OFF_NOEXEC) -- no further transition is needed.
         elif kind == "DISARM":
             # period-model ss10.4 (DL-158): the explicit journaled disarm.
             # The drop is the WHOLE effect: no status move, no wake, no
@@ -884,10 +970,25 @@ class Oracle:
         if rt is None:
             return False  # SEM-06: undefined -> permanently, silently false
         if rt.on_ice and rt.status not in ("STARTING", "RUNNING"):
-            # SEM-05/SEM-20 + DL-13: an iced predecessor satisfies every atom
-            # kind, lookback ignored -- but ice on a running job takes effect
-            # at completion (the in-flight run is still real)
-            return True
+            # Ice on a running job takes effect at completion (the in-flight
+            # run is still real); for a non-live iced job, split on whether
+            # the atom carries a lookback qualifier (DL-243).
+            if atom.lookback is not None:
+                # SEM-05 + DL-13: a LOOKBACK atom (any kind, zero included)
+                # keeps the blanket pin -- every atom kind true, lookback
+                # ignored. The lookback/ice interaction stays open.
+                # PENDING: Q10 -- the vendor's ON_ICE table (below) covers an
+                # ordinary atom only; a lookback-qualified atom against an
+                # iced predecessor is uncited, pinned at this pre-DL-243
+                # default until a live instance decides it.
+                return True
+            # DL-243 (SEM-20): an ORDINARY atom (no lookback qualifier
+            # at all) follows the vendor's own ON_ICE truth table instead:
+            # success/done/notrunning true, failure/terminated/exitcode
+            # false.
+            if isinstance(atom, ExitCodeAtom):
+                return False
+            return atom.status in ("SUCCESS", "DONE", "NOTRUNNING")
         if isinstance(atom, ExitCodeAtom):
             if rt.exit_code is None or not self._lookback_ok(rt, atom.lookback, evaluator):
                 return False
@@ -974,13 +1075,29 @@ class Oracle:
             # condition edges stay silent exactly as before.
             return f"already {rt.status} -- concurrent or repeated start request, no effect"
         if rt.on_ice:
-            return None  # SEM-20: iced jobs never run (FORCE included -- DL-13);
-            # never arms: conditions must REOCCUR after OFF_ICE
+            if not force:
+                return None  # SEM-20: iced jobs never run on a plain start;
+                # never arms: conditions must REOCCUR after OFF_ICE
+            # SEM-23/DL-243: FORCE_STARTJOB on a non-live iced job is the
+            # vendor's "returns to an executable state" case (sendevent Start
+            # Jobs page) -- clear the flag the same way an OFF_ICE would,
+            # with a cause naming the force, then fall through to start.
+            self.store.set_flags(job, on_ice=False)
+            self._record(job, "OFF_ICE", f"FORCE_STARTJOB clears ON_ICE (SEM-23, DL-243; {cause})")
+            rt = self._runtime(job)
         if rt.on_hold and not force:
             # SEM-21: held jobs do not start; a scheduled tick latches so the
             # missed run collapses to at most one on OFF_HOLD (Q3, DL-54)
             self._arm(job_ir, rt, scheduled, "blocked ON_HOLD")
             return None
+        if rt.on_hold and force:
+            # SEM-23/DL-243: same FORCE_STARTJOB rule for ON_HOLD -- the
+            # vendor groups ON_HOLD with ON_ICE as "non-executable" states.
+            self.store.set_flags(job, on_hold=False)
+            self._record(
+                job, "OFF_HOLD", f"FORCE_STARTJOB clears ON_HOLD (SEM-23, DL-243; {cause})"
+            )
+            rt = self._runtime(job)
         if not force:
             if job_ir.schedule is not None and not scheduled and not rt.armed:
                 # SEM-30/31 (DL-13): a date_conditions job -- standalone OR

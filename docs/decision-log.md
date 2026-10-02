@@ -15206,3 +15206,285 @@ relitigate an entry; append a new one.
   Rewritten to the vendor rule: `test_sem10a_*` and `test_sem13_*` (a rerun
   member now shows SUCCESS->INACTIVE first), four DL-154 box-skip tests,
   and P-M04 in test_uc_oracle.py.
+- DL-243 ON_NOEXEC as an event-time INACTIVE transition, the ON_ICE
+  ordinary-atom truth table, and FORCE_STARTJOB clearing ON_ICE/ON_HOLD on
+  a non-live job (2026-10-02; src/dsl41/oracle.py, src/dsl41/equiv.py,
+  src/dsl41/lint.py, src/dsl41/rehearse_check.py, src/dsl41/runner_ledger.py,
+  src/dsl41/simulation_register_rows.py, docs/autosys-semantics.md,
+  docs/citation-index.md, docs/stonebranch-semantics.md, docs/ir-design.md,
+  docs/simulation-coverage.md, tests/test_oracle.py, tests/test_equiv.py,
+  tests/test_dsl.py, tests/test_derive.py, tests/test_lint.py,
+  tests/test_ir.py, tests/test_rehearse_check.py,
+  tests/test_simulation_register.py, tests/corpus/l020_iced_consumer.jil)
+  Four vendor sources, all from AutoSys Workload Automation 24.2
+  documentation. (1) "Start Conditions", on JOB_ON_NOEXEC: "When you send
+  the JOB_ON_NOEXEC event and the job is in the INACTIVE, SUCCESS, or
+  ACTIVATED status, the job retains its current status; otherwise the
+  effect is the same as if the job enters the INACTIVE status." (2) "Job
+  States", the ON_NOEXEC state entry: "the scheduler places the job in the
+  ON_NOEXEC status and the effect is the same as sending the CHANGE_STATUS
+  event to INACTIVE for the job. The scheduler does not immediately
+  schedule downstream jobs that have dependency on the NOEXEC job nor does
+  it evaluate their success conditions to success. Instead, the scheduler
+  evaluates the conditions of downstream dependent jobs as if the
+  predecessor job is set to the INACTIVE status." The "Events" reference
+  page's JOB_OFF_NOEXEC entry: "it places the job in the INACTIVE,
+  ACTIVATED, or SUCCESS status based on the job's existing status while in
+  non-execution mode." (3) "Start Conditions", the ON_ICE row of the
+  downstream-conditions truth table: success TRUE, failure FALSE,
+  terminated FALSE, done TRUE, notrunning TRUE, exitcode FALSE. (4)
+  "sendevent -- Start Jobs", on forcing a non-executable job: "When you
+  force start a job that is in a non-executable state (ON_HOLD, ON_ICE),
+  it returns to an executable state, runs, and does not revert to the
+  previous (non-executable) state." The same page states concurrent runs
+  of one job are unsupported; the oracle's refusal to FORCE a live job is
+  unaffected.
+
+  ON_NOEXEC on a FAILURE or TERMINATED (non-live, non-BOX, non-iced) job is
+  an EVENT-TIME transition to INACTIVE, exit code cleared, through DL-242's
+  operator-INACTIVE path (`Oracle._inject_inactive`, extended with a
+  `clear_exit_code` flag and a caller-supplied `cause`) -- not a read-time
+  projection off the stored status. A read-time projection (an "effective
+  (status, exit_code) pair" computed locally and never written back) breaks
+  three ways a stored transition does not: OFF_NOEXEC on a FAILURE row
+  brings the FAILURE reading straight back for any consumer released
+  afterward, a real failure that happens strictly AFTER ON_NOEXEC on a
+  still-live job is hidden once that job later fails (the projection keys
+  only on the current status and the flag, which cannot tell "failed, then
+  noexec'd" from "noexec'd, then failed"), and the equivalence checker has
+  no way to model a status that never actually changed. With the event-time
+  transition: OFF_NOEXEC is a plain flag clear on a row that is ALREADY
+  INACTIVE (matching the Events page's JOB_OFF_NOEXEC text), a later real
+  failure on a job that was still live when ON_NOEXEC arrived is visible
+  because that job's status never changed, and a RUNNING box's member
+  resolves through the same DL-242 door (so the box fold can complete
+  through it) instead of there being no transition for anything to read.
+
+  The transition is SKIPPED when the job is STARTING, RUNNING, or ON_ICE at
+  the moment of the event: "Change the Executable Status of a Job" (AutoSys
+  Workload Automation 24.2 documentation) -- "The scheduler ignores the
+  JOB_ON_NOEXEC event, if sent to: A non-box job that is in the STARTING,
+  RUNNING, or ON_ICE status." A FAILURE job that is then put ON_ICE and
+  then ON_NOEXEC stays FAILURE, visible to a consumer released later. The
+  `on_noexec` flag itself is still set unconditionally on every ON_NOEXEC
+  event regardless of status (STARTING/RUNNING/ON_ICE included) -- a
+  pre-existing oracle behavior, narrower than the vendor's "ignores the
+  event" reading, left unchanged by this decision.
+
+  A BOX target keeps the flag-only behavior: descendant propagation of this
+  rule is not modeled. The transition wakes referencers synchronously, the
+  same as any other injected INACTIVE, while the vendor's Job States text
+  says dependent jobs are not scheduled "immediately" -- a documented
+  divergence, not modeled: an ordinary `n()` consumer can start at once
+  instead of waiting, and a FAILURE box left idle by this member moving to
+  INACTIVE can re-derive SUCCESS immediately under DL-242's idle-box rule
+  (ss15) rather than on whatever later cadence the vendor intends; both
+  stay open, not closed by this decision. `status_at` moves with the
+  transition, so an ORDINARY (non-lookback) `n()` atom was already true
+  before it (FAILURE/TERMINATED already satisfies NOTRUNNING) and nothing
+  changes for it; only a LOOKBACK-qualified `n()` atom can newly turn true
+  by this specific transition, from the refreshed timestamp. Separately,
+  `equiv.py`'s tier-b state space has no axis for "INACTIVE with a fresh
+  timestamp" distinct from "INACTIVE, never touched"; it can therefore call
+  two conditions equivalent that a lookback-qualified `n()` would actually
+  tell apart post-transition. This predates this slice (the state space
+  never modeled `status_at` at all) and is tracked separately, not by this
+  decision.
+
+  An ORDINARY downstream atom (`atom.lookback is None`, no qualifier at
+  all) on a non-live iced job follows the vendor's ON_ICE table instead of
+  the DL-13 blanket-true pin; a LOOKBACK-qualified atom (any kind, the zero
+  form included) keeps that pin, because the vendor text does not
+  separately address a lookback-qualified atom against an iced predecessor
+  -- that corner is Q10 (section 9), pinned at its pre-DL-243 default, not
+  closed by this decision; `_atom_true` now carries a `# PENDING: Q10`
+  marker at that branch, and the simulation register gains a `provisional`
+  row labelled Q10 (`src/dsl41/simulation_register_rows.py`,
+  `oracle.Oracle._atom_true#1`). This SUPERSEDES one sentence of DL-13:
+  "Iced jobs satisfy EVERY atom kind (f/t/e included) per SEM-05's blanket
+  wording -- chosen over SEM-20's `as though it succeeded` reading" no
+  longer holds for an ORDINARY atom; it still holds, unchanged, for a
+  lookback-qualified atom (DL-13's "but only once not RUNNING" clause is
+  untouched either way).
+
+  FORCE_STARTJOB on a non-live job that is ON_ICE or ON_HOLD now clears
+  that flag -- recorded the same way `_handle_oob` records an explicit
+  OFF_ICE/OFF_HOLD, with a cause naming FORCE_STARTJOB -- then starts the
+  job through the normal FORCE path; the flag stays cleared after the run,
+  including when a later gate (`run_window`) still refuses the start,
+  because the return to an executable state is the event's own effect, not
+  conditioned on the start succeeding. This SUPERSEDES another sentence of
+  DL-13: "FORCE_STARTJOB overrides hold and the box-RUNNING gate but never
+  ice (SEM-20 `removed from all logic` wins)" no longer holds for a
+  NON-LIVE iced job; a job that is already STARTING/RUNNING/QUE_WAIT is
+  still refused regardless of force (DL-13's `run_window` clause is
+  untouched). `ON_NOEXEC` is not named in the vendor's force sentence and
+  is untouched by FORCE.
+
+  Four parity/correctness fixes elsewhere, all reproduced by the two
+  reviews and all required for the ON_ICE split to hold project-wide.
+  `src/dsl41/equiv.py`'s `_eval_cond` mirrors `Oracle._atom_true` by design
+  ("oracle parity" comments on both); its iced-state branch gets the same
+  split, so the tier-b/tier-c equivalence checker keeps agreeing with the
+  oracle. Separately, `_canon_lookback` collapsed an explicit `9999`
+  (kind="indefinite") to the same canonical form as a bare atom (lookback
+  is None) on the old "explicit 9999 == no qualifier" reading (SEM-04);
+  the ON_ICE split makes the two behaviorally DISTINCT (only the qualified
+  one keeps the blanket-true pin), so the collapse made `f(x)` and
+  `f(x,9999)` hash identically and let the CLI's tier-a short-circuit
+  (`cli_compile.py`) report two catalogs equivalent without ever reaching
+  tier c; `_canon_lookback` now only drops `raw`, keeping `kind="indefinite"`
+  a distinct canonical form from `None`. `src/dsl41/lint.py`'s L020 (iced
+  consumer, M19) read every `DerivedEdge.is_start_gate` predecessor as
+  ice-satisfied regardless of the atom kind referencing it; it now reads
+  each edge's own `via`/`lookback` and splits the same way, adding a SECOND
+  warning direction: an iced predecessor gated only by an ordinary
+  failure/terminated/exitcode atom reads false there, so AutoSys can never
+  run the consumer through it while UC's skip cascade (blind to which
+  AutoSys atom kind an edge stands for) may still resolve the dependency
+  and run it -- the opposite-direction divergence from the original
+  warning. `docs/stonebranch-semantics.md` M19 and `docs/ir-design.md`'s
+  L020 row are updated to state both directions. L006's "no status-store
+  state short of ON_ICE... satisfies it" caveat is a related but separate
+  accuracy note -- it is no longer a universal rescue case for an ORDINARY
+  contradiction, but L006 itself needs no code change (it already
+  evaluates with `include_ice=False`); the wording is left for a future
+  pass. `src/dsl41/rehearse_check.py`'s `genesis_truth` (the scripted-globals
+  at-start wake-credit side of the DL-184 flag sweep) read an ON_ICE seed
+  as satisfying every atom at genesis; it now applies the same split, so an
+  ordinary f()/t()/exitcode() atom on an iced seed no longer buys an
+  at-start SET_GLOBAL extra wake credit it cannot actually earn.
+
+  Open: the lookback/ice interaction (Q10) stays unresolved pending a live
+  instance; both readings keep a documented default rather than guessing.
+  `STATE_MACHINE_VERSION` moves 4 -> 5 (DL-242 took 3 -> 4 first): a v4
+  replay of a FAILURE/TERMINATED job that is ON_NOEXEC, an ordinary atom
+  against a non-live iced job, or a FORCE_STARTJOB against a non-live
+  ON_ICE/ON_HOLD job each derive different state under this build than
+  under v4; a v4 log is refused at every door, and a live v4 estate drains
+  and a new estate is created (period-model ss11), as DL-235/DL-241/
+  DL-242's bumps did.
+
+  Tests: `tests/test_oracle.py` --
+  `test_sem22_noexec_on_a_failed_job_transitions_to_inactive` and its
+  TERMINATED twin `test_sem22_noexec_on_a_terminated_job_transitions_to_inactive`
+  (stored status moves to INACTIVE and exit_code to None, f/t/d/exitcode
+  false, n true), `test_sem22_noexec_keeps_a_success_visible` (control),
+  `test_sem22_noexec_bypasses_to_success_on_its_next_start` (the flag
+  persists across the move to INACTIVE; the job's next start still
+  bypasses to SUCCESS and an s() consumer then starts),
+  `test_sem22_noexec_off_noexec_then_release_a_held_f_consumer_stays_blocked`
+  (fail p, ON_NOEXEC, OFF_NOEXEC, a held f(p) consumer released afterward
+  does not start), `test_sem22_noexec_while_running_then_real_failure_is_not_hidden`
+  (ON_NOEXEC while RUNNING is flag-only; the real failure that follows is
+  visible to f(p), not retroactively hidden),
+  `test_sem22_noexec_on_an_iced_job_is_ignored_and_the_job_stays_failure`
+  (p fails, ON_ICE, ON_NOEXEC: the event is ignored and p stays FAILURE;
+  OFF_ICE then releases a held f(p) consumer normally against the real
+  FAILURE), `test_sem22_noexec_on_a_failed_box_member_completes_the_box`
+  (an unmet `box_failure` override leaves the box hung after the member's
+  real FAILURE; ON_NOEXEC resolves the member and the box completes);
+  `test_sem20_ordinary_atoms_on_an_iced_job_follow_the_vendor_table`
+  (parametrized over all six atom kinds),
+  `test_sem20_lookback_atoms_on_an_iced_job_stay_true`,
+  `test_sem20_ordinary_atom_on_an_undefined_iced_lookalike_stays_false`,
+  `test_sem20_ordinary_atom_on_a_live_iced_job_reads_the_real_in_flight_status`,
+  `test_sem20_off_ice_later_reads_the_real_status_not_the_vendor_table`,
+  `test_sem23_force_start_clears_ice_and_runs`,
+  `test_sem23_force_start_clears_hold_and_runs`,
+  `test_sem23_force_start_on_a_live_job_is_still_refused`,
+  `test_sem23_after_force_clears_ice_a_later_plain_start_needs_no_off_event`,
+  `test_sem23_force_start_clears_ice_even_when_run_window_then_refuses`.
+  `test_sem23_force_startjob_ignores_condition_and_hold_and_satisfies_downstream`
+  and `test_ice_on_a_running_job_takes_effect_at_completion` are existing
+  tests rewritten for this decision: the first now expects an OFF_HOLD
+  record and the cleared flag from a FORCE on a held job; the second's
+  comment no longer claims the ice reading covers every atom kind, since
+  its own atom (`s()`) is ordinary and only ever pinned that one atom.
+  The original ON_NOEXEC read-time-projection tests (the
+  `..._reads_as_inactive_downstream` and `..._then_bypass_reads_success`
+  names) are superseded by the event-time
+  rewrites above -- a stored INACTIVE row makes a separate "bypass" test
+  moot, since a bypass is just a later plain start on an ordinary INACTIVE
+  row.
+
+  `tests/test_equiv.py` -- `test_success_vs_failure_diverges_with_a_counterexample_naming_the_job`,
+  `test_iced_state_distinguishes_contradictions_on_different_jobs`, and
+  `test_iced_contradiction_matches_oracle_end_to_end` are rewritten: the
+  first's enumerated counterexample moves from plain `SUCCESS` to an
+  earlier-enumerated `NEVER_RAN,ON_ICE` state (both still divergent; the
+  split just makes the iced state divergent too, so the search stops
+  sooner); the other two switch their `s(x)&f(x)`/`s(y)&f(y)` pair to a
+  lookback-qualified `s(x, 0)&f(x, 0)`/`s(y, 0)&f(y, 0)` pair, because the
+  ordinary pair they used no longer distinguishes under ice (both catalogs
+  are now genuinely equivalent for that input) while the lookback pair
+  still does, under the Q10 pin.
+  The old 9999-folds-to-no-qualifier test is rewritten as
+  `test_indefinite_9999_lookback_stays_a_distinct_qualifier` (the two no
+  longer canonicalize the same), plus a new
+  `test_indefinite_9999_lookback_distinguishes_catalogs_under_ice` pinning
+  the hash and tier-c divergence directly.
+  `tests/test_dsl.py::test_cond_to_source_hand_built_indefinite_lookback_folds_to_bare_atom`
+  is rewritten as `..._round_trips_distinct_from_bare` for the same reason
+  (it round-trips through the same `canonical_cond`).
+
+  `tests/test_derive.py::test_whole_corpus_exact_edge_count_and_mapping_row_counter`
+  and the old L020-fires-once test (renamed
+  `test_l020_fires_on_the_corpus_fixtures`) are updated for three new
+  corpus jobs in `l020_iced_consumer.jil`: `l20_never_runs` (condition
+  `f(l20_iced) & s(l20_live)`, the blocking-direction trigger),
+  `l20_live_failure` (condition `f(l20_live)`, its non-triggering sibling,
+  an ordinary f() atom on a producer that is never iced), and
+  `l20_lookback_rescued` (condition `f(l20_iced, 0)`, a regression guard:
+  the zero-lookback qualifier keeps the Q10 blanket-true pin, so this
+  trips the ORIGINAL direction, not the blocking one). Edge count 54 -> 58
+  (+1 M02 for `s(l20_live)`, +2 M04 for the two new ordinary f() edges --
+  f() rows are M04 regardless of cross-stream-ness, unlike s()'s M01/M02
+  split -- and +1 M03 for the lookback-qualified f() edge).
+  `tests/test_ir.py::test_whole_corpus_lowers_as_one_catalog` gains the
+  three job names in its pinned set. The rewritten corpus test also
+  asserts each violation's direction by its message text, not just its
+  job name.
+  `tests/test_lint.py::test_lint_catalog_whole_corpus_exact_per_code_counts`:
+  L020 1 -> 3 (the blocking direction on `l20_never_runs`, the original
+  direction again on `l20_lookback_rescued`); L021 10 -> 11
+  (`l20_never_runs` is a two-unqualified-wake-source shape, same family as
+  `l20_mixed`); L022 19 -> 18 (`l20_live_failure` now reads `l20_live`'s
+  failure, so `l20_live` is no longer a stranded-on-failure tail).
+
+  `rule_l020` itself (`src/dsl41/lint.py`) is rewritten: it used to group
+  `DerivedEdge.is_start_gate` edges per producer and decide each producer
+  with `any()` over its own edges, which a satisfied lookback atom could
+  use to hide a FALSE ordinary conjunct on the very same producer. It now
+  reads the job's own `condition:` tree directly and evaluates it
+  3-valued (true/false/unknown) under the ice/noexec substitution,
+  propagated through And/Or the way real boolean logic would. Two new
+  standalone tests in `tests/test_derive.py` pin the cases this fixes:
+  `test_l020_fires_the_blocking_direction_on_a_hidden_ordinary_conjunct`
+  (`f(ice,9999) & f(ice) & s(live)`, ice iced -- the And is false
+  regardless of `live`, where the old `any()` grouping saw the lookback
+  atom and stayed quiet) and
+  `test_l020_quiet_on_a_disjunct_a_live_alternative_still_converges`
+  (`f(p) | s(q)`, p iced via an ordinary f() -- the Or is UNKNOWN, not
+  false, because `s(q)` can still satisfy it, where the old grouping fired
+  a false positive on `p`'s sole ordinary atom). A GlobalAtom reads TRUE in
+  this evaluation, not UNKNOWN: DL-162 settled that a global gate is not a
+  predecessor and never decides the verdict on its own, and that reading
+  is kept, not reopened, by this decision -- `test_l020_reads_a_global_gate_as_no_predecessor_at_all`
+  still fires exactly as DL-162 pinned it, and the new
+  `test_l020_fires_the_blocking_direction_even_with_a_global_gate`
+  (`f(icy) & v(G)=1`) checks the blocking direction fires the same way
+  through a global gate.
+  `tests/test_rehearse_check.py::test_expected_bounds_scripted_globals_at_start_ordinary_ice_atom_buys_no_credit`:
+  a seeded ON_ICE `ice` with no condition of its own, daily
+  producers `a`/`b`, consumer `(f(ice) | (s(a) & s(b))) & v(G) = 1` over a
+  48-hour probe with `G` scripted at-start -- the bound is 2 consumer runs,
+  not 3 (the pre-fix `genesis_truth` read `f(ice)` as blanket-true,
+  crediting the at-start set an extra run the consumer can never actually
+  earn).
+  `src/dsl41/simulation_register_rows.py` (three `effect=` rows updated --
+  the `event:FORCE_STARTJOB`, `event:ON_ICE`, and `trace_marker:ON_ICE`
+  rows -- plus the new Q10 row, regenerated via
+  `scripts/render_simulation_coverage.py`); `tests/test_simulation_register.py`
+  (`LABEL_RE`/`MARKER_RE` widened to admit two-digit `Q` numbers so
+  `PENDING: Q10` is not read as `Q1`).
