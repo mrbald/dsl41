@@ -167,7 +167,7 @@ fails the suite.
 | job_attr:std_in_file | supported | runner_adapters._build_run_spec | - |  |  |  | generic | the child reads stdin from here instead of /dev/null; inert on a BOX (SEM-10) |
 | job_attr:std_out_file | supported | runner_adapters.job_log_paths | - |  |  |  | generic | the child's stdout appends here instead of the default run log; inert on a BOX (SEM-10) |
 | job_attr:success_codes | supported | SEM-09, DL-33 | - |  |  |  | generic | the explicit success set; with no fail_codes beside it, it alone decides the verdict |
-| job_attr:term_run_time | supported | dossier ss5, oracle.Oracle._arm_sla_and_term | - |  |  |  | generic | arms a timer that TERMINATEs the run after n minutes |
+| job_attr:term_run_time | supported | dossier ss5, oracle.Oracle._arm_sla_and_term | - |  |  |  | generic | arms a timer that TERMINATEs the run after n minutes; zero means no limit and arms no timer (DL-241) |
 | job_attr:timezone | supported | SEM-35 | - |  |  |  | generic | the zone every schedule time on this job is read in |
 | job_attr:timezone#dst-fold | provisional | SEM-35, runner_scheduler | E10 | yes |  |  | none | a start time inside a DST fold or gap resolves by the pinned interpretation, not by a vendor-verified rule |
 | job_attr:ulimit | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | no resource limit is applied to the child process |
@@ -555,7 +555,7 @@ fails the suite.
 | timer:deferred_cause | supported | PR-09, oracle.Oracle._schedule_timer | - |  |  |  | generic | the fourth timer shape: a run_window-deferred start replaying its own provenance |
 | timer:must_complete | supported | PR-09, oracle.Oracle._schedule_timer | - |  |  |  | generic | armed by the start; it raises MUST_COMPLETE_ALARM if the run is still live |
 | timer:must_start | supported | PR-09, oracle.Oracle._schedule_timer | - |  |  |  | generic | armed by the schedule tick; it raises MUST_START_ALARM if no new run began |
-| timer:term_run_time | supported | PR-09, oracle.Oracle._schedule_timer | - |  |  |  | generic | armed by the start; it TERMINATEs a run still live at the deadline |
+| timer:term_run_time | supported | PR-09, oracle.Oracle._schedule_timer | - |  |  |  | generic | armed by the start; it TERMINATEs a run still live at the deadline; zero means no limit and arms no timer (DL-241) |
 
 ### profile_field
 

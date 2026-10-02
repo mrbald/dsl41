@@ -669,7 +669,7 @@ DL-56).
 | `box_name`, `box_success`, `box_failure`, `box_terminator`, `job_terminator` | container semantics (§2) |
 | `date_conditions` + time cluster | scheduling (§4) |
 | `max_exit_success`, `success_codes`, `fail_codes` | success-boundary shift (SEM-09); `fail_codes` decides alone, else `success_codes` replaces the rule, else the threshold |
-| `term_run_time` | auto-terminate after n minutes → TERMINATED **[V]** |
+| `term_run_time` | auto-terminate after n minutes → TERMINATED **[V]**: 0 means no limit, the vendor default (DL-241) |
 | `n_retrys` | auto-restart on FAILURE only: application failures (vendor's examples: "cannot find a file or a command, permissions are not properly set"). A TERMINATED job "does not restart"; system/network failures restart via the scheduler's `MaxRestartTrys` config parameter instead **[V]** (Q4, DL-53). Retries are not modeled in the oracle or the runner; preflight WARNs on `n_retrys > 0` |
 | `auto_hold` | box member enters ON_HOLD automatically when box starts **[C/?]** |
 | `auto_delete` | definition lifecycle, not runtime; carried in IR-F `JobIR.passthrough` |

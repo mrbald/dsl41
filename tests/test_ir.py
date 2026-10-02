@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from dsl41.ast_jil import parse_file
+from dsl41.ast_jil import parse, parse_file, render
 from dsl41.conditions import And, JobRef, StatusAtom, parse_condition
 from dsl41.ir import (
     BoxLinkage,
@@ -1015,6 +1015,17 @@ def test_term_run_time_maps_to_term_run_time_min() -> None:
     text = "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\nterm_run_time: 90\n"
     (job,) = lower_source(text).jobs.values()
     assert job.sem.term_run_time_min == 90
+
+
+def test_term_run_time_zero_lowers_to_zero_not_none() -> None:
+    """DL-241: zero is a real, distinct value ("no limit"), not absence --
+    lowering must carry it verbatim so `Oracle._arm_sla_and_term` can tell
+    "no limit" (0) apart from "no term_run_time attribute" (None), and
+    preserve-mode rendering must round-trip the literal zero."""
+    text = "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\nterm_run_time: 0\n"
+    (job,) = lower_source(text).jobs.values()
+    assert job.sem.term_run_time_min == 0
+    assert render(parse(text)) == text
 
 
 def test_max_exit_success_is_carried_through() -> None:

@@ -1410,7 +1410,8 @@ class Oracle:
                         payload={"check": "must_complete", "job": job_ir.name, "run": run_number},
                     ),
                 )
-        if job_ir.sem.term_run_time_min is not None:
+        # zero means no limit (vendor default; DL-241); arm no timer for it
+        if job_ir.sem.term_run_time_min is not None and job_ir.sem.term_run_time_min != 0:
             deadline = self._now + timedelta(minutes=job_ir.sem.term_run_time_min)
             self._schedule_timer(
                 deadline,

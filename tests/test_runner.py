@@ -36,7 +36,7 @@ from hypothesis import strategies as st
 
 from dsl41.ir import JobIR, lower_source
 from dsl41.oracle import Oracle
-from dsl41.oracle_state import Event, EventKind, OracleError
+from dsl41.oracle_state import Event, EventKind, OracleError, TraceEntry
 from dsl41.runner import Engine, _Work
 from dsl41.runner_adapters import AdapterContext, FakeAdapter
 from dsl41.runner_clock import EngineError, RealClock, VirtualClock
@@ -557,6 +557,35 @@ def test_term_run_time_auto_terminates_through_the_engine_advance_path() -> None
     asyncio.run(scenario())
 
 
+def test_term_run_time_zero_runs_to_completion_through_the_engine_advance_path() -> None:
+    """term_run_time: 0 arms no timer (DL-241): advancing well past the
+    start leaves the job RUNNING, and it completes SUCCESS when its
+    scripted completion arrives, unlike the positive-limit sibling
+    test_term_run_time_auto_terminates_through_the_engine_advance_path."""
+
+    async def scenario() -> None:
+        text = "insert_job: tz\njob_type: c\ncommand: x\nmachine: m1\nterm_run_time: 0\n"
+        adapter = FakeAdapter({("tz", 1): (600.0, 0)})
+        engine = Engine(
+            lower_source(text),
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": adapter, "FW": adapter},
+        )
+        engine.inject(ev("STARTJOB", 0, job="tz"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=5))
+        assert engine.oracle.store.job["tz"].status == "RUNNING"
+        await engine.run_until_quiescent(T0 + timedelta(minutes=20))
+        assert transitions(engine.oracle, "tz") == [
+            "INACTIVE->STARTING",
+            "STARTING->RUNNING",
+            "RUNNING->SUCCESS",
+        ]
+        assert engine.drops == []
+        await engine.shutdown()
+
+    asyncio.run(scenario())
+
+
 def test_stale_completion_gate_run_number_mismatch_and_already_terminal() -> None:
     """(runner-design ss4 DL-41 decision 4): white-box test. Under
     VirtualClock the kill-vs-natural-exit race always resolves to the kill
@@ -897,13 +926,14 @@ def test_negative_term_run_time_matches_oracle_direct_instead_of_crashing() -> N
     assert engine_trace == [t.model_dump() for t in o.trace()]
 
 
-def test_zero_delta_deadline_stays_lazy_like_the_oracle() -> None:
-    """A term_run_time of 0 arms a timer due exactly at
-    the arming instant; the oracle's lazy discipline keeps it armed until
-    the next feed, but the engine fired it eagerly at the same horizon --
-    observably divergent store state at the same script point. The frontier
-    rule pins laziness: RUNNING after the arming feed on BOTH paths,
-    TERMINATED (back-dated to the due instant) after the next feed."""
+def test_term_run_time_zero_means_no_limit_on_both_paths() -> None:
+    """term_run_time: 0 is the vendor default, "run forever" (DL-241), not a
+    zero-delta deadline -- it arms no timer at all. RUNNING after the
+    arming feed and after a later unrelated STATUS feed, on both the engine
+    and the oracle paths, with byte-identical traces and no pending timer
+    for the job on the oracle. The past-due-timer behavior for a negative
+    limit is unchanged and stays pinned by
+    test_negative_term_run_time_matches_oracle_direct_instead_of_crashing."""
     text = "insert_job: zd\njob_type: c\ncommand: x\nmachine: m1\nterm_run_time: 0\n"
 
     harness = EngineHarness(lower_source(text))
@@ -921,7 +951,57 @@ def test_zero_delta_deadline_stays_lazy_like_the_oracle() -> None:
     o.feed(ev("STATUS", 3, job="tick_undef", status="SUCCESS"))
 
     assert engine_trace == [t.model_dump() for t in o.trace()]
-    assert o.store.job["zd"].status == "TERMINATED"
+
+
+def test_zero_delta_deadline_stays_lazy_like_the_oracle() -> None:
+    """DL-241 made term_run_time: 0 mean "no limit," so it no longer arms a
+    timer and can no longer serve as the zero-delta-deadline vehicle this
+    test used to pin. must_complete_times takes over: a relative offset of
+    +0 still lowers (SEM-34's "+" plus decimal digits) and still arms a
+    timer due exactly at the arming instant, and it is control-flow-free
+    (MUST_COMPLETE_ALARM only, SEM-34), so it cannot be confused with a
+    limit that should now mean unlimited.
+    The frontier rule (runner.py's `raw_due > now or horizon > now`) is
+    what keeps a due-at-arming timer lazy; the surviving negative-offset
+    test (test_negative_term_run_time_matches_oracle_direct_instead_of_crashing)
+    cannot catch a `>` -> `>=` regression there, because a negative offset
+    is already past due and never needs the `horizon > now` branch. This
+    test does: no MUST_COMPLETE_ALARM after the arming feed on BOTH paths;
+    the alarm fires, back-dated to the due instant, only after the next
+    feed; traces byte-identical."""
+    text = (
+        "insert_job: zd\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n'
+        "must_complete_times: +0\n\n"
+        "insert_job: dummy_zd\njob_type: c\ncommand: y\nmachine: m1\n"
+    )
+
+    def alarmed(trace: list[TraceEntry]) -> bool:
+        return any(t.job == "zd" and t.transition == "MUST_COMPLETE_ALARM" for t in trace)
+
+    harness = EngineHarness(lower_source(text))
+    try:
+        harness.feed(ev("STARTJOB", 0, job="zd"))
+        mid_engine_alarmed = alarmed(harness.trace())
+        harness.feed(ev("STATUS", 3, job="dummy_zd", status="SUCCESS"))
+        engine_trace = [t.model_dump() for t in harness.trace()]
+    finally:
+        harness.close()
+
+    o = Oracle(lower_source(text))
+    o.feed(ev("STARTJOB", 0, job="zd"))
+    mid_oracle_alarmed = alarmed(o.trace())
+    assert mid_engine_alarmed is mid_oracle_alarmed is False  # lazy, like the oracle
+    o.feed(ev("STATUS", 3, job="dummy_zd", status="SUCCESS"))
+
+    assert engine_trace == [t.model_dump() for t in o.trace()]
+    alarm_entries = [
+        t for t in o.trace() if t.job == "zd" and t.transition == "MUST_COMPLETE_ALARM"
+    ]
+    assert len(alarm_entries) == 1
+    assert alarm_entries[0].at == T0  # back-dated to the due instant: arming + 0
+    assert o.store.job["zd"].status == "RUNNING"
+    assert all(job != "zd" for _, job, _ in o.pending_timers())
 
 
 class _TeardownBugAdapter:

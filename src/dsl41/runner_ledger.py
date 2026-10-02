@@ -69,7 +69,9 @@ from dsl41.runner_clock import EngineError
 #: manufactured by bookkeeping.
 #: 2 since DL-235: the ss4 stale-completion gate rejects a non-live row, so
 #: an undecided crash-window completion recovers differently from v1.
-STATE_MACHINE_VERSION = 2
+#: 3 since DL-241: term_run_time 0 arms no timer, so a replay with such a
+#: job keeps the run live where v2 terminated it.
+STATE_MACHINE_VERSION = 3
 
 LOCK_NAME = "leader.lock"
 

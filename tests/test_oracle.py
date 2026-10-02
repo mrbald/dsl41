@@ -102,6 +102,13 @@ def transitions(o: Oracle | EngineHarness, job: str) -> list[str]:
     return [t.transition for t in o.trace() if t.job == job]
 
 
+def pending_timer_jobs(o: Oracle | EngineHarness) -> set[str]:
+    """pending_timers() is Oracle-only; the engine path's oracle lives at
+    `.engine.oracle` on the harness (bisim_harness.EngineHarness)."""
+    oracle_obj = o if isinstance(o, Oracle) else o.engine.oracle
+    return {job for _, job, _ in oracle_obj.pending_timers()}
+
+
 def test_bisim_gate_meta_all_tests_go_through_the_oracle_helper() -> None:
     """Gate-honesty guard: the DL-43 claim 'every SEM trace test runs twice'
     holds only if every test builds its interpreter through the oracle()
@@ -2468,6 +2475,30 @@ def test_term_run_time_no_terminate_when_job_completes_before_the_limit() -> Non
         "STARTING->RUNNING",
         "RUNNING->SUCCESS",
     ]
+
+
+def test_term_run_time_zero_runs_to_scripted_completion_with_no_pending_timer() -> None:
+    """term_run_time: 0 is the vendor default, "run forever" (DL-241) -- it
+    arms no timer, so the job runs to its scripted completion with no
+    TERMINATED anywhere in its trace and no pending timer for it at any
+    point. test_term_run_time_auto_terminates_and_downstream_terminated_consumer_fires
+    is the positive-limit control."""
+    text = (
+        "insert_job: trt_job0\njob_type: c\ncommand: x\nmachine: m1\nterm_run_time: 0\n\n"
+        "insert_job: dummy_trt0\njob_type: c\ncommand: z\nmachine: m1\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="trt_job0"))
+    assert "trt_job0" not in pending_timer_jobs(o)
+    o.feed(ev("STATUS", 10, job="dummy_trt0", status="SUCCESS"))
+    assert "trt_job0" not in pending_timer_jobs(o)
+    o.feed(ev("STATUS", 20, job="trt_job0", status="SUCCESS"))
+    assert transitions(o, "trt_job0") == [
+        "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+        "RUNNING->SUCCESS",
+    ]
+    assert "trt_job0" not in pending_timer_jobs(o)
 
 
 # --------------------------------------------------------- 21. determinism + cascade order

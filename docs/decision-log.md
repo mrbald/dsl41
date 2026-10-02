@@ -15042,3 +15042,40 @@ relitigate an entry; append a new one.
   tests/test_simulation_register.py (the register's `job_attr:chk_files`
   and `job_attr:envvars` rows move from passthrough to refused, citing
   this rule).
+- DL-241 `term_run_time: 0` arms no timer; it means no run-time limit
+  (2026-10-02; src/dsl41/oracle.py, src/dsl41/runner_ledger.py,
+  tests/test_ir.py, tests/test_oracle.py, tests/test_runner.py,
+  src/dsl41/simulation_register_rows.py, docs/autosys-semantics.md)
+  The vendor's "term_run_time Attribute" page (AutoSys 24.2) gives the
+  range as 0-527040 and the default as 0, "the job is allowed to run
+  forever." `Oracle._arm_sla_and_term` had armed a term_run_time timer
+  for every non-None `term_run_time_min`, so a lowered zero armed a
+  timer due at the arming instant and the run was TERMINATED at the next
+  timer drain. The fix sits at timer construction, not at lowering: the
+  arming guard now skips a zero limit as well as a None one. Lowering
+  still carries the attribute's value verbatim (`JobIR.sem.term_run_time_min
+  == 0`, not normalized to None), so `tests/test_ir.py::test_term_run_time_zero_lowers_to_zero_not_none`
+  and preserve-mode rendering see the literal zero. Because the guard is
+  at the one construction site, every caller that reaches the oracle
+  through typed IR is covered without touching lowering, the DSL
+  renderer, or the TUI/control-protocol pending-timer views, which all
+  read `Oracle.pending_timers()` rather than recomputing a deadline from
+  `term_run_time_min`.
+  A negative `term_run_time` is unchanged: it is out of the vendor's
+  0-527040 range, and neither lowering nor preflight refuses it yet; the
+  past-due-timer behavior it exercises stays pinned by
+  `tests/test_runner.py::test_negative_term_run_time_matches_oracle_direct_instead_of_crashing`.
+  Tests: `tests/test_oracle.py::test_term_run_time_zero_runs_to_scripted_completion_with_no_pending_timer`
+  (direct oracle, scripted SUCCESS, no TERMINATED and no pending timer at
+  any point; the positive-limit control is
+  `test_term_run_time_auto_terminates_and_downstream_terminated_consumer_fires`);
+  `tests/test_runner.py::test_term_run_time_zero_means_no_limit_on_both_paths`
+  (engine and oracle paths, byte-identical traces, no pending timer); and
+  `tests/test_runner.py::test_term_run_time_zero_runs_to_completion_through_the_engine_advance_path`
+  (virtual-clock advance well past the start, still RUNNING, then SUCCESS
+  on the scripted completion).
+  This changes what the state machine derives from an identical log (a v2
+  replay of a `term_run_time: 0` job ends TERMINATED; this build ends
+  RUNNING), so `STATE_MACHINE_VERSION` moves 2 -> 3: a v2 log is refused at
+  every door, and a live v2 estate drains and a new estate is created
+  (period-model ss11), as DL-235's bump did.

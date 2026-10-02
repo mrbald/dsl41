@@ -788,7 +788,8 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             member="term_run_time",
             klass=SUPPORTED,
             cite="dossier ss5, oracle.Oracle._arm_sla_and_term",
-            effect="arms a timer that TERMINATEs the run after n minutes",
+            effect="arms a timer that TERMINATEs the run after n minutes"
+            "; zero means no limit and arms no timer (DL-241)",
             trigger=_job(
                 "insert_job: J1\njob_type: c\ncommand: true\nmachine: M0", term_run_time="10"
             ),
@@ -2731,7 +2732,8 @@ SCENARIO_ROWS: tuple[Row, ...] = (
             member="term_run_time",
             klass=SUPPORTED,
             cite="PR-09, oracle.Oracle._schedule_timer",
-            effect="armed by the start; it TERMINATEs a run still live at the deadline",
+            effect="armed by the start; it TERMINATEs a run still live at the deadline"
+            "; zero means no limit and arms no timer (DL-241)",
             trigger=_scn(_job(term_run_time="15"), "0 STARTJOB job=J0"),
         ),
         _row(
