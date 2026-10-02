@@ -2,7 +2,7 @@
 name = "dsl41"
 version = "1.7.0"
 description = "AutoSys->Stonebranch migration compiler: JIL frontend, semantic IR, linter, Mermaid visualizer, equivalence validator, UC backend, Python DSL."
-readme = "README.md"
+dynamic = ["readme"]
 requires-python = ">=3.12"
 license = "AGPL-3.0-only"
 license-files = ["LICENSE", "LICENSING.md", "COMMERCIAL.md", "THIRD_PARTY_LICENSES"]
@@ -71,8 +71,22 @@ Issues = "https://github.com/mrbald/dsl41/issues"
 dsl41 = "dsl41.cli:app"
 
 [build-system]
-requires = ["hatchling>=1.27,<2"]
+requires = ["hatchling>=1.27,<2", "hatch-fancy-pypi-readme>=25.1,<26"]
 build-backend = "hatchling.build"
+
+# README.md links to repo files by relative path, which GitHub resolves and
+# the PyPI project page does not. The readme is built from README.md at
+# package build time with each relative link rewritten to the file on main.
+# Absolute links, mail links and in-page anchors pass through unchanged.
+[tool.hatch.metadata.hooks.fancy-pypi-readme]
+content-type = "text/markdown"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
+path = "README.md"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '\]\((?!https?://|mailto:|#)([^)\s]+)\)'
+replacement = '](https://github.com/mrbald/dsl41/blob/main/\1)'
 
 # grammars/ lives at the repo root (docs reference it there); ship it inside the
 # package so conditions._grammar_text() works from a wheel install too.

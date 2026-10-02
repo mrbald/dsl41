@@ -20,36 +20,36 @@ boundaries for estates that run for months.
 
 Read these in this order:
 
-1. [docs/autosys-semantics.md](https://github.com/mrbald/dsl41/blob/main/docs/autosys-semantics.md) - the meaning of JIL (SEM entries)
-2. [docs/stonebranch-semantics.md](https://github.com/mrbald/dsl41/blob/main/docs/stonebranch-semantics.md) - the target model and the AutoSys-to-UC mapping (UCS/M entries)
-3. [docs/ir-design.md](https://github.com/mrbald/dsl41/blob/main/docs/ir-design.md) - AST, IR-F, IR-G, oracle, and equivalence design
-4. [docs/jil-statement-syntax.md](https://github.com/mrbald/dsl41/blob/main/docs/jil-statement-syntax.md) - the statement scanner spec
-5. [docs/decision-log.md](https://github.com/mrbald/dsl41/blob/main/docs/decision-log.md) - the reasons for the decisions
-6. [docs/citation-index.md](https://github.com/mrbald/dsl41/blob/main/docs/citation-index.md) - what every reference token in the sources means
-7. [docs/simulation-coverage.md](https://github.com/mrbald/dsl41/blob/main/docs/simulation-coverage.md) - what the simulation models, refuses, or assumes
-8. [CLAUDE.md](https://github.com/mrbald/dsl41/blob/main/CLAUDE.md) - the shared agent contract and task-specific reading routes
+1. [docs/autosys-semantics.md](docs/autosys-semantics.md) - the meaning of JIL (SEM entries)
+2. [docs/stonebranch-semantics.md](docs/stonebranch-semantics.md) - the target model and the AutoSys-to-UC mapping (UCS/M entries)
+3. [docs/ir-design.md](docs/ir-design.md) - AST, IR-F, IR-G, oracle, and equivalence design
+4. [docs/jil-statement-syntax.md](docs/jil-statement-syntax.md) - the statement scanner spec
+5. [docs/decision-log.md](docs/decision-log.md) - the reasons for the decisions
+6. [docs/citation-index.md](docs/citation-index.md) - what every reference token in the sources means
+7. [docs/simulation-coverage.md](docs/simulation-coverage.md) - what the simulation models, refuses, or assumes
+8. [CLAUDE.md](CLAUDE.md) - the shared agent contract and task-specific reading routes
 
 The runner's design is
-[docs/runner-design.md](https://github.com/mrbald/dsl41/blob/main/docs/runner-design.md).
+[docs/runner-design.md](docs/runner-design.md).
 Its frozen contracts are
-[docs/supervisor-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/supervisor-protocol.md),
-[docs/control-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/control-protocol.md),
-[docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md),
-[docs/period-model.md](https://github.com/mrbald/dsl41/blob/main/docs/period-model.md),
-[docs/protocol-evolution.md](https://github.com/mrbald/dsl41/blob/main/docs/protocol-evolution.md),
-and [docs/access-model.md](https://github.com/mrbald/dsl41/blob/main/docs/access-model.md).
+[docs/supervisor-protocol.md](docs/supervisor-protocol.md),
+[docs/control-protocol.md](docs/control-protocol.md),
+[docs/concurrency-model.md](docs/concurrency-model.md),
+[docs/period-model.md](docs/period-model.md),
+[docs/protocol-evolution.md](docs/protocol-evolution.md),
+and [docs/access-model.md](docs/access-model.md).
 
 Agent setup, verification commands, and cross-vendor review recipes are in
-[docs/agent-workflow.md](https://github.com/mrbald/dsl41/blob/main/docs/agent-workflow.md).
+[docs/agent-workflow.md](docs/agent-workflow.md).
 Operating the runner on a server (install, systemd, web UI exposure, the
 JIL-update cycle, upgrades) is
-[docs/deployment-runbook.md](https://github.com/mrbald/dsl41/blob/main/docs/deployment-runbook.md).
+[docs/deployment-runbook.md](docs/deployment-runbook.md).
 
 ## Status
 
 The compiler and the runner are built and tested. Three designed items are
 not built: the remote relay and shared store that multihost execution needs
-([docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md)
+([docs/concurrency-model.md](docs/concurrency-model.md)
 §7), rich UC condition forms with write-path verification (they need a live
 controller), and the decompiler's custom-pattern option (`--patterns`). The
 open questions that need a live instance are listed under
@@ -226,7 +226,7 @@ dsl41 uc --strict jobs.jil                  # exit 1 if anything was quarantined
 
 The command emits one `taskWorkflow` record per serializable workflow, in
 the shape frozen in
-[docs/uc-edge-schema.md](https://github.com/mrbald/dsl41/blob/main/docs/uc-edge-schema.md).
+[docs/uc-edge-schema.md](docs/uc-edge-schema.md).
 The records use base edge conditions only (Success, Failure,
 Success/Failure), with `retainSysIds: false` and no system ids. A workflow
 with an edge the base schema cannot express (a `t()`-derived condition, a
@@ -358,7 +358,7 @@ the help panel.
 that execution host, and work already running finishes. Held jobs are not
 failed and not moved. A job is rerun elsewhere only after the host is
 evicted, which needs proof that the old executor is dead
-([docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md)
+([docs/concurrency-model.md](docs/concurrency-model.md)
 §8). `query status` marks a held job, because a held job otherwise reads
 RUNNING with no process behind it.
 
@@ -400,7 +400,7 @@ jobs continue. `--resume --detached` reconnects and reattaches to the runs
 still alive, with no re-run, and resolves from the spool any run that
 finished meanwhile. The engine holds a single fencing lease. The socket
 protocol is frozen in
-[docs/supervisor-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/supervisor-protocol.md).
+[docs/supervisor-protocol.md](docs/supervisor-protocol.md).
 `supervise` is read-only unless you ask it to shut down or start.
 
 `--deadman N` trades some of what `--detached` buys. The supervisor exits
@@ -460,7 +460,7 @@ change. A run root with no stored inputs reports its rows as
 
 A long-lived estate runs as a sequence of periods under a lineage anchor.
 The contract is
-[docs/period-model.md](https://github.com/mrbald/dsl41/blob/main/docs/period-model.md).
+[docs/period-model.md](docs/period-model.md).
 
 - `seal` closes the running period and commits the next one. It works live
   through the engine, which then exits with code 3, or offline when no
@@ -495,7 +495,7 @@ a launcher script and systemd units for running it as a service. The
 example is repo-only; it is not packaged.
 
 CI also uses it to test the concurrency model
-([docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md)
+([docs/concurrency-model.md](docs/concurrency-model.md)
 §9): seeded interleavings of leader failover, a spawn decided and never
 acted on, duplicated and stale completions, quarantine, and drain, with a
 check that no `(job, run_number)` ever runs twice.
@@ -580,7 +580,7 @@ Tools:
   key in no class stops the run.
 - `src/dsl41/simulation_register.py` and
   `src/dsl41/simulation_register_rows.py`: the coverage register behind
-  [docs/simulation-coverage.md](https://github.com/mrbald/dsl41/blob/main/docs/simulation-coverage.md):
+  [docs/simulation-coverage.md](docs/simulation-coverage.md):
   the row model and the rows as data. A test derives every surface's
   members from the code and fails on a member with no row.
 - `src/dsl41/rehearse_check.py`: `rehearse --check-cadence`.
@@ -611,7 +611,7 @@ Runner:
   HostCommand vocabulary, eviction's preconditions as a pure function of
   the row, and the genesis seed.
 - `src/dsl41/runner_access.py`: the access perimeter
-  ([docs/access-model.md](https://github.com/mrbald/dsl41/blob/main/docs/access-model.md)):
+  ([docs/access-model.md](docs/access-model.md)):
   the optional `--access-map`, its gates over the control verbs, denial
   receipts, and the privileged ledger. With no map, nothing changes.
 - `src/dsl41/runner_history.py`: run history for `runs`, a projection over
@@ -637,7 +637,7 @@ Runner:
   vocabulary, and three clients (persistent async for the TUI, one-shot
   blocking for the CLI, a blocking generator for `subscribe`). The
   protocol is
-  [docs/control-protocol.md](https://github.com/mrbald/dsl41/blob/main/docs/control-protocol.md).
+  [docs/control-protocol.md](docs/control-protocol.md).
 - `src/dsl41/runner_supervisor.py`: the detached supervisor: stdlib-only,
   one per run root. It owns the wrapper lifelines and speaks the supervisor
   protocol (SPAWN, SIGNAL, LIST, SHUTDOWN, PING, and the lease), with
@@ -692,7 +692,7 @@ CLI and scripts:
 - `scripts/arch_check.py`: the architecture gate CI runs next to ruff and
   mypy. Blocking checks: a body duplicated across modules, a new private
   cross-module import under `src/`, a citation token with no row in
-  [docs/citation-index.md](https://github.com/mrbald/dsl41/blob/main/docs/citation-index.md),
+  [docs/citation-index.md](docs/citation-index.md),
   a `test_...` name in the docs that no test defines, and an IR-F schema
   change without an `IR_VERSION` bump. Size checks are advisory, ratcheted
   against `scripts/arch_baseline.json`. It also reports when a conceptual
@@ -896,7 +896,7 @@ Training estate:
 
 - The remote relay and shared store that multihost execution needs. They
   are designed in
-  [docs/concurrency-model.md](https://github.com/mrbald/dsl41/blob/main/docs/concurrency-model.md)
+  [docs/concurrency-model.md](docs/concurrency-model.md)
   §7.
 - Rich UC condition forms, the live OpenAPI pull, write-path verification,
   and the generated client (U3b). They need a live controller.
@@ -909,25 +909,28 @@ AutoSys instance; Q6 has no code switch. The resource-manager questions
 Qr2-Qr4 and Qr6 are stated in DL-50. The UC questions U1 and U3b need a
 live controller; U6b lives in the migration report's question table. The
 runner questions E5-E10 are in
-[docs/runner-design.md](https://github.com/mrbald/dsl41/blob/main/docs/runner-design.md)
+[docs/runner-design.md](docs/runner-design.md)
 §15. The probe protocols that would settle them are in
-[docs/live-instance-runbook.md](https://github.com/mrbald/dsl41/blob/main/docs/live-instance-runbook.md).
+[docs/live-instance-runbook.md](docs/live-instance-runbook.md).
 
 ## Release
 
 Releases are tag-driven. A push of a tag that matches `v*` starts
-[.github/workflows/release.yml](https://github.com/mrbald/dsl41/blob/main/.github/workflows/release.yml).
+[.github/workflows/release.yml](.github/workflows/release.yml).
 The workflow runs the whole CI workflow as its first job, checks that the
 tag is annotated and names the version in `pyproject.toml`, builds the
 sdist and the wheel, exports the locked dependency closure with hashes,
 smoke-tests the installed wheel with
-[scripts/release_smoke.sh](https://github.com/mrbald/dsl41/blob/main/scripts/release_smoke.sh),
+[scripts/release_smoke.sh](scripts/release_smoke.sh),
 and publishes only what the smoke tested. Publication uses trusted
 publishing (OIDC) in the `pypi` environment, which waits for the owner's
 approval. The repository holds no PyPI token. The GitHub release that
 follows carries the sdist, the wheel, the two requirements files, and
 `SHA256SUMS`. The workflow's header comment lists its jobs and records the
 one-time trusted-publisher setup on pypi.org.
+The package readme is README.md with every relative link rewritten at
+build time to the file on `main`, because the PyPI project page cannot
+resolve a relative path.
 
 A minor bump (1.3.0 to 1.4.0) carries one or more functional units. A patch
 bump (1.3.0 to 1.3.1) carries documentation or a correction with no
@@ -937,20 +940,20 @@ package inside a minor bump; the tag message names it.
 The annotated tag's message is the release note. Its first line is the
 summary. Its body says whether the WAL format, the state-machine version, or
 a protocol version moved, which is what the upgrade section of
-[docs/deployment-runbook.md](https://github.com/mrbald/dsl41/blob/main/docs/deployment-runbook.md)
+[docs/deployment-runbook.md](docs/deployment-runbook.md)
 asks a release note for, and it names any Python module that left the
 package.
 
 ### Make a release
 
 Start from a clean working tree with `main` pushed. Run the
-[full local gates](https://github.com/mrbald/dsl41/blob/main/docs/agent-workflow.md#verify-a-change).
+[full local gates](docs/agent-workflow.md#verify-a-change).
 The list follows CI, including format checking and the scoped 100% branch
 coverage requirement.
 
 Set the new version in `pyproject.toml` and run `uv lock`, which writes the
 same version into `uv.lock`. Move the install pin (`ver=`) in
-[docs/deployment-runbook.md](https://github.com/mrbald/dsl41/blob/main/docs/deployment-runbook.md)
+[docs/deployment-runbook.md](docs/deployment-runbook.md)
 to the same version. Build locally and compare the wheel's file list with
 the previous release's (`uv build`, then `unzip -Z1` on both): the
 difference must be what the tag message is about to say. Commit the three
