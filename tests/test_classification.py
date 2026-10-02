@@ -1286,8 +1286,10 @@ def test_word_operators_are_their_symbols() -> None:
 def test_holiday_s_with_a_holcal_is_not_no_action() -> None:
     """`holiday: S` on a holiday keeps the day and skips PAST the
     non_workday branch -- with a holcal and `non_workday: W` it shields a
-    weekend holiday from the walk (DL-58's shielding family). So the S
-    collapses to no-action only when no holcal exists to hit."""
+    holiday from the walk (DL-58's shielding family; DL-244: that includes
+    a weekday holcal date, since the non_workday code treats any admitted
+    holcal date as a non-workday with no holiday action specified). So the
+    S collapses to no-action only when no holcal exists to hit."""
 
     def estate(extra: str) -> str:
         return (
@@ -1319,18 +1321,28 @@ def test_holiday_s_with_a_holcal_is_not_no_action() -> None:
         "calendar:cal"
         not in ClassificationGraph(Baseline(catalog=idle), Baseline(catalog=idle_s)).changed
     )
-    # FIFTH and SIXTH: a non-empty holiday set OUTSIDE the action's domain.
-    # W walks non-workdays, so a Monday-only holcal is untouched; O drops
-    # workdays, so a Saturday-only holcal is untouched -- either way the
-    # skip shields nothing and S is no action.
+    # FIFTH: DL-244 -- with no holiday action, a holcal date is a
+    # non-workday for the non_workday code regardless of its weekday, so a
+    # Monday-only holcal is NOT outside W's domain: W now walks it exactly
+    # like a weekend holiday, and S shields it from that walk. The verdict
+    # below is the CONSERVATIVE one (`action_touches_a_holiday`'s own
+    # caveat): the adjacent weekend's own W-walk already lands on this
+    # Monday either way, so the two sides' COMPILED day sets are in fact
+    # identical here -- the classifier still reports "changed" because it
+    # reasons from candidacy, not from a full day-set diff, and a false
+    # refusal (changed when nothing moved) is the accepted direction, never
+    # a false carry.
     monday = lower_source(
         estate("holiday: S\n").replace("08/22/2026 00:00", "08/24/2026 00:00")  # a Monday
     )
     monday_plain = lower_source(estate("").replace("08/22/2026 00:00", "08/24/2026 00:00"))
     assert (
         "calendar:cal"
-        not in ClassificationGraph(Baseline(catalog=monday_plain), Baseline(catalog=monday)).changed
+        in ClassificationGraph(Baseline(catalog=monday_plain), Baseline(catalog=monday)).changed
     )
+    # SIXTH: O (restrict-to-non-workday) already treated a Saturday as a
+    # non-workday by weekday alone, so the holcal membership changes
+    # nothing here -- untouched before and after DL-244.
     saturday_o = lower_source(estate("").replace("non_workday: W", "non_workday: O"))
     saturday_o_s = lower_source(estate("holiday: S\n").replace("non_workday: W", "non_workday: O"))
     assert (
@@ -1339,26 +1351,32 @@ def test_holiday_s_with_a_holcal_is_not_no_action() -> None:
             Baseline(catalog=saturday_o), Baseline(catalog=saturday_o_s)
         ).changed
     )
-    # SEVENTH: a holiday the RULES never admit -- Monday holcal, O (which
-    # can alter Mondays), but the rule set includes only Tuesdays: neither
-    # side ever produces the Monday as a candidate, so S is no action
+    # SEVENTH: a holiday the RULES never admit -- Monday holcal, W, but the
+    # rule set includes only Tuesdays: neither side ever produces the
+    # Monday as a candidate, so S is no action. W (not O) on purpose: O
+    # always returns `False` from `action_touches_a_holiday` before
+    # `candidates` is even inspected (EIGHTH, below), so an O version of
+    # this case would pass whether or not candidacy was computed right. W
+    # pins the REPLACE branch's `bool(candidates)` on its empty side.
     tue_only = lower_source(
         estate("")
         .replace("08/22/2026 00:00", "08/24/2026 00:00")
-        .replace("non_workday: W", "non_workday: O")
         .replace("condition: daily", "condition: tue")
     )
     tue_only_s = lower_source(
         estate("holiday: S\n")
         .replace("08/22/2026 00:00", "08/24/2026 00:00")
-        .replace("non_workday: W", "non_workday: O")
         .replace("condition: daily", "condition: tue")
     )
     assert (
         "calendar:cal"
         not in ClassificationGraph(Baseline(catalog=tue_only), Baseline(catalog=tue_only_s)).changed
     )
-    # and the domains DO reach when they should: Monday-holcal under O
+    # EIGHTH: DL-244 -- O (restrict-to-non-workday) is a filter, never a
+    # replacement, and a holcal date the rules admit is ALWAYS counted as a
+    # non-workday with no holiday action, so O keeps a Monday holcal date
+    # outright, exactly like S. O's domain never diverges from S on an
+    # admitted holcal date, regardless of weekday, so this stays no action.
     monday_o = lower_source(
         estate("")
         .replace("08/22/2026 00:00", "08/24/2026 00:00")
@@ -1371,7 +1389,7 @@ def test_holiday_s_with_a_holcal_is_not_no_action() -> None:
     )
     assert (
         "calendar:cal"
-        in ClassificationGraph(Baseline(catalog=monday_o), Baseline(catalog=monday_o_s)).changed
+        not in ClassificationGraph(Baseline(catalog=monday_o), Baseline(catalog=monday_o_s)).changed
     )
     # and the FOURTH: the holcal is present but EMPTY -- S has nothing to
     # keep, the compiled dates are identical, so S is still no action
@@ -1385,3 +1403,31 @@ def test_holiday_s_with_a_holcal_is_not_no_action() -> None:
         "calendar:cal"
         not in ClassificationGraph(Baseline(catalog=empty), Baseline(catalog=empty_s)).changed
     )
+
+
+def test_non_workday_replace_is_no_action_when_rule_excludes_the_holcal_date() -> None:
+    """DL-244 mutation pin: `action_touches_a_holiday`'s REPLACE branch
+    (non_workday N/W/P) returns `bool(candidates)`, not an unconditional
+    `True`. This test and the SEVENTH sub-case of
+    `test_holiday_s_with_a_holcal_is_not_no_action` both kill a mutant
+    collapsing it to `True`; this one covers N, W and P together. Here the
+    rule admits only Tuesdays, so a Monday holcal date is never a
+    candidate for any of the three REPLACE codes, and `holiday: S` stays
+    no action for all of them."""
+
+    def estate(code: str, extra: str = "") -> str:
+        return (
+            "calendar: hcal\n08/24/2026 00:00\n\n"  # a Monday
+            f"extended_calendar: cal\nnon_workday: {code}\nholcal: hcal\n"
+            f"{extra}condition: tue\n"
+            "\ninsert_job: j\njob_type: c\ncommand: x\nmachine: m1\n"
+            "date_conditions: 1\nrun_calendar: cal\nstart_mins: 0\n"
+        )
+
+    for code in ("N", "W", "P"):
+        bare = lower_source(estate(code))
+        shielded = lower_source(estate(code, "holiday: S\n"))
+        assert (
+            "calendar:cal"
+            not in ClassificationGraph(Baseline(catalog=bare), Baseline(catalog=shielded)).changed
+        ), code

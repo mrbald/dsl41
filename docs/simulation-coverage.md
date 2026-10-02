@@ -227,7 +227,7 @@ fails the suite.
 | calendar_attr:end_date | supported | SEM-39 | - |  |  |  | generic | closes the cycle period its preceding start_date opened |
 | calendar_attr:holcal | supported | SEM-36 | - |  |  |  | generic | names the standard calendar whose days are this calendar's holidays |
 | calendar_attr:holiday | supported | SEM-36, SEM-38 | - |  |  |  | generic | what happens to a generated day that is a holiday; it governs holcal dates outright |
-| calendar_attr:holiday#absent | supported | SEM-38, DL-58, autocal.CompiledCalendar._dispose | - |  |  |  | none | with no holiday action a holcal date gets no treatment of its own: it falls through to the non_workday branch, which only acts on a day that is not a workday, so a holiday ON a workday is kept untouched |
+| calendar_attr:holiday#absent | supported | SEM-38, DL-58, DL-244, autocal.CompiledCalendar._dispose | - |  |  |  | none | with no holiday action a holcal date gets no treatment of its own: it falls through to the non_workday branch, which treats it as a non-workday regardless of its own weekday, so a holiday ON a workday is governed by the non_workday action exactly like a weekend non-workday would be |
 | calendar_attr:non_workday | supported | SEM-36, SEM-38 | - |  |  |  | generic | what happens to a generated day that is not a workday: filter or replacement |
 | calendar_attr:non_workday#absent | supported | SEM-38, autocal.CompiledCalendar._dispose | - |  |  |  | none | with no non_workday action a generated day is kept exactly as it falls |
 | calendar_attr:start_date | supported | SEM-39 | - |  |  |  | generic | opens one cycle period; it pairs positionally with the end_date after it |

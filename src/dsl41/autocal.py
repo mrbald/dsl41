@@ -303,7 +303,10 @@ def _weekday_keyword(weekday: int) -> _Pred:
 #: loop reads exactly as the interleaved branch chain did.
 _KEYWORDS: dict[str, tuple[_Pred, bool]] = {
     "daily": (lambda d, c: True, False),
-    "workdays": (lambda d, c: d.weekday() in c.workdays, False),
+    # [V] auto-subtracts the holiday calendar when one is named (SEM-37
+    # quote, DL-244): c.holidays is empty with no holcal, so this is a
+    # no-op in that case.
+    "workdays": (lambda d, c: d.weekday() in c.workdays and d not in c.holidays, False),
     # [V] auto-subtracts the holiday calendar (SEM-37 quote)
     "weekdays": (lambda d, c: d.weekday() < 5 and d not in c.holidays, False),
     "fomwork": (lambda d, c: bool(s := _workday_seq(d, c)) and d == s[0], False),
@@ -746,7 +749,11 @@ class CompiledCalendar:
         replacement) never sees a holiday once a holiday action exists.
         ([?] Q8a residue: whether a replacement target re-enters the other
         stage stays unverified -- kept single-shot per the holiday-N
-        wording.)"""
+        wording.) DL-244: with NO holiday action, a holcal date is a
+        non-workday for the non_workday code's purposes regardless of its
+        weekday (Define Extended Calendars 12.1's either/or dispatch,
+        SEM-38): the effective predicate is weekday-non-workday OR holcal
+        member."""
         out: set[date] = set()
         for day in candidates:
             if self.holiday is not None and day in self.ctx.holidays:
@@ -757,9 +764,10 @@ class CompiledCalendar:
                 continue
             if self.holiday == "o":
                 continue  # not a holiday: the restrict-to-holidays filter drops it
-            if self.non_workday == "o" and day.weekday() in self.ctx.workdays:
+            is_non_workday = day.weekday() not in self.ctx.workdays or day in self.ctx.holidays
+            if self.non_workday == "o" and not is_non_workday:
                 continue
-            if self.non_workday in _REPLACE and day.weekday() not in self.ctx.workdays:
+            if self.non_workday in _REPLACE and is_non_workday:
                 out.add(self._replace("non_workday", day))
             else:
                 out.add(day)
@@ -1101,15 +1109,24 @@ def semantic_key(cal: CalendarIR, catalog: CatalogIR | None = None) -> tuple[Any
     def action_touches_a_holiday() -> bool:
         """Whether the non_workday action would ALTER any resolved holiday
         that the rule set ADMITS -- the exact domain `holiday: S`'s skip
-        shields (`_dispose`): "o" drops days IN the workday set, n/w/p walk
-        days OUTSIDE it, and either only ever sees a day the include/
-        exclude predicate produced as a candidate. The holiday set is
+        shields (`_dispose`). DL-244: with no holiday action, a holcal date
+        the rules admit is ALWAYS a non-workday for the non_workday code's
+        purposes, regardless of weekday -- `candidates` below is already
+        restricted to resolved holcal members, so that effective predicate
+        is unconditionally true for every one of them. "o" (restrict-to-
+        non-workday) therefore never drops a candidate -- it is always
+        indistinguishable from S-on-a-holiday, which also keeps the day
+        as-is -- and n/w/p (replace) always fires on one, so reach is just
+        whether the rule admits any candidate at all. The holiday set is
         finite, so candidacy evaluates exactly, through the engine's own
         compile. Unresolvable pieces (raw workday, unreadable holcal, an
         uncompilable calendar, an unknown action spelling) answer True --
-        the refusal-safe direction; a replace-walk that happens to land on
-        an already-included day is an accepted false-refusal corner, never
-        a false carry."""
+        the refusal-safe direction. Conservative, not exact: a REPLACE
+        candidate's walk can land back on an already-included day (another
+        candidate's own replacement, or its own unmolested generation), so
+        this can call two calendars with equal compiled day sets
+        'different' -- a false carry never happens, only an accepted
+        false-refusal corner."""
         if holidays is None or not isinstance(workday, frozenset) or catalog is None:
             return True
         try:
@@ -1118,9 +1135,9 @@ def semantic_key(cal: CalendarIR, catalog: CatalogIR | None = None) -> tuple[Any
             return True
         candidates = frozenset(d for d in holidays if compiled._included(d))
         if non_workday_action == "o":
-            return any(d.weekday() in workday for d in candidates)
+            return False
         if non_workday_action in _REPLACE:
-            return any(d.weekday() not in workday for d in candidates)
+            return bool(candidates)
         return True  # an unparsed action spelling: assume reach
 
     adjust_raw = cal.attrs.get("adjust", "").strip()
