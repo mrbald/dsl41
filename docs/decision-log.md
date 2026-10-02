@@ -15488,3 +15488,103 @@ relitigate an entry; append a new one.
   `scripts/render_simulation_coverage.py`); `tests/test_simulation_register.py`
   (`LABEL_RE`/`MARKER_RE` widened to admit two-digit `Q` numbers so
   `PENDING: Q10` is not read as `Q1`).
+- DL-244 An unspecified holiday action makes a holcal date a non-workday
+  regardless of its weekday, and WORKDAYS excludes it too
+  (2026-10-02; src/dsl41/autocal.py, src/dsl41/simulation_register_rows.py,
+  docs/autosys-semantics.md, tests/test_autocal.py,
+  tests/test_classification.py)
+  "Define Extended Calendars" (AutoSys 12.1/24.2, identical): "When you
+  specify an action at the Holiday Action prompt, the utility applies that
+  action to all of the dates listed in the calendar that you specify at
+  the Holiday Calendar prompt. When you do not specify an action at the
+  Holiday Action prompt, the utility treats the dates listed in the
+  calendar that you specify at the Holiday Calendar prompt as non-workdays
+  according to the value that you specify at the Non-workday Action
+  prompt." "Date Condition Keywords" (same two releases), WORKDAYS:
+  "...The utility automatically considers holidays to be non-workdays if
+  you specified a holiday calendar at the Holiday Calendar prompt."
+  Defect: `CompiledCalendar._dispose`'s fallback branch (no holiday action)
+  tested only `day.weekday() not in ctx.workdays` to decide whether the
+  non_workday code applied. A holcal date that fell on an ordinary weekday
+  was invisible to it: O dropped it (should keep it, since it is now a
+  non-workday), N/W/P left it in place (should replace it). WORKDAYS had
+  the matching gap: it tested only the weekday mask, never the holiday
+  calendar, unlike WEEKDAYS which already auto-subtracts it (SEM-37).
+  Behavior: the non_workday O/N/W/P codes now test
+  `day.weekday() not in ctx.workdays or day in ctx.holidays` in the
+  no-holiday-action branch. WORKDAYS now excludes a holcal date the same
+  way, and is unchanged with no holcal (`ctx.holidays` is empty in that
+  case, so the added clause is a no-op). A specified `holiday:` action
+  still governs a holcal date outright wherever that date is a CANDIDATE
+  (Q8a, DL-58): it is read before the non_workday branch, unaffected by
+  this entry. But WORKDAYS's own fix removes the holcal date as a
+  candidate in the first place, so a holiday action ATTACHED to a
+  WORKDAYS calendar now never sees that date at all -- not "unaffected":
+  a holcal Friday under `condition: WORKDAYS` with `holiday: O` used to
+  read {that Friday} and now reads {} (O has nothing to restrict to);
+  `holiday: N` used to one-shot it to the next day and now adds nothing
+  (there is no candidate to replace); `holiday: S` used to keep it and
+  now drops it (nothing to keep). This matches WEEKDAYS, which already
+  worked this way, and the vendor's own WORKDAYS sentence, so the
+  behavior is kept, not re-guarded. The classifier's `autocal.semantic_key`
+  (`action_touches_a_holiday`) is updated to match the non_workday-branch
+  change: since it only ever examines days already known to be holcal
+  members, O never alters one now (always indistinguishable from
+  `holiday: S`), and N/W/P always do when the rule admits at least one
+  -- `bool(candidates)`, not an unconditional `True` (the helper's
+  conservative-overapproximation caveat is restored and kept, DL-131: it
+  may call two calendars with equal compiled day sets "different", a
+  false refusal, never a false carry).
+  Stays open: Q8c (the non_workday W/P walk's own holiday-ness check on
+  its REPLACEMENT TARGET, and N's re-check of "all other criteria") is
+  untouched -- this entry is about which days enter the non_workday
+  branch, not what a walk does once it is there. Weekday holcal dates now
+  reaching that branch means more dates meet Q8c's open pin: a W/P walk
+  can land on another holcal date without a re-check (for example a
+  Friday holcal date walking forward to the following Monday across an
+  intervening weekend). The other workday-ordinal keywords (`WORKD#nn`,
+  `FOMWORK`, `EOMWORK`, and the cycle-workday family) are untouched; the
+  audit that produced this entry did not establish whether they should
+  auto-subtract holidays too.
+  Tests: `tests/test_autocal.py::test_sem38_non_workday_o_keeps_a_weekday_holcal_date_with_no_holiday_action`,
+  `..._n_moves_a_weekday_holcal_date_with_no_holiday_action`,
+  `..._w_moves_a_weekday_holcal_date_with_no_holiday_action`,
+  `..._p_moves_a_weekday_holcal_date_with_no_holiday_action`,
+  `test_sem38_non_workday_action_leaves_an_ordinary_weekday_alone` (control),
+  `test_sem38_non_workday_weekend_control_is_unaffected` (control),
+  `test_sem38_holiday_action_still_shields_a_weekday_holcal_date` (Q8a
+  precedence, unchanged), `test_sem37_workdays_excludes_holcal_date`,
+  `test_sem37_workdays_without_holcal_is_unaffected`,
+  `test_sem37_workdays_holiday_o_never_sees_the_holcal_date`,
+  `test_sem37_workdays_holiday_n_gets_no_candidate_to_one_shot`,
+  `test_sem37_workdays_holiday_s_drops_the_holcal_date` (the WORKDAYS +
+  holiday-action interaction above, pinned for O/N/S on the vendor-worked
+  Fri Aug 28 2026 example). Two existing
+  `tests/test_classification.py::test_holiday_s_with_a_holcal_is_not_no_action`
+  sub-cases encoded the old fallback and are rewritten: a Monday-only
+  holcal under `non_workday: W` moved from "not in changed" (W was blind
+  to it) to "in changed" (W now walks it, so `holiday: S` shields it --
+  this verdict is the classifier's conservative one: the two sides'
+  compiled day sets are in fact identical here, because the adjacent
+  weekend's own W-walk already lands on the same Monday either way); a
+  Monday-only holcal under `non_workday: O` moved from "in changed" (O
+  used to drop a weekday holcal date, differing from `holiday: S`) to "not
+  in changed" (O now keeps it outright, same as `holiday: S`, on every
+  admitted holcal date regardless of weekday). The SEVENTH sub-case (a
+  rule that excludes the holcal date entirely) is reverted from a
+  `non_workday: O` substitution back to `non_workday: W`: O's branch
+  returns `False` whatever `candidates` holds, so an O version passed
+  vacuously regardless of whether candidacy was right. A new
+  `test_non_workday_replace_is_no_action_when_rule_excludes_the_holcal_date`
+  pins the REPLACE branch's empty-`candidates` side across N/W/P
+  directly (a mutant collapsing `bool(candidates)` to `True` fails it).
+  `STATE_MACHINE_VERSION` moves 5 -> 6 (DL-243 took 4 -> 5 first; comment
+  added in runner_ledger.py in the existing style). `attest.py`'s offline
+  audit re-derives a boundary's classification from the sealed C1/C2 catalogs
+  (`classify(...)`, ~819), which reaches `autocal.semantic_key` and the
+  compiled day sets this entry changes. A boundary a v5 build sealed as
+  `carry` (or vice versa `R`/`A`) can classify differently under v6 from
+  the identical catalogs and carried set, which changes the re-derived
+  seal digest -- a replay-visible difference, not merely a forward-looking
+  one. As with DL-235/DL-241: a v5 log is refused at every door, and a
+  live v5 estate drains and a new estate is created (period-model ss11).

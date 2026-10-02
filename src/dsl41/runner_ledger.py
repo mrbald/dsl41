@@ -76,7 +76,12 @@ from dsl41.runner_clock import EngineError
 #: INACTIVE derives different state.
 #: 5 since DL-243: ON_ICE/ON_NOEXEC condition reads and FORCE_STARTJOB on a
 #: non-live ON_ICE/ON_HOLD job derive different state from an identical log.
-STATE_MACHINE_VERSION = 5
+#: 6 since DL-244: a holcal weekday date now reaches the non_workday
+#: action, and WORKDAYS now excludes it, so autocal's compiled day sets
+#: (which `classify`/`semantic_key` feed) can differ -- `attest` re-derives
+#: a boundary's classification from the sealed catalogs, so a v5 boundary
+#: can carry/refuse/assume a job differently under v6.
+STATE_MACHINE_VERSION = 6
 
 LOCK_NAME = "leader.lock"
 

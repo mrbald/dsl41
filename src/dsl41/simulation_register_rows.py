@@ -1339,10 +1339,11 @@ CALENDAR_ATTR_ROWS: tuple[Row, ...] = (
         member="holiday",
         facet="absent",
         klass=SUPPORTED,
-        cite="SEM-38, DL-58, autocal.CompiledCalendar._dispose",
+        cite="SEM-38, DL-58, DL-244, autocal.CompiledCalendar._dispose",
         effect="with no holiday action a holcal date gets no treatment of its own: it"
-        " falls through to the non_workday branch, which only acts on a day that is"
-        " not a workday, so a holiday ON a workday is kept untouched",
+        " falls through to the non_workday branch, which treats it as a non-workday"
+        " regardless of its own weekday, so a holiday ON a workday is governed by the"
+        " non_workday action exactly like a weekend non-workday would be",
         trigger=_cal("condition: DAILY", holcal=True),
         quiet=_cal("condition: DAILY", "holiday: S", holcal=True),
     ),
