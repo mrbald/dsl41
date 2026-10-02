@@ -16153,3 +16153,102 @@ relitigate an entry; append a new one.
   names `_window_span` as the caller that passes fold=1 near a change,
   and says the wall-time path's fold=1 hand-off is now reached only by
   changes of another shape.
+- DL-250 Vendor support limits and evidence for pinned defaults, with no
+  behavior change; Q11 opens for the WEKR reading (2026-10-03;
+  docs/autosys-semantics.md SEM-02, SEM-04, SEM-08, SEM-09, SEM-24,
+  SEM-37, ss5 and ss9; docs/runner-design.md ss15; docs/ir-design.md;
+  docs/jil-statement-syntax.md; docs/citation-index.md;
+  src/dsl41/simulation_register_rows.py; docs/simulation-coverage.md;
+  src/dsl41/ir.py and src/dsl41/conditions.py docstrings;
+  tests/test_autocal.py, tests/test_autocal_breadth.py and
+  tests/test_conditions.py comments)
+  STATUS. The "status Attribute" page (AutoSys 24.2) lists seven values:
+  FAILURE, INACTIVE, ON_HOLD, ON_ICE, ON_NOEXEC, SUCCESS and TERMINATED.
+  SEM-24 quotes the set and drops its [?]. dsl41 models four values and
+  refuses SUCCESS, FAILURE and TERMINATED at lowering. SEM-24 and the ss5
+  row state this as a support limit. The lowering message already names
+  the four.
+  ENVVARS. The "envvars Attribute" page allows several `envvars` lines.
+  Lowering refuses a repeated one as a duplicate attribute. The ss5 row
+  states the limit beside DL-240's run-time refusal. The workaround is one
+  line with a comma-separated list.
+  CONDITIONS. The "condition Attribute" page says "You cannot mix case".
+  It gives 9998.59 as the largest finite hours.minutes lookback, and 9999
+  alone means indefinite. SEM-04 said 9999.59; it now says 9998.59. SEM-02
+  and SEM-04 state the leniencies as accepted but undocumented input:
+  mixed case within a keyword (`sUCCESS`, `AnD`), mixed case across the
+  keywords of one condition (`SUCCESS(a) and failure(b)`, the likelier
+  reading of the vendor sentence), and 9999.00 to 9999.59 read as finite
+  windows. The conditions.py docstring and one error message drop the old
+  maximum.
+  RESOURCES. The ss5 resources row states three loud lowering refusals as
+  support limits. `QUANTITY=ALL` asks for all units. For a renewable
+  resource the workaround is to write its `amount`; for a depletable one
+  that is not exact, since its free units fall below `amount` after use. A
+  real-resource group with `VALUEOP` and `VALUE` has no workaround. One
+  resource name defined on several machines is allowed by the
+  "insert_resource Subcommand" page; dsl41 refuses it as a duplicate,
+  with no workaround.
+  JOB_TYPE. The "job_type Attribute" page gives CMD as the default.
+  Lowering requires the attribute and refuses its absence. A new ss5 row
+  states this as a support limit. The ir.py docstring said autorep -q
+  output always emits the attribute; that was never measured, and the
+  docstring now says it is expected, not measured.
+  EXIT CODES. The "success_codes Attribute" and "fail_codes Attribute"
+  pages allow integers from -2147483647 to 2147483647. Lowering refuses a
+  negative code as malformed. SEM-09 states the limit.
+  GLOBALS. No vendor page documents an `insert_global` or `delete_global`
+  JIL subcommand. The condition page says globals are set with the
+  sendevent command. SEM-08, ir-design and jil-statement-syntax mark the
+  statements as dsl41 input forms with [?] and keep their behavior.
+  QR1. The "resources Attribute" page gives FREE's default as Y: "Frees
+  the units only if the job completes successfully." DL-50 pins release
+  on every terminal outcome for a renewable request with no FREE. The pin
+  stays. Qr1 waits for a decision between the documented default and the
+  pin. The register row and the ss5 row record the documented default.
+  QR6. "EvaluateQueuedJobStarts" (Administrating > Configure a Scheduler,
+  AutoSys 24.2) names the default: "By default, AutoSys Workload
+  Automation re-evaluates the starting conditions for these jobs other
+  than the date condition check for the day of evaluation before starting
+  them." The parameter takes 0, 1 or 2. 0 starts the job without
+  evaluating its starting conditions. 1 evaluates them other than the
+  day's date check: "This is the default". 2 evaluates them including that
+  check. Under 1 the scheduler does not re-evaluate run_calendar,
+  days_of_week, start_times or start_mins. A failed check sets INACTIVE,
+  or ACTIVATED inside a running box. "Start Conditions" (AutoSys 24.2)
+  agrees: the scheduler re-evaluates "unless you configure AutoSys
+  Workload Automation to skip starting condition evaluation for queued
+  jobs". dsl41's Qr6 pin is mode 0. The pin stays; moving to the vendor
+  default waits for a decision. The register row records the default.
+  E6. The "watch_interval Attribute" page (AutoSys 24.2) gives a default
+  of 60 seconds. It says a job watching for existence, not size, whose
+  file already exists completes at once, and watch_interval is ignored.
+  The "watch_file_min_size Attribute" page says a job with no minimum
+  size completes if the file exists. "Define a File Watcher Job" gives 30
+  seconds on an agent. runner-design ss15 records this. The pin of two
+  stable polls and the 60-second default stay under E6 until decided.
+  E10. "Standard Time Changes" and "Daylight Time Changes" (AutoSys 24.2)
+  document the DST corners. In the fall, an absolute start runs in the
+  second occurrence and start_mins run in both hours. In the spring, an
+  absolute start in the missing hour runs in the first minute of the
+  next hour, and only the first of several such starts runs.
+  runner-design ss15 records this and how the fold=0 pin differs. The
+  fold=0 pin stays under E10 until decided; the register row no longer
+  says no vendor rule exists.
+  WEKR AND Q11. "Date Condition Keywords" lists the WEKR forms as WEEK#,
+  WEEKX and WEEKM with a different week start: a week-of-year reading.
+  Its `WEEKDXn` entry says "You can specify a different start day by
+  using the WEEKDstartdayXn keyword" (12.1 and 24.2): a day-of-week
+  reading. The 24.2 render spells the anchor as a digit, `WEKRn`, n from
+  1 to 7, with Monday as 1 in its example; 12.x spells it `WEKRddd`.
+  dsl41 reads WEKR as a recurring weekday, ordinals 1 to 7 and named
+  anchors only; `WEKRMon#08` to `#53` are refused loudly. Q11 opens in
+  dossier ss9 for the choice between the readings, the partial first and
+  last weeks, and the numeric anchors 2 to 7. The `cal_family:wekr`
+  register row moves from supported to provisional under Q11, and
+  citation-index's Q row now runs to Q11. The current reading is the pin.
+  UNCHANGED. No code path, default or earlier open-question pin changes,
+  and `STATE_MACHINE_VERSION` stays. The pins that stay are Qr1 and Qr6
+  (DL-50), E6, E10's fold=0 half (DL-45, DL-155), the four-value SEM-24
+  model, the required `job_type`, and the WEKR reading (Q11). Each waits
+  for a separate decision.

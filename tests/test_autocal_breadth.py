@@ -348,7 +348,9 @@ def test_backward_workday_ordinal_at_short_february() -> None:
 
 
 def test_wekr_anchor_crosses_year_boundary() -> None:
-    """WEKR-anchored weeks are pure weekday-offset arithmetic (unlike the
+    """Pins dsl41's day-of-week WEKR reading, which is open question Q11
+    (SEM-37); the vendor text also supports a week-of-year reading. Under
+    the pin, WEKR-anchored weeks are pure weekday-offset arithmetic (unlike the
     default Jan1 anchor, which recomputes per calendar year via
     `date(day.year, 1, 1)`), so a Saturday-anchored week can straddle
     Dec31/Jan1: Dec 26 2026 is a Saturday, and the following Friday is

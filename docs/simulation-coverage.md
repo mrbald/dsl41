@@ -111,7 +111,7 @@ fails the suite.
 | job_attr:chk_files | refused | runner_preflight._execution_input_preflight, DL-240 | - |  |  |  | generic | carried verbatim; never applied; real execution refuses it at preflight; rehearse and compile are unaffected; inert on a BOX (SEM-10) |
 | job_attr:command | supported | runner-design ss6 | - |  |  |  | generic | the shell command the CMD adapter spawns, passed to /bin/sh verbatim |
 | job_attr:condition | supported | SEM-02, SEM-08 | - |  |  |  | generic | the start gate: the job starts on the edge where its condition becomes true |
-| job_attr:condition#queued-no-recheck | provisional | DL-50, oracle.Oracle._readmit | Qr6 | yes |  |  | none | a job admitted out of QUE_WAIT does not re-evaluate its condition |
+| job_attr:condition#queued-no-recheck | provisional | DL-50, oracle.Oracle._readmit | Qr6 | yes |  |  | none | a job admitted out of QUE_WAIT does not re-evaluate its condition, the vendor's EvaluateQueuedJobStarts=0; the vendor default is 1, which re-evaluates the starting conditions other than the day's date check (DL-250) |
 | job_attr:date_conditions | supported | SEM-30 | - |  |  |  | generic | the master switch: the time cluster is honoured only when it is truthy |
 | job_attr:days_of_week | supported | SEM-30, SEM-31 | - |  |  |  | generic | the days a schedule tick may fall on, as two-letter tokens or `all` |
 | job_attr:days_of_week#absent | provisional | SEM-30, runner_scheduler | E10 | yes |  |  | none | a schedule with no days_of_week is read as every day |
@@ -177,7 +177,7 @@ fails the suite.
 | job_attr:success_codes | supported | SEM-09, DL-33 | - |  |  |  | generic | the explicit success set; with no fail_codes beside it, it alone decides the verdict |
 | job_attr:term_run_time | supported | dossier ss5, oracle.Oracle._arm_term_run_time | - |  |  |  | generic | arms a timer that TERMINATEs the run after n minutes; zero means no limit and arms no timer (DL-241) |
 | job_attr:timezone | supported | SEM-35 | - |  |  |  | generic | the zone every schedule time on this job is read in |
-| job_attr:timezone#dst-fold | provisional | SEM-35, runner_scheduler | E10 | yes |  |  | none | a start time inside a DST fold or gap resolves by the pinned interpretation, not by a vendor-verified rule |
+| job_attr:timezone#dst-fold | provisional | SEM-35, runner_scheduler | E10 | yes |  |  | none | a start time inside a DST fold or gap resolves by the pinned fold=0 interpretation, which differs from the vendor's documented rule (runner-design ss15) |
 | job_attr:ulimit | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | no resource limit is applied to the child process |
 | job_attr:watch_file | supported | runner-design ss6 | - |  |  |  | generic | the path an FW job polls; the job completes only once the file exists, reaches watch_file_min_size, and two consecutive polls agree on its size |
 | job_attr:watch_file#stat-error | provisional | runner-design ss6, runner_adapters.FileWatcherAdapter | - |  |  |  | none | EVERY stat error reads as the file being absent -- a permission denial is not told apart from a missing file -- and the watch resets its stable count and keeps polling; no label was opened for it |
@@ -329,7 +329,7 @@ fails the suite.
 | id | class | cite | label | marker | protocol | bound | detector | effect |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | release_policy:completion | supported | DL-50, capacity.release_policy | - |  |  |  | generic | units are released on completion |
-| release_policy:completion#free-absent | provisional | DL-50, capacity.release_policy | Qr1 |  |  |  | none | a request with no FREE takes the res_type default, renewable for an absent res_type |
+| release_policy:completion#free-absent | provisional | DL-50, capacity.release_policy | Qr1 |  |  |  | none | a request with no FREE takes the res_type default, renewable for an absent res_type; the vendor documents FREE's default as Y, free on success only, and the pin stays until decided (DL-250) |
 | release_policy:never | supported | DL-50, capacity.release_policy | - |  |  |  | generic | units are released on never |
 | release_policy:success | supported | DL-50, capacity.release_policy | - |  |  |  | generic | units are released on success |
 
@@ -463,7 +463,7 @@ fails the suite.
 | cal_family:week | supported | SEM-37 | - |  |  |  | generic | the nth week of the year, `#`/`M`/`X`, 1..53 or `L` |
 | cal_family:week_parity | supported | SEM-37 | - |  |  |  | generic | every even (`E`) or odd (`O`) week of the year |
 | cal_family:weekd | supported | SEM-37 | - |  |  |  | generic | the nth day of the week, from the start (`#`), the end (`M`) or excluded (`X`), 1..7 or `L` |
-| cal_family:wekr | supported | SEM-37 | - |  |  |  | generic | the nth day of a week anchored on a named weekday, `#`/`M`/`X`, 1..7 or `L` |
+| cal_family:wekr | provisional | SEM-37, DL-250 | Q11 |  |  |  | generic | the pinned reading: the nth day of a week anchored on a named weekday, `#`/`M`/`X`, 1..7 or `L`; the vendor text also supports a week-of-year reading, and 24.2 spells the anchor as a digit |
 | cal_family:workd | supported | SEM-37 | - |  |  |  | generic | the nth workday of the month, counted from the start (`#`) or the end (`M`), 1..31 or `L` |
 | cal_family:workdx | refused | autocal._parse_token, SEM-37 | - |  |  |  | generic | an excluded workday ordinal whose text contradicts its month-scoped siblings; refused rather than guessed, because no sane default exists |
 
