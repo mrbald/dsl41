@@ -459,8 +459,10 @@ class JobIR(BaseModel):
         return _int_attr(self.passthrough, "job_load", label="job_load")
 
     def priority_value(self) -> int | None:
-        """DL-50: `priority` for deterministic QUE_WAIT waiter ordering
-        (# PENDING: Qr2 -- lower-number-higher assumed). None = unset."""
+        """DL-50: `priority` for deterministic QUE_WAIT waiter ordering, lower
+        number first; only a positive value makes a start check machine load
+        (DL-247). None = unset (# PENDING: Qr2 -- where an unset priority
+        sorts among resource waiters). Load queueing reads unset as 0."""
         return _int_attr(self.passthrough, "priority", label="priority")
 
 

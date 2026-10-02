@@ -4693,12 +4693,13 @@ def test_dl50_threshold_resource_is_a_gate_not_a_consumable() -> None:
 
 def test_dl50_machine_load_throttles_by_job_load_vs_max_load() -> None:
     """A machine max_load caps concurrent job_load: two job_load=1 jobs run on a
-    max_load=2 machine, the third queues, and admits on a release."""
+    max_load=2 machine, the third queues, and admits on a release. Each job
+    sets a positive priority, which load queueing needs (DL-247)."""
     text = (
         "insert_machine: box1\ntype: a\nnode_name: box1\nmax_load: 2\n\n"
-        "insert_job: ml1\njob_type: c\ncommand: x\nmachine: box1\njob_load: 1\n\n"
-        "insert_job: ml2\njob_type: c\ncommand: x\nmachine: box1\njob_load: 1\n\n"
-        "insert_job: ml3\njob_type: c\ncommand: x\nmachine: box1\njob_load: 1\n"
+        "insert_job: ml1\njob_type: c\ncommand: x\nmachine: box1\njob_load: 1\npriority: 1\n\n"
+        "insert_job: ml2\njob_type: c\ncommand: x\nmachine: box1\njob_load: 1\npriority: 1\n\n"
+        "insert_job: ml3\njob_type: c\ncommand: x\nmachine: box1\njob_load: 1\npriority: 1\n"
     )
     o = oracle(text)
     for j in ("ml1", "ml2", "ml3"):
@@ -4735,8 +4736,8 @@ def test_dl50_queued_box_member_keeps_the_box_running_until_admitted() -> None:
 
 
 def test_dl50_waiters_admit_in_priority_order() -> None:
-    """When one slot frees, the higher-priority waiter (lower number, # PENDING
-    Qr2) admits and the lower-priority one stays queued."""
+    """When one slot frees, the higher-priority waiter (lower number, DL-247)
+    admits and the lower-priority one stays queued."""
     text = (
         "insert_resource: ONE\nres_type: R\namount: 1\n\n"
         "insert_job: holder\njob_type: c\ncommand: x\nmachine: m1\nresources: (ONE, QUANTITY=1)\n\n"
@@ -4823,6 +4824,433 @@ def test_dl50_icing_a_queued_job_dequeues_it_immediately() -> None:
     assert o.store.job["ib"].status == "INACTIVE"  # not lingering QUE_WAIT
     o.feed(ev("STATUS", 2, job="ia", status="SUCCESS"))  # frees I
     assert o.store.job["ib"].status == "INACTIVE"  # iced, did NOT run
+
+
+# ------------------------------------- DL-247 machine-load bypass and priority blocking
+#
+# A machine with max_load 1 and a running holder that takes its one unit.
+# `kind` names the contender: an unset priority, priority 0, priority 1 by
+# STARTJOB, and priority 1 by FORCE_STARTJOB.
+
+_FULL_MACHINE = (
+    "insert_machine: m247\ntype: a\nnode_name: m247\nmax_load: 1\n\n"
+    "insert_resource: L247\nres_type: R\namount: 1\n\n"
+    "insert_job: hold247\njob_type: c\ncommand: x\nmachine: m247\n"
+    "job_load: 1\npriority: 1\n\n"
+    "insert_job: lock247\njob_type: c\ncommand: x\nmachine: m9\n"
+    "resources: (L247, QUANTITY=1)\n\n"
+)
+
+#: kind -> (priority line, event kind, the contender's status on a full machine)
+_CONTENDERS = {
+    "unset": ("", "STARTJOB", "RUNNING"),
+    "zero": ("priority: 0\n", "STARTJOB", "RUNNING"),
+    "positive": ("priority: 1\n", "STARTJOB", "QUE_WAIT"),
+    "forced": ("priority: 1\n", "FORCE_STARTJOB", "RUNNING"),
+}
+
+
+def _contender(kind: str, *, locked: bool) -> str:
+    prio, _, _ = _CONTENDERS[kind]
+    lock = "resources: (L247, QUANTITY=1)\n" if locked else ""
+    return (
+        _FULL_MACHINE
+        + f"insert_job: c247\njob_type: c\ncommand: y\nmachine: m247\njob_load: 1\n{prio}{lock}"
+    )
+
+
+@pytest.mark.parametrize("kind", list(_CONTENDERS))
+def test_dl247_machine_load_applies_only_to_a_positive_priority_unforced_start(
+    kind: str,
+) -> None:
+    """The vendor: an unset or zero priority "runs immediately on a machine if
+    resource dependencies permit", and the scheduler "ignores any load unit
+    values" for it. A forced job "runs even if its load exceeds the machine's
+    max_load value". Only the plain start of a priority-1 job queues."""
+    _, event, expected = _CONTENDERS[kind]
+    o = oracle(_contender(kind, locked=False))
+    o.feed(ev("STARTJOB", 0, job="hold247"))
+    o.feed(ev(event, 1, job="c247"))
+    assert _statuses(o, "hold247", "c247") == {"hold247": "RUNNING", "c247": expected}
+
+
+@pytest.mark.parametrize("kind", list(_CONTENDERS))
+def test_dl247_a_named_resource_still_gates_every_contender(kind: str) -> None:
+    """The load bypass leaves named resources alone: "If the job has resource
+    dependencies that are not met, it is queued until resources are available
+    even when the priority attribute is set to 0". A FORCE start is gated
+    too. The machine has room here, so only the lock holds the job."""
+    _, event, _ = _CONTENDERS[kind]
+    o = oracle(_contender(kind, locked=True))
+    o.feed(ev("STARTJOB", 0, job="lock247"))
+    o.feed(ev(event, 1, job="c247"))
+    assert o.store.job["c247"].status == "QUE_WAIT"
+    o.feed(ev("STATUS", 2, job="lock247", status="SUCCESS"))
+    assert o.store.job["c247"].status == "RUNNING"
+
+
+def test_dl247_a_forced_start_still_takes_its_load() -> None:
+    """A forced job is over the machine's limit but its load is real: while it
+    runs, a priority-1 job still finds the machine full after the first
+    holder ends, and starts once the forced job ends."""
+    text = _contender("forced", locked=False) + (
+        "\ninsert_job: next247\njob_type: c\ncommand: z\nmachine: m247\njob_load: 1\npriority: 1\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="hold247"))
+    o.feed(ev("FORCE_STARTJOB", 1, job="c247"))
+    o.feed(ev("STARTJOB", 2, job="next247"))
+    o.feed(ev("STATUS", 3, job="hold247", status="SUCCESS"))
+    assert _statuses(o, "c247", "next247") == {"c247": "RUNNING", "next247": "QUE_WAIT"}
+    o.feed(ev("STATUS", 4, job="c247", status="SUCCESS"))
+    assert o.store.job["next247"].status == "RUNNING"
+
+
+def test_dl247_unset_and_zero_priority_skip_the_check_but_hold_their_load() -> None:
+    """Both vendor sentences hold. The priority page: "the scheduler ignores
+    any load unit values ... when the job has a priority value of zero", so
+    an unset or zero priority starts on a full machine. The queueing page:
+    "even when jobs have a priority of 0, AutoSys Workload Automation tracks
+    job loads on each machine so that jobs with non-zero priorities can be
+    queued", so the priority-1 job behind them queues until they end."""
+    text = (
+        "insert_machine: z247\ntype: a\nnode_name: z247\nmax_load: 1\n\n"
+        "insert_job: u247\njob_type: c\ncommand: x\nmachine: z247\njob_load: 1\n\n"
+        "insert_job: o247\njob_type: c\ncommand: x\nmachine: z247\njob_load: 1\npriority: 0\n\n"
+        "insert_job: p247\njob_type: c\ncommand: x\nmachine: z247\njob_load: 1\npriority: 1\n"
+    )
+    o = oracle(text)
+    for job in ("u247", "o247", "p247"):
+        o.feed(ev("STARTJOB", 0, job=job))
+    assert _statuses(o, "u247", "o247", "p247") == {
+        "u247": "RUNNING",
+        "o247": "RUNNING",
+        "p247": "QUE_WAIT",
+    }
+    o.feed(ev("STATUS", 1, job="u247", status="SUCCESS"))
+    assert o.store.job["p247"].status == "QUE_WAIT"  # o247 still holds the unit
+    o.feed(ev("STATUS", 2, job="o247", status="SUCCESS"))
+    assert o.store.job["p247"].status == "RUNNING"
+
+
+@pytest.mark.parametrize(
+    ("priority", "expected"),
+    [("priority: 3\n", "QUE_WAIT"), ("priority: 0\n", "RUNNING")],
+    ids=["positive", "zero"],
+)
+def test_dl247_a_running_priority_zero_job_counts_against_the_machine(
+    priority: str, expected: str
+) -> None:
+    """A running priority-0 job with job_load 50 on an 80-unit machine leaves
+    30 units: a positive-priority 50-unit arrival queues, and a priority-0
+    50-unit arrival still starts, over the limit, as a forced one would."""
+    text = (
+        "insert_machine: c247\ntype: a\nnode_name: c247\nmax_load: 80\n\n"
+        "insert_job: zr247\njob_type: c\ncommand: x\nmachine: c247\njob_load: 50\npriority: 0\n\n"
+        "insert_job: ar247\njob_type: c\ncommand: y\nmachine: c247\njob_load: 50\n" + priority
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="zr247"))
+    o.feed(ev("STARTJOB", 1, job="ar247"))
+    assert _statuses(o, "zr247", "ar247") == {"zr247": "RUNNING", "ar247": expected}
+
+
+#: The vendor's queueing example: machine cheetah, max_load 80.
+_CHEETAH = (
+    "insert_machine: cheetah\ntype: a\nnode_name: cheetah\nmax_load: 80\n\n"
+    "insert_job: JobA\njob_type: c\ncommand: a\nmachine: cheetah\njob_load: 50\npriority: 70\n\n"
+    "insert_job: JobB\njob_type: c\ncommand: b\nmachine: cheetah\njob_load: 50\npriority: 50\n\n"
+    "insert_job: JobC\njob_type: c\ncommand: c\nmachine: cheetah\njob_load: 30\npriority: 60\n\n"
+    "insert_job: JobD\njob_type: c\ncommand: d\nmachine: cheetah\njob_load: 30\npriority: 80\n"
+)
+
+
+def _cheetah_running_b_and_c() -> Oracle | EngineHarness:
+    """JobB and JobC run; JobA and JobD wait in QUE_WAIT."""
+    o = oracle(_CHEETAH)
+    for job in ("JobB", "JobC", "JobA", "JobD"):
+        o.feed(ev("STARTJOB", 0, job=job))
+    assert _statuses(o, "JobA", "JobB", "JobC", "JobD") == {
+        "JobA": "QUE_WAIT",
+        "JobB": "RUNNING",
+        "JobC": "RUNNING",
+        "JobD": "QUE_WAIT",
+    }
+    return o
+
+
+def test_dl247_cheetah_jobb_first_runs_joba_then_jobd() -> None:
+    """The vendor: "If JobB finishes first, 50 load units become available,
+    so JobA runs. After JobA or JobB complete, sufficient load units become
+    available, so JobD runs." JobB is already done here, so JobC's end is
+    the second completion."""
+    o = _cheetah_running_b_and_c()
+    o.feed(ev("STATUS", 1, job="JobB", status="SUCCESS"))
+    assert _statuses(o, "JobA", "JobD") == {"JobA": "RUNNING", "JobD": "QUE_WAIT"}
+    o.feed(ev("STATUS", 2, job="JobC", status="SUCCESS"))
+    assert o.store.job["JobD"].status == "RUNNING"
+
+
+def test_dl247_cheetah_jobc_first_keeps_both_queued_until_jobb_ends() -> None:
+    """The vendor: "If JobC finishes first, only 30 load units become
+    available, so JobA and JobD remain queued until JobB completes." JobD's
+    30 units fit, but JobA waits for load at a higher priority and blocks it.
+    "After JobB completes ... Because JobA has a higher priority, it runs
+    first. JobD runs shortly after." """
+    o = _cheetah_running_b_and_c()
+    o.feed(ev("STATUS", 1, job="JobC", status="SUCCESS"))
+    assert _statuses(o, "JobA", "JobD") == {"JobA": "QUE_WAIT", "JobD": "QUE_WAIT"}
+    o.feed(ev("STATUS", 2, job="JobB", status="SUCCESS"))
+    assert _statuses(o, "JobA", "JobD") == {"JobA": "RUNNING", "JobD": "RUNNING"}
+    starts = [t.job for t in o.trace() if t.transition == "QUE_WAIT->STARTING"]
+    assert starts == ["JobA", "JobD"]
+
+
+#: A holder takes 50 of m1's 80 units and `hi247` (priority 5, load 50)
+#: waits for load. Each arrival names its own priority, load and machine.
+_BLOCKING = (
+    "insert_machine: bm247\ntype: a\nnode_name: bm247\nmax_load: 80\n\n"
+    "insert_machine: om247\ntype: a\nnode_name: om247\nmax_load: 80\n\n"
+    "insert_job: own247\njob_type: c\ncommand: x\nmachine: bm247\njob_load: 50\npriority: 1\n\n"
+    "insert_job: hi247\njob_type: c\ncommand: x\nmachine: bm247\njob_load: 50\npriority: 5\n\n"
+)
+
+
+def _arrival(priority: str, machine: str = "bm247") -> str:
+    return (
+        _BLOCKING + "insert_job: new247\njob_type: c\ncommand: y\n"
+        f"machine: {machine}\njob_load: 30\n{priority}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("priority", "machine", "expected"),
+    [
+        ("priority: 9\n", "bm247", "QUE_WAIT"),  # lower priority, same machine
+        ("priority: 9\n", "om247", "RUNNING"),  # another machine
+        ("priority: 5\n", "bm247", "RUNNING"),  # equal priority
+        ("priority: 2\n", "bm247", "RUNNING"),  # higher priority
+        ("priority: 0\n", "bm247", "RUNNING"),  # takes no load
+        ("", "bm247", "RUNNING"),  # unset: takes no load
+    ],
+    ids=["lower", "other-machine", "equal", "higher", "zero", "unset"],
+)
+def test_dl247_a_load_waiter_blocks_only_lower_priority_on_its_machine(
+    priority: str, machine: str, expected: str
+) -> None:
+    """The vendor: "A job in the QUE_WAIT state for one machine attribute value
+    automatically blocks all the lower priority jobs that specify the same
+    machine attribute value. It does not automatically block higher or equal
+    priority jobs ... or a job that specifies a different machine attribute
+    value." The arrival's 30 units fit beside the holder every time."""
+    o = oracle(_arrival(priority, machine))
+    o.feed(ev("STARTJOB", 0, job="own247"))
+    o.feed(ev("STARTJOB", 1, job="hi247"))
+    o.feed(ev("STARTJOB", 2, job="new247"))
+    assert _statuses(o, "hi247", "new247") == {"hi247": "QUE_WAIT", "new247": expected}
+
+
+def test_dl247_a_blocked_arrival_starts_after_the_waiter_ahead_of_it() -> None:
+    """The blocked lower-priority arrival queues, and starts once the waiter
+    ahead of it has started and room is left: the holder's end admits
+    `hi247` (50 of 80), then `new247` (30) fits."""
+    o = oracle(_arrival("priority: 9\n"))
+    o.feed(ev("STARTJOB", 0, job="own247"))
+    o.feed(ev("STARTJOB", 1, job="hi247"))
+    o.feed(ev("STARTJOB", 2, job="new247"))
+    o.feed(ev("STATUS", 3, job="own247", status="SUCCESS"))
+    assert _statuses(o, "hi247", "new247") == {"hi247": "RUNNING", "new247": "RUNNING"}
+    starts = [t.job for t in o.trace() if t.transition == "QUE_WAIT->STARTING"]
+    assert starts == ["hi247", "new247"]
+
+
+def test_dl247_a_held_waiter_does_not_block() -> None:
+    """A queued job put ON_HOLD is not waiting for load: it does not block a
+    lower-priority arrival on its machine."""
+    o = oracle(_arrival("priority: 9\n"))
+    o.feed(ev("STARTJOB", 0, job="own247"))
+    o.feed(ev("STARTJOB", 1, job="hi247"))
+    o.feed(ev("ON_HOLD", 2, job="hi247"))
+    o.feed(ev("STARTJOB", 3, job="new247"))
+    assert _statuses(o, "hi247", "new247") == {"hi247": "QUE_WAIT", "new247": "RUNNING"}
+
+
+@pytest.mark.parametrize(
+    ("priority", "expected"),
+    [("priority: 5\n", "RUNNING"), ("priority: 6\n", "QUE_WAIT"), ("", "RUNNING")],
+    ids=["equal", "lower", "unset"],
+)
+def test_dl247_a_positive_priority_without_job_load_is_still_blocked(
+    priority: str, expected: str
+) -> None:
+    """The vendor blocks "all the lower priority jobs that specify the same
+    machine attribute value", and priority is itself a load-balancing
+    attribute. A job with no job_load on the waiter's machine is blocked at a
+    lower priority, not at an equal one, and never with no priority."""
+    text = _BLOCKING + (f"insert_job: nl247\njob_type: c\ncommand: y\nmachine: bm247\n{priority}")
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="own247"))
+    o.feed(ev("STARTJOB", 1, job="hi247"))
+    o.feed(ev("STARTJOB", 2, job="nl247"))
+    assert _statuses(o, "hi247", "nl247") == {"hi247": "QUE_WAIT", "nl247": expected}
+
+
+def test_dl247_a_blocked_job_without_job_load_starts_once_the_waiter_starts() -> None:
+    """The blocked no-load job is admitted in the same scan that starts the
+    waiter ahead of it."""
+    text = _BLOCKING + "insert_job: nl247\njob_type: c\ncommand: y\nmachine: bm247\npriority: 6\n"
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="own247"))
+    o.feed(ev("STARTJOB", 1, job="hi247"))
+    o.feed(ev("STARTJOB", 2, job="nl247"))
+    o.feed(ev("STATUS", 3, job="own247", status="SUCCESS"))
+    assert _statuses(o, "hi247", "nl247") == {"hi247": "RUNNING", "nl247": "RUNNING"}
+    starts = [t.job for t in o.trace() if t.transition == "QUE_WAIT->STARTING"]
+    assert starts == ["hi247", "nl247"]
+
+
+@pytest.mark.parametrize("lift", ["KILLJOB", "ON_ICE", "ON_HOLD"])
+def test_dl247_a_block_lifts_when_the_waiter_leaves_the_queue(lift: str) -> None:
+    """No capacity is freed, but the blocker leaves the queue or stops
+    counting: the blocked arrival, whose 30 units fit, starts at once."""
+    o = oracle(_arrival("priority: 9\n"))
+    o.feed(ev("STARTJOB", 0, job="own247"))
+    o.feed(ev("STARTJOB", 1, job="hi247"))
+    o.feed(ev("STARTJOB", 2, job="new247"))
+    assert o.store.job["new247"].status == "QUE_WAIT"
+    o.feed(ev(lift, 3, job="hi247"))
+    assert o.store.job["new247"].status == "RUNNING"
+
+
+#: A 30-unit holder on bm's 80 units; box member M (priority 5, load 60)
+#: waits for load and blocks X (priority 9, load 30), whose load fits.
+_BOX_BLOCK = (
+    "insert_machine: bx247m\ntype: a\nnode_name: bx247m\nmax_load: 80\n\n"
+    "insert_job: bh247\njob_type: c\ncommand: h\nmachine: bx247m\njob_load: 30\npriority: 1\n\n"
+    "insert_job: bb247\njob_type: b\n\n"
+    "insert_job: bm247m\njob_type: c\ncommand: m\nmachine: bx247m\nbox_name: bb247\n"
+    "job_load: 60\npriority: 5\n\n"
+    "insert_job: bxx247\njob_type: c\ncommand: x\nmachine: bx247m\njob_load: 30\npriority: 9\n\n"
+    "insert_job: byy247\njob_type: c\ncommand: y\nmachine: bx247m\njob_load: 30\npriority: 9\n"
+)
+
+
+def _box_member_blocking() -> Oracle | EngineHarness:
+    o = oracle(_BOX_BLOCK)
+    o.feed(ev("STARTJOB", 0, job="bh247"))
+    o.feed(ev("STARTJOB", 1, job="bb247"))
+    o.feed(ev("STARTJOB", 2, job="bxx247"))
+    assert _statuses(o, "bm247m", "bxx247") == {"bm247m": "QUE_WAIT", "bxx247": "QUE_WAIT"}
+    return o
+
+
+def test_dl247_a_stopped_box_lifts_its_members_block_at_once() -> None:
+    """KILLJOB on the box stops its member from blocking. The queue is
+    scanned then, so X starts without waiting for a release; the member
+    itself stays queued until a release cancels it (DL-158, DL-54)."""
+    o = _box_member_blocking()
+    o.feed(ev("KILLJOB", 3, job="bb247"))
+    assert _statuses(o, "bb247", "bm247m", "bxx247") == {
+        "bb247": "TERMINATED",
+        "bm247m": "QUE_WAIT",
+        "bxx247": "RUNNING",
+    }
+    o.feed(ev("STATUS", 4, job="bh247", status="SUCCESS"))
+    assert o.store.job["bm247m"].status == "INACTIVE"  # the release cancels it
+
+
+def test_dl247_a_later_arrival_does_not_overtake_after_a_box_stops() -> None:
+    """After the box stops, X starts first; Y, with X's priority and load,
+    arrives later and finds the machine full (30 + 30 + 30 > 80)."""
+    o = _box_member_blocking()
+    o.feed(ev("KILLJOB", 3, job="bb247"))
+    o.feed(ev("STARTJOB", 4, job="byy247"))
+    assert _statuses(o, "bxx247", "byy247") == {"bxx247": "RUNNING", "byy247": "QUE_WAIT"}
+
+
+def test_dl247_the_box_stop_scan_waits_for_the_release_and_the_referencers() -> None:
+    """DL-50's order is release, condition referencers, waiters. C's end
+    folds box B (box_success: s(C)) to SUCCESS, which lifts M's block on X;
+    but C's own release and its referencer Y come first. Y (priority 1,
+    load 50) takes the room C freed, and X stays queued."""
+    text = (
+        "insert_machine: ow247\ntype: a\nnode_name: ow247\nmax_load: 80\n\n"
+        "insert_job: oh247\njob_type: c\ncommand: h\nmachine: ow247\njob_load: 30\npriority: 1\n\n"
+        "insert_job: ob247\njob_type: b\nbox_success: s(oc247)\n\n"
+        "insert_job: oc247\njob_type: c\ncommand: c\nmachine: ow247\nbox_name: ob247\n"
+        "job_load: 20\npriority: 1\n\n"
+        "insert_job: om247\njob_type: c\ncommand: m\nmachine: ow247\nbox_name: ob247\n"
+        "job_load: 60\npriority: 5\n\n"
+        "insert_job: ox247\njob_type: c\ncommand: x\nmachine: ow247\njob_load: 30\npriority: 9\n\n"
+        "insert_job: oy247\njob_type: c\ncommand: y\nmachine: ow247\njob_load: 50\npriority: 1\n"
+        "condition: s(oc247)\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="oh247"))
+    o.feed(ev("STARTJOB", 1, job="ob247"))
+    o.feed(ev("STARTJOB", 2, job="ox247"))
+    assert _statuses(o, "oc247", "om247", "ox247") == {
+        "oc247": "RUNNING",
+        "om247": "QUE_WAIT",
+        "ox247": "QUE_WAIT",
+    }
+    o.feed(ev("STATUS", 3, job="oc247", status="SUCCESS"))
+    assert _statuses(o, "ob247", "oy247", "ox247") == {
+        "ob247": "SUCCESS",
+        "oy247": "RUNNING",
+        "ox247": "QUE_WAIT",
+    }
+
+
+def test_dl247_a_release_inside_the_box_stop_scan_still_cancels() -> None:
+    """The box-stop scan only admits. Here it starts X, a member of box Q;
+    X's start fails Q (box_failure: v(GO) = 1), and job_terminator ends X,
+    releasing its units. That release asks for a full scan, which the
+    running scan takes up as its next pass: M, queued in the stopped box B,
+    is cancelled on the release, as DL-158 says a release does."""
+    text = (
+        "insert_machine: up247\ntype: a\nnode_name: up247\nmax_load: 80\n\n"
+        "insert_job: uh247\njob_type: c\ncommand: h\nmachine: up247\njob_load: 30\npriority: 1\n\n"
+        "insert_job: ub247\njob_type: b\n\n"
+        "insert_job: um247\njob_type: c\ncommand: m\nmachine: up247\nbox_name: ub247\n"
+        "job_load: 60\npriority: 5\n\n"
+        "insert_job: uq247\njob_type: b\nbox_failure: s(ux247) | v(GO247) = 1\n\n"
+        "insert_job: ux247\njob_type: c\ncommand: x\nmachine: up247\nbox_name: uq247\n"
+        "job_load: 30\npriority: 9\njob_terminator: 1\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="uh247"))
+    o.feed(ev("STARTJOB", 1, job="ub247"))
+    o.feed(ev("STARTJOB", 2, job="uq247"))
+    assert _statuses(o, "um247", "ux247") == {"um247": "QUE_WAIT", "ux247": "QUE_WAIT"}
+    o.feed(ev("SET_GLOBAL", 3, name="GO247", value="1"))
+    assert o.store.job["uq247"].status == "RUNNING"
+    o.feed(ev("KILLJOB", 4, job="ub247"))
+    assert _statuses(o, "uq247", "ux247", "um247") == {
+        "uq247": "FAILURE",
+        "ux247": "TERMINATED",
+        "um247": "INACTIVE",
+    }
+
+
+def test_dl247_a_waiter_short_only_on_a_named_resource_does_not_block() -> None:
+    """A queued job whose load fits waits on a named resource, and the vendor
+    says such a job does "not automatically block lower priority jobs that
+    specify the same machine attribute value and ... do not specify the
+    resource attribute"."""
+    text = (
+        "insert_machine: rm247\ntype: a\nnode_name: rm247\nmax_load: 80\n\n"
+        "insert_resource: R247\nres_type: R\namount: 1\n\n"
+        "insert_job: rh247\njob_type: c\ncommand: x\nmachine: m9\nresources: (R247, QUANTITY=1)\n\n"
+        "insert_job: rw247\njob_type: c\ncommand: x\nmachine: rm247\njob_load: 10\npriority: 1\n"
+        "resources: (R247, QUANTITY=1)\n\n"
+        "insert_job: rn247\njob_type: c\ncommand: y\nmachine: rm247\njob_load: 10\npriority: 9\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="rh247"))
+    o.feed(ev("STARTJOB", 1, job="rw247"))
+    o.feed(ev("STARTJOB", 2, job="rn247"))
+    assert _statuses(o, "rw247", "rn247") == {"rw247": "QUE_WAIT", "rn247": "RUNNING"}
 
 
 # ------------------------------------------------ DL-54 Q2/Q3 additional trace tests

@@ -222,7 +222,11 @@ def _resource_preflight(name: str, job: JobIR, catalog: CatalogIR) -> list[Prefl
         honored (stricter than L016's warn; a `--resource-capacity` override is
         a documented future escape hatch, not v1);
       * an unknown res_type (not R/D/T) -- unknown release semantics;
-      * a malformed job_load/priority/max_load -- a non-integer load.
+      * a malformed job_load/priority/max_load -- a non-integer load;
+      * a `job_load` above its machine's `max_load` on a job with a positive
+        priority -- it can never fit, and as a load waiter it would block
+        every lower priority on that machine forever (DL-247). Priority 0 or
+        unset skips the load check, so it is exempt.
     It WARNs (does not refuse) a job_load on a pool machine, where per-member
     load placement is unmodelled (# PENDING: Qr3) -- resource semaphores on
     such a job still apply. Cross-machine shared locks need no separate refusal:
@@ -244,13 +248,28 @@ def _resource_preflight(name: str, job: JobIR, catalog: CatalogIR) -> list[Prefl
         machine = catalog.machines.get(spec.machine)
         if machine is not None:
             try:
-                machine.max_load_units()
+                max_load = machine.max_load_units()
             except ValueError as exc:
                 err(f"machine {spec.machine!r}: {exc}")
+                max_load = None
             try:
                 load = job.job_load_units()
+                priority = job.priority_value()
             except ValueError:
-                load = None  # already reported above
+                load = priority = None  # already reported above
+            if (
+                not machine.members
+                and load is not None
+                and priority is not None
+                and priority > 0
+                and max_load is not None
+                and load > max_load
+            ):
+                err(
+                    f"job_load={load} exceeds machine {spec.machine!r} max_load={max_load}"
+                    f" at priority={priority} -- can never fit, the job would hang in"
+                    " QUE_WAIT forever and block every lower priority there (DL-247)"
+                )
             if machine.members and load:
                 items.append(
                     PreflightItem(

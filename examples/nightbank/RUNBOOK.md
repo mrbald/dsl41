@@ -956,7 +956,7 @@ tree, filter, and views earn their keep. Each estate ships its OWN
 bank names are per-asset-class, so the marks hang lands on
 `EMEA_MKT_EQ_MARKS_C` and the recon breaks on `APAC_REC_EQ_TRADES_C`
 (custody no-show and FX fail_once keep their small-estate names). The
-contention exercise is 8 shards per asset class (`job_load: 40`,
-shard 8 low priority) instead of 4. Everything else in this runbook
+contention exercise is 8 shards per asset class (`job_load: 40`;
+shard 8 has priority 10, ahead of the others' 20) instead of 4. Everything else in this runbook
 applies unchanged. Regenerate with different knobs:
 `uv run python generate.py --asset-classes 4 --shards 6`.

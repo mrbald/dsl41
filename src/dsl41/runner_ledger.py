@@ -83,7 +83,11 @@ from dsl41.runner_clock import EngineError
 #: can carry/refuse/assume a job differently under v6.
 #: 7 since DL-246: a box start decides a run_window member's disposition and
 #: a standalone window skip moves a prior result to INACTIVE.
-STATE_MACHINE_VERSION = 7
+#: 8 since DL-247: an unset or zero priority and a forced start skip the
+#: machine-load check but hold their load, a load waiter blocks lower
+#: priorities on its machine, and more transitions wake the queue, so a
+#: replay with load demand or with queued jobs can derive different state.
+STATE_MACHINE_VERSION = 8
 
 LOCK_NAME = "leader.lock"
 

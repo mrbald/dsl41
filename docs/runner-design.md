@@ -812,8 +812,11 @@ ERROR:
   `--resource-capacity` override is a documented future escape hatch.
   Unknown `res_type` (not R/D/T). The same resource named twice in one
   `resources:` list — the demand is ambiguous. A `QUANTITY` above the
-  resource's `amount` — the job would wait in QUE_WAIT forever.
-  Malformed (non-integer) `job_load` / `priority` / machine `max_load`.
+  resource's `amount` — the job would wait in QUE_WAIT forever. A
+  `job_load` above its machine's `max_load` on a job with a positive
+  `priority` — it would wait forever and block every lower priority on
+  that machine (DL-247); priority 0 or unset skips the load check and is
+  exempt, and so is a pool machine. Malformed (non-integer) `job_load` / `priority` / machine `max_load`.
   Refused in BOTH run and rehearse
   (resource semantics gate the oracle in either clock domain).
 - Oracle construction failure (surfaces IR-level refusals unchanged).
@@ -844,7 +847,19 @@ WARN:
   unmodeled for pools (DL-50, PENDING Qr3). Resource semaphores on such a
   job still apply. (Plain `job_load`/`priority`/`resources:` are now
   HONORED (DL-50), not warned. An unsized/unknown-res_type/malformed
-  resource is an ERROR below, not a WARN.)
+  resource is an ERROR below, not a WARN.) The oracle applies the vendor's
+  load rules (DL-247). Only a job with a positive `priority` checks its
+  `job_load`: "The scheduler ignores any load unit values defined for the
+  job or machine when the job has a priority value of zero", and 0 is the
+  default. That job's load still counts against the machine: "even when
+  jobs have a priority of 0, AutoSys Workload Automation tracks job loads
+  on each machine". A FORCE_STARTJOB "runs even if its load exceeds the
+  machine's max_load value"; its units are held the same way. A job
+  waiting for load "automatically blocks all the lower priority jobs that
+  specify the same machine attribute value", on a fresh start and on
+  readmission; a positive priority is blocked even without a `job_load`.
+  Named resources gate every start, forced or not. Pools stay outside
+  both rules. This WARN still fires for a pool job at priority 0.
 - Cycle in the AND-success skeleton (graphlib `CycleError`): cycles are
   *legal* AutoSys (edge-triggered re-runs, DL-13, L010's territory). Thus
   this rule warns and disables `plan`, and it does not refuse.
