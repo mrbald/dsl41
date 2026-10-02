@@ -86,17 +86,17 @@ _SOCKET_OPT = typer.Option(
     ...,
     "--socket",
     "-S",
-    help="The engine's control socket (<run_root>/control.sock).",
+    help="The engine's control socket, <run-root>/control.sock.",
 )
 
 
 _EPOCH_PIN_HELP = (
-    "PIN the envelope's epoch rather than reading it. An exact retry needs"
-    " the epoch the original carried: the CLI prints it before sending."
+    "Use this epoch instead of reading it. An exact retry needs the epoch"
+    " the original carried; the CLI prints it before sending."
 )
 _BASELINE_PIN_HELP = (
-    "PIN the envelope's baseline_id rather than reading it. An exact retry"
-    " needs the baseline the original carried: the CLI prints it before sending."
+    "Use this baseline id instead of reading it. An exact retry needs the"
+    " baseline the original carried; the CLI prints it before sending."
 )
 
 
@@ -134,62 +134,66 @@ def _pinned_read(
 def sendevent(
     event: str = typer.Argument(
         ...,
-        help="STARTJOB|FORCE_STARTJOB|KILLJOB|ON_ICE|OFF_ICE|ON_HOLD|OFF_HOLD"
-        "|ON_NOEXEC|OFF_NOEXEC|DISARM|SET_GLOBAL|CHANGE_STATUS"
-        " (DISARM clears the job's armed latch and does nothing else)",
+        metavar="EVENT",
+        help="One of STARTJOB, FORCE_STARTJOB, KILLJOB, ON_ICE, OFF_ICE,"
+        " ON_HOLD, OFF_HOLD, ON_NOEXEC, OFF_NOEXEC, DISARM, SET_GLOBAL,"
+        " CHANGE_STATUS. DISARM clears the job's armed latch and does"
+        " nothing else.",
     ),
     socket_path: Path = _SOCKET_OPT,
-    job: str = typer.Option(None, "--job", "-J", help="Target job (job verbs, CHANGE_STATUS)."),
-    status: str = typer.Option(None, "--status", "-s", help="CHANGE_STATUS: the new status."),
-    global_kv: str = typer.Option(None, "--global", "-G", help='SET_GLOBAL: "NAME=value".'),
-    exit_code: int = typer.Option(
-        None, "--exit-code", help="CHANGE_STATUS: optional exit code to record."
+    job: str = typer.Option(
+        None, "--job", "-J", help="Target job. Needed by the job events and CHANGE_STATUS."
     ),
+    status: str = typer.Option(None, "--status", "-s", help="CHANGE_STATUS: the new status."),
+    global_kv: str = typer.Option(None, "--global", "-G", help="SET_GLOBAL: NAME=value."),
+    exit_code: int = typer.Option(None, "--exit-code", help="CHANGE_STATUS: exit code to record."),
     expect: int = typer.Option(
         None,
         "--expect",
-        help="The state_rev you read for the target (from `query status`/`global`)."
-        " The command is rejected if it moved since. Omitted, this reads it first --"
-        " which narrows the race to one round trip, not to nothing. 0 means"
-        " 'still absent' (SET_GLOBAL's conditional create).",
+        help="The state_rev you read for the target with 'query status' or"
+        " 'query global'. The event is rejected if the target moved since."
+        " Without it, the command reads the revision first, which narrows"
+        " the race to one round trip. For SET_GLOBAL, 0 means the global"
+        " must not exist yet.",
     ),
     request_id: str = typer.Option(
         None,
         "--request-id",
-        help="RETRY the command that carried this id, rather than issuing a new one."
-        " An exact retry -- same id, same envelope -- is answered from the original"
-        " decision and applies nothing twice, which is the only safe response to"
-        " exit 4. Give it with the --expect, --epoch and --baseline the CLI"
-        " printed, or the re-read values make a different envelope. A fresh"
-        " uuid4 otherwise.",
+        help="Retry the event that carried this id instead of sending a"
+        " new one. An exact retry, same id and same values, is answered"
+        " from the original decision and applies nothing twice. It is the"
+        " only safe answer to exit 4. Give it with the --expect, --epoch"
+        " and --baseline the CLI printed; other values make a different"
+        " request, which is refused. Without it a fresh id is generated.",
     ),
     epoch: int = typer.Option(None, "--epoch", help=_EPOCH_PIN_HELP),
     baseline: str = typer.Option(None, "--baseline", help=_BASELINE_PIN_HELP),
 ) -> None:
-    """Vendor-parity sendevent against a running engine (runner-design ss10),
-    over the v3 protocol (concurrency-model ss6).
+    """Send an AutoSys-style event to a running engine.
 
-    Every mutation names the revision it was composed against and is
-    answered with its DECISION, in four kinds that call for four different
-    next moves -- so they get four exit codes rather than one failure
-    (control-protocol ss3):
+    Every event names the revision it was composed against, and the
+    engine answers with one of four decisions, each with its own exit
+    code:
 
-      0  applied.
-      2  REFUSED: this request was not admitted, no index consumed, and the
-         log says nothing about it. Fix it and send it again. A refused
-         RETRY says nothing about the original it retries: that one may
-         have applied, and a collision prints what it decided.
-      3  REJECTED: a decision went against it -- the target moved between
-         the read and the write. It IS in the log. Re-read and re-decide;
-         resending the same envelope loses the same race.
-      4  UNKNOWN: no decision arrived. NOT a failure -- the command may be
-         durably admitted and about to apply. Re-read; if it must be sent
-         again, re-run the same arguments with the --request-id, --expect,
-         --epoch and --baseline printed on stderr.
+      0  Applied.
+      2  Refused. The request was not admitted and nothing was logged.
+         Fix it and send it again. A refused retry says nothing about
+         the original it retries: that one may have applied, and stderr
+         prints what it decided.
+      3  Rejected. The target changed between your read and the write.
+         The rejection is in the log. Re-read, then decide again;
+         resending the same request loses the same race.
+      4  Unknown. No decision arrived. The event may still be admitted
+         and about to apply. Re-read. If you must send it again, repeat
+         the same arguments with the --request-id, --expect, --epoch
+         and --baseline printed on stderr.
 
-    Before the first write, one stderr line prints the retry flags:
-    --request-id and the three values placed in the envelope. Keep it: with
-    the original arguments it is the whole recovery reference (DL-217)."""
+    Before the first write, one stderr line prints those retry values.
+    Keep it: with the original arguments, it is everything a safe retry
+    needs.
+    """
+    # Design: runner-design ss10, concurrency-model ss6, control-protocol
+    # ss3, DL-217
     from dsl41.runner_admission import addressed_key
     from dsl41.runner_clock import EngineError
     from dsl41.runner_control import claimed_actor, command
@@ -227,30 +231,25 @@ def sendevent(
 
 def release_held(
     socket_path: Path = _SOCKET_OPT,
-    dry_run: bool = typer.Option(False, "--dry-run", help="List the held jobs, send nothing."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="List the held jobs and send nothing."),
 ) -> None:
-    """Release every ON_HOLD job in one sweep -- the estate-wide OFF_HOLD
-    the one-job `sendevent` cannot say (DL-180).
+    """Take every held job off hold in one sweep.
 
-    A CLIENT-side sweep, not a protocol verb: ONE `status` read both
-    selects the held jobs and supplies the revision every OFF_HOLD envelope
-    is composed against -- the sweep acts on exactly what it saw, so a job
-    that moved in between is REJECTED with its own printed decision rather
-    than re-released over a state nobody looked at. A release that loses
-    the race to another operator applies as the journaled no-op
-    (control-protocol ss3, DL-158's "the OFF_HOLD shape"); applying one
-    also re-evaluates the job's start (SEM-21), exactly as the one-job
-    verb does.
+    One status read selects the held jobs and supplies the revision
+    each OFF_HOLD is composed against. A job that changed in between is
+    rejected with its own printed decision. Each release re-evaluates
+    the job's start, as a single OFF_HOLD does.
 
-    Exit codes: 2 when the status read failed (nothing was sent);
-    otherwise 0 when every release applied, 1 when any per-job decision
-    did not -- the per-job answers, each prefixed `-- <job>`, carry
-    `sendevent`'s 0/2/3/4 detail, which one aggregate number cannot.
+    Each job gets a fresh request id, so the sweep as a whole cannot be
+    retried. The pre-send line and any exit-4 advice name each job's
+    exact retry as a single 'sendevent OFF_HOLD --job <name>' with that
+    job's values.
 
-    Each per-job id is fresh, so the sweep cannot be retried as a sweep. The
-    pre-send line and any exit-4 advice name each job's exact retry as the
-    one-job `sendevent OFF_HOLD --job <name> --socket <path>` with that
-    job's pins (DL-217)."""
+    Exit codes: 0 every release applied; 1 some per-job decision did not
+    apply (each job's answer is printed with sendevent's 0, 2, 3 or 4
+    meaning); 2 the status read failed and nothing was sent.
+    """
+    # Design: DL-180, control-protocol ss3, DL-158, SEM-21, DL-217
     import shlex
 
     from dsl41.runner_admission import addressed_key
@@ -298,43 +297,49 @@ def release_held(
 
 
 def host(
-    action: str = typer.Argument(..., help="list|drain|activate|evict"),
-    host_id: str = typer.Argument(None, help="The host id (all but `list`)."),
+    action: str = typer.Argument(..., metavar="ACTION", help="list, drain, activate or evict."),
+    host_id: str = typer.Argument(
+        None, metavar="HOST_ID", help="The host id. Needed by every action but list."
+    ),
     socket_path: Path = _SOCKET_OPT,
     force: bool = typer.Option(
         False,
         "--force",
-        help="evict: skip the ss8 preconditions. Recorded with the actor that"
-        " claimed it, and the one path in the concurrency model that can produce"
-        " a double run -- use it with out-of-band proof the machine is dead.",
-    ),
+        help="evict only: skip the preconditions. Recorded with the actor"
+        " who claimed it. This is the one path that can run a job twice,"
+        " so use it only with proof from outside that the machine is"
+        " dead.",
+    ),  # ss8
     expect: int = typer.Option(
         None,
         "--expect",
-        help="The state_rev you read for the host (from `host list`). The command"
-        " is rejected if it moved since. Omitted, this reads it first.",
+        help="The state_rev you read for the host with 'host list'. The"
+        " command is rejected if the host moved since. Without it, the"
+        " command reads the revision first.",
     ),
     request_id: str = typer.Option(
-        None, "--request-id", help="RETRY the command that carried this id (see `sendevent`)."
+        None,
+        "--request-id",
+        help="Retry the command that carried this id. See 'dsl41 sendevent --help'.",
     ),
     epoch: int = typer.Option(None, "--epoch", help=_EPOCH_PIN_HELP),
     baseline: str = typer.Option(None, "--baseline", help=_BASELINE_PIN_HELP),
 ) -> None:
-    """The ss8 routing table: which execution hosts take new work
-    (concurrency-model ss8).
+    """List, drain, activate or evict execution hosts.
 
-      list      the table, with each host's revision.
-      drain     stop routing NEW work here; running work finishes. Reversible,
-                asserts nothing, and is the tool for planned maintenance.
-      activate  route here again, and re-dispatch what the drain held.
-      evict     declare this host's work rerouteable. The only state that lets
-                another host run what was bound to this one, so it is refused
+    ACTION is one of:
+      list      Show the routing table with each host's revision.
+      drain     Stop routing new work to the host. Running work finishes.
+                Reversible; use it for planned maintenance.
+      activate  Route work to the host again and dispatch what the drain held.
+      evict     Declare the host's work reroutable to other hosts. Refused
                 unless the leader has recorded the host unreachable, the host
                 runs a deadman, and the kill bound has passed.
 
-    Mutations take `sendevent`'s four exit codes (0 applied / 2 refused /
-    3 rejected / 4 unknown) for the same reason: four outcomes, four next
-    moves."""
+    drain, activate and evict use sendevent's exit codes: 0 applied, 2
+    refused, 3 rejected, 4 unknown.
+    """
+    # Design: concurrency-model ss8
     from dsl41.oracle_state import RuntimeState
     from dsl41.runner_control import claimed_actor, command
 
@@ -360,10 +365,18 @@ def host(
 
 
 def ui(socket_path: Path = _SOCKET_OPT) -> None:
-    """Attach the ss11 Textual TUI to a running engine: jobs table, explain
-    pane with per-atom truth, log tail, sendevent console. A thin client of
-    the control socket only -- quitting detaches the viewer and leaves the
-    run alone (unlike `run --ui`, whose terminal owns the run)."""
+    """Open the terminal UI against a running engine.
+
+    The UI shows the jobs table, an explain pane with each condition
+    atom's truth, the log tail and a sendevent console. It is a client
+    of the control socket only: quitting detaches the viewer and leaves
+    the run alone. 'run --ui' is different; there the terminal owns the
+    run.
+
+    Exit codes: 0 the viewer quit; 2 the ui extra is not installed or
+    the socket does not exist.
+    """
+    # Design: ss11
     runner_tui = import_tui_or_exit_2()
     if not socket_path.exists():
         raise typer.Exit(refuse(f"control socket {socket_path}: no such file"))
@@ -393,16 +406,23 @@ def serve(
     host: str = typer.Option(
         "127.0.0.1",
         "--host",
-        help="Bind address (loopback default: textual-serve ships no"
-        " auth, ss11 -- put a proxy or tunnel in front for remote access).",
-    ),
+        help="Bind address. Keep the loopback default unless a proxy or"
+        " tunnel provides authentication.",
+    ),  # ss11
     port: int = typer.Option(8000, "--port", help="Bind port."),
 ) -> None:
-    """Serve the ss11 TUI over the web via textual-serve: one app subprocess
-    per browser session, each `dsl41 ui --socket` against this same running
-    engine -- never in-process with the engine, so no viewer gets a private
-    universe (ss11). No auth of its own; see README's deployment notes
-    before exposing this beyond loopback."""
+    """Serve the terminal UI in a web browser.
+
+    Each browser session gets its own 'dsl41 ui' process against the
+    same running engine. The server has no authentication of its own.
+    Keep it on loopback, or put a proxy or tunnel in front; see the
+    README's deployment notes.
+
+    Exit codes: 2 the ui extra is not installed, the socket does not
+    exist, or the address cannot be bound. Otherwise it serves until
+    interrupted.
+    """
+    # Design: ss11
     import shlex
     import sys
 
@@ -478,35 +498,49 @@ def _stream_subscribe(socket_path: Path, request: dict[str, Any]) -> None:
 def query(
     what: str = typer.Argument(
         ...,
-        help="|".join([*_QUERY_VERBS, *_QUERY_PREDICATES]),
+        metavar="WHAT",
+        help="One of " + ", ".join([*_QUERY_VERBS, *_QUERY_PREDICATES]) + ".",
     ),
     socket_path: Path = _SOCKET_OPT,
     job: str = typer.Option(
-        None, "--job", "-J", help="status: filter; explain/spec/deps/is-*: the job."
+        None,
+        "--job",
+        "-J",
+        help="status: only this job. explain, spec, deps, is-success, is-failed: the job to query.",
     ),
     name: list[str] = typer.Option(
-        None, "--name", "-N", help="global/globals: the global(s) to read. Repeatable."
+        None, "--name", "-N", help="global, globals: the global to read. Repeatable."
     ),
-    since: int = typer.Option(None, "--since", help="trace/subscribe: only records after SEQ."),
+    since: int = typer.Option(
+        None, "--since", help="trace, subscribe: only records after this sequence number."
+    ),
     brief: bool = typer.Option(
         False,
         "--brief",
-        help="status: one line per job (name, status, at, run, exit, flags, rev)"
-        " instead of the JSON document -- the estate-scale skim (DL-66).",
-    ),
+        help="status: one line per job (name, status, at, run, exit, flags,"
+        " rev) instead of the JSON document.",
+    ),  # DL-66
 ) -> None:
-    """Read-only control-plane queries (runner-design ss10); `subscribe`
-    streams journal records as JSON lines until interrupted. The headless
-    autorep analog -- the ss11 TUI consumes the same verbs. `is-success` /
-    `is-failed` are scriptable predicates (DL-65): print the current status
-    and exit 0 when it matches (SUCCESS; FAILURE or TERMINATED), 1 when it
-    does not -- shell glue's `systemctl is-active` analog.
+    """Read status, traces, explanations and more from a running engine.
 
-    `status` and `global`/`globals` are the reads a `sendevent --expect` is
-    composed from (concurrency-model ss6): both publish the `state_rev` of a
-    NAMED entity, and `global` answers an unset name at revision 0 rather
-    than omitting it, because absence you cannot name is absence you cannot
-    lock against."""
+    The queries are listed under WHAT below. subscribe streams journal
+    records as JSON lines until interrupted.
+
+    is-success and is-failed print the job's current status and exit 0
+    when it matches (SUCCESS for is-success; FAILURE or TERMINATED for
+    is-failed), and 1 when it does not. They are for scripts, like
+    'systemctl is-active'.
+
+    status, global and globals report the state_rev of each named
+    entity. That is the value 'sendevent --expect' is composed from.
+    global reports an unset name at revision 0 rather than leaving it
+    out.
+
+    Exit codes: 0 answered; 1 is-success or is-failed did not match; 2 an
+    unknown query, a missing option, or an engine that refused or could
+    not be reached.
+    """
+    # Design: runner-design ss10, ss11, DL-65, concurrency-model ss6
     verb = what.lower()
     known, predicates = _QUERY_VERBS, _QUERY_PREDICATES
     if verb not in known and verb not in predicates:
@@ -561,22 +595,32 @@ def query(
 
 
 def supervise(
-    action: str = typer.Argument(..., help="start|list|shutdown"),
+    action: str = typer.Argument(..., metavar="ACTION", help="start, list or shutdown."),
     run_root: Path = typer.Option(
-        ..., "--run-root", help="Run directory holding supervisor.sock (ss6a Tier 1)."
-    ),
+        ..., "--run-root", help="Run directory holding supervisor.sock."
+    ),  # ss6a Tier 1
     deadman_seconds: float | None = typer.Option(
-        None, "--deadman-seconds", help="Start only: exit after this many seconds without a holder."
+        None,
+        "--deadman-seconds",
+        help="start only: exit after this many seconds without a holder.",
     ),
 ) -> None:
-    """Start, observe or stop a run-root's supervisor (runner-design ss6a; DL-42 item
-    4 -- read-only by default). `list` prints its live runs and lease; `shutdown`
-    ACQUIREs the lease (failing loudly with holder info while an engine holds an
-    unexpired one), then SHUTDOWNs: TERM->grace->KILL each command, wrappers
-    record truthfully, socket + pidfile removed. Exit 2 when there is no
-    supervisor or the lease could not be taken; 0 on a clean shutdown.
-    `start` execs the supervisor in the foreground: ownership refusal is 1,
-    configuration or usage refusal is 2, and orderly exit is 0 (DL-210)."""
+    """Start, list or shut down a run root's job supervisor.
+
+    ACTION is one of:
+      start     Run the supervisor in the foreground.
+      list      Show its live runs and lease. Read-only.
+      shutdown  Take the lease, then stop every command (TERM, a grace period,
+                KILL), record each outcome, and remove the socket and pidfile.
+                Fails with the holder's details while an engine holds an
+                unexpired lease.
+
+    Exit codes: list and shutdown exit 0 on success and 2 when there is
+    no supervisor or the lease could not be taken. start exits 0 on an
+    orderly exit, 1 when another owner holds the root, and 2 on a
+    configuration or usage error.
+    """
+    # Design: runner-design ss6a, DL-42 item 4, DL-210
     import json as json_mod
     import math
     import os

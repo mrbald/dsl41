@@ -50,17 +50,24 @@ def _emit(body: str, out: "Path | None") -> None:
 
 def lint(
     files: list[Path] = CATALOG_FILES,
-    strict: bool = typer.Option(False, "--strict", help="Warnings also fail the exit code."),
+    strict: bool = typer.Option(False, "--strict", help="Also fail on warnings."),
     permit_unknown: bool = PERMIT_UNKNOWN,
     properties: list[Path] = PROPERTIES,
     suppress: list[str] = typer.Option(
         [],
         "--suppress",
-        help="Rule code(s) to drop from the report and the exit code, e.g."
-        " --suppress L005 (repeatable; comma lists accepted; DL-23).",
-    ),
+        help="Rule codes to leave out of the report and the exit code, for"
+        " example L005. Repeatable; comma-separated lists accepted.",
+    ),  # DL-23
 ) -> None:
-    """Parse + lower FILES into one catalog, then run the linter rules."""
+    """Check JIL files and report linter findings.
+
+    All FILES form one catalog. Each finding names its rule, file and line.
+
+    Exit codes: 0 clean; 1 findings at error severity, or at warning
+    severity with --strict; 2 the input could not be read, parsed or
+    lowered.
+    """
     from dsl41.lint import RULE_CODES
 
     codes = {
@@ -118,30 +125,36 @@ def _print_tier_c(result: TierCResult) -> bool:
 
 
 def equiv(
-    files: list[Path] = typer.Argument(..., help="JIL files of catalog A"),
+    files: list[Path] = typer.Argument(..., help="JIL files of catalog A."),
     against: list[Path] = typer.Option(
-        ..., "--against", "-b", help="JIL files of catalog B (repeatable)."
+        ..., "--against", "-b", help="JIL files of catalog B. Repeatable."
     ),
-    tier: str = typer.Option("all", "--tier", help="Which tier(s) to run: a, b, c, or all."),
+    tier: str = typer.Option("all", "--tier", help="Tiers to run: a, b, c or all."),
     rename: list[str] = typer.Option(
-        [], "--rename", help="OLD=NEW job-name mapping A->B (repeatable)."
+        [], "--rename", help="Job name mapping from A to B as OLD=NEW. Repeatable."
     ),
     case_fold: bool = typer.Option(
-        False, "--case-fold", help="Compare job names case-insensitively (ir-design ss6)."
-    ),
+        False, "--case-fold", help="Compare job names case-insensitively."
+    ),  # ir-design ss6
     scripts: int = typer.Option(
-        20, "--scripts", help="Tier-c event scripts to generate (seeded, deterministic)."
+        20,
+        "--scripts",
+        help="Number of event scripts tier c generates. Seeded, so repeated runs agree.",
     ),
     permit_unknown: bool = PERMIT_UNKNOWN,
     properties: list[Path] = PROPERTIES,
 ) -> None:
-    """Check FILES (catalog A) equivalent to --against (catalog B).
+    """Check whether two sets of JIL files describe the same estate.
 
-    --properties applies the same bindings to BOTH catalogs (one
-    environment, two estates).
+    FILES form catalog A and --against forms catalog B. Three tiers
+    compare them. Tier a: structural equality of the canonical form. Tier
+    b: each job's condition logic and the derived graph. Tier c: oracle
+    traces on shared event scripts. --properties applies the same
+    bindings to both catalogs.
 
-    Exit 0 when every requested tier reports equivalence, 1 on divergence,
-    2 when either input never reached the comparison.
+    Exit codes: 0 every requested tier reports equivalence; 1 a tier
+    found a difference; 2 either input could not be read, parsed or
+    lowered.
     """
     from dsl41.equiv import (
         RenameError,
@@ -206,16 +219,19 @@ def equiv(
 def report(
     files: list[Path] = CATALOG_FILES,
     out: Path = typer.Option(
-        None, "--out", "-o", help="Write the markdown report here instead of stdout."
+        None, "--out", "-o", help="Write the report to this file instead of stdout."
     ),
     permit_unknown: bool = PERMIT_UNKNOWN,
     properties: list[Path] = PROPERTIES,
 ) -> None:
-    """Emit the per-catalog migration report (markdown).
+    """Write the migration report for a set of JIL files (Markdown).
 
-    Always exits 0 once the report is generated -- the report IS the loud
-    channel for refused/assumed constructs; use `dsl41 lint --strict` as the
-    gate. Exit 2 when the input never reached the backend.
+    The report lists what the compiler refused, assumed or warned about.
+    It is the record of those findings, so it exits 0 whenever it was
+    generated. Use 'dsl41 lint --strict' as a pass or fail gate.
+
+    Exit codes: 0 report generated; 2 the input could not be read, parsed
+    or lowered.
     """
     from dsl41.backend_uc import render_migration_report
 
@@ -227,7 +243,7 @@ def report(
 def uc(
     files: list[Path] = CATALOG_FILES,
     out: Path = typer.Option(
-        None, "--out", "-o", help="Write the JSON bundle here instead of stdout."
+        None, "--out", "-o", help="Write the JSON bundle to this file instead of stdout."
     ),
     strict: bool = typer.Option(
         False, "--strict", help="Exit 1 when any workflow was quarantined."
@@ -235,16 +251,19 @@ def uc(
     permit_unknown: bool = PERMIT_UNKNOWN,
     properties: list[Path] = PROPERTIES,
 ) -> None:
-    """Emit the U3a base CREATE-ONLY UC workflow record bundle (JSON).
+    """Convert JIL files into Stonebranch Universal Controller records (JSON).
 
-    One taskWorkflow record per serializable workflow, exactly the shape
-    frozen in docs/uc-edge-schema.md. A workflow is QUARANTINED whole for
-    either of two causes -- an edge the base schema cannot express, or a
-    record name a second workflow also serializes to -- and every one is
-    listed in the bundle's own ledger (summarized on stderr). Exit 0 once a
-    bundle is generated (1 with --strict when anything was quarantined);
-    exit 2 when the input never reached the backend.
+    The bundle holds one taskWorkflow record per workflow, in the base
+    create-only schema (docs/uc-edge-schema.md). A workflow is
+    quarantined whole when it has an edge the base schema cannot
+    express, or when its record name collides with another workflow's.
+    Quarantined workflows are listed in the bundle's ledger and
+    summarized on stderr.
+
+    Exit codes: 0 bundle generated; 1 with --strict when any workflow
+    was quarantined; 2 the input could not be read, parsed or lowered.
     """
+    # Design: U3a
     from dsl41.backend_uc import compile_to_uc
 
     catalog = load_catalog_or_exit_2(files, permit_unknown, properties)
@@ -266,32 +285,36 @@ def uc(
 def decompile(
     files: list[Path] = CATALOG_FILES,
     out: Path = typer.Option(
-        None, "--out", "-o", help="Write the Python module here instead of stdout."
+        None, "--out", "-o", help="Write the Python module to this file instead of stdout."
     ),
     check: bool = typer.Option(
         True,
         "--check/--no-check",
-        help="Execute the emitted module and verify the rebuilt catalog's canonical"
-        " hash equals the source's; divergence still emits the module but exits 1.",
+        help="Run the written module and compare the rebuilt catalog's canonical"
+        " hash with the input's.",
     ),
     no_fold: list[str] = typer.Option(
         [],
         "--no-fold",
-        help="Fold code(s) to disable (DL-38 closed set; `dsl41 folds` lists"
-        " them); repeatable, comma-separated values accepted,"
-        " e.g. '--no-fold T-005 --no-fold T-007' or '--no-fold T-005,T-007'.",
-    ),
+        help="Fold codes to disable, for example T-005. Repeatable;"
+        " comma-separated lists accepted. 'dsl41 folds' lists the codes.",
+    ),  # DL-38
     permit_unknown: bool = PERMIT_UNKNOWN,
     properties: list[Path] = PROPERTIES,
 ) -> None:
-    """Emit the catalog as a runnable dsl41 builder module (phase-10 DSL).
+    """Turn JIL files into a Python module that rebuilds the same catalog.
 
-    Executing the emitted module rebuilds a catalog whose canonical form
-    equals this one; --check (default on) proves that on THIS catalog before
-    you rely on it -- a failure is a decompiler gap, worth a bug report, and
-    exits 1 (the module is still emitted for inspection). Exit 2 when the
-    input never reached the decompiler. The fold inventory and the
-    stays-explicit diagnostics go to stderr.
+    The module uses the dsl41 builder DSL. Running it rebuilds a catalog
+    whose canonical form equals the input's. With --check (the default),
+    this command runs the module and compares the two before you rely on
+    it. The fold inventory and any construct left explicit are reported
+    on stderr.
+
+    Exit codes: 0 module written; 1 the check found a difference (the
+    module is still written, and the difference is a decompiler bug
+    worth reporting); 2 the input could not be read, parsed or lowered,
+    or the decompiler refused it (nothing to emit, or an unknown
+    --no-fold code).
     """
     from dsl41.dsl import DslError
     from dsl41.dsl import decompile as decompile_catalog
@@ -342,7 +365,11 @@ def decompile(
 
 
 def folds() -> None:
-    """List the decompiler's built-in fold registry (DL-38 closed set)."""
+    """List the decompiler's fold patterns and their codes.
+
+    Exit code: always 0.
+    """
+    # Design: DL-38; the phase-10 DSL (DL-03)
     from dsl41.dsl import FOLDS
 
     for code, description in FOLDS.items():
@@ -351,35 +378,38 @@ def folds() -> None:
 
 def resolve(
     files: list[Path] = typer.Argument(
-        ..., help="Templated JIL (or any text) file(s); several files merge in order."
+        ...,
+        help="Templated JIL files, or any text files. Several files are joined in order.",
     ),
     properties: list[Path] = typer.Option(
         ...,
         "--properties",
         "-p",
-        help="Properties file(s) with KEY=VALUE lines; later files override earlier (repeatable).",
+        help="Properties files with KEY=VALUE lines. Repeatable; later files"
+        " override earlier ones.",
     ),
     out: Path = typer.Option(
-        None, "--out", "-o", help="Write the resolved text here instead of stdout."
+        None, "--out", "-o", help="Write the resolved text to this file instead of stdout."
     ),
     permit_unresolved: bool = typer.Option(
         False,
         "--permit-unresolved",
-        help="Leave unresolved/malformed ~{...}~ tokens verbatim (reported on stderr)"
-        " instead of failing.",
+        help="Leave unresolved or malformed ~{...}~ tokens as they are and"
+        " report them on stderr, instead of failing.",
     ),
 ) -> None:
-    """Resolve estate `~{$NAME}~` placeholders in FILES from properties files.
+    """Fill ~{$NAME}~ placeholders in JIL files from properties files.
 
-    Non-core preprocessor (DL-19/DL-22): reproduces the estate templating
-    step so resolved JIL flows through the ordinary pipeline. Several FILES
-    concatenate in argument order into one output (a missing final newline
-    between inputs is completed in that input's own style; merging LF and
-    CRLF inputs is refused -- statement-syntax rule 10 makes the merged
-    text unparseable). Exit 0 on success (including permitted leftovers,
-    which are reported on stderr); exit 2 when the properties or any input
-    cannot be resolved.
+    This is the estate's templating step, run ahead of the compiler.
+    Several FILES are joined in argument order into one output. A
+    missing newline between two inputs is added in the style of the text
+    so far. Mixing LF and CRLF files is refused.
+
+    Exit codes: 0 resolved, including permitted leftovers, which are
+    reported on stderr; 2 a properties file or an input could not be
+    resolved.
     """
+    # Design: DL-19/DL-22
     try:
         bindings = load_properties(properties)
         chunks: list[str] = []
@@ -484,47 +514,50 @@ def viz(
     output_format: VizFormat = typer.Option(
         VizFormat.report,
         "--format",
-        help="report: Markdown report of per-workflow charts (DL-35). "
-        "chart: one bare Mermaid chart of the whole graph, standalone jobs "
-        "included, --direction auto meaning LR (DL-61). "
-        "html: one self-contained offline page, charts rendering in-browser "
-        "with ELK layout at natural scale, ~5 MB of embedded JavaScript (DL-70). "
-        "html-chart: that same offline page holding the whole-graph chart alone "
-        "-- the terminal-artifact counterpart to chart, which is bare pipeable "
-        "Mermaid text (DL-70, DL-76). "
-        "explore: one self-contained interactive navigation page, ~2 MB of "
-        "embedded JavaScript (DL-71). -o is recommended for every page format.",
+        metavar="FORMAT",
+        help="report: a Markdown report with one chart per workflow. chart: one"
+        " bare Mermaid chart of the whole graph, standalone jobs included."
+        " html: a self-contained offline page that renders the charts in"
+        " the browser (about 5 MB). html-chart: the same page with only"
+        " the whole-graph chart. explore: a self-contained interactive"
+        " page for navigating the graph (about 2 MB). Use -o for every"
+        " page format.",
+        # DL-35, DL-61, DL-70, DL-70/DL-76, DL-71
     ),
     collapse_threshold: int = typer.Option(
         None,
         "--collapse-threshold",
-        help="Boxes with more direct members than this render as one node; "
-        "under --format explore they start collapsed (none without the flag).",
+        help="Boxes with more direct members than this are drawn as one node."
+        " Under --format explore they start collapsed instead, and only"
+        " when this flag is given.",
         show_default="12; no folds under --format explore",
     ),
     direction: str = typer.Option(
         "auto",
         "--direction",
-        help="Chart direction: auto (per-component heuristic), LR, or TD.",
+        help="Chart direction: auto, LR or TD. auto chooses per component in the"
+        " report, html and explore formats, and means LR for chart and html-chart.",
     ),
     include_singletons: bool = typer.Option(
         False,
         "--include-singletons",
-        help="Also chart standalone jobs (they are always listed in Appendix A).",
+        help="Also chart standalone jobs. They are always listed in Appendix A.",
     ),
     elk: bool = typer.Option(
         False,
         "--elk",
-        help="Prepend Mermaid ELK-layout frontmatter (VS Code/local; GitHub ignores it).",
+        help="Add Mermaid ELK layout frontmatter. VS Code and local renderers"
+        " use it; GitHub ignores it.",
     ),
     fixed_scale: bool = typer.Option(
         False,
         "--fixed-scale",
-        help="Per-chart frontmatter flowchart.useMaxWidth=false: charts render at natural "
-        "size (uniform scale across charts) instead of shrinking to fit the page. "
-        "Composes with --elk into one frontmatter block.",
+        help="Render each chart at its natural size instead of shrinking it to"
+        " fit the page. Combines with --elk into one frontmatter block.",
     ),
-    out: Path = typer.Option(None, "--out", "-o", help="Write the report here, not stdout."),
+    out: Path = typer.Option(
+        None, "--out", "-o", help="Write the output to this file instead of stdout."
+    ),
     permit_unknown: bool = PERMIT_UNKNOWN,
     properties: list[Path] = PROPERTIES,
     # Removed booleans (DL-75), kept hidden only so passing one names its
@@ -533,11 +566,17 @@ def viz(
     html: bool = typer.Option(False, "--html", hidden=True),
     explore: bool = typer.Option(False, "--explore", hidden=True),
 ) -> None:
-    """Render FILES' derived dependency graph in one of five exclusive
-    formats -- see --format. The shaping options (--collapse-threshold,
-    --direction, --include-singletons, --elk, --fixed-scale) apply wherever
-    the chosen format can deliver their effect, and are refused where it
-    cannot (DL-75)."""
+    """Draw the dependency graph as Markdown, Mermaid or an HTML page.
+
+    All FILES form one catalog. --format picks the output. The shaping
+    options (--collapse-threshold, --direction, --include-singletons,
+    --elk, --fixed-scale) apply where the chosen format can honour them
+    and are refused where it cannot.
+
+    Exit codes: 0 output written; 2 the input could not be read, parsed
+    or lowered, or a shaping option was refused for the chosen format.
+    """
+    # Design: DL-75
     from dsl41.viz import DEFAULT_COLLAPSE_THRESHOLD, to_markdown, to_mermaid
 
     _refuse_removed_viz_flags(whole_graph, html, explore)
@@ -620,66 +659,62 @@ def _print_refusal(exc: "MinifyRefusal") -> None:
 
 
 def minify(
-    files: list[Path] = typer.Argument(..., help="JIL source files to minify (never a run root)"),
+    files: list[Path] = typer.Argument(..., help="JIL source files to minify."),
     out: Path = typer.Option(
         None,
         "--out",
         "-o",
-        help="Directory to write one minified file per input; without it the whole"
-        " minified estate goes to stdout.",
+        help="Directory for the output, one minified file per input. Without"
+        " it the whole result goes to stdout.",
     ),
-    force: bool = typer.Option(
-        False, "--force", help="Overwrite files that already exist under --out."
-    ),
+    force: bool = typer.Option(False, "--force", help="Overwrite existing files under --out."),
     mapping: Path = typer.Option(
         None,
         "--mapping",
-        help="Write the old->new name map here as JSON. This file RE-IDENTIFIES the"
-        " estate: never commit or share it.",
+        help="Write the old-to-new name map to this JSON file. The map"
+        " re-identifies the estate. Never commit or share it.",
     ),
     verify: bool = typer.Option(
         True,
         "--verify/--no-verify",
-        help="Lower both estates and prove them isomorphic under the mapping"
-        " before emitting anything.",
+        help="Lower both estates and check they are isomorphic under the"
+        " name map before writing anything.",
     ),
     scrub_timezones: bool = typer.Option(
         False,
         "--scrub-timezones",
-        help="Map every SEM-35 timezone to UTC. Off by default: a zone name is"
-        " public vocabulary and the estate stops exercising SEM-35 without it,"
-        " but a zone does disclose a region.",
-    ),
+        help="Replace every timezone with UTC. Off by default: zone names"
+        " are public vocabulary, but a zone does reveal a region.",
+    ),  # SEM-35
     properties: list[Path] = PROPERTIES,
 ) -> None:
-    """Emit a de-identified, minified copy of FILES.
+    """Write a de-identified copy of JIL files that keeps their structure.
 
-    Everything dsl41 models structurally survives -- the job graph, conditions
-    and their lookbacks, schedules, exit-code policy, resource gates, the
-    numeric timing hints. Everything that could name the estate does not: names
-    are renamed into synthetic namespaces, `command` becomes an inert constant,
-    comments and the observability attributes are dropped, every kept value is
-    checked against the closed space its key claims, and an attribute this tool
-    cannot classify stops the run rather than guessing.
+    What the compiler models survives: the job graph, conditions and
+    their lookbacks, schedules, exit-code policy, resource gates and
+    numeric timing hints. What could identify the estate does not:
+    names are replaced with synthetic ones, 'command' becomes a
+    constant, comments and observability attributes are dropped, and
+    every kept value is checked against the closed set its key allows.
+    An attribute this tool cannot classify stops the run.
 
-    The leak guard behind all this is a BACKSTOP, not a total check: it only
-    sees tokens of 4+ characters that carry a letter, and it cannot see a value
-    the classification table already proved to be closed vocabulary. Read the
-    output before you hand it over.
+    The leak guard is a backstop, not a complete check. It only sees
+    tokens of four or more characters that contain a letter, and it
+    cannot see a value the classification table treats as closed
+    vocabulary. Read the output before you share it.
 
-    `--properties` resolves `~{$NAME}~` placeholders before parsing, so a
-    placeholder in a KEEP lane is checked as its bound value, not as the
-    token. Without it a placeholder is ordinary text, and one in a KEEP lane
-    refuses as outside its closed space. A properties file is estate text in
-    the same measure as the JIL it fills.
+    --properties fills ~{$NAME}~ placeholders before parsing, so a
+    placeholder in a kept value is checked as its bound value. Without
+    it a placeholder is plain text, and one in a kept value is refused.
+    A properties file is as sensitive as the JIL it fills.
 
-    Exit 0 once the estate is emitted; 2 when the input never reached the tool
-    (an unreadable file, a JIL parse error, an unreadable properties file, or
-    a placeholder --properties cannot resolve); 3 for every minify refusal --
-    an unclassified key or subcommand, a value that will not parse, a
-    structural mismatch against the original, a surviving input token, a KEEP
-    value outside its closed space, or an existing output file without
-    --force. A refusal quotes the estate on stderr and says so.
+    Exit codes: 0 output written; 2 the input could not be read or
+    parsed, or a placeholder could not be resolved; 3 the tool refused
+    to emit (an unclassified key or subcommand, a value that does not
+    parse, a structural mismatch with the original, a surviving input
+    token, a kept value outside its closed set, or an existing output
+    file without --force). A refusal quotes the offending text on
+    stderr.
     """
     from dsl41.minify import MinifyRefusal, minify_files, output_paths
 

@@ -33,39 +33,44 @@ if TYPE_CHECKING:
 # ------------------------------------------------- the shared options
 
 
-CATALOG_FILES = typer.Argument(..., help="JIL files / autocal calendar exports forming one catalog")
+CATALOG_FILES = typer.Argument(
+    ...,
+    help="JIL files and autocal calendar exports. Together they form one catalog.",
+)
 
 PERMIT_UNKNOWN = typer.Option(
     False,
     "--permit-unknown",
-    help="Carry unknown attributes verbatim instead of refusing (DL-07 escape hatch).",
-)
+    help="Accept unknown attributes and carry them through unchanged, instead of"
+    " refusing the input.",
+)  # DL-07
 
 PROPERTIES = typer.Option(
     None,
     "--properties",
     "-p",
-    help="Resolve ~{$NAME}~ placeholders from these properties file(s) before parsing"
-    " (repeatable; later files override earlier, DL-19/DL-22).",
-)
+    help="Properties files with KEY=VALUE lines. Their values fill ~{$NAME}~"
+    " placeholders before parsing. Repeatable; later files override earlier"
+    " ones.",
+)  # DL-19/DL-22
 
 
 TIMEZONE_OPT = typer.Option(
     None,
     "--timezone",
-    help="Base zone for schedules without a per-job timezone (DL-155: the vendor"
-    " schedules these in the scheduler's own zone; default UTC, so a migrated"
-    " estate sets the server's zone explicitly).",
-)
+    help="Timezone for schedules that do not set their own. Default UTC. AutoSys"
+    " uses the scheduler's zone, so set the server's zone here when migrating"
+    " an estate.",
+)  # DL-155
 
 TIMEZONE_MAP_OPT = typer.Option(
     None,
     "--timezone-map",
-    help="File resolving vendor timezone names (SEM-35/DL-62): the instance's"
-    " `autotimezone -l` listing verbatim, or bare 'name zone' pairs. Without"
-    " it, an unknown city name falls back to the unique zoneinfo city match"
-    " with a preflight WARN.",
-)
+    help="File that maps AutoSys timezone names to zones: the output of"
+    " 'autotimezone -l', or plain 'name zone' lines. Without it, an unknown"
+    " city name falls back to the one matching zoneinfo city, with a"
+    " warning.",
+)  # SEM-35/DL-62
 
 
 # --------------------------------------------------- the catalog door
