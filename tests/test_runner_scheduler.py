@@ -23,7 +23,9 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
+from typer.testing import CliRunner
 
+from dsl41.cli import app
 from dsl41.ir import CatalogIR, JobIR, lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event
@@ -1239,6 +1241,119 @@ def test_preflight_owner_accepts_unset_or_the_invoking_user() -> None:
     )
     items = preflight(lower_source(text))
     assert not any(i.code == "owner" for i in items)
+
+
+def test_preflight_envvars_refuses_a_cmd_job() -> None:
+    text = "insert_job: e_job\njob_type: c\ncommand: x\nmachine: localhost\nenvvars: A=1\n"
+    items = preflight(lower_source(text))
+    assert any(i.code == "envvars" and i.severity == "ERROR" and i.job == "e_job" for i in items)
+
+
+def test_preflight_envvars_is_skipped_for_rehearse() -> None:
+    text = "insert_job: e_job\njob_type: c\ncommand: x\nmachine: localhost\nenvvars: A=1\n"
+    items = preflight(lower_source(text), execution=False)
+    assert not any(i.code == "envvars" for i in items)
+
+
+def test_preflight_envvars_is_inert_on_a_box() -> None:
+    text = "insert_job: b_job\njob_type: b\nenvvars: A=1\n"
+    items = preflight(lower_source(text))
+    assert not any(i.code == "envvars" for i in items)
+
+
+def test_preflight_global_substitution_in_command_names_the_global() -> None:
+    text = "insert_job: g_job\njob_type: c\ncommand: echo $$AUDIT_GLOBAL\nmachine: localhost\n"
+    items = preflight(lower_source(text))
+    hits = [i for i in items if i.code == "global-substitution" and i.job == "g_job"]
+    assert len(hits) == 1
+    assert "AUDIT_GLOBAL" in hits[0].message
+
+
+def test_preflight_global_substitution_in_std_out_file_refuses() -> None:
+    text = (
+        "insert_job: g_job\njob_type: c\ncommand: x\nmachine: localhost\n"
+        "std_out_file: /tmp/$$X.log\n"
+    )
+    items = preflight(lower_source(text))
+    assert any(i.code == "global-substitution" and i.job == "g_job" for i in items)
+
+
+def test_preflight_global_substitution_in_description_is_not_refused() -> None:
+    """`description` is an annotation, not an exec_ field -- its $$ site is
+    never read by the shell, so it is out of this rule's reach."""
+    text = "insert_job: g_job\njob_type: c\ncommand: x\nmachine: localhost\ndescription: $$X\n"
+    items = preflight(lower_source(text))
+    assert not any(i.code == "global-substitution" for i in items)
+
+
+def test_preflight_global_substitution_on_fw_watch_file_refuses() -> None:
+    text = "insert_job: fw_job\njob_type: f\nwatch_file: /tmp/$$DIR/x\n"
+    items = preflight(lower_source(text))
+    assert any(i.code == "global-substitution" and i.job == "fw_job" for i in items)
+
+
+def test_preflight_single_dollar_is_not_a_global_substitution_site() -> None:
+    text = "insert_job: s_job\njob_type: c\ncommand: echo $HOME\nmachine: localhost\n"
+    items = preflight(lower_source(text))
+    assert not any(i.code == "global-substitution" for i in items)
+
+
+def test_preflight_global_substitution_is_inert_on_a_box() -> None:
+    """A BOX carries no exec spec, so a $$ site elsewhere on it (here, an
+    annotation) can never land on one -- the same BOX exemption as envvars
+    and chk_files, exercised for this code too."""
+    text = "insert_job: b_job\njob_type: b\ndescription: $$X\n"
+    items = preflight(lower_source(text))
+    assert not any(i.code == "global-substitution" for i in items)
+
+
+def test_preflight_global_substitution_is_skipped_for_rehearse() -> None:
+    text = "insert_job: g_job\njob_type: c\ncommand: echo $$G\nmachine: localhost\n"
+    items = preflight(lower_source(text), execution=False)
+    assert not any(i.code == "global-substitution" for i in items)
+
+
+def test_preflight_chk_files_refuses_a_cmd_job() -> None:
+    text = "insert_job: c_job\njob_type: c\ncommand: x\nmachine: localhost\nchk_files: /tmp 2000\n"
+    items = preflight(lower_source(text))
+    assert any(i.code == "chk-files" and i.severity == "ERROR" and i.job == "c_job" for i in items)
+
+
+def test_preflight_chk_files_matches_case_insensitively() -> None:
+    """passthrough is keyed by the raw attribute case (ir._lookup_ci), so
+    `CHK_FILES:` must refuse exactly like `chk_files:`."""
+    text = "insert_job: c_job\njob_type: c\ncommand: x\nmachine: localhost\nCHK_FILES: /tmp 2000\n"
+    items = preflight(lower_source(text))
+    assert any(i.code == "chk-files" and i.severity == "ERROR" and i.job == "c_job" for i in items)
+
+
+def test_preflight_chk_files_is_inert_on_a_box() -> None:
+    text = "insert_job: b_job\njob_type: b\nchk_files: /tmp 2000\n"
+    items = preflight(lower_source(text))
+    assert not any(i.code == "chk-files" for i in items)
+
+
+def test_preflight_chk_files_is_skipped_for_rehearse() -> None:
+    text = "insert_job: c_job\njob_type: c\ncommand: x\nmachine: localhost\nchk_files: /tmp 2000\n"
+    items = preflight(lower_source(text), execution=False)
+    assert not any(i.code == "chk-files" for i in items)
+
+
+def test_run_cli_refuses_envvars_before_any_run_directory_exists(tmp_path: Path) -> None:
+    """DL-240 end to end: `dsl41 run` on a JIL carrying `envvars` exits 2,
+    prints the `[envvars]` preflight line, and never creates `--run-root`
+    at all -- not even the directory itself, let alone `runs/` under it."""
+    jil = tmp_path / "e.jil"
+    jil.write_text("insert_job: e_job\njob_type: c\ncommand: x\nmachine: localhost\nenvvars: A=1\n")
+    run_root = tmp_path / "root"
+    result = CliRunner().invoke(
+        app, ["run", str(jil), "--run-root", str(run_root)], catch_exceptions=False
+    )
+    assert result.exit_code == 2
+    assert "refusing to run" in result.output
+    assert "[envvars]" in result.output
+    assert not run_root.exists()
+    assert not (run_root / "runs").exists()
 
 
 def test_preflight_calendar_errors_on_dangling_references() -> None:

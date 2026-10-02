@@ -14986,3 +14986,59 @@ relitigate an entry; append a new one.
   file by GitHub URL; every relative link and heading fragment resolves;
   the pyproject substitution applied to README.md leaves no relative
   link and double-prefixes nothing.
+- DL-240 Real execution refuses three carried-but-unapplied inputs at
+  preflight: envvars, $$-global substitution, chk_files (2026-10-02;
+  src/dsl41/runner_preflight.py, src/dsl41/cli_estate.py,
+  src/dsl41/simulation_register_rows.py, docs/runner-design.md,
+  docs/autosys-semantics.md, tests/test_runner_scheduler.py,
+  tests/test_estate.py, tests/test_simulation_register.py)
+  Three AutoSys job attributes reach the runner's exec spec intact but
+  are never applied when a command actually runs: `envvars`
+  (AutoSys 24.2 "envvars Attribute") is never set on the child
+  environment; a `$$NAME` global reference on an exec_ field (AutoSys
+  24.2 "Global Variables") is never substituted, so `/bin/sh` reads the
+  literal `$$` as its own PID; `chk_files` (AutoSys 24.2 "chk_files
+  Attribute") never gates the start on free disk space. Without a
+  refusal, a command can complete successfully having read the wrong
+  environment, the wrong path, or started despite an unmet disk-space
+  precondition it was supposed to enforce. Other carried-but-unapplied
+  execution attributes (`ulimit`, `elevated`, `interactive`, `job_class`)
+  are not covered by this decision; each needs its own applicability
+  check before a refusal is justified.
+  Preflight gains one ERROR-only rule,
+  `runner_preflight._execution_input_preflight`, run inside the
+  existing `if execution:` block alongside `_machine_preflight` and
+  `_owner_preflight` -- so it fires for `dsl41 run` (including resume)
+  and the period-seal boundary check (`boundary.preflight_errors`,
+  which always runs with `execution=True`), and is skipped for rehearse
+  (`execution=False`), consistent with those two rules: the FakeAdapter
+  spawns no process, so nothing can misapply. The offline sealer
+  (`cli_estate._offline_seal`) calls the same `preflight_errors` directly
+  on the CLOSING period's own catalog, before `wire_from_profile` wires
+  any adapter, because the live boundary check only ever reads the
+  successor's. BOX jobs are exempt for
+  all three codes: SEM-10 makes `envvars`/`chk_files` inert there, and a
+  BOX carries no exec spec to substitute into. The three codes are
+  `envvars`, `global-substitution`, and `chk-files`.
+  This is a refusal, not support: no envvars application and no `$$`
+  substitution are implemented by this decision. A job that needs either
+  must stop carrying the attribute (or the $$ reference) until a future
+  decision adds real support.
+  Upgrade consequence: `run --resume` hash-gates the catalog against the
+  one the run started with (ss7), so a live estate whose catalog carries
+  one of these inputs cannot resume under this build -- editing the
+  catalog to drop the input would itself fail the hash gate. The operator
+  drains the estate and starts a new one from a catalog without the
+  carried input (period-model ss11), the same path DL-235's version bump
+  takes.
+  Unchanged: rehearse, `compile`, lowering, and the UC backend (`backend_uc`
+  continues to carry/refuse these attributes on its own R/A terms,
+  unaffected by the runner's execution gate).
+  Tests: tests/test_runner_scheduler.py (triggering and non-triggering
+  fixtures per code, a BOX exemption per code, an `execution=False`
+  check per code, and an end-to-end `dsl41 run` refusal before any run
+  directory exists). tests/test_estate.py (the offline sealer refuses a
+  closing catalog that fails preflight, before any adapter is wired).
+  tests/test_simulation_register.py (the register's `job_attr:chk_files`
+  and `job_attr:envvars` rows move from passthrough to refused, citing
+  this rule).

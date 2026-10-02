@@ -5,12 +5,13 @@ Split out of runner.py by DL-74, with the paragraph it owns, verbatim.
 Phase 11c (ss5, ss8, ss10; DL-45 pins the decisions):
 
 - Preflight (ss8): ERROR refuses the run (job-type / machine / owner /
-  calendar / timezone / oracle construction), WARN prints + journals and
-  runs (n-retrys DL-53 scope, resources, exhausted run_calendar DL-56,
-  AND-success skeleton cycle -- cycles are
+  execution-input / calendar / timezone / oracle construction), WARN prints
+  + journals and runs (n-retrys DL-53 scope, resources, exhausted
+  run_calendar DL-56, AND-success skeleton cycle -- cycles are
   legal AutoSys, DL-13/L010, so they only disable `plan`). Identity rules
-  (machine/owner) guard real execution and are skipped for rehearse
-  (execution=False): the FakeAdapter runs nothing.
+  (machine/owner) and the execution-input rule (envvars / global
+  substitution / chk_files, DL-240) guard real execution and are skipped for
+  rehearse (execution=False): the FakeAdapter runs nothing.
 """
 
 from __future__ import annotations
@@ -34,7 +35,7 @@ from dsl41.autocal import (
 )
 from dsl41.capacity import RES_TYPES
 from dsl41.conditions import And, Cond, Paren, StatusAtom
-from dsl41.ir import CatalogIR, JobIR, MachineIR, unquote_jil_value
+from dsl41.ir import CatalogIR, ExecSpec, JobIR, MachineIR, unquote_jil_value
 from dsl41.oracle import Oracle
 from dsl41.period import MachinePolicy as _MachinePolicy
 from dsl41.oracle_state import OracleError
@@ -417,6 +418,66 @@ def _owner_preflight(name: str, job: JobIR, user: str) -> list[PreflightItem]:
     return items
 
 
+def _execution_input_preflight(name: str, job: JobIR) -> list[PreflightItem]:
+    """ERROR: three execution inputs the JIL carries but real execution never
+    applies -- `envvars` (ExecSpec, CMD), a `$$NAME` global-substitution site
+    on an exec_ field, and `chk_files` (DL-240). BOX jobs are exempt: SEM-10
+    makes all three inert there, and a BOX carries no exec spec. Caller skips
+    this rule entirely for rehearse, same reason as `_owner_preflight` -- the
+    FakeAdapter spawns no process, so nothing misapplies."""
+    items: list[PreflightItem] = []
+    if job.job_type == "BOX":
+        return items
+
+    # one closure per code: the register's scanner reads the constant `code=`
+    # on each PreflightItem call to enumerate the preflight_code surface
+
+    def err_envvars(message: str) -> None:
+        items.append(PreflightItem(severity="ERROR", code="envvars", job=name, message=message))
+
+    def err_global_sub(message: str) -> None:
+        items.append(
+            PreflightItem(severity="ERROR", code="global-substitution", job=name, message=message)
+        )
+
+    def err_chk_files(message: str) -> None:
+        items.append(PreflightItem(severity="ERROR", code="chk-files", job=name, message=message))
+
+    spec = job.exec_
+    if isinstance(spec, ExecSpec) and spec.envvars is not None:
+        # the value is not echoed: an environment list may carry a secret
+        err_envvars(
+            "envvars is carried but never applied to the child environment;"
+            " real execution is refused (DL-240)"
+        )
+
+    if spec is not None:
+        exec_attrs = set(type(spec).model_fields) - {"kind"}
+        seen: set[tuple[str, str]] = set()
+        for site in job.var_sites:
+            if site.attr not in exec_attrs:
+                continue
+            key = (site.attr, site.name)
+            if key in seen:
+                continue
+            seen.add(key)
+            err_global_sub(
+                f"{site.attr} references global $${site.name}; global substitution"
+                " is not implemented, so the literal text would be used; real"
+                " execution is refused (DL-240)"
+            )
+
+    # passthrough is keyed by the raw attribute case (ir._lookup_ci, lint.py's
+    # own TIME_CLUSTER scan), so CHK_FILES must match too -- case-insensitively
+    chk_files = next((v for k, v in job.passthrough.items() if k.lower() == "chk_files"), None)
+    if chk_files is not None:
+        err_chk_files(
+            f"chk_files {chk_files!r} is carried but the pre-start disk-space gate"
+            " is never evaluated; real execution is refused (DL-240)"
+        )
+    return items
+
+
 def _calendar_preflight(
     name: str,
     job: JobIR,
@@ -688,6 +749,7 @@ def preflight(
         if execution:
             items.extend(_machine_preflight(name, job, catalog, local, machine_policy))
             items.extend(_owner_preflight(name, job, user))
+            items.extend(_execution_input_preflight(name, job))
         items.extend(_calendar_preflight(name, job, catalog, start, tz_aliases, default_tz))
         items.extend(_timezone_preflight(name, job, tz_aliases))
         items.extend(_retry_preflight(name, job))

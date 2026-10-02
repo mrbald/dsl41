@@ -439,7 +439,12 @@ async def _offline_seal(
 
     from datetime import UTC, datetime
 
-    from dsl41.boundary import SealRequest, load_bundle_catalog, resume_root_refusal
+    from dsl41.boundary import (
+        SealRequest,
+        load_bundle_catalog,
+        preflight_errors,
+        resume_root_refusal,
+    )
     from dsl41.runner_clock import EngineError, RealClock
     from dsl41.period import read_period_manifest
     from dsl41.runner_startup import resume_run, wire_from_profile
@@ -486,11 +491,23 @@ async def _offline_seal(
         # and re-asking it here would make `dsl41 seal` refuse a root
         # `dsl41 run` is serving.
         catalog = load_bundle_catalog(run_root, pinned.source_bundle_hash, permit_unknown=True)
+        # DL-240: the live path's boundary check (`preflight_errors`) only
+        # ever sees the SUCCESSOR catalog (ss10.1); offline sealing resumes
+        # and dispatches the CLOSING period's own catalog first, so it is
+        # the one that needs this gate here, before any adapter is wired.
+        now = datetime.now(UTC).replace(tzinfo=None)
+        errors = preflight_errors(catalog, pinned.runtime_profile, at=now)
+        if errors:
+            return refuse(
+                f"{run_root}: the closing period's catalog fails preflight under"
+                f" this build: {'; '.join(errors)}; drain and recreate"
+                " the estate (DL-240)"
+            )
         wiring = await wire_from_profile(
             run_root,
             catalog,
             pinned.runtime_profile,
-            start=datetime.now(UTC).replace(tzinfo=None),
+            start=now,
         )
         engine = await resume_run(
             catalog,

@@ -1783,7 +1783,7 @@ def validate_staged(ctx: StagedContext) -> Classification:
             " version, so an SM bump is a full drain and a new estate, never a transition"
             " (period-model ss2.1, PR-17)"
         )
-    errors = _preflight_errors(ctx.c2, bytes_.runtime_profile, at=ctx.at)
+    errors = preflight_errors(ctx.c2, bytes_.runtime_profile, at=ctx.at)
     if errors:
         raise EngineError(
             f"the staged estate does not pass preflight ({'; '.join(errors)}):"
@@ -1804,7 +1804,13 @@ def validate_staged(ctx: StagedContext) -> Classification:
     return verdict
 
 
-def _preflight_errors(catalog: CatalogIR, profile: RuntimeProfile, *, at: datetime) -> list[str]:
+def preflight_errors(catalog: CatalogIR, profile: RuntimeProfile, *, at: datetime) -> list[str]:
+    """ERROR-severity preflight codes over `catalog`/`profile` (one string
+    per finding, `code` or `code (job)`): the live boundary check's own
+    read of a SUCCESSOR catalog (`validate_staged`, period-model ss10.1)
+    and the offline sealer's read of the CLOSING one
+    (`cli_estate._offline_seal`, DL-240) share this, so the two gates
+    cannot drift apart over what counts as a refusal."""
     from dsl41.runner_preflight import preflight
 
     return [

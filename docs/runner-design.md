@@ -778,6 +778,17 @@ ERROR:
   shell-side. The bisimulation gate is untouched. Remote dispatch (routing
   a foreign machine to another box) stays a §12 non-goal.
 - `owner` set and not the invoking user.
+- `envvars` set on a CMD job's `ExecSpec`: the adapter never applies it to
+  the child environment (DL-240). `run` only; rehearse spawns no process.
+- a non-BOX job whose `var_sites` name a field of its exec spec (command,
+  std_in_file, envvars, profile, std_out_file, std_err_file, machine,
+  owner; watch_file on FW): global substitution is not implemented, so the
+  literal `$$NAME` text would be used as-is (DL-240) -- on `command`, for
+  example, the shell would read `$$` as its own PID. `run` only; rehearse
+  spawns no process.
+- a non-BOX job whose `passthrough` carries `chk_files`: the pre-start
+  disk-space gate is never evaluated (DL-240). `run` only; rehearse spawns
+  no process.
 - `run_calendar` / `exclude_calendar` that names a calendar absent from
   the loaded set (L018's lint WARN, fail-closed here — the same strictness
   split as L016-vs-DL-50 resources). Also a calendar reference that

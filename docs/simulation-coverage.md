@@ -106,7 +106,7 @@ fails the suite.
 | job_attr:box_success | supported | SEM-12 | - |  |  |  | generic | overrides a box's success verdict, evaluated on every member transition while the box is RUNNING, so an internal reference can finish the box early |
 | job_attr:box_success#iced-member | provisional | SEM-12, SEM-20 | Q6 |  | Q6 |  | none | an iced member is read as satisfied inside box_success, the same way it is read inside an ordinary condition |
 | job_attr:box_terminator | supported | SEM-14 | - |  |  |  | generic | this member's failure terminates the whole box |
-| job_attr:chk_files | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | the pre-start disk-space gate is not evaluated; the job starts regardless |
+| job_attr:chk_files | refused | runner_preflight._execution_input_preflight, DL-240 | - |  |  |  | generic | carried verbatim; never applied; real execution refuses it at preflight; rehearse and compile are unaffected; inert on a BOX (SEM-10) |
 | job_attr:command | supported | runner-design ss6 | - |  |  |  | generic | the shell command the CMD adapter spawns, passed to /bin/sh verbatim |
 | job_attr:condition | supported | SEM-02, SEM-08 | - |  |  |  | generic | the start gate: the job starts on the edge where its condition becomes true |
 | job_attr:condition#queued-no-recheck | provisional | DL-50, oracle.Oracle._readmit | Qr6 | yes |  |  | none | a job admitted out of QUE_WAIT does not re-evaluate its condition |
@@ -115,7 +115,7 @@ fails the suite.
 | job_attr:days_of_week#absent | provisional | SEM-30, runner_scheduler | E10 | yes |  |  | none | a schedule with no days_of_week is read as every day |
 | job_attr:description | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
 | job_attr:elevated | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | no privilege elevation happens; the child runs as the invoking user |
-| job_attr:envvars | passthrough | ir._Lowerer._exec_spec, DL-32 | - |  |  |  | generic | carried verbatim on the exec spec; the child process environment is not modified; inert on a BOX (SEM-10) |
+| job_attr:envvars | refused | runner_preflight._execution_input_preflight, DL-240 | - |  |  |  | generic | carried verbatim; never applied; real execution refuses it at preflight; rehearse and compile are unaffected; inert on a BOX (SEM-10) |
 | job_attr:exclude_calendar | supported | SEM-30, DL-56 | - |  |  |  | generic | the named calendar whose days are subtracted from the schedule's day set |
 | job_attr:exclude_calendar#two-year-probe | supported | DL-56, DL-57, runner_preflight._calendar_preflight | - |  |  | 732 dates inclusive, anchor through anchor+731 days | none | preflight WARNs when the exclusion covers every eligible day it probes -- 732 dates inclusive, anchor through anchor+731 days; absence is proven within that bound only, and the run is warned, not refused |
 | job_attr:fail_codes | supported | SEM-09, DL-33 | - |  |  |  | generic | the explicit failure set; present, it is the only verdict source (Q7, DL-58) |
@@ -644,6 +644,9 @@ fails the suite.
 | id | class | cite | label | marker | protocol | bound | detector | effect |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | preflight_code:calendar | refused | runner_preflight._calendar_preflight, DL-56 | - |  |  |  | generic | a calendar the scheduler cannot read or that can never fire refuses the run |
+| preflight_code:chk-files | refused | runner_preflight._execution_input_preflight, DL-240 | - |  |  |  | generic | chk_files on a non-BOX job is carried but the pre-start disk-space gate is never evaluated, so real execution refuses the run |
+| preflight_code:envvars | refused | runner_preflight._execution_input_preflight, DL-240 | - |  |  |  | generic | envvars on a CMD job's ExecSpec is carried but the adapter never applies it to the child environment, so real execution refuses the run |
+| preflight_code:global-substitution | refused | runner_preflight._execution_input_preflight, DL-240 | - |  |  |  | generic | a $$NAME site on an exec_ field is carried but never substituted, so the literal text would be used; real execution refuses the run |
 | preflight_code:job-type | refused | runner_preflight._job_type_preflight | - |  |  |  | unreachable | a job_type with no adapter refuses the run; no JIL reaches this gate, because lowering already refuses every type outside CMD/BOX/FW |
 | preflight_code:machine | refused | runner_preflight._machine_preflight, DL-49 | - |  |  |  | generic | a job whose machine does not resolve to this host refuses the run: there is no remote fabric |
 | preflight_code:machine-mixed | supported | runner_preflight._machine_preflight, DL-49 | - |  |  |  | generic | a pool with some members here and some elsewhere runs here under local-eligible, with a warning that pool placement was ignored |

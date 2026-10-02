@@ -136,6 +136,8 @@ modeled universe.
 - In attribute strings (command, std_out_file, …): `$$NAME` or `$${NAME}` substitution at
   runtime. Single-`$` is shell/environment, double-`$$` is AutoSys global; the parser keeps
   these distinct. A global-variable set is an event that triggers condition re-evaluation.
+  Substitution itself is not implemented: real execution refuses an unsubstituted `$$NAME`
+  site on an exec field at preflight (DL-240).
 
 ### SEM-09 · max_exit_success shifts SUCCESS/FAILURE boundary **[V]**
 A job with `max_exit_success: 2` records SUCCESS for exit codes ≤ 2. Therefore `s(j)` on a
@@ -673,14 +675,14 @@ DL-56).
 | `auto_delete` | definition lifecycle, not runtime; carried in IR-F `JobIR.passthrough` |
 | `status` (on insert) | definition-time out-of-band state (SEM-24) **[V]** existence / **[?]** full value set |
 | `job_load`/`priority`/`machine_method`/QUE_WAIT, `machine` lists | the pre-11.3 load-balancing model; the IR carries these in `passthrough` and reads `job_load` and `priority` from there. The oracle honors `job_load` vs machine `max_load` as a capacity bucket and `priority` as QUE_WAIT waiter ordering (DL-50); pool `machine:` lines are typed `MachineMember` rows (DL-49) and preflight resolves their locality; `machine_method`, member selection/routing and per-member `factor`/`max_load` are opaque placement |
-| `std_in_file`, `envvars` | CMD exec cluster (DL-32): stdin redirect (may reference a blob) + NAME=value environment list; typed carry on ExecSpec, `$$VAR` sites indexed (SEM-08) |
+| `std_in_file`, `envvars` | CMD exec cluster (DL-32): stdin redirect (may reference a blob) + NAME=value environment list; typed carry on ExecSpec, `$$VAR` sites indexed (SEM-08); real execution refuses `envvars` at preflight outright, and refuses a `$$NAME` site in either field, since global substitution is not implemented (DL-240) |
 | `ulimit`, `elevated`, `interactive`, `job_class` | OS/agent-side exec tuning **[V]** (TechDocs 12.x); inert carry (DL-32) |
-| `chk_files` | pre-start disk-space gate **[V]**: the agent checks required space; unmet → alarm and the job does NOT start; Resource-Wait class. Opaque carry, no oracle gate (a real disk level is out of a pure simulator's reach; distinct from `resources:`, which the oracle honors as capacity semaphores, DL-50) |
+| `chk_files` | pre-start disk-space gate **[V]**: the agent checks required space; unmet → alarm and the job does NOT start; Resource-Wait class. Opaque carry, no oracle gate (a real disk level is out of a pure simulator's reach; distinct from `resources:`, which the oracle honors as capacity semaphores, DL-50); real execution refuses it at preflight (DL-240) |
 | `heartbeat_interval` | MISSING_HEARTBEAT alarm only **[V]**; observability (DL-32) |
 | `avg_runtime` | statistics seed at insert **[V]**; inert carry (DL-32) |
 | `resources` + `insert_resource`/`update_resource`/`delete_resource` | 11.3+ resource objects **[V]** (TechDocs 12.x): `resources: (name, QUANTITY=n[, FREE=Y\|N\|A]) AND (...)`; FREE: Y=free on success, N=never, A=unconditionally; `res_type: D\|R\|T` (depletable/renewable/threshold), `amount` required, optional agent-level `machine`. Typed carry (DL-21); the oracle honors these as capacity semaphores (DL-50): `amount` is the bucket size, QUANTITY the demand, res_type sets the default release (R free-on-completion / D depletable-never / T level-gate) and FREE overrides it; UCS-09 → UC Virtual Resources |
 | `alarm_if_fail`, `alarm_if_terminated`, `min/max_run_alarm`, `send_notification` + `notification_*` family (msg, template, alarm_types, emailaddress[_on_alarm/_on_failure/_on_success/_on_terminated]), `must_*_times` | observability annotations, no control flow (family per 12.x notification services, DL-32) |
-| `std_out_file` etc. with `$$VAR` | string substitution sites (SEM-08) |
+| `std_out_file` etc. with `$$VAR` | string substitution sites (SEM-08); real execution refuses an unsubstituted site on an exec field at preflight (DL-240) |
 | `watch_file`, `watch_interval`, `watch_file_min_size` (FW jobs) | file-watcher job type: terminal SUCCESS when the file condition is met; a *source* node in derived graphs |
 
 ---

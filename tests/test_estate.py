@@ -375,6 +375,52 @@ def test_a_live_seal_refusal_leaves_the_engine_running(short_root: Path) -> None
         assert status.returncode == 0
 
 
+def test_offline_seal_refuses_a_closing_catalog_that_fails_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DL-240: the live boundary's `preflight_errors` only ever reads the
+    SUCCESSOR catalog (C2); the offline sealer resumes and dispatches the
+    CLOSING period's own catalog (C1) first, so C1 needs the same gate,
+    before `wire_from_profile` builds any adapter.
+
+    C1 here carries `envvars`, as a pre-upgrade estate's catalog would --
+    built by patching `_execution_input_preflight` to a no-op for the
+    `_native_root` construction only (the direct `start_run` path this
+    helper drives never calls preflight itself; the patch stands in for
+    "whatever older build wrote this catalog to disk")."""
+    import dsl41.runner_preflight as runner_preflight
+
+    base = tmp_path / "estate"
+    base.mkdir()
+    c1 = base / "c1.jil"
+    c1.write_text("insert_job: a\njob_type: c\ncommand: sleep 600\nenvvars: A=1\n")
+    c2 = base / "c2.jil"
+    c2.write_text(C2_JIL)
+    run_root = tmp_path / "root"
+
+    with monkeypatch.context() as patched:
+        patched.setattr(runner_preflight, "_execution_input_preflight", lambda name, job: [])
+        _native_root(run_root, c1)
+    # the patch is reverted here: the gate under test must be the live one
+
+    # _stage_next legitimately writes C2's staged bytes before this gate
+    # runs (period-model ss7); what must NOT move is `runs/`, the one
+    # directory `wire_from_profile`/`resume_run` would add to
+    runs_dir = run_root / "runs"
+    before = sorted(p.name for p in runs_dir.iterdir())
+    result = _seal_offline(run_root, c2)
+    after = sorted(p.name for p in runs_dir.iterdir())
+
+    assert result.exit_code == 2
+    assert "fails preflight under this build" in result.output
+    assert "envvars" in result.output
+    assert "drain and recreate the estate" in result.output
+    assert "DL-240" in result.output
+    # no adapter was ever wired: no new spool or runs entry past what
+    # `_native_root` itself wrote for period 1
+    assert after == before
+
+
 # ------------------------------------------- ss1.3 audit and attestation
 
 

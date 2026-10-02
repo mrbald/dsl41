@@ -98,6 +98,7 @@ FUNCTION_SURFACE: dict[str, str] = {
     "_lower_global": "global_attr",
     "_lower_calendar": "calendar_attr",
     "_lower_cycle": "calendar_attr",
+    "_execution_input_preflight": "job_attr",
 }
 
 SCANNED_FILES = ("ir.py", "runner_preflight.py")
