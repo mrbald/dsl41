@@ -729,6 +729,13 @@ _SEM34_OK_CASES: list[tuple[str, str, SlaSpec]] = [
         'start_times: "10:00, 11:00, 12:00"\nmust_start_times: +5, +10, +15\n',
         SlaSpec(kind="relative", offsets_min=[5, 10, 15]),
     ),
+    # DL-248: one relative offset counts against start_mins and broadcasts
+    (
+        "relative-single-offset-with-start-mins",
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\ndate_conditions: 1\n"
+        "start_mins: 0, 10, 20, 30, 40, 50\nmust_start_times: +7\n",
+        SlaSpec(kind="relative", offsets_min=[7]),
+    ),
 ]
 
 
@@ -761,6 +768,16 @@ _SEM34_ERROR_CASES = [
         "missing-start-times",
         "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\ndate_conditions: 1\n"
         "must_start_times: +5\n",
+    ),
+    (
+        "absolute-with-start-mins",
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\ndate_conditions: 1\n"
+        'start_mins: 0, 30\nmust_start_times: "10:05, 10:35"\n',
+    ),
+    (
+        "relative-list-with-start-mins",
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\ndate_conditions: 1\n"
+        "start_mins: 0, 30\nmust_start_times: +5, +20\n",
     ),
     # DL-151: int() alone read these as -1 and as 10.
     (
@@ -1030,7 +1047,7 @@ def test_term_run_time_maps_to_term_run_time_min() -> None:
 
 def test_term_run_time_zero_lowers_to_zero_not_none() -> None:
     """DL-241: zero is a real, distinct value ("no limit"), not absence --
-    lowering must carry it verbatim so `Oracle._arm_sla_and_term` can tell
+    lowering must carry it verbatim so `Oracle._arm_term_run_time` can tell
     "no limit" (0) apart from "no term_run_time attribute" (None), and
     preserve-mode rendering must round-trip the literal zero."""
     text = "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\nterm_run_time: 0\n"

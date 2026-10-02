@@ -571,7 +571,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             member="must_start_times",
             facet="absolute",
             klass=PASSTHROUGH,
-            cite="SEM-34, oracle.Oracle._arm_sla_and_term",
+            cite="SEM-34, oracle.Oracle._slot_deadline",
             effect="an ABSOLUTE must_start_times lowers and is carried, and arms nothing:"
             " the oracle owns no calendar, so no absolute deadline exists v1",
             trigger=_job(date_conditions="1", start_times='"08:00"', must_start_times='"08:30"'),
@@ -582,7 +582,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             member="must_complete_times",
             facet="absolute",
             klass=PASSTHROUGH,
-            cite="SEM-34, oracle.Oracle._arm_sla_and_term",
+            cite="SEM-34, oracle.Oracle._slot_deadline",
             effect="an ABSOLUTE must_complete_times lowers and is carried, and arms"
             " nothing: the oracle owns no calendar, so no absolute deadline exists v1",
             trigger=_job(date_conditions="1", start_times='"08:00"', must_complete_times='"09:30"'),
@@ -630,6 +630,30 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             trigger=_job(
                 date_conditions="1", start_times='"08:00,12:00"', must_complete_times='"+30,+60"'
             ),
+            quiet=_job(date_conditions="1", start_times='"08:00"', must_complete_times='"+45"'),
+        ),
+        _row(
+            surface="job_attr",
+            member="must_start_times",
+            facet="start-mins",
+            klass=SUPPORTED,
+            cite="SEM-34, DL-248, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset",
+            effect="a single relative offset counts against start_mins and broadcasts to"
+            " every start_mins tick; a list of offsets or an absolute form there is not"
+            " specified by the vendor, stays open, and is refused at lowering",
+            trigger=_job(date_conditions="1", start_mins="0,30", must_start_times='"+7"'),
+            quiet=_job(date_conditions="1", start_times='"08:00"', must_start_times='"+45"'),
+        ),
+        _row(
+            surface="job_attr",
+            member="must_complete_times",
+            facet="start-mins",
+            klass=SUPPORTED,
+            cite="SEM-34, DL-248, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset",
+            effect="a single relative offset counts against start_mins and broadcasts to"
+            " every start_mins tick; a list of offsets or an absolute form there is not"
+            " specified by the vendor, stays open, and is refused at lowering",
+            trigger=_job(date_conditions="1", start_mins="0,30", must_complete_times='"+7"'),
             quiet=_job(date_conditions="1", start_times='"08:00"', must_complete_times='"+45"'),
         ),
     )
@@ -794,7 +818,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             surface="job_attr",
             member="term_run_time",
             klass=SUPPORTED,
-            cite="dossier ss5, oracle.Oracle._arm_sla_and_term",
+            cite="dossier ss5, oracle.Oracle._arm_term_run_time",
             effect="arms a timer that TERMINATEs the run after n minutes"
             "; zero means no limit and arms no timer (DL-241)",
             trigger=_job(
@@ -2619,7 +2643,8 @@ SCENARIO_ROWS: tuple[Row, ...] = (
             member="MUST_COMPLETE_ALARM",
             klass=SUPPORTED,
             cite="SEM-34",
-            effect="emitted when a must_complete deadline passes with the run still live",
+            effect="emitted when a must_complete deadline passes before the run its tick asked"
+            " for completed, including a run that never began (DL-248)",
             trigger=_scn(
                 _estate(_MC_JIL, TICKER_BLOCK),
                 "0 STARTJOB job=J0",
@@ -2772,7 +2797,8 @@ SCENARIO_ROWS: tuple[Row, ...] = (
             member="must_complete",
             klass=SUPPORTED,
             cite="PR-09, oracle.Oracle._schedule_timer",
-            effect="armed by the start; it raises MUST_COMPLETE_ALARM if the run is still live",
+            effect="armed by the schedule tick; it raises MUST_COMPLETE_ALARM if the run the"
+            " tick asked for has not completed (DL-248)",
             trigger=_scn(_MC_JIL, "0 STARTJOB job=J0"),
         ),
         _row(
@@ -3289,7 +3315,8 @@ TRACE_MARKER_ROWS: tuple[Row, ...] = (
         member="MUST_COMPLETE_ALARM",
         klass=SUPPORTED,
         cite="ir-design ss7, oracle.Oracle._record",
-        effect="the must_complete deadline passed with the run still live; no status moved",
+        effect="the must_complete deadline passed before the run its tick asked for"
+        " completed; no status moved",
         trigger=_scn(SLA_COMPLETE_JIL, "0 STARTJOB job=J0", "21 STATUS job=TICK status=SUCCESS"),
     ),
     _row(
@@ -3763,7 +3790,7 @@ LITERAL_ALT_ROWS: tuple[Row, ...] = (
         surface="literal_alt",
         member="SlaSpec.kind=absolute",
         klass=SUPPORTED,
-        cite="SEM-34, oracle.Oracle._arm_sla_and_term",
+        cite="SEM-34, oracle.Oracle._slot_deadline",
         effect="an absolute must_*_times is lowered and carried, and arms nothing: the"
         " oracle owns no calendar, so no absolute deadline exists v1",
         trigger="ir.SlaSpec",
@@ -3773,7 +3800,7 @@ LITERAL_ALT_ROWS: tuple[Row, ...] = (
         surface="literal_alt",
         member="SlaSpec.kind=relative",
         klass=SUPPORTED,
-        cite="SEM-34, oracle.Oracle._arm_sla_and_term",
+        cite="SEM-34, oracle.Oracle._slot_deadline",
         effect="a relative `+n` must_*_times is what arms the alarm timer",
         trigger="ir.SlaSpec",
         quiet="conditions.parse_condition",
@@ -4004,11 +4031,10 @@ RUNTIME_ROWS: tuple[Row, ...] = (
     _row(
         surface="runtime",
         member="sla-offset-broadcast",
-        klass=PROVISIONAL,
-        cite="SEM-34, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset",
-        effect="one relative offset broadcasts to every start slot, which SEM-34 marks"
-        " open -- the strict count rule and the vendor's own example disagree; no label"
-        " was opened for it",
+        klass=SUPPORTED,
+        cite="SEM-34, DL-248, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset",
+        effect="one relative offset broadcasts to every start slot: the vendor's relative"
+        " syntax is a single +minutes applied after each start time",
         trigger=_job(date_conditions="1", start_times='"08:00,12:00"', must_start_times='"+30"'),
         quiet=_job(date_conditions="1", start_times='"08:00,12:00"', must_start_times='"+30,+60"'),
     ),

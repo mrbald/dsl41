@@ -87,7 +87,9 @@ from dsl41.runner_clock import EngineError
 #: machine-load check but hold their load, a load waiter blocks lower
 #: priorities on its machine, and more transitions wake the queue, so a
 #: replay with load demand or with queued jobs can derive different state.
-STATE_MACHINE_VERSION = 8
+#: 9 since DL-248: the schedule tick arms the relative must_complete deadline
+#: and its timer carries the tick's run, so a replay alarms differently.
+STATE_MACHINE_VERSION = 9
 
 LOCK_NAME = "leader.lock"
 

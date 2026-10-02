@@ -1512,12 +1512,14 @@ def test_b1_two_timers_due_at_exactly_t_are_c1s_and_the_next_one_is_c2s(
         for job in (*_region_workers(catalog), *QUIESCE):
             inject("ON_HOLD", job)
         await engine.run_until_quiescent(t0)
+        # a STARTJOB is the tick that arms a relative must_complete
+        # deadline; a FORCE_STARTJOB is no tick and arms none (DL-248)
         for box in B_DEADLINE_BOXES[:2]:
-            inject("FORCE_STARTJOB", box)
+            inject("STARTJOB", box)
         await engine.run_until_quiescent(t0)
         # the third box one minute later: its deadline is T + 1min
         await engine.clock.wait_until(t0 + timedelta(minutes=1))
-        inject("FORCE_STARTJOB", B_DEADLINE_BOXES[2])
+        inject("STARTJOB", B_DEADLINE_BOXES[2])
         await engine.run_until_quiescent(engine.clock.now())
         assert [(due, job) for due, job, _ in engine.oracle.pending_timers()] == [
             (cutoff, B_DEADLINE_BOXES[0]),

@@ -1211,10 +1211,11 @@ class _Lowerer:
             fields["run_window"] = self._run_window(attr)
         start_times = fields.get("start_times")
         n_starts = len(start_times) if isinstance(start_times, list) else None
+        by_mins = n_starts is None and isinstance(fields.get("start_mins"), list)
         if (attr := take("must_start_times")) is not None:
-            fields["must_start"] = self._sla_attr(attr, n_starts)
+            fields["must_start"] = self._sla_attr(attr, n_starts, by_mins=by_mins)
         if (attr := take("must_complete_times")) is not None:
-            fields["must_complete"] = self._sla_attr(attr, n_starts)
+            fields["must_complete"] = self._sla_attr(attr, n_starts, by_mins=by_mins)
         # SEM-31 pre-check so findings point at the conflicting attribute line
         # (presence-based; the model validator below stays the ground truth).
         ok = True
@@ -1291,16 +1292,33 @@ class _Lowerer:
             self.err(f"run_window: {exc}", attr.span)
             return None
 
-    def _sla_attr(self, attr: RawAttr, n_start_times: int | None) -> SlaSpec | None:
+    def _sla_attr(
+        self, attr: RawAttr, n_start_times: int | None, *, by_mins: bool = False
+    ) -> SlaSpec | None:
         """SEM-34 must_*_times: absolute or relative, never mixed; count must
-        match start_times, except a single relative offset broadcasts (module
-        docstring, [?] pin on live instance)."""
+        match start_times, except a single relative offset broadcasts (the
+        vendor's relative syntax, DL-248). Against start_mins only the
+        documented form lowers: one relative offset, broadcast to every
+        start_mins tick ("The must complete times are calculated relative to
+        the start_mins or start_times attributes", DL-248). A list of
+        relative offsets or an absolute form there is not specified by the
+        vendor pages and stays open, so it is refused."""
         tokens = _split_list(attr.raw_value)
         if not tokens:
             self.err(f"{attr.key}: empty value", attr.span)
             return None
+        if by_mins:
+            if len(tokens) != 1 or not tokens[0].startswith("+"):
+                self.err(
+                    f"{attr.key}: with start_mins only a single relative offset is accepted"
+                    " (SEM-34, DL-248); a list of offsets or an absolute form against"
+                    " start_mins is not specified by the vendor and stays open",
+                    attr.span,
+                )
+                return None
+            n_start_times = 1
         if n_start_times is None:
-            self.err(f"{attr.key}: requires start_times (SEM-34)", attr.span)
+            self.err(f"{attr.key}: requires start_times or start_mins (SEM-34)", attr.span)
             return None
         relative = [t.startswith("+") for t in tokens]
         if any(relative) and not all(relative):
