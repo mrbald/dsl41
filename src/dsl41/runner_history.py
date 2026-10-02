@@ -42,11 +42,13 @@ Five decisions, each with its reason here; the decision itself is
    so there is no simpler "journal clock" for a box than replaying the
    journal that defines it. A box row is therefore built entirely from the
    replayed trace: the Nth `*->STARTING` transition for that job opens run
-   N, the next terminal transition closes it (SEM-01 latching applies here
-   too -- a later CHANGE_STATUS overwrites the close already recorded), and
-   `clock_source` is always "journal". This is also where `started_by`
-   comes from for every row, box or leaf: it is the cause the STARTING
-   transition carries, which a `dispatch` record does not.
+   N, and the next terminal transition closes it (SEM-01 latching applies
+   here too -- a later CHANGE_STATUS overwrites the close already
+   recorded). A box set INACTIVE while it runs (SEM-18, DL-242) closes its
+   window as INACTIVE, at that instant. `clock_source` is always
+   "journal". This is also where `started_by` comes from for every row,
+   box or leaf: it is the cause the STARTING transition carries, which a
+   `dispatch` record does not.
 
    The same trace fallback also catches the leaf-job completions that
    never produce a `STATUS` input at all: KILLJOB and a term_run_time
@@ -55,7 +57,9 @@ Five decisions, each with its reason here; the decision itself is
    so there is no separate adapter completion to match by run_number.
    Reading only `dispatch` + `input(kind=STATUS)` records would silently
    report such a run as still RUNNING; the trace shows what actually
-   closed it. This is the one place the design note this
+   closed it. A box's INACTIVE cascading to a live member (SEM-18, DL-242)
+   is the same case: the trace's `RUNNING->INACTIVE` closes the run, as
+   an injected INACTIVE's own STATUS input does. This is the one place the design note this
    was built from was wrong: it assumed a leaf run's close always reaches
    the log as a STATUS record. The journal alone does not always carry the
    close, and the fix is the same replay boxes already need, not a new
@@ -126,7 +130,7 @@ from dsl41.boundary import read_seal
 from dsl41.canon import is_wire_int, naive_utc
 from dsl41.ir import CatalogIR, LoweringError, Semantics, lower_catalog
 from dsl41.oracle import Oracle
-from dsl41.oracle_state import TERMINAL, CarriedRows, JobStatus, OracleError, TraceEntry
+from dsl41.oracle_state import LIVE, TERMINAL, CarriedRows, JobStatus, OracleError, TraceEntry
 from dsl41.period import (
     Manifest,
     RuntimeProfile,
@@ -271,7 +275,7 @@ def _windows_from_entries(entries: Sequence[TraceEntry], first: int = 0) -> list
     ended_at: datetime | None = None
     status: str | None = None
     for entry in entries:
-        _, sep, new = entry.transition.partition("->")
+        old, sep, new = entry.transition.partition("->")
         if not sep:
             continue
         if new == "STARTING":
@@ -282,6 +286,13 @@ def _windows_from_entries(entries: Sequence[TraceEntry], first: int = 0) -> list
         elif new in TERMINAL and started_at is not None:
             # SEM-01 latching: a later CHANGE_STATUS overwrites the close
             # already recorded for this same open run, not a new one.
+            ended_at, status = entry.at, new
+        elif new == "INACTIVE" and old in LIVE and started_at is not None:
+            # DL-242: the oracle moved a live run to INACTIVE with no STATUS
+            # input of its own -- the SEM-18 cascade from its box. The row
+            # reads it as an injected INACTIVE reads (DL-235): closed, at
+            # that instant. INACTIVE from a terminal status (a box-start
+            # reset) leaves the recorded close alone.
             ended_at, status = entry.at, new
     if started_at is not None:
         windows.append(_TraceWindow(run_number, started_at, started_by, ended_at, status))
@@ -472,11 +483,20 @@ class _LeafIndex:
     executor_by_key: dict[tuple[str, int], str]
 
 
+def _trace_run_at(windows: Mapping[int, _TraceWindow], at: datetime) -> int | None:
+    """The run the trace had opened for a job strictly before `at`, or None
+    when the trace opened none. Ties go to the earlier run, the attribution
+    the dispatch records already gave."""
+    started = [run for run, window in windows.items() if naive_utc(window.started_at) < at]
+    return max(started, default=None)
+
+
 def _index_leaves(
     records: list[dict[str, Any]],
     rejected: set[int],
     decided: AbstractSet[int],
     fidelity: Literal["full", "records_only"],
+    trace_windows: Mapping[str, Mapping[int, _TraceWindow]] | None = None,
 ) -> _LeafIndex:
     """Walk phase (D3): one pass over the segment's records builds the leaf
     index; `_emit_leaf_rows` reads it as a pure function. `rejected`/
@@ -517,6 +537,18 @@ def _index_leaves(
                 # sendevent has no such option): it overwrites whichever run
                 # is currently open, same as the oracle's own SEM-01 read
                 c_run = last_run_number.get(c_job)
+                # DL-242: a run can start and end with no dispatch -- a
+                # job_terminator cascade TERMINATES it during its STARTING
+                # transition and its SPAWN retires. The trace still opened
+                # it, and a later operator status is that run's, never the
+                # last dispatched run's: rewriting an earlier close would
+                # corrupt a finished run. An undispatched run has no row.
+                traced = _trace_run_at(
+                    (trace_windows or {}).get(c_job, {}),
+                    _parse_timestamp(str(record["at"])),
+                )
+                if traced is not None and (c_run is None or traced > c_run):
+                    continue
                 if c_run is None:
                     continue
             if fidelity == "records_only" and index is not None and index not in decided:
@@ -642,7 +674,7 @@ def _leaf_rows(
         result.index for result in recovered if result.decision == "rejected"
     }
     decided = _decided_attempts(records) if fidelity == "records_only" else frozenset()
-    index = _index_leaves(records, rejected, decided, fidelity)
+    index = _index_leaves(records, rejected, decided, fidelity, trace_windows)
     return _emit_leaf_rows(
         index, catalog, catalog_hash, spool, trace_windows, fingerprints, fidelity
     )

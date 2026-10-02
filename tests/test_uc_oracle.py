@@ -797,17 +797,16 @@ def test_pM01_staleness_latch_vs_within_run() -> None:
 
 
 def test_pM04_stale_failure_latch_in_one_box_vs_waiting_edge() -> None:
-    """P-M04 (stonebranch Part IV; the DL-153 ground). f() latches like s()
-    does, INSIDE one top-level box: same box == same cycle (DL-12), yet the
-    staleness exposure is identical to P-M01's, which is why every M04/M05
-    edge is A-class with the staleness assumption, never E. The shape needs
-    a producer that does not re-run in cycle two -- an ungated member
-    restarts at box start and clears its own latch first -- so pm04_m1 is
+    """P-M04 (stonebranch Part IV; the DL-153 ground, revised by DL-242).
+    The shape: a producer that does not re-run in cycle two, so pm04_m1 is
     gated on an outside job whose s() goes false before run two. Run one:
     m1 FAILS, m2's f(m1) fires, m2 succeeds. Run two (STARTJOB on the box):
-    AutoSys leaves m1 blocked (gate FAILURE, SEM-01) and re-starts m2 on
-    m1's STALE FAILURE; the twin's Failure edge sees no fresh m1 completion
-    and waits.
+    AutoSys leaves m1 blocked (gate FAILURE, SEM-01). DL-153 pinned a
+    divergence here: m2 re-started on m1's STALE FAILURE. Since DL-242 the
+    box start resets every member to INACTIVE ("jobs in boxes do not retain
+    their statuses from previous box cycles", SEM-10), so f(m1) is false
+    in run two and m2 waits, as the twin's Failure edge does: the two
+    converge on m2.
 
     Side note (its OWN divergence, asserted separately): m1's s(gate) edge
     spans workflows, so the twin excludes it (Task Monitor territory) and
@@ -833,20 +832,15 @@ def test_pM04_stale_failure_latch_in_one_box_vs_waiting_edge() -> None:
         ev("STARTJOB", 10, job="pm04_bx"),  # run two
     ]
     autosys_trace, uc_trace = run_both(text, script)
+    assert transitions(autosys_trace, "pm04_m1")[-1] == "FAILURE->INACTIVE"  # SEM-10 reset
     assert transitions(autosys_trace, "pm04_m2") == [
         "INACTIVE->STARTING",
         "STARTING->RUNNING",
         "RUNNING->SUCCESS",
-        "SUCCESS->STARTING",  # the stale-FAILURE latch re-fires at run two
-        "STARTING->RUNNING",
+        "SUCCESS->INACTIVE",  # run two's box start; f(m1) no longer latched
     ]
     assert transitions(uc_trace, "pm04_m2") == ["Waiting->Running", "Running->Success"]
-
-    divergence = first_divergence(autosys_trace, uc_trace, ["pm04_m2"])
-    assert divergence is not None
-    assert divergence.job == "pm04_m2"
-    assert divergence.autosys == ["RUNNING", "SUCCESS", "RUNNING"]
-    assert divergence.uc == ["RUNNING", "SUCCESS"]
+    assert first_divergence(autosys_trace, uc_trace, ["pm04_m2"]) is None
 
     # side note: run two restarts m1 in UC (source task, gate edge excluded)
     # while AutoSys holds it blocked on the gate's FAILURE

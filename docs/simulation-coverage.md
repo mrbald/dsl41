@@ -533,7 +533,7 @@ fails the suite.
 | event:ON_NOEXEC | supported | ir-design ss7 | - |  |  |  | generic | marks a job as not executing; it completes without running |
 | event:SET_GLOBAL | supported | ir-design ss7 | - |  |  |  | generic | sets a global and wakes every job whose condition reads it |
 | event:STARTJOB | supported | ir-design ss7 | - |  |  |  | generic | a schedule tick or operator start; it arms must_start whether or not it starts |
-| event:STATUS | supported | ir-design ss7 | - |  |  |  | generic | sets a job's status and wakes every job whose condition names it |
+| event:STATUS | supported | ir-design ss7 | - |  |  |  | generic | sets a job's status and wakes every job whose condition names it; INACTIVE on a box cascades to every job it contains (SEM-18) |
 | event:TIMER | supported | ir-design ss7 | - |  |  |  | generic | a due deadline or deferred start firing off the timer heap |
 
 ### status
@@ -706,7 +706,7 @@ fails the suite.
 | runtime:calendar-row-seconds-truncation | supported | autocal.standard_rows, DL-60 | - |  |  |  | none | a date row's seconds are dropped: ticks are minute-grained |
 | runtime:empty-workday-mask | refused | autocal.compile_calendar | - |  |  |  | none | a W/P action with an all-non-workday mask has nowhere to walk and refuses the calendar before any day is generated |
 | runtime:exclusion-only-compound | provisional | autocal.compile_calendar, DL-59 | Q8d | yes | Q8b / Q8c / Q8d |  | none | a compound rule with no inclusive leaf is evaluated literally as an include, which makes it near-universal |
-| runtime:member-arm-scope | provisional | oracle.Oracle._after_transition | Q3c | yes | Q3c |  | none | a box member's latched tick is scoped to the box run it was latched in |
+| runtime:member-arm-scope | provisional | oracle.Oracle._disarm_members | Q3c | yes | Q3c |  | none | a box member's latched tick is scoped to the box run it was latched in |
 | runtime:missed-tick-skip | provisional | runner_startup, runner_scheduler.Scheduler.pop_due | E9 | yes |  |  | none | a tick whose instant passed while the engine was down is journaled and dropped, never fired late |
 | runtime:preflight-date-basis-utc | supported | DL-212, runner_preflight._preflight_local_day | - |  |  |  | none | the calendar probes read the run anchor on the scheduler's own ladder: the JOB's local day, else the run-level base timezone, else UTC. Preflight and the engine name the same day |
 | runtime:preflight-no-start-skips-probe | supported | DL-213, runner_preflight.preflight | - |  |  |  | none | a preflight called with no run anchor takes now as the anchor, so the exhaustion and dormancy probes run on every call; a caller that wants a fixed answer passes a fixed anchor. The probe is day-granular: a last eligible day equal to the anchor's day passes even when its start times have passed |

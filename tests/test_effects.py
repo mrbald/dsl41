@@ -853,6 +853,67 @@ def test_a_completion_for_a_job_an_operator_set_inactive_is_rejected_not_applied
     ]
 
 
+_BOX_CASCADE_JIL = (
+    "insert_job: bx\njob_type: b\n\n"
+    "insert_job: j\njob_type: c\ncommand: x\nbox_name: bx\n\n"
+    "insert_job: dep\njob_type: c\ncommand: y\ncondition: s(j)\n"
+)
+
+
+def test_a_box_set_inactive_cascades_without_a_kill_and_its_orphans_exit_is_rejected(
+    tmp_path: Path,
+) -> None:
+    """DL-242 over DL-235: `CHANGE_STATUS INACTIVE` on a RUNNING box sets
+    every job it contains INACTIVE (SEM-18). For a launched member that is
+    exactly DL-235's injected INACTIVE: no KILL is planned, the process
+    runs on, and its later exit meets the stale-completion gate as "job not
+    live: INACTIVE". The dependent never starts."""
+    catalog = lower_source(_BOX_CASCADE_JIL)
+    engine = start_run(
+        catalog,
+        tmp_path / "run",
+        clock=VirtualClock(start=T0),
+        adapters={"CMD": FakeAdapter(default=None)},  # inert: no natural exit of its own
+    )
+
+    async def scenario() -> None:
+        engine.inject(_ev("STARTJOB", 0, job="bx"))
+        await engine.run_until_quiescent(T0)
+        assert engine.oracle.store.job["j"].status == "RUNNING"
+
+        engine.inject(_ev("STATUS", 1, job="bx", status="INACTIVE"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+        assert engine.oracle.store.job["j"].status == "INACTIVE"
+
+        engine._enqueue(  # forge the orphan's late natural exit as a COMPLETION
+            _ev("STATUS", 2, job="j", run_number=1, exit_code=0), source="adapter"
+        )
+        await engine.run_until_quiescent(T0 + timedelta(minutes=2))
+
+    asyncio.run(scenario())
+    store = engine.oracle.store.job
+    assert (store["bx"].status, store["j"].status, store["j"].run_number) == (
+        "INACTIVE",
+        "INACTIVE",
+        1,
+    )
+    assert store["dep"].status == "INACTIVE"  # never started
+    assert engine.live_jobs() == {"j"}  # the process is still live in the shell
+    assert all(e.kind != "KILL" for e in engine.outbox.effects())  # no KILL planned
+    assert engine.drops and engine.drops[-1][1] == "job not live: INACTIVE"
+    rejected = engine.decisions.for_index(engine.frontiers.applied_index)
+    assert rejected is not None and rejected.decision == "rejected"
+    assert engine.journal is not None
+    engine.journal.close()
+
+    fresh = Oracle(catalog)
+    replay_inputs(fresh, read_journal(tmp_path / "run" / "journal.jsonl"))
+    assert (fresh.store.job["j"].status, fresh.store.job["dep"].status) == (
+        "INACTIVE",
+        "INACTIVE",
+    )
+
+
 def test_a_restart_on_an_inactive_row_cancels_the_orphan_and_spawns_again() -> None:
     """DL-235's M1. An injected INACTIVE leaves the earlier run live in the
     shell (no KILL), and the oracle's DL-81 refusal only blocks STARTJOB on

@@ -1583,3 +1583,69 @@ def test_the_opening_proof_covers_every_shared_field(tmp_path: Path) -> None:
         with pytest.raises(RunHistoryError, match=accept):
             read_run_root(run_root)
         _wal_path(run_root, 2).write_bytes(original)
+
+
+def test_a_cascaded_inactive_closes_the_members_run_as_an_injected_one_does() -> None:
+    """DL-242: `CHANGE_STATUS INACTIVE` on box B cascades to its running
+    member J (SEM-18) with no STATUS input for J. The fold reads the
+    trace's `RUNNING->INACTIVE` as it reads an injected INACTIVE: J's row
+    agrees with the oracle row, closed at the cascade. A later box-start
+    reset (`SUCCESS->INACTIVE`) does not reopen or rewrite a closed run."""
+    from dsl41.oracle import Oracle
+
+    catalog = lower_source(
+        "insert_job: b\njob_type: b\n\n"
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\nbox_name: b\n"
+    )
+    cascade_at = T0 + timedelta(minutes=1)
+    oracle = Oracle(catalog)
+    oracle.feed(Event(at=T0, kind="STARTJOB", payload={"job": "b"}))
+    oracle.feed(Event(at=cascade_at, kind="STATUS", payload={"job": "b", "status": "INACTIVE"}))
+    records = [_header(), _dispatch("j", 1, run_dir=None, started_at=T0)]
+    [box_row, row] = fold_run_rows(records, catalog=catalog, trace=oracle.trace())
+    assert row.status == oracle.store.job["j"].status == "INACTIVE"
+    assert row.ended_at == cascade_at
+    assert row.fidelity == "full"
+    assert (box_row.job, box_row.status) == ("b", "INACTIVE")
+
+    second = Oracle(catalog)
+    second.feed(Event(at=T0, kind="STARTJOB", payload={"job": "b"}))
+    second.feed(Event(at=cascade_at, kind="STATUS", payload={"job": "j", "status": "SUCCESS"}))
+    second.feed(Event(at=T0 + timedelta(minutes=5), kind="STARTJOB", payload={"job": "b"}))
+    records = [_header(), _dispatch("j", 1, run_dir=None, started_at=T0)]
+    rows = fold_run_rows(records, catalog=catalog, trace=second.trace())
+    [first_run] = [r for r in rows if r.job == "j" and r.run_number == 1]
+    assert (first_run.status, first_run.ended_at) == ("SUCCESS", cascade_at)
+
+
+def test_an_operator_status_after_an_undispatched_start_does_not_rewrite_the_earlier_run() -> None:
+    """DL-242: run 2 of `j` starts and ends during its STARTING transition
+    (a job_terminator cascade; here a KILLJOB at the same instant gives the
+    fold the same records), and its SPAWN retires with no dispatch. A later
+    operator `STATUS j FAILURE` belongs to run 2, the run the trace has
+    open, not to run 1, the last DISPATCHED run: run 1 stays SUCCESS at
+    08:01. The fold has no row for an undispatched run."""
+    from dsl41.oracle import Oracle
+
+    catalog = lower_source("insert_job: j\njob_type: c\ncommand: x\nmachine: m1\n")
+    oracle = Oracle(catalog)
+    script = [
+        (0, "STARTJOB", {"job": "j"}),
+        (1, "STATUS", {"job": "j", "status": "SUCCESS"}),
+        (2, "STARTJOB", {"job": "j"}),
+        (2, "KILLJOB", {"job": "j"}),
+        (4, "STATUS", {"job": "j", "status": "FAILURE"}),
+    ]
+    for minute, kind, payload in script:
+        oracle.feed(Event(at=T0 + timedelta(minutes=minute), kind=kind, payload=payload))  # type: ignore[arg-type]
+    records = [
+        _header(),
+        _dispatch("j", 1, run_dir=None, started_at=T0),
+        _status_input(1, T0 + timedelta(minutes=1), job="j", run_number=1, exit_code=0),
+        _status_input(
+            2, T0 + timedelta(minutes=4), job="j", run_number=None, status="FAILURE", source=None
+        ),
+    ]
+    [row] = fold_run_rows(records, catalog=catalog, trace=oracle.trace())
+    assert (row.run_number, row.status) == (1, "SUCCESS")
+    assert row.ended_at == T0 + timedelta(minutes=1)

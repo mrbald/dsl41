@@ -1136,6 +1136,13 @@ async def _reconcile(
         job_ir = engine.oracle.catalog.jobs.get(job)
         if job_ir is None:
             continue
+        # DL-242: only a LIVE row is relaunched. A row an operator set
+        # INACTIVE, a SEM-18 cascade or a box-start reset moved off its run
+        # at the SAME run number is DL-235's orphan: its evidence is still
+        # reconciled below -- the stale-completion gate rejects it -- but
+        # nothing starts the run again (a killed, held watch restarted by
+        # its box's reset was relaunched from its incomplete log)
+        live = rt.status in LIVE
         reattach = supervised_live.get((job, run_number))
         if reattach is not None and reattach.wrapper_alive:
             cmd_adapter = engine.adapters.get(job_ir.job_type)
@@ -1148,12 +1155,13 @@ async def _reconcile(
                 engine._launch(job_ir, run_number, cmd_adapter)
                 continue
         if job_ir.job_type == "FW":
-            _resume_watch(engine, job_ir, run_number, run_dir, last_at)
+            _resume_watch(engine, job_ir, run_number, run_dir, last_at, relaunch=live)
             continue
         bound = _spawn_effect_for(engine, job, run_number)
         cmd_adapter = engine.adapters.get(job_ir.job_type)
         if (
-            isinstance(cmd_adapter, SupervisedCommandAdapter)
+            live
+            and isinstance(cmd_adapter, SupervisedCommandAdapter)
             and bound is not None
             and bound.run_id is not None
             and not _spool_has_evidence(run_dir)
@@ -1223,12 +1231,16 @@ def _resume_watch(
     run_number: int,
     run_dir: Path | None,
     last_at: datetime,
+    *,
+    relaunch: bool = True,
 ) -> None:
     """One incomplete FW run, from its spool (period-model ss2.2).
 
     A dispatched watch leaves a run directory now, so this is where a resumed
     watch lands: the sweep finds the directory, and the log says whether the
-    watch is over."""
+    watch is over. `relaunch=False` is a row that is no longer live (DL-242):
+    a completed log is still injected, for the gate to judge, and an
+    incomplete one is left alone."""
     job = job_ir.name
     if run_dir is None and engine.run_root is not None:
         # the same fallback the preflight makes: a candidate that came from a
@@ -1260,6 +1272,8 @@ def _resume_watch(
             )
         extras["ended_at"] = watch.last_at.isoformat()
         _inject_completion(engine, job, run_number, extras, at=watch.last_at, last_at=last_at)
+        return
+    if not relaunch:
         return
     adapter = engine.adapters.get("FW")
     if adapter is None:
