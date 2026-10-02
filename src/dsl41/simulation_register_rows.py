@@ -2484,7 +2484,8 @@ SCENARIO_ROWS: tuple[Row, ...] = (
             member="FORCE_STARTJOB",
             klass=SUPPORTED,
             cite="ir-design ss7",
-            effect="starts a job past its condition gate",
+            effect="starts a job past its condition gate; on a non-live ON_ICE or ON_HOLD job"
+            " it clears that flag first, like an OFF_ICE/OFF_HOLD, then starts it (DL-243)",
             trigger=_scn(BASE_JIL, "0 FORCE_STARTJOB job=J0"),
         ),
         _row(
@@ -2500,7 +2501,9 @@ SCENARIO_ROWS: tuple[Row, ...] = (
             member="ON_ICE",
             klass=SUPPORTED,
             cite="ir-design ss7",
-            effect="ices a job: downstream conditions read it as satisfied and it never runs",
+            effect="ices a job: an ordinary downstream atom follows the vendor ON_ICE table"
+            " (s/d/n true, f/t/exitcode false), a lookback-qualified atom reads satisfied"
+            " regardless, and it never runs on a plain start (DL-243)",
             trigger=_scn(BASE_JIL, "0 ON_ICE job=J0"),
         ),
         _row(
@@ -2606,6 +2609,21 @@ SCENARIO_ROWS: tuple[Row, ...] = (
             effect="a pre-existing arm survives the ice round trip untouched",
             trigger=_scn(BASE_JIL, "0 ON_ICE job=J0", "1 OFF_ICE job=J0"),
             quiet=_scn(BASE_JIL, "0 ON_HOLD job=J0", "1 OFF_HOLD job=J0"),
+        ),
+        _row(
+            surface="event",
+            member="ON_ICE",
+            facet="lookback atom",
+            klass=PROVISIONAL,
+            cite="SEM-20, DL-243, oracle.Oracle._atom_true",
+            label="Q10",
+            sites=("oracle.Oracle._atom_true#1",),
+            effect="a LOOKBACK-qualified atom on a non-live iced job keeps the"
+            " pre-DL-243 blanket-true reading; an ORDINARY atom (no lookback) follows"
+            " the narrower vendor table instead -- the vendor text does not address"
+            " the lookback case, so this corner stays pinned rather than cited",
+            trigger=_scn(BASE_JIL, "0 ON_ICE job=J0"),
+            quiet=_scn(BASE_JIL, "0 ON_HOLD job=J0"),
         ),
         _row(
             surface="event",
@@ -3142,7 +3160,9 @@ TRACE_MARKER_ROWS: tuple[Row, ...] = (
         member="ON_ICE",
         klass=SUPPORTED,
         cite="ir-design ss7, oracle.Oracle._record",
-        effect="the job is iced: downstream conditions read it as satisfied and it never runs",
+        effect="the job is iced: an ordinary downstream atom follows the vendor ON_ICE table"
+        " (s/d/n true, f/t/exitcode false), a lookback-qualified atom reads satisfied"
+        " regardless, and it never runs on a plain start (DL-243)",
         trigger=_scn(BASE_JIL, "0 ON_ICE job=J0"),
     ),
     _row(

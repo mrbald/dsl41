@@ -479,14 +479,22 @@ def genesis_truth(catalog: CatalogIR) -> Callable[[StatusAtom | ExitCodeAtom], b
     -- never a terminal -- so s/f/d/t and exit-code atoms are FALSE at
     genesis, with two exceptions the slice review caught the first draft
     missing: bare or qualified n() is TRUE (a never-run partner is
-    notrunning, oracle's own reading), and an ON_ICE seed satisfies EVERY
-    atom naming that job (SEM-05/SEM-20)."""
+    notrunning, oracle's own reading), and an ON_ICE seed satisfies every
+    atom naming that job IF the atom carries a lookback qualifier (SEM-05,
+    the DL-13 blanket pin) -- DL-243 narrowed this for an ORDINARY atom (no
+    lookback at all) to the vendor's ON_ICE table instead (SEM-20):
+    success/done/notrunning true, failure/terminated/exitcode false, same
+    split as `Oracle._atom_true`."""
 
     def truth(atom: StatusAtom | ExitCodeAtom) -> bool:
         if atom.job.instance is None:
             job = catalog.jobs.get(atom.job.name)
             if job is not None and job.sem.initial_status == "ON_ICE":
-                return True
+                if atom.lookback is not None:
+                    return True
+                if isinstance(atom, ExitCodeAtom):
+                    return False
+                return atom.status in ("SUCCESS", "DONE", "NOTRUNNING")
         if isinstance(atom, ExitCodeAtom):
             return False
         return atom.status == "NOTRUNNING"
@@ -831,9 +839,11 @@ def expected_bounds(
       global: the whole condition, with globals at their values so far
       (unset -> False for every operator, the oracle's reading) and job
       atoms at their GENESIS truth for at-start sets -- bare/qualified n()
-      is TRUE there and an ON_ICE seed satisfies every atom on that job
-      (SEM-05/SEM-20); s/f/d/t and exit codes are false, SEM-24 cannot
-      seed a terminal -- or optimistic-TRUE for mid-window sets (latches
+      is TRUE there; an ON_ICE seed satisfies a LOOKBACK-qualified atom on
+      that job (SEM-05) but an ORDINARY one only for success/done/
+      notrunning, never failure/terminated/exitcode (SEM-20, DL-243); s/f/
+      d/t and exit codes are otherwise false, SEM-24 cannot seed a
+      terminal -- or optimistic-TRUE for mid-window sets (latches
       can be true by then; over-credit is the safe direction). A set whose
       whole condition cannot then be true buys no headroom: a flat +1
       would let the DL-180 stale-latch multi-fire slide under the bound.

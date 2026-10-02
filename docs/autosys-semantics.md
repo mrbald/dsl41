@@ -96,8 +96,12 @@ Syntax: `s(job, hhhh.mm)` (or escaped colon `hhhh\:mm`).
   When a new job is inserted it has no initial/previous end time."; the thread's reporter
   observed the epoch-0 effect as modeled. For box overrides, the box itself is the evaluator
   and the anchor.
-- `s(job, 9999)` — explicit "indefinite lookback", equivalent to no qualifier (the 4.5.1
-  default). **[V]**
+- `s(job, 9999)` — explicit "indefinite lookback", condition-equivalent to a bare atom with no
+  qualifier (the 4.5.1 default): both evaluate the same way against a non-iced predecessor.
+  **[V]** Against an ICED predecessor the two diverge (DL-243, open question Q10): `9999`
+  carries a lookback qualifier and keeps the blanket-true reading (SEM-05), while the bare
+  atom follows the narrower vendor ON_ICE table (SEM-20). Canonicalization keeps `9999`
+  distinct from the bare form for this reason.
 - Lookback applies to **status, cross-instance/external status, and exitcode atoms only,
   never to `value()` global-variable atoms**. **[V]** (Linter: lookback on `v()` = error.)
 - Max lookback ≈ 416.58 days (9999.59). **[V]**
@@ -106,7 +110,10 @@ Syntax: `s(job, hhhh.mm)` (or escaped colon `hhhh\:mm`).
 If the predecessor job referenced in a lookback condition is currently ON_ICE, the atom
 evaluates **true** and the scheduler ignores the lookback entirely. (Interacts with SEM-20.)
 The rule is blanket over atom kinds (DL-13): `f()`, `t()`, `d()` and `e()` on an iced
-predecessor are all true, not only `s()`. Ice on a job that is STARTING or RUNNING takes effect
+predecessor are all true, not only `s()`. This blanket reading is scoped to a LOOKBACK-
+qualified atom (`atom.lookback is not None`, any kind, the zero form included); an ORDINARY
+atom (no lookback qualifier at all) on the same iced predecessor follows SEM-20's narrower
+vendor truth table instead (DL-243). Ice on a job that is STARTING or RUNNING takes effect
 when that run ends; atoms read the real in-flight status until then **[?]** (unverified corner,
 modeled deliberately).
 Source (DL-58): KB 438836, 12.1.01: with a local ON_ICE predecessor "the system ignores the
@@ -296,11 +303,22 @@ it.
 ## 3. Out-of-band status manipulation
 
 ### SEM-20 · ON_ICE **[V]**
-- The job will not run. It is removed from all conditions/logic.
-- **Downstream conditions treat the iced job as satisfied** (runs "as though it succeeded"),
-  every atom kind, per SEM-05.
+- The job will not run on a plain start. It is removed from all conditions/logic, except
+  through FORCE_STARTJOB (SEM-23, DL-243), which returns a non-live iced job to an executable
+  state first.
+- **Downstream conditions on a non-live iced job split by lookback qualifier (DL-243).**
+  An atom WITH a lookback qualifier (any kind, the zero form included) keeps the DL-13
+  blanket-true pin (SEM-05): every atom kind reads satisfied, lookback ignored. An ORDINARY
+  atom (`atom.lookback is None`, no qualifier at all) instead follows the vendor's own
+  ON_ICE truth table. Source: "Start Conditions" (AutoSys Workload Automation 24.2
+  documentation), the ON_ICE row of the downstream-conditions table: "success" TRUE,
+  "failure" FALSE, "terminated" FALSE, "done" TRUE, "notrunning" TRUE, "exitcode" FALSE.
+  This is a NARROWER reading than the pre-DL-243 blanket pin for f()/t()/exitcode() on an
+  ordinary atom; s()/d()/n() are unaffected (both readings already say true). The two tables'
+  disagreement over a lookback-qualified atom is not addressed by the vendor text and stays
+  an open pin (Q10, section 9), not a citation.
   Inside a box, a member that depends on an iced sibling starts immediately when the box
-  runs. **[V]**
+  runs (an ordinary s() atom, true under both tables). **[V]**
 - OFF_ICE: the job does **not** run even if its starting conditions currently hold. It waits
   for conditions to *reoccur*. **[V]**
 - IR: on_ice ≙ graph rewrite "excise node, short-circuit its outgoing dependency edges to true".
@@ -335,15 +353,50 @@ member that never ran. The bypass is also the tick's run for SEM-34, so a bypass
 no MUST_START_ALARM. The vendor text states one box level; applying it per level is this
 project's pin. **[?]**
 
+DL-243: a FAILURE or TERMINATED (non-live, non-BOX) job that is put ON_NOEXEC is moved to
+INACTIVE, exit code cleared, through the same path an operator's `CHANGE_STATUS INACTIVE`
+takes (DL-242) -- an EVENT-TIME transition, not a read-time projection off the stored status.
+Sources: "Start Conditions" (AutoSys Workload Automation 24.2 documentation): "When you send
+the JOB_ON_NOEXEC event and the job is in the INACTIVE, SUCCESS, or ACTIVATED status, the job
+retains its current status; otherwise the effect is the same as if the job enters the INACTIVE
+status." "Job States" (same documentation), the ON_NOEXEC state entry: "the scheduler places
+the job in the ON_NOEXEC status and the effect is the same as sending the CHANGE_STATUS event
+to INACTIVE for the job. The scheduler does not immediately schedule downstream jobs that have
+dependency on the NOEXEC job nor does it evaluate their success conditions to success. Instead,
+the scheduler evaluates the conditions of downstream dependent jobs as if the predecessor job
+is set to the INACTIVE status." For a FAILURE or TERMINATED job this means f()/t()/d()/
+exitcode() atoms read false and n() reads true, while s() stays false (it already was). SUCCESS
+is the documented exception and is left alone. A job still live (STARTING/RUNNING/QUE_WAIT)
+when ON_NOEXEC arrives is untouched -- a real failure that follows it later is not
+retroactively hidden. A RUNNING box's member resolves the same way DL-242 rules; a BOX target
+keeps the flag-only behavior (descendant propagation of this rule is not modeled). The vendor
+text also says dependent jobs are not "immediately" scheduled, where this oracle wakes
+referencers synchronously like any other transition; that gap is noted, not modeled. Because
+the transition updates `status_at`, an ordinary (non-lookback) `n()` atom was already true
+before it (FAILURE/TERMINATED already satisfies NOTRUNNING) and stays true; only a
+LOOKBACK-qualified `n()` atom can newly turn true by this specific transition, from the
+refreshed timestamp.
+
 ### SEM-23 · FORCE_STARTJOB vs STARTJOB **[C]**
 STARTJOB honors nothing extra (it *is* the normal start event). FORCE_STARTJOB starts the job
 regardless of conditions. Force-started runs still emit normal status events, so forced runs
 satisfy downstream latching conditions. The oracle takes both as injectable events.
 Which gates a force bypasses (DL-13): the `condition` expression, `ON_HOLD`, the schedule gate
 (SEM-30/32), the box-RUNNING gate and the once-per-box-run gate (SEM-10). Which gates still
-hold: `ON_ICE` (SEM-20 removes the job from all logic), a job that is already
-STARTING/RUNNING/QUE_WAIT, and `run_window`; the SEM-33 closer-edge rule applies to a forced
-start like any other.
+hold: a job that is already STARTING/RUNNING/QUE_WAIT, and `run_window`; the SEM-33 closer-edge
+rule applies to a forced start like any other.
+
+DL-243: FORCE_STARTJOB on a non-live job that is `ON_ICE` or `ON_HOLD` clears that flag
+first, then starts the job through the normal FORCE path -- it is no longer an unconditional
+refusal. Source: "sendevent -- Start Jobs" (AutoSys Workload Automation 24.2 documentation):
+"When you force start a job that is in a non-executable state (ON_HOLD, ON_ICE), it returns to
+an executable state, runs, and does not revert to the previous (non-executable) state." The
+clearing is recorded the same way `_handle_oob` records an OFF_ICE/OFF_HOLD sendevent, with a
+cause naming FORCE_STARTJOB, and the flag stays cleared after the run -- including when a
+later gate (`run_window`) still refuses the start, because the return to an executable state is
+the event's own effect, not conditioned on the start succeeding. `ON_NOEXEC` is not named in
+the vendor sentence and is untouched by FORCE. A job that is already STARTING/RUNNING/QUE_WAIT
+is still refused: the same page states concurrent runs of one job are unsupported.
 
 ### SEM-24 · `status:` at definition time **[V]** (existence) / **[?]** (full value set)
 Estate-shaped JIL carries `status: ON_HOLD` on `insert_job` (including on box jobs): the job
@@ -821,9 +874,28 @@ T15 idle box ignores INACTIVE members, the single-member table (SEM-15, DL-242:
 `test_sem15_*`) · T18 box INACTIVE cascades to every contained job (SEM-18, DL-242:
 `test_sem18_*`) ·
 T20a ice downstream fires, T20b off-ice does not immediately run (SEM-20) ·
+ordinary vs lookback atoms on a non-live iced job follow different tables, DL-243
+(SEM-20/SEM-05, Q10 residue: `test_sem20_ordinary_atoms_on_an_iced_job_follow_the_vendor_table`,
+`test_sem20_lookback_atoms_on_an_iced_job_stay_true`,
+`test_sem20_ordinary_atom_on_an_undefined_iced_lookalike_stays_false`,
+`test_sem20_ordinary_atom_on_a_live_iced_job_reads_the_real_in_flight_status`,
+`test_sem20_off_ice_later_reads_the_real_status_not_the_vendor_table`) ·
 T21a hold blocks downstream, T21b off-hold immediate run (SEM-21) · T22 noexec bypass,
 T22b an ON_NOEXEC box goes RUNNING and every member bypasses (SEM-22) ·
+a completed FAILURE/TERMINATED job put ON_NOEXEC is moved to INACTIVE (exit code cleared)
+through DL-242's operator-INACTIVE path, DL-243 (SEM-22:
+`test_sem22_noexec_on_a_failed_job_transitions_to_inactive`,
+`test_sem22_noexec_on_a_terminated_job_transitions_to_inactive`,
+`test_sem22_noexec_keeps_a_success_visible`,
+`test_sem22_noexec_off_noexec_then_release_a_held_f_consumer_stays_blocked`,
+`test_sem22_noexec_while_running_then_real_failure_is_not_hidden`,
+`test_sem22_noexec_on_a_failed_box_member_completes_the_box`) ·
 T23 force start satisfies latch (SEM-23) ·
+FORCE_STARTJOB on a non-live ON_ICE/ON_HOLD job clears the flag and runs, DL-243 (SEM-23:
+`test_sem23_force_start_clears_ice_and_runs`, `test_sem23_force_start_clears_hold_and_runs`,
+`test_sem23_force_start_on_a_live_job_is_still_refused`,
+`test_sem23_after_force_clears_ice_a_later_plain_start_needs_no_off_event`,
+`test_sem23_force_start_clears_ice_even_when_run_window_then_refuses`) ·
 T24a initial ON_HOLD blocks then OFF_HOLD releases, T24b initial ON_ICE satisfies downstream
 (SEM-24) · T04 zero-lookback since-last-end anchor pinned both directions + Q2b first-run
 corner, both cited (SEM-04, DL-54/DL-58: `test_sem04_zero_lookback_*`) · T32 arm-and-wait:
@@ -957,6 +1029,14 @@ holds the probe that would settle it.
   re-verified, the weakest evidence tier in this dossier. KB 29387's
   `autocal_asc -e ALL -E file` is the byte-exact re-verification if a live instance becomes
   available; parens are accepted alongside braces, so no behavior rides on the grouping read.
+- Q10 (SEM-05/SEM-20, DL-243): open, pinned default. The vendor's ON_ICE truth table ("Start
+  Conditions", AutoSys Workload Automation 24.2) covers an ORDINARY downstream atom; it does
+  not separately address a LOOKBACK-qualified atom against an iced predecessor. The default
+  keeps the pre-DL-243 reading for that corner: every atom kind true, lookback ignored (the
+  DL-13 blanket pin, SEM-05), rather than extending the narrower ordinary-atom table to a
+  lookback-qualified atom. `# PENDING: Q10` marks the branch in `_atom_true`. A live instance
+  icing a predecessor referenced by both an ordinary and a lookback-qualified atom on the same
+  consumer job would settle it.
 
 ## Sources
 Primary: Broadcom TechDocs, AutoSys Workload Automation 12.0/12.0.01/12.1/12.1.01 (Basic Box

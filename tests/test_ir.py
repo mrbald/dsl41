@@ -207,6 +207,9 @@ def test_whole_corpus_lowers_as_one_catalog() -> None:
     names_colon_join.jil (DL-39) the colon-named etl:*/night:box/
     boxed:member set (semantic, unescaped keys). l020_iced_consumer.jil
     (DL-151) added the l20_* set (the M19 iced-consumer rule L020);
+    DL-243 added l20_never_runs/l20_live_failure/l20_lookback_rescued to
+    that same file (L020's opposite-direction blocking case, its in-file
+    non-trigger, and a lookback-rescue regression guard);
     l021_multifire.jil (DL-180) the l21_* set (the multi-fire rule L021);
     l022_stranded.jil (DL-181) the l22_* set (the stranded-consumer rule
     L022); viz_locks.jil (DL-192) the lk_* set (both lock kinds, drawn on
@@ -269,7 +272,10 @@ def test_whole_corpus_lowers_as_one_catalog() -> None:
         "l20_consumer",
         "l20_iced",
         "l20_live",
+        "l20_live_failure",
+        "l20_lookback_rescued",
         "l20_mixed",
+        "l20_never_runs",
         "l21_daily",
         "l21_fixed",
         "l21_guard",

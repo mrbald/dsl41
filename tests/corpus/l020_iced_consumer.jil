@@ -1,7 +1,19 @@
 /* L020 trigger (M19): l20_consumer's only predecessor is inserted ON_ICE, so
-   AutoSys runs the consumer (an iced producer satisfies its atoms, SEM-05/
-   SEM-20) while UC cascades the skip onto it (UCS-02). l20_mixed is the
-   in-file non-trigger: one iced predecessor and one live one. Synthetic. */
+   AutoSys runs the consumer (an iced producer satisfies an ordinary s/d/n
+   atom or any lookback-qualified atom, DL-243, open question Q10) while UC
+   cascades the skip onto it (UCS-02). l20_mixed is the in-file non-trigger:
+   one iced predecessor and one live one. l20_never_runs (DL-243) is the
+   SECOND trigger shape: its iced predecessor is referenced only by an
+   ordinary f() atom, which DL-243's vendor table reads false while iced,
+   so AutoSys can never start l20_never_runs -- the opposite-direction
+   divergence from l20_consumer's. l20_live_failure is that shape's
+   in-file non-trigger: an ordinary f() atom on a LIVE (never-iced)
+   producer is not this rule's business at all. l20_lookback_rescued
+   (DL-243) is a direction-2 non-trigger guard: f(l20_iced, 0) carries a
+   zero-lookback qualifier, which the Q10 pin keeps blanket-true against
+   an iced predecessor, so it is NOT read as a blocking atom -- it trips
+   direction 1 instead (l20_iced is its only, iced, predecessor).
+   Synthetic. */
 insert_job: l20_iced
 job_type: c
 command: /usr/bin/true
@@ -24,3 +36,21 @@ job_type: c
 command: /usr/bin/true
 machine: m1
 condition: s(l20_iced) & s(l20_live)
+
+insert_job: l20_never_runs
+job_type: c
+command: /usr/bin/true
+machine: m1
+condition: f(l20_iced) & s(l20_live)
+
+insert_job: l20_live_failure
+job_type: c
+command: /usr/bin/true
+machine: m1
+condition: f(l20_live)
+
+insert_job: l20_lookback_rescued
+job_type: c
+command: /usr/bin/true
+machine: m1
+condition: f(l20_iced, 0)

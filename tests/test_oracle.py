@@ -1518,6 +1518,131 @@ def test_sem20b_off_ice_does_not_immediately_run_but_fires_when_condition_reoccu
     ]
 
 
+@pytest.mark.parametrize(
+    ("atom_expr", "expect_true"),
+    [
+        ("s(prod_f17)", True),
+        ("d(prod_f17)", True),
+        ("n(prod_f17)", True),
+        ("f(prod_f17)", False),
+        ("t(prod_f17)", False),
+        ("e(prod_f17) = 0", False),
+    ],
+)
+def test_sem20_ordinary_atoms_on_an_iced_job_follow_the_vendor_table(
+    atom_expr: str, expect_true: bool
+) -> None:
+    """SEM-20, DL-243: Start Conditions page, ON_ICE truth table for
+    downstream conditions -- success TRUE, failure FALSE, terminated FALSE,
+    done TRUE, notrunning TRUE, exitcode FALSE. An ORDINARY atom (no
+    lookback qualifier at all, `atom.lookback is None`) on a non-live iced
+    job follows this narrower table instead of the DL-13 blanket-true pin
+    (which stays the rule for a lookback-qualified atom, see the next
+    test)."""
+    text = (
+        "insert_job: prod_f17\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        f"insert_job: cons_f17\njob_type: c\ncommand: y\nmachine: m1\ncondition: {atom_expr}\n"
+    )
+    o = oracle(text)
+    # ON_ICE itself wakes referencers (SEM-20): a true atom fires right here,
+    # so no separate STARTJOB is needed (and none should be -- a second
+    # attempt on an already-started consumer would add its own refusal
+    # record and corrupt the comparison below).
+    o.feed(ev("ON_ICE", 0, job="prod_f17"))
+    expected = ["INACTIVE->STARTING", "STARTING->RUNNING"] if expect_true else []
+    assert transitions(o, "cons_f17") == expected
+
+
+@pytest.mark.parametrize(
+    ("atom_expr",),
+    [
+        ("f(prod_f17lb, 0)",),  # zero form
+        ("t(prod_f17lb, 9999)",),  # explicit indefinite form
+        ("e(prod_f17lb, 01.00) = 0",),  # window form
+    ],
+)
+def test_sem20_lookback_atoms_on_an_iced_job_stay_true(atom_expr: str) -> None:
+    """Q10 (SEM-20 section 9, DL-243): the vendor's ON_ICE truth table does
+    not separately address a LOOKBACK-qualified atom against an iced
+    predecessor -- that corner is an open pin, not a citation. This project
+    keeps the pre-existing DL-13 blanket-true reading for it (every atom
+    kind true, lookback ignored), rather than extending the narrower
+    ordinary-atom table to lookback atoms. f()/t()/exitcode() each read
+    true here despite reading false in the ordinary-atom table above,
+    because each carries a lookback qualifier (any kind, the zero form
+    included)."""
+    text = (
+        "insert_job: prod_f17lb\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        f"insert_job: cons_f17lb\njob_type: c\ncommand: y\nmachine: m1\ncondition: {atom_expr}\n"
+    )
+    o = oracle(text)
+    # ON_ICE wakes referencers itself (SEM-20); the atom is true immediately,
+    # so this one event is the whole scenario.
+    o.feed(ev("ON_ICE", 0, job="prod_f17lb"))
+    assert transitions(o, "cons_f17lb") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+
+
+def test_sem20_ordinary_atom_on_an_undefined_iced_lookalike_stays_false() -> None:
+    """Control: a condition naming a job the catalog does not have reads
+    false forever (SEM-06), independent of ON_ICE -- icing an unrelated
+    real job must not make the undefined reference true."""
+    text = (
+        "insert_job: cons_f17u\njob_type: c\ncommand: y\nmachine: m1\n"
+        "condition: s(ghost_f17)\n\n"
+        "insert_job: real_f17u\njob_type: c\ncommand: x\nmachine: m1\n"
+    )
+    o = oracle(text)
+    o.feed(ev("ON_ICE", 0, job="real_f17u"))
+    o.feed(ev("STARTJOB", 1, job="cons_f17u"))
+    assert transitions(o, "cons_f17u") == []
+
+
+def test_sem20_ordinary_atom_on_a_live_iced_job_reads_the_real_in_flight_status() -> None:
+    """Control: ice on a STARTING/RUNNING job takes effect at completion --
+    the ordinary-atom table (and the DL-13 blanket pin) apply only once the job is
+    non-live; while it is RUNNING, s() still reads false for the real
+    in-flight state (companion to test_ice_on_a_running_job_takes_effect_
+    at_completion, which checks s() after it fails)."""
+    text = (
+        "insert_job: prod_f17live\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: cons_f17live\njob_type: c\ncommand: y\nmachine: m1\n"
+        "condition: s(prod_f17live)\n"
+    )
+    o = oracle(text)
+    o.feed(ev("FORCE_STARTJOB", 0, job="prod_f17live"))
+    o.feed(ev("ON_ICE", 1, job="prod_f17live"))
+    o.feed(ev("STARTJOB", 2, job="cons_f17live"))
+    assert transitions(o, "cons_f17live") == []  # still RUNNING for real: s() false
+
+
+def test_sem20_off_ice_later_reads_the_real_status_not_the_vendor_table() -> None:
+    """Control: once OFF_ICE lifts the flag, an ordinary atom goes back to
+    reading the job's real status -- f() becomes true here although the
+    ordinary-atom table would have read it false while iced. cons_f17off is held
+    across the producer's real FAILURE so that transition's own wake does
+    not settle the question before icing is even in the picture."""
+    text = (
+        "insert_job: prod_f17off\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: cons_f17off\njob_type: c\ncommand: y\nmachine: m1\n"
+        "condition: f(prod_f17off)\n"
+    )
+    o = oracle(text)
+    o.feed(ev("ON_HOLD", 0, job="cons_f17off"))
+    o.feed(ev("FORCE_STARTJOB", 1, job="prod_f17off"))
+    o.feed(ev("STATUS", 2, job="prod_f17off", status="FAILURE"))
+    o.feed(ev("ON_ICE", 3, job="prod_f17off"))
+    o.feed(ev("OFF_HOLD", 4, job="cons_f17off"))  # SEM-21 re-attempt while prod stays iced
+    assert transitions(o, "cons_f17off") == ["ON_HOLD", "OFF_HOLD"]  # ordinary f() false while iced
+    o.feed(ev("OFF_ICE", 5, job="prod_f17off"))
+    o.feed(ev("STARTJOB", 6, job="cons_f17off"))  # fresh attempt reads the real FAILURE
+    assert transitions(o, "cons_f17off") == [
+        "ON_HOLD",
+        "OFF_HOLD",
+        "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+    ]
+
+
 # --------------------------------------------------------------------- 14. SEM-21 ON_HOLD
 
 
@@ -1762,6 +1887,244 @@ def test_sem22_noexec_box_bypasses_a_nested_member_box_level_by_level() -> None:
         ]
 
 
+def test_sem22_noexec_on_a_failed_job_transitions_to_inactive() -> None:
+    """DL-243 REWRITE: the read-time projection is replaced by an
+    EVENT-TIME transition. Job States page: "the scheduler places the job
+    in the ON_NOEXEC status and the effect is the same as sending the
+    CHANGE_STATUS event to INACTIVE for the job. The scheduler does not
+    immediately schedule downstream jobs ... Instead, the scheduler
+    evaluates the conditions of downstream dependent jobs as if the
+    predecessor job is set to the INACTIVE status." A FAILURE job put
+    ON_NOEXEC is moved to INACTIVE through DL-242's operator-INACTIVE path
+    (`_inject_inactive`), exit code cleared: the STORED row changes, not
+    just the read. f()/t()/d()/exitcode() read false, n() reads true, s()
+    stays false. Each watcher is held across the producer's real FAILURE
+    transition so that edge's own wake does not settle anything before
+    ON_NOEXEC is even sent."""
+    text = (
+        "insert_job: prod_nx_f\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: watch_nx_f_f\njob_type: c\ncommand: a\nmachine: m1\ncondition: f(prod_nx_f)\n\n"
+        "insert_job: watch_nx_f_t\njob_type: c\ncommand: b\nmachine: m1\ncondition: t(prod_nx_f)\n\n"
+        "insert_job: watch_nx_f_d\njob_type: c\ncommand: c\nmachine: m1\ncondition: d(prod_nx_f)\n\n"
+        "insert_job: watch_nx_f_n\njob_type: c\ncommand: d\nmachine: m1\ncondition: n(prod_nx_f)\n\n"
+        "insert_job: watch_nx_f_s\njob_type: c\ncommand: e\nmachine: m1\ncondition: s(prod_nx_f)\n\n"
+        "insert_job: watch_nx_f_e\njob_type: c\ncommand: f\nmachine: m1\ncondition: e(prod_nx_f) = 7\n"
+    )
+    watchers = (
+        "watch_nx_f_f",
+        "watch_nx_f_t",
+        "watch_nx_f_d",
+        "watch_nx_f_n",
+        "watch_nx_f_s",
+        "watch_nx_f_e",
+    )
+    o = oracle(text)
+    for w in watchers:
+        o.feed(ev("ON_HOLD", 0, job=w))
+    o.feed(ev("FORCE_STARTJOB", 1, job="prod_nx_f"))
+    o.feed(ev("STATUS", 2, job="prod_nx_f", status="FAILURE", exit_code=7))
+    o.feed(ev("ON_NOEXEC", 3, job="prod_nx_f"))
+    assert o.store.job["prod_nx_f"].status == "INACTIVE"  # the stored row moved
+    assert o.store.job["prod_nx_f"].exit_code is None  # cleared, not just unread
+    assert "ON_NOEXEC" in transitions(o, "prod_nx_f")
+    assert "FAILURE->INACTIVE" in transitions(o, "prod_nx_f")
+    for w in watchers:
+        o.feed(ev("OFF_HOLD", 4, job=w))
+    for w in ("watch_nx_f_f", "watch_nx_f_t", "watch_nx_f_d", "watch_nx_f_s", "watch_nx_f_e"):
+        assert transitions(o, w) == ["ON_HOLD", "OFF_HOLD"]  # f/t/d/s/exitcode all false
+    assert transitions(o, "watch_nx_f_n") == [
+        "ON_HOLD",
+        "OFF_HOLD",
+        "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+    ]  # n() reads true
+
+
+def test_sem22_noexec_on_a_terminated_job_transitions_to_inactive() -> None:
+    """DL-243 REWRITE, TERMINATED twin: a killed job put ON_NOEXEC
+    moves to INACTIVE (exit code cleared) the same way as the FAILURE
+    case -- f()/t()/d()/exitcode() false, n() true, s() false."""
+    text = (
+        "insert_job: prod_nx_t\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: watch_nx_t_f\njob_type: c\ncommand: a\nmachine: m1\ncondition: f(prod_nx_t)\n\n"
+        "insert_job: watch_nx_t_t\njob_type: c\ncommand: b\nmachine: m1\ncondition: t(prod_nx_t)\n\n"
+        "insert_job: watch_nx_t_d\njob_type: c\ncommand: c\nmachine: m1\ncondition: d(prod_nx_t)\n\n"
+        "insert_job: watch_nx_t_n\njob_type: c\ncommand: d\nmachine: m1\ncondition: n(prod_nx_t)\n\n"
+        "insert_job: watch_nx_t_s\njob_type: c\ncommand: e\nmachine: m1\ncondition: s(prod_nx_t)\n\n"
+        "insert_job: watch_nx_t_e\njob_type: c\ncommand: f\nmachine: m1\ncondition: e(prod_nx_t) = 0\n"
+    )
+    watchers = (
+        "watch_nx_t_f",
+        "watch_nx_t_t",
+        "watch_nx_t_d",
+        "watch_nx_t_n",
+        "watch_nx_t_s",
+        "watch_nx_t_e",
+    )
+    o = oracle(text)
+    for w in watchers:
+        o.feed(ev("ON_HOLD", 0, job=w))
+    o.feed(ev("FORCE_STARTJOB", 1, job="prod_nx_t"))
+    o.feed(ev("KILLJOB", 2, job="prod_nx_t"))
+    o.feed(ev("ON_NOEXEC", 3, job="prod_nx_t"))
+    assert o.store.job["prod_nx_t"].status == "INACTIVE"
+    assert o.store.job["prod_nx_t"].exit_code is None
+    for w in watchers:
+        o.feed(ev("OFF_HOLD", 4, job=w))
+    for w in ("watch_nx_t_f", "watch_nx_t_t", "watch_nx_t_d", "watch_nx_t_s", "watch_nx_t_e"):
+        assert transitions(o, w) == ["ON_HOLD", "OFF_HOLD"]  # f/t/d/s/exitcode all false
+    assert transitions(o, "watch_nx_t_n") == [
+        "ON_HOLD",
+        "OFF_HOLD",
+        "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+    ]  # n() reads true
+
+
+def test_sem22_noexec_keeps_a_success_visible() -> None:
+    """DL-243 control: SUCCESS is the documented exception -- "the job
+    retains its current status" -- so a SUCCESS job put ON_NOEXEC is left
+    alone (no `_inject_inactive` call): s() stays true, f() stays false."""
+    text = (
+        "insert_job: prod_nx_s\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: watch_nx_s_s\njob_type: c\ncommand: a\nmachine: m1\ncondition: s(prod_nx_s)\n\n"
+        "insert_job: watch_nx_s_f\njob_type: c\ncommand: b\nmachine: m1\ncondition: f(prod_nx_s)\n"
+    )
+    o = oracle(text)
+    o.feed(ev("ON_HOLD", 0, job="watch_nx_s_s"))
+    o.feed(ev("ON_HOLD", 0, job="watch_nx_s_f"))
+    o.feed(ev("FORCE_STARTJOB", 1, job="prod_nx_s"))
+    o.feed(ev("STATUS", 2, job="prod_nx_s", status="SUCCESS"))
+    o.feed(ev("ON_NOEXEC", 3, job="prod_nx_s"))
+    assert o.store.job["prod_nx_s"].status == "SUCCESS"  # untouched
+    o.feed(ev("OFF_HOLD", 4, job="watch_nx_s_s"))
+    o.feed(ev("OFF_HOLD", 4, job="watch_nx_s_f"))
+    assert transitions(o, "watch_nx_s_s") == [
+        "ON_HOLD",
+        "OFF_HOLD",
+        "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+    ]
+    assert transitions(o, "watch_nx_s_f") == ["ON_HOLD", "OFF_HOLD"]
+
+
+def test_sem22_noexec_bypasses_to_success_on_its_next_start() -> None:
+    """A FAILURE job put ON_NOEXEC moves to INACTIVE but keeps its
+    `on_noexec` flag; its NEXT start bypasses to SUCCESS (SEM-22) instead
+    of running, and an s() consumer then starts against that SUCCESS."""
+    text = (
+        "insert_job: p\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: watch_s\njob_type: c\ncommand: a\nmachine: m1\ncondition: s(p)\n"
+    )
+    o = oracle(text)
+    o.feed(ev("FORCE_STARTJOB", 0, job="p"))
+    o.feed(ev("STATUS", 1, job="p", status="FAILURE"))
+    o.feed(ev("ON_NOEXEC", 2, job="p"))
+    assert o.store.job["p"].status == "INACTIVE"
+    assert o.store.job["p"].on_noexec
+    o.feed(ev("STARTJOB", 3, job="p"))  # next start: ON_NOEXEC bypass, not a real run
+    assert transitions(o, "p")[-2:] == ["FAILURE->INACTIVE", "INACTIVE->SUCCESS"]
+    assert o.store.job["p"].on_noexec  # the flag persists across the bypass
+    assert transitions(o, "watch_s") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+
+
+def test_sem22_noexec_off_noexec_then_release_a_held_f_consumer_stays_blocked() -> None:
+    """Fail p, ON_NOEXEC, OFF_NOEXEC, then release a held f(p) consumer: it
+    does not start. p is really INACTIVE by the time OFF_NOEXEC runs
+    (Events page: OFF_NOEXEC "places the job in the INACTIVE, ACTIVATED, or
+    SUCCESS status", and here it already is), so f(p) reads false
+    normally."""
+    text = (
+        "insert_job: p\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: watch_f\njob_type: c\ncommand: a\nmachine: m1\ncondition: f(p)\n"
+    )
+    o = oracle(text)
+    o.feed(ev("ON_HOLD", 0, job="watch_f"))
+    o.feed(ev("FORCE_STARTJOB", 1, job="p"))
+    o.feed(ev("STATUS", 2, job="p", status="FAILURE"))
+    o.feed(ev("ON_NOEXEC", 3, job="p"))
+    o.feed(ev("OFF_NOEXEC", 4, job="p"))
+    o.feed(ev("OFF_HOLD", 5, job="watch_f"))
+    assert transitions(o, "watch_f") == ["ON_HOLD", "OFF_HOLD"]  # stays blocked
+    assert o.store.job["p"].status == "INACTIVE"
+    assert o.store.job["p"].exit_code is None
+
+
+def test_sem22_noexec_while_running_then_real_failure_is_not_hidden() -> None:
+    """ON_NOEXEC sent while p is RUNNING is a bare flag set -- the
+    event-time transition only fires for a job that is ALREADY
+    FAILURE/TERMINATED at the moment of the event, so a job still live when
+    ON_NOEXEC arrives is untouched by it. The real failure that follows is
+    therefore not hidden: f(p) sees it fresh and starts. watch_n started
+    earlier, before p was even forced, because p's initial INACTIVE already reads
+    n(p) true; with no completion script of its own it is still running
+    that first attempt, so the later true-again edge from p's failure finds
+    it already live and refuses a restart -- not because n(p) reads false."""
+    text = (
+        "insert_job: p\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: watch_f\njob_type: c\ncommand: a\nmachine: m1\ncondition: f(p)\n\n"
+        "insert_job: watch_n\njob_type: c\ncommand: b\nmachine: m1\ncondition: n(p)\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="watch_n"))  # n(p) already true: p is INACTIVE
+    assert o.store.job["watch_n"].status == "RUNNING"
+    o.feed(ev("FORCE_STARTJOB", 1, job="p"))
+    o.feed(ev("ON_NOEXEC", 2, job="p"))  # p is RUNNING: flag only, no transition
+    assert o.store.job["p"].status == "RUNNING"
+    o.feed(ev("STATUS", 3, job="p", status="FAILURE"))
+    assert o.store.job["p"].status == "FAILURE"  # the real failure is not hidden
+    assert transitions(o, "watch_f") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+    assert transitions(o, "watch_n") == ["INACTIVE->STARTING", "STARTING->RUNNING"]  # no restart
+
+
+def test_sem22_noexec_on_an_iced_job_is_ignored_and_the_job_stays_failure() -> None:
+    """DL-243: "Change the Executable Status of a Job" page -- "The
+    scheduler ignores the JOB_ON_NOEXEC event, if sent to: A non-box job
+    that is in the STARTING, RUNNING, or ON_ICE status." p fails, is put
+    ON_ICE, then ON_NOEXEC: the event is ignored and p stays FAILURE. Once
+    OFF_ICE lifts the flag, a held f(p) consumer released afterward starts
+    normally against the real FAILURE -- ON_NOEXEC never touched it."""
+    text = (
+        "insert_job: p\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: watch_f\njob_type: c\ncommand: a\nmachine: m1\ncondition: f(p)\n"
+    )
+    o = oracle(text)
+    o.feed(ev("ON_HOLD", 0, job="watch_f"))
+    o.feed(ev("FORCE_STARTJOB", 1, job="p"))
+    o.feed(ev("STATUS", 2, job="p", status="FAILURE"))
+    o.feed(ev("ON_ICE", 3, job="p"))
+    o.feed(ev("ON_NOEXEC", 4, job="p"))
+    assert o.store.job["p"].status == "FAILURE"  # the event is ignored while iced
+    o.feed(ev("OFF_ICE", 5, job="p"))
+    o.feed(ev("OFF_HOLD", 6, job="watch_f"))
+    assert transitions(o, "watch_f") == [
+        "ON_HOLD",
+        "OFF_HOLD",
+        "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+    ]
+
+
+def test_sem22_noexec_on_a_failed_box_member_completes_the_box() -> None:
+    """A member of a RUNNING box put ON_NOEXEC after failing completes the
+    box. `box_failure` is specified but never met, so the member's real
+    FAILURE alone leaves the box hung RUNNING (SEM-12 third bullet, the
+    specified-but-unmet-override case). ON_NOEXEC settles the member to
+    INACTIVE (DL-242/DL-243), which resolves it "as if ... SUCCESS"
+    (SEM-11) and completes the box."""
+    text = (
+        "insert_job: box1\njob_type: b\nbox_failure: v(NEVERSET) = 1\n\n"
+        "insert_job: mem1\njob_type: c\ncommand: x\nmachine: m1\nbox_name: box1\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="box1"))
+    o.feed(ev("STATUS", 1, job="mem1", status="FAILURE"))
+    assert o.store.job["box1"].status == "RUNNING"  # suppressed default: hung
+    o.feed(ev("ON_NOEXEC", 2, job="mem1"))
+    assert o.store.job["mem1"].status == "INACTIVE"
+    assert o.store.job["box1"].status == "SUCCESS"  # the box completes
+
+
 # ------------------------------------------------------------- 16. SEM-23 FORCE_STARTJOB
 
 
@@ -1769,7 +2132,12 @@ def test_sem23_force_startjob_ignores_condition_and_hold_and_satisfies_downstrea
     """T23 (SEM-23): FORCE_STARTJOB starts the job regardless of a false
     condition AND regardless of ON_HOLD; the forced run still emits normal
     status events, so its SUCCESS satisfies a downstream latching
-    condition just like a normal run would."""
+    condition just like a normal run would.
+
+    DL-243 REWRITE: FORCE_STARTJOB on a non-live ON_HOLD job now clears the
+    flag too (sendevent Start Jobs page), recorded like an OFF_HOLD -- the
+    old expectation omitted that trace entry and never checked the flag
+    itself; both are added here, the rest of the scenario is unchanged."""
     text = (
         "insert_job: held_false23\njob_type: c\ncommand: x\nmachine: m1\n"
         "condition: s(never_true23)\n\n"
@@ -1779,9 +2147,124 @@ def test_sem23_force_startjob_ignores_condition_and_hold_and_satisfies_downstrea
     o = oracle(text)
     o.feed(ev("ON_HOLD", 0, job="held_false23"))
     o.feed(ev("FORCE_STARTJOB", 1, job="held_false23"))
-    assert transitions(o, "held_false23") == ["ON_HOLD", "INACTIVE->STARTING", "STARTING->RUNNING"]
+    assert transitions(o, "held_false23") == [
+        "ON_HOLD",
+        "OFF_HOLD",
+        "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+    ]
+    assert not o.store.job["held_false23"].on_hold
     o.feed(ev("STATUS", 2, job="held_false23", status="SUCCESS"))
     assert transitions(o, "cons23") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+
+
+def test_sem23_force_start_clears_ice_and_runs() -> None:
+    """SEM-23, DL-243: sendevent Start Jobs page -- forcing a
+    non-executable (ON_HOLD/ON_ICE) job "returns it to an executable state,
+    runs, and does not revert to the previous ... state." FORCE_STARTJOB on
+    a non-live iced job clears ON_ICE (recorded like an OFF_ICE, with a
+    cause naming the force) and starts it; the flag stays cleared after the
+    run completes."""
+    text = "insert_job: force_ice23\njob_type: c\ncommand: x\nmachine: m1\n"
+    o = oracle(text)
+    o.feed(ev("ON_ICE", 0, job="force_ice23"))
+    o.feed(ev("FORCE_STARTJOB", 1, job="force_ice23"))
+    assert transitions(o, "force_ice23") == [
+        "ON_ICE",
+        "OFF_ICE",
+        "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+    ]
+    off_ice = next(t for t in o.trace() if t.job == "force_ice23" and t.transition == "OFF_ICE")
+    assert "FORCE_STARTJOB" in off_ice.cause
+    assert not o.store.job["force_ice23"].on_ice
+    o.feed(ev("STATUS", 2, job="force_ice23", status="SUCCESS"))
+    assert not o.store.job["force_ice23"].on_ice  # stays cleared after the run
+
+
+def test_sem23_force_start_clears_hold_and_runs() -> None:
+    """SEM-23, DL-243: the same FORCE_STARTJOB rule for ON_HOLD --
+    cleared and recorded like an OFF_HOLD, with a cause naming the force,
+    and the flag stays cleared after the run."""
+    text = "insert_job: force_hold23\njob_type: c\ncommand: x\nmachine: m1\n"
+    o = oracle(text)
+    o.feed(ev("ON_HOLD", 0, job="force_hold23"))
+    o.feed(ev("FORCE_STARTJOB", 1, job="force_hold23"))
+    assert transitions(o, "force_hold23") == [
+        "ON_HOLD",
+        "OFF_HOLD",
+        "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+    ]
+    off_hold = next(t for t in o.trace() if t.job == "force_hold23" and t.transition == "OFF_HOLD")
+    assert "FORCE_STARTJOB" in off_hold.cause
+    assert not o.store.job["force_hold23"].on_hold
+    o.feed(ev("STATUS", 2, job="force_hold23", status="SUCCESS"))
+    assert not o.store.job["force_hold23"].on_hold  # stays cleared after the run
+
+
+def test_sem23_force_start_on_a_live_job_is_still_refused() -> None:
+    """SEM-23/DL-243: a job that is already STARTING/RUNNING/QUE_WAIT is
+    refused for FORCE_STARTJOB same as a plain STARTJOB -- "concurrent runs
+    of [a] process are not supported" (sendevent Start Jobs page). The
+    live-job guard sits above the ice/hold-clearing branch in
+    _attempt_start, so this is unaffected by DL-243."""
+    text = "insert_job: force_live23\njob_type: c\ncommand: x\nmachine: m1\n"
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="force_live23"))
+    assert transitions(o, "force_live23") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+    o.feed(ev("FORCE_STARTJOB", 1, job="force_live23"))
+    statuses = [t for t in transitions(o, "force_live23") if "->" in t]
+    assert statuses == ["INACTIVE->STARTING", "STARTING->RUNNING"]  # no second start
+    refused = [t for t in o.trace() if t.job == "force_live23" and t.transition == "START_REFUSED"]
+    assert len(refused) == 1
+    assert "already RUNNING" in refused[0].cause
+    assert "FORCE_STARTJOB event" in refused[0].cause
+
+
+def test_sem23_after_force_clears_ice_a_later_plain_start_needs_no_off_event() -> None:
+    """DL-243: once FORCE_STARTJOB has cleared ON_ICE, the job is a normal
+    job going forward -- a later re-run through a plain STARTJOB needs no
+    OFF_ICE of its own, because there is nothing left to clear."""
+    text = "insert_job: force_ice23b\njob_type: c\ncommand: x\nmachine: m1\n"
+    o = oracle(text)
+    o.feed(ev("ON_ICE", 0, job="force_ice23b"))
+    o.feed(ev("FORCE_STARTJOB", 1, job="force_ice23b"))
+    o.feed(ev("STATUS", 2, job="force_ice23b", status="SUCCESS"))
+    o.feed(ev("STARTJOB", 3, job="force_ice23b"))
+    assert transitions(o, "force_ice23b") == [
+        "ON_ICE",
+        "OFF_ICE",
+        "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+        "RUNNING->SUCCESS",
+        "SUCCESS->STARTING",
+        "STARTING->RUNNING",
+    ]
+
+
+def test_sem23_force_start_clears_ice_even_when_run_window_then_refuses() -> None:
+    """DL-243: "it returns to an executable state" is the event's OWN
+    effect -- a FORCE_STARTJOB that goes on to lose at run_window still
+    leaves ON_ICE cleared, because the return to an executable state
+    already happened before that later gate was even reached."""
+    text = (
+        "insert_job: force_ice_rw23\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "02:00"\n'
+        'run_window: "02:00-04:00"\n'
+    )
+    o = oracle(text)
+    o.feed(Event(at=datetime(2026, 7, 1, 0, 30), kind="ON_ICE", payload={"job": "force_ice_rw23"}))
+    o.feed(
+        Event(
+            at=datetime(2026, 7, 1, 4, 10),
+            kind="FORCE_STARTJOB",
+            payload={"job": "force_ice_rw23"},
+        )
+    )
+    assert transitions(o, "force_ice_rw23") == ["ON_ICE", "OFF_ICE", "RUN_WINDOW_SKIP"]
+    assert o.store.job["force_ice_rw23"].status == "INACTIVE"
+    assert not o.store.job["force_ice_rw23"].on_ice  # cleared regardless of the later refusal
 
 
 # --------------------------------------------------------- 17. SEM-32 arm-and-wait
@@ -3286,7 +3769,9 @@ def test_must_start_alarm_quiet_when_the_run_began_in_time() -> None:
 def test_ice_on_a_running_job_takes_effect_at_completion() -> None:
     """DL-13: atoms read the real in-flight status of an
     iced-but-RUNNING job; the satisfied-by-ice reading applies only once
-    the run completes."""
+    the run completes. ir_c's s() atom is ordinary (no lookback), so once
+    non-live it follows the vendor's ON_ICE table (DL-243), where success
+    is still TRUE -- this test only pins s(), not every atom kind."""
     text = (
         "insert_job: ir_p\njob_type: c\ncommand: x\nmachine: m1\n\n"
         "insert_job: ir_c\njob_type: c\ncommand: y\nmachine: m1\ncondition: s(ir_p)\n"
@@ -3296,7 +3781,7 @@ def test_ice_on_a_running_job_takes_effect_at_completion() -> None:
     o.feed(ev("ON_ICE", 1, job="ir_p"))
     assert o.store.job["ir_c"].status == "INACTIVE"  # run still real: s(ir_p) false
     o.feed(ev("STATUS", 2, job="ir_p", status="FAILURE"))  # run completes (failed!)
-    # now iced satisfies every atom kind (DL-13 reading): s(ir_p) true
+    # now iced and non-live: the vendor's ON_ICE table reads s() true (DL-243)
     assert o.store.job["ir_c"].status == "RUNNING"
 
 

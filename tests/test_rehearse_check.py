@@ -560,6 +560,36 @@ def test_expected_bounds_scripted_globals_ordered_operator_is_checked_per_litera
     assert not_satisfying["cons"].expected == 1  # 1 + 0
 
 
+def test_expected_bounds_scripted_globals_at_start_ordinary_ice_atom_buys_no_credit() -> None:
+    """DL-243: (f(ice) | (s(a) & s(b))) & v(G) = 1 over a 48h
+    probe, `ice` seeded ON_ICE with no condition of its own (wake bound 0).
+    a and b are daily producers, so the OR's own wake bound is
+    max(0, max(2, 2)) == 2. Before DL-243, `genesis_truth` read an iced
+    seed's f() atom as blanket TRUE, so the at-start v(G)=1 set bought the
+    consumer an extra +1 (the whole condition "could fire at genesis") for
+    a bound of 3. DL-243's split reads f() on an ORDINARY (no lookback)
+    iced atom as FALSE at genesis -- same as any other ordinary f/t/exitcode
+    atom -- so the OR is false at genesis regardless of v(G), the set buys
+    no credit, and the bound is 2, not 3."""
+    text = (
+        "insert_job: ice\njob_type: c\ncommand: i\nmachine: m1\nstatus: ON_ICE\n\n"
+        "insert_job: a\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "01:00"\n\n'
+        "insert_job: b\njob_type: c\ncommand: y\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "01:00"\n\n'
+        "insert_job: cons\njob_type: c\ncommand: z\nmachine: m1\n"
+        "condition: (f(ice) | (s(a) & s(b))) & v(G) = 1\n"
+    )
+    horizon = START + timedelta(hours=48)
+    catalog = lower_source(text)
+    graph = derive_graph(catalog)
+    ticks = scheduled_ticks(catalog, start=START, horizon=horizon)
+    bounds = expected_bounds(catalog, graph, ticks, scripted_globals=[("G", "1", True)])
+    assert bounds["a"].expected == 2
+    assert bounds["b"].expected == 2
+    assert bounds["cons"].expected == 2  # not 3: the ice-seeded f() buys no at-start credit
+
+
 # ------------------------------------------------------------------ success_exit
 
 

@@ -600,23 +600,32 @@ def test_lint_catalog_whole_corpus_exact_per_code_counts() -> None:
     deliberately missing exclude_calendar (DL-36; the calendar fixtures added
     no other finding -- every other count is unchanged). L019 x1 via
     sem04_lookback.jil's consumer_stale, the corpus's one schedule+condition
-    composition (Q3, DL-54). L020 x1 via l020_iced_consumer.jil's
-    l20_consumer (DL-151); its l20_mixed sibling is the in-file non-trigger
-    and adds no other finding. L021 x8 (DL-180): l21_daily (the designed
-    trigger), plus seven existing condition-only consumers whose shapes
-    genuinely multi-fire -- the fold_t003 OR-joins (fold_or_join,
+    composition (Q3, DL-54). L020 x3 via l020_iced_consumer.jil: l20_consumer
+    (DL-151, AutoSys runs it while UC skips), and since DL-243,
+    l20_never_runs (the opposite direction: AutoSys can never run it while
+    UC might, because its iced predecessor is gated by an ordinary f()
+    atom) and l20_lookback_rescued (the original direction again: its
+    f(l20_iced, 0) carries a lookback qualifier, which the Q10 pin reads
+    true against the iced producer regardless of atom kind). l20_mixed and
+    l20_live_failure are each the in-file non-trigger for one direction and
+    add no other L020 finding. L021 x9: l21_daily
+    (the designed trigger), plus eight condition-only consumers whose
+    shapes genuinely multi-fire -- the fold_t003 OR-joins (fold_or_join,
     fold_or2_joina/b: either branch's completion finds the other's latch),
-    l20_mixed (two unqualified latches), the two guard-as-trigger shapes
-    the rule was built for, mutex_b and etl:load, and l022_stranded.jil's
-    l22_either (an unqualified OR pair, DL-181). L012 3 -> 5 with
-    l021_multifire.jil's two guard pairs (l21_daily and l21_fixed each
-    name n(l21_guard)). L022 x14 (DL-181): l22_tail (the designed
-    trigger), the fold_t003 fan-out members and fold_mixed_b stranding on
-    their seeds, l20_mixed on l20_live (its iced producer is skipped),
-    l21_daily/l21_fixed on their sources, the guard-shape consumers
-    mutex_b and etl:load on their feeders, the sem04 pitfall pair on
-    upstream_feed, and sem24_status_resource's NIGHT_SB on SEED_C -- every
-    one a condition-only tail whose producer's failure nothing reads."""
+    l20_mixed (two unqualified latches), l20_never_runs since DL-243 (same
+    shape: f(l20_iced) & s(l20_live), two unqualified wake sources), the
+    two guard-as-trigger shapes the rule was built for, mutex_b and
+    etl:load, and l022_stranded.jil's l22_either (an unqualified OR pair,
+    DL-181). L012 3 -> 5 with l021_multifire.jil's two guard pairs
+    (l21_daily and l21_fixed each name n(l21_guard)). L022 x18 (DL-181):
+    l22_tail (the designed trigger), the fold_t003 fan-out members and
+    fold_mixed_b stranding on their seeds, l21_daily/l21_fixed on their
+    sources, the guard-shape consumers mutex_b and etl:load on their
+    feeders, the sem04 pitfall pair on upstream_feed, and
+    sem24_status_resource's NIGHT_SB on SEED_C -- every one a
+    condition-only tail whose producer's failure nothing reads. l20_live is
+    no longer one of them since DL-243: l20_live_failure now reads its
+    failure (f(l20_live)), so it is no longer stranded."""
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
     report = lint_catalog(catalog)
     counts = Counter(v.code for v in report.violations)
@@ -638,11 +647,13 @@ def test_lint_catalog_whole_corpus_exact_per_code_counts() -> None:
             "L016": 1,
             "L018": 1,
             "L019": 1,
-            "L020": 1,
+            # DL-243 added l20_never_runs (the opposite direction) and
+            # l20_lookback_rescued (original direction, lookback-rescued)
+            "L020": 3,
             # +2 and +5 at DL-192: viz_locks.jil's lk_seed fans out to five
             # condition-only consumers, and lk_a/lk_e guard theirs with n()
-            "L021": 10,
-            "L022": 19,
+            "L021": 11,  # DL-243 added l20_never_runs (two unqualified sources)
+            "L022": 18,  # DL-243: -1, l20_live_failure now reads l20_live's failure
         }
     )
     dangling = sorted(v.jobs[0] for v in report.by_code("L011"))

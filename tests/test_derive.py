@@ -744,6 +744,11 @@ def test_whole_corpus_exact_edge_count_and_mapping_row_counter() -> None:
     (DL-39) adds 1 M01 success edge between colon-named jobs.
     l020_iced_consumer.jil (DL-151) adds 3 M02 edges: its four jobs are all
     unscheduled and unboxed, so every s() latch there is cross-stream.
+    DL-243 added three more jobs to that file: l20_never_runs's s(l20_live)
+    is +1 M02 (same cross-stream reasoning), its f(l20_iced) plus
+    l20_live_failure's f(l20_live) are +2 M04 (f() rows are M04 regardless
+    of stream, unlike s()'s M01/M02 split), and l20_lookback_rescued's
+    f(l20_iced, 0) is +1 M03 (every lookback-qualified edge is M03).
     l021_multifire.jil (DL-180) adds 4: l21_daily's two unqualified s()
     latches are cross-stream (+2 M02, everything there is unscheduled), and
     l21_fixed's zero-lookback pair is +2 M03; both n(l21_guard) refs are
@@ -756,9 +761,9 @@ def test_whole_corpus_exact_edge_count_and_mapping_row_counter() -> None:
     # lk_x5, lk_a and lk_e. Four consumers inherit the seed's cadence (+4
     # M01); the box carries no cadence of its own, so its latch is
     # cross-stream (+1 M02).
-    assert len(graph.edges) == 54
+    assert len(graph.edges) == 58
     assert Counter(e.mapping_row for e in graph.edges) == Counter(
-        {"M01": 17, "M02": 18, "M04": 4, "M05": 3, "M09": 2, "M03": 5, "M33": 2, "M16": 2, "M15": 1}
+        {"M01": 17, "M02": 19, "M04": 6, "M05": 3, "M09": 2, "M03": 6, "M33": 2, "M16": 2, "M15": 1}
     )
 
 
@@ -1069,6 +1074,65 @@ def test_l020_quiet_when_one_predecessor_still_runs() -> None:
     assert rule_l020(catalog, derive_graph(catalog)) == []
 
 
+def test_l020_fires_the_blocking_direction_on_a_hidden_ordinary_conjunct() -> None:
+    """DL-243: f(ice,9999) & f(ice) & s(live), ice iced. Grouping
+    per producer with `any()` over its edges let the lookback-qualified
+    f(ice,9999) (true, Q10 pin) hide the ordinary f(ice) (false, DL-243
+    table) on the SAME producer -- no finding at all, though AutoSys's
+    condition is permanently false (the And propagates false from the one
+    false conjunct) while UC's skip cascade may still resolve `live` and
+    run it. Evaluating the whole tree catches it."""
+    text = (
+        "insert_job: ice\njob_type: c\ncommand: x\nmachine: m1\nstatus: ON_ICE\n\n"
+        "insert_job: live\njob_type: c\ncommand: y\nmachine: m1\n\n"
+        "insert_job: hidden_conjunct\njob_type: c\ncommand: z\nmachine: m1\n"
+        "condition: f(ice, 9999) & f(ice) & s(live)\n"
+    )
+    catalog = lower_source(text)
+    (violation,) = rule_l020(catalog, derive_graph(catalog))
+    assert violation.jobs == ["hidden_conjunct"]
+    assert violation.detail == "ice"
+    assert "can never be satisfied" in violation.message
+
+
+def test_l020_quiet_on_a_disjunct_a_live_alternative_still_converges() -> None:
+    """DL-243: f(p) | s(q), p iced via an ordinary (no lookback) f().
+    f(p) reads false against the iced p, but the Or is UNKNOWN, not false,
+    because s(q) can still satisfy it -- both engines actually converge on
+    this shape (AutoSys can run it through q; UC does not skip-cascade
+    either, since q's edge is live). The old per-producer `any()` grouping
+    read p as the consumer's only iced predecessor gated by a sole ordinary
+    atom and fired the blocking direction here -- a false positive this
+    full evaluation does not reproduce."""
+    text = (
+        "insert_job: p\njob_type: c\ncommand: x\nmachine: m1\nstatus: ON_ICE\n\n"
+        "insert_job: q\njob_type: c\ncommand: y\nmachine: m1\n\n"
+        "insert_job: disjunct_cons\njob_type: c\ncommand: z\nmachine: m1\n"
+        "condition: f(p) | s(q)\n"
+    )
+    catalog = lower_source(text)
+    assert rule_l020(catalog, derive_graph(catalog)) == []
+
+
+def test_l020_fires_the_blocking_direction_even_with_a_global_gate() -> None:
+    """DL-162/DL-243: a global never decides the verdict on its own (it
+    reads TRUE, the And identity). f(icy) & v(G)=1, icy iced via an
+    ordinary f(): the And is false from f(icy) alone, whatever G reads, so
+    the blocking direction still fires -- a global cannot rescue the
+    consumer here any more than it can manufacture the original direction
+    on its own."""
+    text = (
+        "insert_job: icy\njob_type: c\ncommand: x\nmachine: m1\nstatus: ON_ICE\n\n"
+        "insert_job: g_cons\njob_type: c\ncommand: y\nmachine: m1\n"
+        "condition: f(icy) & v(G) = 1\n"
+    )
+    catalog = lower_source(text)
+    (violation,) = rule_l020(catalog, derive_graph(catalog))
+    assert violation.jobs == ["g_cons"]
+    assert violation.detail == "icy"
+    assert "can never be satisfied" in violation.message
+
+
 def test_l020_quiet_on_a_held_predecessor_and_on_a_box_override_ref() -> None:
     """ON_HOLD is M20: it blocks downstream on BOTH sides, so it is not this
     divergence. A box_success reference is a completion predicate on the
@@ -1100,13 +1164,26 @@ def test_l020_quiet_when_the_consumer_itself_translates_to_skip() -> None:
     assert rule_l020(catalog, derive_graph(catalog)) == []
 
 
-def test_l020_fires_once_on_the_corpus_fixture() -> None:
-    """The house rule: one corpus fixture that trips the rule and one that
-    does not -- l020_iced_consumer.jil carries both (l20_consumer trips,
-    l20_mixed does not)."""
+def test_l020_fires_on_the_corpus_fixtures() -> None:
+    """The house rule: a triggering and a non-triggering fixture per
+    behavior -- l020_iced_consumer.jil carries three pairs now. l20_consumer
+    trips the original direction (AutoSys runs it, UC skips), l20_mixed
+    does not. DL-243 added the opposite direction: l20_never_runs trips it
+    (AutoSys can never run it, UC might), l20_live_failure does not (its
+    f() atom names a LIVE, never-iced producer). l20_lookback_rescued trips
+    the ORIGINAL direction too, not the blocking one: f(l20_iced, 0) carries
+    a lookback qualifier, which the Q10 pin reads true against the iced
+    producer regardless of atom kind -- asserting each violation's direction
+    by its message, not just its job name, is what catches a regression that
+    merges the two directions' filters back together."""
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
-    (violation,) = rule_l020(catalog, derive_graph(catalog))
-    assert violation.jobs == ["l20_consumer"]
+    violations = {v.jobs[0]: v for v in rule_l020(catalog, derive_graph(catalog))}
+    assert set(violations) == {"l20_consumer", "l20_never_runs", "l20_lookback_rescued"}
+    assert "AutoSys runs the consumer" in violations["l20_consumer"].message
+    assert "translates to a UC Skip" in violations["l20_consumer"].message
+    assert "AutoSys runs the consumer" in violations["l20_lookback_rescued"].message
+    assert "can never be satisfied" in violations["l20_never_runs"].message
+    assert "AutoSys never starts the consumer" in violations["l20_never_runs"].message
 
 
 def test_l021_fires_for_the_condition_only_double_fire_shape() -> None:

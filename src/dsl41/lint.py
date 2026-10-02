@@ -96,7 +96,17 @@ from pydantic import BaseModel
 
 from dsl41.ast_jil import SourceSpan
 from dsl41.backend_uc import SKIP_TRANSLATED
-from dsl41.conditions import GlobalAtom, iter_atoms, lookback_pitfalls
+from dsl41.conditions import (
+    And,
+    Cond,
+    ExitCodeAtom,
+    GlobalAtom,
+    Or,
+    Paren,
+    StatusAtom,
+    iter_atoms,
+    lookback_pitfalls,
+)
 from dsl41.derive import DerivedGraph, derive_graph, local_producer, start_gates
 from dsl41.ir import TIME_CLUSTER, CatalogIR, ExecSpec, FwSpec, unquote_jil_value
 
@@ -565,11 +575,15 @@ def rule_l019(catalog: CatalogIR) -> list[Violation]:
 
 def rule_l006(catalog: CatalogIR) -> list[Violation]:
     """Contradiction (e.g. s(x)&f(x) same lookback scope): the condition is
-    unsatisfiable over the ICE-FREE tier-b state space -- it can only fire
-    if an operator ices a referenced job (SEM-05 makes every atom true
-    then). The ice-free framing is deliberate (DL-14 amendment): icing is
-    intervention, not scheduling. Too-large conditions are skipped silently
-    (tier-c territory)."""
+    unsatisfiable over the ICE-FREE tier-b state space. Icing a referenced
+    job can still rescue a LOOKBACK-qualified pair into satisfiability
+    (SEM-05 keeps every atom kind true there, DL-243); an ORDINARY pair (no
+    lookback at all) stays unsatisfiable even iced, since the vendor's
+    ON_ICE table reads an ordinary f()/t()/exitcode() atom false there too
+    (SEM-20, DL-243) -- so for that shape the ice-free framing changes
+    nothing. The ice-free framing is deliberate either way (DL-14
+    amendment): icing is intervention, not scheduling. Too-large conditions
+    are skipped silently (tier-c territory)."""
     from dsl41.equiv import cond_truth_profile
 
     out: list[Violation] = []
@@ -926,51 +940,158 @@ def rule_l014(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
     return out
 
 
-def rule_l020(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
-    """Iced consumer (M19; Part II requirement 3's last detector): EVERY
-    immediate predecessor of the job translates to a UC Skip.
+def _ice_atom_value(catalog: CatalogIR, atom: StatusAtom | ExitCodeAtom) -> str:
+    """ "true"/"false"/"unknown" for one atom, substituting the vendor's
+    ON_ICE truth table (SEM-20, DL-243) for a definition-time iced/noexec
+    LOCAL producer and leaving every other producer (live, undefined,
+    cross-instance) UNKNOWN -- this analysis resolves only the ice/noexec
+    dimension, the conservative direction for everything else (DL-162a: a
+    cross-instance `src` is the composite `name^INST`, read off the atom's
+    `instance`, never off `src in catalog.jobs`).
 
-    Which statuses those are is NOT listed here: `backend_uc`'s
+    A LOOKBACK-qualified atom keeps the DL-13 blanket-true pin (SEM-05,
+    the open Q10 question) regardless of kind. An ORDINARY atom (no
+    lookback at all) follows the narrower table: success/done/notrunning
+    true, failure/terminated/exitcode false."""
+    if atom.job.instance is not None:
+        return "unknown"
+    local = atom.job.name if atom.job.name in catalog.jobs else None
+    if local is None or catalog.jobs[local].sem.initial_status not in SKIP_TRANSLATED:
+        return "unknown"
+    if atom.lookback is not None:
+        return "true"
+    if isinstance(atom, ExitCodeAtom):
+        return "false"
+    return "true" if atom.status in ("SUCCESS", "DONE", "NOTRUNNING") else "false"
+
+
+def _ice_cond_value(catalog: CatalogIR, cond: Cond) -> str:
+    """3-valued (true/false/unknown) evaluation of `cond` under the
+    ice/noexec substitution (`_ice_atom_value`), propagated through
+    And/Or/Paren the way real boolean logic would: an And is false as soon
+    as ONE operand is, whatever an unknown sibling might turn out to be,
+    and symmetrically for Or.
+
+    This replaces per-producer `any()` grouping over derived-graph edges
+    (DL-243): that grouping let one SATISFIED atom on a producer hide
+    another, FALSE, ordinary conjunct on the SAME producer --
+    `f(ice,9999) & f(ice) & s(live)` read as no finding, though AutoSys's
+    condition is permanently false there regardless of `live`. A full
+    evaluation also drops a false positive on a disjunct: `f(ice) | s(live)`
+    is UNKNOWN here (not false), because `s(live)` can still satisfy the Or
+    -- both engines actually converge on that shape.
+
+    A GlobalAtom reads TRUE (DL-162, settled, not reopened here): a global
+    gate is not a predecessor, and it never decides the verdict on its own
+    -- `s(icy) & v(G)=1` still fires the original direction (TRUE is the
+    And identity) and `f(icy) & v(G)=1` still fires the blocking one (the
+    And is false from `f(icy)` alone, whatever the global reads)."""
+    if isinstance(cond, And):
+        values = [_ice_cond_value(catalog, c) for c in cond.operands]
+        if "false" in values:
+            return "false"
+        return "true" if all(v == "true" for v in values) else "unknown"
+    if isinstance(cond, Or):
+        values = [_ice_cond_value(catalog, c) for c in cond.operands]
+        if "true" in values:
+            return "true"
+        return "false" if all(v == "false" for v in values) else "unknown"
+    if isinstance(cond, Paren):
+        return _ice_cond_value(catalog, cond.inner)
+    if isinstance(cond, GlobalAtom):
+        return "true"
+    return _ice_atom_value(catalog, cond)
+
+
+def rule_l020(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
+    """Iced/noexec consumer (M19/M21; Part II requirement 3's last
+    detector), decided by evaluating the job's own `condition:` tree under
+    the vendor's ON_ICE truth table (SEM-20, DL-243) rather than grouping
+    `DerivedEdge.is_start_gate` edges per producer with `any()` (the prior
+    design, which the docstring below's two divergences both broke). `graph`
+    is unused: the condition tree alone is both necessary and sufficient
+    once box-override attrs (`box_success`/`box_failure`, never a start
+    gate) are excluded by reading `job.sem.condition` directly.
+
+    Which statuses translate to UC Skip is NOT listed here: `backend_uc`'s
     `INITIAL_STATUS_CONTROL` says what UC does with each definition-time
     status, and `SKIP_TRANSLATED` is the "skip" half of that one table
     (DL-152). ON_HOLD is M20 Hold -- it blocks downstream on BOTH sides, so
     it is not this rule's business.
 
-    This is where the two engines part. In AutoSys an iced producer
-    satisfies every atom that names it (SEM-05/SEM-20), so the consumer
-    RUNS. In UC a task whose incoming edges are all skipped is Skipped
-    itself, and the skip cascades on (UCS-02). One live predecessor is
-    enough to converge, which is why the rule needs ALL of them.
-
-    Predecessors are `DerivedEdge.is_start_gate` edges, the predicate this
-    rule and L009 used to spell from opposite ends (DL-162). An undefined or
-    cross-instance producer IS a start gate and cannot be iced in this
-    catalog, so it counts as a source with no ICE and keeps the rule quiet
-    -- the conservative direction. Which producer this catalog defines is
-    `local_producer`'s answer, not `src in catalog.jobs`: for a
-    cross-instance edge `src` is the composite `name^INST` and the lookup
-    would say yes to a catalog job that merely spells its own name that way
-    (DL-162a)."""
-    predecessors: dict[str, dict[str, str | None]] = {
-        dst: {edge.src: local_producer(edge, catalog) for edge in edges}
-        for dst, edges in start_gates(graph).items()
-    }
+    Two divergences, opposite directions, both read off `_ice_cond_value`.
+    (1) The whole condition evaluates to TRUE under the ice/noexec
+    substitution, AND every local producer the condition names is itself
+    iced/noexec-seeded (no live predecessor to converge with UC on): AutoSys
+    runs the consumer, while in UC a task whose incoming edges are ALL
+    skipped is itself Skipped, cascading on (UCS-02). One live predecessor
+    is enough to converge, which is why this needs ALL of them -- an
+    undefined or cross-instance reference is UNKNOWN to the evaluator (the
+    conservative direction) and is excluded from the "every producer"
+    check, so it cannot manufacture a false trigger on its own; it can
+    still make the WHOLE condition unknown, correctly suppressing one. (2)
+    The whole condition evaluates to FALSE: at least one iced/noexec
+    producer is gated by an ordinary failure/terminated/exitcode atom with
+    no lookback and no satisfying alternative ANYWHERE in the condition
+    that could rescue it, so AutoSys can never start the consumer at all
+    (a definition-time seed never un-ices itself in a static catalog) --
+    while UC's skip cascade, blind to which AutoSys atom kind an edge
+    stands for, may still resolve the dependency and start it. The message
+    names each such producer's actual seeded status (ON_ICE or
+    ON_NOEXEC)."""
     out: list[Violation] = []
     for name, job in catalog.jobs.items():
         if job.sem.initial_status in SKIP_TRANSLATED:
             continue  # skipped on BOTH sides: no cascade divergence to flag
-        gates = predecessors.get(name, {})
-        sources = sorted(gates)
-        if not sources:
+        if job.sem.condition is None:
             continue
-        iced = [
-            src
-            for src in sources
-            if (local := gates[src]) is not None
-            and catalog.jobs[local].sem.initial_status in SKIP_TRANSLATED
+        cond = job.sem.condition.cond
+        local_atoms = [
+            atom
+            for atom in iter_atoms(cond)
+            if not isinstance(atom, GlobalAtom)
+            and atom.job.instance is None
+            and atom.job.name in catalog.jobs
         ]
-        if len(iced) != len(sources):
+        iced_atoms = [
+            atom
+            for atom in local_atoms
+            if catalog.jobs[atom.job.name].sem.initial_status in SKIP_TRANSLATED
+        ]
+        if not iced_atoms:
             continue
+        value = _ice_cond_value(catalog, cond)
+        if value == "false":
+            blocked = sorted(
+                {atom.job.name for atom in iced_atoms if _ice_atom_value(catalog, atom) == "false"}
+            )
+            if not blocked:
+                continue
+            named = ", ".join(
+                f"{src!r} ({catalog.jobs[src].sem.initial_status})" for src in blocked
+            )
+            out.append(
+                Violation(
+                    code="L020",
+                    severity="warn",
+                    message=(
+                        f"{name!r}'s condition can never be satisfied through {named}: an"
+                        " ordinary failure/terminated/exitcode atom reads false against a"
+                        " definition-time iced/noexec producer (DL-243), so AutoSys never"
+                        " starts the consumer through it, while UC's skip cascade may still"
+                        " resolve the dependency and start it (M19/M21, UCS-02)"
+                    ),
+                    jobs=[name],
+                    span=job.span,
+                    detail=",".join(blocked),
+                )
+            )
+            continue  # (2) fired; (1)'s premise (AutoSys runs it) cannot also hold
+        if value != "true":
+            continue
+        sources = sorted({atom.job.name for atom in local_atoms})
+        if not all(catalog.jobs[src].sem.initial_status in SKIP_TRANSLATED for src in sources):
+            continue  # a live predecessor converges with UC -- not this divergence
         listed = ", ".join(repr(src) for src in sources)
         out.append(
             Violation(
@@ -978,8 +1099,9 @@ def rule_l020(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
                 severity="warn",
                 message=(
                     f"every immediate predecessor of {name!r} ({listed}) translates to"
-                    " a UC Skip (M19/M21): AutoSys runs the consumer -- an iced"
-                    " producer satisfies its atoms (SEM-05/SEM-20) -- while UC"
+                    " a UC Skip (M19/M21): AutoSys runs the consumer -- an iced/noexec"
+                    " producer satisfies an ordinary success/done/notrunning atom, or any"
+                    " lookback-qualified atom (DL-243, open question Q10) -- while UC"
                     " cascades the skip onto it (UCS-02)"
                 ),
                 jobs=[name],
