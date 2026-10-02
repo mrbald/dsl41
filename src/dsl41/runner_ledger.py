@@ -81,7 +81,9 @@ from dsl41.runner_clock import EngineError
 #: (which `classify`/`semantic_key` feed) can differ -- `attest` re-derives
 #: a boundary's classification from the sealed catalogs, so a v5 boundary
 #: can carry/refuse/assume a job differently under v6.
-STATE_MACHINE_VERSION = 6
+#: 7 since DL-246: a box start decides a run_window member's disposition and
+#: a standalone window skip moves a prior result to INACTIVE.
+STATE_MACHINE_VERSION = 7
 
 LOCK_NAME = "leader.lock"
 

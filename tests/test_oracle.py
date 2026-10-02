@@ -2431,13 +2431,14 @@ def test_sem33_run_window_exact_midpoint_ties_to_next_opening() -> None:
 
 
 def test_sem33_box_variant_sole_deferred_member_keeps_box_running_until_it_completes() -> None:
-    """T33 box variant (SEM-33 "Box interaction" note): a run_window-gated
-    member deferred to the next window opening keeps the containing box
-    RUNNING overnight. Under the SEM-31/L013 double gate (DL-13) the
-    scheduled member no longer auto-starts with the box -- its own
-    start-time tick (script STARTJOB at 09:50) is what meets the window
-    gate and gets deferred; the box folds only once the deferred member
-    eventually starts (via its queued timer) and completes."""
+    """T33 box variant (SEM-33 "Box interaction" note, DL-246): a
+    run_window-gated member deferred to the next window opening keeps the
+    containing box RUNNING overnight. The box start itself decides the
+    deferral, before the member's own schedule gate: "the product issues a
+    future STARTJOB event for the job for the next run_window" (TechDocs
+    24.2, run_window page). The member's own tick at the same instant adds
+    no second deferral; the box folds only once the deferred member starts
+    (via its queued timer) and completes."""
     text = (
         "insert_job: box_rw33\njob_type: b\n\n"
         "insert_job: rw_member33\njob_type: c\ncommand: x\nmachine: m1\nbox_name: box_rw33\n"
@@ -2447,9 +2448,9 @@ def test_sem33_box_variant_sole_deferred_member_keeps_box_running_until_it_compl
     o = oracle(text)
     o.feed(Event(at=datetime(2026, 7, 1, 9, 50), kind="STARTJOB", payload={"job": "box_rw33"}))
     assert transitions(o, "box_rw33") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
-    assert transitions(o, "rw_member33") == []  # double gate: waits for its tick
+    assert transitions(o, "rw_member33") == ["RUN_WINDOW_DEFER"]  # decided at the box start
     o.feed(Event(at=datetime(2026, 7, 1, 9, 50), kind="STARTJOB", payload={"job": "rw_member33"}))
-    assert transitions(o, "rw_member33") == ["RUN_WINDOW_DEFER"]
+    assert transitions(o, "rw_member33") == ["RUN_WINDOW_DEFER"]  # one deferral per opening
     o.feed(
         Event(
             at=datetime(2026, 7, 1, 10, 30),
@@ -2526,18 +2527,18 @@ _SKIP_BOX_JIL = (
 
 
 def test_sem33_box_skip_bypasses_member_and_box_completes() -> None:
-    """T33b box variant (SEM-33 [V], DL-154): a member whose start attempt
-    inside a live box run lands closer to the previous window close is
-    SKIPPED as a bypass -- TechDocs 12.1, run_window page: "the job's status
-    changes to INACTIVE. The box job can still run to completion." The
-    member stays out of the ran set (no vote in the SEM-11 fold), the
-    sibling's completion folds the box, and the skip queues no
-    RUN_WINDOW_DEFER timer (a deadline the member's own tick armed is a
-    separate fact -- see the must_start variant below)."""
+    """T33b box variant (SEM-33 [V], DL-154, DL-246): a box started after
+    its member's window closed, closer to that close, SKIPS the member at
+    the box start as a bypass -- TechDocs 12.1, run_window page: "the job's
+    status changes to INACTIVE. The box job can still run to completion."
+    No member tick is needed. The member stays out of the ran set (no vote
+    in the SEM-11 fold), the sibling's completion folds the box, and the
+    skip queues no RUN_WINDOW_DEFER timer."""
     o = oracle(_SKIP_BOX_JIL)
     o.feed(Event(at=datetime(2026, 7, 1, 4, 30), kind="STARTJOB", payload={"job": "box_rw33c"}))
-    o.feed(Event(at=datetime(2026, 7, 1, 4, 31), kind="STARTJOB", payload={"job": "rw_member33c"}))
     assert transitions(o, "rw_member33c") == ["RUN_WINDOW_SKIP"]
+    [skip] = [t for t in o.trace() if t.job == "rw_member33c"]
+    assert skip.at == datetime(2026, 7, 1, 4, 30)  # at the box start
     assert o.store.job["rw_member33c"].status == "INACTIVE"
     assert list(o.store.timers()) == []  # no defer timer queued (no tick armed a deadline here)
     o.feed(
@@ -2558,9 +2559,12 @@ def test_sem33_box_skip_on_last_outstanding_member_folds_the_box() -> None:
     outstanding member, the bypass itself re-runs the box completion check
     -- the box folds on the skip, not on some later unrelated transition.
     Before DL-154 this box hung RUNNING forever (the DL-13 literal reading
-    of SEM-11, now carved out for the explicit INACTIVE verdict)."""
+    of SEM-11, now carved out for the explicit INACTIVE verdict). The box
+    starts inside the member's window, so the box start decides nothing
+    (DL-246) and the member's later tick meets the skip branch."""
     o = oracle(_SKIP_BOX_JIL)
-    o.feed(Event(at=datetime(2026, 7, 1, 4, 30), kind="STARTJOB", payload={"job": "box_rw33c"}))
+    o.feed(Event(at=datetime(2026, 7, 1, 3, 50), kind="STARTJOB", payload={"job": "box_rw33c"}))
+    assert transitions(o, "rw_member33c") == []  # inside the window: waits for its tick
     o.feed(
         Event(
             at=datetime(2026, 7, 1, 4, 35),
@@ -2581,7 +2585,9 @@ def test_sem33_box_skip_on_a_rerun_member_follows_the_box_start_reset() -> None:
     cycles" -- so the skip that follows has no edge of its own to show.
     The sibling completes FIRST here, so the skip resolves the last
     outstanding member on an already-INACTIVE row: the bypass runs the
-    completion door itself and the box folds SUCCESS. The transition ride
+    completion door itself and the box folds SUCCESS. Run two starts
+    inside the window, so the box start decides nothing (DL-246) and the
+    member's tick after the close meets the skip. The transition ride
     is pinned by `test_sem33_box_skip_transition_route_evaluates_the_
     override_too`."""
     o = oracle(_SKIP_BOX_JIL)
@@ -2603,10 +2609,10 @@ def test_sem33_box_skip_on_a_rerun_member_follows_the_box_start_reset() -> None:
         )
     )
     assert o.store.job["box_rw33c"].status == "SUCCESS"
-    # run 2: box re-started after the window close; the sibling completes
-    # first, then the member tick skips as the last outstanding member
+    # run 2: box re-started inside the window; the sibling completes first,
+    # then the member tick after the close skips as the last outstanding member
     o.feed(
-        Event(at=datetime(2026, 7, 2, 4, 30), kind="FORCE_STARTJOB", payload={"job": "box_rw33c"})
+        Event(at=datetime(2026, 7, 2, 3, 50), kind="FORCE_STARTJOB", payload={"job": "box_rw33c"})
     )
     o.feed(
         Event(
@@ -2621,7 +2627,7 @@ def test_sem33_box_skip_on_a_rerun_member_follows_the_box_start_reset() -> None:
     [reset] = [
         t for t in o.trace() if t.job == "rw_member33c" and t.transition.endswith("INACTIVE")
     ]
-    assert reset.at == datetime(2026, 7, 2, 4, 30)  # at the box start, not at the skip
+    assert reset.at == datetime(2026, 7, 2, 3, 50)  # at the box start, not at the skip
     assert reset.cause.startswith("box 'box_rw33c' started")
     assert o.store.job["box_rw33c"].status == "SUCCESS"  # folded through the bypass door
 
@@ -2670,7 +2676,9 @@ def test_sem33_every_member_skipped_folds_the_box_over_an_empty_vote() -> None:
     window-skipped completes through the existing SEM-11 default fold over
     an empty ran set -- no member failed, box_success unspecified, so the
     box ends SUCCESS. That empty-vote rule predates DL-154; this pins it
-    for the all-bypassed shape rather than inventing a new one."""
+    for the all-bypassed shape rather than inventing a new one. Since
+    DL-246 the box start skips both members, so the box completes at its
+    own start with no member tick."""
     text = (
         "insert_job: box_rw33e\njob_type: b\n\n"
         "insert_job: rw_e1\njob_type: c\ncommand: x\nmachine: m1\nbox_name: box_rw33e\n"
@@ -2682,9 +2690,8 @@ def test_sem33_every_member_skipped_folds_the_box_over_an_empty_vote() -> None:
     )
     o = oracle(text)
     o.feed(Event(at=datetime(2026, 7, 1, 4, 30), kind="STARTJOB", payload={"job": "box_rw33e"}))
-    o.feed(Event(at=datetime(2026, 7, 1, 4, 31), kind="STARTJOB", payload={"job": "rw_e1"}))
-    assert o.store.job["box_rw33e"].status == "RUNNING"  # rw_e2 still owed a verdict
-    o.feed(Event(at=datetime(2026, 7, 1, 4, 32), kind="STARTJOB", payload={"job": "rw_e2"}))
+    assert transitions(o, "rw_e1") == ["RUN_WINDOW_SKIP"]
+    assert transitions(o, "rw_e2") == ["RUN_WINDOW_SKIP"]
     assert o.store.job["box_rw33e"].status == "SUCCESS"
     assert o.store.job["box_rw33e"].ran_members == frozenset()  # nobody voted
     fold = next(t for t in o.trace() if t.job == "box_rw33e" and t.transition == "RUNNING->SUCCESS")
@@ -2741,7 +2748,9 @@ def test_sem33_box_skip_resolution_evaluates_a_satisfied_external_override() -> 
     a box_success over an external job that became true earlier fires the
     moment the skip resolves the last outstanding member. Without the door
     the override is never evaluated (INACTIVE is not a completion status)
-    and the box hangs RUNNING with its override satisfied."""
+    and the box hangs RUNNING with its override satisfied. The box starts
+    inside the member's window, so the member's tick after the close is
+    what skips it (DL-246 decides nothing at an in-window box start)."""
     text = (
         "insert_job: box_rw33g\njob_type: b\nbox_success: s(ext33g)\n\n"
         "insert_job: m33g\njob_type: c\ncommand: x\nmachine: m1\nbox_name: box_rw33g\n\n"
@@ -2751,7 +2760,7 @@ def test_sem33_box_skip_resolution_evaluates_a_satisfied_external_override() -> 
         "insert_job: ext33g\njob_type: c\ncommand: z\nmachine: m1\n"
     )
     o = oracle(text)
-    o.feed(Event(at=datetime(2026, 7, 1, 4, 30), kind="STARTJOB", payload={"job": "box_rw33g"}))
+    o.feed(Event(at=datetime(2026, 7, 1, 3, 50), kind="STARTJOB", payload={"job": "box_rw33g"}))
     o.feed(
         Event(
             at=datetime(2026, 7, 1, 4, 31),
@@ -2807,12 +2816,13 @@ def test_sem33_box_skip_member_later_set_by_the_operator_stays_settled(
 
 @pytest.mark.parametrize("override", ["n(a33w)", "s(ext33w)"])
 def test_sem33_box_skip_on_an_inactive_member_reaches_ancestor_overrides(override: str) -> None:
-    """T33b box variant (SEM-33/SEM-12, DL-154, DL-242): after the box-start
-    reset a skip usually lands on a member already INACTIVE, so there is no
-    transition to ride. The bypass still runs the ancestors' transitive
-    overrides as a completion moment, as an operator's INACTIVE on the same
-    member does: OUT completes by its override while IN's other member
-    still runs."""
+    """T33b box variant (SEM-33/SEM-12, DL-154, DL-242, DL-246): after the
+    box-start reset a skip usually lands on a member already INACTIVE, so
+    there is no transition to ride. The bypass still runs the ancestors'
+    transitive overrides as a completion moment, as an operator's INACTIVE
+    on the same member does. Here IN's own start, inside OUT's, skips the
+    member (DL-246): OUT completes by its override at that instant while
+    IN's other member still runs."""
     text = (
         f"insert_job: out33w\njob_type: b\nbox_success: {override}\n\n"
         "insert_job: in33w\njob_type: b\nbox_name: out33w\n\n"
@@ -2826,15 +2836,13 @@ def test_sem33_box_skip_on_an_inactive_member_reaches_ancestor_overrides(overrid
     at = datetime(2026, 7, 2, 4, 30)
     o.feed(Event(at=at, kind="STATUS", payload={"job": "ext33w", "status": "SUCCESS"}))
     o.feed(Event(at=at, kind="STARTJOB", payload={"job": "out33w"}))
+    assert transitions(o, "a33w") == ["RUN_WINDOW_SKIP"]
     assert _status(o, "out33w", "in33w", "a33w", "wait33w") == [
-        "RUNNING",
+        "SUCCESS",
         "RUNNING",
         "INACTIVE",
         "RUNNING",
     ]
-    o.feed(Event(at=at + timedelta(minutes=1), kind="STARTJOB", payload={"job": "a33w"}))
-    assert transitions(o, "a33w")[-1] == "RUN_WINDOW_SKIP"
-    assert _status(o, "out33w", "in33w") == ["SUCCESS", "RUNNING"]
     [fold] = [t for t in o.trace() if t.job == "out33w" and t.transition == "RUNNING->SUCCESS"]
     assert fold.cause == "box_success override met (SEM-12)"
 
@@ -2847,8 +2855,10 @@ def test_sem33_box_skip_transition_route_evaluates_the_override_too() -> None:
     Since DL-242 a box start resets a rerun member to INACTIVE, so run two
     gives the member a SUCCESS by CHANGE_STATUS before its skip; the
     external ref is false at that completion moment and turns true only
-    between it and the skip. Reordering the mark after the write leaves
-    this box hanging RUNNING."""
+    between it and the skip. Run two starts inside the window, so its box
+    start decides nothing (DL-246) and the tick after the close is the
+    skip. Reordering the mark after the write leaves this box hanging
+    RUNNING."""
     text = (
         "insert_job: box_rw33h\njob_type: b\nbox_success: s(ext33h)\n\n"
         "insert_job: rw_member33h\njob_type: c\ncommand: y\nmachine: m1\nbox_name: box_rw33h\n"
@@ -2879,14 +2889,15 @@ def test_sem33_box_skip_transition_route_evaluates_the_override_too() -> None:
     # operator's SUCCESS on the waiting member, so neither decides the box
     o.feed(
         Event(
-            at=datetime(2026, 7, 2, 4, 29),
+            at=datetime(2026, 7, 2, 3, 49),
             kind="STATUS",
             payload={"job": "ext33h", "status": "FAILURE"},
         )
     )
     o.feed(
-        Event(at=datetime(2026, 7, 2, 4, 30), kind="FORCE_STARTJOB", payload={"job": "box_rw33h"})
+        Event(at=datetime(2026, 7, 2, 3, 50), kind="FORCE_STARTJOB", payload={"job": "box_rw33h"})
     )
+    assert transitions(o, "rw_member33h")[-1] == "SUCCESS->INACTIVE"  # reset, no decision
     assert o.store.job["rw_member33h"].status == "INACTIVE"  # SEM-10 reset
     o.feed(
         Event(
@@ -2917,7 +2928,7 @@ def test_sem33_box_skip_with_unmet_override_still_hangs() -> None:
     pinned rules. The skip resolves its member (vendor INACTIVE verdict),
     but a specified-and-UNMET box_success still suppresses the default fold
     (SEM-12 third bullet) -- so the box hangs RUNNING. DL-154 completes the
-    member, not the box."""
+    member, not the box. The box start decides the skip (DL-246)."""
     text = (
         "insert_job: box_rw33i\njob_type: b\nbox_success: s(ext33i)\n\n"
         "insert_job: m33i\njob_type: c\ncommand: x\nmachine: m1\nbox_name: box_rw33i\n\n"
@@ -2929,6 +2940,7 @@ def test_sem33_box_skip_with_unmet_override_still_hangs() -> None:
     )
     o = oracle(text)
     o.feed(Event(at=datetime(2026, 7, 1, 4, 30), kind="STARTJOB", payload={"job": "box_rw33i"}))
+    assert transitions(o, "rw_member33i") == ["RUN_WINDOW_SKIP"]  # at the box start
     o.feed(
         Event(
             at=datetime(2026, 7, 1, 4, 31),
@@ -2936,8 +2948,6 @@ def test_sem33_box_skip_with_unmet_override_still_hangs() -> None:
             payload={"job": "m33i", "status": "SUCCESS"},
         )
     )
-    o.feed(Event(at=datetime(2026, 7, 1, 4, 32), kind="STARTJOB", payload={"job": "rw_member33i"}))
-    assert transitions(o, "rw_member33i") == ["RUN_WINDOW_SKIP"]
     assert o.store.job["box_rw33i"].status == "RUNNING"  # ext33i never ran: override unmet
     o.feed(
         Event(
@@ -2960,7 +2970,8 @@ def test_sem33_box_skip_clears_a_stale_failure_latch_and_flips_the_fold() -> Non
     the stale FAILURE decided run two as FAILURE. DL-153 ruled the
     stale-latch ground the same day, which is why this flip is pinned here
     rather than left implicit. Since DL-242 the latch clears at the box
-    start rather than at the skip."""
+    start rather than at the skip, and since DL-246 the same box start
+    decides the skip."""
     text = (
         "insert_job: box_rw33j\njob_type: b\nbox_failure: f(rw_member33j)\n\n"
         "insert_job: m33j\njob_type: c\ncommand: x\nmachine: m1\nbox_name: box_rw33j\n\n"
@@ -2993,7 +3004,6 @@ def test_sem33_box_skip_clears_a_stale_failure_latch_and_flips_the_fold() -> Non
     o.feed(
         Event(at=datetime(2026, 7, 2, 4, 30), kind="FORCE_STARTJOB", payload={"job": "box_rw33j"})
     )
-    o.feed(Event(at=datetime(2026, 7, 2, 4, 31), kind="STARTJOB", payload={"job": "rw_member33j"}))
     assert transitions(o, "rw_member33j")[-2:] == ["FAILURE->INACTIVE", "RUN_WINDOW_SKIP"]
     o.feed(
         Event(
@@ -3012,7 +3022,8 @@ def test_sem33_box_skip_after_the_box_start_reset_leaves_downstream_atoms_false(
     read current status; INACTIVE satisfies none of them), and larger than
     the box fold: a consumer holding the member's run-one SUCCESS in an
     AND that completes later never starts. Since DL-242 the write lands at
-    run two's box start (SEM-10), before the skip."""
+    run two's box start (SEM-10), and since DL-246 that box start also
+    decides the skip."""
     text = (
         "insert_job: box_rw33k\njob_type: b\n\n"
         "insert_job: m33k\njob_type: c\ncommand: x\nmachine: m1\nbox_name: box_rw33k\n\n"
@@ -3047,7 +3058,6 @@ def test_sem33_box_skip_after_the_box_start_reset_leaves_downstream_atoms_false(
     o.feed(
         Event(at=datetime(2026, 7, 2, 4, 30), kind="FORCE_STARTJOB", payload={"job": "box_rw33k"})
     )
-    o.feed(Event(at=datetime(2026, 7, 2, 4, 31), kind="STARTJOB", payload={"job": "drw33k"}))
     assert transitions(o, "drw33k")[-2:] == ["SUCCESS->INACTIVE", "RUN_WINDOW_SKIP"]
     o.feed(
         Event(
@@ -3064,7 +3074,8 @@ def test_sem33_box_skip_keeps_the_ticks_must_start_deadline_armed() -> None:
     -- unlike the ON_NOEXEC bypass (SEM-22) -- so the must_start deadline
     the member's own STARTJOB tick armed stays armed and ALARMS at
     tick+offset: SEM-34's "armed even when the start is abandoned" pin,
-    deliberately unchanged by the bypass."""
+    deliberately unchanged by the bypass. The box starts inside the
+    window, so the tick after the close is what skips (DL-246)."""
     text = (
         "insert_job: box_rw33m\njob_type: b\n\n"
         "insert_job: rw_member33m\njob_type: c\ncommand: y\nmachine: m1\nbox_name: box_rw33m\n"
@@ -3073,7 +3084,7 @@ def test_sem33_box_skip_keeps_the_ticks_must_start_deadline_armed() -> None:
         "insert_job: idle33m\njob_type: c\ncommand: i\nmachine: m1\n"
     )
     o = oracle(text)
-    o.feed(Event(at=datetime(2026, 7, 1, 4, 30), kind="STARTJOB", payload={"job": "box_rw33m"}))
+    o.feed(Event(at=datetime(2026, 7, 1, 3, 50), kind="STARTJOB", payload={"job": "box_rw33m"}))
     o.feed(Event(at=datetime(2026, 7, 1, 4, 31), kind="STARTJOB", payload={"job": "rw_member33m"}))
     assert transitions(o, "rw_member33m") == ["RUN_WINDOW_SKIP"]
     assert o.store.job["box_rw33m"].status == "SUCCESS"  # sole member skipped: empty-vote fold
@@ -3096,7 +3107,8 @@ def test_sem11_window_skip_leaves_the_run_but_a_never_fired_condition_still_hang
     otherwise untouched. In one box: a skipped member leaves the run, yet
     the box stays RUNNING because a sibling's condition has never fired --
     the real hung-box pattern. Only when that condition fires and the
-    sibling completes does the box fold."""
+    sibling completes does the box fold. The box start decides the skip
+    (DL-246)."""
     text = (
         "insert_job: box_rw11\njob_type: b\n\n"
         "insert_job: rw_member11\njob_type: c\ncommand: x\nmachine: m1\nbox_name: box_rw11\n"
@@ -3108,7 +3120,6 @@ def test_sem11_window_skip_leaves_the_run_but_a_never_fired_condition_still_hang
     )
     o = oracle(text)
     o.feed(Event(at=datetime(2026, 7, 1, 4, 30), kind="STARTJOB", payload={"job": "box_rw11"}))
-    o.feed(Event(at=datetime(2026, 7, 1, 4, 31), kind="STARTJOB", payload={"job": "rw_member11"}))
     assert transitions(o, "rw_member11") == ["RUN_WINDOW_SKIP"]
     # the skip left the run, but cond_member11 has neither run nor been
     # bypassed: the box stays RUNNING (DL-13, the hung-box pattern)
@@ -3129,6 +3140,494 @@ def test_sem11_window_skip_leaves_the_run_but_a_never_fired_condition_still_hang
         )
     )
     assert o.store.job["box_rw11"].status == "SUCCESS"
+
+
+# DL-246: the box start decides a run_window member's disposition (TechDocs
+# 24.2, run_window page, Box1 example), and a standalone skip moves the job
+# to INACTIVE.
+
+_BOX1_JIL = (
+    "insert_job: box1_33v\njob_type: b\n\n"
+    "insert_job: joba_33v\njob_type: c\ncommand: a\nmachine: m1\nbox_name: box1_33v\n"
+    'date_conditions: 1\ndays_of_week: all\nstart_times: "02:00"\n'
+    'run_window: "02:00-04:00"\n\n'
+    "insert_job: jobb_33v\njob_type: c\ncommand: b\nmachine: m1\nbox_name: box1_33v\n\n"
+    "insert_job: jobc_33v\njob_type: c\ncommand: c\nmachine: m1\nbox_name: box1_33v\n\n"
+    "insert_job: clock_33v\njob_type: c\ncommand: k\nmachine: m1\n"
+)
+
+
+def ev_at(at: datetime, kind: EventKind, **payload: object) -> Event:
+    return Event(at=at, kind=kind, payload=payload)
+
+
+def _timers(o: Oracle | EngineHarness, job: str) -> list[tuple[datetime, str, str]]:
+    oracle_obj = o if isinstance(o, Oracle) else o.engine.oracle
+    return [t for t in oracle_obj.pending_timers() if t[1] == job]
+
+
+def test_sem33_vendor_box1_started_at_0405_skips_joba_and_completes() -> None:
+    """T33 (SEM-33 [V], DL-246): the vendor's Box1 example, first half.
+    "If Box1 starts at 04:05, JobB and JobC can run and JobA becomes
+    INACTIVE so that the box can complete that day" (TechDocs 24.2,
+    run_window page). The box start decides JobA's disposition before its
+    own schedule gate, so no tick is injected for JobA at all."""
+    o = oracle(_BOX1_JIL)
+    o.feed(Event(at=datetime(2026, 7, 1, 4, 5), kind="STARTJOB", payload={"job": "box1_33v"}))
+    assert transitions(o, "joba_33v") == ["RUN_WINDOW_SKIP"]
+    assert _status(o, "joba_33v", "jobb_33v", "jobc_33v") == ["INACTIVE", "RUNNING", "RUNNING"]
+    assert _timers(o, "joba_33v") == []
+    o.feed(ev_at(datetime(2026, 7, 1, 4, 10), "STATUS", job="jobb_33v", status="SUCCESS"))
+    assert o.store.job["box1_33v"].status == "RUNNING"  # JobC still runs
+    o.feed(ev_at(datetime(2026, 7, 1, 4, 15), "STATUS", job="jobc_33v", status="SUCCESS"))
+    assert o.store.job["box1_33v"].status == "SUCCESS"
+    assert "joba_33v" not in o.store.job["box1_33v"].ran_members
+    assert transitions(o, "joba_33v") == ["RUN_WINDOW_SKIP"]  # nothing started
+
+
+def test_sem33_vendor_box1_started_at_1605_defers_joba_to_0200_next_day() -> None:
+    """T33 (SEM-33 [V], DL-246): the vendor's Box1 example, second half.
+    "If Box1 instead starts at 16:05, JobA will have a STARTJOB event set
+    for 02:00 the next day, and the box continues running until the job
+    starts the next day." Exactly one deferred start is queued at the box
+    start; at 02:00 JobA starts, and the box completes after it."""
+    o = oracle(_BOX1_JIL)
+    o.feed(Event(at=datetime(2026, 7, 1, 16, 5), kind="STARTJOB", payload={"job": "box1_33v"}))
+    assert transitions(o, "joba_33v") == ["RUN_WINDOW_DEFER"]
+    assert _timers(o, "joba_33v") == [(datetime(2026, 7, 2, 2, 0), "joba_33v", "run_window")]
+    o.feed(ev_at(datetime(2026, 7, 1, 16, 10), "STATUS", job="jobb_33v", status="SUCCESS"))
+    o.feed(ev_at(datetime(2026, 7, 1, 16, 15), "STATUS", job="jobc_33v", status="SUCCESS"))
+    assert o.store.job["box1_33v"].status == "RUNNING"  # JobA still owed its start
+    o.feed(ev_at(datetime(2026, 7, 2, 2, 0), "STATUS", job="clock_33v", status="SUCCESS"))
+    assert transitions(o, "joba_33v") == [
+        "RUN_WINDOW_DEFER",
+        "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+    ]
+    start = next(t for t in o.trace() if t.job == "joba_33v" and t.transition.endswith("STARTING"))
+    assert start.at == datetime(2026, 7, 2, 2, 0)
+    assert o.store.job["box1_33v"].status == "RUNNING"
+    o.feed(ev_at(datetime(2026, 7, 2, 2, 30), "STATUS", job="joba_33v", status="SUCCESS"))
+    assert o.store.job["box1_33v"].status == "SUCCESS"
+
+
+def test_sem33_box_start_inside_the_members_window_decides_nothing() -> None:
+    """T33 (SEM-33, DL-246): a box started inside a member's window leaves
+    the member as before: it waits for its own schedule tick (SEM-31's
+    double gate), no deferral or skip is recorded, and the tick starts it."""
+    o = oracle(_BOX1_JIL)
+    o.feed(Event(at=datetime(2026, 7, 1, 3, 0), kind="STARTJOB", payload={"job": "box1_33v"}))
+    assert transitions(o, "joba_33v") == []
+    assert _timers(o, "joba_33v") == []
+    assert o.store.job["joba_33v"].status == "INACTIVE"
+    o.feed(Event(at=datetime(2026, 7, 1, 3, 1), kind="STARTJOB", payload={"job": "joba_33v"}))
+    assert transitions(o, "joba_33v") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+
+
+def test_sem33_box_start_passes_over_a_member_once_a_skip_completed_its_box() -> None:
+    """T33 (SEM-33/SEM-12, DL-246): both members are outside their window at
+    the box start. The first skip is a completion moment, and the box's
+    satisfied external override completes the box there. The second member
+    is then passed over: its box is no longer RUNNING, so nothing is
+    recorded for it."""
+    text = (
+        "insert_job: ext33z\njob_type: c\ncommand: e\nmachine: m1\n\n"
+        "insert_job: bx33z\njob_type: b\nbox_success: s(ext33z)\n\n"
+        "insert_job: a33z\njob_type: c\ncommand: a\nmachine: m1\nbox_name: bx33z\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "02:00"\n'
+        'run_window: "02:00-04:00"\n\n'
+        "insert_job: b33z\njob_type: c\ncommand: b\nmachine: m1\nbox_name: bx33z\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "02:00"\n'
+        'run_window: "02:00-04:00"\n'
+    )
+    o = oracle(text)
+    o.feed(ev_at(datetime(2026, 7, 1, 4, 0), "STATUS", job="ext33z", status="SUCCESS"))
+    o.feed(Event(at=datetime(2026, 7, 1, 4, 5), kind="STARTJOB", payload={"job": "bx33z"}))
+    assert transitions(o, "a33z") == ["RUN_WINDOW_SKIP"]
+    assert transitions(o, "b33z") == []
+    assert _status(o, "bx33z", "b33z") == ["SUCCESS", "INACTIVE"]
+    [fold] = [t for t in o.trace() if t.job == "bx33z" and t.transition == "RUNNING->SUCCESS"]
+    assert fold.cause == "box_success override met (SEM-12)"
+
+
+def test_sem33_box_start_leaves_a_held_member_to_its_own_path() -> None:
+    """T33 (SEM-33, DL-246 decision): a held member is not decided at the
+    box start, as a held job does not take the box start's status change.
+    It keeps its hold, records no deferral or skip, and keeps the box
+    RUNNING as any held member does (SEM-21)."""
+    o = oracle(_BOX1_JIL)
+    o.feed(Event(at=datetime(2026, 7, 1, 4, 0), kind="ON_HOLD", payload={"job": "joba_33v"}))
+    o.feed(Event(at=datetime(2026, 7, 1, 4, 5), kind="STARTJOB", payload={"job": "box1_33v"}))
+    assert transitions(o, "joba_33v") == ["ON_HOLD"]
+    o.feed(ev_at(datetime(2026, 7, 1, 4, 10), "STATUS", job="jobb_33v", status="SUCCESS"))
+    o.feed(ev_at(datetime(2026, 7, 1, 4, 15), "STATUS", job="jobc_33v", status="SUCCESS"))
+    assert o.store.job["box1_33v"].status == "RUNNING"
+
+
+def _ordered(*blocks: str, first: str) -> str:
+    """The blocks with the one whose first line names `first` moved to the front."""
+    lead = [b for b in blocks if b.startswith(f"insert_job: {first}\n")]
+    return "\n\n".join(lead + [b for b in blocks if b not in lead]) + "\n"
+
+
+@pytest.mark.parametrize("first", ["a33o", "b33o"])
+def test_sem33_box_start_window_decision_does_not_depend_on_member_order(first: str) -> None:
+    """T33 (SEM-33/SEM-12, DL-246): the box start decides the window after
+    every member's start attempt. The skip is a completion moment, and the
+    box's satisfied external override fires there, but only after the
+    plain sibling has started. Both catalog orders give the same result."""
+    member_a = (
+        "insert_job: a33o\njob_type: c\ncommand: a\nmachine: m1\nbox_name: bx33o\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "02:00"\n'
+        'run_window: "02:00-04:00"'
+    )
+    member_b = "insert_job: b33o\njob_type: c\ncommand: b\nmachine: m1\nbox_name: bx33o"
+    text = (
+        "insert_job: ext33o\njob_type: c\ncommand: e\nmachine: m1\n\n"
+        "insert_job: bx33o\njob_type: b\nbox_success: s(ext33o)\n\n"
+        + _ordered(member_a, member_b, first=first)
+    )
+    o = oracle(text)
+    o.feed(ev_at(datetime(2026, 7, 1, 4, 0), "STATUS", job="ext33o", status="SUCCESS"))
+    o.feed(Event(at=datetime(2026, 7, 1, 4, 5), kind="STARTJOB", payload={"job": "bx33o"}))
+    assert transitions(o, "b33o") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+    assert transitions(o, "a33o") == ["RUN_WINDOW_SKIP"]
+    assert _status(o, "bx33o", "a33o", "b33o") == ["SUCCESS", "INACTIVE", "RUNNING"]
+
+
+@pytest.mark.parametrize("first", ["in33o", "c33o"])
+def test_sem33_subbox_skip_waits_for_the_outer_boxs_direct_member(first: str) -> None:
+    """T33 (SEM-33/SEM-12, DL-246), nested: the subbox's skip reaches the
+    outer box's override through the ancestor walk. The decision runs after
+    every attempt in the started subtree, so the outer box's direct member
+    starts whether it is listed after the subbox or before it."""
+    sub = "insert_job: in33o\njob_type: b\nbox_name: out33o"
+    member_a = (
+        "insert_job: a33p\njob_type: c\ncommand: a\nmachine: m1\nbox_name: in33o\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "02:00"\n'
+        'run_window: "02:00-04:00"'
+    )
+    member_w = "insert_job: w33p\njob_type: c\ncommand: w\nmachine: m1\nbox_name: in33o"
+    member_c = "insert_job: c33o\njob_type: c\ncommand: c\nmachine: m1\nbox_name: out33o"
+    text = (
+        "insert_job: ext33p\njob_type: c\ncommand: e\nmachine: m1\n\n"
+        "insert_job: out33o\njob_type: b\nbox_success: s(ext33p)\n\n"
+        + _ordered(sub, member_a, member_w, member_c, first=first)
+    )
+    o = oracle(text)
+    o.feed(ev_at(datetime(2026, 7, 1, 4, 0), "STATUS", job="ext33p", status="SUCCESS"))
+    o.feed(Event(at=datetime(2026, 7, 1, 4, 5), kind="STARTJOB", payload={"job": "out33o"}))
+    assert transitions(o, "c33o") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+    assert transitions(o, "w33p") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+    assert transitions(o, "a33p") == ["RUN_WINDOW_SKIP"]
+    assert _status(o, "out33o", "in33o") == ["SUCCESS", "RUNNING"]
+
+
+@pytest.mark.parametrize("first", ["sub33x", "wk33x"])
+def test_sem33_running_wakes_join_the_box_starts_window_pass(first: str) -> None:
+    """T33 (SEM-33/SEM-12, DL-246): the outer box's RUNNING transition wakes
+    a subbox and a worker that both reference the outer box. The subbox's
+    window skip completes the outer box through its override, but only in
+    the single pass after every attempt, so the worker starts in both
+    catalog orders."""
+    sub = "insert_job: sub33x\njob_type: b\nbox_name: out33x\ncondition: n(out33x) | s(ext33x)"
+    member = (
+        "insert_job: a33x\njob_type: c\ncommand: a\nmachine: m1\nbox_name: sub33x\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "02:00"\n'
+        'run_window: "02:00-04:00"'
+    )
+    worker = (
+        "insert_job: wk33x\njob_type: c\ncommand: w\nmachine: m1\nbox_name: out33x\n"
+        "condition: n(out33x) | s(ext33x)"
+    )
+    text = (
+        "insert_job: ext33x\njob_type: c\ncommand: e\nmachine: m1\n\n"
+        "insert_job: out33x\njob_type: b\nbox_success: s(ext33x)\n\n"
+        + _ordered(sub, member, worker, first=first)
+    )
+    o = oracle(text)
+    o.feed(ev_at(datetime(2026, 7, 1, 4, 0), "STATUS", job="ext33x", status="SUCCESS"))
+    o.feed(Event(at=datetime(2026, 7, 1, 4, 5), kind="STARTJOB", payload={"job": "out33x"}))
+    assert transitions(o, "wk33x") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+    assert transitions(o, "a33x") == ["RUN_WINDOW_SKIP"]
+    assert _status(o, "out33x", "sub33x", "wk33x") == ["SUCCESS", "SUCCESS", "RUNNING"]
+
+
+def test_sem33_a_window_pass_never_decides_for_a_later_box_run() -> None:
+    """T33 (SEM-33, DL-246): each window decision is bound to its box run.
+    Run one's first skip completes the box through its override; an
+    ON_NOEXEC relay then starts run two at once, inside that skip. Run two
+    decides both members itself and stays RUNNING beside the worker kept
+    from run one, and a marker then makes the override true. Run one's
+    pass resumes with its second member and does nothing: no duplicate
+    skip, and run two is not completed by run one's pass."""
+    text = (
+        "insert_job: ext33r\njob_type: c\ncommand: e\nmachine: m1\ncondition: s(relay33r)\n\n"
+        "insert_job: relay33r\njob_type: c\ncommand: r\nmachine: m1\n"
+        "condition: s(bx33r) & s(ext33r)\n\n"
+        "insert_job: bx33r\njob_type: b\ncondition: s(relay33r)\n"
+        "box_success: s(ext33r) | s(mk33r)\n\n"
+        "insert_job: a33r\njob_type: c\ncommand: a\nmachine: m1\nbox_name: bx33r\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "02:00"\n'
+        'run_window: "02:00-04:00"\n\n'
+        "insert_job: b33r\njob_type: c\ncommand: b\nmachine: m1\nbox_name: bx33r\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "02:00"\n'
+        'run_window: "02:00-04:00"\n\n'
+        "insert_job: wk33r\njob_type: c\ncommand: w\nmachine: m1\nbox_name: bx33r\n\n"
+        "insert_job: mk33r\njob_type: c\ncommand: m\nmachine: m1\ncondition: s(relay33r)\n"
+    )
+    o = oracle(text)
+    at = datetime(2026, 7, 1, 4, 0)
+    o.feed(Event(at=at, kind="ON_NOEXEC", payload={"job": "relay33r"}))
+    o.feed(Event(at=at, kind="ON_NOEXEC", payload={"job": "mk33r"}))
+    o.feed(ev_at(at, "STATUS", job="ext33r", status="SUCCESS"))
+    o.feed(Event(at=at + timedelta(minutes=5), kind="FORCE_STARTJOB", payload={"job": "bx33r"}))
+    runs = [t.transition for t in o.trace() if t.job == "bx33r"]
+    assert runs == [
+        "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+        "RUNNING->SUCCESS",
+        "SUCCESS->STARTING",
+        "STARTING->RUNNING",
+    ]
+    assert o.store.job["bx33r"].run_number == 2
+    assert _status(o, "ext33r", "mk33r", "wk33r") == ["RUNNING", "SUCCESS", "RUNNING"]
+    assert transitions(o, "a33r") == ["RUN_WINDOW_SKIP", "RUN_WINDOW_SKIP"]
+    assert transitions(o, "b33r") == ["RUN_WINDOW_SKIP"]  # run two's only
+    assert o.store.job["bx33r"].status == "RUNNING"
+
+
+def test_sem33_box_start_deferral_is_not_swallowed_by_a_deadline_timer() -> None:
+    """T33 x T34 (SEM-33/SEM-34, DL-246): the member's tick before the box
+    starts is refused but arms a must_start deadline at 02:00 the next day.
+    The box start's deferral to the same 02:00 opening is still queued,
+    because only a deferred start counts as one; at 02:00 the member starts
+    and the box completes after it."""
+    text = (
+        "insert_job: box33d2\njob_type: b\n\n"
+        "insert_job: a33d2\njob_type: c\ncommand: a\nmachine: m1\nbox_name: box33d2\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "16:00"\n'
+        'run_window: "02:00-04:00"\nmust_start_times: +600\n\n'
+        "insert_job: clock33d2\njob_type: c\ncommand: k\nmachine: m1\n"
+    )
+    o = oracle(text)
+    o.feed(Event(at=datetime(2026, 7, 1, 16, 0), kind="STARTJOB", payload={"job": "a33d2"}))
+    assert _timers(o, "a33d2") == [(datetime(2026, 7, 2, 2, 0), "a33d2", "must_start")]
+    o.feed(Event(at=datetime(2026, 7, 1, 16, 5), kind="STARTJOB", payload={"job": "box33d2"}))
+    assert transitions(o, "a33d2")[-1] == "RUN_WINDOW_DEFER"
+    assert sorted(kind for _, _, kind in _timers(o, "a33d2")) == ["must_start", "run_window"]
+    o.feed(ev_at(datetime(2026, 7, 2, 2, 0), "STATUS", job="clock33d2", status="SUCCESS"))
+    assert o.store.job["a33d2"].status == "RUNNING"
+    o.feed(ev_at(datetime(2026, 7, 2, 2, 30), "STATUS", job="a33d2", status="SUCCESS"))
+    assert o.store.job["box33d2"].status == "SUCCESS"
+
+
+def test_sem33_deferral_from_an_earlier_box_run_is_refused_after_a_restart() -> None:
+    """T33 (SEM-33, DL-246): a deferral belongs to the box run that queued
+    it. The box completes and starts again before the opening; the new run
+    records its own deferral, the old timer is not pending, and at the
+    opening the old one is refused with a record while the new one starts
+    the member."""
+    o = oracle(_BOX1_JIL)
+    o.feed(Event(at=datetime(2026, 7, 1, 16, 5), kind="STARTJOB", payload={"job": "box1_33v"}))
+    o.feed(ev_at(datetime(2026, 7, 1, 17, 0), "STATUS", job="box1_33v", status="SUCCESS"))
+    o.feed(
+        Event(at=datetime(2026, 7, 1, 20, 0), kind="FORCE_STARTJOB", payload={"job": "box1_33v"})
+    )
+    assert transitions(o, "joba_33v") == ["RUN_WINDOW_DEFER", "RUN_WINDOW_DEFER"]
+    assert _timers(o, "joba_33v") == [(datetime(2026, 7, 2, 2, 0), "joba_33v", "run_window")]
+    o.feed(ev_at(datetime(2026, 7, 2, 2, 0), "STATUS", job="clock_33v", status="SUCCESS"))
+    assert transitions(o, "joba_33v")[2:] == [
+        "START_REFUSED",
+        "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+    ]
+    [refused] = [t for t in o.trace() if t.job == "joba_33v" and t.transition == "START_REFUSED"]
+    assert "the box has started again since" in refused.cause
+    assert o.store.job["joba_33v"].run_number == 1  # one start, by the new run's deferral
+
+
+@pytest.mark.parametrize(
+    ("hour", "outer", "joba"),
+    [(4, "SUCCESS", "RUN_WINDOW_SKIP"), (16, "RUNNING", "RUN_WINDOW_DEFER")],
+)
+def test_sem33_box_start_decides_a_member_of_a_subbox(hour: int, outer: str, joba: str) -> None:
+    """T33 (SEM-33, DL-246), nested: the member sits in a subbox of the
+    started box. The subbox starts with the outer box, and its own start
+    decides the member: at 04:05 the skip lets both boxes complete, at
+    16:05 the deferral keeps both RUNNING with one start queued."""
+    text = (
+        "insert_job: out33n\njob_type: b\n\n"
+        "insert_job: sub33n\njob_type: b\nbox_name: out33n\n\n"
+        "insert_job: joba33n\njob_type: c\ncommand: a\nmachine: m1\nbox_name: sub33n\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "02:00"\n'
+        'run_window: "02:00-04:00"\n\n'
+        "insert_job: jobb33n\njob_type: c\ncommand: b\nmachine: m1\nbox_name: sub33n\n\n"
+        "insert_job: jobc33n\njob_type: c\ncommand: c\nmachine: m1\nbox_name: out33n\n"
+    )
+    o = oracle(text)
+    start = datetime(2026, 7, 1, hour, 5)
+    o.feed(Event(at=start, kind="STARTJOB", payload={"job": "out33n"}))
+    assert transitions(o, "joba33n") == [joba]
+    o.feed(ev_at(start + timedelta(minutes=5), "STATUS", job="jobb33n", status="SUCCESS"))
+    o.feed(ev_at(start + timedelta(minutes=10), "STATUS", job="jobc33n", status="SUCCESS"))
+    assert _status(o, "out33n", "sub33n") == [outer, outer]
+    expected = [] if outer == "SUCCESS" else [(datetime(2026, 7, 2, 2, 0), "joba33n", "run_window")]
+    assert _timers(o, "joba33n") == expected
+
+
+def test_sem33_deferred_box_start_at_the_opening_arms_on_a_false_condition() -> None:
+    """T33 (SEM-33, DL-246 provisional): the deferred STARTJOB is a start
+    attempt with a schedule tick's standing, through the normal gates. At
+    the opening JobA's condition is false, so the attempt arms (SEM-32),
+    and the condition edge inside the window starts it."""
+    text = (
+        "insert_job: box33p\njob_type: b\n\n"
+        "insert_job: joba33p\njob_type: c\ncommand: a\nmachine: m1\nbox_name: box33p\n"
+        "condition: s(feed33p)\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "02:00"\n'
+        'run_window: "02:00-04:00"\n\n'
+        "insert_job: feed33p\njob_type: c\ncommand: f\nmachine: m1\n\n"
+        "insert_job: clock33p\njob_type: c\ncommand: k\nmachine: m1\n"
+    )
+    o = oracle(text)
+    o.feed(Event(at=datetime(2026, 7, 1, 16, 5), kind="STARTJOB", payload={"job": "box33p"}))
+    assert transitions(o, "joba33p") == ["RUN_WINDOW_DEFER"]
+    o.feed(ev_at(datetime(2026, 7, 2, 2, 0), "STATUS", job="clock33p", status="SUCCESS"))
+    assert transitions(o, "joba33p") == ["RUN_WINDOW_DEFER", "SCHED_ARM"]
+    o.feed(ev_at(datetime(2026, 7, 2, 2, 20), "STATUS", job="feed33p", status="SUCCESS"))
+    assert transitions(o, "joba33p")[-2:] == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+    assert o.store.job["box33p"].status == "RUNNING"
+
+
+def test_sem33_deferred_box_start_counts_as_the_members_run_for_the_box_execution() -> None:
+    """T33 (SEM-33, DL-246 provisional): at most one start per box run
+    still holds. The deferred start at 02:00 runs JobA; its own 02:30 tick
+    in the same box execution is refused (SEM-10)."""
+    text = (
+        "insert_job: box33q\njob_type: b\n\n"
+        "insert_job: joba33q\njob_type: c\ncommand: a\nmachine: m1\nbox_name: box33q\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "02:30"\n'
+        'run_window: "02:00-04:00"\n\n'
+        "insert_job: jobb33q\njob_type: c\ncommand: b\nmachine: m1\nbox_name: box33q\n\n"
+        "insert_job: clock33q\njob_type: c\ncommand: k\nmachine: m1\n"
+    )
+    o = oracle(text)
+    o.feed(Event(at=datetime(2026, 7, 1, 16, 5), kind="STARTJOB", payload={"job": "box33q"}))
+    o.feed(ev_at(datetime(2026, 7, 2, 2, 0), "STATUS", job="clock33q", status="SUCCESS"))
+    o.feed(ev_at(datetime(2026, 7, 2, 2, 10), "STATUS", job="joba33q", status="SUCCESS"))
+    assert o.store.job["box33q"].status == "RUNNING"  # JobB still runs
+    o.feed(Event(at=datetime(2026, 7, 2, 2, 30), kind="STARTJOB", payload={"job": "joba33q"}))
+    assert transitions(o, "joba33q") == [
+        "RUN_WINDOW_DEFER",
+        "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+        "RUNNING->SUCCESS",
+        "START_REFUSED",
+    ]
+    refused = [t for t in o.trace() if t.job == "joba33q" and t.transition == "START_REFUSED"]
+    assert "already ran in this 'box33q' execution" in refused[0].cause
+
+
+_STANDALONE_SKIP_JIL = (
+    "insert_job: rw33s\njob_type: c\ncommand: x\nmachine: m1\n"
+    'date_conditions: 1\ndays_of_week: all\nstart_times: "02:00"\n'
+    'run_window: "02:00-04:00"\n\n'
+    "insert_job: gate33s\njob_type: c\ncommand: g\nmachine: m1\n\n"
+    "insert_job: cs33s\njob_type: c\ncommand: s\nmachine: m1\n"
+    "condition: s(rw33s) & s(gate33s)\n\n"
+    "insert_job: cf33s\njob_type: c\ncommand: f\nmachine: m1\n"
+    "condition: f(rw33s) & s(gate33s)\n\n"
+    "insert_job: cn33s\njob_type: c\ncommand: n\nmachine: m1\n"
+    "condition: n(rw33s, 00.05) & v(GO33S) = 1\n"
+)
+
+
+@pytest.mark.parametrize(("code", "prior"), [(0, "SUCCESS"), (1, "FAILURE")])
+def test_sem33_standalone_skip_moves_a_prior_result_to_inactive(code: int, prior: str) -> None:
+    """T33b (SEM-33 [V], DL-246): "When the current time is closer to the
+    end of the previous run window, the product does not start the job and
+    changes its status to INACTIVE" (TechDocs 24.2, run_window page). A
+    standalone job's prior SUCCESS or FAILURE moves to INACTIVE at the
+    skip, so the s() and f() consumers read false when their other
+    conjunct completes. The transition wakes referencers as an injected
+    INACTIVE does: the n() consumer with a lookback reads the moved status
+    time and starts. The exit code stays, as an injected INACTIVE keeps
+    it. Nothing starts the skipped job."""
+    o = oracle(_STANDALONE_SKIP_JIL)
+    o.feed(Event(at=datetime(2026, 7, 1, 2, 0), kind="STARTJOB", payload={"job": "rw33s"}))
+    o.feed(ev_at(datetime(2026, 7, 1, 2, 10), "STATUS", job="rw33s", exit_code=code))
+    assert o.store.job["rw33s"].status == prior
+    o.feed(ev_at(datetime(2026, 7, 1, 3, 0), "SET_GLOBAL", name="GO33S", value="1"))
+    assert o.store.job["cn33s"].status == "INACTIVE"  # the lookback has lapsed
+    o.feed(Event(at=datetime(2026, 7, 1, 4, 10), kind="STARTJOB", payload={"job": "rw33s"}))
+    assert transitions(o, "rw33s")[-2:] == ["RUN_WINDOW_SKIP", f"{prior}->INACTIVE"]
+    assert o.store.job["rw33s"].exit_code == code
+    assert _timers(o, "rw33s") == []
+    [woken] = [t for t in o.trace() if t.job == "cn33s" and t.transition.endswith("STARTING")]
+    assert woken.cause == "status of 'rw33s' changed to INACTIVE"
+    o.feed(ev_at(datetime(2026, 7, 1, 4, 20), "STATUS", job="gate33s", status="SUCCESS"))
+    assert _status(o, "cs33s", "cf33s") == ["INACTIVE", "INACTIVE"]
+    assert transitions(o, "cs33s") == transitions(o, "cf33s") == []
+    starts = [t for t in transitions(o, "rw33s") if t.endswith("->STARTING")]
+    assert starts == ["INACTIVE->STARTING"]  # the 02:00 run only
+
+
+def test_sem33_standalone_skip_on_a_fresh_inactive_job_records_no_transition() -> None:
+    """T33b (SEM-33, DL-246): a standalone job that is already INACTIVE
+    stays as it is at a skip. Only the RUN_WINDOW_SKIP record appears, and
+    the status time does not move."""
+    o = oracle(_STANDALONE_SKIP_JIL)
+    o.feed(Event(at=datetime(2026, 7, 1, 4, 10), kind="STARTJOB", payload={"job": "rw33s"}))
+    assert transitions(o, "rw33s") == ["RUN_WINDOW_SKIP"]
+    assert o.store.job["rw33s"].status == "INACTIVE"
+    assert o.store.job["rw33s"].status_at is None
+
+
+def test_sem33_standalone_skip_moves_a_prior_terminated_to_inactive() -> None:
+    """T33b (SEM-33, DL-246): a killed standalone job's TERMINATED moves to
+    INACTIVE at a skip, as SUCCESS and FAILURE do."""
+    o = oracle(_STANDALONE_SKIP_JIL)
+    o.feed(Event(at=datetime(2026, 7, 1, 2, 0), kind="STARTJOB", payload={"job": "rw33s"}))
+    o.feed(Event(at=datetime(2026, 7, 1, 2, 5), kind="KILLJOB", payload={"job": "rw33s"}))
+    assert o.store.job["rw33s"].status == "TERMINATED"
+    o.feed(Event(at=datetime(2026, 7, 1, 4, 10), kind="STARTJOB", payload={"job": "rw33s"}))
+    assert transitions(o, "rw33s")[-2:] == ["RUN_WINDOW_SKIP", "TERMINATED->INACTIVE"]
+
+
+def test_sem33_force_start_on_a_held_standalone_job_meets_the_skip() -> None:
+    """T33b (SEM-33/SEM-23, DL-246): a FORCE_STARTJOB passes the hold but
+    not run_window. On the skip branch the held job's prior SUCCESS moves to
+    INACTIVE and nothing starts. The hold stays cleared: DL-243 makes the
+    return to an executable state the event's own effect."""
+    o = oracle(_STANDALONE_SKIP_JIL)
+    o.feed(Event(at=datetime(2026, 7, 1, 2, 0), kind="STARTJOB", payload={"job": "rw33s"}))
+    o.feed(ev_at(datetime(2026, 7, 1, 2, 10), "STATUS", job="rw33s", status="SUCCESS"))
+    o.feed(Event(at=datetime(2026, 7, 1, 3, 0), kind="ON_HOLD", payload={"job": "rw33s"}))
+    o.feed(Event(at=datetime(2026, 7, 1, 4, 10), kind="FORCE_STARTJOB", payload={"job": "rw33s"}))
+    assert transitions(o, "rw33s")[-3:] == ["OFF_HOLD", "RUN_WINDOW_SKIP", "SUCCESS->INACTIVE"]
+    assert not o.store.job["rw33s"].on_hold
+    assert o.store.job["rw33s"].run_number == 1
+
+
+def test_sem33_standalone_box_skip_moves_only_the_box_to_inactive() -> None:
+    """T33b (SEM-33, DL-246): a standalone box on the skip branch takes the
+    plain INACTIVE transition. It does not cascade (SEM-18 is the
+    operator's rule), so its member keeps the last run's SUCCESS."""
+    text = (
+        "insert_job: sbx33s\njob_type: b\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "02:00"\n'
+        'run_window: "02:00-04:00"\n\n'
+        "insert_job: m33s\njob_type: c\ncommand: m\nmachine: m1\nbox_name: sbx33s\n"
+    )
+    o = oracle(text)
+    o.feed(Event(at=datetime(2026, 7, 1, 2, 0), kind="STARTJOB", payload={"job": "sbx33s"}))
+    o.feed(ev_at(datetime(2026, 7, 1, 2, 10), "STATUS", job="m33s", status="SUCCESS"))
+    assert o.store.job["sbx33s"].status == "SUCCESS"
+    o.feed(Event(at=datetime(2026, 7, 1, 4, 10), kind="STARTJOB", payload={"job": "sbx33s"}))
+    assert transitions(o, "sbx33s")[-2:] == ["RUN_WINDOW_SKIP", "SUCCESS->INACTIVE"]
+    assert _status(o, "sbx33s", "m33s") == ["INACTIVE", "SUCCESS"]
+    assert transitions(o, "m33s")[-1] == "RUNNING->SUCCESS"
 
 
 def test_sem33_window_is_read_in_the_job_timezone_not_the_engine_clock() -> None:

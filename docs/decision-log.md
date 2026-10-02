@@ -15701,3 +15701,128 @@ relitigate an entry; append a new one.
   against the updated `_REFUSED_STATEMENTS`.
   No `STATE_MACHINE_VERSION` change: the scanner does not affect oracle
   replay.
+- DL-246 run_window at box start and for standalone jobs: a box start
+  decides a waiting member's window disposition, and a standalone skip
+  moves the job to INACTIVE (2026-10-02; oracle.py, runner_ledger.py,
+  simulation_register_rows.py, simulation-coverage.md; autosys-semantics
+  SEM-11, SEM-33)
+  THE VENDOR. TechDocs 24.2, run_window attribute page; 12.1 has the same
+  text. Outside the window: "When the current time is closer to the
+  beginning of the next run window, the product schedules the job to
+  start when the next run window starts. When the current time is closer
+  to the end of the previous run window, the product does not start the
+  job and changes its status to INACTIVE." For a box member: "its status
+  changes to ACTIVATED when the box starts running. However, if the
+  current time is not in the specified run window for the job, its
+  status changes to INACTIVE. When the current time is closer to the end
+  of the previous run_window, the job's status changes to INACTIVE. The
+  box job can still run to completion. When the current time is closer
+  to the beginning of the next run_window, the product issues a future
+  STARTJOB event for the job for the next run_window." The Box1 example:
+  "If Box1 starts at 04:05, JobB and JobC can run and JobA becomes
+  INACTIVE so that the box can complete that day. If Box1 instead starts
+  at 16:05, JobA will have a STARTJOB event set for 02:00 the next day,
+  and the box continues running until the job starts the next day."
+  THE DEFECTS. A box start did not decide a scheduled member's
+  disposition. The box start's attempt stops at the member's schedule
+  gate before the window check runs. In the 04:05 example the box stayed
+  RUNNING after JobB and JobC succeeded. In the 16:05 example no deferred
+  start was queued unless the member's own tick arrived. Separately, a
+  standalone job whose attempt met the previous-close branch recorded
+  RUN_WINDOW_SKIP but kept a prior SUCCESS or FAILURE, so downstream
+  conditions still read the old result.
+  THE BEHAVIOR. One: at box start, after the DL-242 reset, each member
+  with a `run_window` is decided at that instant, before its own schedule
+  gate, through `_run_window_permits`. The decisions run after every
+  start attempt across the whole subtree the start began, the attempts
+  of the box's RUNNING wakes included: the collection opens before the
+  RUNNING transition. Deferrals run before skips. A skip is a completion
+  moment and can complete its box or an ancestor through an override, so
+  a skip decided inside the attempt loop, or inside a subbox started by
+  a RUNNING wake, refused the siblings and outer members attempted after
+  it. That order dependence, between window decisions and member
+  attempts, is gone. Competing sibling completions are still evaluated
+  one at a time under SEM-12; no rule for simultaneous overrides is
+  defined. Each queued decision is bound to its box run: a skip may
+  complete the run and its wakes may start the box again inside the
+  pass, and the old pass then decided for the new run, recording a
+  duplicate skip and completing the new run. Inside the
+  window nothing changes:
+  the member is attempted as before and waits for its own conditions and
+  schedule. Closer to the previous close, the member takes the DL-154
+  skip bypass; it is already INACTIVE after the reset, so the bypass
+  marks it resolved and runs the parent's door and the ancestor walk, and
+  the box can complete. Closer to the next opening, one deferred start is
+  queued through the existing TIMER mechanism, and the box stays RUNNING.
+  No schedule tick is invented. The decision belongs to the direct
+  parent, at its own start, so a member of a subbox is decided when the
+  subbox starts. A held or iced member, a live one, and one that already
+  ran this execution are left to their own paths. The held exclusion is
+  this project's reading: a held job does not take the box start's
+  status change. A member whose days_of_week exclude today is decided at
+  box start too, and a deferral then starts it the next day through the
+  deferred start's tick standing. A member's deferred start carries its
+  box's name and run number. If the box starts again before the opening,
+  or a rebaseline moves the member to another box or out of one, the old
+  timer is not pending, and at fire it is refused with a START_REFUSED
+  record; the current run decides the member afresh. A run number alone
+  let a deferral queued in one box start the member in the box it moved
+  to, whose first run had the same number. Before this, the new run took the old timer as its own
+  deferral and wrote no record, and the old timer started the member with
+  the old run's cause. The one-deferral-per-opening dedup counts only a
+  deferred start of the same box run: a must_start timer at the same
+  instant swallowed the deferral, and the box hung after the alarm. Two: a standalone job (no box) that meets the
+  previous-close branch moves to INACTIVE when it is not INACTIVE
+  already. The RUN_WINDOW_SKIP record stays. The transition wakes
+  referencers as an injected INACTIVE does, and nothing starts. The exit
+  code stays, as an injected INACTIVE keeps it. A job already INACTIVE
+  gets no transition. A standalone box job takes the same plain
+  transition; it does not cascade to its members, since SEM-18 is the
+  operator's rule.
+  PROVISIONAL. The vendor does not say how the deferred STARTJOB
+  composes with the member's own start_times. The smallest rule is
+  pinned: the deferred STARTJOB is a start attempt with a schedule
+  tick's standing, through the normal gates at the window opening. It
+  passes the schedule gate, a false condition arms it (SEM-32), and the
+  box, hold, ice and window gates apply as for any tick. At most one
+  start per box run still holds (SEM-10): whichever of the deferred start
+  and the member's own tick runs first is the run, and a later one is
+  refused. No question label is opened; the register carries the row
+  `job_attr:run_window#box-start-defer`.
+  UNCHANGED. A member inside its window at box start composes schedule
+  and condition as before. A mid-run attempt that meets either branch
+  behaves as before (DL-154). Members of a box that is not RUNNING keep
+  the plain skip. A member that already ran this execution keeps its
+  result. SEM-11's literal fold, SEM-12's override gating and the Q3c arm
+  scope are untouched. The UC side does not move: M27 stays an R row.
+  VERSION. `STATE_MACHINE_VERSION` moves to 7: a replay with a box start
+  outside a member's window, or with a standalone skip on a job that has
+  a result, derives different state.
+  Tests: test_oracle.py `test_sem33_vendor_box1_*` (04:05 and 16:05),
+  `test_sem33_box_start_*` (inside the window, a held member, a subbox
+  member, both catalog orders, a deferral beside a must_start timer, a
+  member passed over once a skip completed its box),
+  `test_sem33_running_wakes_join_the_box_starts_window_pass`,
+  `test_sem33_a_window_pass_never_decides_for_a_later_box_run`,
+  test_classification.py
+  `test_sem33_a_deferral_does_not_follow_its_job_into_another_box`,
+  `test_sem33_subbox_skip_waits_for_the_outer_boxs_direct_member`,
+  `test_sem33_deferral_from_an_earlier_box_run_is_refused_after_a_restart`,
+  `test_sem33_deferred_box_start_*` (the provisional rule: a false
+  condition arms at the opening; the member's own tick is refused once
+  the deferred start ran), `test_sem33_standalone_*` (prior SUCCESS,
+  FAILURE and TERMINATED, a fresh INACTIVE job, a forced start on a held
+  job, a standalone box that does not cascade). Rewritten to the vendor
+  rule: `test_sem33_box_variant_sole_deferred_member_*` (the deferral is
+  recorded at the box start, not at the tick), and in
+  `test_sem33_box_skip_*`, `test_sem33_every_member_skipped_*` and
+  `test_sem11_window_skip_*` either the box start now records the skip,
+  or the box starts inside the window so the tick after the close still
+  exercises the mid-run skip. `test_sem33_box_skip_transition_route_*`
+  starts run two inside the window, so the tick's skip still pins that
+  the resolution mark lands before the SUCCESS->INACTIVE transition.
+  INTEGRATION. On top of DL-243, a FORCE_STARTJOB on a held standalone job
+  clears the hold before the skip, so
+  `test_sem33_force_start_on_a_held_standalone_job_meets_the_skip` now
+  expects the OFF_HOLD record and the cleared flag; the skip itself is
+  unchanged.

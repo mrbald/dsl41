@@ -158,7 +158,8 @@ fails the suite.
 | job_attr:resources | supported | DL-21, DL-50 | - |  |  |  | generic | the resource groups a start must satisfy before it may run |
 | job_attr:resources#duplicate | refused | runner_preflight._resource_preflight, DL-50 | - |  |  |  | none | a job naming one resource twice is refused at preflight as ambiguous demand; a direct oracle caller instead SUMS the quantities and takes the most restrictive release policy |
 | job_attr:run_calendar | supported | SEM-30, DL-56 | - |  |  |  | generic | the named calendar whose days are the schedule's day set |
-| job_attr:run_window | supported | SEM-33 | - |  |  |  | generic | a gate, not a trigger: a start outside the window defers or drops, never fires early |
+| job_attr:run_window | supported | SEM-33 | - |  |  |  | generic | a gate, not a trigger: a start outside the window defers or drops, never fires early; a box start decides it for a waiting member (DL-246) |
+| job_attr:run_window#box-start-defer | provisional | SEM-33, DL-246, oracle.Oracle._decide_windows_at_box_start | - |  |  |  | none | the STARTJOB a box start defers to the next window opening is a start attempt with a schedule tick's standing, through the normal gates; how it composes with the member's own start_times is undocumented, at most one start per box run still holds, and no label was opened for it |
 | job_attr:run_window#equal-endpoints | provisional | SEM-33, oracle.Oracle._run_window_permits | - |  |  |  | none | a window whose endpoints are equal ADMITS that one instant -- `lo <= now <= hi` is inclusive at both ends, so the window is not empty and not all day; the pin is undocumented and no label was opened for it |
 | job_attr:run_window#midpoint-tie | provisional | SEM-33, oracle.Oracle._run_window_permits | - |  |  |  | none | a start exactly halfway between the previous close and the next opening DEFERS to the opening rather than dropping; the tie is undocumented and no label was opened for it |
 | job_attr:send_notification | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
@@ -637,7 +638,7 @@ fails the suite.
 | trace_marker:ON_ICE | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | the job is iced: an ordinary downstream atom follows the vendor ON_ICE table (s/d/n true, f/t/exitcode false), a lookback-qualified atom reads satisfied regardless, and it never runs on a plain start (DL-243) |
 | trace_marker:ON_NOEXEC | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | the job is marked not-executing; it completes without running |
 | trace_marker:RUN_WINDOW_DEFER | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | a start outside the run_window, closer to the next opening, was queued for it |
-| trace_marker:RUN_WINDOW_SKIP | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | a start outside the run_window, closer to the previous close, was dropped |
+| trace_marker:RUN_WINDOW_SKIP | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | a start outside the run_window, closer to the previous close, was dropped; the job reads INACTIVE (DL-246) |
 | trace_marker:SCHED_ARM | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | a schedule tick that could not start the job latched instead |
 | trace_marker:SCHED_DISARM | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | an unconsumed member arm died with the box run that armed it |
 | trace_marker:START_REFUSED | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | a start request the oracle declined, with the reason it declined it |
