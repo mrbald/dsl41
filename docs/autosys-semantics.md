@@ -198,8 +198,8 @@ FAILURE if at least one member failed (evaluated after all members complete). A 
 ended TERMINATED counts as failed for this fold; SEM-14 kills land here.
 Two carve-outs to the literal fold resolve a member as INACTIVE. Each is a completion moment
 and runs the full completion door: overrides first, then the default fold.
-- A run_window skip inside a live box run is an explicit INACTIVE verdict (DL-13, DL-154). The
-  member leaves the run and casts no vote in the fold **[C]** (mechanism tier; SEM-33's vendor
+- A run_window skip inside a live box run is an explicit INACTIVE verdict (DL-13, DL-154),
+  including the one a box start decides (DL-246). The member leaves the run and casts no vote in the fold **[C]** (mechanism tier; SEM-33's vendor
   quotes pin the verdict and the completion, not the bookkeeping).
 - An operator's INACTIVE on a member of a RUNNING box counts as SUCCESS (DL-242). **[V]**
   TechDocs 24.2 and 12.x, Basic Box Job Concepts: "Using the sendevent command to change the
@@ -492,20 +492,55 @@ minute is inside the window. Equal endpoints (`"02:00-02:00"`) are a zero-width 
 close and the next opening resolves to the next opening. Both readings are **[?]**: undocumented
 ties, pinned this way, revisit with live access. The "closer edge" rule is a prime migration
 hazard (no direct Stonebranch analog); always flag it in mapping.
-Box interaction (verified example): a member with run_window and a start time inside a box
-started after the window → member INACTIVE so the box can complete, or STARTJOB queued for the
-next window. The queued STARTJOB keeps the box RUNNING overnight. The closer edge decides which
-outcome occurs.
+A standalone job that meets the previous-close branch moves to INACTIVE (DL-246). **[V]**
+TechDocs 24.2, run_window attribute page (12.1 has the same text): "When the current time is
+closer to the end of the previous run window, the product does not start the job and changes
+its status to INACTIVE." A prior SUCCESS, FAILURE or TERMINATED becomes INACTIVE, so
+downstream s()/f()/d() atoms read false. The transition wakes referencers as an injected
+INACTIVE does. The exit code stays, as it does for an injected INACTIVE. A job already
+INACTIVE records the skip and gets no transition.
+Box interaction (verified example): a box start decides the window disposition of each
+waiting member at that instant (DL-246). **[V]** Same page: "If the job is in a box, its
+status changes to ACTIVATED when the box starts running. However, if the current time is not
+in the specified run window for the job, its status changes to INACTIVE. When the current time
+is closer to the end of the previous run_window, the job's status changes to INACTIVE. The box
+job can still run to completion. When the current time is closer to the beginning of the next
+run_window, the product issues a future STARTJOB event for the job for the next run_window."
+Its Box1 example: "If Box1 starts at 04:05, JobB and JobC can run and JobA becomes INACTIVE so
+that the box can complete that day. If Box1 instead starts at 16:05, JobA will have a STARTJOB
+event set for 02:00 the next day, and the box continues running until the job starts the next
+day." The decision runs before the member's own schedule gate, so no schedule tick is needed.
+It runs after every start attempt in the subtree the box start began, including the
+attempts that the box's RUNNING transition wakes, deferrals before skips. So a skip that
+completes a box or an ancestor never precedes a sibling's or an outer member's attempt. That
+removes the order dependence between window decisions and member attempts only: competing
+sibling completions are still evaluated one at a time under SEM-12, and no rule for
+simultaneous overrides is defined. Each decision is bound to its box run; a run that ended
+or was replaced during the pass is not decided for.
+Inside the window nothing is decided: the member waits for its own conditions and schedule.
+Closer to the previous close, the member takes the skip bypass below. Closer to the next
+opening, one deferred start is queued, and the box stays RUNNING overnight. The direct parent
+decides at its own start, so a member of a subbox is decided when the subbox starts. A held or
+iced member, a live one and one that already ran this execution are not decided there; the
+held exclusion is this project's reading, since a held job does not take the box start's
+status change. A member's deferred start belongs to its box and box run: if the box starts
+again before the opening, or a rebaseline moves the member to another box, the old deferral
+is refused when it fires, and the current run decides afresh. Only a deferred start dedups a deferral to the same opening; a deadline timer does not.
+**[?]** The deferred STARTJOB's interaction with the member's own start_times is not
+documented. Provisional (DL-246): the deferred STARTJOB is a start attempt with a schedule
+tick's standing, through the normal gates at the window opening. A false condition arms it
+(SEM-32). At most one start per box run still holds, so whichever of the deferred start and
+the member's own tick runs first is the run, and a later one is refused (SEM-10).
 **[V]** The "so the box can complete" half is cited (TechDocs 12.1, run_window attribute
 page): "the job's status changes to INACTIVE. The box job can still run to completion." The
 page's Box1 worked example: "JobA becomes INACTIVE so that the box can complete that day." The
 modeled mechanism is **[C]** (DL-154): the quotes pin the INACTIVE verdict and the box
-completing, not the bookkeeping. The skip inside a live box run is a bypass, the ON_ICE shape:
+completing, not the bookkeeping. The 24.2 page has the same sentences. The skip inside a live box run is a bypass, the ON_ICE shape:
 the member goes INACTIVE, stays out of the box's ran set (it casts no vote in the SEM-11 fold),
 and the skip resolution is a completion moment. The box runs the full completion step, so a
 satisfied box_success/box_failure fires there, the default fold runs only if none did, and a
 specified-but-unmet override still hangs the box (SEM-12's own rule composed with the INACTIVE
-verdict). The vendor anchors INACTIVE at box start. A mid-run attempt that lands on the skip
+verdict). The vendor anchors INACTIVE at box start, which DL-246 models. A mid-run attempt that lands on the skip
 branch (a condition edge, or a FORCE_STARTJOB, which does not override run_window, SEM-23)
 bypasses identically; that is this project's pin, not the vendor's text. The closer-edge rule
 applies at the attempt's own moment. SEM-11's literal fold
@@ -924,8 +959,18 @@ tick arms, edge starts, start consumes (SEM-32, DL-54/DL-58: `test_sem32_*`) · 
 run_window closer-edge both sides + box variants (incl. the DL-154 skip bypass and the SEM-11
 carve-out contrast; since DL-242 a rerun member's INACTIVE edge comes from the box-start
 reset, not the skip: `test_sem33_box_skip_on_a_rerun_member_follows_the_box_start_reset`,
-`test_sem33_box_skip_after_the_box_start_reset_leaves_downstream_atoms_false`), T33c the
-window read in the job's timezone (SEM-33, with SEM-35) ·
+`test_sem33_box_skip_after_the_box_start_reset_leaves_downstream_atoms_false`), T33 the
+box-start disposition: the vendor's Box1 example at 04:05 and 16:05, an in-window box start,
+a held member, a subbox member, both catalog orders, a deferral beside a deadline timer, a
+stale deferral after a box restart (and after a rebaseline moves the member, in the
+classification suite), RUNNING wakes in the same pass, a pass bound to its box run, and the
+provisional deferred-start rule; T33b a standalone
+skip moves a prior result to INACTIVE and does not cascade from a box (SEM-33, DL-246:
+`test_sem33_vendor_box1_*`, `test_sem33_box_start_*`, `test_sem33_subbox_skip_*`,
+`test_sem33_deferral_from_*`, `test_sem33_running_wakes_*`, `test_sem33_a_window_pass_*`,
+`test_sem33_deferred_box_start_*`, `test_sem33_standalone_*`,
+`test_sem33_force_start_on_a_held_standalone_*`),
+T33c the window read in the job's timezone (SEM-33, with SEM-35) ·
 T34a/b must_* emit alarms only, T34c each start_time arms its own relative offset (SEM-34).
 
 Layer note: not every SEM entry lands in the oracle suite. SEM-07 (cross-instance atoms) is
@@ -1061,7 +1106,8 @@ holds the probe that would settle it.
 
 ## Sources
 Primary: Broadcom TechDocs, AutoSys Workload Automation 12.0/12.0.01/12.1/12.1.01 (Basic Box
-Job Concepts also 24.2, same box-cycle wording: SEM-10, SEM-11, SEM-15, SEM-18): JIL
+Job Concepts also 24.2, same box-cycle wording: SEM-10, SEM-11, SEM-15, SEM-18; the
+run_window page also 24.2, same wording: SEM-33): JIL
 reference pages (`condition`, `box_success`, `box_failure`, `run_window`, `start_mins`,
 `must_complete_times`, `date_conditions`, `n_retrys`), Scheduling guides (Basic Box Job
 Concepts, Box Job Completion State, Must Start/Complete Times, Manage Common Job Properties,

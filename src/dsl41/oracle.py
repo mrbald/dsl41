@@ -55,11 +55,15 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
 - run_window (SEM-33): a start attempt outside the window applies the
   closer-edge rule -- nearer the next opening: schedule a TIMER STARTJOB at
   window open (box context stays RUNNING overnight); nearer the previous
-  end: no run this cycle (INACTIVE stays). Inside a live box run the skip
-  is a bypass (DL-154): the member goes INACTIVE, stays out of the ran
-  set, and the SEM-11 fold completes past it -- "the job's status changes
-  to INACTIVE. The box job can still run to completion" (TechDocs 12.1,
-  run_window page). Exact midpoint: next opening
+  end: no run, and a standalone job moves to INACTIVE (DL-246). Inside a
+  live box run the skip is a bypass (DL-154): the member goes INACTIVE,
+  stays out of the ran set, and the SEM-11 fold completes past it -- "the
+  job's status changes to INACTIVE. The box job can still run to
+  completion" (TechDocs 12.1, run_window page). A box start decides each
+  waiting run_window member's disposition at that instant, before its
+  schedule gate (DL-246); the deferred STARTJOB is a start attempt with a
+  tick's standing, through the normal gates (provisional). Exact midpoint:
+  next opening
   ([?] undocumented; pinned here, revisit with live access). The window is
   read in the job's own `timezone` (SEM-35 re-bases every time attribute of
   that job), so the comparison runs on local wall time and the queued timer
@@ -322,6 +326,12 @@ class InputBatch:
 #: canonicalizes; `_schedule_timer` refuses anything outside it.
 TIMER_CHECKS: Final[frozenset[str]] = frozenset({"must_start", "must_complete", "term_run_time"})
 
+#: A box member's deferred start also carries its box's name and run number
+#: (DL-246): the deferral belongs to that box run, and a box restart, or a
+#: rebaseline that moves the member to another box, makes it stale.
+DEFERRED_BOX_KEY: Final = "box"
+DEFERRED_BOX_RUN_KEY: Final = "box_run"
+
 #: PR-09's fourth armed shape: a run_window-deferred start carries no
 #: deadline `check`, it carries the provenance of the start it defers.
 #: Named once (DL-209) -- `_schedule_timer` admits it, `_dispatch` replays
@@ -420,6 +430,11 @@ class Oracle:
         #: The runner passes nothing here: `--timezone` stays on the
         #: scheduler.
         self._default_tz: str | None = default_tz
+        #: SEM-33 (DL-246): the box runs whose start is in progress, as (box,
+        #: run number, cause), collected from the outermost box's RUNNING
+        #: transition on, so the window decisions of a whole started subtree
+        #: run after every attempt in it. None when no box start is open.
+        self._window_starts: list[tuple[str, int, str]] | None = None
 
     # ------------------------------------------------------------------ plumbing
 
@@ -481,7 +496,9 @@ class Oracle:
                 # completed by next_open, and the fire would legally start it
                 # again. Filtering on current status would hide a timer that
                 # can still act (DL-46 review, finding rejected with reason).
-                live.append((due, job, "run_window"))
+                # One staleness IS permanent: a box restart (DL-246).
+                if self._deferral_is_stale(ev) is None:
+                    live.append((due, job, "run_window"))
                 continue
             rt = self.store.job.get(job)
             if rt is None or ev.payload.get("run") != rt.run_number:
@@ -720,6 +737,10 @@ class Oracle:
                 # SEM-33 defer: the fired timer replays the original start's
                 # provenance instead of collapsing to a bare TIMER (DL-68)
                 cause = f"run_window-deferred {deferred}"
+                stale = self._deferral_is_stale(ev)
+                if stale is not None:
+                    self._record(job, "START_REFUSED", f"{stale} ({cause})")
+                    return
             refused = self._attempt_start(job, force=force, scheduled=True, cause=cause)
             if refused is not None:
                 self._record(job, "START_REFUSED", f"{refused} ({cause})")
@@ -1175,9 +1196,28 @@ class Oracle:
         is read in the job's own timezone (SEM-35 re-bases every time
         attribute of that job), so the comparison happens on local wall time
         while the timer it queues goes back on the engine clock."""
+        side, next_open = self._window_side(job_ir)
+        if side == "inside":
+            return True
+        if side == "defer":
+            assert next_open is not None
+            self._defer_start(job_ir, next_open, cause)
+        else:
+            self._record(
+                job_ir.name,
+                "RUN_WINDOW_SKIP",
+                f"outside run_window; closer to previous close -- not run ({cause})",
+            )
+            self._window_skip_bypass(job_ir)
+        return False
+
+    def _window_side(self, job_ir: JobIR) -> tuple[str, datetime | None]:
+        """Which side of the SEM-33 closer-edge rule `now` falls on, with no
+        effect: "inside", "defer" (with the next opening on the engine
+        clock) or "skip"."""
         schedule = job_ir.schedule
         if schedule is None or schedule.run_window is None:
-            return True
+            return "inside", None
         assert self._now is not None
         tz = self._job_tz(job_ir)
         now_local = to_local(self._now, tz)
@@ -1190,7 +1230,7 @@ class Oracle:
         else:  # window crosses midnight
             inside = now_t >= lo_t or now_t <= hi_t
         if inside:
-            return True
+            return "inside", None
         next_open = to_utc(_next_occurrence(now_local, lo_t), tz)
         prev_close = to_utc(_prev_occurrence(now_local, hi_t), tz)
         # both distances are measured on the ENGINE clock: a DST shift inside
@@ -1198,35 +1238,64 @@ class Oracle:
         to_open = next_open - self._now
         since_close = self._now - prev_close
         if to_open <= since_close:  # [?] midpoint tie -> next opening
-            # DL-54 review MINOR: an armed job can reach this branch on every
-            # condition edge -- one pending defer per (job, opening) instant,
-            # not one per attempt (duplicate timers spammed pending_timers()).
-            pending = any(
-                due == next_open and e.kind == "TIMER" and e.payload.get("job") == job_ir.name
-                for due, _, e in self.store.timers()
+            return "defer", next_open
+        return "skip", None
+
+    def _defer_start(self, job_ir: JobIR, next_open: datetime, cause: str) -> None:
+        """Queue the SEM-33 deferred STARTJOB at the next opening. A member's
+        deferral carries its box's run number, so a box restart makes it
+        stale (DL-246)."""
+        payload: dict[str, object] = {"job": job_ir.name, DEFERRED_TIMER_KEY: cause}
+        box = job_ir.box.box_name
+        if box is not None:
+            payload[DEFERRED_BOX_KEY] = box
+            payload[DEFERRED_BOX_RUN_KEY] = self._runtime(box).run_number
+        # DL-54 review MINOR: an armed job can reach this branch on every
+        # condition edge -- one pending defer per (job, opening) instant, not
+        # one per attempt (duplicate timers spammed pending_timers()). Only a
+        # deferred start of the same box run counts: a deadline timer at the
+        # same instant is not one (DL-246).
+        pending = any(
+            due == next_open
+            and e.kind == "TIMER"
+            and DEFERRED_TIMER_KEY in e.payload
+            and e.payload.get("job") == job_ir.name
+            and e.payload.get(DEFERRED_BOX_KEY) == payload.get(DEFERRED_BOX_KEY)
+            and e.payload.get(DEFERRED_BOX_RUN_KEY) == payload.get(DEFERRED_BOX_RUN_KEY)
+            for due, _, e in self.store.timers()
+        )
+        if pending:
+            return
+        self._schedule_timer(next_open, Event(at=next_open, kind="TIMER", payload=payload))
+        self._record(
+            job_ir.name,
+            "RUN_WINDOW_DEFER",
+            f"outside run_window; closer to next opening -- STARTJOB queued ({cause})",
+        )
+
+    def _deferral_is_stale(self, ev: Event) -> str | None:
+        """The refusal reason for a deferred start that no longer belongs to
+        its job's box run (DL-246), None otherwise: the box has started
+        again since the deferral, or a rebaseline moved the job into another
+        box or out of one. The current box run decides the job afresh."""
+        job = ev.payload.get("job")
+        if not isinstance(job, str):
+            return None
+        job_ir = self.catalog.jobs.get(job)
+        current = job_ir.box.box_name if job_ir is not None else None
+        origin = ev.payload.get(DEFERRED_BOX_KEY)
+        if origin != current:
+            return (
+                f"deferred start was queued in box {origin!r}, and the job is now in box"
+                f" {current!r} -- no effect (SEM-33, DL-246)"
             )
-            if not pending:
-                self._schedule_timer(
-                    next_open,
-                    Event(
-                        at=next_open,
-                        kind="TIMER",
-                        payload={"job": job_ir.name, DEFERRED_TIMER_KEY: cause},
-                    ),
-                )
-                self._record(
-                    job_ir.name,
-                    "RUN_WINDOW_DEFER",
-                    f"outside run_window; closer to next opening -- STARTJOB queued ({cause})",
-                )
-        else:
-            self._record(
-                job_ir.name,
-                "RUN_WINDOW_SKIP",
-                f"outside run_window; closer to previous close -- not run ({cause})",
-            )
-            self._window_skip_bypass(job_ir)
-        return False
+        box_run = ev.payload.get(DEFERRED_BOX_RUN_KEY)
+        if current is None or self._runtime(current).run_number == box_run:
+            return None
+        return (
+            f"deferred start belongs to box {current!r} run {box_run}, and the box has started"
+            " again since -- no effect (SEM-33, DL-246)"
+        )
 
     def _window_skip_bypass(self, job_ir: JobIR) -> None:
         """SEM-33/DL-154: a run_window skip during a live box run is a
@@ -1241,13 +1310,25 @@ class Oracle:
         the vendor's INACTIVE verdict). A mid-run condition edge -- or a
         FORCE_STARTJOB, which does not override run_window (SEM-23) --
         that lands on the skip branch bypasses identically: the
-        closer-edge rule applies at the attempt's own moment. Standalone
-        jobs and members of non-RUNNING boxes keep the plain skip
-        (INACTIVE stays, no transition); a member that already ran this
-        execution keeps its real result -- a forced re-attempt's skip
+        closer-edge rule applies at the attempt's own moment. A box start
+        decides the same skip for a member outside its window (DL-246).
+
+        For a standalone job the product "does not start the job and
+        changes its status to INACTIVE" (same page): a prior SUCCESS,
+        FAILURE or TERMINATED moves to INACTIVE and wakes referencers, as
+        an injected INACTIVE does, and the exit code stays, as it does
+        there (DL-246). A job already INACTIVE gets no transition. Members
+        of non-RUNNING boxes keep the plain skip; a member that already ran
+        this execution keeps its real result -- a forced re-attempt's skip
         must not un-run it."""
         box = job_ir.box.box_name
         if box is None:
+            if self._runtime(job_ir.name).status != "INACTIVE":
+                self._set_status(
+                    job_ir.name,
+                    "INACTIVE",
+                    cause="run_window skip: closer to previous close (SEM-33, DL-246)",
+                )
             return
         box_rt = self._runtime(box)
         if box_rt.status != "RUNNING" or job_ir.name in box_rt.ran_members:
@@ -1367,9 +1448,25 @@ class Oracle:
             if had_demand
             else "QUE_WAIT collapses to immediate (ss7 non-goal)"
         )
-        self._set_status(job, "RUNNING", cause=running_cause)
-        if job_ir.job_type == "BOX":
-            self._on_box_started(job)
+        if job_ir.job_type != "BOX":
+            self._set_status(job, "RUNNING", cause=running_cause)
+            return
+        # SEM-33 (DL-246): the window decisions of every box this start
+        # begins -- its own, and any subbox started by RUNNING's wakes or by a
+        # member attempt -- wait for one pass after all of their attempts
+        outermost = self._window_starts is None
+        if outermost:
+            self._window_starts = []
+        try:
+            self._set_status(job, "RUNNING", cause=running_cause)
+            self._on_box_started(job, run_number)
+            starts = self._window_starts
+        finally:
+            if outermost:
+                self._window_starts = None
+        if outermost:
+            assert starts is not None
+            self._decide_windows_at_box_start(starts)
 
     # ---------------------------------------------------------- resources (DL-50)
 
@@ -1472,7 +1569,7 @@ class Oracle:
                 self.store.clear_exit_code(job)
         self._set_inactive_batch(rows, clear_exit_code=True, between=starting)
 
-    def _on_box_started(self, box: str) -> None:
+    def _on_box_started(self, box: str, run_number: int) -> None:
         for member in self._members(box):
             member_ir = self.catalog.jobs[member]
             if member_ir.sem.auto_hold:
@@ -1481,8 +1578,73 @@ class Oracle:
                     self.store.set_flags(member, on_hold=True)
                     self._record(member, "ON_HOLD", "auto_hold on box start (dossier ss5)")
         # members with no conditions start immediately; others when theirs hold
+        cause = f"box {box!r} started"
         for member in self._members(box):
-            self._attempt_start(member, force=False, scheduled=False, cause=f"box {box!r} started")
+            self._attempt_start(member, force=False, scheduled=False, cause=cause)
+        # the run's window decisions wait for the outermost start's pass
+        assert self._window_starts is not None
+        self._window_starts.append((box, run_number, cause))
+
+    def _waiting_for_window(self, box: str, member_ir: JobIR) -> bool:
+        """A run_window member the box start leaves waiting (DL-246): not
+        iced or held, not live, not run or resolved this execution."""
+        schedule = member_ir.schedule
+        if schedule is None or schedule.run_window is None:
+            return False
+        rt = self._runtime(member_ir.name)
+        box_rt = self._runtime(box)
+        return not (
+            rt.on_ice
+            or rt.on_hold
+            or rt.status in LIVE | {"QUE_WAIT"}
+            or member_ir.name in box_rt.ran_members
+            or member_ir.name in box_rt.window_skipped_members
+        )
+
+    def _decide_windows_at_box_start(self, starts: list[tuple[str, int, str]]) -> None:
+        """SEM-33 (DL-246): a box start decides the window disposition of
+        each run_window member still waiting, at that instant and before its
+        own schedule gate. TechDocs 24.2, run_window page: "its status
+        changes to ACTIVATED when the box starts running. However, if the
+        current time is not in the specified run window for the job, its
+        status changes to INACTIVE." Closer to the previous close, the
+        member goes through the window-skip bypass, so the box can complete.
+        Closer to the next opening, one deferred start is queued, so the box
+        keeps running. Inside the window nothing is decided: the member
+        waits for its own conditions and schedule.
+
+        `starts` holds every box run this start began, a subbox before its
+        parent, with each run's number and cause. The decisions run after
+        every start attempt in that subtree, including the attempts of
+        RUNNING's wakes, deferrals before skips. A skip is a completion
+        moment and may complete its box or an ancestor, so it must not run
+        before a sibling or an outer member had its attempt. Each decision
+        is bound to its box run: a skip may complete the run and its wakes
+        may start the box again, and the new run decides for itself. An iced or held
+        member, a live one, one that already ran or was resolved this
+        execution, and one already deferred this run (the deferral's own
+        dedup) are not decided. The decision is the direct parent's: a
+        member of a subbox is decided with its subbox's start."""
+        waiting: dict[str, list[tuple[str, int, JobIR, str]]] = {"defer": [], "skip": []}
+        for box, run, cause in starts:
+            box_rt = self._runtime(box)
+            if box_rt.status != "RUNNING" or box_rt.run_number != run:
+                continue  # the run already ended, or a later run replaced it
+            for member in self._members(box):
+                member_ir = self.catalog.jobs[member]
+                if not self._waiting_for_window(box, member_ir):
+                    continue
+                side, _ = self._window_side(member_ir)
+                if side != "inside":
+                    waiting[side].append((box, run, member_ir, cause))
+        for box, run, member_ir, cause in waiting["defer"] + waiting["skip"]:
+            # an earlier skip may have completed this run, and its wakes may
+            # have started the box again. No member can start during the
+            # pass: each is outside its window, so any attempt on it meets
+            # the window gate again.
+            box_rt = self._runtime(box)
+            if box_rt.status == "RUNNING" and box_rt.run_number == run:
+                self._run_window_permits(member_ir, cause)
 
     # ------------------------------------------------------------------ box rules
 

@@ -51,7 +51,7 @@ from dsl41.capacity import CapacityPool
 from dsl41.derive import derive_graph
 from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
-from dsl41.oracle_state import CapacityReservation, Event, JobRuntime
+from dsl41.oracle_state import CapacityReservation, CarriedRows, Event, JobRuntime
 from dsl41.period import RuntimeProfile, job_fingerprints
 
 T0 = datetime(2026, 8, 20, 2, 0)
@@ -1431,3 +1431,75 @@ def test_non_workday_replace_is_no_action_when_rule_excludes_the_holcal_date() -
             "calendar:cal"
             not in ClassificationGraph(Baseline(catalog=bare), Baseline(catalog=shielded)).changed
         ), code
+
+
+_MOVE_C1 = (
+    "insert_job: b\njob_type: b\n\n"
+    "insert_job: j\njob_type: c\ncommand: j\nmachine: m1\nbox_name: b\n"
+    'date_conditions: 1\ndays_of_week: all\nstart_times: "02:00"\n'
+    'run_window: "02:00-04:00"\n\n'
+    "insert_job: w\njob_type: c\ncommand: w\nmachine: m1\nbox_name: b\n\n"
+    "insert_job: newbox\njob_type: b\n\n"
+    "insert_job: nm\njob_type: c\ncommand: n\nmachine: m1\nbox_name: newbox\n"
+)
+_MOVE_C2 = _MOVE_C1.replace(
+    "machine: m1\nbox_name: b\n" + "date_conditions",
+    "machine: m1\nbox_name: newbox\n" + "date_conditions",
+)
+
+
+def test_sem33_a_deferral_does_not_follow_its_job_into_another_box() -> None:
+    """SEM-33 (DL-246) across a rebaseline: box `b` run one defers `j` to
+    02:00. `b` completes, runs again while `j` is held, and completes. The
+    rebaseline moves `j` into `newbox`, whose first run starts while `j` is
+    still held. At 02:00 the old deferral fires and is refused: it was
+    queued in `b`, so it does not start `j` in `newbox`."""
+    assert _MOVE_C2 != _MOVE_C1
+    day = datetime(2026, 7, 1)
+
+    def at(hour: int, minute: int = 0, *, days: int = 0) -> datetime:
+        return day + timedelta(days=days, hours=hour, minutes=minute)
+
+    closing = Oracle(lower_source(_MOVE_C1))
+    for event in (
+        Event(at=at(16, 5), kind="STARTJOB", payload={"job": "b"}),
+        Event(at=at(16, 30), kind="STATUS", payload={"job": "w", "status": "SUCCESS"}),
+        Event(at=at(17, 0), kind="STATUS", payload={"job": "b", "status": "SUCCESS"}),
+        Event(at=at(17, 5), kind="ON_HOLD", payload={"job": "j"}),
+        Event(at=at(17, 10), kind="FORCE_STARTJOB", payload={"job": "b"}),
+        Event(at=at(17, 15), kind="STATUS", payload={"job": "w", "status": "SUCCESS"}),
+        Event(at=at(17, 20), kind="STATUS", payload={"job": "b", "status": "SUCCESS"}),
+    ):
+        closing.feed(event)
+    assert [t.transition for t in closing.trace() if t.job == "j"] == [
+        "RUN_WINDOW_DEFER",
+        "ON_HOLD",
+    ]
+    assert closing.pending_timers() == []  # the box ran again: the deferral is stale
+    verdict = classify(
+        closing=_side(_MOVE_C1),
+        opening=_side(_MOVE_C2),
+        carried=carried_from_oracle(closing, now=at(17, 20)),
+    ).by_job["j"]
+    assert verdict.verdict != "R"
+    store = closing.store
+    opening = Oracle(
+        lower_source(_MOVE_C2),
+        carried=CarriedRows(
+            jobs=dict(store.job),
+            globals_=dict(store.globals_),
+            timers=tuple(store.timers()),
+            timer_seq=store.timer_seq,
+            now=at(17, 20),
+        ),
+    )
+    opening.feed(Event(at=at(18, 0), kind="STARTJOB", payload={"job": "newbox"}))
+    opening.feed(Event(at=at(18, 30), kind="OFF_HOLD", payload={"job": "j"}))
+    opening.feed(
+        Event(at=at(2, 0, days=1), kind="STATUS", payload={"job": "nm", "status": "SUCCESS"})
+    )
+    j = [t for t in opening.trace() if t.job == "j"]
+    assert [t.transition for t in j] == ["OFF_HOLD", "START_REFUSED"]
+    assert "queued in box 'b', and the job is now in box 'newbox'" in j[-1].cause
+    assert opening.store.job["j"].status == "INACTIVE"
+    assert opening.store.job["newbox"].status == "RUNNING"  # j still owes newbox its run

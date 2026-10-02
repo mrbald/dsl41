@@ -495,7 +495,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             klass=SUPPORTED,
             cite="SEM-33",
             effect="a gate, not a trigger: a start outside the window defers or drops,"
-            " never fires early",
+            " never fires early; a box start decides it for a waiting member (DL-246)",
             trigger=_job(HOLCAL_BLOCK, date_conditions="1", run_window='"09:00-10:00"'),
         ),
         _row(
@@ -848,6 +848,25 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             " undocumented and no label was opened for it",
             trigger=_job(date_conditions="1", days_of_week="all", run_window='"09:00-10:00"'),
             quiet=_job(date_conditions="1", days_of_week="all", run_window='"06:00-07:00"'),
+        ),
+        _row(
+            surface="job_attr",
+            member="run_window",
+            facet="box-start-defer",
+            klass=PROVISIONAL,
+            cite="SEM-33, DL-246, oracle.Oracle._decide_windows_at_box_start",
+            effect="the STARTJOB a box start defers to the next window opening is a start"
+            " attempt with a schedule tick's standing, through the normal gates; how it"
+            " composes with the member's own start_times is undocumented, at most one start"
+            " per box run still holds, and no label was opened for it",
+            trigger=_job(
+                BOX_BLOCK,
+                box_name="BOX0",
+                date_conditions="1",
+                days_of_week="all",
+                run_window='"09:00-10:00"',
+            ),
+            quiet=_job(BOX_BLOCK, box_name="BOX0"),
         ),
         _row(
             surface="job_attr",
@@ -3282,7 +3301,8 @@ TRACE_MARKER_ROWS: tuple[Row, ...] = (
         member="RUN_WINDOW_SKIP",
         klass=SUPPORTED,
         cite="ir-design ss7, oracle.Oracle._record",
-        effect="a start outside the run_window, closer to the previous close, was dropped",
+        effect="a start outside the run_window, closer to the previous close, was dropped;"
+        " the job reads INACTIVE (DL-246)",
         trigger=_scn(
             _job(date_conditions="1", days_of_week="all", run_window='"06:00-07:00"'),
             "0 STARTJOB job=J0",
