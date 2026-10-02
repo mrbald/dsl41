@@ -406,9 +406,11 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             surface="job_attr",
             member="job_load",
             klass=SUPPORTED,
-            cite="DL-50",
-            effect="the machine-load units a start holds against the machine's max_load",
-            trigger=_job(job_load="1"),
+            cite="DL-50, DL-247",
+            effect="the machine-load units a start holds against the machine's max_load;"
+            " only a positive priority checks them, while an unset or zero priority and a"
+            " forced start skip the check and still hold the units",
+            trigger=_job(job_load="1", priority="1"),
         ),
         _row(
             surface="job_attr",
@@ -418,8 +420,9 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             cite="DL-50, ir.JobIR.job_load_units",
             label="Qr4",
             sites=("ir.JobIR.job_load_units#1",),
-            effect="a job with no job_load demands zero machine-load units, so an unsized"
-            " job never queues behind max_load",
+            effect="a job with no job_load demands zero machine-load units, so it never"
+            " waits for load itself; with a positive priority it can still queue behind a"
+            " higher-priority load waiter on its machine",
             trigger=_job(),
             quiet=_job(job_load="1"),
         ),
@@ -427,25 +430,27 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             surface="job_attr",
             member="priority",
             klass=SUPPORTED,
-            cite="DL-50",
-            effect="orders the QUE_WAIT queue; an undeclared priority sorts behind every"
-            " declared one",
+            cite="DL-50, DL-247",
+            effect="orders the QUE_WAIT queue, lower number first; a positive priority"
+            " makes a start check machine load, and a job waiting for load blocks every"
+            " lower positive priority on its machine",
             trigger=_job(priority="10"),
         ),
         _row(
             surface="job_attr",
             member="priority",
-            facet="direction",
+            facet="unset-order",
             klass=PROVISIONAL,
-            cite="DL-50, capacity.CapacityPool.sorted_waiters",
+            cite="DL-50, DL-247, capacity.CapacityPool.sorted_waiters",
             label="Qr2",
             sites=(
                 "capacity.CapacityPool.sorted_waiters.key#1",
                 "ir.JobIR.priority_value#1",
             ),
-            effect="a lower priority number is assumed to mean higher priority",
-            trigger=_job(priority="1"),
-            quiet=_job(priority="99"),
+            effect="a resource waiter with no priority is assumed to sort behind every"
+            " declared priority, explicit 0 included, though the vendor default is 0",
+            trigger=_job(RESOURCE_BLOCK, resources="(R0, QUANTITY=1)"),
+            quiet=_job(RESOURCE_BLOCK, resources="(R0, QUANTITY=1)", priority="1"),
         ),
     )
     + (
@@ -905,6 +910,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
                 "insert_job: J1\njob_type: c\ncommand: true\nmachine: M0",
                 condition="s(J1)",
                 job_load="1",
+                priority="1",
             ),
             quiet=_job(
                 "insert_job: J1\njob_type: c\ncommand: true\nmachine: M0", condition="s(J1)"
@@ -2478,8 +2484,8 @@ _MC_JIL = _job(date_conditions="1", start_times='"08:00"', must_complete_times='
 #: machine sized for one, so the second clears its condition gate and queues.
 _QUE_WAIT_JIL = _estate(
     "insert_machine: M0\ntype: a\nnode_name: localhost\nmax_load: 1",
-    "insert_job: J0\njob_type: c\ncommand: true\nmachine: M0\njob_load: 1",
-    "insert_job: J1\njob_type: c\ncommand: true\nmachine: M0\njob_load: 1",
+    "insert_job: J0\njob_type: c\ncommand: true\nmachine: M0\njob_load: 1\npriority: 1",
+    "insert_job: J1\njob_type: c\ncommand: true\nmachine: M0\njob_load: 1\npriority: 1",
 )
 
 SCENARIO_ROWS: tuple[Row, ...] = (
@@ -2505,9 +2511,10 @@ SCENARIO_ROWS: tuple[Row, ...] = (
             surface="event",
             member="FORCE_STARTJOB",
             klass=SUPPORTED,
-            cite="ir-design ss7",
-            effect="starts a job past its condition gate; on a non-live ON_ICE or ON_HOLD job"
-            " it clears that flag first, like an OFF_ICE/OFF_HOLD, then starts it (DL-243)",
+            cite="ir-design ss7, DL-247",
+            effect="starts a job past its condition gate and its machine's load limit;"
+            " on a non-live ON_ICE or ON_HOLD job it clears that flag first, like an"
+            " OFF_ICE/OFF_HOLD, then starts it (DL-243); named resources still gate it",
             trigger=_scn(BASE_JIL, "0 FORCE_STARTJOB job=J0"),
         ),
         _row(

@@ -1624,6 +1624,26 @@ def test_preflight_resources_refuses_duplicate_and_unsatisfiable(monkeypatch) ->
     assert refused == {"dup", "big"}
 
 
+def test_preflight_resources_refuses_a_positive_priority_load_above_max_load(monkeypatch) -> None:
+    """DL-247: a job_load above its machine's max_load at a positive priority
+    can never fit, and as a load waiter it would block every lower priority on
+    that machine forever. Priority 0 and an unset priority skip the load
+    check, so the same load there is not refused; nor is a load that fits."""
+    monkeypatch.setattr(socket_mod, "getfqdn", lambda *a: "test.host")
+    text = (
+        "insert_machine: localhost\ntype: a\nnode_name: localhost\nmax_load: 1\n\n"
+        "insert_job: over\njob_type: c\ncommand: x\nmachine: localhost\njob_load: 2\npriority: 1\n\n"
+        "insert_job: zero\njob_type: c\ncommand: x\nmachine: localhost\njob_load: 2\npriority: 0\n\n"
+        "insert_job: unset\njob_type: c\ncommand: x\nmachine: localhost\njob_load: 2\n\n"
+        "insert_job: fits\njob_type: c\ncommand: x\nmachine: localhost\njob_load: 1\npriority: 2\n"
+    )
+    items = preflight(lower_source(text))
+    refused = {i.job for i in items if i.code == "resources" and i.severity == "ERROR"}
+    assert refused == {"over"}
+    [item] = [i for i in items if i.job == "over"]
+    assert "max_load=1" in item.message and "QUE_WAIT forever" in item.message
+
+
 def test_preflight_resources_clean_without_load_priority_or_resources() -> None:
     text = "insert_job: rl0\njob_type: c\ncommand: x\nmachine: localhost\n"
     items = preflight(lower_source(text))

@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Literal
 from dsl41.oracle_state import CapacityReservation, ReleasePolicy
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from dsl41.ir import CatalogIR, JobIR, ResourceIR, ResourceRef
     from dsl41.oracle_state import JobRuntime
@@ -66,6 +66,9 @@ FREE_CODES = frozenset(_FREE_POLICY)
 _THRESHOLD = "T"
 _DEPLETABLE = "D"
 
+#: The key prefix of a machine-load bucket; `r:` prefixes a resource.
+_MACHINE = "m:"
+
 
 class CapacityPool:
     """The DL-50 capacity subsystem of one Oracle: the sized buckets (machine
@@ -87,7 +90,7 @@ class CapacityPool:
         for mname, machine in catalog.machines.items():
             cap = _safe_units(machine.max_load_units)
             if cap is not None:
-                self._bucket_cap[f"m:{mname}"] = cap
+                self._bucket_cap[f"{_MACHINE}{mname}"] = cap
         for rname, resource in catalog.resources.items():
             cap = _safe_units(resource.capacity_units)
             if cap is not None:
@@ -102,15 +105,16 @@ class CapacityPool:
 
         One entry per bucket: the groups a job states on ONE resource are
         folded by `job_demand`, which the explore page calls for the same
-        job (DL-193). A machine bucket is stated once and needs no fold."""
+        job (DL-193). A machine bucket is stated once and needs no fold.
+
+        DL-247: the machine entry is here whatever the priority, because the
+        load is held whatever the priority: "even when jobs have a priority
+        of 0, AutoSys Workload Automation tracks job loads on each machine".
+        Whether the entry is CHECKED is the Oracle's call (`checks_load`)."""
         vector: list[DemandEntry] = []
-        spec = job_ir.exec_
-        if spec is not None and spec.machine is not None:
-            key = f"m:{spec.machine}"
-            if key in self._bucket_cap:
-                load = _safe_units(job_ir.job_load_units) or 0  # Qr4: absent -> 0
-                if load > 0:
-                    vector.append((key, load, "acquire", "completion"))
+        load_entry = self._machine_entry(job_ir)
+        if load_entry is not None:
+            vector.append(load_entry)
         groups: dict[str, list[ResourceRef]] = {}
         for ref in job_ir.resources:
             groups.setdefault(ref.name, []).append(ref)
@@ -121,6 +125,26 @@ class CapacityPool:
             units, mode, policy = job_demand(resource_type(self.catalog.resources.get(name)), refs)
             vector.append((key, units, mode, policy))
         return vector
+
+    def _machine_key(self, job_ir: JobIR) -> str | None:
+        """The load bucket of the job's machine, or None when the machine is
+        unset or has no max_load (AutoSys's unlimited default)."""
+        spec = job_ir.exec_
+        if spec is None or spec.machine is None:
+            return None
+        key = f"{_MACHINE}{spec.machine}"
+        return key if key in self._bucket_cap else None
+
+    def _machine_entry(self, job_ir: JobIR) -> DemandEntry | None:
+        """The machine-load entry of a start, or None when it takes no load:
+        no sized machine, or no `job_load` (Qr4: absent is 0)."""
+        key = self._machine_key(job_ir)
+        if key is None:
+            return None
+        load = _safe_units(job_ir.job_load_units) or 0
+        if load <= 0:
+            return None
+        return (key, load, "acquire", "completion")
 
     def used(self, rows: Mapping[str, JobRuntime], consumed: Mapping[str, int]) -> dict[str, int]:
         """Units unavailable per bucket: those PERMANENTLY spent plus those
@@ -145,8 +169,64 @@ class CapacityPool:
     ) -> bool:
         """True iff every bucket has room for its demand (gate and acquire share
         the same free>=units test; keys are guaranteed sized)."""
+        if not vector:
+            return True
         used = self.used(rows, consumed)
         return all(used.get(key, 0) + units <= self._bucket_cap[key] for key, units, _, _ in vector)
+
+    def load_blocked(
+        self,
+        job_ir: JobIR,
+        rows: Mapping[str, JobRuntime],
+        consumed: Mapping[str, int],
+        counts: Callable[[str], bool],
+    ) -> bool:
+        """DL-247: True when a queued job of strictly higher priority waits for
+        load on this job's machine. The vendor rule: "A job in the QUE_WAIT
+        state for one machine attribute value automatically blocks all the
+        lower priority jobs that specify the same machine attribute value.
+        It does not automatically block higher or equal priority jobs ... or
+        a job that specifies a different machine attribute value."
+
+        The blocked job needs a positive priority and a sized machine; it
+        need not state a `job_load`, since priority is itself a
+        load-balancing attribute. A priority-0 or unset job is never blocked.
+        The blocker is a waiter that checks load (positive priority), loads
+        the same machine, and whose own load does not fit now; one whose load
+        fits waits on a named resource, and the vendor says such a job does
+        not block on the machine. `counts` says which waiters the caller
+        counts as queued: the Oracle leaves out a held waiter and one whose
+        box no longer runs."""
+        priority = job_priority(job_ir)
+        key = self._machine_key(job_ir)
+        if priority <= 0 or key is None:
+            return False
+        used = self.used(rows, consumed).get(key, 0)
+        for name, row in rows.items():
+            other = self.catalog.jobs.get(name)
+            if row.waiter_seq is None or name == job_ir.name or other is None:
+                continue
+            other_entry = self._machine_entry(other)
+            if other_entry is None or other_entry[0] != key:
+                continue
+            if not 0 < job_priority(other) < priority:
+                continue
+            if used + other_entry[1] <= self._bucket_cap[key]:
+                continue
+            if counts(name):
+                return True
+        return False
+
+    def has_load_waiters(self, rows: Mapping[str, JobRuntime]) -> bool:
+        """True when a queued job checks machine load on a sized machine:
+        the only kind of job a priority block can hold (DL-247)."""
+        for name, row in rows.items():
+            job_ir = self.catalog.jobs.get(name)
+            if row.waiter_seq is None or job_ir is None:
+                continue
+            if checks_load(job_ir) and self._machine_key(job_ir) is not None:
+                return True
+        return False
 
     @staticmethod
     def holds(row: JobRuntime) -> bool:
@@ -161,8 +241,10 @@ class CapacityPool:
 
         def key(item: tuple[str, int]) -> tuple[int, int, str]:
             job, seq = item
-            # PENDING: Qr2 -- lower priority number == higher priority assumed;
-            # unset sorts last. enqueue-seq then name make the order total.
+            # PENDING: Qr2 -- an unset priority sorts last, behind every
+            # declared one, explicit 0 included, though the vendor default is
+            # 0. Lower number first is documented (DL-247); enqueue-seq then
+            # name make the order total.
             #
             # A waiter the catalog does not have takes that same "unset"
             # priority rather than raising KeyError. period-model ss10
@@ -176,6 +258,28 @@ class CapacityPool:
 
         waiting = [(job, row.waiter_seq) for job, row in rows.items() if row.waiter_seq is not None]
         return [job for job, _ in sorted(waiting, key=key)]
+
+
+def without_machine_load(vector: list[DemandEntry]) -> list[DemandEntry]:
+    """The vector less its machine-load entry: what a start that skips the
+    load check tests (DL-247). The start still reserves the whole vector."""
+    return [entry for entry in vector if not entry[0].startswith(_MACHINE)]
+
+
+def job_priority(job_ir: JobIR) -> int:
+    """A job's priority as load queueing reads it: the declared number, or 0
+    when unset or malformed, the vendor default (DL-247). A negative number is
+    outside the vendor's range; it compares as itself and checks no load."""
+    value = _safe_units(job_ir.priority_value)
+    return value if value is not None else 0
+
+
+def checks_load(job_ir: JobIR) -> bool:
+    """DL-247: whether a start tests its machine load. Only a positive
+    priority does: "The scheduler ignores any load unit values defined for
+    the job or machine when the job has a priority value of zero". The load
+    of a job that skips the test is still held (`demand_vector`)."""
+    return job_priority(job_ir) > 0
 
 
 def to_reservations(vector: list[DemandEntry]) -> tuple[CapacityReservation, ...]:

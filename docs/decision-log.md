@@ -15826,3 +15826,135 @@ relitigate an entry; append a new one.
   `test_sem33_force_start_on_a_held_standalone_job_meets_the_skip` now
   expects the OFF_HOLD record and the cleared flag; the skip itself is
   unchanged.
+- DL-247 Machine load is checked only for a positive priority but held
+  by every start, and a load waiter blocks lower priorities on its machine
+  (2026-10-02; capacity.py, oracle.py, ir.py, runner_preflight.py,
+  runner_ledger.py, simulation_register_rows.py; autosys-semantics ss5
+  load-balancing row; runner-design ss8)
+  THE VENDOR. TechDocs 24.2. The priority attribute page: "A lower number
+  attribute value indicates a higher priority. If you do not set the
+  priority attribute or the priority is set to 0, the job is not queued
+  behind other jobs and runs immediately on a machine if resource
+  dependencies permit or if the job has no resource dependencies. The
+  scheduler ignores any load unit values defined for the job or machine
+  when the job has a priority value of zero." The default is 0. How AutoSys
+  Workload Automation Queues Jobs: "However, even when jobs have a
+  priority of 0, AutoSys Workload Automation tracks job loads on each
+  machine so that jobs with non-zero priorities can be queued." The
+  job_load attribute page: "When you force a job to start, for example by
+  using the sendevent command to issue a FORCE_STARTJOB event, the job runs
+  even if its load exceeds the machine's max_load value." The queueing
+  page again: "A job in the QUE_WAIT state for one machine attribute value
+  automatically blocks all the lower priority jobs that specify the same
+  machine attribute value. It does not automatically block higher or equal
+  priority jobs that specify the same machine attribute value or a job
+  that specifies a different machine attribute value." Its first sentence
+  lists priority among the load balancing attributes. It works an example
+  on machine cheetah, max_load 80: JobB (50) and JobC (30) run, JobA (load
+  50, priority 70) and JobD (load 30, priority 80) wait. "If JobC finishes
+  first, only 30 load units become available, so JobA and JobD remain
+  queued until JobB completes."
+  THE READING. The two priority-0 sentences agree. "Ignores any load unit
+  values" governs the job's own start: it skips the load check. "Tracks
+  job loads" governs everyone else: its load counts against the machine
+  while it runs. This is the FORCE rule too.
+  THE DEFECTS. A job with no priority, or priority 0, queued behind a full
+  machine, and so did a FORCE_STARTJOB of a job with a positive priority.
+  In the cheetah example with JobC first, the oracle kept JobA queued but
+  started JobD. A new lower-priority arrival started beside a queued
+  higher-priority job whenever its own load fit.
+  THE BEHAVIOR. One: every start reserves its `job_load` on a sized
+  machine, whatever its priority. Only a start with a positive priority
+  checks it. An unset, zero or malformed priority reads as 0, the vendor
+  default; such a start may take the machine over max_load, and its
+  `resources:` still gate it. Two: a FORCE_STARTJOB also checks the named
+  resources only, and also reserves its load. Force belongs to the event,
+  not the row: a forced job that queues on a named resource is readmitted
+  by the ordinary test, load included. Three: a job blocks another when it
+  is QUE_WAIT, not held, not a member of a box that stopped running, has a
+  positive priority, loads the same machine, has a strictly lower
+  priority number, and its own load does not fit now. A queued job whose
+  load fits waits on a named resource; the vendor says such a job does
+  "not automatically block lower priority jobs that specify the same
+  machine attribute value". The blocked job needs a positive priority on
+  that machine and nothing more: priority is a load balancing attribute,
+  so a job with no `job_load` is blocked too. Priority 0 and an unset
+  priority are never blocked. The test runs on a fresh start and in the
+  readmission scan. Four: a job leaving QUE_WAIT, and a waiter put
+  ON_HOLD, wake the queue, since either can lift a block with no capacity
+  freed. An admission, QUE_WAIT to STARTING, is not such a wake: the scan
+  that made it sees it on its next pass. A box that leaves RUNNING lifts
+  its queued members' blocks at once, and owes an admit-only scan when
+  any queued job checks machine load. The owed scan runs at the waiter
+  step of the outermost transition, after that transition's release and
+  its referencer wakes (DL-50's order), or at the end of an INACTIVE
+  batch; any scan that runs first pays it. It admits other waiters that
+  now fit and are no longer blocked, and leaves every member of a stopped
+  box queued until a release cancels it, as DL-158 and DL-54 require. A
+  release inside that scan asks for a full scan, and the running loop
+  makes its next pass a full one, so the release still cancels. Without
+  the scan a job blocked only by such a member could wait with nothing
+  left to release, and a later arrival could overtake it. Five: preflight refuses a
+  non-pool job whose positive priority comes with a `job_load` above its
+  machine's `max_load`, as it refuses a QUANTITY above a resource's
+  amount. Such a job can never fit, and as a load waiter it would block
+  every lower priority on that machine forever (DL-59). Priority 0 and an
+  unset priority skip the check and are exempt. The queue still has no
+  resource hold-and-wait; priority blocking can starve a lower priority
+  only while a higher-priority waiter cannot yet fit.
+  SUPERSEDED. In DL-50 (4), "Waiters admit greedily in (priority,
+  enqueue-seq, name) order" holds for the order only: a waiter whose load
+  does not fit now stops lower priorities on its machine, where the greedy
+  scan passed them. In DL-50 (8), Qr2's "priority direction
+  (lower-number-higher assumed ..." is now the documented direction, and
+  an unset priority no longer checks machine load. DL-50 itself is not
+  edited.
+  RECORDED CHOICES. A FORCE_STARTJOB on a job already in QUE_WAIT stays
+  refused as already queued; the vendor advises a CHANGE_PRIORITY event to
+  0 instead, which is not modelled. A negative priority reads as 0 for
+  load and is not refused. The preflight WARN for a `job_load` on a pool
+  machine still fires at priority 0. A queued member of a box that
+  restarts keeps its old QUE_WAIT row, since the DL-242 reset skips live
+  and queued rows, and it blocks again; that is older behavior, not
+  changed here. The new queue wakes also change the trace of an estate
+  with no load or priority: a KILLJOB on an unrelated queued job now
+  scans the queue and cancels a queued member of a stopped box at once. A
+  blocked job with no `job_load` is admitted with the cause "admitted:
+  resources acquired (DL-50)" although it acquired nothing; the cause
+  text is left as it is.
+  STILL OPEN. Qr2 keeps one pin: among resource waiters an unset priority
+  sorts behind every declared one, explicit 0 included, though the vendor
+  default is 0. The queueing page's named-resource blocking ("A job in
+  the RESWAIT state for one resource name automatically blocks all the
+  lower priority jobs that specify the same resource name") is not
+  modelled. Nor is the RESWAIT-after-load corner, where a job whose load
+  passed waits on a resource without holding load. A forced job's reuse
+  of resources it already holds is not modelled. The queueing page says a
+  job with resource dependencies does not use the load-limiting process:
+  "Instead, the resource manager (AutoSys Workload Automation) is used to
+  select the best machine to run the job." That is not modelled; dsl41
+  checks load for a job that also states `resources:`, as before. Pools keep DL-49 and
+  Qr3's unmodelled throttle and are outside both rules.
+  VERSION. `STATE_MACHINE_VERSION` moves to 8: a replay with machine-load
+  demand or priorities admits differently, and a replay with queued jobs
+  can wake and cancel differently.
+  Tests: test_oracle.py `test_dl247_*` (each contender kind on a full
+  machine and against an exhausted named resource, a forced start's load
+  still held, unset and zero skipping the check but holding load, a
+  running priority-0 job against positive and zero arrivals, the cheetah
+  example in both completion orders, the blocking matrix of lower, equal,
+  higher, zero, unset and another machine, a positive priority with no
+  `job_load` blocked or not, the blocked arrival's later start, a block
+  lifted by KILLJOB, ON_ICE and ON_HOLD, a box stopping with a blocking
+  member queued and a later arrival after it, the box-stop scan after a
+  release and a referencer, a release inside that scan, a held waiter, a
+  waiter short only on a named resource); test_resources.py
+  `test_dl247_checked_starts_fit_and_respect_priority_blocking`, a
+  property over arrivals, forced arrivals and completions that checks
+  each checked start against the rows; test_runner_scheduler.py
+  `test_preflight_resources_refuses_a_positive_priority_load_above_max_load`.
+  Rewritten to the vendor rule:
+  `test_dl50_machine_load_throttles_by_job_load_vs_max_load` (its jobs
+  now set priority 1), and the register's QUE_WAIT and Qr6 fixtures,
+  which set priority 1 so they still queue on load. The Qr2 register row
+  moves from facet `direction` to `unset-order`.

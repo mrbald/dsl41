@@ -125,8 +125,8 @@ fails the suite.
 | job_attr:heartbeat_interval | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
 | job_attr:interactive | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | no interactive terminal is attached to the child process |
 | job_attr:job_class | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | job classes are not implemented; no class quota gates a start |
-| job_attr:job_load | supported | DL-50 | - |  |  |  | generic | the machine-load units a start holds against the machine's max_load |
-| job_attr:job_load#absent | provisional | DL-50, ir.JobIR.job_load_units | Qr4 | yes |  |  | none | a job with no job_load demands zero machine-load units, so an unsized job never queues behind max_load |
+| job_attr:job_load | supported | DL-50, DL-247 | - |  |  |  | generic | the machine-load units a start holds against the machine's max_load; only a positive priority checks them, while an unset or zero priority and a forced start skip the check and still hold the units |
+| job_attr:job_load#absent | provisional | DL-50, ir.JobIR.job_load_units | Qr4 | yes |  |  | none | a job with no job_load demands zero machine-load units, so it never waits for load itself; with a positive priority it can still queue behind a higher-priority load waiter on its machine |
 | job_attr:job_terminator | supported | SEM-14 | - |  |  |  | generic | this member is terminated when its box fails |
 | job_attr:job_type | supported | SEM-10 | - |  |  |  | generic | selects the modelled job kind: CMD, BOX or FW |
 | job_attr:machine | supported | DL-49, DL-52 | - |  |  |  | generic | names the machine the job runs on; the resolver refuses a foreign one; inert on a BOX (SEM-10) |
@@ -151,8 +151,8 @@ fails the suite.
 | job_attr:notification_template | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
 | job_attr:owner | refused | runner_preflight._owner_preflight | - |  |  |  | generic | an owner other than the invoking user is refused at preflight: there is no setuid; inert on a BOX (SEM-10) |
 | job_attr:permission | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | job permissions are not enforced; the run uses the invoking user's own |
-| job_attr:priority | supported | DL-50 | - |  |  |  | generic | orders the QUE_WAIT queue; an undeclared priority sorts behind every declared one |
-| job_attr:priority#direction | provisional | DL-50, capacity.CapacityPool.sorted_waiters | Qr2 | yes |  |  | none | a lower priority number is assumed to mean higher priority |
+| job_attr:priority | supported | DL-50, DL-247 | - |  |  |  | generic | orders the QUE_WAIT queue, lower number first; a positive priority makes a start check machine load, and a job waiting for load blocks every lower positive priority on its machine |
+| job_attr:priority#unset-order | provisional | DL-50, DL-247, capacity.CapacityPool.sorted_waiters | Qr2 | yes |  |  | none | a resource waiter with no priority is assumed to sort behind every declared priority, explicit 0 included, though the vendor default is 0 |
 | job_attr:profile | supported | runner_adapters._build_run_spec | - |  |  |  | generic | sourced before the command runs (`. <profile> && <command>`); inert on a BOX (SEM-10) |
 | job_attr:profile#sourcing-failure | provisional | runner_adapters._build_run_spec | E5 | yes |  |  | none | a profile that fails to source fails the job with sh's exit code |
 | job_attr:resources | supported | DL-21, DL-50 | - |  |  |  | generic | the resource groups a start must satisfy before it may run |
@@ -520,7 +520,7 @@ fails the suite.
 | id | class | cite | label | marker | protocol | bound | detector | effect |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | event:DISARM | supported | ir-design ss7 | - |  |  |  | generic | drops a latched tick; no status moves, nothing wakes |
-| event:FORCE_STARTJOB | supported | ir-design ss7 | - |  |  |  | generic | starts a job past its condition gate; on a non-live ON_ICE or ON_HOLD job it clears that flag first, like an OFF_ICE/OFF_HOLD, then starts it (DL-243) |
+| event:FORCE_STARTJOB | supported | ir-design ss7, DL-247 | - |  |  |  | generic | starts a job past its condition gate and its machine's load limit; on a non-live ON_ICE or ON_HOLD job it clears that flag first, like an OFF_ICE/OFF_HOLD, then starts it (DL-243); named resources still gate it |
 | event:KILLJOB | supported | ir-design ss7 | - |  |  |  | generic | terminates a running job, or dequeues and terminates a queued one |
 | event:KILLJOB#queued | provisional | DL-50, oracle.Oracle._dispatch | Qr5 |  |  |  | none | killing a queued job dequeues it, consumes its arm and TERMINATEs it |
 | event:MUST_COMPLETE_ALARM | supported | SEM-34 | - |  |  |  | generic | emitted when a must_complete deadline passes with the run still live |
