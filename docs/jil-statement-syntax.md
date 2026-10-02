@@ -30,19 +30,22 @@ default there.
    unescapes `\:` inside general values (command, std_*_file) is not known; value lanes stay
    escaped until a live instance gives the answer.
 3. **Statement boundary**: a line whose key is a subcommand starts a new statement. The
-   recognized set is the complete TechDocs 12.1 inventory (DL-29): `insert_job`,
-   `update_job`, `delete_job`, `rename_job`, `delete_box`, `insert_machine`,
-   `update_machine`, `delete_machine`, `insert_global`, `delete_global`, `override_job`,
-   `insert_xinst`, `update_xinst`, `delete_xinst`, `insert_blob`, `delete_blob`,
-   `insert_glob`, `delete_glob`, `insert_resource`, `update_resource`, `delete_resource`,
-   `insert_monbro`, `update_monbro`, `delete_monbro`, `insert_job_type`,
-   `update_job_type`, `delete_job_type`, `insert_connectionprofile`,
-   `update_connectionprofile`, `delete_connectionprofile`; plus the autocal_asc
-   calendar-export statements `calendar`, `cycle`, `extended_calendar` (rule 11, DL-36) and
-   the accepted `ext_calendar` spelling (DL-57). All attribute lines that follow belong to
-   this statement until the next subcommand or EOF. An attribute line before the first
-   statement is a scanner error. Unknown keys are attributes, never boundaries (forward
-   compatibility). There is one exception: a key that matches the subcommand shape
+   recognized set tracks the TechDocs 12.1 JIL subcommand pages (DL-29), each added as it was
+   found: `insert_job`, `update_job`, `delete_job`, `rename_job`, `delete_box`,
+   `insert_machine`, `update_machine`, `delete_machine`, `insert_global`, `delete_global`,
+   `override_job`, `insert_xinst`, `update_xinst`, `delete_xinst`, `insert_blob`,
+   `update_blob`, `delete_blob`, `insert_glob`, `update_glob`, `delete_glob`,
+   `insert_resource`, `update_resource`, `delete_resource`, `insert_monbro`, `update_monbro`,
+   `delete_monbro`, `insert_job_type`, `update_job_type`, `delete_job_type`,
+   `insert_connectionprofile`, `update_connectionprofile`, `delete_connectionprofile`; plus
+   the autocal_asc calendar-export statements `calendar`, `cycle`, `extended_calendar` (rule
+   11, DL-36) and the accepted `ext_calendar` spelling (DL-57). This set was once claimed
+   complete against TechDocs 12.1 (DL-29); `update_blob` and `update_glob` were missing from
+   it (DL-245), so the claim is retracted -- treat the list above as the verbs found so
+   far, not a proof of completeness. All attribute lines that follow belong to this statement
+   until the next subcommand or EOF. An attribute line before the first statement is a
+   scanner error. Unknown keys are attributes, never boundaries (forward compatibility).
+   There is one exception: a key that matches the subcommand shape
    `/(insert|update|delete|override|rename)_\w+/i` but is not in the recognized set is a
    scanner error (DL-18, DL-27). A missed statement boundary folded into the previous
    statement is silent *structural* loss, strictly worse than a loud stop. No documented JIL
@@ -183,6 +186,46 @@ default there.
     multi-line trailing comment on the `calendar:` line or on one of its attributes does not
     break date-body contiguity: the atomic scan consumes the body lines with their statement
     line, so they are trailing trivia, not comment lines between rows.
+12. **Literal blob region** (DL-245): the vendor's "JIL Syntax Rules" page, its own rule 8
+    (a different document from this one's numbering -- this scanner rule is 12, not 8), reads:
+    "You can use the blob_input attribute to enter multiline text manually... The blob_input
+    attribute has the following form: `blob_input:<auto_blobt> this is a multi-line
+    text</auto_blobt>`. Use the auto_blobt meta-tags to indicate the beginning and end of
+    multiline text. JIL interprets every character input between the auto_blobt meta-tags
+    literally. This behavior implies that JIL does not enforce any of the previously discussed
+    rules for text that is entered in an open auto_blobt meta-tag." The scanner gates this on
+    the key, and anchors the opener at the value's own start: only a `blob_input:` value that
+    STARTS WITH `<auto_blobt>` opens the region -- a `/* <auto_blobt> */` sitting inside an
+    ordinary closed comment, or a quoted `"<auto_blobt>"`, is not the region and goes through
+    every rule above exactly as an ordinary value does. Once a region opens, every rule above
+    is suspended for its text: no `/*` opens a comment, no `key:`-shaped token is a pair (rule
+    4b) or a statement boundary (rule 3), and no line is blank-line or comment-line trivia. The
+    closer is searched strictly AFTER the opener's own text, so a glued
+    `</auto_blobt><auto_blobt>` on the opening line can never self-close against the opener
+    that follows it (and that shape opens no region at all, failing the start-anchor on
+    whichever line reads it next). The span from the opener through the line holding
+    `</auto_blobt>` becomes part of `blob_input`'s `raw_value` verbatim, `\n`-joined the same
+    way a rule-6 continuation is. A closer on the opening line needs no further lines. Text
+    AFTER the closer, still on the closer's own line, is NOT part of the region: it is an
+    ordinary value tail and goes through the ordinary pipeline -- a trailing comment there
+    still splits off (rule 5), and a `key:`-shaped pair there still gets the loud rule-4b
+    error -- exactly as it would following any other attribute's value. The closer's own `>`
+    counts as a real, non-whitespace character immediately before that tail, even though the
+    tail is scanned as its own string: a `/*` GLUED right after the closer opens nothing
+    (rule 5's own glued-marker rule), so it stays ordinary value text rather than being
+    misread as sitting at a value's own start -- it neither swallows following lines into a
+    comment body nor hides a `key:`-shaped pair from rule 4b. The vendor states a
+    beginning and an end, not an optional end: an opener with no `</auto_blobt>` by EOF is a
+    loud scanner error naming the opener's line, never a silent close-at-EOF. Canonical mode
+    must not trim the lines strictly inside the region (the vendor's "every character...
+    literally" covers trailing whitespace and tabs mid-payload too); only the merged last
+    line, where a tail (if any) lives, gets the ordinary per-line trim rule 6's own continuation
+    values get. The corpus fixture that pins the structural half of this rule (a `blob_input`
+    value whose literal text contains a complete `insert_job:` fragment at column 0, scanning
+    into exactly one statement rather than a phantom second one) is synthetic, hand-written for
+    this rule -- the vendor's own insert_blob examples use plain prose and a JSON payload, never
+    a JIL fragment; the fixture exists to demonstrate that the region cannot start a statement,
+    not to reproduce a vendor example.
 
 ## Corpus policy
 

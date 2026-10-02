@@ -929,6 +929,11 @@ _UNSUPPORTED_SUBCOMMAND_CASES = [
     ("update-job-unsupported", "update_job: j\ncommand: x\n", "not supported by lowering v1"),
     ("insert-global-missing-value", "insert_global: G\n", "missing value attribute"),
     ("insert-xinst-missing-xtype", "insert_xinst: PRD\n", "missing xtype attribute"),
+    # DL-245: update_blob/update_glob now scan as statement boundaries;
+    # lowering refuses them through the same generic blob/glob-out-of-scope
+    # message insert_blob/insert_glob already get (ir.py's _Lowerer.run).
+    ("update-blob-refused", "update_blob: X0\nblob_input: v\n", "blob/glob"),
+    ("update-glob-refused", "update_glob: X0\nblob_mode: text\n", "blob/glob"),
 ]
 
 

@@ -15588,3 +15588,116 @@ relitigate an entry; append a new one.
   seal digest -- a replay-visible difference, not merely a forward-looking
   one. As with DL-235/DL-241: a v5 log is refused at every door, and a
   live v5 estate drains and a new estate is created (period-model ss11).
+- DL-245 Scanner inventory gains update_blob/update_glob; a literal
+  auto_blobt blob region stops a phantom statement (2026-10-02;
+  src/dsl41/ast_jil.py, src/dsl41/simulation_register_rows.py,
+  docs/jil-statement-syntax.md, docs/simulation-coverage.md,
+  tests/test_ast_fidelity.py, tests/test_ir.py)
+  Two independent scanner gaps, found together while re-checking the
+  rule-3 inventory against the vendor pages (DL-29's "complete TechDocs
+  12.1 inventory" claim). Evidence: "update_blob Subcommand" and
+  "update_glob Subcommand" (AutoSys 12.1 and 24.2) both give
+  `update_blob:`/`update_glob: name` as their own subcommand form, so
+  DL-29's completeness claim was wrong; "insert_blob Subcommand"'s own
+  examples show `blob_input: <auto_blobt>Testing this blob</auto_blobt>`
+  and a JSON payload (never a JIL fragment), and the vendor's "JIL Syntax
+  Rules" page states, in ITS OWN rule 8 (a different document from this
+  one's numbering -- the new scanner rule below is ours, numbered 12),
+  that the auto_blobt meta-tags open a region where "JIL interprets every
+  character input between the auto_blobt meta-tags literally... does not
+  enforce any of the previously discussed rules" there.
+  Change 1: `update_blob` and `update_glob` join `SUBCOMMANDS` (rule 3)
+  next to `insert_blob`/`delete_blob` and `insert_glob`/`delete_glob`.
+  jil-statement-syntax.md rule 3 no longer claims the list is a proven
+  complete TechDocs inventory -- it names the verbs found so far and
+  records the retraction.
+  Change 2: the scanner gates a literal region on the `blob_input` key
+  (the only attribute the vendor's rule 8 names), ANCHORED at the value's
+  own start: only a value that STARTS WITH `<auto_blobt>` opens a region
+  -- a `/* <auto_blobt> */` sitting inside an ordinary closed comment, or
+  a quoted `"<auto_blobt>"`, is not the region and is read by every rule
+  above exactly as an ordinary value (an unanchored first implementation
+  let a comment-embedded `<auto_blobt>` swallow lines up to an unrelated,
+  later `</auto_blobt>`-shaped string, or spuriously error as
+  unterminated when none followed; review caught this before it landed).
+  Once open, the region runs through the line holding `</auto_blobt>`
+  (the closer is searched strictly AFTER the opener's own text, so a
+  glued `</auto_blobt><auto_blobt>` can never self-close against the
+  opener that follows it), consumed the same way a rule-5 block comment
+  is -- the body lines never reach the scan loop as statement boundaries,
+  attributes, or continuations, and no comment/rule-4b detector runs on
+  the text. The span becomes part of `blob_input`'s `raw_value` verbatim,
+  `\n`-joined like a rule-6 continuation. Text AFTER the closer, still on
+  the closer's own line, is NOT part of the region: it goes through the
+  ordinary value-tail pipeline -- a trailing comment there still splits
+  off, and a `key:`-shaped pair there still gets the loud rule-4b error,
+  exactly as for any other attribute value (an earlier draft swallowed
+  that tail into the literal value unconditionally, which silently
+  folded a real second attribute in under permit-unknown; review caught
+  this too). That tail check needed its own anchor: the closer's `>` is a
+  real, non-whitespace character the tail-only string does not carry, so
+  `_split_trailing_comment`/`_mask_closed_blocks` gained an `at_start`
+  flag (default True, unchanged everywhere else) that the blob-tail call
+  sites pass as False, so a `/*` GLUED to the closer opens nothing (rule
+  5) instead of being misread as sitting at a legitimate value start --
+  an earlier draft let such a glued marker swallow following statements
+  into comment text, or hide a real second attribute pair from rule 4b
+  inside a comment that was never actually open; a second review round
+  caught this. An opener with no closer by EOF is a loud `JilParseError`
+  naming the opener's line -- the vendor states a beginning AND an end,
+  so EOF is refused, never silently closed. Canonical mode's ordinary
+  per-line trim is suspended for the lines strictly inside the region (a
+  new `RawAttr.literal_prefix_lines` field marks how many): the vendor's
+  "every character... literally" covers trailing spaces and tabs
+  mid-payload, which a blanket `rstrip()` had been silently discarding
+  (the canonical fixpoint still held on the damaged text, so F2 alone
+  could not have caught it); only the merged last/tail line keeps the
+  ordinary trim.
+  Before this change, a `blob_input` value spanning lines was scanned
+  like any other attribute: a complete `insert_job:` fragment inside the
+  literal text at column 0 was promoted to a phantom third statement,
+  structural silent loss of the same class rule 3's own guard exists to
+  stop, except here the vendor's own rule 8 is what exempts the text, not
+  a missed boundary.
+  Unchanged: lowering still refuses every blob/glob subcommand, including
+  the two new verbs, through the same generic "not supported by lowering
+  v1 ... blob/glob ... out of compile scope" message (`ir._Lowerer.run`,
+  DL-29) -- `update_blob`/`update_glob` fall into that `else` branch
+  automatically once the scanner accepts them, so no lowering code
+  changed. No blob execution or update-merge semantics are modeled by
+  this decision. `src/dsl41/simulation_register_rows.py`'s
+  `_REFUSED_STATEMENTS` gains `update_blob`/`update_glob` rows in the
+  same style as `delete_blob`; `docs/simulation-coverage.md` regenerated
+  with `scripts/render_simulation_coverage.py`.
+  Tests: `tests/test_ast_fidelity.py` (both new verbs scan as boundaries
+  and round-trip F1/F2; a synthetic insert_blob fixture with a phantom
+  `insert_job:` fragment inside its literal blob_input scans into exactly
+  two statements with the literal text intact and round-trips F1/F2; a
+  key-shaped line inside the region does not start a statement; comment-
+  and blank-line-shaped lines inside the region stay literal; a one-line
+  closed region bypasses the rule-4b pair guard; an unterminated region
+  is a loud error naming the opener's line; a comment-embedded or quoted
+  opener does not open a region; a glued closer-then-opener opens no
+  region and the next line scans normally; the closer search starts after
+  the opener's own text; a second pair and a trailing comment after the
+  closer are both still caught/split on the ordinary pipeline; canonical
+  mode preserves blob payload whitespace byte for byte, LF and CRLF
+  source alike; a `/*` GLUED right after the closer does not swallow the
+  following statement into comment text, and does not hide a `key:`-pair
+  from rule 4b either -- the glued-region case and the equivalent plain
+  value get the identical error). A dedicated hypothesis generator
+  (`test_f3_blob_region_payload_and_tail_never_change_statement_count`)
+  draws `blob_input` payloads from `insert_job:`-shaped, comment-shaped,
+  blank, and trailing-whitespace lines, crossed with five tail shapes
+  after the closer (empty, whitespace, a spaced comment, a glued `/*`, an
+  attribute pair), and asserts the statement count, F1 round-trip, and F2
+  fixpoint hold for every tail except the attribute pair, which must
+  raise rule 4b -- the existing F3 fuzzers cannot reach this region at
+  all (`_ATTR_KEY` caps identifiers at 8 characters against the
+  10-character `blob_input`; the soup alphabet has no `<`/`>`), so no
+  change to either existing generator was needed.
+  `tests/test_ir.py` extends `_UNSUPPORTED_SUBCOMMAND_CASES` with
+  `update_blob`/`update_glob`. `tests/test_simulation_register.py` passes
+  against the updated `_REFUSED_STATEMENTS`.
+  No `STATE_MACHINE_VERSION` change: the scanner does not affect oracle
+  replay.
