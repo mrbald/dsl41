@@ -7,13 +7,15 @@ a Scheduler stayed there: those pin the caller, not the ladder.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from dsl41.timezones import (
     alias_table,
+    dst_change,
+    dst_change_near,
     parse_timezone_map,
     resolve_timezone,
     to_local,
@@ -112,12 +114,17 @@ def test_the_conversion_carries_the_dst_edges_at_the_default_fold() -> None:
     `to_utc` does not IMPOSE fold=0; it honours whatever fold the caller's
     datetime carries. The scheduler's ticks are plain `datetime`s, whose fold
     is 0, and that default is what these instants pin. The oracle's window
-    math is the caller that differs: it passes a `to_local` result through
+    math is the caller that differs. Near a documented DST change,
+    `_window_span` passes fold=1 for a window opening in the repeated hour,
+    the vendor's standard-time pass (DL-249). A change of another shape, such
+    as Europe/Berlin's fall change that repeats 02:00-02:59, keeps the
+    wall-time path: it passes a `to_local` result through
     `_next_occurrence`/`_prev_occurrence`, both of which preserve fold, so on
     the second occurrence of an ambiguous local time it hands `to_utc` a
     fold=1 datetime -- and the fold=1 answer is the RIGHT one there, since the
     fold=0 instant is in the past and would make `to_open` negative. The last
-    assertion is that honouring.
+    assertion pins that honouring in `to_utc` itself, on New York's instants;
+    New York's fall change no longer reaches the wall-time path.
 
     Fall back (2026-11-01, America/New_York): 01:30 local happens twice and
     fold=0 is the FIRST, the -04:00 one. Spring forward (2026-03-08): 02:30
@@ -173,3 +180,48 @@ def test_alias_table_is_the_switch_between_the_city_default_and_the_map() -> Non
     assert resolve_timezone("Zurich", alias_table(None)) is not None
     assert resolve_timezone("Zurich", alias_table({})) is not None  # {} -> None -> default on
     assert resolve_timezone("Zurich", alias_table({"dallas": "US/Central"})) is None
+
+
+def test_sem33_dst_change_names_only_the_documented_one_hour_shape() -> None:
+    """DL-249: the vendor's run_window DST rules are scoped by offset shape:
+    one-hour changes where spring skips 02:00-02:59 and fall repeats
+    01:00-01:59. Europe/Berlin's and Australia/Sydney's spring changes have
+    that shape and their fall changes (02:00-02:59 repeated) do not;
+    Europe/London's fall change has it and its spring change (01:00-01:59
+    skipped) does not. A half-hour change, a zone
+    without DST, a fixed offset and no zone are never a change."""
+    ny = ZoneInfo("America/New_York")
+    assert dst_change(date(2026, 3, 8), ny) == "spring"
+    assert dst_change(date(2026, 11, 1), ny) == "fall"
+    assert dst_change(date(2026, 3, 9), ny) is None
+    berlin = ZoneInfo("Europe/Berlin")
+    assert dst_change(date(2026, 3, 29), berlin) == "spring"
+    assert dst_change(date(2026, 10, 25), berlin) is None
+    london = ZoneInfo("Europe/London")
+    assert dst_change(date(2026, 3, 29), london) is None
+    assert dst_change(date(2026, 10, 25), london) == "fall"
+    sydney = ZoneInfo("Australia/Sydney")
+    assert dst_change(date(2026, 10, 4), sydney) == "spring"
+    assert dst_change(date(2026, 4, 5), sydney) is None
+    lord_howe = ZoneInfo("Australia/Lord_Howe")
+    assert dst_change(date(2026, 4, 5), lord_howe) is None
+    assert dst_change(date(2026, 10, 4), lord_howe) is None
+    assert dst_change(date(2026, 3, 8), ZoneInfo("America/Phoenix")) is None
+    assert dst_change(date(2026, 3, 8), timezone(timedelta(hours=-5))) is None
+    assert dst_change(date(2026, 3, 8), None) is None
+
+
+def test_sem33_dst_change_near_looks_two_days_either_side() -> None:
+    """DL-249: the guard that sends a run_window check to the interval path
+    spans the change day and two days either side, never three. No zone is
+    never near a change, and a day outside the calendar's range counts as
+    no change, at both ends."""
+    ny = ZoneInfo("America/New_York")
+    for day in (date(2026, 3, 6), date(2026, 3, 8), date(2026, 3, 10)):
+        assert dst_change_near(day, ny)
+    for day in (date(2026, 3, 5), date(2026, 3, 11)):
+        assert not dst_change_near(day, ny)
+    assert not dst_change_near(date(2026, 3, 8), None)
+    for day in (date.min, date(1, 1, 2), date(9999, 12, 30), date.max):
+        assert not dst_change_near(day, ny)
+        assert not dst_change_near(day, None)

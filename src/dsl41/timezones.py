@@ -34,7 +34,7 @@ import contextlib
 import functools
 import re
 from collections.abc import Mapping
-from datetime import UTC, datetime, timedelta, timezone, tzinfo
+from datetime import UTC, date, datetime, time, timedelta, timezone, tzinfo
 from typing import Literal, NamedTuple
 from zoneinfo import ZoneInfo, available_timezones
 
@@ -171,6 +171,66 @@ def to_utc(local: datetime, tz: tzinfo | None) -> datetime:
     if tz is None:
         return local
     return local.replace(tzinfo=tz).astimezone(UTC).replace(tzinfo=None)
+
+
+#: The two wall hours a documented DST change touches (DL-249): spring
+#: forward skips 02:00-02:59, fall back repeats 01:00-01:59. Both changes
+#: happen at 02:00 local, as in America/New_York.
+MISSING_HOUR = 2
+REPEATED_HOUR = 1
+
+
+def _offsets(local: datetime, tz: tzinfo) -> tuple[timedelta | None, timedelta | None]:
+    """The UTC offset of wall time `local` at fold=0 and at fold=1 (PEP 495)."""
+    return (
+        local.replace(tzinfo=tz, fold=0).utcoffset(),
+        local.replace(tzinfo=tz, fold=1).utcoffset(),
+    )
+
+
+def dst_change(day: date, tz: tzinfo | None) -> Literal["spring", "fall"] | None:
+    """The documented one-hour DST change on local `day`, or None (DL-249).
+
+    "spring": wall 02:00-02:59 does not exist. "fall": wall 01:00-01:59
+    happens twice. Any other shape answers None: a half-hour change, a
+    change at another hour, a zone without DST, a fixed offset."""
+    if tz is None:
+        return None
+    hour = timedelta(hours=1)
+
+    def gap(h: int, m: int) -> bool:
+        before, after = _offsets(datetime.combine(day, time(h, m)), tz)
+        return before is not None and after is not None and after - before == hour
+
+    def repeat(h: int, m: int) -> bool:
+        first, second = _offsets(datetime.combine(day, time(h, m)), tz)
+        return first is not None and second is not None and first - second == hour
+
+    def clean(h: int, m: int) -> bool:
+        first, second = _offsets(datetime.combine(day, time(h, m)), tz)
+        return first == second
+
+    if gap(MISSING_HOUR, 0) and gap(MISSING_HOUR, 59) and clean(1, 59) and clean(3, 0):
+        return "spring"
+    if repeat(REPEATED_HOUR, 0) and repeat(REPEATED_HOUR, 59) and clean(0, 59) and clean(2, 0):
+        return "fall"
+    return None
+
+
+def dst_change_near(day: date, tz: tzinfo | None, days: int = 2) -> bool:
+    """Whether a documented DST change (`dst_change`) falls on a local date
+    within `days` of `day` (DL-249). No zone is never near one, and a date
+    outside the calendar's range counts as no change."""
+    if tz is None:
+        return False
+    for k in range(-days, days + 1):
+        try:
+            other = day + timedelta(days=k)
+        except OverflowError:
+            continue
+        if dst_change(other, tz) is not None:
+            return True
+    return False
 
 
 def alias_table(aliases: Mapping[str, str] | None) -> dict[str, str] | None:

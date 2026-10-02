@@ -16051,3 +16051,105 @@ relitigate an entry; append a new one.
   `test_b1_two_timers_due_at_exactly_t_are_c1s_and_the_next_one_is_c2s`
   arms the region boxes' deadlines with STARTJOB, where it used
   FORCE_STARTJOB, which no longer arms one.
+- DL-249 run_window endpoints across a DST change follow the vendor's
+  rules (2026-10-02; oracle.py, timezones.py, runner_ledger.py,
+  simulation_register_rows.py, simulation-coverage.md; autosys-semantics
+  SEM-33)
+  THE VENDOR. TechDocs 12.1 and 24.2 carry the same text. "Daylight Time
+  Changes": "When the specified end of the run window falls during the
+  missing hour, AutoSys Workload Automation recalculates its end time, so
+  that the effective duration of the run window remains the same. For
+  example, the product recalculates a run window of 1:00 - 2:30 so that
+  the window ends at 3:30 and the run window remains open for 90
+  minutes." "When the specified start time of the run window falls during
+  the missing hour, AutoSys Workload Automation moves the start time to
+  3:00. The end time does not change, so the run window is shortened. For
+  example, a run window of 2:45 - 3:45 becomes 3:00 - 3:45". "When both
+  the start time and the end time of the run window, fall during the
+  missing hour, AutoSys Workload Automation moves the start time to the
+  first minute after 3:00 and the end time to one hour later. Therefore,
+  the resulting run window might be lengthened. For example, a run window
+  of 2:15 - 2:45 becomes 3:00 - 3:45". "Standard Time Changes": "When the
+  specified start of a run window is before the time change and its
+  specified end occurs during the repeated hour, the run window closes
+  during the daylight time period (the first hour). For example, a run
+  window of 11:30 - 1:30 ends at 1:30 DT, not 1:30 ST". "When the
+  specified opening of the run window falls during the repeated hour,
+  AutoSys Workload Automation moves its start time to the second,
+  standard time hour. The end time does not change ... a run window of
+  1:45 - 2:45 becomes 1:45 ST - 2:45 ST." "When both the specified start
+  and end of the run window occur during the repeated hour, the run
+  window opens during the second, standard time hour."
+  THE DEFECT. The oracle compared the attempt's local wall time with the
+  window's bare wall times. On 2026-03-08 in America/New_York, 01:00-02:30
+  was closed at 03:15 EDT, where the vendor keeps it open until 03:30.
+  2:45-3:45 deferred to 03:45 EDT, where 02:45 maps past the gap, not to
+  03:00. On 2026-11-01, 23:30-01:30 was open again at 01:20 EST, and
+  windows that open in the repeated hour were open in its first pass.
+  THE BEHAVIOR. When the job's zone has a change of the documented shape
+  on the attempt's local date or within two days of it, the oracle builds
+  the windows that open on the four local days around the attempt as
+  pairs of engine instants (`_window_span`). Containment and the
+  closer-edge rule run on those instants; the inclusive endpoints, the
+  equal-endpoint pin and the midpoint pin are unchanged. The vendor's
+  rules describe two distinct endpoints, so an equal-endpoint window is
+  the single instant its opening maps to: `"02:30-02:30"` on 2026-03-08
+  in America/New_York is 03:00 EDT, not 03:00-03:30. Spring: an
+  opening in 02:00-02:59 moves to 03:00, and a close in it takes the
+  fold=0 instant, which keeps the window's length and is one hour later
+  when the opening is in the missing hour too. The vendor moves that
+  opening "to the first minute after 3:00"; it is pinned to 03:00 exactly.
+  Fall: an opening in
+  01:00-01:59 takes the second, standard-time pass. A close in it takes
+  the first, daylight-time pass, unless the opening is in that hour on the
+  same day, when the close follows it into the second pass. The vendor
+  says only where such a window opens; a close before its own opening
+  would be no window, so the close follows. Those two readings are
+  PROVISIONAL, this project's pins with no question label: the register
+  row `job_attr:run_window#dst-both-in-hour` carries them. A box start
+  decides a member's disposition through the same path (DL-246).
+  `dst_change` in timezones.py names the shape from PEP 495 offsets, and
+  `dst_change_near` is the two-day guard. The guard checks for a zone
+  first, and a day outside the calendar's range counts as no change.
+  SCOPE. Coverage is decided by the offset shape of each change, not by a
+  list of zones. A spring change is covered when 02:00-02:59 is missing
+  for exactly one hour, and a fall change when 01:00-01:59 repeats for
+  exactly one hour, as in America/New_York. So Europe/Berlin's and
+  Australia/Sydney's spring changes are covered and their fall changes,
+  which repeat 02:00-02:59, are not. Europe/London's and Europe/Dublin's
+  fall changes are covered and their spring changes, which skip
+  01:00-01:59, are not. Other shapes, such as a half-hour change or a
+  change at another hour, keep the wall-time comparison. That is
+  unverified: the vendor text gives no rule for them, and the register
+  carries the row `job_attr:run_window#dst-other-shape` with no label
+  opened. Zones without DST and fixed offsets never meet the new path,
+  nor does a job read on the engine clock (no `timezone:` and no
+  `default_tz`). A job with no `timezone:` under a `default_tz` reads that
+  zone (DL-155) and meets the new path as a zoned job does. Away from a
+  change the wall-time comparison runs as before.
+  UNCHANGED. start_times and start_mins conversion is not touched:
+  runner-design E10 stays open, with its fold=0 pin. The vendor's
+  example that a 1:15 start time inside an 11:30 - 1:30 window "would be
+  calculated for 1:15 ST and the job would not run" depends on E10. It is
+  recorded in SEM-33, not modelled.
+  VERSION. `STATE_MACHINE_VERSION` moves to 10: a replay with a window
+  check near a DST change can decide inside, defer or skip differently,
+  and can queue a deferred start at another instant.
+  Tests: test_oracle.py `test_sem33_spring_*` (a close in the missing
+  hour, an opening in it, both in it), `test_sem33_fall_*` (a close in
+  the repeated hour, an opening in it, both in it),
+  `test_sem33_dst_window_*` (a week before and the day after the change,
+  America/Phoenix on the change day, and two and three days either side
+  of the change), `test_sem33_dst_equal_endpoints_stay_one_instant`,
+  `test_sem33_spring_window_crossing_midnight_into_the_missing_hour`,
+  `test_sem33_dst_rules_follow_the_offset_shape_not_the_zone_name`
+  (Australia/Sydney's spring change, Europe/London's fall change),
+  `test_sem33_dst_guard_at_the_ends_of_the_date_range`,
+  `test_sem33_box_start_on_a_spring_change_defers_to_0300`;
+  test_timezones.py `test_sem33_dst_change_names_only_the_documented_one_hour_shape`,
+  `test_sem33_dst_change_near_looks_two_days_either_side`.
+  No existing test pinned the old DST window behavior. The docstring of
+  `test_the_conversion_carries_the_dst_edges_at_the_default_fold` now
+  names `_window_span` as the caller that passes fold=1 near a change,
+  and says the wall-time path's fold=1 hand-off is now reached only by
+  changes of another shape.

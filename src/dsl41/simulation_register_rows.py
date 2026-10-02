@@ -899,6 +899,67 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
         ),
         _row(
             surface="job_attr",
+            member="run_window",
+            facet="dst-change",
+            klass=SUPPORTED,
+            cite="SEM-33, DL-249, oracle._window_span",
+            effect="near a one-hour DST change at 02:00 local the window's endpoints follow"
+            " the vendor's rules: in spring an opening in the missing hour moves to 03:00"
+            " and a close in it keeps the window's length; in fall an opening in the"
+            " repeated hour takes the standard-time pass and a close takes the"
+            " daylight-time pass unless the opening is in that hour too",
+            trigger=_job(
+                date_conditions="1",
+                days_of_week="all",
+                run_window='"01:00-02:30"',
+                timezone="America/New_York",
+            ),
+            quiet=_job(
+                date_conditions="1", days_of_week="all", run_window='"01:00-02:30"', timezone="UTC"
+            ),
+        ),
+        _row(
+            surface="job_attr",
+            member="run_window",
+            facet="dst-both-in-hour",
+            klass=PROVISIONAL,
+            cite="SEM-33, DL-249, oracle._window_span",
+            effect="when both endpoints fall in the hour a DST change touches, two readings"
+            " are pinned: in fall the close follows the opening into the second,"
+            " standard-time pass, and in spring the vendor's 'first minute after 3:00'"
+            " opening is exactly 03:00; the vendor text does not settle either, and no"
+            " label was opened for it",
+            trigger=_job(
+                date_conditions="1",
+                days_of_week="all",
+                run_window='"01:10-01:40"',
+                timezone="America/New_York",
+            ),
+            quiet=_job(
+                date_conditions="1", days_of_week="all", run_window='"01:10-01:40"', timezone="UTC"
+            ),
+        ),
+        _row(
+            surface="job_attr",
+            member="run_window",
+            facet="dst-other-shape",
+            klass=PROVISIONAL,
+            cite="SEM-33, DL-249, oracle.Oracle._window_side",
+            effect="a DST change of another shape (a half-hour change, a change at another"
+            " hour) keeps the wall-time comparison: the vendor's endpoint rules are"
+            " unverified there, and no label was opened for it",
+            trigger=_job(
+                date_conditions="1",
+                days_of_week="all",
+                run_window='"01:00-02:30"',
+                timezone="Australia/Lord_Howe",
+            ),
+            quiet=_job(
+                date_conditions="1", days_of_week="all", run_window='"01:00-02:30"', timezone="UTC"
+            ),
+        ),
+        _row(
+            surface="job_attr",
             member="watch_file",
             facet="stat-error",
             klass=PROVISIONAL,
