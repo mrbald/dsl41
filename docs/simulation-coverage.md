@@ -81,7 +81,9 @@ fails the suite.
 | statement:insert_xinst | supported | SEM-07 | - |  |  |  | generic | an external-instance definition is carried; cross-instance atoms read it by name |
 | statement:override_job | refused | ir._Lowerer.run, DL-29 | - |  |  |  | generic | lowering refuses override_job: merging and out-of-scope object classes are semantics this compiler does not model |
 | statement:rename_job | refused | ir._Lowerer.run, DL-29 | - |  |  |  | generic | lowering refuses rename_job: merging and out-of-scope object classes are semantics this compiler does not model |
+| statement:update_blob | refused | ir._Lowerer.run, DL-29 | - |  |  |  | generic | lowering refuses update_blob: merging and out-of-scope object classes are semantics this compiler does not model |
 | statement:update_connectionprofile | refused | ir._Lowerer.run, DL-29 | - |  |  |  | generic | lowering refuses update_connectionprofile: merging and out-of-scope object classes are semantics this compiler does not model |
+| statement:update_glob | refused | ir._Lowerer.run, DL-29 | - |  |  |  | generic | lowering refuses update_glob: merging and out-of-scope object classes are semantics this compiler does not model |
 | statement:update_job | refused | ir._Lowerer.run, DL-29 | - |  |  |  | generic | lowering refuses update_job: merging and out-of-scope object classes are semantics this compiler does not model |
 | statement:update_job_type | refused | ir._Lowerer.run, DL-29 | - |  |  |  | generic | lowering refuses update_job_type: merging and out-of-scope object classes are semantics this compiler does not model |
 | statement:update_machine | refused | ir._Lowerer.run, DL-29 | - |  |  |  | generic | lowering refuses update_machine: merging and out-of-scope object classes are semantics this compiler does not model |
