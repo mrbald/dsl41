@@ -14966,3 +14966,23 @@ relitigate an entry; append a new one.
   optional `--run-root` of the two verbs where it is true.
   Not changed: behavior, option names, defaults, exit codes, or the
   README's exit-code summary, which already matched the help.
+- DL-239 Repository links in README.md are relative; the package readme
+  rewrites them at build time (2026-10-02; README.md, pyproject.toml,
+  tests/test_docs_links.py)
+  README.md linked repo files by absolute GitHub URL because the PyPI
+  project page renders the readme and cannot resolve a relative path. Six
+  links were relative anyway, so the PyPI page already carried broken
+  links. All repository links are now relative, as in every other
+  document, and resolve in a clone, on GitHub and in a fork. The package
+  readme is dynamic: hatch-fancy-pypi-readme reads README.md at build time
+  and rewrites every relative link to the file on main; absolute links,
+  mail links and in-page anchors pass through, and an anchor stays dead
+  on PyPI as before, since that page gives headings no id. The wheel's
+  long description carries no relative link and `twine check --strict`
+  passes. The rewrite targets main, as the absolute links did, not the
+  release tag. The plugin is calendar-versioned, so its bound is the next
+  year, the nearest thing to hatchling's major bound.
+  Tests: tests/test_docs_links.py. No published document links a repo
+  file by GitHub URL; every relative link and heading fragment resolves;
+  the pyproject substitution applied to README.md leaves no relative
+  link and double-prefixes nothing.
