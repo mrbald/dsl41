@@ -165,6 +165,11 @@ _VAR_RE = re.compile(r"\$\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_
 #: would take non-ASCII digits int() then rejects, so the class is explicit.
 _REL_OFFSET_RE = re.compile(r"\+[0-9]+")
 
+#: Lexical HH:MM shape, shared by Time.parse and the must_*_times absolute-hour
+#: check below so both agree on what "hour" means before Time's own Field
+#: bound (0-23) rejects it (DL-251).
+_HHMM_RE = re.compile(r"(\d{1,2}):(\d{2})")
+
 IR_VERSION: Literal["0.2"] = "0.2"
 
 
@@ -177,7 +182,15 @@ class Time(BaseModel):
 
     @classmethod
     def parse(cls, text: str) -> Time:
-        m = re.fullmatch(r"(\d{1,2}):(\d{2})", text.strip())
+        """Lexical HH:MM. JIL syntax rule 2/6: a colon inside an unquoted value
+        may be escaped (`10\\:00`) instead of quoting the whole value; dsl41
+        applies that general rule to every `hh:mm` lane (DL-251), so `\\:`
+        unescapes here regardless of lane. Per-token quoting of a single list
+        item (`"10:00", "14:00"`) is not a documented spelling and is not
+        unwrapped -- only a whole-value quote (handled upstream by
+        `unquote_jil_value`/`_split_list` before this is called) is."""
+        candidate = text.strip().replace("\\:", ":")
+        m = _HHMM_RE.fullmatch(candidate)
         if m is None:
             raise ValueError(f"invalid time {text!r} (expected HH:MM)")
         return cls(hour=int(m.group(1)), minute=int(m.group(2)))
@@ -1352,6 +1365,21 @@ class _Lowerer:
             return SlaSpec(kind="relative", offsets_min=offsets)
         times = []
         for t in tokens:
+            # SEM-34: the vendor's Limits are 00:00-71:59 (two calendar days
+            # ahead), but an absolute must time is carried and never armed
+            # (the oracle owns no calendar), so dsl41 supports only
+            # 00:00-23:59 here and refuses the wider span loudly (DL-251)
+            # instead of silently truncating it.
+            wide = _HHMM_RE.fullmatch(t.strip().replace("\\:", ":"))
+            if wide is not None and int(wide.group(1)) > 23:
+                self.err(
+                    f"{attr.key}: {t.strip()}: hour {int(wide.group(1))} is outside dsl41's"
+                    " supported 00:00-23:59 for the absolute form (SEM-34); the vendor's"
+                    " Limits are 00:00-71:59, but an absolute must time is carried and"
+                    " never armed, so dsl41 does not model the wider span",
+                    attr.span,
+                )
+                return None
             try:
                 times.append(Time.parse(t))
             except ValueError as exc:

@@ -295,6 +295,21 @@ def test_a_keep_value_inside_its_closed_space_does_not_refuse() -> None:
     assert "job_load: 10\n" in out
 
 
+def test_escaped_colon_time_values_are_kept_not_refused() -> None:
+    # DL-251: JIL syntax rule 6's escaped colon (`10\:00`) is a documented
+    # spelling for start_times, and dsl41 applies it to every hh:mm lane; the
+    # KEEP predicates must not refuse it as outside the closed value space.
+    text = (
+        "insert_job: A\njob_type: c\nmachine: h\ncommand: /x\ndate_conditions: 1\n"
+        "start_times: 10\\:00, 14\\:00\nrun_window: 09\\:00-10\\:00\n"
+        "must_start_times: 10\\:30\n"
+    )
+    out = minify_text(text, verify=False)
+    assert "start_times: 10\\:00, 14\\:00\n" in out
+    assert "run_window: 09\\:00-10\\:00\n" in out
+    assert "must_start_times: 10\\:30\n" in out
+
+
 def test_timezones_are_kept_by_default_and_reported() -> None:
     text = (
         "insert_job: A\njob_type: c\nmachine: h\ncommand: /x\n"

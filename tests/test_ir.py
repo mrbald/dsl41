@@ -82,6 +82,19 @@ def test_time_parse_rejects_garbage() -> None:
         Time.parse("garbage")
 
 
+def test_time_parse_unescapes_backslash_colon() -> None:
+    # JIL syntax rule 2/6: `\:` is a literal colon in a value lane, applied to
+    # every hh:mm lane (DL-251).
+    assert Time.parse(r"10\:00") == Time(hour=10, minute=0)
+
+
+def test_time_parse_does_not_unwrap_a_quoted_token() -> None:
+    # Per-token quoting of a single list item is not a documented spelling
+    # (DL-251); only a whole-value quote is unwrapped, upstream of parse.
+    with pytest.raises(ValueError, match="expected HH:MM"):
+        Time.parse('"14:00"')
+
+
 def test_time_parse_defers_range_checking_to_the_model() -> None:
     """A syntactically HH:MM-shaped but out-of-range hour parses lexically,
     then fails the Field constraint on construction (ValidationError, not the
@@ -800,6 +813,81 @@ def test_sem34_must_start_times_error_shapes(text: str) -> None:
     with pytest.raises(LoweringError) as exc_info:
         lower_source(text)
     assert "SEM-34" in str(exc_info.value)
+
+
+# -------------------------------------------------- 6b. escaped-colon time lanes (DL-251)
+
+_ESCAPED_COLON_CASES: list[tuple[str, str, str, object]] = [
+    (
+        "start-times-escaped",
+        "start_times",
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\ndate_conditions: 1\n"
+        "start_times: 10\\:00, 14\\:00\n",
+        [Time(hour=10, minute=0), Time(hour=14, minute=0)],
+    ),
+    (
+        "run-window-escaped",
+        "run_window",
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\ndate_conditions: 1\n"
+        "run_window: 09\\:00-10\\:00\n",
+        (Time(hour=9, minute=0), Time(hour=10, minute=0)),
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "member,text,expected",
+    [c[1:] for c in _ESCAPED_COLON_CASES],
+    ids=[c[0] for c in _ESCAPED_COLON_CASES],
+)
+def test_escaped_colon_time_lanes_lower(member: str, text: str, expected: object) -> None:
+    (job,) = lower_source(text).jobs.values()
+    assert job.schedule is not None
+    assert getattr(job.schedule, member) == expected
+
+
+@pytest.mark.parametrize("attr_key", ["must_start_times", "must_complete_times"])
+def test_escaped_colon_must_times_lower(attr_key: str) -> None:
+    text = (
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\ndate_conditions: 1\n"
+        f'start_times: "08:00"\n{attr_key}: 10\\:05\n'
+    )
+    (job,) = lower_source(text).jobs.values()
+    assert job.schedule is not None
+    field = "must_start" if attr_key == "must_start_times" else "must_complete"
+    assert getattr(job.schedule, field) == SlaSpec(kind="absolute", times=[Time(hour=10, minute=5)])
+
+
+def test_per_token_quoted_list_item_is_refused() -> None:
+    # Per-token quoting of one list item is not a documented spelling: the
+    # vendor's choice is escape-every-colon or quote-the-whole-value, never a
+    # mix (DL-251). A per-item quoted relative must-time offset is refused
+    # the same way at HEAD.
+    text = (
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\ndate_conditions: 1\n"
+        'start_times: 10\\:00, "14:00"\n'
+    )
+    with pytest.raises(LoweringError):
+        lower_source(text)
+
+
+# ------------------------------ 6c. must_*_times absolute hour support limit (DL-251)
+
+
+@pytest.mark.parametrize("attr_key", ["must_start_times", "must_complete_times"])
+def test_sem34_absolute_must_time_above_23_59_refused_with_named_bounds(attr_key: str) -> None:
+    # SEM-34: the vendor's Limits are 00:00-71:59; dsl41 supports 00:00-23:59
+    # for the absolute form because it is carried and never armed. The
+    # message names both bounds rather than leaking a raw Field error.
+    text = (
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\ndate_conditions: 1\n"
+        f'start_times: "08:00"\n{attr_key}: "24:00"\n'
+    )
+    with pytest.raises(LoweringError) as exc_info:
+        lower_source(text)
+    message = str(exc_info.value)
+    assert "00:00-71:59" in message
+    assert "00:00-23:59" in message
 
 
 # ----------------------------------------------------------------- 7. exec/type rules
