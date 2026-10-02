@@ -16252,3 +16252,59 @@ relitigate an entry; append a new one.
   (DL-50), E6, E10's fold=0 half (DL-45, DL-155), the four-value SEM-24
   model, the required `job_type`, and the WEKR reading (Q11). Each waits
   for a separate decision.
+- DL-251 Escaped-colon time values accepted; must_*_times above 23:59
+  stays a refusal, now named (2026-10-03; ir.py, minify_rules.py,
+  autosys-semantics.md SEM-32/SEM-34, jil-statement-syntax.md rule 2)
+  THE DEFECT. JIL syntax rule 6 (TechDocs 24.2, condition-attribute
+  page): "you must use escape characters (a backslash) or must enclose
+  the value in quotation marks with any colons that are used in the
+  value of an attribute statement. For example, to define the start
+  time for a job, specify 10\:00 or "10:00"." The start_times page gives
+  `start_times: 10\:00, 14\:00`; the vendor does not show this spelling
+  for run_window or must_*_times, but rule 6 states it as a general rule
+  for any attribute value. `ir.Time.parse` only matched a bare `HH:MM`,
+  so the escaped spelling failed lowering on every `hh:mm` lane, and
+  `minify.py`'s KEEP predicates (`minify_rules._TIME_RE`) refused it too.
+  THE FIX. `Time.parse` unescapes `\:` before the `HH:MM` match, so
+  `10\:00` lowers like `10:00` on `start_times`, `run_window`,
+  `must_start_times` and `must_complete_times` alike; dsl41 applies rule
+  6 to all four rather than guessing which the vendor meant narrowly.
+  The AST keeps the source bytes verbatim; this is a lowering-only
+  change, and preserve/canonical fidelity (F1/F2) hold unchanged because
+  canonical rendering is purely lexical on `RawAttr.raw_value`, never a
+  re-derivation from IR. Per-token quoting of one list item (`10:00,
+  "11:00"`) is NOT accepted: that spelling is undocumented, and a
+  per-item quoted relative must-time offset (`"+30"`) was already
+  refused at HEAD, so unwrapping it only for the absolute time lane
+  would be an inconsistent, invented rule. `minify_rules._TIME_RE` gains
+  the same optional backslash so `start_times`, `run_window` and
+  `must_*_times` (`_v_times`/`_v_sla`/`_v_window`) all KEEP the escaped
+  spelling instead of refusing it as outside the closed value space.
+  SUPPORT LIMIT, not a widened one. must_start_times
+  (must_complete_times has the same limits): "Limits: 00:00-71:59 (2
+  calendar days ahead of the current calendar day)", with the worked
+  example 10:00 + 24 hours = 34:00. `Time.hour`'s Field bound stays 0-23:
+  an absolute must time is carried and never armed (the oracle owns no
+  calendar, `Oracle._slot_deadline` returns `None` for any non-relative
+  SlaSpec before touching `.times`), so the 24-71 slice of the vendor's
+  range buys nothing at runtime, and widening `Time.hour` would move the
+  CatalogIR JSON schema for every caller of `Time` -- `dsl.py` and
+  `equiv.py` both read `schedule.must_start`/`must_complete` -- forcing
+  an IR_VERSION bump whose only payoff is carrying a number nothing
+  reads. Lowering refuses an hour above 23 in the absolute
+  must_start_times/must_complete_times form with a message naming both
+  bounds: the vendor's 00:00-71:59, and dsl41's supported 00:00-23:59
+  because the value is carried and never armed. `start_times` and
+  `run_window` are untouched -- they were never documented past 23:59,
+  so their existing refusal above 23:59 needs no new message.
+  Tests: test_ir.py gains lowering tests for the escaped spelling on
+  start_times, run_window, must_start_times and must_complete_times, the
+  refusal of a per-item quoted list entry, the must-time-above-23:59
+  refusal and its new message (including the exact 24:00 boundary), and
+  start_times' 24:00 staying refused with the unchanged Field-constraint
+  error. test_ast_fidelity.py's F4 case matrix gains the escaped spelling
+  on start_times (F1 preserve identity, F2 canonical fixpoint).
+  test_minify.py gains a KEEP case for the escaped spelling on
+  start_times/run_window/must_start_times. No IR-F shape moved: IR_VERSION,
+  CatalogIR's schema, and every golden catalog-hash/seal-artifact vector
+  are untouched.

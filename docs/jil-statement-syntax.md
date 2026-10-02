@@ -26,9 +26,12 @@ default there.
    box_name values, and condition job references through the one
    `conditions.unescape_job_name`, per the rule 7 principle that semantic unquoting happens at
    lowering. Both estate spellings therefore converge on the semantic catalog key, and each
-   JIL-emitting path re-escapes. Other value lanes stay verbatim in IR. [?] Whether the engine
-   unescapes `\:` inside general values (command, std_*_file) is not known; value lanes stay
-   escaped until a live instance gives the answer.
+   JIL-emitting path re-escapes. The `hh:mm` time lane is the same shape (DL-251): the vendor's
+   own documented spelling escapes every colon instead of quoting the whole value
+   (`start_times: 10\:00, 14\:00`), and `ir.Time.parse` unescapes `\:` for `start_times`,
+   `run_window`, `must_start_times` and `must_complete_times` the same way. Other value lanes
+   stay verbatim in IR. [?] Whether the engine unescapes `\:` inside general values (command,
+   std_*_file) is not known; value lanes stay escaped until a live instance gives the answer.
 3. **Statement boundary**: a line whose key is a subcommand starts a new statement. The
    recognized set tracks the TechDocs 12.1 JIL subcommand pages (DL-29), each added as it was
    found: `insert_job`, `update_job`, `delete_job`, `rename_job`, `delete_box`,

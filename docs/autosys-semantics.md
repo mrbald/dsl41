@@ -454,8 +454,24 @@ Time attributes on a job inside a box: the member still needs the box RUNNING. A
 member of a non-running box does not fire (schedule + box gate compose with AND).
 
 ### SEM-32 · start_times / start_mins **[V]**
-`start_times: "10:00, 11:00"` — absolute times of day (24h). `start_mins: 10,20,30` — minutes
-past *every* hour. Each firing inserts a STARTJOB event. Time and condition compose as AND.
+`start_times: "10:00, 11:00"` — absolute times of day (24h), 00:00-23:59. `start_mins:
+10,20,30` — minutes past *every* hour. Each firing inserts a STARTJOB event. Time and
+condition compose as AND.
+
+Colons inside an unquoted value need an escape (DL-251). JIL syntax rule 6 (TechDocs 24.2,
+condition-attribute page): "you must use escape characters (a backslash) or must enclose the
+value in quotation marks with any colons that are used in the value of an attribute statement.
+For example, to define the start time for a job, specify 10\:00 or "10:00"." The start_times
+attribute page gives the same spelling: `start_times: 10\:00, 14\:00`. The vendor shows this
+escape on start_times (and on condition lookbacks, SEM-04) but not on run_window or
+must_*_times; rule 6 is stated as a general rule for any attribute value, so dsl41 applies it
+to every `hh:mm` lane (`start_times`, `run_window`, `must_start_times`, `must_complete_times`)
+rather than guessing a narrower one. The AST keeps the source bytes verbatim (preserve and
+canonical fidelity, `docs/jil-statement-syntax.md` rule 2); only lowering unescapes. A
+whole-value quote (`"10:00, 11:00"`) is also accepted, as before; quoting one item of a list
+(`10:00, "11:00"`) is not a documented spelling and stays refused, the same as a per-item
+quoted relative must-time offset (SEM-34). `run_window` shares this lane's 00:00-23:59 bound;
+see SEM-34 for the vendor's wider `must_*_times` range and dsl41's support limit.
 
 **Arm and wait (Q3, DL-54, DL-58).** A tick whose `condition` is still false ARMS the job. The
 condition edge later starts it, and the start consumes the arm (at most one run per tick).
@@ -660,6 +676,17 @@ absolute deadline is armed. Under the strict count match the offsets pair with t
 the slot. A tick at an instant that matches no start time (an operator's STARTJOB at another
 time) cannot be paired and takes the first offset. **[?]**
 (Contrast `term_run_time`: that one *is* control flow, auto-TERMINATE after n minutes.)
+
+Absolute `must_start_times` / `must_complete_times` range, a support limit (DL-251). The
+vendor's must_start_times page (must_complete_times has the same limits): "Limits:
+00:00-71:59 (2 calendar days ahead of the current calendar day)", with the worked example
+10:00 + 24 hours = 34:00. Lowering refuses an absolute hour above 23:59 with a message naming
+both numbers: the vendor's full range, and that dsl41 supports only 00:00-23:59 here because
+the *Model note* above already means an absolute must time is carried and never armed -- the
+oracle owns no calendar, so the 24-71 span the vendor reserves for alarms the oracle would
+have to schedule buys nothing, and modeling it moves the IR-F shape (`Time.hour`) for every
+caller, not just this one. `start_times` and `run_window` are unaffected; they were never
+documented past 23:59.
 
 ### SEM-35 · timezone **[V]**
 Per-job `timezone:` re-bases all time attributes of that job. IR carries tz per schedule
