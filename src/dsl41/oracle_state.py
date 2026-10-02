@@ -184,11 +184,14 @@ class JobRuntime(BaseModel):
     #: current execution. Only a BOX row ever carries entries; it was the loose
     #: `_box_ran` map until DL-86 moved it onto the entity it describes.
     ran_members: frozenset[str] = frozenset()
-    #: SEM-33/DL-154: the members whose run_window verdict in THIS box
-    #: execution was the INACTIVE skip. The SEM-11 fold completes past them
-    #: while they stay out of `ran_members` (they cast no vote); a later
-    #: in-window start joins `ran_members` and voids the mark. Only a BOX
-    #: row ever carries entries; reset beside `ran_members` on box start.
+    #: Every resolution in THIS box execution: the members whose INACTIVE
+    #: is an explicit verdict, a run_window skip (SEM-33/DL-154) or an
+    #: operator's injected STATUS INACTIVE (SEM-11, DL-242). The SEM-11 fold
+    #: completes past a resolved member that is not live. A member that
+    #: merely waits in the run is INACTIVE too, but carries no mark. The
+    #: member's own later start voids the mark. Only a BOX row ever carries
+    #: entries; reset beside `ran_members` on box start. The name predates
+    #: DL-242 and stays: sealed periods and their attestations carry it.
     window_skipped_members: frozenset[str] = frozenset()
     #: DL-120: the capacity vector THIS run acquired, non-empty only while
     #: STARTING or RUNNING. It is a per-run fact with exactly `run_number`'s
@@ -643,16 +646,25 @@ class RuntimeState:
         self._jobs[job] = JobRuntime.model_validate({**dict(self.runtime(job)), **fields})
 
     def transition(
-        self, job: str, status: JobStatus, at: datetime | None, exit_code: int | None = None
+        self,
+        job: str,
+        status: JobStatus,
+        at: datetime | None,
+        exit_code: int | None = None,
+        *,
+        clear_exit_code: bool = False,
     ) -> None:
         """Record a status change. `last_end_at` latches on every terminal
         transition -- the Q2 anchor is the job's OWN last end (DL-54) -- and
-        an exit code is written only when one was reported."""
+        an exit code is written only when one was reported. A box-start
+        reset clears it instead (`clear_exit_code`, SEM-10, DL-242)."""
         fields: dict[str, object] = {"status": status, "status_at": at}
         if status in TERMINAL:
             fields["last_end_at"] = at
         if exit_code is not None:
             fields["exit_code"] = exit_code
+        elif clear_exit_code:
+            fields["exit_code"] = None
         self._replace(job, **fields)
 
     def start_run(self, job: str, *, cause: str, box: str | None, is_box: bool) -> None:
@@ -671,18 +683,32 @@ class RuntimeState:
             start_period=self._period_id,
         )
         if box is not None:
-            self._replace(box, ran_members=self.runtime(box).ran_members | {job})
+            # the member's own start voids its resolution mark (DL-242)
+            box_rt = self.runtime(box)
+            self._replace(
+                box,
+                ran_members=box_rt.ran_members | {job},
+                window_skipped_members=box_rt.window_skipped_members - {job},
+            )
         if is_box:
             # Reset BEFORE the caller's RUNNING transition: that transition's
             # own re-evaluation may already start members, and they must land
             # in the fresh per-run set (SEM-10 at-most-once bookkeeping).
-            # The skip marks are per-execution too (SEM-33/DL-154).
+            # The resolution marks are per-execution too (DL-154, DL-242).
             self._replace(job, ran_members=frozenset(), window_skipped_members=frozenset())
 
-    def record_window_skip(self, box: str, member: str) -> None:
-        """SEM-33/DL-154: mark `member` bypassed for this box execution --
-        its run_window verdict was the INACTIVE skip, so the SEM-11 fold
-        completes past it. `start_run` on the box resets the marks."""
+    def clear_exit_code(self, job: str) -> None:
+        """SEM-10 (DL-242): a box-start reset drops the previous cycle's exit
+        code from a row that is already INACTIVE. Not a transition: the
+        status and its time stay."""
+        self._replace(job, exit_code=None)
+
+    def record_resolution(self, box: str, member: str) -> None:
+        """Mark `member` resolved for this box execution: its INACTIVE is an
+        explicit verdict, a run_window skip (SEM-33/DL-154) or an injected
+        STATUS INACTIVE (SEM-11, DL-242), so the SEM-11 fold completes past
+        it. `start_run` on the box resets the marks; the member's own start
+        voids its mark."""
         self._replace(
             box, window_skipped_members=self.runtime(box).window_skipped_members | {member}
         )

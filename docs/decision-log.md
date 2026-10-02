@@ -15079,3 +15079,130 @@ relitigate an entry; append a new one.
   RUNNING), so `STATE_MACHINE_VERSION` moves 2 -> 3: a v2 log is refused at
   every door, and a live v2 estate drains and a new estate is created
   (period-model ss11), as DL-235's bump did.
+- DL-242 Box-cycle state: a box start resets its members, an operator's
+  INACTIVE resolves a member and cascades from a box, and an idle box
+  ignores INACTIVE members (2026-10-02; oracle.py, oracle_state.py,
+  runner_startup.py, runner_history.py, runner_ledger.py,
+  simulation_register_rows.py; autosys-semantics SEM-10, SEM-11, SEM-15,
+  SEM-17, SEM-18; stonebranch-semantics M04 and P-M04; runner-design ss4)
+  THE VENDOR. TechDocs 24.2 and 12.x, scheduling guide, Basic Box Job
+  Concepts; the wording is the same in every edition cited. Rule 1: "When
+  a box starts running, the status of all the jobs it contains (including
+  subboxes) changes to ACTIVATED ... Because of this status change, jobs
+  in boxes do not retain their statuses from previous box cycles." ON_NOEXEC
+  members are included. Rule 2: "Using the sendevent command to change the
+  state of a box to INACTIVE changes the state of all the jobs it contains
+  to INACTIVE." Rule 3: "Using the sendevent command to change the state
+  of a job in a box to INACTIVE affects the box's completion status as if
+  the INACTIVE job returned a status of SUCCESS." Rule 4, for a box that is
+  not running: "Any jobs in the box with a status of INACTIVE are ignored
+  when the status of the box is being re-evaluated", with a single-member
+  table and a worked example in which all-INACTIVE members give SUCCESS.
+  Rule 5: a completed box and its members keep their statuses until the
+  next time the box runs.
+  THE DEFECTS. A second box run read the first run's member statuses, so a
+  chain A -> B -> C started C on B's stale SUCCESS. A RUNNING box stayed
+  RUNNING after its only member was set INACTIVE. An idle box with a
+  forced SUCCESS member and an INACTIVE sibling stayed INACTIVE. A box set
+  INACTIVE left its RUNNING member RUNNING.
+  THE MECHANISM. `_after_transition` is split into the box rules, the
+  row's own settlement (QUE_WAIT rank, reservations) and the wakes, and a
+  single transition runs the three in the old order. A batch of INACTIVE
+  transitions writes and settles every row first, then runs the box rules
+  and wakes for each row in the same order, skipping a row a wake has
+  already restarted. So no wake sees a half-moved subtree, and a restart
+  acquires against freed capacity. A skipped row that released capacity
+  still owes the waiters their wake, so the batch wakes them once at its
+  end.
+  THE FOUR BEHAVIORS. One (SEM-10): a box start sets every job the box
+  contains, transitively, to INACTIVE and clears its exit code, on rows
+  already INACTIVE too; an exit code is the previous cycle's result, and
+  an e() consumer started on it otherwise. For a row already INACTIVE the
+  clear is a plain store write with no record and no wake. A job that is
+  STARTING, RUNNING or QUE_WAIT keeps its run, and the reset does not
+  descend into a live subbox. `last_end_at`, the flags and the arm stay.
+  The rows are written before the box's STARTING transition, so that
+  transition's wakes read the new cycle; their own box rules and wakes
+  run after it, while the box is STARTING. Then no member starts, no
+  completion door runs and the box cannot start again, but an outside
+  n() consumer with a minutes lookback reads the moved status time and
+  starts at the reset. If those wakes end the run -- a job_terminator
+  cascade TERMINATES a STARTING box -- the start stops: RUNNING is
+  written only while the job is still STARTING at the run number its
+  start gave it, for every job type. Two (SEM-11): an injected INACTIVE on a member of a RUNNING box
+  marks the member resolved on the box row before the transition, so the
+  transition runs the full completion door, as the DL-154 window skip
+  does. A member that ran and failed and is then set INACTIVE resolves
+  too. An injected STATUS always records a transition, INACTIVE->INACTIVE
+  included, so a waiting member set INACTIVE needs no separate path. A
+  resolved member stays settled if an operator later gives it a status
+  that is not live; the fold still votes over ran members only. A resolved
+  INACTIVE is a completion moment for every running ancestor's overrides
+  as well, since SEM-12's "inside" is transitive; a window skip on a
+  member already INACTIVE, the usual case after the reset, runs the same
+  ancestor walk. Three (SEM-15): the idle-box re-derivation ignores
+  INACTIVE members and gives SUCCESS when no other member is left. An injected INACTIVE on a member of a box that
+  is not RUNNING, STARTING or TERMINATED now triggers it, as a terminal
+  member transition already did; the box is re-read after the transition
+  and skipped if that transition's wakes started it. Only the event's
+  direct target triggers it; the reset, the cascade and a window skip do
+  not. Four (SEM-18): an injected INACTIVE on a box sets the box and every
+  job it contains, top-down, to INACTIVE in one batch. Jobs already
+  INACTIVE are skipped and nothing is marked resolved. The box runs it
+  ends lose their unconsumed member arms with the Q3c SCHED_DISARM record,
+  as a terminal box transition does. A wake in the batch may start the box
+  again; that run is left whole.
+  THE FIELD. `JobRuntime.window_skipped_members` keeps its name for
+  sealed-artifact compatibility, and it now also holds operator
+  resolutions.
+  THE ENGINE. A live member cascaded to INACTIVE is DL-235's case: no KILL
+  is planned, a held SPAWN is superseded and the orphan's exit is rejected
+  as "job not live: INACTIVE". Resume relaunches only a live row: a row
+  moved to INACTIVE at the same run number keeps its evidence reconciled,
+  for the gate to judge, but is never relaunched. Before this, a killed
+  and held watch whose box restarted was relaunched from its incomplete
+  watch log. Run history reads the trace's live-to-INACTIVE transition as
+  it reads an injected INACTIVE, closing the run at that instant; a reset
+  from a terminal status leaves the recorded close alone.
+  An operator STATUS with no run number belongs to the run the trace
+  opened before it, so a run that started and ended with no dispatch, as
+  a job_terminator cascade during STARTING leaves it, never rewrites an
+  earlier run's close; an undispatched run has no row.
+  UNCHANGED. The oracle has no ACTIVATED status; the label stays a
+  display non-goal (SEM-17). A waiting member is INACTIVE without the
+  mark, so a condition that never fires still hangs the box. TERMINATED
+  stays sticky (SEM-13). An operator's SUCCESS on a member that has not
+  run in this box execution does not settle the fold, while an
+  operator's INACTIVE does: the vendor rule names INACTIVE only, so
+  SUCCESS on a running box's member is left as it was.
+  CONSEQUENCES, recorded. The DL-154 tests that relied on a run-one status
+  surviving into run two now see that status cleared at the box start,
+  not at the skip; their verdicts stand, and two are renamed to say so.
+  DL-153's P-M04 pair rested on "nothing resets member statuses at box
+  start". It no longer diverges on the consumer, and the pair now pins the
+  convergence. The M04/M05 same-box staleness assumption keeps its class;
+  whether it is still needed is a separate UC decision. Because the reset
+  wakes referencers, an outside consumer on a plain n(member) re-evaluates
+  at every box start of that member's box. An operator-resolved waiting
+  member can still start later in the same run if its condition comes
+  true; its start voids the mark.
+  VERSION. `STATE_MACHINE_VERSION` moves to 4: a replay with a second box
+  run or an injected INACTIVE derives different state.
+  Tests: test_oracle.py `test_sem10_*` (chain head, nested, held,
+  ON_NOEXEC, live member kept, stale exit code on a reset row and on a
+  row already INACTIVE, lookback wake, the trace-order control, the
+  STARTING wake reading the new cycle, a box its own start terminated),
+  `test_sem11_member_set_inactive_*`, `test_sem11_failed_member_set_inactive_*`,
+  `test_sem11_waiting_member_*`, `test_sem12_a_resolved_member_reaches_every_ancestor_override`,
+  `test_sem15_*`, `test_sem18_*` (cascade, batch order, arms, restart
+  during the cascade), `test_sem33_box_skip_member_later_set_by_the_operator_stays_settled`,
+  `test_sem33_box_skip_on_an_inactive_member_reaches_ancestor_overrides`;
+  test_effects.py
+  `test_a_box_set_inactive_cascades_without_a_kill_and_its_orphans_exit_is_rejected`;
+  test_fw_spool.py
+  `test_resume_never_relaunches_a_watch_whose_row_a_box_start_reset`;
+  test_run_history.py
+  `test_a_cascaded_inactive_closes_the_members_run_as_an_injected_one_does`.
+  Rewritten to the vendor rule: `test_sem10a_*` and `test_sem13_*` (a rerun
+  member now shows SUCCESS->INACTIVE first), four DL-154 box-skip tests,
+  and P-M04 in test_uc_oracle.py.

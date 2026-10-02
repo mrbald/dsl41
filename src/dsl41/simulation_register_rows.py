@@ -2467,7 +2467,8 @@ SCENARIO_ROWS: tuple[Row, ...] = (
             member="STATUS",
             klass=SUPPORTED,
             cite="ir-design ss7",
-            effect="sets a job's status and wakes every job whose condition names it",
+            effect="sets a job's status and wakes every job whose condition names it;"
+            " INACTIVE on a box cascades to every job it contains (SEM-18)",
             trigger=_scn(BASE_JIL, "0 STATUS job=J0 status=SUCCESS"),
         ),
         _row(
@@ -3793,9 +3794,9 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         surface="runtime",
         member="member-arm-scope",
         klass=PROVISIONAL,
-        cite="oracle.Oracle._after_transition",
+        cite="oracle.Oracle._disarm_members",
         label="Q3c",
-        sites=("oracle.<module>#1", "oracle.Oracle._after_transition#1"),
+        sites=("oracle.<module>#1", "oracle.Oracle._disarm_members#1"),
         protocol="Q3c",
         effect="a box member's latched tick is scoped to the box run it was latched in",
         trigger=_job(BOX_BLOCK, box_name="BOX0", condition="s(BOX0)"),

@@ -167,15 +167,45 @@ FAILURE, threshold ignored). If neither list is present, `max_exit_success` deci
 conditions hold. Members with no conditions start immediately when the box starts. A member runs
 **at most once per box run**. **[V]**
 
+A box start resets the statuses of the jobs it contains (DL-242). **[V]** TechDocs 24.2 and
+12.x, scheduling guide, Basic Box Job Concepts: "When a box starts running, the status of all
+the jobs it contains (including subboxes) changes to ACTIVATED ... Because of this status
+change, jobs in boxes do not retain their statuses from previous box cycles." And: "When the
+box is scheduled to run, the statuses of ON_NOEXEC jobs in the box change to ACTIVATED." The
+oracle has no ACTIVATED status (SEM-17). At box start it sets every job the box contains,
+transitively, to INACTIVE. A job that is STARTING, RUNNING or QUE_WAIT keeps its run, and so
+does everything inside a live subbox. An ON_NOEXEC member is reset like any other and keeps
+its flag. The reset clears `exit_code` with the status, on rows already INACTIVE too, so an
+`e()` atom does not read the previous cycle's result. It keeps `last_end_at`, the flags and
+the arm. The rows are written before the box's STARTING transition, so that transition's
+wakes read the new cycle. Their wakes run after it, while the box is STARTING: no member can
+start, no completion check runs, and the box cannot start again. A consumer outside the box
+sees the change at once, for example an `n()` atom with a lookback, which reads the moved
+status time. If those wakes end the box's run (a `job_terminator` cascade), the start stops
+there: the box is not set RUNNING and no member starts.
+
 ### SEM-11 · Box RUNNING/completion **[V]**
 The box stays RUNNING while any member is running. The box cannot complete before all members
 run (or are bypassed). Default: box SUCCESS if and only if all members ended SUCCESS. Box
 FAILURE if at least one member failed (evaluated after all members complete). A member that
 ended TERMINATED counts as failed for this fold; SEM-14 kills land here.
-One carve-out to the literal fold (DL-13, DL-154): a run_window skip inside a live box run is
-an explicit INACTIVE verdict. The member leaves the run and casts no vote in the fold **[C]**
-(mechanism tier; SEM-33's vendor quotes pin the verdict and the completion, not the
-bookkeeping). A member whose condition never fires inside the run still hangs the box.
+Two carve-outs to the literal fold resolve a member as INACTIVE. Each is a completion moment
+and runs the full completion door: overrides first, then the default fold.
+- A run_window skip inside a live box run is an explicit INACTIVE verdict (DL-13, DL-154). The
+  member leaves the run and casts no vote in the fold **[C]** (mechanism tier; SEM-33's vendor
+  quotes pin the verdict and the completion, not the bookkeeping).
+- An operator's INACTIVE on a member of a RUNNING box counts as SUCCESS (DL-242). **[V]**
+  TechDocs 24.2 and 12.x, Basic Box Job Concepts: "Using the sendevent command to change the
+  state of a job in a box to INACTIVE affects the box's completion status as if the INACTIVE
+  job returned a status of SUCCESS." This holds for a member that ran, one that failed, and
+  one that still waited. DL-235 still holds for a launched run: no kill.
+
+The box row records both kinds in `window_skipped_members`; the member's own later start voids its
+mark. A resolved member stays settled if an operator later gives it a status that is not
+live; the fold still votes over members that ran. A resolved member is a completion moment
+for every running ancestor's overrides too, since "inside" is transitive (SEM-12). A member
+whose condition never fires inside the run, and that nobody resolves, still hangs the box:
+waiting reads INACTIVE without the mark.
 
 ### SEM-12 · box_success / box_failure override — with evaluation gating **[V]**
 `box_success: <condition expr>` (same predicate language). Verified semantics:
@@ -202,10 +232,34 @@ Control flow, not alarms:
 - `job_terminator: 1` on a member — if the containing box terminates/fails, terminate this member.
 Members killed this way end with status TERMINATED (this matters for `d()`/`t()` consumers).
 
-### SEM-15 · Member status changes can ripple upward **[C]**
+### SEM-15 · Member status changes can ripple upward **[V/C]**
 A CHANGE_STATUS/FORCE_STARTJOB on a member of a *non-running* box can change the box's derived
 status and thereby trigger downstream jobs conditioned on the box. The oracle models box
-status as derived state re-evaluated on member events.
+status as derived state re-evaluated on member events. **[C]**
+
+INACTIVE members are ignored in that re-evaluation (DL-242). **[V]** TechDocs 24.2 and 12.x,
+Basic Box Job Concepts: "Any jobs in the box with a status of INACTIVE are ignored when the
+status of the box is being re-evaluated." The page's single-member table:
+
+| Box status | Member changes to | Box becomes |
+| --- | --- | --- |
+| SUCCESS | TERMINATED or FAILURE | FAILURE |
+| FAILURE | INACTIVE or SUCCESS | SUCCESS |
+| FAILURE | FAILURE | no change |
+| INACTIVE | INACTIVE or SUCCESS | SUCCESS |
+| INACTIVE | TERMINATED or FAILURE | FAILURE |
+| TERMINATED | anything | no change (SEM-13) |
+
+The page's worked example has an INACTIVE box with four INACTIVE members. One is forced and
+completes SUCCESS, so the box is SUCCESS. And: "if the status of the same job is being updated
+to INACTIVE and all the other jobs inside the box are already in INACTIVE status, the box
+status is re-evaluated and returns a SUCCESS status as it ignores all the jobs that are in
+INACTIVE status." So the oracle re-derives once every member that is not INACTIVE is
+terminal, and a box with only INACTIVE members derives SUCCESS. A terminal member transition
+triggers the re-evaluation, and so does an injected INACTIVE on a member. A box-start reset,
+a SEM-18 cascade and a window skip are internal transitions and do not trigger it. The box is
+read again after the injected transition: a box that the transition's own wakes started is
+not re-derived.
 
 ### SEM-16 · Jobs added to a RUNNING box **[V]**
 When a job is inserted/moved into a running box: an ALERT event occurs, and the job's run
@@ -218,9 +272,24 @@ scope, mid-run `update_resource` replenishment of a depletable included (DL-50).
 ### SEM-17 · Deep nesting **[C]**
 Boxes nest arbitrarily (practical guidance: ≤ 1000 members, avoid organizational grouping;
 Broadcom's own guidance is boxes for *shared starting conditions*). ACTIVATED state = "top-level
-box is RUNNING, member not yet started."
+box is RUNNING, member not yet started." The oracle does not model the ACTIVATED label. Its
+state effect is modeled (DL-242): a waiting member reads INACTIVE (SEM-10's reset), and an
+explicit INACTIVE verdict carries the box row's resolution mark (SEM-11).
 *Model note:* lowering accepts at most 64 containment links as a compiler sanity limit; a deeper
 chain is a loud finding, not a silent truncation.
+
+### SEM-18 · CHANGE_STATUS INACTIVE on a box cascades **[V]**
+TechDocs 24.2 and 12.x, Basic Box Job Concepts: "Using the sendevent command to change the
+state of a box to INACTIVE changes the state of all the jobs it contains to INACTIVE." The
+oracle sets the box INACTIVE, then every job it contains, transitively and top-down: a subbox
+before its own members (DL-242). Jobs already INACTIVE are skipped. Cascaded members are not
+marked resolved. The cascade is one batch: every row is written and settled first, the box
+runs it ends lose their unconsumed member arms (the Q3c pin, as at a terminal box
+transition), and only then do the wakes run. So no member starts inside a half-moved subtree.
+A wake may start the box again; that new run is left alone. A live member is treated as
+DL-235 treats an injected INACTIVE: no kill is planned, its reservations release, its
+process's later exit is rejected as "job not live: INACTIVE", and resume does not relaunch
+it.
 
 ---
 
@@ -739,10 +808,18 @@ T05 iced predecessor in lookback (SEM-05) · T06 undefined job never fires (SEM-
 T08 SET_GLOBAL triggers re-eval (SEM-08) · T09 max_exit_success boundary, T09b fail_codes
 decide alone (unlisted → SUCCESS), T09c success_codes replacement, T09d success_codes
 ignored beside fail_codes (SEM-09, DL-58 cited composition) ·
-T10 unconditioned member starts with box (SEM-10) · T11 default box fold (SEM-11) ·
+T10 unconditioned member starts with box (SEM-10), T10 box-cycle reset: a second box run
+starts only the head of a chain, nested, held and ON_NOEXEC variants (SEM-10, DL-242:
+`test_sem10_second_box_run_*`) · T11 default box fold (SEM-11), T11 operator INACTIVE on a
+member completes the box and a waiting member still hangs it (SEM-11, DL-242:
+`test_sem11_member_set_inactive_*`, `test_sem11_failed_member_set_inactive_*`,
+`test_sem11_waiting_member_*`) ·
 T12a internal box_success early-exit, T12b external box_success hung-RUNNING,
 T12c box_success over a grandchild fires transitively (SEM-12) ·
 T13 sticky TERMINATED box (SEM-13) · T14 terminator cascade both directions (SEM-14) ·
+T15 idle box ignores INACTIVE members, the single-member table (SEM-15, DL-242:
+`test_sem15_*`) · T18 box INACTIVE cascades to every contained job (SEM-18, DL-242:
+`test_sem18_*`) ·
 T20a ice downstream fires, T20b off-ice does not immediately run (SEM-20) ·
 T21a hold blocks downstream, T21b off-hold immediate run (SEM-21) · T22 noexec bypass,
 T22b an ON_NOEXEC box goes RUNNING and every member bypasses (SEM-22) ·
@@ -752,12 +829,15 @@ T24a initial ON_HOLD blocks then OFF_HOLD releases, T24b initial ON_ICE satisfie
 corner, both cited (SEM-04, DL-54/DL-58: `test_sem04_zero_lookback_*`) · T32 arm-and-wait:
 tick arms, edge starts, start consumes (SEM-32, DL-54/DL-58: `test_sem32_*`) · T33a/b
 run_window closer-edge both sides + box variants (incl. the DL-154 skip bypass and the SEM-11
-carve-out contrast), T33c the window read in the job's timezone (SEM-33, with SEM-35) ·
+carve-out contrast; since DL-242 a rerun member's INACTIVE edge comes from the box-start
+reset, not the skip: `test_sem33_box_skip_on_a_rerun_member_follows_the_box_start_reset`,
+`test_sem33_box_skip_after_the_box_start_reset_leaves_downstream_atoms_false`), T33c the
+window read in the job's timezone (SEM-33, with SEM-35) ·
 T34a/b must_* emit alarms only, T34c each start_time arms its own relative offset (SEM-34).
 
 Layer note: not every SEM entry lands in the oracle suite. SEM-07 (cross-instance atoms) is
-pinned by the condition, derive and control-plane suites, not by an oracle trace. SEM-15 has its
-own oracle test (`test_sem15_idle_box_recompute_derives_status_from_member_changes`). SEM-30 and
+pinned by the condition, derive and control-plane suites, not by an oracle trace. SEM-15's
+oracle tests are listed as T15 above. SEM-30 and
 SEM-31 are lowering rules, pinned in the IR suite (`test_sem30_*`, `test_sem31_*`). SEM-35 is
 pinned by the scheduler suite's `test_resolve_timezone_*` and `test_preflight_timezone_*`
 families, which carry no `sem35` in their names, and by T33c in the oracle suite for the
@@ -765,7 +845,8 @@ re-basing of `run_window`. SEM-36..39 are calendar rules, pinned in the autocal 
 (`test_sem36_*`..`test_sem39_*`). T34a/b's own `test_sem34a/b_*` cover must_complete only; the
 must_start half is pinned by `test_must_start_alarm_fires_when_no_run_began_by_deadline` and
 `test_must_start_alarm_quiet_when_the_run_began_in_time`. SEM-16 (definition-time mutation of a
-running box) and SEM-17's ACTIVATED state are oracle non-goals and have no trace test.
+running box) and SEM-17's ACTIVATED label are oracle non-goals and have no trace test. The
+label's state effect is pinned under SEM-10 and SEM-11 (DL-242).
 
 ## 9. Open questions and their pinned defaults
 
@@ -878,7 +959,8 @@ holds the probe that would settle it.
   available; parens are accepted alongside braces, so no behavior rides on the grouping read.
 
 ## Sources
-Primary: Broadcom TechDocs, AutoSys Workload Automation 12.0/12.0.01/12.1/12.1.01: JIL
+Primary: Broadcom TechDocs, AutoSys Workload Automation 12.0/12.0.01/12.1/12.1.01 (Basic Box
+Job Concepts also 24.2, same box-cycle wording: SEM-10, SEM-11, SEM-15, SEM-18): JIL
 reference pages (`condition`, `box_success`, `box_failure`, `run_window`, `start_mins`,
 `must_complete_times`, `date_conditions`, `n_retrys`), Scheduling guides (Basic Box Job
 Concepts, Box Job Completion State, Must Start/Complete Times, Manage Common Job Properties,
