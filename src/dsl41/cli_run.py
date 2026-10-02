@@ -141,66 +141,65 @@ def _spec_texts(parsed: "list[JilFile]", catalog: CatalogIR) -> "dict[str, str]"
 
 def run(
     ctx: typer.Context,
-    files: list[Path] = typer.Argument(..., help="JIL files forming the estate to execute"),
+    files: list[Path] = typer.Argument(..., help="JIL files forming the estate."),
     run_root: Path = typer.Option(
-        ..., "--run-root", help="Run directory (journal, runs/, logs/, control.sock)."
+        ...,
+        "--run-root",
+        help="Directory for this run: the journal, runs/, logs/ and control.sock.",
     ),
     resume: bool = typer.Option(
-        False, "--resume", help="Resume the run_root's journal (replay + reconcile, ss7)."
-    ),
+        False, "--resume", help="Continue the run recorded in --run-root's journal."
+    ),  # ss7
     open_from: Path = typer.Option(
         None,
         "--open-from",
-        help="PHYSICAL ROLL: open the next period into this FRESH --run-root from the"
-        " lineage this ANCHOR DIRECTORY names (period-model ss7). The head must be"
-        " `closed`, the closing period must be quiescent and ATTESTED (`dsl41"
-        " audit`), and the target must satisfy ss1.1's ownership rule. The anchor is"
-        " the lineage's, so pass the same --estate-anchor on every later --resume.",
+        help="Open the next period into a fresh --run-root from the lineage this"
+        " anchor directory names. The lineage head must be closed, and the"
+        " closing period must be quiet and attested ('dsl41 audit'). Pass the"
+        " same --estate-anchor on every later --resume.",
+        # period-model ss7, ss1.1
     ),
     estate_anchor: Path = typer.Option(
         None,
         "--estate-anchor",
-        help="The lineage anchor directory (period-model ss1.3). Defaults to"
-        " <run-root>.anchor -- a sibling of the root, never inside it, because the"
-        " root is what an operator archives.",
-    ),
+        help="The lineage anchor directory. Defaults to <run-root>.anchor, a"
+        " sibling of the run root.",
+    ),  # period-model ss1.3
     ui: bool = typer.Option(
-        False, "--ui", help="Attach the ss11 Textual TUI in this terminal (quit stops the run)."
-    ),
+        False, "--ui", help="Open the terminal UI in this terminal. Quitting it stops the run."
+    ),  # ss11
     detached: bool = typer.Option(
         False,
         "--detached",
-        help="Run CMD jobs under a per-run-root supervisor (ss6a Tier 1) so an"
-        " engine restart reattaches instead of killing them; stopping the engine"
-        " leaves jobs running -- resume with --resume --detached.",
-    ),
+        help="Run command jobs under a per-run-root supervisor, so an engine"
+        " restart reattaches to them instead of killing them. Stopping the"
+        " engine leaves them running; resume with --resume --detached.",
+    ),  # ss6a Tier 1
     deadman: float = typer.Option(
         None,
         "--deadman",
-        help="SECONDS with no live controller after which the supervisor exits,"
-        " killing every job it holds by lifeline EOF (concurrency-model ss8)."
-        " Needs --detached. This is what makes `dsl41 host evict` provable: a"
-        " run root without it is never reroutable except by force. It costs the"
-        " thing --detached buys, so choose it longer than any planned engine"
-        " outage -- an engine down longer than this loses its jobs.",
+        help="Seconds without a live engine after which the supervisor exits"
+        " and kills every job it holds. Needs --detached. Required for"
+        " 'dsl41 host evict' without --force. Choose it longer than any"
+        " planned engine outage: an engine down longer than this loses its"
+        " jobs.",
+        # concurrency-model ss8
     ),
     machine_policy: str = typer.Option(
         "strict",
         "--machine-policy",
-        help="How to treat a job on a virtual pool split across this host and"
-        " others: 'strict' (default) refuses it; 'local-eligible' runs it here"
-        " with a WARN (pool placement ignored). Machines are resolved through"
-        " insert_machine (node_name / members); a job pinned to another host is"
-        " always refused (DL-49).",
-    ),
+        help="What to do with a job whose machine pool spans this host and"
+        " others. strict refuses it. local-eligible runs it here with a"
+        " warning. A job pinned to another host is always refused.",
+    ),  # DL-49
     as_machine: list[str] = typer.Option(
         [],
         "--as-machine",
-        help="Machine name(s) this runner IS (DL-52), e.g. --as-machine"
-        " greezy_spoon. A job whose machine: is (or resolves through"
-        " insert_machine to) one of these runs here; anything else is refused"
-        " foreign. Repeatable. Omit for zero-config (the forward hostname; no"
-        " reverse-DNS). Declaring is explicit and drops all hostname guessing.",
+        help="Machine names this runner answers to. A job whose machine is"
+        " one of these, directly or through insert_machine, runs here; any"
+        " other machine is refused. Repeatable. Without it the runner uses"
+        " its own hostname.",
+        # DL-52
     ),
     timezone: str = TIMEZONE_OPT,
     timezone_map: Path = TIMEZONE_MAP_OPT,
@@ -209,20 +208,31 @@ def run(
     access_map: Path = typer.Option(
         None,
         "--access-map",
-        help="Role map arming the three-tier perimeter on the control socket"
-        " (docs/access-model.md): strict TOML, principal -> tier. A configured"
-        " path that is missing or invalid REFUSES startup; omit the option and"
-        " the 0600 owner-only model stands unchanged. SIGHUP reloads the map.",
+        help="TOML file mapping principals to access tiers on the control"
+        " socket (docs/access-model.md). A missing or invalid file refuses"
+        " startup. Without it the socket is owner-only (mode 0600). SIGHUP"
+        " reloads the file.",
     ),
 ) -> None:
-    """Execute the estate headlessly on this machine: wall clock, real
-    processes, WAL journal, calendar scheduler, and the control socket
-    (runner-design ss1/ss9/ss10). Runs until stopped (SIGINT/SIGTERM);
-    tethered (default) engine death terminates all jobs, durably recorded
-    (ss6a); `--detached` keeps jobs alive under a supervisor across engine
-    restarts. Drive it with `dsl41 sendevent` / `dsl41 query`, or attach the
-    TUI (`--ui` here, or `dsl41 ui` from another terminal).
+    """Run an estate on this machine with real processes and a wall clock.
+
+    The engine schedules jobs by calendar, starts real processes,
+    journals every input, and listens on a control socket under
+    --run-root. It runs until SIGINT or SIGTERM. By default jobs are
+    tethered: when the engine dies, its jobs are terminated and the
+    journal records it. With --detached, jobs run under a supervisor
+    and survive an engine restart.
+
+    While it runs, use 'dsl41 query' and 'dsl41 sendevent' from another
+    terminal, or open the terminal UI with --ui here or 'dsl41 ui'
+    elsewhere.
+
+    Exit codes: 0 stopped by the operator; 1 the engine or the estate
+    failed while running; 2 the run never started (a preflight error, a
+    refused resume, an unreadable input); 3 a seal committed, and the
+    next period is ready to open.
     """
+    # Design: runner-design ss1, ss9, ss10, ss6a
     import asyncio
 
     from datetime import UTC, datetime
@@ -1151,104 +1161,104 @@ def _scenario_completion(raw: object, where: str) -> tuple[float, int]:
 
 
 def rehearse(
-    files: list[Path] = typer.Argument(..., help="JIL files forming the estate to rehearse"),
+    files: list[Path] = typer.Argument(..., help="JIL files forming the estate."),
     scenario: Path = typer.Option(
         None,
         "--scenario",
-        help="JSON scenario: adapter script + events to inject (see command help).",
+        help="JSON scenario with scripted job outcomes and events to inject."
+        " The shape is described above.",
     ),
     start: str = typer.Option(
-        None, "--start", help="Virtual clock start, ISO datetime (default: wall now, UTC)."
+        None, "--start", help="Virtual clock start as an ISO datetime. Defaults to now, UTC."
     ),
     hours: float = typer.Option(
-        24.0, "--hours", help="Horizon: quiesce once no work remains within start + HOURS."
+        24.0,
+        "--hours",
+        help="Horizon. The rehearsal ends when no work remains before start + HOURS.",
     ),
     output: RehearseFormat = typer.Option(
         RehearseFormat.text,
         "--format",
-        help="text: trace lines; summary: trace + per-job run counts and final"
-        " statuses; json: one document carrying both. With --check-cadence:"
-        " text is the comparison table, summary is trace + table, json gains"
-        " one nested cadence_check block.",
+        metavar="FORMAT",
+        help="text: trace lines. summary: trace plus per-job run counts and"
+        " final statuses. json: one document with both. With"
+        " --check-cadence, text is the comparison table, summary is trace"
+        " plus table, and json gains a cadence_check block.",
     ),
     check_cadence: bool = typer.Option(
         False,
         "--check-cadence",
-        help="Compare observed per-job run counts against the DL-182 cadence"
-        " bound and exit 3 on deviations. Latch effects across days need"
-        " --hours 48 or more.",
-    ),
+        help="Compare each job's run count with its computed bound and"
+        " exit 3 on deviations. Latch effects across days need --hours 48"
+        " or more.",
+    ),  # DL-182
     cadence_policy: Path = typer.Option(
         None,
         "--cadence-policy",
-        help="Declared cadence exceptions (JSON; see command help). Requires --check-cadence.",
+        help="JSON file of declared cadence exceptions. The shape is"
+        " described above. Needs --check-cadence.",
     ),
     sweep: list[SweepKind] = typer.Option(
         None,
         "--sweep",
-        help="Additional check-cadence plays (repeatable). fail: one replay per"
-        " producer with its first run scripted to FAILURE -- suppressed runs"
-        " are inventory, multi-fire still deviates. flags: one replay per"
-        " (global, region value, reset variant); global-gated consumers"
-        " become checked under the pinned flag. Requires --check-cadence;"
-        " refuses --run-root (one journal, one run).",
+        metavar="SWEEP",
+        help="Extra cadence plays, fail or flags, as described above."
+        " Repeatable. Needs --check-cadence. Cannot be combined with"
+        " --run-root.",
     ),
     timezone: str = TIMEZONE_OPT,
     timezone_map: Path = TIMEZONE_MAP_OPT,
     run_root: Path = typer.Option(
-        None, "--run-root", help="Also persist a WAL journal under this directory."
+        None, "--run-root", help="Also write the journal under this directory."
     ),
     permit_unknown: bool = PERMIT_UNKNOWN,
     properties: list[Path] = PROPERTIES,
 ) -> None:
-    """Rehearse the estate under the virtual clock (runner-design ss9): the
-    same engine path as `run` with scripted adapters, so a 24h estate plays
-    in seconds and the printed trace is evidence about production behavior.
+    r"""Play an estate under a virtual clock and print what would happen.
 
-    Scenario file shape (all keys optional):
-    {"adapter": {"default": [duration_s, exit_code]
-                     | {"duration_s": S, "exit_code": C} | null,
-                 "park": [job, ...],
-                 "runs": [{"job": J, "run_number": N,
-                           "duration_s": S, "exit_code": C}
-                          | {"job": J, "run_number": N, "park": true}, ...]},
-     "events": [{"at": ISO, "kind": KIND, "payload": {...}}, ...]}
-    -- events reuse the oracle trace tests' event shape. A null default
-    parks EVERY unscripted run (the script drives completions); "park"
-    parks every run of the named jobs -- a file watcher that must not fire
-    during the rehearsal -- and a runs entry with park:true parks that one
-    run. Precedence: runs entry, then park, then default.
+    Rehearsal runs the same engine as 'run' with scripted job outcomes,
+    so a 24-hour estate plays in seconds. The printed trace shows what
+    production would do.
 
-    --check-cadence (DL-182/DL-184) plays the same rehearsal and compares
-    each job's observed run count (a run_number delta, never trace lines)
-    against a typed bound: own scheduler ticks, the max over wake sources
-    for condition-only jobs, min-composed for box members. Deviations exit
-    3; jobs whose bound cannot be honestly computed report as unchecked.
-    Scenario events are allow-listed to STARTJOB/FORCE_STARTJOB/SET_GLOBAL
-    (each start adds +1 to its target's bound); unscripted file watchers
-    auto-park; completions are synthesized from each job's own SEM-09
-    boundary. --cadence-policy declares intended exceptions:
-    {"schema_version": 1, "policies": {JOB:
-    {"max_runs": N | null, "reason": "..."}}} -- null means unchecked, the
-    reason prints in the report.
+    Scenario file (JSON, every key optional):
+      {"adapter": {"default": \[duration_s, exit_code]
+                              | {"duration_s": S, "exit_code": C} | null,
+                   "park": \[job, ...],
+                   "runs": \[{"job": J, "run_number": N,
+                             "duration_s": S, "exit_code": C}
+                            | {"job": J, "run_number": N, "park": true}, ...]},
+       "events": \[{"at": ISO, "kind": KIND, "payload": {...}}, ...]}
+    A null default parks every unscripted run, so the script drives
+    completions. "park" parks every run of the named jobs, for example a
+    file watcher that must not fire. A runs entry with "park": true parks
+    that one run. Precedence: runs entry, then park, then default.
 
-    --sweep fail replays the estate once per start-gate producer with that
-    producer's first run scripted to an exit its own boundary calls
-    FAILURE. Jobs that dropped runs against the happy-path baseline are
-    the suppressed-run inventory (report-only, the dynamic L022);
-    multi-fire in any replay still deviates and exits 3. BOX, parked and
-    n_retrys producers report skipped/inconclusive rather than pretending
-    coverage. Case progress prints on stderr.
+    --check-cadence plays the rehearsal and compares each job's run count
+    with a computed bound. Deviations exit 3. Jobs whose bound cannot be
+    computed are reported as unchecked. Scenario events are limited to
+    STARTJOB, FORCE_STARTJOB and SET_GLOBAL, and unscripted file watchers
+    are parked. --cadence-policy declares intended exceptions:
+      {"schema_version": 1,
+       "policies": {JOB: {"max_runs": N | null, "reason": "..."}}}
+    null means unchecked. The reason is printed in the report.
 
-    --sweep flags replays the estate once per (global, region value, reset
-    variant) -- region values come from the equivalence literal regions,
-    covering the ordered operators literal-by-literal sets miss. Under a
-    pinned flag its consumers become CHECKED: the wake budget counts only
-    satisfying assignments, and an at-start set counts nothing for a
-    latch-gated consumer, so the stale-flag multi-fire (the DL-180 shape)
-    deviates while the reset variant shows the fix. Globals past the case
+    --sweep fail replays the estate once per upstream job, with that
+    job's first run failing. Jobs that then run fewer times are listed
+    as suppressed runs. A job that runs more often than its bound still
+    deviates and exits 3. Box, parked and retrying producers are reported
+    as skipped or inconclusive rather than covered.
+
+    --sweep flags replays the estate once per global, per value its
+    conditions test, with and without a reset. Consumers gated by that
+    global are checked under the pinned value. Globals past the case
     ceiling stay unchecked and are named in the report.
+
+    Exit codes: 0 the estate went quiet within the horizon; 1 the engine
+    or the estate failed while playing; 2 the rehearsal never started
+    (an unreadable input or scenario); 3 --check-cadence found
+    deviations.
     """
+    # Design: runner-design ss9, DL-182, DL-184, SEM-09, DL-180, L022 (dynamic)
     import asyncio
 
     from datetime import UTC, datetime, timedelta
@@ -1398,61 +1408,49 @@ def rehearse(
 def journal(
     journal_file: Path = typer.Argument(
         ...,
-        help="Run journal to replay: an estate root, its journal.jsonl sentinel, or a"
-        " wal/NNNNNN.jsonl segment. A root or a sentinel replays EVERY segment the"
-        " root retains, in period order; name one wal/NNNNNN.jsonl to replay exactly"
-        " that period. Name the lineage ANCHOR directory instead and the read is"
-        " ESTATE-WIDE: every root the registry holds, in period order.",
+        help="What to replay: a run root, its journal.jsonl, or one"
+        " wal/NNNNNN.jsonl segment. A root or journal.jsonl replays every"
+        " retained segment in period order. A segment replays that period"
+        " only. The lineage anchor directory replays every root in the"
+        " registry.",
     ),
     files: list[Path] = typer.Argument(
         None,
-        help="JIL files forming the catalog the FIRST replayed period ran under."
-        " OPTIONAL since DL-142: omitted, every period's catalog is loaded from the"
-        " estate's own content-addressed bundle, by the hash that period's opening"
-        " `segment` pins.",
-    ),
+        help="JIL files of the first replayed period's catalog. Optional:"
+        " without them each period's catalog is loaded from the estate's"
+        " bundle.",
+    ),  # DL-142
     permit_unknown: bool = PERMIT_UNKNOWN,
     properties: list[Path] = PROPERTIES,
 ) -> None:
-    """Replay a run journal's inputs through a fresh Oracle and print the
-    reconstructed trace.
+    """Replay a run's journal and print the reconstructed trace.
 
-    The WAL is inputs-only (runner-design ss7): emitted events and the trace
-    are pure functions of the input sequence, so they are derived here, never
-    stored. Refuses on catalog-hash mismatch -- a changed estate re-baselines
-    explicitly.
+    The journal stores inputs only. Events and the trace are recomputed
+    from them, never stored. Replay refuses when the journal's catalog
+    hash does not match the catalog it is replayed against.
 
-    **It CROSSES boundaries** (period-model ss11; DL-142). At each `segment`
-    record the replay folds state through the seal exactly as an engine
-    opening the period does -- `open_from_seal`, the one opener -- loads the
-    next period's catalog from the bundle that segment pins, and continues.
-    The boundary is narrated, never silent -- and only once it has been
-    crossed. A boundary is crossed only over a seal that proves out: the
-    digest the record names, the record's own fields against the sidecar
-    (ss2.2), the chain, `next_period` agreement, and the seal RE-DERIVED
-    from the period's own evidence -- or, for a later segment named alone,
-    its predecessor's attestation. Anything less refuses by name, because a
-    read-only replay across a forged seal would narrate a forged
-    continuation just as confidently as a true one.
+    Replay crosses period boundaries. At each segment record it folds
+    state through the seal, loads the next period's catalog from the
+    bundle the segment pins, and continues. Every seal is checked before
+    it is crossed: its digest, its fields against the sidecar, its
+    chain, and its re-derivation from the period's evidence or its
+    predecessor's attestation. A seal that fails any check refuses the
+    replay.
 
-    **The catalog argument is optional and never wins over a pin.** The
-    estate has held its own inputs since DL-130 and a bundle re-parses under
-    the ORIGINAL paths `sources.json` records, so it reproduces the very
-    `catalog_hash` the segment pins -- which is what lets this verb answer
-    with no estate-file argument at all, as `dsl41 runs` already does. Files GIVEN are the FIRST replayed period's catalog and are
-    hash-gated against its pin exactly as before; later periods still come
-    from their own bundles, because one supplied catalog cannot be many
-    periods' catalogs. Files OMITTED, every period including the first comes
-    from its bundle. `--permit-unknown` and `-p` therefore govern the files
-    a caller SUPPLIES and nothing else: a bundle is the bytes the period
-    ran, already through the launch gate and already post-placeholder.
+    The catalog argument is optional. Without it, every period's
+    catalog comes from the estate's own bundle. With it, the given
+    FILES are the first replayed period's catalog, checked against its
+    pinned hash; later periods still come from their bundles.
+    --permit-unknown and -p apply only to the files you give.
 
-    **Pointed at the ESTATE it replays the whole lineage.** Given the anchor
-    directory it walks ss1.3's archive registry -- every period, in period
-    order, with the root that holds it -- so period 1 is found after a
-    physical roll without knowing which root it went to (PR-02f), and the
-    roll is crossed like any other boundary.
+    Given the lineage anchor directory, replay covers the whole estate:
+    every root in the registry, in period order, across physical rolls.
+
+    Exit codes: 0 replayed; 2 refused (a catalog hash mismatch, a seal
+    that fails its checks, or an unreadable input).
     """
+    # Design: runner-design ss7, period-model ss11, DL-142, ss2.2, DL-130,
+    # ss1.3, PR-02f
     from dsl41.boundary import is_anchor_dir
 
     catalog = load_catalog_or_exit_2(files, permit_unknown, properties) if files else None
@@ -2018,38 +2016,40 @@ def _runs_table(rows: list[RunRow]) -> list[str]:
 def runs(
     run_roots: list[Path] = typer.Argument(
         ...,
-        help="One or more run roots (dsl41 run --run-root TARGET) -- or the lineage"
-        " ANCHOR directory ALONE, which reads every root the registry names, in"
-        " period order.",
+        help="Run roots (the --run-root of 'dsl41 run'), or the lineage"
+        " anchor directory alone to read every root in the registry.",
     ),
-    job: str = typer.Option(None, "--job", help="Filter to one job's rows."),
+    job: str = typer.Option(None, "--job", help="Only this job's rows."),
     since: str = typer.Option(
-        None, "--since", help="ISO 8601: only runs started at or after this instant."
+        None, "--since", help="Only runs started at or after this ISO 8601 instant."
     ),
     output_format: RunsFormat = typer.Option(
         RunsFormat.table,
         "--format",
-        help="table (default): human-readable, with a labelled break at every"
-        " catalog change. json / csv: every field, self-describing via catalog_hash"
-        " on every row -- segment yourself by watching it change.",
+        help="table: human-readable, with a marked break at every catalog"
+        " change. json or csv: every field, with catalog_hash on each row.",
     ),
 ) -> None:
-    """Run history (DL-113): one row per job run, folded from each run
-    root's journal + manifest + spool -- "how long did it take, run after
-    run, and did it change." Offline only: no control socket, no live engine,
-    and deliberately not a control-protocol verb (docs/control-protocol.md
-    stays frozen at v2).
+    """List the run history of one or more run roots.
 
-    Multiple run roots on one command line is the point: every row sorts by
-    (job, started_at) across ALL of them, so a series that crosses a baseline
-    change comes back segmented rather than blended into one misleading
-    line -- never silently, and never refused.
+    One row per job run, built from each root's journal, manifest and
+    spool: when it started, how long it took, and how it ended. Rows
+    sort by job and start time across all the roots given. Where the
+    catalog changed between runs, the table marks the break instead of
+    blending the series.
 
-    **Pointed at the ESTATE it needs no list at all.** Name the lineage
-    anchor directory and the roots come from ss1.3's archive registry, in
-    period order, so a lineage that has rolled reads as one table and
-    period 1's root is found rather than remembered (PR-02f). A root the
-    registry names and the disk does not refuses by name."""
+    Given the lineage anchor directory, the roots come from the
+    registry, in period order. A root the registry names but the disk
+    lacks is refused.
+
+    This command reads files only. It needs no running engine and no
+    socket.
+
+    Exit codes: 0 history printed; 2 a root could not be read, or the
+    registry names a root the disk lacks.
+    """
+    # Design: DL-113, ss1.3, PR-02f; not a control-protocol verb, which stays
+    # frozen at v2
     from dsl41.boundary import is_anchor_dir
     from dsl41.runner_history import RunHistoryError, archived_coverage, read_run_roots
 

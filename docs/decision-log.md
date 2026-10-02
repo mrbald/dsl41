@@ -14933,3 +14933,36 @@ relitigate an entry; append a new one.
   LESSONS. A digest from a pull on one platform is that platform's
   manifest, not the index: pin the index digest and check the media type.
   A scripted conflict resolution must handle diff3 markers.
+
+- DL-238 CLI help is user prose; design citations live in code comments
+  (2026-10-02; src/dsl41/cli.py, cli_common.py, cli_compile.py,
+  cli_run.py, cli_control.py, cli_estate.py)
+  The help text is the first thing a user of the package sees, so it is
+  written for that reader: plain English, one idea per sentence, what
+  the command does, what it takes, what it refuses, and its exit codes.
+  Every verb's help ends with its exit codes, so the root help can send
+  a reader there for them.
+  Rationale, capitals for emphasis, and citation tokens (DL, SEM, PR,
+  section numbers) are not help text. Each command keeps its citations
+  on a `# Design:` comment line after the docstring, and each option
+  keeps its own as a trailing comment on the declaration, so
+  scripts/arch_check.py gate 3 and a maintainer still find them. A new
+  verb or option follows the same split.
+  `dsl41 --help` groups the verbs into four panels by workflow: Compile
+  JIL, Run an estate, Control a running engine, Periods and retention.
+  Registration order is the order within a panel. `-h` is an alias of
+  `--help` everywhere. Rich markup mode stays on, so a literal `[` in
+  help text is written `\[`; the rehearse scenario sketch had lost its
+  lists to markup before this entry. Typer strips the leading
+  whitespace of the first line of a docstring body, so a table that
+  opens the body loses its first row's indent; an intro line ("ACTION
+  is one of:") precedes every such table. Arguments whose values are a
+  fixed set carry an upper-case metavar (EVENT, WHAT, ACTION, HOST_ID),
+  and the set is listed in the argument's help with commas, because a
+  pipe-joined list is one word to the renderer and gets truncated.
+  One option string was wrong and is fixed: `--estate-anchor` said it
+  could be named alone, which holds for audit and prune but not for
+  seal, whose `--run-root` is required. That sentence now lives on the
+  optional `--run-root` of the two verbs where it is true.
+  Not changed: behavior, option names, defaults, exit codes, or the
+  README's exit-code summary, which already matched the help.

@@ -45,51 +45,58 @@ from dsl41 import cli_compile, cli_control, cli_estate, cli_run
 
 app = typer.Typer(
     no_args_is_help=True,
-    help="dsl41: AutoSys->Stonebranch migration compiler.",
     add_completion=False,
+    context_settings={"help_option_names": ["-h", "--help"]},
 )
 
 
+# Callback exists only to keep typer in subcommand mode -- without it,
+# typer collapses a single @app.command() into a bare top-level command
+# instead of a `dsl41 <verb> ...` subcommand.
 @app.callback()
 def _root() -> None:
-    """dsl41: AutoSys->Stonebranch migration compiler.
+    """Migration compiler and runner for AutoSys job estates.
 
-    (Callback exists only to keep typer in subcommand mode -- without it,
-    typer collapses a single @app.command() into a bare top-level command
-    instead of a `dsl41 <verb> ...` subcommand.)
+    Compile JIL into reports, graphs and Stonebranch Universal Controller
+    records. Run or rehearse an estate on this machine under AutoSys
+    semantics, control it while it runs, and keep its history in sealed
+    periods.
+
+    Run 'dsl41 COMMAND --help' for one command's options and exit codes.
     """
 
 
-# The registration order IS the order `dsl41 --help` lists the verbs in,
-# so it is the order they were declared in before the split.
-app.command()(cli_compile.lint)
-app.command()(cli_compile.equiv)
-app.command()(cli_compile.report)
-app.command()(cli_compile.uc)
-app.command()(cli_compile.decompile)
-app.command()(cli_compile.minify)
-app.command()(cli_run.journal)
-app.command()(cli_run.runs)
-app.command()(cli_compile.folds)
-app.command()(cli_compile.resolve)
-app.command()(cli_compile.viz)
-app.command()(cli_run.run)
-app.command()(cli_run.rehearse)
-app.command()(cli_control.sendevent)
-app.command()(cli_control.release_held)
-app.command()(cli_control.host)
-app.command()(cli_control.ui)
-app.command()(cli_control.serve)
-app.command()(cli_control.query)
-app.command()(cli_control.supervise)
-app.command()(cli_estate.seal)
-app.command()(cli_estate.audit)
-app.command()(cli_estate.verify)
+# Panels and order are what `dsl41 --help` shows. Group by workflow, most
+# common first.
+app.command(rich_help_panel="Compile JIL")(cli_compile.lint)
+app.command(rich_help_panel="Compile JIL")(cli_compile.report)
+app.command(rich_help_panel="Compile JIL")(cli_compile.viz)
+app.command(rich_help_panel="Compile JIL")(cli_compile.equiv)
+app.command(rich_help_panel="Compile JIL")(cli_compile.uc)
+app.command(rich_help_panel="Compile JIL")(cli_compile.decompile)
+app.command(rich_help_panel="Compile JIL")(cli_compile.folds)
+app.command(rich_help_panel="Compile JIL")(cli_compile.minify)
+app.command(rich_help_panel="Compile JIL")(cli_compile.resolve)
+app.command(rich_help_panel="Run an estate")(cli_run.run)
+app.command(rich_help_panel="Run an estate")(cli_run.rehearse)
+app.command(rich_help_panel="Run an estate")(cli_run.journal)
+app.command(rich_help_panel="Run an estate")(cli_run.runs)
+app.command(rich_help_panel="Control a running engine")(cli_control.query)
+app.command(rich_help_panel="Control a running engine")(cli_control.sendevent)
+app.command(rich_help_panel="Control a running engine")(cli_control.release_held)
+app.command(rich_help_panel="Control a running engine")(cli_control.host)
+app.command(rich_help_panel="Control a running engine")(cli_control.ui)
+app.command(rich_help_panel="Control a running engine")(cli_control.serve)
+app.command(rich_help_panel="Control a running engine")(cli_control.supervise)
+app.command(rich_help_panel="Periods and retention")(cli_estate.seal)
+app.command(rich_help_panel="Periods and retention")(cli_estate.audit)
+app.command(rich_help_panel="Periods and retention")(cli_estate.verify)
 
 estate_app = typer.Typer(
     no_args_is_help=True,
-    help="Lineage-level operations: prune what retention allows, and the break-glass reclaim.",
+    help="Prune what retention allows, or reclaim a stale claim.",
+    context_settings={"help_option_names": ["-h", "--help"]},
 )
-app.add_typer(estate_app, name="estate")
+app.add_typer(estate_app, name="estate", rich_help_panel="Periods and retention")
 estate_app.command("reclaim")(cli_estate.estate_reclaim)
 estate_app.command("prune")(cli_estate.estate_prune)

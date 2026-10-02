@@ -44,7 +44,7 @@ if TYPE_CHECKING:
 
 # ------------------------------------------------------- the boundary (U7)
 
-_RUN_ROOT_OPT = typer.Option(..., "--run-root", help="The estate root (period-model ss1.1).")
+_RUN_ROOT_OPT = typer.Option(..., "--run-root", help="The estate root.")  # period-model ss1.1
 
 #: the same option where the verb ALSO has an estate-wide mode: omitting it
 #: and naming the anchor alone is how a caller points at the lineage rather
@@ -52,27 +52,24 @@ _RUN_ROOT_OPT = typer.Option(..., "--run-root", help="The estate root (period-mo
 _ESTATE_ROOT_OPT = typer.Option(
     None,
     "--run-root",
-    help="The estate root (period-model ss1.1). Omit it and name --estate-anchor"
-    " alone to work ESTATE-WIDE: every root the registry names, in period order.",
-)
+    help="The estate root. Omit it and give --estate-anchor alone to work on"
+    " the whole estate: every root in the registry, in period order.",
+)  # period-model ss1.1
 
 _ANCHOR_OPT = typer.Option(
     None,
     "--estate-anchor",
-    help="The lineage anchor directory (period-model ss1.3). Defaults to"
-    " <run-root>.anchor -- a sibling of the root, never inside it, because the"
-    " root is what an operator archives. A ROLLED root's anchor is the lineage's"
-    " and must be named explicitly. Named ALONE, with no --run-root, it is how"
-    " this verb addresses the whole estate.",
-)
+    help="The lineage anchor directory. Defaults to <run-root>.anchor, a"
+    " sibling of the run root. A rolled root's anchor is the lineage's and"
+    " must be named.",
+)  # period-model ss1.3
 
 _ACTOR_OPT = typer.Option(
     None,
     "--claimed-actor",
-    help="Who is asking, for the log. A CLAIM: this tier has no authentication"
-    " (control-protocol ss7 gap 2), so it is a breadcrumb, never an"
-    " authorization. Defaults to <user>@<host>.",
-)
+    help="Who is asking, for the log. This is a claim, not an authorization:"
+    " this tier has no authentication. Defaults to <user>@<host>.",
+)  # control-protocol ss7 gap 2
 
 
 def _next_profile(
@@ -149,68 +146,79 @@ def seal(
     next_files: list[Path] = typer.Option(
         ...,
         "--next",
-        help="JIL file(s) forming C2 -- the estate the NEXT period runs."
-        " Repeatable; command-line order is part of source_bundle_hash.",
+        help="JIL files of the next period's estate. Repeatable; the order"
+        " is part of the bundle hash.",
     ),
     run_root: Path = _RUN_ROOT_OPT,
     estate_anchor: Path = _ANCHOR_OPT,
     force_seal: bool = typer.Option(
         False,
         "--force-seal",
-        help="Commit inside the closing period's retry horizon (period-model ss9)."
-        " Recorded as force_seal: true in the seal and, when the gate was really"
-        " engaged, with the gate's own numbers in forced_gate.",
-    ),
+        help="Commit inside the closing period's retry horizon. Recorded"
+        " in the seal as force_seal: true, with the gate's numbers when"
+        " the gate was engaged.",
+    ),  # period-model ss9
     claimed_actor: str = _ACTOR_OPT,
     request_id: str = typer.Option(
         None,
         "--request-id",
-        help="Reuse the id of an earlier attempt to RETRY it exactly. A committed"
-        " boundary answers its own exact retry from the next period; anything"
-        " else is a fresh request.",
+        help="Reuse the id of an earlier attempt to retry it exactly. A"
+        " committed boundary answers its exact retry from the next"
+        " period. Any other id is a fresh request.",
     ),
     next_timezone: str = typer.Option(
-        None, "--next-timezone", help="C2's base zone for schedules without a per-job one."
+        None,
+        "--next-timezone",
+        help="The next period's timezone for schedules that do not set their own.",
     ),
     next_timezone_map: Path = typer.Option(
-        None, "--next-timezone-map", help="C2's vendor timezone table (SEM-35/DL-62)."
-    ),
+        None,
+        "--next-timezone-map",
+        help="The next period's timezone map. See 'dsl41 run --help' for --timezone-map.",
+    ),  # SEM-35/DL-62
     next_as_machine: list[str] = typer.Option(
-        [], "--next-as-machine", help="Machine name(s) C2 runs as (DL-52). Repeatable."
-    ),
+        [],
+        "--next-as-machine",
+        help="Machine names the next period runs as. Repeatable. See"
+        " 'dsl41 run --help' for --as-machine.",
+    ),  # DL-52
     next_machine_policy: str = typer.Option(
-        "strict", "--next-machine-policy", help="C2's machine policy: strict|local-eligible."
+        "strict",
+        "--next-machine-policy",
+        help="The next period's machine policy: strict or local-eligible.",
     ),
     next_detached: bool = typer.Option(
-        False, "--next-detached", help="C2 runs CMD jobs under the supervisor (ss6a Tier 1)."
-    ),
+        False,
+        "--next-detached",
+        help="The next period runs command jobs under the supervisor.",
+    ),  # ss6a Tier 1
     next_deadman: float = typer.Option(
-        None, "--next-deadman", help="C2's supervisor deadman, seconds. Needs --next-detached."
+        None,
+        "--next-deadman",
+        help="The next period's supervisor deadman, in seconds. Needs --next-detached.",
     ),
     permit_unknown: bool = PERMIT_UNKNOWN,
     properties: list[Path] = PROPERTIES,
 ) -> None:
-    """Close the running period and commit the next one (period-model ss7).
+    """Close the running period and commit the next estate.
 
-    Two entry modes and one body. **Live**: an engine leads `--run-root`,
-    so this stages C2 and asks it over the control socket; the engine runs
-    the cutoff in its single-writer loop and then exits with code 3.
-    **Offline**: nothing leads the root, so this takes `leader.lock` and
-    `anchor.lock`, appends a `leader` record, runs the same-root recovery
-    barrier in full, and performs the boundary as that offline leader.
-    Which one you get is decided by the lock, not by a flag: an engine that
-    holds it is a live engine.
+    --next names the JIL files of the next period. Who leads the run
+    root decides how the seal happens. Live: an engine leads it, so
+    this command stages the next catalog and asks the engine over the
+    control socket; the engine runs the cutoff and exits with code 3.
+    Offline: nothing leads it, so this command takes the locks, runs
+    recovery, and performs the boundary itself. The lock decides which,
+    not a flag.
 
-    Step 9 in both modes is an OPENER -- `dsl41 run --resume` on the same
-    root, or `dsl41 run --open-from` into a fresh one. A transition is a
-    restart, not a reload.
+    After the seal, open the next period with 'dsl41 run --resume' on
+    the same root or 'dsl41 run --open-from' into a fresh one. A period
+    change is a restart, not a reload.
 
-    Exit codes: 0 the boundary committed; 2 it did NOT commit and the period
-    is still open (C1 may legitimately have advanced first -- an offline
-    sealer's `leader` record and the cutoff's admitted ticks are C1
-    activity, not damage); 4 the outcome is UNKNOWN, and the printed
+    Exit codes: 0 the boundary committed; 2 it did not commit and the
+    period is still open; 4 the outcome is unknown, and the printed
     request_id is the only safe way to retry.
     """
+    # Design: period-model ss7
     import asyncio
 
     from dsl41.runner_clock import EngineError
@@ -658,47 +666,37 @@ def audit(
     run_root: Path = _ESTATE_ROOT_OPT,
     estate_anchor: Path = _ANCHOR_OPT,
     period: int = typer.Option(
-        None, "--period", help="Audit exactly this period. Omit to audit every closed one."
+        None, "--period", help="Audit only this period. Without it, every closed period."
     ),
 ) -> None:
-    """Re-derive a closed period and write its attestation (period-model
-    ss1.3, ss11).
+    """Re-derive a closed period and write its attestation.
 
-    **Verified means re-derived, not self-consistent.** A sidecar whose
-    digest matches its own canonical form proves integrity, not derivation,
-    so this rebuilds the seal from the period's own evidence -- the opening
-    seal, the complete ordered WAL, the immutable spool, and the C1 and C2
-    manifests -- and refuses when the two disagree, naming the fields.
+    Verified means re-derived. This command rebuilds the seal from the
+    period's own evidence (the opening seal, the ordered journal, the
+    spool, and both manifests) and refuses when the rebuilt seal and
+    the stored one disagree, naming the fields.
 
-    **Producing an attestation and consuming one are two acts with two
-    rules.** Producing N requires the PREDECESSOR attestation present and
-    VERIFIED;
-    period 1 is the base case. There is deliberately no "or re-derive
-    everything below" alternative, because without the requirement a
-    checkpoint can be emitted over an unaudited opening seal and earlier
-    roots then get deleted on a chain that was never established.
+    Attesting period N needs the previous period's attestation present
+    and verified. Period 1 is the base case. There is no option to
+    skip this, because a checkpoint over an unaudited opening seal
+    would let earlier roots be deleted on a chain that was never
+    established.
 
-    `dsl41 verify` is the other verb and is not this one: it validates an
-    attestation, which is what a rolled root can do and a full audit is
-    not.
+    A period archived by 'estate prune --archive-inputs' has no inputs
+    left to re-derive from. For it, this command verifies the
+    checkpoint and reports attestation-verified, a weaker result than a
+    re-derivation.
 
-    **An ARCHIVED period is reported at the other tier, by name (DL-144).**
-    Its inputs were deleted under `estate prune --archive-inputs`, so there
-    is nothing to re-derive from and the checkpoint is what stands for it.
-    This verb verifies that checkpoint and says **attestation-verified**,
-    never the word it uses for a period it re-derived: two proofs of two
-    strengths do not share a sentence.
+    With --estate-anchor and no --run-root, every period in the
+    registry is audited in period order, each in the root that holds
+    it. A root the registry names but the disk lacks is refused.
 
-    **Pointed at the ESTATE it audits every root.** With `--estate-anchor`
-    and no `--run-root` it takes its periods from ss1.3's archive registry
-    -- every period, in period order, each re-derived in the root that
-    holds it -- so a lineage that has rolled is audited as one estate and
-    period 1 is found without knowing which root it went to (PR-02f). A
-    root the registry names and the disk does not refuses by name; nothing
-    is skipped quietly.
+    'dsl41 verify' checks one attestation instead. That is what a
+    rolled root can do; a full audit is not.
 
-    Exit 0 when every period asked for is attested, 2 on any refusal.
+    Exit codes: 0 every requested period is attested; 2 any refusal.
     """
+    # Design: period-model ss1.3, ss11, DL-144, PR-02f
     from dsl41.boundary import EstateAnchor, default_anchor_dir
 
     if run_root is None and estate_anchor is None:
@@ -884,21 +882,20 @@ def _archived_line(root: Path, period_id: int, at: str, attestation: "Attestatio
 def verify(
     run_root: Path = _RUN_ROOT_OPT,
     period: int = typer.Option(
-        None, "--period", help="Verify this period's attestation. Omit for the newest one."
+        None, "--period", help="Verify this period's attestation. Without it, the newest."
     ),
 ) -> None:
-    """Validate an attestation: its own digest, its binding to the seal it
-    names, and its place in the chain (period-model ss1.3).
+    """Check an attestation's digest, seal binding and chain position.
 
-    It accepts the attestation ALONE, deliberately. The producing `audit`
-    already established the induction, and a physical roll imports only the
-    current seal and its attestation -- a consumer that re-walked the chain
-    would make a second roll impossible. So a root that imported seal 2 and
-    attestation 2 while its predecessors are gone verifies the chain below
-    seal 2, because attestation 2 proves it.
+    It checks the attestation alone, without re-walking the chain. The
+    audit that produced it established the chain, and a physical roll
+    imports only the current seal and attestation. So a root that
+    imported seal 2 and attestation 2, with its predecessors gone,
+    still verifies the chain below seal 2.
 
-    Exit 0 when it verifies, 2 otherwise.
+    Exit codes: 0 it verifies; 2 otherwise.
     """
+    # Design: period-model ss1.3
     from dsl41.attest import verify_attestation
     from dsl41.period import attestation_path, attestation_periods
     from dsl41.runner_clock import EngineError
@@ -921,30 +918,28 @@ def verify(
 
 def estate_reclaim(
     estate_anchor: Path = typer.Option(
-        ..., "--estate-anchor", help="The lineage anchor directory (period-model ss1.3)."
-    ),
+        ..., "--estate-anchor", help="The lineage anchor directory."
+    ),  # period-model ss1.3
     force: bool = typer.Option(
         False, "--force", help="Required. This is the one operation that can fork a lineage."
     ),
     claimed_actor: str = _ACTOR_OPT,
 ) -> None:
-    """Break-glass: move a successor claim out of the way (period-model
-    ss1.3).
+    """Move a stale successor claim out of the way (break-glass).
 
-    **A stale claim is break-glass, not garbage.** A `claimed` head whose
-    target root is unreachable cannot be told from one whose target is
-    merely paused, and nothing here decides that -- you do. If the claimant
-    is alive, this forks the lineage: two roots then open the same period,
-    allocate the same indices and run the same `(job, run_number)` twice,
-    which is the safety property the whole fence exists to hold. Prove the
-    claimant is gone before you run it.
+    A claimed lineage head whose target root is unreachable looks the
+    same as one whose target is merely paused. Nothing here can tell
+    them apart; you must. If the claimant is still alive, this forks
+    the lineage: two roots open the same period, allocate the same
+    indices, and run the same job runs twice. Prove the claimant is
+    gone before you run this.
 
-    It is recorded in the anchor and again in the next `segment` record's
-    `reclaimed` field with the actor who claimed to authorize it -- loud,
-    durable and attributable.
+    The reclaim is recorded in the anchor and in the next segment
+    record, with the actor who claimed to authorize it.
 
-    Exit 0 when the head moved, 2 otherwise.
+    Exit codes: 0 the head moved; 2 otherwise.
     """
+    # Design: period-model ss1.3
     from dsl41.boundary import EstateAnchor
     from dsl41.runner_clock import EngineError
     from dsl41.runner_control import claimed_actor as default_actor
@@ -985,89 +980,79 @@ def estate_prune(
     tombstones: bool = typer.Option(
         False,
         "--tombstones",
-        help="Remove SPAWN tombstones -- run directory, `.by_run_id` entry and"
-        " default logs -- whose period is attested and whose run is terminal.",
+        help="Remove run tombstones (the run directory, its .by_run_id"
+        " entry and default logs) of runs that have ended in attested"
+        " periods.",
     ),
     quarantine: bool = typer.Option(
         False,
         "--quarantine",
-        help="Remove quarantined candidates: superseded staged periods no recovery references.",
+        help="Remove quarantined candidates: staged periods that were"
+        " superseded and that no recovery references.",
     ),
     archive_inputs: bool = typer.Option(
         False,
         f"--{ARCHIVE_CLASS}",
-        help="ARCHIVE a covered period: write its receipt, then delete its WAL and"
-        " its committed candidate files. IRREVERSIBLE -- the period drops to the"
-        " attestation-verified tier and can never be re-derived. Prune its"
+        help="Archive a covered period: write its receipt, then delete"
+        " its journal and committed candidate files. Irreversible. The"
+        " period can then only be attestation-verified. Prune its"
         " tombstones first.",
     ),
     older_than_days: float = typer.Option(
         None,
         "--older-than-days",
-        help="Keep any run spool touched more recently than this. Your policy, not the model's.",
+        help="Keep any run spool touched more recently than this many days.",
     ),
     keep_runs: int = typer.Option(
         0,
         "--keep-runs",
-        help="Keep the N newest run spools OF EACH JOB, whatever else says."
-        " Per job, because `run_number` is per job -- and per ROOT in the"
-        " estate-wide mode, which keeps more than asked and never less.",
+        help="Keep the newest N run spools of each job, whatever else"
+        " says. Counted per job and, estate-wide, per root.",
     ),
 ) -> None:
-    """Delete what retention allows, and report what it does not
-    (period-model ss11a, ss12; PR-36b, PR-36c).
+    """Delete what retention allows and report what it keeps.
 
-    **Retention policy is yours; the floors are the model's.** Which
-    periods, spools and tombstones an estate keeps is a business decision,
-    so the flags above are how you state it. What may never go is
-    everything reachable from the lineage head -- the sentinel, the anchor
-    and any live claim, the sidecars this period opened from and will close
-    with, the current and committed-next manifests, an uncommitted
-    candidate's two files, their bundles, the latest attestation, and the
-    WAL and spool of any unattested period. This verb cannot reach them.
+    Retention policy is yours; the flags state it. The floors are the
+    model's: everything reachable from the lineage head stays, whatever
+    the flags say. That covers the sentinel, the anchor and any live
+    claim, the sidecars this period opened from and will close with,
+    the current and next manifests, an uncommitted candidate, their
+    bundles, the latest attestation, and the journal and spool of any
+    unattested period.
 
-    The report has six rows and each is a different fact. **removed** (or
-    **would remove**, under `--dry-run`) is what went. **prunable, outside
-    the flags given** is licensed by name -- a tombstone whose period is
-    attested and whose run has ended, a quarantined candidate, the INPUTS
-    of a period the archive covers -- and was not asked for. **held** has
-    been released by the head moving on and is kept anyway, because no
-    retention class licenses it; the row says which dependency is in the
-    way. **floored** is refused by the model and this verb cannot reach
-    it. **the archive refused** is selected and NOT licensed: nothing was
-    attempted and nothing is broken, and the reason names the order to
-    follow. **the filesystem refused** is selected, licensed, and refused
-    by the operating system -- a partial sweep, reported as one.
+    The report has six rows:
+      removed (would remove, under --dry-run): what went.
+      prunable, outside the flags given: could go, but no flag asked for it.
+      held: released by the head moving on, but kept because no retention
+        flag covers it. The row says which dependency is in the way.
+      floored: below the model's floor. This command cannot remove it.
+      the archive refused: selected but not allowed yet. Nothing was
+        attempted. The reason names the order to follow.
+      the filesystem refused: selected and allowed, but the operating
+        system refused. A partial sweep, reported as one.
 
-    **`--archive-inputs` is the one irreversible verdict (DL-144).** It
-    answers PR-Q3 -- may a seal-only archive stand in for pruned inputs? --
-    with yes, conditionally, by explicit policy. A period is archived only
-    when it is attested, a LATER chain checkpoint covers it, its spool is
-    already pruned, and every older period this root retains is archived.
-    The receipt (`seals/<period>.archive.json`) is written before the first
-    deletion and is what tells every reader afterwards that the absence is
-    an archive and not a loss; it, the sidecar and the attestation may
-    never be pruned. After it, the period reads at the
-    **attestation-verified** tier and can never be re-derived. Restoring
-    the files does not undo it.
+    --archive-inputs is irreversible. A period is archived only when it
+    is attested, a later checkpoint covers it, its spool is already
+    pruned, and every older period in this root is archived. The
+    receipt (seals/<period>.archive.json) is written before the first
+    deletion. After it, the period can only be attestation-verified,
+    never re-derived. Restoring the files does not undo it.
 
-    Pruning a tombstone is not reversible and it is not free: that period
-    can no longer be re-derived from its own evidence, and its attestation
-    becomes the proof that stands for it. Attest first, then prune.
+    Pruning a tombstone is also irreversible: the period can no longer
+    be re-derived from its own evidence, and its attestation stands for
+    it. Attest first, then prune.
 
-    **Pointed at the ESTATE it plans every root.** With `--estate-anchor`
-    and no `--run-root` it takes its roots from ss1.3's archive registry,
-    in period order, and reports ONE result (PR-02f). Each root is still
-    planned on its own: the floors, the refusals and the descriptor the
-    removal walks are per root, because a plan is bound to the (st_dev,
-    st_ino) of the root it was computed over and one plan spanning two
-    roots could not hold that binding. `--keep-runs` is per job and per
-    ROOT for the same reason, which keeps more than asked and never less.
+    With --estate-anchor and no --run-root, every root in the registry
+    is planned and reported as one result, in period order. Floors and
+    refusals are per root, and --keep-runs counts per job and per root,
+    which keeps more than asked and never less.
 
-    Exit 0 when every selected artifact was removed (or listed, under
-    `--dry-run`), 2 on a refusal and 2 when the filesystem refused a
-    removal -- and then the report says which ones went and which did not.
+    Exit codes: 0 every selected artifact was removed, or listed under
+    --dry-run; 2 a refusal, or the filesystem refused a removal. The
+    report says which ones went.
     """
+    # Design: period-model ss11a, ss12, PR-36b, PR-36c, DL-144 (PR-Q3), ss1.3,
+    # PR-02f
     from dsl41.retention import CLASSES, plan_retention, prune
     from dsl41.runner_clock import EngineError
 
