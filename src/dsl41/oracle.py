@@ -71,7 +71,10 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
   ladder. A job with no `timezone:` compares in the constructor's
   `default_tz`, else on the engine clock -- the vendor's own rule since
   DL-155 ("scheduled based on the time zone under which the scheduler is
-  running"), with the engine clock playing the scheduler's zone.
+  running"), with the engine clock playing the scheduler's zone. Within two
+  days of a one-hour DST change at 02:00 local, the window is built as
+  concrete intervals whose endpoints follow the vendor's DST rules (DL-249);
+  other change shapes keep the wall-time comparison, unverified.
 - Lookback (SEM-04): window -> status_at >= now - window. zero -> satisfied
   iff the predecessor's own last end (last_end_at) is at-or-after the
   EVALUATING job's last end (Q2a RESOLVED by citation, DL-54 -- "examines
@@ -225,7 +228,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable, Mapping
-from datetime import datetime, time as dtime, timedelta, tzinfo
+from datetime import date, datetime, time as dtime, timedelta, tzinfo
 from typing import Final
 
 from dsl41.canon import CanonError, canonical_bytes
@@ -262,7 +265,15 @@ from dsl41.oracle_state import (
     RuntimeState,
     TraceEntry,
 )
-from dsl41.timezones import resolve_timezone, to_local, to_utc
+from dsl41.timezones import (
+    MISSING_HOUR,
+    REPEATED_HOUR,
+    dst_change,
+    dst_change_near,
+    resolve_timezone,
+    to_local,
+    to_utc,
+)
 
 #: SEM-02: n() is true unless the job is in one of these (WAIT_REPLY/RESTART/
 #: SUSPENDED are out-of-scope states the oracle never produces). QUE_WAIT is
@@ -1275,7 +1286,9 @@ class Oracle:
         """SEM-33 closer-edge rule; True == start may proceed now. The window
         is read in the job's own timezone (SEM-35 re-bases every time
         attribute of that job), so the comparison happens on local wall time
-        while the timer it queues goes back on the engine clock."""
+        while the timer it queues goes back on the engine clock. Near a
+        documented DST change it happens on the window's engine instants
+        instead (DL-249, `_window_span`)."""
         side, next_open = self._window_side(job_ir)
         if side == "inside":
             return True
@@ -1302,17 +1315,29 @@ class Oracle:
         tz = self._job_tz(job_ir)
         now_local = to_local(self._now, tz)
         lo, hi = schedule.run_window
-        now_t = now_local.time()
         lo_t = _to_time(lo)
         hi_t = _to_time(hi)
-        if lo_t <= hi_t:
-            inside = lo_t <= now_t <= hi_t
-        else:  # window crosses midnight
-            inside = now_t >= lo_t or now_t <= hi_t
-        if inside:
-            return "inside", None
-        next_open = to_utc(_next_occurrence(now_local, lo_t), tz)
-        prev_close = to_utc(_prev_occurrence(now_local, hi_t), tz)
+        today = now_local.date()
+        if dst_change_near(today, tz):
+            # DL-249: near a documented DST change the window is a set of
+            # concrete intervals whose endpoints follow the vendor's rules.
+            # No zone has such a change within days of the calendar's ends,
+            # so the four opening days stay inside the date range.
+            spans = [_window_span(today + timedelta(days=k), lo_t, hi_t, tz) for k in range(-2, 2)]
+            if any(opens <= self._now <= closes for opens, closes in spans):
+                return "inside", None
+            next_open = min(opens for opens, _ in spans if opens > self._now)
+            prev_close = max(closes for _, closes in spans if closes < self._now)
+        else:
+            now_t = now_local.time()
+            if lo_t <= hi_t:
+                inside = lo_t <= now_t <= hi_t
+            else:  # window crosses midnight
+                inside = now_t >= lo_t or now_t <= hi_t
+            if inside:
+                return "inside", None
+            next_open = to_utc(_next_occurrence(now_local, lo_t), tz)
+            prev_close = to_utc(_prev_occurrence(now_local, hi_t), tz)
         # both distances are measured on the ENGINE clock: a DST shift inside
         # the gap makes the two wall-clock distances lie about elapsed time
         to_open = next_open - self._now
@@ -2165,3 +2190,38 @@ def _prev_occurrence(now: datetime, target: dtime) -> datetime:
     if candidate > now:
         candidate -= timedelta(days=1)
     return candidate
+
+
+def _window_span(day: date, lo: dtime, hi: dtime, tz: tzinfo | None) -> tuple[datetime, datetime]:
+    """The run_window that opens on local `day`, as two engine instants,
+    with the vendor's endpoint rules on a documented DST change (DL-249).
+    TechDocs 12.1 and 24.2, "Daylight Time Changes" and "Standard Time
+    Changes".
+
+    Spring, an opening in the missing hour moves to 03:00: "a run window of
+    2:45 - 3:45 becomes 3:00 - 3:45". A close in the missing hour keeps the
+    window's length: "a run window of 1:00 - 2:30 ... ends at 3:30". Both in
+    it: "a run window of 2:15 - 2:45 becomes 3:00 - 3:45". Fall, an opening
+    in the repeated hour takes the second, standard-time pass: "a run
+    window of 1:45 - 2:45 becomes 1:45 ST - 2:45 ST". A close in it takes
+    the first pass: "a run window of 11:30 - 1:30 ends at 1:30 DT". When
+    both fall in it, "the run window opens during the second, standard time
+    hour", and the close follows it there. The vendor's text describes two
+    distinct endpoints, so an equal-endpoint window keeps the SEM-33
+    zero-width pin: the single instant its opening maps to."""
+    start = datetime.combine(day, lo)
+    end = datetime.combine(day if lo <= hi else day + timedelta(days=1), hi)
+    change = dst_change(day, tz)
+    opens_repeated = change == "fall" and start.hour == REPEATED_HOUR
+    if change == "spring" and start.hour == MISSING_HOUR:
+        opens = to_utc(start.replace(hour=MISSING_HOUR + 1, minute=0), tz)
+    else:
+        opens = to_utc(start.replace(fold=1 if opens_repeated else 0), tz)
+    if lo == hi:
+        return opens, opens
+    # fold=0 is the vendor's close in both seasons: past the gap by the
+    # missing hour in spring, the daylight-time pass in fall. Only a close
+    # on the same day as an opening in the repeated hour takes fold=1.
+    closes_second = opens_repeated and end.date() == day and end.hour == REPEATED_HOUR
+    closes = to_utc(end.replace(fold=1 if closes_second else 0), tz)
+    return opens, closes

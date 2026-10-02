@@ -492,6 +492,41 @@ minute is inside the window. Equal endpoints (`"02:00-02:00"`) are a zero-width 
 close and the next opening resolves to the next opening. Both readings are **[?]**: undocumented
 ties, pinned this way, revisit with live access. The "closer edge" rule is a prime migration
 hazard (no direct Stonebranch analog); always flag it in mapping.
+DST changes (DL-249). **[V]** TechDocs 12.1 and 24.2, "Daylight Time Changes" and
+"Standard Time Changes" (same text in both). Near a change, each window is a concrete
+interval of instants, and containment and the closer-edge rule run on that interval. The
+endpoints follow the vendor's rules. Spring, missing 02:00-02:59: "When the specified end of
+the run window falls during the missing hour, AutoSys Workload Automation recalculates its
+end time, so that the effective duration of the run window remains the same. For example, the
+product recalculates a run window of 1:00 - 2:30 so that the window ends at 3:30". "When the
+specified start time of the run window falls during the missing hour, AutoSys Workload
+Automation moves the start time to 3:00. The end time does not change ... a run window of
+2:45 - 3:45 becomes 3:00 - 3:45". "When both the start time and the end time of the run
+window, fall during the missing hour, AutoSys Workload Automation moves the start time to the
+first minute after 3:00 and the end time to one hour later ... a run window of 2:15 - 2:45
+becomes 3:00 - 3:45". Fall, repeated 01:00-01:59: "When the specified start of a run window
+is before the time change and its specified end occurs during the repeated hour, the run
+window closes during the daylight time period (the first hour). For example, a run window of
+11:30 - 1:30 ends at 1:30 DT, not 1:30 ST". "When the specified opening of the run window
+falls during the repeated hour, AutoSys Workload Automation moves its start time to the
+second, standard time hour. The end time does not change ... a run window of 1:45 - 2:45
+becomes 1:45 ST - 2:45 ST". "When both the specified start and end of the run window occur
+during the repeated hour, the run window opens during the second, standard time hour".
+Two readings are this project's pins, not the vendor's text **[?]**: in fall, when both
+endpoints are in the repeated hour, the close follows the opening into the second pass; in
+spring, the vendor's "first minute after 3:00" is pinned to exactly 03:00. The vendor's rules
+describe two distinct endpoints, so an equal-endpoint window keeps the zero-width pin above:
+it is the one instant its opening maps to (`"02:30-02:30"` on a spring change is 03:00).
+Scope is the offset shape, not a list of zones: a spring change where 02:00-02:59 is missing
+for one hour, or a fall change where 01:00-01:59 repeats for one hour, on the attempt's local
+date or within two days of it. America/New_York has both. Europe/Berlin and Australia/Sydney
+qualify in spring only; their fall changes repeat 02:00-02:59. Europe/London and
+Europe/Dublin qualify in fall only; their spring changes skip 01:00-01:59. Other shapes
+(those, half-hour changes, changes at other hours) keep the wall-time comparison, which is
+unverified **[?]**. The same
+page notes that a start time of 1:15 inside an 11:30 - 1:30 window "would be calculated for
+1:15 ST and the job would not run". That depends on how start_times resolve in the repeated
+hour, which E10 keeps open; it is recorded, not modelled.
 A standalone job that meets the previous-close branch moves to INACTIVE (DL-246). **[V]**
 TechDocs 24.2, run_window attribute page (12.1 has the same text): "When the current time is
 closer to the end of the previous run window, the product does not start the job and changes
@@ -1009,7 +1044,9 @@ skip moves a prior result to INACTIVE and does not cascade from a box (SEM-33, D
 `test_sem33_deferral_from_*`, `test_sem33_running_wakes_*`, `test_sem33_a_window_pass_*`,
 `test_sem33_deferred_box_start_*`, `test_sem33_standalone_*`,
 `test_sem33_force_start_on_a_held_standalone_*`),
-T33c the window read in the job's timezone (SEM-33, with SEM-35) ·
+T33c the window read in the job's timezone (SEM-33, with SEM-35), and its endpoints across a
+DST change (DL-249: `test_sem33_spring_*`, `test_sem33_fall_*`, `test_sem33_dst_*`,
+`test_sem33_box_start_on_a_spring_change_*`) ·
 T34a/b must_* emit alarms only, T34c each start_time arms its own relative offset, T34
 relative must_complete anchored to the tick's slot (SEM-34, DL-248: `test_sem34_must_complete_*`).
 

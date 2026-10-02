@@ -3748,6 +3748,276 @@ def test_sem33_deferred_start_timer_is_the_engine_instant_of_the_local_opening()
     assert start.at == datetime(2026, 6, 30, 16, 0)  # 01:00 Tokyo, on the engine clock
 
 
+# DL-249: run_window endpoints across a DST change, America/New_York. The
+# vendor text is TechDocs 12.1 and 24.2, "Daylight Time Changes" and
+# "Standard Time Changes". 2026-03-08: 02:00 EST jumps to 03:00 EDT at 07:00
+# UTC. 2026-11-01: 02:00 EDT falls back to 01:00 EST at 06:00 UTC.
+
+
+def _dst_window_jil(window: str, zone: str = "America/New_York") -> str:
+    return (
+        "insert_job: rw_dst\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "00:00"\n'
+        f'run_window: "{window}"\ntimezone: {zone}\n\n'
+        "insert_job: dummy_dst\njob_type: c\ncommand: y\nmachine: m1\n"
+    )
+
+
+def _dst_attempt(window: str, at: datetime, zone: str = "America/New_York") -> Oracle:
+    o = oracle(_dst_window_jil(window, zone))
+    o.feed(Event(at=at, kind="STARTJOB", payload={"job": "rw_dst"}))
+    return o
+
+
+_STARTED = ["INACTIVE->STARTING", "STARTING->RUNNING"]
+
+
+def test_sem33_spring_close_in_the_missing_hour_keeps_the_window_length() -> None:
+    """SEM-33, DL-249: "the product recalculates a run window of 1:00 - 2:30
+    so that the window ends at 3:30 and the run window remains open for 90
+    minutes". 03:15 EDT is inside; 03:30 EDT is the inclusive close, and
+    03:31 EDT is closer to that close, so the attempt is skipped."""
+    assert transitions(_dst_attempt("01:00-02:30", datetime(2026, 3, 8, 7, 15)), "rw_dst") == (
+        _STARTED
+    )
+    assert transitions(_dst_attempt("01:00-02:30", datetime(2026, 3, 8, 7, 30)), "rw_dst") == (
+        _STARTED
+    )
+    assert transitions(_dst_attempt("01:00-02:30", datetime(2026, 3, 8, 7, 31)), "rw_dst") == [
+        "RUN_WINDOW_SKIP"
+    ]
+
+
+def test_sem33_spring_opening_in_the_missing_hour_moves_to_0300() -> None:
+    """SEM-33, DL-249: "a run window of 2:45 - 3:45 becomes 3:00 - 3:45".
+    At 01:59 EST the next opening is 03:00 EDT, one minute away, so the
+    deferred start is queued there, not at 03:45 EDT, where 02:45 EST maps.
+    03:00 EDT is inside, 03:45 EDT is the close, and 03:46 EDT is skipped."""
+    o = _dst_attempt("02:45-03:45", datetime(2026, 3, 8, 6, 59))
+    assert transitions(o, "rw_dst") == ["RUN_WINDOW_DEFER"]
+    assert _timers(o, "rw_dst") == [(datetime(2026, 3, 8, 7, 0), "rw_dst", "run_window")]
+    o.feed(ev_at(datetime(2026, 3, 8, 7, 5), "STATUS", job="dummy_dst", status="SUCCESS"))
+    start = next(t for t in o.trace() if t.job == "rw_dst" and t.transition.endswith("STARTING"))
+    assert start.at == datetime(2026, 3, 8, 7, 0)
+    assert transitions(_dst_attempt("02:45-03:45", datetime(2026, 3, 8, 7, 0)), "rw_dst") == (
+        _STARTED
+    )
+    assert transitions(_dst_attempt("02:45-03:45", datetime(2026, 3, 8, 7, 45)), "rw_dst") == (
+        _STARTED
+    )
+    assert transitions(_dst_attempt("02:45-03:45", datetime(2026, 3, 8, 7, 46)), "rw_dst") == [
+        "RUN_WINDOW_SKIP"
+    ]
+
+
+def test_sem33_spring_window_wholly_in_the_missing_hour_becomes_0300_to_0345() -> None:
+    """SEM-33, DL-249: "When both the start time and the end time of the run
+    window, fall during the missing hour, AutoSys Workload Automation moves
+    the start time to the first minute after 3:00 and the end time to one
+    hour later ... a run window of 2:15 - 2:45 becomes 3:00 - 3:45". At
+    01:30 EST the deferral goes to 03:00 EDT. 03:00 and 03:45 EDT are
+    inside; 03:46 EDT is skipped."""
+    o = _dst_attempt("02:15-02:45", datetime(2026, 3, 8, 6, 30))
+    assert transitions(o, "rw_dst") == ["RUN_WINDOW_DEFER"]
+    assert _timers(o, "rw_dst") == [(datetime(2026, 3, 8, 7, 0), "rw_dst", "run_window")]
+    for inside in (datetime(2026, 3, 8, 7, 0), datetime(2026, 3, 8, 7, 45)):
+        assert transitions(_dst_attempt("02:15-02:45", inside), "rw_dst") == _STARTED
+    assert transitions(_dst_attempt("02:15-02:45", datetime(2026, 3, 8, 7, 46)), "rw_dst") == [
+        "RUN_WINDOW_SKIP"
+    ]
+
+
+def test_sem33_fall_close_in_the_repeated_hour_is_the_daylight_pass() -> None:
+    """SEM-33, DL-249: "a run window of 11:30 - 1:30 ends at 1:30 DT, not
+    1:30 ST". 01:30 EDT is the inclusive close. 01:31 EDT is skipped, and so
+    is 01:20 EST, whose wall time reads inside the window but whose instant
+    is fifty minutes past the close."""
+    assert transitions(_dst_attempt("23:30-01:30", datetime(2026, 11, 1, 5, 20)), "rw_dst") == (
+        _STARTED
+    )
+    assert transitions(_dst_attempt("23:30-01:30", datetime(2026, 11, 1, 5, 30)), "rw_dst") == (
+        _STARTED
+    )
+    for after in (datetime(2026, 11, 1, 5, 31), datetime(2026, 11, 1, 6, 20)):
+        assert transitions(_dst_attempt("23:30-01:30", after), "rw_dst") == ["RUN_WINDOW_SKIP"]
+
+
+def test_sem33_fall_opening_in_the_repeated_hour_is_the_standard_pass() -> None:
+    """SEM-33, DL-249: "a run window of 1:45 - 2:45 becomes 1:45 ST - 2:45
+    ST". At 01:50 EDT the window is not open yet: the opening is 01:45 EST,
+    55 minutes on, so the start is deferred there. 01:45 EST and 02:45 EST
+    are inside; 02:46 EST is skipped."""
+    o = _dst_attempt("01:45-02:45", datetime(2026, 11, 1, 5, 50))
+    assert transitions(o, "rw_dst") == ["RUN_WINDOW_DEFER"]
+    assert _timers(o, "rw_dst") == [(datetime(2026, 11, 1, 6, 45), "rw_dst", "run_window")]
+    for inside in (datetime(2026, 11, 1, 6, 45), datetime(2026, 11, 1, 7, 45)):
+        assert transitions(_dst_attempt("01:45-02:45", inside), "rw_dst") == _STARTED
+    assert transitions(_dst_attempt("01:45-02:45", datetime(2026, 11, 1, 7, 46)), "rw_dst") == [
+        "RUN_WINDOW_SKIP"
+    ]
+
+
+def test_sem33_fall_window_wholly_in_the_repeated_hour_opens_in_the_second() -> None:
+    """SEM-33, DL-249: "When both the specified start and end of the run
+    window occur during the repeated hour, the run window opens during the
+    second, standard time hour." 01:10-01:40 is 01:10-01:40 EST. At 01:20
+    EDT the start is deferred to 01:10 EST; 01:20 EST is inside, and 01:41
+    EST is skipped."""
+    o = _dst_attempt("01:10-01:40", datetime(2026, 11, 1, 5, 20))
+    assert transitions(o, "rw_dst") == ["RUN_WINDOW_DEFER"]
+    assert _timers(o, "rw_dst") == [(datetime(2026, 11, 1, 6, 10), "rw_dst", "run_window")]
+    assert transitions(_dst_attempt("01:10-01:40", datetime(2026, 11, 1, 6, 20)), "rw_dst") == (
+        _STARTED
+    )
+    assert transitions(_dst_attempt("01:10-01:40", datetime(2026, 11, 1, 6, 41)), "rw_dst") == [
+        "RUN_WINDOW_SKIP"
+    ]
+
+
+def test_sem33_dst_window_control_on_ordinary_days_is_unchanged() -> None:
+    """SEM-33, DL-249, the control: a week before the change (the wall-time
+    path, EST) and the day after it (the interval path, EDT, no endpoint in
+    a missing hour), 01:00-02:30 is 01:00-02:30 local. 02:15 is inside, and
+    02:31 and 03:15 are skipped."""
+    for day, utc_offset in ((datetime(2026, 3, 1), 5), (datetime(2026, 3, 9), 4)):
+
+        def at(
+            hour: int, minute: int, day: datetime = day, utc_offset: int = utc_offset
+        ) -> datetime:
+            return day + timedelta(hours=hour + utc_offset, minutes=minute)
+
+        assert transitions(_dst_attempt("01:00-02:30", at(2, 15)), "rw_dst") == _STARTED
+        for after in (at(2, 31), at(3, 15)):
+            assert transitions(_dst_attempt("01:00-02:30", after), "rw_dst") == ["RUN_WINDOW_SKIP"]
+
+
+def test_sem33_dst_window_in_a_zone_without_dst_is_unchanged() -> None:
+    """SEM-33, DL-249, the control: America/Phoenix keeps MST (UTC-7) on
+    2026-03-08, so 01:00-02:30 is not lengthened there. 02:15 is inside and
+    03:15 is skipped."""
+    phoenix = "America/Phoenix"
+    assert (
+        transitions(_dst_attempt("01:00-02:30", datetime(2026, 3, 8, 9, 15), phoenix), "rw_dst")
+        == _STARTED
+    )
+    assert transitions(
+        _dst_attempt("01:00-02:30", datetime(2026, 3, 8, 10, 15), phoenix), "rw_dst"
+    ) == ["RUN_WINDOW_SKIP"]
+
+
+def test_sem33_box_start_on_a_spring_change_defers_to_0300() -> None:
+    """SEM-33, DL-246 x DL-249: a box start decides its member's window on
+    the change day with the same endpoints. Started at 01:30 EST, the member
+    with "02:45-03:45" is deferred to 03:00 EDT, where it starts."""
+    text = (
+        "insert_job: box_dst\njob_type: b\n\n"
+        "insert_job: m_dst\njob_type: c\ncommand: a\nmachine: m1\nbox_name: box_dst\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "02:45"\n'
+        'run_window: "02:45-03:45"\ntimezone: America/New_York\n\n'
+        "insert_job: clock_dst\njob_type: c\ncommand: k\nmachine: m1\n"
+    )
+    o = oracle(text)
+    o.feed(Event(at=datetime(2026, 3, 8, 6, 30), kind="STARTJOB", payload={"job": "box_dst"}))
+    assert transitions(o, "m_dst") == ["RUN_WINDOW_DEFER"]
+    assert _timers(o, "m_dst") == [(datetime(2026, 3, 8, 7, 0), "m_dst", "run_window")]
+    o.feed(ev_at(datetime(2026, 3, 8, 7, 5), "STATUS", job="clock_dst", status="SUCCESS"))
+    assert transitions(o, "m_dst") == ["RUN_WINDOW_DEFER", *_STARTED]
+    start = next(t for t in o.trace() if t.job == "m_dst" and t.transition.endswith("STARTING"))
+    assert start.at == datetime(2026, 3, 8, 7, 0)
+    assert o.store.job["box_dst"].status == "RUNNING"
+
+
+def test_sem33_dst_equal_endpoints_stay_one_instant() -> None:
+    """SEM-33, DL-249: the vendor's DST rules describe two distinct
+    endpoints, so the zero-width pin stands on a change day. "02:30-02:30"
+    on the spring change is the one instant 03:00 EDT: 03:00 starts, and
+    03:15 is skipped. "01:30-01:30" on the fall change opens in the second
+    pass, so 01:30 EDT defers to 01:30 EST, which starts."""
+    assert transitions(_dst_attempt("02:30-02:30", datetime(2026, 3, 8, 7, 0)), "rw_dst") == (
+        _STARTED
+    )
+    assert transitions(_dst_attempt("02:30-02:30", datetime(2026, 3, 8, 7, 15)), "rw_dst") == [
+        "RUN_WINDOW_SKIP"
+    ]
+    o = _dst_attempt("01:30-01:30", datetime(2026, 11, 1, 5, 30))
+    assert transitions(o, "rw_dst") == ["RUN_WINDOW_DEFER"]
+    assert _timers(o, "rw_dst") == [(datetime(2026, 11, 1, 6, 30), "rw_dst", "run_window")]
+    assert transitions(_dst_attempt("01:30-01:30", datetime(2026, 11, 1, 6, 30)), "rw_dst") == (
+        _STARTED
+    )
+
+
+def test_sem33_spring_window_crossing_midnight_into_the_missing_hour() -> None:
+    """SEM-33, DL-249: "22:00-02:30" opens at 22:00 EST the evening before
+    and its close in the missing hour keeps the length, so it ends at 03:30
+    EDT. 03:15 EDT is inside and 03:31 EDT is skipped."""
+    assert transitions(_dst_attempt("22:00-02:30", datetime(2026, 3, 8, 7, 15)), "rw_dst") == (
+        _STARTED
+    )
+    assert transitions(_dst_attempt("22:00-02:30", datetime(2026, 3, 8, 7, 31)), "rw_dst") == [
+        "RUN_WINDOW_SKIP"
+    ]
+
+
+def test_sem33_dst_window_at_the_guards_edges_is_ordinary() -> None:
+    """SEM-33, DL-249: two days either side of the change take the interval
+    path and three days take the wall-time path. On all four days
+    01:00-02:30 is 01:00-02:30 local: 02:15 is inside and 03:15 skipped."""
+    for day, utc_offset in (
+        (datetime(2026, 3, 5), 5),
+        (datetime(2026, 3, 6), 5),
+        (datetime(2026, 3, 10), 4),
+        (datetime(2026, 3, 11), 4),
+    ):
+        inside = day + timedelta(hours=2 + utc_offset, minutes=15)
+        after = day + timedelta(hours=3 + utc_offset, minutes=15)
+        assert transitions(_dst_attempt("01:00-02:30", inside), "rw_dst") == _STARTED
+        assert transitions(_dst_attempt("01:00-02:30", after), "rw_dst") == ["RUN_WINDOW_SKIP"]
+
+
+def test_sem33_dst_rules_follow_the_offset_shape_not_the_zone_name() -> None:
+    """SEM-33, DL-249: coverage is the change's shape. Australia/Sydney's
+    spring change (2026-10-04, 02:00 AEST to 03:00 AEDT) has it, so
+    01:00-02:30 is open at 03:15 AEDT and closed at 03:31. Europe/London's
+    fall change (2026-10-25, 02:00 BST to 01:00 GMT) has it too, so at 01:50
+    BST the window 01:45-02:45 defers to 01:45 GMT."""
+    sydney = "Australia/Sydney"
+    assert transitions(
+        _dst_attempt("01:00-02:30", datetime(2026, 10, 3, 16, 15), sydney), "rw_dst"
+    ) == (_STARTED)
+    assert transitions(
+        _dst_attempt("01:00-02:30", datetime(2026, 10, 3, 16, 31), sydney), "rw_dst"
+    ) == ["RUN_WINDOW_SKIP"]
+    o = _dst_attempt("01:45-02:45", datetime(2026, 10, 25, 0, 50), "Europe/London")
+    assert transitions(o, "rw_dst") == ["RUN_WINDOW_DEFER"]
+    assert _timers(o, "rw_dst") == [(datetime(2026, 10, 25, 1, 45), "rw_dst", "run_window")]
+
+
+@pytest.mark.parametrize("zone", [None, "America/New_York"])
+@pytest.mark.parametrize(
+    "at",
+    [
+        datetime(1, 1, 1, 12, 0),
+        datetime(1, 1, 2, 12, 0),
+        datetime(9999, 12, 30, 12, 0),
+        datetime(9999, 12, 31, 12, 0),
+    ],
+)
+def test_sem33_dst_guard_at_the_ends_of_the_date_range(at: datetime, zone: str | None) -> None:
+    """SEM-33, DL-249: the DST guard looks two days either side of the
+    attempt. A day outside the calendar's range counts as no change, so an
+    all-day window still admits a start at both ends, with or without a
+    zone."""
+    text = (
+        "insert_job: rw_end\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "00:00"\n'
+        'run_window: "00:00-23:59"\n' + (f"timezone: {zone}\n" if zone else "")
+    )
+    o = oracle(text)
+    o.feed(Event(at=at, kind="STARTJOB", payload={"job": "rw_end"}))
+    assert transitions(o, "rw_end") == _STARTED
+
+
 # --------------------------------------------------------------------- 19. SEM-34 must_*
 
 
