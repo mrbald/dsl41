@@ -15958,3 +15958,96 @@ relitigate an entry; append a new one.
   now set priority 1), and the register's QUE_WAIT and Qr6 fixtures,
   which set priority 1 so they still queue on load. The Qr2 register row
   moves from facet `direction` to `unset-order`.
+- DL-248 A relative must_complete deadline belongs to the schedule slot:
+  the tick arms it at tick plus that slot's offset, and a single relative
+  must-time offset also counts against start_mins (2026-10-02; oracle.py,
+  ir.py, runner_ledger.py, simulation_register_rows.py;
+  autosys-semantics SEM-34 and ss8)
+  THE VENDOR. TechDocs 24.2. The must_complete_times attribute page: "The
+  must complete times are calculated relative to the start_mins or
+  start_times attributes." Its relative example: a job runs at 10:00,
+  11:00 and 12:00, and "Each job run must complete within 8 minutes after
+  each start time (10:08 a.m., 11:08 a.m., and 12:08 p.m.)". Its
+  start_mins example runs every 10 minutes with +7: "the 2:10 p.m. job run
+  must complete by 2:17 p.m." How Must Start Times and Must Complete Times
+  Work: the CHK_COMPLETE event for the next must complete time is
+  inserted with the job; "The scheduler checks for the SUCCESS, FAILURE,
+  or TERMINATED events. If the job has not completed, a
+  MUST_COMPLETE_ALARM is issued." After the job completes, the scheduler
+  inserts a new STARTJOB, CHK_START and CHK_COMPLETE.
+  THE DEFECT. The oracle armed the relative must_complete timer when the
+  job actually started, from the start instant. A tick at 08:00 blocked
+  until 08:10, with +8, alarmed at 08:18 and not at 08:08. A job that
+  never started got no completion check at all.
+  THE RULE. The STARTJOB tick arms the relative must_complete deadline
+  beside must_start's, at tick plus the offset `_sla_offset` names for
+  that slot. A late start neither moves nor re-arms it. The timer carries
+  the job's run_number at the tick. The run the tick asks for is the
+  first run to begin after it. The deadline is met once that run is no
+  longer STARTING or RUNNING, or once a later run has begun, since runs of
+  one job never overlap. Otherwise it alarms, including when no run began.
+  ONE AT A TIME. At most one relative must_complete deadline is pending
+  per job. The process text inserts the next CHK_COMPLETE only "after the
+  job completes", so a slot that passes while a run is live, or while an
+  earlier tick's deadline is pending, gets no deadline of its own. A tick
+  arms one only when the job is not STARTING, RUNNING or QUE_WAIT and no
+  earlier must_complete timer of the job is still unmet and unfired. A
+  met deadline stops counting as pending at once; a fired one leaves the
+  heap. The pending test reads the timer heap, so no new state is kept.
+  The same text suggests one-at-a-time for CHK_START too; must_start keeps
+  its per-tick arming, left for a separate change.
+  Elapsed run time stays term_run_time's. Absolute forms stay carried and
+  unarmed. `pending_timers` reports the deadline live by the same rule, so
+  a never-started job shows it.
+  RECORDED CHOICES, the smallest rule the vendor sentences allow. A
+  terminal status from before the tick does not meet it. A held
+  job's tick, an iced job's tick and a member's tick while its box is not
+  RUNNING all arm the deadline, as they arm must_start's; the iced and
+  box cases alarm, because no run follows. FORCE_STARTJOB, a condition
+  edge, OFF_HOLD and a run_window deferred start are no ticks and arm
+  nothing; a run they begin can meet an earlier tick's deadline. The
+  ON_NOEXEC bypass is a run and meets it.
+  START_MINS. Lowering refused every must-time without start_times. It
+  now accepts the documented form against start_mins: a single relative
+  offset, broadcast to every start_mins tick. A list of relative offsets
+  or an absolute form against start_mins is not specified by the vendor
+  pages and stays open, so lowering still refuses it, and says so. No
+  slot pairing exists for start_mins, and the canonical form needs no
+  change: a single offset has no order to keep. The register gains a
+  `start-mins` facet row for each of must_start_times and
+  must_complete_times.
+  BROADCAST. The single relative offset that broadcasts over several
+  start_times moves from [?] to [V]. On every captured edition's
+  must_start_times and must_complete_times pages, the note that counts
+  must times against start times sits inside the absolute-format list
+  item, and the relative syntax is a single `+minutes` for each start
+  time; the 24.2 must_complete_times page: "Each job run must complete
+  within 8 minutes after each start time". A list of several relative
+  offsets has no documented syntax and stays [?]. The register's
+  `sla-offset-broadcast` row moves from provisional to supported.
+  LATENCY. A job with only must_complete_times can now be latent at a
+  period boundary while not executing, because a tick armed a deadline
+  and no run followed, so classify can return R or A for it as it already
+  does for must_start.
+  STILL OPEN. The first-offset fallback for an unmatched instant is an
+  unchanged [?] pin. A run that ends by an injected non-terminal status
+  counts as ended. A KILLJOB that dequeues a QUE_WAIT run sets TERMINATED
+  without a new run number, so the oracle alarms where the vendor's check
+  would see a TERMINATED event; it joins the injected-status corner. A
+  strict reading of the CHK_COMPLETE text would decide both.
+  VERSION. `STATE_MACHINE_VERSION` moves to 9: the must_complete timer is
+  armed at a different moment and carries the tick's run, so a replay
+  alarms differently.
+  Tests: test_oracle.py `test_sem34_must_complete_*` (blocked to the
+  deadline, the late start alarming at 08:08 and not 08:18, a late start
+  complete in time, distinct offsets anchored to their own tick, the
+  start_mins +7 example, a second tick while the first deadline is
+  pending, a tick on a live job, two latched ticks with one late run, a
+  later run, prior terminal history, held, iced and box-not-running
+  ticks, OFF_HOLD, a run_window deferred start, the ON_NOEXEC bypass, a
+  run ended while STARTING, FORCE_STARTJOB, the pending timer); test_ir.py
+  start_mins ok and error shapes.
+  Rewritten to the vendor rule: test_nightbank_boundary.py
+  `test_b1_two_timers_due_at_exactly_t_are_c1s_and_the_next_one_is_c2s`
+  arms the region boxes' deadlines with STARTJOB, where it used
+  FORCE_STARTJOB, which no longer arms one.

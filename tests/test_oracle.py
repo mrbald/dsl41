@@ -3861,9 +3861,10 @@ def test_sem34c_a_single_offset_still_broadcasts_over_every_start_time() -> None
 
 def test_sem34a_must_complete_alarm_not_emitted_when_job_finishes_in_time() -> None:
     """T34a (SEM-34): must_complete_times: +5 arms a deadline timer relative
-    to the start. Completing at +2 (before the deadline) means the timer,
-    when it eventually pops at +5, finds the job no longer RUNNING -> no
-    alarm ever, no matter how much later the clock advances."""
+    to the tick (DL-248), here also the start. Completing at +2 (before the
+    deadline) means the timer, when it eventually pops at +5, finds the
+    tick's run complete -> no alarm ever, no matter how much later the
+    clock advances."""
     text = (
         "insert_job: mc34\njob_type: c\ncommand: x\nmachine: m1\n"
         'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n'
@@ -3900,6 +3901,349 @@ def test_sem34b_must_complete_alarm_fires_and_job_keeps_running() -> None:
     assert len(alarm_entries) == 1
     assert "SEM-34" in alarm_entries[0].cause
     assert o.store.job["mc34b"].status == "RUNNING"  # no control flow
+
+
+# DL-248: a relative must_complete deadline belongs to the schedule slot. The
+# tick arms it at tick+offset; the run it asks for is the first to begin after
+# the tick; a late start does not move it. TechDocs 24.2, must_complete_times:
+# "The must complete times are calculated relative to the start_mins or
+# start_times attributes."
+
+
+def _mc_alarm_times(o: Oracle | EngineHarness, job: str) -> list[datetime]:
+    return [t.at for t in o.trace() if t.job == job and t.transition == "MUST_COMPLETE_ALARM"]
+
+
+def _mc_gated(name: str, *, start: str = 'start_times: "08:00"', offsets: str = "+8") -> str:
+    """One gated job with a relative must_complete, its gate, and an idle
+    job whose STATUS moves the clock without touching either."""
+    return (
+        f"insert_job: {name}\njob_type: c\ncommand: x\nmachine: m1\n"
+        f"date_conditions: 1\ndays_of_week: all\n{start}\n"
+        f"must_complete_times: {offsets}\ncondition: s({name}_gate)\n\n"
+        f"insert_job: {name}_gate\njob_type: c\ncommand: y\nmachine: m1\n\n"
+        f"insert_job: {name}_idle\njob_type: c\ncommand: z\nmachine: m1\n"
+    )
+
+
+def test_sem34_must_complete_alarms_at_tick_plus_offset_when_blocked_throughout() -> None:
+    """T34 (SEM-34, DL-248): the 08:00 tick is blocked by its condition and
+    the job never starts. The tick armed the deadline, so the alarm fires at
+    08:08. The job stays INACTIVE: the alarm has no control flow."""
+    o = oracle(_mc_gated("mcb"))
+    o.feed(ev("STARTJOB", 0, job="mcb"))
+    o.feed(ev("STATUS", 30, job="mcb_idle", status="SUCCESS"))
+    assert _mc_alarm_times(o, "mcb") == [T0 + timedelta(minutes=8)]
+    assert transitions(o, "mcb") == ["SCHED_ARM", "MUST_COMPLETE_ALARM"]
+    assert o.store.job["mcb"].status == "INACTIVE"
+
+
+def test_sem34_must_complete_late_start_alarms_at_the_slot_deadline_only() -> None:
+    """T34 (SEM-34, DL-248): the vendor's "within 8 minutes after each start
+    time". The 08:00 tick is blocked until 08:10. The deadline stays at
+    08:08, where the alarm fires; the 08:10 start arms nothing, so 08:18
+    is quiet. The run itself is unaffected and completes normally."""
+    o = oracle(_mc_gated("mcl"))
+    o.feed(ev("STARTJOB", 0, job="mcl"))
+    o.feed(ev("STATUS", 10, job="mcl_gate", status="SUCCESS"))
+    assert o.store.job["mcl"].status == "RUNNING"
+    o.feed(ev("STATUS", 30, job="mcl_idle", status="SUCCESS"))
+    assert _mc_alarm_times(o, "mcl") == [T0 + timedelta(minutes=8)]
+    o.feed(ev("STATUS", 31, job="mcl", status="SUCCESS"))
+    assert transitions(o, "mcl") == [
+        "SCHED_ARM",
+        "MUST_COMPLETE_ALARM",
+        "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+        "RUNNING->SUCCESS",
+    ]
+
+
+def test_sem34_must_complete_late_start_that_completes_in_time_is_quiet() -> None:
+    """T34 (SEM-34, DL-248): blocked at the 08:00 tick, started at 08:03,
+    complete at 08:06. The run the slot asked for completed before 08:08,
+    so no alarm, however late the clock runs."""
+    o = oracle(_mc_gated("mcq"))
+    o.feed(ev("STARTJOB", 0, job="mcq"))
+    o.feed(ev("STATUS", 3, job="mcq_gate", status="SUCCESS"))
+    o.feed(ev("STATUS", 6, job="mcq", status="FAILURE"))
+    o.feed(ev("STATUS", 60, job="mcq_idle", status="SUCCESS"))
+    assert _mc_alarm_times(o, "mcq") == []
+
+
+def test_sem34_must_complete_distinct_offsets_anchor_to_their_own_tick() -> None:
+    """T34c (SEM-34, DL-248): start_times 08:00 and 09:00 with +7 and +40.
+    The 09:00 tick is blocked until 09:20 and the run is still RUNNING at
+    09:40, its slot's deadline: the alarm is at 09:40, not at 10:00, which
+    is the actual start plus 40."""
+    o = oracle(_mc_gated("mcd", start='start_times: "08:00, 09:00"', offsets="+7, +40"))
+    o.feed(ev("STARTJOB", 60, job="mcd"))
+    o.feed(ev("STATUS", 80, job="mcd_gate", status="SUCCESS"))
+    o.feed(ev("STATUS", 130, job="mcd_idle", status="SUCCESS"))
+    assert _mc_alarm_times(o, "mcd") == [T0 + timedelta(minutes=100)]
+    assert o.store.job["mcd"].status == "RUNNING"
+
+
+def test_sem34_must_complete_with_start_mins_the_2_10_run_is_due_at_2_17() -> None:
+    """T34 (SEM-34, DL-248): the vendor's start_mins example. Runs every 10
+    minutes with +7: "the 2:10 p.m. job run must complete by 2:17 p.m."
+    The 14:10 tick is blocked until 14:12; still RUNNING at 14:17, it
+    alarms then. A second job of the same shape completes at 14:16 and is
+    quiet."""
+    start = "start_mins: 0, 10, 20, 30, 40, 50"
+    tick = datetime(2026, 7, 1, 14, 10)
+    late = oracle(_mc_gated("mcm", start=start, offsets="+7"))
+    late.feed(ev_at(tick, "STARTJOB", job="mcm"))
+    late.feed(ev_at(tick + timedelta(minutes=2), "STATUS", job="mcm_gate", status="SUCCESS"))
+    late.feed(ev_at(tick + timedelta(minutes=9), "STATUS", job="mcm_idle", status="SUCCESS"))
+    assert _mc_alarm_times(late, "mcm") == [datetime(2026, 7, 1, 14, 17)]
+
+    quiet = oracle(_mc_gated("mcm", start=start, offsets="+7"))
+    quiet.feed(ev_at(tick, "STARTJOB", job="mcm"))
+    quiet.feed(ev_at(tick + timedelta(minutes=2), "STATUS", job="mcm_gate", status="SUCCESS"))
+    quiet.feed(ev_at(tick + timedelta(minutes=6), "STATUS", job="mcm", status="SUCCESS"))
+    quiet.feed(ev_at(tick + timedelta(minutes=9), "STATUS", job="mcm_idle", status="SUCCESS"))
+    assert _mc_alarm_times(quiet, "mcm") == []
+
+
+def test_sem34_must_complete_second_tick_while_the_first_deadline_is_pending() -> None:
+    """T34 (SEM-34, DL-248): at most one pending deadline per job. Ticks at
+    08:00 and 08:05 (+8) are both blocked; the 08:05 tick finds the 08:08
+    deadline pending and arms nothing. The latched arm starts one run at
+    08:06, which completes at 08:10, after 08:08: one alarm, at 08:08."""
+    o = oracle(_mc_gated("mc2", start='start_times: "08:00, 08:05"'))
+    o.feed(ev("STARTJOB", 0, job="mc2"))
+    o.feed(ev("STARTJOB", 5, job="mc2"))
+    o.feed(ev("STATUS", 6, job="mc2_gate", status="SUCCESS"))
+    o.feed(ev("STATUS", 10, job="mc2", status="SUCCESS"))
+    o.feed(ev("STATUS", 30, job="mc2_idle", status="SUCCESS"))
+    assert _mc_alarm_times(o, "mc2") == [T0 + timedelta(minutes=8)]
+
+
+def test_sem34_must_complete_a_tick_on_a_live_job_arms_nothing() -> None:
+    """T34 (SEM-34, DL-248): one pending deadline per job. The vendor inserts
+    the next CHK_COMPLETE only "after the job completes". Runs every 10
+    minutes with +7; the 14:00 run lasts to 14:12. It alarms at 14:07. The
+    14:10 tick finds the job live, is refused, and arms nothing, so 14:17 is
+    quiet."""
+    o = oracle(
+        "insert_job: mcr\njob_type: c\ncommand: x\nmachine: m1\n"
+        "date_conditions: 1\ndays_of_week: all\nstart_mins: 0, 10, 20, 30, 40, 50\n"
+        "must_complete_times: +7\n\n"
+        "insert_job: mcr_idle\njob_type: c\ncommand: z\nmachine: m1\n"
+    )
+    tick = datetime(2026, 7, 1, 14, 0)
+    o.feed(ev_at(tick, "STARTJOB", job="mcr"))
+    o.feed(ev_at(tick + timedelta(minutes=10), "STARTJOB", job="mcr"))
+    assert "START_REFUSED" in transitions(o, "mcr")
+    o.feed(ev_at(tick + timedelta(minutes=12), "STATUS", job="mcr", status="SUCCESS"))
+    o.feed(ev_at(tick + timedelta(minutes=19), "STATUS", job="mcr_idle", status="SUCCESS"))
+    assert _mc_alarm_times(o, "mcr") == [datetime(2026, 7, 1, 14, 7)]
+
+
+def test_sem34_must_complete_two_latched_ticks_and_one_late_run_alarm_once() -> None:
+    """T34 (SEM-34, DL-248): ticks at 08:00 and 08:05 (+8) are both blocked.
+    The 08:05 tick finds the 08:08 deadline pending and arms nothing. The
+    latched run starts at 08:06 and ends at 08:15: one alarm, at 08:08."""
+    o = oracle(_mc_gated("mc1", start='start_times: "08:00, 08:05"'))
+    o.feed(ev("STARTJOB", 0, job="mc1"))
+    o.feed(ev("STARTJOB", 5, job="mc1"))
+    o.feed(ev("STATUS", 6, job="mc1_gate", status="SUCCESS"))
+    o.feed(ev("STATUS", 15, job="mc1", status="SUCCESS"))
+    o.feed(ev("STATUS", 30, job="mc1_idle", status="SUCCESS"))
+    assert _mc_alarm_times(o, "mc1") == [T0 + timedelta(minutes=8)]
+
+
+def test_sem34_must_complete_a_later_run_meets_the_deadline() -> None:
+    """T34 (SEM-34, DL-248): the 08:00 tick's run ends at 08:02 and a forced
+    second run begins at 08:04, still RUNNING at 08:08. A later run began,
+    so the run the tick asked for had ended: no alarm."""
+    o = oracle(_mc_gated("mcn"))
+    o.feed(ev("STATUS", -1, job="mcn_gate", status="SUCCESS"))
+    o.feed(ev("STARTJOB", 0, job="mcn"))
+    o.feed(ev("STATUS", 2, job="mcn", status="SUCCESS"))
+    o.feed(ev("FORCE_STARTJOB", 4, job="mcn"))
+    o.feed(ev("STATUS", 30, job="mcn_idle", status="SUCCESS"))
+    assert o.store.job["mcn"].status == "RUNNING"
+    assert _mc_alarm_times(o, "mcn") == []
+
+
+def test_sem34_must_complete_off_hold_release_arms_nothing() -> None:
+    """T34 x SEM-21 (DL-248): held through its 08:08 deadline, the job
+    alarms then. OFF_HOLD at 08:10 starts it and the run lasts to 08:30. The
+    release is no tick, so 08:18 is quiet."""
+    o = oracle(
+        "insert_job: mcu\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n'
+        "must_complete_times: +8\n\n"
+        "insert_job: mcu_idle\njob_type: c\ncommand: z\nmachine: m1\n"
+    )
+    o.feed(ev("ON_HOLD", 0, job="mcu"))
+    o.feed(ev("STARTJOB", 0, job="mcu"))
+    o.feed(ev("OFF_HOLD", 10, job="mcu"))
+    assert o.store.job["mcu"].status == "RUNNING"
+    o.feed(ev("STATUS", 30, job="mcu", status="SUCCESS"))
+    assert _mc_alarm_times(o, "mcu") == [T0 + timedelta(minutes=8)]
+
+
+def test_sem34_must_complete_run_window_deferred_start_arms_nothing() -> None:
+    """T34 x SEM-33 (DL-248): the 01:50 tick is deferred to the 02:00
+    opening, so its +5 deadline alarms at 01:55. The deferred start runs to
+    02:30 and is no tick, so 02:05 is quiet."""
+    o = oracle(
+        "insert_job: mcw\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "01:50"\n'
+        'run_window: "02:00-03:00"\nmust_complete_times: +5\n\n'
+        "insert_job: mcw_idle\njob_type: c\ncommand: z\nmachine: m1\n"
+    )
+    tick = datetime(2026, 7, 1, 1, 50)
+    o.feed(ev_at(tick, "STARTJOB", job="mcw"))
+    assert transitions(o, "mcw") == ["RUN_WINDOW_DEFER"]
+    o.feed(ev_at(tick + timedelta(minutes=12), "STATUS", job="mcw_idle", status="SUCCESS"))
+    assert o.store.job["mcw"].status == "RUNNING"
+    o.feed(ev_at(tick + timedelta(minutes=40), "STATUS", job="mcw", status="SUCCESS"))
+    assert _mc_alarm_times(o, "mcw") == [datetime(2026, 7, 1, 1, 55)]
+
+
+def test_sem34_must_complete_on_noexec_bypass_meets_the_deadline() -> None:
+    """T34 x SEM-22 (DL-248): the bypass is the tick's run and ends SUCCESS
+    at once, so the deadline is met."""
+    o = oracle(
+        "insert_job: mce\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n'
+        "must_complete_times: +8\n\n"
+        "insert_job: mce_idle\njob_type: c\ncommand: z\nmachine: m1\n"
+    )
+    o.feed(ev("ON_NOEXEC", 0, job="mce"))
+    o.feed(ev("STARTJOB", 0, job="mce"))
+    o.feed(ev("STATUS", 30, job="mce_idle", status="SUCCESS"))
+    assert o.store.job["mce"].status == "SUCCESS"
+    assert _mc_alarm_times(o, "mce") == []
+
+
+def test_sem34_must_complete_a_run_ended_during_its_starting_meets_the_deadline() -> None:
+    """T34 x SEM-14 (DL-248), on the shape of
+    test_sem10_a_box_its_start_terminated_is_not_overwritten_running: the
+    20-minute tick on b is refused (it already ran this box execution) and
+    arms a +5 deadline. A forced start of b is TERMINATED while STARTING by
+    its parent's job_terminator cascade. That run ended, so 25 is quiet."""
+    text = (
+        "insert_job: p34s\njob_type: b\nbox_failure: s(nx34s)\n\n"
+        "insert_job: b34s\njob_type: b\nbox_name: p34s\njob_terminator: 1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n'
+        "must_complete_times: +5\n\n"
+        "insert_job: b1_34s\njob_type: c\ncommand: x\nmachine: m1\nbox_name: b34s\n\n"
+        "insert_job: nx34s\njob_type: c\ncommand: n\nmachine: m1\nbox_name: p34s\n"
+        "condition: n(b1_34s, 00.01) & v(GO34S) = 1\n\n"
+        "insert_job: idle34s\njob_type: c\ncommand: z\nmachine: m1\n"
+    )
+    o = oracle(text)
+    o.feed(ev("ON_NOEXEC", 0, job="nx34s"))
+    o.feed(ev("STARTJOB", 0, job="p34s"))
+    o.feed(ev("STARTJOB", 0, job="b34s"))
+    o.feed(ev("STATUS", 1, job="b1_34s", status="SUCCESS"))
+    o.feed(ev("SET_GLOBAL", 10, name="GO34S", value="1"))
+    assert _status(o, "p34s", "b34s", "nx34s") == ["RUNNING", "SUCCESS", "INACTIVE"]
+    o.feed(ev("STARTJOB", 20, job="b34s"))
+    assert transitions(o, "b34s")[-1] == "START_REFUSED"
+    o.feed(ev("FORCE_STARTJOB", 21, job="b34s"))
+    assert transitions(o, "b34s")[-2:] == ["SUCCESS->STARTING", "STARTING->TERMINATED"]
+    o.feed(ev("STATUS", 30, job="idle34s", status="SUCCESS"))
+    assert _mc_alarm_times(o, "b34s") == []
+
+
+def test_sem34_must_complete_prior_terminal_history_does_not_satisfy_a_later_tick() -> None:
+    """T34 (SEM-34, DL-248): yesterday's run ended SUCCESS. Today's 08:00
+    tick is blocked and the job never starts, so the SUCCESS it still shows
+    is no completion of the run this tick asked for: the alarm fires."""
+    o = oracle(_mc_gated("mch"))
+    o.feed(ev("STATUS", -1440, job="mch_gate", status="SUCCESS"))
+    o.feed(ev("FORCE_STARTJOB", -1439, job="mch"))
+    o.feed(ev("STATUS", -1430, job="mch", status="SUCCESS"))
+    o.feed(ev("STATUS", -1, job="mch_gate", status="FAILURE"))
+    o.feed(ev("STARTJOB", 0, job="mch"))
+    o.feed(ev("STATUS", 30, job="mch_idle", status="SUCCESS"))
+    assert o.store.job["mch"].status == "SUCCESS"
+    assert _mc_alarm_times(o, "mch") == [T0 + timedelta(minutes=8)]
+
+
+def test_sem34_must_complete_held_at_the_tick_is_judged_like_any_late_start() -> None:
+    """T34 x SEM-21 (DL-248): a held job's tick latches (Q3) and arms the
+    deadline. Released at 08:02 and complete at 08:05, it is quiet;
+    released at 08:10, it alarms at 08:08."""
+    text = (
+        "insert_job: mco\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n'
+        "must_complete_times: +8\n\n"
+        "insert_job: mco_idle\njob_type: c\ncommand: z\nmachine: m1\n"
+    )
+    for released, finished, expected in ((2, 5, []), (10, 15, [T0 + timedelta(minutes=8)])):
+        o = oracle(text)
+        o.feed(ev("ON_HOLD", 0, job="mco"))
+        o.feed(ev("STARTJOB", 0, job="mco"))
+        o.feed(ev("OFF_HOLD", released, job="mco"))
+        assert o.store.job["mco"].status == "RUNNING"
+        o.feed(ev("STATUS", finished, job="mco", status="SUCCESS"))
+        o.feed(ev("STATUS", 30, job="mco_idle", status="SUCCESS"))
+        assert _mc_alarm_times(o, "mco") == expected
+
+
+def test_sem34_must_complete_iced_or_box_not_running_at_the_tick_still_alarms() -> None:
+    """T34 x SEM-20/SEM-10 (DL-248): the deadline belongs to the tick, as
+    must_start's does, so a tick that cannot start the job still arms it.
+    An iced job and a member whose box is not RUNNING both alarm at 08:08."""
+    text = (
+        "insert_job: mci\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n'
+        "must_complete_times: +8\n\n"
+        "insert_job: mcx_box\njob_type: b\n\n"
+        "insert_job: mcx\njob_type: c\ncommand: x\nmachine: m1\nbox_name: mcx_box\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n'
+        "must_complete_times: +8\n\n"
+        "insert_job: mci_idle\njob_type: c\ncommand: z\nmachine: m1\n"
+    )
+    o = oracle(text)
+    o.feed(ev("ON_ICE", 0, job="mci"))
+    o.feed(ev("STARTJOB", 0, job="mci"))
+    o.feed(ev("STARTJOB", 0, job="mcx"))
+    assert transitions(o, "mcx") == ["START_REFUSED"]
+    o.feed(ev("STATUS", 30, job="mci_idle", status="SUCCESS"))
+    assert _mc_alarm_times(o, "mci") == [T0 + timedelta(minutes=8)]
+    assert _mc_alarm_times(o, "mcx") == [T0 + timedelta(minutes=8)]
+
+
+def test_sem34_must_complete_force_start_is_no_tick_and_arms_no_deadline() -> None:
+    """T34 x SEM-23 (DL-248): a FORCE_STARTJOB names no slot, so it arms no
+    relative completion deadline; a run left RUNNING alarms never. A forced
+    run is still a run: begun after a blocked tick and complete in time, it
+    satisfies that tick's deadline."""
+    o = oracle(_mc_gated("mcf"))
+    o.feed(ev("FORCE_STARTJOB", 0, job="mcf"))
+    assert _timers(o, "mcf") == []
+    o.feed(ev("STATUS", 30, job="mcf_idle", status="SUCCESS"))
+    assert _mc_alarm_times(o, "mcf") == []
+    assert o.store.job["mcf"].status == "RUNNING"
+
+    satisfied = oracle(_mc_gated("mcf"))
+    satisfied.feed(ev("STARTJOB", 0, job="mcf"))
+    satisfied.feed(ev("FORCE_STARTJOB", 2, job="mcf"))
+    satisfied.feed(ev("STATUS", 5, job="mcf", status="SUCCESS"))
+    satisfied.feed(ev("STATUS", 30, job="mcf_idle", status="SUCCESS"))
+    assert _mc_alarm_times(satisfied, "mcf") == []
+
+
+def test_sem34_must_complete_deadline_of_a_never_started_job_is_pending() -> None:
+    """DL-248 x DL-46: pending_timers mirrors the fire rule. A blocked tick's
+    completion deadline is live before any run begins, and stays live while
+    the late run is RUNNING; the completion retires it."""
+    o = oracle(_mc_gated("mcp"))
+    o.feed(ev("STARTJOB", 0, job="mcp"))
+    deadline = (T0 + timedelta(minutes=8), "mcp", "must_complete")
+    assert _timers(o, "mcp") == [deadline]
+    o.feed(ev("STATUS", 2, job="mcp_gate", status="SUCCESS"))
+    assert _timers(o, "mcp") == [deadline]
+    o.feed(ev("STATUS", 4, job="mcp", status="SUCCESS"))
+    assert _timers(o, "mcp") == []
 
 
 # --------------------------------------------------------------------- 20. term_run_time

@@ -135,10 +135,12 @@ fails the suite.
 | job_attr:max_run_alarm | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
 | job_attr:min_run_alarm | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
 | job_attr:must_complete_times | supported | SEM-34 | - |  |  |  | generic | the RELATIVE form arms an alarm: a missed completion raises MUST_COMPLETE_ALARM and changes no status |
-| job_attr:must_complete_times#absolute | passthrough | SEM-34, oracle.Oracle._arm_sla_and_term | - |  |  |  | none | an ABSOLUTE must_complete_times lowers and is carried, and arms nothing: the oracle owns no calendar, so no absolute deadline exists v1 |
+| job_attr:must_complete_times#absolute | passthrough | SEM-34, oracle.Oracle._slot_deadline | - |  |  |  | none | an ABSOLUTE must_complete_times lowers and is carried, and arms nothing: the oracle owns no calendar, so no absolute deadline exists v1 |
+| job_attr:must_complete_times#start-mins | supported | SEM-34, DL-248, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset | - |  |  |  | none | a single relative offset counts against start_mins and broadcasts to every start_mins tick; a list of offsets or an absolute form there is not specified by the vendor, stays open, and is refused at lowering |
 | job_attr:must_complete_times#unmatched-slot | provisional | SEM-34, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset | - |  |  |  | none | an instant matching no start time uses the first offset; no label was opened for the corner |
 | job_attr:must_start_times | supported | SEM-34 | - |  |  |  | generic | the RELATIVE form arms an alarm: a missed start raises MUST_START_ALARM and changes no status |
-| job_attr:must_start_times#absolute | passthrough | SEM-34, oracle.Oracle._arm_sla_and_term | - |  |  |  | none | an ABSOLUTE must_start_times lowers and is carried, and arms nothing: the oracle owns no calendar, so no absolute deadline exists v1 |
+| job_attr:must_start_times#absolute | passthrough | SEM-34, oracle.Oracle._slot_deadline | - |  |  |  | none | an ABSOLUTE must_start_times lowers and is carried, and arms nothing: the oracle owns no calendar, so no absolute deadline exists v1 |
+| job_attr:must_start_times#start-mins | supported | SEM-34, DL-248, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset | - |  |  |  | none | a single relative offset counts against start_mins and broadcasts to every start_mins tick; a list of offsets or an absolute form there is not specified by the vendor, stays open, and is refused at lowering |
 | job_attr:must_start_times#unmatched-slot | provisional | SEM-34, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset | - |  |  |  | none | an instant matching no start time uses the first offset; no label was opened for the corner |
 | job_attr:n_retrys | passthrough | DL-53 | - |  |  |  | generic | the job runs without retries; preflight WARNs that the attribute is unmodelled |
 | job_attr:notification_alarm_types | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
@@ -170,7 +172,7 @@ fails the suite.
 | job_attr:std_in_file | supported | runner_adapters._build_run_spec | - |  |  |  | generic | the child reads stdin from here instead of /dev/null; inert on a BOX (SEM-10) |
 | job_attr:std_out_file | supported | runner_adapters.job_log_paths | - |  |  |  | generic | the child's stdout appends here instead of the default run log; inert on a BOX (SEM-10) |
 | job_attr:success_codes | supported | SEM-09, DL-33 | - |  |  |  | generic | the explicit success set; with no fail_codes beside it, it alone decides the verdict |
-| job_attr:term_run_time | supported | dossier ss5, oracle.Oracle._arm_sla_and_term | - |  |  |  | generic | arms a timer that TERMINATEs the run after n minutes; zero means no limit and arms no timer (DL-241) |
+| job_attr:term_run_time | supported | dossier ss5, oracle.Oracle._arm_term_run_time | - |  |  |  | generic | arms a timer that TERMINATEs the run after n minutes; zero means no limit and arms no timer (DL-241) |
 | job_attr:timezone | supported | SEM-35 | - |  |  |  | generic | the zone every schedule time on this job is read in |
 | job_attr:timezone#dst-fold | provisional | SEM-35, runner_scheduler | E10 | yes |  |  | none | a start time inside a DST fold or gap resolves by the pinned interpretation, not by a vendor-verified rule |
 | job_attr:ulimit | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | no resource limit is applied to the child process |
@@ -523,7 +525,7 @@ fails the suite.
 | event:FORCE_STARTJOB | supported | ir-design ss7, DL-247 | - |  |  |  | generic | starts a job past its condition gate and its machine's load limit; on a non-live ON_ICE or ON_HOLD job it clears that flag first, like an OFF_ICE/OFF_HOLD, then starts it (DL-243); named resources still gate it |
 | event:KILLJOB | supported | ir-design ss7 | - |  |  |  | generic | terminates a running job, or dequeues and terminates a queued one |
 | event:KILLJOB#queued | provisional | DL-50, oracle.Oracle._dispatch | Qr5 |  |  |  | none | killing a queued job dequeues it, consumes its arm and TERMINATEs it |
-| event:MUST_COMPLETE_ALARM | supported | SEM-34 | - |  |  |  | generic | emitted when a must_complete deadline passes with the run still live |
+| event:MUST_COMPLETE_ALARM | supported | SEM-34 | - |  |  |  | generic | emitted when a must_complete deadline passes before the run its tick asked for completed, including a run that never began (DL-248) |
 | event:MUST_START_ALARM | supported | SEM-34 | - |  |  |  | generic | emitted when a must_start deadline passes with no new run; no status moves |
 | event:OFF_HOLD | supported | ir-design ss7 | - |  |  |  | generic | releases a hold and re-attempts the start immediately |
 | event:OFF_ICE | supported | ir-design ss7 | - |  |  |  | generic | un-ices a job; conditions are deliberately NOT re-evaluated |
@@ -557,7 +559,7 @@ fails the suite.
 | id | class | cite | label | marker | protocol | bound | detector | effect |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | timer:deferred_cause | supported | PR-09, oracle.Oracle._schedule_timer | - |  |  |  | generic | the fourth timer shape: a run_window-deferred start replaying its own provenance |
-| timer:must_complete | supported | PR-09, oracle.Oracle._schedule_timer | - |  |  |  | generic | armed by the start; it raises MUST_COMPLETE_ALARM if the run is still live |
+| timer:must_complete | supported | PR-09, oracle.Oracle._schedule_timer | - |  |  |  | generic | armed by the schedule tick; it raises MUST_COMPLETE_ALARM if the run the tick asked for has not completed (DL-248) |
 | timer:must_start | supported | PR-09, oracle.Oracle._schedule_timer | - |  |  |  | generic | armed by the schedule tick; it raises MUST_START_ALARM if no new run began |
 | timer:term_run_time | supported | PR-09, oracle.Oracle._schedule_timer | - |  |  |  | generic | armed by the start; it TERMINATEs a run still live at the deadline; zero means no limit and arms no timer (DL-241) |
 
@@ -629,7 +631,7 @@ fails the suite.
 | id | class | cite | label | marker | protocol | bound | detector | effect |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | trace_marker:DISARM | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | an explicit journaled disarm: the latched tick is dropped and nothing else moves |
-| trace_marker:MUST_COMPLETE_ALARM | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | the must_complete deadline passed with the run still live; no status moved |
+| trace_marker:MUST_COMPLETE_ALARM | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | the must_complete deadline passed before the run its tick asked for completed; no status moved |
 | trace_marker:MUST_START_ALARM | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | the must_start deadline passed with no new run; no status moved |
 | trace_marker:OFF_HOLD | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | the hold is released and the start is re-attempted immediately |
 | trace_marker:OFF_ICE | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | the ice is cleared; conditions are deliberately NOT re-evaluated |
@@ -697,8 +699,8 @@ fails the suite.
 | literal_alt:ResolvedTz.how=map | supported | SEM-35, DL-62 | - |  |  |  | generic | the name resolved through the estate's ujo_timezones alias table, chained at most five hops with an OS lookup per hop |
 | literal_alt:ResolvedTz.how=os | supported | SEM-35 | - |  |  |  | generic | the zone name resolved straight out of the OS database |
 | literal_alt:ResolvedTz.how=posix | supported | SEM-35 | - |  |  |  | generic | a POSIX fixed-offset spelling, resolved without the zone database |
-| literal_alt:SlaSpec.kind=absolute | supported | SEM-34, oracle.Oracle._arm_sla_and_term | - |  |  |  | generic | an absolute must_*_times is lowered and carried, and arms nothing: the oracle owns no calendar, so no absolute deadline exists v1 |
-| literal_alt:SlaSpec.kind=relative | supported | SEM-34, oracle.Oracle._arm_sla_and_term | - |  |  |  | generic | a relative `+n` must_*_times is what arms the alarm timer |
+| literal_alt:SlaSpec.kind=absolute | supported | SEM-34, oracle.Oracle._slot_deadline | - |  |  |  | generic | an absolute must_*_times is lowered and carried, and arms nothing: the oracle owns no calendar, so no absolute deadline exists v1 |
+| literal_alt:SlaSpec.kind=relative | supported | SEM-34, oracle.Oracle._slot_deadline | - |  |  |  | generic | a relative `+n` must_*_times is what arms the alarm timer |
 | literal_alt:StatusAtom.kind=status | supported | SEM-02, ir-design ss3 | - |  |  |  | generic | the discriminator of a job-status atom |
 
 ### runtime
@@ -715,7 +717,7 @@ fails the suite.
 | runtime:preflight-date-basis-utc | supported | DL-212, runner_preflight._preflight_local_day | - |  |  |  | none | the calendar probes read the run anchor on the scheduler's own ladder: the JOB's local day, else the run-level base timezone, else UTC. Preflight and the engine name the same day |
 | runtime:preflight-no-start-skips-probe | supported | DL-213, runner_preflight.preflight | - |  |  |  | none | a preflight called with no run anchor takes now as the anchor, so the exhaustion and dormancy probes run on every call; a caller that wants a fixed answer passes a fixed anchor. The probe is day-granular: a last eligible day equal to the anchor's day passes even when its start times have passed |
 | runtime:scan-horizon | supported | autocal._SCAN_YEARS, runner_scheduler._EXTENDED_SCAN_DAYS | - |  |  | 60 years | none | a calendar that generates nothing within 60 years reads as exhausted; dormancy is proven within that bound only |
-| runtime:sla-offset-broadcast | provisional | SEM-34, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset | - |  |  |  | none | one relative offset broadcasts to every start slot, which SEM-34 marks open -- the strict count rule and the vendor's own example disagree; no label was opened for it |
+| runtime:sla-offset-broadcast | supported | SEM-34, DL-248, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset | - |  |  |  | none | one relative offset broadcasts to every start slot: the vendor's relative syntax is a single +minutes applied after each start time |
 | runtime:unsized-capacity | refused | runner_preflight._resource_preflight, DL-50 | - |  |  |  | none | preflight refuses a run over an unsized resource; a direct oracle caller bypasses that guard and runs unthrottled, and there the malformed values go quiet -- a malformed job_load reads as zero demand, a malformed priority as unset, and a malformed amount omits the bucket altogether |
 | runtime:walk-cap | refused | autocal.CompiledCalendar._walk | - |  |  | 366 days | none | a W/P replacement that finds no valid day within 366 days is degenerate and refuses the calendar |
 

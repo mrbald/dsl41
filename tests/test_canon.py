@@ -492,7 +492,7 @@ def _oracle_with_every_timer_armed() -> Oracle:
     """One catalog that arms every deadline oracle.py can enqueue, all at T0
     and all due later, so nothing has fired when the timers are read."""
     text = (
-        # must_complete: armed at the start of the run
+        # must_complete: armed on the tick, which also starts the run (DL-248)
         "insert_job: pr09_mc\njob_type: c\ncommand: x\nmachine: m1\n"
         'date_conditions: 1\ndays_of_week: all\nstart_times: "09:50"\n'
         "must_complete_times: +5\n\n"

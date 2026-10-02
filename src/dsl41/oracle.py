@@ -168,14 +168,16 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
 - Injected STATUS may overwrite a terminal status (the CHANGE_STATUS
   analog): script-authoring hazard, documented not guarded.
 - must_start_times / must_complete_times (SEM-34): alarms only, never
-  control flow. Relative offsets arm on the STARTJOB tick (must_start:
-  alarm iff no new run began by tick+offset -- armed even when the start
-  is abandoned or deferred, that is the alarm's point) and on the actual
-  start (must_complete). N offsets against N start_times pair BY POSITION
-  -- the tick's local time of day names the slot. A SINGLE offset
-  broadcasts over every start time ([?] the dossier's strict count rule and
-  the vendor's own worked example disagree; open against a live instance),
-  and an instant that matches no start time keeps the first offset.
+  control flow. Relative offsets arm on the STARTJOB tick, both halves
+  (DL-248), even when the start is abandoned or deferred -- that is the
+  alarm's point. must_start alarms iff no new run began by tick+offset.
+  must_complete alarms iff the first run to begin after the tick has not
+  ended by tick+offset; a late start does not move the deadline, and a
+  FORCE_STARTJOB, which is no tick, arms none. N offsets against N
+  start_times pair BY POSITION -- the tick's local time of day names the
+  slot; start_mins takes a single offset only (DL-248). A SINGLE offset
+  broadcasts over every start time (the vendor's relative syntax is one
+  `+minutes` for each start time), and an instant that matches no start time keeps the first offset.
   Absolute forms need the calendar the oracle does not own; scripts
   exercise relative forms.
 - term_run_time (dossier ss5): control flow -- auto-TERMINATE when the run
@@ -501,8 +503,9 @@ class Oracle:
         `must_complete`, `term_run_time`) or `run_window` for a SEM-33
         deferred start. Liveness mirrors _dispatch_timer_check's fire-time
         rules -- a heap entry a fire would discard as stale (run_number moved
-        on; deadline's run no longer RUNNING) is not pending, it is dead
-        weight awaiting its lazy pop. The ss10 status query renders this for
+        on; a term_run_time run no longer RUNNING; a must_complete deadline
+        already met by the run its tick asked for, DL-248) is not pending, it
+        is dead weight awaiting its lazy pop. The ss10 status query renders this for
         the ss11 jobs table; display truth must be the dispatch truth --
         which is why the order is `store.timers()`'s and is NOT re-sorted
         here. On a TIE that order carries the ordering token, the firing
@@ -528,9 +531,15 @@ class Oracle:
                     live.append((due, job, "run_window"))
                 continue
             rt = self.store.job.get(job)
+            if check == "must_complete":
+                # DL-248: judged against the tick's run, so a job that never
+                # started still has a live completion deadline
+                if rt is None or not self._slot_run_completed(rt, ev.payload.get("run")):
+                    live.append((due, job, str(check)))
+                continue
             if rt is None or ev.payload.get("run") != rt.run_number:
                 continue  # stale: a later run superseded this deadline
-            if check in ("must_complete", "term_run_time") and rt.status != "RUNNING":
+            if check == "term_run_time" and rt.status != "RUNNING":
                 continue  # the run already ended; the check fires as a no-op
             live.append((due, job, str(check)))
         return live
@@ -794,9 +803,10 @@ class Oracle:
             job = self._required_job(ev)
             force = kind == "FORCE_STARTJOB"
             if kind == "STARTJOB":
-                # SEM-34: the schedule tick arms the must_start deadline
-                # whether or not the start succeeds -- that is its point
+                # SEM-34: the schedule tick arms both deadlines whether or not
+                # the start succeeds -- that is their point (DL-248)
                 self._arm_must_start(job)
+                self._arm_must_complete(job)
             # DL-68: a sourced event names its trigger -- a scheduler tick and
             # an operator sendevent must not collapse to one cause string
             cause = f"{kind} event ({ev.source})" if ev.source else f"{kind} event"
@@ -1488,7 +1498,7 @@ class Oracle:
         the rows are written before it, so its wakes read the new cycle,
         and their notifications run after it, while the box is STARTING."""
         job = job_ir.name
-        self._arm_sla_and_term(job_ir)  # reads run_number before the bump
+        self._arm_term_run_time(job_ir)  # reads run_number before the bump
         # one act: the arm this start consumes (Q3/DL-54 -- the ACTUAL start
         # consumes it, FORCE included; a QUE_WAIT enqueue keeps it latched, so
         # a cancelled queue attempt does not eat the tick), the run_number
@@ -1980,8 +1990,9 @@ class Oracle:
     def _start_slot(self, job_ir: JobIR) -> int | None:
         """SEM-34: which `start_times` entry the current instant is, read in
         the job's own timezone. None when the job declares none, or when the
-        instant is not one of them -- an operator's sendevent, or a start a
-        condition edge released after the tick (SEM-32)."""
+        instant is not one of them -- an operator's sendevent, say. A
+        start_mins job carries one broadcast offset (DL-248), so it never
+        needs a slot."""
         schedule = job_ir.schedule
         if schedule is None or not schedule.start_times:
             return None
@@ -1997,10 +2008,9 @@ class Oracle:
         match -- N offsets against N start_times pair BY POSITION, so the
         second tick gets the second offset.
 
-        Two cases keep the first offset. A SINGLE offset is the dossier's
-        own [?] exception (it broadcasts over every start time; the vendor's
-        worked example and the strict rule disagree, open against a live
-        instance). An instant that matches no start time cannot be paired at
+        Two cases keep the first offset. A SINGLE offset broadcasts over
+        every start time: the vendor's relative syntax is one `+minutes`
+        "after each start time" (DL-248). An instant that matches no start time cannot be paired at
         all, and the first offset is what the oracle used before the pairing
         existed."""
         if len(offsets) == 1:
@@ -2008,45 +2018,68 @@ class Oracle:
         slot = self._start_slot(job_ir)
         return offsets[0] if slot is None else offsets[slot]
 
-    def _arm_must_start(self, job: str) -> None:
-        """SEM-34: MUST_START_ALARM if no new run has begun by tick+offset."""
+    def _slot_deadline(self, job: str, check: str) -> Event | None:
+        """SEM-34: the relative deadline of the slot this tick names, due at
+        tick+offset, or None. The payload carries the run_number AT THE
+        TICK: the run the slot asks for is the first one to begin after it
+        (DL-248). An absolute form arms nothing; the oracle owns no
+        calendar."""
         job_ir = self.catalog.jobs.get(job)
         if job_ir is None or job_ir.schedule is None:
-            return
-        spec = job_ir.schedule.must_start
+            return None
+        schedule = job_ir.schedule
+        spec = schedule.must_start if check == "must_start" else schedule.must_complete
         if spec is None or spec.kind != "relative" or not spec.offsets_min:
-            return
+            return None
         assert self._now is not None
         deadline = self._now + timedelta(minutes=self._sla_offset(job_ir, spec.offsets_min))
-        self._schedule_timer(
-            deadline,
-            Event(
-                at=deadline,
-                kind="TIMER",
-                payload={
-                    "check": "must_start",
-                    "job": job,
-                    "run": self._runtime(job).run_number,  # unchanged == never started
-                },
-            ),
-        )
+        payload = {"check": check, "job": job, "run": self._runtime(job).run_number}
+        return Event(at=deadline, kind="TIMER", payload=payload)
 
-    def _arm_sla_and_term(self, job_ir: JobIR) -> None:
+    def _arm_must_start(self, job: str) -> None:
+        """SEM-34: MUST_START_ALARM if no new run has begun by tick+offset."""
+        if (timer := self._slot_deadline(job, "must_start")) is not None:
+            self._schedule_timer(timer.at, timer)
+
+    def _arm_must_complete(self, job: str) -> None:
+        """SEM-34 (DL-248): MUST_COMPLETE_ALARM if the run this tick asks
+        for has not completed by tick+offset, whenever it started.
+
+        At most one such deadline is pending per job. The vendor inserts the
+        next CHK_COMPLETE only "after the job completes", so a tick that
+        finds the job live, or finds an earlier tick's deadline neither met
+        nor fired, arms nothing."""
+        timer = self._slot_deadline(job, "must_complete")
+        if timer is None:
+            return
+        rt = self._runtime(job)
+        if rt.status in ("STARTING", "RUNNING", "QUE_WAIT"):
+            return
+        for _, _, armed in self.store.timers():
+            payload = armed.payload
+            if (
+                payload.get("check") == "must_complete"
+                and payload.get("job") == job
+                and not self._slot_run_completed(rt, payload.get("run"))
+            ):
+                return
+        self._schedule_timer(timer.at, timer)
+
+    @staticmethod
+    def _slot_run_completed(rt: JobRuntime, tick_run: object) -> bool:
+        """SEM-34 (DL-248): has the run a tick asked for completed? That run
+        is the first to begin after the tick, number tick_run+1. It has
+        completed once it is no longer STARTING or RUNNING, or once a later
+        run began -- runs of one job never overlap."""
+        if not isinstance(tick_run, int):
+            return False
+        if rt.run_number > tick_run + 1:
+            return True
+        return rt.run_number == tick_run + 1 and rt.status not in ("STARTING", "RUNNING")
+
+    def _arm_term_run_time(self, job_ir: JobIR) -> None:
         assert self._now is not None
         run_number = self._runtime(job_ir.name).run_number + 1  # the run being started
-        schedule = job_ir.schedule
-        if schedule is not None and schedule.must_complete is not None:
-            spec = schedule.must_complete
-            if spec.kind == "relative" and spec.offsets_min:
-                deadline = self._now + timedelta(minutes=self._sla_offset(job_ir, spec.offsets_min))
-                self._schedule_timer(
-                    deadline,
-                    Event(
-                        at=deadline,
-                        kind="TIMER",
-                        payload={"check": "must_complete", "job": job_ir.name, "run": run_number},
-                    ),
-                )
         # zero means no limit (vendor default; DL-241); arm no timer for it
         if job_ir.sem.term_run_time_min is not None and job_ir.sem.term_run_time_min != 0:
             deadline = self._now + timedelta(minutes=job_ir.sem.term_run_time_min)
@@ -2075,14 +2108,16 @@ class Oracle:
                 self._emit("MUST_START_ALARM", job=job)
                 self._record(job, "MUST_START_ALARM", "must_start_times deadline (SEM-34)")
             return True
-        if ev.payload.get("run") != rt.run_number:
-            return True  # stale deadline from an earlier run of this job
         if check == "must_complete":
-            # SEM-34: alarm only, no control flow
-            if rt.status == "RUNNING":
+            # SEM-34 (DL-248): alarm only, no control flow -- iff the run the
+            # tick asked for has not completed, including when it never began
+            if not self._slot_run_completed(rt, ev.payload.get("run")):
                 self._emit("MUST_COMPLETE_ALARM", job=job)
                 self._record(job, "MUST_COMPLETE_ALARM", "must_complete_times deadline (SEM-34)")
-        elif check == "term_run_time":
+            return True
+        if ev.payload.get("run") != rt.run_number:
+            return True  # stale deadline from an earlier run of this job
+        if check == "term_run_time":
             if rt.status == "RUNNING":
                 self._terminate(job, cause="term_run_time exceeded (dossier ss5)")
         return True

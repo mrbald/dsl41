@@ -550,20 +550,59 @@ carries the matching carve-out; a member whose condition never fires still hangs
 ### SEM-34 · must_start_times / must_complete_times are alarms only **[V]**
 They emit MUST_START_ALARM / MUST_COMPLETE_ALARM. They do not affect control flow. Absolute or
 relative (`+n` minutes from each start time), not mixed. The count must match the number of
-start_times (JIL insert error otherwise). **[?]** One exception is implemented: a single
-relative offset is accepted against any number of start_times and broadcasts to all of them.
-The doc-derived corpus fixture uses one `+3` against three start_times, from TechDocs' own
-example, so the strict count rule and the vendor's example disagree. Pin the exact rule on a
-live instance. Relative can cross ≤ 2 calendar days. Each must_complete must precede the next
+start_times (JIL insert error otherwise) for the absolute form. A single relative offset is
+accepted against any number of start_times and broadcasts to all of them. **[V]** On every
+captured edition's must_start_times and must_complete_times pages, the note that counts must
+times against start times sits inside the absolute-format list item, and the relative syntax
+is a single `+minutes` for each start time. TechDocs 24.2, must_complete_times page: "Each job
+run must complete within 8 minutes after each start time". The doc-derived corpus fixture
+uses one `+3` against three start_times, from that example. A list of several relative
+offsets has no documented syntax. **[?]** It is accepted against start_times with the
+positional pairing below, and refused against start_mins (DL-248). Relative can cross ≤ 2 calendar days. Each must_complete must precede the next
 start. Those last two are recorded vendor constraints, not loader validation: lowering checks
 the form and the count, never the span or the ordering. IR: model as SLA annotations, not
 semantics.
+The relative form also counts against `start_mins` (DL-248). **[V]** TechDocs 24.2,
+must_complete_times attribute page: "The must complete times are calculated relative to the
+start_mins or start_times attributes." Its start_mins example runs every 10 minutes with
+`+7`: "the 2:10 p.m. job run must complete by 2:17 p.m." Only that documented form lowers: a
+single relative offset, broadcast to every start_mins tick. A list of relative offsets or an
+absolute form against start_mins is not specified by the vendor pages and stays open; lowering
+refuses it.
+**Relative must_complete is anchored to the schedule slot (DL-248). [V]** The same page: "Each
+job run must complete within 8 minutes after each start time (10:08 a.m., 11:08 a.m., and
+12:08 p.m.)". How Must Start Times and Must Complete Times Work (24.2): the CHK_COMPLETE event
+for the next must complete time is inserted with the job; "The scheduler checks for the
+SUCCESS, FAILURE, or TERMINATED events. If the job has not completed, a MUST_COMPLETE_ALARM is
+issued." So the deadline is the tick's time plus that slot's offset. The STARTJOB tick arms
+it, as it arms must_start, and a late start neither moves nor re-arms it. Elapsed run time is
+`term_run_time`'s business, not this one's.
+Recorded choices (DL-248), the smallest rule the vendor sentences allow. **[C]**
+- The run a tick asks for is the first run to begin after that tick. Its deadline is met once
+  that run is no longer STARTING or RUNNING, or once a later run has begun; runs of one job
+  never overlap. Otherwise the deadline alarms, including when no run began at all.
+- At most one relative must_complete deadline is pending per job. The vendor inserts the next
+  CHK_COMPLETE only "after the job completes". A tick arms one only when the job is not live
+  (STARTING, RUNNING or QUE_WAIT) and no earlier deadline is still pending, that is neither
+  met nor fired. A slot that passes while a run is live or a deadline is pending gets none.
+  must_start keeps one deadline per tick.
+- A terminal status from before the tick does not meet the deadline.
+- A run that ends without a SUCCESS, FAILURE or TERMINATED transition of its own counts as
+  ended: an injected non-terminal status, say. A KILLJOB that dequeues a QUE_WAIT run sets
+  TERMINATED without a new run number, so the oracle alarms where the vendor's check would see
+  a TERMINATED event. Both corners stay open. **[?]**
+- A held job's tick latches (SEM-21) and arms the deadline. An iced job's tick and a member's
+  tick while its box is not RUNNING arm it too, and it alarms, because no run follows. The
+  deadline belongs to the tick, as must_start's does.
+- A FORCE_STARTJOB, a condition edge, an OFF_HOLD release and a run_window deferred start are
+  not ticks and arm nothing. A run they begin can still meet an earlier tick's deadline. The
+  ON_NOEXEC bypass is a run and meets it (SEM-22).
 *Model note:* only the relative forms arm an alarm. Absolute `must_start_times` /
 `must_complete_times` lower to IR and are carried, but the oracle owns no calendar, so no
 absolute deadline is armed. Under the strict count match the offsets pair with the start_times
 **by position**: the oracle reads the tick's own time of day, in the job's timezone, to name
-the slot. A start at an instant that is no start_time (an operator's sendevent, or a start a
-condition edge released after the tick) cannot be paired and takes the first offset. **[?]**
+the slot. A tick at an instant that matches no start time (an operator's STARTJOB at another
+time) cannot be paired and takes the first offset. **[?]**
 (Contrast `term_run_time`: that one *is* control flow, auto-TERMINATE after n minutes.)
 
 ### SEM-35 · timezone **[V]**
@@ -971,7 +1010,8 @@ skip moves a prior result to INACTIVE and does not cascade from a box (SEM-33, D
 `test_sem33_deferred_box_start_*`, `test_sem33_standalone_*`,
 `test_sem33_force_start_on_a_held_standalone_*`),
 T33c the window read in the job's timezone (SEM-33, with SEM-35) ·
-T34a/b must_* emit alarms only, T34c each start_time arms its own relative offset (SEM-34).
+T34a/b must_* emit alarms only, T34c each start_time arms its own relative offset, T34
+relative must_complete anchored to the tick's slot (SEM-34, DL-248: `test_sem34_must_complete_*`).
 
 Layer note: not every SEM entry lands in the oracle suite. SEM-07 (cross-instance atoms) is
 pinned by the condition, derive and control-plane suites, not by an oracle trace. SEM-15's
@@ -1109,7 +1149,8 @@ Primary: Broadcom TechDocs, AutoSys Workload Automation 12.0/12.0.01/12.1/12.1.0
 Job Concepts also 24.2, same box-cycle wording: SEM-10, SEM-11, SEM-15, SEM-18; the
 run_window page also 24.2, same wording: SEM-33; the 24.2 `priority` and `job_load`
 attribute pages and How AutoSys Workload Automation Queues Jobs: the §5 load-balancing row,
-DL-247): JIL
+DL-247; the 24.2 `must_complete_times` page and How Must Start Times and Must Complete Times
+Work: SEM-34, DL-248): JIL
 reference pages (`condition`, `box_success`, `box_failure`, `run_window`, `start_mins`,
 `must_complete_times`, `date_conditions`, `n_retrys`), Scheduling guides (Basic Box Job
 Concepts, Box Job Completion State, Must Start/Complete Times, Manage Common Job Properties,
