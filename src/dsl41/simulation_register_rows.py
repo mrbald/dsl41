@@ -561,8 +561,9 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             cite="SEM-35, runner_scheduler",
             label="E10",
             sites=("runner_scheduler.Scheduler#1",),
-            effect="a start time inside a DST fold or gap resolves by the pinned"
-            " interpretation, not by a vendor-verified rule",
+            effect="a start time inside a DST fold or gap resolves by the pinned fold=0"
+            " interpretation, which differs from the vendor's documented rule"
+            " (runner-design ss15)",
             trigger=_job(date_conditions="1", timezone="Europe/Berlin", start_times='"02:30"'),
             quiet=_job(date_conditions="1", timezone="UTC", start_times='"02:30"'),
         ),
@@ -990,7 +991,9 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             cite="DL-50, oracle.Oracle._readmit",
             label="Qr6",
             sites=("oracle.<module>#1", "oracle.Oracle._readmit#1"),
-            effect="a job admitted out of QUE_WAIT does not re-evaluate its condition",
+            effect="a job admitted out of QUE_WAIT does not re-evaluate its condition, the"
+            " vendor's EvaluateQueuedJobStarts=0; the vendor default is 1, which re-evaluates"
+            " the starting conditions other than the day's date check (DL-250)",
             trigger=_job(
                 "insert_job: J1\njob_type: c\ncommand: true\nmachine: M0",
                 condition="s(J1)",
@@ -1633,7 +1636,8 @@ VALUE_ROWS: tuple[Row, ...] = (
             cite="DL-50, capacity.release_policy",
             label="Qr1",
             effect="a request with no FREE takes the res_type default, renewable for an"
-            " absent res_type",
+            " absent res_type; the vendor documents FREE's default as Y, free on success"
+            " only, and the pin stays until decided (DL-250)",
             trigger=_job(RESOURCE_BLOCK, resources="(R0, QUANTITY=1)"),
             quiet=_job(RESOURCE_BLOCK, resources="(R0, QUANTITY=1, FREE=A)"),
         ),
@@ -2241,7 +2245,9 @@ _CAL_FAMILIES: dict[str, tuple[str, str, str]] = {
     "wekr": (
         "WEKRMON#1",
         "wekr(mon|tue|wed|thu|fri|sat|sun)([#mx])(\\d+|l)",
-        "the nth day of a week anchored on a named weekday, `#`/`M`/`X`, 1..7 or `L`",
+        "the pinned reading: the nth day of a week anchored on a named weekday, `#`/`M`/`X`,"
+        " 1..7 or `L`; the vendor text also supports a week-of-year reading, and 24.2 spells"
+        " the anchor as a digit",
     ),
     "week_parity": ("WEEK#E", "week#([eo])", "every even (`E`) or odd (`O`) week of the year"),
     "week": (
@@ -2296,6 +2302,10 @@ _CAL_FAMILIES: dict[str, tuple[str, str, str]] = {
     ),
 }
 
+#: family name -> the open question its reading is pinned under (SEM-37).
+#: Such a family keeps its behaviour as a provisional pin until decided.
+_OPEN_FAMILIES: dict[str, str] = {"wekr": "Q11"}
+
 #: The families whose tokens only mean anything inside a cycle's periods;
 #: their calendars need a `cyccal` or `compile_calendar` refuses them.
 _CYCLE_SCOPED_FAMILIES = frozenset({"cycl", "cycp", "cweek_parity", "cweek", "cwrk", "cddd"})
@@ -2346,8 +2356,9 @@ CALENDAR_ROWS: tuple[Row, ...] = (
         _row(
             surface="cal_family",
             member=member,
-            klass=SUPPORTED,
-            cite="SEM-37",
+            klass=PROVISIONAL if member in _OPEN_FAMILIES else SUPPORTED,
+            cite="SEM-37, DL-250" if member in _OPEN_FAMILIES else "SEM-37",
+            label=_OPEN_FAMILIES.get(member),
             pattern=pattern,
             effect=f"{words}",
             trigger=_cal(f"condition: {token}", cyccal=member in _CYCLE_SCOPED_FAMILIES),

@@ -43,7 +43,7 @@ LOOKBACK_TABLE = [
     ("12.0", "window", 720),  # grammar-test VALID example
     ("01\\:00", "window", 60),  # escaped-colon form, Broadcom doc verbatim
     ("02\\:15", "window", 135),
-    ("9999.59", "window", 9999 * 60 + 59),  # SEM-04 max ~= 416.58 days
+    ("9999.59", "window", 9999 * 60 + 59),  # accepted but undocumented (SEM-04: 9998.59)
     ("9999.00", "window", 9999 * 60),  # dotted form is a window, not indefinite
     ("0.00", "window", 0),  # zero-minute window, distinct from zero-lookback
     ("0", "zero", None),

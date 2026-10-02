@@ -59,9 +59,14 @@ FORCE-triggered evaluation at T0+72h → JobB starts.
   exclusion, not sequencing.
 - `exitcode(j) OP value` / `e(j) OP value` — comparison operators against the last exit code.
 - `value(GLOBAL) OP value` / `v(...)` — global-variable comparison.
-Atom keywords are case-insensitive, and the one-letter abbreviations are the canonical short
-forms. Job and global names are matched exactly: the parser preserves their case and the status
-store keys on the name as written.
+Atom keywords are accepted in upper or lower case, and the one-letter abbreviations are the
+canonical short forms. Job and global names are matched exactly: the parser preserves their case
+and the status store keys on the name as written. The vendor forbids mixed case: "You can use
+uppercase or lowercase characters to define conditions. You cannot mix case." ("condition
+Attribute", AutoSys 24.2). dsl41 accepts mixed case in both senses: within one keyword, such
+as `sUCCESS` or `AnD`, and across the keywords of one condition, such as
+`SUCCESS(a) and failure(b)`. The second is the likelier reading of the vendor sentence. Both
+inputs are accepted but undocumented.
 *Model note:* the oracle produces only `INACTIVE`, `QUE_WAIT`, `STARTING`, `RUNNING` and the
 three terminal states. `WAIT_REPLY`, `RESTART` and `SUSPENDED` never occur in it, so its `n()`
 is false for `STARTING` and `RUNNING` alone. `QUE_WAIT` stays outside that false set (DL-50): a
@@ -104,7 +109,11 @@ Syntax: `s(job, hhhh.mm)` (or escaped colon `hhhh\:mm`).
   distinct from the bare form for this reason.
 - Lookback applies to **status, cross-instance/external status, and exitcode atoms only,
   never to `value()` global-variable atoms**. **[V]** (Linter: lookback on `v()` = error.)
-- Max lookback ≈ 416.58 days (9999.59). **[V]**
+- The largest finite lookback is `9998.59`, about 416.58 days. **[V]** Source: "condition
+  Attribute", AutoSys 24.2: "0-9998 for hhhh when specifying hours and minutes (for example,
+  9998.59)". A bare `9999` means indefinite. dsl41 also accepts `9999.00` to `9999.59`, and the
+  same values in the `9999\:mm` spelling, as finite windows. That input is accepted but
+  undocumented.
 
 ### SEM-05 · ON_ICE predecessors inside lookback conditions **[V]**
 If the predecessor job referenced in a lookback condition is currently ON_ICE, the atom
@@ -134,7 +143,12 @@ migration these become boundary markers in the IR: dependencies whose producer i
 modeled universe.
 
 ### SEM-08 · Global variables **[V]**
-- Set via `sendevent -E SET_GLOBAL -G NAME=value` or `insert_global` JIL.
+- Set via `sendevent -E SET_GLOBAL -G NAME=value`. The condition page says global variables
+  are "set using the sendevent command" ("condition Attribute", AutoSys 24.2).
+- `insert_global` **[?]**: dsl41 also lowers an `insert_global: NAME` statement with a `value:`
+  attribute, and the value seeds the global store. No vendor page documents an
+  `insert_global` or `delete_global` JIL subcommand. The statement stays a dsl41 input form
+  with its current behavior until vendor evidence settles it.
 - In conditions: `value(NAME) = X` (also `>`, `<`, `!=` comparisons). *Model note:* the
   comparand is a string in JIL. The oracle compares numerically when both sides parse as
   base-10 integers, and lexicographically when either does not. The rule covers all six
@@ -159,6 +173,10 @@ Focus, and z/OS jobs; in this project's scope, **CMD only**, and a loud error on
   code is failure". **[V]**
 The verdict is `f(exit_code; max_exit_success, success_codes, fail_codes)`, with a single
 source, `ir.exit_is_success`, shared with the UC twin (M31).
+Support limit: lowering refuses a negative exit code in either list. The vendor allows one: "The
+exit code must be an integer in the range -2147483647 to 2147483647" ("success_codes Attribute"
+and "fail_codes Attribute", AutoSys 24.2). The list parser reads a leading `-` as a range
+separator, so a negative code is refused as malformed (`ir._Lowerer._code_set_attr`).
 
 Composition (Q7, DL-58; KB 408778): a present `fail_codes` decides **alone**. Listed codes are
 FAILURE and "Any other exit code … will be interpreted as a success", so `success_codes` and
@@ -398,17 +416,20 @@ the event's own effect, not conditioned on the start succeeding. `ON_NOEXEC` is 
 the vendor sentence and is untouched by FORCE. A job that is already STARTING/RUNNING/QUE_WAIT
 is still refused: the same page states concurrent runs of one job are unsupported.
 
-### SEM-24 · `status:` at definition time **[V]** (existence) / **[?]** (full value set)
+### SEM-24 · `status:` at definition time **[V]**
 Estate-shaped JIL carries `status: ON_HOLD` on `insert_job` (including on box jobs): the job
 is created already in an out-of-band state, equivalent to an insert plus an immediate sendevent
-of the state. Source: TechDocs 12.0.01, "status Attribute — Set an Initial Status for a Job
-During Insertion", which also states that the attribute cannot be used with
-update_job/override_job. The page's exact documented value list is unretrieved **[?]**. The
-modeled set is `INACTIVE` (the implicit default) plus the SEM-20/21/22 states `ON_HOLD` /
-`ON_ICE` / `ON_NOEXEC`.
-- Lowering: `Semantics.initial_status`. Any other value (in particular run states like
-  `SUCCESS`, which can interact with the SEM-01 latch) is a loud lowering error; extend
-  deliberately when the page or an estate shape shows one, never guess.
+of the state. Source: "status Attribute — Set an Initial Status for a Job During Insertion"
+(TechDocs 12.0.01; AutoSys 24.2). The page states that the attribute cannot be used with
+update_job/override_job. The 24.2 page gives the full value set: "The valid values are FAILURE,
+INACTIVE, ON_HOLD, ON_ICE, ON_NOEXEC, SUCCESS, or TERMINATED." The default is INACTIVE. For an
+initial FAILURE, SUCCESS or TERMINATED it adds that "the downstream jobs can start when other
+jobs complete and utilize this job as a dependency."
+- Support limit: dsl41 models `INACTIVE` (the implicit default) and the SEM-20/21/22 states
+  `ON_HOLD` / `ON_ICE` / `ON_NOEXEC`. Lowering refuses `SUCCESS`, `FAILURE` and `TERMINATED`
+  loudly. Each would seed a SEM-01 latch at definition time, which is not modeled. Supporting
+  them is a separate decision.
+- Lowering: `Semantics.initial_status`.
 - Oracle: seeds the SEM-20/21/22 flags before the first event. No trace entry (definition
   state, not a transition).
 - UC mapping: M20 (Hold, E-class) covers `ON_HOLD`. Ice/noexec follow their SEM-20/22 rows.
@@ -732,12 +753,14 @@ Source: "Date Condition Keywords", byte-identical between the 12.0.01 and 12.1 r
 (diffed). Placeholders, verbatim: "Replace n with a 1-digit number between 1 and 9. Replace
 nn with a 2-digit number between 01 and 31. Replace nnn with a 3-digit number between 001 and
 365. Replace ddd with one of the following 3-letter abbreviations: mon, tue, wed, thu, fri,
-sat, sun. Replace mmm with [jan … dec]." The worked example `Ctue#02` shows that two-digit
+sat, sun. Replace mmm with [jan … dec]." The 24.2 render of the page says "Replace n with a
+1-digit number between 1 and 7." The worked example `Ctue#02` shows that two-digit
 forms are zero-padded. "The below list of keywords uses all capital letters; however, the date
 condition keywords are not case-sensitive." Zero padding is the documented canonical width, not
 a parse requirement: the observed export sample writes `MNTHD#1` and `workd#1`, so unpadded
 ordinals are accepted as input and mean the same day. `n`/`nn`/`nnn` are spelling widths; the
-accepted range is per family, not global: `ddd` 1–5, `WEEKD`/`WEKRddd` 1–7, `WORKD` / day-of-month
+accepted range is per family, not global: `ddd` 1–5, `WEEKD` 1–7, `WEKRddd` 1–7 (dsl41's own
+reading, below), `WORKD` / day-of-month
 / `mmm` 1–31, `WEEK`/`CWEEK`/`Cddd` 1–53, `CYCP` 1–30, `CYCL`/`CWRK` 1–365. An ordinal outside its
 family's range is a loud refusal.
 
@@ -761,8 +784,21 @@ uniformly across every ordinal family below.
 | cycle weekday | `Cddd#nn`, `Cddd#L`, `CdddMnn` | `XCddd#nn`, `XCdddMnn` | nnth/last occurrence of ddd in each period |
 
 - Week anchoring **[V]**: "All weeks in the year begin on the same weekday as January 1 of
-  that year", overridable per keyword via the `WEKRddd` forms (`WEKRddd#nn` / `WEKRdddXnn` /
-  `WEKRdddMnn`), for example `WEKRMon#nn` for Monday-anchored weeks (the page's 2014 example).
+  that year". The page lists the WEKR forms right after `WEEK#nn`, `WEEKXnn` and `WEEKMnn`:
+  "you can specify a different start day by modifying the keywords as follows". So a WEKR
+  token selects the nnth week of the year, with weeks that begin on the given day. The 12.x
+  renders spell the anchor as a day name (`WEKRddd#nn` / `WEKRdddXnn` / `WEKRdddMnn`;
+  `WEKRMon#nn` in the 2014 example). The 24.2 render spells it as a digit (`WEKRn#nn` /
+  `WEKRnXnn` / `WEKRnMnn`, n from 1 to 7), and its 2014 example writes Monday as `WEKR1#nn`.
+- The same page also supports a day-of-week reading. Its `WEEKDXn` entry says: "You can
+  specify a different start day by using the WEEKDstartdayXn keyword." (12.1 and 24.2). So a
+  start-day form may also re-anchor the day-of-week keywords.
+- **WEKR reading [?]** (Q11): the vendor text supports two readings, and neither is settled.
+  dsl41 reads `WEKRddd#n` as the nth day of a week that begins on ddd, so `WEKRMon#1` is every
+  Monday: a recurring weekday. Only ordinals 1 to 7 are read this way. `WEKRMon#08` to
+  `WEKRMon#53` are refused loudly ("ordinal 8 outside 1..7"), so no input gets a silent
+  week-of-year meaning. dsl41 accepts the named anchors only and refuses `WEKR1#01` as an
+  unknown token. The pin stays until Q11 is decided (§9).
 - `WEEKDAYS` auto-subtracts holidays **[V]**: "The utility automatically excludes all dates
   that are listed in the calendar that you specify in the holiday calendar field."
 - Operators: "Use AND when you want to specify only dates that meet both conditions. Use OR
@@ -925,14 +961,15 @@ DL-56).
 | `n_retrys` | auto-restart on FAILURE only: application failures (vendor's examples: "cannot find a file or a command, permissions are not properly set"). A TERMINATED job "does not restart"; system/network failures restart via the scheduler's `MaxRestartTrys` config parameter instead **[V]** (Q4, DL-53). Retries are not modeled in the oracle or the runner; preflight WARNs on `n_retrys > 0` |
 | `auto_hold` | box member enters ON_HOLD automatically when box starts **[C/?]** |
 | `auto_delete` | definition lifecycle, not runtime; carried in IR-F `JobIR.passthrough` |
-| `status` (on insert) | definition-time out-of-band state (SEM-24) **[V]** existence / **[?]** full value set |
+| `status` (on insert) | definition-time out-of-band state (SEM-24) **[V]**. Support limit: the vendor allows seven values; dsl41 models INACTIVE, ON_HOLD, ON_ICE and ON_NOEXEC, and lowering refuses SUCCESS, FAILURE and TERMINATED |
+| `job_type` | selects the modeled job kind: CMD, BOX or FW (SEM-10); lowering refuses every other type. Support limit: the vendor default is CMD ("job_type Attribute", AutoSys 24.2: "If you do not specify the job_type attribute in your job definition, the job type is set to CMD (the default)"), but lowering requires the attribute and refuses its absence. That an exported definition always carries it is expected, not measured |
 | `job_load`/`priority`/`machine_method`/QUE_WAIT, `machine` lists | the pre-11.3 load-balancing model; the IR carries these in `passthrough` and reads `job_load` and `priority` from there. The oracle honors `job_load` vs machine `max_load` as a capacity bucket and `priority` as QUE_WAIT waiter ordering, lower number first (DL-50). **[V]** TechDocs 24.2 (DL-247): only a positive priority checks machine load. The priority page: "If you do not set the priority attribute or the priority is set to 0, the job is not queued behind other jobs and runs immediately on a machine if resource dependencies permit ... The scheduler ignores any load unit values defined for the job or machine when the job has a priority value of zero." The queueing page: "even when jobs have a priority of 0, AutoSys Workload Automation tracks job loads on each machine so that jobs with non-zero priorities can be queued." So an unset or zero priority skips the load check but its load still counts against the machine for every other job; its `resources:` still gate it. The job_load page: a forced job "runs even if its load exceeds the machine's max_load value"; a FORCE_STARTJOB likewise skips the check, holds its load, and is gated by named resources. The queueing page: "A job in the QUE_WAIT state for one machine attribute value automatically blocks all the lower priority jobs that specify the same machine attribute value. It does not automatically block higher or equal priority jobs that specify the same machine attribute value or a job that specifies a different machine attribute value." The oracle applies that to a fresh start and to the readmission scan, for a waiter whose own load does not fit. A blocked job needs a positive priority on that machine, with or without a `job_load`. DL-50's greedy scan past such a waiter is gone. Open: named-resource blocking, the RESWAIT-after-load corner, a forced job's reuse of resources it holds, unset-priority order among resource waiters (Qr2), pools (Qr3); pool `machine:` lines are typed `MachineMember` rows (DL-49) and preflight resolves their locality; `machine_method`, member selection/routing and per-member `factor`/`max_load` are opaque placement |
-| `std_in_file`, `envvars` | CMD exec cluster (DL-32): stdin redirect (may reference a blob) + NAME=value environment list; typed carry on ExecSpec, `$$VAR` sites indexed (SEM-08); real execution refuses `envvars` at preflight outright, and refuses a `$$NAME` site in either field, since global substitution is not implemented (DL-240) |
+| `std_in_file`, `envvars` | CMD exec cluster (DL-32): stdin redirect (may reference a blob) + NAME=value environment list; typed carry on ExecSpec, `$$VAR` sites indexed (SEM-08); real execution refuses `envvars` at preflight outright, and refuses a `$$NAME` site in either field, since global substitution is not implemented (DL-240). Support limit: lowering refuses a repeated `envvars` line as a duplicate attribute. The vendor allows several ("envvars Attribute", AutoSys 24.2: "You can use multiple entries of envvars to define different sets of environment variables"). The workaround is one `envvars` line with a comma-separated list |
 | `ulimit`, `elevated`, `interactive`, `job_class` | OS/agent-side exec tuning **[V]** (TechDocs 12.x); inert carry (DL-32) |
 | `chk_files` | pre-start disk-space gate **[V]**: the agent checks required space; unmet → alarm and the job does NOT start; Resource-Wait class. Opaque carry, no oracle gate (a real disk level is out of a pure simulator's reach; distinct from `resources:`, which the oracle honors as capacity semaphores, DL-50); real execution refuses it at preflight (DL-240) |
 | `heartbeat_interval` | MISSING_HEARTBEAT alarm only **[V]**; observability (DL-32) |
 | `avg_runtime` | statistics seed at insert **[V]**; inert carry (DL-32) |
-| `resources` + `insert_resource`/`update_resource`/`delete_resource` | 11.3+ resource objects **[V]** (TechDocs 12.x): `resources: (name, QUANTITY=n[, FREE=Y\|N\|A]) AND (...)`; FREE: Y=free on success, N=never, A=unconditionally; `res_type: D\|R\|T` (depletable/renewable/threshold), `amount` required, optional agent-level `machine`. Typed carry (DL-21); the oracle honors these as capacity semaphores (DL-50): `amount` is the bucket size, QUANTITY the demand, res_type sets the default release (R free-on-completion / D depletable-never / T level-gate) and FREE overrides it; UCS-09 → UC Virtual Resources |
+| `resources` + `insert_resource`/`update_resource`/`delete_resource` | 11.3+ resource objects **[V]** (TechDocs 12.x): `resources: (name, QUANTITY=n[, FREE=Y\|N\|A]) AND (...)`; FREE: Y=free on success, N=never, A=unconditionally; `res_type: D\|R\|T` (depletable/renewable/threshold), `amount` required, optional agent-level `machine`. Typed carry (DL-21); the oracle honors these as capacity semaphores (DL-50): `amount` is the bucket size, QUANTITY the demand, res_type sets the default release (R free-on-completion / D depletable-never / T level-gate) and FREE overrides it; UCS-09 → UC Virtual Resources. The vendor documents FREE's default as Y, free on success only ("resources Attribute", AutoSys 24.2: "Default: Y"); the renewable free-on-completion default stays pinned (Qr1, DL-50). Support limits, each a loud lowering refusal: `QUANTITY=ALL`, "all the units of the resource" (workaround for a renewable resource: write its `amount` as the quantity; for a depletable resource this is not exact, since its free units fall below `amount` after use); a real-resource group with `VALUEOP`/`VALUE` (the page's `SYSTEM_OS_TYPE` example; no workaround); and one resource name defined on several machines, which the vendor allows ("insert_resource Subcommand", AutoSys 24.2: "You can define the same virtual resource on multiple machines") and dsl41 refuses as a duplicate `insert_resource` (no workaround) |
 | `alarm_if_fail`, `alarm_if_terminated`, `min/max_run_alarm`, `send_notification` + `notification_*` family (msg, template, alarm_types, emailaddress[_on_alarm/_on_failure/_on_success/_on_terminated]), `must_*_times` | observability annotations, no control flow (family per 12.x notification services, DL-32) |
 | `std_out_file` etc. with `$$VAR` | string substitution sites (SEM-08); real execution refuses an unsubstituted site on an exec field at preflight (DL-240) |
 | `watch_file`, `watch_interval`, `watch_file_min_size` (FW jobs) | file-watcher job type: terminal SUCCESS when the file condition is met; a *source* node in derived graphs |
@@ -1180,6 +1217,14 @@ holds the probe that would settle it.
   lookback-qualified atom. `# PENDING: Q10` marks the branch in `_atom_true`. A live instance
   icing a predecessor referenced by both an ordinary and a lookback-qualified atom on the same
   consumer job would settle it.
+- Q11 (SEM-37, DL-250): open, pinned default. What does a WEKR token select? "Date Condition
+  Keywords" lists the WEKR forms as `WEEK#nn`, `WEEKXnn` and `WEEKMnn` with a different week
+  start: a week of the year. Its `WEEKDXn` entry names a `WEEKDstartdayXn` keyword: a day of
+  the week. The page also leaves open how the partial first and last weeks of a year count,
+  and which days the 24.2 numeric anchors 2 to 7 name; it shows only Monday as 1. The pin is
+  dsl41's day-of-week reading: `WEKRddd#n` is the nth day of a week that begins on ddd, n from
+  1 to 7, named anchors only. There is no code switch and no `PENDING` marker. A live instance
+  generating `WEKRMon#02` for one year would settle the first half.
 
 ## Sources
 Primary: Broadcom TechDocs, AutoSys Workload Automation 12.0/12.0.01/12.1/12.1.01 (Basic Box
@@ -1187,7 +1232,9 @@ Job Concepts also 24.2, same box-cycle wording: SEM-10, SEM-11, SEM-15, SEM-18; 
 run_window page also 24.2, same wording: SEM-33; the 24.2 `priority` and `job_load`
 attribute pages and How AutoSys Workload Automation Queues Jobs: the §5 load-balancing row,
 DL-247; the 24.2 `must_complete_times` page and How Must Start Times and Must Complete Times
-Work: SEM-34, DL-248): JIL
+Work: SEM-34, DL-248; the 24.2 `status`, `envvars`, `condition`, `resources`, `job_type`,
+`success_codes` and `fail_codes` attribute pages, the insert_resource Subcommand page and Date
+Condition Keywords 24.2: SEM-02/04/09/24/37 and §5, DL-250): JIL
 reference pages (`condition`, `box_success`, `box_failure`, `run_window`, `start_mins`,
 `must_complete_times`, `date_conditions`, `n_retrys`), Scheduling guides (Basic Box Job
 Concepts, Box Job Completion State, Must Start/Complete Times, Manage Common Job Properties,

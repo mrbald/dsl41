@@ -32,7 +32,8 @@ default there.
 3. **Statement boundary**: a line whose key is a subcommand starts a new statement. The
    recognized set tracks the TechDocs 12.1 JIL subcommand pages (DL-29), each added as it was
    found: `insert_job`, `update_job`, `delete_job`, `rename_job`, `delete_box`,
-   `insert_machine`, `update_machine`, `delete_machine`, `insert_global`, `delete_global`,
+   `insert_machine`, `update_machine`, `delete_machine`, `insert_global`, `delete_global`
+   (dsl41 input forms; no vendor page documents them, SEM-08 [?]),
    `override_job`, `insert_xinst`, `update_xinst`, `delete_xinst`, `insert_blob`,
    `update_blob`, `delete_blob`, `insert_glob`, `update_glob`, `delete_glob`,
    `insert_resource`, `update_resource`, `delete_resource`, `insert_monbro`, `update_monbro`,

@@ -133,8 +133,10 @@ def test_sem37_weekdays_auto_subtracts_holcal() -> None:
 
 
 def test_sem37_week_anchoring_jan1_and_wekr_override() -> None:
-    """[V] weeks begin on Jan 1's weekday; WEKRddd re-anchors (the doc's
-    2014 example: Jan 1 2014 is a Wednesday)."""
+    """[V] weeks begin on Jan 1's weekday (the doc's 2014 example: Jan 1
+    2014 is a Wednesday). The WEKR half pins dsl41's current reading, a
+    recurring weekday. The vendor text also supports a week-of-year
+    reading; open question Q11 (SEM-37) decides between them."""
     # WEEKD#1 under the default anchor: every Wednesday of 2014
     default = _days(_ext(conditions=["WEEKD#1"]), date(2014, 1, 6), date(2014, 1, 12))
     assert default == {date(2014, 1, 8)}  # the Wednesday

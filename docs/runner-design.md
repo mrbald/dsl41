@@ -1117,7 +1117,18 @@ code. None is guess-resolved.
 - **E5** — profile sourcing failure semantics [?]. Default: the job fails
   with sh's exit code (§6).
 - **E6** — FW steady-size semantics and default watch_interval [?].
-  Default: two stable polls, 60s (§6).
+  Default: two stable polls, 60s (§6). The vendor documents part of
+  this (AutoSys 24.2). The "watch_interval Attribute" page gives
+  "Default: 60" and says: "If you are monitoring for the existence of a
+  file (not the size) and the file already exists when the job runs, the
+  job completes immediately. The watch_interval attribute is ignored."
+  The "watch_file_min_size Attribute" page: "If you do not specify the
+  watch_file_min_size attribute in your job definition, the job completes
+  if the file exists (the default)." On an agent, "Define a File Watcher
+  Job" says a job with no watch_interval checks the file every 30
+  seconds. The adapter still waits for two stable polls when the file is
+  already there and no minimum size is set. The pin stays until a
+  decision adopts the vendor rule (DL-250).
 - **E7** — verdict for an unobservable exit status (§7). Default: FAILURE
   with cause `exit_status_unobservable`. TERMINATED is reserved for kills
   that actually happened. The vendor's "Lost Control" is the same
@@ -1167,7 +1178,18 @@ code. None is guess-resolved.
   halves stay open [?], each behind its `# PENDING: E10` marker in
   `runner_scheduler.py`: absent `days_of_week` = every day, and DST
   corners pinned to PEP 495 fold=0 (ambiguous = first occurrence,
-  nonexistent maps past the gap).
+  nonexistent maps past the gap). The vendor documents the DST corners
+  (AutoSys 24.2). "Standard Time Changes": an absolute start between
+  1:00 and 1:59 runs only in the second (standard time) hour, and "Jobs
+  for which the start_mins attribute is set run in both hours."
+  "Daylight Time Changes": an absolute start in the missing hour runs
+  "during the first minute of the next hour" (2:05 runs at 3:00:05), and
+  "If you schedule a job to run more than once during the missing hour
+  (for example, at 2:05 and 2:25), only the first scheduled job run
+  occurs." The fold=0 pin differs on each point. It runs a repeated wall
+  time once, in its first occurrence. It moves a missing-hour start
+  forward by the gap (2:05 runs at 3:05), and it keeps every such start.
+  The pin stays until a decision adopts the vendor rules (DL-250).
 - **E11** — opened by DL-56, closed by DL-58: `run_calendar` with neither
   `start_times` nor `start_mins` is a valid vendor shape. The job fires at
   the calendar row's own time-of-day (`mm/dd/yyyy HH:MM`), and at 00:00

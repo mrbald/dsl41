@@ -24,7 +24,9 @@ Decisions pinned here (each with a test):
   (legacy explicit form, SEM-04); every dotted/colon form is a window,
   including "0.00" (a zero-minute window, distinct from zero-lookback) and
   "9999.00".
-- Lookback minutes part must be 00-59 (SEM-04: max is 9999.59): hard error.
+- Lookback minutes part must be 00-59: hard error. A 9999 hours part with
+  minutes is accepted as a window, though the vendor's largest finite form
+  is 9998.59 (SEM-04).
 - Node spans cover the node's full lexical extent including punctuation
   (lark propagates positions before token filtering).
 """
@@ -221,7 +223,7 @@ def parse_lookback(raw: str, *, pos: int | None = None) -> Lookback:
     minutes = int(mm_s)
     if minutes > 59:
         raise ConditionParseError(
-            f"lookback minutes out of range in {raw!r} (mm must be 00-59; SEM-04 max 9999.59)",
+            f"lookback minutes out of range in {raw!r} (mm must be 00-59; SEM-04)",
             pos=pos,
         )
     return Lookback(kind="window", minutes=int(hours_s) * 60 + minutes, raw=raw)

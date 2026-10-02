@@ -43,7 +43,8 @@ never serialize it as authority.
 
 The surface grammar of JIL is line-oriented statements. A statement is a subcommand attribute
 (`insert_job`, `update_job`, `delete_job`, `insert_machine`, `insert_global`, `override_job`,
-…) followed by attribute lines until the next subcommand.
+…) followed by attribute lines until the next subcommand. `insert_global` is a dsl41 input
+form; no vendor page documents it (SEM-08 [?]).
 
 ```python
 class SourceSpan(BaseModel):

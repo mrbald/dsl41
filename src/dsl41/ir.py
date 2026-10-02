@@ -35,9 +35,11 @@ relitigated -- see the docstrings of the individual models/handlers):
   separator); malformed groups are loud errors. QUANTITY is required (every
   documented and estate example carries it); FREE absent stays None (the
   engine default is not guessed). No oracle gate semantics v1.
-- job_type is required (no defaulting to CMD): autorep -q output always emits
-  it; a missing one in hand-written JIL is more likely an error than an
-  intentional default. [?] Relax if a real-estate fixture shape needs it.
+- job_type is required (no defaulting to CMD, the vendor default): an
+  exported definition is expected to carry it, though that export shape is
+  not measured; a missing one in hand-written JIL is more likely an error
+  than an intentional default. [?] Relax if a real-estate fixture shape
+  needs it (dossier ss5).
 - Type-inapplicable exec attributes: command on BOX/FW, watch_* on CMD/BOX,
   and std_in_file/envvars on FW are lowering errors (control-flow-shaped
   attrs on the wrong type = estate smell); machine/owner/profile/std_*/
