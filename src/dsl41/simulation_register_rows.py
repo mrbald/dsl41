@@ -336,9 +336,10 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
         _row(
             surface="job_attr",
             member="chk_files",
-            klass=PASSTHROUGH,
-            cite="dossier ss5, DL-32",
-            effect="the pre-start disk-space gate is not evaluated; the job starts regardless",
+            klass=REFUSED,
+            cite="runner_preflight._execution_input_preflight, DL-240",
+            effect="carried verbatim; never applied; real execution refuses it at"
+            " preflight; rehearse and compile are unaffected; inert on a BOX (SEM-10)",
             trigger=_job(chk_files="1"),
         ),
         _row(
@@ -683,10 +684,10 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
         _row(
             surface="job_attr",
             member="envvars",
-            klass=PASSTHROUGH,
-            cite="ir._Lowerer._exec_spec, DL-32",
-            effect="carried verbatim on the exec spec; the child process environment is"
-            " not modified; inert on a BOX (SEM-10)",
+            klass=REFUSED,
+            cite="runner_preflight._execution_input_preflight, DL-240",
+            effect="carried verbatim; never applied; real execution refuses it at"
+            " preflight; rehearse and compile are unaffected; inert on a BOX (SEM-10)",
             trigger=_job(envvars="A=1"),
         ),
     )
@@ -3304,6 +3305,33 @@ PREFLIGHT_CODE_ROWS: tuple[Row, ...] = (
         cite="runner_preflight._owner_preflight",
         effect="an owner other than the invoking user refuses the run: there is no setuid",
         trigger=_job(owner="someone_else"),
+    ),
+    _row(
+        surface="preflight_code",
+        member="envvars",
+        klass=REFUSED,
+        cite="runner_preflight._execution_input_preflight, DL-240",
+        effect="envvars on a CMD job's ExecSpec is carried but the adapter never"
+        " applies it to the child environment, so real execution refuses the run",
+        trigger=_job(envvars="A=1"),
+    ),
+    _row(
+        surface="preflight_code",
+        member="global-substitution",
+        klass=REFUSED,
+        cite="runner_preflight._execution_input_preflight, DL-240",
+        effect="a $$NAME site on an exec_ field is carried but never substituted, so"
+        " the literal text would be used; real execution refuses the run",
+        trigger=_job(command="echo $$AUDIT_GLOBAL"),
+    ),
+    _row(
+        surface="preflight_code",
+        member="chk-files",
+        klass=REFUSED,
+        cite="runner_preflight._execution_input_preflight, DL-240",
+        effect="chk_files on a non-BOX job is carried but the pre-start disk-space"
+        " gate is never evaluated, so real execution refuses the run",
+        trigger=_job(chk_files="1"),
     ),
     _row(
         surface="preflight_code",

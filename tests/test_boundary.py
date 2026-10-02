@@ -4705,7 +4705,7 @@ def test_boundary_preflight_reads_the_zone_table_the_way_the_engine_does(
     table on it. Passing that dict on retires SEM-35's unique-city rung, so
     a city name refuses a boundary the `Scheduler` builds happily
     (DL-151/DL-163) -- `tz_aliases_of` is what the two must share."""
-    from dsl41.boundary import _preflight_errors
+    from dsl41.boundary import preflight_errors
     from dsl41.ir import lower_source
     from dsl41.period import runtime_profile_from_cli, tz_aliases_of
 
@@ -4718,7 +4718,7 @@ def test_boundary_preflight_reads_the_zone_table_the_way_the_engine_does(
     profile = runtime_profile_from_cli(timezone="Zurich")
     assert dict(profile.tz_aliases) == {}  # the empty table, not an absent one
     at = datetime(2026, 3, 10, 23, 30)
-    assert _preflight_errors(catalog, profile, at=at) == []
+    assert preflight_errors(catalog, profile, at=at) == []
     # the engine resolves both zones on the same inputs and builds
     Scheduler(
         catalog,
