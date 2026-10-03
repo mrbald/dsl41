@@ -17322,3 +17322,84 @@ relitigate an entry; append a new one.
   INTEGRATION. On top of DL-256, whose `affects` takes the catalog too, the
   registry wraps `fw_no_min_size` in `_fw_without_min_size`; the public
   one-argument helper is unchanged.
+- DL-259 WEKR selects a week of the year; the wekr-first-week switch
+  places week 1; Q11 closed (2026-10-03; autocal.py, semantics.py,
+  classify.py, runner.py, runner_scheduler.py, runner_startup.py,
+  rehearse_check.py, cli_run.py, runner_ledger.py,
+  simulation_register_rows.py, autosys-semantics.md SEM-37/Q11,
+  runner-design.md ss8a, period-model.md ss10.2, citation-index.md,
+  simulation-coverage.md)
+  THE READING. "Date Condition Keywords" lists the WEKR forms beside
+  WEEK#nn, WEEKXnn and WEEKMnn and says they give the weeks "a
+  different start day". So a WEKR token selects whole weeks of the
+  year, and every week starts on the anchor day. It is not a recurring
+  weekday, which DL-250 pinned until Q11 was decided. The anchor is a
+  digit, 1 = Monday to 7 = Sunday (24.2), or a day name (12.x); both
+  spellings name one anchor. The vendor shows only 1 = Monday, and the
+  other digits follow the same order. Ordinals run 01 to 53, and 00, 54
+  and above, and anchors 0, 8 and 9, are refused loudly. `Mnn` counts
+  back from the week that holds December 31, `Xnn` excludes the week,
+  and `#L` is `M01`. A week counts in its own year: one that runs past
+  December 31 ends there, and the last week may have fewer than seven
+  days, as the plain WEEK family's last week already does.
+  THE SWITCH. The vendor text does not say how the days before the
+  first anchor day count. `wekr-first-week` selects the reading.
+  `first-full`, the default: week 1 starts on the first anchor day on
+  or after January 1, and the days before it are in no numbered week,
+  as in the C library's %U/%W numbering. The vendor example, "consider
+  full weeks as those that start on a Monday", supports it. `partial`:
+  week 1 runs from January 1 to the day before the first anchor day.
+  The default is an owner-approved choice, not verified on a live
+  instance; the registry records its AutoSys value as unknown. Both readings agree when
+  January 1 falls on the anchor day; then a WEKR token selects the same
+  days as the WEEK token. Both count `Mnn` from the same last week, so
+  they differ backward only when the count reaches the partial first
+  week. Under `partial`, a leap year that starts the day before the
+  anchor day has a week 54, reachable only as `M01`.
+  WIRING. The switch lives in the evaluation context `compile_calendar`
+  builds, from the switches it is given (the defaults when none). The
+  scheduler takes the switches and compiles under them: genesis and
+  resume pass the period's pin, rehearse its `--semantics`, and the
+  cadence check's expected ticks the engine's own. The calendar
+  switches (`CALENDAR_SWITCHES`, the entries with `affects_calendar`)
+  are read back from the wired scheduler into the derived runtime
+  profile, as its timezone is; `semantics` therefore leaves
+  `_UNWIRED_FIELDS`, and its other switches are still declared or
+  inherited. Genesis without a staged manifest (a root holding only the
+  sentinel, or a launcher that stages nothing) now takes the launch
+  options as its base, so it pins every switch the launcher asked for;
+  it used to pin the default switches. Its calendar switches are the
+  reading that fires, and a staged or pinned profile that disagrees
+  is refused as profile drift before the manifest, the log or a leader
+  record is written. An engine also refuses a scheduler whose calendar
+  switches differ from its own; the other switches are not compared,
+  because the scheduler does not read them.
+  PREFLIGHT. Preflight's calendar checks stay on the defaults with the
+  other static tools; the anchor and ordinal refusals do not depend on
+  the switch. Its dormancy WARN can therefore be wrong under `partial`:
+  `WEKR1#01 & JAN#01 & TUE` warns dormant under `first-full`, but fires
+  on 2030-01-01 under `partial`. This is recorded, not fixed.
+  CLASSIFIER. A registry entry gains `affects_calendar`, a predicate on
+  calendars, with a default that names none. `wekr-first-week` names
+  every extended calendar with a WEKR token and no job. The classifier
+  adds an edge from such a calendar to the switch node, and a job
+  reaches the switch through its calendar edge. A flip therefore
+  refuses a running job on such a calendar and leaves a job on a
+  calendar without a WEKR token alone. `semantic_key` takes the
+  switches too, so its holiday-shielding reach compiles under the same
+  reading. It also gives a token the parser accepts one spelling per
+  meaning: ordinals lose their zero padding and a numeric WEKR anchor
+  becomes its day name. So `WEKRMon#02` respelled `WEKR1#2` across a
+  boundary is no change.
+  STATE MACHINE. `STATE_MACHINE_VERSION` moves to 15: the compiled day
+  sets of a WEKR calendar change, and `attest` re-derives the boundary
+  classification from them.
+  INTEGRATION. On top of DL-256 to DL-258. `_derive_runtime_profile`
+  starts the switches from `declared`, else `base`, reads the calendar
+  switches back from the scheduler and `fw-existence` from a wired
+  `FileWatcherAdapter` (DL-258's rule, so a disagreeing adapter still
+  meets the drift gate), and sets `semantics` once. `semantics` is thus
+  wired only, and DL-258's mixed-field allowance in the partition test
+  goes. `_no_job` takes the catalog, as DL-256's `affects` does. Since
+  DL-254 ignores ON_ICE on a running job, the `ice-lookback` description
+  and its register rows say "on ice", not "on ice and not running".

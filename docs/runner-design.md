@@ -934,7 +934,9 @@ boundary classifier treats the jobs each switch names as changed: a
 running box whose `box_success` reads a lookback atom is refused, an
 armed job gated on one is carried with a recorded assumption. For
 `queued-recheck`, a queued job is carried with a recorded assumption, and
-a running box with a member that can queue is refused. Replay
+a running box with a member that can queue is refused. A switch can also
+name calendars; then every job that names such a calendar is changed.
+Replay
 refuses a period whose manifest is missing or is not bound to its
 segment, because it cannot know which switches the engine ran. Only
 explicit overrides are recorded, and a profile with none writes
@@ -944,16 +946,23 @@ Defaults live in code. Changing a default changes how existing estates are
 read, so it is a state-machine change and bumps `STATE_MACHINE_VERSION`.
 
 Static tools that have no runtime profile use the defaults: `equiv`,
-`lint`, `derive`, preflight's oracle check, and the genesis credit of
-`rehearse --check-cadence`. The cadence sweeps replay under the
-rehearsal's own switches.
+`lint`, `derive`, preflight's oracle and calendar checks, and the genesis
+credit of `rehearse --check-cadence`. The cadence sweeps and the expected
+tick counts use the rehearsal's own switches. The scheduler compiles
+extended calendars under the calendar switches. Those are read back from
+the scheduler into the runtime profile, like its timezone, so a profile
+that disagrees with them is refused as drift before anything durable is
+written. An engine also refuses a scheduler built under other calendar
+switches. Preflight's calendar checks use the defaults, so its dormancy
+warning can be wrong for a calendar the switch changes.
 
 | Switch | Values | Default | Documented AutoSys | Why this default |
 | --- | --- | --- | --- | --- |
-| `ice-lookback` | `true`, `ordinary` | `true` | `true` | A condition atom with a lookback qualifier whose predecessor is on ice and not running. `true`: the atom is true, lookback ignored. `ordinary`: the qualifier is dropped and the ordinary on-ice table applies (s, d, n true; f, t, exitcode false). The "condition Attribute" page (AutoSys 24.2) says "If the predecessor job being evaluated for the look-back condition is currently in an ON_ICE status, it always evaluates to true. That is, any look-back evaluation is ignored." `ordinary` extends the Start Conditions on-ice table (SEM-20), which does not separate lookback atoms, to the lookback atom. Q10 stays open. |
+| `ice-lookback` | `true`, `ordinary` | `true` | `true` | A condition atom with a lookback qualifier whose predecessor is on ice. `true`: the atom is true, lookback ignored. `ordinary`: the qualifier is dropped and the ordinary on-ice table applies (s, d, n true; f, t, exitcode false). The "condition Attribute" page (AutoSys 24.2) says "If the predecessor job being evaluated for the look-back condition is currently in an ON_ICE status, it always evaluates to true. That is, any look-back evaluation is ignored." `ordinary` extends the Start Conditions on-ice table (SEM-20), which does not separate lookback atoms, to the lookback atom. Q10 stays open. |
 | `renewable-free` | `Y`, `A` | `Y` | `Y` | A renewable resource request (`res_type: R` or none) that states no FREE. `Y`: the units are freed only when the run ends SUCCESS; after FAILURE or TERMINATED the job holds them until `RELEASE_RESOURCE` or its next run. `A`: the units are freed on every completion, dsl41's reading before DL-256. The "resources Attribute" page (AutoSys 24.2) gives FREE's default: "Default: Y", where "Y -- Frees the units only if the job completes successfully". An explicit FREE is not affected. Qr1 is decided. |
 | `queued-recheck` | `0`, `1`, `2` | `0` | `1` | A job that can queue (it names a resource, or a positive priority makes it check machine load) and leaves QUE_WAIT. The values are the vendor's EvaluateQueuedJobStarts (Administrating > Configure a Scheduler, AutoSys 24.2). `0`: it starts without a recheck. `1`: its `condition`, `run_window` and `exclude_calendar` are checked again, but not `run_calendar`, `days_of_week`, `start_times` or `start_mins`. `2`: `run_calendar` or `days_of_week` is checked for the day too. A job that fails goes INACTIVE without starting, its arm is cleared, and its next start time starts it; a member of a running box that fails its condition waits and keeps the box running, the vendor's ACTIVATED. A `run_window` failure takes DL-246's disposition at that instant (the skip, or one deferral to the opening), and a day failure of a job with no start times of its own is deferred to its next eligible window opening, so no job waits for a tick that never comes. The vendor's default is `1`. The owner kept `0`, dsl41's existing behavior: a queued job met its conditions when it started. Qr6 is decided (DL-50, DL-257). The day and window checks use the oracle's zone, which DL-253 aligns with the scheduler's base zone. |
 | `fw-existence` | `stable`, `immediate` | `stable` | `immediate` | What an FW job with no `watch_file_min_size` does once the watched file exists. `stable`: wait for the size to stay steady across two polls, like a job with a minimum size — dsl41's own choice, because a file still being written is not complete. `immediate`: complete at once, `watch_interval` ignored — the vendor reading. The "watch_interval Attribute" page (AutoSys 24.2) says "If you are monitoring for the existence of a file (not the size) and the file already exists when the job runs, the job completes immediately. The watch_interval attribute is ignored." The "watch_file_min_size Attribute" page says "If you do not specify the watch_file_min_size attribute in your job definition, the job completes if the file exists (the default)." A job with a minimum size is unaffected by this switch either way (§6, E6). |
+| `wekr-first-week` | `first-full`, `partial` | `first-full` | unknown | Where week 1 of a WEKR token's year starts (SEM-37). A WEKR token selects a week of the year whose weeks start on the anchor day. `first-full`: week 1 starts on the first anchor day on or after January 1, and the days before it are in no week, as in the C library's `%U`/`%W` numbering. `partial`: week 1 runs from January 1 to the day before that anchor day. The vendor text does not say; its example, "consider full weeks as those that start on a Monday", supports `first-full`. Both readings agree when January 1 falls on the anchor day, and both count `Mnn` back from the week that holds December 31. The switch reaches every job whose `run_calendar` or `exclude_calendar` has a WEKR token. Q11 is closed (DL-259). |
 
 ## 9. Time domains (E2)
 

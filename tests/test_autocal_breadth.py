@@ -23,6 +23,7 @@ from dsl41.autocal import compile_calendar
 from dsl41.ir import CalendarIR, CatalogIR, CycleIR, LoweringError, lower_source
 from dsl41.runner_preflight import preflight
 from dsl41.runner_scheduler import Scheduler
+from dsl41.semantics import resolve
 
 # ------------------------------------------------------------ builders
 # (mirrors tests/test_autocal.py's local helpers; duplicated rather than
@@ -347,20 +348,23 @@ def test_backward_workday_ordinal_at_short_february() -> None:
     }
 
 
-def test_wekr_anchor_crosses_year_boundary() -> None:
-    """Pins dsl41's day-of-week WEKR reading, which is open question Q11
-    (SEM-37); the vendor text also supports a week-of-year reading. Under
-    the pin, WEKR-anchored weeks are pure weekday-offset arithmetic (unlike the
-    default Jan1 anchor, which recomputes per calendar year via
-    `date(day.year, 1, 1)`), so a Saturday-anchored week can straddle
-    Dec31/Jan1: Dec 26 2026 is a Saturday, and the following Friday is
-    Jan 1 2027 (Jan 1 2027 is independently a Friday) -- the SAME anchored
-    week. Querying exactly that 7-day window isolates it."""
+def test_wekr_week_is_cut_at_december_31() -> None:
+    """A WEKR week counts in its own year (SEM-37, DL-259). Dec 26 2026 is
+    a Saturday and Jan 1 2027 the following Friday, so one Saturday week
+    straddles the year end. Its 2026 days are the last week of 2026
+    (`WEKRSatM01`); Jan 1 2027 comes before the first Saturday of 2027, so
+    it is in no week under the default `first-full` reading and is week 1
+    under `partial`. Querying exactly that 7-day window isolates it."""
     lo, hi = date(2026, 12, 26), date(2027, 1, 1)
-    first = _days(_ext(conditions=["WEKRSat#01"]), lo, hi)
-    last = _days(_ext(conditions=["WEKRSatM01"]), lo, hi)
-    assert first == {date(2026, 12, 26)}
-    assert last == {date(2027, 1, 1)}
+    cal_first = _ext(conditions=["WEKRSat#01"])
+    cal_last = _ext(conditions=["WEKRSatM01"])
+    assert _days(cal_last, lo, hi) == {date(2026, 12, 26) + timedelta(days=i) for i in range(6)}
+    assert _days(cal_first, lo, hi) == set()
+    partial = resolve({"wekr-first-week": "partial"})
+    compiled = compile_calendar(
+        cal_first, CatalogIR(jobs={}, calendars={"ext": cal_first}), partial
+    )
+    assert set(compiled.days_between(lo, hi)) == {date(2027, 1, 1)}
 
 
 def test_touching_cycle_periods_index_independently() -> None:

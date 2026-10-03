@@ -885,10 +885,9 @@ forms are zero-padded. "The below list of keywords uses all capital letters; how
 condition keywords are not case-sensitive." Zero padding is the documented canonical width, not
 a parse requirement: the observed export sample writes `MNTHD#1` and `workd#1`, so unpadded
 ordinals are accepted as input and mean the same day. `n`/`nn`/`nnn` are spelling widths; the
-accepted range is per family, not global: `ddd` 1–5, `WEEKD` 1–7, `WEKRddd` 1–7 (dsl41's own
-reading, below), `WORKD` / day-of-month
-/ `mmm` 1–31, `WEEK`/`CWEEK`/`Cddd` 1–53, `CYCP` 1–30, `CYCL`/`CWRK` 1–365. An ordinal outside its
-family's range is a loud refusal.
+accepted range is per family, not global: `ddd` 1–5, `WEEKD` 1–7, `WORKD` / day-of-month
+/ `mmm` 1–31, `WEEK`/`WEKR`/`CWEEK`/`Cddd` 1–53, `CYCP` 1–30, `CYCL`/`CWRK` 1–365. A `WEKR`
+anchor digit is 1–7. An ordinal or anchor outside its family's range is a loud refusal.
 
 Token inventory (naming conventions: `#nn` forward ordinal, `Mnn` backward ordinal, `X`
 prefix/infix exclusion, `#L` last). The doc page spells `#L` only in the cycle families; an
@@ -902,6 +901,7 @@ uniformly across every ordinal family below.
 | weekday-of-month | `ddd`, `ddd#n`, `dddMn` | `Xddd#n`, `XdddMn` | every ddd; nth ddd of month fwd/back |
 | weekday-of-week | `WEEKDAYS`, `WEEKD#n`, `WEEKDMn`, `FOMWEEK`, `EOMWEEK` | `WEEKDXn`, `XFOMWEEK`, `XEOMWEEK` | Mon–Fri; nth day of week fwd/back; first/last weekday of month |
 | week-of-year | `WEEK#nn`, `WEEK#E`, `WEEK#O`, `WEEKMnn` | `WEEKXnn` | nnth/even/odd week of year, back from last |
+| anchored week-of-year | `WEKRn#nn`, `WEKRnMnn`, `WEKRddd#nn`, `WEKRdddMnn` | `WEKRnXnn`, `WEKRdddXnn` | nnth week of year with weeks starting on the anchor day, back from last |
 | day-of-month | `MNTHD#nn`, `MNTHDMnn`, `FOM`, `EOM` | `MNTHDXnn`, `XFOM`, `XEOM` | nnth day of month fwd/back; first/last day of month |
 | named month | `mmm`, `mmm#nn`, `mmmMnn` | `Xmmm#nn`, `XmmmMnn` | whole month; nnth day of mmm fwd/back |
 | cycle day | `CYCLE`, `CYCL#nnn`, `CYCLMnnn`, `CYCP#nn` | `CYCLXnnn` | any period day; nnnth day of each period fwd/back; nnth period |
@@ -916,15 +916,34 @@ uniformly across every ordinal family below.
   renders spell the anchor as a day name (`WEKRddd#nn` / `WEKRdddXnn` / `WEKRdddMnn`;
   `WEKRMon#nn` in the 2014 example). The 24.2 render spells it as a digit (`WEKRn#nn` /
   `WEKRnXnn` / `WEKRnMnn`, n from 1 to 7), and its 2014 example writes Monday as `WEKR1#nn`.
-- The same page also supports a day-of-week reading. Its `WEEKDXn` entry says: "You can
-  specify a different start day by using the WEEKDstartdayXn keyword." (12.1 and 24.2). So a
-  start-day form may also re-anchor the day-of-week keywords.
-- **WEKR reading [?]** (Q11): the vendor text supports two readings, and neither is settled.
-  dsl41 reads `WEKRddd#n` as the nth day of a week that begins on ddd, so `WEKRMon#1` is every
-  Monday: a recurring weekday. Only ordinals 1 to 7 are read this way. `WEKRMon#08` to
-  `WEKRMon#53` are refused loudly ("ordinal 8 outside 1..7"), so no input gets a silent
-  week-of-year meaning. dsl41 accepts the named anchors only and refuses `WEKR1#01` as an
-  unknown token. The pin stays until Q11 is decided (§9).
+- The `WEEKDXn` entry says: "You can specify a different start day by using the
+  WEEKDstartdayXn keyword." (12.1 and 24.2). That form re-anchors the day-of-week keywords.
+  The page gives no entry for that form, and dsl41 refuses it as an unknown token.
+- **WEKR reading** (DL-259): a WEKR token selects whole weeks of the year, and every week
+  starts on the anchor day. It is not a recurring weekday. This is the vendor reading above;
+  the `WEEKDstartdayXn` sentence names a different keyword and does not change it. The anchor
+  is a digit or a day name, and both spellings name one anchor. The digits run 1 = Monday to
+  7 = Sunday. The vendor shows only 1 = Monday; the rest follow the same order. `#nn` counts
+  forward, `Mnn` counts back with 01 as the last week of the year, and `Xnn` excludes the
+  week. `#L` is `M01`. A week counts in its own year: a week that runs past December 31 ends
+  there, and its January days count in the next year. The last week is the week that holds
+  December 31, even when it has fewer than seven days. The plain `WEEK` family treats its
+  last week the same way.
+- **The partial first week [?]** (DL-259): the vendor text does not say how the days before
+  the first anchor day count. The `wekr-first-week` switch (runner-design §8a) selects the
+  reading. `first-full`, the default: week 1 starts on the first anchor day on or after
+  January 1, and the days before it are in no numbered week. This is the C library's `%U`/`%W`
+  numbering. The vendor example asks for "full weeks as those that start on a Monday", which
+  supports it. `partial`: week 1 runs from January 1 to the day before the first anchor day,
+  so every later week number is one higher. When January 1 falls on the anchor day there is
+  no partial week: both readings put week 1 at January 1–7, and a WEKR token with that anchor
+  selects the same days as the `WEEK` token. Both readings count back from the same last
+  week, so `Mnn` differs between them only when it reaches the partial first week. In a leap
+  year that starts the day before the anchor day, `partial` numbers the last week 54; only
+  `M01` reaches it, because `#54` is refused. Neither reading is verified on a live instance.
+  Worked case, 2014 (January 1 a Wednesday), `WEKR1`: under `first-full`, `#01` is January
+  6–12 and `#52` is December 29–31, and there is no week 53; under `partial`, `#01` is
+  January 1–5, `#02` is January 6–12 and `#53` is December 29–31.
 - `WEEKDAYS` auto-subtracts holidays **[V]**: "The utility automatically excludes all dates
   that are listed in the calendar that you specify in the holiday calendar field."
 - Operators: "Use AND when you want to specify only dates that meet both conditions. Use OR
@@ -1376,14 +1395,13 @@ holds the probe that would settle it.
   selectable without a code change (DL-252): `--semantics ice-lookback=ordinary` drops the
   qualifier and applies the ordinary ON_ICE table to the lookback atom too. The register row
   `event:ON_ICE#lookback atom` names the switch.
-- Q11 (SEM-37, DL-250): open, pinned default. What does a WEKR token select? "Date Condition
-  Keywords" lists the WEKR forms as `WEEK#nn`, `WEEKXnn` and `WEEKMnn` with a different week
-  start: a week of the year. Its `WEEKDXn` entry names a `WEEKDstartdayXn` keyword: a day of
-  the week. The page also leaves open how the partial first and last weeks of a year count,
-  and which days the 24.2 numeric anchors 2 to 7 name; it shows only Monday as 1. The pin is
-  dsl41's day-of-week reading: `WEKRddd#n` is the nth day of a week that begins on ddd, n from
-  1 to 7, named anchors only. There is no code switch and no `PENDING` marker. A live instance
-  generating `WEKRMon#02` for one year would settle the first half.
+- Q11 (SEM-37, DL-250): closed (DL-259). A WEKR token selects a week of the year with weeks
+  starting on the anchor day, as "Date Condition Keywords" lists it beside `WEEK#nn`,
+  `WEEKXnn` and `WEEKMnn`. The numeric anchors run 1 = Monday to 7 = Sunday. How the days
+  before the first anchor day count is an owner-approved choice, not a probed fact: the
+  default `first-full` puts them in no week, and `--semantics wekr-first-week=partial` makes
+  them week 1. SEM-37 states both readings. A live instance generating `WEKR1#02` for 2014
+  would settle the choice: January 13–19 under `first-full`, January 6–12 under `partial`.
 
 ## Sources
 Primary: Broadcom TechDocs, AutoSys Workload Automation 12.0/12.0.01/12.1/12.1.01 (Basic Box

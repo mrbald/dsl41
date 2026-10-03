@@ -29,11 +29,14 @@ from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
 from .ir import CalendarIR, CatalogIR, unquote_jil_value
+from .semantics import DEFAULTS as DEFAULT_SWITCHES
+from .semantics import SemanticSwitches, WekrFirstWeek
 
 __all__ = [
     "CalendarRuleError",
     "CompiledCalendar",
     "compile_calendar",
+    "reads_family",
     "standard_days",
     "standard_rows",
 ]
@@ -159,6 +162,9 @@ class _Ctx:
     workdays: frozenset[int]  # date.weekday() values
     holidays: frozenset[date]
     periods: tuple[tuple[date, date], ...]
+    #: the `wekr-first-week` semantic switch (DL-259): where week 1 of a
+    #: WEKR token's year starts
+    wekr_first_week: WekrFirstWeek
 
 
 _Pred = Callable[[date, _Ctx], bool]
@@ -217,6 +223,21 @@ def _week_number(day: date, anchor_wd: int | None = None) -> int:
     jan1 = date(day.year, 1, 1)
     wd = _jan1_anchor(day) if anchor_wd is None else anchor_wd
     return (day - _week_start(jan1, wd)).days // 7 + 1
+
+
+def _wekr_week(day: date, anchor_wd: int, first_week: WekrFirstWeek) -> int:
+    """`day`'s week of its own year for a WEKR token anchored on weekday
+    `anchor_wd` (SEM-37), or 0 for a day before week 1. Every week starts on
+    the anchor day. `first-full`: week 1 starts on the first anchor day on
+    or after January 1, and the days before it are in no week. `partial`:
+    week 1 runs from January 1 to the day before that anchor day. When
+    January 1 is the anchor day the two agree. A week that runs past
+    December 31 ends there: its January days count in the next year."""
+    jan1 = date(day.year, 1, 1)
+    number = (day - _week_start(jan1, anchor_wd)).days // 7 + 1
+    if first_week == "first-full" and jan1.weekday() != anchor_wd:
+        number -= 1
+    return number
 
 
 def _year_weeks(day: date) -> int:
@@ -357,15 +378,32 @@ def _b_weekd(cal: str, raw: str, m: re.Match[str], exclusive: bool) -> _Token:
     return _mk(pred, excl=exclusive or m.group(1) == "x")
 
 
+def _wekr_anchor(cal: str, raw: str, text: str) -> int:
+    """A WEKR anchor as a `date.weekday()` value. 12.x spells it as a day
+    name; 24.2 as a digit, 1 = Monday through 7 = Sunday (SEM-37)."""
+    if text in _DAY_NAMES:
+        return _DAY_NAMES.index(text)
+    number = int(text)
+    if not 1 <= number <= 7:
+        raise _err(cal, f"token {raw!r}: anchor {number} outside 1..7 (1 = Monday)")
+    return number - 1
+
+
 def _b_wekr(cal: str, raw: str, m: re.Match[str], exclusive: bool) -> _Token:
-    anchor = _DAY_NAMES.index(m.group(1))
-    n, back = _ordinal(cal, raw, m.group(2), m.group(3), lo=1, hi=7)
-    pred: _Pred = (
-        (lambda d, c: (d - _week_start(d, anchor)).days == 7 - n)
-        if back
-        else (lambda d, c: (d - _week_start(d, anchor)).days == n - 1)
-    )
-    return _mk(pred, excl=exclusive or m.group(2) == "x")
+    """The nnth week of the year, weeks starting on the anchor day (SEM-37):
+    `#` counts from week 1, `M` back from the week holding December 31, and
+    `X` excludes the week. Week 1 follows the `wekr-first-week` switch."""
+    anchor = _wekr_anchor(cal, raw, m.group(1))
+    n, back = _ordinal(cal, raw, m.group(2), m.group(3), lo=1, hi=53)
+
+    def wekr(d: date, c: _Ctx) -> bool:
+        week = _wekr_week(d, anchor, c.wekr_first_week)
+        if not back:
+            return week == n
+        last = _wekr_week(date(d.year, 12, 31), anchor, c.wekr_first_week)
+        return week >= 1 and week == last - n + 1
+
+    return _mk(wekr, excl=exclusive or m.group(2) == "x")
 
 
 def _b_week_parity(cal: str, raw: str, m: re.Match[str], exclusive: bool) -> _Token:
@@ -498,7 +536,7 @@ def _b_cddd(cal: str, raw: str, m: re.Match[str], exclusive: bool) -> _Token:
 _FAMILIES: tuple[tuple[str, re.Pattern[str], _Builder], ...] = (
     ("workd", re.compile(r"workd([#m])(\d+|l)"), _b_workd),
     ("weekd", re.compile(r"weekd([#mx])(\d+|l)"), _b_weekd),
-    ("wekr", re.compile(r"wekr(mon|tue|wed|thu|fri|sat|sun)([#mx])(\d+|l)"), _b_wekr),
+    ("wekr", re.compile(r"wekr(\d|mon|tue|wed|thu|fri|sat|sun)([#mx])(\d+|l)"), _b_wekr),
     ("week_parity", re.compile(r"week#([eo])"), _b_week_parity),
     ("week", re.compile(r"week([#mx])(\d+|l)"), _b_week),
     ("mnthd", re.compile(r"mnthd([#mx])(\d+|l)"), _b_mnthd),
@@ -534,6 +572,17 @@ def classify_token(raw: str) -> tuple[str, str] | None:
         if pattern.fullmatch(body):
             return "family", name
     return None
+
+
+def reads_family(cal: CalendarIR, family: str) -> bool:
+    """Whether any rule of `cal` holds a token of the SEM-37 family named
+    `family`, as `classify_token` reads it. Every word of the rules is
+    tested, so a rule the parser would refuse still answers."""
+    return any(
+        classify_token(word) == ("family", family)
+        for line in cal.conditions
+        for word in _TOKEN_RE.findall(line)
+    )
 
 
 def _parse_token(cal: str, raw: str) -> _Token:
@@ -893,12 +942,15 @@ def _parse_periods(cal: str, cycle_name: str, catalog: CatalogIR) -> tuple[tuple
     return tuple(periods)
 
 
-def compile_calendar(cal: CalendarIR, catalog: CatalogIR) -> CompiledCalendar:
+def compile_calendar(
+    cal: CalendarIR, catalog: CatalogIR, semantics: SemanticSwitches | None = None
+) -> CompiledCalendar:
     """Parse and validate one extended calendar against the loaded set.
     Raises CalendarRuleError on anything the SEM-36..39 freeze genuinely
     cannot interpret -- unknown tokens, defective tokens, missing
     dependencies, degenerate walks. Open composition corners compile on
-    pinned defaults instead (Q8b/Q8d, DL-59)."""
+    pinned defaults instead (Q8b/Q8d, DL-59). `semantics` are the period's
+    switches (DL-252); None reads the registry defaults."""
     if cal.kind != "extended":
         raise CalendarRuleError(f"calendar {cal.name!r} is standard; use standard_days()")
     if "condition" in cal.attrs:
@@ -1004,7 +1056,12 @@ def compile_calendar(cal: CalendarIR, catalog: CatalogIR) -> CompiledCalendar:
 
     return CompiledCalendar(
         name=cal.name,
-        ctx=_Ctx(workdays=workdays, holidays=holidays, periods=periods),
+        ctx=_Ctx(
+            workdays=workdays,
+            holidays=holidays,
+            periods=periods,
+            wekr_first_week=(semantics or DEFAULT_SWITCHES).wekr_first_week,
+        ),
         include=tuple(include),
         exclude=tuple(exclude),
         non_workday=non_workday,
@@ -1014,7 +1071,31 @@ def compile_calendar(cal: CalendarIR, catalog: CatalogIR) -> CompiledCalendar:
     )
 
 
-def semantic_key(cal: CalendarIR, catalog: CatalogIR | None = None) -> tuple[Any, ...]:
+#: An ordinal's leading zeros, after its `#`/`M`/`X` marker: `MNTHD#05` is
+#: `MNTHD#5` (SEM-37: zero padding is a spelling width).
+_ORDINAL_ZEROS = re.compile(r"([#mx])0+(\d)")
+#: A 24.2 numeric WEKR anchor, which `_wekr_anchor` reads as a day name.
+_WEKR_DIGIT = re.compile(r"wekr([1-7])(?=[#mx])")
+
+
+def _canonical_keyword(cal: str, lowered: str) -> str:
+    """One spelling per meaning for a keyword the parser accepts: ordinals
+    without padding, and a numeric WEKR anchor as its day name, so the
+    digit 1 and `mon`, and `#02` and `#2`, are one key. A token the parser refuses
+    keeps its spelling; `compile_calendar` refuses it loudly."""
+    try:
+        _parse_token(cal, lowered)
+    except CalendarRuleError:
+        return lowered
+    unpadded = _ORDINAL_ZEROS.sub(r"\1\2", lowered)
+    return _WEKR_DIGIT.sub(lambda m: "wekr" + _DAY_NAMES[int(m.group(1)) - 1], unpadded)
+
+
+def semantic_key(
+    cal: CalendarIR,
+    catalog: CatalogIR | None = None,
+    semantics: SemanticSwitches | None = None,
+) -> tuple[Any, ...]:
     """The extended-calendar surface this rule engine READS, canonicalized
     with the SAME parsers that evaluate it -- for the DL-131 classifier,
     whose calendar node must call two spellings of one rule set one value.
@@ -1028,13 +1109,15 @@ def semantic_key(cal: CalendarIR, catalog: CatalogIR | None = None) -> tuple[Any
     classifier must not crash where the gate is elsewhere. Rules compare as
     a SET of canonical token tuples (the fold is any-of and tokens
     case-fold); `{}` reads as `()` and the word operators as their symbols,
-    exactly as `_tokenize`/`_parse_rule` do."""
+    exactly as `_tokenize`/`_parse_rule` do. `semantics` are the switches
+    the holiday-shielding reach below compiles under; a switch itself is a
+    classifier node of its own (DL-259)."""
 
     def canonical_token(token: str) -> str:
         if token in "&|()":
             return token
         lowered = token.lower()
-        return {"and": "&", "or": "|"}.get(lowered, lowered)
+        return {"and": "&", "or": "|"}.get(lowered, _canonical_keyword(cal.name, lowered))
 
     def parsed_rules() -> tuple[tuple[str, ...], ...]:
         rules: set[tuple[str, ...]] = set()
@@ -1130,7 +1213,7 @@ def semantic_key(cal: CalendarIR, catalog: CatalogIR | None = None) -> tuple[Any
         if holidays is None or not isinstance(workday, frozenset) or catalog is None:
             return True
         try:
-            compiled = compile_calendar(cal, catalog)
+            compiled = compile_calendar(cal, catalog, semantics)
         except CalendarRuleError:
             return True
         candidates = frozenset(d for d in holidays if compiled._included(d))

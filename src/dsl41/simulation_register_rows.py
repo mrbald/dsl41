@@ -2335,11 +2335,11 @@ _CAL_FAMILIES: dict[str, tuple[str, str, str]] = {
         "the nth day of the week, from the start (`#`), the end (`M`) or excluded (`X`), 1..7 or `L`",
     ),
     "wekr": (
-        "WEKRMON#1",
-        "wekr(mon|tue|wed|thu|fri|sat|sun)([#mx])(\\d+|l)",
-        "the pinned reading: the nth day of a week anchored on a named weekday, `#`/`M`/`X`,"
-        " 1..7 or `L`; the vendor text also supports a week-of-year reading, and 24.2 spells"
-        " the anchor as a digit",
+        "WEKR1#02",
+        "wekr(\\d|mon|tue|wed|thu|fri|sat|sun)([#mx])(\\d+|l)",
+        "the nth week of the year with weeks starting on the anchor day, a digit 1..7"
+        " (Monday..Sunday) or a day name, `#`/`M`/`X`, 1..53 or `L`; the"
+        " wekr-first-week switch places week 1",
     ),
     "week_parity": ("WEEK#E", "week#([eo])", "every even (`E`) or odd (`O`) week of the year"),
     "week": (
@@ -2394,10 +2394,6 @@ _CAL_FAMILIES: dict[str, tuple[str, str, str]] = {
     ),
 }
 
-#: family name -> the open question its reading is pinned under (SEM-37).
-#: Such a family keeps its behaviour as a provisional pin until decided.
-_OPEN_FAMILIES: dict[str, str] = {"wekr": "Q11"}
-
 #: The families whose tokens only mean anything inside a cycle's periods;
 #: their calendars need a `cyccal` or `compile_calendar` refuses them.
 _CYCLE_SCOPED_FAMILIES = frozenset({"cycl", "cycp", "cweek_parity", "cweek", "cwrk", "cddd"})
@@ -2448,9 +2444,8 @@ CALENDAR_ROWS: tuple[Row, ...] = (
         _row(
             surface="cal_family",
             member=member,
-            klass=PROVISIONAL if member in _OPEN_FAMILIES else SUPPORTED,
-            cite="SEM-37, DL-250" if member in _OPEN_FAMILIES else "SEM-37",
-            label=_OPEN_FAMILIES.get(member),
+            klass=SUPPORTED,
+            cite="SEM-37",
             pattern=pattern,
             effect=f"{words}",
             trigger=_cal(f"condition: {token}", cyccal=member in _CYCLE_SCOPED_FAMILIES),
@@ -2855,7 +2850,7 @@ SCENARIO_ROWS: tuple[Row, ...] = (
             cite="SEM-20, DL-243, oracle.Oracle._atom_true",
             label="Q10",
             sites=("oracle.Oracle._atom_true#1",),
-            effect="a LOOKBACK-qualified atom on a non-live iced job reads true, lookback"
+            effect="a LOOKBACK-qualified atom on an iced job reads true, lookback"
             " ignored, as the AutoSys 24.2 condition attribute page states; an ORDINARY"
             " atom (no lookback) follows the Start Conditions on-ice table, which does"
             " not separate lookback atoms, so which page a live instance follows stays"
@@ -3157,7 +3152,7 @@ PROFILE_ROWS: tuple[Row, ...] = (
             member="semantics.ice-lookback=true",
             klass=SUPPORTED,
             cite="runner-design ss8a, SEM-05, DL-252",
-            effect="the default: a lookback-qualified atom on a non-live iced predecessor"
+            effect="the default: a lookback-qualified atom on an iced predecessor"
             " reads true, every atom kind, lookback ignored",
             trigger='{"semantics": {"ice-lookback": "true"}}',
         ),
@@ -3166,7 +3161,7 @@ PROFILE_ROWS: tuple[Row, ...] = (
             member="semantics.ice-lookback=ordinary",
             klass=SUPPORTED,
             cite="runner-design ss8a, SEM-20, DL-243, DL-252",
-            effect="the qualifier is dropped on a non-live iced predecessor and the ordinary"
+            effect="the qualifier is dropped on an iced predecessor and the ordinary"
             " on-ice table applies: s, d, n true; f, t, exitcode false",
             trigger='{"semantics": {"ice-lookback": "ordinary"}}',
         ),
@@ -3237,6 +3232,24 @@ PROFILE_ROWS: tuple[Row, ...] = (
             effect="the vendor reading: an FW job with no watch_file_min_size completes as soon"
             " as the watched file exists, watch_interval ignored",
             trigger='{"semantics": {"fw-existence": "immediate"}}',
+        ),
+        _row(
+            surface="profile_alt",
+            member="semantics.wekr-first-week=first-full",
+            klass=SUPPORTED,
+            cite="runner-design ss8a, SEM-37, DL-259",
+            effect="the default: a WEKR token's week 1 starts on the first anchor day on or"
+            " after January 1, and the days before it are in no numbered week",
+            trigger='{"semantics": {"wekr-first-week": "first-full"}}',
+        ),
+        _row(
+            surface="profile_alt",
+            member="semantics.wekr-first-week=partial",
+            klass=SUPPORTED,
+            cite="runner-design ss8a, SEM-37, DL-259",
+            effect="a WEKR token's week 1 runs from January 1 to the day before the first"
+            " anchor day; unless January 1 is the anchor day, every week number is one higher",
+            trigger='{"semantics": {"wekr-first-week": "partial"}}',
         ),
     )
     + _PROFILE_FACETS
