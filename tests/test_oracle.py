@@ -7614,6 +7614,65 @@ def test_dl257_a_queued_job_whose_condition_went_false(mode: str) -> None:
     assert o.store.job["qc257"].status == "RUNNING"
 
 
+# The queued recheck reads calendars under the period's switches, as the
+# scheduler does. 2014-01-01 is a Wednesday, so `WEKR1#02` is 2014-01-06..12
+# under `wekr-first-week=partial` and 2014-01-13..19 under `first-full`.
+_WEKR_QUEUE = (
+    "extended_calendar: wk257\ncondition: WEKR1#02\n\n"
+    "insert_resource: R257W\nres_type: R\namount: 1\n\n"
+    "insert_job: hw257\njob_type: c\nmachine: m1\ncommand: x\n"
+    "resources: (R257W, QUANTITY=1, FREE=A)\n\n"
+    "insert_job: ww257\njob_type: c\nmachine: m1\ncommand: x\n"
+    "resources: (R257W, QUANTITY=1)\n"
+    'date_conditions: 1\nstart_times: "08:00"\n'
+)
+
+
+def _wekr_queue_run(schedule: str, switches: dict[str, str], queued: datetime) -> str:
+    o = oracle(_WEKR_QUEUE + schedule, semantics=resolve_switches(switches))
+    o.feed(Event(at=queued - timedelta(minutes=1), kind="STARTJOB", payload={"job": "hw257"}))
+    o.feed(Event(at=queued, kind="STARTJOB", payload={"job": "ww257"}))
+    assert o.store.job["ww257"].status == "QUE_WAIT"
+    released = datetime(2014, 1, 6, 8, 1)
+    o.feed(Event(at=released, kind="STATUS", payload={"job": "hw257", "status": "SUCCESS"}))
+    return o.store.job["ww257"].status
+
+
+@pytest.mark.parametrize(
+    ("first_week", "expected"), [("partial", "INACTIVE"), ("first-full", "RUNNING")]
+)
+def test_dl257_the_recheck_reads_an_exclusion_under_the_wekr_switch(
+    first_week: str, expected: str
+) -> None:
+    """`queued-recheck=1`: queued on 2014-01-05 and freed on 2014-01-06,
+    which the exclusion calendar holds only under `partial`. The recheck
+    used to compile the calendar under the default and start the job on an
+    excluded day."""
+    status = _wekr_queue_run(
+        "days_of_week: all\nexclude_calendar: wk257\n",
+        {"wekr-first-week": first_week, "queued-recheck": "1"},
+        datetime(2014, 1, 5, 8, 0),
+    )
+    assert status == expected
+
+
+@pytest.mark.parametrize(
+    ("first_week", "expected"), [("partial", "RUNNING"), ("first-full", "INACTIVE")]
+)
+def test_dl257_the_recheck_reads_a_run_day_under_the_wekr_switch(
+    first_week: str, expected: str
+) -> None:
+    """`queued-recheck=2`: queued and freed on 2014-01-06, a run day of the
+    run calendar only under `partial`. The recheck used to compile the
+    calendar under the default and reject a run day as "not a run day"."""
+    status = _wekr_queue_run(
+        "run_calendar: wk257\n",
+        {"wekr-first-week": first_week, "queued-recheck": "2"},
+        datetime(2014, 1, 6, 8, 0),
+    )
+    assert status == expected
+
+
 def test_dl257_a_holder_that_leaves_the_queue_unstarted_keeps_its_held_units() -> None:
     """DL-257 with DL-256: `qh257` failed once and holds K257's unit. It
     queues on LOCK257 behind `hq257`, and when the lock frees its condition

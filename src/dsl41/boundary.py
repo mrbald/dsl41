@@ -109,6 +109,7 @@ from dsl41.period import (
     sentinel_path,
     stage_manifest,
     staging_dir,
+    switches_of,
     tz_aliases_of,
     is_opening,
     wal_path,
@@ -1835,6 +1836,7 @@ def preflight_errors(catalog: CatalogIR, profile: RuntimeProfile, *, at: datetim
             # SEM-35's unique-city rung for the base zone AND for every
             # per-job zone, refusing a boundary the engine runs (DL-151/DL-163)
             tz_aliases=tz_aliases_of(profile),
+            semantics=switches_of(profile),
         )
         if item.severity == "ERROR"
     ]

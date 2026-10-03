@@ -2102,7 +2102,7 @@ class Oracle:
                     f"{job_ir.name}: calendar {name!r} has no definition in the loaded set"
                 )
             days = (
-                compile_calendar(cal, self.catalog)
+                compile_calendar(cal, self.catalog, self.semantics)
                 if cal.kind == "extended"
                 else standard_days(cal)
             )

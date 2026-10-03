@@ -617,6 +617,7 @@ def _finish_genesis(
             manifest=manifest,
         ),
         fence=fence,
+        semantics=switches_of(manifest.runtime_profile),
     )
 
 
@@ -885,6 +886,9 @@ async def _resume_under_lock(
             else None
         ),
         fence=fence,
+        # the pin even with no estate home, so the oracle reads what replay
+        # reads (DL-252); with one, the engine checks the two agree
+        semantics=switches_of(manifest.runtime_profile),
     )
     # ss3.5: the carry is what this segment OPENED holding -- C1's
     # undelivered intents and its applied bindings -- and it is seeded
