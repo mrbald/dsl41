@@ -1073,13 +1073,13 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             surface="job_attr",
             member="condition",
             facet="queued-no-recheck",
-            klass=PROVISIONAL,
-            cite="DL-50, oracle.Oracle._readmit",
-            label="Qr6",
-            sites=("oracle.<module>#1", "oracle.Oracle._readmit#1"),
-            effect="a job admitted out of QUE_WAIT does not re-evaluate its condition, the"
-            " vendor's EvaluateQueuedJobStarts=0; the vendor default is 1, which re-evaluates"
-            " the starting conditions other than the day's date check (DL-250)",
+            klass=SUPPORTED,
+            cite="DL-50, DL-257, oracle.Oracle._readmit",
+            effect="Qr6 decided: the owner's default with a switch. A job admitted out of"
+            " QUE_WAIT does not re-evaluate its condition, the vendor's"
+            " EvaluateQueuedJobStarts=0; the vendor default is 1, which re-evaluates the"
+            " starting conditions other than the day's date check (DL-250). queued-recheck"
+            " selects 1 or 2 (DL-257)",
             trigger=_job(
                 "insert_job: J1\njob_type: c\ncommand: true\nmachine: M0",
                 condition="s(J1)",
@@ -2997,7 +2997,8 @@ SCENARIO_ROWS: tuple[Row, ...] = (
             klass=SUPPORTED,
             cite="PR-09, oracle.Oracle._schedule_timer",
             effect="the fourth timer shape: a run_window-deferred start replaying its"
-            " own provenance",
+            " own provenance; with `rescan_run` it resumes queued-recheck's scan for an"
+            " eligible day instead of attempting a start (DL-257)",
             trigger=_scn(
                 _job(date_conditions="1", days_of_week="all", run_window='"09:00-10:00"'),
                 "0 STARTJOB job=J0",
@@ -3183,6 +3184,38 @@ PROFILE_ROWS: tuple[Row, ...] = (
             effect="a renewable request with no FREE frees its units on every completion,"
             " dsl41's reading before DL-256",
             trigger='{"semantics": {"renewable-free": "A"}}',
+        ),
+        _row(
+            surface="profile_alt",
+            member="semantics.queued-recheck=0",
+            klass=SUPPORTED,
+            cite="runner-design ss8a, DL-50, DL-257",
+            effect="the default: a job leaving QUE_WAIT starts without re-checking its"
+            " condition, run_window or calendars",
+            trigger='{"semantics": {"queued-recheck": "0"}}',
+        ),
+        _row(
+            surface="profile_alt",
+            member="semantics.queued-recheck=1",
+            klass=SUPPORTED,
+            cite="runner-design ss8a, DL-257",
+            effect="a job leaving QUE_WAIT re-checks its condition, run_window and"
+            " exclude_calendar; on a failure it goes INACTIVE without starting, its arm"
+            " cleared. A member of a running box that fails its condition waits"
+            " unresolved: with no date conditions it starts on its condition's next"
+            " edge, with them on its next tick in that box run. A run_window failure"
+            " takes DL-246's skip or deferral; a day failure of a job with no ticks is"
+            " deferred to its next eligible window opening",
+            trigger='{"semantics": {"queued-recheck": "1"}}',
+        ),
+        _row(
+            surface="profile_alt",
+            member="semantics.queued-recheck=2",
+            klass=SUPPORTED,
+            cite="runner-design ss8a, DL-257",
+            effect="as 1, and a job leaving QUE_WAIT on a day that is not a run day by its"
+            " run_calendar or days_of_week does not start",
+            trigger='{"semantics": {"queued-recheck": "2"}}',
         ),
     )
     + _PROFILE_FACETS

@@ -26,7 +26,7 @@ parser produced.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 from bisim_harness import EngineHarness
@@ -7434,6 +7434,545 @@ def test_dl255_an_owed_scan_waits_for_every_referencer_of_the_input(between: str
         "ql255": "QUE_WAIT",
         "qh255": "QUE_WAIT",
     }
+
+
+# ------------------------------------- DL-257 queued-recheck (EvaluateQueuedJobStarts)
+#
+# `hq257` holds the one unit of LOCK257; the job under test queues behind it
+# and leaves the queue when `hq257` ends. `up257` is the predecessor its
+# condition reads. T0, 2026-07-01, is a Wednesday.
+
+_LOCKED_257 = (
+    "insert_resource: LOCK257\nres_type: R\namount: 1\n\n"
+    "insert_job: hq257\njob_type: c\ncommand: x\nmachine: m1\nresources: (LOCK257, QUANTITY=1)\n\n"
+    "insert_job: up257\njob_type: c\ncommand: x\nmachine: m1\n\n"
+)
+_QUEUED_257 = "job_type: c\ncommand: y\nmachine: m1\nresources: (LOCK257, QUANTITY=1)\n"
+_MODES_257 = ("0", "1", "2")
+_LEFT_257 = "QUE_WAIT left unstarted: {why} (queued-recheck={mode}, DL-257)"
+
+
+def _recheck_257(mode: str) -> SemanticSwitches:
+    return resolve_switches({"queued-recheck": mode})
+
+
+def _queue_behind_hq257(o, job: str) -> None:
+    """`hq257` takes the lock, then `up257` succeeds: `job`, gated on it,
+    starts on that edge and queues."""
+    o.feed(ev("STARTJOB", 0, job="hq257"))
+    o.feed(ev("STARTJOB", 0, job="up257"))
+    o.feed(ev("STATUS", 0, job="up257", status="SUCCESS"))
+    assert o.store.job[job].status == "QUE_WAIT"
+
+
+def _left_unstarted(o, job: str) -> list[str]:
+    return [t.cause for t in o.trace() if t.job == job and t.transition == "QUE_WAIT->INACTIVE"]
+
+
+@pytest.mark.parametrize("mode", _MODES_257)
+def test_dl257_a_queued_job_whose_condition_went_false(mode: str) -> None:
+    """Mode 0, the default, starts the job without a recheck (Qr6, DL-50).
+    Modes 1 and 2 re-evaluate the condition as the job leaves the queue:
+    "If a job fails its starting condition checks after leaving a queued
+    state, the scheduler places the job in an INACTIVE state." The job then
+    waits like any INACTIVE job, so the next edge of its condition starts
+    it."""
+    o = oracle(
+        _LOCKED_257 + "insert_job: qc257\n" + _QUEUED_257 + "condition: s(up257)\n",
+        semantics=_recheck_257(mode),
+    )
+    _queue_behind_hq257(o, "qc257")
+    o.feed(ev("STATUS", 1, job="up257", status="FAILURE"))
+    o.feed(ev("STATUS", 2, job="hq257", status="SUCCESS"))
+    if mode == "0":
+        assert o.store.job["qc257"].status == "RUNNING"
+        assert _left_unstarted(o, "qc257") == []
+        return
+    assert o.store.job["qc257"].status == "INACTIVE"
+    assert _left_unstarted(o, "qc257") == [_LEFT_257.format(why="condition false", mode=mode)]
+    assert o.store.job["qc257"].waiter_seq is None
+    o.feed(ev("STATUS", 3, job="up257", status="SUCCESS"))
+    assert o.store.job["qc257"].status == "RUNNING"
+
+
+def test_dl257_a_holder_that_leaves_the_queue_unstarted_keeps_its_held_units() -> None:
+    """DL-257 with DL-256: `qh257` failed once and holds K257's unit. It
+    queues on LOCK257 behind `hq257`, and when the lock frees its condition
+    is false, so under `queued-recheck=1` it leaves the queue unstarted. It
+    keeps K257: leaving QUE_WAIT is not the end of a run, and only
+    RELEASE_RESOURCE or its next run gives a held unit back."""
+    text = (
+        _LOCKED_257 + "insert_resource: K257\nres_type: R\namount: 1\n\n"
+        "insert_job: qh257\njob_type: c\ncommand: y\nmachine: m1\n"
+        "resources: (LOCK257, QUANTITY=1, FREE=A) and (K257, QUANTITY=1)\n"
+        "condition: s(up257)\n"
+    )
+    o = oracle(text, semantics=_recheck_257("1"))
+    o.feed(ev("FORCE_STARTJOB", 0, job="qh257"))
+    o.feed(ev("STATUS", 0, job="qh257", status="FAILURE"))
+    assert [r.bucket for r in o.store.job["qh257"].reservations] == ["r:K257"]
+    _queue_behind_hq257(o, "qh257")
+    o.feed(ev("STATUS", 1, job="up257", status="FAILURE"))
+    o.feed(ev("STATUS", 2, job="hq257", status="SUCCESS"))
+    assert o.store.job["qh257"].status == "INACTIVE"
+    assert _left_unstarted(o, "qh257") == [_LEFT_257.format(why="condition false", mode="1")]
+    assert [r.bucket for r in o.store.job["qh257"].reservations] == ["r:K257"]
+    o.feed(ev("RELEASE_RESOURCE", 3, job="qh257"))
+    assert o.store.job["qh257"].reservations == ()
+
+
+@pytest.mark.parametrize("mode", _MODES_257)
+def test_dl257_a_job_whose_condition_still_holds_starts_in_every_mode(mode: str) -> None:
+    o = oracle(
+        _LOCKED_257 + "insert_job: qh257\n" + _QUEUED_257 + "condition: s(up257)\n",
+        semantics=_recheck_257(mode),
+    )
+    _queue_behind_hq257(o, "qh257")
+    o.feed(ev("STATUS", 2, job="hq257", status="SUCCESS"))
+    assert o.store.job["qh257"].status == "RUNNING"
+    assert transitions(o, "qh257")[-2:] == ["QUE_WAIT->STARTING", "STARTING->RUNNING"]
+
+
+@pytest.mark.parametrize("mode", _MODES_257)
+def test_dl257_a_member_of_a_running_box_waits_and_keeps_the_box_running(mode: str) -> None:
+    """The vendor: "If the job is in a box that is running and it fails its starting
+    condition checks, the scheduler places the job in the ACTIVATED state."
+    The oracle's ACTIVATED analog is an unresolved INACTIVE member (DL-242):
+    it has not run, so the box stays RUNNING. This member has no date
+    conditions, so it starts when its condition holds again while the box
+    runs; a date-conditions member would wait for its next tick."""
+    text = (
+        _LOCKED_257 + "insert_job: bx257\njob_type: b\n\n"
+        "insert_job: mb257\n" + _QUEUED_257 + "box_name: bx257\ncondition: s(up257)\n"
+    )
+    o = oracle(text, semantics=_recheck_257(mode))
+    o.feed(ev("STARTJOB", 0, job="bx257"))
+    _queue_behind_hq257(o, "mb257")
+    assert o.store.job["bx257"].status == "RUNNING"
+    o.feed(ev("STATUS", 1, job="up257", status="FAILURE"))
+    o.feed(ev("STATUS", 2, job="hq257", status="SUCCESS"))
+    if mode == "0":
+        assert _statuses(o, "bx257", "mb257") == {"bx257": "RUNNING", "mb257": "RUNNING"}
+    else:
+        assert _statuses(o, "bx257", "mb257") == {"bx257": "RUNNING", "mb257": "INACTIVE"}
+        o.feed(ev("STATUS", 3, job="up257", status="SUCCESS"))
+        assert o.store.job["mb257"].status == "RUNNING"
+    o.feed(ev("STATUS", 4, job="mb257", status="SUCCESS"))
+    assert o.store.job["bx257"].status == "SUCCESS"
+
+
+@pytest.mark.parametrize("mode", _MODES_257)
+def test_dl257_a_date_conditions_job_leaves_no_arm_and_waits_for_its_next_tick(
+    mode: str,
+) -> None:
+    """The vendor: "If a job with date conditions fails its starting condition checks
+    after leaving a queued state, the scheduler re-schedules the job to its
+    next start time after resetting its status." The tick's arm (SEM-32)
+    goes with the reset, so a later condition edge does not start the job;
+    its next tick does."""
+    text = (
+        _LOCKED_257 + "insert_job: dq257\n" + _QUEUED_257 + "condition: s(up257)\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n'
+    )
+    o = oracle(text, semantics=_recheck_257(mode))
+    o.feed(ev("STARTJOB", 0, job="hq257"))
+    o.feed(ev("STARTJOB", 0, job="dq257"))  # the tick: condition false, armed
+    assert o.store.job["dq257"].armed
+    o.feed(ev("STARTJOB", 1, job="up257"))
+    o.feed(ev("STATUS", 1, job="up257", status="SUCCESS"))  # rides the arm, queues
+    assert o.store.job["dq257"].status == "QUE_WAIT"
+    assert o.store.job["dq257"].armed  # a QUE_WAIT enqueue keeps the arm (DL-50)
+    o.feed(ev("STATUS", 2, job="up257", status="FAILURE"))
+    o.feed(ev("STATUS", 3, job="hq257", status="SUCCESS"))
+    if mode == "0":
+        assert o.store.job["dq257"].status == "RUNNING"
+        return
+    assert o.store.job["dq257"].status == "INACTIVE"
+    assert not o.store.job["dq257"].armed
+    assert transitions(o, "dq257")[-2:] == ["SCHED_DISARM", "QUE_WAIT->INACTIVE"]
+    o.feed(ev("STATUS", 4, job="up257", status="SUCCESS"))
+    assert o.store.job["dq257"].status == "INACTIVE"  # no stale arm to ride
+    o.feed(ev("STARTJOB", 24 * 60, job="dq257"))  # the next tick
+    assert o.store.job["dq257"].status == "RUNNING"
+
+
+def _timers_257(o) -> list[tuple[datetime, str]]:
+    oracle_obj = o if isinstance(o, Oracle) else o.engine.oracle
+    return [(due, job) for due, job, _ in oracle_obj.pending_timers()]
+
+
+@pytest.mark.parametrize(("release", "side"), [(90, "skip"), (14 * 60, "defer")])
+@pytest.mark.parametrize("mode", _MODES_257)
+def test_dl257_leaving_the_queue_outside_the_run_window(mode: str, release: int, side: str) -> None:
+    """Mode 1: "Jobs that leave the queued state ... at a time outside their
+    run window do not start and are re-scheduled to their next start time."
+    The job goes INACTIVE and takes DL-246's disposition at that instant:
+    at 09:30, nearer the 09:00 close, the SEM-33 skip and its next tick; at
+    22:00, nearer the 08:00 opening, one deferred start at it."""
+    text = (
+        _LOCKED_257 + "insert_job: wq257\n" + _QUEUED_257 + "date_conditions: 1\n"
+        'days_of_week: all\nstart_times: "08:00"\nrun_window: "08:00-09:00"\n'
+    )
+    o = oracle(text, semantics=_recheck_257(mode))
+    o.feed(ev("STARTJOB", 0, job="hq257"))
+    o.feed(ev("STARTJOB", 0, job="wq257"))
+    assert o.store.job["wq257"].status == "QUE_WAIT"
+    o.feed(ev("STATUS", release, job="hq257", status="SUCCESS"))
+    if mode == "0":
+        assert o.store.job["wq257"].status == "RUNNING"
+        return
+    assert o.store.job["wq257"].status == "INACTIVE"
+    assert _left_unstarted(o, "wq257") == [_LEFT_257.format(why="outside run_window", mode=mode)]
+    if side == "skip":
+        assert transitions(o, "wq257")[-1] == "RUN_WINDOW_SKIP"
+        assert _timers_257(o) == []
+        o.feed(ev("STARTJOB", 24 * 60, job="wq257"))  # the next tick, inside the window
+    else:
+        assert transitions(o, "wq257")[-1] == "RUN_WINDOW_DEFER"
+        assert _timers_257(o) == [(T0 + timedelta(days=1), "wq257")]
+        o.feed(ev("STARTJOB", 24 * 60, job="up257"))  # the clock reaches the opening
+    assert o.store.job["wq257"].status == "RUNNING"
+
+
+@pytest.mark.parametrize("mode", _MODES_257)
+def test_dl257_a_window_only_member_outside_its_window_does_not_hang_its_box(
+    mode: str,
+) -> None:
+    """A member with a run_window and no start times is never ticked, and its
+    box starts it unscheduled, so a plain INACTIVE would wait for ever. Box
+    starts 07:00; DL-246 defers the member to 08:00, where it queues behind
+    `hq257`; `hq257` ends 09:30. The recheck fails outside the window and the
+    SEM-33 skip resolves the member, so the box completes."""
+    text = (
+        _LOCKED_257 + "insert_job: bw257\njob_type: b\n\n"
+        "insert_job: mw257\n" + _QUEUED_257 + "box_name: bw257\ndate_conditions: 1\n"
+        'run_window: "08:00-09:00"\n'
+    )
+    o = oracle(text, semantics=_recheck_257(mode))
+    o.feed(ev("STARTJOB", -60, job="hq257"))
+    o.feed(ev("STARTJOB", -60, job="bw257"))  # 07:00
+    assert transitions(o, "mw257") == ["RUN_WINDOW_DEFER"]
+    o.feed(ev("STARTJOB", 0, job="up257"))  # 08:00: the deferred start fires
+    assert o.store.job["mw257"].status == "QUE_WAIT"
+    o.feed(ev("STATUS", 90, job="hq257", status="SUCCESS"))  # 09:30
+    if mode == "0":
+        assert _statuses(o, "bw257", "mw257") == {"bw257": "RUNNING", "mw257": "RUNNING"}
+        o.feed(ev("STATUS", 91, job="mw257", status="SUCCESS"))
+    else:
+        assert o.store.job["mw257"].status == "INACTIVE"
+        assert transitions(o, "mw257")[-1] == "RUN_WINDOW_SKIP"
+    assert o.store.job["bw257"].status == "SUCCESS"
+
+
+@pytest.mark.parametrize("mode", _MODES_257)
+def test_dl257_a_day_failure_with_no_ticks_defers_to_the_next_eligible_opening(
+    mode: str,
+) -> None:
+    """A job with no start times of its own that leaves the queue on an
+    excluded day is deferred to the window opening of its next eligible day,
+    since no tick will ever come. Started by hand on Wednesday 08:30, it
+    leaves the queue on the excluded Thursday at 08:30 and starts Friday
+    08:00."""
+    text = (
+        _EXCLUSIONS_257["standard"]
+        + _LOCKED_257
+        + "insert_job: nq257\n"
+        + _QUEUED_257
+        + 'date_conditions: 1\nrun_window: "08:00-09:00"\nexclude_calendar: ex257\n'
+    )
+    o = oracle(text, semantics=_recheck_257(mode))
+    o.feed(ev("STARTJOB", 0, job="hq257"))
+    o.feed(ev("STARTJOB", 30, job="nq257"))
+    assert o.store.job["nq257"].status == "QUE_WAIT"
+    o.feed(ev("STATUS", 24 * 60 + 30, job="hq257", status="SUCCESS"))  # Thursday 08:30
+    if mode == "0":
+        assert o.store.job["nq257"].status == "RUNNING"
+        return
+    assert o.store.job["nq257"].status == "INACTIVE"
+    assert transitions(o, "nq257")[-1] == "RUN_WINDOW_DEFER"
+    assert _timers_257(o) == [(T0 + timedelta(days=2), "nq257")]
+    o.feed(ev("STARTJOB", 2 * 24 * 60, job="up257"))  # Friday 08:00
+    assert o.store.job["nq257"].status == "RUNNING"
+
+
+#: an exclusion holding Thursday 2026-07-02, as a standard and as an extended
+#: calendar
+_EXCLUSIONS_257 = {
+    "standard": "calendar: ex257\n07/02/2026 00:00\n\n",
+    "extended": "extended_calendar: ex257\nworkday: mo,tu,we,th,fr\ncondition: THU\n\n",
+}
+
+
+@pytest.mark.parametrize("calendar", list(_EXCLUSIONS_257))
+@pytest.mark.parametrize("mode", _MODES_257)
+def test_dl257_leaving_the_queue_on_an_excluded_day(mode: str, calendar: str) -> None:
+    """Mode 1: "Jobs that leave the queued state on a day that is defined in
+    an exclusion calendar ... do not start". The job queued on Wednesday and
+    leaves the queue on the excluded Thursday."""
+    text = (
+        _EXCLUSIONS_257[calendar]
+        + _LOCKED_257
+        + "insert_job: xq257\n"
+        + _QUEUED_257
+        + 'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n'
+        "exclude_calendar: ex257\n"
+    )
+    o = oracle(text, semantics=_recheck_257(mode))
+    o.feed(ev("STARTJOB", 0, job="hq257"))
+    o.feed(ev("STARTJOB", 0, job="xq257"))
+    o.feed(ev("STATUS", 24 * 60 + 30, job="hq257", status="SUCCESS"))  # Thursday 08:30
+    if mode == "0":
+        assert o.store.job["xq257"].status == "RUNNING"
+        return
+    assert o.store.job["xq257"].status == "INACTIVE"
+    why = "2026-07-02 is in exclude_calendar 'ex257'"
+    assert _left_unstarted(o, "xq257") == [_LEFT_257.format(why=why, mode=mode)]
+    assert _timers_257(o) == []  # it has ticks: the next one starts it
+
+
+#: a Wednesday-only run day, by days_of_week and by a standard run_calendar
+_RUN_DAYS_257 = {
+    "days_of_week": ("", "days_of_week: we\n"),
+    "run_calendar": ("calendar: rc257\n07/01/2026 00:00\n\n", "run_calendar: rc257\n"),
+}
+
+
+@pytest.mark.parametrize("run_days", list(_RUN_DAYS_257))
+@pytest.mark.parametrize("mode", _MODES_257)
+def test_dl257_only_mode_2_checks_the_run_day(mode: str, run_days: str) -> None:
+    """Mode 1 does not re-evaluate "run_calendar, days_of_week, start_times,
+    and start_mins"; mode 2 evaluates the starting conditions including the
+    date condition check for the day. A Wednesday job queued on Wednesday
+    and leaving the queue on Thursday starts under 0 and 1, not under 2."""
+    calendar, days = _RUN_DAYS_257[run_days]
+    text = (
+        calendar
+        + _LOCKED_257
+        + "insert_job: rq257\n"
+        + _QUEUED_257
+        + f'date_conditions: 1\n{days}start_times: "08:00"\n'
+    )
+    o = oracle(text, semantics=_recheck_257(mode))
+    o.feed(ev("STARTJOB", 0, job="hq257"))
+    o.feed(ev("STARTJOB", 0, job="rq257"))
+    o.feed(ev("STATUS", 24 * 60 + 30, job="hq257", status="SUCCESS"))  # Thursday 08:30
+    if mode != "2":
+        assert o.store.job["rq257"].status == "RUNNING"
+        return
+    assert o.store.job["rq257"].status == "INACTIVE"
+    why = "2026-07-02 is not a run day"
+    assert _left_unstarted(o, "rq257") == [_LEFT_257.format(why=why, mode=mode)]
+
+
+@pytest.mark.parametrize("mode", ("1", "2"))
+def test_dl257_a_rejected_member_does_not_inherit_an_earlier_skip(mode: str) -> None:
+    """A member skipped by its run_window on Wednesday carries a resolution
+    mark for the box run (DL-154). Thursday's tick queues it again; it is
+    rejected for a false condition once its sibling is done. That attempt
+    ends unresolved, so the earlier mark must not complete the box."""
+    text = (
+        _LOCKED_257 + "insert_job: bs257\njob_type: b\n\n"
+        "insert_job: sib257\njob_type: c\ncommand: x\nmachine: m1\nbox_name: bs257\n\n"
+        "insert_job: ms257\n" + _QUEUED_257 + "box_name: bs257\ncondition: s(up257)\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n'
+        'run_window: "08:00-09:00"\n'
+    )
+    o = oracle(text, semantics=_recheck_257(mode))
+    o.feed(ev("STARTJOB", 0, job="hq257"))
+    o.feed(ev("STARTJOB", 0, job="up257"))
+    o.feed(ev("STATUS", 0, job="up257", status="SUCCESS"))
+    o.feed(ev("STARTJOB", 30, job="bs257"))  # 08:30: sib257 starts; ms257 needs a tick
+    o.feed(ev("STARTJOB", 90, job="ms257"))  # Wednesday's tick lands at 09:30: skipped
+    assert transitions(o, "ms257")[-1] == "RUN_WINDOW_SKIP"
+    o.feed(ev("STARTJOB", 24 * 60, job="ms257"))  # Thursday 08:00: queues behind hq257
+    assert o.store.job["ms257"].status == "QUE_WAIT"
+    o.feed(ev("STATUS", 24 * 60 + 5, job="up257", status="FAILURE"))
+    o.feed(ev("STATUS", 24 * 60 + 10, job="sib257", status="SUCCESS"))
+    o.feed(ev("STATUS", 24 * 60 + 15, job="hq257", status="SUCCESS"))
+    assert o.store.job["ms257"].status == "INACTIVE"
+    assert o.store.job["bs257"].status == "RUNNING"  # the rejected member is unresolved
+
+
+#: `br257` restarts itself through the bypassing `wr257` whenever it succeeds,
+#: and succeeds as soon as `xr257` does. `xr257` is armed and was iced past
+#: its gate, so the first edge that wakes it is `mr257` leaving the queue.
+_RESTARTING_257 = (
+    _EXCLUSIONS_257["standard"] + _LOCKED_257 + "insert_global: G257\nvalue: 0\n\n"
+    "insert_job: br257\njob_type: b\nbox_success: s(xr257)\ncondition: s(wr257)\n\n"
+    "insert_job: wr257\njob_type: c\ncommand: x\nmachine: m1\nstatus: ON_NOEXEC\n"
+    "condition: s(br257)\n\n"
+    "insert_job: xr257\njob_type: c\ncommand: x\nmachine: m1\nbox_name: br257\n"
+    "status: ON_NOEXEC\ncondition: n(mr257) & v(G257) = 1\n"
+    'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n\n'
+    "insert_job: mr257\n" + _QUEUED_257 + "box_name: br257\ndate_conditions: 1\n"
+    'run_window: "08:00-09:00"\nexclude_calendar: ex257\n'
+)
+
+
+@pytest.mark.parametrize("mode", ("1", "2"))
+def test_dl257_a_deferral_belongs_to_the_box_run_it_was_made_in(mode: str) -> None:
+    """The member's day rejection wakes `xr257`, whose bypass completes the
+    box, which restarts at once. The deferral the rejection would make
+    belongs to the run that just ended: it is not attached to the new run
+    (DL-246), so no timer starts the member there."""
+    o = oracle(_RESTARTING_257, semantics=_recheck_257(mode))
+    o.feed(ev("STARTJOB", -60, job="hq257"))
+    o.feed(ev("FORCE_STARTJOB", -60, job="br257"))  # 07:00: mr257 deferred to 08:00
+    o.feed(ev("STARTJOB", 0, job="xr257"))  # 08:00: mr257 queues; xr257's tick arms
+    assert o.store.job["mr257"].status == "QUE_WAIT"
+    assert o.store.job["xr257"].armed
+    o.feed(ev("ON_ICE", 1, job="xr257"))
+    o.feed(ev("SET_GLOBAL", 2, name="G257", value="1"))
+    o.feed(ev("OFF_ICE", 3, job="xr257"))  # conditions must reoccur: no start
+    run = o.store.job["br257"].run_number
+    o.feed(ev("STATUS", 24 * 60 + 30, job="hq257", status="SUCCESS"))  # excluded Thursday
+    assert o.store.job["br257"].run_number == run + 1
+    assert o.store.job["br257"].status == "RUNNING"
+    assert o.store.job["mr257"].status == "INACTIVE"
+    assert [job for _, job in _timers_257(o)] == []
+
+
+def _leap_257(o, monkeypatch: pytest.MonkeyPatch) -> int:
+    """Queue the Feb-29-only member behind `hq257` on 2028-02-29 and release
+    it on 1 March; return the number of extended-calendar expansions the
+    release made."""
+    from dsl41.autocal import CompiledCalendar
+
+    calls: list[int] = []
+    expand = CompiledCalendar.days_between
+
+    def counted(self: CompiledCalendar, lo: date, hi: date) -> frozenset[date]:
+        calls.append(1)
+        return expand(self, lo, hi)
+
+    leap = datetime(2028, 2, 29, 7, 0)
+    o.feed(Event(at=leap, kind="STARTJOB", payload={"job": "hq257"}))
+    o.feed(Event(at=leap, kind="STARTJOB", payload={"job": "bl257"}))
+    o.feed(Event(at=leap + timedelta(hours=1), kind="STARTJOB", payload={"job": "up257"}))
+    assert o.store.job["ml257"].status == "QUE_WAIT"
+    monkeypatch.setattr(CompiledCalendar, "days_between", counted)
+    release = datetime(2028, 3, 1, 8, 30)
+    o.feed(Event(at=release, kind="STATUS", payload={"job": "hq257", "status": "SUCCESS"}))
+    monkeypatch.setattr(CompiledCalendar, "days_between", expand)
+    return len(calls)
+
+
+_LEAP_257 = (
+    "extended_calendar: nl257\nworkday: mo,tu,we,th,fr\ncondition: NOT FEB#29\n\n"
+    + _LOCKED_257
+    + "insert_job: bl257\njob_type: b\n\n"
+    "insert_job: ml257\n" + _QUEUED_257 + "box_name: bl257\ndate_conditions: 1\n"
+    'run_window: "08:00-09:00"\nexclude_calendar: nl257\n'
+)
+
+
+@pytest.mark.parametrize("mode", ("1", "2"))
+def test_dl257_the_scan_resumes_past_its_bound_and_expands_once(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tickless member whose only eligible day is 29 February leaves the
+    queue on 1 March 2028. The next such day, 2032-02-29, lies past the
+    scan's bound, so a continuation timer resumes the scan at the bound and
+    the member starts in 2032 while its box still runs. Each scan generates
+    the calendar once for its whole range, not once per day."""
+    o = oracle(_LEAP_257, semantics=_recheck_257(mode))
+    expansions = _leap_257(o, monkeypatch)
+    assert o.store.job["ml257"].status == "INACTIVE"
+    assert expansions <= 2  # the recheck's day, then one range for the scan
+    [(bound, job)] = _timers_257(o)
+    assert job == "ml257" and bound == datetime(2030, 3, 3)
+    o.feed(Event(at=bound, kind="SET_GLOBAL", payload={"name": "T257", "value": "1"}))
+    assert _timers_257(o) == [(datetime(2032, 2, 29, 8, 0), "ml257")]
+    o.feed(
+        Event(
+            at=datetime(2032, 2, 29, 8, 0),
+            kind="SET_GLOBAL",
+            payload={"name": "T257", "value": "2"},
+        )
+    )
+    assert o.store.job["ml257"].status == "RUNNING"
+    assert o.store.job["bl257"].status == "RUNNING"
+
+
+def _leap_run_started_since(o, monkeypatch: pytest.MonkeyPatch) -> datetime:
+    """The leap-day member's scan stops at its bound with a continuation at
+    2030-03-03; it is then forced, runs and succeeds as run 1, and its box
+    completes. Returns the continuation's due instant."""
+    _leap_257(o, monkeypatch)
+    [(bound, _job)] = _timers_257(o)
+    later = datetime(2028, 3, 1, 9, 0)
+    o.feed(Event(at=later, kind="FORCE_STARTJOB", payload={"job": "ml257"}))
+    o.feed(Event(at=later, kind="STATUS", payload={"job": "ml257", "status": "SUCCESS"}))
+    assert o.store.job["ml257"].run_number == 1
+    assert o.store.job["bl257"].status == "SUCCESS"
+    return bound
+
+
+@pytest.mark.parametrize("mode", ("1", "2"))
+def test_dl257_a_superseded_continuation_is_not_live(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A continuation armed at run 0 can never act once the job has started:
+    it is not a pending timer, so a boundary that removes the job does not
+    hold the period open for it (period-model ss10, DL-257)."""
+    from dsl41.classify import Baseline, carried_from_oracle, classify
+    from dsl41.period import RuntimeProfile
+
+    o = oracle(_LEAP_257, semantics=_recheck_257(mode))
+    _leap_run_started_since(o, monkeypatch)
+    assert "ml257" not in pending_timer_jobs(o)
+    oracle_obj = o if isinstance(o, Oracle) else o.engine.oracle
+    removed = _LEAP_257[: _LEAP_257.index("insert_job: ml257")]
+    profile = RuntimeProfile(semantics={"queued-recheck": mode})
+    result = classify(
+        closing=Baseline(catalog=lower_source(_LEAP_257), profile=profile),
+        opening=Baseline(catalog=lower_source(removed), profile=profile),
+        carried=carried_from_oracle(oracle_obj, now=datetime(2028, 3, 1, 9, 0)),
+    )
+    assert result.by_job["ml257"].verdict != "R"
+
+
+@pytest.mark.parametrize("mode", ("1", "2"))
+def test_dl257_a_continuation_fired_after_the_job_started_does_nothing(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The heap entry still fires at its instant; the job has started since
+    the scan stopped, so it is refused with a record and arms nothing."""
+    o = oracle(_LEAP_257, semantics=_recheck_257(mode))
+    bound = _leap_run_started_since(o, monkeypatch)
+    o.feed(Event(at=bound, kind="SET_GLOBAL", payload={"name": "T257", "value": "1"}))
+    last = o.trace()[-1]
+    assert (last.job, last.transition) == ("ml257", "START_REFUSED")
+    assert "moved on since the scan stopped" in last.cause
+    assert _timers_257(o) == []
+    assert o.store.job["ml257"].status == "SUCCESS"
+
+
+@pytest.mark.parametrize("mode", ("0", "1"))
+def test_dl257_the_scan_admits_the_next_waiter_when_one_leaves_unstarted(mode: str) -> None:
+    """A load waiter that fails its recheck leaves QUE_WAIT and holds no
+    load, so the same scan admits the lower-priority waiter behind it; under
+    mode 0 the first waiter runs and the second stays queued (DL-247)."""
+    text = (
+        "insert_machine: m257\ntype: a\nnode_name: m257\nmax_load: 2\n\n"
+        "insert_job: up257\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: big257\njob_type: c\ncommand: x\nmachine: m257\njob_load: 2\npriority: 1\n\n"
+        "insert_job: hi257\njob_type: c\ncommand: x\nmachine: m257\njob_load: 2\npriority: 1\n"
+        "condition: s(up257)\n\n"
+        "insert_job: lo257\njob_type: c\ncommand: y\nmachine: m257\njob_load: 1\npriority: 5\n"
+    )
+    o = oracle(text, semantics=_recheck_257(mode))
+    o.feed(ev("STARTJOB", 0, job="big257"))
+    o.feed(ev("STARTJOB", 0, job="up257"))
+    o.feed(ev("STATUS", 0, job="up257", status="SUCCESS"))
+    o.feed(ev("STARTJOB", 1, job="lo257"))
+    assert _statuses(o, "hi257", "lo257") == {"hi257": "QUE_WAIT", "lo257": "QUE_WAIT"}
+    o.feed(ev("STATUS", 2, job="up257", status="FAILURE"))
+    o.feed(ev("STATUS", 3, job="big257", status="SUCCESS"))
+    expected = {"hi257": "RUNNING", "lo257": "QUE_WAIT"}
+    if mode == "1":
+        expected = {"hi257": "INACTIVE", "lo257": "RUNNING"}
+    assert _statuses(o, "hi257", "lo257") == expected
 
 
 # ------------------------------------------------ DL-54 Q2/Q3 additional trace tests

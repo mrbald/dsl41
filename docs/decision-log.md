@@ -17064,3 +17064,163 @@ relitigate an entry; append a new one.
   DL-255's block check, as the vendor says it re-evaluates no other
   resource. Tests: `test_dl256_a_forced_start_on_held_units_lifts_the_resource_block_at_once`,
   `test_a_queued_holder_counts_its_own_held_units_when_it_blocks`.
+- DL-257 Semantic switch queued-recheck: what a job leaving QUE_WAIT
+  re-checks, the vendor's EvaluateQueuedJobStarts; default 0
+  (2026-10-03; semantics.py, oracle.py, simulation_register_rows.py,
+  runner-design.md ss8a, autosys-semantics.md SEM-32 and ss5,
+  simulation-coverage.md, README.md)
+  THE VENDOR. "EvaluateQueuedJobStarts" (Administrating > Configure a
+  Scheduler, AutoSys 24.2): "When queued jobs leave the queued state,
+  they might no longer meet their starting conditions. ... By default,
+  AutoSys Workload Automation re-evaluates the starting conditions for
+  these jobs other than the date condition check for the day of
+  evaluation before starting them. If a job fails its starting condition
+  checks after leaving a queued state, the scheduler places the job in an
+  INACTIVE state. If the job meets its starting conditions, the scheduler
+  starts the job. If the job is in a box that is running and it fails its
+  starting condition checks, the scheduler places the job in the
+  ACTIVATED state. If the job is in a box that is not running and it
+  fails its starting condition checks, the scheduler places the job in an
+  INACTIVE state. If a job with date conditions fails its starting
+  condition checks after leaving a queued state, the scheduler
+  re-schedules the job to its next start time after resetting its
+  status." The values: "0 Specifies that the scheduler immediately starts
+  the job without evaluating the starting conditions of the job. 1
+  Specifies that the scheduler evaluates the starting conditions of the
+  job other than the date condition check for the day of evaluation
+  before starting the job. This is the default. The scheduler does not
+  re-evaluate the following job attributes: run_calendar, days_of_week,
+  start_times, and start_mins. Jobs that leave the queued state on a day
+  that is defined in an exclusion calendar or at a time outside their run
+  window do not start and are re-scheduled to their next start time. 2
+  Specifies that the scheduler evaluates the starting conditions of the
+  job", the date condition check for the day included.
+  THE DEFAULT. DL-50 pinned Qr6 as no recheck, and DL-250 recorded that
+  this is the vendor's 0, not its default 1. Under DL-252's rule the owner
+  kept dsl41's choice as the default: `queued-recheck=0`. A queued job
+  met its conditions when it started. Values `1` and `2` select the
+  vendor's readings. The registry records `1` as the documented AutoSys
+  value. This closes Qr6: decided, the owner's default with a switch. The
+  vendor's behavior is documented, so nothing is left for a live
+  instance to settle, unlike Q10. The `# PENDING: Qr6` markers go, and
+  the register row moves from provisional to supported, its effect
+  starting "Qr6 decided". Qr6 leaves the register test's list of open
+  questions.
+  THE BEHAVIOR. The check runs in `Oracle._readmit`, after the ice,
+  box-RUNNING and hold guards and after the admission test passes: that
+  is the moment the job leaves the queue. A job that does not fit stays
+  queued and is not checked. Under `1` the oracle checks, in this order:
+  for a job with date conditions, today in its `exclude_calendar`, then
+  `run_window` (SEM-33's window test); then `condition`. Under `2` it also checks the day before `run_window`:
+  `run_calendar`, else `days_of_week`, with an absent `days_of_week` read
+  as every day, as the scheduler reads it. The day is the job's local
+  day, in the zone the oracle reads its `run_window` in. The day and
+  window checks use the oracle's zone; DL-253 aligns that zone with the
+  scheduler's base zone, and this entry does not change it. A job that fails
+  leaves QUE_WAIT for INACTIVE without starting and holds nothing. Its
+  arm is cleared first, with a `SCHED_DISARM` record, so a later
+  condition edge cannot start a date-conditions job; its next tick does.
+  That is the vendor's re-scheduling, in dsl41 terms. A job with no date
+  conditions waits as any INACTIVE job does, and its next condition edge
+  starts it. A member of a running box that fails its condition is not
+  resolved: it has not run, so it keeps the box RUNNING (SEM-11, DL-242).
+  That is the vendor's ACTIVATED. A member with no date conditions starts
+  when its condition holds again while the box runs; a date-conditions
+  member has lost its arm, so only its next tick in that box run starts
+  it. A member of a box that stopped running is cancelled to INACTIVE
+  before the check, as before.
+  NO JOB WAITS FOR EVER. The scheduler never ticks a job with no start
+  times of its own (no start_times, start_mins or run_calendar), and a
+  box starts its members unscheduled, so such a job sent INACTIVE would
+  wait for a next start time that never comes. A run_window-only member
+  that DL-246 deferred to its opening, queued there, and left the queue
+  after the close kept its box RUNNING for ever. So after the INACTIVE
+  transition two failures get a disposition. A `run_window` failure takes
+  DL-246's at that instant (`_run_window_permits`): nearer the previous
+  close, the SEM-33 skip, which resolves a member of a running box
+  (DL-154) so its box can complete, and leaves a standalone job INACTIVE
+  for its next tick; nearer the next opening, one deferred start at it.
+  A day failure (an excluded day, or under `2` a non-run day) of a job
+  with no ticks of its own gets one deferred start at the window opening
+  of its next eligible day: the first day after today that is not
+  excluded and is a run day by `run_calendar` or `days_of_week`. One scan
+  covers 732 days and generates each calendar once over that range, not
+  once per day. When the range holds no eligible day, the scan does not
+  give up: it arms one continuation timer at local midnight of the last
+  day it scanned, and when that fires, with the job still INACTIVE and
+  not started since, the scan resumes from there. A member eligible only
+  on 29 February that leaves the queue on 1 March 2028 is so deferred to
+  2032-02-29 through one continuation. The continuation is a deferred
+  start that carries `rescan_run` (the job's run number) beside its
+  cause; it attempts no start, and it is bound to its box run like any
+  deferral. Once the job's run number differs from `rescan_run` the
+  continuation is permanently dead: `pending_timers` drops it, so a
+  boundary does not count it as latent work, and if it fires it is
+  refused with a record and arms nothing. One helper makes that test for
+  both. At the same run number it stays live whatever the job's status,
+  which can return to INACTIVE before it fires. A job with ticks waits for its next tick, and a tickless job
+  with no `run_window` gets no deferral: it has no opening, and a box
+  never starts it unscheduled anyway, so nothing new waits.
+  RUN-BOUND DISPOSITIONS. The rejection is one decision of one box run.
+  It drops any resolution mark the member already holds in that run, a
+  run_window skip earlier the same run, for instance: the rejected
+  attempt ends unresolved, and an inherited mark would complete the box
+  past it. The skip or deferral that follows the INACTIVE transition is
+  made only if, after that transition's wakes, the member is still
+  INACTIVE with the same run number and its box is still RUNNING in the
+  same run. A wake that completes the box and restarts it ends the run
+  the decision belonged to; the new run decides the member afresh, as
+  DL-246 has a box restart void a deferral.
+  Leaving the queue lifts a DL-247 block, and the scan that made the
+  check goes on, so a waiter behind it can be admitted in the same scan.
+  CALENDARS. The oracle owns no tick calendar. This is the one calendar
+  question it asks: whether a named calendar holds one day. It reads the
+  catalog's own calendars, a standard calendar's day rows or an extended
+  calendar compiled by `autocal`, so a replay with no scheduler reads the
+  same days. Preflight refuses a missing or uninterpretable calendar
+  before a run; a direct oracle caller that skipped preflight gets an
+  OracleError.
+  CLASSIFIER. The switch's `affects` names every job that can queue: one
+  that names a resource, or one whose positive priority makes its start
+  check machine load (DL-247). A carried QUE_WAIT row of such a job is
+  latent intent and classifies A when the switch flips. A running box
+  with such a member is R, because a box depends on its members.
+  RECORDED CHOICES. Modes `1` and `2` re-check a FORCE_STARTJOB job that
+  queued on a named resource, because the row does not record that its
+  start was forced (DL-247: "Force belongs to the event, not the row").
+  The vendor does not say whether its recheck applies to forced jobs.
+  This is recorded, not fixed. The `affects` set over-counts: a job
+  with a positive priority on a machine with no `max_load` cannot queue
+  on load, but is counted, so a flip may refuse a running box it need
+  not. That is the safe direction; recorded, not narrowed. A job that
+  leaves the queue unstarted during DL-247's admit-only box-stop scan
+  lifts a block, which asks for a full scan, so the running loop turns
+  its next pass into a full one, as an iced job's cancel already does.
+  UNCHANGED. Mode 0 is the code path before this entry, so every
+  existing trace is unchanged and `STATE_MACHINE_VERSION` stays. A
+  non-default value is recorded in the period's profile (DL-252). The
+  register gains three `profile_alt:semantics.queued-recheck=*` rows.
+  Tests: test_oracle.py `test_dl257_*` under both bisimulation paths (a
+  queued job whose condition went false under each mode, one whose
+  condition holds, a member of a running box, a date-conditions job with
+  no stale arm, outside the run_window on each side of the closer-edge
+  rule, a run_window-only box member that must not hang its box, a
+  tickless job deferred past an excluded day, a rejected member that
+  must not inherit an earlier skip, a deferral that must not cross into
+  a restarted box run, the 29 February member found past the scan's
+  bound with one calendar expansion per scan, a continuation that is
+  not live once its job has started, and its refused firing, an
+  excluded day by a standard and an extended calendar, mode 2's run-day
+  check by days_of_week and run_calendar against mode 1, and the scan
+  admitting the waiter behind
+  a job that left unstarted); test_semantics.py (the registry entry, the
+  `affects` predicate, the engine run and its replay under 0 and 1, the
+  base-zone "today" on the engine and its replay under each mode, and the
+  boundary classifier).
+  INTEGRATION. On top of DL-256, a job that leaves the queue unstarted
+  takes no new units, but it keeps the units it holds from an earlier
+  run: leaving QUE_WAIT does not end a run, so only RELEASE_RESOURCE or
+  its next run gives them back. No code change was needed; the test is
+  `test_dl257_a_holder_that_leaves_the_queue_unstarted_keeps_its_held_units`.
+  Both slices' switches share the registry: `_can_queue` takes the catalog,
+  as DL-256's `affects` signature requires, and ignores it.

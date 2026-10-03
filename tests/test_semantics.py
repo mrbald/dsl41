@@ -53,12 +53,25 @@ from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.runner_history import RunHistoryError, replay_trace
 from dsl41.runner_journal import read_journal
 from dsl41.runner_ledger import STATE_MACHINE_VERSION
+from dsl41.runner_scheduler import Scheduler
 from dsl41.runner_startup import _derive_runtime_profile, resume_run, start_run
 from test_period_identity import GOLDEN_RUNTIME_HASH, _full_profile
 from test_runner_leadership import engine
 
 T0 = datetime(2026, 7, 1, 8, 0)
 ORDINARY = {"ice-lookback": "ordinary"}
+RECHECK = {"queued-recheck": "1"}
+
+#: `qc` queues behind `hq` on LOCK while its condition s(up) holds; `up`
+#: then fails, and `hq` ends: the shape where `queued-recheck` 0 and 1
+#: disagree (DL-257).
+_QUEUED_JIL = (
+    "insert_resource: LOCK\nres_type: R\namount: 1\n\n"
+    "insert_job: hq\njob_type: c\ncommand: x\nmachine: m1\nresources: (LOCK, QUANTITY=1)\n\n"
+    "insert_job: up\njob_type: c\ncommand: x\nmachine: m1\n\n"
+    "insert_job: qc\njob_type: c\ncommand: y\nmachine: m1\nresources: (LOCK, QUANTITY=1)\n"
+    "condition: s(up)\n"
+)
 
 #: An iced producer and a consumer gated on a lookback f() atom: the one
 #: shape where the two `ice-lookback` readings disagree.
@@ -105,6 +118,56 @@ def test_the_ice_lookback_default_is_the_documented_autosys_reading() -> None:
     switch = semantics.REGISTRY["ice-lookback"]
     assert switch.values == ("true", "ordinary")
     assert switch.default == "true" == switch.autosys
+
+
+def test_the_queued_recheck_default_is_dsl41_s_and_the_vendor_s_is_1() -> None:
+    """DL-257: the owner kept dsl41's admission without a recheck as the
+    default; the vendor's EvaluateQueuedJobStarts default is 1."""
+    switch = semantics.REGISTRY["queued-recheck"]
+    assert switch.values == ("0", "1", "2")
+    assert switch.default == "0"
+    assert switch.autosys == "1"
+    assert semantics.resolve(RECHECK).queued_recheck == "1"
+
+
+def test_queued_recheck_affects_the_jobs_that_can_queue() -> None:
+    """A job that names a resource, or whose positive priority makes its
+    start check machine load (DL-247), can wait in QUE_WAIT."""
+    affects = semantics.REGISTRY["queued-recheck"].affects
+    catalog = lower_source(
+        "insert_resource: R1\nres_type: R\namount: 1\n\n"
+        "insert_job: res\njob_type: c\nmachine: m1\ncommand: x\nresources: (R1, QUANTITY=1)\n\n"
+        "insert_job: prio\njob_type: c\nmachine: m1\ncommand: x\npriority: 3\n\n"
+        "insert_job: zero\njob_type: c\nmachine: m1\ncommand: x\njob_load: 5\npriority: 0\n\n"
+        "insert_job: plain\njob_type: c\nmachine: m1\ncommand: x\njob_load: 5\n"
+    )
+    assert {name for name, job in catalog.jobs.items() if affects(job, catalog)} == {"res", "prio"}
+
+
+@pytest.mark.parametrize(
+    ("calendar", "message"),
+    [
+        ("", "calendar 'ex' has no definition in the loaded set"),
+        ("calendar: ex\nnot-a-date\n\n", "unparseable date row"),
+    ],
+)
+def test_queued_recheck_refuses_a_calendar_it_cannot_read(calendar: str, message: str) -> None:
+    """DL-257: preflight refuses these before a run; an oracle built
+    without it raises, naming the job, rather than guess the day."""
+    from dsl41.oracle import Oracle
+    from dsl41.oracle_state import OracleError
+
+    catalog = lower_source(
+        calendar + "insert_resource: LOCK\nres_type: R\namount: 1\n\n"
+        "insert_job: hq\njob_type: c\ncommand: x\nmachine: m1\nresources: (LOCK, QUANTITY=1)\n\n"
+        "insert_job: xq\njob_type: c\ncommand: y\nmachine: m1\nresources: (LOCK, QUANTITY=1)\n"
+        'date_conditions: 1\nstart_times: "08:00"\nexclude_calendar: ex\n'
+    )
+    oracle = Oracle(catalog, semantics=semantics.resolve(RECHECK))
+    oracle.feed(Event(at=T0, kind="STARTJOB", payload={"job": "hq"}))
+    oracle.feed(Event(at=T0, kind="STARTJOB", payload={"job": "xq"}))
+    with pytest.raises(OracleError, match=f"xq: .*{message}"):
+        oracle.feed(Event(at=T0, kind="STATUS", payload={"job": "hq", "status": "SUCCESS"}))
 
 
 def test_the_profile_refuses_an_unknown_switch_with_the_known_names() -> None:
@@ -224,14 +287,16 @@ def test_a_manifest_refuses_a_missing_profile_field(tmp_path: Path, field: str) 
 # ------------------------------------------------- engine, resume and replay
 
 
-def _start_iced(run_root: Path, profile: RuntimeProfile):
+def _start_iced(
+    run_root: Path, profile: RuntimeProfile, text: str = _ICED_JIL, *, scheduled: bool = False
+):
     from dsl41.boundary import stage_period
     from dsl41.ast_jil import parse
 
     jil = run_root.parent / "iced.jil"
-    jil.write_text(_ICED_JIL)
-    catalog = lower_source(_ICED_JIL, file=str(jil))
-    parsed = [parse(_ICED_JIL, file=str(jil))]
+    jil.write_text(text)
+    catalog = lower_source(text, file=str(jil))
+    parsed = [parse(text, file=str(jil))]
     run_root.mkdir()
     staged = stage_period(run_root, parsed, catalog, profile)
     return catalog, start_run(
@@ -240,6 +305,11 @@ def _start_iced(run_root: Path, profile: RuntimeProfile):
         clock=VirtualClock(start=T0),
         adapters={"CMD": FakeAdapter(default=None)},
         staged=staged,
+        scheduler=Scheduler(
+            catalog, start=T0, default_tz=profile.default_tz, tz_aliases=profile.tz_aliases
+        )
+        if scheduled
+        else None,
     )
 
 
@@ -284,6 +354,109 @@ def test_the_engine_runs_the_period_s_pin_and_replay_reads_it_back(
     finally:
         asyncio.run(resumed.shutdown())
         resumed.journal.close()
+
+
+def _play(live, script: list[tuple[datetime, str | None, dict[str, str]]]) -> None:
+    """Feed `script` to the engine; a step with no kind only advances the
+    clock, so the scheduler's ticks up to it fire."""
+
+    async def play() -> None:
+        try:
+            for at, kind, payload in script:
+                if kind is not None:
+                    live.inject(Event(at=at, kind=kind, payload=payload), source=None)
+                await live.run_until_quiescent(at)
+        finally:
+            await live.shutdown()
+
+    asyncio.run(play())
+    live.journal.close()
+
+
+#: Wednesday 2026-07-01 23:00 in Zurich is 21:00 UTC; Thursday 00:30 there is
+#: 22:30 UTC, still July 1 on the engine clock. July 2 is excluded.
+_ZURICH_JIL = (
+    "calendar: ex\n07/02/2026 00:00\n\n"
+    "insert_resource: LOCK\nres_type: R\namount: 1\n\n"
+    "insert_job: hq\njob_type: c\ncommand: x\nmachine: m1\nresources: (LOCK, QUANTITY=1)\n\n"
+    "insert_job: xq\njob_type: c\ncommand: y\nmachine: m1\nresources: (LOCK, QUANTITY=1)\n"
+    'date_conditions: 1\ndays_of_week: all\nstart_times: "23:00"\nexclude_calendar: ex\n'
+)
+
+
+@pytest.mark.parametrize(
+    ("mode", "xq_end"), [("0", "RUNNING"), ("1", "INACTIVE"), ("2", "INACTIVE")]
+)
+def test_queued_recheck_reads_today_in_the_base_zone_on_the_engine_and_replay(
+    tmp_path: Path, mode: str, xq_end: str
+) -> None:
+    """DL-257 with DL-253's base zone: a job with no `timezone:` reads
+    "today" in the run's base zone, not on the UTC engine clock. Released at
+    00:30 Thursday in Zurich, it is on the excluded July 2 although the
+    engine clock still says July 1; modes 1 and 2 refuse it, and the replay
+    of the log does the same."""
+    run_root = tmp_path / "run"
+    profile = RuntimeProfile(default_tz="Europe/Zurich", semantics={"queued-recheck": mode})
+    catalog, live = _start_iced(run_root, profile, _ZURICH_JIL, scheduled=True)
+    _play(
+        live,
+        [
+            # hq takes the lock; the scheduler ticks xq at 23:00 Zurich
+            (datetime(2026, 7, 1, 20, 0), "STARTJOB", {"job": "hq"}),
+            (datetime(2026, 7, 1, 21, 0), None, {}),
+            (datetime(2026, 7, 1, 22, 30), "STATUS", {"job": "hq", "status": "SUCCESS"}),
+        ],
+    )
+    trace = [t.transition for t in live.oracle.trace() if t.job == "xq"]
+    assert trace[0] == "INACTIVE->QUE_WAIT"
+    assert trace[-1].endswith(xq_end)
+    if mode != "0":
+        [left] = [t.cause for t in live.oracle.trace() if t.transition == "QUE_WAIT->INACTIVE"]
+        assert "2026-07-02 is in exclude_calendar 'ex'" in left
+    records = read_journal(estate_wal(run_root))
+    replayed = [
+        t.transition for t in replay_trace(run_root, records, catalog).trace if t.job == "xq"
+    ]
+    assert replayed == trace
+
+
+@pytest.mark.parametrize(("overrides", "qc_end"), [({}, "RUNNING"), (RECHECK, "INACTIVE")])
+def test_the_engine_runs_queued_recheck_and_replay_reads_it_back(
+    tmp_path: Path, overrides: dict[str, str], qc_end: str
+) -> None:
+    """DL-257 on the engine: a queued job whose condition went false starts
+    under the default and leaves the queue unstarted under 1, and the
+    offline replay of the log narrates the same run."""
+    run_root = tmp_path / "run"
+    catalog, live = _start_iced(run_root, RuntimeProfile(semantics=overrides), _QUEUED_JIL)
+    assert live.oracle.semantics == semantics.resolve(overrides)
+    script = [
+        (0, "STARTJOB", {"job": "hq"}),
+        (0, "STARTJOB", {"job": "up"}),
+        (1, "STATUS", {"job": "up", "status": "SUCCESS"}),
+        (2, "STATUS", {"job": "up", "status": "FAILURE"}),
+        (3, "STATUS", {"job": "hq", "status": "SUCCESS"}),
+    ]
+
+    async def play() -> None:
+        try:
+            for minutes, kind, payload in script:
+                at = T0 + timedelta(minutes=minutes)
+                live.inject(Event(at=at, kind=kind, payload=payload), source=None)
+                await live.run_until_quiescent(at)
+        finally:
+            await live.shutdown()
+
+    asyncio.run(play())
+    live.journal.close()
+    trace = [t.transition for t in live.oracle.trace() if t.job == "qc"]
+    assert trace[0] == "INACTIVE->QUE_WAIT"
+    assert trace[-1].endswith(qc_end)
+    records = read_journal(estate_wal(run_root))
+    replayed = [
+        t.transition for t in replay_trace(run_root, records, catalog).trace if t.job == "qc"
+    ]
+    assert replayed == trace
 
 
 def test_an_engine_refuses_switches_that_disagree_with_its_pin(tmp_path: Path) -> None:
@@ -389,6 +562,43 @@ def test_a_switch_flip_carries_an_armed_job_with_the_armed_assumption() -> None:
     assert verdict.assumption == ARMED_ASSUMPTION
     assert verdict.changed == (_SWITCH_NODE,)
     assert [(f.job, f.before, f.after) for f in result.readiness_flips] == [("j", True, False)]
+
+
+def test_a_queued_recheck_flip_carries_a_queued_job_and_refuses_its_running_box() -> None:
+    """ss10.2, DL-257: a flip of `queued-recheck` changes whether a queued
+    job starts when it leaves the queue. A standalone QUE_WAIT row is latent
+    intent, so it is A; a running box with a queued member is R, since the
+    box depends on its members; a job that cannot queue is untouched."""
+    estate = (
+        "insert_resource: LOCK\nres_type: R\namount: 1\n\n"
+        "insert_job: q\njob_type: c\nmachine: m1\ncommand: x\nresources: (LOCK, QUANTITY=1)\n\n"
+        "insert_job: bx\njob_type: b\n\n"
+        "insert_job: m\njob_type: c\nmachine: m1\ncommand: y\nbox_name: bx\n"
+        "resources: (LOCK, QUANTITY=1)\n\n"
+        "insert_job: other\njob_type: c\nmachine: m1\ncommand: z\n"
+    )
+    catalog = lower_source(estate)
+    result = classify(
+        closing=Baseline(catalog=catalog, profile=RuntimeProfile()),
+        opening=Baseline(catalog=catalog, profile=RuntimeProfile(semantics=RECHECK)),
+        carried=CarriedState(
+            jobs={
+                "q": CarriedJob(row=JobRuntime(status="QUE_WAIT", status_at=T0, waiter_seq=1)),
+                "bx": CarriedJob(row=JobRuntime(status="RUNNING", status_at=T0)),
+                "m": CarriedJob(row=JobRuntime(status="QUE_WAIT", status_at=T0, waiter_seq=2)),
+                "other": CarriedJob(row=JobRuntime(status="RUNNING", status_at=T0)),
+            },
+            now=T0,
+        ),
+    )
+    node = SWITCH + "queued-recheck"
+    assert node in result.changed_nodes
+    assert result.by_job["q"].verdict == "A"
+    assert result.by_job["q"].changed == (node,)
+    assert result.by_job["bx"].verdict == "R"
+    assert node in result.by_job["bx"].changed
+    assert result.by_job["other"].verdict == "carry"
+    assert result.by_job["other"].changed == ()
 
 
 def test_ice_lookback_affects_exactly_the_jobs_with_a_lookback_atom() -> None:

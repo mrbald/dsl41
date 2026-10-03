@@ -733,6 +733,14 @@ class RuntimeState:
             box, window_skipped_members=self.runtime(box).window_skipped_members | {member}
         )
 
+    def void_resolution(self, box: str, member: str) -> None:
+        """Drop `member`'s resolution mark in `box`: a fresh attempt by the
+        member that ends unresolved must not inherit an earlier verdict of
+        the same box run (DL-257)."""
+        marks = self.runtime(box).window_skipped_members
+        if member in marks:
+            self._replace(box, window_skipped_members=marks - {member})
+
     def set_flags(
         self,
         job: str,

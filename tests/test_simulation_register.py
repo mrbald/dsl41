@@ -1328,13 +1328,14 @@ def test_every_provisional_row_is_followable() -> None:
     assert stranded == [], f"provisional rows with no way to follow them: {stranded}"
 
 
-R2_LABELS = ("Q3c", "Q3d", "Qr6", "E5", "E6", "E7", "E8", "E9", "Qr3", "Qr4", "Qr2")
+#: Qr6 left this list when DL-257 decided it: its row is supported now.
+R2_LABELS = ("Q3c", "Q3d", "E5", "E6", "E7", "E8", "E9", "Qr3", "Qr4", "Qr2")
 
 
 @pytest.mark.parametrize("label", R2_LABELS)
 def test_the_named_open_questions_each_have_a_row(label: str) -> None:
-    """Breaks when one of the eleven questions this register was opened for
-    loses its row."""
+    """Breaks when one of the questions this register was opened for, and
+    that is still open, loses its row."""
     assert any(row.label == label for row in REGISTER), label
 
 

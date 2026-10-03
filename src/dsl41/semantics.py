@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
-from dsl41.capacity import resource_type
+from dsl41.capacity import checks_load, resource_type
 from dsl41.conditions import ExitCodeAtom, StatusAtom, iter_atoms
 
 if TYPE_CHECKING:
@@ -66,6 +66,13 @@ def _renewable_without_free(job: JobIR, catalog: CatalogIR) -> bool:
     )
 
 
+def _can_queue(job: JobIR, _catalog: CatalogIR) -> bool:
+    """A job that can wait in QUE_WAIT: one that names a resource, or one
+    whose positive priority makes its start check machine load (DL-247).
+    What `queued-recheck` reads when such a job leaves the queue."""
+    return bool(job.resources) or checks_load(job)
+
+
 #: The registry. Closed: a name that is not here is refused wherever it is
 #: met, at profile construction and on the command line.
 REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
@@ -91,12 +98,23 @@ REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
                 " TERMINATED until RELEASE_RESOURCE, A frees them on every completion",
                 affects=_renewable_without_free,
             ),
+            Switch(
+                name="queued-recheck",
+                values=("0", "1", "2"),
+                default="0",
+                autosys="1",
+                description="what a job leaving QUE_WAIT re-checks before it starts, as the"
+                " vendor's EvaluateQueuedJobStarts: 0 nothing; 1 its condition, run_window and"
+                " exclude_calendar; 2 also whether today is a run day",
+                affects=_can_queue,
+            ),
         )
     }
 )
 
 IceLookback = Literal["true", "ordinary"]
 RenewableFree = Literal["Y", "A"]
+QueuedRecheck = Literal["0", "1", "2"]
 
 
 @dataclass(frozen=True)
@@ -108,6 +126,7 @@ class SemanticSwitches:
 
     ice_lookback: IceLookback
     renewable_free: RenewableFree
+    queued_recheck: QueuedRecheck
 
     def value(self, name: str) -> str:
         """The effective value of the switch called `name`."""
