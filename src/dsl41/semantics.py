@@ -5,8 +5,9 @@ Each switch names one place where documented AutoSys behavior and dsl41's
 own choice can differ, or where the documentation is unclear. The default
 lives here, in code. A period records only explicit overrides, in its
 runtime profile, so replay and audit read the same values the engine ran.
-Each switch also names the jobs it can change, so a boundary that flips it
-classifies those jobs (period-model ss10.2).
+Each switch also names the jobs and the calendars it can change, so a
+boundary that flips it classifies those jobs and the jobs that name those
+calendars (period-model ss10.2).
 
 Changing a default is a state-machine change and bumps
 `STATE_MACHINE_VERSION`.
@@ -24,7 +25,12 @@ from dsl41.conditions import ExitCodeAtom, StatusAtom, iter_atoms
 from dsl41.ir import FwSpec
 
 if TYPE_CHECKING:
-    from dsl41.ir import CatalogIR, JobIR
+    from dsl41.ir import CalendarIR, CatalogIR, JobIR
+
+
+def _no_calendar(calendar: CalendarIR) -> bool:
+    """A switch that changes no calendar's days."""
+    return False
 
 
 @dataclass(frozen=True)
@@ -45,6 +51,23 @@ class Switch:
     #: `catalog` -- the classifier's edge from a job to this switch
     #: (period-model ss10.2)
     affects: Callable[[JobIR, CatalogIR], bool]
+    #: whether flipping this switch can change the days `calendar` generates
+    #: -- the classifier's edge from a calendar to this switch. A job reaches
+    #: such a switch through the calendars it names.
+    affects_calendar: Callable[[CalendarIR], bool] = _no_calendar
+
+
+def _no_job(job: JobIR, _catalog: CatalogIR) -> bool:
+    """A switch that reaches jobs only through their calendars."""
+    return False
+
+
+def _reads_wekr(calendar: CalendarIR) -> bool:
+    """An extended calendar with a WEKR token in its rules: what
+    `wekr-first-week` reads (SEM-37)."""
+    from dsl41.autocal import reads_family
+
+    return calendar.kind == "extended" and reads_family(calendar, "wekr")
 
 
 def _has_lookback_atom(job: JobIR, _catalog: CatalogIR) -> bool:
@@ -108,7 +131,7 @@ REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
                 default="true",
                 autosys="true",
                 description="what a condition atom with a lookback qualifier reads when its"
-                " predecessor is on ice and not running: true, or the ordinary on-ice table",
+                " predecessor is on ice: true, or the ordinary on-ice table",
                 affects=_has_lookback_atom,
             ),
             Switch(
@@ -143,14 +166,31 @@ REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
                 " reading)",
                 affects=_fw_without_min_size,
             ),
+            Switch(
+                name="wekr-first-week",
+                values=("first-full", "partial"),
+                default="first-full",
+                autosys="unknown",
+                description="where week 1 of a WEKR token's year starts: on the first anchor"
+                " day on or after January 1, or on January 1 itself",
+                affects=_no_job,
+                affects_calendar=_reads_wekr,
+            ),
         )
     }
+)
+
+#: The switches that can change a calendar's days, so the ones a scheduler
+#: compiles its extended calendars under (DL-259).
+CALENDAR_SWITCHES: Final[tuple[str, ...]] = tuple(
+    name for name, switch in REGISTRY.items() if switch.affects_calendar is not _no_calendar
 )
 
 IceLookback = Literal["true", "ordinary"]
 RenewableFree = Literal["Y", "A"]
 QueuedRecheck = Literal["0", "1", "2"]
 FwExistence = Literal["stable", "immediate"]
+WekrFirstWeek = Literal["first-full", "partial"]
 
 
 @dataclass(frozen=True)
@@ -164,6 +204,7 @@ class SemanticSwitches:
     renewable_free: RenewableFree
     queued_recheck: QueuedRecheck
     fw_existence: FwExistence
+    wekr_first_week: WekrFirstWeek
 
     def value(self, name: str) -> str:
         """The effective value of the switch called `name`."""

@@ -40,6 +40,8 @@ from dsl41.autocal import (
 from dsl41.ir import CatalogIR, ScheduleBlock
 from dsl41.oracle_state import Event
 from dsl41.runner_clock import EngineError
+from dsl41.semantics import DEFAULTS as DEFAULT_SWITCHES
+from dsl41.semantics import SemanticSwitches
 from dsl41.timezones import resolve_timezone, to_local, to_utc
 
 
@@ -118,7 +120,7 @@ class _SchedulePlan:
 
 
 def _scheduler_calendar(
-    catalog: CatalogIR, job: str, role: str, ref: str
+    catalog: CatalogIR, job: str, role: str, ref: str, semantics: SemanticSwitches
 ) -> dict[date, frozenset[tuple[int, int]]] | CompiledCalendar:
     """Resolve a run_calendar/exclude_calendar reference for the Scheduler:
     a standard calendar's day -> row-tick map (row times fire E11 jobs,
@@ -131,7 +133,7 @@ def _scheduler_calendar(
         raise EngineError(f"{job}: {role} {ref!r} has no calendar definition in the loaded set")
     try:
         if cal.kind == "extended":
-            return compile_calendar(cal, catalog)
+            return compile_calendar(cal, catalog, semantics)
         return standard_rows(cal)
     except CalendarRuleError as exc:
         raise EngineError(f"{job}: {exc}") from exc
@@ -190,6 +192,7 @@ class Scheduler:
         start: datetime,
         default_tz: str | None = None,
         tz_aliases: Mapping[str, str] | None = None,
+        semantics: SemanticSwitches | None = None,
     ) -> None:
         base_tz = _scheduler_tz(default_tz, "--timezone", tz_aliases) if default_tz else None
         # what this scheduler was WIRED with, kept READ-ONLY (properties
@@ -199,6 +202,9 @@ class Scheduler:
         # execute under another (period-model ss2.1, DL-130)
         self._default_tz = default_tz
         self._tz_aliases: dict[str, str] = dict(tz_aliases or {})
+        #: the semantic switches the extended calendars compile under (DL-252);
+        #: an engine refuses a scheduler whose switches are not its own
+        self._semantics = semantics or DEFAULT_SWITCHES
         # the catalog these plans were COMPILED from, pinned as its v2 hash
         # at compile time -- an object reference could be mutated after the
         # plans were built, and the gate would then bless stale plans under
@@ -218,7 +224,9 @@ class Scheduler:
             run_gen: _CalCache | None = None
             row_times: dict[date, frozenset[tuple[int, int]]] | None = None
             if sched.run_calendar is not None:
-                source = _scheduler_calendar(catalog, name, "run_calendar", sched.run_calendar)
+                source = _scheduler_calendar(
+                    catalog, name, "run_calendar", sched.run_calendar, self._semantics
+                )
                 if isinstance(source, CompiledCalendar):
                     run_gen = _CalCache(source)
                 else:
@@ -231,7 +239,7 @@ class Scheduler:
             exclude_gen: _CalCache | None = None
             if sched.exclude_calendar is not None:
                 source = _scheduler_calendar(
-                    catalog, name, "exclude_calendar", sched.exclude_calendar
+                    catalog, name, "exclude_calendar", sched.exclude_calendar, self._semantics
                 )
                 if isinstance(source, CompiledCalendar):
                     exclude_gen = _CalCache(source)
@@ -277,6 +285,10 @@ class Scheduler:
     @property
     def catalog_hash(self) -> str:
         return self._catalog_hash
+
+    @property
+    def semantics(self) -> SemanticSwitches:
+        return self._semantics
 
     @staticmethod
     def _ticks(sched: ScheduleBlock) -> tuple[tuple[int, int], ...]:

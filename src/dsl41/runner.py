@@ -223,7 +223,8 @@ from dsl41.runner_journal import (
 from dsl41.runner_ledger import Fence
 from dsl41.seal import Execution, SealedHost, SealedState, implicit_routes
 from dsl41.runner_scheduler import Scheduler
-from dsl41.semantics import SemanticSwitches
+from dsl41.semantics import CALENDAR_SWITCHES, SemanticSwitches
+from dsl41.semantics import DEFAULTS as DEFAULT_SWITCHES
 from dsl41.timezones import alias_table
 
 
@@ -339,21 +340,35 @@ def _raise_if_failed(task: asyncio.Task[None]) -> None:
 
 
 def _engine_switches(
-    estate: EstateHome | None, semantics: SemanticSwitches | None
-) -> SemanticSwitches | None:
+    estate: EstateHome | None, semantics: SemanticSwitches | None, scheduler: Scheduler | None
+) -> SemanticSwitches:
     """The semantic switches an engine runs (DL-252). An engine that leads
     an estate runs its period's pin and nothing else; `semantics` is for an
     engine with no estate (a rehearsal without a run root, a harness), and
-    one that disagrees with the pin is a caller bug, refused."""
+    one that disagrees with the pin is a caller bug, refused. So is a
+    scheduler built under another calendar switch (DL-259): its extended
+    calendars would fire under one reading while the period records
+    another."""
     if estate is None:
-        return semantics
-    pinned = switches_of(estate.manifest.runtime_profile)
-    if semantics is not None and semantics != pinned:
-        raise EngineError(
-            f"semantic switches {semantics} disagree with the period's pin {pinned}"
-            " (runner-design ss8a)"
-        )
-    return pinned
+        switches = semantics or DEFAULT_SWITCHES
+    else:
+        switches = switches_of(estate.manifest.runtime_profile)
+        if semantics is not None and semantics != switches:
+            raise EngineError(
+                f"semantic switches {semantics} disagree with the period's pin {switches}"
+                " (runner-design ss8a)"
+            )
+    if scheduler is not None:
+        # only the switches the scheduler reads: an embedder's scheduler
+        # built under another `ice-lookback` fires the same ticks
+        for name in CALENDAR_SWITCHES:
+            if scheduler.semantics.value(name) != switches.value(name):
+                raise EngineError(
+                    f"the scheduler compiled its calendars under {name}="
+                    f"{scheduler.semantics.value(name)}, the engine runs"
+                    f" {switches.value(name)} (runner-design ss8a)"
+                )
+    return switches
 
 
 class Engine:
@@ -405,7 +420,7 @@ class Engine:
             carried=carried,
             default_tz=default_tz,
             tz_aliases=tz_aliases,
-            semantics=_engine_switches(estate, semantics),
+            semantics=_engine_switches(estate, semantics, scheduler),
         )
         #: concurrency-model ss2/ss8: the execution host this engine dispatches
         #: to. One engine per run root owns one local executor; machine names

@@ -46,8 +46,10 @@ from dsl41.period import (
     runtime_profile_from_cli,
     stage_manifest,
     switches_of,
+    wal_path,
     write_period_manifest,
 )
+from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.runner_history import RunHistoryError, replay_trace
@@ -796,6 +798,290 @@ def test_fw_existence_reaches_the_adapter_from_the_pinned_profile(tmp_path: Path
 
     assert asyncio.run(wire(RuntimeProfile(semantics={"fw-existence": "immediate"}))) == "immediate"
     assert asyncio.run(wire(RuntimeProfile())) == "stable"
+
+
+# ------------------------------------------------ wekr-first-week (DL-259)
+
+PARTIAL = {"wekr-first-week": "partial"}
+BOTH = {"ice-lookback": "ordinary", "wekr-first-week": "partial"}
+
+#: Two calendared jobs, one on a WEKR calendar and one on a plain one.
+_WEKR_JIL = (
+    "extended_calendar: wk\ncondition: WEKR1#02\n\n"
+    "extended_calendar: plain\ncondition: MON\n\n"
+    "insert_job: wj\njob_type: c\nmachine: m1\ncommand: x\n"
+    'date_conditions: 1\nrun_calendar: wk\nstart_times: "08:00"\n\n'
+    "insert_job: pj\njob_type: c\nmachine: m1\ncommand: y\n"
+    'date_conditions: 1\nrun_calendar: plain\nstart_times: "08:00"\n'
+)
+
+
+def test_the_wekr_default_is_dsl41_s_first_full_week() -> None:
+    switch = semantics.REGISTRY["wekr-first-week"]
+    assert switch.values == ("first-full", "partial")
+    assert switch.default == "first-full"
+    assert switch.autosys == "unknown"
+
+
+def test_wekr_first_week_affects_exactly_the_calendars_with_a_wekr_token() -> None:
+    entry = semantics.REGISTRY["wekr-first-week"]
+    catalog = lower_source(_WEKR_JIL)
+    assert {name for name, cal in catalog.calendars.items() if entry.affects_calendar(cal)} == {
+        "wk"
+    }
+    assert not any(entry.affects(job, catalog) for job in catalog.jobs.values())
+    ice = semantics.REGISTRY["ice-lookback"]
+    assert not any(ice.affects_calendar(cal) for cal in catalog.calendars.values())
+
+
+def test_a_wekr_switch_flip_refuses_a_running_job_on_a_wekr_calendar() -> None:
+    """ss10.2, DL-259: the flip moves `wk`'s week 2 from January 13-19 2014
+    to January 6-12, so the job on it reaches the switch through its
+    calendar and a running one is refused. The job on a calendar with no
+    WEKR token does not reach the switch and carries."""
+    catalog = lower_source(_WEKR_JIL)
+    running = CarriedJob(row=JobRuntime(status="RUNNING", status_at=T0))
+    result = classify(
+        closing=Baseline(catalog=catalog, profile=RuntimeProfile()),
+        opening=Baseline(catalog=catalog, profile=RuntimeProfile(semantics=PARTIAL)),
+        carried=CarriedState(jobs={"wj": running, "pj": running}, now=T0),
+    )
+    node = SWITCH + "wekr-first-week"
+    assert node in result.changed_nodes
+    assert result.by_job["wj"].verdict == "R"
+    assert result.by_job["wj"].changed == (node,)
+    assert result.by_job["pj"].verdict == "carry"
+    assert result.by_job["pj"].changed == ()
+
+
+def test_a_wekr_respelling_across_a_boundary_carries_a_running_job() -> None:
+    """`WEKRMon#02` and `WEKR1#2` are one calendar (DL-259), so a boundary
+    that only respells the anchor and the padding moves nothing."""
+    running = CarriedJob(row=JobRuntime(status="RUNNING", status_at=T0))
+    result = classify(
+        closing=Baseline(catalog=lower_source(_WEKR_JIL), profile=RuntimeProfile()),
+        opening=Baseline(
+            catalog=lower_source(_WEKR_JIL.replace("WEKR1#02", "WEKRMon#2")),
+            profile=RuntimeProfile(),
+        ),
+        carried=CarriedState(jobs={"wj": running}, now=T0),
+    )
+    assert result.by_job["wj"].verdict == "carry"
+    assert "calendar:wk" not in result.changed_nodes
+
+
+def test_the_scheduler_compiles_wekr_calendars_under_its_switches() -> None:
+    """The scheduler's first tick for WEKR1#02 in 2014: Monday January 13
+    under the default, Monday January 6 under `partial`."""
+    catalog = lower_source(_WEKR_JIL)
+    start = datetime(2014, 1, 1)
+    first = {}
+    for switches in (None, PARTIAL):
+        scheduler = Scheduler(catalog, start=start, semantics=semantics.resolve(switches))
+        first[str(switches)] = min(t for t, job in scheduler.upcoming() if job == "wj")
+    assert first[str(None)] == datetime(2014, 1, 13, 8, 0)
+    assert first[str(PARTIAL)] == datetime(2014, 1, 6, 8, 0)
+
+
+def test_an_engine_refuses_a_scheduler_built_under_other_calendar_switches() -> None:
+    """The scheduler fires what its calendars compiled to, and the engine
+    records its own switches: the calendar switches must be one reading
+    (DL-259). A switch the scheduler does not read is not compared."""
+    catalog = lower_source(_WEKR_JIL)
+    scheduler = Scheduler(catalog, start=T0, semantics=semantics.resolve(PARTIAL))
+    with pytest.raises(EngineError, match="wekr-first-week=partial, the engine runs first-full"):
+        Engine(catalog, clock=VirtualClock(T0), adapters={}, scheduler=scheduler)
+    Engine(
+        catalog,
+        clock=VirtualClock(T0),
+        adapters={},
+        scheduler=scheduler,
+        semantics=semantics.resolve(PARTIAL),
+    )
+    Engine(
+        catalog,
+        clock=VirtualClock(T0),
+        adapters={},
+        scheduler=Scheduler(catalog, start=T0),
+        semantics=semantics.resolve(ORDINARY),
+    )
+
+
+def _wekr_genesis(run_root: Path, scheduler_switches: dict[str, str] | None, staged=None):
+    catalog = lower_source(_WEKR_JIL)
+    scheduler = Scheduler(catalog, start=T0, semantics=semantics.resolve(scheduler_switches))
+    return catalog, start_run(
+        catalog,
+        run_root,
+        clock=VirtualClock(start=T0),
+        adapters={"CMD": FakeAdapter(default=None)},
+        scheduler=scheduler,
+        staged=staged,
+    )
+
+
+def _close(live) -> None:
+    asyncio.run(live.shutdown())
+    live.journal.close()
+
+
+def test_genesis_pins_the_calendar_switch_its_scheduler_compiled_under(tmp_path: Path) -> None:
+    """DL-259: with no staged manifest, genesis reads the calendar switches
+    back from the wired scheduler, like its timezone. It used to pin the
+    default, write the manifest and the log, and only then refuse in the
+    engine, so a retry met an existing log."""
+    run_root = tmp_path / "run"
+    _catalog, live = _wekr_genesis(run_root, PARTIAL)
+    try:
+        assert live.oracle.semantics.wekr_first_week == "partial"
+    finally:
+        _close(live)
+    manifest = read_period_manifest(run_root)
+    assert manifest is not None
+    assert manifest.runtime_profile.semantics == PARTIAL
+
+
+def test_a_staged_profile_that_disagrees_with_the_scheduler_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    """A staged default pin over a `partial` scheduler is profile drift,
+    refused before the manifest and the log exist; a retry with the right
+    pin then opens the period."""
+    run_root = tmp_path / "run"
+    catalog = lower_source(_WEKR_JIL)
+
+    def staged(profile: RuntimeProfile):
+        return stage_manifest(
+            catalog,
+            source_bundle_hash=EMPTY_BUNDLE_HASH,
+            profile=profile,
+            state_machine_version=STATE_MACHINE_VERSION,
+        )
+
+    with pytest.raises(EngineError, match="disagrees with the engine's wiring on semantics"):
+        _wekr_genesis(run_root, PARTIAL, staged(RuntimeProfile()))
+    assert not (period_dir(run_root, 1) / "manifest.json").exists()
+    assert not wal_path(run_root, 1).exists()
+    _catalog, live = _wekr_genesis(run_root, PARTIAL, staged(RuntimeProfile(semantics=PARTIAL)))
+    _close(live)
+    manifest = read_period_manifest(run_root)
+    assert manifest is not None and manifest.runtime_profile.semantics == PARTIAL
+
+
+def test_a_resume_with_a_scheduler_off_the_pin_refuses_before_the_leader_record(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    catalog, live = _wekr_genesis(run_root, None)
+    _close(live)
+    before = read_journal(estate_wal(run_root))
+    with pytest.raises(EngineError, match="runtime-profile mismatch on semantics"):
+        asyncio.run(
+            resume_run(
+                catalog,
+                run_root,
+                clock=VirtualClock(start=T0 + timedelta(minutes=1)),
+                adapters={"CMD": FakeAdapter(default=None)},
+                scheduler=Scheduler(catalog, start=T0, semantics=semantics.resolve(PARTIAL)),
+            )
+        )
+    assert read_journal(estate_wal(run_root)) == before
+
+
+def test_run_without_a_staged_bundle_wires_and_pins_the_calendar_switch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_serve_run` with no parsed sources stages nothing; `wire_from_profile`
+    builds the scheduler under the profile's switches, and genesis pins
+    what it built."""
+    from dsl41 import runner_startup
+    from dsl41.cli_run import _serve_run
+
+    real_start_run = runner_startup.start_run
+    seen: dict[str, object] = {}
+
+    def genesis_then_stop(*args: object, **kwargs: object):
+        live = real_start_run(*args, **kwargs)  # type: ignore[arg-type]
+        seen["scheduler"] = live.scheduler.semantics
+        seen["engine"] = live.oracle.semantics
+        live.journal.close()
+        raise EngineError("pin test: stop before the loop")
+
+    monkeypatch.setattr(runner_startup, "start_run", genesis_then_stop)
+    run_root = tmp_path / "root"
+    profile = RuntimeProfile(semantics=BOTH)
+    catalog = lower_source(_WEKR_JIL + "\n" + _ICED_JIL)
+    with pytest.raises(EngineError, match="stop before the loop"):
+        asyncio.run(_serve_run(catalog, run_root, False, [], profile=profile))
+    assert seen == {"scheduler": semantics.resolve(BOTH), "engine": semantics.resolve(BOTH)}
+    manifest = read_period_manifest(run_root)
+    assert manifest is not None and manifest.runtime_profile.semantics == BOTH
+
+
+@pytest.mark.parametrize("claimed", [False, True])
+def test_a_rehearse_root_pins_every_switch_staged_or_not(tmp_path: Path, claimed: bool) -> None:
+    """A fresh root stages the launch options; a root holding only the
+    sentinel stages nothing, and genesis pins the launch options instead.
+    Either way both switches are pinned and the oracle runs `ordinary`:
+    the iced producer's f(prod, 0) reads false and `cons` never starts.
+    The unstaged path used to pin only the calendar switch."""
+    from dsl41.boundary import claim_root
+
+    run_root = tmp_path / "run"
+    if claimed:
+        run_root.mkdir()
+        claim_root(run_root)
+    result = _rehearse(
+        tmp_path,
+        "--semantics",
+        "ice-lookback=ordinary",
+        "--semantics",
+        "wekr-first-week=partial",
+        "--run-root",
+        str(run_root),
+    )
+    assert result.exit_code == 0, result.output
+    assert "cons runs=0" in result.stdout
+    manifest = read_period_manifest(run_root)
+    assert manifest is not None and manifest.runtime_profile.semantics == BOTH
+
+
+def test_a_rehearse_rerun_over_a_claimed_root_pins_the_calendar_switch(tmp_path: Path) -> None:
+    """A root holding only the genesis sentinel (a crash before the log) is
+    not unused, so the rehearsal stages nothing and genesis completes it.
+    The pin is the calendar switch the rehearsal's scheduler runs."""
+    from dsl41.boundary import claim_root
+
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    claim_root(run_root)
+    jil = tmp_path / "wekr.jil"
+    jil.write_text(_WEKR_JIL)
+    scenario = tmp_path / "scenario.json"
+    scenario.write_text(json.dumps({"events": []}))
+    result = CliRunner().invoke(
+        app,
+        [
+            "rehearse",
+            str(jil),
+            "--scenario",
+            str(scenario),
+            "--start",
+            "2014-01-06T00:00:00",
+            "--hours",
+            "12",
+            "--format",
+            "summary",
+            "--semantics",
+            "wekr-first-week=partial",
+            "--run-root",
+            str(run_root),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "wj runs=1" in result.stdout  # January 6 2014 is in week 2 under `partial`
+    manifest = read_period_manifest(run_root)
+    assert manifest is not None and manifest.runtime_profile.semantics == PARTIAL
 
 
 # ------------------------------------------------------------------ the CLI

@@ -760,6 +760,7 @@ async def _serve_run(
                 lock=lock,
                 staged=staged,
                 anchor_dir=anchor_dir,
+                launched=profile,
             )
         if client is not None:
             # ss8's supervisor clauses at the seal (PR-27): the boundary needs
@@ -1071,7 +1072,12 @@ def _emit_cadence_check(
     }
     graph = derive_graph(catalog)
     ticks = scheduled_ticks(
-        catalog, start=start_dt, horizon=horizon, default_tz=timezone, tz_aliases=tz_aliases
+        catalog,
+        start=start_dt,
+        horizon=horizon,
+        default_tz=timezone,
+        tz_aliases=tz_aliases,
+        semantics=engine.oracle.semantics,
     )
     bounds = expected_bounds(
         catalog,
@@ -1329,7 +1335,14 @@ def rehearse(
             raise typer.Exit(refuse(exc)) from exc
         adapter, parked_fw, no_success = check_adapter(catalog, adapter)
     clock = VirtualClock(start_dt)
-    scheduler = Scheduler(catalog, start=start_dt, default_tz=timezone, tz_aliases=tz_aliases)
+    switches = resolve_switches(overrides)
+    scheduler = Scheduler(
+        catalog,
+        start=start_dt,
+        default_tz=timezone,
+        tz_aliases=tz_aliases,
+        semantics=switches,
+    )
     adapters = {"CMD": adapter, "FW": adapter}
     try:
         if run_root is not None:
@@ -1339,15 +1352,11 @@ def rehearse(
             # claims a period it did not run (ss2.1). Staged only for a
             # FRESH root: an existing journal is start_run's refusal to
             # make, and nothing is written on the way to it.
+            launched = runtime_profile_from_cli(
+                timezone=timezone, tz_aliases=tz_aliases, semantics=overrides
+            )
             staged = (
-                stage_period(
-                    run_root,
-                    parsed,
-                    catalog,
-                    runtime_profile_from_cli(
-                        timezone=timezone, tz_aliases=tz_aliases, semantics=overrides
-                    ),
-                )
+                stage_period(run_root, parsed, catalog, launched)
                 if root_is_unused(run_root)
                 else None
             )
@@ -1358,6 +1367,9 @@ def rehearse(
                 adapters=adapters,
                 scheduler=scheduler,
                 staged=staged,
+                # a root holding only the sentinel stages nothing; genesis
+                # then pins the launch options, every switch included
+                launched=launched,
             )
         else:
             engine = Engine(
@@ -1365,7 +1377,7 @@ def rehearse(
                 clock=clock,
                 adapters=adapters,
                 scheduler=scheduler,
-                semantics=resolve_switches(overrides),
+                semantics=switches,
             )
     except EngineError as exc:
         raise typer.Exit(refuse(exc)) from exc

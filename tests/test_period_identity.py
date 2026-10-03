@@ -405,20 +405,10 @@ def test_pr15_runtime_hash_moves_for_every_field(field: str) -> None:
 #: computed, so widening this set is a decision somebody wrote down.
 _INHERITED_FIELDS: frozenset[str] = frozenset({"retry_horizon_us"})
 
-#: Fields deliberately placed in BOTH the wired and the declared group
-#: (DL-258): `semantics` holds one independent switch per entry, and
-#: `fw-existence` is read back from the wired FW adapter -- the same
-#: reasoning as `fw_default_interval_us` -- while every other switch (today,
-#: `ice-lookback`) has no wired component and stays purely declared. Listed
-#: rather than inferred, so widening it past `semantics` is a decision
-#: somebody wrote down, exactly like `_INHERITED_FIELDS`.
-_MIXED_FIELDS: frozenset[str] = frozenset({"semantics"})
-
 
 def test_every_profile_field_is_wired_declared_or_deliberately_inherited() -> None:
-    """`_derive_runtime_profile`'s partition is exhaustive over the model,
-    and its three groups do not overlap except at `_MIXED_FIELDS` (DL-152,
-    DL-258).
+    """`_derive_runtime_profile`'s partition is exhaustive over the model
+    and its three groups do not overlap (DL-152).
 
     The derived profile is what the runtime gate compares against the pin,
     so a field nobody placed inherits the pin FOR EVER and can never
@@ -439,15 +429,7 @@ def test_every_profile_field_is_wired_declared_or_deliberately_inherited() -> No
     declared = set(runner_startup._UNWIRED_FIELDS)
     groups = (wired, declared, set(_INHERITED_FIELDS))
     placed = [name for group in groups for name in group]
-    overlap_free = [name for name in placed if name not in _MIXED_FIELDS]
-    assert len(overlap_free) == len(set(overlap_free)), (
-        f"a field is in two groups: {sorted(overlap_free)}"
-    )
-    for name in _MIXED_FIELDS:
-        assert placed.count(name) == 2, (
-            f"{name}: expected exactly wired+declared ({placed.count(name)} found) -- update"
-            " _MIXED_FIELDS if this field's split changed"
-        )
+    assert len(placed) == len(set(placed)), f"a field is in two groups: {sorted(placed)}"
     assert set(placed) == set(RuntimeProfile.model_fields), (
         "every RuntimeProfile field must be wired, declared or listed as inherited:"
         f" unplaced {sorted(set(RuntimeProfile.model_fields) - set(placed))},"

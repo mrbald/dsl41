@@ -101,9 +101,10 @@ TZ_BASIS: Final = "tz:basis"
 #: `semantics` is placed per SWITCH, not per field (DL-252): each switch
 #: is a node of its own (`SWITCH` + name, valued at its effective value),
 #: and a job depends on it exactly when the registry entry's `affects`
-#: says so. A flip can change a run in flight -- a running box whose
-#: `box_success` reads a lookback atom on an iced job completes under one
-#: reading and not the other -- so it reaches those jobs and no others.
+#: says so, or through a calendar its `affects_calendar` names (DL-259).
+#: A flip can change a run in flight -- a running box whose `box_success`
+#: reads a lookback atom on an iced job completes under one reading and not
+#: the other -- so it reaches those jobs and no others.
 PROFILE_SCHEDULED: Final = ("default_tz", "tz_aliases")
 PROFILE_CMD: Final = (
     "as_machine",
@@ -444,7 +445,7 @@ def _node_values(side: Baseline) -> dict[str, Any]:
         values[CALENDAR + name] = (
             calendar.kind,
             _calendar_dates(calendar),
-            semantic_key(calendar, catalog),
+            semantic_key(calendar, catalog, switches_of(profile)),
         )
     for name, cycle in catalog.cycles.items():
         # autocal's `_period_of` walks the PERIODS and nothing else: the
@@ -573,6 +574,11 @@ class ClassificationGraph:
             for component in machine.members:
                 self._edge(MACHINE + name, MACHINE + component.name)
         for name, calendar in catalog.calendars.items():
+            # (9) the semantic switches whose reading changes this
+            # calendar's days; a job reaches them through its calendar edge
+            for switch_name, entry in SWITCH_REGISTRY.items():
+                if entry.affects_calendar(calendar):
+                    self._edge(CALENDAR + name, SWITCH + switch_name)
             holcal = _named_ref(calendar.attrs, "holcal")
             if holcal is not None:
                 self._edge(CALENDAR + name, CALENDAR + holcal)

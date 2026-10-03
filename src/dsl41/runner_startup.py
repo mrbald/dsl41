@@ -133,14 +133,16 @@ from dsl41.runner_ledger import (
     next_epoch,
 )
 from dsl41.runner_scheduler import Scheduler
+from dsl41.semantics import CALENDAR_SWITCHES, check_overrides
 
 
-#: Profile fields NO wired object can report: they act in preflight, over
-#: the catalog, or (the semantic switches, DL-252) inside the oracle, which
-#: reads them from the pin itself, and never on an adapter or a scheduler.
-#: They inherit the pin unless the launcher DECLARES them -- see
-#: `_derive_runtime_profile`.
-_UNWIRED_FIELDS: tuple[str, ...] = ("as_machine", "machine_policy", "semantics")
+#: Profile fields NO wired object can report: they act in preflight or over
+#: the catalog, and never on an adapter or a scheduler. They inherit the pin
+#: unless the launcher DECLARES them -- see `_derive_runtime_profile`.
+#: `semantics` is wired: the scheduler reports its calendar switches and a
+#: wired FW adapter `fw-existence`; the rest are declared or inherited the
+#: same way (DL-252, DL-258, DL-259).
+_UNWIRED_FIELDS: tuple[str, ...] = ("as_machine", "machine_policy")
 
 
 def _derive_runtime_profile(
@@ -168,16 +170,13 @@ def _derive_runtime_profile(
     pinned others (DL-151). A caller that declares nothing keeps the old
     inheritance, because it has said nothing to hold to the pin.
 
-    `fw-existence`, inside `semantics`, is the one switch with a wired
-    component to read back from -- `_resume_watch` and the live adapter both
-    decide completeness from `FileWatcherAdapter.existence`, not from the
-    profile (DL-258). So it is read back here, like `fw_default_interval_us`,
-    OVER whatever `declared` or `base` said for it: a caller that wires an
-    adapter disagreeing with its own declared switch, or with the pin, must
-    be refused by the drift gate below rather than silently believed."""
+    The semantic switches start from `declared`, else `base` (DL-252). The
+    ones a wired component acts on are read back over that: the calendar
+    switches the scheduler compiled under (DL-259) and `fw-existence` from a
+    wired `FileWatcherAdapter` (DL-258). So wiring that disagrees with its
+    own declaration, or with the pin, is refused by the drift gate."""
     from dsl41.period import RuntimeProfile, to_us
     from dsl41.runner_adapters import FileWatcherAdapter, LocalCommandAdapter
-    from dsl41.semantics import check_overrides
 
     values: dict[str, object] = dict((base or RuntimeProfile()).model_dump())
     if declared is not None:
@@ -186,6 +185,13 @@ def _derive_runtime_profile(
     if scheduler is not None:
         values["default_tz"] = scheduler.default_tz or "UTC"
         values["tz_aliases"] = dict(scheduler.tz_aliases)
+    # the semantic switches: declared or inherited like the machine
+    # identity (DL-252), with the calendar switches the scheduler compiled
+    # under read back like its timezone (DL-259)
+    switches = dict((declared or base or RuntimeProfile()).semantics)
+    if scheduler is not None:
+        for name in CALENDAR_SWITCHES:
+            switches[name] = scheduler.semantics.value(name)
     values["deadman_us"] = None if deadman_s is None else to_us(deadman_s)
     cmd = adapters.get("CMD")
     if isinstance(cmd, SupervisedCommandAdapter):
@@ -198,10 +204,9 @@ def _derive_runtime_profile(
     fw = adapters.get("FW")
     if isinstance(fw, FileWatcherAdapter):
         values["fw_default_interval_us"] = to_us(float(fw.default_interval_s))
-        semantics_overrides = dict(cast("Mapping[str, str]", values.get("semantics") or {}))
-        semantics_overrides.pop("fw-existence", None)
-        semantics_overrides.update(check_overrides({"fw-existence": fw.existence}))
-        values["semantics"] = semantics_overrides
+        # the adapter decides FW completeness, not the profile (DL-258)
+        switches["fw-existence"] = fw.existence
+    values["semantics"] = check_overrides(switches)
     # the spawn window is a module constant, not an adapter knob: derive it
     # from the value the machine actually runs, so a staged 0 cannot pin a
     # fiction over the real five seconds
@@ -311,6 +316,9 @@ async def wire_from_profile(
             # than re-deciding here (DL-163); the offline sealer closing an
             # estate opened that way was the bug (DL-151).
             tz_aliases=tz_aliases_of(profile),
+            # the extended calendars compile under the period's switches,
+            # the ones its engine runs (DL-259)
+            semantics=switches_of(profile),
         )
     except BaseException:
         # the LEASE is this function's until it hands back a `Wiring`, and
@@ -430,6 +438,7 @@ def start_run(
     lock: LeaderLock | None = None,
     staged: StagedManifest | None = None,
     anchor_dir: Path | None = None,
+    launched: RuntimeProfile | None = None,
 ) -> Engine:
     """ss1.1's GENESIS TRANSACTION, in its order, plus an Engine wired to
     what it created.
@@ -459,7 +468,10 @@ def start_run(
     The manifest is installed before the log opens, and both are derived
     from ONE object so the two cannot disagree (PR-22). `staged` is what
     the launcher pinned -- catalog hash, bundle address, runtime profile; a
-    caller with none gets the default profile over the empty bundle.
+    caller with none gets `launched` (the launch options, the default
+    profile when absent) over the empty bundle, with the wired fields read
+    back as always. Without it an unstaged genesis pinned the default
+    semantic switches whatever the launcher asked (DL-259).
     `anchor_dir` defaults to the root's sibling (`boundary.default_anchor_dir`),
     which is outside every archivable root, as ss1.1 requires. A failure
     here releases both locks, because a caller that got this far and was
@@ -501,6 +513,7 @@ def start_run(
             hold_open=hold_open,
             deadman_s=deadman_s,
             staged=staged,
+            launched=launched,
         )
     except BaseException:
         # a refused genesis holds nothing (same rule as the claim above):
@@ -525,6 +538,7 @@ def _finish_genesis(
     hold_open: bool,
     deadman_s: float | None,
     staged: StagedManifest | None,
+    launched: RuntimeProfile | None,
 ) -> Engine:
     """ss1.1 steps 4-6 plus the Engine, split out so `start_run` can pair
     the acquire with a release on every failure path."""
@@ -534,7 +548,7 @@ def _finish_genesis(
     _require_adapters(catalog, adapters, "genesis")
     _require_scheduler(catalog, scheduler, "genesis")
     derived = _derive_runtime_profile(
-        scheduler, adapters, deadman_s, base=staged.runtime_profile if staged else None
+        scheduler, adapters, deadman_s, base=staged.runtime_profile if staged else launched
     )
     if staged is not None:
         if staged.state_machine_version != STATE_MACHINE_VERSION:

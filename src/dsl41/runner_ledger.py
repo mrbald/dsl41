@@ -103,7 +103,11 @@ from dsl41.runner_clock import EngineError
 #: SUCCESS only, held units outlive the run until RELEASE_RESOURCE or the
 #: job's next run, and FORCE_STARTJOB of a holder starts on them, so a
 #: replay with resource demand can derive different state.
-STATE_MACHINE_VERSION = 14
+#: 15 since DL-259: a WEKR token selects a week of the year, not a day of
+#: the week, and the wekr-first-week switch places week 1, so autocal's
+#: compiled day sets and the boundary classification `attest` re-derives
+#: from them can differ from v14.
+STATE_MACHINE_VERSION = 15
 
 LOCK_NAME = "leader.lock"
 

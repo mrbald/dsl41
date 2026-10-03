@@ -14,8 +14,15 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from dsl41.autocal import CalendarRuleError, compile_calendar, standard_days, standard_rows
+from dsl41.autocal import (
+    CalendarRuleError,
+    compile_calendar,
+    semantic_key,
+    standard_days,
+    standard_rows,
+)
 from dsl41.ir import CalendarIR, CatalogIR, CycleIR, lower_source
+from dsl41.semantics import resolve
 
 # ------------------------------------------------------------ builders
 
@@ -134,14 +141,159 @@ def test_sem37_weekdays_auto_subtracts_holcal() -> None:
 
 def test_sem37_week_anchoring_jan1_and_wekr_override() -> None:
     """[V] weeks begin on Jan 1's weekday (the doc's 2014 example: Jan 1
-    2014 is a Wednesday). The WEKR half pins dsl41's current reading, a
-    recurring weekday. The vendor text also supports a week-of-year
-    reading; open question Q11 (SEM-37) decides between them."""
+    2014 is a Wednesday). A WEKR token moves the week start to its anchor
+    day and selects a whole week of the year (DL-259): `WEKRMon#01` is the
+    first Monday-to-Sunday week of 2014, not every Monday."""
     # WEEKD#1 under the default anchor: every Wednesday of 2014
     default = _days(_ext(conditions=["WEEKD#1"]), date(2014, 1, 6), date(2014, 1, 12))
     assert default == {date(2014, 1, 8)}  # the Wednesday
-    monday = _days(_ext(conditions=["WEKRMon#01"]), date(2014, 1, 6), date(2014, 1, 12))
-    assert monday == {date(2014, 1, 6)}  # the Monday
+    monday = _days(_ext(conditions=["WEKRMon#01"]), date(2014, 1, 1), date(2014, 1, 31))
+    assert monday == _span(date(2014, 1, 6), date(2014, 1, 12))
+
+
+# ------------------------------------- SEM-37: WEKR weeks of the year (DL-259)
+
+PARTIAL = {"wekr-first-week": "partial"}
+
+
+def _span(lo: date, hi: date) -> set[date]:
+    return {lo + timedelta(days=i) for i in range((hi - lo).days + 1)}
+
+
+def _year(token: str, year: int, switches: dict[str, str] | None = None) -> set[date]:
+    """`token`'s days in `year` under `switches` (None: the defaults)."""
+    cal = _ext(conditions=[token])
+    compiled = compile_calendar(cal, _catalog(ext=cal), resolve(switches))
+    return set(compiled.days_between(date(year, 1, 1), date(year, 12, 31)))
+
+
+def test_sem37_wekr_2014_first_full_week_is_week_one_by_default() -> None:
+    """The vendor's 2014 example: January 1 is a Wednesday and `WEKR1` asks
+    for Monday weeks. Under the default `first-full`, week 1 starts on the
+    first Monday, January 6, and January 1-5 are in no week. The week that
+    holds December 31 is week 52 and ends on December 31; there is no
+    week 53 in 2014."""
+    assert _year("WEKR1#01", 2014) == _span(date(2014, 1, 6), date(2014, 1, 12))
+    assert _year("WEKR1#02", 2014) == _span(date(2014, 1, 13), date(2014, 1, 19))
+    assert _year("WEKR1#52", 2014) == _span(date(2014, 12, 29), date(2014, 12, 31))
+    assert _year("WEKR1#53", 2014) == set()
+
+
+def test_sem37_wekr_2014_partial_first_week_shifts_every_number() -> None:
+    """`wekr-first-week=partial`: week 1 is January 1-5 2014, the days
+    before the first Monday, so every later week number is one higher than
+    under the default, and the week that holds December 31 is week 53."""
+    assert _year("WEKR1#01", 2014, PARTIAL) == _span(date(2014, 1, 1), date(2014, 1, 5))
+    assert _year("WEKR1#02", 2014, PARTIAL) == _span(date(2014, 1, 6), date(2014, 1, 12))
+    assert _year("WEKR1#52", 2014, PARTIAL) == _span(date(2014, 12, 22), date(2014, 12, 28))
+    assert _year("WEKR1#53", 2014, PARTIAL) == _span(date(2014, 12, 29), date(2014, 12, 31))
+
+
+@pytest.mark.parametrize("switches", [None, PARTIAL])
+def test_sem37_wekr_day_name_and_digit_anchors_agree(switches: dict[str, str] | None) -> None:
+    """12.x spells the anchor as a day name, 24.2 as a digit with Monday as
+    1; both spellings, in any case, are one anchor."""
+    digit = _year("WEKR1#02", 2014, switches)
+    assert digit
+    assert _year("WEKRMon#02", 2014, switches) == digit
+    assert _year("wekrmon#02", 2014, switches) == digit
+    for number, name in enumerate(("Tue", "Wed", "Thu", "Fri", "Sat", "Sun"), start=2):
+        assert _year(f"WEKR{number}M01", 2014, switches) == _year(f"WEKR{name}M01", 2014, switches)
+
+
+@pytest.mark.parametrize("switches", [None, PARTIAL])
+def test_sem37_wekr_on_january_1_s_weekday_is_week_of_year(
+    switches: dict[str, str] | None,
+) -> None:
+    """With the anchor on January 1's weekday (Wednesday in 2014, so 3),
+    both readings put week 1 at January 1-7, and a WEKR token selects the
+    same days as the plain WEEK token, forward and backward."""
+    assert _year("WEKR3#02", 2014, switches) == _year("WEEK#02", 2014)
+    assert _year("WEKR3#02", 2014, switches) == _span(date(2014, 1, 8), date(2014, 1, 14))
+    for n in (1, 27, 52, 53):
+        assert _year(f"WEKR3#{n:02d}", 2014, switches) == _year(f"WEEK#{n:02d}", 2014)
+        assert _year(f"WEKR3M{n:02d}", 2014, switches) == _year(f"WEEKM{n:02d}", 2014)
+
+
+def test_sem37_wekr_backward_counts_from_the_week_holding_december_31() -> None:
+    """`WEKR7Mnn`, Sunday weeks in 2014: M01 is the week that holds
+    December 31, cut at December 31, under both readings. Counting back
+    agrees until it reaches January: M53 is the partial first week under
+    `partial` and no week at all under `first-full`. `#L` reads as M01."""
+    for switches in (None, PARTIAL):
+        last = _year("WEKR7M01", 2014, switches)
+        assert last == _span(date(2014, 12, 28), date(2014, 12, 31))
+        assert _year("WEKR7#L", 2014, switches) == last
+        assert _year("WEKR7M02", 2014, switches) == _span(date(2014, 12, 21), date(2014, 12, 27))
+    assert _year("WEKR7M52", 2014) == _span(date(2014, 1, 5), date(2014, 1, 11))
+    assert _year("WEKR7M53", 2014) == set()
+    assert _year("WEKR7M53", 2014, PARTIAL) == _span(date(2014, 1, 1), date(2014, 1, 4))
+
+
+def test_sem37_wekr_x_excludes_the_week() -> None:
+    """`WEKRnXnn` subtracts the week from the rest of the rule list; alone,
+    from DAILY. The excluded week follows the switch."""
+    year = _span(date(2014, 1, 1), date(2014, 12, 31))
+    assert _year("WEKR1X02", 2014) == year - _span(date(2014, 1, 13), date(2014, 1, 19))
+    assert _year("WEKR1X02", 2014, PARTIAL) == year - _span(date(2014, 1, 6), date(2014, 1, 12))
+
+
+@pytest.mark.parametrize("switches", [None, PARTIAL])
+def test_sem37_wekr_year_starting_on_the_anchor_day(switches: dict[str, str] | None) -> None:
+    """January 1 2018 is a Monday, so `WEKR1` weeks have no partial first
+    week and the two readings agree. December 31 2018, also a Monday, is
+    week 53 on its own."""
+    assert _year("WEKR1#01", 2018, switches) == _span(date(2018, 1, 1), date(2018, 1, 7))
+    assert _year("WEKR1#53", 2018, switches) == {date(2018, 12, 31)}
+    assert _year("WEKR1M01", 2018, switches) == {date(2018, 12, 31)}
+    assert _year("WEKR1M02", 2018, switches) == _span(date(2018, 12, 24), date(2018, 12, 30))
+
+
+def test_sem37_semantic_key_reads_one_spelling_per_meaning() -> None:
+    """The classifier's calendar key (DL-259): a day-name or digit WEKR
+    anchor and a padded or unpadded ordinal are one key. A token the parser
+    refuses keeps its own spelling."""
+
+    def key(*conditions: str) -> tuple[object, ...]:
+        cal = _ext(conditions=list(conditions))
+        return semantic_key(cal, _catalog(ext=cal))
+
+    assert key("WEKRMon#02") == key("WEKR1#2") == key("wekr1#02")
+    assert key("XWEKRSunM01") == key("xwekr7m1")
+    assert key("MNTHD#05 & WEKR3X02") == key("mnthd#5 & WEKRWedX2")
+    assert key("WEKRMon#02") != key("WEKRTue#02")
+    assert key("MON#01") != key("MON#1")  # MON#01 is refused, so not canonical
+
+
+def test_sem37_semantic_key_compiles_under_the_switches_it_is_given() -> None:
+    """The holiday-shielding reach compiles the calendar. January 1 2014 is
+    a holiday and in no WEKR1 week under `first-full`, so `holiday: S`
+    shields nothing; under `partial` it is in week 1 and S shields it from
+    the non_workday walk."""
+    hols = _std("hols", "01/01/2014")
+    cal = _ext(conditions=["WEKR1#01"], holcal="hols", holiday="S", non_workday="W")
+    catalog = _catalog(ext=cal, hols=hols)
+    default = semantic_key(cal, catalog)
+    partial = semantic_key(cal, catalog, resolve(PARTIAL))
+    assert default[2] is None
+    assert partial[2] == "s"
+    assert default[:2] == partial[:2] and default[3:] == partial[3:]
+
+
+@pytest.mark.parametrize(
+    ("token", "message"),
+    [
+        ("WEKR0#01", "anchor 0 outside 1..7"),
+        ("WEKR8#01", "anchor 8 outside 1..7"),
+        ("WEKR1#00", "ordinal 0 outside 1..53"),
+        ("WEKR1#54", "ordinal 54 outside 1..53"),
+        ("WEKRMonM54", "ordinal 54 outside 1..53"),
+    ],
+)
+def test_sem37_wekr_refuses_an_anchor_or_ordinal_out_of_range(token: str, message: str) -> None:
+    cal = _ext(conditions=[token])
+    with pytest.raises(CalendarRuleError, match=message):
+        compile_calendar(cal, _catalog(ext=cal))
 
 
 def test_sem37_case_insensitive_and_word_operators() -> None:

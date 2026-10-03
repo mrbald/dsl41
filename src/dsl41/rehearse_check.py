@@ -257,12 +257,15 @@ def scheduled_ticks(
     horizon: datetime,
     default_tz: str | None = None,
     tz_aliases: Mapping[str, str] | None = None,
+    semantics: SemanticSwitches | None = None,
 ) -> dict[str, int]:
     """Per-job tick counts in [start, horizon] from a FRESH Scheduler with
     the engine's own construction arguments: reset(start) is tick-at-start
     inclusive and run_until_quiescent is at-or-before-horizon inclusive, so
     the windows match by construction."""
-    sched = Scheduler(catalog, start=start, default_tz=default_tz, tz_aliases=tz_aliases)
+    sched = Scheduler(
+        catalog, start=start, default_tz=default_tz, tz_aliases=tz_aliases, semantics=semantics
+    )
     counts: dict[str, int] = {}
     for ev in sched.pop_due(horizon):
         job = str(ev.payload["job"])
@@ -1172,7 +1175,9 @@ def play_once(
     on the result -- the check's own finding; every other EngineError
     propagates as the shell failure it is."""
     clock = VirtualClock(start)
-    scheduler = Scheduler(catalog, start=start, default_tz=default_tz, tz_aliases=tz_aliases)
+    scheduler = Scheduler(
+        catalog, start=start, default_tz=default_tz, tz_aliases=tz_aliases, semantics=semantics
+    )
     adapters = {"CMD": adapter, "FW": adapter}
     engine = Engine(
         catalog, clock=clock, adapters=adapters, scheduler=scheduler, semantics=semantics
