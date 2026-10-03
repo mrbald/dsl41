@@ -911,7 +911,9 @@ Training estate:
 Open questions run on documented defaults marked `# PENDING: <label>` in
 the code. The AutoSys questions Q3c, Q3d, Q6, and Q8b-Q8d need a live
 AutoSys instance; Q6 has no code switch. The resource-manager questions
-Qr2-Qr4 and Qr6 are stated in DL-50; DL-247 narrows Qr2. The UC questions
+Qr2-Qr4 are stated in DL-50; DL-247 narrows Qr2. Qr6 is decided: dsl41
+keeps its default, and the `queued-recheck` switch selects the vendor's
+readings (DL-257). The UC questions
 U1 and U3b need a live controller; U6b lives in the migration report's
 question table. The
 runner questions E5-E10 are in

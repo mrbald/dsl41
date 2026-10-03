@@ -929,7 +929,9 @@ opening with different switches is refused, the same as a changed
 `--timezone`. A new value takes effect at a period boundary, and the
 boundary classifier treats the jobs each switch names as changed: a
 running box whose `box_success` reads a lookback atom is refused, an
-armed job gated on one is carried with a recorded assumption. Replay
+armed job gated on one is carried with a recorded assumption. For
+`queued-recheck`, a queued job is carried with a recorded assumption, and
+a running box with a member that can queue is refused. Replay
 refuses a period whose manifest is missing or is not bound to its
 segment, because it cannot know which switches the engine ran. Only
 explicit overrides are recorded, and a profile with none writes
@@ -947,6 +949,7 @@ rehearsal's own switches.
 | --- | --- | --- | --- | --- |
 | `ice-lookback` | `true`, `ordinary` | `true` | `true` | A condition atom with a lookback qualifier whose predecessor is on ice and not running. `true`: the atom is true, lookback ignored. `ordinary`: the qualifier is dropped and the ordinary on-ice table applies (s, d, n true; f, t, exitcode false). The "condition Attribute" page (AutoSys 24.2) says "If the predecessor job being evaluated for the look-back condition is currently in an ON_ICE status, it always evaluates to true. That is, any look-back evaluation is ignored." `ordinary` extends the Start Conditions on-ice table (SEM-20), which does not separate lookback atoms, to the lookback atom. Q10 stays open. |
 | `renewable-free` | `Y`, `A` | `Y` | `Y` | A renewable resource request (`res_type: R` or none) that states no FREE. `Y`: the units are freed only when the run ends SUCCESS; after FAILURE or TERMINATED the job holds them until `RELEASE_RESOURCE` or its next run. `A`: the units are freed on every completion, dsl41's reading before DL-256. The "resources Attribute" page (AutoSys 24.2) gives FREE's default: "Default: Y", where "Y -- Frees the units only if the job completes successfully". An explicit FREE is not affected. Qr1 is decided. |
+| `queued-recheck` | `0`, `1`, `2` | `0` | `1` | A job that can queue (it names a resource, or a positive priority makes it check machine load) and leaves QUE_WAIT. The values are the vendor's EvaluateQueuedJobStarts (Administrating > Configure a Scheduler, AutoSys 24.2). `0`: it starts without a recheck. `1`: its `condition`, `run_window` and `exclude_calendar` are checked again, but not `run_calendar`, `days_of_week`, `start_times` or `start_mins`. `2`: `run_calendar` or `days_of_week` is checked for the day too. A job that fails goes INACTIVE without starting, its arm is cleared, and its next start time starts it; a member of a running box that fails its condition waits and keeps the box running, the vendor's ACTIVATED. A `run_window` failure takes DL-246's disposition at that instant (the skip, or one deferral to the opening), and a day failure of a job with no start times of its own is deferred to its next eligible window opening, so no job waits for a tick that never comes. The vendor's default is `1`. The owner kept `0`, dsl41's existing behavior: a queued job met its conditions when it started. Qr6 is decided (DL-50, DL-257). The day and window checks use the oracle's zone, which DL-253 aligns with the scheduler's base zone. |
 
 ## 9. Time domains (E2)
 

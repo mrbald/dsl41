@@ -111,7 +111,7 @@ fails the suite.
 | job_attr:chk_files | refused | runner_preflight._execution_input_preflight, DL-240 | - |  |  |  | generic | carried verbatim; never applied; real execution refuses it at preflight; rehearse and compile are unaffected; inert on a BOX (SEM-10) |
 | job_attr:command | supported | runner-design ss6 | - |  |  |  | generic | the shell command the CMD adapter spawns, passed to /bin/sh verbatim |
 | job_attr:condition | supported | SEM-02, SEM-08 | - |  |  |  | generic | the start gate: the job starts on the edge where its condition becomes true |
-| job_attr:condition#queued-no-recheck | provisional | DL-50, oracle.Oracle._readmit | Qr6 | yes |  |  | none | a job admitted out of QUE_WAIT does not re-evaluate its condition, the vendor's EvaluateQueuedJobStarts=0; the vendor default is 1, which re-evaluates the starting conditions other than the day's date check (DL-250) |
+| job_attr:condition#queued-no-recheck | supported | DL-50, DL-257, oracle.Oracle._readmit | - |  |  |  | none | Qr6 decided: the owner's default with a switch. A job admitted out of QUE_WAIT does not re-evaluate its condition, the vendor's EvaluateQueuedJobStarts=0; the vendor default is 1, which re-evaluates the starting conditions other than the day's date check (DL-250). queued-recheck selects 1 or 2 (DL-257) |
 | job_attr:date_conditions | supported | SEM-30 | - |  |  |  | generic | the master switch: the time cluster is honoured only when it is truthy |
 | job_attr:days_of_week | supported | SEM-30, SEM-31 | - |  |  |  | generic | the days a schedule tick may fall on, as two-letter tokens or `all` |
 | job_attr:days_of_week#absent | provisional | SEM-30, runner_scheduler | E10 | yes |  |  | none | a schedule with no days_of_week is read as every day |
@@ -566,7 +566,7 @@ fails the suite.
 
 | id | class | cite | label | marker | protocol | bound | detector | effect |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| timer:deferred_cause | supported | PR-09, oracle.Oracle._schedule_timer | - |  |  |  | generic | the fourth timer shape: a run_window-deferred start replaying its own provenance |
+| timer:deferred_cause | supported | PR-09, oracle.Oracle._schedule_timer | - |  |  |  | generic | the fourth timer shape: a run_window-deferred start replaying its own provenance; with `rescan_run` it resumes queued-recheck's scan for an eligible day instead of attempting a start (DL-257) |
 | timer:must_complete | supported | PR-09, oracle.Oracle._schedule_timer | - |  |  |  | generic | armed by the schedule tick; it raises MUST_COMPLETE_ALARM if the run the tick asked for has not completed (DL-248) |
 | timer:must_start | supported | PR-09, oracle.Oracle._schedule_timer | - |  |  |  | generic | armed by the schedule tick; it raises MUST_START_ALARM if no new run began |
 | timer:term_run_time | supported | PR-09, oracle.Oracle._schedule_timer | - |  |  |  | generic | armed by the start; it TERMINATEs a run still live at the deadline; zero means no limit and arms no timer (DL-241) |
@@ -599,6 +599,9 @@ fails the suite.
 | profile_alt:machine_policy=strict | supported | period-model ss2.1 | - |  |  |  | generic | a job whose machine does not resolve local is refused |
 | profile_alt:semantics.ice-lookback=ordinary | supported | runner-design ss8a, SEM-20, DL-243, DL-252 | - |  |  |  | generic | the qualifier is dropped on a non-live iced predecessor and the ordinary on-ice table applies: s, d, n true; f, t, exitcode false |
 | profile_alt:semantics.ice-lookback=true | supported | runner-design ss8a, SEM-05, DL-252 | - |  |  |  | generic | the default: a lookback-qualified atom on a non-live iced predecessor reads true, every atom kind, lookback ignored |
+| profile_alt:semantics.queued-recheck=0 | supported | runner-design ss8a, DL-50, DL-257 | - |  |  |  | generic | the default: a job leaving QUE_WAIT starts without re-checking its condition, run_window or calendars |
+| profile_alt:semantics.queued-recheck=1 | supported | runner-design ss8a, DL-257 | - |  |  |  | generic | a job leaving QUE_WAIT re-checks its condition, run_window and exclude_calendar; on a failure it goes INACTIVE without starting, its arm cleared. A member of a running box that fails its condition waits unresolved: with no date conditions it starts on its condition's next edge, with them on its next tick in that box run. A run_window failure takes DL-246's skip or deferral; a day failure of a job with no ticks is deferred to its next eligible window opening |
+| profile_alt:semantics.queued-recheck=2 | supported | runner-design ss8a, DL-257 | - |  |  |  | generic | as 1, and a job leaving QUE_WAIT on a day that is not a run day by its run_calendar or days_of_week does not start |
 | profile_alt:semantics.renewable-free=A | supported | runner-design ss8a, DL-50, DL-256 | - |  |  |  | generic | a renewable request with no FREE frees its units on every completion, dsl41's reading before DL-256 |
 | profile_alt:semantics.renewable-free=Y | supported | runner-design ss8a, DL-256 | - |  |  |  | generic | the default and the vendor's: a renewable request with no FREE frees on SUCCESS only and holds its units after FAILURE or TERMINATED |
 

@@ -246,8 +246,17 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
   job's row after the run, until RELEASE_RESOURCE or the job's next run,
   which re-uses them; a depletable's are spent. A FORCE_STARTJOB of a
   FAILURE or TERMINATED holder starts on its held units with no admission
-  check (DL-256). A queued job re-validates box-RUNNING/ice/hold at admission
-  (# PENDING: Qr6 conditions are NOT re-checked). Enforcement of unsized/
+  check (DL-256). A queued job re-validates box-RUNNING/ice/hold at admission.
+  Whether it re-checks its starting conditions is the `queued-recheck`
+  semantic switch, the vendor's EvaluateQueuedJobStarts (DL-257): at the
+  default 0 they are NOT re-checked (Qr6, decided); 1 re-checks the
+  condition, run_window and exclude_calendar; 2 also the day's run_calendar
+  or days_of_week. A job that fails leaves the queue for INACTIVE, its arm
+  cleared, and waits for its next start time; a member of a running box
+  stays unresolved, the ACTIVATED analog. A run_window failure takes
+  DL-246's disposition at that instant, and a day failure of a job the
+  scheduler never ticks is deferred to its next eligible opening, so no
+  job waits for a start that never comes. Enforcement of unsized/
   unknown-res_type/malformed shapes is the runner's preflight (DL-50): the
   oracle models only sizeable buckets, so oracle-direct over an unrefused bad
   catalog runs it unthrottled -- the execution gate is preflight, by design.
@@ -262,6 +271,7 @@ from collections.abc import Callable, Mapping
 from datetime import date, datetime, time as dtime, timedelta, tzinfo
 from typing import Final
 
+from dsl41.autocal import CalendarRuleError, CompiledCalendar, compile_calendar, standard_days
 from dsl41.canon import CanonError, canonical_bytes
 from dsl41.capacity import (
     CapacityPool,
@@ -314,6 +324,12 @@ from dsl41.timezones import (
 #: DELIBERATELY absent (DL-50): a resource-queued job is not running, so n() is
 #: TRUE for it -- and every status/exitcode atom reads false (it never ran).
 _N_FALSE_STATUSES: frozenset[str] = frozenset({"STARTING", "RUNNING"})
+
+#: how far ahead `_next_eligible_opening` looks for an eligible day (DL-257)
+_OPENING_SCAN_DAYS: Final = 2 * 366
+
+#: `date.weekday()` (Monday 0) -> the JIL days_of_week token
+_WEEKDAY_TOKENS: Final = ("mo", "tu", "we", "th", "fr", "sa", "su")
 
 
 class InputBatch:
@@ -404,6 +420,11 @@ DEFERRED_BOX_RUN_KEY: Final = "box_run"
 #: Named once (DL-209) -- `_schedule_timer` admits it, `_dispatch` replays
 #: it, and the coverage register derives the timer domain from the pair.
 DEFERRED_TIMER_KEY: Final = "deferred_cause"
+
+#: A deferred start that resumes `queued-recheck`'s scan for an eligible day
+#: instead of attempting a start (DL-257) carries this key, valued at the
+#: job's run number when the scan stopped at its bound.
+DEFERRED_RESCAN_KEY: Final = "rescan_run"
 
 
 class Oracle:
@@ -505,6 +526,9 @@ class Oracle:
         #: SEM-35 name -> zone, resolved once per name (the ladder walks
         #: the whole zoneinfo database for a city default)
         self._tz_cache: dict[str, tzinfo] = {}
+        #: calendar name -> its days, built on first use by `queued-recheck`
+        #: (DL-257): a standard calendar's day set, or a compiled extended one
+        self._calendars: dict[str, frozenset[date] | CompiledCalendar] = {}
         #: SEM-35's `ujo_timezones` table, as `--timezone-map` supplies it to
         #: the scheduler (DL-62). None means no map, which is a DIFFERENT
         #: resolution than an empty one: the ladder's unique-city default
@@ -591,8 +615,12 @@ class Oracle:
                 # completed by next_open, and the fire would legally start it
                 # again. Filtering on current status would hide a timer that
                 # can still act (DL-46 review, finding rejected with reason).
-                # One staleness IS permanent: a box restart (DL-246).
-                if self._deferral_is_stale(ev) is None:
+                # Two stalenesses ARE permanent: a box restart (DL-246), and
+                # a scan continuation whose job has started since (DL-257).
+                if self._deferral_is_stale(ev) is None and not (
+                    DEFERRED_RESCAN_KEY in ev.payload
+                    and self._rescan_superseded(job, ev.payload[DEFERRED_RESCAN_KEY])
+                ):
                     live.append((due, job, "run_window"))
                 continue
             rt = self.store.job.get(job)
@@ -891,6 +919,9 @@ class Oracle:
                 stale = self._deferral_is_stale(ev)
                 if stale is not None:
                     self._record(job, "START_REFUSED", f"{stale} ({cause})")
+                    return
+                if DEFERRED_RESCAN_KEY in ev.payload:
+                    self._resume_opening_scan(job, ev.payload[DEFERRED_RESCAN_KEY], deferred)
                     return
             refused = self._attempt_start(job, force=force, scheduled=True, cause=cause)
             if refused is not None:
@@ -1607,11 +1638,21 @@ class Oracle:
             return "defer", next_open
         return "skip", None
 
-    def _defer_start(self, job_ir: JobIR, next_open: datetime, cause: str) -> None:
+    def _defer_start(
+        self,
+        job_ir: JobIR,
+        next_open: datetime,
+        cause: str,
+        *,
+        rescan_run: int | None = None,
+        note: str = "outside run_window; closer to next opening -- STARTJOB queued",
+    ) -> None:
         """Queue the SEM-33 deferred STARTJOB at the next opening. A member's
         deferral carries its box's run number, so a box restart makes it
         stale (DL-246)."""
         payload: dict[str, object] = {"job": job_ir.name, DEFERRED_TIMER_KEY: cause}
+        if rescan_run is not None:
+            payload[DEFERRED_RESCAN_KEY] = rescan_run
         box = job_ir.box.box_name
         if box is not None:
             payload[DEFERRED_BOX_KEY] = box
@@ -1628,16 +1669,13 @@ class Oracle:
             and e.payload.get("job") == job_ir.name
             and e.payload.get(DEFERRED_BOX_KEY) == payload.get(DEFERRED_BOX_KEY)
             and e.payload.get(DEFERRED_BOX_RUN_KEY) == payload.get(DEFERRED_BOX_RUN_KEY)
+            and e.payload.get(DEFERRED_RESCAN_KEY) == payload.get(DEFERRED_RESCAN_KEY)
             for due, _, e in self.store.timers()
         )
         if pending:
             return
         self._schedule_timer(next_open, Event(at=next_open, kind="TIMER", payload=payload))
-        self._record(
-            job_ir.name,
-            "RUN_WINDOW_DEFER",
-            f"outside run_window; closer to next opening -- STARTJOB queued ({cause})",
-        )
+        self._record(job_ir.name, "RUN_WINDOW_DEFER", f"{note} ({cause})")
 
     def _deferral_is_stale(self, ev: Event) -> str | None:
         """The refusal reason for a deferred start that no longer belongs to
@@ -1962,12 +2000,13 @@ class Oracle:
 
     def _readmit(self, job: str, *, keep_stopped: bool = False) -> str:
         """One admission attempt for a queued job. Re-validates the guards that
-        can change while queued (ice, box-RUNNING, hold) before the
-        capacity check; conditions are NOT re-checked (# PENDING: Qr6). The capacity
-        check is a fresh start's, so a higher-priority load waiter on the
-        same machine keeps this job queued even when its load fits
-        (DL-247), and so does a higher-priority waiter on a named resource
-        it names (DL-255)."""
+        can change while queued (ice, box-RUNNING, hold) before the capacity
+        check. The capacity check is a fresh start's, so a higher-priority
+        load waiter on the same machine keeps this job queued even when its
+        load fits (DL-247), and so does a higher-priority waiter on a named
+        resource it names (DL-255). A job that fits is leaving the queue; at
+        the default `queued-recheck=0` its conditions are NOT re-checked
+        (Qr6, decided), and otherwise `_queued_recheck` decides (DL-257)."""
         rt = self._runtime(job)
         job_ir = self.catalog.jobs[job]
         if rt.on_ice:
@@ -1982,11 +2021,217 @@ class Oracle:
         vector = self._pool.demand_vector(job_ir)
         if not self._admissible(job_ir, vector, force=False):
             return "waiting"
+        failed = self._queued_recheck(job_ir)
+        if failed is not None:
+            return self._leave_queue_unstarted(job_ir, *failed)
         self.store.dequeue_waiter(job)
         # a held excess freed here is seen by the running scan's next pass
         self._acquire(job, vector)
         self._run(job_ir, cause="resources freed (QUE_WAIT admitted, DL-50)", had_demand=True)
         return "admitted"
+
+    def _queued_recheck(self, job_ir: JobIR) -> tuple[str, str] | None:
+        """Why a job leaving QUE_WAIT must not start, as (check, reason), or
+        None (DL-257). `check` is "day", "window" or "condition". The
+        `queued-recheck` switch is the vendor's EvaluateQueuedJobStarts: 0
+        re-checks nothing; 1 re-checks the starting conditions "other than
+        the date condition check for the day of evaluation" -- run_calendar,
+        days_of_week, start_times and start_mins are not re-read, but a day
+        in the exclusion calendar and a time outside the run window still
+        stop the start; 2 also checks that today is a run day. The day is
+        the job's local day, in the zone its run_window is read in."""
+        mode = self.semantics.queued_recheck
+        if mode == "0":
+            return None
+        schedule = job_ir.schedule
+        if schedule is not None:
+            assert self._now is not None
+            today = to_local(self._now, self._job_tz(job_ir)).date()
+            excluded = schedule.exclude_calendar
+            if excluded is not None and self._calendar_has(job_ir, excluded, today):
+                return "day", f"{today} is in exclude_calendar {excluded!r}"
+            if mode == "2" and not self._is_run_day(job_ir, today):
+                return "day", f"{today} is not a run day"
+            if self._window_side(job_ir)[0] != "inside":
+                return "window", "outside run_window"
+        gate = job_ir.sem.condition
+        if gate is not None and not self._cond_true(gate.cond, job_ir.name):
+            return "condition", "condition false"
+        return None
+
+    def _is_run_day(self, job_ir: JobIR, day: date) -> bool:
+        """`queued-recheck=2`'s date check for one day: run_calendar XOR
+        days_of_week (SEM-31), with an absent days_of_week read as every
+        day, as the scheduler reads it. The exclusion is checked apart."""
+        schedule = job_ir.schedule
+        assert schedule is not None
+        if schedule.run_calendar is not None:
+            return self._calendar_has(job_ir, schedule.run_calendar, day)
+        days = schedule.days_of_week
+        return days is None or "all" in days or _WEEKDAY_TOKENS[day.weekday()] in days
+
+    def _calendar_has(self, job_ir: JobIR, name: str, day: date) -> bool:
+        """Whether calendar `name` holds `day`. The scheduler owns ticks; this
+        is the one calendar question the oracle asks, so a replay with no
+        scheduler reads the same days (DL-257). Preflight refuses a missing
+        or uninterpretable calendar before a run; a direct caller that
+        skipped it gets an OracleError, never a guess."""
+        try:
+            days = self._calendar(job_ir, name)
+            if isinstance(days, CompiledCalendar):
+                return day in days.days_between(day, day)
+            return day in days
+        except CalendarRuleError as exc:
+            raise OracleError(f"{job_ir.name}: {exc}") from exc
+
+    def _calendar(self, job_ir: JobIR, name: str) -> frozenset[date] | CompiledCalendar:
+        """Calendar `name`'s days, resolved once: a standard calendar's day
+        set, or a compiled extended one. Raises CalendarRuleError on a rule
+        it cannot interpret, OracleError on a missing definition."""
+        days = self._calendars.get(name)
+        if days is None:
+            cal = self.catalog.calendars.get(name)
+            if cal is None:
+                raise OracleError(
+                    f"{job_ir.name}: calendar {name!r} has no definition in the loaded set"
+                )
+            days = (
+                compile_calendar(cal, self.catalog)
+                if cal.kind == "extended"
+                else standard_days(cal)
+            )
+            self._calendars[name] = days
+        return days
+
+    def _leave_queue_unstarted(self, job_ir: JobIR, check: str, why: str) -> str:
+        """A job that failed `_queued_recheck` leaves QUE_WAIT for INACTIVE
+        without starting (DL-257). Its arm goes first, before any wake can
+        ride it: a job with date conditions "re-schedules ... to its next
+        start time", so only its next tick starts it. A member of a running
+        box is not resolved: it waits, as the vendor's ACTIVATED does, and
+        keeps the box RUNNING (SEM-11, DL-242).
+
+        Two failures would otherwise wait for a start that never comes, since
+        the scheduler never ticks a job with no start times of its own and a
+        box starts its members unscheduled. A run_window failure takes
+        DL-246's disposition at this instant: nearer the previous close, the
+        SEM-33 skip, which resolves a member of a running box; nearer the
+        next opening, one deferred start at it. A day failure of a job with
+        no ticks of its own is deferred to the window opening of its next
+        eligible day (`_next_eligible_opening`)."""
+        job = job_ir.name
+        mode = self.semantics.queued_recheck
+        if self._runtime(job).armed:
+            self.store.set_armed(job, False)
+            self._record(
+                job,
+                "SCHED_DISARM",
+                f"left QUE_WAIT unstarted; waits for its next start time"
+                f" (queued-recheck={mode}, DL-257)",
+            )
+        self.store.dequeue_waiter(job)
+        cause = f"QUE_WAIT left unstarted: {why} (queued-recheck={mode}, DL-257)"
+        box = job_ir.box.box_name
+        box_run = self._runtime(box).run_number if box is not None else None
+        if box is not None:
+            # this attempt ends unresolved: an earlier verdict of the same box
+            # run must not complete the box past it
+            self.store.void_resolution(box, job)
+        run_number = self._runtime(job).run_number
+        self._set_status(job, "INACTIVE", cause=cause)
+        rt = self._runtime(job)
+        if rt.status != "INACTIVE" or rt.run_number != run_number:
+            return "cancelled"  # a wake of the transition already moved it on
+        if box is not None:
+            box_rt = self._runtime(box)
+            if box_rt.status != "RUNNING" or box_rt.run_number != box_run:
+                # the box run this decision belongs to ended in the wakes; a
+                # later run decides the member afresh (DL-246)
+                return "cancelled"
+        if check == "window":
+            self._run_window_permits(job_ir, cause)
+        elif check == "day" and not self._has_ticks(job_ir):
+            self._defer_to_next_opening(job_ir, cause)
+        return "cancelled"
+
+    @staticmethod
+    def _has_ticks(job_ir: JobIR) -> bool:
+        """Whether the scheduler ticks this job: start_times, start_mins, or a
+        run_calendar's own row times (E11, DL-58)."""
+        schedule = job_ir.schedule
+        return schedule is not None and bool(
+            schedule.start_times or schedule.start_mins or schedule.run_calendar
+        )
+
+    def _defer_to_next_opening(self, job_ir: JobIR, cause: str) -> None:
+        """Defer a tickless job to the run_window opening of its next eligible
+        day: the first day after today that is not excluded and is a run day
+        by run_calendar or days_of_week (DL-257). The scan covers
+        `_OPENING_SCAN_DAYS` days; when none is eligible, one continuation
+        timer is armed at local midnight of the last scanned day, and the
+        scan resumes there, so a rare eligible day (a 29 February) is still
+        found. A job with no run_window has no opening and is not deferred."""
+        schedule = job_ir.schedule
+        if schedule is None or schedule.run_window is None:
+            return
+        assert self._now is not None
+        tz = self._job_tz(job_ir)
+        today = to_local(self._now, tz).date()
+        first, last = today + timedelta(days=1), today + timedelta(days=_OPENING_SCAN_DAYS)
+        excluded = self._calendar_days(job_ir, schedule.exclude_calendar, first, last)
+        runs = self._calendar_days(job_ir, schedule.run_calendar, first, last)
+        lo, hi = (_to_time(t) for t in schedule.run_window)
+        day = first
+        while day <= last:
+            eligible = (excluded is None or day not in excluded) and (
+                day in runs if runs is not None else self._is_run_day(job_ir, day)
+            )
+            if eligible:
+                self._defer_start(job_ir, _window_span(day, lo, hi, tz)[0], cause)
+                return
+            day += timedelta(days=1)
+        self._defer_start(
+            job_ir,
+            to_utc(datetime.combine(last, dtime()), tz),
+            cause,
+            rescan_run=self._runtime(job_ir.name).run_number,
+            note=f"no eligible day through {last}; the scan for one resumes then",
+        )
+
+    def _rescan_superseded(self, job: str, run: object) -> bool:
+        """Whether a scan continuation armed at the job's run number `run` is
+        permanently dead: the job has started since (DL-257). One test for
+        `pending_timers` and the firing, so the two cannot disagree. A
+        continuation at the same run number stays live whatever the status,
+        which can return to INACTIVE before it fires."""
+        return self._runtime(job).run_number != run
+
+    def _resume_opening_scan(self, job: str, run: object, cause: str) -> None:
+        """A continuation timer of `_defer_to_next_opening` fired: scan on
+        from here, unless the job has started since or is not INACTIVE now."""
+        if self._rescan_superseded(job, run) or self._runtime(job).status != "INACTIVE":
+            self._record(
+                job,
+                "START_REFUSED",
+                f"the job has moved on since the scan stopped -- no effect (DL-257; {cause})",
+            )
+            return
+        self._defer_to_next_opening(self.catalog.jobs[job], cause)
+
+    def _calendar_days(
+        self, job_ir: JobIR, name: str | None, first: date, last: date
+    ) -> frozenset[date] | None:
+        """The days of calendar `name` within [first, last], generated once
+        for the range (DL-257); None when there is no calendar."""
+        if name is None:
+            return None
+        try:
+            days = self._calendar(job_ir, name)
+            if isinstance(days, CompiledCalendar):
+                return days.days_between(first, last)
+        except CalendarRuleError as exc:
+            raise OracleError(f"{job_ir.name}: {exc}") from exc
+        return frozenset(d for d in days if first <= d <= last)
 
     def _cancel_waiter(self, job: str, why: str) -> str:
         self.store.dequeue_waiter(job)
