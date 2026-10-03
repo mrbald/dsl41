@@ -2708,11 +2708,13 @@ SCENARIO_ROWS: tuple[Row, ...] = (
         _row(
             surface="event",
             member="ON_ICE",
+            revision=2,
             klass=SUPPORTED,
-            cite="ir-design ss7",
+            cite="ir-design ss7, DL-254",
             effect="ices a job: an ordinary downstream atom follows the vendor ON_ICE table"
             " (s/d/n true, f/t/exitcode false), a lookback-qualified atom reads satisfied"
-            " regardless, and it never runs on a plain start (DL-243)",
+            " regardless, and it never runs on a plain start (DL-243); ignored on a"
+            " STARTING or RUNNING job (DL-254)",
             trigger=_scn(BASE_JIL, "0 ON_ICE job=J0"),
         ),
         _row(
@@ -2726,9 +2728,11 @@ SCENARIO_ROWS: tuple[Row, ...] = (
         _row(
             surface="event",
             member="ON_HOLD",
+            revision=2,
             klass=SUPPORTED,
-            cite="ir-design ss7",
-            effect="holds a job: it stays startable but does not start",
+            cite="ir-design ss7, DL-254",
+            effect="holds a job: it stays startable but does not start; ignored on a"
+            " STARTING or RUNNING job (DL-254)",
             trigger=_scn(BASE_JIL, "0 ON_HOLD job=J0"),
         ),
         _row(
@@ -2742,17 +2746,23 @@ SCENARIO_ROWS: tuple[Row, ...] = (
         _row(
             surface="event",
             member="ON_NOEXEC",
+            revision=2,
             klass=SUPPORTED,
-            cite="ir-design ss7",
-            effect="marks a job as not executing; it completes without running",
+            cite="ir-design ss7, DL-254",
+            effect="marks a job as not executing; it completes without running. It clears a"
+            " hold and takes a queued job out of the queue, then retries the start; on a box"
+            " it sets the box INACTIVE with every job it holds and flags every level. Ignored on an iced job, a"
+            " RUNNING job, a STARTING non-box job and a box holding an iced, live or queued"
+            " job (DL-254)",
             trigger=_scn(BASE_JIL, "0 ON_NOEXEC job=J0"),
         ),
         _row(
             surface="event",
             member="OFF_NOEXEC",
+            revision=2,
             klass=SUPPORTED,
-            cite="ir-design ss7",
-            effect="clears the noexec flag",
+            cite="ir-design ss7, DL-254",
+            effect="clears the noexec flag; on a box, on every job it holds at every level",
             trigger=_scn(BASE_JIL, "0 OFF_NOEXEC job=J0"),
         ),
         _row(
@@ -2840,11 +2850,11 @@ SCENARIO_ROWS: tuple[Row, ...] = (
             surface="event",
             member="ON_ICE",
             facet="running",
-            klass=PROVISIONAL,
-            cite="SEM-05, SEM-20, DL-13, oracle.Oracle._atom_true",
-            effect="icing a STARTING or RUNNING job does NOT make its atoms read as"
-            " satisfied: the in-flight run is real, so conditions keep reading the live"
-            " status until it completes (DL-13); no label was opened for the exception",
+            revision=2,
+            klass=SUPPORTED,
+            cite="SEM-20, DL-254, oracle.Oracle._oob_ignored",
+            effect="ON_ICE sent to a STARTING or RUNNING job is ignored: no flag, no wake,"
+            " one EVENT_IGNORED trace line; the run completes and reads normally",
             trigger=_scn(BASE_JIL, "0 STARTJOB job=J0", "1 ON_ICE job=J0"),
             quiet=_scn(BASE_JIL, "0 ON_ICE job=J0"),
         ),
@@ -3457,6 +3467,15 @@ TRACE_MARKER_ROWS: tuple[Row, ...] = (
         cite="ir-design ss7, oracle.Oracle._record",
         effect="a start request the oracle declined, with the reason it declined it",
         trigger=_scn(BASE_JIL, "0 STARTJOB job=J0", "1 STARTJOB job=J0"),
+    ),
+    _row(
+        surface="trace_marker",
+        member="EVENT_IGNORED",
+        klass=SUPPORTED,
+        cite="ir-design ss7, DL-254, oracle.Oracle._oob_ignored",
+        effect="an ON_ICE, ON_HOLD or ON_NOEXEC the vendor ignores for the job's status;"
+        " nothing else moves",
+        trigger=_scn(BASE_JIL, "0 STARTJOB job=J0", "1 ON_HOLD job=J0"),
     ),
     _row(
         surface="trace_marker",

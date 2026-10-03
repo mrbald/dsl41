@@ -93,7 +93,10 @@ from dsl41.runner_clock import EngineError
 #: replay with a window check near a DST change can decide differently.
 #: 11 since DL-253: absolute must times arm alarms, and must_start arms one
 #: deadline at a time, so a replay alarms differently.
-STATE_MACHINE_VERSION = 11
+#: 12 since DL-254: ON_ICE, ON_HOLD and ON_NOEXEC sent to a live (or, for
+#: ON_NOEXEC, iced) job are ignored, so a replay with such an event sets no
+#: flag where v11 set one.
+STATE_MACHINE_VERSION = 12
 
 LOCK_NAME = "leader.lock"
 

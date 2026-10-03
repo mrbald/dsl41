@@ -16572,3 +16572,198 @@ relitigate an entry; append a new one.
   `test_a_deadline_arms_on_a_tick_that_changes_no_row_at_all` let a second
   blocked tick arm a second must_start deadline beside a pending one, and
   now lets the first fire before the second tick arms its own.
+- DL-254 ON_ICE, ON_HOLD and ON_NOEXEC are ignored where the vendor says
+  they are (2026-10-03; src/dsl41/oracle.py, src/dsl41/equiv.py,
+  src/dsl41/runner_ledger.py, src/dsl41/simulation_register_rows.py,
+  docs/autosys-semantics.md SEM-05, SEM-20, SEM-21, SEM-22 and ss8,
+  docs/simulation-coverage.md, tests/test_oracle.py,
+  tests/test_preconditions.py, tests/test_runner_tui.py)
+  THE RULE. "sendevent Command -- Change the Executable Status of a Job"
+  (AutoSys 24.2). JOB_ON_HOLD and JOB_ON_ICE: "The event has no effect on
+  jobs with a status of STARTING or RUNNING." JOB_ON_NOEXEC: "The
+  scheduler ignores the JOB_ON_NOEXEC event, if sent to: A non-box job
+  that is in the STARTING, RUNNING, or ON_ICE status; A box job that is in
+  the ON_ICE or RUNNING status; A box job with jobs (including the jobs
+  contained in lower level boxes) in a status other than the following
+  status: ON_HOLD, ON_NOEXEC, INACTIVE, SUCCESS, FAILURE, ACTIVATED, or
+  TERMINATED", and "The JOB_ON_NOEXEC event does not
+  supersede the JOB_ON_ICE event and does not overwrite the ON_ICE status
+  with the ON_NOEXEC status." The text is direct, so the oracle follows it
+  with no switch.
+  THE CHANGE. `Oracle._oob_ignored` decides the case before any flag
+  moves. An ignored event sets no flag, moves no status, wakes nothing and
+  plans no effect. It writes one trace line with the new marker
+  `EVENT_IGNORED`, whose cause names the event and the job's status. This
+  is the START_REFUSED shape: an operator event that did nothing still
+  leaves a visible answer. ON_HOLD and ON_ICE apply to boxes and other
+  jobs alike. A box in STARTING is not on the vendor's ON_NOEXEC list and
+  still takes the flag. The third box case is stated without a gap, so it
+  is modeled: the oracle's statuses outside the vendor's list are
+  STARTING, RUNNING and QUE_WAIT, and an iced job reads ON_ICE. A box
+  that contains such a job at any depth ignores ON_NOEXEC. A waiting
+  member reads INACTIVE here, as SEM-17 maps ACTIVATED.
+  WHAT GOES. DL-13's "ice on a running job takes effect at completion",
+  the SEM-05 [?] pin, is replaced by the vendor rule. `_atom_true` loses
+  its live-status guard on the ice branch: no oracle path ices a live job
+  now, so the flag reads the same whatever the stored status. Only an
+  injected STATUS can make an iced row live, and then the ice reading wins.
+  `equiv._eval_cond` drops the same guard for oracle parity. DL-243's
+  sentence that the `on_noexec` flag is set on every ON_NOEXEC "regardless
+  of status (STARTING/RUNNING/ON_ICE included)" no longer holds. Its
+  event-time INACTIVE move for a FAILURE or TERMINATED job stays.
+  QUE_WAIT. The vendor names STARTING and RUNNING, not QUE_WAIT, so
+  ON_ICE and ON_HOLD keep their handling of a queued job. ON_ICE dequeues
+  it and settles it INACTIVE (DL-50, Qr5). ON_HOLD keeps it queued and
+  held. Treating a queued job as live would be a guess. ON_NOEXEC on a
+  queued job had a defect: the flag was set, and the job was later
+  admitted through `_readmit` and `_run` and executed. The same vendor
+  page states the rule: "If the job is in the QUEWAIT or RESWAIT status,
+  the scheduler removes the job from the load balancing and resource wait
+  queues before placing it in the ON_NOEXEC status." The oracle dequeues
+  the job and moves it to INACTIVE through DL-242's operator-INACTIVE
+  path, exit code cleared, as DL-243 does for a FAILURE job; a queued
+  member of a RUNNING box therefore resolves. It holds no reservation and
+  the engine plans no SPAWN. Then the start is retried, as OFF_HOLD
+  retries it (see HOLD): the job met its starting conditions to be
+  queued, so it normally bypasses to SUCCESS at once. The retry runs
+  after the removal, so it does not contradict the vendor's "removes the
+  job from the ... queues"; it applies the page's other sentence, "When
+  the NOEXEC job meets its starting conditions, the scheduler evaluates
+  this job as successfully completed". A queued job whose condition went
+  false while it waited (conditions are not re-checked in the queue,
+  Qr6) stays INACTIVE until the condition fires again. An earlier draft
+  bypassed the queued job straight from the queue, before any removal;
+  that draft was dropped.
+  HOLD. "The JOB_ON_NOEXEC event supersedes the JOB_ON_HOLD event
+  effectively overwriting the ON_HOLD status with the ON_NOEXEC status."
+  The oracle kept the hold flag beside the noexec flag, so the job stayed
+  held and never bypassed. Now ON_NOEXEC clears the hold. The trace has
+  the ON_NOEXEC line, then an `OFF_HOLD` whose cause names ON_NOEXEC, the
+  shape FORCE_STARTJOB uses when it clears a hold (DL-243). Then the start
+  is retried as OFF_HOLD retries it (`_attempt_start`, not forced, not
+  scheduled), after any status move the event makes. The vendor bypasses
+  a NOEXEC job "When the NOEXEC job meets its starting conditions"; a held
+  job whose conditions already hold has met them, and without the retry
+  it waited for an edge that had already passed: a held box member left
+  its box RUNNING for good. The retry is skipped when the job's run number
+  moved during the event: the event's own wakes already started it (a
+  job woken by a consumer its INACTIVE move restarted), and a further
+  start would be a run with no trigger. The run number is read before
+  the event's transitions, per released job.
+  BOX. "If you send the JOB_ON_NOEXEC event to a box, the effect is the
+  same as sending the CHANGE_STATUS event to INACTIVE for a box. The box
+  enters the ON_NOEXEC status and the scheduler sets the status of all
+  jobs in the box (including all jobs contained in lower level boxes
+  within the box) at all levels to ON_NOEXEC." DL-243 left a box target
+  flag-only. Now every job in the tree takes the flag (clearing any
+  hold), and then DL-242's box INACTIVE path runs: the SEM-18 cascade, one
+  batch, exit codes cleared. The cascade skips rows already INACTIVE, so
+  their exit codes are cleared by a plain store write first, as the SEM-10
+  reset does; otherwise an e() consumer could still read a code the box
+  event was meant to drop. Flags go first, so a box that its own
+  cascade restarts (a box waiting on `n()` of itself) already runs in
+  non-execution mode. The ignore rules guarantee no live, queued or iced
+  job is in the tree, so no kill question arises. Composition with
+  DL-243: a FAILURE or TERMINATED member reaches INACTIVE with its exit
+  code cleared through the box's cascade, the same end state DL-243 gives
+  it alone. A SUCCESS member also moves to INACTIVE. The box-specific
+  sentence names CHANGE_STATUS INACTIVE for the box, and SEM-18 moves
+  every contained job; the single-job SUCCESS exception from "Start
+  Conditions" is read as covering a job targeted directly, not a box's
+  members. A box whose whole tree is already INACTIVE keeps its status,
+  as an INACTIVE job does: only the flags move and nothing wakes. The
+  exception is a box whose parent is RUNNING. The event is CHANGE_STATUS
+  INACTIVE on the box, and DL-242 records INACTIVE->INACTIVE for a
+  waiting member so its parent resolves it and runs the completion door.
+  The box event does the same; otherwise a parent whose only member is a
+  waiting subbox stayed RUNNING. Jobs in the tree whose hold was cleared
+  retry their start after the cascade. A
+  STARTING box (only reachable by an injected STATUS) is not on the
+  ignore list and takes the box path. JOB_OFF_NOEXEC on a box: "all jobs
+  in the box (including all jobs that are contained in lower level boxes
+  within the box) are reset to the INACTIVE, ACTIVATED, or SUCCESS
+  status", so OFF_NOEXEC on a box clears every contained flag, each
+  recorded as an `OFF_NOEXEC`. Without that, the flags the box event sets
+  could never be cleared by the box event that undoes it.
+  NOT MODELED. The same page also says CHANGE_STATUS has no effect on an
+  ON_NOEXEC job, and that a box CHANGE_STATUS INACTIVE leaves ON_NOEXEC
+  members' status alone. The oracle's injected STATUS still moves a
+  flagged job; that is left for a separate decision. Members do not take
+  the flag from a box's definition-time `status: ON_NOEXEC` (SEM-24).
+  A box with no schedule whose condition reads `n()` of itself can
+  recurse without end once it runs in non-execution mode: its members
+  bypass at once, the box completes, `n()` turns true and starts it
+  again in the same input. The recursion predates this decision (an
+  ON_NOEXEC box already bypassed its members); it is recorded, not
+  fixed. The TUI renders `EVENT_IGNORED` lines dim, like other trace
+  commentary; START_REFUSED alone is yellow (DL-64). Left as is.
+  `STATE_MACHINE_VERSION` moves 11 -> 12 (DL-253 took 10 -> 11 first): a
+  v11 replay with one of these events on a live or iced job, or on a box
+  holding one, sets a flag that
+  this build does not; a queued, held or box target derives different
+  rows; and OFF_NOEXEC on a box clears flags v11 left set. A
+  v11 log is refused at every door, and a live v11 estate drains and a new
+  estate is created (period-model ss11), as the earlier bumps did.
+  Register: the `event:ON_ICE`, `event:ON_HOLD` and `event:ON_NOEXEC` rows
+  state the rule; `event:ON_ICE#running` moves from provisional to
+  supported; `trace_marker:EVENT_IGNORED` is new.
+  Tests: `tests/test_oracle.py` gains
+  `test_sem20_on_ice_on_a_live_job_is_ignored`,
+  `test_sem21_on_hold_on_a_live_job_is_ignored` and
+  `test_sem22_on_noexec_on_a_live_job_is_ignored` (box and non-box,
+  STARTING and RUNNING: the row is unchanged, one EVENT_IGNORED line, no
+  planned effect on the engine path, the later failure reads normally
+  and the next start runs), `test_sem22_on_noexec_on_an_iced_job_is_ignored`,
+  `test_sem22_on_noexec_on_a_running_box_does_not_bypass_its_waiting_members`,
+  `test_sem22_on_noexec_on_a_starting_box_still_sets_the_flag`,
+  `test_sem22_on_noexec_on_a_box_with_a_contained_job_in_another_status_is_ignored`
+  (an idle box whose job two levels down is iced or RUNNING),
+  `test_sem22_on_noexec_on_a_queued_job_takes_it_out_of_the_queue` and
+  `test_sem22_on_noexec_supersedes_the_hold_on_a_queued_job` (out of the
+  queue, no reservation, no queue rank, no SPAWN on the engine path, then
+  the bypass), `test_sem22_a_dequeued_noexec_job_whose_condition_went_false_waits_for_it`,
+  `test_sem22_on_noexec_supersedes_on_hold` (a conditioned held job,
+  condition met: bypasses at once; unmet: bypasses when it fires),
+  `test_sem22_on_noexec_on_a_held_member_bypasses_and_completes_the_box`,
+  `test_sem22_on_noexec_on_a_waiting_subbox_resolves_its_running_parent`,
+  `test_sem22_on_noexec_on_a_box_clears_the_exit_code_of_an_inactive_member`,
+  `test_sem22_the_release_retry_does_not_repeat_a_start_the_event_already_made`
+  (leaf and box: q waits on e(a) = 7, a on n(q); the event's wakes start
+  q once per transition of a, and the retry adds none),
+  `test_sem22_on_noexec_on_a_box_cascades_inactive_and_flags_every_level`
+  (a two-level tree with a failed member, a held member and a box_failure
+  verdict: all INACTIVE, all flagged, no planned effect, then a dry run),
+  `test_sem22_on_noexec_on_an_inactive_box_moves_no_status`,
+  `test_sem22_off_noexec_on_a_box_clears_every_level`,
+  `test_sem21_events_on_a_completed_job_still_apply` and
+  `test_sem21_events_on_a_queued_job_keep_their_handling` (ON_ICE and
+  ON_HOLD). Rewritten in
+  place, names kept because DL-243 cites them:
+  `test_ice_on_a_running_job_takes_effect_at_completion` (the s() consumer
+  stayed INACTIVE while the job ran and started once it failed; it now
+  stays INACTIVE after the failure, and the docstring says the name
+  records the replaced behavior) and
+  `test_sem20_ordinary_atom_on_a_live_iced_job_reads_the_real_in_flight_status`
+  (same outcome, s() false while RUNNING; it now asserts no flag is set).
+  `test_sem22_noexec_while_running_then_real_failure_is_not_hidden`
+  and `test_sem22_noexec_on_an_iced_job_is_ignored_and_the_job_stays_failure`
+  keep their outcome and now also assert that no flag is set.
+  `test_sem22_noexec_box_goes_running_and_every_member_bypasses`,
+  `test_sem22_noexec_box_member_whose_condition_never_fires_keeps_the_box_running`
+  and `test_sem22_noexec_box_bypasses_a_nested_member_box_level_by_level`
+  expected members with no trace line before their bypass; each member now
+  first records its own ON_NOEXEC from the box event. The bypass
+  outcomes are unchanged.
+  `test_sem18_a_restart_during_the_cascade_still_wakes_the_resource_waiters`
+  put ON_NOEXEC on a RUNNING member so that its restart would bypass and
+  take no lock. That event is now ignored, and the third box case rules
+  out flagging the box instead. The member now also takes a depletable
+  resource that its first run uses up, so the restart queues instead of
+  taking the lock. Expected statuses: box RUNNING, member SUCCESS ->
+  QUE_WAIT, waiter RUNNING. Removing the owed wake still leaves the
+  waiter QUE_WAIT, so the test still guards it.
+  `tests/test_preconditions.py::test_a_stale_precondition_still_observed_the_clock`
+  and `tests/test_runner_tui.py::test_pilot_the_confirmed_kill_names_the_revision_the_dialog_showed`
+  sent ON_ICE to a RUNNING job only to move its revision. An ignored event
+  moves nothing, so they now inject a RUNNING status on the running job
+  (a CHANGE_STATUS that moves `status_at`), with the same expectations.

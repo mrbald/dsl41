@@ -14,7 +14,7 @@ Decisions pinned here (each with a test; recorded as DL-14 + amendment):
   atoms cannot detect L006's own flagship contradiction s(x)&f(x). Each
   referenced job scope contributes (status in NEVER_RAN/RUNNING/SUCCESS/
   FAILURE/TERMINATED/INACTIVE) x (iced flag -- a LOOKBACK-qualified atom on
-  an iced non-running job is true regardless of kind, SEM-05; an ORDINARY atom
+  an iced job is true regardless of kind, SEM-05; an ORDINARY atom
   (no lookback) instead follows SEM-20's narrower vendor table, DL-243;
   oracle parity either way) x (age bucket cut by the referenced
   lookback windows) x (zero-freshness flag when zero-lookbacks appear --
@@ -647,10 +647,10 @@ def _eval_cond(cond: Cond, state: _State, alphabet: _Alphabet) -> bool:
         return compare_value(actual, cond.op, cond.value)
     key = _job_key(cond)
     status = state.job_status.get(key, "NEVER_RAN")
-    if state.job_iced.get(key, False) and status != "RUNNING":
-        # SEM-05/SEM-20 oracle parity (DL-243): ice on a running job takes
-        # effect at completion (handled by the status != RUNNING guard
-        # above). For a non-live iced job, a LOOKBACK atom (any kind, zero
+    if state.job_iced.get(key, False):
+        # SEM-05/SEM-20 oracle parity (DL-243, DL-254): the iced reading
+        # holds whatever the status, since ON_ICE on a RUNNING job is
+        # ignored. A LOOKBACK atom (any kind, zero
         # included) still satisfies every atom kind, lookback ignored
         # (SEM-05's blanket pin). An ORDINARY atom (no lookback qualifier
         # at all) instead follows SEM-20's narrower vendor truth table:
