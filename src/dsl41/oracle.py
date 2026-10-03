@@ -55,11 +55,15 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
 - run_window (SEM-33): a start attempt outside the window applies the
   closer-edge rule -- nearer the next opening: schedule a TIMER STARTJOB at
   window open (box context stays RUNNING overnight); nearer the previous
-  end: no run this cycle (INACTIVE stays). Inside a live box run the skip
-  is a bypass (DL-154): the member goes INACTIVE, stays out of the ran
-  set, and the SEM-11 fold completes past it -- "the job's status changes
-  to INACTIVE. The box job can still run to completion" (TechDocs 12.1,
-  run_window page). Exact midpoint: next opening
+  end: no run, and a standalone job moves to INACTIVE (DL-246). Inside a
+  live box run the skip is a bypass (DL-154): the member goes INACTIVE,
+  stays out of the ran set, and the SEM-11 fold completes past it -- "the
+  job's status changes to INACTIVE. The box job can still run to
+  completion" (TechDocs 12.1, run_window page). A box start decides each
+  waiting run_window member's disposition at that instant, before its
+  schedule gate (DL-246); the deferred STARTJOB is a start attempt with a
+  tick's standing, through the normal gates (provisional). Exact midpoint:
+  next opening
   ([?] undocumented; pinned here, revisit with live access). The window is
   read in the job's own `timezone` (SEM-35 re-bases every time attribute of
   that job), so the comparison runs on local wall time and the queued timer
@@ -67,7 +71,10 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
   ladder. A job with no `timezone:` compares in the constructor's
   `default_tz`, else on the engine clock -- the vendor's own rule since
   DL-155 ("scheduled based on the time zone under which the scheduler is
-  running"), with the engine clock playing the scheduler's zone.
+  running"), with the engine clock playing the scheduler's zone. Within two
+  days of a one-hour DST change at 02:00 local, the window is built as
+  concrete intervals whose endpoints follow the vendor's DST rules (DL-249);
+  other change shapes keep the wall-time comparison, unverified.
 - Lookback (SEM-04): window -> status_at >= now - window. zero -> satisfied
   iff the predecessor's own last end (last_end_at) is at-or-after the
   EVALUATING job's last end (Q2a RESOLVED by citation, DL-54 -- "examines
@@ -78,34 +85,78 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
   and the atom is satisfied -- CA support: "working as designed. When a new
   job is inserted it has no initial/previous end time", with the epoch-0
   effect observed exactly as modeled.
-- ON_ICE (SEM-05/SEM-20): every status/exitcode atom whose job is currently
-  ON_ICE evaluates TRUE -- f()/t()/e() included, per SEM-05's blanket
-  wording over SEM-20's "as though it succeeded" (DL-13, Q6-adjacent; the
-  lookback-ignored half is cited since DL-58: KB 438836, "the system
-  ignores the look-back condition") --
-  with lookback ignored; the iced job itself never starts (FORCE included);
-  OFF_ICE does not re-evaluate (conditions must REOCCUR). Ice on a RUNNING
-  job takes effect at completion: atoms read the real in-flight status
-  until then ([?] unverified corner, documented).
+- ON_ICE (SEM-05/SEM-20, DL-243): split by whether the atom carries a
+  lookback qualifier. An atom WITH one -- any kind, the zero form included
+  -- keeps the blanket pin: every status/exitcode atom on an iced
+  predecessor evaluates TRUE, f()/t()/e() included, lookback ignored
+  (DL-13, Q6-adjacent; cited since DL-58: KB 438836, "the system ignores
+  the look-back condition"). An ORDINARY atom (`atom.lookback is None`, no
+  qualifier at all) follows the vendor's own ON_ICE truth table instead
+  (Start Conditions, AutoSys 24.2, ON_ICE downstream-conditions row):
+  success/done/notrunning TRUE, failure/terminated/exitcode FALSE -- a
+  narrower reading than the blanket-true pin, and the two tables disagree
+  on f()/t()/exitcode. For a lookback-qualified atom the AutoSys 24.2
+  "condition Attribute" page is explicit: "If the predecessor job being
+  evaluated for the look-back condition is currently in an ON_ICE status,
+  it always evaluates to true. That is, any look-back evaluation is
+  ignored." That is the default. The Start Conditions table does not
+  separate lookback atoms, so the two pages read f()/t()/exitcode
+  differently and Q10 (section 9) stays open over which a live instance
+  follows. The `ice-lookback` semantic switch selects the table's reading
+  (DL-252): `ordinary` drops the qualifier and applies the table to the
+  lookback atom too. ON_ICE sent to a STARTING
+  or RUNNING job is ignored (DL-254, "Change the Executable Status of a
+  Job": "The event has no effect on jobs with a status of STARTING or
+  RUNNING"): no flag, no wake, one EVENT_IGNORED trace line. ON_ICE on a
+  QUE_WAIT job still dequeues it (DL-50). The iced job itself
+  never starts on a plain STARTJOB; FORCE_STARTJOB on a non-live iced job
+  now clears the flag first (SEM-23 below) -- DL-13's "FORCE included"
+  reading no longer holds for that case. OFF_ICE does not re-evaluate
+  (conditions must REOCCUR).
 - ON_HOLD (SEM-21): the held job does not start; nothing else changes;
   OFF_HOLD immediately re-evaluates that job's start (missed runs collapse
-  to at most one).
-- ON_NOEXEC (SEM-22): when the job would start, it bypasses to SUCCESS
-  (STARTING/RUNNING skipped) and downstream runs normally. A BOX does not
-  bypass: it goes RUNNING and its members bypass as their conditions are
-  met, box level by box level, so a member box walks its own members too.
-  A member bypasses on its own flag or on any containing box's. The bypass
-  joins the box's ran set like a real start, so the SEM-11 fold waits for
-  it and the once-per-box-run gate holds; it also counts as the tick's run
-  (the Q3/DL-54 reading), so no MUST_START_ALARM follows a bypass.
+  to at most one). ON_HOLD sent to a STARTING or RUNNING job is ignored
+  like ON_ICE (DL-254); a QUE_WAIT job is held in the queue.
+- ON_NOEXEC (SEM-22, DL-243): when the job would start, it bypasses to
+  SUCCESS (STARTING/RUNNING skipped) and downstream runs normally. A BOX
+  does not bypass: it goes RUNNING and its members bypass as their
+  conditions are met, box level by box level, so a member box walks its
+  own members too. A member bypasses on its own flag or on any containing
+  box's. The bypass joins the box's ran set like a real start, so the
+  SEM-11 fold waits for it and the once-per-box-run gate holds; it also
+  counts as the tick's run (the Q3/DL-54 reading), so no MUST_START_ALARM
+  follows a bypass. A FAILURE or TERMINATED (non-live, non-BOX) job that is
+  put ON_NOEXEC is moved to INACTIVE through DL-242's operator-INACTIVE
+  path, exit code cleared (Job States page: "the effect is the same as
+  sending the CHANGE_STATUS event to INACTIVE for the job"). This is an
+  EVENT-TIME transition, not a read-time projection: the stored row
+  changes, a RUNNING box member resolves the same way an operator's
+  CHANGE_STATUS INACTIVE would, and the transition wakes referencers
+  normally -- f()/t()/d()/exitcode now read false, n() reads true, s()
+  stays false, same as any other INACTIVE job. SUCCESS is the documented
+  exception and is left alone. The scheduler ignores ON_NOEXEC sent to a
+  non-box job that is STARTING, RUNNING or ON_ICE, and to a box that is
+  RUNNING or ON_ICE, or that contains (at any depth) a job that is iced,
+  STARTING, RUNNING or QUE_WAIT (DL-254): no flag, no transition, one
+  EVENT_IGNORED trace line, so a real failure that follows is not hidden
+  and the next run executes. A QUE_WAIT job leaves the queue and moves to
+  INACTIVE through the same operator-INACTIVE path, so its next start
+  bypasses. ON_NOEXEC supersedes ON_HOLD: the hold is cleared and recorded
+  as an OFF_HOLD. A job released from a hold or the queue retries its start,
+  so one whose conditions hold bypasses at once. On a box it is CHANGE_STATUS INACTIVE for the box (the
+  SEM-18 cascade) and every contained job, at every level, takes the flag;
+  OFF_NOEXEC on a box clears them all (DL-254).
 - initial_status (SEM-24, DL-18): definition-time ON_HOLD/ON_ICE/ON_NOEXEC
   seeds the corresponding flag before the first event; no trace entry
   (definition state, not a transition). INACTIVE is the default anyway.
 - Boxes: SEM-10 (members start when box RUNNING + own condition; at most
-  once per box run), SEM-11 LITERAL (DL-13: the box cannot complete until
+  once per box run; a box start resets every contained job that is not
+  live to INACTIVE, so no status survives from the previous box cycle,
+  DL-242), SEM-11 LITERAL (DL-13: the box cannot complete until
   every member that is not ON_ICE has RUN to a terminal state, been
-  bypassed to SUCCESS by SEM-22, or been window-skipped to INACTIVE
-  inside the run (SEM-33/DL-154); a member whose condition never fires,
+  bypassed to SUCCESS by SEM-22, or been resolved to INACTIVE inside the
+  run by a window skip (SEM-33/DL-154) or an injected STATUS INACTIVE
+  (DL-242); a member whose condition never fires,
   or whose run_window deferred it, keeps the box RUNNING: the hung-box
   pattern is real behavior), SEM-12 (override
   gating: internal refs evaluated on the referenced member's transition;
@@ -115,27 +166,44 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
   not just the direct parent), SEM-13 (TERMINATED boxes are sticky until the
   next box start), SEM-14 (box_terminator member FAILURE -- not
   TERMINATED -- kills the box; job_terminator members die with the box),
-  SEM-15 (a terminal member transition on a non-running, non-TERMINATED
-  box re-derives its status once all members are terminal), SEM-17
-  (nesting: a member box starting is a member start; folds recurse;
-  ACTIVATED is unmodeled -- non-goal v1).
-- FORCE_STARTJOB (SEM-23): overrides false conditions, ON_HOLD, and the
-  box-RUNNING gate ("regardless of conditions"), but never ON_ICE
-  (SEM-20's "removed from all logic" wins; DL-13). Forced runs emit normal
+  SEM-15 (a terminal member transition, or an injected INACTIVE on a
+  member, re-derives a non-running, non-TERMINATED box's status once every
+  member that is not INACTIVE is terminal; INACTIVE members are ignored,
+  DL-242), SEM-17 (nesting: a member box starting is a member start; folds
+  recurse; the ACTIVATED label is unmodeled -- a waiting member reads
+  INACTIVE), SEM-18 (an injected INACTIVE on a box cascades to every job it
+  contains, DL-242).
+- FORCE_STARTJOB (SEM-23, DL-243): overrides false conditions, ON_HOLD, and
+  the box-RUNNING gate ("regardless of conditions"). A non-live job that is
+  ON_ICE or ON_HOLD is a non-executable state the force clears first
+  (sendevent Start Jobs page: "it returns to an executable state, runs,
+  and does not revert to the previous ... state"), recorded the same way
+  as an OFF_ICE/OFF_HOLD sendevent with a cause naming FORCE_STARTJOB; the
+  flag stays cleared even if a later gate (`run_window`) still refuses the
+  start, because the event's own effect is the return to an executable
+  state. A job that is already STARTING/RUNNING/QUE_WAIT is still refused
+  (concurrent runs of one job are unsupported). ON_NOEXEC is not named in
+  that vendor sentence and is untouched by FORCE. Forced runs emit normal
   statuses and satisfy downstream latches.
 - Injected STATUS may overwrite a terminal status (the CHANGE_STATUS
   analog): script-authoring hazard, documented not guarded.
 - must_start_times / must_complete_times (SEM-34): alarms only, never
-  control flow. Relative offsets arm on the STARTJOB tick (must_start:
-  alarm iff no new run began by tick+offset -- armed even when the start
-  is abandoned or deferred, that is the alarm's point) and on the actual
-  start (must_complete). N offsets against N start_times pair BY POSITION
-  -- the tick's local time of day names the slot. A SINGLE offset
-  broadcasts over every start time ([?] the dossier's strict count rule and
-  the vendor's own worked example disagree; open against a live instance),
-  and an instant that matches no start time keeps the first offset.
-  Absolute forms need the calendar the oracle does not own; scripts
-  exercise relative forms.
+  control flow. The STARTJOB tick arms both halves (DL-248), even when the
+  start is abandoned or deferred -- that is the alarm's point. A relative
+  deadline is tick+offset. An absolute one is the slot's must time on the
+  tick's local calendar day, hours 24-71 on the days after, with the
+  vendor's DST rules (DL-253). must_start alarms iff no new run began by
+  the deadline. must_complete alarms iff the first run to begin after the
+  tick has not ended by it; a late start does not move the deadline, and a
+  FORCE_STARTJOB, which is no tick, arms none. One deadline of each kind
+  is pending per job at a time: a tick on a live job, or while an earlier
+  deadline of that kind is pending, arms none (DL-248, DL-253). N values
+  against N start_times pair BY POSITION -- the tick names the slot;
+  start_mins takes a single relative offset only (DL-248). A SINGLE offset
+  broadcasts over every start time (the vendor's relative syntax is one
+  `+minutes` for each start time), and an instant that matches no start
+  time keeps the first offset. An absolute form arms nothing for such an
+  instant: its times belong to their start times.
 - term_run_time (dossier ss5): control flow -- auto-TERMINATE when the run
   exceeds the limit, checked lazily as the clock advances.
 - n_retrys: Q4 resolved (DL-53) -- the trigger set is FAILURE-only application
@@ -153,8 +221,23 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
   `resources:` semaphore units (QUANTITY vs insert_resource `amount`) -- before
   RUNNING. If any bucket is short it enters QUE_WAIT and is admitted later, in
   deterministic (priority, enqueue-seq, name) order, when a holder's terminal
-  release frees room. All-or-nothing acquire => no hold-and-wait => deadlock-
-  free by construction; QUANTITY=1 shared == mutex. res_type sets the default
+  release frees room. All-or-nothing acquire => no resource hold-and-wait, so
+  no deadlock over held units; QUANTITY=1 shared == mutex. Priority blocking
+  (below) can still starve a lower-priority job while a higher-priority
+  waiter cannot fit; preflight refuses a load that can never fit, which
+  bounds that wait to feasible loads (DL-247). Only a job with a
+  positive priority checks machine load; an unset or zero priority and a
+  FORCE_STARTJOB skip the check, and every start holds its load. A job
+  waiting for load blocks every lower positive priority on the same
+  machine, on a fresh start and in the readmission scan (DL-247). A job
+  past its load check and short on any named resource blocks every lower
+  positive priority that names any resource it names, forced or not
+  (DL-255); a queued job holds no load. A job
+  leaving the queue and a waiter put on hold wake the queue, since each can
+  lift a block; a box leaving RUNNING, and a start or enqueue that takes
+  machine load, owe an admit-only scan. The input pays it once fully
+  applied, after its releases and every referencer it woke, and it leaves
+  the stopped box's queued members queued. res_type sets the default
   release (R/absent free-on-completion, D never, T is a level GATE that never
   acquires); per-request FREE overrides it (Y success-only, N never, A
   unconditional). A queued job re-validates box-RUNNING/ice/hold at admission
@@ -169,12 +252,19 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Mapping
-from datetime import datetime, time as dtime, timedelta, tzinfo
+from collections.abc import Callable, Mapping
+from datetime import date, datetime, time as dtime, timedelta, tzinfo
 from typing import Final
 
 from dsl41.canon import CanonError, canonical_bytes
-from dsl41.capacity import CapacityPool, to_reservations
+from dsl41.capacity import (
+    CapacityPool,
+    DemandEntry,
+    checks_load,
+    takes_machine_load,
+    to_reservations,
+    without_machine_load,
+)
 from dsl41.conditions import (
     And,
     Cond,
@@ -187,7 +277,7 @@ from dsl41.conditions import (
     compare_int,
     compare_value,
 )
-from dsl41.ir import CatalogIR, JobIR, Semantics, Time
+from dsl41.ir import CatalogIR, JobIR, MustTime, Semantics, Time
 
 from dsl41.oracle_state import (
     LIVE,
@@ -201,7 +291,16 @@ from dsl41.oracle_state import (
     RuntimeState,
     TraceEntry,
 )
-from dsl41.timezones import resolve_timezone, to_local, to_utc
+from dsl41.semantics import DEFAULTS as DEFAULT_SWITCHES, SemanticSwitches
+from dsl41.timezones import (
+    MISSING_HOUR,
+    REPEATED_HOUR,
+    dst_change,
+    dst_change_near,
+    resolve_timezone,
+    to_local,
+    to_utc,
+)
 
 #: SEM-02: n() is true unless the job is in one of these (WAIT_REPLY/RESTART/
 #: SUSPENDED are out-of-scope states the oracle never produces). QUE_WAIT is
@@ -284,6 +383,12 @@ class InputBatch:
 #: canonicalizes; `_schedule_timer` refuses anything outside it.
 TIMER_CHECKS: Final[frozenset[str]] = frozenset({"must_start", "must_complete", "term_run_time"})
 
+#: A box member's deferred start also carries its box's name and run number
+#: (DL-246): the deferral belongs to that box run, and a box restart, or a
+#: rebaseline that moves the member to another box, makes it stale.
+DEFERRED_BOX_KEY: Final = "box"
+DEFERRED_BOX_RUN_KEY: Final = "box_run"
+
 #: PR-09's fourth armed shape: a run_window-deferred start carries no
 #: deadline `check`, it carries the provenance of the start it defers.
 #: Named once (DL-209) -- `_schedule_timer` admits it, `_dispatch` replays
@@ -301,8 +406,13 @@ class Oracle:
         carried: CarriedRows | None = None,
         tz_aliases: Mapping[str, str] | None = None,
         default_tz: str | None = None,
+        semantics: SemanticSwitches | None = None,
     ) -> None:
         self.catalog = catalog
+        #: the semantic switches (runner-design ss8a, DL-252): a caller with
+        #: a runtime profile passes the period's own (`period.switches_of`);
+        #: a static tool with no profile gets the registry defaults
+        self.semantics: SemanticSwitches = semantics or DEFAULT_SWITCHES
         self.store = RuntimeState()
         if carried is not None:
             # period-model ss7 phase 3 step 3: carried rows install VERBATIM
@@ -360,6 +470,18 @@ class Oracle:
         #: given all three.
         self._pool = CapacityPool(catalog)
         self._in_wake = False
+        #: DL-247: a full scan requested while a scan runs; the running loop
+        #: takes it up as its next pass, so an admit-only scan cannot swallow
+        #: a release's cancellations.
+        self._full_scan_requested = False
+        #: DL-247: a block may have lifted with no capacity freed, so the
+        #: admit-only scan is owed: a box left RUNNING, or (DL-255) a start
+        #: or a queued job took a machine's load and so may have sent a
+        #: resource waiter back to its load check. It runs at the waiter step
+        #: of the input (DL-50's order: release, referencers, waiters), once
+        #: every referencer the input woke has been visited; no nested
+        #: transition pays it (DL-255).
+        self._scan_owed = False
         #: SEM-35 name -> zone, resolved once per name (the ladder walks
         #: the whole zoneinfo database for a city default)
         self._tz_cache: dict[str, tzinfo] = {}
@@ -382,6 +504,11 @@ class Oracle:
         #: The runner passes nothing here: `--timezone` stays on the
         #: scheduler.
         self._default_tz: str | None = default_tz
+        #: SEM-33 (DL-246): the box runs whose start is in progress, as (box,
+        #: run number, cause), collected from the outermost box's RUNNING
+        #: transition on, so the window decisions of a whole started subtree
+        #: run after every attempt in it. None when no box start is open.
+        self._window_starts: list[tuple[str, int, str]] | None = None
 
     # ------------------------------------------------------------------ plumbing
 
@@ -421,8 +548,9 @@ class Oracle:
         `must_complete`, `term_run_time`) or `run_window` for a SEM-33
         deferred start. Liveness mirrors _dispatch_timer_check's fire-time
         rules -- a heap entry a fire would discard as stale (run_number moved
-        on; deadline's run no longer RUNNING) is not pending, it is dead
-        weight awaiting its lazy pop. The ss10 status query renders this for
+        on; a term_run_time run no longer RUNNING; a must_complete deadline
+        already met by the run its tick asked for, DL-248) is not pending, it
+        is dead weight awaiting its lazy pop. The ss10 status query renders this for
         the ss11 jobs table; display truth must be the dispatch truth --
         which is why the order is `store.timers()`'s and is NOT re-sorted
         here. On a TIE that order carries the ordering token, the firing
@@ -443,12 +571,20 @@ class Oracle:
                 # completed by next_open, and the fire would legally start it
                 # again. Filtering on current status would hide a timer that
                 # can still act (DL-46 review, finding rejected with reason).
-                live.append((due, job, "run_window"))
+                # One staleness IS permanent: a box restart (DL-246).
+                if self._deferral_is_stale(ev) is None:
+                    live.append((due, job, "run_window"))
                 continue
             rt = self.store.job.get(job)
+            if check == "must_complete":
+                # DL-248: judged against the tick's run, so a job that never
+                # started still has a live completion deadline
+                if rt is None or not self._slot_run_completed(rt, ev.payload.get("run")):
+                    live.append((due, job, str(check)))
+                continue
             if rt is None or ev.payload.get("run") != rt.run_number:
                 continue  # stale: a later run superseded this deadline
-            if check in ("must_complete", "term_run_time") and rt.status != "RUNNING":
+            if check == "term_run_time" and rt.status != "RUNNING":
                 continue  # the run already ended; the check fires as a no-op
             live.append((due, job, str(check)))
         return live
@@ -479,6 +615,8 @@ class Oracle:
     def _drain(self) -> None:
         while self._queue:
             self._dispatch(self._queue.popleft())
+            # DL-255: the input's waiter step, after all its referencers
+            self._run_owed_scan()
 
     def _emit(self, kind: EventKind, **payload: object) -> None:
         assert self._now is not None
@@ -514,66 +652,188 @@ class Oracle:
         return self.store.runtime(job)  # DL-82: the store owns creation too
 
     def _set_status(
-        self, job: str, status: JobStatus, cause: str, exit_code: int | None = None
+        self,
+        job: str,
+        status: JobStatus,
+        cause: str,
+        exit_code: int | None = None,
+        *,
+        clear_exit_code: bool = False,
     ) -> None:
         old = self._runtime(job).status
-        self.store.transition(job, status, self._now, exit_code)
+        self.store.transition(job, status, self._now, exit_code, clear_exit_code=clear_exit_code)
         self._record(job, f"{old}->{status}", cause)
         self._emit("STATUS", job=job, status=status)
         self._after_transition(job, old, status)
 
     def _after_transition(self, job: str, old: str, new: str) -> None:
+        """Every consequence of one transition, in the documented order: the
+        box rules, then the row's own settlement, then the wakes. A batch of
+        transitions (`_set_inactive_batch`) runs the same three pieces, with
+        every row settled before anything is notified."""
+        if self._box_stopped(job, old, new):
+            self._scan_owed = True
+        self._notify_boxes(job, old, new)
+        released = self._settle_row(job, new)
+        self._notify_wakes(job, new, wake_queue=released or self._lifts_a_block(old, new))
+
+    def _notify_boxes(self, job: str, old: str, new: str) -> None:
+        """The box rules a transition drives: the parent's member rules, the
+        ancestors' transitive overrides, and the Q3c disarm of a box that
+        reached a terminal status."""
         job_ir = self.catalog.jobs.get(job)
-        if job_ir is not None:
-            box = job_ir.box.box_name
-            if box is not None:
-                self._on_member_transition(box, job, old, new)
-                self._on_descendant_transition(job, new)
-            if job_ir.job_type == "BOX" and new in TERMINAL:
-                # PENDING: Q3c -- a member's arm is scoped to the box run
-                # that armed it (DL-54 review MAJOR): an unconsumed arm dies
-                # with the run, BEFORE any wake can ride it (nested boxes
-                # recurse via their own completion transitions). One field
-                # aside (DL-58) hints the vendor latch may instead survive
-                # into the NEXT box run; the scoped pin stands until a live
-                # test.
-                for member in self._members(job):
-                    m_rt = self.store.job.get(member)
-                    if m_rt is not None and m_rt.armed:
-                        self.store.set_armed(member, False)
-                        self._record(
-                            member,
-                            "SCHED_DISARM",
-                            f"unconsumed arm dies with box {job!r} run (Q3c pin, DL-54/58)",
-                        )
-        # DL-120: a job leaves QUE_WAIT through one of three paths that drop
-        # its rank first (admitted, killed, cancelled) -- or through an
-        # injected STATUS, which drops nothing. A rank left behind kept a
-        # terminal job in the admission queue, where the next release would
-        # start it again, so the rank goes with the status that owns it.
+        if job_ir is None:
+            return
+        box = job_ir.box.box_name
+        if box is not None:
+            self._on_member_transition(box, job, old, new)
+            self._on_descendant_transition(job, new)
+        if job_ir.job_type == "BOX" and new in TERMINAL:
+            self._disarm_members(job)
+
+    def _disarm_members(self, box: str) -> None:
+        """A member's arm is scoped to the box run that armed it (DL-54
+        review MAJOR): an unconsumed arm dies with the run, BEFORE any wake
+        can ride it. Nested boxes recurse via their own completion
+        transitions, or through the SEM-18 cascade (DL-242)."""
+        # PENDING: Q3c -- one field aside (DL-58) hints the vendor latch may
+        # instead survive into the NEXT box run; the scoped pin stands until
+        # a live test.
+        for member in self._members(box):
+            m_rt = self.store.job.get(member)
+            if m_rt is not None and m_rt.armed:
+                self.store.set_armed(member, False)
+                self._record(
+                    member,
+                    "SCHED_DISARM",
+                    f"unconsumed arm dies with box {box!r} run (Q3c pin, DL-54/58)",
+                )
+
+    def _settle_row(self, job: str, new: str) -> bool:
+        """The row-local consequences of a transition; True when it released
+        reservations, so the caller wakes the waiters after the referencers.
+
+        DL-120: a job leaves QUE_WAIT through one of three paths that drop
+        its rank first (admitted, killed, cancelled) -- or through an
+        injected STATUS, which drops nothing. A rank left behind kept a
+        terminal job in the admission queue, where the next release would
+        start it again, so the rank goes with the status that owns it.
+
+        DL-50: RELEASE a completed holder's units BEFORE waking anything. A
+        self-referencing re-trigger (the L010 tight-loop -- _wake_referencers
+        may re-start the very job that just completed) must re-acquire
+        against the FREED capacity, not overwrite its own still-held record
+        and strand a unit (adversarial review BLOCKER).
+
+        DL-120: the release edge is LEAVING the live statuses, not reaching
+        a terminal one. The two coincide for every ordinary run and differ
+        only for an injected STATUS INACTIVE on a live holder, which used to
+        strand the units in a `_held` record no row could see. Reservations
+        exist exactly while STARTING or RUNNING (period-model ss5), so the
+        release is on that same edge; a non-SUCCESS exit spends what FREE=N
+        and a depletable were always going to spend."""
         if new != "QUE_WAIT" and self._runtime(job).waiter_seq is not None:
             self.store.dequeue_waiter(job)
-        # DL-50: RELEASE a completed holder's units BEFORE waking anything. A
-        # self-referencing re-trigger (the L010 tight-loop -- _wake_referencers
-        # may re-start the very job that just completed) must re-acquire against
-        # the FREED capacity, not overwrite its own still-held record and strand
-        # a unit (adversarial review BLOCKER). Waiters then wake after condition
-        # referencers -- the documented deterministic order.
-        #
-        # DL-120: the release edge is LEAVING the live statuses, not reaching a
-        # terminal one. The two coincide for every ordinary run and differ only
-        # for an injected STATUS INACTIVE on a live holder, which used to strand
-        # the units in a `_held` record no row could see. Reservations exist
-        # exactly while STARTING or RUNNING (period-model ss5), so the release
-        # is on that same edge; a non-SUCCESS exit spends what FREE=N and a
-        # depletable were always going to spend.
         released = new not in LIVE and self._pool.holds(self._runtime(job))
         if released:
             self.store.release_reservations(job, new)
-        # SEM-01/dossier ss0: the transition wakes exactly the jobs whose
-        # condition references this one (edge-triggered, DL-13)
+        return released
+
+    @staticmethod
+    def _lifts_a_block(old: str, new: str) -> bool:
+        """DL-247: a job leaving QUE_WAIT can lift a priority block without
+        freeing capacity, so it wakes the queue. QUE_WAIT -> STARTING is an
+        admission, made by the scan that is already running; that scan's
+        next pass sees the change, so it requests nothing."""
+        return old == "QUE_WAIT" and new not in ("QUE_WAIT", "STARTING")
+
+    def _box_stopped(self, job: str, old: str, new: str) -> bool:
+        """DL-247: a box leaving RUNNING. Its queued members stop blocking at
+        once, so a job they blocked may now start."""
+        job_ir = self.catalog.jobs.get(job)
+        return old == "RUNNING" != new and job_ir is not None and job_ir.job_type == "BOX"
+
+    def _notify_wakes(self, job: str, new: str, *, wake_queue: bool) -> None:
+        """SEM-01/dossier ss0: the transition wakes exactly the jobs whose
+        condition references this one (edge-triggered, DL-13). Waiters then
+        wake after condition referencers -- the documented deterministic
+        order -- when capacity was released or a block lifted."""
         self._wake_referencers(job, cause=f"status of {job!r} changed to {new}")
-        if released:
+        if wake_queue:
+            self._wake_waiters()
+
+    def _run_owed_scan(self) -> None:
+        """DL-247: a box that stopped running lifts the blocks its queued
+        members held, so the queue is scanned when a queued job has a
+        positive priority on a sized machine or resource. DL-255 owes the
+        same scan after a start or an enqueue that takes a machine's load:
+        a resource waiter whose load no longer fits, or that a new load
+        waiter now blocks, is back at its load check and stops blocking on
+        its resources. The scan is owed, not run, at the act itself. The
+        input pays it once it is fully applied, after every release and
+        every referencer it woke (DL-255): a transition nested in that input
+        does not, or a scan owed by one referencer's start could admit a
+        waiter ahead of a later referencer. A scan that ran in between has
+        already paid it. It only
+        admits: every member of a stopped box stays queued for the next
+        release to cancel (DL-158, DL-54)."""
+        while self._scan_owed and not self._in_wake:
+            self._scan_owed = False
+            if self._pool.has_priority_waiters(self.store.job):
+                self._wake_waiters(keep_stopped=True)
+
+    def _set_inactive_batch(
+        self,
+        rows: list[tuple[str, str]],
+        *,
+        clear_exit_code: bool = False,
+        exit_code: int | None = None,
+        between: Callable[[], None] | None = None,
+    ) -> None:
+        """Move several jobs to INACTIVE as one act (DL-242): the box-start
+        reset (SEM-10) and the box INACTIVE cascade (SEM-18). `rows` pairs
+        each job with its trace cause, in order.
+
+        Phase 1 writes every row -- store, trace record, STATUS emission --
+        and settles it (rank, reservations). Phase 2 then runs the box rules
+        and the wakes for each row, in the same order. Writing first means
+        no wake sees a half-moved subtree: a member woken by a sibling's
+        reset or cascade meets its box already out of RUNNING. Settling
+        first means a restart in phase 2 acquires against freed capacity.
+        A wake in phase 2 may restart a job of the batch; such a row did
+        its own notifications, so phase 2 skips any row that has moved on.
+        `between` runs after phase 1: the cascade's Q3c disarm, or the box's
+        own STARTING transition for the reset.
+
+        `exit_code` is written on the first row only (an injected STATUS
+        may carry one); `clear_exit_code` clears it on every row."""
+        written: list[tuple[str, str, int, bool]] = []
+        for index, (job, cause) in enumerate(rows):
+            old = self._runtime(job).status
+            code = exit_code if index == 0 else None
+            self.store.transition(job, "INACTIVE", self._now, code, clear_exit_code=clear_exit_code)
+            self._record(job, f"{old}->INACTIVE", cause)
+            self._emit("STATUS", job=job, status="INACTIVE")
+            # the queue's wake: capacity released, or a block lifted (DL-247)
+            wake = self._settle_row(job, "INACTIVE") or self._lifts_a_block(old, "INACTIVE")
+            if self._box_stopped(job, old, "INACTIVE"):
+                self._scan_owed = True
+            written.append((job, old, self._runtime(job).run_number, wake))
+        if between is not None:
+            between()
+        owed = False
+        for job, before, run_number, wake in written:
+            rt = self._runtime(job)
+            if rt.status != "INACTIVE" or rt.run_number != run_number:
+                # restarted by an earlier wake of this phase; capacity it
+                # released in phase 1 still owes the waiters their wake
+                owed = owed or wake
+                continue
+            # `before` is the pre-batch status even when a wake restarted the
+            # box around this row; no rule reads it here, so that is harmless
+            self._notify_boxes(job, before, "INACTIVE")
+            self._notify_wakes(job, "INACTIVE", wake_queue=wake)
+        if owed:
             self._wake_waiters()
 
     # ------------------------------------------------------------ event dispatch
@@ -588,9 +848,12 @@ class Oracle:
             job = self._required_job(ev)
             force = kind == "FORCE_STARTJOB"
             if kind == "STARTJOB":
-                # SEM-34: the schedule tick arms the must_start deadline
-                # whether or not the start succeeds -- that is its point
-                self._arm_must_start(job)
+                # SEM-34: the schedule tick arms both deadlines whether or not
+                # the start succeeds -- that is their point (DL-248)
+                if (timer := self._tick_deadline(job, "must_start")) is not None:
+                    self._schedule_timer(timer.at, timer)
+                if (timer := self._tick_deadline(job, "must_complete")) is not None:
+                    self._schedule_timer(timer.at, timer)
             # DL-68: a sourced event names its trigger -- a scheduler tick and
             # an operator sendevent must not collapse to one cause string
             cause = f"{kind} event ({ev.source})" if ev.source else f"{kind} event"
@@ -599,6 +862,10 @@ class Oracle:
                 # SEM-33 defer: the fired timer replays the original start's
                 # provenance instead of collapsing to a bare TIMER (DL-68)
                 cause = f"run_window-deferred {deferred}"
+                stale = self._deferral_is_stale(ev)
+                if stale is not None:
+                    self._record(job, "START_REFUSED", f"{stale} ({cause})")
+                    return
             refused = self._attempt_start(job, force=force, scheduled=True, cause=cause)
             if refused is not None:
                 self._record(job, "START_REFUSED", f"{refused} ({cause})")
@@ -666,9 +933,133 @@ class Oracle:
         ):
             raise OracleError(f"unknown status {status!r}")
         code = exit_code if isinstance(exit_code, int) else None
-        self._set_status(job, status, cause="injected STATUS", exit_code=code)
+        if status != "INACTIVE" or job_ir is None:
+            self._set_status(job, status, cause="injected STATUS", exit_code=code)
+            return
+        self._inject_inactive(job_ir, code)
+
+    def _status(self, job: str) -> str:
+        return self._runtime(job).status
+
+    def _inject_inactive(
+        self,
+        job_ir: JobIR,
+        code: int | None,
+        *,
+        clear_exit_code: bool = False,
+        cause: str = "injected STATUS",
+    ) -> None:
+        """An operator's CHANGE_STATUS INACTIVE (DL-242). Three vendor rules
+        ride on it, besides DL-235's no-kill ruling for a launched run.
+        DL-243 reuses this path for ON_NOEXEC on a completed FAILURE/
+        TERMINATED job (`cause` names that call instead; `clear_exit_code`
+        drops the previous run's code, same as the SEM-10 box-start reset).
+
+        In a RUNNING box the member resolves: "affects the box's completion
+        status as if the INACTIVE job returned a status of SUCCESS"
+        (SEM-11). The mark lands BEFORE the transition, so the transition
+        itself runs the completion door. An injected STATUS always records a
+        transition, INACTIVE->INACTIVE included, so a waiting member set
+        INACTIVE runs the door the same way.
+
+        On a box, every contained job goes INACTIVE too (SEM-18), as one
+        batch: every row is written before anything is woken, and the box
+        runs in the subtree lose their unconsumed arms (Q3c).
+
+        On a member of a box that is not running, the box re-derives its
+        status with INACTIVE members ignored (SEM-15). Only this direct
+        target triggers that: the box-start reset, the SEM-18 cascade and a
+        window skip are internal transitions and leave the box alone. The
+        parent is re-read after the transition: a wake may have started it."""
+        job = job_ir.name
+        box = job_ir.box.box_name
+        parent = None if box is None else self._runtime(box)
+        if box is not None and parent is not None and parent.status == "RUNNING":
+            self.store.record_resolution(box, job)
+        if job_ir.job_type != "BOX":
+            self._set_status(
+                job, "INACTIVE", cause=cause, exit_code=code, clear_exit_code=clear_exit_code
+            )
+        else:
+            cascade_cause = (
+                f"box {job!r} set INACTIVE: cascades to every job it contains (SEM-18, DL-242)"
+            )
+            inner = [
+                j for j in self._contained(job, skip_live=False) if self._status(j) != "INACTIVE"
+            ]
+            boxes = [job] + [j for j in inner if self.catalog.jobs[j].job_type == "BOX"]
+
+            def disarm() -> None:
+                # Q3c: the box run ends here, so its unconsumed arms die
+                for each in boxes:
+                    self._disarm_members(each)
+
+            self._set_inactive_batch(
+                [(job, cause)] + [(j, cascade_cause) for j in inner],
+                exit_code=code,
+                clear_exit_code=clear_exit_code,
+                between=disarm,
+            )
+        if box is None or parent is None:
+            return
+        # SEM-15 on an idle parent -- unless this transition's own wakes
+        # started it, or it was running, starting or sticky TERMINATED
+        settled = ("RUNNING", "STARTING", "TERMINATED")
+        now = self._runtime(box)
+        if (
+            parent.status not in settled
+            and now.status not in settled
+            and now.run_number == parent.run_number
+        ):
+            self._idle_box_recompute(
+                box, self.catalog.jobs[box], cause=f"member {job!r} set INACTIVE"
+            )
+
+    def _oob_ignored(self, kind: EventKind, job: str) -> str | None:
+        """Why the scheduler ignores this ON_ICE/ON_HOLD/ON_NOEXEC, or None
+        (DL-254). "Change the Executable Status of a Job" (AutoSys 24.2):
+        ON_HOLD and ON_ICE have "no effect on jobs with a status of STARTING
+        or RUNNING", box or not. ON_NOEXEC is ignored for a non-box job that
+        is STARTING, RUNNING or ON_ICE, for a box that is ON_ICE or RUNNING,
+        and for "A box job with jobs (including the jobs contained in lower
+        level boxes) in a status other than the following status: ON_HOLD,
+        ON_NOEXEC, INACTIVE, SUCCESS, FAILURE, ACTIVATED, or TERMINATED". In
+        this model that is a contained job that is iced, STARTING, RUNNING
+        or QUE_WAIT. QUE_WAIT is not named for the job itself, so a queued
+        job keeps the handling below."""
+        rt = self._runtime(job)
+        if kind in ("ON_ICE", "ON_HOLD"):
+            if rt.status in LIVE:
+                return f"sendevent {kind} ignored: the job is {rt.status} (DL-254)"
+            return None
+        if kind != "ON_NOEXEC":
+            return None
+        job_ir = self.catalog.jobs.get(job)
+        is_box = job_ir is not None and job_ir.job_type == "BOX"
+        if rt.on_ice:
+            return "sendevent ON_NOEXEC ignored: the job is ON_ICE (DL-254)"
+        if rt.status == "RUNNING" or (not is_box and rt.status == "STARTING"):
+            return f"sendevent ON_NOEXEC ignored: the job is {rt.status} (DL-254)"
+        if not is_box:
+            return None
+        for member in self._contained(job, skip_live=False):
+            mrt = self._runtime(member)
+            if mrt.on_ice:
+                return f"sendevent ON_NOEXEC ignored: contained job {member!r} is ON_ICE (DL-254)"
+            if mrt.status in LIVE | {"QUE_WAIT"}:
+                return (
+                    f"sendevent ON_NOEXEC ignored: contained job {member!r} is"
+                    f" {mrt.status} (DL-254)"
+                )
+        return None
 
     def _handle_oob(self, kind: EventKind, job: str) -> None:
+        ignored = self._oob_ignored(kind, job)
+        if ignored is not None:
+            # DL-254: no flag, no transition, no wake -- only the trace line,
+            # the START_REFUSED shape for an operator event that did nothing
+            self._record(job, "EVENT_IGNORED", ignored)
+            return
         # the status BEFORE the flag change -- a flag never moves a status, but
         # the rows are frozen (DL-86), so hold the value, not a stale row
         status = self._runtime(job).status
@@ -698,6 +1089,8 @@ class Oracle:
         elif kind == "ON_HOLD":
             self.store.set_flags(job, on_hold=True)
             self._record(job, "ON_HOLD", "sendevent ON_HOLD")
+            if status == "QUE_WAIT":
+                self._wake_waiters()  # DL-247: a held waiter blocks no one
         elif kind == "OFF_HOLD":
             self.store.set_flags(job, on_hold=False)
             self._record(job, "OFF_HOLD", "sendevent OFF_HOLD")
@@ -707,11 +1100,28 @@ class Oracle:
                 # SEM-21: if conditions are already satisfied, run immediately
                 self._attempt_start(job, force=False, scheduled=False, cause="OFF_HOLD")
         elif kind == "ON_NOEXEC":
-            self.store.set_flags(job, on_noexec=True)
-            self._record(job, "ON_NOEXEC", "sendevent ON_NOEXEC")
+            job_ir = self.catalog.jobs.get(job)
+            if job_ir is not None and job_ir.job_type == "BOX":
+                self._noexec_box(job_ir)
+            else:
+                self._noexec_job(job, job_ir, status)
         elif kind == "OFF_NOEXEC":
+            # DL-243: a job ON_NOEXEC'd after FAILURE/TERMINATED was already
+            # moved to INACTIVE at that event; OFF_NOEXEC here is a plain
+            # flag clear on an already-INACTIVE row, same as the vendor's
+            # "places the job in the INACTIVE ... status" (Events page,
+            # JOB_OFF_NOEXEC). On a box it clears every contained job too
+            # (DL-254): "If you send the JOB_OFF_NOEXEC to a box, all jobs in
+            # the box (including all jobs that are contained in lower level
+            # boxes within the box) are reset".
             self.store.set_flags(job, on_noexec=False)
             self._record(job, "OFF_NOEXEC", "sendevent OFF_NOEXEC")
+            job_ir = self.catalog.jobs.get(job)
+            if job_ir is not None and job_ir.job_type == "BOX":
+                for member in self._contained(job, skip_live=False):
+                    if self._runtime(member).on_noexec:
+                        self.store.set_flags(member, on_noexec=False)
+                        self._record(member, "OFF_NOEXEC", f"box {job!r} taken OFF_NOEXEC (DL-254)")
         elif kind == "DISARM":
             # period-model ss10.4 (DL-158): the explicit journaled disarm.
             # The drop is the WHOLE effect: no status move, no wake, no
@@ -726,6 +1136,117 @@ class Oracle:
             reason = "sendevent DISARM" if was_armed else "sendevent DISARM (no latch)"
             self._record(job, "DISARM", reason)
 
+    def _set_noexec(self, job: str, cause: str) -> bool:
+        """Set the ON_NOEXEC flag and record it. ON_NOEXEC supersedes ON_HOLD
+        (DL-254): "The JOB_ON_NOEXEC event supersedes the JOB_ON_HOLD event
+        effectively overwriting the ON_HOLD status with the ON_NOEXEC
+        status." The hold is cleared and recorded like an OFF_HOLD. Returns
+        True when a hold was cleared: the caller then retries the start, as
+        OFF_HOLD does, once its own transitions are done."""
+        self.store.set_flags(job, on_noexec=True)
+        self._record(job, "ON_NOEXEC", cause)
+        if not self._runtime(job).on_hold:
+            return False
+        self.store.set_flags(job, on_hold=False)
+        self._record(job, "OFF_HOLD", "ON_NOEXEC supersedes ON_HOLD (SEM-22, DL-254)")
+        return True
+
+    def _noexec_job(self, job: str, job_ir: JobIR | None, status: str) -> None:
+        """ON_NOEXEC on a job that is not a box and does not ignore it.
+
+        DL-243 (Job States page): "the scheduler places the job in the
+        ON_NOEXEC status and the effect is the same as sending the
+        CHANGE_STATUS event to INACTIVE for the job" -- for a job that
+        already completed FAILURE/TERMINATED, materialize that through
+        DL-242's operator-INACTIVE path (exit code cleared) instead of a
+        read-time projection. A queued job takes the same path (DL-254):
+        "If the job is in the QUEWAIT or RESWAIT status, the scheduler
+        removes the job from the load balancing and resource wait queues
+        before placing it in the ON_NOEXEC status." It holds no reservation.
+        INACTIVE and SUCCESS keep their status.
+
+        A job released from a hold or from the queue retries its start, as
+        OFF_HOLD does: the vendor bypasses a NOEXEC job "When the NOEXEC job
+        meets its starting conditions", so one whose conditions already
+        hold bypasses to SUCCESS now. A queued job had met them; the retry
+        runs after the removal, so it does not contradict it. The retry is
+        skipped when the event's own wakes already started the job: its run
+        number moved, and a second start would be a run with no trigger."""
+        run_number = self._runtime(job).run_number
+        released = self._set_noexec(job, "sendevent ON_NOEXEC")
+        if job_ir is None:
+            return
+        if status == "QUE_WAIT":
+            self.store.dequeue_waiter(job)
+            self._inject_inactive(
+                job_ir,
+                None,
+                clear_exit_code=True,
+                cause="ON_NOEXEC takes a queued job out of the queue (DL-254)",
+            )
+            released = True
+        elif status in ("FAILURE", "TERMINATED"):
+            self._inject_inactive(
+                job_ir,
+                None,
+                clear_exit_code=True,
+                cause="ON_NOEXEC settles a completed job to INACTIVE (DL-243)",
+            )
+        if released:
+            self._retry_released(job, run_number)
+
+    def _retry_released(self, job: str, run_number: int) -> None:
+        """The OFF_HOLD-style start retry for a job ON_NOEXEC released from a
+        hold or the queue (DL-254), unless a wake of the same event already
+        started it."""
+        if self._runtime(job).run_number == run_number:
+            self._attempt_start(job, force=False, scheduled=False, cause="ON_NOEXEC (DL-254)")
+
+    def _noexec_box(self, box_ir: JobIR) -> None:
+        """ON_NOEXEC on a box that does not ignore it (DL-254): "the effect is
+        the same as sending the CHANGE_STATUS event to INACTIVE for a box.
+        The box enters the ON_NOEXEC status and the scheduler sets the status
+        of all jobs in the box (including all jobs contained in lower level
+        boxes within the box) at all levels to ON_NOEXEC."
+
+        Every flag is set first, then DL-242's box INACTIVE path runs (the
+        SEM-18 cascade, one batch). Flags first, so a box its own cascade
+        restarts already runs in non-execution mode. `_oob_ignored` has
+        already refused a box with a live, queued or iced job inside, so
+        the cascade kills nothing. Every row the event covers loses its
+        exit code, as DL-243 clears it; a row already INACTIVE by a plain
+        store write, as the SEM-10 reset does (no wake: an atom only turns
+        false). A box whose whole subtree is already INACTIVE keeps its
+        status, as an INACTIVE job does -- unless its parent box is RUNNING:
+        then the INACTIVE->INACTIVE transition runs, so the parent records
+        the resolution and runs its completion door, as an operator's
+        CHANGE_STATUS INACTIVE on a waiting member does (DL-242). Jobs whose
+        hold the event cleared retry their start afterwards, as OFF_HOLD
+        does, unless the cascade's wakes already started them."""
+        box = box_ir.name
+        tree = [box, *self._contained(box, skip_live=False)]
+        runs = {job: self._runtime(job).run_number for job in tree}
+        released = [job for job in tree if self._set_noexec(job, self._noexec_cause(box, job))]
+        for job in tree:
+            rt = self._runtime(job)
+            if rt.status == "INACTIVE" and rt.exit_code is not None:
+                self.store.clear_exit_code(job)
+        parent = box_ir.box.box_name
+        parent_running = parent is not None and self._status(parent) == "RUNNING"
+        if parent_running or any(self._status(j) != "INACTIVE" for j in tree):
+            self._inject_inactive(
+                box_ir,
+                None,
+                clear_exit_code=True,
+                cause="ON_NOEXEC on a box: CHANGE_STATUS INACTIVE (DL-254)",
+            )
+        for job in released:
+            self._retry_released(job, runs[job])
+
+    @staticmethod
+    def _noexec_cause(box: str, job: str) -> str:
+        return "sendevent ON_NOEXEC" if job == box else f"box {box!r} put ON_NOEXEC (DL-254)"
+
     # -------------------------------------------------------- condition evaluation
 
     def _atom_true(self, atom: StatusAtom | ExitCodeAtom, evaluator: str) -> bool:
@@ -735,11 +1256,30 @@ class Oracle:
         rt = self.store.job.get(name)
         if rt is None:
             return False  # SEM-06: undefined -> permanently, silently false
-        if rt.on_ice and rt.status not in ("STARTING", "RUNNING"):
-            # SEM-05/SEM-20 + DL-13: an iced predecessor satisfies every atom
-            # kind, lookback ignored -- but ice on a running job takes effect
-            # at completion (the in-flight run is still real)
-            return True
+        if rt.on_ice:
+            # The flag reads the same whatever the stored status: ON_ICE on
+            # a STARTING/RUNNING job is ignored (DL-254) and a plain start
+            # refuses an iced job, so only an injected STATUS can make an
+            # iced row live. Split on whether the atom carries a lookback
+            # qualifier (DL-243) and on the `ice-lookback` switch (DL-252).
+            if atom.lookback is not None and self.semantics.ice_lookback == "true":
+                # SEM-05 + DL-13: a LOOKBACK atom (any kind, zero included)
+                # keeps the blanket pin -- every atom kind true, lookback
+                # ignored -- as the AutoSys 24.2 "condition Attribute" page
+                # states for a look-back condition on an ON_ICE predecessor.
+                # PENDING: Q10 -- the Start Conditions ON_ICE table (below)
+                # does not separate lookback atoms and reads f/t/exitcode
+                # false; which page a live instance follows is open. The
+                # table's reading is the `ice-lookback=ordinary` switch
+                # (DL-252): the qualifier is dropped and the table applies.
+                return True
+            # DL-243 (SEM-20): an ORDINARY atom (no lookback qualifier
+            # at all) follows the vendor's own ON_ICE truth table instead:
+            # success/done/notrunning true, failure/terminated/exitcode
+            # false.
+            if isinstance(atom, ExitCodeAtom):
+                return False
+            return atom.status in ("SUCCESS", "DONE", "NOTRUNNING")
         if isinstance(atom, ExitCodeAtom):
             if rt.exit_code is None or not self._lookback_ok(rt, atom.lookback, evaluator):
                 return False
@@ -826,13 +1366,29 @@ class Oracle:
             # condition edges stay silent exactly as before.
             return f"already {rt.status} -- concurrent or repeated start request, no effect"
         if rt.on_ice:
-            return None  # SEM-20: iced jobs never run (FORCE included -- DL-13);
-            # never arms: conditions must REOCCUR after OFF_ICE
+            if not force:
+                return None  # SEM-20: iced jobs never run on a plain start;
+                # never arms: conditions must REOCCUR after OFF_ICE
+            # SEM-23/DL-243: FORCE_STARTJOB on a non-live iced job is the
+            # vendor's "returns to an executable state" case (sendevent Start
+            # Jobs page) -- clear the flag the same way an OFF_ICE would,
+            # with a cause naming the force, then fall through to start.
+            self.store.set_flags(job, on_ice=False)
+            self._record(job, "OFF_ICE", f"FORCE_STARTJOB clears ON_ICE (SEM-23, DL-243; {cause})")
+            rt = self._runtime(job)
         if rt.on_hold and not force:
             # SEM-21: held jobs do not start; a scheduled tick latches so the
             # missed run collapses to at most one on OFF_HOLD (Q3, DL-54)
             self._arm(job_ir, rt, scheduled, "blocked ON_HOLD")
             return None
+        if rt.on_hold and force:
+            # SEM-23/DL-243: same FORCE_STARTJOB rule for ON_HOLD -- the
+            # vendor groups ON_HOLD with ON_ICE as "non-executable" states.
+            self.store.set_flags(job, on_hold=False)
+            self._record(
+                job, "OFF_HOLD", f"FORCE_STARTJOB clears ON_HOLD (SEM-23, DL-243; {cause})"
+            )
+            rt = self._runtime(job)
         if not force:
             if job_ir.schedule is not None and not scheduled and not rt.armed:
                 # SEM-30/31 (DL-13): a date_conditions job -- standalone OR
@@ -860,7 +1416,7 @@ class Oracle:
                 return None
         if not self._run_window_permits(job_ir, cause):
             return None
-        self._start(job, cause)
+        self._start(job, cause, force=force)
         return None
 
     def _arm(self, job_ir: JobIR, rt: JobRuntime, scheduled: bool, why: str) -> None:
@@ -909,51 +1465,15 @@ class Oracle:
         """SEM-33 closer-edge rule; True == start may proceed now. The window
         is read in the job's own timezone (SEM-35 re-bases every time
         attribute of that job), so the comparison happens on local wall time
-        while the timer it queues goes back on the engine clock."""
-        schedule = job_ir.schedule
-        if schedule is None or schedule.run_window is None:
+        while the timer it queues goes back on the engine clock. Near a
+        documented DST change it happens on the window's engine instants
+        instead (DL-249, `_window_span`)."""
+        side, next_open = self._window_side(job_ir)
+        if side == "inside":
             return True
-        assert self._now is not None
-        tz = self._job_tz(job_ir)
-        now_local = to_local(self._now, tz)
-        lo, hi = schedule.run_window
-        now_t = now_local.time()
-        lo_t = _to_time(lo)
-        hi_t = _to_time(hi)
-        if lo_t <= hi_t:
-            inside = lo_t <= now_t <= hi_t
-        else:  # window crosses midnight
-            inside = now_t >= lo_t or now_t <= hi_t
-        if inside:
-            return True
-        next_open = to_utc(_next_occurrence(now_local, lo_t), tz)
-        prev_close = to_utc(_prev_occurrence(now_local, hi_t), tz)
-        # both distances are measured on the ENGINE clock: a DST shift inside
-        # the gap makes the two wall-clock distances lie about elapsed time
-        to_open = next_open - self._now
-        since_close = self._now - prev_close
-        if to_open <= since_close:  # [?] midpoint tie -> next opening
-            # DL-54 review MINOR: an armed job can reach this branch on every
-            # condition edge -- one pending defer per (job, opening) instant,
-            # not one per attempt (duplicate timers spammed pending_timers()).
-            pending = any(
-                due == next_open and e.kind == "TIMER" and e.payload.get("job") == job_ir.name
-                for due, _, e in self.store.timers()
-            )
-            if not pending:
-                self._schedule_timer(
-                    next_open,
-                    Event(
-                        at=next_open,
-                        kind="TIMER",
-                        payload={"job": job_ir.name, DEFERRED_TIMER_KEY: cause},
-                    ),
-                )
-                self._record(
-                    job_ir.name,
-                    "RUN_WINDOW_DEFER",
-                    f"outside run_window; closer to next opening -- STARTJOB queued ({cause})",
-                )
+        if side == "defer":
+            assert next_open is not None
+            self._defer_start(job_ir, next_open, cause)
         else:
             self._record(
                 job_ir.name,
@@ -962,6 +1482,104 @@ class Oracle:
             )
             self._window_skip_bypass(job_ir)
         return False
+
+    def _window_side(self, job_ir: JobIR) -> tuple[str, datetime | None]:
+        """Which side of the SEM-33 closer-edge rule `now` falls on, with no
+        effect: "inside", "defer" (with the next opening on the engine
+        clock) or "skip"."""
+        schedule = job_ir.schedule
+        if schedule is None or schedule.run_window is None:
+            return "inside", None
+        assert self._now is not None
+        tz = self._job_tz(job_ir)
+        now_local = to_local(self._now, tz)
+        lo, hi = schedule.run_window
+        lo_t = _to_time(lo)
+        hi_t = _to_time(hi)
+        today = now_local.date()
+        if dst_change_near(today, tz):
+            # DL-249: near a documented DST change the window is a set of
+            # concrete intervals whose endpoints follow the vendor's rules.
+            # No zone has such a change within days of the calendar's ends,
+            # so the four opening days stay inside the date range.
+            spans = [_window_span(today + timedelta(days=k), lo_t, hi_t, tz) for k in range(-2, 2)]
+            if any(opens <= self._now <= closes for opens, closes in spans):
+                return "inside", None
+            next_open = min(opens for opens, _ in spans if opens > self._now)
+            prev_close = max(closes for _, closes in spans if closes < self._now)
+        else:
+            now_t = now_local.time()
+            if lo_t <= hi_t:
+                inside = lo_t <= now_t <= hi_t
+            else:  # window crosses midnight
+                inside = now_t >= lo_t or now_t <= hi_t
+            if inside:
+                return "inside", None
+            next_open = to_utc(_next_occurrence(now_local, lo_t), tz)
+            prev_close = to_utc(_prev_occurrence(now_local, hi_t), tz)
+        # both distances are measured on the ENGINE clock: a DST shift inside
+        # the gap makes the two wall-clock distances lie about elapsed time
+        to_open = next_open - self._now
+        since_close = self._now - prev_close
+        if to_open <= since_close:  # [?] midpoint tie -> next opening
+            return "defer", next_open
+        return "skip", None
+
+    def _defer_start(self, job_ir: JobIR, next_open: datetime, cause: str) -> None:
+        """Queue the SEM-33 deferred STARTJOB at the next opening. A member's
+        deferral carries its box's run number, so a box restart makes it
+        stale (DL-246)."""
+        payload: dict[str, object] = {"job": job_ir.name, DEFERRED_TIMER_KEY: cause}
+        box = job_ir.box.box_name
+        if box is not None:
+            payload[DEFERRED_BOX_KEY] = box
+            payload[DEFERRED_BOX_RUN_KEY] = self._runtime(box).run_number
+        # DL-54 review MINOR: an armed job can reach this branch on every
+        # condition edge -- one pending defer per (job, opening) instant, not
+        # one per attempt (duplicate timers spammed pending_timers()). Only a
+        # deferred start of the same box run counts: a deadline timer at the
+        # same instant is not one (DL-246).
+        pending = any(
+            due == next_open
+            and e.kind == "TIMER"
+            and DEFERRED_TIMER_KEY in e.payload
+            and e.payload.get("job") == job_ir.name
+            and e.payload.get(DEFERRED_BOX_KEY) == payload.get(DEFERRED_BOX_KEY)
+            and e.payload.get(DEFERRED_BOX_RUN_KEY) == payload.get(DEFERRED_BOX_RUN_KEY)
+            for due, _, e in self.store.timers()
+        )
+        if pending:
+            return
+        self._schedule_timer(next_open, Event(at=next_open, kind="TIMER", payload=payload))
+        self._record(
+            job_ir.name,
+            "RUN_WINDOW_DEFER",
+            f"outside run_window; closer to next opening -- STARTJOB queued ({cause})",
+        )
+
+    def _deferral_is_stale(self, ev: Event) -> str | None:
+        """The refusal reason for a deferred start that no longer belongs to
+        its job's box run (DL-246), None otherwise: the box has started
+        again since the deferral, or a rebaseline moved the job into another
+        box or out of one. The current box run decides the job afresh."""
+        job = ev.payload.get("job")
+        if not isinstance(job, str):
+            return None
+        job_ir = self.catalog.jobs.get(job)
+        current = job_ir.box.box_name if job_ir is not None else None
+        origin = ev.payload.get(DEFERRED_BOX_KEY)
+        if origin != current:
+            return (
+                f"deferred start was queued in box {origin!r}, and the job is now in box"
+                f" {current!r} -- no effect (SEM-33, DL-246)"
+            )
+        box_run = ev.payload.get(DEFERRED_BOX_RUN_KEY)
+        if current is None or self._runtime(current).run_number == box_run:
+            return None
+        return (
+            f"deferred start belongs to box {current!r} run {box_run}, and the box has started"
+            " again since -- no effect (SEM-33, DL-246)"
+        )
 
     def _window_skip_bypass(self, job_ir: JobIR) -> None:
         """SEM-33/DL-154: a run_window skip during a live box run is a
@@ -976,18 +1594,30 @@ class Oracle:
         the vendor's INACTIVE verdict). A mid-run condition edge -- or a
         FORCE_STARTJOB, which does not override run_window (SEM-23) --
         that lands on the skip branch bypasses identically: the
-        closer-edge rule applies at the attempt's own moment. Standalone
-        jobs and members of non-RUNNING boxes keep the plain skip
-        (INACTIVE stays, no transition); a member that already ran this
-        execution keeps its real result -- a forced re-attempt's skip
+        closer-edge rule applies at the attempt's own moment. A box start
+        decides the same skip for a member outside its window (DL-246).
+
+        For a standalone job the product "does not start the job and
+        changes its status to INACTIVE" (same page): a prior SUCCESS,
+        FAILURE or TERMINATED moves to INACTIVE and wakes referencers, as
+        an injected INACTIVE does, and the exit code stays, as it does
+        there (DL-246). A job already INACTIVE gets no transition. Members
+        of non-RUNNING boxes keep the plain skip; a member that already ran
+        this execution keeps its real result -- a forced re-attempt's skip
         must not un-run it."""
         box = job_ir.box.box_name
         if box is None:
+            if self._runtime(job_ir.name).status != "INACTIVE":
+                self._set_status(
+                    job_ir.name,
+                    "INACTIVE",
+                    cause="run_window skip: closer to previous close (SEM-33, DL-246)",
+                )
             return
         box_rt = self._runtime(box)
         if box_rt.status != "RUNNING" or job_ir.name in box_rt.ran_members:
             return
-        self.store.record_window_skip(box, job_ir.name)
+        self.store.record_resolution(box, job_ir.name)
         cause = f"run_window skip bypasses inside box {box!r} (SEM-33, DL-154)"
         if self._runtime(job_ir.name).status != "INACTIVE":
             # the transition runs the completion door itself: the mark is
@@ -995,12 +1625,15 @@ class Oracle:
             # as the member's resolution moment
             self._set_status(job_ir.name, "INACTIVE", cause=cause)
             return
-        # already INACTIVE: no transition to ride -- run the same door here
+        # already INACTIVE: no transition to ride -- run the same door here,
+        # then the ancestors' transitive overrides, as a resolved INACTIVE
+        # transition would (SEM-12, DL-242)
         box_ir = self.catalog.jobs[box]
-        if self._apply_box_overrides(box, box_ir, job_ir.name, "INACTIVE", completion_moment=True):
-            return
-        if self._all_members_done(box):
+        if not self._apply_box_overrides(
+            box, box_ir, job_ir.name, "INACTIVE", completion_moment=True
+        ) and self._all_members_done(box):
             self._fold_box_default(box, box_ir)
+        self._on_descendant_transition(job_ir.name, "INACTIVE")
 
     def _ancestor_boxes(self, job: str) -> list[str]:
         """Containing boxes, innermost first (SEM-17). Lowering rejects
@@ -1031,7 +1664,7 @@ class Oracle:
             return True
         return any(self._runtime(box).on_noexec for box in self._ancestor_boxes(job_ir.name))
 
-    def _start(self, job: str, cause: str) -> None:
+    def _start(self, job: str, cause: str, *, force: bool = False) -> None:
         job_ir = self.catalog.jobs[job]
         if self._noexec_bypasses(job_ir):
             # SEM-22: lifecycle bypass -- straight to SUCCESS, downstream normal.
@@ -1050,22 +1683,30 @@ class Oracle:
             return
         # DL-50: atomic admission before RUNNING. Empty demand -> straight to
         # RUNNING, byte-identical to the pre-resource oracle (bisim + the whole
-        # existing corpus are untouched: no buckets, no waiters, same cause).
+        # existing corpus are untouched: no buckets, no waiters, same cause),
+        # unless a higher-priority waiter blocks it (DL-247, DL-255).
         vector = self._pool.demand_vector(job_ir)
-        if vector and not self._pool.can_admit(vector, self.store.job, self.store.consumed):
+        if not self._admissible(job_ir, vector, force=force):
             self._enqueue_waiter(job, cause)
-            return
-        # DL-120: the vector is FROZEN onto the row here. The terminal
-        # transition releases what this run took, never what the catalog says
-        # the job wants by then (PR-20).
-        self.store.reserve(job, to_reservations(vector))
-        self._run(job_ir, cause, had_demand=bool(vector))
+        else:
+            # DL-120: the vector is FROZEN onto the row here. The terminal
+            # transition releases what this run took, never what the catalog
+            # says the job wants by then (PR-20).
+            self.store.reserve(job, to_reservations(vector))
+            self._run(job_ir, cause, had_demand=bool(vector))
+        if takes_machine_load(vector):
+            # DL-255: the held load, or the new load waiter, can send a
+            # resource waiter on this machine back to its load check
+            self._scan_owed = True
 
     def _run(self, job_ir: JobIR, cause: str, *, had_demand: bool) -> None:
         """Start tail once admission has passed: run_number bump, box
-        bookkeeping, STARTING -> RUNNING, box member launch (SEM-10)."""
+        bookkeeping, STARTING -> RUNNING, box member launch (SEM-10). A box
+        resets its contained jobs around its STARTING transition (DL-242):
+        the rows are written before it, so its wakes read the new cycle,
+        and their notifications run after it, while the box is STARTING."""
         job = job_ir.name
-        self._arm_sla_and_term(job_ir)  # reads run_number before the bump
+        self._arm_term_run_time(job_ir)  # reads run_number before the bump
         # one act: the arm this start consumes (Q3/DL-54 -- the ACTUAL start
         # consumes it, FORCE included; a QUE_WAIT enqueue keeps it latched, so
         # a cancelled queue attempt does not eat the tick), the run_number
@@ -1076,53 +1717,139 @@ class Oracle:
             box=job_ir.box.box_name,
             is_box=job_ir.job_type == "BOX",
         )
-        self._set_status(job, "STARTING", cause=cause)
+        run_number = self._runtime(job).run_number
+
+        def starting() -> None:
+            self._set_status(job, "STARTING", cause=cause)
+
+        if job_ir.job_type == "BOX":
+            self._reset_box_cycle(job, starting)
+        else:
+            starting()
+        rt = self._runtime(job)
+        if rt.status != "STARTING" or rt.run_number != run_number:
+            # a wake of the STARTING transition (or of the box-start reset)
+            # ended this run -- a job_terminator cascade TERMINATES a
+            # STARTING member -- so RUNNING must not overwrite that verdict
+            return
         running_cause = (
             "admitted: resources acquired (DL-50)"
             if had_demand
             else "QUE_WAIT collapses to immediate (ss7 non-goal)"
         )
-        self._set_status(job, "RUNNING", cause=running_cause)
-        if job_ir.job_type == "BOX":
-            self._on_box_started(job)
+        if job_ir.job_type != "BOX":
+            self._set_status(job, "RUNNING", cause=running_cause)
+            return
+        # SEM-33 (DL-246): the window decisions of every box this start
+        # begins -- its own, and any subbox started by RUNNING's wakes or by a
+        # member attempt -- wait for one pass after all of their attempts
+        outermost = self._window_starts is None
+        if outermost:
+            self._window_starts = []
+        try:
+            self._set_status(job, "RUNNING", cause=running_cause)
+            self._on_box_started(job, run_number)
+            starts = self._window_starts
+        finally:
+            if outermost:
+                self._window_starts = None
+        if outermost:
+            assert starts is not None
+            self._decide_windows_at_box_start(starts)
 
     # ---------------------------------------------------------- resources (DL-50)
+
+    def _admissible(self, job_ir: JobIR, vector: list[DemandEntry], *, force: bool) -> bool:
+        """The admission test of a start, fresh or out of the queue (DL-247).
+        A job with a positive priority must not be blocked by a
+        higher-priority waiter on a named resource it names (DL-255); force
+        does not lift that block, since the vendor's force rule is a load
+        rule. A FORCE_STARTJOB then checks the named resources only: the
+        forced job "runs even if its load exceeds the machine's max_load
+        value", and so no load waiter blocks it either. A job whose priority
+        is unset or 0 does the same: the scheduler "ignores any load unit
+        values" for it. Both still hold their load. Otherwise the job must
+        not be blocked by a higher-priority load waiter on its machine, and
+        every bucket must fit. Force lives on the event, not the row: a
+        forced job that queues on a named resource is readmitted like any
+        other."""
+        rows, consumed = self.store.job, self.store.consumed
+        if self._pool.resource_blocked(job_ir, rows, consumed, self._counts_as_waiter):
+            return False
+        if force or not checks_load(job_ir):
+            return self._pool.can_admit(without_machine_load(vector), rows, consumed)
+        if self._pool.load_blocked(job_ir, rows, consumed, self._counts_as_waiter):
+            return False
+        return self._pool.can_admit(vector, rows, consumed)
+
+    def _counts_as_waiter(self, waiter: str) -> bool:
+        """A queued job that counts toward priority blocking (DL-247,
+        DL-255): not held, and not a member whose box has stopped running.
+        The readmission scan cancels the latter and keeps the former queued
+        without trying it, so neither is waiting for load or a resource."""
+        rt = self._runtime(waiter)
+        job_ir = self.catalog.jobs.get(waiter)
+        if rt.on_hold or job_ir is None:
+            return False
+        box = job_ir.box.box_name
+        return box is None or self._runtime(box).status == "RUNNING"
 
     def _enqueue_waiter(self, job: str, cause: str) -> None:
         self.store.enqueue_waiter(job)
         self._set_status(job, "QUE_WAIT", cause=f"waiting for resources ({cause})")
 
-    def _wake_waiters(self) -> None:
+    def _wake_waiters(self, *, keep_stopped: bool = False) -> None:
         """Admit queued jobs whose full vector now fits, in deterministic order,
         to a fixpoint. Re-entrancy-guarded: a nested call (a release inside an
-        admitted job's cascade) defers to the outer loop's next scan."""
+        admitted job's cascade) defers to the outer loop's next scan.
+        `keep_stopped` leaves a member of a stopped box queued instead of
+        cancelling it (the owed admit-only scan of DL-247 and DL-255). A full scan requested while
+        an admit-only one runs turns its next pass into a full one, so a
+        release inside the scan still cancels what a release cancels.
+
+        Every pass pays an owed scan, since every pass admits."""
         if self._in_wake:
+            if not keep_stopped:
+                self._full_scan_requested = True
             return
         self._in_wake = True
         try:
-            while any(
-                self._readmit(job) in ("admitted", "cancelled")
-                for job in self._pool.sorted_waiters(self.store.job)
-            ):
-                pass  # queue changed; sorted_waiters is re-read each scan
+            while True:
+                self._scan_owed = False
+                self._full_scan_requested = False
+                moved = any(
+                    self._readmit(job, keep_stopped=keep_stopped) in ("admitted", "cancelled")
+                    for job in self._pool.sorted_waiters(self.store.job)
+                )
+                if self._full_scan_requested and keep_stopped:
+                    keep_stopped = False
+                    continue
+                if not moved:
+                    break  # queue unchanged; sorted_waiters is re-read each pass
         finally:
             self._in_wake = False
 
-    def _readmit(self, job: str) -> str:
+    def _readmit(self, job: str, *, keep_stopped: bool = False) -> str:
         """One admission attempt for a queued job. Re-validates the guards that
-        can change while queued (ice, box-RUNNING, hold) before the capacity
-        check; conditions are NOT re-checked (# PENDING: Qr6)."""
+        can change while queued (ice, box-RUNNING, hold) before the
+        capacity check; conditions are NOT re-checked (# PENDING: Qr6). The capacity
+        check is a fresh start's, so a higher-priority load waiter on the
+        same machine keeps this job queued even when its load fits
+        (DL-247), and so does a higher-priority waiter on a named resource
+        it names (DL-255)."""
         rt = self._runtime(job)
         job_ir = self.catalog.jobs[job]
         if rt.on_ice:
             return self._cancel_waiter(job, "iced while queued")
         box = job_ir.box.box_name
         if box is not None and self._runtime(box).status != "RUNNING":
+            if keep_stopped:
+                return "waiting"
             return self._cancel_waiter(job, f"box {box!r} no longer RUNNING")
         if rt.on_hold:
             return "held"  # stays queued; OFF_HOLD re-scans
         vector = self._pool.demand_vector(job_ir)
-        if not self._pool.can_admit(vector, self.store.job, self.store.consumed):
+        if not self._admissible(job_ir, vector, force=False):
             return "waiting"
         self.store.dequeue_waiter(job)
         self.store.reserve(job, to_reservations(vector))
@@ -1134,7 +1861,60 @@ class Oracle:
         self._set_status(job, "INACTIVE", cause=f"QUE_WAIT cancelled: {why} (DL-50)")
         return "cancelled"
 
-    def _on_box_started(self, box: str) -> None:
+    def _contained(self, box: str, *, skip_live: bool) -> list[str]:
+        """Every job `box` contains, transitively, top-down: a subbox comes
+        before its own members. With `skip_live`, a job that is STARTING,
+        RUNNING or QUE_WAIT is left out, and so is everything inside a live
+        subbox. Lowering rejects containment cycles; the seen-set keeps a
+        hand-built IR finite."""
+        out: list[str] = []
+        seen = {box}
+        pending = deque([box])
+        while pending:
+            for member in self._members(pending.popleft()):
+                if member in seen:
+                    continue
+                seen.add(member)
+                if skip_live and self._runtime(member).status in LIVE | {"QUE_WAIT"}:
+                    continue
+                out.append(member)
+                if self.catalog.jobs[member].job_type == "BOX":
+                    pending.append(member)
+        return out
+
+    def _reset_box_cycle(self, box: str, starting: Callable[[], None]) -> None:
+        """SEM-10 (DL-242): "When a box starts running, the status of all the
+        jobs it contains (including subboxes) changes to ACTIVATED ... jobs
+        in boxes do not retain their statuses from previous box cycles."
+        The oracle has no ACTIVATED status; a waiting member reads INACTIVE.
+        A live job keeps its run. The exit code goes with the status: it is
+        the previous cycle's result, and an e() atom must not read it. A row
+        that is already INACTIVE loses its exit code too, by a plain store
+        write: no transition, and no wake, since an atom only turns false.
+        `last_end_at`, the flags and the arm stay.
+
+        One batch (`_set_inactive_batch`) around the box's own STARTING
+        transition, which `starting` performs: the rows are written first,
+        so the STARTING wakes read the new cycle, and the rows' box rules
+        and wakes run after it. The box is STARTING throughout phase 2: no
+        member can start (SEM-10's box-RUNNING gate), no completion door or
+        idle recompute runs, and the box cannot be started again. A
+        consumer outside the box that reads a reset member -- an n() atom
+        with a lookback reads the moved `status_at` -- sees the change."""
+        cause = (
+            f"box {box!r} started: statuses from the previous box cycle are not retained"
+            " (SEM-10, DL-242)"
+        )
+        rows: list[tuple[str, str]] = []
+        for job in self._contained(box, skip_live=True):
+            rt = self._runtime(job)
+            if rt.status != "INACTIVE":
+                rows.append((job, cause))
+            elif rt.exit_code is not None:
+                self.store.clear_exit_code(job)
+        self._set_inactive_batch(rows, clear_exit_code=True, between=starting)
+
+    def _on_box_started(self, box: str, run_number: int) -> None:
         for member in self._members(box):
             member_ir = self.catalog.jobs[member]
             if member_ir.sem.auto_hold:
@@ -1143,8 +1923,73 @@ class Oracle:
                     self.store.set_flags(member, on_hold=True)
                     self._record(member, "ON_HOLD", "auto_hold on box start (dossier ss5)")
         # members with no conditions start immediately; others when theirs hold
+        cause = f"box {box!r} started"
         for member in self._members(box):
-            self._attempt_start(member, force=False, scheduled=False, cause=f"box {box!r} started")
+            self._attempt_start(member, force=False, scheduled=False, cause=cause)
+        # the run's window decisions wait for the outermost start's pass
+        assert self._window_starts is not None
+        self._window_starts.append((box, run_number, cause))
+
+    def _waiting_for_window(self, box: str, member_ir: JobIR) -> bool:
+        """A run_window member the box start leaves waiting (DL-246): not
+        iced or held, not live, not run or resolved this execution."""
+        schedule = member_ir.schedule
+        if schedule is None or schedule.run_window is None:
+            return False
+        rt = self._runtime(member_ir.name)
+        box_rt = self._runtime(box)
+        return not (
+            rt.on_ice
+            or rt.on_hold
+            or rt.status in LIVE | {"QUE_WAIT"}
+            or member_ir.name in box_rt.ran_members
+            or member_ir.name in box_rt.window_skipped_members
+        )
+
+    def _decide_windows_at_box_start(self, starts: list[tuple[str, int, str]]) -> None:
+        """SEM-33 (DL-246): a box start decides the window disposition of
+        each run_window member still waiting, at that instant and before its
+        own schedule gate. TechDocs 24.2, run_window page: "its status
+        changes to ACTIVATED when the box starts running. However, if the
+        current time is not in the specified run window for the job, its
+        status changes to INACTIVE." Closer to the previous close, the
+        member goes through the window-skip bypass, so the box can complete.
+        Closer to the next opening, one deferred start is queued, so the box
+        keeps running. Inside the window nothing is decided: the member
+        waits for its own conditions and schedule.
+
+        `starts` holds every box run this start began, a subbox before its
+        parent, with each run's number and cause. The decisions run after
+        every start attempt in that subtree, including the attempts of
+        RUNNING's wakes, deferrals before skips. A skip is a completion
+        moment and may complete its box or an ancestor, so it must not run
+        before a sibling or an outer member had its attempt. Each decision
+        is bound to its box run: a skip may complete the run and its wakes
+        may start the box again, and the new run decides for itself. An iced or held
+        member, a live one, one that already ran or was resolved this
+        execution, and one already deferred this run (the deferral's own
+        dedup) are not decided. The decision is the direct parent's: a
+        member of a subbox is decided with its subbox's start."""
+        waiting: dict[str, list[tuple[str, int, JobIR, str]]] = {"defer": [], "skip": []}
+        for box, run, cause in starts:
+            box_rt = self._runtime(box)
+            if box_rt.status != "RUNNING" or box_rt.run_number != run:
+                continue  # the run already ended, or a later run replaced it
+            for member in self._members(box):
+                member_ir = self.catalog.jobs[member]
+                if not self._waiting_for_window(box, member_ir):
+                    continue
+                side, _ = self._window_side(member_ir)
+                if side != "inside":
+                    waiting[side].append((box, run, member_ir, cause))
+        for box, run, member_ir, cause in waiting["defer"] + waiting["skip"]:
+            # an earlier skip may have completed this run, and its wakes may
+            # have started the box again. No member can start during the
+            # pass: each is outside its window, so any attempt on it meets
+            # the window gate again.
+            box_rt = self._runtime(box)
+            if box_rt.status == "RUNNING" and box_rt.run_number == run:
+                self._run_window_permits(member_ir, cause)
 
     # ------------------------------------------------------------------ box rules
 
@@ -1158,17 +2003,14 @@ class Oracle:
                 return
         if box_rt.status == "TERMINATED":
             return  # SEM-13: sticky until the next box start
-        # SEM-12 gating: overrides are evaluated on member transitions. A
-        # window-skip's INACTIVE verdict resolves the member (DL-154), so
-        # that transition is a completion moment: the full completion door
-        # runs -- overrides first, the default fold only if none fired.
-        skip_resolved = (
-            new == "INACTIVE"
-            and member in box_rt.window_skipped_members
-            and member not in box_rt.ran_members
-        )
-        if box_rt.status == "RUNNING" and (new in TERMINAL | {"RUNNING"} or skip_resolved):
-            if self._apply_box_overrides(box, box_ir, member, new, completion_moment=skip_resolved):
+        # SEM-12 gating: overrides are evaluated on member transitions. An
+        # INACTIVE verdict that resolves the member -- a window skip
+        # (DL-154) or an injected STATUS INACTIVE (DL-242) -- is a
+        # completion moment: the full completion door runs, overrides first,
+        # the default fold only if none fired.
+        resolved = new == "INACTIVE" and member in box_rt.window_skipped_members
+        if box_rt.status == "RUNNING" and (new in TERMINAL | {"RUNNING"} or resolved):
+            if self._apply_box_overrides(box, box_ir, member, new, completion_moment=resolved):
                 return
         if box_rt.status == "RUNNING" and self._all_members_done(box):
             self._fold_box_default(box, box_ir)
@@ -1189,24 +2031,39 @@ class Oracle:
         (SEM-11) and the SEM-15 idle recompute read an ancestor's OWN
         members, which a descendant transition does not move; they reach the
         ancestor through the direct parent's own transition."""
-        for box in self._ancestor_boxes(member)[1:]:  # [0] is the direct parent
+        chain = self._ancestor_boxes(member)
+        # a resolved INACTIVE (window skip, DL-154; operator, DL-242) is a
+        # completion moment for every ancestor, as it is for the parent
+        parent = self._runtime(chain[0]) if chain else None
+        resolved = (
+            new == "INACTIVE"
+            and parent is not None
+            and parent.status == "RUNNING"
+            and member in parent.window_skipped_members
+        )
+        for box in chain[1:]:  # [0] is the direct parent
             box_ir = self.catalog.jobs.get(box)
             if box_ir is None:
                 return
             if self._runtime(box).status != "RUNNING":
                 continue  # not evaluating: SEM-13 sticky, or already folded
-            if new in TERMINAL | {"RUNNING"} and self._apply_box_overrides(
-                box, box_ir, member, new
+            if (new in TERMINAL | {"RUNNING"} or resolved) and self._apply_box_overrides(
+                box, box_ir, member, new, completion_moment=resolved
             ):
                 return
 
     def _idle_box_recompute(self, box: str, box_ir: JobIR, cause: str) -> None:
         """Derived-status recompute for a non-running box (SEM-15): pure
         function of current member statuses -- ran_members does not apply
-        outside a live run. Only fires when every member is terminal."""
+        outside a live run. "Any jobs in the box with a status of INACTIVE
+        are ignored when the status of the box is being re-evaluated"
+        (DL-242), so it fires when every other member is terminal. With
+        every member INACTIVE the default verdict is SUCCESS."""
         members = self._members(box)
-        statuses = [self._runtime(m).status for m in members]
-        if not members or not all(s in TERMINAL for s in statuses):
+        if not members:
+            return
+        statuses = [s for s in (self._runtime(m).status for m in members) if s != "INACTIVE"]
+        if not all(s in TERMINAL for s in statuses):
             return
         for attr, target in (
             (box_ir.sem.box_success, "SUCCESS"),
@@ -1233,10 +2090,11 @@ class Oracle:
     ) -> bool:
         """Returns True if an override fired and set the box status.
 
-        `completion_moment=True` (DL-154): a window-skip's INACTIVE verdict
-        RESOLVES the member without a terminal status, so the caller names
-        the moment a completion moment for SEM-12's external/global-ref
-        gate; the atoms still read the real INACTIVE status."""
+        `completion_moment=True` (DL-154, DL-242): a window skip's or an
+        operator's INACTIVE verdict RESOLVES the member without a terminal
+        status, so the caller names the moment a completion moment for
+        SEM-12's external/global-ref gate; the atoms still read the real
+        INACTIVE status."""
         member_completed = completion_moment or new in TERMINAL
         for attr, target in (
             (box_ir.sem.box_success, "SUCCESS"),
@@ -1263,7 +2121,8 @@ class Oracle:
     def _all_members_done(self, box: str) -> bool:
         """SEM-11, literal (DL-13): the box cannot complete until every
         member has run (to a terminal state) or been bypassed (iced, or
-        window-skipped -- DL-154). A member whose condition never fires
+        resolved to INACTIVE by a window skip, DL-154, or by an injected
+        STATUS INACTIVE, DL-242). A member whose condition never fires
         inside the run -- or whose run_window deferred it -- keeps the box
         RUNNING: the hung-box pattern is real behavior, not a defect to
         smooth over.
@@ -1274,15 +2133,18 @@ class Oracle:
         waits for a real run."""
         box_rt = self._runtime(box)
         ran = box_rt.ran_members
-        skipped = box_rt.window_skipped_members
+        resolved = box_rt.window_skipped_members
         for member in self._members(box):
             rt = self._runtime(member)
             if rt.on_ice:
                 continue  # SEM-20: an iced member is out of the logic entirely
-            if member in skipped and member not in ran:
-                # SEM-33/DL-154: run_window skip this execution -- an explicit
-                # INACTIVE verdict, "the box job can still run to completion";
-                # a later in-window start joins ran and voids the mark
+            if member in resolved and rt.status not in LIVE | {"QUE_WAIT"}:
+                # an explicit INACTIVE verdict this execution: a run_window
+                # skip (DL-154) or an operator's (DL-242), which counts "as
+                # if the INACTIVE job returned a status of SUCCESS". A later
+                # operator status on it that is not live keeps it settled;
+                # the fold still votes over ran members only. The member's
+                # own later start voids the mark.
                 continue
             if member not in ran:
                 return False  # not yet run this box execution (incl. held)
@@ -1343,15 +2205,25 @@ class Oracle:
     def _start_slot(self, job_ir: JobIR) -> int | None:
         """SEM-34: which `start_times` entry the current instant is, read in
         the job's own timezone. None when the job declares none, or when the
-        instant is not one of them -- an operator's sendevent, or a start a
-        condition edge released after the tick (SEM-32)."""
+        instant is not one of them -- an operator's sendevent, say. A
+        start_mins job carries one broadcast offset (DL-248), so it never
+        needs a slot.
+
+        A start time in a spring change's missing hour has no wall time to
+        match. The scheduler ticks it at the instant `to_utc` gives (fold=0,
+        runner-design E10), so that instant names the slot too (DL-253)."""
         schedule = job_ir.schedule
         if schedule is None or not schedule.start_times:
             return None
         assert self._now is not None
-        now_local = to_local(self._now, self._job_tz(job_ir))
+        tz = self._job_tz(job_ir)
+        now_local = to_local(self._now, tz)
         for index, start in enumerate(schedule.start_times):
             if (start.hour, start.minute) == (now_local.hour, now_local.minute):
+                return index
+        tick = self._now.replace(second=0, microsecond=0)
+        for index, start in enumerate(schedule.start_times):
+            if to_utc(datetime.combine(now_local.date(), _to_time(start)), tz) == tick:
                 return index
         return None
 
@@ -1360,10 +2232,9 @@ class Oracle:
         match -- N offsets against N start_times pair BY POSITION, so the
         second tick gets the second offset.
 
-        Two cases keep the first offset. A SINGLE offset is the dossier's
-        own [?] exception (it broadcasts over every start time; the vendor's
-        worked example and the strict rule disagree, open against a live
-        instance). An instant that matches no start time cannot be paired at
+        Two cases keep the first offset. A SINGLE offset broadcasts over
+        every start time: the vendor's relative syntax is one `+minutes`
+        "after each start time" (DL-248). An instant that matches no start time cannot be paired at
         all, and the first offset is what the oracle used before the pairing
         existed."""
         if len(offsets) == 1:
@@ -1371,46 +2242,106 @@ class Oracle:
         slot = self._start_slot(job_ir)
         return offsets[0] if slot is None else offsets[slot]
 
-    def _arm_must_start(self, job: str) -> None:
-        """SEM-34: MUST_START_ALARM if no new run has begun by tick+offset."""
+    def _slot_deadline(self, job: str, check: str) -> Event | None:
+        """SEM-34: the deadline of the slot this tick names, or None. The
+        payload carries the run_number AT THE TICK: the run the slot asks for
+        is the first one to begin after it (DL-248). A relative form is due
+        at tick+offset; an absolute one at `_absolute_deadline`."""
         job_ir = self.catalog.jobs.get(job)
         if job_ir is None or job_ir.schedule is None:
-            return
-        spec = job_ir.schedule.must_start
-        if spec is None or spec.kind != "relative" or not spec.offsets_min:
-            return
+            return None
+        schedule = job_ir.schedule
+        spec = schedule.must_start if check == "must_start" else schedule.must_complete
+        if spec is None:
+            return None
         assert self._now is not None
-        deadline = self._now + timedelta(minutes=self._sla_offset(job_ir, spec.offsets_min))
-        self._schedule_timer(
-            deadline,
-            Event(
-                at=deadline,
-                kind="TIMER",
-                payload={
-                    "check": "must_start",
-                    "job": job,
-                    "run": self._runtime(job).run_number,  # unchanged == never started
-                },
-            ),
-        )
+        deadline: datetime | None
+        if spec.kind == "relative":
+            if not spec.offsets_min:
+                return None
+            deadline = self._now + timedelta(minutes=self._sla_offset(job_ir, spec.offsets_min))
+        else:
+            deadline = self._absolute_deadline(job_ir, spec.times or [])
+        if deadline is None:
+            return None
+        payload = {"check": check, "job": job, "run": self._runtime(job).run_number}
+        return Event(at=deadline, kind="TIMER", payload=payload)
 
-    def _arm_sla_and_term(self, job_ir: JobIR) -> None:
+    def _absolute_deadline(self, job_ir: JobIR, times: list[MustTime]) -> datetime | None:
+        """SEM-34 (DL-253): the absolute must time of the slot this tick
+        names, on the tick's local calendar day in the job's zone, plus a
+        day for each 24 hours past 23 ("Limits: 00:00-71:59 (2 calendar days
+        ahead of the current calendar day)"). None when the tick names no
+        slot: the times pair with start_times by position, so an instant
+        that is no start time has none.
+
+        A deadline that falls before the tick is due at the tick. Only one
+        case reaches that, because lowering refuses a must time below its
+        own start time (SEM-34): a start in a spring change's missing hour
+        ticks at fold=0 (runner-design E10), later than the vendor's first
+        minute of the next hour, where its must time may lie."""
+        slot = self._start_slot(job_ir)
+        schedule = job_ir.schedule
+        if slot is None or schedule is None or not schedule.start_times or slot >= len(times):
+            return None
+        assert self._now is not None
+        tz = self._job_tz(job_ir)
+        day = to_local(self._now, tz).date()
+        due = _must_instant(day, schedule.start_times[slot], times[slot], tz)
+        return max(due, self._now)
+
+    def _pending_check(self, job: str, check: str, rt: JobRuntime) -> bool:
+        """Is a deadline of this kind still pending for `job`: armed, not
+        fired, and not yet met (DL-248, DL-253)? A must_start deadline is met
+        once a run began after its tick; a must_complete one once that run
+        completed. The test reads the timer heap, so no new state is kept."""
+        for _, _, armed in self.store.timers():
+            payload = armed.payload
+            if payload.get("check") != check or payload.get("job") != job:
+                continue
+            tick_run = payload.get("run")
+            if check == "must_start" and tick_run == rt.run_number:
+                return True
+            if check == "must_complete" and not self._slot_run_completed(rt, tick_run):
+                return True
+        return False
+
+    def _tick_deadline(self, job: str, check: str) -> Event | None:
+        """SEM-34: the must_start or must_complete deadline this tick arms,
+        or None. MUST_START_ALARM fires if no new run has begun by it;
+        MUST_COMPLETE_ALARM if the run this tick asks for has not completed
+        by it, whenever that run started (DL-248).
+
+        At most one deadline of each kind is pending per job (DL-248,
+        DL-253). The vendor inserts the next CHK_START and CHK_COMPLETE only
+        "after the job completes", so a tick that finds the job live, or
+        finds an earlier tick's deadline of the same kind still pending,
+        arms nothing."""
+        timer = self._slot_deadline(job, check)
+        if timer is None:
+            return None
+        rt = self._runtime(job)
+        if rt.status in ("STARTING", "RUNNING", "QUE_WAIT") or self._pending_check(job, check, rt):
+            return None
+        return timer
+
+    @staticmethod
+    def _slot_run_completed(rt: JobRuntime, tick_run: object) -> bool:
+        """SEM-34 (DL-248): has the run a tick asked for completed? That run
+        is the first to begin after the tick, number tick_run+1. It has
+        completed once it is no longer STARTING or RUNNING, or once a later
+        run began -- runs of one job never overlap."""
+        if not isinstance(tick_run, int):
+            return False
+        if rt.run_number > tick_run + 1:
+            return True
+        return rt.run_number == tick_run + 1 and rt.status not in ("STARTING", "RUNNING")
+
+    def _arm_term_run_time(self, job_ir: JobIR) -> None:
         assert self._now is not None
         run_number = self._runtime(job_ir.name).run_number + 1  # the run being started
-        schedule = job_ir.schedule
-        if schedule is not None and schedule.must_complete is not None:
-            spec = schedule.must_complete
-            if spec.kind == "relative" and spec.offsets_min:
-                deadline = self._now + timedelta(minutes=self._sla_offset(job_ir, spec.offsets_min))
-                self._schedule_timer(
-                    deadline,
-                    Event(
-                        at=deadline,
-                        kind="TIMER",
-                        payload={"check": "must_complete", "job": job_ir.name, "run": run_number},
-                    ),
-                )
-        if job_ir.sem.term_run_time_min is not None:
+        # zero means no limit (vendor default; DL-241); arm no timer for it
+        if job_ir.sem.term_run_time_min is not None and job_ir.sem.term_run_time_min != 0:
             deadline = self._now + timedelta(minutes=job_ir.sem.term_run_time_min)
             self._schedule_timer(
                 deadline,
@@ -1423,7 +2354,7 @@ class Oracle:
 
     def _lazy_clock_checks(self) -> None:
         """Deadline timers fire through the timer heap inside feed(); nothing
-        else is time-lazy v1 (hook kept for the SLA/absolute-times extension)."""
+        else is time-lazy v1."""
 
     def _dispatch_timer_check(self, ev: Event) -> bool:
         check = ev.payload.get("check")
@@ -1437,14 +2368,16 @@ class Oracle:
                 self._emit("MUST_START_ALARM", job=job)
                 self._record(job, "MUST_START_ALARM", "must_start_times deadline (SEM-34)")
             return True
-        if ev.payload.get("run") != rt.run_number:
-            return True  # stale deadline from an earlier run of this job
         if check == "must_complete":
-            # SEM-34: alarm only, no control flow
-            if rt.status == "RUNNING":
+            # SEM-34 (DL-248): alarm only, no control flow -- iff the run the
+            # tick asked for has not completed, including when it never began
+            if not self._slot_run_completed(rt, ev.payload.get("run")):
                 self._emit("MUST_COMPLETE_ALARM", job=job)
                 self._record(job, "MUST_COMPLETE_ALARM", "must_complete_times deadline (SEM-34)")
-        elif check == "term_run_time":
+            return True
+        if ev.payload.get("run") != rt.run_number:
+            return True  # stale deadline from an earlier run of this job
+        if check == "term_run_time":
             if rt.status == "RUNNING":
                 self._terminate(job, cause="term_run_time exceeded (dossier ss5)")
         return True
@@ -1480,6 +2413,54 @@ def _to_time(t: Time) -> dtime:
     return dtime(hour=t.hour, minute=t.minute)
 
 
+def _vendor_gap_instant(day: date, hour: int, minute: int, tz: tzinfo | None) -> datetime:
+    """A wall time in a spring change's missing hour, as the vendor moves
+    it: into the first minute of the next hour, its minute read as seconds.
+    "Daylight Time Changes": "a job that is scheduled to run on Sundays at
+    2:05 runs at 3:00:05"."""
+    first = to_utc(datetime.combine(day, dtime(hour + 1, 0)), tz)
+    return first + timedelta(seconds=minute)
+
+
+def _must_instant(day: date, start: Time, must: MustTime, tz: tzinfo | None) -> datetime:
+    """An absolute must time as an engine instant (SEM-34, DL-253). `day`
+    is the local calendar day of the start it pairs with. Hours 24-71 land
+    on the next days. TechDocs 24.2, "Daylight Time Changes" and "Standard
+    Time Changes".
+
+    Spring, a must time in the missing hour moves to the first minute of
+    the next hour: "a job that must start by 2:05 and must complete by 2:45
+    generates an alarm if the job does not start by 3:00:05 or if it does
+    not complete by 3:00:45". A start in the missing hour runs in that
+    minute too; when it would run after its must time, the must time moves
+    "to the final second of the first minute of the hour following the
+    missing hour", 3:00:59.
+
+    Fall, a must time in the repeated hour takes the first, daylight pass
+    when the start is before the change: "must complete at 1:30 generates
+    an alarm if the job has not completed by 1:30 DT". When the start is in
+    the repeated hour too, it takes the second, standard pass. A start on
+    an earlier day is before the change.
+
+    Other change shapes keep the plain fold=0 conversion, as run_window's
+    do (DL-249)."""
+    days, hour = divmod(must.hour, 24)
+    local = datetime.combine(day + timedelta(days=days), dtime(hour, must.minute))
+    change = dst_change(local.date(), tz)
+    if change == "spring" and hour == MISSING_HOUR:
+        due = _vendor_gap_instant(local.date(), hour, must.minute, tz)
+    else:
+        second = (
+            change == "fall" and hour == REPEATED_HOUR and days == 0 and start.hour == REPEATED_HOUR
+        )
+        due = to_utc(local.replace(fold=1 if second else 0), tz)
+    if dst_change(day, tz) == "spring" and start.hour == MISSING_HOUR:
+        runs_at = _vendor_gap_instant(day, start.hour, start.minute, tz)
+        if runs_at > due:
+            due = _vendor_gap_instant(day, start.hour, 59, tz)
+    return due
+
+
 def _next_occurrence(now: datetime, target: dtime) -> datetime:
     candidate = now.replace(hour=target.hour, minute=target.minute, second=0, microsecond=0)
     if candidate <= now:
@@ -1492,3 +2473,38 @@ def _prev_occurrence(now: datetime, target: dtime) -> datetime:
     if candidate > now:
         candidate -= timedelta(days=1)
     return candidate
+
+
+def _window_span(day: date, lo: dtime, hi: dtime, tz: tzinfo | None) -> tuple[datetime, datetime]:
+    """The run_window that opens on local `day`, as two engine instants,
+    with the vendor's endpoint rules on a documented DST change (DL-249).
+    TechDocs 12.1 and 24.2, "Daylight Time Changes" and "Standard Time
+    Changes".
+
+    Spring, an opening in the missing hour moves to 03:00: "a run window of
+    2:45 - 3:45 becomes 3:00 - 3:45". A close in the missing hour keeps the
+    window's length: "a run window of 1:00 - 2:30 ... ends at 3:30". Both in
+    it: "a run window of 2:15 - 2:45 becomes 3:00 - 3:45". Fall, an opening
+    in the repeated hour takes the second, standard-time pass: "a run
+    window of 1:45 - 2:45 becomes 1:45 ST - 2:45 ST". A close in it takes
+    the first pass: "a run window of 11:30 - 1:30 ends at 1:30 DT". When
+    both fall in it, "the run window opens during the second, standard time
+    hour", and the close follows it there. The vendor's text describes two
+    distinct endpoints, so an equal-endpoint window keeps the SEM-33
+    zero-width pin: the single instant its opening maps to."""
+    start = datetime.combine(day, lo)
+    end = datetime.combine(day if lo <= hi else day + timedelta(days=1), hi)
+    change = dst_change(day, tz)
+    opens_repeated = change == "fall" and start.hour == REPEATED_HOUR
+    if change == "spring" and start.hour == MISSING_HOUR:
+        opens = to_utc(start.replace(hour=MISSING_HOUR + 1, minute=0), tz)
+    else:
+        opens = to_utc(start.replace(fold=1 if opens_repeated else 0), tz)
+    if lo == hi:
+        return opens, opens
+    # fold=0 is the vendor's close in both seasons: past the gap by the
+    # missing hour in spring, the daylight-time pass in fall. Only a close
+    # on the same day as an opening in the repeated hour takes fold=1.
+    closes_second = opens_repeated and end.date() == day and end.hour == REPEATED_HOUR
+    closes = to_utc(end.replace(fold=1 if closes_second else 0), tz)
+    return opens, closes

@@ -461,7 +461,17 @@ class RuntimeProfile(BaseModel):
     reconcile_settle_us: int              # default 5_000_000; >= 0
     spawn_window_us: int                  # default 5_000_000; >= 0
     retry_horizon_us: int                 # the §9 soft gate; default 60_000_000; > 0; carried here so audit can read it
+    semantics: dict[str, str]             # semantic-switch overrides only (DL-252); {} when none, never absent
 ```
+
+`semantics` holds only the explicit overrides of the semantic switches
+(runner-design §8a); each name and value must be in the registry, an
+explicit default is normalized away, and the defaults live in code. It is
+always written, `{}` when empty (§3.2), and a manifest whose profile lacks
+it is refused like any other missing field. Replay, audit and the
+classifier read the switches from the pinned profile, as they read
+`tz_aliases`, and replay refuses a period whose manifest is missing or
+not bound to its segment.
 
 Seconds from the CLI convert to microseconds by `round(seconds * 1_000_000)`;
 every duration is present with its resolved default and validated to the
@@ -1625,7 +1635,7 @@ Nodes and what moves them:
 | machine | `max_load`, `type`, `node_name`, or membership moves — the fields resolution actually reads |
 | calendar / cycle | a referenced date set moves |
 | timezone basis | `default_tz` or `tz_aliases` contents move |
-| runtime profile, **per field** | `default_tz`, `tz_aliases` → every job with `start_times`, `start_mins` or a calendar; `as_machine`, `machine_policy`, `execution_mode`, `deadman_us`, `cmd_grace_us`, `reconcile_settle_us`, `spawn_window_us` → every CMD job; `fw_default_interval_us` → every FW job; **`retry_horizon_us` → no job** — it is boundary policy, and a field that reached every job would turn a horizon tweak into a full live-work drain |
+| runtime profile, **per field** | `default_tz`, `tz_aliases` → every job with `start_times`, `start_mins`, a calendar or a `run_window` (`run_window` added by DL-253: the oracle reads it, and absolute must times, which need `start_times`, in the base zone); `as_machine`, `machine_policy`, `execution_mode`, `deadman_us`, `cmd_grace_us`, `reconcile_settle_us`, `spawn_window_us` → every CMD job; `fw_default_interval_us` → every FW job; **`retry_horizon_us` → no job** — it is boundary policy, and a field that reached every job would turn a horizon tweak into a full live-work drain; **`semantics` → per switch**: one node per semantic switch, valued at its effective value, reached by the jobs the switch's registry entry names (DL-252) — for `ice-lookback`, every job with a lookback-qualified atom in its `condition`, `box_success` or `box_failure`. A flip can change a run in flight (a running box whose `box_success` reads such an atom completes under one reading and not the other), so those jobs classify as changed; each side's condition truth in the boundary-truth diff is read under that side's switches |
 
 Edges, **from a job to what it depends on**, every one of them, the profile
 fields included: its condition's job, global and `name^INST` atoms, walked
@@ -1634,9 +1644,10 @@ directly off `JobIR.iter_conditions()` (condition, `box_success`,
 unqualified `n()` into `mutex_groups` (M07) and keeps no edge for it (IR-G
 remains the box-topology input, DL-131); its box, and a box to each member (both directions, nested); its
 `resources:` entries; its `machine:` and that machine's members; its calendars
-and cycles; the timezone basis for every job with `start_times`, `start_mins`
-or a calendar; and **from each job to each runtime-profile field** the table
-names for its kind — so a live CMD's forward closure reaches `cmd_grace_us`,
+and cycles; the timezone basis for every job with `start_times`, `start_mins`,
+a calendar or a `run_window` (DL-253); and **from each job to each runtime-profile field** the table
+names for its kind, and to each semantic switch whose registry entry names
+the job — so a live CMD's forward closure reaches `cmd_grace_us`,
 and a C2 that changes only the grace cannot commit over it and then kill the
 C1 run with C2's ladder. The profile edges run in the same direction as
 every other edge, job → field: a reversed-edge implementation reached no

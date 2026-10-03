@@ -2916,13 +2916,20 @@ def test_pr45_a_segment_that_never_opened_is_re_opened_from_the_boundary(
 # ------------------------------------------- ss7 phase 1, check by check
 
 
-def _staged_context(run_root: Path, engine, *, text: str = C2_JIL, **overrides: Any):
+def _staged_context(
+    run_root: Path,
+    engine,
+    *,
+    text: str = C2_JIL,
+    profile: RuntimeProfile | None = None,
+    **overrides: Any,
+):
     """A phase-1 context over a real staged C2, so each case below injects
     exactly ONE failure into an otherwise valid one."""
     from dsl41.boundary import StagedContext, load_staged_catalog, read_staged_manifest
     from dsl41.classify import Baseline
 
-    staged = _stage(run_root, text)
+    staged = _stage(run_root, text, profile=profile)
     bytes_ = read_staged_manifest(staging_dir(run_root, staged.stage_digest))
     assert bytes_ is not None
     estate = engine.estate
@@ -3005,6 +3012,27 @@ def test_pr28_phase_one_refuses_each_of_its_own_checks(tmp_path: Path) -> None:
     with pytest.raises(EngineError, match="one executable implements one version"):
         validate_staged(
             _staged_context(run_root, engine, state_machine_version=STATE_MACHINE_VERSION + 1)
+        )
+    _close(engine)
+
+
+def test_dl253_phase_one_names_the_version_before_it_compares_the_hash(tmp_path: Path) -> None:
+    """DL-253: the catalog hash covers `ir_version`, so a candidate from
+    another build also fails the hash recomputation. The version is checked
+    first, so the refusal names the version and never reads as a bundle the
+    boundary did not validate."""
+    from dsl41.boundary import validate_staged
+
+    run_root = tmp_path / "run"
+    engine = _genesis(run_root)
+    with pytest.raises(EngineError, match="one executable implements one version"):
+        validate_staged(
+            _staged_context(
+                run_root,
+                engine,
+                c2=engine.oracle.catalog,
+                state_machine_version=STATE_MACHINE_VERSION + 1,
+            )
         )
     _close(engine)
 
@@ -4705,7 +4733,7 @@ def test_boundary_preflight_reads_the_zone_table_the_way_the_engine_does(
     table on it. Passing that dict on retires SEM-35's unique-city rung, so
     a city name refuses a boundary the `Scheduler` builds happily
     (DL-151/DL-163) -- `tz_aliases_of` is what the two must share."""
-    from dsl41.boundary import _preflight_errors
+    from dsl41.boundary import preflight_errors
     from dsl41.ir import lower_source
     from dsl41.period import runtime_profile_from_cli, tz_aliases_of
 
@@ -4718,7 +4746,7 @@ def test_boundary_preflight_reads_the_zone_table_the_way_the_engine_does(
     profile = runtime_profile_from_cli(timezone="Zurich")
     assert dict(profile.tz_aliases) == {}  # the empty table, not an absent one
     at = datetime(2026, 3, 10, 23, 30)
-    assert _preflight_errors(catalog, profile, at=at) == []
+    assert preflight_errors(catalog, profile, at=at) == []
     # the engine resolves both zones on the same inputs and builds
     Scheduler(
         catalog,
@@ -4726,3 +4754,114 @@ def test_boundary_preflight_reads_the_zone_table_the_way_the_engine_does(
         default_tz=profile.default_tz,
         tz_aliases=tz_aliases_of(profile),
     )
+
+
+# DL-253: an older build's committed boundary. Both of that build's pins
+# differ from this one's for the same estate: its state-machine version, and
+# its catalog hash, which covers `ir_version`. Every opener checks the
+# version first and writes nothing before it.
+
+
+@contextlib.contextmanager
+def _older_build(monkeypatch: pytest.MonkeyPatch):
+    """Run the block as the previous build: one state-machine version lower
+    and stamping `ir_version` 0.2 on every catalog it lowers."""
+    import sys
+
+    old = STATE_MACHINE_VERSION - 1
+    with monkeypatch.context() as patch:
+        for name, module in list(sys.modules.items()):
+            if (name.startswith("dsl41") or name == __name__) and hasattr(
+                module, "STATE_MACHINE_VERSION"
+            ):
+                patch.setattr(module, "STATE_MACHINE_VERSION", old)
+        field = CatalogIR.model_fields["ir_version"]
+        patch.setattr(field, "default", "0.2")
+        CatalogIR.model_rebuild(force=True)
+        try:
+            yield
+        finally:
+            patch.undo()
+            CatalogIR.model_rebuild(force=True)
+    assert CatalogIR().ir_version != "0.2"
+
+
+def _older_build_boundary(run_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Period 1 sealed onto C2 by the older build, and audited by it."""
+    with _older_build(monkeypatch):
+        assert CatalogIR().ir_version == "0.2"
+        engine = _genesis(run_root)
+        asyncio.run(_seal(engine, _request(engine, _stage(run_root, C2_JIL))))
+        _close(engine)
+        audit_period(run_root, 1, anchor=EstateAnchor(default_anchor_dir(run_root)))
+
+
+def test_dl253_resume_refuses_an_older_build_s_boundary_for_its_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The in-place opener: the refusal names the version, not a catalog
+    that does not match, and comes before the claim or the opening segment
+    is written -- the head stays closed and period 2 has no segment."""
+    run_root = tmp_path / "run"
+    _older_build_boundary(run_root, monkeypatch)
+    with pytest.raises(EngineError, match="state_machine_version") as refused:
+        _resume(run_root, C2_JIL)
+    assert "catalog" not in str(refused.value)
+    assert not wal_path(run_root, 2).exists()
+    stored = EstateAnchor(default_anchor_dir(run_root)).read()
+    assert stored is not None and isinstance(stored.head, ClosedHead)
+
+
+def test_dl253_estate_roll_refuses_an_older_build_s_boundary_before_writing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The physical roll: refused for the version in its read-only half,
+    before the sentinel, the claim or the import touches the new root."""
+    from dsl41.estate import roll_into_root
+
+    root_a = tmp_path / "a"
+    _older_build_boundary(root_a, monkeypatch)
+    anchor_dir = default_anchor_dir(root_a)
+    catalog, _ = _catalog(C2_JIL)
+    root_b = tmp_path / "b"
+    with pytest.raises(EngineError, match="state_machine_version") as refused:
+        roll_into_root(root_b, anchor_dir=anchor_dir, catalog_of=lambda _r, _m: catalog)
+    assert "catalog" not in str(refused.value)
+    assert not root_b.exists()
+    stored = EstateAnchor(anchor_dir).read()
+    assert stored is not None and isinstance(stored.head, ClosedHead)
+
+
+_WINDOW_BOX_JIL = (
+    "insert_job: b\njob_type: b\n\n"
+    "insert_job: j\njob_type: c\ncommand: x\nbox_name: b\n"
+    'date_conditions: 1\nrun_window: "10:00-11:00"\n'
+)
+
+
+def test_dl253_phase_one_refuses_a_base_zone_change_under_an_executing_window_box(
+    tmp_path: Path,
+) -> None:
+    """DL-253, ss10.2: box `b` runs under UTC and its member `j` waits on a
+    10:00-11:00 window. A candidate that changes only the base zone would
+    read that window in Europe/Zurich inside the box's C1 run, so phase 1
+    refuses it; the same candidate under UTC is accepted."""
+    from dsl41.boundary import validate_staged
+
+    run_root = tmp_path / "run"
+    engine = _genesis(run_root, text=_WINDOW_BOX_JIL)
+    engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "b"}))
+    asyncio.run(engine.run_until_quiescent(T0))
+    assert engine.oracle.store.job["b"].status == "RUNNING"
+    assert engine.oracle.store.job["j"].status != "RUNNING"
+
+    def staged_under(zone: str):
+        return _staged_context(
+            run_root, engine, text=_WINDOW_BOX_JIL, profile=RuntimeProfile(default_tz=zone)
+        )
+
+    with pytest.raises(EngineError, match="the classification refuses the boundary") as refused:
+        validate_staged(staged_under("Europe/Zurich"))
+    assert "b" in str(refused.value)
+    assert validate_staged(staged_under("UTC")).refused == ()
+    _close(engine)

@@ -22,6 +22,7 @@ from dsl41.cli_common import (
     check_base_tz,
     command_outcome,
     load_catalog_and_ast_or_exit_2,
+    load_semantics,
     load_tz_aliases,
     read_header_of,
     refuse,
@@ -79,6 +80,7 @@ def _next_profile(
     machine_policy: str,
     detached: bool,
     deadman: "float | None",
+    semantics: "list[str] | None" = None,
 ) -> "RuntimeProfile":
     """C2's `RuntimeProfile` from the `--next-*` flags (period-model ss2.1).
 
@@ -107,6 +109,7 @@ def _next_profile(
         )
     tz_aliases = load_tz_aliases(timezone_map)
     check_base_tz(timezone, tz_aliases)
+    overrides = load_semantics(semantics, option="--next-semantics")
     try:
         return runtime_profile_from_cli(
             timezone=timezone,
@@ -115,6 +118,7 @@ def _next_profile(
             machine_policy=machine_policy,
             detached=detached,
             deadman_s=deadman,
+            semantics=overrides,
         )
     except ValidationError as exc:
         raise typer.Exit(refuse(exc, prefix="the next period's runtime profile")) from None
@@ -197,6 +201,13 @@ def seal(
         "--next-deadman",
         help="The next period's supervisor deadman, in seconds. Needs --next-detached.",
     ),
+    next_semantics: list[str] = typer.Option(
+        [],
+        "--next-semantics",
+        metavar="NAME=VALUE",
+        help="The next period's semantic switches. Repeatable. See 'dsl41 run"
+        " --help' for --semantics.",
+    ),  # runner-design ss8a, DL-252
     permit_unknown: bool = PERMIT_UNKNOWN,
     properties: list[Path] = PROPERTIES,
 ) -> None:
@@ -232,6 +243,7 @@ def seal(
         next_machine_policy,
         next_detached,
         next_deadman,
+        next_semantics,
     )
     actor = claimed_actor or default_actor()
     try:
@@ -439,7 +451,12 @@ async def _offline_seal(
 
     from datetime import UTC, datetime
 
-    from dsl41.boundary import SealRequest, load_bundle_catalog, resume_root_refusal
+    from dsl41.boundary import (
+        SealRequest,
+        load_bundle_catalog,
+        preflight_errors,
+        resume_root_refusal,
+    )
     from dsl41.runner_clock import EngineError, RealClock
     from dsl41.period import read_period_manifest
     from dsl41.runner_startup import resume_run, wire_from_profile
@@ -486,11 +503,23 @@ async def _offline_seal(
         # and re-asking it here would make `dsl41 seal` refuse a root
         # `dsl41 run` is serving.
         catalog = load_bundle_catalog(run_root, pinned.source_bundle_hash, permit_unknown=True)
+        # DL-240: the live path's boundary check (`preflight_errors`) only
+        # ever sees the SUCCESSOR catalog (ss10.1); offline sealing resumes
+        # and dispatches the CLOSING period's own catalog first, so it is
+        # the one that needs this gate here, before any adapter is wired.
+        now = datetime.now(UTC).replace(tzinfo=None)
+        errors = preflight_errors(catalog, pinned.runtime_profile, at=now)
+        if errors:
+            return refuse(
+                f"{run_root}: the closing period's catalog fails preflight under"
+                f" this build: {'; '.join(errors)}; drain and recreate"
+                " the estate (DL-240)"
+            )
         wiring = await wire_from_profile(
             run_root,
             catalog,
             pinned.runtime_profile,
-            start=datetime.now(UTC).replace(tzinfo=None),
+            start=now,
         )
         engine = await resume_run(
             catalog,

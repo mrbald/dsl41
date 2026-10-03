@@ -133,8 +133,10 @@ def test_sem37_weekdays_auto_subtracts_holcal() -> None:
 
 
 def test_sem37_week_anchoring_jan1_and_wekr_override() -> None:
-    """[V] weeks begin on Jan 1's weekday; WEKRddd re-anchors (the doc's
-    2014 example: Jan 1 2014 is a Wednesday)."""
+    """[V] weeks begin on Jan 1's weekday (the doc's 2014 example: Jan 1
+    2014 is a Wednesday). The WEKR half pins dsl41's current reading, a
+    recurring weekday. The vendor text also supports a week-of-year
+    reading; open question Q11 (SEM-37) decides between them."""
     # WEEKD#1 under the default anchor: every Wednesday of 2014
     default = _days(_ext(conditions=["WEEKD#1"]), date(2014, 1, 6), date(2014, 1, 12))
     assert default == {date(2014, 1, 8)}  # the Wednesday
@@ -281,6 +283,136 @@ def test_sem38_non_workday_n_walks_to_a_workday() -> None:
     days = _days(cal, date(2026, 1, 1), date(2026, 1, 31))
     assert days == {date(2026, 1, 5), date(2026, 1, 12), date(2026, 1, 19), date(2026, 1, 26)}
     assert all(d.weekday() == 0 for d in days)  # Mondays, never Sundays
+
+
+def test_sem38_non_workday_o_keeps_a_weekday_holcal_date_with_no_holiday_action() -> None:
+    """DL-244: with NO holiday action, Define Extended Calendars 12.1 treats
+    a holcal date as a non-workday for the non_workday action's purposes --
+    'When you do not specify an action at the Holiday Action prompt, the
+    utility treats the dates listed [in the holiday calendar] as
+    non-workdays according to the value...at the Non-workday Action
+    prompt.' O ('Include only [non-workdays] that also meet all other
+    criteria') is a restrict-to-non-workday filter, never a replacement, so
+    it keeps a weekday holcal date outright: Mon Jul 6 2026 stays put (the
+    fallback used to check only weekday membership and drop it)."""
+    hol = _std("hols", "07/06/2026 00:00")  # a Monday
+    cal = _ext(non_workday="O", holcal="hols", conditions=["MNTHD#06"])
+    assert _days(cal, *JUL26, hols=hol) == {date(2026, 7, 6)}
+
+
+def test_sem38_non_workday_n_moves_a_weekday_holcal_date_with_no_holiday_action() -> None:
+    """DL-244: N now walks a weekday holcal date too, landing on Tue Jul 7
+    2026 (the fallback used to check only weekday membership and leave the
+    Monday in place)."""
+    hol = _std("hols", "07/06/2026 00:00")
+    cal = _ext(non_workday="N", holcal="hols", conditions=["MNTHD#06"])
+    assert _days(cal, *JUL26, hols=hol) == {date(2026, 7, 7)}
+
+
+def test_sem38_non_workday_w_moves_a_weekday_holcal_date_with_no_holiday_action() -> None:
+    """DL-244: W walks the same Monday holcal date forward to the next
+    workday, Tue Jul 7 2026."""
+    hol = _std("hols", "07/06/2026 00:00")
+    cal = _ext(non_workday="W", holcal="hols", conditions=["MNTHD#06"])
+    assert _days(cal, *JUL26, hols=hol) == {date(2026, 7, 7)}
+
+
+def test_sem38_non_workday_p_moves_a_weekday_holcal_date_with_no_holiday_action() -> None:
+    """DL-244: P walks backward to the previous workday, Fri Jul 3 2026."""
+    hol = _std("hols", "07/06/2026 00:00")
+    cal = _ext(non_workday="P", holcal="hols", conditions=["MNTHD#06"])
+    assert _days(cal, *JUL26, hols=hol) == {date(2026, 7, 3)}
+
+
+def test_sem38_non_workday_action_leaves_an_ordinary_weekday_alone() -> None:
+    """Control: a weekday that is NOT in the holiday calendar is unaffected
+    by DL-244 -- the fix only changes how a holcal weekday date is
+    classified, not every weekday. Tue Jul 7 2026 is a plain workday: O
+    drops it (not a non-workday), N/W/P leave it in place (nothing to
+    replace)."""
+    hol = _std("hols", "07/06/2026 00:00")  # the holcal date is the 6th, not the 7th
+    cal_o = _ext(non_workday="O", holcal="hols", conditions=["MNTHD#07"])
+    assert _days(cal_o, *JUL26, hols=hol) == set()
+    for code in ("N", "W", "P"):
+        cal = _ext(non_workday=code, holcal="hols", conditions=["MNTHD#07"])
+        assert _days(cal, *JUL26, hols=hol) == {date(2026, 7, 7)}
+
+
+def test_sem38_non_workday_weekend_control_is_unaffected() -> None:
+    """Control: an ordinary weekend day with no holiday calendar at all is
+    disposed exactly as before DL-244."""
+    cal_o = _ext(non_workday="O", conditions=["jul#4"])  # Sat Jul 4 2026
+    assert _days(cal_o, *JUL26) == {date(2026, 7, 4)}
+    cal_n = _ext(non_workday="N", conditions=["jul#4"])
+    assert _days(cal_n, *JUL26) == {date(2026, 7, 6)}  # next workday, Monday
+
+
+def test_sem38_holiday_action_still_shields_a_weekday_holcal_date() -> None:
+    """A specified holiday action keeps governing a holcal date outright,
+    unchanged by DL-244 -- holiday O keeps Mon Jul 6 2026 in place even
+    with a non_workday W that would otherwise move it (Q8a precedence,
+    DL-58)."""
+    hol = _std("hols", "07/06/2026 00:00")
+    cal = _ext(holiday="O", non_workday="W", holcal="hols", conditions=["MNTHD#06"])
+    assert _days(cal, *JUL26, hols=hol) == {date(2026, 7, 6)}
+
+
+def test_sem37_workdays_excludes_holcal_date() -> None:
+    """DL-244: WORKDAYS auto-subtracts the holiday calendar when one is
+    named, same as WEEKDAYS already does (SEM-37's WEEKDAYS quote) --
+    'The utility automatically considers holidays to be non-workdays if
+    you specified a holiday calendar at the Holiday Calendar prompt' (Date
+    Condition Keywords, WORKDAYS)."""
+    hol = _std("hols", "07/06/2026 00:00")  # a Monday
+    cal = _ext(holcal="hols", conditions=["WORKDAYS"])
+    days = _days(cal, *JUL26, hols=hol)
+    assert date(2026, 7, 6) not in days
+    assert date(2026, 7, 7) in days  # an ordinary Tuesday workday
+
+
+def test_sem37_workdays_without_holcal_is_unaffected() -> None:
+    """WORKDAYS with no holiday calendar named keeps every weekday, exactly
+    as before DL-244."""
+    days = _days(_ext(conditions=["WORKDAYS"]), *JUL26)
+    assert date(2026, 7, 6) in days
+    assert all(d.weekday() < 5 for d in days)
+
+
+_AUG26 = (date(2026, 8, 1), date(2026, 8, 31))
+
+
+def test_sem37_workdays_holiday_o_never_sees_the_holcal_date() -> None:
+    """DL-244: WORKDAYS excludes a holcal date as a candidate outright (it
+    is not generated at all), so a `holiday:` action never gets a day to
+    act on, even one as restrictive as O ('include only holidays'). Fri
+    Aug 28 2026 is the holcal date; the whole month is empty."""
+    hol = _std("hols", "08/28/2026 00:00")  # a Friday
+    cal = _ext(holiday="O", holcal="hols", conditions=["WORKDAYS"])
+    assert _days(cal, *_AUG26, hols=hol) == set()
+
+
+def test_sem37_workdays_holiday_n_gets_no_candidate_to_one_shot() -> None:
+    """DL-244: holiday N's one-shot +1 day never fires, because WORKDAYS
+    never generates Fri Aug 28 2026 (the holcal date) as a candidate to
+    replace -- Aug 29 is NOT added, unlike a plain `condition: daily`
+    calendar would."""
+    hol = _std("hols", "08/28/2026 00:00")
+    cal = _ext(holiday="N", holcal="hols", conditions=["WORKDAYS"])
+    days = _days(cal, *_AUG26, hols=hol)
+    assert date(2026, 8, 28) not in days
+    assert date(2026, 8, 29) not in days
+    assert date(2026, 8, 27) in days  # the ordinary Thursday workday either side
+
+
+def test_sem37_workdays_holiday_s_drops_the_holcal_date() -> None:
+    """DL-244: `holiday: S` keeps a holiday unchanged when it is a
+    candidate, but WORKDAYS never offers it one -- Fri Aug 28 2026 is
+    simply absent, not kept."""
+    hol = _std("hols", "08/28/2026 00:00")
+    cal = _ext(holiday="S", holcal="hols", conditions=["WORKDAYS"])
+    days = _days(cal, *_AUG26, hols=hol)
+    assert date(2026, 8, 28) not in days
+    assert date(2026, 8, 27) in days
 
 
 def test_q8b_nonzero_adjust_with_replacement_action_pinned_replace_then_shift() -> None:

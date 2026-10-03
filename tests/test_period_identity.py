@@ -143,7 +143,7 @@ def _golden_catalog() -> CatalogIR:
 
 GOLDEN_CATALOG_BYTES = (
     b'{"calendars":{},"cycles":{},"external_instances":{},"globals_declared":{},'
-    b'"ir_version":"0.2","jobs":{"j1":{"annotations":{},"box":{"box_name":null,'
+    b'"ir_version":"0.3","jobs":{"j1":{"annotations":{},"box":{"box_name":null,'
     b'"box_terminator":false,"job_terminator":false},"exec_":{"command":"echo hi",'
     b'"envvars":null,"kind":"cmd","machine":"m1","owner":null,"profile":null,'
     b'"std_err_file":null,"std_in_file":null,"std_out_file":null},"job_type":"CMD",'
@@ -155,7 +155,7 @@ GOLDEN_CATALOG_BYTES = (
     b'"line_start":1},"var_sites":[]}},"machines":{},'
     b'"meta":{"source_files":["estate.jil"]},"resources":{}}'
 )
-GOLDEN_CATALOG_HASH_V2 = "sha256:1ab5aefe06485a8c60af7b0af4d2112d895d035e09ef09e785d507ebe34bc2df"
+GOLDEN_CATALOG_HASH_V2 = "sha256:d461eff80c08b65bdcac7e5002026ac48825f701be65db1b79e01989288c143f"
 
 
 def test_pr08a_catalog_hash_v2_golden_vector() -> None:
@@ -318,10 +318,10 @@ GOLDEN_PROFILE_BYTES = (
     b'{"as_machine":["alpha","beta"],"cmd_grace_us":15500000,"deadman_us":90000000,'
     b'"default_tz":"Europe/Zurich","execution_mode":"detached",'
     b'"fw_default_interval_us":30000000,"machine_policy":"local-eligible",'
-    b'"reconcile_settle_us":0,"retry_horizon_us":120000000,"spawn_window_us":0,'
+    b'"reconcile_settle_us":0,"retry_horizon_us":120000000,"semantics":{},"spawn_window_us":0,'
     b'"tz_aliases":{"CET":"Europe/Zurich","EST":"America/New_York"}}'
 )
-GOLDEN_RUNTIME_HASH = "sha256:b00ad496ee749327ba93592ad9b0e4adc4098882dcf919f2f525225a91823d02"
+GOLDEN_RUNTIME_HASH = "sha256:aa82271f28aa992a72f20785b0086775c59270ba003302ac618d008fead36ebf"
 
 
 def test_the_profile_defaults_are_the_engine_s_own() -> None:
@@ -378,6 +378,7 @@ _ALTERNATES: dict[str, Any] = {
     "reconcile_settle_us": 0,
     "spawn_window_us": 0,
     "retry_horizon_us": 120_000_000,
+    "semantics": {"ice-lookback": "ordinary"},
 }
 
 

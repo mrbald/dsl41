@@ -292,7 +292,8 @@ def test_a_stale_precondition_still_observed_the_clock() -> None:
         engine.inject(_ev("STARTJOB", 0, job="x"))
         await engine.run_until_quiescent(T0)
         stale = engine.oracle.store.revision("job:x")
-        engine.inject(_ev("ON_ICE", 1, job="x"))  # moves it under the caller
+        # moves it under the caller; ON_ICE would not, on a RUNNING job (DL-254)
+        engine.inject(_ev("STATUS", 1, job="x", status="RUNNING"))
         await engine.run_until_quiescent(T0 + timedelta(minutes=1))
         result = await _submitted(
             engine,

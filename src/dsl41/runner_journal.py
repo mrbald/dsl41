@@ -97,7 +97,9 @@ from dsl41.period import (
     is_opening,
     opening_at,
     resolve_wal,
+    root_of_wal,
     segment_record,
+    write_period_manifest,
 )
 from dsl41.runner_clock import EngineError
 from pydantic import ValidationError
@@ -184,7 +186,8 @@ class Journal:
         the `manifest` it committed, so the file and the record cannot say
         two different things (PR-22); one that only has a catalog -- a
         rehearsal, an embedder, the bisimulation harness -- gets a default
-        over the empty bundle and the default runtime profile. The
+        over the empty bundle and the default runtime profile, installed
+        beside the log the way genesis installs one (DL-252). The
         `estate_id` is the SENTINEL's since DL-133 -- genesis mints it
         into `journal.jsonl` before this file exists and reads it back on
         every retry (PR-01a) -- and is minted here only for the journal-only
@@ -205,6 +208,12 @@ class Journal:
                 # these two match, and a pin nothing reads is not a pin
                 state_machine_version=STATE_MACHINE_VERSION,
             )
+            # installed BEFORE the record that names it, exactly as genesis
+            # does: replay reads the period's profile -- its semantic
+            # switches above all -- from a manifest bound to the segment and
+            # refuses without one (DL-252), so a synthesized pin that was
+            # never written would leave a log nothing can replay
+            write_period_manifest(root_of_wal(Path(path)), manifest)
         else:
             # a NATIVE log pins the current recipe, always -- through the ONE
             # dispatcher (D4, DL-138), so this gate and `check_segment_record`

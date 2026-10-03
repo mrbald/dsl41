@@ -208,7 +208,14 @@ from dsl41.runner_hosts import (
     routes_new_effects,
     seed_local_executor,
 )
-from dsl41.period import CMD_GRACE_S, StagedManifest, staging_dir
+from dsl41.period import (
+    CMD_GRACE_S,
+    StagedManifest,
+    default_tz_of,
+    staging_dir,
+    switches_of,
+    tz_aliases_of,
+)
 from dsl41.runner_journal import (
     Journal,
     read_journal,
@@ -216,6 +223,7 @@ from dsl41.runner_journal import (
 from dsl41.runner_ledger import Fence
 from dsl41.seal import Execution, SealedHost, SealedState, implicit_routes
 from dsl41.runner_scheduler import Scheduler
+from dsl41.semantics import SemanticSwitches
 from dsl41.timezones import alias_table
 
 
@@ -330,6 +338,24 @@ def _raise_if_failed(task: asyncio.Task[None]) -> None:
             raise exc  # adapter bug: fail loudly, never guess
 
 
+def _engine_switches(
+    estate: EstateHome | None, semantics: SemanticSwitches | None
+) -> SemanticSwitches | None:
+    """The semantic switches an engine runs (DL-252). An engine that leads
+    an estate runs its period's pin and nothing else; `semantics` is for an
+    engine with no estate (a rehearsal without a run root, a harness), and
+    one that disagrees with the pin is a caller bug, refused."""
+    if estate is None:
+        return semantics
+    pinned = switches_of(estate.manifest.runtime_profile)
+    if semantics is not None and semantics != pinned:
+        raise EngineError(
+            f"semantic switches {semantics} disagree with the period's pin {pinned}"
+            " (runner-design ss8a)"
+        )
+    return pinned
+
+
 class Engine:
     """ss4 single-writer engine loop over one Oracle. 11a surface: inject()
     external events + run_until_quiescent(horizon). The WAL journal slots in
@@ -361,14 +387,25 @@ class Engine:
         estate: EstateHome | None = None,
         fence: Fence | None = None,
         carried: CarriedRows | None = None,
+        semantics: SemanticSwitches | None = None,
     ) -> None:
-        # SEM-35 alias table the oracle resolves `timezone:` through: the
-        # scheduler's own, so the two halves of one engine read a job's zone
-        # the same way (DL-62). Empty reads as absent (timezones.alias_table).
+        # SEM-35: the base zone and alias table the oracle reads a job's time
+        # attributes in. The period's pinned profile when there is one, which
+        # is what every replay of this log reads (`default_tz_of`), else the
+        # scheduler's own: the two halves of one engine must read a job's
+        # zone the same way (DL-62, DL-253). Empty aliases read as absent.
+        profile = estate.manifest.runtime_profile if estate is not None else None
+        if profile is not None:
+            default_tz, tz_aliases = default_tz_of(profile), tz_aliases_of(profile)
+        else:
+            default_tz = scheduler.default_tz if scheduler is not None else None
+            tz_aliases = alias_table(scheduler.tz_aliases if scheduler is not None else None)
         self.oracle = Oracle(
             catalog,
             carried=carried,
-            tz_aliases=alias_table(scheduler.tz_aliases if scheduler is not None else None),
+            default_tz=default_tz,
+            tz_aliases=tz_aliases,
+            semantics=_engine_switches(estate, semantics),
         )
         #: concurrency-model ss2/ss8: the execution host this engine dispatches
         #: to. One engine per run root owns one local executor; machine names

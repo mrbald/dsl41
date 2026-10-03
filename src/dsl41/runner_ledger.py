@@ -69,7 +69,37 @@ from dsl41.runner_clock import EngineError
 #: manufactured by bookkeeping.
 #: 2 since DL-235: the ss4 stale-completion gate rejects a non-live row, so
 #: an undecided crash-window completion recovers differently from v1.
-STATE_MACHINE_VERSION = 2
+#: 3 since DL-241: term_run_time 0 arms no timer, so a replay with such a
+#: job keeps the run live where v2 terminated it.
+#: 4 since DL-242: box start resets member statuses, operator INACTIVE
+#: resolves and cascades, so a replay with a second box run or an injected
+#: INACTIVE derives different state.
+#: 5 since DL-243: ON_ICE/ON_NOEXEC condition reads and FORCE_STARTJOB on a
+#: non-live ON_ICE/ON_HOLD job derive different state from an identical log.
+#: 6 since DL-244: a holcal weekday date now reaches the non_workday
+#: action, and WORKDAYS now excludes it, so autocal's compiled day sets
+#: (which `classify`/`semantic_key` feed) can differ -- `attest` re-derives
+#: a boundary's classification from the sealed catalogs, so a v5 boundary
+#: can carry/refuse/assume a job differently under v6.
+#: 7 since DL-246: a box start decides a run_window member's disposition and
+#: a standalone window skip moves a prior result to INACTIVE.
+#: 8 since DL-247: an unset or zero priority and a forced start skip the
+#: machine-load check but hold their load, a load waiter blocks lower
+#: priorities on its machine, and more transitions wake the queue, so a
+#: replay with load demand or with queued jobs can derive different state.
+#: 9 since DL-248: the schedule tick arms the relative must_complete deadline
+#: and its timer carries the tick's run, so a replay alarms differently.
+#: 10 since DL-249: run_window endpoints follow the vendor's DST rules, so a
+#: replay with a window check near a DST change can decide differently.
+#: 11 since DL-253: absolute must times arm alarms, and must_start arms one
+#: deadline at a time, so a replay alarms differently.
+#: 12 since DL-254: ON_ICE, ON_HOLD and ON_NOEXEC sent to a live (or, for
+#: ON_NOEXEC, iced) job are ignored, so a replay with such an event sets no
+#: flag where v11 set one.
+#: 13 since DL-255: a job waiting on a named resource blocks lower
+#: priorities that name it, and a start or enqueue that takes machine load
+#: owes a queue scan, so a replay with resource waiters admits differently.
+STATE_MACHINE_VERSION = 13
 
 LOCK_NAME = "leader.lock"
 
@@ -335,10 +365,14 @@ def check_leader_eligibility(opening: dict[str, Any], *, catalog: CatalogIR) -> 
     did not change, which is the outage DL-100 named.
 
     The version half is `check_state_machine_version`, mode="lead" --
-    see there for why an absent field refuses in both halves (DL-189)."""
+    see there for why an absent field refuses in both halves (DL-189). It
+    runs FIRST, and `catalog_hash_for` checks the hash recipe's version
+    before it recomputes: a log an older build wrote is refused for its
+    version, never reported as an estate that changed. The catalog hash
+    covers `ir_version`, so an IR bump alone moves it (DL-253)."""
+    check_state_machine_version(opening, mode="lead")
     if opening.get("catalog_hash") != catalog_hash_for(opening, catalog):
         raise EngineError(
             "catalog hash mismatch: the estate changed since this journal was written;"
             " re-baseline explicitly with a fresh run (no silent semantic drift, ss7)"
         )
-    check_state_machine_version(opening, mode="lead")

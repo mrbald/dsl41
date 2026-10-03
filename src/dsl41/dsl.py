@@ -89,6 +89,7 @@ from dsl41.ir import (
     CatalogIR,
     EXEC_BASE_ATTRS,
     JobIR,
+    MustTime,
     ScheduleBlock,
     SlaSpec,
     Time,
@@ -669,7 +670,7 @@ def _schedule_kwargs(schedule: ScheduleBlock) -> list[str]:
     return out
 
 
-def _time(t: Time) -> str:
+def _time(t: Time | MustTime) -> str:
     return f"{t.hour:02d}:{t.minute:02d}"
 
 

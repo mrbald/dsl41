@@ -139,7 +139,8 @@ completion enters the common admission order first, so it is durable before
 it is judged (§7). The gate then rejects one whose run_number does not match
 the current one, or whose row is no longer STARTING or RUNNING: a terminal
 status, a status an operator injected, such as INACTIVE, or QUE_WAIT after
-a restart queued behind a reservation (DL-235). The rejection is that
+a restart queued behind a reservation (DL-235). An INACTIVE cascaded from the
+job's box (SEM-18) counts as injected (DL-242). The rejection is that
 attempt's `decision` record with its reason; no `drop` record is written.
 This gate closes the race between a natural exit and a concurrent
 KILLJOB/term_run_time kill. The gate must live in the shell. The oracle
@@ -778,6 +779,17 @@ ERROR:
   shell-side. The bisimulation gate is untouched. Remote dispatch (routing
   a foreign machine to another box) stays a §12 non-goal.
 - `owner` set and not the invoking user.
+- `envvars` set on a CMD job's `ExecSpec`: the adapter never applies it to
+  the child environment (DL-240). `run` only; rehearse spawns no process.
+- a non-BOX job whose `var_sites` name a field of its exec spec (command,
+  std_in_file, envvars, profile, std_out_file, std_err_file, machine,
+  owner; watch_file on FW): global substitution is not implemented, so the
+  literal `$$NAME` text would be used as-is (DL-240) -- on `command`, for
+  example, the shell would read `$$` as its own PID. `run` only; rehearse
+  spawns no process.
+- a non-BOX job whose `passthrough` carries `chk_files`: the pre-start
+  disk-space gate is never evaluated (DL-240). `run` only; rehearse spawns
+  no process.
 - `run_calendar` / `exclude_calendar` that names a calendar absent from
   the loaded set (L018's lint WARN, fail-closed here — the same strictness
   split as L016-vs-DL-50 resources). Also a calendar reference that
@@ -800,8 +812,13 @@ ERROR:
   `--resource-capacity` override is a documented future escape hatch.
   Unknown `res_type` (not R/D/T). The same resource named twice in one
   `resources:` list — the demand is ambiguous. A `QUANTITY` above the
-  resource's `amount` — the job would wait in QUE_WAIT forever.
-  Malformed (non-integer) `job_load` / `priority` / machine `max_load`.
+  resource's `amount`, at any priority — the job would wait in QUE_WAIT
+  forever, and at a positive priority it would block every lower priority
+  that names the resource (DL-255). A
+  `job_load` above its machine's `max_load` on a job with a positive
+  `priority` — it would wait forever and block every lower priority on
+  that machine (DL-247); priority 0 or unset skips the load check and is
+  exempt, and so is a pool machine. Malformed (non-integer) `job_load` / `priority` / machine `max_load`.
   Refused in BOTH run and rehearse
   (resource semantics gate the oracle in either clock domain).
 - Oracle construction failure (surfaces IR-level refusals unchanged).
@@ -832,7 +849,36 @@ WARN:
   unmodeled for pools (DL-50, PENDING Qr3). Resource semaphores on such a
   job still apply. (Plain `job_load`/`priority`/`resources:` are now
   HONORED (DL-50), not warned. An unsized/unknown-res_type/malformed
-  resource is an ERROR below, not a WARN.)
+  resource is an ERROR below, not a WARN.) The oracle applies the vendor's
+  load rules (DL-247). Only a job with a positive `priority` checks its
+  `job_load`: "The scheduler ignores any load unit values defined for the
+  job or machine when the job has a priority value of zero", and 0 is the
+  default. That job's load still counts against the machine: "even when
+  jobs have a priority of 0, AutoSys Workload Automation tracks job loads
+  on each machine". A FORCE_STARTJOB "runs even if its load exceeds the
+  machine's max_load value"; its units are held the same way. A job
+  waiting for load "automatically blocks all the lower priority jobs that
+  specify the same machine attribute value", on a fresh start and on
+  readmission; a positive priority is blocked even without a `job_load`.
+  Named resources gate every start, forced or not. Pools stay outside
+  both load rules. This WARN still fires for a pool job at priority 0.
+  The oracle applies the vendor's named-resource rule too (DL-255): "A job
+  in the RESWAIT state for one resource name automatically blocks all the
+  lower priority jobs that specify the same resource name. It does not
+  automatically block higher or equal priority jobs that specify the same
+  resource name or a job that specifies a different resource name." The
+  blocked job has a positive priority and may be forced. The blocker has a
+  positive priority, names a resource the blocked job names, is short on
+  any resource it names (Broadcom KB 240816, AutoSys 12.0: a job waiting
+  for its second resource blocks jobs that need only its first), and has
+  passed its load check: its load fits and no higher-priority load waiter blocks it, since
+  jobs still in QUE_WAIT for load "do not automatically block lower
+  priority jobs that specify the same resource attribute". A queued job
+  holds no load: jobs "that enter the RESWAIT state after the load
+  balancing attributes are successfully evaluated do not consume any load
+  units". A start or enqueue that takes machine load can send a resource
+  waiter back to its load check, so it owes an admit-only queue scan. The
+  input pays that scan after every referencer it woke.
 - Cycle in the AND-success skeleton (graphlib `CycleError`): cycles are
   *legal* AutoSys (edge-triggered re-runs, DL-13, L010's territory). Thus
   this rule warns and disables `plan`, and it does not refuse.
@@ -841,6 +887,52 @@ graphlib's role is deliberately bounded to that skeleton check plus `plan`
 (wave-by-wave `get_ready()` batches for acyclic estates). General
 eligibility is predicate evaluation over the status store. That is the
 oracle's edge-triggered referencer machinery, not a topological order.
+
+## 8a. Semantic switches
+
+A semantic switch names one place where dsl41 can read an estate two
+ways. The rule for defaults (DL-252): where AutoSys behavior is
+documented, dsl41 follows it. Where dsl41's own choice is safer or more
+useful, dsl41 keeps it. Either way, the other reading can be selected
+without a code change, so an incompatibility found after rollout can be
+flipped by the operator.
+
+The switches form a closed registry in `src/dsl41/semantics.py`. Each
+entry has a name, its allowed values, its default, the value that matches
+documented AutoSys behavior, and a one-line description. An unknown name
+or value is refused with the allowed names or values. Nothing is dropped.
+
+Set a switch with `--semantics NAME=VALUE` on `dsl41 run` and
+`dsl41 rehearse`. The option is repeatable. `dsl41 seal` takes
+`--next-semantics NAME=VALUE` for the period it opens. `dsl41 run --help`
+lists every switch and its values.
+
+Overrides are recorded in the period's runtime profile (`semantics`,
+period-model §2.1), so they are part of `runtime_hash`. An explicit
+default, such as `ice-lookback=true`, is the same as no override. Replay, `journal`,
+`runs`, audit and the boundary classifier read the switches from that
+profile, and so use the values the engine ran. A resume or a period
+opening with different switches is refused, the same as a changed
+`--timezone`. A new value takes effect at a period boundary, and the
+boundary classifier treats the jobs each switch names as changed: a
+running box whose `box_success` reads a lookback atom is refused, an
+armed job gated on one is carried with a recorded assumption. Replay
+refuses a period whose manifest is missing or is not bound to its
+segment, because it cannot know which switches the engine ran. Only
+explicit overrides are recorded, and a profile with none writes
+`"semantics": {}`.
+
+Defaults live in code. Changing a default changes how existing estates are
+read, so it is a state-machine change and bumps `STATE_MACHINE_VERSION`.
+
+Static tools that have no runtime profile use the defaults: `equiv`,
+`lint`, `derive`, preflight's oracle check, and the genesis credit of
+`rehearse --check-cadence`. The cadence sweeps replay under the
+rehearsal's own switches.
+
+| Switch | Values | Default | Documented AutoSys | Why this default |
+| --- | --- | --- | --- | --- |
+| `ice-lookback` | `true`, `ordinary` | `true` | `true` | A condition atom with a lookback qualifier whose predecessor is on ice and not running. `true`: the atom is true, lookback ignored. `ordinary`: the qualifier is dropped and the ordinary on-ice table applies (s, d, n true; f, t, exitcode false). The "condition Attribute" page (AutoSys 24.2) says "If the predecessor job being evaluated for the look-back condition is currently in an ON_ICE status, it always evaluates to true. That is, any look-back evaluation is ignored." `ordinary` extends the Start Conditions on-ice table (SEM-20), which does not separate lookback atoms, to the lookback atom. Q10 stays open. |
 
 ## 9. Time domains (E2)
 
@@ -1090,7 +1182,18 @@ code. None is guess-resolved.
 - **E5** — profile sourcing failure semantics [?]. Default: the job fails
   with sh's exit code (§6).
 - **E6** — FW steady-size semantics and default watch_interval [?].
-  Default: two stable polls, 60s (§6).
+  Default: two stable polls, 60s (§6). The vendor documents part of
+  this (AutoSys 24.2). The "watch_interval Attribute" page gives
+  "Default: 60" and says: "If you are monitoring for the existence of a
+  file (not the size) and the file already exists when the job runs, the
+  job completes immediately. The watch_interval attribute is ignored."
+  The "watch_file_min_size Attribute" page: "If you do not specify the
+  watch_file_min_size attribute in your job definition, the job completes
+  if the file exists (the default)." On an agent, "Define a File Watcher
+  Job" says a job with no watch_interval checks the file every 30
+  seconds. The adapter still waits for two stable polls when the file is
+  already there and no minimum size is set. The pin stays until a
+  decision adopts the vendor rule (DL-250).
 - **E7** — verdict for an unobservable exit status (§7). Default: FAILURE
   with cause `exit_status_unobservable`. TERMINATED is reserved for kills
   that actually happened. The vendor's "Lost Control" is the same
@@ -1140,7 +1243,18 @@ code. None is guess-resolved.
   halves stay open [?], each behind its `# PENDING: E10` marker in
   `runner_scheduler.py`: absent `days_of_week` = every day, and DST
   corners pinned to PEP 495 fold=0 (ambiguous = first occurrence,
-  nonexistent maps past the gap).
+  nonexistent maps past the gap). The vendor documents the DST corners
+  (AutoSys 24.2). "Standard Time Changes": an absolute start between
+  1:00 and 1:59 runs only in the second (standard time) hour, and "Jobs
+  for which the start_mins attribute is set run in both hours."
+  "Daylight Time Changes": an absolute start in the missing hour runs
+  "during the first minute of the next hour" (2:05 runs at 3:00:05), and
+  "If you schedule a job to run more than once during the missing hour
+  (for example, at 2:05 and 2:25), only the first scheduled job run
+  occurs." The fold=0 pin differs on each point. It runs a repeated wall
+  time once, in its first occurrence. It moves a missing-hour start
+  forward by the gap (2:05 runs at 3:05), and it keeps every such start.
+  The pin stays until a decision adopts the vendor rules (DL-250).
 - **E11** — opened by DL-56, closed by DL-58: `run_calendar` with neither
   `start_times` nor `start_mins` is a valid vendor shape. The job fires at
   the calendar row's own time-of-day (`mm/dd/yyyy HH:MM`), and at 00:00

@@ -58,6 +58,7 @@ from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import VirtualClock, ZeroDelayCycleError
 from dsl41.runner_scheduler import Scheduler
+from dsl41.semantics import SemanticSwitches
 
 #: The check-mode scenario event allowlist (DL-184): injected starts carry a
 #: +1 budget on their target; a scripted STATUS forges the counts under test.
@@ -356,6 +357,7 @@ def run_fail_sweep(
     horizon: datetime,
     default_tz: str | None = None,
     tz_aliases: Mapping[str, str] | None = None,
+    semantics: SemanticSwitches | None = None,
     producers: Iterable[str],
     parked: Collection[str] = (),
     progress: "Callable[[str], None] | None" = None,
@@ -417,6 +419,7 @@ def run_fail_sweep(
             events=list(events),
             default_tz=default_tz,
             tz_aliases=tz_aliases,
+            semantics=semantics,
         )
         suppressed = {
             name: baseline_runs.get(name, 0) - runs
@@ -479,14 +482,23 @@ def genesis_truth(catalog: CatalogIR) -> Callable[[StatusAtom | ExitCodeAtom], b
     -- never a terminal -- so s/f/d/t and exit-code atoms are FALSE at
     genesis, with two exceptions the slice review caught the first draft
     missing: bare or qualified n() is TRUE (a never-run partner is
-    notrunning, oracle's own reading), and an ON_ICE seed satisfies EVERY
-    atom naming that job (SEM-05/SEM-20)."""
+    notrunning, oracle's own reading), and an ON_ICE seed satisfies every
+    atom naming that job IF the atom carries a lookback qualifier (SEM-05,
+    the DL-13 blanket pin) -- DL-243 narrowed this for an ORDINARY atom (no
+    lookback at all) to the vendor's ON_ICE table instead (SEM-20):
+    success/done/notrunning true, failure/terminated/exitcode false, same
+    split as `Oracle._atom_true` at the default switches, which a static
+    estimate reads like lint does (DL-252)."""
 
     def truth(atom: StatusAtom | ExitCodeAtom) -> bool:
         if atom.job.instance is None:
             job = catalog.jobs.get(atom.job.name)
             if job is not None and job.sem.initial_status == "ON_ICE":
-                return True
+                if atom.lookback is not None:
+                    return True
+                if isinstance(atom, ExitCodeAtom):
+                    return False
+                return atom.status in ("SUCCESS", "DONE", "NOTRUNNING")
         if isinstance(atom, ExitCodeAtom):
             return False
         return atom.status == "NOTRUNNING"
@@ -652,6 +664,7 @@ def run_flag_sweep(
     horizon: datetime,
     default_tz: str | None = None,
     tz_aliases: Mapping[str, str] | None = None,
+    semantics: SemanticSwitches | None = None,
     injected_start: Mapping[str, int] | None = None,
     injected_force: Mapping[str, int] | None = None,
     policy: CadencePolicy | None = None,
@@ -715,6 +728,7 @@ def run_flag_sweep(
             events=[*events, *case_events],
             default_tz=default_tz,
             tz_aliases=tz_aliases,
+            semantics=semantics,
         )
         if result.cycle is not None:
             findings.append(_cycle_finding(result.cycle, case=case_id))
@@ -831,9 +845,11 @@ def expected_bounds(
       global: the whole condition, with globals at their values so far
       (unset -> False for every operator, the oracle's reading) and job
       atoms at their GENESIS truth for at-start sets -- bare/qualified n()
-      is TRUE there and an ON_ICE seed satisfies every atom on that job
-      (SEM-05/SEM-20); s/f/d/t and exit codes are false, SEM-24 cannot
-      seed a terminal -- or optimistic-TRUE for mid-window sets (latches
+      is TRUE there; an ON_ICE seed satisfies a LOOKBACK-qualified atom on
+      that job (SEM-05) but an ORDINARY one only for success/done/
+      notrunning, never failure/terminated/exitcode (SEM-20, DL-243); s/f/
+      d/t and exit codes are otherwise false, SEM-24 cannot seed a
+      terminal -- or optimistic-TRUE for mid-window sets (latches
       can be true by then; over-credit is the safe direction). A set whose
       whole condition cannot then be true buys no headroom: a flat +1
       would let the DL-180 stale-latch multi-fire slide under the bound.
@@ -1149,6 +1165,7 @@ def play_once(
     events: Iterable[Event] = (),
     default_tz: str | None = None,
     tz_aliases: Mapping[str, str] | None = None,
+    semantics: SemanticSwitches | None = None,
 ) -> PlayResult:
     """One journal-free virtual-clock play: the reentrant player the sweeps
     and tests reuse (DL-184). A ZeroDelayCycleError is caught and returned
@@ -1156,8 +1173,9 @@ def play_once(
     propagates as the shell failure it is."""
     clock = VirtualClock(start)
     scheduler = Scheduler(catalog, start=start, default_tz=default_tz, tz_aliases=tz_aliases)
+    adapters = {"CMD": adapter, "FW": adapter}
     engine = Engine(
-        catalog, clock=clock, adapters={"CMD": adapter, "FW": adapter}, scheduler=scheduler
+        catalog, clock=clock, adapters=adapters, scheduler=scheduler, semantics=semantics
     )
     before = {name: engine.oracle.store.runtime(name).run_number for name in catalog.jobs}
     for ev in events:

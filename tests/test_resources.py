@@ -10,6 +10,12 @@ BOTH oracle-direct and engine arms; this file adds:
     is deadlock-free (every runnable job eventually admits). A failure here is
     a real bug OR a real order-dependence, surfaced, not hidden;
   * depletable (res_type D) and FREE=N: units that never return;
+  * machine load with priorities, arrivals, completions and FORCE starts:
+    every checked start fits and passes no higher-priority load waiter, and
+    the run ends with every job run and no unit held (DL-247);
+  * a named resource with priorities, loads, arrivals, completions and
+    FORCE starts: no start passes a higher-priority waiter short on a
+    resource it names (DL-255);
   * the enforcement-is-preflight boundary: an UNSIZED resource is not modelled
     by the oracle (runs unthrottled oracle-direct) -- the runner's preflight is
     the execution gate that refuses it (see test_runner_scheduler.py).
@@ -91,6 +97,208 @@ def test_dl50_admission_never_overcommits_and_is_deadlock_free(data: st.DataObje
 
     assert len(terminal) == n, "deadlock: a runnable job was never admitted"
     assert all(_used(o).get(k, 0) == 0 for k in o._pool._bucket_cap), "renewable units leaked"
+
+
+def _machine_load_catalog(capacity: int, jobs: list[tuple[int, int]]) -> str:
+    body = "".join(
+        f"insert_job: j{i}\njob_type: c\ncommand: x\nmachine: lm\n"
+        f"job_load: {load}\npriority: {prio}\n\n"
+        for i, (load, prio) in enumerate(jobs)
+    )
+    return f"insert_machine: lm\ntype: a\nnode_name: lm\nmax_load: {capacity}\n\n{body}"
+
+
+@settings(max_examples=300, deadline=None)
+@given(data=st.data())
+def test_dl247_checked_starts_fit_and_respect_priority_blocking(data: st.DataObject) -> None:
+    """DL-247 over any script of arrivals (plain or forced) interleaved with
+    completions. At every start that checks load -- a positive priority, not
+    forced -- the units held just before plus the job's load fit the machine,
+    and no queued job of strictly higher positive priority is waiting for
+    load it cannot get. The check is computed here from the rows, not by the
+    oracle's own test. A priority-0 or forced start may go over the limit.
+    Every job eventually runs and no unit leaks. Loads are clamped to
+    max_load, the feasibility preflight enforces."""
+    capacity = data.draw(st.integers(min_value=1, max_value=5))
+    jobs = data.draw(
+        st.lists(
+            st.tuples(st.integers(min_value=1, max_value=5), st.integers(min_value=0, max_value=3)),
+            min_size=3,
+            max_size=8,
+        )
+    )
+    jobs = [(min(load, capacity), prio) for load, prio in jobs]
+    n = len(jobs)
+    forced = data.draw(st.lists(st.booleans(), min_size=n, max_size=n))
+    pending = list(data.draw(st.permutations(range(n))))
+    names = [f"j{i}" for i in range(n)]
+    load = {f"j{i}": job_load for i, (job_load, _) in enumerate(jobs)}
+    prio = {f"j{i}": job_prio for i, (_, job_prio) in enumerate(jobs)}
+
+    o = Oracle(lower_source(_machine_load_catalog(capacity, jobs)))
+    forcing: list[str | None] = [None]
+    reserve = o.store.reserve
+
+    def checked_reserve(job: str, reservations: object) -> None:
+        if prio[job] > 0 and forcing[0] != job:
+            used = _used(o).get("m:lm", 0)
+            assert used + load[job] <= capacity, f"{job} started over max_load"
+            for other, row in o.store.job.items():
+                if row.waiter_seq is None or other == job:
+                    continue
+                short = used + load[other] > capacity
+                assert not (0 < prio[other] < prio[job] and short), (
+                    f"{job} started past {other}, a higher-priority load waiter"
+                )
+        reserve(job, reservations)  # type: ignore[arg-type]
+
+    o.store.reserve = checked_reserve  # type: ignore[method-assign]
+
+    done: set[str] = set()
+    minute = 0.0
+    while True:
+        running = [job for job in names if o.store.job[job].status == "RUNNING"]
+        choices = (["arrive"] if pending else []) + (["complete"] if running else [])
+        if not choices:
+            break
+        minute += 1
+        if data.draw(st.sampled_from(choices)) == "arrive":
+            idx = pending.pop(0)
+            job = names[idx]
+            forcing[0] = job if forced[idx] else None
+            o.feed(_ev("FORCE_STARTJOB" if forced[idx] else "STARTJOB", minute, job=job))
+            forcing[0] = None
+        else:
+            job = data.draw(st.sampled_from(running))
+            o.feed(_ev("STATUS", minute, job=job, status="SUCCESS"))
+            done.add(job)
+
+    assert done == set(names), "deadlock: a runnable job was never admitted"
+    assert all(_used(o).get(k, 0) == 0 for k in o._pool._bucket_cap), "load units leaked"
+
+
+def _resource_priority_catalog(
+    capacity: int, amounts: dict[str, int], jobs: list[tuple[int, int, int, int]]
+) -> str:
+    resources = "".join(
+        f"insert_resource: {name}\nres_type: R\namount: {amount}\n\n"
+        for name, amount in amounts.items()
+    )
+    body = ""
+    for i, (load, prio, qty_r, qty_s) in enumerate(jobs):
+        groups = [f"({n}, QUANTITY={q})" for n, q in (("R", qty_r), ("S", qty_s)) if q]
+        body += (
+            f"insert_job: j{i}\njob_type: c\ncommand: x\nmachine: lm\n"
+            f"job_load: {load}\npriority: {prio}\n"
+            + (f"resources: {' AND '.join(groups)}\n" if groups else "")
+            + "\n"
+        )
+    return f"insert_machine: lm\ntype: a\nnode_name: lm\nmax_load: {capacity}\n\n{resources}{body}"
+
+
+@settings(max_examples=300, deadline=None)
+@given(data=st.data())
+def test_dl255_starts_respect_resource_priority_blocking(data: st.DataObject) -> None:
+    """DL-255 over any script of arrivals (plain or forced) interleaved with
+    completions, on one machine and two named resources. At every start of
+    a positive-priority job that names a resource, forced or not, no queued
+    job of strictly higher positive priority that names one of the same
+    resources is short on ANY resource it names after passing its load
+    check: its load fits and no higher-priority load waiter is short (KB
+    240816). The check is computed here from the rows, not by the oracle's
+    own test. No resource is over-committed, every job eventually runs, and
+    no unit leaks. Demands are clamped to what preflight lets through."""
+    capacity = data.draw(st.integers(min_value=1, max_value=5))
+    amounts = {
+        "R": data.draw(st.integers(min_value=1, max_value=4)),
+        "S": data.draw(st.integers(min_value=1, max_value=3)),
+    }
+    jobs = data.draw(
+        st.lists(
+            st.tuples(
+                st.integers(min_value=0, max_value=2),
+                st.integers(min_value=0, max_value=3),
+                st.integers(min_value=0, max_value=4),
+                st.integers(min_value=0, max_value=3),
+            ),
+            min_size=3,
+            max_size=8,
+        )
+    )
+    jobs = [
+        (min(load, capacity), prio, min(qr, amounts["R"]), min(qs, amounts["S"]))
+        for load, prio, qr, qs in jobs
+    ]
+    n = len(jobs)
+    forced = data.draw(st.lists(st.booleans(), min_size=n, max_size=n))
+    pending = list(data.draw(st.permutations(range(n))))
+    names = [f"j{i}" for i in range(n)]
+    load = {names[i]: job[0] for i, job in enumerate(jobs)}
+    prio = {names[i]: job[1] for i, job in enumerate(jobs)}
+    demand = {
+        names[i]: {res: q for res, q in (("R", job[2]), ("S", job[3])) if q}
+        for i, job in enumerate(jobs)
+    }
+
+    o = Oracle(lower_source(_resource_priority_catalog(capacity, amounts, jobs)))
+    reserve = o.store.reserve
+
+    def queued() -> list[str]:
+        return [job for job, row in o.store.job.items() if row.waiter_seq is not None]
+
+    def load_short(job: str, used: dict[str, int]) -> bool:
+        return load[job] > 0 and used.get("m:lm", 0) + load[job] > capacity
+
+    def passed_load(job: str, used: dict[str, int]) -> bool:
+        if load_short(job, used):
+            return False
+        return not any(
+            0 < prio[other] < prio[job] and load_short(other, used)
+            for other in queued()
+            if other != job
+        )
+
+    def res_short(job: str, used: dict[str, int]) -> bool:
+        return any(used.get(f"r:{res}", 0) + q > amounts[res] for res, q in demand[job].items())
+
+    def checked_reserve(job: str, reservations: object) -> None:
+        if prio[job] > 0 and demand[job]:
+            used = _used(o)
+            for other in queued():
+                if other == job or not 0 < prio[other] < prio[job]:
+                    continue
+                if not demand[job].keys() & demand[other].keys():
+                    continue
+                assert not (res_short(other, used) and passed_load(other, used)), (
+                    f"{job} started past {other}, a higher-priority resource waiter"
+                )
+        reserve(job, reservations)  # type: ignore[arg-type]
+        used = _used(o)
+        assert all(used.get(f"r:{res}", 0) <= cap for res, cap in amounts.items()), (
+            f"{job} over-committed a resource"
+        )
+
+    o.store.reserve = checked_reserve  # type: ignore[method-assign]
+
+    done: set[str] = set()
+    minute = 0.0
+    while True:
+        running = [job for job in names if o.store.job[job].status == "RUNNING"]
+        # arrivals twice as likely as completions, so waiters pile up
+        choices = (["arrive"] * 2 if pending else []) + (["complete"] if running else [])
+        if not choices:
+            break
+        minute += 1
+        if data.draw(st.sampled_from(choices)) == "arrive":
+            idx = pending.pop(0)
+            o.feed(_ev("FORCE_STARTJOB" if forced[idx] else "STARTJOB", minute, job=names[idx]))
+        else:
+            job = data.draw(st.sampled_from(running))
+            o.feed(_ev("STATUS", minute, job=job, status="SUCCESS"))
+            done.add(job)
+
+    assert done == set(names), "deadlock: a runnable job was never admitted"
+    assert all(_used(o).get(k, 0) == 0 for k in o._pool._bucket_cap), "units leaked"
 
 
 def test_dl50_depletable_drains_and_never_refills() -> None:

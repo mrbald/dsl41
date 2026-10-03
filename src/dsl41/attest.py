@@ -93,7 +93,9 @@ from dsl41.period import (
     read_archive_receipt,
     read_or_none,
     read_sentinel,
+    switches_of,
     tz_aliases_of,
+    default_tz_of,
     wrote_period,
 )
 from dsl41.runner_clock import EngineError
@@ -739,7 +741,13 @@ def rederive_seal(run_root: Path, period_id: int, *, stored: Seal | None = None)
     carried = carried_from_opening(run_root, opening, closing)
     # SEM-35: the period's own alias table, or a job whose `timezone:` only
     # that table resolves refuses the log this estate really wrote (DL-151)
-    oracle = Oracle(c1, carried=carried, tz_aliases=tz_aliases_of(closing.runtime_profile))
+    oracle = Oracle(
+        c1,
+        carried=carried,
+        default_tz=default_tz_of(closing.runtime_profile),
+        tz_aliases=tz_aliases_of(closing.runtime_profile),
+        semantics=switches_of(closing.runtime_profile),
+    )
     seed_local_executor(oracle.store, LOCAL_EXECUTOR_ID, at=opening_at(opening))
     replay = replay_inputs(
         oracle,

@@ -81,7 +81,9 @@ fails the suite.
 | statement:insert_xinst | supported | SEM-07 | - |  |  |  | generic | an external-instance definition is carried; cross-instance atoms read it by name |
 | statement:override_job | refused | ir._Lowerer.run, DL-29 | - |  |  |  | generic | lowering refuses override_job: merging and out-of-scope object classes are semantics this compiler does not model |
 | statement:rename_job | refused | ir._Lowerer.run, DL-29 | - |  |  |  | generic | lowering refuses rename_job: merging and out-of-scope object classes are semantics this compiler does not model |
+| statement:update_blob | refused | ir._Lowerer.run, DL-29 | - |  |  |  | generic | lowering refuses update_blob: merging and out-of-scope object classes are semantics this compiler does not model |
 | statement:update_connectionprofile | refused | ir._Lowerer.run, DL-29 | - |  |  |  | generic | lowering refuses update_connectionprofile: merging and out-of-scope object classes are semantics this compiler does not model |
+| statement:update_glob | refused | ir._Lowerer.run, DL-29 | - |  |  |  | generic | lowering refuses update_glob: merging and out-of-scope object classes are semantics this compiler does not model |
 | statement:update_job | refused | ir._Lowerer.run, DL-29 | - |  |  |  | generic | lowering refuses update_job: merging and out-of-scope object classes are semantics this compiler does not model |
 | statement:update_job_type | refused | ir._Lowerer.run, DL-29 | - |  |  |  | generic | lowering refuses update_job_type: merging and out-of-scope object classes are semantics this compiler does not model |
 | statement:update_machine | refused | ir._Lowerer.run, DL-29 | - |  |  |  | generic | lowering refuses update_machine: merging and out-of-scope object classes are semantics this compiler does not model |
@@ -106,16 +108,16 @@ fails the suite.
 | job_attr:box_success | supported | SEM-12 | - |  |  |  | generic | overrides a box's success verdict, evaluated on every member transition while the box is RUNNING, so an internal reference can finish the box early |
 | job_attr:box_success#iced-member | provisional | SEM-12, SEM-20 | Q6 |  | Q6 |  | none | an iced member is read as satisfied inside box_success, the same way it is read inside an ordinary condition |
 | job_attr:box_terminator | supported | SEM-14 | - |  |  |  | generic | this member's failure terminates the whole box |
-| job_attr:chk_files | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | the pre-start disk-space gate is not evaluated; the job starts regardless |
+| job_attr:chk_files | refused | runner_preflight._execution_input_preflight, DL-240 | - |  |  |  | generic | carried verbatim; never applied; real execution refuses it at preflight; rehearse and compile are unaffected; inert on a BOX (SEM-10) |
 | job_attr:command | supported | runner-design ss6 | - |  |  |  | generic | the shell command the CMD adapter spawns, passed to /bin/sh verbatim |
 | job_attr:condition | supported | SEM-02, SEM-08 | - |  |  |  | generic | the start gate: the job starts on the edge where its condition becomes true |
-| job_attr:condition#queued-no-recheck | provisional | DL-50, oracle.Oracle._readmit | Qr6 | yes |  |  | none | a job admitted out of QUE_WAIT does not re-evaluate its condition |
+| job_attr:condition#queued-no-recheck | provisional | DL-50, oracle.Oracle._readmit | Qr6 | yes |  |  | none | a job admitted out of QUE_WAIT does not re-evaluate its condition, the vendor's EvaluateQueuedJobStarts=0; the vendor default is 1, which re-evaluates the starting conditions other than the day's date check (DL-250) |
 | job_attr:date_conditions | supported | SEM-30 | - |  |  |  | generic | the master switch: the time cluster is honoured only when it is truthy |
 | job_attr:days_of_week | supported | SEM-30, SEM-31 | - |  |  |  | generic | the days a schedule tick may fall on, as two-letter tokens or `all` |
 | job_attr:days_of_week#absent | provisional | SEM-30, runner_scheduler | E10 | yes |  |  | none | a schedule with no days_of_week is read as every day |
 | job_attr:description | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
 | job_attr:elevated | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | no privilege elevation happens; the child runs as the invoking user |
-| job_attr:envvars | passthrough | ir._Lowerer._exec_spec, DL-32 | - |  |  |  | generic | carried verbatim on the exec spec; the child process environment is not modified; inert on a BOX (SEM-10) |
+| job_attr:envvars | refused | runner_preflight._execution_input_preflight, DL-240 | - |  |  |  | generic | carried verbatim; never applied; real execution refuses it at preflight; rehearse and compile are unaffected; inert on a BOX (SEM-10) |
 | job_attr:exclude_calendar | supported | SEM-30, DL-56 | - |  |  |  | generic | the named calendar whose days are subtracted from the schedule's day set |
 | job_attr:exclude_calendar#two-year-probe | supported | DL-56, DL-57, runner_preflight._calendar_preflight | - |  |  | 732 dates inclusive, anchor through anchor+731 days | none | preflight WARNs when the exclusion covers every eligible day it probes -- 732 dates inclusive, anchor through anchor+731 days; absence is proven within that bound only, and the run is warned, not refused |
 | job_attr:fail_codes | supported | SEM-09, DL-33 | - |  |  |  | generic | the explicit failure set; present, it is the only verdict source (Q7, DL-58) |
@@ -123,8 +125,8 @@ fails the suite.
 | job_attr:heartbeat_interval | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
 | job_attr:interactive | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | no interactive terminal is attached to the child process |
 | job_attr:job_class | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | job classes are not implemented; no class quota gates a start |
-| job_attr:job_load | supported | DL-50 | - |  |  |  | generic | the machine-load units a start holds against the machine's max_load |
-| job_attr:job_load#absent | provisional | DL-50, ir.JobIR.job_load_units | Qr4 | yes |  |  | none | a job with no job_load demands zero machine-load units, so an unsized job never queues behind max_load |
+| job_attr:job_load | supported | DL-50, DL-247 | - |  |  |  | generic | the machine-load units a start holds against the machine's max_load; only a positive priority checks them, while an unset or zero priority and a forced start skip the check and still hold the units |
+| job_attr:job_load#absent | provisional | DL-50, ir.JobIR.job_load_units | Qr4 | yes |  |  | none | a job with no job_load demands zero machine-load units, so it never waits for load itself; with a positive priority it can still queue behind a higher-priority load waiter on its machine |
 | job_attr:job_terminator | supported | SEM-14 | - |  |  |  | generic | this member is terminated when its box fails |
 | job_attr:job_type | supported | SEM-10 | - |  |  |  | generic | selects the modelled job kind: CMD, BOX or FW |
 | job_attr:machine | supported | DL-49, DL-52 | - |  |  |  | generic | names the machine the job runs on; the resolver refuses a foreign one; inert on a BOX (SEM-10) |
@@ -133,11 +135,17 @@ fails the suite.
 | job_attr:max_run_alarm | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
 | job_attr:min_run_alarm | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
 | job_attr:must_complete_times | supported | SEM-34 | - |  |  |  | generic | the RELATIVE form arms an alarm: a missed completion raises MUST_COMPLETE_ALARM and changes no status |
-| job_attr:must_complete_times#absolute | passthrough | SEM-34, oracle.Oracle._arm_sla_and_term | - |  |  |  | none | an ABSOLUTE must_complete_times lowers and is carried, and arms nothing: the oracle owns no calendar, so no absolute deadline exists v1 |
-| job_attr:must_complete_times#unmatched-slot | provisional | SEM-34, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset | - |  |  |  | none | an instant matching no start time uses the first offset; no label was opened for the corner |
+| job_attr:must_complete_times#absolute | supported | SEM-34, DL-253, oracle.Oracle._absolute_deadline | - |  |  | 00:00-71:59 | none | an ABSOLUTE must_complete_times, 00:00-71:59, arms MUST_COMPLETE_ALARM at the slot's must time on the tick's local day, hours 24-71 on the days after; 72:00 and above, a time below its own start time and a time not earlier than the next later start time of the same day are refused at lowering; the day's latest start time is not checked, its next run depending on the calendar |
+| job_attr:must_complete_times#before-tick | provisional | SEM-34, DL-253, oracle.Oracle._absolute_deadline | E10 |  |  |  | none | an absolute must time that resolves before its tick is due at the tick: a start in a spring change's missing hour ticks at fold=0, past the vendor's 3:00:59; lowering refuses a must time below its own start time, so no other input reaches the pin |
+| job_attr:must_complete_times#dst | supported | SEM-34, DL-253, oracle._must_instant | - |  |  |  | none | an absolute must time in a spring change's missing hour is due in the first minute of the next hour (2:45 is 3:00:45), and at 3:00:59 when a start in the missing hour would run after it; in a fall change's repeated hour it takes the first pass, or the second when the start is in that hour too |
+| job_attr:must_complete_times#start-mins | supported | SEM-34, DL-248, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset | - |  |  |  | none | a single relative offset counts against start_mins and broadcasts to every start_mins tick; the vendor refuses an absolute form there, a list of offsets there is not specified and stays open, and lowering refuses both |
+| job_attr:must_complete_times#unmatched-slot | provisional | SEM-34, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset | - |  |  |  | none | an instant matching no start time uses the first offset, and an absolute form arms nothing there; no label was opened for the corner |
 | job_attr:must_start_times | supported | SEM-34 | - |  |  |  | generic | the RELATIVE form arms an alarm: a missed start raises MUST_START_ALARM and changes no status |
-| job_attr:must_start_times#absolute | passthrough | SEM-34, oracle.Oracle._arm_sla_and_term | - |  |  |  | none | an ABSOLUTE must_start_times lowers and is carried, and arms nothing: the oracle owns no calendar, so no absolute deadline exists v1 |
-| job_attr:must_start_times#unmatched-slot | provisional | SEM-34, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset | - |  |  |  | none | an instant matching no start time uses the first offset; no label was opened for the corner |
+| job_attr:must_start_times#absolute | supported | SEM-34, DL-253, oracle.Oracle._absolute_deadline | - |  |  | 00:00-71:59 | none | an ABSOLUTE must_start_times, 00:00-71:59, arms MUST_START_ALARM at the slot's must time on the tick's local day, hours 24-71 on the days after; 72:00 and above, a time below its own start time and a time not earlier than the next later start time of the same day are refused at lowering; the day's latest start time is not checked, its next run depending on the calendar |
+| job_attr:must_start_times#before-tick | provisional | SEM-34, DL-253, oracle.Oracle._absolute_deadline | E10 |  |  |  | none | an absolute must time that resolves before its tick is due at the tick: a start in a spring change's missing hour ticks at fold=0, past the vendor's first minute of the next hour; lowering refuses a must time below its own start time, so no other input reaches the pin |
+| job_attr:must_start_times#dst | supported | SEM-34, DL-253, oracle._must_instant | - |  |  |  | none | an absolute must time in a spring change's missing hour is due in the first minute of the next hour (2:05 is 3:00:05); in a fall change's repeated hour it takes the first pass, or the second when the start is in that hour too; other change shapes keep the fold=0 conversion |
+| job_attr:must_start_times#start-mins | supported | SEM-34, DL-248, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset | - |  |  |  | none | a single relative offset counts against start_mins and broadcasts to every start_mins tick; the vendor refuses an absolute form there, a list of offsets there is not specified and stays open, and lowering refuses both |
+| job_attr:must_start_times#unmatched-slot | provisional | SEM-34, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset | - |  |  |  | none | an instant matching no start time uses the first offset, and an absolute form arms nothing there; no label was opened for the corner |
 | job_attr:n_retrys | passthrough | DL-53 | - |  |  |  | generic | the job runs without retries; preflight WARNs that the attribute is unmodelled |
 | job_attr:notification_alarm_types | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
 | job_attr:notification_emailaddress | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
@@ -149,14 +157,18 @@ fails the suite.
 | job_attr:notification_template | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
 | job_attr:owner | refused | runner_preflight._owner_preflight | - |  |  |  | generic | an owner other than the invoking user is refused at preflight: there is no setuid; inert on a BOX (SEM-10) |
 | job_attr:permission | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | job permissions are not enforced; the run uses the invoking user's own |
-| job_attr:priority | supported | DL-50 | - |  |  |  | generic | orders the QUE_WAIT queue; an undeclared priority sorts behind every declared one |
-| job_attr:priority#direction | provisional | DL-50, capacity.CapacityPool.sorted_waiters | Qr2 | yes |  |  | none | a lower priority number is assumed to mean higher priority |
+| job_attr:priority | supported | DL-50, DL-247, DL-255 | - |  |  |  | generic | orders the QUE_WAIT queue, lower number first; a positive priority makes a start check machine load, a job waiting for load blocks every lower positive priority on its machine, and a job past its load check that waits on a named resource blocks every lower positive priority naming any resource it names |
+| job_attr:priority#unset-order | provisional | DL-50, DL-247, capacity.CapacityPool.sorted_waiters | Qr2 | yes |  |  | none | a resource waiter with no priority is assumed to sort behind every declared priority, explicit 0 included, though the vendor default is 0 |
 | job_attr:profile | supported | runner_adapters._build_run_spec | - |  |  |  | generic | sourced before the command runs (`. <profile> && <command>`); inert on a BOX (SEM-10) |
 | job_attr:profile#sourcing-failure | provisional | runner_adapters._build_run_spec | E5 | yes |  |  | none | a profile that fails to source fails the job with sh's exit code |
-| job_attr:resources | supported | DL-21, DL-50 | - |  |  |  | generic | the resource groups a start must satisfy before it may run |
+| job_attr:resources | supported | DL-21, DL-50, DL-255 | - |  |  |  | generic | the resource groups a start must satisfy before it may run; a job with a positive priority that waits on any of them blocks every lower positive priority naming any of them, a forced start included, and holds no load while it waits |
 | job_attr:resources#duplicate | refused | runner_preflight._resource_preflight, DL-50 | - |  |  |  | none | a job naming one resource twice is refused at preflight as ambiguous demand; a direct oracle caller instead SUMS the quantities and takes the most restrictive release policy |
 | job_attr:run_calendar | supported | SEM-30, DL-56 | - |  |  |  | generic | the named calendar whose days are the schedule's day set |
-| job_attr:run_window | supported | SEM-33 | - |  |  |  | generic | a gate, not a trigger: a start outside the window defers or drops, never fires early |
+| job_attr:run_window | supported | SEM-33 | - |  |  |  | generic | a gate, not a trigger: a start outside the window defers or drops, never fires early; a box start decides it for a waiting member (DL-246) |
+| job_attr:run_window#box-start-defer | provisional | SEM-33, DL-246, oracle.Oracle._decide_windows_at_box_start | - |  |  |  | none | the STARTJOB a box start defers to the next window opening is a start attempt with a schedule tick's standing, through the normal gates; how it composes with the member's own start_times is undocumented, at most one start per box run still holds, and no label was opened for it |
+| job_attr:run_window#dst-both-in-hour | provisional | SEM-33, DL-249, oracle._window_span | - |  |  |  | none | when both endpoints fall in the hour a DST change touches, two readings are pinned: in fall the close follows the opening into the second, standard-time pass, and in spring the vendor's 'first minute after 3:00' opening is exactly 03:00; the vendor text does not settle either, and no label was opened for it |
+| job_attr:run_window#dst-change | supported | SEM-33, DL-249, oracle._window_span | - |  |  |  | none | near a one-hour DST change at 02:00 local the window's endpoints follow the vendor's rules: in spring an opening in the missing hour moves to 03:00 and a close in it keeps the window's length; in fall an opening in the repeated hour takes the standard-time pass and a close takes the daylight-time pass unless the opening is in that hour too |
+| job_attr:run_window#dst-other-shape | provisional | SEM-33, DL-249, oracle.Oracle._window_side | - |  |  |  | none | a DST change of another shape (a half-hour change, a change at another hour) keeps the wall-time comparison: the vendor's endpoint rules are unverified there, and no label was opened for it |
 | job_attr:run_window#equal-endpoints | provisional | SEM-33, oracle.Oracle._run_window_permits | - |  |  |  | none | a window whose endpoints are equal ADMITS that one instant -- `lo <= now <= hi` is inclusive at both ends, so the window is not empty and not all day; the pin is undocumented and no label was opened for it |
 | job_attr:run_window#midpoint-tie | provisional | SEM-33, oracle.Oracle._run_window_permits | - |  |  |  | none | a start exactly halfway between the previous close and the next opening DEFERS to the opening rather than dropping; the tie is undocumented and no label was opened for it |
 | job_attr:send_notification | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
@@ -167,9 +179,9 @@ fails the suite.
 | job_attr:std_in_file | supported | runner_adapters._build_run_spec | - |  |  |  | generic | the child reads stdin from here instead of /dev/null; inert on a BOX (SEM-10) |
 | job_attr:std_out_file | supported | runner_adapters.job_log_paths | - |  |  |  | generic | the child's stdout appends here instead of the default run log; inert on a BOX (SEM-10) |
 | job_attr:success_codes | supported | SEM-09, DL-33 | - |  |  |  | generic | the explicit success set; with no fail_codes beside it, it alone decides the verdict |
-| job_attr:term_run_time | supported | dossier ss5, oracle.Oracle._arm_sla_and_term | - |  |  |  | generic | arms a timer that TERMINATEs the run after n minutes |
+| job_attr:term_run_time | supported | dossier ss5, oracle.Oracle._arm_term_run_time | - |  |  |  | generic | arms a timer that TERMINATEs the run after n minutes; zero means no limit and arms no timer (DL-241) |
 | job_attr:timezone | supported | SEM-35 | - |  |  |  | generic | the zone every schedule time on this job is read in |
-| job_attr:timezone#dst-fold | provisional | SEM-35, runner_scheduler | E10 | yes |  |  | none | a start time inside a DST fold or gap resolves by the pinned interpretation, not by a vendor-verified rule |
+| job_attr:timezone#dst-fold | provisional | SEM-35, runner_scheduler | E10 | yes |  |  | none | a start time inside a DST fold or gap resolves by the pinned fold=0 interpretation, which differs from the vendor's documented rule (runner-design ss15) |
 | job_attr:ulimit | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | no resource limit is applied to the child process |
 | job_attr:watch_file | supported | runner-design ss6 | - |  |  |  | generic | the path an FW job polls; the job completes only once the file exists, reaches watch_file_min_size, and two consecutive polls agree on its size |
 | job_attr:watch_file#stat-error | provisional | runner-design ss6, runner_adapters.FileWatcherAdapter | - |  |  |  | none | EVERY stat error reads as the file being absent -- a permission denial is not told apart from a missing file -- and the watch resets its stable count and keeps polling; no label was opened for it |
@@ -227,7 +239,7 @@ fails the suite.
 | calendar_attr:end_date | supported | SEM-39 | - |  |  |  | generic | closes the cycle period its preceding start_date opened |
 | calendar_attr:holcal | supported | SEM-36 | - |  |  |  | generic | names the standard calendar whose days are this calendar's holidays |
 | calendar_attr:holiday | supported | SEM-36, SEM-38 | - |  |  |  | generic | what happens to a generated day that is a holiday; it governs holcal dates outright |
-| calendar_attr:holiday#absent | supported | SEM-38, DL-58, autocal.CompiledCalendar._dispose | - |  |  |  | none | with no holiday action a holcal date gets no treatment of its own: it falls through to the non_workday branch, which only acts on a day that is not a workday, so a holiday ON a workday is kept untouched |
+| calendar_attr:holiday#absent | supported | SEM-38, DL-58, DL-244, autocal.CompiledCalendar._dispose | - |  |  |  | none | with no holiday action a holcal date gets no treatment of its own: it falls through to the non_workday branch, which treats it as a non-workday regardless of its own weekday, so a holiday ON a workday is governed by the non_workday action exactly like a weekend non-workday would be |
 | calendar_attr:non_workday | supported | SEM-36, SEM-38 | - |  |  |  | generic | what happens to a generated day that is not a workday: filter or replacement |
 | calendar_attr:non_workday#absent | supported | SEM-38, autocal.CompiledCalendar._dispose | - |  |  |  | none | with no non_workday action a generated day is kept exactly as it falls |
 | calendar_attr:start_date | supported | SEM-39 | - |  |  |  | generic | opens one cycle period; it pairs positionally with the end_date after it |
@@ -321,7 +333,7 @@ fails the suite.
 | id | class | cite | label | marker | protocol | bound | detector | effect |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | release_policy:completion | supported | DL-50, capacity.release_policy | - |  |  |  | generic | units are released on completion |
-| release_policy:completion#free-absent | provisional | DL-50, capacity.release_policy | Qr1 |  |  |  | none | a request with no FREE takes the res_type default, renewable for an absent res_type |
+| release_policy:completion#free-absent | provisional | DL-50, capacity.release_policy | Qr1 |  |  |  | none | a request with no FREE takes the res_type default, renewable for an absent res_type; the vendor documents FREE's default as Y, free on success only, and the pin stays until decided (DL-250) |
 | release_policy:never | supported | DL-50, capacity.release_policy | - |  |  |  | generic | units are released on never |
 | release_policy:success | supported | DL-50, capacity.release_policy | - |  |  |  | generic | units are released on success |
 
@@ -455,7 +467,7 @@ fails the suite.
 | cal_family:week | supported | SEM-37 | - |  |  |  | generic | the nth week of the year, `#`/`M`/`X`, 1..53 or `L` |
 | cal_family:week_parity | supported | SEM-37 | - |  |  |  | generic | every even (`E`) or odd (`O`) week of the year |
 | cal_family:weekd | supported | SEM-37 | - |  |  |  | generic | the nth day of the week, from the start (`#`), the end (`M`) or excluded (`X`), 1..7 or `L` |
-| cal_family:wekr | supported | SEM-37 | - |  |  |  | generic | the nth day of a week anchored on a named weekday, `#`/`M`/`X`, 1..7 or `L` |
+| cal_family:wekr | provisional | SEM-37, DL-250 | Q11 |  |  |  | generic | the pinned reading: the nth day of a week anchored on a named weekday, `#`/`M`/`X`, 1..7 or `L`; the vendor text also supports a week-of-year reading, and 24.2 spells the anchor as a digit |
 | cal_family:workd | supported | SEM-37 | - |  |  |  | generic | the nth workday of the month, counted from the start (`#`) or the end (`M`), 1..31 or `L` |
 | cal_family:workdx | refused | autocal._parse_token, SEM-37 | - |  |  |  | generic | an excluded workday ordinal whose text contradicts its month-scoped siblings; refused rather than guessed, because no sane default exists |
 
@@ -517,23 +529,24 @@ fails the suite.
 | id | class | cite | label | marker | protocol | bound | detector | effect |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | event:DISARM | supported | ir-design ss7 | - |  |  |  | generic | drops a latched tick; no status moves, nothing wakes |
-| event:FORCE_STARTJOB | supported | ir-design ss7 | - |  |  |  | generic | starts a job past its condition gate |
+| event:FORCE_STARTJOB | supported | ir-design ss7, DL-247 | - |  |  |  | generic | starts a job past its condition gate and its machine's load limit; on a non-live ON_ICE or ON_HOLD job it clears that flag first, like an OFF_ICE/OFF_HOLD, then starts it (DL-243); named resources still gate it |
 | event:KILLJOB | supported | ir-design ss7 | - |  |  |  | generic | terminates a running job, or dequeues and terminates a queued one |
 | event:KILLJOB#queued | provisional | DL-50, oracle.Oracle._dispatch | Qr5 |  |  |  | none | killing a queued job dequeues it, consumes its arm and TERMINATEs it |
-| event:MUST_COMPLETE_ALARM | supported | SEM-34 | - |  |  |  | generic | emitted when a must_complete deadline passes with the run still live |
+| event:MUST_COMPLETE_ALARM | supported | SEM-34 | - |  |  |  | generic | emitted when a must_complete deadline passes before the run its tick asked for completed, including a run that never began (DL-248) |
 | event:MUST_START_ALARM | supported | SEM-34 | - |  |  |  | generic | emitted when a must_start deadline passes with no new run; no status moves |
 | event:OFF_HOLD | supported | ir-design ss7 | - |  |  |  | generic | releases a hold and re-attempts the start immediately |
 | event:OFF_ICE | supported | ir-design ss7 | - |  |  |  | generic | un-ices a job; conditions are deliberately NOT re-evaluated |
-| event:OFF_NOEXEC | supported | ir-design ss7 | - |  |  |  | generic | clears the noexec flag |
-| event:ON_HOLD | supported | ir-design ss7 | - |  |  |  | generic | holds a job: it stays startable but does not start |
-| event:ON_ICE | supported | ir-design ss7 | - |  |  |  | generic | ices a job: downstream conditions read it as satisfied and it never runs |
+| event:OFF_NOEXEC | supported | ir-design ss7, DL-254 | - |  |  |  | generic | clears the noexec flag; on a box, on every job it holds at every level |
+| event:ON_HOLD | supported | ir-design ss7, DL-254 | - |  |  |  | generic | holds a job: it stays startable but does not start; ignored on a STARTING or RUNNING job (DL-254) |
+| event:ON_ICE | supported | ir-design ss7, DL-254 | - |  |  |  | generic | ices a job: an ordinary downstream atom follows the vendor ON_ICE table (s/d/n true, f/t/exitcode false), a lookback-qualified atom reads satisfied regardless, and it never runs on a plain start (DL-243); ignored on a STARTING or RUNNING job (DL-254) |
 | event:ON_ICE#armed | provisional | SEM-20, oracle.Oracle._handle_oob | Q3d | yes | Q3d |  | none | a pre-existing arm survives the ice round trip untouched |
+| event:ON_ICE#lookback atom | provisional | SEM-20, DL-243, oracle.Oracle._atom_true | Q10 | yes |  |  | none | a LOOKBACK-qualified atom on a non-live iced job reads true, lookback ignored, as the AutoSys 24.2 condition attribute page states; an ORDINARY atom (no lookback) follows the Start Conditions on-ice table, which does not separate lookback atoms, so which page a live instance follows stays open. The ice-lookback=ordinary switch selects the table's reading (DL-252) |
 | event:ON_ICE#queued | provisional | DL-50, oracle.Oracle._handle_oob | Qr5 |  |  |  | none | icing a queued job dequeues it and settles it INACTIVE now, rather than leaving it in QUE_WAIT |
-| event:ON_ICE#running | provisional | SEM-05, SEM-20, DL-13, oracle.Oracle._atom_true | - |  |  |  | none | icing a STARTING or RUNNING job does NOT make its atoms read as satisfied: the in-flight run is real, so conditions keep reading the live status until it completes (DL-13); no label was opened for the exception |
-| event:ON_NOEXEC | supported | ir-design ss7 | - |  |  |  | generic | marks a job as not executing; it completes without running |
+| event:ON_ICE#running | supported | SEM-20, DL-254, oracle.Oracle._oob_ignored | - |  |  |  | none | ON_ICE sent to a STARTING or RUNNING job is ignored: no flag, no wake, one EVENT_IGNORED trace line; the run completes and reads normally |
+| event:ON_NOEXEC | supported | ir-design ss7, DL-254 | - |  |  |  | generic | marks a job as not executing; it completes without running. It clears a hold and takes a queued job out of the queue, then retries the start; on a box it sets the box INACTIVE with every job it holds and flags every level. Ignored on an iced job, a RUNNING job, a STARTING non-box job and a box holding an iced, live or queued job (DL-254) |
 | event:SET_GLOBAL | supported | ir-design ss7 | - |  |  |  | generic | sets a global and wakes every job whose condition reads it |
 | event:STARTJOB | supported | ir-design ss7 | - |  |  |  | generic | a schedule tick or operator start; it arms must_start whether or not it starts |
-| event:STATUS | supported | ir-design ss7 | - |  |  |  | generic | sets a job's status and wakes every job whose condition names it |
+| event:STATUS | supported | ir-design ss7 | - |  |  |  | generic | sets a job's status and wakes every job whose condition names it; INACTIVE on a box cascades to every job it contains (SEM-18) |
 | event:TIMER | supported | ir-design ss7 | - |  |  |  | generic | a due deadline or deferred start firing off the timer heap |
 
 ### status
@@ -553,9 +566,9 @@ fails the suite.
 | id | class | cite | label | marker | protocol | bound | detector | effect |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | timer:deferred_cause | supported | PR-09, oracle.Oracle._schedule_timer | - |  |  |  | generic | the fourth timer shape: a run_window-deferred start replaying its own provenance |
-| timer:must_complete | supported | PR-09, oracle.Oracle._schedule_timer | - |  |  |  | generic | armed by the start; it raises MUST_COMPLETE_ALARM if the run is still live |
+| timer:must_complete | supported | PR-09, oracle.Oracle._schedule_timer | - |  |  |  | generic | armed by the schedule tick; it raises MUST_COMPLETE_ALARM if the run the tick asked for has not completed (DL-248) |
 | timer:must_start | supported | PR-09, oracle.Oracle._schedule_timer | - |  |  |  | generic | armed by the schedule tick; it raises MUST_START_ALARM if no new run began |
-| timer:term_run_time | supported | PR-09, oracle.Oracle._schedule_timer | - |  |  |  | generic | armed by the start; it TERMINATEs a run still live at the deadline |
+| timer:term_run_time | supported | PR-09, oracle.Oracle._schedule_timer | - |  |  |  | generic | armed by the start; it TERMINATEs a run still live at the deadline; zero means no limit and arms no timer (DL-241) |
 
 ### profile_field
 
@@ -571,6 +584,7 @@ fails the suite.
 | profile_field:machine_policy | supported | period-model ss2.1, DL-49 | - |  |  |  | generic | how the one ambiguous machine verdict resolves |
 | profile_field:reconcile_settle_us | supported | period-model ss2.1 | - |  |  |  | generic | how long reconcile waits for late evidence before it decides |
 | profile_field:retry_horizon_us | supported | period-model ss2.1 | - |  |  |  | generic | how far ahead a deferred dispatch retry may be scheduled |
+| profile_field:semantics | supported | period-model ss2.1, runner-design ss8a, DL-252 | - |  |  |  | generic | explicit semantic-switch overrides only, an explicit default normalized away; written {} when there is none |
 | profile_field:spawn_window_us | supported | period-model ss2.1 | - |  |  |  | generic | the window a spawn has to produce its receipt |
 | profile_field:tz_aliases | supported | period-model ss2.1, DL-62 | - |  |  |  | generic | the site-local zone-name table; a name only it resolves fails without it |
 
@@ -582,6 +596,8 @@ fails the suite.
 | profile_alt:execution_mode=tethered | supported | period-model ss2.1 | - |  |  |  | generic | the engine owns the child processes; there is no supervisor |
 | profile_alt:machine_policy=local-eligible | supported | period-model ss2.1 | - |  |  |  | generic | only a MIXED pool runs here, with a warning that pool placement was ignored; a foreign or unreadable machine still refuses |
 | profile_alt:machine_policy=strict | supported | period-model ss2.1 | - |  |  |  | generic | a job whose machine does not resolve local is refused |
+| profile_alt:semantics.ice-lookback=ordinary | supported | runner-design ss8a, SEM-20, DL-243, DL-252 | - |  |  |  | generic | the qualifier is dropped on a non-live iced predecessor and the ordinary on-ice table applies: s, d, n true; f, t, exitcode false |
+| profile_alt:semantics.ice-lookback=true | supported | runner-design ss8a, SEM-05, DL-252 | - |  |  |  | generic | the default: a lookback-qualified atom on a non-live iced predecessor reads true, every atom kind, lookback ignored |
 
 ### adapter_outcome
 
@@ -625,16 +641,17 @@ fails the suite.
 | id | class | cite | label | marker | protocol | bound | detector | effect |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | trace_marker:DISARM | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | an explicit journaled disarm: the latched tick is dropped and nothing else moves |
-| trace_marker:MUST_COMPLETE_ALARM | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | the must_complete deadline passed with the run still live; no status moved |
+| trace_marker:EVENT_IGNORED | supported | ir-design ss7, DL-254, oracle.Oracle._oob_ignored | - |  |  |  | generic | an ON_ICE, ON_HOLD or ON_NOEXEC the vendor ignores for the job's status; nothing else moves |
+| trace_marker:MUST_COMPLETE_ALARM | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | the must_complete deadline passed before the run its tick asked for completed; no status moved |
 | trace_marker:MUST_START_ALARM | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | the must_start deadline passed with no new run; no status moved |
 | trace_marker:OFF_HOLD | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | the hold is released and the start is re-attempted immediately |
 | trace_marker:OFF_ICE | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | the ice is cleared; conditions are deliberately NOT re-evaluated |
 | trace_marker:OFF_NOEXEC | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | the noexec flag is cleared |
 | trace_marker:ON_HOLD | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | the job is held: it stays startable but no start goes through |
-| trace_marker:ON_ICE | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | the job is iced: downstream conditions read it as satisfied and it never runs |
+| trace_marker:ON_ICE | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | the job is iced: an ordinary downstream atom follows the vendor ON_ICE table (s/d/n true, f/t/exitcode false), a lookback-qualified atom reads satisfied regardless, and it never runs on a plain start (DL-243) |
 | trace_marker:ON_NOEXEC | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | the job is marked not-executing; it completes without running |
 | trace_marker:RUN_WINDOW_DEFER | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | a start outside the run_window, closer to the next opening, was queued for it |
-| trace_marker:RUN_WINDOW_SKIP | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | a start outside the run_window, closer to the previous close, was dropped |
+| trace_marker:RUN_WINDOW_SKIP | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | a start outside the run_window, closer to the previous close, was dropped; the job reads INACTIVE (DL-246) |
 | trace_marker:SCHED_ARM | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | a schedule tick that could not start the job latched instead |
 | trace_marker:SCHED_DISARM | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | an unconsumed member arm died with the box run that armed it |
 | trace_marker:START_REFUSED | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | a start request the oracle declined, with the reason it declined it |
@@ -644,6 +661,9 @@ fails the suite.
 | id | class | cite | label | marker | protocol | bound | detector | effect |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | preflight_code:calendar | refused | runner_preflight._calendar_preflight, DL-56 | - |  |  |  | generic | a calendar the scheduler cannot read or that can never fire refuses the run |
+| preflight_code:chk-files | refused | runner_preflight._execution_input_preflight, DL-240 | - |  |  |  | generic | chk_files on a non-BOX job is carried but the pre-start disk-space gate is never evaluated, so real execution refuses the run |
+| preflight_code:envvars | refused | runner_preflight._execution_input_preflight, DL-240 | - |  |  |  | generic | envvars on a CMD job's ExecSpec is carried but the adapter never applies it to the child environment, so real execution refuses the run |
+| preflight_code:global-substitution | refused | runner_preflight._execution_input_preflight, DL-240 | - |  |  |  | generic | a $$NAME site on an exec_ field is carried but never substituted, so the literal text would be used; real execution refuses the run |
 | preflight_code:job-type | refused | runner_preflight._job_type_preflight | - |  |  |  | unreachable | a job_type with no adapter refuses the run; no JIL reaches this gate, because lowering already refuses every type outside CMD/BOX/FW |
 | preflight_code:machine | refused | runner_preflight._machine_preflight, DL-49 | - |  |  |  | generic | a job whose machine does not resolve to this host refuses the run: there is no remote fabric |
 | preflight_code:machine-mixed | supported | runner_preflight._machine_preflight, DL-49 | - |  |  |  | generic | a pool with some members here and some elsewhere runs here under local-eligible, with a warning that pool placement was ignored |
@@ -677,7 +697,7 @@ fails the suite.
 | literal_alt:And.kind=and | supported | SEM-03, ir-design ss3 | - |  |  |  | generic | the discriminator that makes an AND node readable back from JSON |
 | literal_alt:CalendarIR.kind=extended | supported | SEM-36, DL-36 | - |  |  |  | generic | a calendar of rules; `compile_calendar` reads it and refuses a standard one |
 | literal_alt:CalendarIR.kind=standard | supported | SEM-36, DL-36 | - |  |  |  | generic | a calendar of date rows; `standard_days` reads it and `holcal` requires it |
-| literal_alt:CatalogIR.ir_version=0.2 | supported | ir-design ss4 | - |  |  |  | generic | the IR version stamped on every catalog; a reader that meets another refuses |
+| literal_alt:CatalogIR.ir_version=0.3 | supported | ir-design ss4 | - |  |  |  | generic | the IR version stamped on every catalog; a reader that meets another refuses |
 | literal_alt:ExecSpec.kind=cmd | supported | SEM-10, ir-design ss4 | - |  |  |  | generic | the discriminator that selects the command exec spec |
 | literal_alt:ExitCodeAtom.kind=exitcode | supported | SEM-02, ir-design ss3 | - |  |  |  | generic | the discriminator of an exit-code atom |
 | literal_alt:FwSpec.kind=fw | supported | SEM-10, ir-design ss4 | - |  |  |  | generic | the discriminator that selects the file-watcher exec spec |
@@ -690,8 +710,8 @@ fails the suite.
 | literal_alt:ResolvedTz.how=map | supported | SEM-35, DL-62 | - |  |  |  | generic | the name resolved through the estate's ujo_timezones alias table, chained at most five hops with an OS lookup per hop |
 | literal_alt:ResolvedTz.how=os | supported | SEM-35 | - |  |  |  | generic | the zone name resolved straight out of the OS database |
 | literal_alt:ResolvedTz.how=posix | supported | SEM-35 | - |  |  |  | generic | a POSIX fixed-offset spelling, resolved without the zone database |
-| literal_alt:SlaSpec.kind=absolute | supported | SEM-34, oracle.Oracle._arm_sla_and_term | - |  |  |  | generic | an absolute must_*_times is lowered and carried, and arms nothing: the oracle owns no calendar, so no absolute deadline exists v1 |
-| literal_alt:SlaSpec.kind=relative | supported | SEM-34, oracle.Oracle._arm_sla_and_term | - |  |  |  | generic | a relative `+n` must_*_times is what arms the alarm timer |
+| literal_alt:SlaSpec.kind=absolute | supported | SEM-34, oracle.Oracle._slot_deadline | - |  |  |  | generic | an absolute must_*_times, 00:00-71:59, arms its alarm timer at the slot's must time (DL-253) |
+| literal_alt:SlaSpec.kind=relative | supported | SEM-34, oracle.Oracle._slot_deadline | - |  |  |  | generic | a relative `+n` must_*_times is what arms the alarm timer |
 | literal_alt:StatusAtom.kind=status | supported | SEM-02, ir-design ss3 | - |  |  |  | generic | the discriminator of a job-status atom |
 
 ### runtime
@@ -703,12 +723,12 @@ fails the suite.
 | runtime:calendar-row-seconds-truncation | supported | autocal.standard_rows, DL-60 | - |  |  |  | none | a date row's seconds are dropped: ticks are minute-grained |
 | runtime:empty-workday-mask | refused | autocal.compile_calendar | - |  |  |  | none | a W/P action with an all-non-workday mask has nowhere to walk and refuses the calendar before any day is generated |
 | runtime:exclusion-only-compound | provisional | autocal.compile_calendar, DL-59 | Q8d | yes | Q8b / Q8c / Q8d |  | none | a compound rule with no inclusive leaf is evaluated literally as an include, which makes it near-universal |
-| runtime:member-arm-scope | provisional | oracle.Oracle._after_transition | Q3c | yes | Q3c |  | none | a box member's latched tick is scoped to the box run it was latched in |
+| runtime:member-arm-scope | provisional | oracle.Oracle._disarm_members | Q3c | yes | Q3c |  | none | a box member's latched tick is scoped to the box run it was latched in |
 | runtime:missed-tick-skip | provisional | runner_startup, runner_scheduler.Scheduler.pop_due | E9 | yes |  |  | none | a tick whose instant passed while the engine was down is journaled and dropped, never fired late |
 | runtime:preflight-date-basis-utc | supported | DL-212, runner_preflight._preflight_local_day | - |  |  |  | none | the calendar probes read the run anchor on the scheduler's own ladder: the JOB's local day, else the run-level base timezone, else UTC. Preflight and the engine name the same day |
 | runtime:preflight-no-start-skips-probe | supported | DL-213, runner_preflight.preflight | - |  |  |  | none | a preflight called with no run anchor takes now as the anchor, so the exhaustion and dormancy probes run on every call; a caller that wants a fixed answer passes a fixed anchor. The probe is day-granular: a last eligible day equal to the anchor's day passes even when its start times have passed |
 | runtime:scan-horizon | supported | autocal._SCAN_YEARS, runner_scheduler._EXTENDED_SCAN_DAYS | - |  |  | 60 years | none | a calendar that generates nothing within 60 years reads as exhausted; dormancy is proven within that bound only |
-| runtime:sla-offset-broadcast | provisional | SEM-34, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset | - |  |  |  | none | one relative offset broadcasts to every start slot, which SEM-34 marks open -- the strict count rule and the vendor's own example disagree; no label was opened for it |
+| runtime:sla-offset-broadcast | supported | SEM-34, DL-248, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset | - |  |  |  | none | one relative offset broadcasts to every start slot: the vendor's relative syntax is a single +minutes applied after each start time |
 | runtime:unsized-capacity | refused | runner_preflight._resource_preflight, DL-50 | - |  |  |  | none | preflight refuses a run over an unsized resource; a direct oracle caller bypasses that guard and runs unthrottled, and there the malformed values go quiet -- a malformed job_load reads as zero demand, a malformed priority as unset, and a malformed amount omits the bucket altogether |
 | runtime:walk-cap | refused | autocal.CompiledCalendar._walk | - |  |  | 366 days | none | a W/P replacement that finds no valid day within 366 days is degenerate and refuses the calendar |
 

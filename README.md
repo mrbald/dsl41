@@ -377,6 +377,11 @@ the unique zone whose city component matches (`Europe/Zurich`), with a
 preflight warning. POSIX fixed offsets (`GMT+5`, west-positive) work. An
 unresolvable name is a preflight error that names the remedy.
 
+Where dsl41's default reading of an estate can differ from AutoSys,
+`--semantics NAME=VALUE` selects the other reading and records it with the
+run; the switches are listed in "Semantic switches",
+[docs/runner-design.md](docs/runner-design.md) §8a.
+
 ### Detached mode
 
 By default a run is tethered: if the engine dies, its jobs terminate, and
@@ -906,8 +911,9 @@ Training estate:
 Open questions run on documented defaults marked `# PENDING: <label>` in
 the code. The AutoSys questions Q3c, Q3d, Q6, and Q8b-Q8d need a live
 AutoSys instance; Q6 has no code switch. The resource-manager questions
-Qr2-Qr4 and Qr6 are stated in DL-50. The UC questions U1 and U3b need a
-live controller; U6b lives in the migration report's question table. The
+Qr2-Qr4 and Qr6 are stated in DL-50; DL-247 narrows Qr2. The UC questions
+U1 and U3b need a live controller; U6b lives in the migration report's
+question table. The
 runner questions E5-E10 are in
 [docs/runner-design.md](docs/runner-design.md)
 §15. The probe protocols that would settle them are in

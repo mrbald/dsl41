@@ -23,7 +23,9 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
+from typer.testing import CliRunner
 
+from dsl41.cli import app
 from dsl41.ir import CatalogIR, JobIR, lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event
@@ -1241,6 +1243,119 @@ def test_preflight_owner_accepts_unset_or_the_invoking_user() -> None:
     assert not any(i.code == "owner" for i in items)
 
 
+def test_preflight_envvars_refuses_a_cmd_job() -> None:
+    text = "insert_job: e_job\njob_type: c\ncommand: x\nmachine: localhost\nenvvars: A=1\n"
+    items = preflight(lower_source(text))
+    assert any(i.code == "envvars" and i.severity == "ERROR" and i.job == "e_job" for i in items)
+
+
+def test_preflight_envvars_is_skipped_for_rehearse() -> None:
+    text = "insert_job: e_job\njob_type: c\ncommand: x\nmachine: localhost\nenvvars: A=1\n"
+    items = preflight(lower_source(text), execution=False)
+    assert not any(i.code == "envvars" for i in items)
+
+
+def test_preflight_envvars_is_inert_on_a_box() -> None:
+    text = "insert_job: b_job\njob_type: b\nenvvars: A=1\n"
+    items = preflight(lower_source(text))
+    assert not any(i.code == "envvars" for i in items)
+
+
+def test_preflight_global_substitution_in_command_names_the_global() -> None:
+    text = "insert_job: g_job\njob_type: c\ncommand: echo $$AUDIT_GLOBAL\nmachine: localhost\n"
+    items = preflight(lower_source(text))
+    hits = [i for i in items if i.code == "global-substitution" and i.job == "g_job"]
+    assert len(hits) == 1
+    assert "AUDIT_GLOBAL" in hits[0].message
+
+
+def test_preflight_global_substitution_in_std_out_file_refuses() -> None:
+    text = (
+        "insert_job: g_job\njob_type: c\ncommand: x\nmachine: localhost\n"
+        "std_out_file: /tmp/$$X.log\n"
+    )
+    items = preflight(lower_source(text))
+    assert any(i.code == "global-substitution" and i.job == "g_job" for i in items)
+
+
+def test_preflight_global_substitution_in_description_is_not_refused() -> None:
+    """`description` is an annotation, not an exec_ field -- its $$ site is
+    never read by the shell, so it is out of this rule's reach."""
+    text = "insert_job: g_job\njob_type: c\ncommand: x\nmachine: localhost\ndescription: $$X\n"
+    items = preflight(lower_source(text))
+    assert not any(i.code == "global-substitution" for i in items)
+
+
+def test_preflight_global_substitution_on_fw_watch_file_refuses() -> None:
+    text = "insert_job: fw_job\njob_type: f\nwatch_file: /tmp/$$DIR/x\n"
+    items = preflight(lower_source(text))
+    assert any(i.code == "global-substitution" and i.job == "fw_job" for i in items)
+
+
+def test_preflight_single_dollar_is_not_a_global_substitution_site() -> None:
+    text = "insert_job: s_job\njob_type: c\ncommand: echo $HOME\nmachine: localhost\n"
+    items = preflight(lower_source(text))
+    assert not any(i.code == "global-substitution" for i in items)
+
+
+def test_preflight_global_substitution_is_inert_on_a_box() -> None:
+    """A BOX carries no exec spec, so a $$ site elsewhere on it (here, an
+    annotation) can never land on one -- the same BOX exemption as envvars
+    and chk_files, exercised for this code too."""
+    text = "insert_job: b_job\njob_type: b\ndescription: $$X\n"
+    items = preflight(lower_source(text))
+    assert not any(i.code == "global-substitution" for i in items)
+
+
+def test_preflight_global_substitution_is_skipped_for_rehearse() -> None:
+    text = "insert_job: g_job\njob_type: c\ncommand: echo $$G\nmachine: localhost\n"
+    items = preflight(lower_source(text), execution=False)
+    assert not any(i.code == "global-substitution" for i in items)
+
+
+def test_preflight_chk_files_refuses_a_cmd_job() -> None:
+    text = "insert_job: c_job\njob_type: c\ncommand: x\nmachine: localhost\nchk_files: /tmp 2000\n"
+    items = preflight(lower_source(text))
+    assert any(i.code == "chk-files" and i.severity == "ERROR" and i.job == "c_job" for i in items)
+
+
+def test_preflight_chk_files_matches_case_insensitively() -> None:
+    """passthrough is keyed by the raw attribute case (ir._lookup_ci), so
+    `CHK_FILES:` must refuse exactly like `chk_files:`."""
+    text = "insert_job: c_job\njob_type: c\ncommand: x\nmachine: localhost\nCHK_FILES: /tmp 2000\n"
+    items = preflight(lower_source(text))
+    assert any(i.code == "chk-files" and i.severity == "ERROR" and i.job == "c_job" for i in items)
+
+
+def test_preflight_chk_files_is_inert_on_a_box() -> None:
+    text = "insert_job: b_job\njob_type: b\nchk_files: /tmp 2000\n"
+    items = preflight(lower_source(text))
+    assert not any(i.code == "chk-files" for i in items)
+
+
+def test_preflight_chk_files_is_skipped_for_rehearse() -> None:
+    text = "insert_job: c_job\njob_type: c\ncommand: x\nmachine: localhost\nchk_files: /tmp 2000\n"
+    items = preflight(lower_source(text), execution=False)
+    assert not any(i.code == "chk-files" for i in items)
+
+
+def test_run_cli_refuses_envvars_before_any_run_directory_exists(tmp_path: Path) -> None:
+    """DL-240 end to end: `dsl41 run` on a JIL carrying `envvars` exits 2,
+    prints the `[envvars]` preflight line, and never creates `--run-root`
+    at all -- not even the directory itself, let alone `runs/` under it."""
+    jil = tmp_path / "e.jil"
+    jil.write_text("insert_job: e_job\njob_type: c\ncommand: x\nmachine: localhost\nenvvars: A=1\n")
+    run_root = tmp_path / "root"
+    result = CliRunner().invoke(
+        app, ["run", str(jil), "--run-root", str(run_root)], catch_exceptions=False
+    )
+    assert result.exit_code == 2
+    assert "refusing to run" in result.output
+    assert "[envvars]" in result.output
+    assert not run_root.exists()
+    assert not (run_root / "runs").exists()
+
+
 def test_preflight_calendar_errors_on_dangling_references() -> None:
     """(ss8 DL-56): a calendar name with no definition in the loaded set is
     ERROR here -- L018's lint WARN, fail-closed at run (the same strictness
@@ -1509,6 +1624,53 @@ def test_preflight_resources_refuses_duplicate_and_unsatisfiable(monkeypatch) ->
     assert refused == {"dup", "big"}
 
 
+def test_preflight_resources_refuses_a_positive_priority_load_above_max_load(monkeypatch) -> None:
+    """DL-247: a job_load above its machine's max_load at a positive priority
+    can never fit, and as a load waiter it would block every lower priority on
+    that machine forever. Priority 0 and an unset priority skip the load
+    check, so the same load there is not refused; nor is a load that fits."""
+    monkeypatch.setattr(socket_mod, "getfqdn", lambda *a: "test.host")
+    text = (
+        "insert_machine: localhost\ntype: a\nnode_name: localhost\nmax_load: 1\n\n"
+        "insert_job: over\njob_type: c\ncommand: x\nmachine: localhost\njob_load: 2\npriority: 1\n\n"
+        "insert_job: zero\njob_type: c\ncommand: x\nmachine: localhost\njob_load: 2\npriority: 0\n\n"
+        "insert_job: unset\njob_type: c\ncommand: x\nmachine: localhost\njob_load: 2\n\n"
+        "insert_job: fits\njob_type: c\ncommand: x\nmachine: localhost\njob_load: 1\npriority: 2\n"
+    )
+    items = preflight(lower_source(text))
+    refused = {i.job for i in items if i.code == "resources" and i.severity == "ERROR"}
+    assert refused == {"over"}
+    [item] = [i for i in items if i.job == "over"]
+    assert "max_load=1" in item.message and "QUE_WAIT forever" in item.message
+
+
+def test_preflight_resources_refuses_a_quantity_above_amount_at_every_priority(
+    monkeypatch,
+) -> None:
+    """DL-255: a QUANTITY above the resource's amount can never be satisfied.
+    At a positive priority the waiter would also block every lower priority
+    naming the resource forever. Named resources gate every priority, so the
+    refusal covers priority 0 and an unset priority too; a QUANTITY that fits
+    is not refused."""
+    monkeypatch.setattr(socket_mod, "getfqdn", lambda *a: "test.host")
+    text = (
+        "insert_resource: TWO\nres_type: R\namount: 2\n\n"
+        "insert_job: hi\njob_type: c\ncommand: x\nmachine: localhost\npriority: 1\n"
+        "resources: (TWO, QUANTITY=3)\n\n"
+        "insert_job: zero\njob_type: c\ncommand: x\nmachine: localhost\npriority: 0\n"
+        "resources: (TWO, QUANTITY=3)\n\n"
+        "insert_job: unset\njob_type: c\ncommand: x\nmachine: localhost\n"
+        "resources: (TWO, QUANTITY=3)\n\n"
+        "insert_job: fits\njob_type: c\ncommand: x\nmachine: localhost\npriority: 2\n"
+        "resources: (TWO, QUANTITY=2)\n"
+    )
+    items = preflight(lower_source(text))
+    refused = {i.job for i in items if i.code == "resources" and i.severity == "ERROR"}
+    assert refused == {"hi", "zero", "unset"}
+    [item] = [i for i in items if i.job == "hi"]
+    assert "amount=2" in item.message and "DL-255" in item.message
+
+
 def test_preflight_resources_clean_without_load_priority_or_resources() -> None:
     text = "insert_job: rl0\njob_type: c\ncommand: x\nmachine: localhost\n"
     items = preflight(lower_source(text))
@@ -1651,3 +1813,86 @@ def test_and_success_skeleton_skips_instance_qualified_and_undefined_refs() -> N
     catalog = lower_source(text)
     skeleton = and_success_skeleton(catalog)
     assert skeleton["sk4_b"] == set()
+
+
+# DL-253: the engine's oracle reads a job with no `timezone:` in the base zone
+# the scheduler ticks in. Before, it read UTC: under --timezone
+# America/New_York the 23:00 tick arrives at 03:00 UTC the next day, names no
+# start_times slot, and armed no absolute must time; run_window was read in
+# UTC too.
+
+_NY_BASE = "America/New_York"
+
+
+def _base_zone_engine(text: str, run_root: Path | None, until: datetime) -> Engine:
+    """Run `text` under a New York base zone to `until` (UTC): through
+    `start_run` (a pinned profile) when `run_root` is given, else a bare
+    Engine over the scheduler."""
+    catalog = lower_source(text)
+    start = datetime(2026, 7, 1, 4, 0)  # 00:00 EDT, July 1
+
+    async def scenario() -> Engine:
+        clock = VirtualClock(start=start)
+        scheduler = Scheduler(catalog, start=start, default_tz=_NY_BASE)
+        adapter = FakeAdapter()
+        adapters = {"CMD": adapter, "FW": adapter}
+        if run_root is None:
+            engine = Engine(catalog, clock=clock, adapters=adapters, scheduler=scheduler)
+        else:
+            engine = start_run(
+                catalog, run_root, clock=clock, adapters=adapters, scheduler=scheduler
+            )
+        await engine.run_until_quiescent(until)
+        await engine.shutdown()
+        if engine.journal is not None:
+            engine.journal.close()
+        return engine
+
+    return asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("pinned", [True, False], ids=["start_run", "bare-engine"])
+def test_dl253_absolute_must_times_alarm_under_a_non_utc_base_zone(
+    tmp_path: Path, pinned: bool
+) -> None:
+    """SEM-34, DL-253: a 23:00 start with must times 34:00 and 34:01, read
+    in America/New_York. The July 1 tick is 03:00 UTC on July 2; the job is
+    gated and never starts, so the alarms fire at 10:00 and 10:01 EDT the
+    next day, 14:00 and 14:01 UTC."""
+    text = (
+        "insert_job: nyabs\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "23:00"\n'
+        'must_start_times: "34:00"\nmust_complete_times: "34:01"\n'
+        "condition: s(nyabs_gate)\n\n"
+        "insert_job: nyabs_gate\njob_type: c\ncommand: y\nmachine: m1\n"
+    )
+    engine = _base_zone_engine(
+        text, tmp_path / "run" if pinned else None, datetime(2026, 7, 2, 15, 0)
+    )
+    alarms = [
+        (t.transition, t.at)
+        for t in engine.oracle.trace()
+        if t.job == "nyabs" and t.transition.endswith("_ALARM")
+    ]
+    assert alarms == [
+        ("MUST_START_ALARM", datetime(2026, 7, 2, 14, 0)),
+        ("MUST_COMPLETE_ALARM", datetime(2026, 7, 2, 14, 1)),
+    ]
+
+
+@pytest.mark.parametrize("pinned", [True, False], ids=["start_run", "bare-engine"])
+def test_dl253_run_window_is_read_in_a_non_utc_base_zone(tmp_path: Path, pinned: bool) -> None:
+    """SEM-33, DL-253: the 23:00 New York tick is inside a 22:00-23:30
+    window read in that zone, so the job runs. Read in UTC, as the engine's
+    oracle did, 03:00 is outside it and the start was deferred."""
+    text = (
+        "insert_job: nyrw\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "23:00"\n'
+        'run_window: "22:00-23:30"\n'
+    )
+    engine = _base_zone_engine(
+        text, tmp_path / "run" if pinned else None, datetime(2026, 7, 2, 4, 0)
+    )
+    transitions = [t.transition for t in engine.oracle.trace() if t.job == "nyrw"]
+    assert transitions[:2] == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+    assert not any(t.startswith("RUN_WINDOW") for t in transitions)

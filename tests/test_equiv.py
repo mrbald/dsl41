@@ -54,6 +54,7 @@ from dsl41.equiv import (
 )
 from dsl41.ir import CatalogIR, Time, lower_catalog, lower_source
 from dsl41.lint import rule_l006, rule_l007
+from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event
 
 CORPUS_DIR = Path(__file__).parent / "corpus"
@@ -131,11 +132,34 @@ def test_lookback_raw_dropped_two_spellings_of_the_same_60_minute_window_are_equ
     assert canonical_cond(dotted) == canonical_cond(colon)
 
 
-def test_indefinite_9999_lookback_folds_to_no_qualifier_at_all() -> None:
-    """Explicit s(x, 9999) (SEM-04 legacy indefinite) canonicalizes to the
-    same form as a bare s(x): _canon_lookback maps kind=="indefinite" to
-    None, same as an absent lookback token."""
-    assert canonical_cond(parse_condition("s(x, 9999)")) == canonical_cond(parse_condition("s(x)"))
+def test_indefinite_9999_lookback_stays_a_distinct_qualifier() -> None:
+    """DL-243 REWRITE: s(x, 9999) (SEM-04 legacy indefinite) no longer
+    canonicalizes to the same form as a bare s(x) -- the two are NOT
+    behaviorally interchangeable under the ON_ICE split (Q10): only the
+    qualified atom keeps the blanket-true pin on an iced predecessor, the
+    bare one follows the narrower vendor table. Collapsing them in
+    `_canon_lookback` used to make f(x) and f(x,9999) hash identically."""
+    nine = parse_condition("f(x, 9999)")
+    bare = parse_condition("f(x)")
+    assert canonical_cond(nine) != canonical_cond(bare)
+
+
+def test_indefinite_9999_lookback_distinguishes_catalogs_under_ice() -> None:
+    """DL-243: the two catalogs below differ only in f(x) vs f(x,9999)
+    -- not equivalent (Q10's ice split), and no longer hash identically, so
+    the CLI's tier-a short-circuit (cli_compile.py) cannot claim equivalence
+    without reaching tier c."""
+    template = (
+        "insert_job: x\njob_type: c\ncommand: a\nmachine: m1\n\n"
+        "insert_job: cons\njob_type: c\ncommand: b\nmachine: m1\ncondition: {}\n"
+    )
+    bare = lower_source(template.format("f(x)"))
+    qualified = lower_source(template.format("f(x, 9999)"))
+    assert catalog_hash(bare) != catalog_hash(qualified)
+    at = datetime(2026, 1, 1, 8, 0)
+    script = [Event(at=at, kind="ON_ICE", payload={"job": "x"})]
+    result = equivalent_tier_c(bare, qualified, [script])
+    assert not result.equivalent  # f(x) ordinary-false, f(x,9999) lookback-true (Q10)
 
 
 def test_zero_lookback_survives_canonicalization_as_a_distinct_kind() -> None:
@@ -507,6 +531,8 @@ def test_tier_a_genuinely_different_condition_reports_differing_with_sem_detail(
 def test_done_is_equivalent_to_success_or_failure_or_terminated() -> None:
     result = conds_equivalent(parse_condition("d(x)"), parse_condition("s(x)|f(x)|t(x)"))
     assert result.verdict == "equivalent"
+    # d(x) and s(x)|f(x)|t(x) have no atom that reads a timestamp, so this
+    # scope never needs the INACTIVE axis: HEAD's count, unchanged.
     assert result.state_count == 10  # one job: 5 statuses x iced flag (DL-14a)
 
 
@@ -517,9 +543,62 @@ def test_window_nesting_the_wider_window_absorbs_the_narrower_one_in_an_or() -> 
 
 
 def test_success_vs_failure_diverges_with_a_counterexample_naming_the_job() -> None:
+    """DL-243 REWRITE: the enumerator now finds a divergent witness earlier
+    than plain SUCCESS -- a non-live iced NEVER_RAN job, where the vendor's
+    ON_ICE table reads s() true and f() false for these ordinary atoms
+    (the pre-DL-243 blanket-true pin made both true there, so this state
+    used to agree and the search continued on to SUCCESS)."""
     result = conds_equivalent(parse_condition("s(x)"), parse_condition("f(x)"))
     assert result.verdict == "divergent"
-    assert result.counterexample == {"x": "SUCCESS"}
+    assert result.counterexample == {"x": "NEVER_RAN,ON_ICE"}
+
+
+def test_inactive_with_an_elapsed_short_window_splits_n_or_d_or_n_from_its_and_form() -> None:
+    """A job with a status timestamp whose status is INACTIVE (operator
+    CHANGE_STATUS INACTIVE -- which needs no prior run -- or DL-243's
+    ON_NOEXEC on a failed job) is a distinct state from NEVER_RAN (no
+    timestamp at all): n() is true either way, but a finite-lookback n() on
+    an INACTIVE job is age-gated against that timestamp, not trivially
+    true. Terminal statuses (SUCCESS/FAILURE/TERMINATED) already age-gated
+    n() correctly before INACTIVE existed -- the gap was specific to this
+    one shape, a notrunning-but-timestamped job that is not terminal, which
+    tier b had no state to represent at all. The witness here: INACTIVE
+    with the 1-minute window expired -- n(x,0.01) is false, d(x) is false
+    (INACTIVE is not terminal), so the right side collapses to False while
+    bare n(x) keeps the left side True."""
+    left = parse_condition("n(x) | d(x) | n(x,0.01)")
+    right = parse_condition("n(x) & (d(x) | n(x,0.01))")
+    result = conds_equivalent(left, right)
+    assert result.verdict == "divergent"
+    assert result.counterexample == {"x": "INACTIVE,age_bucket=1"}
+
+
+def test_inactive_between_two_windows_splits_and_or_d_from_or_or_d() -> None:
+    """Same missing-state shape over two windows: once a job is INACTIVE
+    with a timestamp past the 1-hour window but still within the 2-hour
+    one, n(p,1) is false and n(p,2) is true, so the AND form is false while
+    the OR form is true -- d(p) stays false throughout (INACTIVE is not
+    terminal). The oracle scenario in
+    test_tier_c_inactive_window_scenario_matches_oracle_for_both_pairs
+    reproduces this end to end."""
+    left = parse_condition("(n(p,1) & n(p,2)) | d(p)")
+    right = parse_condition("(n(p,1) | n(p,2)) | d(p)")
+    result = conds_equivalent(left, right)
+    assert result.verdict == "divergent"
+    assert result.counterexample == {"p": "INACTIVE,age_bucket=1"}
+
+
+def test_inactive_control_pair_window_nesting_still_holds_with_the_new_axis() -> None:
+    """A control pair that DOES put the INACTIVE axis in play (two
+    finite-lookback n() atoms on the same job, so `needs_inactive` is true
+    and the scope grows to 6 statuses x iced flag) but must stay equivalent:
+    the wider window already absorbs the narrower one for a NEVER_RAN job
+    (test_window_nesting_the_wider_window_absorbs_the_narrower_one_in_an_or,
+    for s()), and the same nesting holds job-timestamp by job-timestamp for
+    an INACTIVE one, since both windows read the same age bucket."""
+    result = conds_equivalent(parse_condition("n(x,1)|n(x,2)"), parse_condition("n(x,2)"))
+    assert result.verdict == "equivalent"
+    assert result.state_count == 36  # one job: 6 statuses x iced x 3 age buckets
 
 
 def test_distributivity_and_over_or() -> None:
@@ -599,6 +678,61 @@ def test_too_large_state_space_reports_too_large_and_exceeds_the_ceiling() -> No
     result = conds_equivalent(big, big)
     assert result.verdict == "too_large"
     assert result.state_count > STATE_CEILING
+
+
+def test_status_only_scopes_do_not_pay_for_inactive_and_stay_divergent() -> None:
+    """A scope with no atom that can distinguish INACTIVE from NEVER_RAN
+    (here: s()/f() atoms only, no n()) must keep HEAD's enumeration size --
+    the INACTIVE axis is derived per job scope, not added everywhere. Before
+    that per-scope derivation, this pair -- divergent and comfortably under
+    the ceiling at HEAD -- went `too_large` once INACTIVE was added
+    unconditionally to every scope (5 jobs x 12 statuses-ish inflation), a
+    real regression in verdict coverage, not just a state-count change."""
+    lhs = parse_condition("s(a,1)&s(b)&s(c)&s(d)&s(e)")
+    rhs = parse_condition("s(a,1)&s(b)&s(c)&s(d)&f(e)")
+    result = conds_equivalent(lhs, rhs)
+    assert result.verdict == "divergent"
+    assert result.state_count == 200_000  # unchanged from HEAD: 20 x 10 x 10 x 10 x 10
+
+
+def test_distinguishes_inactive_decides_from_atom_shape_without_building_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_distinguishes_inactive` must decide per atom (kind + lookback) with
+    no `_State` construction at all -- it used to sweep every atom across
+    every age/zero/exit-cutpoint combination in the scope, building a
+    NEVER_RAN and an INACTIVE `_State` each time, which made a single
+    exit-code-heavy scope pay quadratically for a check it can never need
+    (an ExitCodeAtom never distinguishes). Counting `_State.__init__` calls
+    is timing-free and still pins the fix: it must stay at zero."""
+    import dsl41.equiv as equiv_mod
+
+    calls = 0
+    real_init = equiv_mod._State.__init__
+
+    def counting_init(self: object, *args: object, **kwargs: object) -> None:
+        nonlocal calls
+        calls += 1
+        real_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(equiv_mod._State, "__init__", counting_init)
+    cond_str = " | ".join(f"e(p) = {3 * i}" for i in range(100))
+    equiv_mod._alphabet([parse_condition(cond_str)])
+    assert calls == 0
+
+
+def test_large_exit_code_with_many_windows_reports_too_large_quickly() -> None:
+    """The repro behind the regression above: 100 ExitCodeAtoms on one job,
+    each with its OWN finite window (so the scope also grows 100 distinct
+    age buckets) -- none of them distinguishes INACTIVE from NEVER_RAN, so
+    this is still `too_large` at the same state count as before the O(1)
+    rewrite; only the time to GET that answer regressed (12.5s swept-state
+    construction vs sub-millisecond atom-shape inspection)."""
+    cond_str = " | ".join(f"e(p, {i + 1}) = {3 * i}" for i in range(100))
+    big = parse_condition(cond_str)
+    result = conds_equivalent(big, None)
+    assert result.verdict == "too_large"
+    assert result.state_count == 304_010
 
 
 # --------------------------------------------------- 5. cond_truth_profile / L006 / L007
@@ -867,6 +1001,80 @@ def test_tier_c_s_vs_f_divergence_is_caught_with_first_divergence_populated() ->
     assert "script 0" in result.first_divergence
 
 
+def test_tier_c_inactive_window_scenario_matches_oracle_for_both_pairs() -> None:
+    """End-to-end oracle parity for the INACTIVE-with-timestamp state (the
+    defect this module's tests above are named after): hold the consumer,
+    fail the predecessor, then ON_NOEXEC it to INACTIVE (DL-243) -- that
+    carries a real status timestamp, unlike a job that never ran. Release
+    the consumer once the 1-hour lookback has expired but the 2-hour one
+    still holds. d(p) reads false throughout (INACTIVE is not terminal), so
+    only the OR-of-windows condition starts its consumer; the AND-of-windows
+    one does not."""
+
+    def catalog_for(condition: str) -> CatalogIR:
+        return lower_source(
+            "insert_job: p\njob_type: c\ncommand: x\nmachine: m1\n\n"
+            f"insert_job: consumer\njob_type: c\ncommand: y\nmachine: m1\ncondition: {condition}\n"
+        )
+
+    and_form = catalog_for("(n(p,1) & n(p,2)) | d(p)")
+    or_form = catalog_for("(n(p,1) | n(p,2)) | d(p)")
+    script = [
+        Event(at=datetime(2026, 1, 1, 8, 0), kind="ON_HOLD", payload={"job": "consumer"}),
+        Event(
+            at=datetime(2026, 1, 1, 8, 0), kind="STATUS", payload={"job": "p", "status": "FAILURE"}
+        ),
+        Event(at=datetime(2026, 1, 1, 8, 1), kind="ON_NOEXEC", payload={"job": "p"}),
+        Event(at=datetime(2026, 1, 1, 9, 31), kind="OFF_HOLD", payload={"job": "consumer"}),
+    ]
+    result = equivalent_tier_c(and_form, or_form, [script])
+    assert not result.equivalent
+    assert result.scripts_run == 1
+    assert result.first_divergence is not None
+
+    or_trace = Oracle(or_form).run_script(script)
+    and_trace = Oracle(and_form).run_script(script)
+    assert any(e.job == "consumer" and e.transition == "INACTIVE->STARTING" for e in or_trace)
+    assert not any(e.job == "consumer" and e.transition == "INACTIVE->STARTING" for e in and_trace)
+
+
+def test_tier_c_inactive_short_window_scenario_matches_oracle() -> None:
+    """Same shape, one window: the distributed n()|d()|n(w) form starts its
+    consumer on bare n() alone (true for any notrunning job), while the
+    non-distributed n() & (d()|n(w)) form needs the window to still hold --
+    and an INACTIVE job's 1-minute window has long expired by release."""
+
+    def catalog_for(condition: str) -> CatalogIR:
+        return lower_source(
+            "insert_job: p\njob_type: c\ncommand: x\nmachine: m1\n\n"
+            f"insert_job: consumer\njob_type: c\ncommand: y\nmachine: m1\ncondition: {condition}\n"
+        )
+
+    distributed = catalog_for("n(p) | d(p) | n(p,0.01)")
+    conjoined = catalog_for("n(p) & (d(p) | n(p,0.01))")
+    script = [
+        Event(at=datetime(2026, 1, 1, 8, 0), kind="ON_HOLD", payload={"job": "consumer"}),
+        Event(
+            at=datetime(2026, 1, 1, 8, 0), kind="STATUS", payload={"job": "p", "status": "FAILURE"}
+        ),
+        Event(at=datetime(2026, 1, 1, 8, 1), kind="ON_NOEXEC", payload={"job": "p"}),
+        Event(at=datetime(2026, 1, 1, 9, 31), kind="OFF_HOLD", payload={"job": "consumer"}),
+    ]
+    result = equivalent_tier_c(distributed, conjoined, [script])
+    assert not result.equivalent
+    assert result.scripts_run == 1
+    assert result.first_divergence is not None
+
+    distributed_trace = Oracle(distributed).run_script(script)
+    conjoined_trace = Oracle(conjoined).run_script(script)
+    assert any(
+        e.job == "consumer" and e.transition == "INACTIVE->STARTING" for e in distributed_trace
+    )
+    assert not any(
+        e.job == "consumer" and e.transition == "INACTIVE->STARTING" for e in conjoined_trace
+    )
+
+
 def test_equiv_scripts_is_deterministic_for_the_same_seed() -> None:
     catalog = _corpus_catalog()
     first = equiv_scripts(catalog, scripts=3, seed=41)
@@ -1034,23 +1242,35 @@ def test_string_global_ordering_tier_c_parity() -> None:
 
 
 def test_iced_state_distinguishes_contradictions_on_different_jobs() -> None:
-    """Without the ice dimension, s(x)&f(x) and s(y)&f(y)
-    were both 'unsatisfiable' hence equivalent -- but icing x (SEM-05 makes
-    every atom true) starts one consumer and not the other."""
-    result = conds_equivalent(parse_condition("s(x) & f(x)"), parse_condition("s(y) & f(y)"))
+    """DL-243 REWRITE: an ORDINARY atom pair (no lookback) no longer
+    distinguishes here -- the vendor's ON_ICE table reads an iced
+    predecessor's f() as false, so s(x)&f(x) stays unsatisfiable whether or
+    not x is iced, same as s(y)&f(y); the two are genuinely equivalent now (see
+    test_iced_contradiction_matches_oracle_end_to_end's own rewrite). A
+    LOOKBACK-qualified pair keeps the old blanket-true-when-iced pin
+    (SEM-05, Q10) and still demonstrates the ice dimension: without it,
+    s(x,0)&f(x,0) and s(y,0)&f(y,0) were both 'unsatisfiable' hence
+    equivalent -- but icing x makes every lookback atom true, starting one
+    consumer and not the other."""
+    result = conds_equivalent(
+        parse_condition("s(x, 0) & f(x, 0)"), parse_condition("s(y, 0) & f(y, 0)")
+    )
     assert result.verdict == "divergent"
     assert result.counterexample is not None
     assert any("ON_ICE" in v for v in result.counterexample.values())
 
 
 def test_iced_contradiction_matches_oracle_end_to_end() -> None:
+    """DL-243 REWRITE: the lookback-qualified pair (not the ordinary pair
+    the old version used) is the one that still distinguishes under ice --
+    see the companion tier-b test's docstring."""
     template = (
         "insert_job: x\njob_type: c\ncommand: a\nmachine: m1\n\n"
         "insert_job: y\njob_type: c\ncommand: b\nmachine: m1\n\n"
         "insert_job: consumer\njob_type: c\ncommand: c\nmachine: m1\ncondition: {}\n"
     )
-    a = lower_source(template.format("s(x) & f(x)"))
-    b = lower_source(template.format("s(y) & f(y)"))
+    a = lower_source(template.format("s(x, 0) & f(x, 0)"))
+    b = lower_source(template.format("s(y, 0) & f(y, 0)"))
     at = datetime(2026, 1, 1, 8, 0)
     script = [
         Event(at=at, kind="ON_ICE", payload={"job": "x"}),

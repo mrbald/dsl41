@@ -35,9 +35,11 @@ relitigated -- see the docstrings of the individual models/handlers):
   separator); malformed groups are loud errors. QUANTITY is required (every
   documented and estate example carries it); FREE absent stays None (the
   engine default is not guessed). No oracle gate semantics v1.
-- job_type is required (no defaulting to CMD): autorep -q output always emits
-  it; a missing one in hand-written JIL is more likely an error than an
-  intentional default. [?] Relax if a real-estate fixture shape needs it.
+- job_type is required (no defaulting to CMD, the vendor default): an
+  exported definition is expected to carry it, though that export shape is
+  not measured; a missing one in hand-written JIL is more likely an error
+  than an intentional default. [?] Relax if a real-estate fixture shape
+  needs it (dossier ss5).
 - Type-inapplicable exec attributes: command on BOX/FW, watch_* on CMD/BOX,
   and std_in_file/envvars on FW are lowering errors (control-flow-shaped
   attrs on the wrong type = estate smell); machine/owner/profile/std_*/
@@ -163,7 +165,59 @@ _VAR_RE = re.compile(r"\$\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_
 #: would take non-ASCII digits int() then rejects, so the class is explicit.
 _REL_OFFSET_RE = re.compile(r"\+[0-9]+")
 
-IR_VERSION: Literal["0.2"] = "0.2"
+#: Lexical HH:MM shape, shared by Time.parse and MustTime.parse. Each type's
+#: own Field bound then decides the range (DL-251, DL-253).
+_HHMM_RE = re.compile(r"(\d{1,2}):(\d{2})")
+
+#: 0.3 since DL-253: SlaSpec.times holds MustTime, whose hour runs to 71.
+IR_VERSION: Literal["0.3"] = "0.3"
+
+
+def _parse_hhmm(text: str) -> tuple[int, int]:
+    """Lexical HH:MM. JIL syntax rule 2/6: a colon inside an unquoted value
+    may be escaped (`10\\:00`) instead of quoting the whole value; dsl41
+    applies that general rule to every `hh:mm` lane (DL-251), so `\\:`
+    unescapes here regardless of lane. Per-token quoting of a single list
+    item (`"10:00", "14:00"`) is not a documented spelling and is not
+    unwrapped -- only a whole-value quote (handled upstream by
+    `unquote_jil_value`/`_split_list` before this is called) is."""
+    m = _HHMM_RE.fullmatch(text.strip().replace("\\:", ":"))
+    if m is None:
+        raise ValueError(f"invalid time {text!r} (expected HH:MM)")
+    return int(m.group(1)), int(m.group(2))
+
+
+def _must_time_order(starts: list[Time], musts: list[MustTime]) -> str | None:
+    """SEM-34 (DL-253): the vendor's two ordering rules for absolute must
+    times, paired with start_times by position, or None when both hold.
+
+    A must time below its own start time is refused: "If 10:00 a.m. is
+    specified, the job issues an error message"; the next day's 10:00 is
+    written 34:00. A must time not earlier than the next run's start time
+    is refused: "The must start time for a run must be earlier than the
+    start times for the next run", with 11:10 against an 11:00 run as the
+    invalid example. The next run is the next later start time of the day;
+    the latest start time's next run depends on the calendar, so it is not
+    checked."""
+    walls = sorted({start.hour * 60 + start.minute for start in starts})
+    for start, must in zip(starts, musts, strict=True):
+        wall = start.hour * 60 + start.minute
+        due = must.hour * 60 + must.minute
+        spelled = f"{must.hour:02d}:{must.minute:02d}"
+        if due < wall:
+            return (
+                f"{spelled} is earlier than its start time {start.hour:02d}:{start.minute:02d}"
+                " (SEM-34: the vendor refuses it; a time on the next day is written +24 hours,"
+                " 10:00 as 34:00)"
+            )
+        later = [w for w in walls if w > wall]
+        if later and due >= later[0]:
+            nxt = f"{later[0] // 60:02d}:{later[0] % 60:02d}"
+            return (
+                f"{spelled} is not earlier than the next run's start time {nxt} (SEM-34: the"
+                " vendor requires a run's must time to be earlier than the next run's start)"
+            )
+    return None
 
 
 # ---------------------------------------------------------------- entity models (ss4)
@@ -175,10 +229,24 @@ class Time(BaseModel):
 
     @classmethod
     def parse(cls, text: str) -> Time:
-        m = re.fullmatch(r"(\d{1,2}):(\d{2})", text.strip())
-        if m is None:
-            raise ValueError(f"invalid time {text!r} (expected HH:MM)")
-        return cls(hour=int(m.group(1)), minute=int(m.group(2)))
+        """A time of day, 00:00-23:59 (`_parse_hhmm`)."""
+        hour, minute = _parse_hhmm(text)
+        return cls(hour=hour, minute=minute)
+
+
+class MustTime(BaseModel):
+    """SEM-34: an absolute must_start/must_complete time. The vendor's
+    Limits are 00:00-71:59, "2 calendar days ahead of the current calendar
+    day": hour 24-47 is the next day and 48-71 the day after (DL-253). Its
+    own type, so start_times and run_window keep Time's 0-23 contract."""
+
+    hour: int = Field(ge=0, le=71)
+    minute: int = Field(ge=0, le=59)
+
+    @classmethod
+    def parse(cls, text: str) -> MustTime:
+        hour, minute = _parse_hhmm(text)
+        return cls(hour=hour, minute=minute)
 
 
 class SlaSpec(BaseModel):
@@ -188,7 +256,7 @@ class SlaSpec(BaseModel):
     model_config = ConfigDict(validate_assignment=True)
 
     kind: Literal["absolute", "relative"]
-    times: list[Time] | None = None  # kind == absolute
+    times: list[MustTime] | None = None  # kind == absolute
     offsets_min: list[int] | None = None  # kind == relative; single value broadcasts
 
     @model_validator(mode="after")
@@ -459,8 +527,10 @@ class JobIR(BaseModel):
         return _int_attr(self.passthrough, "job_load", label="job_load")
 
     def priority_value(self) -> int | None:
-        """DL-50: `priority` for deterministic QUE_WAIT waiter ordering
-        (# PENDING: Qr2 -- lower-number-higher assumed). None = unset."""
+        """DL-50: `priority` for deterministic QUE_WAIT waiter ordering, lower
+        number first; only a positive value makes a start check machine load
+        (DL-247). None = unset (# PENDING: Qr2 -- where an unset priority
+        sorts among resource waiters). Load queueing reads unset as 0."""
         return _int_attr(self.passthrough, "priority", label="priority")
 
 
@@ -617,7 +687,7 @@ class CatalogIR(BaseModel):
 
     model_config = ConfigDict(validate_assignment=True)
 
-    ir_version: Literal["0.2"] = IR_VERSION
+    ir_version: Literal["0.3"] = IR_VERSION
     jobs: dict[str, JobIR] = {}
     globals_declared: dict[str, str] = {}  # insert_global
     external_instances: dict[str, XinstIR] = {}  # insert_xinst (SEM-07), plumbing opaque (DL-28)
@@ -723,6 +793,12 @@ def unquote_jil_value(value: str) -> str:
     if _WRAPPED_QUOTES_RE.fullmatch(v):
         return v[1:-1]
     return v
+
+
+#: An exit code or lo-hi range with a negative end: `-1`, `-5-3`, `-5--1`,
+#: `1--3`. A bare `-` and other malformed tokens do not match and get the
+#: ordinary malformed-token message.
+_NEGATIVE_CODE_RE = re.compile(r"-\d+(?:--?\d+)?|\d+--\d+")
 
 
 def _split_list(value: str) -> list[str]:
@@ -925,6 +1001,18 @@ class _Lowerer:
         is semantics."""
         ranges: list[tuple[int, int]] = []
         for token in _split_list(attr.raw_value):
+            if _NEGATIVE_CODE_RE.fullmatch(token):
+                # a well-formed code or range with a negative end is not a
+                # malformed range: say why it is refused instead of
+                # "expected lo-hi"
+                self.err(
+                    f"{attr.key}: negative exit code in {token!r} is not supported: on"
+                    " POSIX an exit status is 0-255, and a job killed by a signal is"
+                    " TERMINATED with no exit code, so a negative code can never match"
+                    " (SEM-09)",
+                    attr.span,
+                )
+                return None
             lo_text, sep, hi_text = token.partition("-")
             try:
                 lo = int(lo_text)
@@ -1208,11 +1296,12 @@ class _Lowerer:
         if (attr := take("run_window")) is not None:
             fields["run_window"] = self._run_window(attr)
         start_times = fields.get("start_times")
-        n_starts = len(start_times) if isinstance(start_times, list) else None
+        starts = start_times if isinstance(start_times, list) else None
+        by_mins = starts is None and isinstance(fields.get("start_mins"), list)
         if (attr := take("must_start_times")) is not None:
-            fields["must_start"] = self._sla_attr(attr, n_starts)
+            fields["must_start"] = self._sla_attr(attr, starts, by_mins=by_mins)
         if (attr := take("must_complete_times")) is not None:
-            fields["must_complete"] = self._sla_attr(attr, n_starts)
+            fields["must_complete"] = self._sla_attr(attr, starts, by_mins=by_mins)
         # SEM-31 pre-check so findings point at the conflicting attribute line
         # (presence-based; the model validator below stays the ground truth).
         ok = True
@@ -1289,20 +1378,47 @@ class _Lowerer:
             self.err(f"run_window: {exc}", attr.span)
             return None
 
-    def _sla_attr(self, attr: RawAttr, n_start_times: int | None) -> SlaSpec | None:
+    def _sla_attr(
+        self, attr: RawAttr, starts: list[Time] | None, *, by_mins: bool = False
+    ) -> SlaSpec | None:
         """SEM-34 must_*_times: absolute or relative, never mixed; count must
-        match start_times, except a single relative offset broadcasts (module
-        docstring, [?] pin on live instance)."""
+        match start_times, except a single relative offset broadcasts (the
+        vendor's relative syntax, DL-248). Against start_mins only the
+        documented form lowers: one relative offset, broadcast to every
+        start_mins tick ("The must complete times are calculated relative to
+        the start_mins or start_times attributes", DL-248). The vendor
+        refuses an absolute form there ("You will get an error if you define
+        absolute times with start_mins", DL-253). A list of relative offsets
+        there is not specified by the vendor pages and stays open, so it is
+        refused too."""
+        n_start_times = None if starts is None else len(starts)
         tokens = _split_list(attr.raw_value)
         if not tokens:
             self.err(f"{attr.key}: empty value", attr.span)
             return None
-        if n_start_times is None:
-            self.err(f"{attr.key}: requires start_times (SEM-34)", attr.span)
-            return None
         relative = [t.startswith("+") for t in tokens]
         if any(relative) and not all(relative):
             self.err(f"{attr.key}: absolute and relative forms cannot be mixed (SEM-34)", attr.span)
+            return None
+        if by_mins:
+            if not all(relative):
+                self.err(
+                    f"{attr.key}: absolute times require start_times; the vendor refuses"
+                    " them with start_mins (SEM-34, DL-253)",
+                    attr.span,
+                )
+                return None
+            if len(tokens) != 1:
+                self.err(
+                    f"{attr.key}: with start_mins only a single relative offset is accepted"
+                    " (SEM-34, DL-248); a list of offsets against start_mins is not"
+                    " specified by the vendor and stays open",
+                    attr.span,
+                )
+                return None
+            n_start_times = 1
+        if n_start_times is None:
+            self.err(f"{attr.key}: requires start_times or start_mins (SEM-34)", attr.span)
             return None
         if all(relative):
             offsets: list[int] = []
@@ -1328,10 +1444,23 @@ class _Lowerer:
                 )
                 return None
             return SlaSpec(kind="relative", offsets_min=offsets)
-        times = []
+        times: list[MustTime] = []
         for t in tokens:
+            # SEM-34: the vendor's Limits are 00:00-71:59, "2 calendar days
+            # ahead of the current calendar day" (DL-253). The hour is
+            # checked here, before MustTime's own bound, so the message
+            # names the limit rather than a pydantic constraint.
+            wide = _HHMM_RE.fullmatch(t.strip().replace("\\:", ":"))
+            if wide is not None and int(wide.group(1)) > 71:
+                self.err(
+                    f"{attr.key}: {t.strip()}: hour {int(wide.group(1))} is outside the"
+                    " vendor's Limits of 00:00-71:59 for the absolute form (SEM-34: two"
+                    " calendar days ahead of the current calendar day)",
+                    attr.span,
+                )
+                return None
             try:
-                times.append(Time.parse(t))
+                times.append(MustTime.parse(t))
             except ValueError as exc:
                 self.err(f"{attr.key}: {exc}", attr.span)
                 return None
@@ -1341,6 +1470,10 @@ class _Lowerer:
                 " (SEM-34: count must match)",
                 attr.span,
             )
+            return None
+        assert starts is not None  # the count matched a start_times list
+        if (problem := _must_time_order(starts, times)) is not None:
+            self.err(f"{attr.key}: {problem}", attr.span)
             return None
         return SlaSpec(kind="absolute", times=times)
 

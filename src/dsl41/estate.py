@@ -38,6 +38,7 @@ from dsl41.boundary import (
     CommittedBoundary,
     CrashPoint,
     EstateAnchor,
+    check_opening_version,
     claim_id_for,
     claim_root,
     OpenHead,
@@ -186,6 +187,9 @@ def _roll_source_or_refuse(anchor_dir: Path, new_root: Path) -> tuple[EstateAnch
         )
     closing_root, period_id, seal_digest = _roll_source(stored, anchor, new_root)
     seal = read_seal(closing_root, period_id)
+    # the version FIRST: this half runs before the roll writes anything
+    # (DL-253), and an older build's boundary must say so
+    check_opening_version(seal.next_period, where=str(closing_root))
     if seal.digest != seal_digest:
         raise EngineError(
             f"{seal_path(closing_root, period_id)}: digest {seal.digest} but the"

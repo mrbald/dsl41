@@ -36,6 +36,7 @@ from dsl41.classify import (
     PROFILE_CMD,
     PROFILE_FW,
     PROFILE_NO_JOB,
+    PROFILE_SWITCHED,
     PROFILE_SCHEDULED,
     RESOURCE,
     RESOURCE_ASSUMPTION,
@@ -51,7 +52,7 @@ from dsl41.capacity import CapacityPool
 from dsl41.derive import derive_graph
 from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
-from dsl41.oracle_state import CapacityReservation, Event, JobRuntime
+from dsl41.oracle_state import CapacityReservation, CarriedRows, Event, JobRuntime
 from dsl41.period import RuntimeProfile, job_fingerprints
 
 T0 = datetime(2026, 8, 20, 2, 0)
@@ -368,14 +369,15 @@ _PROFILE_BUMPS: dict[str, object] = {
     "reconcile_settle_us": 1_000_000,
     "spawn_window_us": 1_000_000,
     "retry_horizon_us": 120_000_000,
+    "semantics": {"ice-lookback": "ordinary"},
 }
 
 
 def test_pr37a_the_profile_field_map_covers_every_field() -> None:
-    """ss10.2's mapping is exhaustive over the model, and its four groups do
+    """ss10.2's mapping is exhaustive over the model, and its five groups do
     not overlap. A field nobody placed reaches every job or no job by
     accident -- both are wrong, and both are silent."""
-    groups = (PROFILE_SCHEDULED, PROFILE_CMD, PROFILE_FW, PROFILE_NO_JOB)
+    groups = (PROFILE_SCHEDULED, PROFILE_CMD, PROFILE_FW, PROFILE_NO_JOB, PROFILE_SWITCHED)
     placed = [field for group in groups for field in group]
     assert sorted(placed) == sorted(RuntimeProfile.model_fields)
     assert len(placed) == len(set(placed))
@@ -397,6 +399,10 @@ def test_pr37a_profile_edges_run_from_job_to_field(field: str) -> None:
         **{f: {"sched", "plain"} for f in PROFILE_CMD},
         **{f: {"watcher"} for f in PROFILE_FW},
         **{f: set() for f in PROFILE_NO_JOB},
+        # per switch, through each switch's own node: this estate has no
+        # lookback atom, so no job reaches `ice-lookback` (DL-252; the jobs
+        # that do are in test_semantics.py)
+        **{f: set() for f in PROFILE_SWITCHED},
     }[field]
     graph = ClassificationGraph(_side(_PROFILE_ESTATE), _side(_PROFILE_ESTATE))
     reaching = {
@@ -418,6 +424,10 @@ def test_pr37a_a_changed_profile_field_classifies_exactly_its_own_jobs(field: st
         **{f: {"sched", "plain"} for f in PROFILE_CMD},
         **{f: {"watcher"} for f in PROFILE_FW},
         **{f: set() for f in PROFILE_NO_JOB},
+        # per switch, through each switch's own node: this estate has no
+        # lookback atom, so no job reaches `ice-lookback` (DL-252; the jobs
+        # that do are in test_semantics.py)
+        **{f: set() for f in PROFILE_SWITCHED},
     }[field]
     closing = _side(_PROFILE_ESTATE)
     opening = _side(_PROFILE_ESTATE, **{field: _PROFILE_BUMPS[field]})
@@ -1286,8 +1296,10 @@ def test_word_operators_are_their_symbols() -> None:
 def test_holiday_s_with_a_holcal_is_not_no_action() -> None:
     """`holiday: S` on a holiday keeps the day and skips PAST the
     non_workday branch -- with a holcal and `non_workday: W` it shields a
-    weekend holiday from the walk (DL-58's shielding family). So the S
-    collapses to no-action only when no holcal exists to hit."""
+    holiday from the walk (DL-58's shielding family; DL-244: that includes
+    a weekday holcal date, since the non_workday code treats any admitted
+    holcal date as a non-workday with no holiday action specified). So the
+    S collapses to no-action only when no holcal exists to hit."""
 
     def estate(extra: str) -> str:
         return (
@@ -1319,18 +1331,28 @@ def test_holiday_s_with_a_holcal_is_not_no_action() -> None:
         "calendar:cal"
         not in ClassificationGraph(Baseline(catalog=idle), Baseline(catalog=idle_s)).changed
     )
-    # FIFTH and SIXTH: a non-empty holiday set OUTSIDE the action's domain.
-    # W walks non-workdays, so a Monday-only holcal is untouched; O drops
-    # workdays, so a Saturday-only holcal is untouched -- either way the
-    # skip shields nothing and S is no action.
+    # FIFTH: DL-244 -- with no holiday action, a holcal date is a
+    # non-workday for the non_workday code regardless of its weekday, so a
+    # Monday-only holcal is NOT outside W's domain: W now walks it exactly
+    # like a weekend holiday, and S shields it from that walk. The verdict
+    # below is the CONSERVATIVE one (`action_touches_a_holiday`'s own
+    # caveat): the adjacent weekend's own W-walk already lands on this
+    # Monday either way, so the two sides' COMPILED day sets are in fact
+    # identical here -- the classifier still reports "changed" because it
+    # reasons from candidacy, not from a full day-set diff, and a false
+    # refusal (changed when nothing moved) is the accepted direction, never
+    # a false carry.
     monday = lower_source(
         estate("holiday: S\n").replace("08/22/2026 00:00", "08/24/2026 00:00")  # a Monday
     )
     monday_plain = lower_source(estate("").replace("08/22/2026 00:00", "08/24/2026 00:00"))
     assert (
         "calendar:cal"
-        not in ClassificationGraph(Baseline(catalog=monday_plain), Baseline(catalog=monday)).changed
+        in ClassificationGraph(Baseline(catalog=monday_plain), Baseline(catalog=monday)).changed
     )
+    # SIXTH: O (restrict-to-non-workday) already treated a Saturday as a
+    # non-workday by weekday alone, so the holcal membership changes
+    # nothing here -- untouched before and after DL-244.
     saturday_o = lower_source(estate("").replace("non_workday: W", "non_workday: O"))
     saturday_o_s = lower_source(estate("holiday: S\n").replace("non_workday: W", "non_workday: O"))
     assert (
@@ -1339,26 +1361,32 @@ def test_holiday_s_with_a_holcal_is_not_no_action() -> None:
             Baseline(catalog=saturday_o), Baseline(catalog=saturday_o_s)
         ).changed
     )
-    # SEVENTH: a holiday the RULES never admit -- Monday holcal, O (which
-    # can alter Mondays), but the rule set includes only Tuesdays: neither
-    # side ever produces the Monday as a candidate, so S is no action
+    # SEVENTH: a holiday the RULES never admit -- Monday holcal, W, but the
+    # rule set includes only Tuesdays: neither side ever produces the
+    # Monday as a candidate, so S is no action. W (not O) on purpose: O
+    # always returns `False` from `action_touches_a_holiday` before
+    # `candidates` is even inspected (EIGHTH, below), so an O version of
+    # this case would pass whether or not candidacy was computed right. W
+    # pins the REPLACE branch's `bool(candidates)` on its empty side.
     tue_only = lower_source(
         estate("")
         .replace("08/22/2026 00:00", "08/24/2026 00:00")
-        .replace("non_workday: W", "non_workday: O")
         .replace("condition: daily", "condition: tue")
     )
     tue_only_s = lower_source(
         estate("holiday: S\n")
         .replace("08/22/2026 00:00", "08/24/2026 00:00")
-        .replace("non_workday: W", "non_workday: O")
         .replace("condition: daily", "condition: tue")
     )
     assert (
         "calendar:cal"
         not in ClassificationGraph(Baseline(catalog=tue_only), Baseline(catalog=tue_only_s)).changed
     )
-    # and the domains DO reach when they should: Monday-holcal under O
+    # EIGHTH: DL-244 -- O (restrict-to-non-workday) is a filter, never a
+    # replacement, and a holcal date the rules admit is ALWAYS counted as a
+    # non-workday with no holiday action, so O keeps a Monday holcal date
+    # outright, exactly like S. O's domain never diverges from S on an
+    # admitted holcal date, regardless of weekday, so this stays no action.
     monday_o = lower_source(
         estate("")
         .replace("08/22/2026 00:00", "08/24/2026 00:00")
@@ -1371,7 +1399,7 @@ def test_holiday_s_with_a_holcal_is_not_no_action() -> None:
     )
     assert (
         "calendar:cal"
-        in ClassificationGraph(Baseline(catalog=monday_o), Baseline(catalog=monday_o_s)).changed
+        not in ClassificationGraph(Baseline(catalog=monday_o), Baseline(catalog=monday_o_s)).changed
     )
     # and the FOURTH: the holcal is present but EMPTY -- S has nothing to
     # keep, the compiled dates are identical, so S is still no action
@@ -1385,3 +1413,191 @@ def test_holiday_s_with_a_holcal_is_not_no_action() -> None:
         "calendar:cal"
         not in ClassificationGraph(Baseline(catalog=empty), Baseline(catalog=empty_s)).changed
     )
+
+
+def test_non_workday_replace_is_no_action_when_rule_excludes_the_holcal_date() -> None:
+    """DL-244 mutation pin: `action_touches_a_holiday`'s REPLACE branch
+    (non_workday N/W/P) returns `bool(candidates)`, not an unconditional
+    `True`. This test and the SEVENTH sub-case of
+    `test_holiday_s_with_a_holcal_is_not_no_action` both kill a mutant
+    collapsing it to `True`; this one covers N, W and P together. Here the
+    rule admits only Tuesdays, so a Monday holcal date is never a
+    candidate for any of the three REPLACE codes, and `holiday: S` stays
+    no action for all of them."""
+
+    def estate(code: str, extra: str = "") -> str:
+        return (
+            "calendar: hcal\n08/24/2026 00:00\n\n"  # a Monday
+            f"extended_calendar: cal\nnon_workday: {code}\nholcal: hcal\n"
+            f"{extra}condition: tue\n"
+            "\ninsert_job: j\njob_type: c\ncommand: x\nmachine: m1\n"
+            "date_conditions: 1\nrun_calendar: cal\nstart_mins: 0\n"
+        )
+
+    for code in ("N", "W", "P"):
+        bare = lower_source(estate(code))
+        shielded = lower_source(estate(code, "holiday: S\n"))
+        assert (
+            "calendar:cal"
+            not in ClassificationGraph(Baseline(catalog=bare), Baseline(catalog=shielded)).changed
+        ), code
+
+
+_MOVE_C1 = (
+    "insert_job: b\njob_type: b\n\n"
+    "insert_job: j\njob_type: c\ncommand: j\nmachine: m1\nbox_name: b\n"
+    'date_conditions: 1\ndays_of_week: all\nstart_times: "02:00"\n'
+    'run_window: "02:00-04:00"\n\n'
+    "insert_job: w\njob_type: c\ncommand: w\nmachine: m1\nbox_name: b\n\n"
+    "insert_job: newbox\njob_type: b\n\n"
+    "insert_job: nm\njob_type: c\ncommand: n\nmachine: m1\nbox_name: newbox\n"
+)
+_MOVE_C2 = _MOVE_C1.replace(
+    "machine: m1\nbox_name: b\n" + "date_conditions",
+    "machine: m1\nbox_name: newbox\n" + "date_conditions",
+)
+
+
+def test_sem33_a_deferral_does_not_follow_its_job_into_another_box() -> None:
+    """SEM-33 (DL-246) across a rebaseline: box `b` run one defers `j` to
+    02:00. `b` completes, runs again while `j` is held, and completes. The
+    rebaseline moves `j` into `newbox`, whose first run starts while `j` is
+    still held. At 02:00 the old deferral fires and is refused: it was
+    queued in `b`, so it does not start `j` in `newbox`."""
+    assert _MOVE_C2 != _MOVE_C1
+    day = datetime(2026, 7, 1)
+
+    def at(hour: int, minute: int = 0, *, days: int = 0) -> datetime:
+        return day + timedelta(days=days, hours=hour, minutes=minute)
+
+    closing = Oracle(lower_source(_MOVE_C1))
+    for event in (
+        Event(at=at(16, 5), kind="STARTJOB", payload={"job": "b"}),
+        Event(at=at(16, 30), kind="STATUS", payload={"job": "w", "status": "SUCCESS"}),
+        Event(at=at(17, 0), kind="STATUS", payload={"job": "b", "status": "SUCCESS"}),
+        Event(at=at(17, 5), kind="ON_HOLD", payload={"job": "j"}),
+        Event(at=at(17, 10), kind="FORCE_STARTJOB", payload={"job": "b"}),
+        Event(at=at(17, 15), kind="STATUS", payload={"job": "w", "status": "SUCCESS"}),
+        Event(at=at(17, 20), kind="STATUS", payload={"job": "b", "status": "SUCCESS"}),
+    ):
+        closing.feed(event)
+    assert [t.transition for t in closing.trace() if t.job == "j"] == [
+        "RUN_WINDOW_DEFER",
+        "ON_HOLD",
+    ]
+    assert closing.pending_timers() == []  # the box ran again: the deferral is stale
+    verdict = classify(
+        closing=_side(_MOVE_C1),
+        opening=_side(_MOVE_C2),
+        carried=carried_from_oracle(closing, now=at(17, 20)),
+    ).by_job["j"]
+    assert verdict.verdict != "R"
+    store = closing.store
+    opening = Oracle(
+        lower_source(_MOVE_C2),
+        carried=CarriedRows(
+            jobs=dict(store.job),
+            globals_=dict(store.globals_),
+            timers=tuple(store.timers()),
+            timer_seq=store.timer_seq,
+            now=at(17, 20),
+        ),
+    )
+    opening.feed(Event(at=at(18, 0), kind="STARTJOB", payload={"job": "newbox"}))
+    opening.feed(Event(at=at(18, 30), kind="OFF_HOLD", payload={"job": "j"}))
+    opening.feed(
+        Event(at=at(2, 0, days=1), kind="STATUS", payload={"job": "nm", "status": "SUCCESS"})
+    )
+    j = [t for t in opening.trace() if t.job == "j"]
+    assert [t.transition for t in j] == ["OFF_HOLD", "START_REFUSED"]
+    assert "queued in box 'b', and the job is now in box 'newbox'" in j[-1].cause
+    assert opening.store.job["j"].status == "INACTIVE"
+    assert opening.store.job["newbox"].status == "RUNNING"  # j still owes newbox its run
+
+
+# DL-253: the oracle reads run_window, and absolute must times, in the run's
+# base zone for a job with no `timezone:`, so those jobs depend on the
+# timezone basis. TechDocs' `date_conditions` page lists `run_window` among
+# the attributes `timezone` governs (SEM-35).
+
+#: no tick attributes on either job: the box is started by an operator's
+#: STARTJOB, so nothing but the member's window reads the zone
+_WINDOW_BOX = (
+    "insert_job: b\njob_type: b\n\n"
+    "insert_job: j\njob_type: c\nmachine: m1\ncommand: x\nbox_name: b\n"
+    'date_conditions: 1\nrun_window: "10:00-11:00"\n'
+)
+
+
+def test_dl253_a_base_zone_change_refuses_an_executing_box_with_a_window_member() -> None:
+    """The review repro: under UTC box `b` was started at 09:30 and its member
+    `j`, with only a run_window, waits for 10:00. A successor that changes
+    only the base zone to Europe/Zurich would read the window an hour away
+    and skip `j` inside the box's C1 run. The member now depends on the
+    basis, so the executing box is R, and so is its member (ss10.3)."""
+    closing = _side(_WINDOW_BOX, default_tz="UTC")
+    opening = _side(_WINDOW_BOX, default_tz="Europe/Zurich")
+    assert closing.catalog == opening.catalog
+    graph = ClassificationGraph(closing, opening)
+    assert TZ_BASIS in graph.forward(JOB + "j")
+    result = classify(
+        closing=closing,
+        opening=opening,
+        carried=_carried({"b": _running(), "j": _inactive()}),
+    )
+    assert result.by_job["b"].verdict == "R"
+    assert result.by_job["j"].verdict == "R"
+    assert set(result.refused) == {"b", "j"}
+    # the control: the same box under an unchanged zone carries
+    same = classify(
+        closing=closing,
+        opening=_side(_WINDOW_BOX, default_tz="UTC"),
+        carried=_carried({"b": _running(), "j": _inactive()}),
+    )
+    assert same.refused == ()
+
+
+def test_dl253_a_standalone_window_job_waiting_on_its_deferral_is_a() -> None:
+    """A standalone job whose start a run_window deferred holds a pending
+    timer; across a base-zone change that latent intent is A, not carry."""
+    text = (
+        "insert_job: w\njob_type: c\nmachine: m1\ncommand: x\n"
+        'date_conditions: 1\nrun_window: "10:00-11:00"\n'
+    )
+    result = classify(
+        closing=_side(text, default_tz="UTC"),
+        opening=_side(text, default_tz="Europe/Zurich"),
+        carried=_carried({"w": _inactive(timer=True)}),
+    )
+    assert result.by_job["w"].verdict == "A"
+    assert result.by_job["w"].assumption == LATENT_ASSUMPTION
+    assert TZ_BASIS in result.by_job["w"].changed
+
+
+def test_dl253_an_armed_job_with_absolute_must_times_is_a_across_a_base_zone_change() -> None:
+    """An armed job with an absolute must time pending: its trigger and its
+    deadline are both read in the base zone, so the change is A, and the
+    same row RUNNING is R. The sentence is the general latent one, as for
+    any start-time job across a base-zone change: ss10.3's armed sentence
+    names a changed schedule or condition, and the JIL did not move."""
+    text = (
+        "insert_job: m\njob_type: c\nmachine: m1\ncommand: x\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "23:00"\n'
+        'must_start_times: "34:00"\nmust_complete_times: "34:01"\n'
+    )
+    closing = _side(text, default_tz="America/New_York")
+    opening = _side(text, default_tz="UTC")
+    armed = classify(
+        closing=closing,
+        opening=opening,
+        carried=_carried({"m": CarriedJob(row=JobRuntime(armed=True), timer=True)}),
+    )
+    assert armed.by_job["m"].verdict == "A"
+    assert armed.by_job["m"].assumption == LATENT_ASSUMPTION
+    assert TZ_BASIS in armed.by_job["m"].changed
+    running = classify(
+        closing=closing,
+        opening=opening,
+        carried=_carried({"m": _running(timer=True)}),
+    )
+    assert running.by_job["m"].verdict == "R"

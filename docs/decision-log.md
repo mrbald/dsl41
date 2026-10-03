@@ -14986,3 +14986,1889 @@ relitigate an entry; append a new one.
   file by GitHub URL; every relative link and heading fragment resolves;
   the pyproject substitution applied to README.md leaves no relative
   link and double-prefixes nothing.
+- DL-240 Real execution refuses three carried-but-unapplied inputs at
+  preflight: envvars, $$-global substitution, chk_files (2026-10-02;
+  src/dsl41/runner_preflight.py, src/dsl41/cli_estate.py,
+  src/dsl41/simulation_register_rows.py, docs/runner-design.md,
+  docs/autosys-semantics.md, tests/test_runner_scheduler.py,
+  tests/test_estate.py, tests/test_simulation_register.py)
+  Three AutoSys job attributes reach the runner's exec spec intact but
+  are never applied when a command actually runs: `envvars`
+  (AutoSys 24.2 "envvars Attribute") is never set on the child
+  environment; a `$$NAME` global reference on an exec_ field (AutoSys
+  24.2 "Global Variables") is never substituted, so `/bin/sh` reads the
+  literal `$$` as its own PID; `chk_files` (AutoSys 24.2 "chk_files
+  Attribute") never gates the start on free disk space. Without a
+  refusal, a command can complete successfully having read the wrong
+  environment, the wrong path, or started despite an unmet disk-space
+  precondition it was supposed to enforce. Other carried-but-unapplied
+  execution attributes (`ulimit`, `elevated`, `interactive`, `job_class`)
+  are not covered by this decision; each needs its own applicability
+  check before a refusal is justified.
+  Preflight gains one ERROR-only rule,
+  `runner_preflight._execution_input_preflight`, run inside the
+  existing `if execution:` block alongside `_machine_preflight` and
+  `_owner_preflight` -- so it fires for `dsl41 run` (including resume)
+  and the period-seal boundary check (`boundary.preflight_errors`,
+  which always runs with `execution=True`), and is skipped for rehearse
+  (`execution=False`), consistent with those two rules: the FakeAdapter
+  spawns no process, so nothing can misapply. The offline sealer
+  (`cli_estate._offline_seal`) calls the same `preflight_errors` directly
+  on the CLOSING period's own catalog, before `wire_from_profile` wires
+  any adapter, because the live boundary check only ever reads the
+  successor's. BOX jobs are exempt for
+  all three codes: SEM-10 makes `envvars`/`chk_files` inert there, and a
+  BOX carries no exec spec to substitute into. The three codes are
+  `envvars`, `global-substitution`, and `chk-files`.
+  This is a refusal, not support: no envvars application and no `$$`
+  substitution are implemented by this decision. A job that needs either
+  must stop carrying the attribute (or the $$ reference) until a future
+  decision adds real support.
+  Upgrade consequence: `run --resume` hash-gates the catalog against the
+  one the run started with (ss7), so a live estate whose catalog carries
+  one of these inputs cannot resume under this build -- editing the
+  catalog to drop the input would itself fail the hash gate. The operator
+  drains the estate and starts a new one from a catalog without the
+  carried input (period-model ss11), the same path DL-235's version bump
+  takes.
+  Unchanged: rehearse, `compile`, lowering, and the UC backend (`backend_uc`
+  continues to carry/refuse these attributes on its own R/A terms,
+  unaffected by the runner's execution gate).
+  Tests: tests/test_runner_scheduler.py (triggering and non-triggering
+  fixtures per code, a BOX exemption per code, an `execution=False`
+  check per code, and an end-to-end `dsl41 run` refusal before any run
+  directory exists). tests/test_estate.py (the offline sealer refuses a
+  closing catalog that fails preflight, before any adapter is wired).
+  tests/test_simulation_register.py (the register's `job_attr:chk_files`
+  and `job_attr:envvars` rows move from passthrough to refused, citing
+  this rule).
+- DL-241 `term_run_time: 0` arms no timer; it means no run-time limit
+  (2026-10-02; src/dsl41/oracle.py, src/dsl41/runner_ledger.py,
+  tests/test_ir.py, tests/test_oracle.py, tests/test_runner.py,
+  src/dsl41/simulation_register_rows.py, docs/autosys-semantics.md)
+  The vendor's "term_run_time Attribute" page (AutoSys 24.2) gives the
+  range as 0-527040 and the default as 0, "the job is allowed to run
+  forever." `Oracle._arm_sla_and_term` had armed a term_run_time timer
+  for every non-None `term_run_time_min`, so a lowered zero armed a
+  timer due at the arming instant and the run was TERMINATED at the next
+  timer drain. The fix sits at timer construction, not at lowering: the
+  arming guard now skips a zero limit as well as a None one. Lowering
+  still carries the attribute's value verbatim (`JobIR.sem.term_run_time_min
+  == 0`, not normalized to None), so `tests/test_ir.py::test_term_run_time_zero_lowers_to_zero_not_none`
+  and preserve-mode rendering see the literal zero. Because the guard is
+  at the one construction site, every caller that reaches the oracle
+  through typed IR is covered without touching lowering, the DSL
+  renderer, or the TUI/control-protocol pending-timer views, which all
+  read `Oracle.pending_timers()` rather than recomputing a deadline from
+  `term_run_time_min`.
+  A negative `term_run_time` is unchanged: it is out of the vendor's
+  0-527040 range, and neither lowering nor preflight refuses it yet; the
+  past-due-timer behavior it exercises stays pinned by
+  `tests/test_runner.py::test_negative_term_run_time_matches_oracle_direct_instead_of_crashing`.
+  Tests: `tests/test_oracle.py::test_term_run_time_zero_runs_to_scripted_completion_with_no_pending_timer`
+  (direct oracle, scripted SUCCESS, no TERMINATED and no pending timer at
+  any point; the positive-limit control is
+  `test_term_run_time_auto_terminates_and_downstream_terminated_consumer_fires`);
+  `tests/test_runner.py::test_term_run_time_zero_means_no_limit_on_both_paths`
+  (engine and oracle paths, byte-identical traces, no pending timer); and
+  `tests/test_runner.py::test_term_run_time_zero_runs_to_completion_through_the_engine_advance_path`
+  (virtual-clock advance well past the start, still RUNNING, then SUCCESS
+  on the scripted completion).
+  This changes what the state machine derives from an identical log (a v2
+  replay of a `term_run_time: 0` job ends TERMINATED; this build ends
+  RUNNING), so `STATE_MACHINE_VERSION` moves 2 -> 3: a v2 log is refused at
+  every door, and a live v2 estate drains and a new estate is created
+  (period-model ss11), as DL-235's bump did.
+- DL-242 Box-cycle state: a box start resets its members, an operator's
+  INACTIVE resolves a member and cascades from a box, and an idle box
+  ignores INACTIVE members (2026-10-02; oracle.py, oracle_state.py,
+  runner_startup.py, runner_history.py, runner_ledger.py,
+  simulation_register_rows.py; autosys-semantics SEM-10, SEM-11, SEM-15,
+  SEM-17, SEM-18; stonebranch-semantics M04 and P-M04; runner-design ss4)
+  THE VENDOR. TechDocs 24.2 and 12.x, scheduling guide, Basic Box Job
+  Concepts; the wording is the same in every edition cited. Rule 1: "When
+  a box starts running, the status of all the jobs it contains (including
+  subboxes) changes to ACTIVATED ... Because of this status change, jobs
+  in boxes do not retain their statuses from previous box cycles." ON_NOEXEC
+  members are included. Rule 2: "Using the sendevent command to change the
+  state of a box to INACTIVE changes the state of all the jobs it contains
+  to INACTIVE." Rule 3: "Using the sendevent command to change the state
+  of a job in a box to INACTIVE affects the box's completion status as if
+  the INACTIVE job returned a status of SUCCESS." Rule 4, for a box that is
+  not running: "Any jobs in the box with a status of INACTIVE are ignored
+  when the status of the box is being re-evaluated", with a single-member
+  table and a worked example in which all-INACTIVE members give SUCCESS.
+  Rule 5: a completed box and its members keep their statuses until the
+  next time the box runs.
+  THE DEFECTS. A second box run read the first run's member statuses, so a
+  chain A -> B -> C started C on B's stale SUCCESS. A RUNNING box stayed
+  RUNNING after its only member was set INACTIVE. An idle box with a
+  forced SUCCESS member and an INACTIVE sibling stayed INACTIVE. A box set
+  INACTIVE left its RUNNING member RUNNING.
+  THE MECHANISM. `_after_transition` is split into the box rules, the
+  row's own settlement (QUE_WAIT rank, reservations) and the wakes, and a
+  single transition runs the three in the old order. A batch of INACTIVE
+  transitions writes and settles every row first, then runs the box rules
+  and wakes for each row in the same order, skipping a row a wake has
+  already restarted. So no wake sees a half-moved subtree, and a restart
+  acquires against freed capacity. A skipped row that released capacity
+  still owes the waiters their wake, so the batch wakes them once at its
+  end.
+  THE FOUR BEHAVIORS. One (SEM-10): a box start sets every job the box
+  contains, transitively, to INACTIVE and clears its exit code, on rows
+  already INACTIVE too; an exit code is the previous cycle's result, and
+  an e() consumer started on it otherwise. For a row already INACTIVE the
+  clear is a plain store write with no record and no wake. A job that is
+  STARTING, RUNNING or QUE_WAIT keeps its run, and the reset does not
+  descend into a live subbox. `last_end_at`, the flags and the arm stay.
+  The rows are written before the box's STARTING transition, so that
+  transition's wakes read the new cycle; their own box rules and wakes
+  run after it, while the box is STARTING. Then no member starts, no
+  completion door runs and the box cannot start again, but an outside
+  n() consumer with a minutes lookback reads the moved status time and
+  starts at the reset. If those wakes end the run -- a job_terminator
+  cascade TERMINATES a STARTING box -- the start stops: RUNNING is
+  written only while the job is still STARTING at the run number its
+  start gave it, for every job type. Two (SEM-11): an injected INACTIVE on a member of a RUNNING box
+  marks the member resolved on the box row before the transition, so the
+  transition runs the full completion door, as the DL-154 window skip
+  does. A member that ran and failed and is then set INACTIVE resolves
+  too. An injected STATUS always records a transition, INACTIVE->INACTIVE
+  included, so a waiting member set INACTIVE needs no separate path. A
+  resolved member stays settled if an operator later gives it a status
+  that is not live; the fold still votes over ran members only. A resolved
+  INACTIVE is a completion moment for every running ancestor's overrides
+  as well, since SEM-12's "inside" is transitive; a window skip on a
+  member already INACTIVE, the usual case after the reset, runs the same
+  ancestor walk. Three (SEM-15): the idle-box re-derivation ignores
+  INACTIVE members and gives SUCCESS when no other member is left. An injected INACTIVE on a member of a box that
+  is not RUNNING, STARTING or TERMINATED now triggers it, as a terminal
+  member transition already did; the box is re-read after the transition
+  and skipped if that transition's wakes started it. Only the event's
+  direct target triggers it; the reset, the cascade and a window skip do
+  not. Four (SEM-18): an injected INACTIVE on a box sets the box and every
+  job it contains, top-down, to INACTIVE in one batch. Jobs already
+  INACTIVE are skipped and nothing is marked resolved. The box runs it
+  ends lose their unconsumed member arms with the Q3c SCHED_DISARM record,
+  as a terminal box transition does. A wake in the batch may start the box
+  again; that run is left whole.
+  THE FIELD. `JobRuntime.window_skipped_members` keeps its name for
+  sealed-artifact compatibility, and it now also holds operator
+  resolutions.
+  THE ENGINE. A live member cascaded to INACTIVE is DL-235's case: no KILL
+  is planned, a held SPAWN is superseded and the orphan's exit is rejected
+  as "job not live: INACTIVE". Resume relaunches only a live row: a row
+  moved to INACTIVE at the same run number keeps its evidence reconciled,
+  for the gate to judge, but is never relaunched. Before this, a killed
+  and held watch whose box restarted was relaunched from its incomplete
+  watch log. Run history reads the trace's live-to-INACTIVE transition as
+  it reads an injected INACTIVE, closing the run at that instant; a reset
+  from a terminal status leaves the recorded close alone.
+  An operator STATUS with no run number belongs to the run the trace
+  opened before it, so a run that started and ended with no dispatch, as
+  a job_terminator cascade during STARTING leaves it, never rewrites an
+  earlier run's close; an undispatched run has no row.
+  UNCHANGED. The oracle has no ACTIVATED status; the label stays a
+  display non-goal (SEM-17). A waiting member is INACTIVE without the
+  mark, so a condition that never fires still hangs the box. TERMINATED
+  stays sticky (SEM-13). An operator's SUCCESS on a member that has not
+  run in this box execution does not settle the fold, while an
+  operator's INACTIVE does: the vendor rule names INACTIVE only, so
+  SUCCESS on a running box's member is left as it was.
+  CONSEQUENCES, recorded. The DL-154 tests that relied on a run-one status
+  surviving into run two now see that status cleared at the box start,
+  not at the skip; their verdicts stand, and two are renamed to say so.
+  DL-153's P-M04 pair rested on "nothing resets member statuses at box
+  start". It no longer diverges on the consumer, and the pair now pins the
+  convergence. The M04/M05 same-box staleness assumption keeps its class;
+  whether it is still needed is a separate UC decision. Because the reset
+  wakes referencers, an outside consumer on a plain n(member) re-evaluates
+  at every box start of that member's box. An operator-resolved waiting
+  member can still start later in the same run if its condition comes
+  true; its start voids the mark.
+  VERSION. `STATE_MACHINE_VERSION` moves to 4: a replay with a second box
+  run or an injected INACTIVE derives different state.
+  Tests: test_oracle.py `test_sem10_*` (chain head, nested, held,
+  ON_NOEXEC, live member kept, stale exit code on a reset row and on a
+  row already INACTIVE, lookback wake, the trace-order control, the
+  STARTING wake reading the new cycle, a box its own start terminated),
+  `test_sem11_member_set_inactive_*`, `test_sem11_failed_member_set_inactive_*`,
+  `test_sem11_waiting_member_*`, `test_sem12_a_resolved_member_reaches_every_ancestor_override`,
+  `test_sem15_*`, `test_sem18_*` (cascade, batch order, arms, restart
+  during the cascade), `test_sem33_box_skip_member_later_set_by_the_operator_stays_settled`,
+  `test_sem33_box_skip_on_an_inactive_member_reaches_ancestor_overrides`;
+  test_effects.py
+  `test_a_box_set_inactive_cascades_without_a_kill_and_its_orphans_exit_is_rejected`;
+  test_fw_spool.py
+  `test_resume_never_relaunches_a_watch_whose_row_a_box_start_reset`;
+  test_run_history.py
+  `test_a_cascaded_inactive_closes_the_members_run_as_an_injected_one_does`.
+  Rewritten to the vendor rule: `test_sem10a_*` and `test_sem13_*` (a rerun
+  member now shows SUCCESS->INACTIVE first), four DL-154 box-skip tests,
+  and P-M04 in test_uc_oracle.py.
+- DL-243 ON_NOEXEC as an event-time INACTIVE transition, the ON_ICE
+  ordinary-atom truth table, and FORCE_STARTJOB clearing ON_ICE/ON_HOLD on
+  a non-live job (2026-10-02; src/dsl41/oracle.py, src/dsl41/equiv.py,
+  src/dsl41/lint.py, src/dsl41/rehearse_check.py, src/dsl41/runner_ledger.py,
+  src/dsl41/simulation_register_rows.py, docs/autosys-semantics.md,
+  docs/citation-index.md, docs/stonebranch-semantics.md, docs/ir-design.md,
+  docs/simulation-coverage.md, tests/test_oracle.py, tests/test_equiv.py,
+  tests/test_dsl.py, tests/test_derive.py, tests/test_lint.py,
+  tests/test_ir.py, tests/test_rehearse_check.py,
+  tests/test_simulation_register.py, tests/corpus/l020_iced_consumer.jil)
+  Four vendor sources, all from AutoSys Workload Automation 24.2
+  documentation. (1) "Start Conditions", on JOB_ON_NOEXEC: "When you send
+  the JOB_ON_NOEXEC event and the job is in the INACTIVE, SUCCESS, or
+  ACTIVATED status, the job retains its current status; otherwise the
+  effect is the same as if the job enters the INACTIVE status." (2) "Job
+  States", the ON_NOEXEC state entry: "the scheduler places the job in the
+  ON_NOEXEC status and the effect is the same as sending the CHANGE_STATUS
+  event to INACTIVE for the job. The scheduler does not immediately
+  schedule downstream jobs that have dependency on the NOEXEC job nor does
+  it evaluate their success conditions to success. Instead, the scheduler
+  evaluates the conditions of downstream dependent jobs as if the
+  predecessor job is set to the INACTIVE status." The "Events" reference
+  page's JOB_OFF_NOEXEC entry: "it places the job in the INACTIVE,
+  ACTIVATED, or SUCCESS status based on the job's existing status while in
+  non-execution mode." (3) "Start Conditions", the ON_ICE row of the
+  downstream-conditions truth table: success TRUE, failure FALSE,
+  terminated FALSE, done TRUE, notrunning TRUE, exitcode FALSE. (4)
+  "sendevent -- Start Jobs", on forcing a non-executable job: "When you
+  force start a job that is in a non-executable state (ON_HOLD, ON_ICE),
+  it returns to an executable state, runs, and does not revert to the
+  previous (non-executable) state." The same page states concurrent runs
+  of one job are unsupported; the oracle's refusal to FORCE a live job is
+  unaffected.
+
+  ON_NOEXEC on a FAILURE or TERMINATED (non-live, non-BOX, non-iced) job is
+  an EVENT-TIME transition to INACTIVE, exit code cleared, through DL-242's
+  operator-INACTIVE path (`Oracle._inject_inactive`, extended with a
+  `clear_exit_code` flag and a caller-supplied `cause`) -- not a read-time
+  projection off the stored status. A read-time projection (an "effective
+  (status, exit_code) pair" computed locally and never written back) breaks
+  three ways a stored transition does not: OFF_NOEXEC on a FAILURE row
+  brings the FAILURE reading straight back for any consumer released
+  afterward, a real failure that happens strictly AFTER ON_NOEXEC on a
+  still-live job is hidden once that job later fails (the projection keys
+  only on the current status and the flag, which cannot tell "failed, then
+  noexec'd" from "noexec'd, then failed"), and the equivalence checker has
+  no way to model a status that never actually changed. With the event-time
+  transition: OFF_NOEXEC is a plain flag clear on a row that is ALREADY
+  INACTIVE (matching the Events page's JOB_OFF_NOEXEC text), a later real
+  failure on a job that was still live when ON_NOEXEC arrived is visible
+  because that job's status never changed, and a RUNNING box's member
+  resolves through the same DL-242 door (so the box fold can complete
+  through it) instead of there being no transition for anything to read.
+
+  The transition is SKIPPED when the job is STARTING, RUNNING, or ON_ICE at
+  the moment of the event: "Change the Executable Status of a Job" (AutoSys
+  Workload Automation 24.2 documentation) -- "The scheduler ignores the
+  JOB_ON_NOEXEC event, if sent to: A non-box job that is in the STARTING,
+  RUNNING, or ON_ICE status." A FAILURE job that is then put ON_ICE and
+  then ON_NOEXEC stays FAILURE, visible to a consumer released later. The
+  `on_noexec` flag itself is still set unconditionally on every ON_NOEXEC
+  event regardless of status (STARTING/RUNNING/ON_ICE included) -- a
+  pre-existing oracle behavior, narrower than the vendor's "ignores the
+  event" reading, left unchanged by this decision.
+
+  A BOX target keeps the flag-only behavior: descendant propagation of this
+  rule is not modeled. The transition wakes referencers synchronously, the
+  same as any other injected INACTIVE, while the vendor's Job States text
+  says dependent jobs are not scheduled "immediately" -- a documented
+  divergence, not modeled: an ordinary `n()` consumer can start at once
+  instead of waiting, and a FAILURE box left idle by this member moving to
+  INACTIVE can re-derive SUCCESS immediately under DL-242's idle-box rule
+  (ss15) rather than on whatever later cadence the vendor intends; both
+  stay open, not closed by this decision. `status_at` moves with the
+  transition, so an ORDINARY (non-lookback) `n()` atom was already true
+  before it (FAILURE/TERMINATED already satisfies NOTRUNNING) and nothing
+  changes for it; only a LOOKBACK-qualified `n()` atom can newly turn true
+  by this specific transition, from the refreshed timestamp. Separately,
+  `equiv.py`'s tier-b state space has no axis for "INACTIVE with a fresh
+  timestamp" distinct from "INACTIVE, never touched"; it can therefore call
+  two conditions equivalent that a lookback-qualified `n()` would actually
+  tell apart post-transition. This predates this slice (the state space
+  never modeled `status_at` at all) and is tracked separately, not by this
+  decision.
+
+  An ORDINARY downstream atom (`atom.lookback is None`, no qualifier at
+  all) on a non-live iced job follows the vendor's ON_ICE table instead of
+  the DL-13 blanket-true pin; a LOOKBACK-qualified atom (any kind, the zero
+  form included) keeps that pin, because the vendor text does not
+  separately address a lookback-qualified atom against an iced predecessor
+  -- that corner is Q10 (section 9), pinned at its pre-DL-243 default, not
+  closed by this decision; `_atom_true` now carries a `# PENDING: Q10`
+  marker at that branch, and the simulation register gains a `provisional`
+  row labelled Q10 (`src/dsl41/simulation_register_rows.py`,
+  `oracle.Oracle._atom_true#1`). This SUPERSEDES one sentence of DL-13:
+  "Iced jobs satisfy EVERY atom kind (f/t/e included) per SEM-05's blanket
+  wording -- chosen over SEM-20's `as though it succeeded` reading" no
+  longer holds for an ORDINARY atom; it still holds, unchanged, for a
+  lookback-qualified atom (DL-13's "but only once not RUNNING" clause is
+  untouched either way).
+
+  FORCE_STARTJOB on a non-live job that is ON_ICE or ON_HOLD now clears
+  that flag -- recorded the same way `_handle_oob` records an explicit
+  OFF_ICE/OFF_HOLD, with a cause naming FORCE_STARTJOB -- then starts the
+  job through the normal FORCE path; the flag stays cleared after the run,
+  including when a later gate (`run_window`) still refuses the start,
+  because the return to an executable state is the event's own effect, not
+  conditioned on the start succeeding. This SUPERSEDES another sentence of
+  DL-13: "FORCE_STARTJOB overrides hold and the box-RUNNING gate but never
+  ice (SEM-20 `removed from all logic` wins)" no longer holds for a
+  NON-LIVE iced job; a job that is already STARTING/RUNNING/QUE_WAIT is
+  still refused regardless of force (DL-13's `run_window` clause is
+  untouched). `ON_NOEXEC` is not named in the vendor's force sentence and
+  is untouched by FORCE.
+
+  Four parity/correctness fixes elsewhere, all reproduced by the two
+  reviews and all required for the ON_ICE split to hold project-wide.
+  `src/dsl41/equiv.py`'s `_eval_cond` mirrors `Oracle._atom_true` by design
+  ("oracle parity" comments on both); its iced-state branch gets the same
+  split, so the tier-b/tier-c equivalence checker keeps agreeing with the
+  oracle. Separately, `_canon_lookback` collapsed an explicit `9999`
+  (kind="indefinite") to the same canonical form as a bare atom (lookback
+  is None) on the old "explicit 9999 == no qualifier" reading (SEM-04);
+  the ON_ICE split makes the two behaviorally DISTINCT (only the qualified
+  one keeps the blanket-true pin), so the collapse made `f(x)` and
+  `f(x,9999)` hash identically and let the CLI's tier-a short-circuit
+  (`cli_compile.py`) report two catalogs equivalent without ever reaching
+  tier c; `_canon_lookback` now only drops `raw`, keeping `kind="indefinite"`
+  a distinct canonical form from `None`. `src/dsl41/lint.py`'s L020 (iced
+  consumer, M19) read every `DerivedEdge.is_start_gate` predecessor as
+  ice-satisfied regardless of the atom kind referencing it; it now reads
+  each edge's own `via`/`lookback` and splits the same way, adding a SECOND
+  warning direction: an iced predecessor gated only by an ordinary
+  failure/terminated/exitcode atom reads false there, so AutoSys can never
+  run the consumer through it while UC's skip cascade (blind to which
+  AutoSys atom kind an edge stands for) may still resolve the dependency
+  and run it -- the opposite-direction divergence from the original
+  warning. `docs/stonebranch-semantics.md` M19 and `docs/ir-design.md`'s
+  L020 row are updated to state both directions. L006's "no status-store
+  state short of ON_ICE... satisfies it" caveat is a related but separate
+  accuracy note -- it is no longer a universal rescue case for an ORDINARY
+  contradiction, but L006 itself needs no code change (it already
+  evaluates with `include_ice=False`); the wording is left for a future
+  pass. `src/dsl41/rehearse_check.py`'s `genesis_truth` (the scripted-globals
+  at-start wake-credit side of the DL-184 flag sweep) read an ON_ICE seed
+  as satisfying every atom at genesis; it now applies the same split, so an
+  ordinary f()/t()/exitcode() atom on an iced seed no longer buys an
+  at-start SET_GLOBAL extra wake credit it cannot actually earn.
+
+  Open: the lookback/ice interaction (Q10) stays unresolved pending a live
+  instance; both readings keep a documented default rather than guessing.
+  `STATE_MACHINE_VERSION` moves 4 -> 5 (DL-242 took 3 -> 4 first): a v4
+  replay of a FAILURE/TERMINATED job that is ON_NOEXEC, an ordinary atom
+  against a non-live iced job, or a FORCE_STARTJOB against a non-live
+  ON_ICE/ON_HOLD job each derive different state under this build than
+  under v4; a v4 log is refused at every door, and a live v4 estate drains
+  and a new estate is created (period-model ss11), as DL-235/DL-241/
+  DL-242's bumps did.
+
+  Tests: `tests/test_oracle.py` --
+  `test_sem22_noexec_on_a_failed_job_transitions_to_inactive` and its
+  TERMINATED twin `test_sem22_noexec_on_a_terminated_job_transitions_to_inactive`
+  (stored status moves to INACTIVE and exit_code to None, f/t/d/exitcode
+  false, n true), `test_sem22_noexec_keeps_a_success_visible` (control),
+  `test_sem22_noexec_bypasses_to_success_on_its_next_start` (the flag
+  persists across the move to INACTIVE; the job's next start still
+  bypasses to SUCCESS and an s() consumer then starts),
+  `test_sem22_noexec_off_noexec_then_release_a_held_f_consumer_stays_blocked`
+  (fail p, ON_NOEXEC, OFF_NOEXEC, a held f(p) consumer released afterward
+  does not start), `test_sem22_noexec_while_running_then_real_failure_is_not_hidden`
+  (ON_NOEXEC while RUNNING is flag-only; the real failure that follows is
+  visible to f(p), not retroactively hidden),
+  `test_sem22_noexec_on_an_iced_job_is_ignored_and_the_job_stays_failure`
+  (p fails, ON_ICE, ON_NOEXEC: the event is ignored and p stays FAILURE;
+  OFF_ICE then releases a held f(p) consumer normally against the real
+  FAILURE), `test_sem22_noexec_on_a_failed_box_member_completes_the_box`
+  (an unmet `box_failure` override leaves the box hung after the member's
+  real FAILURE; ON_NOEXEC resolves the member and the box completes);
+  `test_sem20_ordinary_atoms_on_an_iced_job_follow_the_vendor_table`
+  (parametrized over all six atom kinds),
+  `test_sem20_lookback_atoms_on_an_iced_job_stay_true`,
+  `test_sem20_ordinary_atom_on_an_undefined_iced_lookalike_stays_false`,
+  `test_sem20_ordinary_atom_on_a_live_iced_job_reads_the_real_in_flight_status`,
+  `test_sem20_off_ice_later_reads_the_real_status_not_the_vendor_table`,
+  `test_sem23_force_start_clears_ice_and_runs`,
+  `test_sem23_force_start_clears_hold_and_runs`,
+  `test_sem23_force_start_on_a_live_job_is_still_refused`,
+  `test_sem23_after_force_clears_ice_a_later_plain_start_needs_no_off_event`,
+  `test_sem23_force_start_clears_ice_even_when_run_window_then_refuses`.
+  `test_sem23_force_startjob_ignores_condition_and_hold_and_satisfies_downstream`
+  and `test_ice_on_a_running_job_takes_effect_at_completion` are existing
+  tests rewritten for this decision: the first now expects an OFF_HOLD
+  record and the cleared flag from a FORCE on a held job; the second's
+  comment no longer claims the ice reading covers every atom kind, since
+  its own atom (`s()`) is ordinary and only ever pinned that one atom.
+  The original ON_NOEXEC read-time-projection tests (the
+  `..._reads_as_inactive_downstream` and `..._then_bypass_reads_success`
+  names) are superseded by the event-time
+  rewrites above -- a stored INACTIVE row makes a separate "bypass" test
+  moot, since a bypass is just a later plain start on an ordinary INACTIVE
+  row.
+
+  `tests/test_equiv.py` -- `test_success_vs_failure_diverges_with_a_counterexample_naming_the_job`,
+  `test_iced_state_distinguishes_contradictions_on_different_jobs`, and
+  `test_iced_contradiction_matches_oracle_end_to_end` are rewritten: the
+  first's enumerated counterexample moves from plain `SUCCESS` to an
+  earlier-enumerated `NEVER_RAN,ON_ICE` state (both still divergent; the
+  split just makes the iced state divergent too, so the search stops
+  sooner); the other two switch their `s(x)&f(x)`/`s(y)&f(y)` pair to a
+  lookback-qualified `s(x, 0)&f(x, 0)`/`s(y, 0)&f(y, 0)` pair, because the
+  ordinary pair they used no longer distinguishes under ice (both catalogs
+  are now genuinely equivalent for that input) while the lookback pair
+  still does, under the Q10 pin.
+  The old 9999-folds-to-no-qualifier test is rewritten as
+  `test_indefinite_9999_lookback_stays_a_distinct_qualifier` (the two no
+  longer canonicalize the same), plus a new
+  `test_indefinite_9999_lookback_distinguishes_catalogs_under_ice` pinning
+  the hash and tier-c divergence directly.
+  `tests/test_dsl.py::test_cond_to_source_hand_built_indefinite_lookback_folds_to_bare_atom`
+  is rewritten as `..._round_trips_distinct_from_bare` for the same reason
+  (it round-trips through the same `canonical_cond`).
+
+  `tests/test_derive.py::test_whole_corpus_exact_edge_count_and_mapping_row_counter`
+  and the old L020-fires-once test (renamed
+  `test_l020_fires_on_the_corpus_fixtures`) are updated for three new
+  corpus jobs in `l020_iced_consumer.jil`: `l20_never_runs` (condition
+  `f(l20_iced) & s(l20_live)`, the blocking-direction trigger),
+  `l20_live_failure` (condition `f(l20_live)`, its non-triggering sibling,
+  an ordinary f() atom on a producer that is never iced), and
+  `l20_lookback_rescued` (condition `f(l20_iced, 0)`, a regression guard:
+  the zero-lookback qualifier keeps the Q10 blanket-true pin, so this
+  trips the ORIGINAL direction, not the blocking one). Edge count 54 -> 58
+  (+1 M02 for `s(l20_live)`, +2 M04 for the two new ordinary f() edges --
+  f() rows are M04 regardless of cross-stream-ness, unlike s()'s M01/M02
+  split -- and +1 M03 for the lookback-qualified f() edge).
+  `tests/test_ir.py::test_whole_corpus_lowers_as_one_catalog` gains the
+  three job names in its pinned set. The rewritten corpus test also
+  asserts each violation's direction by its message text, not just its
+  job name.
+  `tests/test_lint.py::test_lint_catalog_whole_corpus_exact_per_code_counts`:
+  L020 1 -> 3 (the blocking direction on `l20_never_runs`, the original
+  direction again on `l20_lookback_rescued`); L021 10 -> 11
+  (`l20_never_runs` is a two-unqualified-wake-source shape, same family as
+  `l20_mixed`); L022 19 -> 18 (`l20_live_failure` now reads `l20_live`'s
+  failure, so `l20_live` is no longer a stranded-on-failure tail).
+
+  `rule_l020` itself (`src/dsl41/lint.py`) is rewritten: it used to group
+  `DerivedEdge.is_start_gate` edges per producer and decide each producer
+  with `any()` over its own edges, which a satisfied lookback atom could
+  use to hide a FALSE ordinary conjunct on the very same producer. It now
+  reads the job's own `condition:` tree directly and evaluates it
+  3-valued (true/false/unknown) under the ice/noexec substitution,
+  propagated through And/Or the way real boolean logic would. Two new
+  standalone tests in `tests/test_derive.py` pin the cases this fixes:
+  `test_l020_fires_the_blocking_direction_on_a_hidden_ordinary_conjunct`
+  (`f(ice,9999) & f(ice) & s(live)`, ice iced -- the And is false
+  regardless of `live`, where the old `any()` grouping saw the lookback
+  atom and stayed quiet) and
+  `test_l020_quiet_on_a_disjunct_a_live_alternative_still_converges`
+  (`f(p) | s(q)`, p iced via an ordinary f() -- the Or is UNKNOWN, not
+  false, because `s(q)` can still satisfy it, where the old grouping fired
+  a false positive on `p`'s sole ordinary atom). A GlobalAtom reads TRUE in
+  this evaluation, not UNKNOWN: DL-162 settled that a global gate is not a
+  predecessor and never decides the verdict on its own, and that reading
+  is kept, not reopened, by this decision -- `test_l020_reads_a_global_gate_as_no_predecessor_at_all`
+  still fires exactly as DL-162 pinned it, and the new
+  `test_l020_fires_the_blocking_direction_even_with_a_global_gate`
+  (`f(icy) & v(G)=1`) checks the blocking direction fires the same way
+  through a global gate.
+  `tests/test_rehearse_check.py::test_expected_bounds_scripted_globals_at_start_ordinary_ice_atom_buys_no_credit`:
+  a seeded ON_ICE `ice` with no condition of its own, daily
+  producers `a`/`b`, consumer `(f(ice) | (s(a) & s(b))) & v(G) = 1` over a
+  48-hour probe with `G` scripted at-start -- the bound is 2 consumer runs,
+  not 3 (the pre-fix `genesis_truth` read `f(ice)` as blanket-true,
+  crediting the at-start set an extra run the consumer can never actually
+  earn).
+  `src/dsl41/simulation_register_rows.py` (three `effect=` rows updated --
+  the `event:FORCE_STARTJOB`, `event:ON_ICE`, and `trace_marker:ON_ICE`
+  rows -- plus the new Q10 row, regenerated via
+  `scripts/render_simulation_coverage.py`); `tests/test_simulation_register.py`
+  (`LABEL_RE`/`MARKER_RE` widened to admit two-digit `Q` numbers so
+  `PENDING: Q10` is not read as `Q1`).
+- DL-244 An unspecified holiday action makes a holcal date a non-workday
+  regardless of its weekday, and WORKDAYS excludes it too
+  (2026-10-02; src/dsl41/autocal.py, src/dsl41/simulation_register_rows.py,
+  docs/autosys-semantics.md, tests/test_autocal.py,
+  tests/test_classification.py)
+  "Define Extended Calendars" (AutoSys 12.1/24.2, identical): "When you
+  specify an action at the Holiday Action prompt, the utility applies that
+  action to all of the dates listed in the calendar that you specify at
+  the Holiday Calendar prompt. When you do not specify an action at the
+  Holiday Action prompt, the utility treats the dates listed in the
+  calendar that you specify at the Holiday Calendar prompt as non-workdays
+  according to the value that you specify at the Non-workday Action
+  prompt." "Date Condition Keywords" (same two releases), WORKDAYS:
+  "...The utility automatically considers holidays to be non-workdays if
+  you specified a holiday calendar at the Holiday Calendar prompt."
+  Defect: `CompiledCalendar._dispose`'s fallback branch (no holiday action)
+  tested only `day.weekday() not in ctx.workdays` to decide whether the
+  non_workday code applied. A holcal date that fell on an ordinary weekday
+  was invisible to it: O dropped it (should keep it, since it is now a
+  non-workday), N/W/P left it in place (should replace it). WORKDAYS had
+  the matching gap: it tested only the weekday mask, never the holiday
+  calendar, unlike WEEKDAYS which already auto-subtracts it (SEM-37).
+  Behavior: the non_workday O/N/W/P codes now test
+  `day.weekday() not in ctx.workdays or day in ctx.holidays` in the
+  no-holiday-action branch. WORKDAYS now excludes a holcal date the same
+  way, and is unchanged with no holcal (`ctx.holidays` is empty in that
+  case, so the added clause is a no-op). A specified `holiday:` action
+  still governs a holcal date outright wherever that date is a CANDIDATE
+  (Q8a, DL-58): it is read before the non_workday branch, unaffected by
+  this entry. But WORKDAYS's own fix removes the holcal date as a
+  candidate in the first place, so a holiday action ATTACHED to a
+  WORKDAYS calendar now never sees that date at all -- not "unaffected":
+  a holcal Friday under `condition: WORKDAYS` with `holiday: O` used to
+  read {that Friday} and now reads {} (O has nothing to restrict to);
+  `holiday: N` used to one-shot it to the next day and now adds nothing
+  (there is no candidate to replace); `holiday: S` used to keep it and
+  now drops it (nothing to keep). This matches WEEKDAYS, which already
+  worked this way, and the vendor's own WORKDAYS sentence, so the
+  behavior is kept, not re-guarded. The classifier's `autocal.semantic_key`
+  (`action_touches_a_holiday`) is updated to match the non_workday-branch
+  change: since it only ever examines days already known to be holcal
+  members, O never alters one now (always indistinguishable from
+  `holiday: S`), and N/W/P always do when the rule admits at least one
+  -- `bool(candidates)`, not an unconditional `True` (the helper's
+  conservative-overapproximation caveat is restored and kept, DL-131: it
+  may call two calendars with equal compiled day sets "different", a
+  false refusal, never a false carry).
+  Stays open: Q8c (the non_workday W/P walk's own holiday-ness check on
+  its REPLACEMENT TARGET, and N's re-check of "all other criteria") is
+  untouched -- this entry is about which days enter the non_workday
+  branch, not what a walk does once it is there. Weekday holcal dates now
+  reaching that branch means more dates meet Q8c's open pin: a W/P walk
+  can land on another holcal date without a re-check (for example a
+  Friday holcal date walking forward to the following Monday across an
+  intervening weekend). The other workday-ordinal keywords (`WORKD#nn`,
+  `FOMWORK`, `EOMWORK`, and the cycle-workday family) are untouched; the
+  audit that produced this entry did not establish whether they should
+  auto-subtract holidays too.
+  Tests: `tests/test_autocal.py::test_sem38_non_workday_o_keeps_a_weekday_holcal_date_with_no_holiday_action`,
+  `..._n_moves_a_weekday_holcal_date_with_no_holiday_action`,
+  `..._w_moves_a_weekday_holcal_date_with_no_holiday_action`,
+  `..._p_moves_a_weekday_holcal_date_with_no_holiday_action`,
+  `test_sem38_non_workday_action_leaves_an_ordinary_weekday_alone` (control),
+  `test_sem38_non_workday_weekend_control_is_unaffected` (control),
+  `test_sem38_holiday_action_still_shields_a_weekday_holcal_date` (Q8a
+  precedence, unchanged), `test_sem37_workdays_excludes_holcal_date`,
+  `test_sem37_workdays_without_holcal_is_unaffected`,
+  `test_sem37_workdays_holiday_o_never_sees_the_holcal_date`,
+  `test_sem37_workdays_holiday_n_gets_no_candidate_to_one_shot`,
+  `test_sem37_workdays_holiday_s_drops_the_holcal_date` (the WORKDAYS +
+  holiday-action interaction above, pinned for O/N/S on the vendor-worked
+  Fri Aug 28 2026 example). Two existing
+  `tests/test_classification.py::test_holiday_s_with_a_holcal_is_not_no_action`
+  sub-cases encoded the old fallback and are rewritten: a Monday-only
+  holcal under `non_workday: W` moved from "not in changed" (W was blind
+  to it) to "in changed" (W now walks it, so `holiday: S` shields it --
+  this verdict is the classifier's conservative one: the two sides'
+  compiled day sets are in fact identical here, because the adjacent
+  weekend's own W-walk already lands on the same Monday either way); a
+  Monday-only holcal under `non_workday: O` moved from "in changed" (O
+  used to drop a weekday holcal date, differing from `holiday: S`) to "not
+  in changed" (O now keeps it outright, same as `holiday: S`, on every
+  admitted holcal date regardless of weekday). The SEVENTH sub-case (a
+  rule that excludes the holcal date entirely) is reverted from a
+  `non_workday: O` substitution back to `non_workday: W`: O's branch
+  returns `False` whatever `candidates` holds, so an O version passed
+  vacuously regardless of whether candidacy was right. A new
+  `test_non_workday_replace_is_no_action_when_rule_excludes_the_holcal_date`
+  pins the REPLACE branch's empty-`candidates` side across N/W/P
+  directly (a mutant collapsing `bool(candidates)` to `True` fails it).
+  `STATE_MACHINE_VERSION` moves 5 -> 6 (DL-243 took 4 -> 5 first; comment
+  added in runner_ledger.py in the existing style). `attest.py`'s offline
+  audit re-derives a boundary's classification from the sealed C1/C2 catalogs
+  (`classify(...)`, ~819), which reaches `autocal.semantic_key` and the
+  compiled day sets this entry changes. A boundary a v5 build sealed as
+  `carry` (or vice versa `R`/`A`) can classify differently under v6 from
+  the identical catalogs and carried set, which changes the re-derived
+  seal digest -- a replay-visible difference, not merely a forward-looking
+  one. As with DL-235/DL-241: a v5 log is refused at every door, and a
+  live v5 estate drains and a new estate is created (period-model ss11).
+- DL-245 Scanner inventory gains update_blob/update_glob; a literal
+  auto_blobt blob region stops a phantom statement (2026-10-02;
+  src/dsl41/ast_jil.py, src/dsl41/simulation_register_rows.py,
+  docs/jil-statement-syntax.md, docs/simulation-coverage.md,
+  tests/test_ast_fidelity.py, tests/test_ir.py)
+  Two independent scanner gaps, found together while re-checking the
+  rule-3 inventory against the vendor pages (DL-29's "complete TechDocs
+  12.1 inventory" claim). Evidence: "update_blob Subcommand" and
+  "update_glob Subcommand" (AutoSys 12.1 and 24.2) both give
+  `update_blob:`/`update_glob: name` as their own subcommand form, so
+  DL-29's completeness claim was wrong; "insert_blob Subcommand"'s own
+  examples show `blob_input: <auto_blobt>Testing this blob</auto_blobt>`
+  and a JSON payload (never a JIL fragment), and the vendor's "JIL Syntax
+  Rules" page states, in ITS OWN rule 8 (a different document from this
+  one's numbering -- the new scanner rule below is ours, numbered 12),
+  that the auto_blobt meta-tags open a region where "JIL interprets every
+  character input between the auto_blobt meta-tags literally... does not
+  enforce any of the previously discussed rules" there.
+  Change 1: `update_blob` and `update_glob` join `SUBCOMMANDS` (rule 3)
+  next to `insert_blob`/`delete_blob` and `insert_glob`/`delete_glob`.
+  jil-statement-syntax.md rule 3 no longer claims the list is a proven
+  complete TechDocs inventory -- it names the verbs found so far and
+  records the retraction.
+  Change 2: the scanner gates a literal region on the `blob_input` key
+  (the only attribute the vendor's rule 8 names), ANCHORED at the value's
+  own start: only a value that STARTS WITH `<auto_blobt>` opens a region
+  -- a `/* <auto_blobt> */` sitting inside an ordinary closed comment, or
+  a quoted `"<auto_blobt>"`, is not the region and is read by every rule
+  above exactly as an ordinary value (an unanchored first implementation
+  let a comment-embedded `<auto_blobt>` swallow lines up to an unrelated,
+  later `</auto_blobt>`-shaped string, or spuriously error as
+  unterminated when none followed; review caught this before it landed).
+  Once open, the region runs through the line holding `</auto_blobt>`
+  (the closer is searched strictly AFTER the opener's own text, so a
+  glued `</auto_blobt><auto_blobt>` can never self-close against the
+  opener that follows it), consumed the same way a rule-5 block comment
+  is -- the body lines never reach the scan loop as statement boundaries,
+  attributes, or continuations, and no comment/rule-4b detector runs on
+  the text. The span becomes part of `blob_input`'s `raw_value` verbatim,
+  `\n`-joined like a rule-6 continuation. Text AFTER the closer, still on
+  the closer's own line, is NOT part of the region: it goes through the
+  ordinary value-tail pipeline -- a trailing comment there still splits
+  off, and a `key:`-shaped pair there still gets the loud rule-4b error,
+  exactly as for any other attribute value (an earlier draft swallowed
+  that tail into the literal value unconditionally, which silently
+  folded a real second attribute in under permit-unknown; review caught
+  this too). That tail check needed its own anchor: the closer's `>` is a
+  real, non-whitespace character the tail-only string does not carry, so
+  `_split_trailing_comment`/`_mask_closed_blocks` gained an `at_start`
+  flag (default True, unchanged everywhere else) that the blob-tail call
+  sites pass as False, so a `/*` GLUED to the closer opens nothing (rule
+  5) instead of being misread as sitting at a legitimate value start --
+  an earlier draft let such a glued marker swallow following statements
+  into comment text, or hide a real second attribute pair from rule 4b
+  inside a comment that was never actually open; a second review round
+  caught this. An opener with no closer by EOF is a loud `JilParseError`
+  naming the opener's line -- the vendor states a beginning AND an end,
+  so EOF is refused, never silently closed. Canonical mode's ordinary
+  per-line trim is suspended for the lines strictly inside the region (a
+  new `RawAttr.literal_prefix_lines` field marks how many): the vendor's
+  "every character... literally" covers trailing spaces and tabs
+  mid-payload, which a blanket `rstrip()` had been silently discarding
+  (the canonical fixpoint still held on the damaged text, so F2 alone
+  could not have caught it); only the merged last/tail line keeps the
+  ordinary trim.
+  Before this change, a `blob_input` value spanning lines was scanned
+  like any other attribute: a complete `insert_job:` fragment inside the
+  literal text at column 0 was promoted to a phantom third statement,
+  structural silent loss of the same class rule 3's own guard exists to
+  stop, except here the vendor's own rule 8 is what exempts the text, not
+  a missed boundary.
+  Unchanged: lowering still refuses every blob/glob subcommand, including
+  the two new verbs, through the same generic "not supported by lowering
+  v1 ... blob/glob ... out of compile scope" message (`ir._Lowerer.run`,
+  DL-29) -- `update_blob`/`update_glob` fall into that `else` branch
+  automatically once the scanner accepts them, so no lowering code
+  changed. No blob execution or update-merge semantics are modeled by
+  this decision. `src/dsl41/simulation_register_rows.py`'s
+  `_REFUSED_STATEMENTS` gains `update_blob`/`update_glob` rows in the
+  same style as `delete_blob`; `docs/simulation-coverage.md` regenerated
+  with `scripts/render_simulation_coverage.py`.
+  Tests: `tests/test_ast_fidelity.py` (both new verbs scan as boundaries
+  and round-trip F1/F2; a synthetic insert_blob fixture with a phantom
+  `insert_job:` fragment inside its literal blob_input scans into exactly
+  two statements with the literal text intact and round-trips F1/F2; a
+  key-shaped line inside the region does not start a statement; comment-
+  and blank-line-shaped lines inside the region stay literal; a one-line
+  closed region bypasses the rule-4b pair guard; an unterminated region
+  is a loud error naming the opener's line; a comment-embedded or quoted
+  opener does not open a region; a glued closer-then-opener opens no
+  region and the next line scans normally; the closer search starts after
+  the opener's own text; a second pair and a trailing comment after the
+  closer are both still caught/split on the ordinary pipeline; canonical
+  mode preserves blob payload whitespace byte for byte, LF and CRLF
+  source alike; a `/*` GLUED right after the closer does not swallow the
+  following statement into comment text, and does not hide a `key:`-pair
+  from rule 4b either -- the glued-region case and the equivalent plain
+  value get the identical error). A dedicated hypothesis generator
+  (`test_f3_blob_region_payload_and_tail_never_change_statement_count`)
+  draws `blob_input` payloads from `insert_job:`-shaped, comment-shaped,
+  blank, and trailing-whitespace lines, crossed with five tail shapes
+  after the closer (empty, whitespace, a spaced comment, a glued `/*`, an
+  attribute pair), and asserts the statement count, F1 round-trip, and F2
+  fixpoint hold for every tail except the attribute pair, which must
+  raise rule 4b -- the existing F3 fuzzers cannot reach this region at
+  all (`_ATTR_KEY` caps identifiers at 8 characters against the
+  10-character `blob_input`; the soup alphabet has no `<`/`>`), so no
+  change to either existing generator was needed.
+  `tests/test_ir.py` extends `_UNSUPPORTED_SUBCOMMAND_CASES` with
+  `update_blob`/`update_glob`. `tests/test_simulation_register.py` passes
+  against the updated `_REFUSED_STATEMENTS`.
+  No `STATE_MACHINE_VERSION` change: the scanner does not affect oracle
+  replay.
+- DL-246 run_window at box start and for standalone jobs: a box start
+  decides a waiting member's window disposition, and a standalone skip
+  moves the job to INACTIVE (2026-10-02; oracle.py, runner_ledger.py,
+  simulation_register_rows.py, simulation-coverage.md; autosys-semantics
+  SEM-11, SEM-33)
+  THE VENDOR. TechDocs 24.2, run_window attribute page; 12.1 has the same
+  text. Outside the window: "When the current time is closer to the
+  beginning of the next run window, the product schedules the job to
+  start when the next run window starts. When the current time is closer
+  to the end of the previous run window, the product does not start the
+  job and changes its status to INACTIVE." For a box member: "its status
+  changes to ACTIVATED when the box starts running. However, if the
+  current time is not in the specified run window for the job, its
+  status changes to INACTIVE. When the current time is closer to the end
+  of the previous run_window, the job's status changes to INACTIVE. The
+  box job can still run to completion. When the current time is closer
+  to the beginning of the next run_window, the product issues a future
+  STARTJOB event for the job for the next run_window." The Box1 example:
+  "If Box1 starts at 04:05, JobB and JobC can run and JobA becomes
+  INACTIVE so that the box can complete that day. If Box1 instead starts
+  at 16:05, JobA will have a STARTJOB event set for 02:00 the next day,
+  and the box continues running until the job starts the next day."
+  THE DEFECTS. A box start did not decide a scheduled member's
+  disposition. The box start's attempt stops at the member's schedule
+  gate before the window check runs. In the 04:05 example the box stayed
+  RUNNING after JobB and JobC succeeded. In the 16:05 example no deferred
+  start was queued unless the member's own tick arrived. Separately, a
+  standalone job whose attempt met the previous-close branch recorded
+  RUN_WINDOW_SKIP but kept a prior SUCCESS or FAILURE, so downstream
+  conditions still read the old result.
+  THE BEHAVIOR. One: at box start, after the DL-242 reset, each member
+  with a `run_window` is decided at that instant, before its own schedule
+  gate, through `_run_window_permits`. The decisions run after every
+  start attempt across the whole subtree the start began, the attempts
+  of the box's RUNNING wakes included: the collection opens before the
+  RUNNING transition. Deferrals run before skips. A skip is a completion
+  moment and can complete its box or an ancestor through an override, so
+  a skip decided inside the attempt loop, or inside a subbox started by
+  a RUNNING wake, refused the siblings and outer members attempted after
+  it. That order dependence, between window decisions and member
+  attempts, is gone. Competing sibling completions are still evaluated
+  one at a time under SEM-12; no rule for simultaneous overrides is
+  defined. Each queued decision is bound to its box run: a skip may
+  complete the run and its wakes may start the box again inside the
+  pass, and the old pass then decided for the new run, recording a
+  duplicate skip and completing the new run. Inside the
+  window nothing changes:
+  the member is attempted as before and waits for its own conditions and
+  schedule. Closer to the previous close, the member takes the DL-154
+  skip bypass; it is already INACTIVE after the reset, so the bypass
+  marks it resolved and runs the parent's door and the ancestor walk, and
+  the box can complete. Closer to the next opening, one deferred start is
+  queued through the existing TIMER mechanism, and the box stays RUNNING.
+  No schedule tick is invented. The decision belongs to the direct
+  parent, at its own start, so a member of a subbox is decided when the
+  subbox starts. A held or iced member, a live one, and one that already
+  ran this execution are left to their own paths. The held exclusion is
+  this project's reading: a held job does not take the box start's
+  status change. A member whose days_of_week exclude today is decided at
+  box start too, and a deferral then starts it the next day through the
+  deferred start's tick standing. A member's deferred start carries its
+  box's name and run number. If the box starts again before the opening,
+  or a rebaseline moves the member to another box or out of one, the old
+  timer is not pending, and at fire it is refused with a START_REFUSED
+  record; the current run decides the member afresh. A run number alone
+  let a deferral queued in one box start the member in the box it moved
+  to, whose first run had the same number. Before this, the new run took the old timer as its own
+  deferral and wrote no record, and the old timer started the member with
+  the old run's cause. The one-deferral-per-opening dedup counts only a
+  deferred start of the same box run: a must_start timer at the same
+  instant swallowed the deferral, and the box hung after the alarm. Two: a standalone job (no box) that meets the
+  previous-close branch moves to INACTIVE when it is not INACTIVE
+  already. The RUN_WINDOW_SKIP record stays. The transition wakes
+  referencers as an injected INACTIVE does, and nothing starts. The exit
+  code stays, as an injected INACTIVE keeps it. A job already INACTIVE
+  gets no transition. A standalone box job takes the same plain
+  transition; it does not cascade to its members, since SEM-18 is the
+  operator's rule.
+  PROVISIONAL. The vendor does not say how the deferred STARTJOB
+  composes with the member's own start_times. The smallest rule is
+  pinned: the deferred STARTJOB is a start attempt with a schedule
+  tick's standing, through the normal gates at the window opening. It
+  passes the schedule gate, a false condition arms it (SEM-32), and the
+  box, hold, ice and window gates apply as for any tick. At most one
+  start per box run still holds (SEM-10): whichever of the deferred start
+  and the member's own tick runs first is the run, and a later one is
+  refused. No question label is opened; the register carries the row
+  `job_attr:run_window#box-start-defer`.
+  UNCHANGED. A member inside its window at box start composes schedule
+  and condition as before. A mid-run attempt that meets either branch
+  behaves as before (DL-154). Members of a box that is not RUNNING keep
+  the plain skip. A member that already ran this execution keeps its
+  result. SEM-11's literal fold, SEM-12's override gating and the Q3c arm
+  scope are untouched. The UC side does not move: M27 stays an R row.
+  VERSION. `STATE_MACHINE_VERSION` moves to 7: a replay with a box start
+  outside a member's window, or with a standalone skip on a job that has
+  a result, derives different state.
+  Tests: test_oracle.py `test_sem33_vendor_box1_*` (04:05 and 16:05),
+  `test_sem33_box_start_*` (inside the window, a held member, a subbox
+  member, both catalog orders, a deferral beside a must_start timer, a
+  member passed over once a skip completed its box),
+  `test_sem33_running_wakes_join_the_box_starts_window_pass`,
+  `test_sem33_a_window_pass_never_decides_for_a_later_box_run`,
+  test_classification.py
+  `test_sem33_a_deferral_does_not_follow_its_job_into_another_box`,
+  `test_sem33_subbox_skip_waits_for_the_outer_boxs_direct_member`,
+  `test_sem33_deferral_from_an_earlier_box_run_is_refused_after_a_restart`,
+  `test_sem33_deferred_box_start_*` (the provisional rule: a false
+  condition arms at the opening; the member's own tick is refused once
+  the deferred start ran), `test_sem33_standalone_*` (prior SUCCESS,
+  FAILURE and TERMINATED, a fresh INACTIVE job, a forced start on a held
+  job, a standalone box that does not cascade). Rewritten to the vendor
+  rule: `test_sem33_box_variant_sole_deferred_member_*` (the deferral is
+  recorded at the box start, not at the tick), and in
+  `test_sem33_box_skip_*`, `test_sem33_every_member_skipped_*` and
+  `test_sem11_window_skip_*` either the box start now records the skip,
+  or the box starts inside the window so the tick after the close still
+  exercises the mid-run skip. `test_sem33_box_skip_transition_route_*`
+  starts run two inside the window, so the tick's skip still pins that
+  the resolution mark lands before the SUCCESS->INACTIVE transition.
+  INTEGRATION. On top of DL-243, a FORCE_STARTJOB on a held standalone job
+  clears the hold before the skip, so
+  `test_sem33_force_start_on_a_held_standalone_job_meets_the_skip` now
+  expects the OFF_HOLD record and the cleared flag; the skip itself is
+  unchanged.
+- DL-247 Machine load is checked only for a positive priority but held
+  by every start, and a load waiter blocks lower priorities on its machine
+  (2026-10-02; capacity.py, oracle.py, ir.py, runner_preflight.py,
+  runner_ledger.py, simulation_register_rows.py; autosys-semantics ss5
+  load-balancing row; runner-design ss8)
+  THE VENDOR. TechDocs 24.2. The priority attribute page: "A lower number
+  attribute value indicates a higher priority. If you do not set the
+  priority attribute or the priority is set to 0, the job is not queued
+  behind other jobs and runs immediately on a machine if resource
+  dependencies permit or if the job has no resource dependencies. The
+  scheduler ignores any load unit values defined for the job or machine
+  when the job has a priority value of zero." The default is 0. How AutoSys
+  Workload Automation Queues Jobs: "However, even when jobs have a
+  priority of 0, AutoSys Workload Automation tracks job loads on each
+  machine so that jobs with non-zero priorities can be queued." The
+  job_load attribute page: "When you force a job to start, for example by
+  using the sendevent command to issue a FORCE_STARTJOB event, the job runs
+  even if its load exceeds the machine's max_load value." The queueing
+  page again: "A job in the QUE_WAIT state for one machine attribute value
+  automatically blocks all the lower priority jobs that specify the same
+  machine attribute value. It does not automatically block higher or equal
+  priority jobs that specify the same machine attribute value or a job
+  that specifies a different machine attribute value." Its first sentence
+  lists priority among the load balancing attributes. It works an example
+  on machine cheetah, max_load 80: JobB (50) and JobC (30) run, JobA (load
+  50, priority 70) and JobD (load 30, priority 80) wait. "If JobC finishes
+  first, only 30 load units become available, so JobA and JobD remain
+  queued until JobB completes."
+  THE READING. The two priority-0 sentences agree. "Ignores any load unit
+  values" governs the job's own start: it skips the load check. "Tracks
+  job loads" governs everyone else: its load counts against the machine
+  while it runs. This is the FORCE rule too.
+  THE DEFECTS. A job with no priority, or priority 0, queued behind a full
+  machine, and so did a FORCE_STARTJOB of a job with a positive priority.
+  In the cheetah example with JobC first, the oracle kept JobA queued but
+  started JobD. A new lower-priority arrival started beside a queued
+  higher-priority job whenever its own load fit.
+  THE BEHAVIOR. One: every start reserves its `job_load` on a sized
+  machine, whatever its priority. Only a start with a positive priority
+  checks it. An unset, zero or malformed priority reads as 0, the vendor
+  default; such a start may take the machine over max_load, and its
+  `resources:` still gate it. Two: a FORCE_STARTJOB also checks the named
+  resources only, and also reserves its load. Force belongs to the event,
+  not the row: a forced job that queues on a named resource is readmitted
+  by the ordinary test, load included. Three: a job blocks another when it
+  is QUE_WAIT, not held, not a member of a box that stopped running, has a
+  positive priority, loads the same machine, has a strictly lower
+  priority number, and its own load does not fit now. A queued job whose
+  load fits waits on a named resource; the vendor says such a job does
+  "not automatically block lower priority jobs that specify the same
+  machine attribute value". The blocked job needs a positive priority on
+  that machine and nothing more: priority is a load balancing attribute,
+  so a job with no `job_load` is blocked too. Priority 0 and an unset
+  priority are never blocked. The test runs on a fresh start and in the
+  readmission scan. Four: a job leaving QUE_WAIT, and a waiter put
+  ON_HOLD, wake the queue, since either can lift a block with no capacity
+  freed. An admission, QUE_WAIT to STARTING, is not such a wake: the scan
+  that made it sees it on its next pass. A box that leaves RUNNING lifts
+  its queued members' blocks at once, and owes an admit-only scan when
+  any queued job checks machine load. The owed scan runs at the waiter
+  step of the outermost transition, after that transition's release and
+  its referencer wakes (DL-50's order), or at the end of an INACTIVE
+  batch; any scan that runs first pays it. It admits other waiters that
+  now fit and are no longer blocked, and leaves every member of a stopped
+  box queued until a release cancels it, as DL-158 and DL-54 require. A
+  release inside that scan asks for a full scan, and the running loop
+  makes its next pass a full one, so the release still cancels. Without
+  the scan a job blocked only by such a member could wait with nothing
+  left to release, and a later arrival could overtake it. Five: preflight refuses a
+  non-pool job whose positive priority comes with a `job_load` above its
+  machine's `max_load`, as it refuses a QUANTITY above a resource's
+  amount. Such a job can never fit, and as a load waiter it would block
+  every lower priority on that machine forever (DL-59). Priority 0 and an
+  unset priority skip the check and are exempt. The queue still has no
+  resource hold-and-wait; priority blocking can starve a lower priority
+  only while a higher-priority waiter cannot yet fit.
+  SUPERSEDED. In DL-50 (4), "Waiters admit greedily in (priority,
+  enqueue-seq, name) order" holds for the order only: a waiter whose load
+  does not fit now stops lower priorities on its machine, where the greedy
+  scan passed them. In DL-50 (8), Qr2's "priority direction
+  (lower-number-higher assumed ..." is now the documented direction, and
+  an unset priority no longer checks machine load. DL-50 itself is not
+  edited.
+  RECORDED CHOICES. A FORCE_STARTJOB on a job already in QUE_WAIT stays
+  refused as already queued; the vendor advises a CHANGE_PRIORITY event to
+  0 instead, which is not modelled. A negative priority reads as 0 for
+  load and is not refused. The preflight WARN for a `job_load` on a pool
+  machine still fires at priority 0. A queued member of a box that
+  restarts keeps its old QUE_WAIT row, since the DL-242 reset skips live
+  and queued rows, and it blocks again; that is older behavior, not
+  changed here. The new queue wakes also change the trace of an estate
+  with no load or priority: a KILLJOB on an unrelated queued job now
+  scans the queue and cancels a queued member of a stopped box at once. A
+  blocked job with no `job_load` is admitted with the cause "admitted:
+  resources acquired (DL-50)" although it acquired nothing; the cause
+  text is left as it is.
+  STILL OPEN. Qr2 keeps one pin: among resource waiters an unset priority
+  sorts behind every declared one, explicit 0 included, though the vendor
+  default is 0. The queueing page's named-resource blocking ("A job in
+  the RESWAIT state for one resource name automatically blocks all the
+  lower priority jobs that specify the same resource name") is not
+  modelled. Nor is the RESWAIT-after-load corner, where a job whose load
+  passed waits on a resource without holding load. A forced job's reuse
+  of resources it already holds is not modelled. The queueing page says a
+  job with resource dependencies does not use the load-limiting process:
+  "Instead, the resource manager (AutoSys Workload Automation) is used to
+  select the best machine to run the job." That is not modelled; dsl41
+  checks load for a job that also states `resources:`, as before. Pools keep DL-49 and
+  Qr3's unmodelled throttle and are outside both rules.
+  VERSION. `STATE_MACHINE_VERSION` moves to 8: a replay with machine-load
+  demand or priorities admits differently, and a replay with queued jobs
+  can wake and cancel differently.
+  Tests: test_oracle.py `test_dl247_*` (each contender kind on a full
+  machine and against an exhausted named resource, a forced start's load
+  still held, unset and zero skipping the check but holding load, a
+  running priority-0 job against positive and zero arrivals, the cheetah
+  example in both completion orders, the blocking matrix of lower, equal,
+  higher, zero, unset and another machine, a positive priority with no
+  `job_load` blocked or not, the blocked arrival's later start, a block
+  lifted by KILLJOB, ON_ICE and ON_HOLD, a box stopping with a blocking
+  member queued and a later arrival after it, the box-stop scan after a
+  release and a referencer, a release inside that scan, a held waiter, a
+  waiter short only on a named resource); test_resources.py
+  `test_dl247_checked_starts_fit_and_respect_priority_blocking`, a
+  property over arrivals, forced arrivals and completions that checks
+  each checked start against the rows; test_runner_scheduler.py
+  `test_preflight_resources_refuses_a_positive_priority_load_above_max_load`.
+  Rewritten to the vendor rule:
+  `test_dl50_machine_load_throttles_by_job_load_vs_max_load` (its jobs
+  now set priority 1), and the register's QUE_WAIT and Qr6 fixtures,
+  which set priority 1 so they still queue on load. The Qr2 register row
+  moves from facet `direction` to `unset-order`.
+- DL-248 A relative must_complete deadline belongs to the schedule slot:
+  the tick arms it at tick plus that slot's offset, and a single relative
+  must-time offset also counts against start_mins (2026-10-02; oracle.py,
+  ir.py, runner_ledger.py, simulation_register_rows.py;
+  autosys-semantics SEM-34 and ss8)
+  THE VENDOR. TechDocs 24.2. The must_complete_times attribute page: "The
+  must complete times are calculated relative to the start_mins or
+  start_times attributes." Its relative example: a job runs at 10:00,
+  11:00 and 12:00, and "Each job run must complete within 8 minutes after
+  each start time (10:08 a.m., 11:08 a.m., and 12:08 p.m.)". Its
+  start_mins example runs every 10 minutes with +7: "the 2:10 p.m. job run
+  must complete by 2:17 p.m." How Must Start Times and Must Complete Times
+  Work: the CHK_COMPLETE event for the next must complete time is
+  inserted with the job; "The scheduler checks for the SUCCESS, FAILURE,
+  or TERMINATED events. If the job has not completed, a
+  MUST_COMPLETE_ALARM is issued." After the job completes, the scheduler
+  inserts a new STARTJOB, CHK_START and CHK_COMPLETE.
+  THE DEFECT. The oracle armed the relative must_complete timer when the
+  job actually started, from the start instant. A tick at 08:00 blocked
+  until 08:10, with +8, alarmed at 08:18 and not at 08:08. A job that
+  never started got no completion check at all.
+  THE RULE. The STARTJOB tick arms the relative must_complete deadline
+  beside must_start's, at tick plus the offset `_sla_offset` names for
+  that slot. A late start neither moves nor re-arms it. The timer carries
+  the job's run_number at the tick. The run the tick asks for is the
+  first run to begin after it. The deadline is met once that run is no
+  longer STARTING or RUNNING, or once a later run has begun, since runs of
+  one job never overlap. Otherwise it alarms, including when no run began.
+  ONE AT A TIME. At most one relative must_complete deadline is pending
+  per job. The process text inserts the next CHK_COMPLETE only "after the
+  job completes", so a slot that passes while a run is live, or while an
+  earlier tick's deadline is pending, gets no deadline of its own. A tick
+  arms one only when the job is not STARTING, RUNNING or QUE_WAIT and no
+  earlier must_complete timer of the job is still unmet and unfired. A
+  met deadline stops counting as pending at once; a fired one leaves the
+  heap. The pending test reads the timer heap, so no new state is kept.
+  The same text suggests one-at-a-time for CHK_START too; must_start keeps
+  its per-tick arming, left for a separate change.
+  Elapsed run time stays term_run_time's. Absolute forms stay carried and
+  unarmed. `pending_timers` reports the deadline live by the same rule, so
+  a never-started job shows it.
+  RECORDED CHOICES, the smallest rule the vendor sentences allow. A
+  terminal status from before the tick does not meet it. A held
+  job's tick, an iced job's tick and a member's tick while its box is not
+  RUNNING all arm the deadline, as they arm must_start's; the iced and
+  box cases alarm, because no run follows. FORCE_STARTJOB, a condition
+  edge, OFF_HOLD and a run_window deferred start are no ticks and arm
+  nothing; a run they begin can meet an earlier tick's deadline. The
+  ON_NOEXEC bypass is a run and meets it.
+  START_MINS. Lowering refused every must-time without start_times. It
+  now accepts the documented form against start_mins: a single relative
+  offset, broadcast to every start_mins tick. A list of relative offsets
+  or an absolute form against start_mins is not specified by the vendor
+  pages and stays open, so lowering still refuses it, and says so. No
+  slot pairing exists for start_mins, and the canonical form needs no
+  change: a single offset has no order to keep. The register gains a
+  `start-mins` facet row for each of must_start_times and
+  must_complete_times.
+  BROADCAST. The single relative offset that broadcasts over several
+  start_times moves from [?] to [V]. On every captured edition's
+  must_start_times and must_complete_times pages, the note that counts
+  must times against start times sits inside the absolute-format list
+  item, and the relative syntax is a single `+minutes` for each start
+  time; the 24.2 must_complete_times page: "Each job run must complete
+  within 8 minutes after each start time". A list of several relative
+  offsets has no documented syntax and stays [?]. The register's
+  `sla-offset-broadcast` row moves from provisional to supported.
+  LATENCY. A job with only must_complete_times can now be latent at a
+  period boundary while not executing, because a tick armed a deadline
+  and no run followed, so classify can return R or A for it as it already
+  does for must_start.
+  STILL OPEN. The first-offset fallback for an unmatched instant is an
+  unchanged [?] pin. A run that ends by an injected non-terminal status
+  counts as ended. A KILLJOB that dequeues a QUE_WAIT run sets TERMINATED
+  without a new run number, so the oracle alarms where the vendor's check
+  would see a TERMINATED event; it joins the injected-status corner. A
+  strict reading of the CHK_COMPLETE text would decide both.
+  VERSION. `STATE_MACHINE_VERSION` moves to 9: the must_complete timer is
+  armed at a different moment and carries the tick's run, so a replay
+  alarms differently.
+  Tests: test_oracle.py `test_sem34_must_complete_*` (blocked to the
+  deadline, the late start alarming at 08:08 and not 08:18, a late start
+  complete in time, distinct offsets anchored to their own tick, the
+  start_mins +7 example, a second tick while the first deadline is
+  pending, a tick on a live job, two latched ticks with one late run, a
+  later run, prior terminal history, held, iced and box-not-running
+  ticks, OFF_HOLD, a run_window deferred start, the ON_NOEXEC bypass, a
+  run ended while STARTING, FORCE_STARTJOB, the pending timer); test_ir.py
+  start_mins ok and error shapes.
+  Rewritten to the vendor rule: test_nightbank_boundary.py
+  `test_b1_two_timers_due_at_exactly_t_are_c1s_and_the_next_one_is_c2s`
+  arms the region boxes' deadlines with STARTJOB, where it used
+  FORCE_STARTJOB, which no longer arms one.
+- DL-249 run_window endpoints across a DST change follow the vendor's
+  rules (2026-10-02; oracle.py, timezones.py, runner_ledger.py,
+  simulation_register_rows.py, simulation-coverage.md; autosys-semantics
+  SEM-33)
+  THE VENDOR. TechDocs 12.1 and 24.2 carry the same text. "Daylight Time
+  Changes": "When the specified end of the run window falls during the
+  missing hour, AutoSys Workload Automation recalculates its end time, so
+  that the effective duration of the run window remains the same. For
+  example, the product recalculates a run window of 1:00 - 2:30 so that
+  the window ends at 3:30 and the run window remains open for 90
+  minutes." "When the specified start time of the run window falls during
+  the missing hour, AutoSys Workload Automation moves the start time to
+  3:00. The end time does not change, so the run window is shortened. For
+  example, a run window of 2:45 - 3:45 becomes 3:00 - 3:45". "When both
+  the start time and the end time of the run window, fall during the
+  missing hour, AutoSys Workload Automation moves the start time to the
+  first minute after 3:00 and the end time to one hour later. Therefore,
+  the resulting run window might be lengthened. For example, a run window
+  of 2:15 - 2:45 becomes 3:00 - 3:45". "Standard Time Changes": "When the
+  specified start of a run window is before the time change and its
+  specified end occurs during the repeated hour, the run window closes
+  during the daylight time period (the first hour). For example, a run
+  window of 11:30 - 1:30 ends at 1:30 DT, not 1:30 ST". "When the
+  specified opening of the run window falls during the repeated hour,
+  AutoSys Workload Automation moves its start time to the second,
+  standard time hour. The end time does not change ... a run window of
+  1:45 - 2:45 becomes 1:45 ST - 2:45 ST." "When both the specified start
+  and end of the run window occur during the repeated hour, the run
+  window opens during the second, standard time hour."
+  THE DEFECT. The oracle compared the attempt's local wall time with the
+  window's bare wall times. On 2026-03-08 in America/New_York, 01:00-02:30
+  was closed at 03:15 EDT, where the vendor keeps it open until 03:30.
+  2:45-3:45 deferred to 03:45 EDT, where 02:45 maps past the gap, not to
+  03:00. On 2026-11-01, 23:30-01:30 was open again at 01:20 EST, and
+  windows that open in the repeated hour were open in its first pass.
+  THE BEHAVIOR. When the job's zone has a change of the documented shape
+  on the attempt's local date or within two days of it, the oracle builds
+  the windows that open on the four local days around the attempt as
+  pairs of engine instants (`_window_span`). Containment and the
+  closer-edge rule run on those instants; the inclusive endpoints, the
+  equal-endpoint pin and the midpoint pin are unchanged. The vendor's
+  rules describe two distinct endpoints, so an equal-endpoint window is
+  the single instant its opening maps to: `"02:30-02:30"` on 2026-03-08
+  in America/New_York is 03:00 EDT, not 03:00-03:30. Spring: an
+  opening in 02:00-02:59 moves to 03:00, and a close in it takes the
+  fold=0 instant, which keeps the window's length and is one hour later
+  when the opening is in the missing hour too. The vendor moves that
+  opening "to the first minute after 3:00"; it is pinned to 03:00 exactly.
+  Fall: an opening in
+  01:00-01:59 takes the second, standard-time pass. A close in it takes
+  the first, daylight-time pass, unless the opening is in that hour on the
+  same day, when the close follows it into the second pass. The vendor
+  says only where such a window opens; a close before its own opening
+  would be no window, so the close follows. Those two readings are
+  PROVISIONAL, this project's pins with no question label: the register
+  row `job_attr:run_window#dst-both-in-hour` carries them. A box start
+  decides a member's disposition through the same path (DL-246).
+  `dst_change` in timezones.py names the shape from PEP 495 offsets, and
+  `dst_change_near` is the two-day guard. The guard checks for a zone
+  first, and a day outside the calendar's range counts as no change.
+  SCOPE. Coverage is decided by the offset shape of each change, not by a
+  list of zones. A spring change is covered when 02:00-02:59 is missing
+  for exactly one hour, and a fall change when 01:00-01:59 repeats for
+  exactly one hour, as in America/New_York. So Europe/Berlin's and
+  Australia/Sydney's spring changes are covered and their fall changes,
+  which repeat 02:00-02:59, are not. Europe/London's and Europe/Dublin's
+  fall changes are covered and their spring changes, which skip
+  01:00-01:59, are not. Other shapes, such as a half-hour change or a
+  change at another hour, keep the wall-time comparison. That is
+  unverified: the vendor text gives no rule for them, and the register
+  carries the row `job_attr:run_window#dst-other-shape` with no label
+  opened. Zones without DST and fixed offsets never meet the new path,
+  nor does a job read on the engine clock (no `timezone:` and no
+  `default_tz`). A job with no `timezone:` under a `default_tz` reads that
+  zone (DL-155) and meets the new path as a zoned job does. Away from a
+  change the wall-time comparison runs as before.
+  UNCHANGED. start_times and start_mins conversion is not touched:
+  runner-design E10 stays open, with its fold=0 pin. The vendor's
+  example that a 1:15 start time inside an 11:30 - 1:30 window "would be
+  calculated for 1:15 ST and the job would not run" depends on E10. It is
+  recorded in SEM-33, not modelled.
+  VERSION. `STATE_MACHINE_VERSION` moves to 10: a replay with a window
+  check near a DST change can decide inside, defer or skip differently,
+  and can queue a deferred start at another instant.
+  Tests: test_oracle.py `test_sem33_spring_*` (a close in the missing
+  hour, an opening in it, both in it), `test_sem33_fall_*` (a close in
+  the repeated hour, an opening in it, both in it),
+  `test_sem33_dst_window_*` (a week before and the day after the change,
+  America/Phoenix on the change day, and two and three days either side
+  of the change), `test_sem33_dst_equal_endpoints_stay_one_instant`,
+  `test_sem33_spring_window_crossing_midnight_into_the_missing_hour`,
+  `test_sem33_dst_rules_follow_the_offset_shape_not_the_zone_name`
+  (Australia/Sydney's spring change, Europe/London's fall change),
+  `test_sem33_dst_guard_at_the_ends_of_the_date_range`,
+  `test_sem33_box_start_on_a_spring_change_defers_to_0300`;
+  test_timezones.py `test_sem33_dst_change_names_only_the_documented_one_hour_shape`,
+  `test_sem33_dst_change_near_looks_two_days_either_side`.
+  No existing test pinned the old DST window behavior. The docstring of
+  `test_the_conversion_carries_the_dst_edges_at_the_default_fold` now
+  names `_window_span` as the caller that passes fold=1 near a change,
+  and says the wall-time path's fold=1 hand-off is now reached only by
+  changes of another shape.
+- DL-250 Vendor support limits and evidence for pinned defaults, with no
+  behavior change; Q11 opens for the WEKR reading (2026-10-03;
+  docs/autosys-semantics.md SEM-02, SEM-04, SEM-08, SEM-09, SEM-24,
+  SEM-37, ss5 and ss9; docs/runner-design.md ss15; docs/ir-design.md;
+  docs/jil-statement-syntax.md; docs/citation-index.md;
+  src/dsl41/simulation_register_rows.py; docs/simulation-coverage.md;
+  src/dsl41/ir.py and src/dsl41/conditions.py docstrings;
+  tests/test_autocal.py, tests/test_autocal_breadth.py and
+  tests/test_conditions.py comments)
+  STATUS. The "status Attribute" page (AutoSys 24.2) lists seven values:
+  FAILURE, INACTIVE, ON_HOLD, ON_ICE, ON_NOEXEC, SUCCESS and TERMINATED.
+  SEM-24 quotes the set and drops its [?]. dsl41 models four values and
+  refuses SUCCESS, FAILURE and TERMINATED at lowering. SEM-24 and the ss5
+  row state this as a support limit. The lowering message already names
+  the four.
+  ENVVARS. The "envvars Attribute" page allows several `envvars` lines.
+  Lowering refuses a repeated one as a duplicate attribute. The ss5 row
+  states the limit beside DL-240's run-time refusal. The workaround is one
+  line with a comma-separated list.
+  CONDITIONS. The "condition Attribute" page says "You cannot mix case".
+  It gives 9998.59 as the largest finite hours.minutes lookback, and 9999
+  alone means indefinite. SEM-04 said 9999.59; it now says 9998.59. SEM-02
+  and SEM-04 state the leniencies as accepted but undocumented input:
+  mixed case within a keyword (`sUCCESS`, `AnD`), mixed case across the
+  keywords of one condition (`SUCCESS(a) and failure(b)`, the likelier
+  reading of the vendor sentence), and 9999.00 to 9999.59 read as finite
+  windows. The conditions.py docstring and one error message drop the old
+  maximum.
+  RESOURCES. The ss5 resources row states three loud lowering refusals as
+  support limits. `QUANTITY=ALL` asks for all units. For a renewable
+  resource the workaround is to write its `amount`; for a depletable one
+  that is not exact, since its free units fall below `amount` after use. A
+  real-resource group with `VALUEOP` and `VALUE` has no workaround. One
+  resource name defined on several machines is allowed by the
+  "insert_resource Subcommand" page; dsl41 refuses it as a duplicate,
+  with no workaround.
+  JOB_TYPE. The "job_type Attribute" page gives CMD as the default.
+  Lowering requires the attribute and refuses its absence. A new ss5 row
+  states this as a support limit. The ir.py docstring said autorep -q
+  output always emits the attribute; that was never measured, and the
+  docstring now says it is expected, not measured.
+  EXIT CODES. The "success_codes Attribute" and "fail_codes Attribute"
+  pages allow integers from -2147483647 to 2147483647. Lowering refuses a
+  negative code as malformed. SEM-09 states the limit.
+  GLOBALS. No vendor page documents an `insert_global` or `delete_global`
+  JIL subcommand. The condition page says globals are set with the
+  sendevent command. SEM-08, ir-design and jil-statement-syntax mark the
+  statements as dsl41 input forms with [?] and keep their behavior.
+  QR1. The "resources Attribute" page gives FREE's default as Y: "Frees
+  the units only if the job completes successfully." DL-50 pins release
+  on every terminal outcome for a renewable request with no FREE. The pin
+  stays. Qr1 waits for a decision between the documented default and the
+  pin. The register row and the ss5 row record the documented default.
+  QR6. "EvaluateQueuedJobStarts" (Administrating > Configure a Scheduler,
+  AutoSys 24.2) names the default: "By default, AutoSys Workload
+  Automation re-evaluates the starting conditions for these jobs other
+  than the date condition check for the day of evaluation before starting
+  them." The parameter takes 0, 1 or 2. 0 starts the job without
+  evaluating its starting conditions. 1 evaluates them other than the
+  day's date check: "This is the default". 2 evaluates them including that
+  check. Under 1 the scheduler does not re-evaluate run_calendar,
+  days_of_week, start_times or start_mins. A failed check sets INACTIVE,
+  or ACTIVATED inside a running box. "Start Conditions" (AutoSys 24.2)
+  agrees: the scheduler re-evaluates "unless you configure AutoSys
+  Workload Automation to skip starting condition evaluation for queued
+  jobs". dsl41's Qr6 pin is mode 0. The pin stays; moving to the vendor
+  default waits for a decision. The register row records the default.
+  E6. The "watch_interval Attribute" page (AutoSys 24.2) gives a default
+  of 60 seconds. It says a job watching for existence, not size, whose
+  file already exists completes at once, and watch_interval is ignored.
+  The "watch_file_min_size Attribute" page says a job with no minimum
+  size completes if the file exists. "Define a File Watcher Job" gives 30
+  seconds on an agent. runner-design ss15 records this. The pin of two
+  stable polls and the 60-second default stay under E6 until decided.
+  E10. "Standard Time Changes" and "Daylight Time Changes" (AutoSys 24.2)
+  document the DST corners. In the fall, an absolute start runs in the
+  second occurrence and start_mins run in both hours. In the spring, an
+  absolute start in the missing hour runs in the first minute of the
+  next hour, and only the first of several such starts runs.
+  runner-design ss15 records this and how the fold=0 pin differs. The
+  fold=0 pin stays under E10 until decided; the register row no longer
+  says no vendor rule exists.
+  WEKR AND Q11. "Date Condition Keywords" lists the WEKR forms as WEEK#,
+  WEEKX and WEEKM with a different week start: a week-of-year reading.
+  Its `WEEKDXn` entry says "You can specify a different start day by
+  using the WEEKDstartdayXn keyword" (12.1 and 24.2): a day-of-week
+  reading. The 24.2 render spells the anchor as a digit, `WEKRn`, n from
+  1 to 7, with Monday as 1 in its example; 12.x spells it `WEKRddd`.
+  dsl41 reads WEKR as a recurring weekday, ordinals 1 to 7 and named
+  anchors only; `WEKRMon#08` to `#53` are refused loudly. Q11 opens in
+  dossier ss9 for the choice between the readings, the partial first and
+  last weeks, and the numeric anchors 2 to 7. The `cal_family:wekr`
+  register row moves from supported to provisional under Q11, and
+  citation-index's Q row now runs to Q11. The current reading is the pin.
+  UNCHANGED. No code path, default or earlier open-question pin changes,
+  and `STATE_MACHINE_VERSION` stays. The pins that stay are Qr1 and Qr6
+  (DL-50), E6, E10's fold=0 half (DL-45, DL-155), the four-value SEM-24
+  model, the required `job_type`, and the WEKR reading (Q11). Each waits
+  for a separate decision.
+- DL-251 Escaped-colon time values accepted; must_*_times above 23:59
+  stays a refusal, now named (2026-10-03; ir.py, minify_rules.py,
+  autosys-semantics.md SEM-32/SEM-34, jil-statement-syntax.md rule 2)
+  THE DEFECT. JIL syntax rule 6 (TechDocs 24.2, condition-attribute
+  page): "you must use escape characters (a backslash) or must enclose
+  the value in quotation marks with any colons that are used in the
+  value of an attribute statement. For example, to define the start
+  time for a job, specify 10\:00 or "10:00"." The start_times page gives
+  `start_times: 10\:00, 14\:00`; the vendor does not show this spelling
+  for run_window or must_*_times, but rule 6 states it as a general rule
+  for any attribute value. `ir.Time.parse` only matched a bare `HH:MM`,
+  so the escaped spelling failed lowering on every `hh:mm` lane, and
+  `minify.py`'s KEEP predicates (`minify_rules._TIME_RE`) refused it too.
+  THE FIX. `Time.parse` unescapes `\:` before the `HH:MM` match, so
+  `10\:00` lowers like `10:00` on `start_times`, `run_window`,
+  `must_start_times` and `must_complete_times` alike; dsl41 applies rule
+  6 to all four rather than guessing which the vendor meant narrowly.
+  The AST keeps the source bytes verbatim; this is a lowering-only
+  change, and preserve/canonical fidelity (F1/F2) hold unchanged because
+  canonical rendering is purely lexical on `RawAttr.raw_value`, never a
+  re-derivation from IR. Per-token quoting of one list item (`10:00,
+  "11:00"`) is NOT accepted: that spelling is undocumented, and a
+  per-item quoted relative must-time offset (`"+30"`) was already
+  refused at HEAD, so unwrapping it only for the absolute time lane
+  would be an inconsistent, invented rule. `minify_rules._TIME_RE` gains
+  the same optional backslash so `start_times`, `run_window` and
+  `must_*_times` (`_v_times`/`_v_sla`/`_v_window`) all KEEP the escaped
+  spelling instead of refusing it as outside the closed value space.
+  SUPPORT LIMIT, not a widened one. must_start_times
+  (must_complete_times has the same limits): "Limits: 00:00-71:59 (2
+  calendar days ahead of the current calendar day)", with the worked
+  example 10:00 + 24 hours = 34:00. `Time.hour`'s Field bound stays 0-23:
+  an absolute must time is carried and never armed (the oracle owns no
+  calendar, `Oracle._slot_deadline` returns `None` for any non-relative
+  SlaSpec before touching `.times`), so the 24-71 slice of the vendor's
+  range buys nothing at runtime, and widening `Time.hour` would move the
+  CatalogIR JSON schema for every caller of `Time` -- `dsl.py` and
+  `equiv.py` both read `schedule.must_start`/`must_complete` -- forcing
+  an IR_VERSION bump whose only payoff is carrying a number nothing
+  reads. Lowering refuses an hour above 23 in the absolute
+  must_start_times/must_complete_times form with a message naming both
+  bounds: the vendor's 00:00-71:59, and dsl41's supported 00:00-23:59
+  because the value is carried and never armed. `start_times` and
+  `run_window` are untouched -- they were never documented past 23:59,
+  so their existing refusal above 23:59 needs no new message.
+  Tests: test_ir.py gains lowering tests for the escaped spelling on
+  start_times, run_window, must_start_times and must_complete_times, the
+  refusal of a per-item quoted list entry, the must-time-above-23:59
+  refusal and its new message (including the exact 24:00 boundary), and
+  start_times' 24:00 staying refused with the unchanged Field-constraint
+  error. test_ast_fidelity.py's F4 case matrix gains the escaped spelling
+  on start_times (F1 preserve identity, F2 canonical fixpoint).
+  test_minify.py gains a KEEP case for the escaped spelling on
+  start_times/run_window/must_start_times. No IR-F shape moved: IR_VERSION,
+  CatalogIR's schema, and every golden catalog-hash/seal-artifact vector
+  are untouched.
+- DL-252 Semantic switches: production-selectable readings, first switch
+  ice-lookback; negative exit codes refused with their reason
+  (2026-10-03; semantics.py, period.py, oracle.py, runner.py,
+  runner_startup.py, runner_history.py, attest.py, classify.py,
+  rehearse_check.py, cli_common.py, cli_run.py, cli_estate.py, ir.py,
+  simulation_register_rows.py, runner-design.md ss8a, period-model.md
+  ss2.1/ss10.2, autosys-semantics.md SEM-09/SEM-20/Q10, README.md)
+  THE RULE. dsl41 is going to production against real AutoSys estates.
+  The owner's rule for defaults: where AutoSys behavior is documented,
+  dsl41 follows it by default; where dsl41's own choice is safer or more
+  useful, dsl41 keeps its choice by default. In both cases the other
+  behavior must be selectable and documented, so a real incompatibility
+  found after rollout can be flipped without a code change.
+  THE MECHANISM. `semantics.py` holds a closed registry. Each entry has a
+  kebab-case name, its allowed values, its default, the value matching
+  documented AutoSys behavior (or "unknown"), a one-line description,
+  and an `affects` predicate naming the jobs a flip can change.
+  `SemanticSwitches` is the frozen resolved view, one typed attribute
+  per switch; `resolve` is the one place a default is read.
+  `RuntimeProfile` gains `semantics: dict[str, str]`, which holds only
+  explicit overrides. A validator refuses an unknown name or a value
+  outside the switch's set, naming the allowed names or values, and
+  normalizes an explicit default away (PR-15a: `ice-lookback=true` is
+  the same profile and hash as no override, so a resume naming it is
+  not drift). `--semantics NAME=VALUE` (repeatable) sets them on `run`
+  and `rehearse`, and `--next-semantics` on `seal` for the period it
+  opens; one name given two different values is refused. The Oracle
+  takes the resolved switches in its constructor (default: the registry
+  defaults). The engine runs its period's pin; an engine with no estate
+  takes them from its caller, and one given switches that disagree with
+  its pin refuses. Static tools with no profile use the defaults:
+  equiv, lint, derive, preflight's oracle check, and the genesis credit
+  of `rehearse --check-cadence`; the cadence sweeps use the rehearsal's
+  own switches.
+  WHY A PROFILE FIELD. DL-06's resolve-and-delete switch stays the
+  protocol for open questions under investigation. It is not production
+  configuration: an environment variable or a module constant is not
+  recorded with the run, so a replay or an audit on another machine could
+  read the log under other semantics than the engine used. In the
+  profile, an override is part of `runtime_hash` and the period's
+  identity. `semantics` is a declared field in `_derive_runtime_profile`,
+  like the machine identity: a resume or a period opening launched with
+  different switches is refused as profile drift, exactly as a changed
+  `--timezone` is.
+  REPLAY. Replay (`journal`, `runs`, audit) and the boundary
+  classifier's truth oracle read the switches from the period's profile,
+  as they read `tz_aliases`. Replay now requires the period's manifest,
+  bound to its segment by `check_manifest_against_segment`, and refuses
+  without one. It used to degrade to defaults: a root whose manifest
+  was removed after an `ordinary` rehearsal replayed under `true` and
+  reported a box FAILURE for a run that ended SUCCESS. Every producer
+  meets that contract: `Journal.create`, when it synthesizes the default
+  manifest for a journal-only caller, now writes it beside the log
+  before the segment record, as genesis does. Staged ingress applies the
+  committed manifest's completeness check (`require_manifest_fields`), so
+  a staged profile missing `semantics` refuses instead of committing
+  with a restored `{}`.
+  CLASSIFIER. A flip can change a run in flight. A running box whose
+  `box_success` is `s(m) & f(x, 0)` with `x` iced completes SUCCESS when
+  `m` succeeds under `true` and stays RUNNING under `ordinary`. So each
+  switch is a node of its own in the ss10.2 graph, valued at its
+  effective value, and every job its registry entry's `affects` names
+  depends on it. For `ice-lookback` that is every job with a
+  lookback-qualified atom in its `condition`, `box_success` or
+  `box_failure`. A live such box is R; an armed such job is A with the
+  armed assumption ("the C1 trigger survives under C2 gating"), because
+  the switch changes how its own gate reads; and the boundary-truth diff
+  sees those jobs and reads each side under that side's switches. The
+  `semantics` profile field keeps its field node, with no edges of its
+  own; PR-37a's field map gains a fifth group for it.
+  ONE-TIME HASH MOVE. period-model ss3.2 writes every typed field, an
+  empty collection as `{}`, and protocol-evolution's closed-artifact row
+  rests on that. So `semantics` is always written, `{}` when empty, and
+  a manifest whose profile lacks it is refused like any other missing
+  field. This moves `runtime_hash`, once, for every profile, and with it
+  every digest computed over a profile, manifest or seal. Nothing runs
+  in production, so that is accepted; the golden vectors were
+  regenerated and each checked to differ only by the new key and the
+  digests that depend on it. Later switches never move the hash again:
+  a new switch adds a registry entry, not a profile field, and its
+  default lives in code, so a profile without an override for it keeps
+  its bytes. Changing a default later is a state-machine change and
+  bumps `STATE_MACHINE_VERSION` as usual.
+  FIRST SWITCH. `ice-lookback`: what a condition atom with a lookback
+  qualifier reads when its predecessor is on ice and not live. `true`,
+  the default and dsl41's existing behavior, is the literal reading of
+  the AutoSys 24.2 "condition Attribute" page: "If the predecessor job
+  being evaluated for the look-back condition is currently in an ON_ICE
+  status, it always evaluates to true. That is, any look-back evaluation
+  is ignored." `ordinary` drops the qualifier and applies DL-243's
+  ordinary ON_ICE table (Start Conditions, which does not separate
+  lookback atoms): s, d and n true; f, t and exitcode false. It is
+  implemented at the `# PENDING: Q10` branch of `Oracle._atom_true`. Q10
+  stays open over which page a live instance follows; its dossier entry
+  and register row now cite both pages and name the switch.
+  NEGATIVE EXIT CODES. dsl41 keeps refusing a negative code in
+  `success_codes` or `fail_codes`. On POSIX a process exit status is
+  0-255, and the runner records a signal death as TERMINATED with no
+  exit code, so a negative code can never match. Before, `-1` failed
+  with "expected an exit code or lo-hi range", because `-` is the range
+  separator. A well-formed code or range with a negative end now gets
+  its own refusal that says so; a bare `-` and other malformed tokens
+  keep the ordinary malformed-token message. The SEM-09 support-limit
+  sentence gives the reason.
+  UNCHANGED. No default changes in this entry, and
+  `STATE_MACHINE_VERSION` stays. The register gains
+  `profile_field:semantics` and one `profile_alt:semantics.NAME=VALUE`
+  row per switch value; its test derives those members from the
+  registry, so a switch without rows, or a row naming no registry entry,
+  fails.
+- DL-253 Absolute must_start_times and must_complete_times are accepted
+  over 00:00-71:59 and armed as alarms; must_start arms one deadline at a
+  time (2026-10-03; ir.py, oracle.py, runner_ledger.py, boundary.py,
+  estate.py, runner_startup.py, runner.py, period.py, attest.py,
+  runner_history.py, classify.py, cli_run.py, dsl.py, equiv.py,
+  simulation_register_rows.py, simulation-coverage.md,
+  scripts/arch_check.py; autosys-semantics SEM-32, SEM-34, SEM-35 and ss8;
+  ir-design ss4 and ss8; period-model ss10.2)
+  THE VENDOR. TechDocs 24.2. The must_start_times page (must_complete_times
+  has the same text): absolute times in 24-hour format, "Limits:
+  00:00-71:59 (2 calendar days ahead of the current calendar day)". "If
+  you specify the start_mins attribute in the job definition, you can only
+  define relative times. You will get an error if you define absolute
+  times with start_mins." With several start times, the same number of
+  must times, "corresponding to each run of the job". A must time below
+  its start time is written +24 hours: for an 11:00 start, 10:00 the next
+  day is 34:00. How Must Start Times and Must Complete Times Work: CHK_START
+  and CHK_COMPLETE for the next must times are inserted with the job; "If
+  the job has not started, a MUST_START_ALARM is issued"; "After the job
+  completes, the scheduler calculates the next must start time and must
+  complete time" and inserts the next events. "Daylight Time Changes" and
+  "Standard Time Changes" give the DST rules quoted in SEM-34.
+  THE GAP. Lowering refused an absolute must time above 23:59 (DL-251),
+  and the oracle armed no absolute deadline, so an absolute must time was
+  carried and never raised an alarm. must_start armed one deadline per
+  tick, where the vendor inserts the next CHK_START only after the job
+  completes.
+  LOWERING. An absolute must time lowers over 00:00-71:59, the `\:`
+  spelling included. 72:00 and above is refused with a message naming the
+  vendor's limit. An absolute form with start_mins is refused with a
+  message that names the vendor rule. Two ordering rules are refused, each
+  message naming the rule. A must time below its own start time: "If
+  10:00 a.m. is specified, the job issues an error message"; the next
+  day's 10:00 is written 34:00. A must time not earlier than the next
+  run's start time: "The must start time for a run must be earlier than
+  the start times for the next run", with 11:10 against an 11:00 run as
+  the vendor's invalid example. The next run is the next later start time
+  of the day; the latest start's next run depends on the calendar and is
+  not checked, because a weekly job's next run may be days away. Its
+  runtime consequence: with one pending check at a time, a last-slot must
+  time that is still pending at the next day's first tick keeps that tick
+  from arming its own deadline. SEM-34's sentence that lowering never
+  checks ordering now holds for the relative form only. The count and the mixed-form
+  refusals are unchanged; the mixed-form check now runs first. IR-F holds
+  the value as a new `MustTime`, hour 0-71. `Time` keeps 0-23, so
+  start_times and run_window keep their contract.
+  THE RULE. The STARTJOB tick arms the absolute deadline beside the
+  relative ones (DL-248). The tick's slot names the must time by
+  position; the deadline is that time on the tick's local calendar day,
+  in the job's zone, plus a day for each 24 hours past 23. The alarm
+  rules and the run the tick asks for are DL-248's.
+  ONE AT A TIME. must_start now follows must_complete: a tick arms a
+  deadline only when the job is not STARTING, RUNNING or QUE_WAIT and no
+  earlier deadline of that kind is pending. A must_start deadline is
+  pending until it fires or a run begins after its tick. This holds for
+  both forms.
+  DST. On a change of the shape DL-249 detects, a must time in the
+  missing hour is due in the first minute of the next hour, its minute
+  read as seconds (2:05 is 3:00:05). When the paired start is in the
+  missing hour and would run, by the vendor's rule, after its must time,
+  the must time is 3:00:59. A must time in the repeated hour takes the
+  first pass, or the second when the start is in that hour on the same
+  day. Other shapes keep the fold=0 conversion.
+  RECORDED CHOICES. A start time in the missing hour also names its slot
+  at the instant the scheduler ticks it, the fold=0 conversion (E10);
+  this also pairs a relative offset there, which fell back to the first
+  offset before. An instant that is no start time arms no absolute
+  deadline, because the vendor ties the CHK events to scheduled start
+  times; the relative form keeps its first-offset pin. A deadline that
+  falls before its tick is due at the tick. Only the E10 tick of a
+  missing-hour start reaches that, being later than the vendor's start;
+  a must time written below its own start time no longer lowers. These
+  are [?] pins; the register rows `#before-tick` carry the E10 label and
+  `#unmatched-slot` the unmatched instant.
+  KNOWN GAP, not fixed here. On a spring change day `_start_slot` tries
+  the wall-time match first, so a missing-hour start can name the wrong
+  slot: with start_times "02:45, 03:45" the 02:45 tick lands at 03:45 EDT
+  and names slot 1. This interacts with the open start-time DST rule
+  (runner-design E10), which a later slice changes.
+  BASE ZONE. The engine built its oracle with no base zone, so a job
+  with no `timezone:` was read on the engine clock (UTC) while the
+  scheduler ticked it in `--timezone`. Under America/New_York a 23:00
+  start ticks at 03:00 UTC, named no slot and armed no absolute must time.
+  run_window (DL-246, DL-249) read through the same `_job_tz` and was
+  affected too. The engine's oracle now takes the period's pinned
+  `default_tz` and alias table, or the scheduler's own where no period is
+  pinned, and every replay (`dsl41 journal`, `dsl41 runs`, audit's
+  re-derivation, the classifier's condition check) takes the same pin
+  through `period.default_tz_of`. Slots, absolute must times and
+  run_window are now read in one zone everywhere.
+  CLASSIFICATION. The base zone now reaches run_window, so period-model
+  ss10.2's dependency table is amended: the timezone basis and the
+  `default_tz`/`tz_aliases` profile fields reach every job with
+  `start_times`, `start_mins`, a calendar or a `run_window`
+  (`classify.reads_zone`). Absolute must times need start_times and were
+  already covered. Before, a window-only member of an executing box
+  classified carry across a base-zone change, and after reopening its
+  window was read an hour away, so it skipped and the box completed
+  without it. A base-zone change now refuses such a box (R, and its
+  member R) and gives a waiting or armed job A with the general latent
+  sentence, as for a start-time job. A job with its own `timezone:` keeps
+  the edge, as scheduled jobs always have: the alias table resolves its
+  name.
+  OLD JOURNALS AND SEALS. The catalog hash covers `ir_version`, so every
+  catalog hashes differently under this build. Each door now checks the
+  version before it compares a catalog hash. `check_leader_eligibility`
+  checks the state-machine version first, then the catalog-hash recipe
+  version (`catalog_hash_for`), then the hash. `validate_staged` checks the
+  candidate's state-machine version before it recomputes the hash.
+  Every opener of a committed boundary checks the version it names first,
+  before it claims, writes or imports (`boundary.check_opening_version`):
+  the resume ladder right after it selects the seal, `open_next_period`,
+  and the read-only half of a physical roll (`dsl41 run --open-from`,
+  `dsl41 estate roll`), which used to write the new root's sentinel, take
+  the claim and import the bundle before a catalog-hash comparison
+  refused. `dsl41 journal` and `audit` already checked the version first. A journal
+  or seal an older build wrote is refused for its state-machine version,
+  never reported as an estate that changed or a bundle that differs. A
+  journal names no `ir_version` of its own; the state-machine version
+  carries the change.
+  VERSIONS. IR_VERSION moves from 0.2 to 0.3: SlaSpec.times holds
+  MustTime, and `scripts/arch_check.py` re-pins the CatalogIR schema hash.
+  `STATE_MACHINE_VERSION` moves to 11: absolute must times arm alarms and
+  must_start arms one at a time, so a replay alarms differently. The
+  catalog-hash recipe is unchanged and `CATALOG_HASH_VERSION` stays 2.
+  Golden vectors regenerated, each verified by reconstruction: the
+  catalog-hash vector in test_period_identity.py, where only the
+  `ir_version` byte and the hash moved, and the seal vector in
+  test_seal_artifact.py, where only the two catalog hashes, the
+  `next_period.baseline_id` derived from them and the digest moved.
+  Tests: test_oracle.py `test_sem34_absolute_*` (the vendor's 10:02/10:08
+  example on time and missed, 34:00 and 71:59, a late start, completion in
+  time, a tick at no start time), `test_sem34_must_start_*` (a tick on a
+  live job in both forms, a tick while a relative deadline is pending),
+  `test_sem34_spring_*` (3:00:05 and 3:00:45, the 3:00:59 special case, the
+  E10 tick of a missing-hour start) and `test_sem34_fall_*` (first pass,
+  second pass); test_ir.py the lowering accept and refuse matrix,
+  including both ordering refusals;
+  test_ledger.py, test_runner_journal.py and test_boundary.py an older
+  build's journal, candidate or committed boundary refused for its
+  version, the boundary on resume and on a physical roll with nothing
+  written; test_runner_scheduler.py `test_dl253_*` absolute must times and
+  run_window under a non-UTC base zone, through start_run and a bare
+  engine; test_classification.py and test_boundary.py `test_dl253_*` a
+  base-zone change under an executing window box (R, refused at phase 1),
+  a deferred window job and an armed absolute-must-time job (A).
+  Rewritten: test_ir.py's DL-251 refusal of a must time above 23:59
+  (24:00 was refused naming 00:00-23:59) became the range matrix, where
+  24:00-71:59 lowers and 72:00 is refused naming 00:00-71:59; test_ir.py
+  `test_dump_contains_ir_version_field` reads 0.3; the SlaSpec tests build
+  `MustTime`; test_runtime_state.py
+  `test_a_deadline_arms_on_a_tick_that_changes_no_row_at_all` let a second
+  blocked tick arm a second must_start deadline beside a pending one, and
+  now lets the first fire before the second tick arms its own.
+- DL-254 ON_ICE, ON_HOLD and ON_NOEXEC are ignored where the vendor says
+  they are (2026-10-03; src/dsl41/oracle.py, src/dsl41/equiv.py,
+  src/dsl41/runner_ledger.py, src/dsl41/simulation_register_rows.py,
+  docs/autosys-semantics.md SEM-05, SEM-20, SEM-21, SEM-22 and ss8,
+  docs/simulation-coverage.md, tests/test_oracle.py,
+  tests/test_preconditions.py, tests/test_runner_tui.py)
+  THE RULE. "sendevent Command -- Change the Executable Status of a Job"
+  (AutoSys 24.2). JOB_ON_HOLD and JOB_ON_ICE: "The event has no effect on
+  jobs with a status of STARTING or RUNNING." JOB_ON_NOEXEC: "The
+  scheduler ignores the JOB_ON_NOEXEC event, if sent to: A non-box job
+  that is in the STARTING, RUNNING, or ON_ICE status; A box job that is in
+  the ON_ICE or RUNNING status; A box job with jobs (including the jobs
+  contained in lower level boxes) in a status other than the following
+  status: ON_HOLD, ON_NOEXEC, INACTIVE, SUCCESS, FAILURE, ACTIVATED, or
+  TERMINATED", and "The JOB_ON_NOEXEC event does not
+  supersede the JOB_ON_ICE event and does not overwrite the ON_ICE status
+  with the ON_NOEXEC status." The text is direct, so the oracle follows it
+  with no switch.
+  THE CHANGE. `Oracle._oob_ignored` decides the case before any flag
+  moves. An ignored event sets no flag, moves no status, wakes nothing and
+  plans no effect. It writes one trace line with the new marker
+  `EVENT_IGNORED`, whose cause names the event and the job's status. This
+  is the START_REFUSED shape: an operator event that did nothing still
+  leaves a visible answer. ON_HOLD and ON_ICE apply to boxes and other
+  jobs alike. A box in STARTING is not on the vendor's ON_NOEXEC list and
+  still takes the flag. The third box case is stated without a gap, so it
+  is modeled: the oracle's statuses outside the vendor's list are
+  STARTING, RUNNING and QUE_WAIT, and an iced job reads ON_ICE. A box
+  that contains such a job at any depth ignores ON_NOEXEC. A waiting
+  member reads INACTIVE here, as SEM-17 maps ACTIVATED.
+  WHAT GOES. DL-13's "ice on a running job takes effect at completion",
+  the SEM-05 [?] pin, is replaced by the vendor rule. `_atom_true` loses
+  its live-status guard on the ice branch: no oracle path ices a live job
+  now, so the flag reads the same whatever the stored status. Only an
+  injected STATUS can make an iced row live, and then the ice reading wins.
+  `equiv._eval_cond` drops the same guard for oracle parity. DL-243's
+  sentence that the `on_noexec` flag is set on every ON_NOEXEC "regardless
+  of status (STARTING/RUNNING/ON_ICE included)" no longer holds. Its
+  event-time INACTIVE move for a FAILURE or TERMINATED job stays.
+  QUE_WAIT. The vendor names STARTING and RUNNING, not QUE_WAIT, so
+  ON_ICE and ON_HOLD keep their handling of a queued job. ON_ICE dequeues
+  it and settles it INACTIVE (DL-50, Qr5). ON_HOLD keeps it queued and
+  held. Treating a queued job as live would be a guess. ON_NOEXEC on a
+  queued job had a defect: the flag was set, and the job was later
+  admitted through `_readmit` and `_run` and executed. The same vendor
+  page states the rule: "If the job is in the QUEWAIT or RESWAIT status,
+  the scheduler removes the job from the load balancing and resource wait
+  queues before placing it in the ON_NOEXEC status." The oracle dequeues
+  the job and moves it to INACTIVE through DL-242's operator-INACTIVE
+  path, exit code cleared, as DL-243 does for a FAILURE job; a queued
+  member of a RUNNING box therefore resolves. It holds no reservation and
+  the engine plans no SPAWN. Then the start is retried, as OFF_HOLD
+  retries it (see HOLD): the job met its starting conditions to be
+  queued, so it normally bypasses to SUCCESS at once. The retry runs
+  after the removal, so it does not contradict the vendor's "removes the
+  job from the ... queues"; it applies the page's other sentence, "When
+  the NOEXEC job meets its starting conditions, the scheduler evaluates
+  this job as successfully completed". A queued job whose condition went
+  false while it waited (conditions are not re-checked in the queue,
+  Qr6) stays INACTIVE until the condition fires again. An earlier draft
+  bypassed the queued job straight from the queue, before any removal;
+  that draft was dropped.
+  HOLD. "The JOB_ON_NOEXEC event supersedes the JOB_ON_HOLD event
+  effectively overwriting the ON_HOLD status with the ON_NOEXEC status."
+  The oracle kept the hold flag beside the noexec flag, so the job stayed
+  held and never bypassed. Now ON_NOEXEC clears the hold. The trace has
+  the ON_NOEXEC line, then an `OFF_HOLD` whose cause names ON_NOEXEC, the
+  shape FORCE_STARTJOB uses when it clears a hold (DL-243). Then the start
+  is retried as OFF_HOLD retries it (`_attempt_start`, not forced, not
+  scheduled), after any status move the event makes. The vendor bypasses
+  a NOEXEC job "When the NOEXEC job meets its starting conditions"; a held
+  job whose conditions already hold has met them, and without the retry
+  it waited for an edge that had already passed: a held box member left
+  its box RUNNING for good. The retry is skipped when the job's run number
+  moved during the event: the event's own wakes already started it (a
+  job woken by a consumer its INACTIVE move restarted), and a further
+  start would be a run with no trigger. The run number is read before
+  the event's transitions, per released job.
+  BOX. "If you send the JOB_ON_NOEXEC event to a box, the effect is the
+  same as sending the CHANGE_STATUS event to INACTIVE for a box. The box
+  enters the ON_NOEXEC status and the scheduler sets the status of all
+  jobs in the box (including all jobs contained in lower level boxes
+  within the box) at all levels to ON_NOEXEC." DL-243 left a box target
+  flag-only. Now every job in the tree takes the flag (clearing any
+  hold), and then DL-242's box INACTIVE path runs: the SEM-18 cascade, one
+  batch, exit codes cleared. The cascade skips rows already INACTIVE, so
+  their exit codes are cleared by a plain store write first, as the SEM-10
+  reset does; otherwise an e() consumer could still read a code the box
+  event was meant to drop. Flags go first, so a box that its own
+  cascade restarts (a box waiting on `n()` of itself) already runs in
+  non-execution mode. The ignore rules guarantee no live, queued or iced
+  job is in the tree, so no kill question arises. Composition with
+  DL-243: a FAILURE or TERMINATED member reaches INACTIVE with its exit
+  code cleared through the box's cascade, the same end state DL-243 gives
+  it alone. A SUCCESS member also moves to INACTIVE. The box-specific
+  sentence names CHANGE_STATUS INACTIVE for the box, and SEM-18 moves
+  every contained job; the single-job SUCCESS exception from "Start
+  Conditions" is read as covering a job targeted directly, not a box's
+  members. A box whose whole tree is already INACTIVE keeps its status,
+  as an INACTIVE job does: only the flags move and nothing wakes. The
+  exception is a box whose parent is RUNNING. The event is CHANGE_STATUS
+  INACTIVE on the box, and DL-242 records INACTIVE->INACTIVE for a
+  waiting member so its parent resolves it and runs the completion door.
+  The box event does the same; otherwise a parent whose only member is a
+  waiting subbox stayed RUNNING. Jobs in the tree whose hold was cleared
+  retry their start after the cascade. A
+  STARTING box (only reachable by an injected STATUS) is not on the
+  ignore list and takes the box path. JOB_OFF_NOEXEC on a box: "all jobs
+  in the box (including all jobs that are contained in lower level boxes
+  within the box) are reset to the INACTIVE, ACTIVATED, or SUCCESS
+  status", so OFF_NOEXEC on a box clears every contained flag, each
+  recorded as an `OFF_NOEXEC`. Without that, the flags the box event sets
+  could never be cleared by the box event that undoes it.
+  NOT MODELED. The same page also says CHANGE_STATUS has no effect on an
+  ON_NOEXEC job, and that a box CHANGE_STATUS INACTIVE leaves ON_NOEXEC
+  members' status alone. The oracle's injected STATUS still moves a
+  flagged job; that is left for a separate decision. Members do not take
+  the flag from a box's definition-time `status: ON_NOEXEC` (SEM-24).
+  A box with no schedule whose condition reads `n()` of itself can
+  recurse without end once it runs in non-execution mode: its members
+  bypass at once, the box completes, `n()` turns true and starts it
+  again in the same input. The recursion predates this decision (an
+  ON_NOEXEC box already bypassed its members); it is recorded, not
+  fixed. The TUI renders `EVENT_IGNORED` lines dim, like other trace
+  commentary; START_REFUSED alone is yellow (DL-64). Left as is.
+  `STATE_MACHINE_VERSION` moves 11 -> 12 (DL-253 took 10 -> 11 first): a
+  v11 replay with one of these events on a live or iced job, or on a box
+  holding one, sets a flag that
+  this build does not; a queued, held or box target derives different
+  rows; and OFF_NOEXEC on a box clears flags v11 left set. A
+  v11 log is refused at every door, and a live v11 estate drains and a new
+  estate is created (period-model ss11), as the earlier bumps did.
+  Register: the `event:ON_ICE`, `event:ON_HOLD` and `event:ON_NOEXEC` rows
+  state the rule; `event:ON_ICE#running` moves from provisional to
+  supported; `trace_marker:EVENT_IGNORED` is new.
+  Tests: `tests/test_oracle.py` gains
+  `test_sem20_on_ice_on_a_live_job_is_ignored`,
+  `test_sem21_on_hold_on_a_live_job_is_ignored` and
+  `test_sem22_on_noexec_on_a_live_job_is_ignored` (box and non-box,
+  STARTING and RUNNING: the row is unchanged, one EVENT_IGNORED line, no
+  planned effect on the engine path, the later failure reads normally
+  and the next start runs), `test_sem22_on_noexec_on_an_iced_job_is_ignored`,
+  `test_sem22_on_noexec_on_a_running_box_does_not_bypass_its_waiting_members`,
+  `test_sem22_on_noexec_on_a_starting_box_still_sets_the_flag`,
+  `test_sem22_on_noexec_on_a_box_with_a_contained_job_in_another_status_is_ignored`
+  (an idle box whose job two levels down is iced or RUNNING),
+  `test_sem22_on_noexec_on_a_queued_job_takes_it_out_of_the_queue` and
+  `test_sem22_on_noexec_supersedes_the_hold_on_a_queued_job` (out of the
+  queue, no reservation, no queue rank, no SPAWN on the engine path, then
+  the bypass), `test_sem22_a_dequeued_noexec_job_whose_condition_went_false_waits_for_it`,
+  `test_sem22_on_noexec_supersedes_on_hold` (a conditioned held job,
+  condition met: bypasses at once; unmet: bypasses when it fires),
+  `test_sem22_on_noexec_on_a_held_member_bypasses_and_completes_the_box`,
+  `test_sem22_on_noexec_on_a_waiting_subbox_resolves_its_running_parent`,
+  `test_sem22_on_noexec_on_a_box_clears_the_exit_code_of_an_inactive_member`,
+  `test_sem22_the_release_retry_does_not_repeat_a_start_the_event_already_made`
+  (leaf and box: q waits on e(a) = 7, a on n(q); the event's wakes start
+  q once per transition of a, and the retry adds none),
+  `test_sem22_on_noexec_on_a_box_cascades_inactive_and_flags_every_level`
+  (a two-level tree with a failed member, a held member and a box_failure
+  verdict: all INACTIVE, all flagged, no planned effect, then a dry run),
+  `test_sem22_on_noexec_on_an_inactive_box_moves_no_status`,
+  `test_sem22_off_noexec_on_a_box_clears_every_level`,
+  `test_sem21_events_on_a_completed_job_still_apply` and
+  `test_sem21_events_on_a_queued_job_keep_their_handling` (ON_ICE and
+  ON_HOLD). Rewritten in
+  place, names kept because DL-243 cites them:
+  `test_ice_on_a_running_job_takes_effect_at_completion` (the s() consumer
+  stayed INACTIVE while the job ran and started once it failed; it now
+  stays INACTIVE after the failure, and the docstring says the name
+  records the replaced behavior) and
+  `test_sem20_ordinary_atom_on_a_live_iced_job_reads_the_real_in_flight_status`
+  (same outcome, s() false while RUNNING; it now asserts no flag is set).
+  `test_sem22_noexec_while_running_then_real_failure_is_not_hidden`
+  and `test_sem22_noexec_on_an_iced_job_is_ignored_and_the_job_stays_failure`
+  keep their outcome and now also assert that no flag is set.
+  `test_sem22_noexec_box_goes_running_and_every_member_bypasses`,
+  `test_sem22_noexec_box_member_whose_condition_never_fires_keeps_the_box_running`
+  and `test_sem22_noexec_box_bypasses_a_nested_member_box_level_by_level`
+  expected members with no trace line before their bypass; each member now
+  first records its own ON_NOEXEC from the box event. The bypass
+  outcomes are unchanged.
+  `test_sem18_a_restart_during_the_cascade_still_wakes_the_resource_waiters`
+  put ON_NOEXEC on a RUNNING member so that its restart would bypass and
+  take no lock. That event is now ignored, and the third box case rules
+  out flagging the box instead. The member now also takes a depletable
+  resource that its first run uses up, so the restart queues instead of
+  taking the lock. Expected statuses: box RUNNING, member SUCCESS ->
+  QUE_WAIT, waiter RUNNING. Removing the owed wake still leaves the
+  waiter QUE_WAIT, so the test still guards it.
+  `tests/test_preconditions.py::test_a_stale_precondition_still_observed_the_clock`
+  and `tests/test_runner_tui.py::test_pilot_the_confirmed_kill_names_the_revision_the_dialog_showed`
+  sent ON_ICE to a RUNNING job only to move its revision. An ignored event
+  moves nothing, so they now inject a RUNNING status on the running job
+  (a CHANGE_STATUS that moves `status_at`), with the same expectations.
+- DL-255 A job waiting on a named resource blocks lower priorities that
+  name it (2026-10-03; capacity.py, oracle.py, runner_preflight.py,
+  runner_ledger.py, simulation_register_rows.py; autosys-semantics ss5
+  resources row; runner-design ss8)
+  THE VENDOR. TechDocs 24.2, How AutoSys Workload Automation Queues
+  Jobs: "The scheduler queues jobs with virtual resource dependencies
+  (whether global or machine-based) based on "like" resource names. A
+  job in the RESWAIT state for one resource name automatically blocks all
+  the lower priority jobs that specify the same resource name. It does
+  not automatically block higher or equal priority jobs that specify the
+  same resource name or a job that specifies a different resource name.
+  The scheduler schedules the job as long as the resources are
+  available." The same page: "The resource dependencies are evaluated
+  after the load balancing attributes are evaluated and the machine has
+  available load units to execute the job." "Jobs with both load
+  balancing and resource attributes that enter the QUE_WAIT state do not
+  consume load units or resources. These jobs do not automatically block
+  lower priority jobs that specify the same resource attribute and a
+  different machine attribute value." "Jobs with both load balancing and
+  resource attributes that enter the RESWAIT state after the load
+  balancing attributes are successfully evaluated do not consume any load
+  units. These jobs do not automatically block lower priority jobs that
+  specify the same machine attribute value and either do not specify the
+  resource attribute or specify a different resource attribute value."
+  Broadcom KB 240816, "AutoSys jobs/resources issue: job stuck in
+  RESWAIT" (AutoSys 12.0): a higher-priority job needing two resources,
+  waiting for the second, blocked lower-priority jobs that needed only
+  the first, although the first was available. The cause it gives is the
+  queueing page's sentence: "A job in the RESWAIT state for one resource
+  name automatically blocks all the lower priority jobs that specify the
+  same resource name."
+  THE DEFECT. DL-247 recorded named-resource blocking as not modelled.
+  A lower-priority job whose units fit started beside a higher-priority
+  job queued on the same resource, on a fresh start and in the
+  readmission scan.
+  THE BEHAVIOR. One: a job is blocked when it has a positive priority,
+  names a sized resource, and a queued job of strictly lower positive
+  priority number names that resource too and is short now on any
+  resource it names. The blocker blocks on every resource it names, not
+  only the short one (KB 240816). dsl41 has no RESWAIT
+  status; that job is QUE_WAIT. The test runs on a fresh start and in the
+  readmission scan. Priority 0 and an unset priority are never blocked,
+  as under DL-247, and never block; this agrees with Qr2's pin that an
+  unset priority sorts behind declared ones among resource waiters. Two: the blocker must have passed its
+  load check. Its load fits now, and no higher-priority load waiter
+  blocks it under DL-247. A job still waiting for load is in QUE_WAIT,
+  not RESWAIT, and the vendor says it does not block on its resource.
+  Three: a queued job holds no units. That was already so, since a start
+  acquires its whole demand at admission; a resource waiter whose load
+  fits does not block on the machine, as DL-247 already said. Four: a
+  block can lift with no unit freed when the blocker returns to its load
+  check. That happens when a start takes load on its machine, or when a
+  new load waiter queues ahead of it. Each such start or enqueue owes
+  DL-247's admit-only scan, and the owed scan now runs when any queued
+  job has a positive priority on a sized machine or a sized resource.
+  The input pays an owed scan at its waiter step, once every referencer
+  it woke has been visited, and no nested transition pays it. DL-247 let
+  the outermost transition pay it; when one input woke several
+  referencers, the next referencer's transition, or a box-start reset,
+  then paid a scan the previous one owed, and a waiter could take
+  capacity ahead of a later referencer. The box-stop scan moves the same
+  way.
+  The other lifts (leaving the queue, ON_HOLD, a box leaving RUNNING)
+  already wake the queue. Five: preflight already refuses a QUANTITY
+  above the resource's amount at every priority (DL-50); its message now
+  also names the block. No other static shape can wedge a waiter: every
+  start checks named resources, so a resource is never over its amount.
+  RECORDED CHOICES. A forced start is blocked too: the vendor's force
+  rule is about load ("runs even if its load exceeds the machine's
+  max_load value"), and the blocking sentence names no exception. A
+  forced start that queues on a resource is readmitted without force, so
+  it then waits for machine load too (DL-247: force lives on the event),
+  although the vendor says a forced job runs even above max_load; that
+  is recorded, not changed. The blocker needs a
+  positive priority, as DL-247's load blocker does; the vendor does not
+  say whether a priority-0 job in RESWAIT blocks. A depletable or FREE=N
+  resource can leave a waiter that never fits, and it then blocks every
+  lower priority naming that resource; the vendor rule implies the same,
+  and the amount left is runtime state preflight cannot see. A box that
+  starts again makes its old queued member count as a load waiter again
+  (DL-247's recorded choice); a resource block this lifts waits for the
+  next queue wake, since a box start owes no scan.
+  SUPERSEDED. DL-247's STILL OPEN items "named-resource blocking" and
+  "the RESWAIT-after-load corner" are settled here. DL-50 (4)'s greedy
+  scan now also stops at a resource waiter. Neither entry is edited.
+  VERSION. `STATE_MACHINE_VERSION` moves up by one: a replay with
+  resource waiters and priorities admits differently.
+  Tests: test_oracle.py `test_dl255_*` (the blocking matrix of lower,
+  forced lower, another resource, equal, higher, zero and unset; the
+  blocked arrival's later start; a block lifted by KILLJOB, ON_ICE and
+  ON_HOLD; a waiter short on one of two resources blocking on both; a
+  box stop lifting a resource-only block; an owed scan waiting for every
+  referencer of the input, with an unrelated job or a box start between
+  them; a load-fitting waiter
+  holding no load; a waiter still short on load, and one blocked on load,
+  not blocking on its resource; a block lifted by a start or an enqueue
+  that takes load); test_resources.py
+  `test_dl255_starts_respect_resource_priority_blocking`, a property over
+  arrivals, forced arrivals and completions on two resources that checks
+  each start against the rows and fails if the rule is removed or
+  narrowed to the short resource;
+  test_runner_scheduler.py
+  `test_preflight_resources_refuses_a_quantity_above_amount_at_every_priority`.
+  No existing test pinned the greedy resource admission, so none was
+  rewritten. DL-247's cheetah traces are unchanged.

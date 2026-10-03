@@ -937,10 +937,14 @@ def test_cond_to_source_hand_built_zero_lookback() -> None:
     assert canonical_cond(parse_condition(rendered)) == canonical_cond(atom)
 
 
-def test_cond_to_source_hand_built_indefinite_lookback_folds_to_bare_atom() -> None:
-    """kind="indefinite" renders "9999", but canonical form drops an explicit
-    9999 (SEM-04: it means the same thing as no lookback qualifier at all),
-    so the reparsed tree must canonically equal the bare, lookback-less atom."""
+def test_cond_to_source_hand_built_indefinite_lookback_round_trips_distinct_from_bare() -> None:
+    """DL-243 REWRITE: kind="indefinite" renders "9999" and used to
+    canonicalize the same as a bare, lookback-less atom (SEM-04: both mean
+    "no window"). The ON_ICE split (Q10) makes the two behaviorally
+    distinct on an iced predecessor -- an explicit qualifier of any kind,
+    9999 included, keeps the blanket-true pin, while a bare atom follows
+    the narrower vendor table -- so canonicalization must keep them apart;
+    the reparsed tree still canonically equals the ORIGINAL qualified atom."""
     atom = StatusAtom(
         job=JobRef(name="x"),
         status="SUCCESS",
@@ -949,7 +953,8 @@ def test_cond_to_source_hand_built_indefinite_lookback_folds_to_bare_atom() -> N
     rendered = cond_to_source(atom)
     assert rendered == "s(x, 9999)"
     bare = StatusAtom(job=JobRef(name="x"), status="SUCCESS", lookback=None)
-    assert canonical_cond(parse_condition(rendered)) == canonical_cond(bare)
+    assert canonical_cond(parse_condition(rendered)) == canonical_cond(atom)
+    assert canonical_cond(parse_condition(rendered)) != canonical_cond(bare)
 
 
 # ------------------------------------------------------- global-value quoting

@@ -625,3 +625,50 @@ def test_pr34_an_unversioned_line_is_unsupported_evidence(tmp_path: Path) -> Non
     (run_dir / WATCH_LOG).write_bytes(canonical_bytes(start) + b"\n")
     with pytest.raises(EngineError, match="artifact_format_version"):
         read_watch_log(run_dir)
+
+
+def test_resume_never_relaunches_a_watch_whose_row_a_box_start_reset(tmp_path: Path) -> None:
+    """DL-242: recovery relaunches only a live row. The watcher is killed
+    (TERMINATED, KILL applied) and held, then its box restarts: the reset
+    makes the row INACTIVE at the SAME run number, so the old run's
+    incomplete watch log matches it. Resume must not relaunch that run --
+    the hold and the applied kill both say it is over -- and the row stays
+    INACTIVE."""
+    catalog = lower_source(
+        "insert_job: b\njob_type: b\n\n"
+        f"insert_job: w\njob_type: f\nbox_name: b\nwatch_file: {tmp_path / 'absent'}\n"
+        "watch_interval: 60\nwatch_file_min_size: 5\n"
+    )
+    run_root = tmp_path / "run"
+
+    def ev(kind: str, seconds: int) -> Event:
+        job = "b" if kind == "STARTJOB" else "w"
+        return Event(at=T0 + timedelta(seconds=seconds), kind=kind, payload={"job": job})  # type: ignore[arg-type]
+
+    async def first() -> None:
+        engine = start_run(
+            catalog, run_root, clock=VirtualClock(start=T0), adapters={"FW": FileWatcherAdapter()}
+        )
+        for seconds, kind in ((0, "STARTJOB"), (1, "KILLJOB"), (2, "ON_HOLD"), (3, "STARTJOB")):
+            engine.inject(ev(kind, seconds))
+            await engine.run_until_quiescent(T0 + timedelta(seconds=seconds))
+        row = engine.oracle.store.job["w"]
+        assert (row.status, row.run_number, row.on_hold) == ("INACTIVE", 1, True)
+        assert engine.oracle.store.job["b"].status == "RUNNING"
+        assert "w" not in engine.live_jobs()
+        await _close(engine)
+
+    asyncio.run(first())
+    lines_before = _lines(run_root)
+
+    async def second() -> None:
+        engine = await resume_run(
+            catalog, run_root, clock=VirtualClock(start=T0), adapters={"FW": FileWatcherAdapter()}
+        )
+        await engine.run_until_quiescent(T0 + timedelta(seconds=200))
+        assert "w" not in engine.live_jobs()
+        assert engine.oracle.store.job["w"].status == "INACTIVE"
+        await _close(engine)
+
+    asyncio.run(second())
+    assert _lines(run_root) == lines_before  # no poll from a relaunched watch

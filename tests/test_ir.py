@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from dsl41.ast_jil import parse_file
+from dsl41.ast_jil import parse, parse_file, render
 from dsl41.conditions import And, JobRef, StatusAtom, parse_condition
 from dsl41.ir import (
     BoxLinkage,
@@ -36,6 +36,7 @@ from dsl41.ir import (
     LoweringError,
     MachineIR,
     MachineMember,
+    MustTime,
     ResourceIR,
     ScheduleBlock,
     Semantics,
@@ -82,6 +83,19 @@ def test_time_parse_rejects_garbage() -> None:
         Time.parse("garbage")
 
 
+def test_time_parse_unescapes_backslash_colon() -> None:
+    # JIL syntax rule 2/6: `\:` is a literal colon in a value lane, applied to
+    # every hh:mm lane (DL-251).
+    assert Time.parse(r"10\:00") == Time(hour=10, minute=0)
+
+
+def test_time_parse_does_not_unwrap_a_quoted_token() -> None:
+    # Per-token quoting of a single list item is not a documented spelling
+    # (DL-251); only a whole-value quote is unwrapped, upstream of parse.
+    with pytest.raises(ValueError, match="expected HH:MM"):
+        Time.parse('"14:00"')
+
+
 def test_time_parse_defers_range_checking_to_the_model() -> None:
     """A syntactically HH:MM-shaped but out-of-range hour parses lexically,
     then fails the Field constraint on construction (ValidationError, not the
@@ -97,7 +111,7 @@ def test_slaspec_absolute_missing_times_rejected() -> None:
 
 def test_slaspec_absolute_with_offsets_cross_set_rejected() -> None:
     with pytest.raises(ValidationError, match="SEM-34"):
-        SlaSpec(kind="absolute", times=[Time(hour=10, minute=0)], offsets_min=[5])
+        SlaSpec(kind="absolute", times=[MustTime(hour=10, minute=0)], offsets_min=[5])
 
 
 def test_slaspec_relative_missing_offsets_rejected() -> None:
@@ -107,12 +121,12 @@ def test_slaspec_relative_missing_offsets_rejected() -> None:
 
 def test_slaspec_relative_with_times_cross_set_rejected() -> None:
     with pytest.raises(ValidationError, match="SEM-34"):
-        SlaSpec(kind="relative", offsets_min=[5], times=[Time(hour=10, minute=0)])
+        SlaSpec(kind="relative", offsets_min=[5], times=[MustTime(hour=10, minute=0)])
 
 
 def test_slaspec_absolute_and_relative_happy_paths() -> None:
-    absolute = SlaSpec(kind="absolute", times=[Time(hour=10, minute=0)])
-    assert absolute.times == [Time(hour=10, minute=0)]
+    absolute = SlaSpec(kind="absolute", times=[MustTime(hour=10, minute=0)])
+    assert absolute.times == [MustTime(hour=10, minute=0)]
     relative = SlaSpec(kind="relative", offsets_min=[5])
     assert relative.offsets_min == [5]
 
@@ -207,6 +221,9 @@ def test_whole_corpus_lowers_as_one_catalog() -> None:
     names_colon_join.jil (DL-39) the colon-named etl:*/night:box/
     boxed:member set (semantic, unescaped keys). l020_iced_consumer.jil
     (DL-151) added the l20_* set (the M19 iced-consumer rule L020);
+    DL-243 added l20_never_runs/l20_live_failure/l20_lookback_rescued to
+    that same file (L020's opposite-direction blocking case, its in-file
+    non-trigger, and a lookback-rescue regression guard);
     l021_multifire.jil (DL-180) the l21_* set (the multi-fire rule L021);
     l022_stranded.jil (DL-181) the l22_* set (the stranded-consumer rule
     L022); viz_locks.jil (DL-192) the lk_* set (both lock kinds, drawn on
@@ -269,7 +286,10 @@ def test_whole_corpus_lowers_as_one_catalog() -> None:
         "l20_consumer",
         "l20_iced",
         "l20_live",
+        "l20_live_failure",
+        "l20_lookback_rescued",
         "l20_mixed",
+        "l20_never_runs",
         "l21_daily",
         "l21_fixed",
         "l21_guard",
@@ -709,7 +729,7 @@ _SEM34_OK_CASES: list[tuple[str, str, SlaSpec]] = [
         "absolute-count-matches-start-times",
         "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\ndate_conditions: 1\n"
         'start_times: "10:00, 11:00"\nmust_start_times: "10:05, 11:05"\n',
-        SlaSpec(kind="absolute", times=[Time(hour=10, minute=5), Time(hour=11, minute=5)]),
+        SlaSpec(kind="absolute", times=[MustTime(hour=10, minute=5), MustTime(hour=11, minute=5)]),
     ),
     (
         "relative-single-offset-broadcasts",
@@ -722,6 +742,13 @@ _SEM34_OK_CASES: list[tuple[str, str, SlaSpec]] = [
         "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\ndate_conditions: 1\n"
         'start_times: "10:00, 11:00, 12:00"\nmust_start_times: +5, +10, +15\n',
         SlaSpec(kind="relative", offsets_min=[5, 10, 15]),
+    ),
+    # DL-248: one relative offset counts against start_mins and broadcasts
+    (
+        "relative-single-offset-with-start-mins",
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\ndate_conditions: 1\n"
+        "start_mins: 0, 10, 20, 30, 40, 50\nmust_start_times: +7\n",
+        SlaSpec(kind="relative", offsets_min=[7]),
     ),
 ]
 
@@ -756,6 +783,16 @@ _SEM34_ERROR_CASES = [
         "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\ndate_conditions: 1\n"
         "must_start_times: +5\n",
     ),
+    (
+        "absolute-with-start-mins",
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\ndate_conditions: 1\n"
+        'start_mins: 0, 30\nmust_start_times: "10:05, 10:35"\n',
+    ),
+    (
+        "relative-list-with-start-mins",
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\ndate_conditions: 1\n"
+        "start_mins: 0, 30\nmust_start_times: +5, +20\n",
+    ),
     # DL-151: int() alone read these as -1 and as 10.
     (
         "relative-offset-carrying-a-second-sign",
@@ -777,6 +814,151 @@ def test_sem34_must_start_times_error_shapes(text: str) -> None:
     with pytest.raises(LoweringError) as exc_info:
         lower_source(text)
     assert "SEM-34" in str(exc_info.value)
+
+
+# -------------------------------------------------- 6b. escaped-colon time lanes (DL-251)
+
+_ESCAPED_COLON_CASES: list[tuple[str, str, str, object]] = [
+    (
+        "start-times-escaped",
+        "start_times",
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\ndate_conditions: 1\n"
+        "start_times: 10\\:00, 14\\:00\n",
+        [Time(hour=10, minute=0), Time(hour=14, minute=0)],
+    ),
+    (
+        "run-window-escaped",
+        "run_window",
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\ndate_conditions: 1\n"
+        "run_window: 09\\:00-10\\:00\n",
+        (Time(hour=9, minute=0), Time(hour=10, minute=0)),
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "member,text,expected",
+    [c[1:] for c in _ESCAPED_COLON_CASES],
+    ids=[c[0] for c in _ESCAPED_COLON_CASES],
+)
+def test_escaped_colon_time_lanes_lower(member: str, text: str, expected: object) -> None:
+    (job,) = lower_source(text).jobs.values()
+    assert job.schedule is not None
+    assert getattr(job.schedule, member) == expected
+
+
+@pytest.mark.parametrize("attr_key", ["must_start_times", "must_complete_times"])
+def test_escaped_colon_must_times_lower(attr_key: str) -> None:
+    text = (
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\ndate_conditions: 1\n"
+        f'start_times: "08:00"\n{attr_key}: 10\\:05\n'
+    )
+    (job,) = lower_source(text).jobs.values()
+    assert job.schedule is not None
+    field = "must_start" if attr_key == "must_start_times" else "must_complete"
+    assert getattr(job.schedule, field) == SlaSpec(
+        kind="absolute", times=[MustTime(hour=10, minute=5)]
+    )
+
+
+def test_per_token_quoted_list_item_is_refused() -> None:
+    # Per-token quoting of one list item is not a documented spelling: the
+    # vendor's choice is escape-every-colon or quote-the-whole-value, never a
+    # mix (DL-251). A per-item quoted relative must-time offset is refused
+    # the same way at HEAD.
+    text = (
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\ndate_conditions: 1\n"
+        'start_times: 10\\:00, "14:00"\n'
+    )
+    with pytest.raises(LoweringError):
+        lower_source(text)
+
+
+# ------------------------------------- 6c. must_*_times absolute range 00:00-71:59 (DL-253)
+
+_HEAD = "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\ndate_conditions: 1\n"
+
+_SEM34_RANGE_OK: list[tuple[str, str, str, list[MustTime]]] = [
+    ("midnight", '"00:00"', '"00:00"', [MustTime(hour=0, minute=0)]),
+    ("next-day", '"11:00"', '"34:00"', [MustTime(hour=34, minute=0)]),
+    ("last-minute", '"23:00"', '"71:59"', [MustTime(hour=71, minute=59)]),
+    ("escaped-colon", "11\\:00", "34\\:00", [MustTime(hour=34, minute=0)]),
+    ("equal-to-start", '"10:00"', '"10:00"', [MustTime(hour=10, minute=0)]),
+    (
+        "unsorted-starts-pair-by-position",
+        '"11:00, 10:00"',
+        '"11:30, 10:59"',
+        [MustTime(hour=11, minute=30), MustTime(hour=10, minute=59)],
+    ),
+    (
+        "vendor-paired-example",
+        '"10:00, 11:00, 12:00"',
+        '"10:08, 11:08, 12:08"',
+        [MustTime(hour=10, minute=8), MustTime(hour=11, minute=8), MustTime(hour=12, minute=8)],
+    ),
+]
+
+
+@pytest.mark.parametrize("attr_key", ["must_start_times", "must_complete_times"])
+@pytest.mark.parametrize(
+    "starts,musts,expected",
+    [c[1:] for c in _SEM34_RANGE_OK],
+    ids=[c[0] for c in _SEM34_RANGE_OK],
+)
+def test_sem34_absolute_must_times_lower_over_the_vendor_range(
+    attr_key: str, starts: str, musts: str, expected: list[MustTime]
+) -> None:
+    # "Limits: 00:00-71:59 (2 calendar days ahead of the current calendar
+    # day)"; an 11:00 start with a must time of 10:00 the next day is 34:00.
+    (job,) = lower_source(f"{_HEAD}start_times: {starts}\n{attr_key}: {musts}\n").jobs.values()
+    assert job.schedule is not None
+    field = "must_start" if attr_key == "must_start_times" else "must_complete"
+    assert getattr(job.schedule, field) == SlaSpec(kind="absolute", times=expected)
+
+
+_SEM34_RANGE_REFUSED: list[tuple[str, str, str, str]] = [
+    ("hour-72", 'start_times: "08:00"', '"72:00"', "00:00-71:59"),
+    ("hour-99", 'start_times: "08:00"', '"99:59"', "00:00-71:59"),
+    ("minute-60", 'start_times: "08:00"', '"34:60"', "minute"),
+    ("with-start-mins", "start_mins: 0, 30", '"10:05"', "require start_times"),
+    ("count-mismatch", 'start_times: "10:00, 11:00"', '"34:00"', "count must match"),
+    ("mixed-forms", 'start_times: "10:00, 11:00"', '"34:00", +5', "cannot be mixed"),
+    # "If 10:00 a.m. is specified, the job issues an error message"
+    ("below-own-start", 'start_times: "11:00"', '"10:00"', "earlier than its start time"),
+    # the vendor's invalid example: 11:10 for the run before the 11:00 run
+    (
+        "not-before-next-run",
+        'start_times: "10:00, 10:30, 11:00"',
+        '"10:10, 11:10, 11:20"',
+        "next run's start time 11:00",
+    ),
+    ("equal-to-next-run", 'start_times: "10:00, 10:30"', '"10:30, 10:40"', "next run's"),
+]
+
+
+@pytest.mark.parametrize("attr_key", ["must_start_times", "must_complete_times"])
+@pytest.mark.parametrize(
+    "schedule,musts,needle",
+    [c[1:] for c in _SEM34_RANGE_REFUSED],
+    ids=[c[0] for c in _SEM34_RANGE_REFUSED],
+)
+def test_sem34_absolute_must_times_refused_shapes(
+    attr_key: str, schedule: str, musts: str, needle: str
+) -> None:
+    with pytest.raises(LoweringError) as exc_info:
+        lower_source(f"{_HEAD}{schedule}\n{attr_key}: {musts}\n")
+    message = str(exc_info.value)
+    assert attr_key in message
+    assert needle in message
+
+
+@pytest.mark.parametrize(
+    "line", ['start_times: "24:00"', 'start_times: "34:00"', 'run_window: "09:00-24:00"']
+)
+def test_sem34_wide_range_stays_on_must_times_only(line: str) -> None:
+    # MustTime carries 24-71; start_times and run_window keep Time's 0-23.
+    with pytest.raises(LoweringError):
+        lower_source(f"{_HEAD}{line}\n")
 
 
 # ----------------------------------------------------------------- 7. exec/type rules
@@ -923,6 +1105,11 @@ _UNSUPPORTED_SUBCOMMAND_CASES = [
     ("update-job-unsupported", "update_job: j\ncommand: x\n", "not supported by lowering v1"),
     ("insert-global-missing-value", "insert_global: G\n", "missing value attribute"),
     ("insert-xinst-missing-xtype", "insert_xinst: PRD\n", "missing xtype attribute"),
+    # DL-245: update_blob/update_glob now scan as statement boundaries;
+    # lowering refuses them through the same generic blob/glob-out-of-scope
+    # message insert_blob/insert_glob already get (ir.py's _Lowerer.run).
+    ("update-blob-refused", "update_blob: X0\nblob_input: v\n", "blob/glob"),
+    ("update-glob-refused", "update_glob: X0\nblob_mode: text\n", "blob/glob"),
 ]
 
 
@@ -975,7 +1162,7 @@ def test_load_dump_round_trips_the_full_corpus_catalog() -> None:
 
 def test_dump_contains_ir_version_field() -> None:
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
-    assert '"ir_version": "0.2"' in dump_catalog(catalog)
+    assert '"ir_version": "0.3"' in dump_catalog(catalog)
 
 
 def test_dump_top_level_keys_are_sorted() -> None:
@@ -1015,6 +1202,17 @@ def test_term_run_time_maps_to_term_run_time_min() -> None:
     text = "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\nterm_run_time: 90\n"
     (job,) = lower_source(text).jobs.values()
     assert job.sem.term_run_time_min == 90
+
+
+def test_term_run_time_zero_lowers_to_zero_not_none() -> None:
+    """DL-241: zero is a real, distinct value ("no limit"), not absence --
+    lowering must carry it verbatim so `Oracle._arm_term_run_time` can tell
+    "no limit" (0) apart from "no term_run_time attribute" (None), and
+    preserve-mode rendering must round-trip the literal zero."""
+    text = "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\nterm_run_time: 0\n"
+    (job,) = lower_source(text).jobs.values()
+    assert job.sem.term_run_time_min == 0
+    assert render(parse(text)) == text
 
 
 def test_max_exit_success_is_carried_through() -> None:

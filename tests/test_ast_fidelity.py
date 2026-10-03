@@ -237,6 +237,329 @@ def test_canonical_keeps_date_rows_after_attrs() -> None:
     assert render_canonical(parse(canonical)) == canonical
 
 
+# ------------------------------------- update_blob/update_glob (DL-245)
+
+
+def test_update_blob_and_update_glob_are_statement_boundaries_and_round_trip() -> None:
+    text = (
+        "update_blob: Blob1\nblob_input: Updating this blob\n\n"
+        'update_glob: Glob1\nblob_mode: text\nblob_file: "updated file path"\n'
+    )
+    jf = parse(text)
+    assert [s.subcommand for s in jf.statements] == ["update_blob", "update_glob"]
+    assert render(jf) == text
+    canonical = render_canonical(jf)
+    assert render_canonical(parse(canonical)) == canonical
+
+
+# ------------------------------------- rule 12: literal blob region (DL-245)
+#
+# This scanner rule is numbered 12 in jil-statement-syntax.md. The vendor's
+# own "JIL Syntax Rules" page numbers the underlying behavior "rule 8" --
+# a different document, not this one's rule 8 (Case).
+
+
+def test_insert_blob_literal_region_scans_as_exactly_two_statements() -> None:
+    """Before this rule, the open `<auto_blobt>` region did not suspend
+    statement-boundary recognition, so a complete `insert_job:` fragment
+    inside the literal blob text was promoted to a phantom third statement
+    -- a missed-boundary silent structural loss, not a benign extra
+    statement. Synthetic fixture, hand-written for this rule: the vendor's
+    own insert_blob examples use plain prose and a JSON payload, never a
+    JIL fragment."""
+    text = (
+        "insert_job: real\njob_type: c\ncommand: true\n\n"
+        "insert_blob: real\n"
+        "blob_input: <auto_blobt>\n"
+        "insert_job: phantom\n"
+        "job_type: c\n"
+        "command: true\n"
+        "</auto_blobt>\n"
+    )
+    jf = parse(text)
+    assert [s.subcommand for s in jf.statements] == ["insert_job", "insert_blob"]
+    blob_attr = jf.statements[1].attrs[0]
+    assert blob_attr.key == "blob_input"
+    assert blob_attr.raw_value == (
+        "<auto_blobt>\ninsert_job: phantom\njob_type: c\ncommand: true\n</auto_blobt>"
+    )
+    assert render(jf) == text
+    canonical = render_canonical(jf)
+    assert render_canonical(parse(canonical)) == canonical
+
+
+def test_blob_literal_region_key_shaped_line_does_not_start_a_statement() -> None:
+    """A line shaped exactly like a recognized subcommand (column 0, real
+    verb) inside an open auto_blobt region must not be treated as a
+    boundary -- the structural half of rule 12."""
+    jf = parse("insert_blob: j\nblob_input: <auto_blobt>\ninsert_job: x\n</auto_blobt>\n")
+    (stmt,) = jf.statements
+    assert stmt.subcommand == "insert_blob"
+    assert "insert_job: x" in stmt.attrs[0].raw_value
+
+
+def test_blob_literal_region_with_comment_shaped_and_blank_lines_inside() -> None:
+    """Rule 12's "does not enforce any of the previously discussed rules"
+    covers comment markers and blank lines too: none of them split the
+    value or close the region early."""
+    text = (
+        "insert_blob: j\n"
+        "blob_input: <auto_blobt>/* not a comment */\n"
+        "\n"
+        "# not a comment either\n"
+        "</auto_blobt>\n"
+    )
+    jf = parse(text)
+    (stmt,) = jf.statements
+    assert stmt.attrs[0].raw_value == (
+        "<auto_blobt>/* not a comment */\n\n# not a comment either\n</auto_blobt>"
+    )
+    assert render(jf) == text
+
+
+def test_blob_literal_region_closed_on_one_line_bypasses_rule_4b() -> None:
+    """A one-line auto_blobt value can carry a `key:`-shaped token that
+    would otherwise be rule 4b's loud error (DL-30); rule 12 exempts it."""
+    text = "insert_blob: j\nblob_input: <auto_blobt>note job_type: c here</auto_blobt>\n"
+    jf = parse(text)
+    assert jf.statements[0].attrs[0].raw_value == "<auto_blobt>note job_type: c here</auto_blobt>"
+    assert render(jf) == text
+
+
+def test_unterminated_blob_literal_is_a_loud_error_naming_the_opener_line() -> None:
+    with pytest.raises(JilParseError, match="unterminated .auto_blobt. blob literal") as exc:
+        parse("insert_blob: j\nblob_input: <auto_blobt>\nno closer here\n")
+    assert exc.value.line == 2
+
+
+def test_blob_opener_not_anchored_at_value_start_is_not_a_region() -> None:
+    """The opener is recognized only as the first non-whitespace text of
+    the `blob_input` value. A `<auto_blobt>` sitting inside an ordinary
+    closed block comment must not open the region -- otherwise a later,
+    unrelated `</auto_blobt>`-shaped string anywhere downstream (even
+    inside another statement's attribute) would get swallowed into a
+    region that never really opened, and a value with no such downstream
+    text would spuriously error as unterminated."""
+    text = (
+        "insert_job: real\njob_type: c\ncommand: true\n\n"
+        "insert_blob: real\n"
+        "blob_input: value /* <auto_blobt> */\n\n"
+        "insert_job: real2\njob_type: c\ncommand: true\n\n"
+        "insert_blob: real2\n"
+        "description: </auto_blobt>\n"
+    )
+    jf = parse(text)
+    assert [s.subcommand for s in jf.statements] == [
+        "insert_job",
+        "insert_blob",
+        "insert_job",
+        "insert_blob",
+    ]
+    blob_attr = jf.statements[1].attrs[0]
+    assert blob_attr.raw_value == "value"
+    (comment,) = blob_attr.comments
+    assert comment.text == "/* <auto_blobt> */"
+    assert render(jf) == text
+
+
+def test_quoted_blob_opener_is_not_a_region() -> None:
+    text = 'insert_blob: j\nblob_input: "<auto_blobt>"\n'
+    jf = parse(text)
+    assert jf.statements[0].attrs[0].raw_value == '"<auto_blobt>"'
+    assert render(jf) == text
+
+
+def test_glued_closer_then_opener_is_not_a_region_at_all() -> None:
+    """A `</auto_blobt>` glued right before a fresh `<auto_blobt>` fails the
+    value-start anchor (the value starts with the closer spelling, not the
+    opener), so this line opens no region -- the following line scans as
+    an ordinary new statement, not a swallowed phantom."""
+    text = (
+        "insert_blob: j\nblob_input: </auto_blobt><auto_blobt>\n\n"
+        "insert_job: real\njob_type: c\ncommand: true\n"
+    )
+    jf = parse(text)
+    assert [s.subcommand for s in jf.statements] == ["insert_blob", "insert_job"]
+    assert render(jf) == text
+
+
+def test_blob_literal_closed_on_one_line() -> None:
+    text = "insert_blob: j\nblob_input: <auto_blobt>x</auto_blobt>\n"
+    jf = parse(text)
+    assert jf.statements[0].attrs[0].raw_value == "<auto_blobt>x</auto_blobt>"
+    assert render(jf) == text
+
+
+def test_blob_opener_alone_then_closer_several_lines_later() -> None:
+    text = "insert_blob: j\nblob_input: <auto_blobt>\nline1\nline2\n</auto_blobt>\n"
+    jf = parse(text)
+    assert jf.statements[0].attrs[0].raw_value == "<auto_blobt>\nline1\nline2\n</auto_blobt>"
+    assert render(jf) == text
+
+
+def test_blob_closer_search_starts_after_the_opener_itself() -> None:
+    """The closer search explicitly starts past the opener's own text, so a
+    (pathological) opener that embeds the closer spelling glued to itself
+    is not mistaken for a self-closing tag; the real, later closer wins."""
+    text = "insert_blob: j\nblob_input: <auto_blobt></auto_blobt> plain\n"
+    jf = parse(text)
+    assert jf.statements[0].attrs[0].raw_value == "<auto_blobt></auto_blobt> plain"
+    assert render(jf) == text
+
+
+def test_tail_after_closer_on_same_line_still_raises_rule_4b() -> None:
+    """Text after the closer, still on the closer's line, is an ordinary
+    value tail: a second `key:`-shaped pair there is the same loud rule-4b
+    error any attribute value would get, not silently folded in."""
+    with pytest.raises(JilParseError, match="rule 4b"):
+        parse("insert_blob: j\nblob_input: <auto_blobt>payload</auto_blobt> condition: s(gate)\n")
+
+
+def test_trailing_comment_after_closer_still_splits() -> None:
+    text = "insert_blob: j\nblob_input: <auto_blobt>payload</auto_blobt> /* note */\n"
+    jf = parse(text)
+    attr = jf.statements[0].attrs[0]
+    assert attr.raw_value == "<auto_blobt>payload</auto_blobt>"
+    (comment,) = attr.comments
+    assert comment.text == "/* note */" and comment.attachment == "trailing"
+    assert render(jf) == text
+    canonical = render_canonical(jf)
+    assert canonical == "insert_blob: j\nblob_input: <auto_blobt>payload</auto_blobt> /* note */\n"
+    assert render_canonical(parse(canonical)) == canonical
+
+
+def test_multiline_trailing_comment_opened_after_closer_still_consumes_its_body() -> None:
+    text = "insert_blob: j\nblob_input: <auto_blobt>payload</auto_blobt> /* watch\nbody prose\n*/\n"
+    jf = parse(text)
+    attr = jf.statements[0].attrs[0]
+    assert attr.raw_value == "<auto_blobt>payload</auto_blobt>"
+    assert render(jf) == text
+
+
+def test_glued_comment_after_closer_does_not_swallow_the_next_statement() -> None:
+    """The closer's own `>` is a real, non-whitespace character immediately
+    before the tail's offset 0: a `/*` glued there opens nothing (rule 5),
+    same as a glued marker anywhere else, so it stays literal value text
+    and the next lines scan as an ordinary new statement -- not as the
+    comment body of a marker that never really opened."""
+    text = (
+        "insert_blob: j\n"
+        "blob_input: <auto_blobt>x</auto_blobt>/*note\n"
+        "insert_job: found\n"
+        "job_type: c\n"
+        "command: echo */\n"
+    )
+    jf = parse(text)
+    assert [s.subcommand for s in jf.statements] == ["insert_blob", "insert_job"]
+    assert jf.statements[0].attrs[0].raw_value == "<auto_blobt>x</auto_blobt>/*note"
+    assert jf.statements[1].attrs[1].raw_value == "echo */"
+    assert render(jf) == text
+
+
+def test_glued_comment_after_closer_does_not_hide_a_pair_from_rule_4b() -> None:
+    """A `/*...*/` glued right after the closer opens nothing either (same
+    rule), so a `key:`-shaped pair inside it is live text, not comment
+    prose -- the region gets the identical rule-4b error a plain value in
+    the same shape would."""
+    region = "insert_blob: j\nblob_input: <auto_blobt>x</auto_blobt>/* condition: s(gate) */ tail\n"
+    plain = "insert_blob: j\nblob_input: plain/* condition: s(gate) */ tail\n"
+    for text in (region, plain):
+        with pytest.raises(JilParseError, match="rule 4b"):
+            parse(text)
+
+
+def test_canonical_mode_preserves_blob_payload_whitespace_byte_for_byte() -> None:
+    """Canonical mode's ordinary per-line trim must not reach inside the
+    literal region: the vendor's "every character... literally" covers
+    trailing spaces and tabs mid-payload."""
+    text = "insert_blob: j\nblob_input: <auto_blobt>hello  \nworld\t\n</auto_blobt>\n"
+    jf = parse(text)
+    canonical = render_canonical(jf)
+    assert canonical == text
+    assert render_canonical(parse(canonical)) == canonical
+
+
+def test_canonical_mode_preserves_blob_payload_across_crlf_source() -> None:
+    text = "insert_blob: j\r\nblob_input: <auto_blobt>hello  \r\nworld\t\r\n</auto_blobt>\r\n"
+    jf = parse(text)
+    assert render(jf) == text
+    canonical = render_canonical(jf)
+    assert canonical == "insert_blob: j\nblob_input: <auto_blobt>hello  \nworld\t\n</auto_blobt>\n"
+    assert render_canonical(parse(canonical)) == canonical
+
+
+# ------------------------------------- rule 12: F3-style property test (DL-245)
+#
+# Neither existing hypothesis generator can produce the `blob_input` key or
+# the `<`/`>` characters the meta-tags need (`_ATTR_KEY` caps identifiers at
+# 8 characters; `blob_input` is 10; the soup alphabet has no `<`/`>`), so the
+# region is otherwise untested by fuzzing. This generator targets it
+# directly.
+
+_BLOB_PAYLOAD_LINE = st.sampled_from(
+    [
+        "insert_job: x",
+        "job_type: c",
+        "/* not a comment */",
+        "# not a comment either",
+        "",
+        "plain text",
+        "trailing space  ",
+        "a tab\tinside",
+    ]
+)
+
+
+#: Tails after the closer (DL-245 confirmation round): empty, whitespace
+#: only, a real whitespace-preceded ("spaced") comment, a glued `/*` that
+#: opens nothing (rule 5), and an ordinary attribute pair that must still
+#: hit the loud rule-4b error, exactly like any other attribute's value.
+_BLOB_TAIL = st.sampled_from(
+    [
+        "",
+        " ",
+        " /* spaced comment */",
+        "/*glued",
+        " condition: s(gate)",
+    ]
+)
+
+
+@st.composite
+def blob_region_statement(draw: st.DrawFn) -> tuple[str, bool]:
+    """A two-statement estate: a real job, then `insert_blob` whose
+    `blob_input` value is a literal region built from `_BLOB_PAYLOAD_LINE`
+    rows -- including statement-boundary-shaped, comment-shaped, and
+    blank rows, plus trailing whitespace -- followed by a varied tail after
+    the closer. Returns `(text, expect_pair_error)`: only the attribute-pair
+    tail must raise rule 4b; every other tail leaves the statement count
+    at two and round-trips in both modes."""
+    body_lines = [draw(_BLOB_PAYLOAD_LINE) for _ in range(draw(st.integers(0, 4)))]
+    tail = draw(_BLOB_TAIL)
+    payload = "\n".join(["<auto_blobt>", *body_lines, "</auto_blobt>"])
+    text = (
+        "insert_job: real\njob_type: c\ncommand: true\n\n"
+        f"insert_blob: real\nblob_input: {payload}{tail}\n"
+    )
+    return text, tail == " condition: s(gate)"
+
+
+@given(blob_region_statement())
+def test_f3_blob_region_payload_and_tail_never_change_statement_count(
+    case: tuple[str, bool],
+) -> None:
+    text, expect_pair_error = case
+    if expect_pair_error:
+        with pytest.raises(JilParseError, match="rule 4b"):
+            parse(text)
+        return
+    jf = parse(text)
+    assert [s.subcommand for s in jf.statements] == ["insert_job", "insert_blob"]
+    assert render(jf) == text
+    canonical = render_canonical(jf)
+    assert render_canonical(parse(canonical)) == canonical
+
+
 def test_rename_job_is_a_statement_boundary() -> None:
     """Rule 3 (amended 2026-07-10, DL-27): rename_job is a documented 12.x
     subcommand whose rename_ verb sat outside the DL-18 guard shape -- before
@@ -747,6 +1070,9 @@ def test_f3_soup_preserve_identity(text: str) -> None:
 
 F4_CASES = [
     ("escaped-colon-in-value", "insert_job: j\ncommand: echo C\\:\\\\TEMP\n"),
+    # DL-251: the vendor's own start_times example escapes every colon
+    # instead of quoting the whole value (jil-statement-syntax rule 6).
+    ("escaped-colon-time-value", "insert_job: j\nstart_times: 10\\:00, 14\\:00\n"),
     ("quoted-and-escaped-colons", 'insert_job: j\ncommand: echo "a : b" and \\: bare\n'),
     ("hash-inside-quotes", 'insert_job: j\ndescription: "hash # inside quotes"\n'),
     ("glob-not-comment", "insert_job: j\ncommand: ls -l /tmp/*\n"),

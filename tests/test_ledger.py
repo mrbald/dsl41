@@ -50,7 +50,7 @@ from dsl41.runner_startup import resume_run, start_run
 from dsl41.runner_adapters import FakeAdapter, SupervisorListReply
 from dsl41.runner_clock import EngineError, RealClock, VirtualClock
 from dsl41.runner_effects import OUTCOME_UNAVAILABLE
-from dsl41.period import catalog_hash_v2
+from dsl41.period import catalog_hash_v2, hash_over
 from dsl41.runner_journal import read_journal
 from dsl41.runner_ledger import (
     LOCK_NAME,
@@ -385,6 +385,38 @@ def test_a_build_that_derives_different_state_may_not_lead_this_log(tmp_path: Pa
 
     with pytest.raises(EngineError, match="state-machine version mismatch"):
         asyncio.run(_resume(run_root, T0 + timedelta(minutes=1)))
+
+
+def _hash_at_ir_version(catalog, ir_version: str) -> str:
+    """`catalog_hash_v2` as an older build computed it: the same projection
+    with that build's `ir_version` stamped in (DL-253)."""
+    payload = catalog.model_dump(mode="json")
+    payload["meta"] = {"source_files": list(catalog.meta.source_files)}
+    payload["ir_version"] = ir_version
+    return hash_over(payload)
+
+
+def test_dl253_an_older_build_s_log_is_refused_for_its_version_not_its_hash(
+    tmp_path: Path,
+) -> None:
+    """DL-253: a log an older build wrote pins that build's state-machine
+    version and a catalog hash over its own `ir_version`, so both pins
+    disagree with this build for the same unchanged estate. The version is
+    checked first: the refusal names it and never says the estate changed."""
+    run_root = tmp_path / "run"
+    _close(_start(run_root))
+    path = run_root / "journal.jsonl"
+    records = read_journal(path)
+    catalog = lower_source(_SOLO_JIL)
+    records[0]["state_machine_version"] = STATE_MACHINE_VERSION - 1
+    records[0]["catalog_hash"] = _hash_at_ir_version(catalog, "0.2")
+    assert records[0]["catalog_hash"] != catalog_hash_v2(catalog)
+    path.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in records))
+
+    with pytest.raises(EngineError, match="state-machine version mismatch") as refused:
+        asyncio.run(_resume(run_root, T0 + timedelta(minutes=1)))
+    assert "catalog hash mismatch" not in str(refused.value)
+    assert "estate changed" not in str(refused.value)
 
 
 def test_the_pinned_state_machine_version_is_read_as_an_exact_integer() -> None:

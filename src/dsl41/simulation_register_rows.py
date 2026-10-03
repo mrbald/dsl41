@@ -181,7 +181,9 @@ _REFUSED_STATEMENTS: tuple[str, ...] = (
     "insert_monbro",
     "override_job",
     "rename_job",
+    "update_blob",
     "update_connectionprofile",
+    "update_glob",
     "update_job",
     "update_job_type",
     "update_machine",
@@ -336,9 +338,10 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
         _row(
             surface="job_attr",
             member="chk_files",
-            klass=PASSTHROUGH,
-            cite="dossier ss5, DL-32",
-            effect="the pre-start disk-space gate is not evaluated; the job starts regardless",
+            klass=REFUSED,
+            cite="runner_preflight._execution_input_preflight, DL-240",
+            effect="carried verbatim; never applied; real execution refuses it at"
+            " preflight; rehearse and compile are unaffected; inert on a BOX (SEM-10)",
             trigger=_job(chk_files="1"),
         ),
         _row(
@@ -403,9 +406,11 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             surface="job_attr",
             member="job_load",
             klass=SUPPORTED,
-            cite="DL-50",
-            effect="the machine-load units a start holds against the machine's max_load",
-            trigger=_job(job_load="1"),
+            cite="DL-50, DL-247",
+            effect="the machine-load units a start holds against the machine's max_load;"
+            " only a positive priority checks them, while an unset or zero priority and a"
+            " forced start skip the check and still hold the units",
+            trigger=_job(job_load="1", priority="1"),
         ),
         _row(
             surface="job_attr",
@@ -415,8 +420,9 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             cite="DL-50, ir.JobIR.job_load_units",
             label="Qr4",
             sites=("ir.JobIR.job_load_units#1",),
-            effect="a job with no job_load demands zero machine-load units, so an unsized"
-            " job never queues behind max_load",
+            effect="a job with no job_load demands zero machine-load units, so it never"
+            " waits for load itself; with a positive priority it can still queue behind a"
+            " higher-priority load waiter on its machine",
             trigger=_job(),
             quiet=_job(job_load="1"),
         ),
@@ -424,25 +430,29 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             surface="job_attr",
             member="priority",
             klass=SUPPORTED,
-            cite="DL-50",
-            effect="orders the QUE_WAIT queue; an undeclared priority sorts behind every"
-            " declared one",
+            cite="DL-50, DL-247, DL-255",
+            effect="orders the QUE_WAIT queue, lower number first; a positive priority"
+            " makes a start check machine load, a job waiting for load blocks every"
+            " lower positive priority on its machine, and a job past its load check"
+            " that waits on a named resource blocks every lower positive priority"
+            " naming any resource it names",
             trigger=_job(priority="10"),
         ),
         _row(
             surface="job_attr",
             member="priority",
-            facet="direction",
+            facet="unset-order",
             klass=PROVISIONAL,
-            cite="DL-50, capacity.CapacityPool.sorted_waiters",
+            cite="DL-50, DL-247, capacity.CapacityPool.sorted_waiters",
             label="Qr2",
             sites=(
                 "capacity.CapacityPool.sorted_waiters.key#1",
                 "ir.JobIR.priority_value#1",
             ),
-            effect="a lower priority number is assumed to mean higher priority",
-            trigger=_job(priority="1"),
-            quiet=_job(priority="99"),
+            effect="a resource waiter with no priority is assumed to sort behind every"
+            " declared priority, explicit 0 included, though the vendor default is 0",
+            trigger=_job(RESOURCE_BLOCK, resources="(R0, QUANTITY=1)"),
+            quiet=_job(RESOURCE_BLOCK, resources="(R0, QUANTITY=1)", priority="1"),
         ),
     )
     + (
@@ -492,7 +502,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             klass=SUPPORTED,
             cite="SEM-33",
             effect="a gate, not a trigger: a start outside the window defers or drops,"
-            " never fires early",
+            " never fires early; a box start decides it for a waiting member (DL-246)",
             trigger=_job(HOLCAL_BLOCK, date_conditions="1", run_window='"09:00-10:00"'),
         ),
         _row(
@@ -553,8 +563,9 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             cite="SEM-35, runner_scheduler",
             label="E10",
             sites=("runner_scheduler.Scheduler#1",),
-            effect="a start time inside a DST fold or gap resolves by the pinned"
-            " interpretation, not by a vendor-verified rule",
+            effect="a start time inside a DST fold or gap resolves by the pinned fold=0"
+            " interpretation, which differs from the vendor's documented rule"
+            " (runner-design ss15)",
             trigger=_job(date_conditions="1", timezone="Europe/Berlin", start_times='"02:30"'),
             quiet=_job(date_conditions="1", timezone="UTC", start_times='"02:30"'),
         ),
@@ -562,23 +573,107 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             surface="job_attr",
             member="must_start_times",
             facet="absolute",
-            klass=PASSTHROUGH,
-            cite="SEM-34, oracle.Oracle._arm_sla_and_term",
-            effect="an ABSOLUTE must_start_times lowers and is carried, and arms nothing:"
-            " the oracle owns no calendar, so no absolute deadline exists v1",
-            trigger=_job(date_conditions="1", start_times='"08:00"', must_start_times='"08:30"'),
+            klass=SUPPORTED,
+            cite="SEM-34, DL-253, oracle.Oracle._absolute_deadline",
+            bound="00:00-71:59",
+            effect="an ABSOLUTE must_start_times, 00:00-71:59, arms MUST_START_ALARM at the"
+            " slot's must time on the tick's local day, hours 24-71 on the days after;"
+            " 72:00 and above, a time below its own start time and a time not earlier"
+            " than the next later start time of the same day are refused at lowering;"
+            " the day's latest start time is not checked, its next run depending on"
+            " the calendar",
+            trigger=_job(date_conditions="1", start_times='"08:00"', must_start_times='"32:30"'),
             quiet=_job(date_conditions="1", start_times='"08:00"', must_start_times='"+30"'),
         ),
         _row(
             surface="job_attr",
             member="must_complete_times",
             facet="absolute",
-            klass=PASSTHROUGH,
-            cite="SEM-34, oracle.Oracle._arm_sla_and_term",
-            effect="an ABSOLUTE must_complete_times lowers and is carried, and arms"
-            " nothing: the oracle owns no calendar, so no absolute deadline exists v1",
-            trigger=_job(date_conditions="1", start_times='"08:00"', must_complete_times='"09:30"'),
+            klass=SUPPORTED,
+            cite="SEM-34, DL-253, oracle.Oracle._absolute_deadline",
+            bound="00:00-71:59",
+            effect="an ABSOLUTE must_complete_times, 00:00-71:59, arms MUST_COMPLETE_ALARM at"
+            " the slot's must time on the tick's local day, hours 24-71 on the days after;"
+            " 72:00 and above, a time below its own start time and a time not earlier"
+            " than the next later start time of the same day are refused at lowering;"
+            " the day's latest start time is not checked, its next run depending on"
+            " the calendar",
+            trigger=_job(date_conditions="1", start_times='"08:00"', must_complete_times='"33:30"'),
             quiet=_job(date_conditions="1", start_times='"08:00"', must_complete_times='"+45"'),
+        ),
+        _row(
+            surface="job_attr",
+            member="must_start_times",
+            facet="dst",
+            klass=SUPPORTED,
+            cite="SEM-34, DL-253, oracle._must_instant",
+            effect="an absolute must time in a spring change's missing hour is due in the"
+            " first minute of the next hour (2:05 is 3:00:05); in a fall change's repeated"
+            " hour it takes the first pass, or the second when the start is in that hour"
+            " too; other change shapes keep the fold=0 conversion",
+            trigger=_job(
+                date_conditions="1",
+                timezone="America/New_York",
+                start_times='"01:00"',
+                must_start_times='"02:05"',
+            ),
+            quiet=_job(date_conditions="1", start_times='"01:00"', must_start_times='"02:05"'),
+        ),
+        _row(
+            surface="job_attr",
+            member="must_complete_times",
+            facet="dst",
+            klass=SUPPORTED,
+            cite="SEM-34, DL-253, oracle._must_instant",
+            effect="an absolute must time in a spring change's missing hour is due in the"
+            " first minute of the next hour (2:45 is 3:00:45), and at 3:00:59 when a start"
+            " in the missing hour would run after it; in a fall change's repeated hour it"
+            " takes the first pass, or the second when the start is in that hour too",
+            trigger=_job(
+                date_conditions="1",
+                timezone="America/New_York",
+                start_times='"02:45"',
+                must_complete_times='"03:00"',
+            ),
+            quiet=_job(date_conditions="1", start_times='"02:45"', must_complete_times='"03:00"'),
+        ),
+        _row(
+            surface="job_attr",
+            member="must_start_times",
+            facet="before-tick",
+            klass=PROVISIONAL,
+            cite="SEM-34, DL-253, oracle.Oracle._absolute_deadline",
+            label="E10",
+            effect="an absolute must time that resolves before its tick is due at the tick:"
+            " a start in a spring change's missing hour ticks at fold=0, past the vendor's"
+            " first minute of the next hour; lowering refuses a must time below its own"
+            " start time, so no other input reaches the pin",
+            trigger=_job(
+                date_conditions="1",
+                timezone="America/New_York",
+                start_times='"02:45"',
+                must_start_times='"03:00"',
+            ),
+            quiet=_job(date_conditions="1", start_times='"02:45"', must_start_times='"03:10"'),
+        ),
+        _row(
+            surface="job_attr",
+            member="must_complete_times",
+            facet="before-tick",
+            klass=PROVISIONAL,
+            cite="SEM-34, DL-253, oracle.Oracle._absolute_deadline",
+            label="E10",
+            effect="an absolute must time that resolves before its tick is due at the tick:"
+            " a start in a spring change's missing hour ticks at fold=0, past the vendor's"
+            " 3:00:59; lowering refuses a must time below its own start time, so no"
+            " other input reaches the pin",
+            trigger=_job(
+                date_conditions="1",
+                timezone="America/New_York",
+                start_times='"02:45"',
+                must_complete_times='"03:00"',
+            ),
+            quiet=_job(date_conditions="1", start_times='"02:45"', must_complete_times='"03:10"'),
         ),
         _row(
             surface="job_attr",
@@ -604,8 +699,8 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             facet="unmatched-slot",
             klass=PROVISIONAL,
             cite="SEM-34, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset",
-            effect="an instant matching no start time uses the first offset; no label was"
-            " opened for the corner",
+            effect="an instant matching no start time uses the first offset, and an absolute"
+            " form arms nothing there; no label was opened for the corner",
             trigger=_job(
                 date_conditions="1", start_times='"08:00,12:00"', must_start_times='"+30,+60"'
             ),
@@ -617,11 +712,35 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             facet="unmatched-slot",
             klass=PROVISIONAL,
             cite="SEM-34, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset",
-            effect="an instant matching no start time uses the first offset; no label was"
-            " opened for the corner",
+            effect="an instant matching no start time uses the first offset, and an absolute"
+            " form arms nothing there; no label was opened for the corner",
             trigger=_job(
                 date_conditions="1", start_times='"08:00,12:00"', must_complete_times='"+30,+60"'
             ),
+            quiet=_job(date_conditions="1", start_times='"08:00"', must_complete_times='"+45"'),
+        ),
+        _row(
+            surface="job_attr",
+            member="must_start_times",
+            facet="start-mins",
+            klass=SUPPORTED,
+            cite="SEM-34, DL-248, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset",
+            effect="a single relative offset counts against start_mins and broadcasts to"
+            " every start_mins tick; the vendor refuses an absolute form there, a list of"
+            " offsets there is not specified and stays open, and lowering refuses both",
+            trigger=_job(date_conditions="1", start_mins="0,30", must_start_times='"+7"'),
+            quiet=_job(date_conditions="1", start_times='"08:00"', must_start_times='"+45"'),
+        ),
+        _row(
+            surface="job_attr",
+            member="must_complete_times",
+            facet="start-mins",
+            klass=SUPPORTED,
+            cite="SEM-34, DL-248, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset",
+            effect="a single relative offset counts against start_mins and broadcasts to"
+            " every start_mins tick; the vendor refuses an absolute form there, a list of"
+            " offsets there is not specified and stays open, and lowering refuses both",
+            trigger=_job(date_conditions="1", start_mins="0,30", must_complete_times='"+7"'),
             quiet=_job(date_conditions="1", start_times='"08:00"', must_complete_times='"+45"'),
         ),
     )
@@ -683,10 +802,10 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
         _row(
             surface="job_attr",
             member="envvars",
-            klass=PASSTHROUGH,
-            cite="ir._Lowerer._exec_spec, DL-32",
-            effect="carried verbatim on the exec spec; the child process environment is"
-            " not modified; inert on a BOX (SEM-10)",
+            klass=REFUSED,
+            cite="runner_preflight._execution_input_preflight, DL-240",
+            effect="carried verbatim; never applied; real execution refuses it at"
+            " preflight; rehearse and compile are unaffected; inert on a BOX (SEM-10)",
             trigger=_job(envvars="A=1"),
         ),
     )
@@ -786,8 +905,9 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             surface="job_attr",
             member="term_run_time",
             klass=SUPPORTED,
-            cite="dossier ss5, oracle.Oracle._arm_sla_and_term",
-            effect="arms a timer that TERMINATEs the run after n minutes",
+            cite="dossier ss5, oracle.Oracle._arm_term_run_time",
+            effect="arms a timer that TERMINATEs the run after n minutes"
+            "; zero means no limit and arms no timer (DL-241)",
             trigger=_job(
                 "insert_job: J1\njob_type: c\ncommand: true\nmachine: M0", term_run_time="10"
             ),
@@ -847,6 +967,86 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
         ),
         _row(
             surface="job_attr",
+            member="run_window",
+            facet="box-start-defer",
+            klass=PROVISIONAL,
+            cite="SEM-33, DL-246, oracle.Oracle._decide_windows_at_box_start",
+            effect="the STARTJOB a box start defers to the next window opening is a start"
+            " attempt with a schedule tick's standing, through the normal gates; how it"
+            " composes with the member's own start_times is undocumented, at most one start"
+            " per box run still holds, and no label was opened for it",
+            trigger=_job(
+                BOX_BLOCK,
+                box_name="BOX0",
+                date_conditions="1",
+                days_of_week="all",
+                run_window='"09:00-10:00"',
+            ),
+            quiet=_job(BOX_BLOCK, box_name="BOX0"),
+        ),
+        _row(
+            surface="job_attr",
+            member="run_window",
+            facet="dst-change",
+            klass=SUPPORTED,
+            cite="SEM-33, DL-249, oracle._window_span",
+            effect="near a one-hour DST change at 02:00 local the window's endpoints follow"
+            " the vendor's rules: in spring an opening in the missing hour moves to 03:00"
+            " and a close in it keeps the window's length; in fall an opening in the"
+            " repeated hour takes the standard-time pass and a close takes the"
+            " daylight-time pass unless the opening is in that hour too",
+            trigger=_job(
+                date_conditions="1",
+                days_of_week="all",
+                run_window='"01:00-02:30"',
+                timezone="America/New_York",
+            ),
+            quiet=_job(
+                date_conditions="1", days_of_week="all", run_window='"01:00-02:30"', timezone="UTC"
+            ),
+        ),
+        _row(
+            surface="job_attr",
+            member="run_window",
+            facet="dst-both-in-hour",
+            klass=PROVISIONAL,
+            cite="SEM-33, DL-249, oracle._window_span",
+            effect="when both endpoints fall in the hour a DST change touches, two readings"
+            " are pinned: in fall the close follows the opening into the second,"
+            " standard-time pass, and in spring the vendor's 'first minute after 3:00'"
+            " opening is exactly 03:00; the vendor text does not settle either, and no"
+            " label was opened for it",
+            trigger=_job(
+                date_conditions="1",
+                days_of_week="all",
+                run_window='"01:10-01:40"',
+                timezone="America/New_York",
+            ),
+            quiet=_job(
+                date_conditions="1", days_of_week="all", run_window='"01:10-01:40"', timezone="UTC"
+            ),
+        ),
+        _row(
+            surface="job_attr",
+            member="run_window",
+            facet="dst-other-shape",
+            klass=PROVISIONAL,
+            cite="SEM-33, DL-249, oracle.Oracle._window_side",
+            effect="a DST change of another shape (a half-hour change, a change at another"
+            " hour) keeps the wall-time comparison: the vendor's endpoint rules are"
+            " unverified there, and no label was opened for it",
+            trigger=_job(
+                date_conditions="1",
+                days_of_week="all",
+                run_window='"01:00-02:30"',
+                timezone="Australia/Lord_Howe",
+            ),
+            quiet=_job(
+                date_conditions="1", days_of_week="all", run_window='"01:00-02:30"', timezone="UTC"
+            ),
+        ),
+        _row(
+            surface="job_attr",
             member="watch_file",
             facet="stat-error",
             klass=PROVISIONAL,
@@ -877,11 +1077,14 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             cite="DL-50, oracle.Oracle._readmit",
             label="Qr6",
             sites=("oracle.<module>#1", "oracle.Oracle._readmit#1"),
-            effect="a job admitted out of QUE_WAIT does not re-evaluate its condition",
+            effect="a job admitted out of QUE_WAIT does not re-evaluate its condition, the"
+            " vendor's EvaluateQueuedJobStarts=0; the vendor default is 1, which re-evaluates"
+            " the starting conditions other than the day's date check (DL-250)",
             trigger=_job(
                 "insert_job: J1\njob_type: c\ncommand: true\nmachine: M0",
                 condition="s(J1)",
                 job_load="1",
+                priority="1",
             ),
             quiet=_job(
                 "insert_job: J1\njob_type: c\ncommand: true\nmachine: M0", condition="s(J1)"
@@ -1013,8 +1216,11 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             surface="job_attr",
             member="resources",
             klass=SUPPORTED,
-            cite="DL-21, DL-50",
-            effect="the resource groups a start must satisfy before it may run",
+            cite="DL-21, DL-50, DL-255",
+            effect="the resource groups a start must satisfy before it may run; a job"
+            " with a positive priority that waits on any of them blocks every lower"
+            " positive priority naming any of them, a forced start included, and holds"
+            " no load while it waits",
             trigger=_job(RESOURCE_BLOCK, resources="(R0, QUANTITY=1)"),
         ),
         _row(
@@ -1337,10 +1543,11 @@ CALENDAR_ATTR_ROWS: tuple[Row, ...] = (
         member="holiday",
         facet="absent",
         klass=SUPPORTED,
-        cite="SEM-38, DL-58, autocal.CompiledCalendar._dispose",
+        cite="SEM-38, DL-58, DL-244, autocal.CompiledCalendar._dispose",
         effect="with no holiday action a holcal date gets no treatment of its own: it"
-        " falls through to the non_workday branch, which only acts on a day that is"
-        " not a workday, so a holiday ON a workday is kept untouched",
+        " falls through to the non_workday branch, which treats it as a non-workday"
+        " regardless of its own weekday, so a holiday ON a workday is governed by the"
+        " non_workday action exactly like a weekend non-workday would be",
         trigger=_cal("condition: DAILY", holcal=True),
         quiet=_cal("condition: DAILY", "holiday: S", holcal=True),
     ),
@@ -1518,7 +1725,8 @@ VALUE_ROWS: tuple[Row, ...] = (
             cite="DL-50, capacity.release_policy",
             label="Qr1",
             effect="a request with no FREE takes the res_type default, renewable for an"
-            " absent res_type",
+            " absent res_type; the vendor documents FREE's default as Y, free on success"
+            " only, and the pin stays until decided (DL-250)",
             trigger=_job(RESOURCE_BLOCK, resources="(R0, QUANTITY=1)"),
             quiet=_job(RESOURCE_BLOCK, resources="(R0, QUANTITY=1, FREE=A)"),
         ),
@@ -2126,7 +2334,9 @@ _CAL_FAMILIES: dict[str, tuple[str, str, str]] = {
     "wekr": (
         "WEKRMON#1",
         "wekr(mon|tue|wed|thu|fri|sat|sun)([#mx])(\\d+|l)",
-        "the nth day of a week anchored on a named weekday, `#`/`M`/`X`, 1..7 or `L`",
+        "the pinned reading: the nth day of a week anchored on a named weekday, `#`/`M`/`X`,"
+        " 1..7 or `L`; the vendor text also supports a week-of-year reading, and 24.2 spells"
+        " the anchor as a digit",
     ),
     "week_parity": ("WEEK#E", "week#([eo])", "every even (`E`) or odd (`O`) week of the year"),
     "week": (
@@ -2181,6 +2391,10 @@ _CAL_FAMILIES: dict[str, tuple[str, str, str]] = {
     ),
 }
 
+#: family name -> the open question its reading is pinned under (SEM-37).
+#: Such a family keeps its behaviour as a provisional pin until decided.
+_OPEN_FAMILIES: dict[str, str] = {"wekr": "Q11"}
+
 #: The families whose tokens only mean anything inside a cycle's periods;
 #: their calendars need a `cyccal` or `compile_calendar` refuses them.
 _CYCLE_SCOPED_FAMILIES = frozenset({"cycl", "cycp", "cweek_parity", "cweek", "cwrk", "cddd"})
@@ -2231,8 +2445,9 @@ CALENDAR_ROWS: tuple[Row, ...] = (
         _row(
             surface="cal_family",
             member=member,
-            klass=SUPPORTED,
-            cite="SEM-37",
+            klass=PROVISIONAL if member in _OPEN_FAMILIES else SUPPORTED,
+            cite="SEM-37, DL-250" if member in _OPEN_FAMILIES else "SEM-37",
+            label=_OPEN_FAMILIES.get(member),
             pattern=pattern,
             effect=f"{words}",
             trigger=_cal(f"condition: {token}", cyccal=member in _CYCLE_SCOPED_FAMILIES),
@@ -2454,8 +2669,8 @@ _MC_JIL = _job(date_conditions="1", start_times='"08:00"', must_complete_times='
 #: machine sized for one, so the second clears its condition gate and queues.
 _QUE_WAIT_JIL = _estate(
     "insert_machine: M0\ntype: a\nnode_name: localhost\nmax_load: 1",
-    "insert_job: J0\njob_type: c\ncommand: true\nmachine: M0\njob_load: 1",
-    "insert_job: J1\njob_type: c\ncommand: true\nmachine: M0\njob_load: 1",
+    "insert_job: J0\njob_type: c\ncommand: true\nmachine: M0\njob_load: 1\npriority: 1",
+    "insert_job: J1\njob_type: c\ncommand: true\nmachine: M0\njob_load: 1\npriority: 1",
 )
 
 SCENARIO_ROWS: tuple[Row, ...] = (
@@ -2465,7 +2680,8 @@ SCENARIO_ROWS: tuple[Row, ...] = (
             member="STATUS",
             klass=SUPPORTED,
             cite="ir-design ss7",
-            effect="sets a job's status and wakes every job whose condition names it",
+            effect="sets a job's status and wakes every job whose condition names it;"
+            " INACTIVE on a box cascades to every job it contains (SEM-18)",
             trigger=_scn(BASE_JIL, "0 STATUS job=J0 status=SUCCESS"),
         ),
         _row(
@@ -2480,8 +2696,10 @@ SCENARIO_ROWS: tuple[Row, ...] = (
             surface="event",
             member="FORCE_STARTJOB",
             klass=SUPPORTED,
-            cite="ir-design ss7",
-            effect="starts a job past its condition gate",
+            cite="ir-design ss7, DL-247",
+            effect="starts a job past its condition gate and its machine's load limit;"
+            " on a non-live ON_ICE or ON_HOLD job it clears that flag first, like an"
+            " OFF_ICE/OFF_HOLD, then starts it (DL-243); named resources still gate it",
             trigger=_scn(BASE_JIL, "0 FORCE_STARTJOB job=J0"),
         ),
         _row(
@@ -2495,9 +2713,13 @@ SCENARIO_ROWS: tuple[Row, ...] = (
         _row(
             surface="event",
             member="ON_ICE",
+            revision=2,
             klass=SUPPORTED,
-            cite="ir-design ss7",
-            effect="ices a job: downstream conditions read it as satisfied and it never runs",
+            cite="ir-design ss7, DL-254",
+            effect="ices a job: an ordinary downstream atom follows the vendor ON_ICE table"
+            " (s/d/n true, f/t/exitcode false), a lookback-qualified atom reads satisfied"
+            " regardless, and it never runs on a plain start (DL-243); ignored on a"
+            " STARTING or RUNNING job (DL-254)",
             trigger=_scn(BASE_JIL, "0 ON_ICE job=J0"),
         ),
         _row(
@@ -2511,9 +2733,11 @@ SCENARIO_ROWS: tuple[Row, ...] = (
         _row(
             surface="event",
             member="ON_HOLD",
+            revision=2,
             klass=SUPPORTED,
-            cite="ir-design ss7",
-            effect="holds a job: it stays startable but does not start",
+            cite="ir-design ss7, DL-254",
+            effect="holds a job: it stays startable but does not start; ignored on a"
+            " STARTING or RUNNING job (DL-254)",
             trigger=_scn(BASE_JIL, "0 ON_HOLD job=J0"),
         ),
         _row(
@@ -2527,17 +2751,23 @@ SCENARIO_ROWS: tuple[Row, ...] = (
         _row(
             surface="event",
             member="ON_NOEXEC",
+            revision=2,
             klass=SUPPORTED,
-            cite="ir-design ss7",
-            effect="marks a job as not executing; it completes without running",
+            cite="ir-design ss7, DL-254",
+            effect="marks a job as not executing; it completes without running. It clears a"
+            " hold and takes a queued job out of the queue, then retries the start; on a box"
+            " it sets the box INACTIVE with every job it holds and flags every level. Ignored on an iced job, a"
+            " RUNNING job, a STARTING non-box job and a box holding an iced, live or queued"
+            " job (DL-254)",
             trigger=_scn(BASE_JIL, "0 ON_NOEXEC job=J0"),
         ),
         _row(
             surface="event",
             member="OFF_NOEXEC",
+            revision=2,
             klass=SUPPORTED,
-            cite="ir-design ss7",
-            effect="clears the noexec flag",
+            cite="ir-design ss7, DL-254",
+            effect="clears the noexec flag; on a box, on every job it holds at every level",
             trigger=_scn(BASE_JIL, "0 OFF_NOEXEC job=J0"),
         ),
         _row(
@@ -2584,7 +2814,8 @@ SCENARIO_ROWS: tuple[Row, ...] = (
             member="MUST_COMPLETE_ALARM",
             klass=SUPPORTED,
             cite="SEM-34",
-            effect="emitted when a must_complete deadline passes with the run still live",
+            effect="emitted when a must_complete deadline passes before the run its tick asked"
+            " for completed, including a run that never began (DL-248)",
             trigger=_scn(
                 _estate(_MC_JIL, TICKER_BLOCK),
                 "0 STARTJOB job=J0",
@@ -2607,12 +2838,28 @@ SCENARIO_ROWS: tuple[Row, ...] = (
         _row(
             surface="event",
             member="ON_ICE",
-            facet="running",
+            facet="lookback atom",
             klass=PROVISIONAL,
-            cite="SEM-05, SEM-20, DL-13, oracle.Oracle._atom_true",
-            effect="icing a STARTING or RUNNING job does NOT make its atoms read as"
-            " satisfied: the in-flight run is real, so conditions keep reading the live"
-            " status until it completes (DL-13); no label was opened for the exception",
+            cite="SEM-20, DL-243, oracle.Oracle._atom_true",
+            label="Q10",
+            sites=("oracle.Oracle._atom_true#1",),
+            effect="a LOOKBACK-qualified atom on a non-live iced job reads true, lookback"
+            " ignored, as the AutoSys 24.2 condition attribute page states; an ORDINARY"
+            " atom (no lookback) follows the Start Conditions on-ice table, which does"
+            " not separate lookback atoms, so which page a live instance follows stays"
+            " open. The ice-lookback=ordinary switch selects the table's reading (DL-252)",
+            trigger=_scn(BASE_JIL, "0 ON_ICE job=J0"),
+            quiet=_scn(BASE_JIL, "0 ON_HOLD job=J0"),
+        ),
+        _row(
+            surface="event",
+            member="ON_ICE",
+            facet="running",
+            revision=2,
+            klass=SUPPORTED,
+            cite="SEM-20, DL-254, oracle.Oracle._oob_ignored",
+            effect="ON_ICE sent to a STARTING or RUNNING job is ignored: no flag, no wake,"
+            " one EVENT_IGNORED trace line; the run completes and reads normally",
             trigger=_scn(BASE_JIL, "0 STARTJOB job=J0", "1 ON_ICE job=J0"),
             quiet=_scn(BASE_JIL, "0 ON_ICE job=J0"),
         ),
@@ -2722,7 +2969,8 @@ SCENARIO_ROWS: tuple[Row, ...] = (
             member="must_complete",
             klass=SUPPORTED,
             cite="PR-09, oracle.Oracle._schedule_timer",
-            effect="armed by the start; it raises MUST_COMPLETE_ALARM if the run is still live",
+            effect="armed by the schedule tick; it raises MUST_COMPLETE_ALARM if the run the"
+            " tick asked for has not completed (DL-248)",
             trigger=_scn(_MC_JIL, "0 STARTJOB job=J0"),
         ),
         _row(
@@ -2730,7 +2978,8 @@ SCENARIO_ROWS: tuple[Row, ...] = (
             member="term_run_time",
             klass=SUPPORTED,
             cite="PR-09, oracle.Oracle._schedule_timer",
-            effect="armed by the start; it TERMINATEs a run still live at the deadline",
+            effect="armed by the start; it TERMINATEs a run still live at the deadline"
+            "; zero means no limit and arms no timer (DL-241)",
             trigger=_scn(_job(term_run_time="15"), "0 STARTJOB job=J0"),
         ),
         _row(
@@ -2848,6 +3097,13 @@ PROFILE_ROWS: tuple[Row, ...] = (
             "period-model ss2.1",
             "how far ahead a deferred dispatch retry may be scheduled",
         ),
+        _profile_row(
+            "semantics",
+            '{"ice-lookback": "ordinary"}',
+            "period-model ss2.1, runner-design ss8a, DL-252",
+            "explicit semantic-switch overrides only, an explicit default normalized away;"
+            " written {} when there is none",
+        ),
     )
     + (
         _row(
@@ -2882,6 +3138,24 @@ PROFILE_ROWS: tuple[Row, ...] = (
             cite="period-model ss2.1",
             effect="a supervisor owns the child processes across engine restarts",
             trigger='{"execution_mode": "detached"}',
+        ),
+        _row(
+            surface="profile_alt",
+            member="semantics.ice-lookback=true",
+            klass=SUPPORTED,
+            cite="runner-design ss8a, SEM-05, DL-252",
+            effect="the default: a lookback-qualified atom on a non-live iced predecessor"
+            " reads true, every atom kind, lookback ignored",
+            trigger='{"semantics": {"ice-lookback": "true"}}',
+        ),
+        _row(
+            surface="profile_alt",
+            member="semantics.ice-lookback=ordinary",
+            klass=SUPPORTED,
+            cite="runner-design ss8a, SEM-20, DL-243, DL-252",
+            effect="the qualifier is dropped on a non-live iced predecessor and the ordinary"
+            " on-ice table applies: s, d, n true; f, t, exitcode false",
+            trigger='{"semantics": {"ice-lookback": "ordinary"}}',
         ),
     )
     + _PROFILE_FACETS
@@ -3138,7 +3412,9 @@ TRACE_MARKER_ROWS: tuple[Row, ...] = (
         member="ON_ICE",
         klass=SUPPORTED,
         cite="ir-design ss7, oracle.Oracle._record",
-        effect="the job is iced: downstream conditions read it as satisfied and it never runs",
+        effect="the job is iced: an ordinary downstream atom follows the vendor ON_ICE table"
+        " (s/d/n true, f/t/exitcode false), a lookback-qualified atom reads satisfied"
+        " regardless, and it never runs on a plain start (DL-243)",
         trigger=_scn(BASE_JIL, "0 ON_ICE job=J0"),
     ),
     _row(
@@ -3199,6 +3475,15 @@ TRACE_MARKER_ROWS: tuple[Row, ...] = (
     ),
     _row(
         surface="trace_marker",
+        member="EVENT_IGNORED",
+        klass=SUPPORTED,
+        cite="ir-design ss7, DL-254, oracle.Oracle._oob_ignored",
+        effect="an ON_ICE, ON_HOLD or ON_NOEXEC the vendor ignores for the job's status;"
+        " nothing else moves",
+        trigger=_scn(BASE_JIL, "0 STARTJOB job=J0", "1 ON_HOLD job=J0"),
+    ),
+    _row(
+        surface="trace_marker",
         member="SCHED_ARM",
         klass=SUPPORTED,
         cite="ir-design ss7, oracle.Oracle._record",
@@ -3236,7 +3521,8 @@ TRACE_MARKER_ROWS: tuple[Row, ...] = (
         member="MUST_COMPLETE_ALARM",
         klass=SUPPORTED,
         cite="ir-design ss7, oracle.Oracle._record",
-        effect="the must_complete deadline passed with the run still live; no status moved",
+        effect="the must_complete deadline passed before the run its tick asked for"
+        " completed; no status moved",
         trigger=_scn(SLA_COMPLETE_JIL, "0 STARTJOB job=J0", "21 STATUS job=TICK status=SUCCESS"),
     ),
     _row(
@@ -3255,7 +3541,8 @@ TRACE_MARKER_ROWS: tuple[Row, ...] = (
         member="RUN_WINDOW_SKIP",
         klass=SUPPORTED,
         cite="ir-design ss7, oracle.Oracle._record",
-        effect="a start outside the run_window, closer to the previous close, was dropped",
+        effect="a start outside the run_window, closer to the previous close, was dropped;"
+        " the job reads INACTIVE (DL-246)",
         trigger=_scn(
             _job(date_conditions="1", days_of_week="all", run_window='"06:00-07:00"'),
             "0 STARTJOB job=J0",
@@ -3304,6 +3591,33 @@ PREFLIGHT_CODE_ROWS: tuple[Row, ...] = (
         cite="runner_preflight._owner_preflight",
         effect="an owner other than the invoking user refuses the run: there is no setuid",
         trigger=_job(owner="someone_else"),
+    ),
+    _row(
+        surface="preflight_code",
+        member="envvars",
+        klass=REFUSED,
+        cite="runner_preflight._execution_input_preflight, DL-240",
+        effect="envvars on a CMD job's ExecSpec is carried but the adapter never"
+        " applies it to the child environment, so real execution refuses the run",
+        trigger=_job(envvars="A=1"),
+    ),
+    _row(
+        surface="preflight_code",
+        member="global-substitution",
+        klass=REFUSED,
+        cite="runner_preflight._execution_input_preflight, DL-240",
+        effect="a $$NAME site on an exec_ field is carried but never substituted, so"
+        " the literal text would be used; real execution refuses the run",
+        trigger=_job(command="echo $$AUDIT_GLOBAL"),
+    ),
+    _row(
+        surface="preflight_code",
+        member="chk-files",
+        klass=REFUSED,
+        cite="runner_preflight._execution_input_preflight, DL-240",
+        effect="chk_files on a non-BOX job is carried but the pre-start disk-space"
+        " gate is never evaluated, so real execution refuses the run",
+        trigger=_job(chk_files="1"),
     ),
     _row(
         surface="preflight_code",
@@ -3671,7 +3985,7 @@ LITERAL_ALT_ROWS: tuple[Row, ...] = (
     ),
     _row(
         surface="literal_alt",
-        member="CatalogIR.ir_version=0.2",
+        member="CatalogIR.ir_version=0.3",
         klass=SUPPORTED,
         cite="ir-design ss4",
         effect="the IR version stamped on every catalog; a reader that meets another refuses",
@@ -3682,9 +3996,9 @@ LITERAL_ALT_ROWS: tuple[Row, ...] = (
         surface="literal_alt",
         member="SlaSpec.kind=absolute",
         klass=SUPPORTED,
-        cite="SEM-34, oracle.Oracle._arm_sla_and_term",
-        effect="an absolute must_*_times is lowered and carried, and arms nothing: the"
-        " oracle owns no calendar, so no absolute deadline exists v1",
+        cite="SEM-34, oracle.Oracle._slot_deadline",
+        effect="an absolute must_*_times, 00:00-71:59, arms its alarm timer at the slot's"
+        " must time (DL-253)",
         trigger="ir.SlaSpec",
         quiet="conditions.parse_condition",
     ),
@@ -3692,7 +4006,7 @@ LITERAL_ALT_ROWS: tuple[Row, ...] = (
         surface="literal_alt",
         member="SlaSpec.kind=relative",
         klass=SUPPORTED,
-        cite="SEM-34, oracle.Oracle._arm_sla_and_term",
+        cite="SEM-34, oracle.Oracle._slot_deadline",
         effect="a relative `+n` must_*_times is what arms the alarm timer",
         trigger="ir.SlaSpec",
         quiet="conditions.parse_condition",
@@ -3763,9 +4077,9 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         surface="runtime",
         member="member-arm-scope",
         klass=PROVISIONAL,
-        cite="oracle.Oracle._after_transition",
+        cite="oracle.Oracle._disarm_members",
         label="Q3c",
-        sites=("oracle.<module>#1", "oracle.Oracle._after_transition#1"),
+        sites=("oracle.<module>#1", "oracle.Oracle._disarm_members#1"),
         protocol="Q3c",
         effect="a box member's latched tick is scoped to the box run it was latched in",
         trigger=_job(BOX_BLOCK, box_name="BOX0", condition="s(BOX0)"),
@@ -3923,11 +4237,10 @@ RUNTIME_ROWS: tuple[Row, ...] = (
     _row(
         surface="runtime",
         member="sla-offset-broadcast",
-        klass=PROVISIONAL,
-        cite="SEM-34, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset",
-        effect="one relative offset broadcasts to every start slot, which SEM-34 marks"
-        " open -- the strict count rule and the vendor's own example disagree; no label"
-        " was opened for it",
+        klass=SUPPORTED,
+        cite="SEM-34, DL-248, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset",
+        effect="one relative offset broadcasts to every start slot: the vendor's relative"
+        " syntax is a single +minutes applied after each start time",
         trigger=_job(date_conditions="1", start_times='"08:00,12:00"', must_start_times='"+30"'),
         quiet=_job(date_conditions="1", start_times='"08:00,12:00"', must_start_times='"+30,+60"'),
     ),

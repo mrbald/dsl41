@@ -106,6 +106,7 @@ from dsl41.boundary import (
     OpenedPeriod,
     act_on_head,
     carried_outbox,
+    check_opening_version,
     claim_root,
     default_anchor_dir,
     open_next_period,
@@ -134,9 +135,11 @@ from dsl41.runner_scheduler import Scheduler
 
 
 #: Profile fields NO wired object can report: they act in preflight, over
-#: the catalog, and never on an adapter or a scheduler. They inherit the pin
-#: unless the launcher DECLARES them -- see `_derive_runtime_profile`.
-_UNWIRED_FIELDS: tuple[str, ...] = ("as_machine", "machine_policy")
+#: the catalog, or (the semantic switches, DL-252) inside the oracle, which
+#: reads them from the pin itself, and never on an adapter or a scheduler.
+#: They inherit the pin unless the launcher DECLARES them -- see
+#: `_derive_runtime_profile`.
+_UNWIRED_FIELDS: tuple[str, ...] = ("as_machine", "machine_policy", "semantics")
 
 
 def _derive_runtime_profile(
@@ -157,7 +160,7 @@ def _derive_runtime_profile(
     over `base` for the fields the engine cannot see.
 
     `declared` is what the LAUNCHER was invoked with, and it supplies
-    exactly `_UNWIRED_FIELDS`. Without it those two inherit the pin and can
+    exactly `_UNWIRED_FIELDS`. Without it those fields inherit the pin and can
     therefore never disagree with it -- so a boundary that staged a new
     machine identity opened SILENTLY under the old one, this process still
     answering to the machine names it was started with while the manifest
@@ -703,6 +706,10 @@ async def _resume_under_lock(
     records = read_journal(estate_wal(run_root))
     lineage = select_seal(run_root, records)  # step 3
     if lineage.seal is not None:
+        # the version FIRST (DL-253): the head action and the opening below
+        # write, and an older build's boundary must be refused for its
+        # version before either, not as a catalog that does not match
+        check_opening_version(lineage.seal.next_period, where=str(run_root))
         # ss3.5's CMD-or-FW half, at the loader that holds C2 (DL-151). The
         # sidecar half ran inside `select_seal`; this is the half that needs
         # the OPENING catalog. Ahead of step 4, so a sidecar this catalog
@@ -1136,6 +1143,13 @@ async def _reconcile(
         job_ir = engine.oracle.catalog.jobs.get(job)
         if job_ir is None:
             continue
+        # DL-242: only a LIVE row is relaunched. A row an operator set
+        # INACTIVE, a SEM-18 cascade or a box-start reset moved off its run
+        # at the SAME run number is DL-235's orphan: its evidence is still
+        # reconciled below -- the stale-completion gate rejects it -- but
+        # nothing starts the run again (a killed, held watch restarted by
+        # its box's reset was relaunched from its incomplete log)
+        live = rt.status in LIVE
         reattach = supervised_live.get((job, run_number))
         if reattach is not None and reattach.wrapper_alive:
             cmd_adapter = engine.adapters.get(job_ir.job_type)
@@ -1148,12 +1162,13 @@ async def _reconcile(
                 engine._launch(job_ir, run_number, cmd_adapter)
                 continue
         if job_ir.job_type == "FW":
-            _resume_watch(engine, job_ir, run_number, run_dir, last_at)
+            _resume_watch(engine, job_ir, run_number, run_dir, last_at, relaunch=live)
             continue
         bound = _spawn_effect_for(engine, job, run_number)
         cmd_adapter = engine.adapters.get(job_ir.job_type)
         if (
-            isinstance(cmd_adapter, SupervisedCommandAdapter)
+            live
+            and isinstance(cmd_adapter, SupervisedCommandAdapter)
             and bound is not None
             and bound.run_id is not None
             and not _spool_has_evidence(run_dir)
@@ -1223,12 +1238,16 @@ def _resume_watch(
     run_number: int,
     run_dir: Path | None,
     last_at: datetime,
+    *,
+    relaunch: bool = True,
 ) -> None:
     """One incomplete FW run, from its spool (period-model ss2.2).
 
     A dispatched watch leaves a run directory now, so this is where a resumed
     watch lands: the sweep finds the directory, and the log says whether the
-    watch is over."""
+    watch is over. `relaunch=False` is a row that is no longer live (DL-242):
+    a completed log is still injected, for the gate to judge, and an
+    incomplete one is left alone."""
     job = job_ir.name
     if run_dir is None and engine.run_root is not None:
         # the same fallback the preflight makes: a candidate that came from a
@@ -1260,6 +1279,8 @@ def _resume_watch(
             )
         extras["ended_at"] = watch.last_at.isoformat()
         _inject_completion(engine, job, run_number, extras, at=watch.last_at, last_at=last_at)
+        return
+    if not relaunch:
         return
     adapter = engine.adapters.get("FW")
     if adapter is None:
