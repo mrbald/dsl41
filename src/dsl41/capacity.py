@@ -197,11 +197,21 @@ class CapacityPool:
         not block on the machine. `counts` says which waiters the caller
         counts as queued: the Oracle leaves out a held waiter and one whose
         box no longer runs."""
+        return self._load_blocked(job_ir, self.used(rows, consumed), rows, counts)
+
+    def _load_blocked(
+        self,
+        job_ir: JobIR,
+        used: Mapping[str, int],
+        rows: Mapping[str, JobRuntime],
+        counts: Callable[[str], bool],
+    ) -> bool:
+        """`load_blocked` over usage the caller has already summed."""
         priority = job_priority(job_ir)
         key = self._machine_key(job_ir)
         if priority <= 0 or key is None:
             return False
-        used = self.used(rows, consumed).get(key, 0)
+        load_used = used.get(key, 0)
         for name, row in rows.items():
             other = self.catalog.jobs.get(name)
             if row.waiter_seq is None or name == job_ir.name or other is None:
@@ -211,20 +221,95 @@ class CapacityPool:
                 continue
             if not 0 < job_priority(other) < priority:
                 continue
-            if used + other_entry[1] <= self._bucket_cap[key]:
+            if load_used + other_entry[1] <= self._bucket_cap[key]:
                 continue
             if counts(name):
                 return True
         return False
 
-    def has_load_waiters(self, rows: Mapping[str, JobRuntime]) -> bool:
-        """True when a queued job checks machine load on a sized machine:
-        the only kind of job a priority block can hold (DL-247)."""
+    def resource_blocked(
+        self,
+        job_ir: JobIR,
+        rows: Mapping[str, JobRuntime],
+        consumed: Mapping[str, int],
+        counts: Callable[[str], bool],
+    ) -> bool:
+        """DL-255: True when a queued job of strictly higher priority waits
+        for a named resource this job also names. The vendor rule: "A job in
+        the RESWAIT state for one resource name automatically blocks all the
+        lower priority jobs that specify the same resource name. It does not
+        automatically block higher or equal priority jobs that specify the
+        same resource name or a job that specifies a different resource
+        name." dsl41 has no RESWAIT status; such a job is QUE_WAIT.
+
+        The blocked job needs a positive priority, as under DL-247: an unset
+        or zero priority "is not queued behind other jobs". The blocker has
+        a positive priority, names a sized resource the blocked job names,
+        and is short now on ANY resource it names. It blocks on every
+        resource it names, not only the short one: AutoSys KB 240816
+        ("AutoSys jobs/resources issue: job stuck in RESWAIT", AutoSys 12.0)
+        shows a job waiting for its second resource blocking lower priorities
+        that need only its first, which was free. It must also have passed
+        its load check: the vendor evaluates resources "after the load balancing attributes are
+        evaluated and the machine has available load units", and a job still
+        waiting for load does "not automatically block lower priority jobs
+        that specify the same resource attribute". So a blocker's load fits
+        and no higher-priority load waiter blocks it. `counts` is
+        `load_blocked`'s."""
+        priority = job_priority(job_ir)
+        if priority <= 0:
+            return False
+        named = {entry[0] for entry in self._resource_entries(job_ir)}
+        if not named:
+            return False
+        used = self.used(rows, consumed)
+        for name, row in rows.items():
+            other = self.catalog.jobs.get(name)
+            if row.waiter_seq is None or name == job_ir.name or other is None:
+                continue
+            if not 0 < job_priority(other) < priority:
+                continue
+            entries = self._resource_entries(other)
+            if not any(entry[0] in named for entry in entries):
+                continue
+            if not any(
+                used.get(key, 0) + units > self._bucket_cap[key] for key, units, _, _ in entries
+            ):
+                continue
+            if not self._passed_load(other, used, rows, counts):
+                continue
+            if counts(name):
+                return True
+        return False
+
+    def _resource_entries(self, job_ir: JobIR) -> list[DemandEntry]:
+        """The named-resource half of a job's demand vector."""
+        return without_machine_load(self.demand_vector(job_ir))
+
+    def _passed_load(
+        self,
+        job_ir: JobIR,
+        used: Mapping[str, int],
+        rows: Mapping[str, JobRuntime],
+        counts: Callable[[str], bool],
+    ) -> bool:
+        """DL-255: whether a queued positive-priority job has passed its
+        machine-load stage: its load fits now and no higher-priority load
+        waiter blocks it. Only such a job waits on its named resources."""
+        entry = self._machine_entry(job_ir)
+        if entry is not None and used.get(entry[0], 0) + entry[1] > self._bucket_cap[entry[0]]:
+            return False
+        return not self._load_blocked(job_ir, used, rows, counts)
+
+    def has_priority_waiters(self, rows: Mapping[str, JobRuntime]) -> bool:
+        """True when a queued job has a positive priority and a sized machine
+        or a sized named resource: the only kind of job a priority block can
+        hold (DL-247, DL-255)."""
         for name, row in rows.items():
             job_ir = self.catalog.jobs.get(name)
-            if row.waiter_seq is None or job_ir is None:
+            if row.waiter_seq is None or job_ir is None or job_priority(job_ir) <= 0:
                 continue
-            if checks_load(job_ir) and self._machine_key(job_ir) is not None:
+            if self._machine_key(job_ir) is not None or self._resource_entries(job_ir):
                 return True
         return False
 
@@ -264,6 +349,11 @@ def without_machine_load(vector: list[DemandEntry]) -> list[DemandEntry]:
     """The vector less its machine-load entry: what a start that skips the
     load check tests (DL-247). The start still reserves the whole vector."""
     return [entry for entry in vector if not entry[0].startswith(_MACHINE)]
+
+
+def takes_machine_load(vector: list[DemandEntry]) -> bool:
+    """True when a demand vector holds load on a sized machine (DL-255)."""
+    return any(entry[0].startswith(_MACHINE) for entry in vector)
 
 
 def job_priority(job_ir: JobIR) -> int:

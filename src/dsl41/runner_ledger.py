@@ -96,7 +96,10 @@ from dsl41.runner_clock import EngineError
 #: 12 since DL-254: ON_ICE, ON_HOLD and ON_NOEXEC sent to a live (or, for
 #: ON_NOEXEC, iced) job are ignored, so a replay with such an event sets no
 #: flag where v11 set one.
-STATE_MACHINE_VERSION = 12
+#: 13 since DL-255: a job waiting on a named resource blocks lower
+#: priorities that name it, and a start or enqueue that takes machine load
+#: owes a queue scan, so a replay with resource waiters admits differently.
+STATE_MACHINE_VERSION = 13
 
 LOCK_NAME = "leader.lock"
 

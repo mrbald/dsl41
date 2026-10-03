@@ -1644,6 +1644,33 @@ def test_preflight_resources_refuses_a_positive_priority_load_above_max_load(mon
     assert "max_load=1" in item.message and "QUE_WAIT forever" in item.message
 
 
+def test_preflight_resources_refuses_a_quantity_above_amount_at_every_priority(
+    monkeypatch,
+) -> None:
+    """DL-255: a QUANTITY above the resource's amount can never be satisfied.
+    At a positive priority the waiter would also block every lower priority
+    naming the resource forever. Named resources gate every priority, so the
+    refusal covers priority 0 and an unset priority too; a QUANTITY that fits
+    is not refused."""
+    monkeypatch.setattr(socket_mod, "getfqdn", lambda *a: "test.host")
+    text = (
+        "insert_resource: TWO\nres_type: R\namount: 2\n\n"
+        "insert_job: hi\njob_type: c\ncommand: x\nmachine: localhost\npriority: 1\n"
+        "resources: (TWO, QUANTITY=3)\n\n"
+        "insert_job: zero\njob_type: c\ncommand: x\nmachine: localhost\npriority: 0\n"
+        "resources: (TWO, QUANTITY=3)\n\n"
+        "insert_job: unset\njob_type: c\ncommand: x\nmachine: localhost\n"
+        "resources: (TWO, QUANTITY=3)\n\n"
+        "insert_job: fits\njob_type: c\ncommand: x\nmachine: localhost\npriority: 2\n"
+        "resources: (TWO, QUANTITY=2)\n"
+    )
+    items = preflight(lower_source(text))
+    refused = {i.job for i in items if i.code == "resources" and i.severity == "ERROR"}
+    assert refused == {"hi", "zero", "unset"}
+    [item] = [i for i in items if i.job == "hi"]
+    assert "amount=2" in item.message and "DL-255" in item.message
+
+
 def test_preflight_resources_clean_without_load_priority_or_resources() -> None:
     text = "insert_job: rl0\njob_type: c\ncommand: x\nmachine: localhost\n"
     items = preflight(lower_source(text))
