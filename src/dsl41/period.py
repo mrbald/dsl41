@@ -390,6 +390,18 @@ def to_us(seconds: float) -> int:
     return round(seconds * 1_000_000)
 
 
+def default_tz_of(profile: "RuntimeProfile | None") -> str | None:
+    """The base zone a period runs under -- the `--timezone` the scheduler
+    ticks in, from the period's own pin (DL-155, DL-253).
+
+    The oracle reads a job with no `timezone:` in it: start-time slots,
+    absolute must times and run_window. A reader that replays a period's
+    log reads it the way the engine did, or it derives other alarms and
+    other window decisions from the same inputs. None when no pin is held,
+    which reads the engine clock, as before."""
+    return None if profile is None else profile.default_tz
+
+
 def tz_aliases_of(profile: "RuntimeProfile | None") -> dict[str, str] | None:
     """The SEM-35 alias table a period runs under, as `resolve_timezone` takes
     it -- from the period's own pin (DL-62, DL-151).

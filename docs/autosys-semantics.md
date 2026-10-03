@@ -478,7 +478,7 @@ canonical fidelity, `docs/jil-statement-syntax.md` rule 2); only lowering unesca
 whole-value quote (`"10:00, 11:00"`) is also accepted, as before; quoting one item of a list
 (`10:00, "11:00"`) is not a documented spelling and stays refused, the same as a per-item
 quoted relative must-time offset (SEM-34). `run_window` shares this lane's 00:00-23:59 bound;
-see SEM-34 for the vendor's wider `must_*_times` range and dsl41's support limit.
+the absolute `must_*_times` run to 71:59 (SEM-34).
 
 **Arm and wait (Q3, DL-54, DL-58).** A tick whose `condition` is still false ARMS the job. The
 condition edge later starts it, and the start consumes the arm (at most one run per tick).
@@ -637,17 +637,28 @@ is a single `+minutes` for each start time. TechDocs 24.2, must_complete_times p
 run must complete within 8 minutes after each start time". The doc-derived corpus fixture
 uses one `+3` against three start_times, from that example. A list of several relative
 offsets has no documented syntax. **[?]** It is accepted against start_times with the
-positional pairing below, and refused against start_mins (DL-248). Relative can cross ≤ 2 calendar days. Each must_complete must precede the next
-start. Those last two are recorded vendor constraints, not loader validation: lowering checks
-the form and the count, never the span or the ordering. IR: model as SLA annotations, not
-semantics.
+positional pairing below, and refused against start_mins (DL-248). Relative can cross ≤ 2
+calendar days; that span is a recorded vendor constraint, not loader validation. For the
+absolute form lowering checks the vendor's two ordering rules (DL-253). A must time below its
+own start time is refused: "If 10:00 a.m. is specified, the job issues an error message", and
+the next day's time is written +24 hours. A must time not earlier than the next run's start
+time is refused: "The must start time for a run must be earlier than the start times for the
+next run", with 11:10 against an 11:00 run as the vendor's invalid example. Lowering checks
+this against the next later start time of the same day only. The latest start time of the day
+is not checked: its next run depends on the calendar, and a weekly job's next run may be days
+away. With one pending check at a time, a last-slot must time that is still pending at the next
+day's first tick keeps that tick from arming its own deadline (DL-253). A relative offset's span
+and order stay unchecked. IR: model as SLA
+annotations, not semantics.
 The relative form also counts against `start_mins` (DL-248). **[V]** TechDocs 24.2,
 must_complete_times attribute page: "The must complete times are calculated relative to the
 start_mins or start_times attributes." Its start_mins example runs every 10 minutes with
 `+7`: "the 2:10 p.m. job run must complete by 2:17 p.m." Only that documented form lowers: a
-single relative offset, broadcast to every start_mins tick. A list of relative offsets or an
-absolute form against start_mins is not specified by the vendor pages and stays open; lowering
-refuses it.
+single relative offset, broadcast to every start_mins tick. The vendor refuses the absolute form
+there: "If you specify the start_mins attribute in the job definition, you can only define
+relative times. You will get an error if you define absolute times with start_mins." Lowering
+refuses it (DL-253). A list of relative offsets against start_mins is not specified by the vendor
+pages and stays open; lowering refuses it too.
 **Relative must_complete is anchored to the schedule slot (DL-248). [V]** The same page: "Each
 job run must complete within 8 minutes after each start time (10:08 a.m., 11:08 a.m., and
 12:08 p.m.)". How Must Start Times and Must Complete Times Work (24.2): the CHK_COMPLETE event
@@ -660,11 +671,12 @@ Recorded choices (DL-248), the smallest rule the vendor sentences allow. **[C]**
 - The run a tick asks for is the first run to begin after that tick. Its deadline is met once
   that run is no longer STARTING or RUNNING, or once a later run has begun; runs of one job
   never overlap. Otherwise the deadline alarms, including when no run began at all.
-- At most one relative must_complete deadline is pending per job. The vendor inserts the next
-  CHK_COMPLETE only "after the job completes". A tick arms one only when the job is not live
-  (STARTING, RUNNING or QUE_WAIT) and no earlier deadline is still pending, that is neither
-  met nor fired. A slot that passes while a run is live or a deadline is pending gets none.
-  must_start keeps one deadline per tick.
+- At most one must_complete and one must_start deadline is pending per job, in either form
+  (DL-248, DL-253). The vendor inserts the next CHK_START and CHK_COMPLETE only "After the job
+  completes". A tick arms one only when the job is not live (STARTING, RUNNING or QUE_WAIT)
+  and no earlier deadline of that kind is still pending, that is neither met nor fired. A
+  must_start deadline is met once a run began after its tick. A slot that passes while a run
+  is live or a deadline is pending gets none.
 - A terminal status from before the tick does not meet the deadline.
 - A run that ends without a SUCCESS, FAILURE or TERMINATED transition of its own counts as
   ended: an injected non-terminal status, say. A KILLJOB that dequeues a QUE_WAIT run sets
@@ -676,28 +688,58 @@ Recorded choices (DL-248), the smallest rule the vendor sentences allow. **[C]**
 - A FORCE_STARTJOB, a condition edge, an OFF_HOLD release and a run_window deferred start are
   not ticks and arm nothing. A run they begin can still meet an earlier tick's deadline. The
   ON_NOEXEC bypass is a run and meets it (SEM-22).
-*Model note:* only the relative forms arm an alarm. Absolute `must_start_times` /
-`must_complete_times` lower to IR and are carried, but the oracle owns no calendar, so no
-absolute deadline is armed. Under the strict count match the offsets pair with the start_times
-**by position**: the oracle reads the tick's own time of day, in the job's timezone, to name
-the slot. A tick at an instant that matches no start time (an operator's STARTJOB at another
-time) cannot be paired and takes the first offset. **[?]**
+**Absolute must times are armed (DL-253). [V]** The must_start_times page (must_complete_times
+has the same text): absolute times in 24-hour format, "Limits: 00:00-71:59 (2 calendar days
+ahead of the current calendar day)". "If a job has multiple start times, you must specify the
+same number of must start times", "corresponding to each run of the job". A must time below its
+start time is the next day's, written +24 hours: "you cannot specify 10:00 a.m. as the must
+start time ... you must specify the must start time as 34:00". Lowering accepts 00:00-71:59,
+the `\:` spelling included (SEM-32), and refuses 72:00 and above. IR-F holds the value as a
+`MustTime`, whose hour runs to 71; `start_times` and `run_window` keep `Time`'s 00:00-23:59.
+The STARTJOB tick arms the absolute deadline beside the relative ones. The tick's slot names
+the must time by position. The deadline is that time on the tick's local calendar day, in the
+job's zone as start_times are read, plus one day for each 24 hours past 23. The alarm rules,
+the run the tick asks for and the one-at-a-time rule are the relative form's.
+*Model note:* the times pair with start_times by position, and the oracle reads the tick's own
+time of day, in the job's timezone, to name the slot. A start time in a spring change's missing
+hour also names the slot at the instant the scheduler ticks it (fold=0, runner-design E10).
+For a relative offset, a tick at an instant that matches no start time (an operator's STARTJOB
+at another time) cannot be paired and takes the first offset. **[?]** An absolute form arms
+nothing for such an instant: the vendor ties the CHK events to the scheduled start times. A
+deadline that falls before its tick is due at the tick. **[?]** Only a start in the missing hour
+reaches that, because the scheduler ticks it later than the vendor runs it (E10); lowering
+refuses a must time below its own start time, the other way to write one.
 (Contrast `term_run_time`: that one *is* control flow, auto-TERMINATE after n minutes.)
 
-Absolute `must_start_times` / `must_complete_times` range, a support limit (DL-251). The
-vendor's must_start_times page (must_complete_times has the same limits): "Limits:
-00:00-71:59 (2 calendar days ahead of the current calendar day)", with the worked example
-10:00 + 24 hours = 34:00. Lowering refuses an absolute hour above 23:59 with a message naming
-both numbers: the vendor's full range, and that dsl41 supports only 00:00-23:59 here because
-the *Model note* above already means an absolute must time is carried and never armed -- the
-oracle owns no calendar, so the 24-71 span the vendor reserves for alarms the oracle would
-have to schedule buys nothing, and modeling it moves the IR-F shape (`Time.hour`) for every
-caller, not just this one. `start_times` and `run_window` are unaffected; they were never
-documented past 23:59.
+**Absolute must times across a DST change (DL-253). [V]** TechDocs 24.2. "Daylight Time
+Changes": "When the specified must start or must complete times falls during the missing hour,
+AutoSys Workload Automation re-evaluates the time the job must start or complete to a time
+during the first minute of the next hour. For example, a job that must start by 2:05 and must
+complete by 2:45 generates an alarm if the job does not start by 3:00:05 or if it does not
+complete by 3:00:45." The special case: "Suppose a job is scheduled to run at 2:45 with a must
+complete time of 3:00 ... the job that is scheduled at 2:45 runs at 3:00:45, a time that takes
+place after the scheduled must complete time. To prevent scheduling a job after its must start
+or must complete time, AutoSys Workload Automation also re-evaluates the time ... to the final
+second of the first minute of the hour following the missing hour. In the previous example, the
+job generates an alarm if it does not complete by 3:00:59." Relative must times "evaluate as
+expected". "Standard Time Changes": "when the specified start of the job is before the time
+change and either the must start or must complete times or both occur during the repeated hour,
+CA Workload Automation raises alarms during the daylight time period (the first hour). For
+example, a job that is scheduled to run at midnight and must complete at 1:30 generates an alarm
+if the job has not completed by 1:30 DT, not 1:30 ST." "When the specified start of the job and
+either the must start or must complete times or both occur during the repeated hour, CA
+Workload Automation raises alarms during the second standard time hour." The oracle applies
+these rules to changes of the shape DL-249 detects (`timezones.dst_change`): a one-hour gap at
+02:00-02:59 or a one-hour repeat at 01:00-01:59. A start on an earlier day is before the change.
+Other shapes keep the fold=0 conversion, as run_window does. The scheduler still ticks a start
+in either hour by the fold=0 pin (E10), so the vendor's own start instant is not modelled.
 
 ### SEM-35 · timezone **[V]**
 Per-job `timezone:` re-bases all time attributes of that job. IR carries tz per schedule
-block. Equivalence of schedules is tz-aware.
+block. Equivalence of schedules is tz-aware. A job with no `timezone:` reads its time
+attributes in the run's base zone (`--timezone`, pinned as the period's `default_tz`). The
+scheduler ticks in it, and the engine's oracle and every replay read slots, absolute must times
+and run_window in it too (DL-155, DL-253).
 Scope (DL-23): TechDocs' own `date_conditions` page lists `timezone` (with `run_window` and
 `must_*_times`) among the attributes date_conditions gates, and the `timezone` page describes
 only "the job's time settings". So timezone without truthy date_conditions is dead
@@ -1119,7 +1161,10 @@ T33c the window read in the job's timezone (SEM-33, with SEM-35), and its endpoi
 DST change (DL-249: `test_sem33_spring_*`, `test_sem33_fall_*`, `test_sem33_dst_*`,
 `test_sem33_box_start_on_a_spring_change_*`) ·
 T34a/b must_* emit alarms only, T34c each start_time arms its own relative offset, T34
-relative must_complete anchored to the tick's slot (SEM-34, DL-248: `test_sem34_must_complete_*`).
+relative must_complete anchored to the tick's slot (SEM-34, DL-248: `test_sem34_must_complete_*`),
+absolute must times armed over 00:00-71:59, one must_start deadline at a time, and the DST
+rules (SEM-34, DL-253: `test_sem34_absolute_*`, `test_sem34_must_start_*`,
+`test_sem34_spring_*`, `test_sem34_fall_*`).
 
 Layer note: not every SEM entry lands in the oracle suite. SEM-07 (cross-instance atoms) is
 pinned by the condition, derive and control-plane suites, not by an oracle trace. SEM-15's
@@ -1271,7 +1316,8 @@ Job Concepts also 24.2, same box-cycle wording: SEM-10, SEM-11, SEM-15, SEM-18; 
 run_window page also 24.2, same wording: SEM-33; the 24.2 `priority` and `job_load`
 attribute pages and How AutoSys Workload Automation Queues Jobs: the §5 load-balancing row,
 DL-247; the 24.2 `must_complete_times` page and How Must Start Times and Must Complete Times
-Work: SEM-34, DL-248; the 24.2 `status`, `envvars`, `condition`, `resources`, `job_type`,
+Work: SEM-34, DL-248; the 24.2 `must_start_times` page and the Standard and Daylight Time
+Changes pages: SEM-34, DL-253; the 24.2 `status`, `envvars`, `condition`, `resources`, `job_type`,
 `success_codes` and `fail_codes` attribute pages, the insert_resource Subcommand page and Date
 Condition Keywords 24.2: SEM-02/04/09/24/37 and §5, DL-250): JIL
 reference pages (`condition`, `box_success`, `box_failure`, `run_window`, `start_mins`,

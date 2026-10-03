@@ -36,6 +36,7 @@ from dsl41.ir import (
     LoweringError,
     MachineIR,
     MachineMember,
+    MustTime,
     ResourceIR,
     ScheduleBlock,
     Semantics,
@@ -110,7 +111,7 @@ def test_slaspec_absolute_missing_times_rejected() -> None:
 
 def test_slaspec_absolute_with_offsets_cross_set_rejected() -> None:
     with pytest.raises(ValidationError, match="SEM-34"):
-        SlaSpec(kind="absolute", times=[Time(hour=10, minute=0)], offsets_min=[5])
+        SlaSpec(kind="absolute", times=[MustTime(hour=10, minute=0)], offsets_min=[5])
 
 
 def test_slaspec_relative_missing_offsets_rejected() -> None:
@@ -120,12 +121,12 @@ def test_slaspec_relative_missing_offsets_rejected() -> None:
 
 def test_slaspec_relative_with_times_cross_set_rejected() -> None:
     with pytest.raises(ValidationError, match="SEM-34"):
-        SlaSpec(kind="relative", offsets_min=[5], times=[Time(hour=10, minute=0)])
+        SlaSpec(kind="relative", offsets_min=[5], times=[MustTime(hour=10, minute=0)])
 
 
 def test_slaspec_absolute_and_relative_happy_paths() -> None:
-    absolute = SlaSpec(kind="absolute", times=[Time(hour=10, minute=0)])
-    assert absolute.times == [Time(hour=10, minute=0)]
+    absolute = SlaSpec(kind="absolute", times=[MustTime(hour=10, minute=0)])
+    assert absolute.times == [MustTime(hour=10, minute=0)]
     relative = SlaSpec(kind="relative", offsets_min=[5])
     assert relative.offsets_min == [5]
 
@@ -728,7 +729,7 @@ _SEM34_OK_CASES: list[tuple[str, str, SlaSpec]] = [
         "absolute-count-matches-start-times",
         "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\ndate_conditions: 1\n"
         'start_times: "10:00, 11:00"\nmust_start_times: "10:05, 11:05"\n',
-        SlaSpec(kind="absolute", times=[Time(hour=10, minute=5), Time(hour=11, minute=5)]),
+        SlaSpec(kind="absolute", times=[MustTime(hour=10, minute=5), MustTime(hour=11, minute=5)]),
     ),
     (
         "relative-single-offset-broadcasts",
@@ -855,7 +856,9 @@ def test_escaped_colon_must_times_lower(attr_key: str) -> None:
     (job,) = lower_source(text).jobs.values()
     assert job.schedule is not None
     field = "must_start" if attr_key == "must_start_times" else "must_complete"
-    assert getattr(job.schedule, field) == SlaSpec(kind="absolute", times=[Time(hour=10, minute=5)])
+    assert getattr(job.schedule, field) == SlaSpec(
+        kind="absolute", times=[MustTime(hour=10, minute=5)]
+    )
 
 
 def test_per_token_quoted_list_item_is_refused() -> None:
@@ -871,23 +874,91 @@ def test_per_token_quoted_list_item_is_refused() -> None:
         lower_source(text)
 
 
-# ------------------------------ 6c. must_*_times absolute hour support limit (DL-251)
+# ------------------------------------- 6c. must_*_times absolute range 00:00-71:59 (DL-253)
+
+_HEAD = "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\ndate_conditions: 1\n"
+
+_SEM34_RANGE_OK: list[tuple[str, str, str, list[MustTime]]] = [
+    ("midnight", '"00:00"', '"00:00"', [MustTime(hour=0, minute=0)]),
+    ("next-day", '"11:00"', '"34:00"', [MustTime(hour=34, minute=0)]),
+    ("last-minute", '"23:00"', '"71:59"', [MustTime(hour=71, minute=59)]),
+    ("escaped-colon", "11\\:00", "34\\:00", [MustTime(hour=34, minute=0)]),
+    ("equal-to-start", '"10:00"', '"10:00"', [MustTime(hour=10, minute=0)]),
+    (
+        "unsorted-starts-pair-by-position",
+        '"11:00, 10:00"',
+        '"11:30, 10:59"',
+        [MustTime(hour=11, minute=30), MustTime(hour=10, minute=59)],
+    ),
+    (
+        "vendor-paired-example",
+        '"10:00, 11:00, 12:00"',
+        '"10:08, 11:08, 12:08"',
+        [MustTime(hour=10, minute=8), MustTime(hour=11, minute=8), MustTime(hour=12, minute=8)],
+    ),
+]
 
 
 @pytest.mark.parametrize("attr_key", ["must_start_times", "must_complete_times"])
-def test_sem34_absolute_must_time_above_23_59_refused_with_named_bounds(attr_key: str) -> None:
-    # SEM-34: the vendor's Limits are 00:00-71:59; dsl41 supports 00:00-23:59
-    # for the absolute form because it is carried and never armed. The
-    # message names both bounds rather than leaking a raw Field error.
-    text = (
-        "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\ndate_conditions: 1\n"
-        f'start_times: "08:00"\n{attr_key}: "24:00"\n'
-    )
+@pytest.mark.parametrize(
+    "starts,musts,expected",
+    [c[1:] for c in _SEM34_RANGE_OK],
+    ids=[c[0] for c in _SEM34_RANGE_OK],
+)
+def test_sem34_absolute_must_times_lower_over_the_vendor_range(
+    attr_key: str, starts: str, musts: str, expected: list[MustTime]
+) -> None:
+    # "Limits: 00:00-71:59 (2 calendar days ahead of the current calendar
+    # day)"; an 11:00 start with a must time of 10:00 the next day is 34:00.
+    (job,) = lower_source(f"{_HEAD}start_times: {starts}\n{attr_key}: {musts}\n").jobs.values()
+    assert job.schedule is not None
+    field = "must_start" if attr_key == "must_start_times" else "must_complete"
+    assert getattr(job.schedule, field) == SlaSpec(kind="absolute", times=expected)
+
+
+_SEM34_RANGE_REFUSED: list[tuple[str, str, str, str]] = [
+    ("hour-72", 'start_times: "08:00"', '"72:00"', "00:00-71:59"),
+    ("hour-99", 'start_times: "08:00"', '"99:59"', "00:00-71:59"),
+    ("minute-60", 'start_times: "08:00"', '"34:60"', "minute"),
+    ("with-start-mins", "start_mins: 0, 30", '"10:05"', "require start_times"),
+    ("count-mismatch", 'start_times: "10:00, 11:00"', '"34:00"', "count must match"),
+    ("mixed-forms", 'start_times: "10:00, 11:00"', '"34:00", +5', "cannot be mixed"),
+    # "If 10:00 a.m. is specified, the job issues an error message"
+    ("below-own-start", 'start_times: "11:00"', '"10:00"', "earlier than its start time"),
+    # the vendor's invalid example: 11:10 for the run before the 11:00 run
+    (
+        "not-before-next-run",
+        'start_times: "10:00, 10:30, 11:00"',
+        '"10:10, 11:10, 11:20"',
+        "next run's start time 11:00",
+    ),
+    ("equal-to-next-run", 'start_times: "10:00, 10:30"', '"10:30, 10:40"', "next run's"),
+]
+
+
+@pytest.mark.parametrize("attr_key", ["must_start_times", "must_complete_times"])
+@pytest.mark.parametrize(
+    "schedule,musts,needle",
+    [c[1:] for c in _SEM34_RANGE_REFUSED],
+    ids=[c[0] for c in _SEM34_RANGE_REFUSED],
+)
+def test_sem34_absolute_must_times_refused_shapes(
+    attr_key: str, schedule: str, musts: str, needle: str
+) -> None:
     with pytest.raises(LoweringError) as exc_info:
-        lower_source(text)
+        lower_source(f"{_HEAD}{schedule}\n{attr_key}: {musts}\n")
     message = str(exc_info.value)
-    assert "00:00-71:59" in message
-    assert "00:00-23:59" in message
+    assert attr_key in message
+    assert needle in message
+
+
+@pytest.mark.parametrize(
+    "line", ['start_times: "24:00"', 'start_times: "34:00"', 'run_window: "09:00-24:00"']
+)
+def test_sem34_wide_range_stays_on_must_times_only(line: str) -> None:
+    # MustTime carries 24-71; start_times and run_window keep Time's 0-23.
+    with pytest.raises(LoweringError):
+        lower_source(f"{_HEAD}{line}\n")
 
 
 # ----------------------------------------------------------------- 7. exec/type rules
@@ -1091,7 +1162,7 @@ def test_load_dump_round_trips_the_full_corpus_catalog() -> None:
 
 def test_dump_contains_ir_version_field() -> None:
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
-    assert '"ir_version": "0.2"' in dump_catalog(catalog)
+    assert '"ir_version": "0.3"' in dump_catalog(catalog)
 
 
 def test_dump_top_level_keys_are_sorted() -> None:

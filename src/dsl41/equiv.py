@@ -79,7 +79,16 @@ from dsl41.conditions import (
     iter_atoms,
 )
 from dsl41.derive import derive_graph
-from dsl41.ir import CatalogIR, CondAttr, JobIR, MachineIR, ScheduleBlock, SlaSpec, Time
+from dsl41.ir import (
+    CatalogIR,
+    CondAttr,
+    JobIR,
+    MachineIR,
+    MustTime,
+    ScheduleBlock,
+    SlaSpec,
+    Time,
+)
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import TERMINAL, Event, TraceEntry
 
@@ -185,14 +194,14 @@ def _canon_attr(attr: CondAttr | None, rename: dict[str, str], case_fold: bool) 
     return CondAttr(cond=_canon(_map_cond(attr.cond, rename, case_fold)))
 
 
-def _sla_column(spec: SlaSpec | None, n_starts: int) -> Sequence[Time | int] | None:
+def _sla_column(spec: SlaSpec | None, n_starts: int) -> Sequence[MustTime | int] | None:
     """The SLA entries that pair one-to-one with start_times, or None when
     there is no pairing to keep. SEM-34 pairs them BY POSITION; a single
     relative offset that covers several start times (the broadcast form) has
     no order to lose, and neither has a one-element schedule."""
     if spec is None or n_starts < 2:
         return None
-    values: Sequence[Time | int] | None = (
+    values: Sequence[MustTime | int] | None = (
         spec.times if spec.kind == "absolute" else spec.offsets_min
     )
     if values is None or len(values) != n_starts:
@@ -200,17 +209,17 @@ def _sla_column(spec: SlaSpec | None, n_starts: int) -> Sequence[Time | int] | N
     return values
 
 
-def _sla_key(value: Time | int | None) -> tuple[int, int]:
-    """Sort key for one SLA entry, one shape for both kinds (a Time is its
+def _sla_key(value: MustTime | int | None) -> tuple[int, int]:
+    """Sort key for one SLA entry, one shape for both kinds (a MustTime is its
     (hour, minute), an offset is its own value). None is the absent column."""
     if value is None:
         return (0, 0)
-    if isinstance(value, Time):
+    if isinstance(value, MustTime):
         return (value.hour, value.minute)
     return (value, 0)
 
 
-def _reordered(spec: SlaSpec, values: Sequence[Time | int]) -> SlaSpec:
+def _reordered(spec: SlaSpec, values: Sequence[MustTime | int]) -> SlaSpec:
     field = "times" if spec.kind == "absolute" else "offsets_min"
     return spec.model_copy(update={field: list(values)})
 

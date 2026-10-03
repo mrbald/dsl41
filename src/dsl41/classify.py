@@ -66,7 +66,13 @@ from dsl41.equiv import canonical_cond
 from dsl41.ir import CatalogIR, CondAttr, JobIR, unquote_jil_value
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import TERMINAL, JobRuntime
-from dsl41.period import RuntimeProfile, job_fingerprints, switches_of, tz_aliases_of
+from dsl41.period import (
+    RuntimeProfile,
+    default_tz_of,
+    job_fingerprints,
+    switches_of,
+    tz_aliases_of,
+)
 from dsl41.semantics import REGISTRY as SWITCH_REGISTRY
 
 # ------------------------------------------------------------------- nodes
@@ -139,6 +145,19 @@ def is_scheduled(job_ir: JobIR) -> bool:
         or schedule.run_calendar
         or schedule.exclude_calendar
     )
+
+
+def reads_zone(job_ir: JobIR) -> bool:
+    """ss10.2 as amended by DL-253: the jobs whose interpretation reads the
+    timezone basis. The scheduled jobs (`is_scheduled`), and every job with a
+    `run_window`: the oracle reads the window's endpoints in the job's zone
+    (SEM-33, SEM-35), and since DL-253 that is the run's base zone for a job
+    with no `timezone:` of its own. Absolute must times need start_times, so
+    they ride `is_scheduled`. A job with its own `timezone:` keeps the edge
+    as the scheduled rule does: the alias table resolves its name."""
+    if is_scheduled(job_ir):
+        return True
+    return job_ir.schedule is not None and job_ir.schedule.run_window is not None
 
 
 class Baseline(BaseModel):
@@ -522,8 +541,8 @@ class ClassificationGraph:
                 for cal in (schedule.run_calendar, schedule.exclude_calendar):
                     if cal is not None:
                         self._edge(node, CALENDAR + cal)
-            # (6) the timezone basis, for scheduled jobs only
-            if is_scheduled(job_ir):
+            # (6) the timezone basis, for the jobs that read it (DL-253)
+            if reads_zone(job_ir):
                 self._edge(node, TZ_BASIS)
             # (7) the runtime-profile fields this job's KIND reads
             for field in self._profile_fields(job_ir):
@@ -546,7 +565,7 @@ class ClassificationGraph:
     @staticmethod
     def _profile_fields(job_ir: JobIR) -> tuple[str, ...]:
         fields: tuple[str, ...] = ()
-        if is_scheduled(job_ir):
+        if reads_zone(job_ir):
             fields += PROFILE_SCHEDULED
         kind = job_ir.job_type.upper()
         if kind == "CMD":
@@ -860,7 +879,10 @@ def _seeded(
     # `timezone:` only that table resolves must not raise here; and its own
     # semantic switches (DL-252), so each side's truth is that side's reading
     oracle = _TruthOracle(
-        catalog, tz_aliases=tz_aliases_of(profile), semantics=switches_of(profile)
+        catalog,
+        default_tz=default_tz_of(profile),
+        tz_aliases=tz_aliases_of(profile),
+        semantics=switches_of(profile),
     )
     store = oracle.store
     store.begin_input()

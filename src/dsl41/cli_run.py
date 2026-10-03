@@ -1876,7 +1876,7 @@ def _run_period(
     means."""
     from dsl41.oracle import Oracle
     from dsl41.oracle_state import OracleError
-    from dsl41.period import opening_at, switches_of, tz_aliases_of
+    from dsl41.period import default_tz_of, opening_at, switches_of, tz_aliases_of
     from dsl41.runner_clock import EngineError
     from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, seed_local_executor
     from dsl41.runner_journal import replay_inputs
@@ -1888,9 +1888,11 @@ def _run_period(
     # because a `ujo_timezones` name is site-local and lives in the pin.
     # The semantic switches come from the same pin (DL-252), or the replay
     # would read a condition differently from the engine that wrote the log.
+    # The base zone comes from it too (DL-253).
     oracle = Oracle(
         catalog,
         carried=carried,
+        default_tz=default_tz_of(profile),
         tz_aliases=tz_aliases_of(profile),
         semantics=switches_of(profile),
     )

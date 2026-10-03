@@ -91,7 +91,9 @@ from dsl41.runner_clock import EngineError
 #: and its timer carries the tick's run, so a replay alarms differently.
 #: 10 since DL-249: run_window endpoints follow the vendor's DST rules, so a
 #: replay with a window check near a DST change can decide differently.
-STATE_MACHINE_VERSION = 10
+#: 11 since DL-253: absolute must times arm alarms, and must_start arms one
+#: deadline at a time, so a replay alarms differently.
+STATE_MACHINE_VERSION = 11
 
 LOCK_NAME = "leader.lock"
 
@@ -357,10 +359,14 @@ def check_leader_eligibility(opening: dict[str, Any], *, catalog: CatalogIR) -> 
     did not change, which is the outage DL-100 named.
 
     The version half is `check_state_machine_version`, mode="lead" --
-    see there for why an absent field refuses in both halves (DL-189)."""
+    see there for why an absent field refuses in both halves (DL-189). It
+    runs FIRST, and `catalog_hash_for` checks the hash recipe's version
+    before it recomputes: a log an older build wrote is refused for its
+    version, never reported as an estate that changed. The catalog hash
+    covers `ir_version`, so an IR bump alone moves it (DL-253)."""
+    check_state_machine_version(opening, mode="lead")
     if opening.get("catalog_hash") != catalog_hash_for(opening, catalog):
         raise EngineError(
             "catalog hash mismatch: the estate changed since this journal was written;"
             " re-baseline explicitly with a fresh run (no silent semantic drift, ss7)"
         )
-    check_state_machine_version(opening, mode="lead")

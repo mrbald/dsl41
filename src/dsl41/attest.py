@@ -95,6 +95,7 @@ from dsl41.period import (
     read_sentinel,
     switches_of,
     tz_aliases_of,
+    default_tz_of,
     wrote_period,
 )
 from dsl41.runner_clock import EngineError
@@ -743,6 +744,7 @@ def rederive_seal(run_root: Path, period_id: int, *, stored: Seal | None = None)
     oracle = Oracle(
         c1,
         carried=carried,
+        default_tz=default_tz_of(closing.runtime_profile),
         tz_aliases=tz_aliases_of(closing.runtime_profile),
         semantics=switches_of(closing.runtime_profile),
     )

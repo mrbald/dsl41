@@ -91,8 +91,9 @@ def oracle(
         if default_tz is not None or tz_aliases is not None:
             pytest.skip(
                 "default_tz/tz_aliases are Oracle-construction knobs (DL-155): the"
-                " engine's oracle takes no run-level default -- the runner keeps"
-                " --timezone on the scheduler -- so only the direct path holds them"
+                " engine's oracle takes them from its scheduler or its pinned profile"
+                " (DL-253), and this harness wires neither; test_runner_scheduler"
+                " covers the engine path"
             )
         harness = EngineHarness(catalog, semantics=semantics)
         _HARNESSES.append(harness)
@@ -4563,6 +4564,286 @@ def test_sem34_must_complete_deadline_of_a_never_started_job_is_pending() -> Non
     assert _timers(o, "mcp") == [deadline]
     o.feed(ev("STATUS", 4, job="mcp", status="SUCCESS"))
     assert _timers(o, "mcp") == []
+
+
+# DL-253: absolute must times are armed. TechDocs 24.2, must_start_times and
+# must_complete_times: absolute times in 24-hour format, "Limits: 00:00-71:59
+# (2 calendar days ahead of the current calendar day)", paired by position
+# with start_times. "How Must Start Times and Must Complete Times Work": the
+# CHK_START and CHK_COMPLETE events for the next must times are inserted with
+# the job, and the next ones only "After the job completes".
+
+
+def _abs_jil(
+    name: str,
+    starts: str,
+    *,
+    must_start: str | None = None,
+    must_complete: str | None = None,
+    zone: str | None = None,
+    gated: bool = True,
+) -> str:
+    """One job with absolute must times, an optional gate that keeps it from
+    starting, and an idle job whose STATUS moves the clock."""
+    lines = [
+        f"insert_job: {name}\njob_type: c\ncommand: x\nmachine: m1\n",
+        f'date_conditions: 1\ndays_of_week: all\nstart_times: "{starts}"\n',
+    ]
+    if must_start is not None:
+        lines.append(f'must_start_times: "{must_start}"\n')
+    if must_complete is not None:
+        lines.append(f'must_complete_times: "{must_complete}"\n')
+    if zone is not None:
+        lines.append(f"timezone: {zone}\n")
+    if gated:
+        lines.append(f"condition: s({name}_gate)\n\n")
+        lines.append(f"insert_job: {name}_gate\njob_type: c\ncommand: y\nmachine: m1\n")
+    lines.append(f"\ninsert_job: {name}_idle\njob_type: c\ncommand: z\nmachine: m1\n")
+    return "".join(lines)
+
+
+def _alarm_times(o: Oracle | EngineHarness, job: str, kind: str) -> list[datetime]:
+    return [t.at for t in o.trace() if t.job == job and t.transition == kind]
+
+
+_VENDOR_STARTS = "10:00, 11:00, 12:00"
+_DAY = datetime(2026, 7, 1)
+
+
+def test_sem34_absolute_vendor_example_runs_on_time_are_quiet() -> None:
+    """SEM-34, DL-253: the vendor's example. A job runs at 10:00, 11:00 and
+    12:00; it "must start by 10:02 a.m., 11:02 a.m., and 12:02 p.m." and must
+    complete by 10:08, 11:08 and 12:08. Each run starts at its tick and ends
+    at five past: no alarm. After the 10:00 tick the 10:08 deadline is
+    pending; the 10:02 one is already met by the run."""
+    o = oracle(
+        _abs_jil(
+            "va",
+            _VENDOR_STARTS,
+            must_start="10:02, 11:02, 12:02",
+            must_complete="10:08, 11:08, 12:08",
+            gated=False,
+        )
+    )
+    for hour in (10, 11, 12):
+        o.feed(ev_at(_DAY.replace(hour=hour), "STARTJOB", job="va"))
+        if hour == 10:
+            assert _timers(o, "va") == [(_DAY.replace(hour=10, minute=8), "va", "must_complete")]
+        o.feed(ev_at(_DAY.replace(hour=hour, minute=5), "STATUS", job="va", status="SUCCESS"))
+    o.feed(ev_at(_DAY.replace(hour=13), "STATUS", job="va_idle", status="SUCCESS"))
+    assert _alarm_times(o, "va", "MUST_START_ALARM") == []
+    assert _alarm_times(o, "va", "MUST_COMPLETE_ALARM") == []
+
+
+def test_sem34_absolute_vendor_example_alarms_for_each_missed_slot() -> None:
+    """SEM-34, DL-253: the same job, gated so it never starts. "Otherwise,
+    an alarm is issued for each missed start time." Each deadline fires
+    before the next tick, so each tick arms its own slot's pair."""
+    o = oracle(
+        _abs_jil(
+            "vm",
+            _VENDOR_STARTS,
+            must_start="10:02, 11:02, 12:02",
+            must_complete="10:08, 11:08, 12:08",
+        )
+    )
+    for hour in (10, 11, 12):
+        o.feed(ev_at(_DAY.replace(hour=hour), "STARTJOB", job="vm"))
+    o.feed(ev_at(_DAY.replace(hour=13), "STATUS", job="vm_idle", status="SUCCESS"))
+    assert _alarm_times(o, "vm", "MUST_START_ALARM") == [
+        _DAY.replace(hour=h, minute=2) for h in (10, 11, 12)
+    ]
+    assert _alarm_times(o, "vm", "MUST_COMPLETE_ALARM") == [
+        _DAY.replace(hour=h, minute=8) for h in (10, 11, 12)
+    ]
+    assert o.store.job["vm"].status == "INACTIVE"  # alarms only, no control flow
+
+
+@pytest.mark.parametrize(
+    "start,must,due",
+    [
+        ("11:00", "34:00", datetime(2026, 7, 2, 10, 0)),
+        ("23:00", "71:59", datetime(2026, 7, 3, 23, 59)),
+    ],
+    ids=["next-day-34-00", "two-days-71-59"],
+)
+def test_sem34_absolute_hours_past_23_land_on_the_days_after(
+    start: str, must: str, due: datetime
+) -> None:
+    """SEM-34, DL-253: "suppose that you define a job that starts at 11:00
+    a.m and you want to specify a must start time of 10:00 a.m. the next
+    day ... you must specify the must start time as 34:00". A job that never
+    starts is quiet one minute before and alarms at that instant. 71:59 is
+    the last minute of the second day after."""
+    tick = _DAY.replace(hour=int(start[:2]))
+    o = oracle(_abs_jil("nd", start, must_start=must))
+    o.feed(ev_at(tick, "STARTJOB", job="nd"))
+    assert _timers(o, "nd") == [(due, "nd", "must_start")]
+    o.feed(ev_at(due - timedelta(minutes=1), "STATUS", job="nd_idle", status="SUCCESS"))
+    assert _alarm_times(o, "nd", "MUST_START_ALARM") == []
+    o.feed(ev_at(due + timedelta(minutes=1), "STATUS", job="nd_idle", status="FAILURE"))
+    assert _alarm_times(o, "nd", "MUST_START_ALARM") == [due]
+
+
+def test_sem34_absolute_late_start_after_the_must_start_time_alarms() -> None:
+    """SEM-34, DL-253: blocked at the 10:00 tick, started at 10:05, after
+    the 10:02 must start time: the alarm fires at 10:02 and the run goes on.
+    A start at 10:01 meets the deadline and is quiet."""
+    late = oracle(_abs_jil("ls", "10:00", must_start="10:02"))
+    late.feed(ev_at(_DAY.replace(hour=10), "STARTJOB", job="ls"))
+    late.feed(ev_at(_DAY.replace(hour=10, minute=5), "STATUS", job="ls_gate", status="SUCCESS"))
+    assert _alarm_times(late, "ls", "MUST_START_ALARM") == [_DAY.replace(hour=10, minute=2)]
+    assert late.store.job["ls"].status == "RUNNING"
+
+    early = oracle(_abs_jil("ls", "10:00", must_start="10:02"))
+    early.feed(ev_at(_DAY.replace(hour=10), "STARTJOB", job="ls"))
+    early.feed(ev_at(_DAY.replace(hour=10, minute=1), "STATUS", job="ls_gate", status="SUCCESS"))
+    early.feed(ev_at(_DAY.replace(hour=11), "STATUS", job="ls_idle", status="SUCCESS"))
+    assert _alarm_times(early, "ls", "MUST_START_ALARM") == []
+
+
+def test_sem34_absolute_completion_before_the_must_complete_time_is_quiet() -> None:
+    """SEM-34, DL-253: a run that ends at 10:07 meets the 10:08 must complete
+    time; one still RUNNING at 10:08 alarms then and keeps running."""
+    quiet = oracle(_abs_jil("cq", "10:00", must_complete="10:08", gated=False))
+    quiet.feed(ev_at(_DAY.replace(hour=10), "STARTJOB", job="cq"))
+    quiet.feed(ev_at(_DAY.replace(hour=10, minute=7), "STATUS", job="cq", status="FAILURE"))
+    quiet.feed(ev_at(_DAY.replace(hour=11), "STATUS", job="cq_idle", status="SUCCESS"))
+    assert _alarm_times(quiet, "cq", "MUST_COMPLETE_ALARM") == []
+
+    late = oracle(_abs_jil("cq", "10:00", must_complete="10:08", gated=False))
+    late.feed(ev_at(_DAY.replace(hour=10), "STARTJOB", job="cq"))
+    late.feed(ev_at(_DAY.replace(hour=10, minute=9), "STATUS", job="cq_idle", status="SUCCESS"))
+    assert _alarm_times(late, "cq", "MUST_COMPLETE_ALARM") == [_DAY.replace(hour=10, minute=8)]
+    assert late.store.job["cq"].status == "RUNNING"
+
+
+def test_sem34_absolute_tick_at_no_start_time_arms_nothing() -> None:
+    """SEM-34, DL-253: absolute must times pair with start_times by position.
+    An operator's STARTJOB at 10:30 is no start time, so it names no slot
+    and arms no absolute deadline; the relative form keeps its first-offset
+    pin (DL-248)."""
+    o = oracle(_abs_jil("un", "10:00", must_start="10:02", must_complete="10:08"))
+    o.feed(ev_at(_DAY.replace(hour=10, minute=30), "STARTJOB", job="un"))
+    assert _timers(o, "un") == []
+
+
+@pytest.mark.parametrize("musts", ['"10:02, 10:32"', "+2"], ids=["absolute", "relative"])
+def test_sem34_must_start_a_tick_on_a_live_job_arms_nothing(musts: str) -> None:
+    """SEM-34, DL-253: one must_start deadline at a time. The vendor inserts
+    the next CHK_START only "After the job completes". The 10:00 run lasts
+    to 10:40, so the 10:30 tick is refused and arms nothing, and 10:32
+    stays quiet. Before DL-253 that tick armed its own deadline and the
+    refused start alarmed at 10:32."""
+    o = oracle(
+        "insert_job: ml\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00, 10:30"\n'
+        f"must_start_times: {musts}\n\n"
+        "insert_job: ml_idle\njob_type: c\ncommand: z\nmachine: m1\n"
+    )
+    o.feed(ev_at(_DAY.replace(hour=10), "STARTJOB", job="ml"))
+    o.feed(ev_at(_DAY.replace(hour=10, minute=30), "STARTJOB", job="ml"))
+    assert "START_REFUSED" in transitions(o, "ml")
+    assert _timers(o, "ml") == []
+    o.feed(ev_at(_DAY.replace(hour=10, minute=40), "STATUS", job="ml", status="SUCCESS"))
+    o.feed(ev_at(_DAY.replace(hour=11), "STATUS", job="ml_idle", status="SUCCESS"))
+    assert _alarm_times(o, "ml", "MUST_START_ALARM") == []
+
+
+def test_sem34_must_start_a_tick_while_a_deadline_is_pending_arms_nothing() -> None:
+    """SEM-34, DL-253: ticks at 10:00 and 10:01 are both blocked. The 10:01
+    tick finds the 10:05 deadline pending and arms nothing: one alarm, at
+    10:05. Before DL-253 each tick armed one and the job alarmed twice. Only
+    the relative form reaches this: lowering refuses an absolute must time
+    that is not earlier than the next run's start, so an absolute deadline
+    fires before the next tick."""
+    musts = "+5"
+    o = oracle(
+        "insert_job: mp\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00, 10:01"\n'
+        f"must_start_times: {musts}\ncondition: s(mp_gate)\n\n"
+        "insert_job: mp_gate\njob_type: c\ncommand: y\nmachine: m1\n\n"
+        "insert_job: mp_idle\njob_type: c\ncommand: z\nmachine: m1\n"
+    )
+    o.feed(ev_at(_DAY.replace(hour=10), "STARTJOB", job="mp"))
+    o.feed(ev_at(_DAY.replace(hour=10, minute=1), "STARTJOB", job="mp"))
+    o.feed(ev_at(_DAY.replace(hour=11), "STATUS", job="mp_idle", status="SUCCESS"))
+    assert _alarm_times(o, "mp", "MUST_START_ALARM") == [_DAY.replace(hour=10, minute=5)]
+
+
+# DL-253 x DST, America/New_York. 2026-03-08: 02:00 EST jumps to 03:00 EDT at
+# 07:00 UTC. 2026-11-01: 02:00 EDT falls back to 01:00 EST at 06:00 UTC.
+_NY = "America/New_York"
+
+
+def test_sem34_spring_must_times_in_the_missing_hour_move_to_the_next_minute() -> None:
+    """SEM-34, DL-253, "Daylight Time Changes": "a job that must start by
+    2:05 and must complete by 2:45 generates an alarm if the job does not
+    start by 3:00:05 or if it does not complete by 3:00:45". The 01:00 EST
+    tick is blocked and the job never starts."""
+    o = oracle(_abs_jil("sp", "01:00", must_start="02:05", must_complete="02:45", zone=_NY))
+    o.feed(ev_at(datetime(2026, 3, 8, 6, 0), "STARTJOB", job="sp"))
+    o.feed(ev_at(datetime(2026, 3, 8, 8, 0), "STATUS", job="sp_idle", status="SUCCESS"))
+    assert _alarm_times(o, "sp", "MUST_START_ALARM") == [datetime(2026, 3, 8, 7, 0, 5)]
+    assert _alarm_times(o, "sp", "MUST_COMPLETE_ALARM") == [datetime(2026, 3, 8, 7, 0, 45)]
+
+
+def test_sem34_spring_must_time_before_a_missing_hour_start_moves_to_3_00_59() -> None:
+    """SEM-34, DL-253, the special case: "Suppose a job is scheduled to run
+    at 2:45 with a must complete time of 3:00 ... the job that is scheduled
+    at 2:45 runs at 3:00:45 ... the job generates an alarm if it does not
+    complete by 3:00:59." A must time after that minute is unchanged."""
+    from zoneinfo import ZoneInfo
+
+    from dsl41.ir import MustTime, Time
+    from dsl41.oracle import _must_instant
+
+    tz = ZoneInfo(_NY)
+    day = datetime(2026, 3, 8).date()
+    start = Time(hour=2, minute=45)
+    assert _must_instant(day, start, MustTime(hour=3, minute=0), tz) == datetime(
+        2026, 3, 8, 7, 0, 59
+    )
+    assert _must_instant(day, start, MustTime(hour=2, minute=50), tz) == (
+        datetime(2026, 3, 8, 7, 0, 50)
+    )
+    assert _must_instant(day, start, MustTime(hour=3, minute=10), tz) == datetime(2026, 3, 8, 7, 10)
+
+
+def test_sem34_spring_missing_hour_start_ticks_late_and_its_deadline_is_the_tick() -> None:
+    """SEM-34, DL-253 x runner-design E10: the scheduler ticks a 02:45 start
+    at fold=0, 03:45 EDT, which still names the 02:45 slot. Its must
+    complete time, 3:00:59 by the vendor's rule, is already past, so it is
+    due at the tick: a run that began there has not completed and alarms at
+    03:45 EDT."""
+    o = oracle(_abs_jil("sg", "02:45", must_complete="03:00", zone=_NY, gated=False))
+    tick = datetime(2026, 3, 8, 7, 45)
+    o.feed(ev_at(tick, "STARTJOB", job="sg"))
+    assert _timers(o, "sg") == [(tick, "sg", "must_complete")]
+    o.feed(ev_at(tick + timedelta(minutes=5), "STATUS", job="sg", status="SUCCESS"))
+    assert _alarm_times(o, "sg", "MUST_COMPLETE_ALARM") == [tick]
+
+
+def test_sem34_fall_must_time_in_the_repeated_hour_takes_the_first_pass() -> None:
+    """SEM-34, DL-253, "Standard Time Changes": "a job that is scheduled to
+    run at midnight and must complete at 1:30 generates an alarm if the job
+    has not completed by 1:30 DT, not 1:30 ST". 01:30 EDT is 05:30 UTC."""
+    o = oracle(_abs_jil("fa", "00:00", must_complete="01:30", zone=_NY))
+    o.feed(ev_at(datetime(2026, 11, 1, 4, 0), "STARTJOB", job="fa"))
+    o.feed(ev_at(datetime(2026, 11, 1, 8, 0), "STATUS", job="fa_idle", status="SUCCESS"))
+    assert _alarm_times(o, "fa", "MUST_COMPLETE_ALARM") == [datetime(2026, 11, 1, 5, 30)]
+
+
+def test_sem34_fall_start_and_must_time_in_the_repeated_hour_take_the_second_pass() -> None:
+    """SEM-34, DL-253: "When the specified start of the job and either the
+    must start or must complete times or both occur during the repeated
+    hour, CA Workload Automation raises alarms during the second standard
+    time hour." The 01:15 start ticks at fold=0 (E10), 05:15 UTC; its 01:30
+    must start time is 01:30 EST, 06:30 UTC."""
+    o = oracle(_abs_jil("fb", "01:15", must_start="01:30", zone=_NY))
+    o.feed(ev_at(datetime(2026, 11, 1, 5, 15), "STARTJOB", job="fb"))
+    o.feed(ev_at(datetime(2026, 11, 1, 8, 0), "STATUS", job="fb_idle", status="SUCCESS"))
+    assert _alarm_times(o, "fb", "MUST_START_ALARM") == [datetime(2026, 11, 1, 6, 30)]
 
 
 # --------------------------------------------------------------------- 20. term_run_time
