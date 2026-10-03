@@ -84,7 +84,15 @@ from dsl41.canon import (
 )
 from dsl41.classify import Classification, Verdict
 from dsl41.ir import CatalogIR
-from dsl41.oracle_state import CarriedRows, Event, GlobalRuntime, HostRuntime, HostState, JobRuntime
+from dsl41.oracle_state import (
+    CarriedRows,
+    Event,
+    GlobalRuntime,
+    HostRuntime,
+    HostState,
+    JobRuntime,
+    may_outlive_run,
+)
 from dsl41.period import (
     CATALOG_HASH_VERSION,
     RETIRED_CATALOG_HASH_VERSIONS,
@@ -521,15 +529,17 @@ def _check_waiters(jobs: Mapping[str, JobRuntime], enqueue_counter: int) -> None
 
 
 def _check_reservations(jobs: Mapping[str, JobRuntime]) -> None:
-    """ss5: a vector is held only while STARTING or RUNNING, and one bucket
-    appears at most once in it (ss3.2's "after duplicate-bucket
-    rejection")."""
+    """ss5: a vector is held while STARTING or RUNNING; a row that is not
+    live holds only a renewable's units its run's policy did not free
+    (DL-256, `may_outlive_run`); and one bucket appears at most once in it
+    (ss3.2's "after duplicate-bucket rejection")."""
     for name, row in sorted(jobs.items()):
-        if row.reservations and row.status not in LIVE_STATUS:
+        if row.status not in LIVE_STATUS and not all(map(may_outlive_run, row.reservations)):
             raise ValueError(
-                f"job {name!r}: status {row.status} still holds"
-                f" {len(row.reservations)} reservation(s) -- a terminal transition"
-                " releases the vector and moves what it kept into consumed (ss5)"
+                f"job {name!r}: status {row.status} still holds a machine load or a"
+                " reservation released on completion -- the run's end releases those,"
+                " and a row that is not live keeps only a resource's unreleased units"
+                " (ss5, DL-256)"
             )
         buckets = [reservation.bucket for reservation in row.reservations]
         if len(set(buckets)) != len(buckets):

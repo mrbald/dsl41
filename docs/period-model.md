@@ -1155,15 +1155,51 @@ class CapacityReservation(BaseModel):
 - `RuntimeState.enqueue_counter: int`
 - `CapacityPool` becomes a pure function of (catalog, rows, consumed).
 
-Placement follows ownership: a reservation belongs to one `(job, run_number)`,
-is acquired at that row's start transition and released at its terminal one,
-and participates in its optimistic-lock projection. Both fields enter the
-projection by default and change at the moments `status` already does — no new
-revision churn. `RuntimeState` enforces: `reservations` non-empty only while
-STARTING or RUNNING; `waiter_seq` non-null iff QUE_WAIT; a terminal transition
-clears `reservations` and atomically moves non-released units into `consumed`;
-a start may not overwrite non-empty `reservations`; the acquired vector is
+Placement follows ownership: a reservation belongs to the job's row. It is
+acquired at a start transition, by the run that start begins, and settled at
+the edge that leaves STARTING or RUNNING. While the run is live it belongs to
+that `(job, run_number)`; held units (below) outlive it, so on a row that is
+not live they belong to the job, not to its current `run_number` (an
+ON_NOEXEC bypass moves the run number and leaves them). Both fields
+participate in the row's optimistic-lock projection. They change at the
+moments `status` already does, with two exceptions that move only the
+reservations: `RELEASE_RESOURCE` and the opening release of a removed job's
+units (below). Each is an input that touches that row, so it moves that
+row's revision once, and nothing else. `RuntimeState`
+enforces: a row that is not STARTING or RUNNING keeps only **held** units
+(below); `waiter_seq` non-null iff QUE_WAIT; the edge that leaves STARTING or
+RUNNING frees what the policy frees, keeps a renewable resource's other
+units on the row as held, and atomically moves a depletable's into
+`consumed`; a start may not overwrite non-empty `reservations`, except a
+start of a job that holds units, which replaces them; the acquired vector is
 frozen at acquisition; `enqueue_counter ≥` every non-null `waiter_seq`.
+
+**Held units** (DL-256). A renewable resource's units that a run's FREE
+policy does not free stay on the job's row after the run: FREE=N always,
+and FREE=Y, or an omitted FREE under `renewable-free=Y`, after FAILURE or
+TERMINATED. They are owed to the job, not spent, because the operator can
+give them back: `RELEASE_RESOURCE` clears them, and the job's next start
+re-uses them — its admission credits them to it, and its new vector
+replaces them. A held reservation is an `r:` bucket whose policy is
+`success` or `never`; a machine load and a `completion` reservation never
+outlive the run. The seal carries held units on the row like any other
+reservation, the loader accepts them on a row that is not live under that
+rule, and the opening installs them verbatim, so they cross a boundary
+until released. `CapacityPool.used` counts them, and so does §10.3's
+oversubscription check. §10 reads the resources a row holds, live or held,
+as dependencies of the job beside its declared ones: a FORCE_STARTJOB can
+re-use units a job no longer declares, and a held unit's fate at the run's
+end reads the resource's type. A change to a held resource is R for an
+executing holder and A (with its own sentence) for an armed or holding one.
+
+A carried row whose job the opening catalog no longer defines (deleted or
+renamed) cannot be addressed, so no `RELEASE_RESOURCE` reaches its units.
+If it holds units while not live, the period's first input gives them back
+at the opening instant, records `RELEASE_RESOURCE` with the reason, and
+wakes the waiters in DL-50's order. A fresh opening admits a time
+observation for it, so the waiters do not wait for an unrelated input;
+replay applies the same input. A live ghost is refused at the boundary
+(§10.1), so it never reaches an opening.
 
 `sorted_waiters` does an unguarded `self.catalog.jobs[j]`; a waiter absent from
 the catalog raises `KeyError`. §10 classifies that R, and the lookup takes a
@@ -1635,7 +1671,7 @@ Nodes and what moves them:
 | machine | `max_load`, `type`, `node_name`, or membership moves — the fields resolution actually reads |
 | calendar / cycle | a referenced date set moves |
 | timezone basis | `default_tz` or `tz_aliases` contents move |
-| runtime profile, **per field** | `default_tz`, `tz_aliases` → every job with `start_times`, `start_mins`, a calendar or a `run_window` (`run_window` added by DL-253: the oracle reads it, and absolute must times, which need `start_times`, in the base zone); `as_machine`, `machine_policy`, `execution_mode`, `deadman_us`, `cmd_grace_us`, `reconcile_settle_us`, `spawn_window_us` → every CMD job; `fw_default_interval_us` → every FW job; **`retry_horizon_us` → no job** — it is boundary policy, and a field that reached every job would turn a horizon tweak into a full live-work drain; **`semantics` → per switch**: one node per semantic switch, valued at its effective value, reached by the jobs the switch's registry entry names (DL-252) — for `ice-lookback`, every job with a lookback-qualified atom in its `condition`, `box_success` or `box_failure`. A flip can change a run in flight (a running box whose `box_success` reads such an atom completes under one reading and not the other), so those jobs classify as changed; each side's condition truth in the boundary-truth diff is read under that side's switches |
+| runtime profile, **per field** | `default_tz`, `tz_aliases` → every job with `start_times`, `start_mins`, a calendar or a `run_window` (`run_window` added by DL-253: the oracle reads it, and absolute must times, which need `start_times`, in the base zone); `as_machine`, `machine_policy`, `execution_mode`, `deadman_us`, `cmd_grace_us`, `reconcile_settle_us`, `spawn_window_us` → every CMD job; `fw_default_interval_us` → every FW job; **`retry_horizon_us` → no job** — it is boundary policy, and a field that reached every job would turn a horizon tweak into a full live-work drain; **`semantics` → per switch**: one node per semantic switch, valued at its effective value, reached by the jobs the switch's registry entry names (DL-252) — for `ice-lookback`, every job with a lookback-qualified atom in its `condition`, `box_success` or `box_failure`; for `renewable-free`, every job with a renewable resource request that states no FREE (DL-256). A flip can change a run in flight (a running box whose `box_success` reads such an atom completes under one reading and not the other), so those jobs classify as changed; each side's condition truth in the boundary-truth diff is read under that side's switches |
 
 Edges, **from a job to what it depends on**, every one of them, the profile
 fields included: its condition's job, global and `name^INST` atoms, walked

@@ -61,6 +61,7 @@ from dsl41.runner_effects import (
 )
 from dsl41.runner_clock import VirtualClock
 from dsl41.runner_journal import read_journal, read_outbox, replay_inputs
+from dsl41.semantics import SemanticSwitches, resolve as resolve_switches
 from model_harness import _lose_the_decision_for
 
 T0 = datetime(2026, 7, 1, 8, 0)
@@ -72,12 +73,23 @@ def _ev(kind: str, minutes: float, **payload: object) -> Event:
     return Event(at=T0 + timedelta(minutes=minutes), kind=kind, payload=payload)  # type: ignore[arg-type]
 
 
-def _engine(jil: str = _SOLO_JIL, adapter: FakeAdapter | None = None) -> Engine:
+def _engine(
+    jil: str = _SOLO_JIL,
+    adapter: FakeAdapter | None = None,
+    semantics: SemanticSwitches | None = None,
+) -> Engine:
     return Engine(
         lower_source(jil),
         clock=VirtualClock(start=T0),
         adapters={"CMD": adapter or FakeAdapter(default=None)},
+        semantics=semantics,
     )
+
+
+#: DL-256: an operator's INACTIVE on a live holder releases its slot only
+#: when the request frees on every completion; under the vendor default an
+#: omitted FREE holds the slot after a run that did not succeed
+_FREE_ON_COMPLETION = resolve_switches({"renewable-free": "A"})
 
 
 def _effect(
@@ -747,7 +759,7 @@ def test_a_held_spawn_whose_job_was_set_inactive_is_retired_not_applied() -> Non
     from dsl41.runner_admission import Envelope
     from dsl41.runner_hosts import HostCommand
 
-    engine = _engine(_SLOT_JIL)
+    engine = _engine(_SLOT_JIL, semantics=_FREE_ON_COMPLETION)
 
     async def scenario() -> None:
         drained = engine.submit_host(
@@ -1170,7 +1182,7 @@ def test_a_held_spawn_is_retired_at_the_edge_that_ends_its_run_not_at_activation
     at activation only k launches, and k holds the slot. Before, the spawn
     waited behind the hold, read RUNNING at activation, and launched j with
     no reservation beside k."""
-    engine = _engine(_ONE_SLOT_JIL)
+    engine = _engine(_ONE_SLOT_JIL, semantics=_FREE_ON_COMPLETION)
 
     async def scenario() -> None:
         await _drained(engine)

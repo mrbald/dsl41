@@ -39,6 +39,9 @@ staging has never ended, so the qualifier is plain success there (Q2b).
 
 `MEDIA_ENCODE` has one renewable admission slot.
 The three media jobs compete for it.
+Each request states `FREE=A`, so a failed encode returns its slot.
+Under the vendor default `FREE=Y`, a failed job would hold the slot until
+`RELEASE_RESOURCE` or its rerun.
 The demo checks engine transitions for queued work and nonoverlapping admission.
 It retains the trace and wrapper execution history.
 These are scheduler admission limits.

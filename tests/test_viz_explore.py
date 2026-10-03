@@ -577,7 +577,8 @@ def test_elements_draw_one_hub_per_consumed_resource() -> None:
     assert one["capacity"] == 1
     # one sentence per member, worded here and printed by the page (DL-193)
     assert one["members"] == [
-        {"id": "lk_x1", "job": "lk_x1", "boxes": [], "how": "1 unit, released on completion"},
+        # no FREE: the vendor default Y, released on success (DL-256)
+        {"id": "lk_x1", "job": "lk_x1", "boxes": [], "how": "1 unit, released on success"},
         {
             "id": "lk_x2",
             "job": "lk_x2",
@@ -682,7 +683,8 @@ def test_elements_coalesce_one_job_two_groups_on_one_resource() -> None:
             "id": "lk_x5",
             "job": "lk_x5",
             "boxes": [],
-            "how": "3 units, released on completion",
+            # no FREE: the vendor default Y (DL-256)
+            "how": "3 units, released on success",
         }
     ]
     links = [e for e in _lock_links(els) if e["data"]["target"] == "lk_x5"]  # type: ignore[index]

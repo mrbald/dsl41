@@ -238,9 +238,15 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
   machine load, owe an admit-only scan. The input pays it once fully
   applied, after its releases and every referencer it woke, and it leaves
   the stopped box's queued members queued. res_type sets the default
-  release (R/absent free-on-completion, D never, T is a level GATE that never
+  release (R/absent free-on-success, D never, T is a level GATE that never
   acquires); per-request FREE overrides it (Y success-only, N never, A
-  unconditional). A queued job re-validates box-RUNNING/ice/hold at admission
+  unconditional). An omitted FREE on a renewable reads the `renewable-free`
+  semantic switch: Y, the vendor default, or A, free on every completion
+  (DL-256). A renewable's units its policy does not free stay HELD on the
+  job's row after the run, until RELEASE_RESOURCE or the job's next run,
+  which re-uses them; a depletable's are spent. A FORCE_STARTJOB of a
+  FAILURE or TERMINATED holder starts on its held units with no admission
+  check (DL-256). A queued job re-validates box-RUNNING/ice/hold at admission
   (# PENDING: Qr6 conditions are NOT re-checked). Enforcement of unsized/
   unknown-res_type/malformed shapes is the runner's preflight (DL-50): the
   oracle models only sizeable buckets, so oracle-direct over an unrefused bad
@@ -261,6 +267,7 @@ from dsl41.capacity import (
     CapacityPool,
     DemandEntry,
     checks_load,
+    machine_load,
     takes_machine_load,
     to_reservations,
     without_machine_load,
@@ -349,6 +356,9 @@ class InputBatch:
         self._emitted_start = len(oracle._emitted)
         oracle.store.begin_input()
         try:
+            # DL-256: a period's first input first gives back the units of
+            # removed jobs, at the opening instant, before any timer fires
+            oracle._release_removed_holders()
             # fire timers due at or before this input first, in time order
             oracle._fire_timers_due(self._at)
             oracle._now = self._at
@@ -454,6 +464,16 @@ class Oracle:
         #: ss3.3: feed times must be non-decreasing across the boundary, so
         #: an opened interpreter starts from the instant the seal was taken
         self._now: datetime | None = carried.now if carried is not None else None
+        #: DL-256: carried rows of jobs this catalog no longer defines that
+        #: still hold units while not live. Nothing can address such a job,
+        #: so RELEASE_RESOURCE cannot reach its units; the period's first
+        #: input gives them back (`_release_removed_holders`). A live one is
+        #: refused at the boundary (period-model ss10.1), so it never opens.
+        self._opening_release: list[str] = sorted(
+            name
+            for name, row in (carried.jobs.items() if carried is not None else ())
+            if name not in catalog.jobs and row.reservations and row.status not in LIVE
+        )
         #: edge-trigger index (DL-13): entity key -> jobs whose `condition`
         #: references it. Keys: job names (incl. "name^INST"), "g:NAME".
         self._referencers: dict[str, list[str]] = {}
@@ -468,7 +488,7 @@ class Oracle:
         #: Since DL-120 it holds no state -- the reservations and the ranks are
         #: on the rows, the spent units are under the owner, and the pool is
         #: given all three.
-        self._pool = CapacityPool(catalog)
+        self._pool = CapacityPool(catalog, self.semantics)
         self._in_wake = False
         #: DL-247: a full scan requested while a scan runs; the running loop
         #: takes it up as its next pass, so an admit-only scan cannot swallow
@@ -674,7 +694,7 @@ class Oracle:
         if self._box_stopped(job, old, new):
             self._scan_owed = True
         self._notify_boxes(job, old, new)
-        released = self._settle_row(job, new)
+        released = self._settle_row(job, old, new)
         self._notify_wakes(job, new, wake_queue=released or self._lifts_a_block(old, new))
 
     def _notify_boxes(self, job: str, old: str, new: str) -> None:
@@ -709,7 +729,7 @@ class Oracle:
                     f"unconsumed arm dies with box {box!r} run (Q3c pin, DL-54/58)",
                 )
 
-    def _settle_row(self, job: str, new: str) -> bool:
+    def _settle_row(self, job: str, old: str, new: str) -> bool:
         """The row-local consequences of a transition; True when it released
         reservations, so the caller wakes the waiters after the referencers.
 
@@ -730,13 +750,19 @@ class Oracle:
         only for an injected STATUS INACTIVE on a live holder, which used to
         strand the units in a `_held` record no row could see. Reservations
         exist exactly while STARTING or RUNNING (period-model ss5), so the
-        release is on that same edge; a non-SUCCESS exit spends what FREE=N
-        and a depletable were always going to spend."""
+        release is on that same edge; a non-SUCCESS exit spends what a
+        depletable was always going to spend.
+
+        DL-256: a renewable's units that the policy does not free (FREE=N,
+        and FREE=Y or an omitted FREE under `renewable-free=Y` after a
+        FAILURE or TERMINATED) stay on the row, held by the job. So the edge
+        is read from `old`, not from the row: a later transition of a job
+        that is not live, INACTIVE or QUE_WAIT included, keeps them."""
         if new != "QUE_WAIT" and self._runtime(job).waiter_seq is not None:
             self.store.dequeue_waiter(job)
-        released = new not in LIVE and self._pool.holds(self._runtime(job))
+        released = old in LIVE and new not in LIVE and self._pool.holds(self._runtime(job))
         if released:
-            self.store.release_reservations(job, new)
+            self.store.release_reservations(job, new, self._pool.keeps_held)
         return released
 
     @staticmethod
@@ -815,7 +841,7 @@ class Oracle:
             self._record(job, f"{old}->INACTIVE", cause)
             self._emit("STATUS", job=job, status="INACTIVE")
             # the queue's wake: capacity released, or a block lifted (DL-247)
-            wake = self._settle_row(job, "INACTIVE") or self._lifts_a_block(old, "INACTIVE")
+            wake = self._settle_row(job, old, "INACTIVE") or self._lifts_a_block(old, "INACTIVE")
             if self._box_stopped(job, old, "INACTIVE"):
                 self._scan_owed = True
             written.append((job, old, self._runtime(job).run_number, wake))
@@ -901,6 +927,8 @@ class Oracle:
             "DISARM",
         ):
             self._handle_oob(kind, self._required_job(ev))
+        elif kind == "RELEASE_RESOURCE":
+            self._release_resource(self._required_job(ev))
         else:
             raise OracleError(f"uninjectable event kind {kind!r}")
 
@@ -1162,7 +1190,8 @@ class Oracle:
         read-time projection. A queued job takes the same path (DL-254):
         "If the job is in the QUEWAIT or RESWAIT status, the scheduler
         removes the job from the load balancing and resource wait queues
-        before placing it in the ON_NOEXEC status." It holds no reservation.
+        before placing it in the ON_NOEXEC status." It holds no run's
+        reservation; units it holds from an earlier run stay held (DL-256).
         INACTIVE and SUCCESS keep their status.
 
         A job released from a hold or from the queue retries its start, as
@@ -1246,6 +1275,59 @@ class Oracle:
     @staticmethod
     def _noexec_cause(box: str, job: str) -> str:
         return "sendevent ON_NOEXEC" if job == box else f"box {box!r} put ON_NOEXEC (DL-254)"
+
+    @property
+    def opening_release_owed(self) -> bool:
+        """True while a removed job's held units wait for the period's first
+        input (DL-256). The engine admits a time observation for it at
+        opening, so the waiters do not wait for an unrelated input."""
+        return bool(self._opening_release)
+
+    def _release_removed_holders(self) -> None:
+        """DL-256: at the opening of a period, a carried row whose job the
+        catalog no longer defines, and that holds units while not live,
+        gives them back. A removed or renamed job cannot be addressed, so
+        no operator verb could ever release them, and a waiter would wait
+        forever. Runs once, inside the period's first input, at the opening
+        instant; the waiters then wake in DL-50's order."""
+        owed, self._opening_release = self._opening_release, []
+        for job in owed:
+            freed = self.store.release_held(job)
+            units = ", ".join(f"{held.units} of {held.bucket[2:]}" for held in freed)
+            self._record(
+                job,
+                "RELEASE_RESOURCE",
+                f"job removed from the catalog: its held units go back at the period"
+                f" opening (frees {units}; DL-256)",
+            )
+        if owed:
+            self._wake_waiters()
+
+    def _release_resource(self, job: str) -> None:
+        """RELEASE_RESOURCE (DL-256): "To free the resources, issue the
+        following command: sendevent -E RELEASE_RESOURCE -J job_name"
+        ("resources Attribute", AutoSys 24.2). Every unit a job that is not
+        live still holds goes back to the pool, and the waiters wake in
+        DL-50's order. No status moves, so no referencer wakes. The marker is
+        the verb's own name, the OOB convention. A job holding nothing, and
+        a live job, whose units belong to its run and go back when the run
+        ends, are recorded no-ops."""
+        rt = self._runtime(job)
+        if rt.status in LIVE:
+            self._record(
+                job,
+                "RELEASE_RESOURCE",
+                f"sendevent RELEASE_RESOURCE (no effect: {rt.status}; the run's units"
+                " go back when it ends)",
+            )
+            return
+        if not rt.reservations:
+            self._record(job, "RELEASE_RESOURCE", "sendevent RELEASE_RESOURCE (nothing held)")
+            return
+        freed = self.store.release_held(job)
+        units = ", ".join(f"{held.units} of {held.bucket[2:]}" for held in freed)
+        self._record(job, "RELEASE_RESOURCE", f"sendevent RELEASE_RESOURCE (frees {units})")
+        self._wake_waiters()
 
     # -------------------------------------------------------- condition evaluation
 
@@ -1686,18 +1768,65 @@ class Oracle:
         # existing corpus are untouched: no buckets, no waiters, same cause),
         # unless a higher-priority waiter blocks it (DL-247, DL-255).
         vector = self._pool.demand_vector(job_ir)
-        if not self._admissible(job_ir, vector, force=force):
+        rt = self._runtime(job)
+        if force and rt.reservations and rt.status in ("FAILURE", "TERMINATED"):
+            self._start_on_held(job_ir, vector, cause)
+        elif not self._admissible(job_ir, vector, force=force):
             self._enqueue_waiter(job, cause)
         else:
             # DL-120: the vector is FROZEN onto the row here. The terminal
             # transition releases what this run took, never what the catalog
             # says the job wants by then (PR-20).
-            self.store.reserve(job, to_reservations(vector))
+            freed = self._acquire(job, vector)
             self._run(job_ir, cause, had_demand=bool(vector))
+            if freed:
+                self._wake_waiters()
         if takes_machine_load(vector):
             # DL-255: the held load, or the new load waiter, can send a
-            # resource waiter on this machine back to its load check
+            # resource waiter on this machine back to its load check; a
+            # forced start on held units holds its load too (DL-256)
             self._scan_owed = True
+
+    def _acquire(self, job: str, vector: list[DemandEntry]) -> bool:
+        """Freeze an admitted start's vector onto its row (DL-120). A job that
+        still holds a renewable's units from an earlier run starts on them
+        (DL-256): admission credited them to it (`_admissible`), so the new
+        vector replaces them and nothing is counted twice. True when the
+        held units exceed the new demand on some bucket -- the catalog
+        lowered a QUANTITY, or dropped the resource -- so the caller owes
+        the queue a wake for the difference."""
+        held = self._runtime(job).reservations
+        reservations = to_reservations(vector)
+        if not held:
+            self.store.reserve(job, reservations)
+            return False
+        self.store.take_over_held(job, reservations)
+        demand: dict[str, int] = {}
+        for reservation in reservations:
+            demand[reservation.bucket] = demand.get(reservation.bucket, 0) + reservation.units
+        return any(h.units > demand.get(h.bucket, 0) for h in held)
+
+    def _start_on_held(self, job_ir: JobIR, vector: list[DemandEntry], cause: str) -> None:
+        """DL-256: a FORCE_STARTJOB of a FAILURE or TERMINATED job that still
+        holds units. "When you force start a job in FAILURE or TERMINATED
+        status that has a virtual resource dependency with free=Y or free=N
+        and has not released the virtual resources, the FORCE_STARTJOB event
+        ... schedules the job using the held virtual resources. Before force
+        starting the job, the scheduler does not re-evaluate other resource
+        dependencies." ("Define Virtual Resource Types", AutoSys 24.2.)
+
+        So no bucket is checked. The run holds the units it held, frozen as
+        they were taken, and its machine load, which every start holds
+        (DL-247). A resource it does not hold is neither checked nor taken."""
+        job = job_ir.name
+        held = self._runtime(job).reservations
+        load = to_reservations(machine_load(vector))
+        self.store.take_over_held(job, held + load)
+        self._run(
+            job_ir,
+            f"{cause}; starts on its held units, other resources not re-evaluated (DL-256)",
+            had_demand=True,
+        )
 
     def _run(self, job_ir: JobIR, cause: str, *, had_demand: bool) -> None:
         """Start tail once admission has passed: run_number bump, box
@@ -1774,13 +1903,15 @@ class Oracle:
         forced job that queues on a named resource is readmitted like any
         other."""
         rows, consumed = self.store.job, self.store.consumed
+        # DL-256: a job's own held units are available to it, and only to it
+        own = job_ir.name
         if self._pool.resource_blocked(job_ir, rows, consumed, self._counts_as_waiter):
             return False
         if force or not checks_load(job_ir):
-            return self._pool.can_admit(without_machine_load(vector), rows, consumed)
+            return self._pool.can_admit(without_machine_load(vector), rows, consumed, own=own)
         if self._pool.load_blocked(job_ir, rows, consumed, self._counts_as_waiter):
             return False
-        return self._pool.can_admit(vector, rows, consumed)
+        return self._pool.can_admit(vector, rows, consumed, own=own)
 
     def _counts_as_waiter(self, waiter: str) -> bool:
         """A queued job that counts toward priority blocking (DL-247,
@@ -1852,7 +1983,8 @@ class Oracle:
         if not self._admissible(job_ir, vector, force=False):
             return "waiting"
         self.store.dequeue_waiter(job)
-        self.store.reserve(job, to_reservations(vector))
+        # a held excess freed here is seen by the running scan's next pass
+        self._acquire(job, vector)
         self._run(job_ir, cause="resources freed (QUE_WAIT admitted, DL-50)", had_demand=True)
         return "admitted"
 

@@ -99,6 +99,35 @@ def test_dl50_admission_never_overcommits_and_is_deadlock_free(data: st.DataObje
     assert all(_used(o).get(k, 0) == 0 for k in o._pool._bucket_cap), "renewable units leaked"
 
 
+@settings(max_examples=250, deadline=None)
+@given(data=st.data())
+def test_dl256_held_units_never_overcommit_under_force_and_release(data: st.DataObject) -> None:
+    """DL-256 over any script of plain and forced starts, every completion
+    outcome, kills and RELEASE_RESOURCE, under the vendor default: no bucket
+    is ever used past its capacity, and usage is exactly the rows' units
+    plus what was spent. A forced start of a held job checks nothing, so
+    this is what proves it re-uses the held units rather than taking more."""
+    capacity = data.draw(st.integers(min_value=1, max_value=3))
+    demands = data.draw(st.lists(st.integers(min_value=1, max_value=3), min_size=2, max_size=4))
+    demands = [min(d, capacity) for d in demands]
+    o = Oracle(lower_source(_renewable_pool_catalog(capacity, demands)))
+    names = [f"j{i}" for i in range(len(demands))]
+    for minute in range(data.draw(st.integers(min_value=1, max_value=20))):
+        job = data.draw(st.sampled_from(names))
+        kind = data.draw(
+            st.sampled_from(["STARTJOB", "FORCE_STARTJOB", "STATUS", "KILLJOB", "RELEASE_RESOURCE"])
+        )
+        payload: dict[str, object] = {"job": job}
+        if kind == "STATUS":
+            if o.store.job[job].status not in ("STARTING", "RUNNING"):
+                continue
+            payload["status"] = data.draw(st.sampled_from(["SUCCESS", "FAILURE", "TERMINATED"]))
+        o.feed(_ev(kind, minute, **payload))
+        assert _no_overcommit(o)
+        held = sum(r.units for row in o.store.job.values() for r in row.reservations)
+        assert _used(o).get("r:R", 0) == held + o.store.consumed.get("r:R", 0)
+
+
 def _machine_load_catalog(capacity: int, jobs: list[tuple[int, int]]) -> str:
     body = "".join(
         f"insert_job: j{i}\njob_type: c\ncommand: x\nmachine: lm\n"
@@ -353,10 +382,10 @@ def test_dl50_unsized_resource_is_unmodelled_oracle_direct() -> None:
 
 
 def test_dl50_self_retrigger_leak_invariant_used_equals_held() -> None:
-    """Direct check of the self-retriggering-holder fix (DL-50): after a
-    self-retriggering holder finally stops, the renewable bucket must be back
-    to 0 and, at every step, `used` must equal the units the rows actually
-    reserve (no strand)."""
+    """Direct check of the self-retriggering-holder fix (DL-50): at every
+    step, `used` must equal the units the rows actually reserve (no strand).
+    Under the vendor default (DL-256) the failed last run keeps its unit on
+    its row, so the bucket is back to 0 only after RELEASE_RESOURCE."""
     text = (
         "insert_resource: R\nres_type: R\namount: 2\n\n"
         "insert_job: sl\njob_type: c\ncommand: x\nmachine: m1\n"
@@ -373,6 +402,8 @@ def test_dl50_self_retrigger_leak_invariant_used_equals_held() -> None:
     # not 1-with-empty-held (the leak)
     assert _used(o).get("r:R", 0) == held_total() == 1
     o.feed(_ev("STATUS", 2, job="sl", status="FAILURE"))  # r2 fails, loop stops
+    assert _used(o).get("r:R", 0) == held_total() == 1  # held by the failed run, no strand
+    o.feed(_ev("RELEASE_RESOURCE", 3, job="sl"))
     assert _used(o).get("r:R", 0) == held_total() == 0  # fully released, no strand
 
 

@@ -860,25 +860,38 @@ WARN:
   waiting for load "automatically blocks all the lower priority jobs that
   specify the same machine attribute value", on a fresh start and on
   readmission; a positive priority is blocked even without a `job_load`.
-  Named resources gate every start, forced or not. Pools stay outside
-  both load rules. This WARN still fires for a pool job at priority 0.
+  Named resources gate every start, forced or not, with one vendor
+  exception: a FORCE_STARTJOB of a FAILURE or TERMINATED job that still
+  holds resource units starts on them and does not re-evaluate its other
+  resources (DL-256). Pools stay outside both load rules. This WARN still
+  fires for a pool job at priority 0.
   The oracle applies the vendor's named-resource rule too (DL-255): "A job
   in the RESWAIT state for one resource name automatically blocks all the
   lower priority jobs that specify the same resource name. It does not
   automatically block higher or equal priority jobs that specify the same
   resource name or a job that specifies a different resource name." The
-  blocked job has a positive priority and may be forced. The blocker has a
+  blocked job has a positive priority and may be forced; a forced start on
+  held units is not checked at all (DL-256). The blocker has a
   positive priority, names a resource the blocked job names, is short on
   any resource it names (Broadcom KB 240816, AutoSys 12.0: a job waiting
   for its second resource blocks jobs that need only its first), and has
   passed its load check: its load fits and no higher-priority load waiter blocks it, since
   jobs still in QUE_WAIT for load "do not automatically block lower
-  priority jobs that specify the same resource attribute". A queued job
-  holds no load: jobs "that enter the RESWAIT state after the load
-  balancing attributes are successfully evaluated do not consume any load
-  units". A start or enqueue that takes machine load can send a resource
-  waiter back to its load check, so it owes an admit-only queue scan. The
-  input pays that scan after every referencer it woke.
+  priority jobs that specify the same resource attribute". A blocker that
+  holds units from an earlier run counts them as its own, as its admission
+  does (DL-256). A queued job holds no load: jobs "that enter the RESWAIT
+  state after the load balancing attributes are successfully evaluated do
+  not consume any load units". A start or enqueue that takes machine load
+  can send a resource waiter back to its load check, so it owes an
+  admit-only queue scan. The input pays that scan after every referencer
+  it woke.
+- Held resource units (DL-256). A renewable resource's units that a run's
+  FREE policy does not release stay held by the job after the run: FREE=N
+  always, and FREE=Y, or an omitted FREE under `renewable-free=Y`, after
+  FAILURE or TERMINATED. They count against the resource until the
+  operator sends `RELEASE_RESOURCE` for the job, or the job's next run
+  takes them over. That run re-uses them for the same resources and is
+  never charged twice. A depletable's units are spent as before.
 - Cycle in the AND-success skeleton (graphlib `CycleError`): cycles are
   *legal* AutoSys (edge-triggered re-runs, DL-13, L010's territory). Thus
   this rule warns and disables `plan`, and it does not refuse.
@@ -933,6 +946,7 @@ rehearsal's own switches.
 | Switch | Values | Default | Documented AutoSys | Why this default |
 | --- | --- | --- | --- | --- |
 | `ice-lookback` | `true`, `ordinary` | `true` | `true` | A condition atom with a lookback qualifier whose predecessor is on ice and not running. `true`: the atom is true, lookback ignored. `ordinary`: the qualifier is dropped and the ordinary on-ice table applies (s, d, n true; f, t, exitcode false). The "condition Attribute" page (AutoSys 24.2) says "If the predecessor job being evaluated for the look-back condition is currently in an ON_ICE status, it always evaluates to true. That is, any look-back evaluation is ignored." `ordinary` extends the Start Conditions on-ice table (SEM-20), which does not separate lookback atoms, to the lookback atom. Q10 stays open. |
+| `renewable-free` | `Y`, `A` | `Y` | `Y` | A renewable resource request (`res_type: R` or none) that states no FREE. `Y`: the units are freed only when the run ends SUCCESS; after FAILURE or TERMINATED the job holds them until `RELEASE_RESOURCE` or its next run. `A`: the units are freed on every completion, dsl41's reading before DL-256. The "resources Attribute" page (AutoSys 24.2) gives FREE's default: "Default: Y", where "Y -- Frees the units only if the job completes successfully". An explicit FREE is not affected. Qr1 is decided. |
 
 ## 9. Time domains (E2)
 
@@ -973,8 +987,8 @@ frozen inventory; what follows is what each is for.
 
 - **sendevent parity** (maps 1:1 onto oracle EventKind): STARTJOB,
   FORCE_STARTJOB, KILLJOB, ON_ICE/OFF_ICE, ON_HOLD/OFF_HOLD,
-  ON_NOEXEC/OFF_NOEXEC, DISARM (DL-158), SET_GLOBAL, CHANGE_STATUS
-  (inject STATUS).
+  ON_NOEXEC/OFF_NOEXEC, DISARM (DL-158), RELEASE_RESOURCE (DL-256),
+  SET_GLOBAL, CHANGE_STATUS (inject STATUS).
 - **host** (S5a, DL-94) and **seal** (DL-133) are the other two mutations.
   `host` changes the execution-host routing table (§7's `host` record);
   `seal` ends a period. Both take the same admission order as sendevent.

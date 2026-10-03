@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import heapq
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from types import MappingProxyType
 from typing import Literal
@@ -85,6 +85,7 @@ EventKind = Literal[
     "ON_NOEXEC",
     "OFF_NOEXEC",
     "DISARM",
+    "RELEASE_RESOURCE",
     "KILLJOB",
     "TIMER",
     "MUST_START_ALARM",
@@ -148,8 +149,26 @@ class CapacityReservation(BaseModel):
     bucket: str
     units: int = Field(gt=0)
     #: DL-50: when the units go back. `never` and an unmet `success` are the
-    #: two that CONSUME them instead (SEM-16).
+    #: two that do not free them: a depletable's are spent (SEM-16), and a
+    #: renewable's stay held by the job (DL-256).
     release_policy: ReleasePolicy
+
+
+#: The bucket prefix of a named resource; `m:` is a machine's load.
+RESOURCE_BUCKET = "r:"
+
+
+def may_outlive_run(reservation: CapacityReservation) -> bool:
+    """DL-256: whether this reservation may stay on a row that is not live.
+    Only a named resource's units under a policy that does not free on every
+    completion can: the units a renewable kept after its run, held until
+    RELEASE_RESOURCE or the job's next run. A machine load and a
+    `completion` reservation are always released at the run's end. The
+    seal loader and the store's invariant check share this one rule."""
+    return (
+        reservation.bucket.startswith(RESOURCE_BUCKET)
+        and reservation.release_policy != "completion"
+    )
 
 
 class JobRuntime(BaseModel):
@@ -193,11 +212,12 @@ class JobRuntime(BaseModel):
     #: entries; reset beside `ran_members` on box start. The name predates
     #: DL-242 and stays: sealed periods and their attestations carry it.
     window_skipped_members: frozenset[str] = frozenset()
-    #: DL-120: the capacity vector THIS run acquired, non-empty only while
-    #: STARTING or RUNNING. It is a per-run fact with exactly `run_number`'s
-    #: lifetime, so it belongs on the row rather than in a map beside it --
-    #: which is also what makes it reconstructible from the rows a seal
-    #: carries (period-model ss5).
+    #: DL-120: the capacity vector THIS run acquired, held while STARTING or
+    #: RUNNING. After the run, the row keeps only a renewable's units its
+    #: policy did not free (DL-256, `may_outlive_run`), until RELEASE_RESOURCE
+    #: or the job's next run takes them over. It belongs on the row rather
+    #: than in a map beside it -- which is also what makes it reconstructible
+    #: from the rows a seal carries (period-model ss5).
     reservations: tuple[CapacityReservation, ...] = ()
     #: DL-120: this job's rank in the QUE_WAIT queue, non-null iff QUE_WAIT.
     #: The rank is allocated from `RuntimeState.enqueue_counter` and rides on
@@ -369,9 +389,9 @@ class RuntimeState:
     rather than merely detected. The rows are frozen, the maps are private
     and published only as read-only views, and every write goes through a
     verb that names what changed (`transition`, `start_run`, `set_flags`,
-    `set_armed`, `set_global`, `enqueue_timer`, and the DL-120 capacity five:
+    `set_armed`, `set_global`, `enqueue_timer`, and the capacity verbs: DL-120's
     `reserve`, `release_reservations`, `enqueue_waiter`, `dequeue_waiter`,
-    `seed_consumed`). No caller assembles a field dict, so no caller can
+    `seed_consumed`, and DL-256's `take_over_held` and `release_held`). No caller assembles a field dict, so no caller can
     invent a field combination the verbs do not.
 
     The reason is the concurrency model, not tidiness. Optimistic locking
@@ -617,7 +637,7 @@ class RuntimeState:
             if row is None:
                 continue
             live = row.status in LIVE
-            if row.reservations and not live:
+            if not live and not all(map(may_outlive_run, row.reservations)):
                 raise OracleError(f"{name!r} holds capacity at status {row.status}")
             if (row.waiter_seq is not None) != (row.status == "QUE_WAIT"):
                 raise OracleError(
@@ -766,34 +786,70 @@ class RuntimeState:
         Refuses a row that already holds one. The Oracle releases before it
         wakes anything, so a live record here at a start means a release was
         missed, and the old pool's forgiving `extend` turned that into a
-        permanently stranded unit nobody could account for."""
+        permanently stranded unit nobody could account for. A start of a job
+        that still holds units from an earlier run goes through
+        `take_over_held` instead (DL-256)."""
         if self.runtime(job).reservations:
             raise OracleError(f"{job!r} already holds reservations: a start may not overwrite")
         self._replace(job, reservations=tuple(reservations))
 
-    def release_reservations(self, job: str, new_status: str) -> None:
-        """Clear a run's vector on the edge that leaves STARTING/RUNNING and
-        move what it did NOT free into `consumed` (DL-120).
+    def take_over_held(self, job: str, reservations: Sequence[CapacityReservation]) -> None:
+        """DL-256: a job that is not live and still holds a renewable's units
+        from an earlier run starts on them. Its admission credited those
+        units to it, so the new run's vector REPLACES them rather than adding
+        to them, and nothing is counted twice. A live row is refused: its
+        reservations are its own run's."""
+        row = self.runtime(job)
+        if row.status in LIVE:
+            raise OracleError(f"{job!r} is {row.status}: a start may not overwrite its run")
+        self._replace(job, reservations=tuple(reservations))
+
+    def release_reservations(
+        self, job: str, new_status: str, keeps_held: Callable[[str], bool] | None = None
+    ) -> None:
+        """Settle a run's vector on the edge that leaves STARTING/RUNNING
+        (DL-120). What the policy frees goes back to the pool. What it does
+        not free is spent into `consumed`, or, when `keeps_held(bucket)` says
+        so, stays on the row as units the job still holds (DL-256: a
+        renewable resource's unreleased units belong to the job until
+        RELEASE_RESOURCE or its next run).
 
         `new_status` is whatever the row is moving to -- a terminal status for
         every ordinary run, and INACTIVE for an injected STATUS on a live
-        holder, which used to strand the units. The two halves are one act
+        holder, which used to strand the units. The halves are one act
         within the input: the row write and the spend happen in the same
         input transaction, and replay re-applies the whole input, so a crash
         between them cannot leave units both held and spent or neither. `never`
-        and an unmet `success` are the policies that spend (SEM-16 depletion,
-        hold-on-failure); what is spent never comes back."""
+        and an unmet `success` are the policies that do not free (SEM-16
+        depletion, hold-on-failure); what is spent never comes back. With no
+        `keeps_held`, nothing stays held: everything not freed is spent."""
         row = self.runtime(job)
         if not row.reservations:
             return
         spent: dict[str, int] = {}
+        kept: list[CapacityReservation] = []
         for reservation in row.reservations:
             policy = reservation.release_policy
-            if policy == "never" or (policy == "success" and new_status != "SUCCESS"):
+            if policy == "completion" or (policy == "success" and new_status == "SUCCESS"):
+                continue
+            if keeps_held is not None and keeps_held(reservation.bucket):
+                kept.append(reservation)
+            else:
                 spent[reservation.bucket] = spent.get(reservation.bucket, 0) + reservation.units
-        self._replace(job, reservations=())  # validates first; the spend cannot raise
+        self._replace(job, reservations=tuple(kept))  # validates first; the spend cannot raise
         for bucket, units in spent.items():
             self._consumed[bucket] = self._consumed.get(bucket, 0) + units
+
+    def release_held(self, job: str) -> tuple[CapacityReservation, ...]:
+        """RELEASE_RESOURCE (DL-256): give back every unit a job that is not
+        live still holds, and return what was given back. A live row's
+        reservations belong to its run and are released at its end, so it
+        is refused here; the Oracle records that case as a no-op."""
+        row = self.runtime(job)
+        if row.status in LIVE:
+            raise OracleError(f"{job!r} is {row.status}: its run's units release at its end")
+        self._replace(job, reservations=())
+        return row.reservations
 
     def enqueue_waiter(self, job: str) -> None:
         """Allocate this job's QUE_WAIT rank. Idempotent: a job already queued

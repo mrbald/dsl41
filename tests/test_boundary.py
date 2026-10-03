@@ -1205,6 +1205,168 @@ def test_dl158_disarm_before_the_seal_yields_no_start_after_c2(tmp_path: Path) -
     _close(opened)
 
 
+HELD_JIL = (
+    "insert_resource: BLOCK\nres_type: R\namount: 1\n\n"
+    "insert_job: h\njob_type: c\ncommand: x\nresources: (BLOCK, QUANTITY=1)\n\n"
+    "insert_job: w\njob_type: c\ncommand: y\nresources: (BLOCK, QUANTITY=1)\n"
+)
+
+
+def test_dl256_held_units_cross_the_seal_until_release_resource(tmp_path: Path) -> None:
+    """DL-256 across a boundary. Under C1 the holder fails with an omitted
+    FREE, the vendor default, so it keeps its unit, and the waiter queues.
+    The seal carries the unit on the FAILURE row; the opening installs it,
+    so the waiter is still queued under C2. A RELEASE_RESOURCE composed in
+    C2 gives the unit back and the waiter runs."""
+    run_root = tmp_path / "run"
+    engine = _genesis(run_root, text=HELD_JIL)
+
+    async def under_c1() -> None:
+        engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "h"}))
+        engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "w"}))
+        await engine.run_until_quiescent(T0)
+        engine.inject(Event(at=T0, kind="STATUS", payload={"job": "h", "status": "FAILURE"}))
+        await engine.run_until_quiescent(T0)
+
+    asyncio.run(under_c1())
+    held = engine.oracle.store.runtime("h").reservations
+    assert engine.oracle.store.runtime("h").status == "FAILURE"
+    assert [(r.bucket, r.units) for r in held] == [("r:BLOCK", 1)]
+    assert engine.oracle.store.runtime("w").status == "QUE_WAIT"
+    boundary = asyncio.run(_seal(engine, _request(engine, _stage(run_root, HELD_JIL))))
+    _close(engine)
+    assert boundary.seal.state.jobs["h"].reservations == held
+
+    opened = _resume(run_root, HELD_JIL, clock=VirtualClock(start=boundary.seal.closed_at))
+    assert opened.oracle.store.runtime("h").reservations == held  # carried verbatim
+    assert opened.oracle.store.runtime("w").status == "QUE_WAIT"
+
+    async def under_c2() -> None:
+        at = boundary.seal.closed_at
+        opened.inject(Event(at=at, kind="RELEASE_RESOURCE", payload={"job": "h"}))
+        await opened.run_until_quiescent(at)
+
+    asyncio.run(under_c2())
+    assert opened.oracle.store.runtime("h").reservations == ()
+    assert opened.oracle.store.runtime("w").status == "RUNNING"
+    _close(opened)
+
+
+@pytest.mark.parametrize(
+    "c2",
+    [
+        HELD_JIL.replace(
+            "insert_job: h\njob_type: c\ncommand: x\nresources: (BLOCK, QUANTITY=1)\n\n", ""
+        ),
+        HELD_JIL.replace("insert_job: h\n", "insert_job: h2\n"),
+    ],
+    ids=["deleted", "renamed"],
+)
+def test_dl256_a_removed_holder_gives_its_units_back_at_the_opening(
+    tmp_path: Path, c2: str
+) -> None:
+    """DL-256: C1 leaves `h` FAILED holding the only unit and `w` queued.
+    C2 deletes or renames `h`, so no RELEASE_RESOURCE can name it. The seal
+    carries the ghost's units, and the period's first input -- the time
+    observation the opening admits -- gives them back with a trace record
+    that says why, and wakes `w`. A second resume replays that input and
+    owes nothing more."""
+    run_root = tmp_path / "run"
+    engine = _genesis(run_root, text=HELD_JIL)
+
+    async def under_c1() -> None:
+        engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "h"}))
+        engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "w"}))
+        await engine.run_until_quiescent(T0)
+        engine.inject(Event(at=T0, kind="STATUS", payload={"job": "h", "status": "FAILURE"}))
+        await engine.run_until_quiescent(T0)
+
+    asyncio.run(under_c1())
+    assert engine.oracle.store.runtime("w").status == "QUE_WAIT"
+    boundary = asyncio.run(_seal(engine, _request(engine, _stage(run_root, c2))))
+    _close(engine)
+    assert boundary.seal.state.jobs["h"].reservations != ()  # the ghost carries them
+
+    at = boundary.seal.closed_at
+    opened = _resume(run_root, c2, clock=VirtualClock(start=at))
+    assert opened.oracle.opening_release_owed
+    asyncio.run(opened.run_until_quiescent(at))
+    assert opened.oracle.store.runtime("h").reservations == ()
+    assert opened.oracle.store.runtime("w").status == "RUNNING"
+    [record] = [t for t in opened.oracle.trace() if t.job == "h"]
+    assert record.transition == "RELEASE_RESOURCE"
+    assert record.cause.startswith("job removed from the catalog")
+    _close(opened)
+
+    again = _resume(run_root, c2, clock=VirtualClock(start=at))
+    assert not again.oracle.opening_release_owed  # replay paid it
+    assert again.oracle.store.runtime("w").status == "RUNNING"
+    _close(again)
+
+
+#: C1: h holds BLOCK. C2: h no longer declares it, and a box `b` with
+#: `box_success: s(h)` opens and runs. C3: BLOCK retypes to depletable.
+_HELD_DEP_C1 = (
+    "insert_resource: BLOCK\nres_type: R\namount: 1\n\n"
+    "insert_job: h\njob_type: c\ncommand: x\nresources: (BLOCK, QUANTITY=1)\n"
+)
+_HELD_DEP_C2 = (
+    "insert_resource: BLOCK\nres_type: R\namount: 1\n\n"
+    "insert_job: h\njob_type: c\ncommand: x\n\n"
+    "insert_job: b\njob_type: b\nbox_success: s(h)\n\n"
+    "insert_job: m\njob_type: c\ncommand: y\nbox_name: b\n"
+)
+_HELD_DEP_C3 = _HELD_DEP_C2.replace("res_type: R", "res_type: D")
+
+
+def test_dl256_a_dependent_box_reaches_the_held_resource_across_two_boundaries(
+    tmp_path: Path,
+) -> None:
+    """The three-period repro behind DL-256's held-dependency rule
+    (period-model ss10.2, ss13.7 forward closure). C1 leaves `h` FAILED
+    holding BLOCK's only unit. C2 drops h's resource declaration and opens
+    box `b`, gated on `s(h)`, which is RUNNING at the C2/C3 boundary. C3
+    retypes BLOCK to depletable. `b` depends on `h` through its
+    box_success atom and on BLOCK through the unit `h` holds, so BLOCK's
+    type move must reach it through that chained edge: a period never opens
+    over live work whose closure changed (period-model ss10.1), so the
+    C2/C3 boundary refuses over `b` rather than committing it as carried."""
+    run_root = tmp_path / "run"
+    engine = _genesis(run_root, text=_HELD_DEP_C1)
+
+    async def under_c1() -> None:
+        engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "h"}))
+        await engine.run_until_quiescent(T0)
+        engine.inject(Event(at=T0, kind="STATUS", payload={"job": "h", "status": "FAILURE"}))
+        await engine.run_until_quiescent(T0)
+
+    asyncio.run(under_c1())
+    assert engine.oracle.store.runtime("h").status == "FAILURE"
+    assert [(r.bucket, r.units) for r in engine.oracle.store.runtime("h").reservations] == [
+        ("r:BLOCK", 1)
+    ]
+    held = engine.oracle.store.runtime("h").reservations
+    seal1 = asyncio.run(_seal(engine, _request(engine, _stage(run_root, _HELD_DEP_C2))))
+    _close(engine)
+
+    opened = _resume(run_root, _HELD_DEP_C2, clock=VirtualClock(start=seal1.seal.closed_at))
+    assert opened.oracle.store.runtime("h").reservations == held  # carried verbatim
+
+    async def under_c2() -> None:
+        at = seal1.seal.closed_at
+        opened.inject(Event(at=at, kind="STARTJOB", payload={"job": "b"}))
+        await opened.run_until_quiescent(at)
+
+    asyncio.run(under_c2())
+    assert opened.oracle.store.runtime("b").status == "RUNNING"
+
+    message = asyncio.run(_refused(opened, _request(opened, _stage(run_root, _HELD_DEP_C3))))
+    assert "the classification refuses the boundary" in message
+    assert "b" in message
+    assert opened.oracle.store.runtime("b").status == "RUNNING"  # untouched
+    _close(opened)
+
+
 def test_dl158_disarm_composed_in_c2_drops_the_carried_latch_no_start(tmp_path: Path) -> None:
     """ss10.4's boundary case (DL-158): the latch crosses the seal, and a
     NEWLY COMPOSED C2 command may drop it -- the disarm is legal on either

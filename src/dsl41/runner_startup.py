@@ -881,6 +881,9 @@ async def _resume_under_lock(
     for job, rt in engine.oracle.store.job.items():
         if rt.run_number:
             engine._dispatched[job] = rt.run_number
+    # DL-256: units of a job the opening catalog removed go back in the
+    # period's first input; a fresh opening admits one for it
+    engine.observe_opening()
     if scheduler is not None:
         # the ticks THIS segment's journal has already ADJUDICATED: admitted
         # as a scheduler `input` (`Engine._enqueue` -> `Journal.admit`, replay

@@ -80,6 +80,7 @@ from dsl41.derive import (
 from dsl41.dsl import cond_to_source
 from dsl41.ir import CatalogIR, ResourceRef
 from dsl41.oracle_state import ReleasePolicy
+from dsl41.semantics import DEFAULTS as DEFAULT_SWITCHES
 from dsl41.viz import Direction, edge_label, job_detail, job_kind, job_schedule, mutex_plan
 from dsl41.viz_html import substitute
 
@@ -385,7 +386,9 @@ def _resource_locks(
         members: list[dict[str, object]] = []
         res_type = resource_type(resource)
         for job_name, refs in by_job.items():
-            quantity, mode, policy = job_demand(res_type, refs)
+            # a static lens has no runtime profile: the registry defaults
+            # (DL-252), so an omitted FREE reads as `renewable-free`'s default
+            quantity, mode, policy = job_demand(res_type, refs, DEFAULT_SWITCHES.renewable_free)
             how = _resource_how(quantity, mode, policy)
             members.append(
                 {

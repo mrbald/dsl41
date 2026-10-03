@@ -16872,3 +16872,195 @@ relitigate an entry; append a new one.
   `test_preflight_resources_refuses_a_quantity_above_amount_at_every_priority`.
   No existing test pinned the greedy resource admission, so none was
   rewritten. DL-247's cheetah traces are unchanged.
+- DL-256 Renewable FREE follows the vendor default; held units,
+  RELEASE_RESOURCE and the FORCE_STARTJOB reuse rule (2026-10-03;
+  semantics.py, capacity.py, oracle.py, oracle_state.py, seal.py,
+  classify.py, viz_explore.py, runner.py, runner_startup.py,
+  runner_control.py, cli_control.py, runner_ledger.py,
+  simulation_register_rows.py, runner-design.md
+  ss8a, period-model.md ss5/ss10.2, control-protocol.md ss3,
+  autosys-semantics.md resources row, ir-design.md ss7,
+  access-model.md, simulation-coverage.md, examples/media)
+  THE VENDOR RULES. "resources Attribute" (AutoSys 24.2): "free=Y | N
+  | A (Optional for renewable virtual resources only) ... Y -- Frees
+  the units only if the job completes successfully. N -- The units are
+  not freed. To free the resources, issue the following command:
+  sendevent -E RELEASE_RESOURCE -J job_name. A-- Frees the units
+  unconditionally. Default: Y". "Define Virtual Resource Dependencies
+  in a Job" repeats the RELEASE_RESOURCE instruction for free=N.
+  "Define Virtual Resource Types": "When you force start a job in
+  FAILURE or TERMINATED status that has a virtual resource dependency
+  with free=Y or free=N and has not released the virtual resources,
+  the FORCE_STARTJOB event verifies if the job's current status is
+  FAILURE or TERMINATED and schedules the job using the held virtual
+  resources. Before force starting the job, the scheduler does not
+  re-evaluate other resource dependencies."
+  QR1 DECIDED. DL-50 pinned free-on-every-completion for a renewable
+  request with no FREE; DL-250 recorded the documented default and
+  kept the pin. Under DL-252's rule the documented default wins, and
+  dsl41's reading stays selectable. A new switch, `renewable-free`,
+  takes `Y` (the default and the vendor's: free on SUCCESS only) or
+  `A` (free on every completion, the DL-50 reading). It reads only an
+  omitted FREE on a renewable resource, `res_type: R` or none. An
+  explicit FREE, a depletable and a threshold are not affected. Its
+  `affects` predicate names the jobs with such a request; `affects`
+  now takes the catalog too, because the job alone does not know its
+  resource's type. The register's Qr1 row becomes
+  `release_policy:success#free-absent`, supported, and gains the two
+  `profile_alt:semantics.renewable-free` rows.
+  HELD UNITS. Before, an unmet policy SPENT a renewable's units into
+  `consumed`, where no operator verb could reach them, so FREE=N and a
+  failed FREE=Y run lost capacity for good. Now the units a renewable's
+  policy does not free stay on the job's row, in `reservations`, as
+  units it holds; a depletable's are spent as before (SEM-16). The
+  release edge is read from the old status: the edge that leaves
+  STARTING or RUNNING settles the run, and any later transition of a
+  job that is not live (INACTIVE, an operator's CHANGE_STATUS, a box
+  reset, QUE_WAIT) keeps them. An ON_NOEXEC bypass is not a run and
+  keeps them too. No row field is added, so no digest moves; the rule
+  that limits a row that is not live to held units is
+  `oracle_state.may_outlive_run`: an `r:` bucket whose policy is
+  `success` or `never`. The store's commit check and the seal loader
+  share it, so period-model ss5's invariant is amended, not dropped. A
+  seal carries held units on the row and the opening installs them
+  verbatim, so they cross a boundary.
+  Whether an unfreed reservation is held or spent is read from the
+  catalog's res_type at the release edge (`CapacityPool.keeps_held`),
+  not frozen into the reservation: freezing it would need a new field
+  or policy value and move every seal digest. A boundary that changes a
+  live holder's resource is refused by the classifier, which reads held
+  buckets as dependencies (below), so the type cannot move under a live
+  run. A resource the catalog no longer
+  types reads as renewable, which keeps the units attributable to the
+  job that can release them.
+  RELEASE_RESOURCE. EventKind grows `RELEASE_RESOURCE`, and the wire
+  verb joins `JOB_EVENT_VERBS`. As with DISARM (DL-158), that
+  membership gives it the job verbs' whole contract: payload `job`,
+  the mandatory expect on `job:<name>`, journaling at admission,
+  replay, the TUI console and the CLI's `sendevent`. control-protocol
+  ss3 gains it in the job-verb row and a paragraph; no frame, field or
+  record kind changes, and the event alphabet grows under
+  protocol-evolution ss1's rule, readers first. The oracle frees every
+  unit a job that is not live holds and wakes the queue in DL-50's
+  order. No status moves, so no referencer wakes. The trace marker is
+  the verb's name, with the reason `sendevent RELEASE_RESOURCE (frees
+  N of R, ...)`. A job holding nothing, and a running job, whose units
+  belong to its run, are recorded no-ops: `(nothing held)` and `(no
+  effect: RUNNING; the run's units go back when it ends)`. A depletable's
+  spent units are not held, so the verb cannot bring them back.
+  THE FORCE_STARTJOB REUSE RULE. A FORCE_STARTJOB of a FAILURE or
+  TERMINATED job that holds units runs no admission check. The run
+  holds its held reservations as they were frozen, plus its machine
+  load, which every start holds (DL-247). A resource it does not hold
+  is neither checked nor taken: "does not re-evaluate other resource
+  dependencies". Its start cause says so. A forced start of a holder in
+  any other status (INACTIVE after a box reset, SUCCESS under FREE=N)
+  takes the ordinary path below.
+  AN ORDINARY START OF A HOLDER. The vendor says nothing. The smallest
+  consistent rule: the job re-uses its own held units. Its admission
+  counts them as available to it and to no one else (`used(own=)`), and
+  the new run's vector replaces them (`take_over_held`), so a unit is
+  never counted twice. If the new vector asks less of a bucket than the
+  job held (a lowered QUANTITY, a dropped resource), the difference is
+  freed and the queue is woken. A holder that cannot be admitted queues
+  and keeps its held units while it waits; that is hold-and-wait, which
+  DL-50's all-or-nothing acquire otherwise excluded, and it is the
+  vendor's own consequence of holding units after a failure.
+  CLASSIFIER. `renewable-free` is a switch node like `ice-lookback`.
+  The reservation's policy is frozen at acquisition, so a live run keeps
+  the policy it started with even across a flip; the edge still reaches
+  every job the predicate names, so a flip with a live such job is
+  refused, which over-refuses by design rather than reasoning per row.
+  A carried row's held units are themselves graph edges, from the
+  holder to each held resource, not just a fact folded into the
+  holder's own `changed` set: a dependent's forward closure now reaches
+  a resource change through the job that holds its units, so a running
+  box gated on a holder is R when the held resource's type moves, even
+  if the holder itself no longer declares that resource.
+  STATIC LENSES. The explore page states an omitted FREE under the
+  registry default, "released on success".
+  STATE MACHINE. `STATE_MACHINE_VERSION` moves by one: the default
+  release of an omitted FREE changes, and held units outlive the run, so
+  a replay with resource demand can derive different state.
+  TESTS REWRITTEN. test_dl50_renewable_default_releases_on_failure now
+  runs under both values (Y: the waiter stays queued; A: it admits).
+  Run under `renewable-free=A` because each pins a release mechanism,
+  not the default: test_dl50_killing_a_holder_releases_its_units,
+  test_dl50_self_retriggering_holder_does_not_leak_its_semaphore,
+  test_sem18_a_restart_during_the_cascade_still_wakes_the_resource_waiters,
+  test_a_live_holder_reset_to_inactive_releases_its_units,
+  test_a_held_spawn_whose_job_was_set_inactive_is_retired_not_applied
+  and test_a_held_spawn_is_retired_at_the_edge_that_ends_its_run_not_at_activation.
+  Changed to the vendor default:
+  test_dl50_self_retrigger_leak_invariant_used_equals_held (the failed
+  run holds one unit until RELEASE_RESOURCE), the explore page's
+  wording for an omitted FREE, the capacity property's invariant (a row
+  that is not live holds only held units), and the seal-loader refusal
+  case, whose injected reservation is now one released on completion.
+  NEW TESTS. Oracle, both bisimulation arms: hold after FAILURE and
+  TERMINATED until RELEASE_RESOURCE, free on SUCCESS, `A` frees on
+  every completion, explicit FREE unchanged by the switch, FORCE reuse
+  without double counting and without the other resource, an ordinary
+  restart of a holder, a holder queued for another resource, the
+  no-op releases, an operator INACTIVE on a holder, and a depletable
+  that still spends. Seal: a held unit on a row that is not live loads.
+  Boundary: a held unit crosses a seal and a C2 release admits the
+  waiter. Control: the wire round trip. Journal: replay of a held unit
+  and its release. Semantics: the predicate's job set (the
+  `ice-lookback` predicate's test passes the catalog now). Store: both
+  held-unit verbs refuse a live row, and a restart that asks less than
+  it holds frees the difference and wakes the queue. Rework: a deleted
+  and a renamed holder across a real seal, with a second resume that
+  owes nothing; the classifier repro (C1 holds, C2 drops the
+  declaration, FORCE reuse, C3 retypes the resource: R) and its held and
+  armed variants; under Y, a live holder set INACTIVE, an ON_NOEXEC
+  bypass of a holder, a box reset of a FAILURE holder, KILLJOB on a
+  holder that is not running, restarts asking for more and for another
+  resource, and two holders of one resource; and the capacity and
+  runtime-state properties sample FORCE_STARTJOB and RELEASE_RESOURCE
+  and assert no bucket is used past its capacity.
+  A REMOVED HOLDER. A job deleted or renamed in the next catalog cannot
+  be named by RELEASE_RESOURCE ("unknown job"), so the units its carried
+  row holds would block their waiters forever. At a period opening, a
+  carried row whose job the catalog no longer defines, and that holds
+  units while not live, gives them back in the period's first input, at
+  the opening instant, before any timer fires
+  (`Oracle._release_removed_holders`). The trace records
+  `RELEASE_RESOURCE` with the cause "job removed from the catalog: its
+  held units go back at the period opening", and the waiters wake in
+  DL-50's order. A fresh opening admits a time observation for it
+  (`Engine.observe_opening`), so the waiters do not wait for an
+  unrelated input; replay applies the same journaled input, and a later
+  resume owes nothing. A live ghost keeps today's handling: the
+  classifier refuses it, so it never opens. The classifier treats a
+  removed holder that is not live as a ghost, not as R.
+  HELD RESOURCES ARE DEPENDENCIES. The classifier used to derive a job's
+  resource dependencies from the catalog alone. A FORCE_STARTJOB can
+  re-use units of a resource the job no longer declares, and a held
+  unit's fate at the run's end reads the resource's type, so a later
+  boundary that retyped that resource classified the running holder as
+  carry and turned its unit into permanent consumption on failure. A
+  job's resource dependencies are now its declared resources plus every
+  `r:` bucket its row holds, live or held. A change to a held resource
+  is R for an executing holder, and A for an armed, queued or holding
+  one, with the sentence "the units it holds stay held under C2's
+  resource definition".
+  NAMES. The existing `dsl41 release-held` command sends OFF_HOLD to
+  held jobs (DL-181). It is unrelated to held resource units and to
+  RELEASE_RESOURCE, and the two read alike. The name stays; the
+  possible confusion is recorded here.
+  EXAMPLE. The media example's one-slot `MEDIA_ENCODE` requests now
+  state `FREE=A`: its failed-rendition drill waits for the other two
+  encodes before it reruns the failed one, which under the vendor
+  default would wait behind the failed job's held slot.
+  UNCHANGED. `equiv`'s random event alphabet does not sample
+  RELEASE_RESOURCE. Depletable and threshold semantics, and the machine
+  load, do not move.
+  INTEGRATION. On top of DL-255, two fixes keep both slices. A forced
+  start on held units still owes DL-255's queue scan for the machine load
+  it holds (`_start`); a queued holder is short, for priority blocking,
+  only if its own admission would be, so `resource_blocked` credits it its
+  held units (`used(own=)`). The forced start on held units runs before
+  DL-255's block check, as the vendor says it re-evaluates no other
+  resource. Tests: `test_dl256_a_forced_start_on_held_units_lifts_the_resource_block_at_once`,
+  `test_a_queued_holder_counts_its_own_held_units_when_it_blocks`.

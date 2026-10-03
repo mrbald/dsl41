@@ -17,12 +17,13 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final, Literal, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
+from dsl41.capacity import resource_type
 from dsl41.conditions import ExitCodeAtom, StatusAtom, iter_atoms
 
 if TYPE_CHECKING:
-    from dsl41.ir import JobIR
+    from dsl41.ir import CatalogIR, JobIR
 
 
 @dataclass(frozen=True)
@@ -39,18 +40,29 @@ class Switch:
     autosys: str
     #: one line, plain English
     description: str
-    #: whether flipping this switch can change how `job` runs or starts --
-    #: the classifier's edge from a job to this switch (period-model ss10.2)
-    affects: Callable[[JobIR], bool]
+    #: whether flipping this switch can change how `job` runs or starts in
+    #: `catalog` -- the classifier's edge from a job to this switch
+    #: (period-model ss10.2)
+    affects: Callable[[JobIR, CatalogIR], bool]
 
 
-def _has_lookback_atom(job: JobIR) -> bool:
+def _has_lookback_atom(job: JobIR, _catalog: CatalogIR) -> bool:
     """A status or exit-code atom with a lookback qualifier in the job's
     condition, box_success or box_failure: what `ice-lookback` reads."""
     return any(
         isinstance(atom, (StatusAtom, ExitCodeAtom)) and atom.lookback is not None
         for _kind, cond, _span in job.iter_conditions()
         for atom in iter_atoms(cond)
+    )
+
+
+def _renewable_without_free(job: JobIR, catalog: CatalogIR) -> bool:
+    """A `resources:` request with no FREE on a renewable resource: what
+    `renewable-free` reads (DL-256). An absent res_type reads as renewable,
+    as `capacity.release_policy` reads it."""
+    return any(
+        ref.free is None and resource_type(catalog.resources.get(ref.name)) in ("", "R")
+        for ref in job.resources
     )
 
 
@@ -69,11 +81,22 @@ REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
                 " predecessor is on ice and not running: true, or the ordinary on-ice table",
                 affects=_has_lookback_atom,
             ),
+            Switch(
+                name="renewable-free",
+                values=("Y", "A"),
+                default="Y",
+                autosys="Y",
+                description="what a renewable resource request with no FREE does with its"
+                " units: Y frees them only on SUCCESS and holds them after FAILURE or"
+                " TERMINATED until RELEASE_RESOURCE, A frees them on every completion",
+                affects=_renewable_without_free,
+            ),
         )
     }
 )
 
 IceLookback = Literal["true", "ordinary"]
+RenewableFree = Literal["Y", "A"]
 
 
 @dataclass(frozen=True)
@@ -84,6 +107,7 @@ class SemanticSwitches:
     is the one place a default is read, from the registry."""
 
     ice_lookback: IceLookback
+    renewable_free: RenewableFree
 
     def value(self, name: str) -> str:
         """The effective value of the switch called `name`."""
@@ -122,7 +146,7 @@ def resolve(overrides: Mapping[str, str] | None = None) -> SemanticSwitches:
     values = {
         _attribute(name): given.get(name, switch.default) for name, switch in REGISTRY.items()
     }
-    return SemanticSwitches(**cast("dict[str, IceLookback]", values))
+    return SemanticSwitches(**cast("dict[str, Any]", values))
 
 
 #: The registry defaults, resolved once.

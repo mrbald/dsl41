@@ -28,6 +28,7 @@ from dsl41.classify import (
     ARMED_ASSUMPTION,
     BOX,
     CALENDAR,
+    HELD_ASSUMPTION,
     INITIAL_STATUS_ASSUMPTION,
     JOB,
     LATENT_ASSUMPTION,
@@ -1601,3 +1602,128 @@ def test_dl253_an_armed_job_with_absolute_must_times_is_a_across_a_base_zone_cha
         carried=_carried({"m": _running(timer=True)}),
     )
     assert running.by_job["m"].verdict == "R"
+
+
+# ------------------------------------------- DL-256 held units are dependencies
+
+_HELD_C1 = (
+    "insert_resource: BLOCK\nres_type: R\namount: 1\n\n"
+    "insert_job: h\njob_type: c\nmachine: m1\ncommand: x\nresources: (BLOCK, QUANTITY=1)\n"
+)
+#: C2 drops h's resources: h no longer DECLARES BLOCK
+_HELD_C2 = "insert_resource: BLOCK\nres_type: R\namount: 1\n\ninsert_job: h\njob_type: c\nmachine: m1\ncommand: x\n"
+#: C3 retypes BLOCK to depletable
+_HELD_C3 = _HELD_C2.replace("res_type: R", "res_type: D")
+
+
+def _carry(o: Oracle, now: datetime) -> CarriedRows:
+    store = o.store
+    return CarriedRows(
+        jobs=dict(store.job),
+        globals_=dict(store.globals_),
+        timers=tuple(store.timers()),
+        timer_seq=store.timer_seq,
+        consumed=dict(store.consumed),
+        enqueue_counter=store.enqueue_counter,
+        now=now,
+    )
+
+
+def _held_under_c2(*, force: bool) -> Oracle:
+    """C1 leaves h FAILED holding BLOCK; C2 opens over that row with h no
+    longer declaring BLOCK; with `force`, FORCE_STARTJOB h re-uses it."""
+    c1 = Oracle(lower_source(_HELD_C1))
+    c1.feed(Event(at=T0, kind="STARTJOB", payload={"job": "h"}))
+    c1.feed(Event(at=T0, kind="STATUS", payload={"job": "h", "status": "FAILURE"}))
+    c2 = Oracle(lower_source(_HELD_C2), carried=_carry(c1, T0))
+    if force:
+        c2.feed(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "h"}))
+        assert c2.store.job["h"].status == "RUNNING"
+    assert [r.bucket for r in c2.store.job["h"].reservations] == ["r:BLOCK"]
+    return c2
+
+
+def test_dl256_a_force_reused_resource_change_refuses_the_running_holder() -> None:
+    """The repro: h runs under C2 on units of BLOCK it no longer declares.
+    C3 retypes BLOCK, which would turn the unit into permanent consumption
+    at the run's end. The classifier reads the row's held buckets as
+    dependencies, so h is executing AND changed: R."""
+    c2 = _held_under_c2(force=True)
+    got = classify(
+        closing=_side(_HELD_C2),
+        opening=_side(_HELD_C3),
+        carried=carried_from_oracle(c2, now=T0),
+    )
+    verdict = got.by_job["h"]
+    assert (verdict.tier, verdict.verdict) == ("executing", "R")
+    assert "resource:BLOCK" in verdict.changed
+    assert got.refused == ("h",)
+
+
+def test_dl256_a_held_resource_change_is_carried_with_its_assumption() -> None:
+    """A completed job holding units of a resource C2 changes is carried
+    with the assumption said out loud, not silently."""
+    c2 = _held_under_c2(force=False)
+    got = classify(
+        closing=_side(_HELD_C2),
+        opening=_side(_HELD_C3),
+        carried=carried_from_oracle(c2, now=T0),
+    )
+    verdict = got.by_job["h"]
+    assert (verdict.tier, verdict.verdict) == ("not_live", "A")
+    assert verdict.assumption == HELD_ASSUMPTION
+    assert got.refused == ()
+
+
+def test_dl256_an_armed_holder_of_a_changed_resource_is_a_with_the_held_sentence() -> None:
+    """Latent and holding: the held sentence names why it is A."""
+    c2 = _held_under_c2(force=False)
+    carried = carried_from_oracle(c2, now=T0)
+    row = carried.jobs["h"].row.model_copy(update={"armed": True})
+    carried = carried.model_copy(update={"jobs": {"h": CarriedJob(row=row)}})
+    got = classify(closing=_side(_HELD_C2), opening=_side(_HELD_C3), carried=carried)
+    verdict = got.by_job["h"]
+    assert (verdict.tier, verdict.verdict, verdict.assumption) == ("latent", "A", HELD_ASSUMPTION)
+
+
+#: a box gated on the holder, neither side declaring BLOCK on h
+_HELD_DEP_C2 = (
+    "insert_resource: BLOCK\nres_type: R\namount: 1\n\n"
+    "insert_job: h\njob_type: c\nmachine: m1\ncommand: x\n\n"
+    "insert_job: b\njob_type: b\nbox_success: s(h)\n"
+)
+#: C3 retypes BLOCK to depletable
+_HELD_DEP_C3 = _HELD_DEP_C2.replace("res_type: R", "res_type: D")
+
+
+def _held_dependent_carried() -> CarriedState:
+    """h holds BLOCK (frozen at acquisition, declared on neither side); b is
+    a running box gated on h's success."""
+    h_row = JobRuntime(
+        status="FAILURE",
+        reservations=(CapacityReservation(bucket="r:BLOCK", units=1, release_policy="never"),),
+    )
+    b_row = JobRuntime(status="RUNNING", run_number=1)
+    return CarriedState(jobs={"h": CarriedJob(row=h_row), "b": CarriedJob(row=b_row)}, now=T0)
+
+
+def test_dl256_a_dependent_box_reaches_the_holders_resource_through_the_holder() -> None:
+    """ss10.2's forward closure: `b` depends on `h` (its `box_success`
+    atom), and `h` depends on BLOCK through the units it holds, even though
+    neither C2 nor C3 declares BLOCK on `h`. BLOCK's type moving must reach
+    `b` through that chained edge (DL-256), so the running box is R."""
+    carried = _held_dependent_carried()
+    got = classify(closing=_side(_HELD_DEP_C2), opening=_side(_HELD_DEP_C3), carried=carried)
+    verdict = got.by_job["b"]
+    assert (verdict.tier, verdict.verdict) == ("executing", "R")
+    assert "resource:BLOCK" in verdict.changed
+
+
+def test_dl256_a_dependent_box_carries_when_the_held_resource_does_not_change() -> None:
+    """The non-triggering twin: BLOCK's definition is unchanged between the
+    two sides, so `b`'s forward closure finds nothing moved and it carries."""
+    carried = _held_dependent_carried()
+    got = classify(closing=_side(_HELD_DEP_C2), opening=_side(_HELD_DEP_C2), carried=carried)
+    verdict = got.by_job["b"]
+    assert (verdict.tier, verdict.verdict) == ("executing", "carry")
+    assert "resource:BLOCK" not in verdict.changed

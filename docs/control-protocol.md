@@ -2,7 +2,7 @@
 
 Status: frozen at **v3** (DL-118; v2 was DL-90, v1 DL-78; amended by
 DL-133, DL-135, DL-146, DL-147, DL-148, DL-150, DL-151, DL-158, DL-189,
-DL-216 and DL-217). This
+DL-216, DL-217 and DL-256). This
 document is normative for the runner's §10 control plane in the same way
 `docs/supervisor-protocol.md` is normative for the §6a lifecycle tier. Each
 change to a frozen item requires a decision-log entry, and each amendment
@@ -141,7 +141,7 @@ never enter the WAL.
 
 | verb | `payload` | notes |
 |---|---|---|
-| job verbs | `job` | `STARTJOB`, `FORCE_STARTJOB`, `KILLJOB`, `ON_ICE`, `OFF_ICE`, `ON_HOLD`, `OFF_HOLD`, `ON_NOEXEC`, `OFF_NOEXEC`, `DISARM` *(DL-158)* |
+| job verbs | `job` | `STARTJOB`, `FORCE_STARTJOB`, `KILLJOB`, `ON_ICE`, `OFF_ICE`, `ON_HOLD`, `OFF_HOLD`, `ON_NOEXEC`, `OFF_NOEXEC`, `DISARM` *(DL-158)*, `RELEASE_RESOURCE` *(DL-256)* |
 | `SET_GLOBAL` | `name` (a non-empty string), `value` (a string) | the empty string is a legal value: `v(G) = ""` is a legal condition, so an operator must be able to satisfy it |
 | `CHANGE_STATUS` | `job`, `status`, optional int `exit_code` | injected as `STATUS`, keeping overwrite parity |
 
@@ -166,6 +166,19 @@ revisions map is not the discriminator, because it carries every revision
 the batch moved, the target's own timers included — a timer of the
 target's due at the DISARM's instant fires in the same batch and moves the
 target's revision whether or not the latch was set (DL-233).
+
+`RELEASE_RESOURCE` (DL-256) is the vendor's `sendevent -E RELEASE_RESOURCE
+-J job`. It joins the job verbs and takes their whole contract: the
+payload, the mandatory `expect` on `job:<name>`, journaling at admission,
+and replay. No frame, field or record kind changes; the event alphabet
+grows by one kind, which protocol-evolution §1 already covers (readers
+upgrade first). It gives back every resource unit a job that is not
+running still holds, and wakes the queue. No status moves. The units are
+on the job's row, so a release moves the job's revision. A job holding
+nothing, and a running job, are accepted, journaled no-ops; the trace
+marker is `RELEASE_RESOURCE`, and its reason names the outcome:
+`sendevent RELEASE_RESOURCE (frees …)`, `(nothing held)`, or
+`(no effect: RUNNING; …)`.
 
 **`expect` is mandatory** (`docs/concurrency-model.md` §0). It names the
 addressed entity — `job:<name>` for a job verb, `global:<name>` for

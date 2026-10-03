@@ -42,7 +42,14 @@ from pydantic import ValidationError
 
 from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
-from dsl41.oracle_state import Event, GlobalRuntime, JobRuntime, OracleError, RuntimeState
+from dsl41.oracle_state import (
+    Event,
+    GlobalRuntime,
+    JobRuntime,
+    OracleError,
+    RuntimeState,
+    may_outlive_run,
+)
 
 T0 = datetime(2026, 7, 1, 8, 0)
 
@@ -286,19 +293,27 @@ def _pool_invariants(o: Oracle) -> list[str]:
     if set(waiters) != queued:
         broken.append(f"waiters {sorted(waiters)} != QUE_WAIT jobs {sorted(queued)}")
     for job in list(o.store.job):
-        if o._pool.holds(o.store.job[job]) and o.store.job[job].status not in (
-            "STARTING",
-            "RUNNING",
+        row = o.store.job[job]
+        # DL-256: a row that is not live keeps only a renewable's unfreed units
+        if row.status not in ("STARTING", "RUNNING") and not all(
+            map(may_outlive_run, row.reservations)
         ):
-            broken.append(f"{job} holds units at status {o.store.job[job].status}")
+            broken.append(f"{job} holds units at status {row.status}")
+    used = o._pool.used(o.store.job, o.store.consumed)
+    for bucket, capacity in o._pool._bucket_cap.items():
+        if used.get(bucket, 0) > capacity:
+            broken.append(f"{bucket} uses {used[bucket]} of {capacity}")
     return broken
 
 
 @settings(max_examples=200, deadline=None)
 @given(data=st.data())
 def test_the_capacity_pool_never_changes_without_a_row_change(data: st.DataObject) -> None:
-    """Every queued job is QUE_WAIT and every QUE_WAIT job is queued, and only
-    a job that is starting or running holds units. Both directions hold after
+    """Every queued job is QUE_WAIT and every QUE_WAIT job is queued, and a
+    job that is not starting or running holds only a renewable's units its
+    run did not free (DL-256), and no bucket is used past its capacity --
+    FORCE_STARTJOB re-using held units and RELEASE_RESOURCE are sampled.
+    Both directions hold after
     EVERY event of a random contended schedule -- so a capacity change with no
     projected row change is not constructible here. DL-86 needed this because
     the pool held the state; DL-120 put the state on the rows, and the
@@ -310,11 +325,22 @@ def test_the_capacity_pool_never_changes_without_a_row_change(data: st.DataObjec
     for _ in range(data.draw(st.integers(min_value=2, max_value=12))):
         job = data.draw(st.sampled_from(jobs))
         kind = data.draw(
-            st.sampled_from(["STARTJOB", "STATUS", "KILLJOB", "ON_ICE", "OFF_ICE", "ON_HOLD"])
+            st.sampled_from(
+                [
+                    "STARTJOB",
+                    "FORCE_STARTJOB",
+                    "STATUS",
+                    "KILLJOB",
+                    "RELEASE_RESOURCE",
+                    "ON_ICE",
+                    "OFF_ICE",
+                    "ON_HOLD",
+                ]
+            )
         )
         payload: dict[str, object] = {"job": job}
         if kind == "STATUS":
-            payload["status"] = data.draw(st.sampled_from(["SUCCESS", "FAILURE"]))
+            payload["status"] = data.draw(st.sampled_from(["SUCCESS", "FAILURE", "TERMINATED"]))
             if o.store.job[job].status not in ("STARTING", "RUNNING"):
                 continue  # the runner never reports a completion for a job that never ran
         o.feed(_ev(kind, minute, **payload))
