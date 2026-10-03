@@ -571,23 +571,107 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             surface="job_attr",
             member="must_start_times",
             facet="absolute",
-            klass=PASSTHROUGH,
-            cite="SEM-34, oracle.Oracle._slot_deadline",
-            effect="an ABSOLUTE must_start_times lowers and is carried, and arms nothing:"
-            " the oracle owns no calendar, so no absolute deadline exists v1",
-            trigger=_job(date_conditions="1", start_times='"08:00"', must_start_times='"08:30"'),
+            klass=SUPPORTED,
+            cite="SEM-34, DL-253, oracle.Oracle._absolute_deadline",
+            bound="00:00-71:59",
+            effect="an ABSOLUTE must_start_times, 00:00-71:59, arms MUST_START_ALARM at the"
+            " slot's must time on the tick's local day, hours 24-71 on the days after;"
+            " 72:00 and above, a time below its own start time and a time not earlier"
+            " than the next later start time of the same day are refused at lowering;"
+            " the day's latest start time is not checked, its next run depending on"
+            " the calendar",
+            trigger=_job(date_conditions="1", start_times='"08:00"', must_start_times='"32:30"'),
             quiet=_job(date_conditions="1", start_times='"08:00"', must_start_times='"+30"'),
         ),
         _row(
             surface="job_attr",
             member="must_complete_times",
             facet="absolute",
-            klass=PASSTHROUGH,
-            cite="SEM-34, oracle.Oracle._slot_deadline",
-            effect="an ABSOLUTE must_complete_times lowers and is carried, and arms"
-            " nothing: the oracle owns no calendar, so no absolute deadline exists v1",
-            trigger=_job(date_conditions="1", start_times='"08:00"', must_complete_times='"09:30"'),
+            klass=SUPPORTED,
+            cite="SEM-34, DL-253, oracle.Oracle._absolute_deadline",
+            bound="00:00-71:59",
+            effect="an ABSOLUTE must_complete_times, 00:00-71:59, arms MUST_COMPLETE_ALARM at"
+            " the slot's must time on the tick's local day, hours 24-71 on the days after;"
+            " 72:00 and above, a time below its own start time and a time not earlier"
+            " than the next later start time of the same day are refused at lowering;"
+            " the day's latest start time is not checked, its next run depending on"
+            " the calendar",
+            trigger=_job(date_conditions="1", start_times='"08:00"', must_complete_times='"33:30"'),
             quiet=_job(date_conditions="1", start_times='"08:00"', must_complete_times='"+45"'),
+        ),
+        _row(
+            surface="job_attr",
+            member="must_start_times",
+            facet="dst",
+            klass=SUPPORTED,
+            cite="SEM-34, DL-253, oracle._must_instant",
+            effect="an absolute must time in a spring change's missing hour is due in the"
+            " first minute of the next hour (2:05 is 3:00:05); in a fall change's repeated"
+            " hour it takes the first pass, or the second when the start is in that hour"
+            " too; other change shapes keep the fold=0 conversion",
+            trigger=_job(
+                date_conditions="1",
+                timezone="America/New_York",
+                start_times='"01:00"',
+                must_start_times='"02:05"',
+            ),
+            quiet=_job(date_conditions="1", start_times='"01:00"', must_start_times='"02:05"'),
+        ),
+        _row(
+            surface="job_attr",
+            member="must_complete_times",
+            facet="dst",
+            klass=SUPPORTED,
+            cite="SEM-34, DL-253, oracle._must_instant",
+            effect="an absolute must time in a spring change's missing hour is due in the"
+            " first minute of the next hour (2:45 is 3:00:45), and at 3:00:59 when a start"
+            " in the missing hour would run after it; in a fall change's repeated hour it"
+            " takes the first pass, or the second when the start is in that hour too",
+            trigger=_job(
+                date_conditions="1",
+                timezone="America/New_York",
+                start_times='"02:45"',
+                must_complete_times='"03:00"',
+            ),
+            quiet=_job(date_conditions="1", start_times='"02:45"', must_complete_times='"03:00"'),
+        ),
+        _row(
+            surface="job_attr",
+            member="must_start_times",
+            facet="before-tick",
+            klass=PROVISIONAL,
+            cite="SEM-34, DL-253, oracle.Oracle._absolute_deadline",
+            label="E10",
+            effect="an absolute must time that resolves before its tick is due at the tick:"
+            " a start in a spring change's missing hour ticks at fold=0, past the vendor's"
+            " first minute of the next hour; lowering refuses a must time below its own"
+            " start time, so no other input reaches the pin",
+            trigger=_job(
+                date_conditions="1",
+                timezone="America/New_York",
+                start_times='"02:45"',
+                must_start_times='"03:00"',
+            ),
+            quiet=_job(date_conditions="1", start_times='"02:45"', must_start_times='"03:10"'),
+        ),
+        _row(
+            surface="job_attr",
+            member="must_complete_times",
+            facet="before-tick",
+            klass=PROVISIONAL,
+            cite="SEM-34, DL-253, oracle.Oracle._absolute_deadline",
+            label="E10",
+            effect="an absolute must time that resolves before its tick is due at the tick:"
+            " a start in a spring change's missing hour ticks at fold=0, past the vendor's"
+            " 3:00:59; lowering refuses a must time below its own start time, so no"
+            " other input reaches the pin",
+            trigger=_job(
+                date_conditions="1",
+                timezone="America/New_York",
+                start_times='"02:45"',
+                must_complete_times='"03:00"',
+            ),
+            quiet=_job(date_conditions="1", start_times='"02:45"', must_complete_times='"03:10"'),
         ),
         _row(
             surface="job_attr",
@@ -613,8 +697,8 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             facet="unmatched-slot",
             klass=PROVISIONAL,
             cite="SEM-34, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset",
-            effect="an instant matching no start time uses the first offset; no label was"
-            " opened for the corner",
+            effect="an instant matching no start time uses the first offset, and an absolute"
+            " form arms nothing there; no label was opened for the corner",
             trigger=_job(
                 date_conditions="1", start_times='"08:00,12:00"', must_start_times='"+30,+60"'
             ),
@@ -626,8 +710,8 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             facet="unmatched-slot",
             klass=PROVISIONAL,
             cite="SEM-34, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset",
-            effect="an instant matching no start time uses the first offset; no label was"
-            " opened for the corner",
+            effect="an instant matching no start time uses the first offset, and an absolute"
+            " form arms nothing there; no label was opened for the corner",
             trigger=_job(
                 date_conditions="1", start_times='"08:00,12:00"', must_complete_times='"+30,+60"'
             ),
@@ -640,8 +724,8 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             klass=SUPPORTED,
             cite="SEM-34, DL-248, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset",
             effect="a single relative offset counts against start_mins and broadcasts to"
-            " every start_mins tick; a list of offsets or an absolute form there is not"
-            " specified by the vendor, stays open, and is refused at lowering",
+            " every start_mins tick; the vendor refuses an absolute form there, a list of"
+            " offsets there is not specified and stays open, and lowering refuses both",
             trigger=_job(date_conditions="1", start_mins="0,30", must_start_times='"+7"'),
             quiet=_job(date_conditions="1", start_times='"08:00"', must_start_times='"+45"'),
         ),
@@ -652,8 +736,8 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             klass=SUPPORTED,
             cite="SEM-34, DL-248, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset",
             effect="a single relative offset counts against start_mins and broadcasts to"
-            " every start_mins tick; a list of offsets or an absolute form there is not"
-            " specified by the vendor, stays open, and is refused at lowering",
+            " every start_mins tick; the vendor refuses an absolute form there, a list of"
+            " offsets there is not specified and stays open, and lowering refuses both",
             trigger=_job(date_conditions="1", start_mins="0,30", must_complete_times='"+7"'),
             quiet=_job(date_conditions="1", start_times='"08:00"', must_complete_times='"+45"'),
         ),
@@ -3877,7 +3961,7 @@ LITERAL_ALT_ROWS: tuple[Row, ...] = (
     ),
     _row(
         surface="literal_alt",
-        member="CatalogIR.ir_version=0.2",
+        member="CatalogIR.ir_version=0.3",
         klass=SUPPORTED,
         cite="ir-design ss4",
         effect="the IR version stamped on every catalog; a reader that meets another refuses",
@@ -3889,8 +3973,8 @@ LITERAL_ALT_ROWS: tuple[Row, ...] = (
         member="SlaSpec.kind=absolute",
         klass=SUPPORTED,
         cite="SEM-34, oracle.Oracle._slot_deadline",
-        effect="an absolute must_*_times is lowered and carried, and arms nothing: the"
-        " oracle owns no calendar, so no absolute deadline exists v1",
+        effect="an absolute must_*_times, 00:00-71:59, arms its alarm timer at the slot's"
+        " must time (DL-253)",
         trigger="ir.SlaSpec",
         quiet="conditions.parse_condition",
     ),

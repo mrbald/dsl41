@@ -143,6 +143,7 @@ from dsl41.period import (
     read_period_manifest,
     switches_of,
     tz_aliases_of,
+    default_tz_of,
     check_manifest_against_segment,
     SEGMENT_FIELDS,
 )
@@ -1059,6 +1060,7 @@ def replay_trace(
     oracle = Oracle(
         catalog,
         carried=carried,
+        default_tz=default_tz_of(profile),
         tz_aliases=tz_aliases_of(profile),
         semantics=switches_of(profile),
     )

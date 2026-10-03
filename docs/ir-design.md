@@ -165,7 +165,7 @@ class ScheduleBlock(BaseModel):          # SEM-30..35; present iff date_conditio
     run_window: tuple[Time, Time] | None # semantics: SEM-33 gate, NOT trigger
     timezone: str | None
     must_start: SlaSpec | None           # SEM-34: annotation class
-    must_complete: SlaSpec | None
+    must_complete: SlaSpec | None        # absolute times are MustTime, 00:00-71:59 (DL-253)
 
 class BoxLinkage(BaseModel):
     box_name: str | None
@@ -236,7 +236,7 @@ class JobIR(BaseModel):
     span: SourceSpan | None              # the statement's own span, for findings
 
 class CatalogIR(BaseModel):              # the compilation unit
-    ir_version: Literal["0.2"]           # §8
+    ir_version: Literal["0.3"]           # §8
     jobs: dict[str, JobIR]
     globals_declared: dict[str, str]     # insert_global
     external_instances: dict[str, XinstIR]  # xtype typed; plumbing attrs opaque (DL-28)
@@ -435,8 +435,10 @@ in `oracle.py` imports them and `oracle_state.py` imports nothing from it (DL-91
 ## 8. Serialization & identity
 
 - IR-F serializes as JSON: `json.dumps(catalog.model_dump(mode="json"), sort_keys=True,
-  indent=2)` plus a trailing newline, with an explicit version field `ir_version: "0.2"`. One
-  catalog is one file. The output is deterministic (diff-able in git).
+  indent=2)` plus a trailing newline, with an explicit version field `ir_version: "0.3"`. One
+  catalog is one file. The output is deterministic (diff-able in git). A change to the IR-F
+  shape bumps the version; `scripts/arch_check.py` pins the schema hash to it. 0.3 (DL-253):
+  an absolute must time is a `MustTime`, whose hour runs to 71.
 - `ir.dump_catalog` / `ir.load_catalog` are the REFERENCE SPELLING of that sentence, and the
   round-trip test in `tests/test_ir.py` holds them to it (DL-193). No CLI verb reads or
   writes an IR-F file: `dsl41 run` consumes JIL bytes only,

@@ -833,6 +833,45 @@ def test_cli_journal_exits_2_on_catalog_hash_mismatch(tmp_path: Path) -> None:
     assert "catalog hash mismatch" in result.output
 
 
+def test_cli_journal_refuses_an_older_build_s_log_for_its_version(tmp_path: Path) -> None:
+    """DL-253: a journal an older build wrote names that build's
+    state-machine version and a catalog hash over its own `ir_version`. Read
+    against the SAME estate file, it is refused for its version, before any
+    hash is compared: never "catalog hash mismatch", never a trace."""
+    from dsl41.period import hash_over
+
+    text = "insert_job: j1\njob_type: c\ncommand: x\nmachine: m1\n"
+    jil_path = tmp_path / "estate.jil"
+    jil_path.write_text(text)
+    catalog = lower_source(text, file=str(jil_path))
+    run_root = tmp_path / "run"
+
+    async def scenario() -> None:
+        engine = start_run(
+            catalog, run_root, clock=VirtualClock(start=T0), adapters={"CMD": FakeAdapter()}
+        )
+        engine.inject(ev("STARTJOB", 0, job="j1"))
+        await engine.run_until_quiescent(T0)
+        await engine.shutdown()
+        assert engine.journal is not None
+        engine.journal.close()
+
+    asyncio.run(scenario())
+    path = run_root / "journal.jsonl"
+    records = read_journal(path)
+    payload = catalog.model_dump(mode="json")
+    payload["meta"] = {"source_files": list(catalog.meta.source_files)}
+    payload["ir_version"] = "0.2"
+    records[0]["catalog_hash"] = hash_over(payload)
+    records[0]["state_machine_version"] = STATE_MACHINE_VERSION - 1
+    path.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in records))
+    result = CliRunner().invoke(app, ["journal", str(path), str(jil_path)])
+    assert result.exit_code == 2
+    assert f"state_machine_version {STATE_MACHINE_VERSION - 1}" in result.output
+    assert "catalog hash mismatch" not in result.output
+    assert "STARTING" not in result.output
+
+
 # ------------------------------------ the WAL's own edges (DL-105)
 
 

@@ -1786,3 +1786,86 @@ def test_and_success_skeleton_skips_instance_qualified_and_undefined_refs() -> N
     catalog = lower_source(text)
     skeleton = and_success_skeleton(catalog)
     assert skeleton["sk4_b"] == set()
+
+
+# DL-253: the engine's oracle reads a job with no `timezone:` in the base zone
+# the scheduler ticks in. Before, it read UTC: under --timezone
+# America/New_York the 23:00 tick arrives at 03:00 UTC the next day, names no
+# start_times slot, and armed no absolute must time; run_window was read in
+# UTC too.
+
+_NY_BASE = "America/New_York"
+
+
+def _base_zone_engine(text: str, run_root: Path | None, until: datetime) -> Engine:
+    """Run `text` under a New York base zone to `until` (UTC): through
+    `start_run` (a pinned profile) when `run_root` is given, else a bare
+    Engine over the scheduler."""
+    catalog = lower_source(text)
+    start = datetime(2026, 7, 1, 4, 0)  # 00:00 EDT, July 1
+
+    async def scenario() -> Engine:
+        clock = VirtualClock(start=start)
+        scheduler = Scheduler(catalog, start=start, default_tz=_NY_BASE)
+        adapter = FakeAdapter()
+        adapters = {"CMD": adapter, "FW": adapter}
+        if run_root is None:
+            engine = Engine(catalog, clock=clock, adapters=adapters, scheduler=scheduler)
+        else:
+            engine = start_run(
+                catalog, run_root, clock=clock, adapters=adapters, scheduler=scheduler
+            )
+        await engine.run_until_quiescent(until)
+        await engine.shutdown()
+        if engine.journal is not None:
+            engine.journal.close()
+        return engine
+
+    return asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("pinned", [True, False], ids=["start_run", "bare-engine"])
+def test_dl253_absolute_must_times_alarm_under_a_non_utc_base_zone(
+    tmp_path: Path, pinned: bool
+) -> None:
+    """SEM-34, DL-253: a 23:00 start with must times 34:00 and 34:01, read
+    in America/New_York. The July 1 tick is 03:00 UTC on July 2; the job is
+    gated and never starts, so the alarms fire at 10:00 and 10:01 EDT the
+    next day, 14:00 and 14:01 UTC."""
+    text = (
+        "insert_job: nyabs\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "23:00"\n'
+        'must_start_times: "34:00"\nmust_complete_times: "34:01"\n'
+        "condition: s(nyabs_gate)\n\n"
+        "insert_job: nyabs_gate\njob_type: c\ncommand: y\nmachine: m1\n"
+    )
+    engine = _base_zone_engine(
+        text, tmp_path / "run" if pinned else None, datetime(2026, 7, 2, 15, 0)
+    )
+    alarms = [
+        (t.transition, t.at)
+        for t in engine.oracle.trace()
+        if t.job == "nyabs" and t.transition.endswith("_ALARM")
+    ]
+    assert alarms == [
+        ("MUST_START_ALARM", datetime(2026, 7, 2, 14, 0)),
+        ("MUST_COMPLETE_ALARM", datetime(2026, 7, 2, 14, 1)),
+    ]
+
+
+@pytest.mark.parametrize("pinned", [True, False], ids=["start_run", "bare-engine"])
+def test_dl253_run_window_is_read_in_a_non_utc_base_zone(tmp_path: Path, pinned: bool) -> None:
+    """SEM-33, DL-253: the 23:00 New York tick is inside a 22:00-23:30
+    window read in that zone, so the job runs. Read in UTC, as the engine's
+    oracle did, 03:00 is outside it and the start was deferred."""
+    text = (
+        "insert_job: nyrw\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "23:00"\n'
+        'run_window: "22:00-23:30"\n'
+    )
+    engine = _base_zone_engine(
+        text, tmp_path / "run" if pinned else None, datetime(2026, 7, 2, 4, 0)
+    )
+    transitions = [t.transition for t in engine.oracle.trace() if t.job == "nyrw"]
+    assert transitions[:2] == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+    assert not any(t.startswith("RUN_WINDOW") for t in transitions)

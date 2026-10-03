@@ -178,18 +178,22 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
 - Injected STATUS may overwrite a terminal status (the CHANGE_STATUS
   analog): script-authoring hazard, documented not guarded.
 - must_start_times / must_complete_times (SEM-34): alarms only, never
-  control flow. Relative offsets arm on the STARTJOB tick, both halves
-  (DL-248), even when the start is abandoned or deferred -- that is the
-  alarm's point. must_start alarms iff no new run began by tick+offset.
-  must_complete alarms iff the first run to begin after the tick has not
-  ended by tick+offset; a late start does not move the deadline, and a
-  FORCE_STARTJOB, which is no tick, arms none. N offsets against N
-  start_times pair BY POSITION -- the tick's local time of day names the
-  slot; start_mins takes a single offset only (DL-248). A SINGLE offset
+  control flow. The STARTJOB tick arms both halves (DL-248), even when the
+  start is abandoned or deferred -- that is the alarm's point. A relative
+  deadline is tick+offset. An absolute one is the slot's must time on the
+  tick's local calendar day, hours 24-71 on the days after, with the
+  vendor's DST rules (DL-253). must_start alarms iff no new run began by
+  the deadline. must_complete alarms iff the first run to begin after the
+  tick has not ended by it; a late start does not move the deadline, and a
+  FORCE_STARTJOB, which is no tick, arms none. One deadline of each kind
+  is pending per job at a time: a tick on a live job, or while an earlier
+  deadline of that kind is pending, arms none (DL-248, DL-253). N values
+  against N start_times pair BY POSITION -- the tick names the slot;
+  start_mins takes a single relative offset only (DL-248). A SINGLE offset
   broadcasts over every start time (the vendor's relative syntax is one
-  `+minutes` for each start time), and an instant that matches no start time keeps the first offset.
-  Absolute forms need the calendar the oracle does not own; scripts
-  exercise relative forms.
+  `+minutes` for each start time), and an instant that matches no start
+  time keeps the first offset. An absolute form arms nothing for such an
+  instant: its times belong to their start times.
 - term_run_time (dossier ss5): control flow -- auto-TERMINATE when the run
   exceeds the limit, checked lazily as the clock advances.
 - n_retrys: Q4 resolved (DL-53) -- the trigger set is FAILURE-only application
@@ -258,7 +262,7 @@ from dsl41.conditions import (
     compare_int,
     compare_value,
 )
-from dsl41.ir import CatalogIR, JobIR, Semantics, Time
+from dsl41.ir import CatalogIR, JobIR, MustTime, Semantics, Time
 
 from dsl41.oracle_state import (
     LIVE,
@@ -829,8 +833,10 @@ class Oracle:
             if kind == "STARTJOB":
                 # SEM-34: the schedule tick arms both deadlines whether or not
                 # the start succeeds -- that is their point (DL-248)
-                self._arm_must_start(job)
-                self._arm_must_complete(job)
+                if (timer := self._tick_deadline(job, "must_start")) is not None:
+                    self._schedule_timer(timer.at, timer)
+                if (timer := self._tick_deadline(job, "must_complete")) is not None:
+                    self._schedule_timer(timer.at, timer)
             # DL-68: a sourced event names its trigger -- a scheduler tick and
             # an operator sendevent must not collapse to one cause string
             cause = f"{kind} event ({ev.source})" if ev.source else f"{kind} event"
@@ -2032,14 +2038,23 @@ class Oracle:
         the job's own timezone. None when the job declares none, or when the
         instant is not one of them -- an operator's sendevent, say. A
         start_mins job carries one broadcast offset (DL-248), so it never
-        needs a slot."""
+        needs a slot.
+
+        A start time in a spring change's missing hour has no wall time to
+        match. The scheduler ticks it at the instant `to_utc` gives (fold=0,
+        runner-design E10), so that instant names the slot too (DL-253)."""
         schedule = job_ir.schedule
         if schedule is None or not schedule.start_times:
             return None
         assert self._now is not None
-        now_local = to_local(self._now, self._job_tz(job_ir))
+        tz = self._job_tz(job_ir)
+        now_local = to_local(self._now, tz)
         for index, start in enumerate(schedule.start_times):
             if (start.hour, start.minute) == (now_local.hour, now_local.minute):
+                return index
+        tick = self._now.replace(second=0, microsecond=0)
+        for index, start in enumerate(schedule.start_times):
+            if to_utc(datetime.combine(now_local.date(), _to_time(start)), tz) == tick:
                 return index
         return None
 
@@ -2059,51 +2074,87 @@ class Oracle:
         return offsets[0] if slot is None else offsets[slot]
 
     def _slot_deadline(self, job: str, check: str) -> Event | None:
-        """SEM-34: the relative deadline of the slot this tick names, due at
-        tick+offset, or None. The payload carries the run_number AT THE
-        TICK: the run the slot asks for is the first one to begin after it
-        (DL-248). An absolute form arms nothing; the oracle owns no
-        calendar."""
+        """SEM-34: the deadline of the slot this tick names, or None. The
+        payload carries the run_number AT THE TICK: the run the slot asks for
+        is the first one to begin after it (DL-248). A relative form is due
+        at tick+offset; an absolute one at `_absolute_deadline`."""
         job_ir = self.catalog.jobs.get(job)
         if job_ir is None or job_ir.schedule is None:
             return None
         schedule = job_ir.schedule
         spec = schedule.must_start if check == "must_start" else schedule.must_complete
-        if spec is None or spec.kind != "relative" or not spec.offsets_min:
+        if spec is None:
             return None
         assert self._now is not None
-        deadline = self._now + timedelta(minutes=self._sla_offset(job_ir, spec.offsets_min))
+        deadline: datetime | None
+        if spec.kind == "relative":
+            if not spec.offsets_min:
+                return None
+            deadline = self._now + timedelta(minutes=self._sla_offset(job_ir, spec.offsets_min))
+        else:
+            deadline = self._absolute_deadline(job_ir, spec.times or [])
+        if deadline is None:
+            return None
         payload = {"check": check, "job": job, "run": self._runtime(job).run_number}
         return Event(at=deadline, kind="TIMER", payload=payload)
 
-    def _arm_must_start(self, job: str) -> None:
-        """SEM-34: MUST_START_ALARM if no new run has begun by tick+offset."""
-        if (timer := self._slot_deadline(job, "must_start")) is not None:
-            self._schedule_timer(timer.at, timer)
+    def _absolute_deadline(self, job_ir: JobIR, times: list[MustTime]) -> datetime | None:
+        """SEM-34 (DL-253): the absolute must time of the slot this tick
+        names, on the tick's local calendar day in the job's zone, plus a
+        day for each 24 hours past 23 ("Limits: 00:00-71:59 (2 calendar days
+        ahead of the current calendar day)"). None when the tick names no
+        slot: the times pair with start_times by position, so an instant
+        that is no start time has none.
 
-    def _arm_must_complete(self, job: str) -> None:
-        """SEM-34 (DL-248): MUST_COMPLETE_ALARM if the run this tick asks
-        for has not completed by tick+offset, whenever it started.
+        A deadline that falls before the tick is due at the tick. Only one
+        case reaches that, because lowering refuses a must time below its
+        own start time (SEM-34): a start in a spring change's missing hour
+        ticks at fold=0 (runner-design E10), later than the vendor's first
+        minute of the next hour, where its must time may lie."""
+        slot = self._start_slot(job_ir)
+        schedule = job_ir.schedule
+        if slot is None or schedule is None or not schedule.start_times or slot >= len(times):
+            return None
+        assert self._now is not None
+        tz = self._job_tz(job_ir)
+        day = to_local(self._now, tz).date()
+        due = _must_instant(day, schedule.start_times[slot], times[slot], tz)
+        return max(due, self._now)
 
-        At most one such deadline is pending per job. The vendor inserts the
-        next CHK_COMPLETE only "after the job completes", so a tick that
-        finds the job live, or finds an earlier tick's deadline neither met
-        nor fired, arms nothing."""
-        timer = self._slot_deadline(job, "must_complete")
-        if timer is None:
-            return
-        rt = self._runtime(job)
-        if rt.status in ("STARTING", "RUNNING", "QUE_WAIT"):
-            return
+    def _pending_check(self, job: str, check: str, rt: JobRuntime) -> bool:
+        """Is a deadline of this kind still pending for `job`: armed, not
+        fired, and not yet met (DL-248, DL-253)? A must_start deadline is met
+        once a run began after its tick; a must_complete one once that run
+        completed. The test reads the timer heap, so no new state is kept."""
         for _, _, armed in self.store.timers():
             payload = armed.payload
-            if (
-                payload.get("check") == "must_complete"
-                and payload.get("job") == job
-                and not self._slot_run_completed(rt, payload.get("run"))
-            ):
-                return
-        self._schedule_timer(timer.at, timer)
+            if payload.get("check") != check or payload.get("job") != job:
+                continue
+            tick_run = payload.get("run")
+            if check == "must_start" and tick_run == rt.run_number:
+                return True
+            if check == "must_complete" and not self._slot_run_completed(rt, tick_run):
+                return True
+        return False
+
+    def _tick_deadline(self, job: str, check: str) -> Event | None:
+        """SEM-34: the must_start or must_complete deadline this tick arms,
+        or None. MUST_START_ALARM fires if no new run has begun by it;
+        MUST_COMPLETE_ALARM if the run this tick asks for has not completed
+        by it, whenever that run started (DL-248).
+
+        At most one deadline of each kind is pending per job (DL-248,
+        DL-253). The vendor inserts the next CHK_START and CHK_COMPLETE only
+        "after the job completes", so a tick that finds the job live, or
+        finds an earlier tick's deadline of the same kind still pending,
+        arms nothing."""
+        timer = self._slot_deadline(job, check)
+        if timer is None:
+            return None
+        rt = self._runtime(job)
+        if rt.status in ("STARTING", "RUNNING", "QUE_WAIT") or self._pending_check(job, check, rt):
+            return None
+        return timer
 
     @staticmethod
     def _slot_run_completed(rt: JobRuntime, tick_run: object) -> bool:
@@ -2134,7 +2185,7 @@ class Oracle:
 
     def _lazy_clock_checks(self) -> None:
         """Deadline timers fire through the timer heap inside feed(); nothing
-        else is time-lazy v1 (hook kept for the SLA/absolute-times extension)."""
+        else is time-lazy v1."""
 
     def _dispatch_timer_check(self, ev: Event) -> bool:
         check = ev.payload.get("check")
@@ -2191,6 +2242,54 @@ def _entity_keys(cond: Cond) -> set[str]:
 
 def _to_time(t: Time) -> dtime:
     return dtime(hour=t.hour, minute=t.minute)
+
+
+def _vendor_gap_instant(day: date, hour: int, minute: int, tz: tzinfo | None) -> datetime:
+    """A wall time in a spring change's missing hour, as the vendor moves
+    it: into the first minute of the next hour, its minute read as seconds.
+    "Daylight Time Changes": "a job that is scheduled to run on Sundays at
+    2:05 runs at 3:00:05"."""
+    first = to_utc(datetime.combine(day, dtime(hour + 1, 0)), tz)
+    return first + timedelta(seconds=minute)
+
+
+def _must_instant(day: date, start: Time, must: MustTime, tz: tzinfo | None) -> datetime:
+    """An absolute must time as an engine instant (SEM-34, DL-253). `day`
+    is the local calendar day of the start it pairs with. Hours 24-71 land
+    on the next days. TechDocs 24.2, "Daylight Time Changes" and "Standard
+    Time Changes".
+
+    Spring, a must time in the missing hour moves to the first minute of
+    the next hour: "a job that must start by 2:05 and must complete by 2:45
+    generates an alarm if the job does not start by 3:00:05 or if it does
+    not complete by 3:00:45". A start in the missing hour runs in that
+    minute too; when it would run after its must time, the must time moves
+    "to the final second of the first minute of the hour following the
+    missing hour", 3:00:59.
+
+    Fall, a must time in the repeated hour takes the first, daylight pass
+    when the start is before the change: "must complete at 1:30 generates
+    an alarm if the job has not completed by 1:30 DT". When the start is in
+    the repeated hour too, it takes the second, standard pass. A start on
+    an earlier day is before the change.
+
+    Other change shapes keep the plain fold=0 conversion, as run_window's
+    do (DL-249)."""
+    days, hour = divmod(must.hour, 24)
+    local = datetime.combine(day + timedelta(days=days), dtime(hour, must.minute))
+    change = dst_change(local.date(), tz)
+    if change == "spring" and hour == MISSING_HOUR:
+        due = _vendor_gap_instant(local.date(), hour, must.minute, tz)
+    else:
+        second = (
+            change == "fall" and hour == REPEATED_HOUR and days == 0 and start.hour == REPEATED_HOUR
+        )
+        due = to_utc(local.replace(fold=1 if second else 0), tz)
+    if dst_change(day, tz) == "spring" and start.hour == MISSING_HOUR:
+        runs_at = _vendor_gap_instant(day, start.hour, start.minute, tz)
+        if runs_at > due:
+            due = _vendor_gap_instant(day, start.hour, 59, tz)
+    return due
 
 
 def _next_occurrence(now: datetime, target: dtime) -> datetime:

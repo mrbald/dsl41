@@ -106,6 +106,7 @@ from dsl41.boundary import (
     OpenedPeriod,
     act_on_head,
     carried_outbox,
+    check_opening_version,
     claim_root,
     default_anchor_dir,
     open_next_period,
@@ -705,6 +706,10 @@ async def _resume_under_lock(
     records = read_journal(estate_wal(run_root))
     lineage = select_seal(run_root, records)  # step 3
     if lineage.seal is not None:
+        # the version FIRST (DL-253): the head action and the opening below
+        # write, and an older build's boundary must be refused for its
+        # version before either, not as a catalog that does not match
+        check_opening_version(lineage.seal.next_period, where=str(run_root))
         # ss3.5's CMD-or-FW half, at the loader that holds C2 (DL-151). The
         # sidecar half ran inside `select_seal`; this is the half that needs
         # the OPENING catalog. Ahead of step 4, so a sidecar this catalog

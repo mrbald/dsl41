@@ -96,12 +96,12 @@ NEAR_MISS_MIN_STATEMENTS = 5
 #: changing both in one commit is the whole point of the check. One other
 #: move is licensed and must say so: pydantic carries a model DOCSTRING into
 #: the schema as `description`, so correcting prose moves the hash while the
-#: shape stands still. The hash below was re-pinned for exactly that, the
-#: DL-151 `ResourceRef` docstring; ir_version stays 0.2 because no reader of
-#: a persisted IR-F is affected.
+#: shape stands still. The DL-151 `ResourceRef` docstring was re-pinned for
+#: exactly that at ir_version 0.2. DL-253 moved ir_version to 0.3: an
+#: absolute must time is a `MustTime`, whose hour runs to 71.
 IR_SCHEMA_PIN = {
-    "ir_version": "0.2",
-    "sha256": "b1fc8e93e68d7ba5f6d65c776598e52dc23cd18ca2fd9c638688485aa1a23b00",
+    "ir_version": "0.3",
+    "sha256": "e75c4d4914f142e21065f3230e7d2e93378bbcbff33cab55188ffeaa551a02cc",
 }
 
 

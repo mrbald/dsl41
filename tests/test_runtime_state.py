@@ -232,9 +232,10 @@ def test_popping_due_timers_drains_in_firing_order_and_stops_at_the_horizon() ->
 
 def test_a_deadline_arms_on_a_tick_that_changes_no_row_at_all() -> None:
     """The reason the heap is authoritative state and not a cache of the rows.
-    SEM-34 arms the must_start deadline on every schedule tick, succeed or not;
-    SEM-32 arms the JOB only on the first, because the second finds it already
-    armed. So the second tick leaves the row byte-identical and still moves the
+    SEM-34 arms the must_start deadline on a schedule tick, succeed or not,
+    once the previous one has fired (one at a time, DL-253); SEM-32 arms the
+    JOB only on the first tick, because the second finds it already armed. So
+    the second tick leaves the row byte-identical and still moves the
     schedule -- a projection over rows alone would replay a different one."""
     o = Oracle(
         lower_source(
@@ -244,15 +245,17 @@ def test_a_deadline_arms_on_a_tick_that_changes_no_row_at_all() -> None:
         )
     )
     o.feed(_ev("STARTJOB", 0, job="ms"))  # condition false -> arms, no run (Q3/DL-54)
+    assert [kind for _, _, kind in o.pending_timers()] == ["must_start"]
+    o.advance(T0 + timedelta(minutes=31))  # the deadline fires and leaves the heap
+    assert o.pending_timers() == []
     after_first = dict(o.store.job["ms"])
     assert after_first["armed"] is True
-    assert [kind for _, _, kind in o.pending_timers()] == ["must_start"]
 
-    o.feed(_ev("STARTJOB", 5, job="ms"))
+    o.feed(_ev("STARTJOB", 40, job="ms"))
     fields = dict(o.store.job["ms"])
     revision = fields.pop("state_rev")
     assert fields == {k: v for k, v in after_first.items() if k != "state_rev"}
-    assert [kind for _, _, kind in o.pending_timers()] == ["must_start", "must_start"]
+    assert [kind for _, _, kind in o.pending_timers()] == ["must_start"]
     # ...and the revision moved anyway (DL-87), because the HEAP is projected.
     # Without the timer half of the projection this input would be invisible to
     # an `expect`, and a client that read revision 1 would win a precondition

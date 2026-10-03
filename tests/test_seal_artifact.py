@@ -406,20 +406,20 @@ def _restamped(document: dict[str, Any]) -> bytes:
 #: field, the key order, the escaping, the datetime spelling or the two
 #: sort rules reds this test, which is the whole point of shipping a
 #: vector rather than a round-trip.
-GOLDEN_DIGEST = "sha256:1c15539af44dc5b4038987663ad5289850e5921dd560c4c84b67ea0c66d490d2"
+GOLDEN_DIGEST = "sha256:e9913d0d52aed50f3272ffb7790d8fded7a51f0978775a415757ddd5688c5e40"
 
 GOLDEN_BYTES = (
     b'{"artifact_format_version":1,"baseline_id":"sha256:d92cb0a1b58f92aad'
     b'65775672e0f75b4583ddb5bb0cb1f30e931864c496ed952","boundary_request":'
     b'{"claimed_actor":"alice@ops-laptop","force_seal":true,"request_id":"'
     b'af7c1fe6-d669-414e-b066-e9733f0de7a8","source":"request"},"catalog_h'
-    b'ash":"sha256:b8a587f87459250e3d9f79f48f1f262924576af9d83424b2ce58b2c'
-    b'9b557e21d","catalog_hash_version":2,"classification":{"latent":{"ass'
+    b'ash":"sha256:729d9f136b90d480a0bd4b2ba7bd30af698b30035eaa75793fc50f8'
+    b'01543c6fd","catalog_hash_version":2,"classification":{"latent":{"ass'
     b'umption":"the C1 trigger survives under C2 gating","class":"A"},"nig'
     b'htly":{"assumption":null,"class":"carry"}},"clock_domain":"real","cl'
     b'osed_at":"2026-08-19T02:00:00.000000","closes_at_index":5310,"digest'
-    b'":"sha256:1c15539af44dc5b4038987663ad5289850e5921dd560c4c84b67ea0c66'
-    b'd490d2","epoch":7,"estate_id":"nightbank/one","executions":[{"effect'
+    b'":"sha256:e9913d0d52aed50f3272ffb7790d8fded7a51f0978775a415757ddd568'
+    b'8c5e40","epoch":7,"estate_id":"nightbank/one","executions":[{"effect'
     b'_id":"e5001:SPAWN:nightly.7","executor_id":"local","generation":0,"i'
     b'ndex":5001,"job":"nightly","kind":"bound","run_dir":"runs/nightly.7"'
     b',"run_id":"3f2504e0-4f89-41d3-9a0c-0305e82c3301","run_number":7},{"e'
@@ -431,9 +431,9 @@ GOLDEN_BYTES = (
     b'ct","kind":"pending_spawn","run_id":"b0c9a1d2-1111-4222-8333-4444555'
     b'56666","run_number":4}],"forced_gate":{"gate":"retry_horizon","horiz'
     b'on_us":60000000,"observed_age_us":2000000},"next_period":{"artifact_'
-    b'format_version":1,"baseline_id":"sha256:46485faff0fceb9e7e890f9d7919'
-    b'e9e39c00345d5a45cf9f2862c8f405e14b87","catalog_hash":"sha256:b8a587f'
-    b'87459250e3d9f79f48f1f262924576af9d83424b2ce58b2c9b557e21d","catalog_'
+    b'format_version":1,"baseline_id":"sha256:47ecbc14d39a858744ccce2ae4be'
+    b'a7b0ef9709e03bece4913b13b483ee74b597","catalog_hash":"sha256:729d9f1'
+    b'36b90d480a0bd4b2ba7bd30af698b30035eaa75793fc50f801543c6fd","catalog_'
     b'hash_version":2,"clock_domain":"real","first_index":5311,"period_id"'
     b':3,"runtime_hash":"sha256:5bf65b3b71d02f23034472749bf8fbba4e4be7bf05'
     b'a0bc2b16afa2d8be11470c","segment_no":3,"source_bundle_hash":"sha256:'

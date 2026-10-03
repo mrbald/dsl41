@@ -1513,3 +1513,91 @@ def test_sem33_a_deferral_does_not_follow_its_job_into_another_box() -> None:
     assert "queued in box 'b', and the job is now in box 'newbox'" in j[-1].cause
     assert opening.store.job["j"].status == "INACTIVE"
     assert opening.store.job["newbox"].status == "RUNNING"  # j still owes newbox its run
+
+
+# DL-253: the oracle reads run_window, and absolute must times, in the run's
+# base zone for a job with no `timezone:`, so those jobs depend on the
+# timezone basis. TechDocs' `date_conditions` page lists `run_window` among
+# the attributes `timezone` governs (SEM-35).
+
+#: no tick attributes on either job: the box is started by an operator's
+#: STARTJOB, so nothing but the member's window reads the zone
+_WINDOW_BOX = (
+    "insert_job: b\njob_type: b\n\n"
+    "insert_job: j\njob_type: c\nmachine: m1\ncommand: x\nbox_name: b\n"
+    'date_conditions: 1\nrun_window: "10:00-11:00"\n'
+)
+
+
+def test_dl253_a_base_zone_change_refuses_an_executing_box_with_a_window_member() -> None:
+    """The review repro: under UTC box `b` was started at 09:30 and its member
+    `j`, with only a run_window, waits for 10:00. A successor that changes
+    only the base zone to Europe/Zurich would read the window an hour away
+    and skip `j` inside the box's C1 run. The member now depends on the
+    basis, so the executing box is R, and so is its member (ss10.3)."""
+    closing = _side(_WINDOW_BOX, default_tz="UTC")
+    opening = _side(_WINDOW_BOX, default_tz="Europe/Zurich")
+    assert closing.catalog == opening.catalog
+    graph = ClassificationGraph(closing, opening)
+    assert TZ_BASIS in graph.forward(JOB + "j")
+    result = classify(
+        closing=closing,
+        opening=opening,
+        carried=_carried({"b": _running(), "j": _inactive()}),
+    )
+    assert result.by_job["b"].verdict == "R"
+    assert result.by_job["j"].verdict == "R"
+    assert set(result.refused) == {"b", "j"}
+    # the control: the same box under an unchanged zone carries
+    same = classify(
+        closing=closing,
+        opening=_side(_WINDOW_BOX, default_tz="UTC"),
+        carried=_carried({"b": _running(), "j": _inactive()}),
+    )
+    assert same.refused == ()
+
+
+def test_dl253_a_standalone_window_job_waiting_on_its_deferral_is_a() -> None:
+    """A standalone job whose start a run_window deferred holds a pending
+    timer; across a base-zone change that latent intent is A, not carry."""
+    text = (
+        "insert_job: w\njob_type: c\nmachine: m1\ncommand: x\n"
+        'date_conditions: 1\nrun_window: "10:00-11:00"\n'
+    )
+    result = classify(
+        closing=_side(text, default_tz="UTC"),
+        opening=_side(text, default_tz="Europe/Zurich"),
+        carried=_carried({"w": _inactive(timer=True)}),
+    )
+    assert result.by_job["w"].verdict == "A"
+    assert result.by_job["w"].assumption == LATENT_ASSUMPTION
+    assert TZ_BASIS in result.by_job["w"].changed
+
+
+def test_dl253_an_armed_job_with_absolute_must_times_is_a_across_a_base_zone_change() -> None:
+    """An armed job with an absolute must time pending: its trigger and its
+    deadline are both read in the base zone, so the change is A, and the
+    same row RUNNING is R. The sentence is the general latent one, as for
+    any start-time job across a base-zone change: ss10.3's armed sentence
+    names a changed schedule or condition, and the JIL did not move."""
+    text = (
+        "insert_job: m\njob_type: c\nmachine: m1\ncommand: x\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "23:00"\n'
+        'must_start_times: "34:00"\nmust_complete_times: "34:01"\n'
+    )
+    closing = _side(text, default_tz="America/New_York")
+    opening = _side(text, default_tz="UTC")
+    armed = classify(
+        closing=closing,
+        opening=opening,
+        carried=_carried({"m": CarriedJob(row=JobRuntime(armed=True), timer=True)}),
+    )
+    assert armed.by_job["m"].verdict == "A"
+    assert armed.by_job["m"].assumption == LATENT_ASSUMPTION
+    assert TZ_BASIS in armed.by_job["m"].changed
+    running = classify(
+        closing=closing,
+        opening=opening,
+        carried=_carried({"m": _running(timer=True)}),
+    )
+    assert running.by_job["m"].verdict == "R"

@@ -1768,6 +1768,16 @@ def validate_staged(ctx: StagedContext) -> Classification:
             f" ({'; '.join(disagree)}): the engine validates exactly the staged"
             " bytes the fingerprint names (period-model ss7)"
         )
+    # the version BEFORE the hash: the catalog hash covers `ir_version`, so a
+    # candidate an older build staged would otherwise read as a tampered
+    # bundle rather than as the version it is (DL-253)
+    if staged.state_machine_version != ctx.state_machine_version:
+        raise EngineError(
+            f"the candidate names state_machine_version {staged.state_machine_version} and"
+            f" this period runs v{ctx.state_machine_version}: one executable implements one"
+            " version, so an SM bump is a full drain and a new estate, never a transition"
+            " (period-model ss2.1, PR-17)"
+        )
     recomputed = catalog_hash_v2(ctx.c2)
     if recomputed != staged.catalog_hash:
         raise EngineError(
@@ -1781,13 +1791,6 @@ def validate_staged(ctx: StagedContext) -> Classification:
             f"the staged runtime profile hashes to {profile_hash} and the candidate pins"
             f" {staged.runtime_hash}: a tampered profile beside the original hash would"
             " pass every shared-field comparison (period-model ss7 phase 1)"
-        )
-    if staged.state_machine_version != ctx.state_machine_version:
-        raise EngineError(
-            f"the candidate names state_machine_version {staged.state_machine_version} and"
-            f" this period runs v{ctx.state_machine_version}: one executable implements one"
-            " version, so an SM bump is a full drain and a new estate, never a transition"
-            " (period-model ss2.1, PR-17)"
         )
     errors = preflight_errors(ctx.c2, bytes_.runtime_profile, at=ctx.at)
     if errors:
@@ -2484,6 +2487,26 @@ class OpenedPeriod:
     claim: Claim | None
 
 
+def check_opening_version(opening: CommittedNextPeriod, *, where: str) -> None:
+    """A committed boundary opens its period under the state-machine
+    version it names, and only a build that derives that version may open
+    it (period-model ss2.1, PR-17).
+
+    Every opener asks this FIRST, before it claims, writes or imports
+    anything (DL-253). The catalog hash covers `ir_version`, so a later
+    gate that compared hashes would refuse an older build's boundary as a
+    catalog that does not match, after the claim, the sentinel and the
+    import had already been written."""
+    if opening.state_machine_version != STATE_MACHINE_VERSION:
+        raise EngineError(
+            f"{where}: the committed boundary opens period {opening.period_id} under"
+            f" state_machine_version {opening.state_machine_version} and this build derives"
+            f" v{STATE_MACHINE_VERSION}: one executable implements one version, so an SM"
+            " bump is a full drain and a new estate, never a transition"
+            " (period-model ss2.1, PR-17)"
+        )
+
+
 def open_next_period(
     *,
     run_root: Path,
@@ -2512,6 +2535,7 @@ def open_next_period(
     `claimed -> open` is a no-op once performed."""
     seal = committed.seal
     opening = seal.next_period
+    check_opening_version(opening, where=str(run_root))
     stored = anchor.require(seal.estate_id)
     head = stored.head
     # ss11's never-opened row: the head already says this root opened this

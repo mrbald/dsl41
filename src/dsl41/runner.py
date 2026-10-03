@@ -208,7 +208,14 @@ from dsl41.runner_hosts import (
     routes_new_effects,
     seed_local_executor,
 )
-from dsl41.period import CMD_GRACE_S, StagedManifest, staging_dir, switches_of
+from dsl41.period import (
+    CMD_GRACE_S,
+    StagedManifest,
+    default_tz_of,
+    staging_dir,
+    switches_of,
+    tz_aliases_of,
+)
 from dsl41.runner_journal import (
     Journal,
     read_journal,
@@ -382,13 +389,22 @@ class Engine:
         carried: CarriedRows | None = None,
         semantics: SemanticSwitches | None = None,
     ) -> None:
-        # SEM-35 alias table the oracle resolves `timezone:` through: the
-        # scheduler's own, so the two halves of one engine read a job's zone
-        # the same way (DL-62). Empty reads as absent (timezones.alias_table).
+        # SEM-35: the base zone and alias table the oracle reads a job's time
+        # attributes in. The period's pinned profile when there is one, which
+        # is what every replay of this log reads (`default_tz_of`), else the
+        # scheduler's own: the two halves of one engine must read a job's
+        # zone the same way (DL-62, DL-253). Empty aliases read as absent.
+        profile = estate.manifest.runtime_profile if estate is not None else None
+        if profile is not None:
+            default_tz, tz_aliases = default_tz_of(profile), tz_aliases_of(profile)
+        else:
+            default_tz = scheduler.default_tz if scheduler is not None else None
+            tz_aliases = alias_table(scheduler.tz_aliases if scheduler is not None else None)
         self.oracle = Oracle(
             catalog,
             carried=carried,
-            tz_aliases=alias_table(scheduler.tz_aliases if scheduler is not None else None),
+            default_tz=default_tz,
+            tz_aliases=tz_aliases,
             semantics=_engine_switches(estate, semantics),
         )
         #: concurrency-model ss2/ss8: the execution host this engine dispatches

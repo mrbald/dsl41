@@ -143,7 +143,7 @@ def _golden_catalog() -> CatalogIR:
 
 GOLDEN_CATALOG_BYTES = (
     b'{"calendars":{},"cycles":{},"external_instances":{},"globals_declared":{},'
-    b'"ir_version":"0.2","jobs":{"j1":{"annotations":{},"box":{"box_name":null,'
+    b'"ir_version":"0.3","jobs":{"j1":{"annotations":{},"box":{"box_name":null,'
     b'"box_terminator":false,"job_terminator":false},"exec_":{"command":"echo hi",'
     b'"envvars":null,"kind":"cmd","machine":"m1","owner":null,"profile":null,'
     b'"std_err_file":null,"std_in_file":null,"std_out_file":null},"job_type":"CMD",'
@@ -155,7 +155,7 @@ GOLDEN_CATALOG_BYTES = (
     b'"line_start":1},"var_sites":[]}},"machines":{},'
     b'"meta":{"source_files":["estate.jil"]},"resources":{}}'
 )
-GOLDEN_CATALOG_HASH_V2 = "sha256:1ab5aefe06485a8c60af7b0af4d2112d895d035e09ef09e785d507ebe34bc2df"
+GOLDEN_CATALOG_HASH_V2 = "sha256:d461eff80c08b65bdcac7e5002026ac48825f701be65db1b79e01989288c143f"
 
 
 def test_pr08a_catalog_hash_v2_golden_vector() -> None:

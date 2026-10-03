@@ -16418,3 +16418,157 @@ relitigate an entry; append a new one.
   row per switch value; its test derives those members from the
   registry, so a switch without rows, or a row naming no registry entry,
   fails.
+- DL-253 Absolute must_start_times and must_complete_times are accepted
+  over 00:00-71:59 and armed as alarms; must_start arms one deadline at a
+  time (2026-10-03; ir.py, oracle.py, runner_ledger.py, boundary.py,
+  estate.py, runner_startup.py, runner.py, period.py, attest.py,
+  runner_history.py, classify.py, cli_run.py, dsl.py, equiv.py,
+  simulation_register_rows.py, simulation-coverage.md,
+  scripts/arch_check.py; autosys-semantics SEM-32, SEM-34, SEM-35 and ss8;
+  ir-design ss4 and ss8; period-model ss10.2)
+  THE VENDOR. TechDocs 24.2. The must_start_times page (must_complete_times
+  has the same text): absolute times in 24-hour format, "Limits:
+  00:00-71:59 (2 calendar days ahead of the current calendar day)". "If
+  you specify the start_mins attribute in the job definition, you can only
+  define relative times. You will get an error if you define absolute
+  times with start_mins." With several start times, the same number of
+  must times, "corresponding to each run of the job". A must time below
+  its start time is written +24 hours: for an 11:00 start, 10:00 the next
+  day is 34:00. How Must Start Times and Must Complete Times Work: CHK_START
+  and CHK_COMPLETE for the next must times are inserted with the job; "If
+  the job has not started, a MUST_START_ALARM is issued"; "After the job
+  completes, the scheduler calculates the next must start time and must
+  complete time" and inserts the next events. "Daylight Time Changes" and
+  "Standard Time Changes" give the DST rules quoted in SEM-34.
+  THE GAP. Lowering refused an absolute must time above 23:59 (DL-251),
+  and the oracle armed no absolute deadline, so an absolute must time was
+  carried and never raised an alarm. must_start armed one deadline per
+  tick, where the vendor inserts the next CHK_START only after the job
+  completes.
+  LOWERING. An absolute must time lowers over 00:00-71:59, the `\:`
+  spelling included. 72:00 and above is refused with a message naming the
+  vendor's limit. An absolute form with start_mins is refused with a
+  message that names the vendor rule. Two ordering rules are refused, each
+  message naming the rule. A must time below its own start time: "If
+  10:00 a.m. is specified, the job issues an error message"; the next
+  day's 10:00 is written 34:00. A must time not earlier than the next
+  run's start time: "The must start time for a run must be earlier than
+  the start times for the next run", with 11:10 against an 11:00 run as
+  the vendor's invalid example. The next run is the next later start time
+  of the day; the latest start's next run depends on the calendar and is
+  not checked, because a weekly job's next run may be days away. Its
+  runtime consequence: with one pending check at a time, a last-slot must
+  time that is still pending at the next day's first tick keeps that tick
+  from arming its own deadline. SEM-34's sentence that lowering never
+  checks ordering now holds for the relative form only. The count and the mixed-form
+  refusals are unchanged; the mixed-form check now runs first. IR-F holds
+  the value as a new `MustTime`, hour 0-71. `Time` keeps 0-23, so
+  start_times and run_window keep their contract.
+  THE RULE. The STARTJOB tick arms the absolute deadline beside the
+  relative ones (DL-248). The tick's slot names the must time by
+  position; the deadline is that time on the tick's local calendar day,
+  in the job's zone, plus a day for each 24 hours past 23. The alarm
+  rules and the run the tick asks for are DL-248's.
+  ONE AT A TIME. must_start now follows must_complete: a tick arms a
+  deadline only when the job is not STARTING, RUNNING or QUE_WAIT and no
+  earlier deadline of that kind is pending. A must_start deadline is
+  pending until it fires or a run begins after its tick. This holds for
+  both forms.
+  DST. On a change of the shape DL-249 detects, a must time in the
+  missing hour is due in the first minute of the next hour, its minute
+  read as seconds (2:05 is 3:00:05). When the paired start is in the
+  missing hour and would run, by the vendor's rule, after its must time,
+  the must time is 3:00:59. A must time in the repeated hour takes the
+  first pass, or the second when the start is in that hour on the same
+  day. Other shapes keep the fold=0 conversion.
+  RECORDED CHOICES. A start time in the missing hour also names its slot
+  at the instant the scheduler ticks it, the fold=0 conversion (E10);
+  this also pairs a relative offset there, which fell back to the first
+  offset before. An instant that is no start time arms no absolute
+  deadline, because the vendor ties the CHK events to scheduled start
+  times; the relative form keeps its first-offset pin. A deadline that
+  falls before its tick is due at the tick. Only the E10 tick of a
+  missing-hour start reaches that, being later than the vendor's start;
+  a must time written below its own start time no longer lowers. These
+  are [?] pins; the register rows `#before-tick` carry the E10 label and
+  `#unmatched-slot` the unmatched instant.
+  KNOWN GAP, not fixed here. On a spring change day `_start_slot` tries
+  the wall-time match first, so a missing-hour start can name the wrong
+  slot: with start_times "02:45, 03:45" the 02:45 tick lands at 03:45 EDT
+  and names slot 1. This interacts with the open start-time DST rule
+  (runner-design E10), which a later slice changes.
+  BASE ZONE. The engine built its oracle with no base zone, so a job
+  with no `timezone:` was read on the engine clock (UTC) while the
+  scheduler ticked it in `--timezone`. Under America/New_York a 23:00
+  start ticks at 03:00 UTC, named no slot and armed no absolute must time.
+  run_window (DL-246, DL-249) read through the same `_job_tz` and was
+  affected too. The engine's oracle now takes the period's pinned
+  `default_tz` and alias table, or the scheduler's own where no period is
+  pinned, and every replay (`dsl41 journal`, `dsl41 runs`, audit's
+  re-derivation, the classifier's condition check) takes the same pin
+  through `period.default_tz_of`. Slots, absolute must times and
+  run_window are now read in one zone everywhere.
+  CLASSIFICATION. The base zone now reaches run_window, so period-model
+  ss10.2's dependency table is amended: the timezone basis and the
+  `default_tz`/`tz_aliases` profile fields reach every job with
+  `start_times`, `start_mins`, a calendar or a `run_window`
+  (`classify.reads_zone`). Absolute must times need start_times and were
+  already covered. Before, a window-only member of an executing box
+  classified carry across a base-zone change, and after reopening its
+  window was read an hour away, so it skipped and the box completed
+  without it. A base-zone change now refuses such a box (R, and its
+  member R) and gives a waiting or armed job A with the general latent
+  sentence, as for a start-time job. A job with its own `timezone:` keeps
+  the edge, as scheduled jobs always have: the alias table resolves its
+  name.
+  OLD JOURNALS AND SEALS. The catalog hash covers `ir_version`, so every
+  catalog hashes differently under this build. Each door now checks the
+  version before it compares a catalog hash. `check_leader_eligibility`
+  checks the state-machine version first, then the catalog-hash recipe
+  version (`catalog_hash_for`), then the hash. `validate_staged` checks the
+  candidate's state-machine version before it recomputes the hash.
+  Every opener of a committed boundary checks the version it names first,
+  before it claims, writes or imports (`boundary.check_opening_version`):
+  the resume ladder right after it selects the seal, `open_next_period`,
+  and the read-only half of a physical roll (`dsl41 run --open-from`,
+  `dsl41 estate roll`), which used to write the new root's sentinel, take
+  the claim and import the bundle before a catalog-hash comparison
+  refused. `dsl41 journal` and `audit` already checked the version first. A journal
+  or seal an older build wrote is refused for its state-machine version,
+  never reported as an estate that changed or a bundle that differs. A
+  journal names no `ir_version` of its own; the state-machine version
+  carries the change.
+  VERSIONS. IR_VERSION moves from 0.2 to 0.3: SlaSpec.times holds
+  MustTime, and `scripts/arch_check.py` re-pins the CatalogIR schema hash.
+  `STATE_MACHINE_VERSION` moves to 11: absolute must times arm alarms and
+  must_start arms one at a time, so a replay alarms differently. The
+  catalog-hash recipe is unchanged and `CATALOG_HASH_VERSION` stays 2.
+  Golden vectors regenerated, each verified by reconstruction: the
+  catalog-hash vector in test_period_identity.py, where only the
+  `ir_version` byte and the hash moved, and the seal vector in
+  test_seal_artifact.py, where only the two catalog hashes, the
+  `next_period.baseline_id` derived from them and the digest moved.
+  Tests: test_oracle.py `test_sem34_absolute_*` (the vendor's 10:02/10:08
+  example on time and missed, 34:00 and 71:59, a late start, completion in
+  time, a tick at no start time), `test_sem34_must_start_*` (a tick on a
+  live job in both forms, a tick while a relative deadline is pending),
+  `test_sem34_spring_*` (3:00:05 and 3:00:45, the 3:00:59 special case, the
+  E10 tick of a missing-hour start) and `test_sem34_fall_*` (first pass,
+  second pass); test_ir.py the lowering accept and refuse matrix,
+  including both ordering refusals;
+  test_ledger.py, test_runner_journal.py and test_boundary.py an older
+  build's journal, candidate or committed boundary refused for its
+  version, the boundary on resume and on a physical roll with nothing
+  written; test_runner_scheduler.py `test_dl253_*` absolute must times and
+  run_window under a non-UTC base zone, through start_run and a bare
+  engine; test_classification.py and test_boundary.py `test_dl253_*` a
+  base-zone change under an executing window box (R, refused at phase 1),
+  a deferred window job and an armed absolute-must-time job (A).
+  Rewritten: test_ir.py's DL-251 refusal of a must time above 23:59
+  (24:00 was refused naming 00:00-23:59) became the range matrix, where
+  24:00-71:59 lowers and 72:00 is refused naming 00:00-71:59; test_ir.py
+  `test_dump_contains_ir_version_field` reads 0.3; the SlaSpec tests build
+  `MustTime`; test_runtime_state.py
+  `test_a_deadline_arms_on_a_tick_that_changes_no_row_at_all` let a second
+  blocked tick arm a second must_start deadline beside a pending one, and
+  now lets the first fire before the second tick arms its own.
