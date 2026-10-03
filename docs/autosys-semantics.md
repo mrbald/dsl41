@@ -529,6 +529,23 @@ whole-value quote (`"10:00, 11:00"`) is also accepted, as before; quoting one it
 quoted relative must-time offset (SEM-34). `run_window` shares this lane's 00:00-23:59 bound;
 the absolute `must_*_times` run to 71:59 (SEM-34).
 
+**Across a DST change (DL-260). [V]** TechDocs 12.1 and 24.2, same text. "Standard Time
+Changes": "AutoSys Workload Automation only runs jobs for which the start_time attribute is set
+to between 1:00 and 1:59 during the second (standard time) hour. Jobs for which the start_mins
+attribute is set run in both hours." A Sunday 1:05 job "runs only at the second 1:05"; an
+every-30-minutes job runs at "1:00 DT and 1:30 DT, then again at 1:00 ST and 1:30 ST".
+"Daylight Time Changes": "a job that is scheduled to run on Sundays at 2:05 runs at 3:00:05
+that day; a job that is scheduled to run every day at 2:45 runs at 3:00:45". "If you schedule a
+job to run more than once during the missing hour (for example, at 2:05 and 2:25), only the
+first scheduled job run occurs." Relative jobs "run as expected": start_mins 0, 20, 40 run at
+"1:00 ST, 1:20 ST, 1:40 ST, 3:00 DT, 3:20 DT, and 3:40 DT". The scheduler applies these rules by
+default, on the change shape DL-249 detects (`timezones.dst_change`): 02:00-02:59 missing for
+one hour, or 01:00-01:59 repeated for one hour. The first missing-hour start time is the
+earliest by wall time, whatever order `start_times` lists them in. Other shapes convert at PEP
+495 fold=0, which is unverified **[?]**, and so do calendar row times. The
+`dst-start-times=fold0` switch selects fold=0 for every change (runner-design §8a): a repeated
+time runs once, in the first pass, and each missing time runs past the gap (2:05 at 3:05).
+
 **Arm and wait (Q3, DL-54, DL-58).** A tick whose `condition` is still false ARMS the job. The
 condition edge later starts it, and the start consumes the arm (at most one run per tick).
 The arm has no expiry. The TechDocs support is an entailment, not one dispositive sentence;
@@ -619,8 +636,9 @@ Europe/Dublin qualify in fall only; their spring changes skip 01:00-01:59. Other
 (those, half-hour changes, changes at other hours) keep the wall-time comparison, which is
 unverified **[?]**. The same
 page notes that a start time of 1:15 inside an 11:30 - 1:30 window "would be calculated for
-1:15 ST and the job would not run". That depends on how start_times resolve in the repeated
-hour, which E10 keeps open; it is recorded, not modelled.
+1:15 ST and the job would not run". Under the default `dst-start-times=vendor` (SEM-32,
+DL-260) the 1:15 tick is 1:15 ST, past the window's 1:30 DT close, and the closer-edge rule
+skips it. Under `fold0` it ticks at 1:15 DT, inside the window, and runs.
 A standalone job that meets the previous-close branch moves to INACTIVE (DL-246). **[V]**
 TechDocs 24.2, run_window attribute page (12.1 has the same text): "When the current time is
 closer to the end of the previous run window, the product does not start the job and changes
@@ -750,15 +768,27 @@ The STARTJOB tick arms the absolute deadline beside the relative ones. The tick'
 the must time by position. The deadline is that time on the tick's local calendar day, in the
 job's zone as start_times are read, plus one day for each 24 hours past 23. The alarm rules,
 the run the tick asks for and the one-at-a-time rule are the relative form's.
-*Model note:* the times pair with start_times by position, and the oracle reads the tick's own
-time of day, in the job's timezone, to name the slot. A start time in a spring change's missing
-hour also names the slot at the instant the scheduler ticks it (fold=0, runner-design E10).
+*Model note:* the times pair with start_times by position. The oracle names the slot by
+instant (DL-260): it converts the start times of the tick's local day, in the job's zone,
+through the scheduler's own conversion and under the same `dst-start-times` value (SEM-32),
+and takes the latest start time at or before the tick, less than a minute earlier. So a start
+moved by a DST change usually names its own slot. Under `fold0` a missing-hour start can share
+an instant with a later start time; the scheduler ticks once, and the tick names the earlier
+wall time. `vendor` can collide too: start_times "02:00, 03:00" in America/New_York on
+2026-03-08 both convert to 07:00:00 UTC, so the scheduler ticks once there as well, naming
+slot 0, and slot 1's run and its must time never arm. On a spring change day, a moved start
+that lands on the instant of a listed start shares one tick, named for the earlier wall time;
+the vendor pages do not say. **[?]**
 For a relative offset, a tick at an instant that matches no start time (an operator's STARTJOB
 at another time) cannot be paired and takes the first offset. **[?]** An absolute form arms
 nothing for such an instant: the vendor ties the CHK events to the scheduled start times. A
-deadline that falls before its tick is due at the tick. **[?]** Only a start in the missing hour
-reaches that, because the scheduler ticks it later than the vendor runs it (E10); lowering
-refuses a must time below its own start time, the other way to write one.
+deadline that falls before its tick is due at the tick. **[?]** Both `dst-start-times` values
+reach that: `fold0` ticks a start in the missing hour past the gap, later than the vendor runs
+it, while lowering refuses a must time below its own start time, the other way to write one.
+`vendor` reaches it too on a change shape `dst_change` does not name (DL-249) -- Europe/London's
+spring change skips 01:00-01:59, not 02:00-02:59, so it keeps the fold=0 conversion even under
+`vendor`: a 01:45 start ticks at 01:45 UTC, and a must_start_times of "02:10" resolves to
+01:10 UTC, before the tick.
 (Contrast `term_run_time`: that one *is* control flow, auto-TERMINATE after n minutes.)
 
 **Absolute must times across a DST change (DL-253). [V]** TechDocs 24.2. "Daylight Time
@@ -781,8 +811,11 @@ either the must start or must complete times or both occur during the repeated h
 Workload Automation raises alarms during the second standard time hour." The oracle applies
 these rules to changes of the shape DL-249 detects (`timezones.dst_change`): a one-hour gap at
 02:00-02:59 or a one-hour repeat at 01:00-01:59. A start on an earlier day is before the change.
-Other shapes keep the fold=0 conversion, as run_window does. The scheduler still ticks a start
-in either hour by the fold=0 pin (E10), so the vendor's own start instant is not modelled.
+Other shapes keep the fold=0 conversion, as run_window does. Under the default
+`dst-start-times=vendor` the scheduler ticks a start in either hour at the vendor's own instant
+(SEM-32, DL-260), so these rules meet the start the vendor describes. Relative must times
+"evaluate as expected": a 2:45 start with +5 and +15 runs at 3:00:45 and is due at 3:05:45 and
+3:15:45.
 
 ### SEM-35 · timezone **[V]**
 Per-job `timezone:` re-bases all time attributes of that job. IR carries tz per schedule
@@ -1236,7 +1269,9 @@ FORCE_STARTJOB on a non-live ON_ICE/ON_HOLD job clears the flag and runs, DL-243
 T24a initial ON_HOLD blocks then OFF_HOLD releases, T24b initial ON_ICE satisfies downstream
 (SEM-24) · T04 zero-lookback since-last-end anchor pinned both directions + Q2b first-run
 corner, both cited (SEM-04, DL-54/DL-58: `test_sem04_zero_lookback_*`) · T32 arm-and-wait:
-tick arms, edge starts, start consumes (SEM-32, DL-54/DL-58: `test_sem32_*`) · T33a/b
+tick arms, edge starts, start consumes (SEM-32, DL-54/DL-58: `test_sem32_*`), and start times
+across a DST change under both `dst-start-times` values (SEM-32, DL-260: `test_sem32_dst_*`) ·
+T33a/b
 run_window closer-edge both sides + box variants (incl. the DL-154 skip bypass and the SEM-11
 carve-out contrast; since DL-242 a rerun member's INACTIVE edge comes from the box-start
 reset, not the skip: `test_sem33_box_skip_on_a_rerun_member_follows_the_box_start_reset`,
@@ -1253,12 +1288,14 @@ skip moves a prior result to INACTIVE and does not cascade from a box (SEM-33, D
 `test_sem33_force_start_on_a_held_standalone_*`),
 T33c the window read in the job's timezone (SEM-33, with SEM-35), and its endpoints across a
 DST change (DL-249: `test_sem33_spring_*`, `test_sem33_fall_*`, `test_sem33_dst_*`,
-`test_sem33_box_start_on_a_spring_change_*`) ·
+`test_sem33_box_start_on_a_spring_change_*`, and with a DL-260 start time
+`test_sem33_dst_a_fall_start_time_*`) ·
 T34a/b must_* emit alarms only, T34c each start_time arms its own relative offset, T34
 relative must_complete anchored to the tick's slot (SEM-34, DL-248: `test_sem34_must_complete_*`),
 absolute must times armed over 00:00-71:59, one must_start deadline at a time, and the DST
 rules (SEM-34, DL-253: `test_sem34_absolute_*`, `test_sem34_must_start_*`,
-`test_sem34_spring_*`, `test_sem34_fall_*`).
+`test_sem34_spring_*`, `test_sem34_fall_*`), the tick naming its slot by instant (DL-260:
+`test_sem34_dst_*`, `test_sem34_an_event_inside_*`).
 
 Layer note: not every SEM entry lands in the oracle suite. SEM-07 (cross-instance atoms) is
 pinned by the condition, derive and control-plane suites, not by an oracle trace. SEM-15's

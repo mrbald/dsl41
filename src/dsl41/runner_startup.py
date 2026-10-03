@@ -133,15 +133,15 @@ from dsl41.runner_ledger import (
     next_epoch,
 )
 from dsl41.runner_scheduler import Scheduler
-from dsl41.semantics import CALENDAR_SWITCHES, check_overrides
+from dsl41.semantics import SCHEDULER_SWITCHES, check_overrides
 
 
 #: Profile fields NO wired object can report: they act in preflight or over
 #: the catalog, and never on an adapter or a scheduler. They inherit the pin
 #: unless the launcher DECLARES them -- see `_derive_runtime_profile`.
-#: `semantics` is wired: the scheduler reports its calendar switches and a
-#: wired FW adapter `fw-existence`; the rest are declared or inherited the
-#: same way (DL-252, DL-258, DL-259).
+#: `semantics` is wired: the scheduler reports the switches it compiles
+#: under and a wired FW adapter `fw-existence`; the rest are declared or
+#: inherited the same way (DL-252, DL-258, DL-259, DL-260).
 _UNWIRED_FIELDS: tuple[str, ...] = ("as_machine", "machine_policy")
 
 
@@ -171,9 +171,10 @@ def _derive_runtime_profile(
     inheritance, because it has said nothing to hold to the pin.
 
     The semantic switches start from `declared`, else `base` (DL-252). The
-    ones a wired component acts on are read back over that: the calendar
-    switches the scheduler compiled under (DL-259) and `fw-existence` from a
-    wired `FileWatcherAdapter` (DL-258). So wiring that disagrees with its
+    ones a wired component acts on are read back over that: the switches the
+    scheduler compiled under, its calendar switches (DL-259) and
+    `dst-start-times` (DL-260), and `fw-existence` from a wired
+    `FileWatcherAdapter` (DL-258). So wiring that disagrees with its
     own declaration, or with the pin, is refused by the drift gate."""
     from dsl41.period import RuntimeProfile, to_us
     from dsl41.runner_adapters import FileWatcherAdapter, LocalCommandAdapter
@@ -186,11 +187,11 @@ def _derive_runtime_profile(
         values["default_tz"] = scheduler.default_tz or "UTC"
         values["tz_aliases"] = dict(scheduler.tz_aliases)
     # the semantic switches: declared or inherited like the machine
-    # identity (DL-252), with the calendar switches the scheduler compiled
-    # under read back like its timezone (DL-259)
+    # identity (DL-252), with the switches the scheduler compiled under read
+    # back like its timezone (DL-259, DL-260)
     switches = dict((declared or base or RuntimeProfile()).semantics)
     if scheduler is not None:
-        for name in CALENDAR_SWITCHES:
+        for name in SCHEDULER_SWITCHES:
             switches[name] = scheduler.semantics.value(name)
     values["deadman_us"] = None if deadman_s is None else to_us(deadman_s)
     cmd = adapters.get("CMD")
@@ -316,8 +317,8 @@ async def wire_from_profile(
             # than re-deciding here (DL-163); the offline sealer closing an
             # estate opened that way was the bug (DL-151).
             tz_aliases=tz_aliases_of(profile),
-            # the extended calendars compile under the period's switches,
-            # the ones its engine runs (DL-259)
+            # the extended calendars and the start instants compile under
+            # the period's switches, the ones its engine runs (DL-259, DL-260)
             semantics=switches_of(profile),
         )
     except BaseException:

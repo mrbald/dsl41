@@ -559,15 +559,30 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             surface="job_attr",
             member="timezone",
             facet="dst-fold",
-            klass=PROVISIONAL,
-            cite="SEM-35, runner_scheduler",
-            label="E10",
-            sites=("runner_scheduler.Scheduler#1",),
-            effect="a start time inside a DST fold or gap resolves by the pinned fold=0"
-            " interpretation, which differs from the vendor's documented rule"
-            " (runner-design ss15)",
+            klass=SUPPORTED,
+            cite="SEM-32, SEM-35, DL-260, timezones.start_time_instants",
+            effect="on a one-hour DST change at 02:00 local, start_times in the repeated"
+            " hour fire once, in the second pass, and start_mins fire in both passes; a"
+            " start time in the missing hour fires in the first minute of 03:00 with its"
+            " minute as seconds (2:05 at 3:00:05), only the first such start time fires,"
+            " and start_mins ticks in the missing hour do not exist. The"
+            " dst-start-times=fold0 switch selects the fold=0 conversion instead",
             trigger=_job(date_conditions="1", timezone="Europe/Berlin", start_times='"02:30"'),
             quiet=_job(date_conditions="1", timezone="UTC", start_times='"02:30"'),
+        ),
+        _row(
+            surface="job_attr",
+            member="timezone",
+            facet="dst-other-shape",
+            klass=PROVISIONAL,
+            cite="SEM-32, DL-260, timezones.start_time_instants",
+            effect="a DST change of another shape (a half-hour change, a change at another"
+            " hour) keeps the fold=0 conversion of start_times and start_mins: the"
+            " vendor's rules are unverified there, and no label was opened for it",
+            trigger=_job(
+                date_conditions="1", timezone="Australia/Lord_Howe", start_times='"02:15"'
+            ),
+            quiet=_job(date_conditions="1", timezone="UTC", start_times='"02:15"'),
         ),
         _row(
             surface="job_attr",
@@ -642,12 +657,13 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             member="must_start_times",
             facet="before-tick",
             klass=PROVISIONAL,
-            cite="SEM-34, DL-253, oracle.Oracle._absolute_deadline",
-            label="E10",
+            cite="SEM-34, DL-253, DL-260, oracle.Oracle._absolute_deadline",
             effect="an absolute must time that resolves before its tick is due at the tick:"
-            " a start in a spring change's missing hour ticks at fold=0, past the vendor's"
-            " first minute of the next hour; lowering refuses a must time below its own"
-            " start time, so no other input reaches the pin",
+            " both values reach it -- fold0 ticks a start in a spring change's missing hour"
+            " past the gap, after the vendor's first minute of the next hour; vendor reaches"
+            " it too on a change shape dst_change does not name, such as Europe/London's"
+            " spring change; lowering refuses a must time below its own start time, so no"
+            " other input reaches the pin, and no label was opened for it",
             trigger=_job(
                 date_conditions="1",
                 timezone="America/New_York",
@@ -661,12 +677,13 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             member="must_complete_times",
             facet="before-tick",
             klass=PROVISIONAL,
-            cite="SEM-34, DL-253, oracle.Oracle._absolute_deadline",
-            label="E10",
+            cite="SEM-34, DL-253, DL-260, oracle.Oracle._absolute_deadline",
             effect="an absolute must time that resolves before its tick is due at the tick:"
-            " a start in a spring change's missing hour ticks at fold=0, past the vendor's"
-            " 3:00:59; lowering refuses a must time below its own start time, so no"
-            " other input reaches the pin",
+            " both values reach it -- fold0 ticks a start in a spring change's missing hour"
+            " past the gap, after the vendor's first minute of the next hour; vendor reaches"
+            " it too on a change shape dst_change does not name, such as Europe/London's"
+            " spring change; lowering refuses a must time below its own start time, so no"
+            " other input reaches the pin, and no label was opened for it",
             trigger=_job(
                 date_conditions="1",
                 timezone="America/New_York",
@@ -3251,6 +3268,26 @@ PROFILE_ROWS: tuple[Row, ...] = (
             " anchor day; unless January 1 is the anchor day, every week number is one higher",
             trigger='{"semantics": {"wekr-first-week": "partial"}}',
         ),
+        _row(
+            surface="profile_alt",
+            member="semantics.dst-start-times=vendor",
+            klass=SUPPORTED,
+            cite="runner-design ss8a, SEM-32, DL-260",
+            effect="the default: on a one-hour DST change at 02:00 local, start_times in the"
+            " repeated hour fire in the second pass, start_mins in both passes, and the"
+            " first start time in the missing hour fires at 03:00 plus its minute as"
+            " seconds; later ones and missing-hour start_mins ticks do not fire",
+            trigger='{"semantics": {"dst-start-times": "vendor"}}',
+        ),
+        _row(
+            surface="profile_alt",
+            member="semantics.dst-start-times=fold0",
+            klass=SUPPORTED,
+            cite="runner-design ss8a, SEM-32, DL-260",
+            effect="start_times and start_mins convert at PEP 495 fold=0: a repeated wall"
+            " time fires once, in the first pass, and every missing one fires past the gap",
+            trigger='{"semantics": {"dst-start-times": "fold0"}}',
+        ),
     )
     + _PROFILE_FACETS
 )
@@ -4169,6 +4206,34 @@ LITERAL_ALT_ROWS: tuple[Row, ...] = (
         cite="SEM-35",
         effect="a POSIX fixed-offset spelling, resolved without the zone database",
         trigger="timezones.ResolvedTz",
+        quiet="ir.unquote_jil_value",
+    ),
+    _row(
+        surface="literal_alt",
+        member="_SchedulePlan.source=start_times",
+        klass=SUPPORTED,
+        cite="SEM-32, DL-260",
+        effect="the ticks are the job's start_times, converted under dst-start-times",
+        trigger="runner_scheduler._SchedulePlan",
+        quiet="ir.unquote_jil_value",
+    ),
+    _row(
+        surface="literal_alt",
+        member="_SchedulePlan.source=start_mins",
+        klass=SUPPORTED,
+        cite="SEM-32, DL-260",
+        effect="the ticks are the job's start_mins in every hour, converted under dst-start-times",
+        trigger="runner_scheduler._SchedulePlan",
+        quiet="ir.unquote_jil_value",
+    ),
+    _row(
+        surface="literal_alt",
+        member="_SchedulePlan.source=calendar",
+        klass=SUPPORTED,
+        cite="DL-58",
+        effect="the ticks are calendar row times, 00:00 for a generated day, converted at"
+        " fold=0 whatever dst-start-times says",
+        trigger="runner_scheduler._SchedulePlan",
         quiet="ir.unquote_jil_value",
     ),
 )

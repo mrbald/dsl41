@@ -4705,6 +4705,45 @@ def test_pr22b_a_committed_profile_change_refuses_before_it_writes_the_segment(
     _close(opened)
 
 
+@pytest.mark.parametrize(
+    "resume_switches", [None, {"dst-start-times": "fold0"}], ids=["vendor", "fold0"]
+)
+def test_pr22b_a_committed_dst_pin_refuses_a_scheduler_off_it_before_the_segment(
+    tmp_path: Path, resume_switches: dict[str, str] | None
+) -> None:
+    """DL-260: period 2 is committed under `dst-start-times=fold0`. A
+    default scheduler reads `vendor`, and the profile reads that back, so
+    the boundary open refuses before it writes the successor segment or
+    moves the head. The twin, a fold0 scheduler, opens period 2."""
+    from dsl41.semantics import resolve
+
+    run_root = tmp_path / "run"
+    _committed_boundary_over(run_root, RuntimeProfile(semantics={"dst-start-times": "fold0"}))
+    catalog, _ = _catalog(C2_JIL)
+
+    def resume():
+        return asyncio.run(
+            resume_run(
+                catalog,
+                run_root,
+                clock=VirtualClock(start=T0),
+                adapters={"CMD": FakeAdapter(default=None)},
+                scheduler=Scheduler(catalog, start=T0, semantics=resolve(resume_switches)),
+            )
+        )
+
+    if resume_switches is None:
+        with pytest.raises(EngineError, match="runtime-profile mismatch on semantics"):
+            resume()
+        assert wal_segments(run_root) == [1]  # nothing written
+        stored = EstateAnchor(default_anchor_dir(run_root)).read()
+        assert stored is not None and isinstance(stored.head, ClosedHead)  # the head never moved
+        return
+    opened = resume()
+    assert wal_segments(run_root) == [1, 2]
+    _close(opened)
+
+
 def test_pr22b_the_opener_is_held_to_the_staged_machine_identity(tmp_path: Path) -> None:
     """ss2.1: `as_machine` and `machine_policy` change what this runner
     answers to, so they are part of a period's identity -- but no wired
