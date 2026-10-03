@@ -175,8 +175,10 @@ The verdict is `f(exit_code; max_exit_success, success_codes, fail_codes)`, with
 source, `ir.exit_is_success`, shared with the UC twin (M31).
 Support limit: lowering refuses a negative exit code in either list. The vendor allows one: "The
 exit code must be an integer in the range -2147483647 to 2147483647" ("success_codes Attribute"
-and "fail_codes Attribute", AutoSys 24.2). The list parser reads a leading `-` as a range
-separator, so a negative code is refused as malformed (`ir._Lowerer._code_set_attr`).
+and "fail_codes Attribute", AutoSys 24.2). dsl41 refuses it because it can never match: on
+POSIX a process exit status is 0-255, and the runner records a job killed by a signal as
+TERMINATED with no exit code. The refusal names the negative code and gives this reason
+(`ir._Lowerer._code_set_attr`, DL-252).
 
 Composition (Q7, DL-58; KB 408778): a present `fail_codes` decides **alone**. Listed codes are
 FAILURE and "Any other exit code … will be interpreted as a success", so `success_codes` and
@@ -332,9 +334,14 @@ it.
   documentation), the ON_ICE row of the downstream-conditions table: "success" TRUE,
   "failure" FALSE, "terminated" FALSE, "done" TRUE, "notrunning" TRUE, "exitcode" FALSE.
   This is a NARROWER reading than the pre-DL-243 blanket pin for f()/t()/exitcode() on an
-  ordinary atom; s()/d()/n() are unaffected (both readings already say true). The two tables'
-  disagreement over a lookback-qualified atom is not addressed by the vendor text and stays
-  an open pin (Q10, section 9), not a citation.
+  ordinary atom; s()/d()/n() are unaffected (both readings already say true). For a
+  lookback-qualified atom the "condition Attribute" page (AutoSys 24.2) is explicit: "If the
+  predecessor job being evaluated for the look-back condition is currently in an ON_ICE
+  status, it always evaluates to true. That is, any look-back evaluation is ignored." The
+  Start Conditions table does not separate lookback atoms, so the two pages read
+  f()/t()/exitcode differently for that atom; which one a live instance follows is open
+  (Q10, section 9). The `ice-lookback` semantic switch selects the table's reading (DL-252,
+  runner-design §8a).
   Inside a box, a member that depends on an iced sibling starts immediately when the box
   runs (an ordinary s() atom, true under both tables). **[V]**
 - OFF_ICE: the job does **not** run even if its starting conditions currently hold. It waits
@@ -1236,14 +1243,19 @@ holds the probe that would settle it.
   re-verified, the weakest evidence tier in this dossier. KB 29387's
   `autocal_asc -e ALL -E file` is the byte-exact re-verification if a live instance becomes
   available; parens are accepted alongside braces, so no behavior rides on the grouping read.
-- Q10 (SEM-05/SEM-20, DL-243): open, pinned default. The vendor's ON_ICE truth table ("Start
-  Conditions", AutoSys Workload Automation 24.2) covers an ORDINARY downstream atom; it does
-  not separately address a LOOKBACK-qualified atom against an iced predecessor. The default
-  keeps the pre-DL-243 reading for that corner: every atom kind true, lookback ignored (the
-  DL-13 blanket pin, SEM-05), rather than extending the narrower ordinary-atom table to a
-  lookback-qualified atom. `# PENDING: Q10` marks the branch in `_atom_true`. A live instance
-  icing a predecessor referenced by both an ordinary and a lookback-qualified atom on the same
-  consumer job would settle it.
+- Q10 (SEM-05/SEM-20, DL-243): open, pinned default. Two vendor pages read a
+  LOOKBACK-qualified atom against an iced predecessor differently. The "condition Attribute"
+  page (AutoSys 24.2) addresses it directly: "If the predecessor job being evaluated for the
+  look-back condition is currently in an ON_ICE status, it always evaluates to true. That is,
+  any look-back evaluation is ignored." The ON_ICE truth table on "Start Conditions" (AutoSys
+  Workload Automation 24.2) does not separate lookback atoms and reads f()/t()/exitcode
+  false. The default follows the condition Attribute page: every atom kind true, lookback
+  ignored (the DL-13 blanket pin, SEM-05). `# PENDING: Q10` marks the branch in `_atom_true`.
+  A live instance icing a predecessor referenced by both an ordinary and a lookback-qualified
+  atom on the same consumer job would settle which page it follows. The table's reading is
+  selectable without a code change (DL-252): `--semantics ice-lookback=ordinary` drops the
+  qualifier and applies the ordinary ON_ICE table to the lookback atom too. The register row
+  `event:ON_ICE#lookback atom` names the switch.
 - Q11 (SEM-37, DL-250): open, pinned default. What does a WEKR token select? "Date Condition
   Keywords" lists the WEKR forms as `WEEK#nn`, `WEEKXnn` and `WEEKMnn` with a different week
   start: a week of the year. Its `WEEKDXn` entry names a `WEEKDstartdayXn` keyword: a day of

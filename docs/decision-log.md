@@ -16308,3 +16308,113 @@ relitigate an entry; append a new one.
   start_times/run_window/must_start_times. No IR-F shape moved: IR_VERSION,
   CatalogIR's schema, and every golden catalog-hash/seal-artifact vector
   are untouched.
+- DL-252 Semantic switches: production-selectable readings, first switch
+  ice-lookback; negative exit codes refused with their reason
+  (2026-10-03; semantics.py, period.py, oracle.py, runner.py,
+  runner_startup.py, runner_history.py, attest.py, classify.py,
+  rehearse_check.py, cli_common.py, cli_run.py, cli_estate.py, ir.py,
+  simulation_register_rows.py, runner-design.md ss8a, period-model.md
+  ss2.1/ss10.2, autosys-semantics.md SEM-09/SEM-20/Q10, README.md)
+  THE RULE. dsl41 is going to production against real AutoSys estates.
+  The owner's rule for defaults: where AutoSys behavior is documented,
+  dsl41 follows it by default; where dsl41's own choice is safer or more
+  useful, dsl41 keeps its choice by default. In both cases the other
+  behavior must be selectable and documented, so a real incompatibility
+  found after rollout can be flipped without a code change.
+  THE MECHANISM. `semantics.py` holds a closed registry. Each entry has a
+  kebab-case name, its allowed values, its default, the value matching
+  documented AutoSys behavior (or "unknown"), a one-line description,
+  and an `affects` predicate naming the jobs a flip can change.
+  `SemanticSwitches` is the frozen resolved view, one typed attribute
+  per switch; `resolve` is the one place a default is read.
+  `RuntimeProfile` gains `semantics: dict[str, str]`, which holds only
+  explicit overrides. A validator refuses an unknown name or a value
+  outside the switch's set, naming the allowed names or values, and
+  normalizes an explicit default away (PR-15a: `ice-lookback=true` is
+  the same profile and hash as no override, so a resume naming it is
+  not drift). `--semantics NAME=VALUE` (repeatable) sets them on `run`
+  and `rehearse`, and `--next-semantics` on `seal` for the period it
+  opens; one name given two different values is refused. The Oracle
+  takes the resolved switches in its constructor (default: the registry
+  defaults). The engine runs its period's pin; an engine with no estate
+  takes them from its caller, and one given switches that disagree with
+  its pin refuses. Static tools with no profile use the defaults:
+  equiv, lint, derive, preflight's oracle check, and the genesis credit
+  of `rehearse --check-cadence`; the cadence sweeps use the rehearsal's
+  own switches.
+  WHY A PROFILE FIELD. DL-06's resolve-and-delete switch stays the
+  protocol for open questions under investigation. It is not production
+  configuration: an environment variable or a module constant is not
+  recorded with the run, so a replay or an audit on another machine could
+  read the log under other semantics than the engine used. In the
+  profile, an override is part of `runtime_hash` and the period's
+  identity. `semantics` is a declared field in `_derive_runtime_profile`,
+  like the machine identity: a resume or a period opening launched with
+  different switches is refused as profile drift, exactly as a changed
+  `--timezone` is.
+  REPLAY. Replay (`journal`, `runs`, audit) and the boundary
+  classifier's truth oracle read the switches from the period's profile,
+  as they read `tz_aliases`. Replay now requires the period's manifest,
+  bound to its segment by `check_manifest_against_segment`, and refuses
+  without one. It used to degrade to defaults: a root whose manifest
+  was removed after an `ordinary` rehearsal replayed under `true` and
+  reported a box FAILURE for a run that ended SUCCESS. Every producer
+  meets that contract: `Journal.create`, when it synthesizes the default
+  manifest for a journal-only caller, now writes it beside the log
+  before the segment record, as genesis does. Staged ingress applies the
+  committed manifest's completeness check (`require_manifest_fields`), so
+  a staged profile missing `semantics` refuses instead of committing
+  with a restored `{}`.
+  CLASSIFIER. A flip can change a run in flight. A running box whose
+  `box_success` is `s(m) & f(x, 0)` with `x` iced completes SUCCESS when
+  `m` succeeds under `true` and stays RUNNING under `ordinary`. So each
+  switch is a node of its own in the ss10.2 graph, valued at its
+  effective value, and every job its registry entry's `affects` names
+  depends on it. For `ice-lookback` that is every job with a
+  lookback-qualified atom in its `condition`, `box_success` or
+  `box_failure`. A live such box is R; an armed such job is A with the
+  armed assumption ("the C1 trigger survives under C2 gating"), because
+  the switch changes how its own gate reads; and the boundary-truth diff
+  sees those jobs and reads each side under that side's switches. The
+  `semantics` profile field keeps its field node, with no edges of its
+  own; PR-37a's field map gains a fifth group for it.
+  ONE-TIME HASH MOVE. period-model ss3.2 writes every typed field, an
+  empty collection as `{}`, and protocol-evolution's closed-artifact row
+  rests on that. So `semantics` is always written, `{}` when empty, and
+  a manifest whose profile lacks it is refused like any other missing
+  field. This moves `runtime_hash`, once, for every profile, and with it
+  every digest computed over a profile, manifest or seal. Nothing runs
+  in production, so that is accepted; the golden vectors were
+  regenerated and each checked to differ only by the new key and the
+  digests that depend on it. Later switches never move the hash again:
+  a new switch adds a registry entry, not a profile field, and its
+  default lives in code, so a profile without an override for it keeps
+  its bytes. Changing a default later is a state-machine change and
+  bumps `STATE_MACHINE_VERSION` as usual.
+  FIRST SWITCH. `ice-lookback`: what a condition atom with a lookback
+  qualifier reads when its predecessor is on ice and not live. `true`,
+  the default and dsl41's existing behavior, is the literal reading of
+  the AutoSys 24.2 "condition Attribute" page: "If the predecessor job
+  being evaluated for the look-back condition is currently in an ON_ICE
+  status, it always evaluates to true. That is, any look-back evaluation
+  is ignored." `ordinary` drops the qualifier and applies DL-243's
+  ordinary ON_ICE table (Start Conditions, which does not separate
+  lookback atoms): s, d and n true; f, t and exitcode false. It is
+  implemented at the `# PENDING: Q10` branch of `Oracle._atom_true`. Q10
+  stays open over which page a live instance follows; its dossier entry
+  and register row now cite both pages and name the switch.
+  NEGATIVE EXIT CODES. dsl41 keeps refusing a negative code in
+  `success_codes` or `fail_codes`. On POSIX a process exit status is
+  0-255, and the runner records a signal death as TERMINATED with no
+  exit code, so a negative code can never match. Before, `-1` failed
+  with "expected an exit code or lo-hi range", because `-` is the range
+  separator. A well-formed code or range with a negative end now gets
+  its own refusal that says so; a bare `-` and other malformed tokens
+  keep the ordinary malformed-token message. The SEM-09 support-limit
+  sentence gives the reason.
+  UNCHANGED. No default changes in this entry, and
+  `STATE_MACHINE_VERSION` stays. The register gains
+  `profile_field:semantics` and one `profile_alt:semantics.NAME=VALUE`
+  row per switch value; its test derives those members from the
+  registry, so a switch without rows, or a row naming no registry entry,
+  fails.

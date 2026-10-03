@@ -37,6 +37,7 @@ from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event, EventKind, OracleError, TraceEntry
 from dsl41.runner_clock import EngineError
+from dsl41.semantics import SemanticSwitches, resolve as resolve_switches
 
 T0 = datetime(2026, 7, 1, 8, 0)
 
@@ -83,6 +84,7 @@ def oracle(
     *,
     default_tz: str | None = None,
     tz_aliases: dict[str, str] | None = None,
+    semantics: SemanticSwitches | None = None,
 ) -> Oracle | EngineHarness:
     catalog = lower_source(jil_text)
     if _ENGINE_PATH:
@@ -92,10 +94,10 @@ def oracle(
                 " engine's oracle takes no run-level default -- the runner keeps"
                 " --timezone on the scheduler -- so only the direct path holds them"
             )
-        harness = EngineHarness(catalog)
+        harness = EngineHarness(catalog, semantics=semantics)
         _HARNESSES.append(harness)
         return harness
-    return Oracle(catalog, default_tz=default_tz, tz_aliases=tz_aliases)
+    return Oracle(catalog, default_tz=default_tz, tz_aliases=tz_aliases, semantics=semantics)
 
 
 def transitions(o: Oracle | EngineHarness, job: str) -> list[str]:
@@ -1562,12 +1564,13 @@ def test_sem20_ordinary_atoms_on_an_iced_job_follow_the_vendor_table(
     ],
 )
 def test_sem20_lookback_atoms_on_an_iced_job_stay_true(atom_expr: str) -> None:
-    """Q10 (SEM-20 section 9, DL-243): the vendor's ON_ICE truth table does
-    not separately address a LOOKBACK-qualified atom against an iced
-    predecessor -- that corner is an open pin, not a citation. This project
-    keeps the pre-existing DL-13 blanket-true reading for it (every atom
-    kind true, lookback ignored), rather than extending the narrower
-    ordinary-atom table to lookback atoms. f()/t()/exitcode() each read
+    """Q10 (SEM-20 section 9, DL-243, DL-252): the AutoSys 24.2 "condition
+    Attribute" page says a look-back condition on an ON_ICE predecessor
+    "always evaluates to true" and the look-back is ignored; the Start
+    Conditions ON_ICE table does not separate lookback atoms. The default
+    `ice-lookback=true` follows the condition Attribute page (the DL-13
+    blanket-true reading: every atom kind true, lookback ignored), and which
+    page a live instance follows stays open. f()/t()/exitcode() each read
     true here despite reading false in the ordinary-atom table above,
     because each carries a lookback qualifier (any kind, the zero form
     included)."""
@@ -1580,6 +1583,52 @@ def test_sem20_lookback_atoms_on_an_iced_job_stay_true(atom_expr: str) -> None:
     # so this one event is the whole scenario.
     o.feed(ev("ON_ICE", 0, job="prod_f17lb"))
     assert transitions(o, "cons_f17lb") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+
+
+_ICE_LOOKBACK_ATOMS = [
+    ("s(prod_f17sw, 0)", True),
+    ("d(prod_f17sw, 01.00)", True),
+    ("n(prod_f17sw, 9999)", True),
+    ("f(prod_f17sw, 0)", False),
+    ("t(prod_f17sw, 9999)", False),
+    ("e(prod_f17sw, 01.00) = 0", False),
+]
+
+
+@pytest.mark.parametrize(("atom_expr", "ordinary_true"), _ICE_LOOKBACK_ATOMS)
+@pytest.mark.parametrize("switch", ["default", "true", "ordinary"])
+def test_sem20_ice_lookback_switch_selects_the_q10_reading(
+    atom_expr: str, ordinary_true: bool, switch: str
+) -> None:
+    """Q10, DL-252: the `ice-lookback` semantic switch. At its default, and
+    when set to `true`, every lookback atom on a non-live iced predecessor
+    reads true. Set to `ordinary`, the qualifier is dropped and the
+    ordinary ON_ICE table applies: s, d, n true; f, t, exitcode false."""
+    text = (
+        "insert_job: prod_f17sw\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        f"insert_job: cons_f17sw\njob_type: c\ncommand: y\nmachine: m1\ncondition: {atom_expr}\n"
+    )
+    chosen = None if switch == "default" else resolve_switches({"ice-lookback": switch})
+    o = oracle(text, semantics=chosen)
+    o.feed(ev("ON_ICE", 0, job="prod_f17sw"))
+    expect_true = ordinary_true if switch == "ordinary" else True
+    expected = ["INACTIVE->STARTING", "STARTING->RUNNING"] if expect_true else []
+    assert transitions(o, "cons_f17sw") == expected
+
+
+def test_sem20_ice_lookback_ordinary_leaves_a_live_iced_job_alone() -> None:
+    """DL-252 control: the switch changes only the non-live iced case. A
+    RUNNING iced predecessor is still read by its real status, so a
+    lookback s() on it stays false under `ordinary` until it ends."""
+    text = (
+        "insert_job: prod_f17swl\njob_type: c\ncommand: x\nmachine: m1\n\n"
+        "insert_job: cons_f17swl\njob_type: c\ncommand: y\nmachine: m1\n"
+        "condition: s(prod_f17swl, 0)\n"
+    )
+    o = oracle(text, semantics=resolve_switches({"ice-lookback": "ordinary"}))
+    o.feed(ev("STARTJOB", 0, job="prod_f17swl"))
+    o.feed(ev("ON_ICE", 1, job="prod_f17swl"))
+    assert transitions(o, "cons_f17swl") == []
 
 
 def test_sem20_ordinary_atom_on_an_undefined_iced_lookalike_stays_false() -> None:

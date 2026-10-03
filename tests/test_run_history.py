@@ -1341,7 +1341,17 @@ def test_replay_refuses_a_segment_naming_a_foreign_state_machine_version(
 
 
 def test_replay_accepts_the_state_machine_version_this_build_derives(tmp_path: Path) -> None:
-    replayed = replay_trace(tmp_path, [_header()], lower_source(_SOLO_JIL))
+    # replay reads the period's runtime profile from a manifest bound to the
+    # segment (DL-252), so the header is the one that manifest names
+    from dsl41.period import _SHARED_FIELDS, genesis_manifest, write_period_manifest
+
+    catalog = lower_source(_SOLO_JIL)
+    manifest = genesis_manifest(
+        catalog, clock_domain="real", state_machine_version=STATE_MACHINE_VERSION
+    )
+    write_period_manifest(tmp_path, manifest)
+    header = {**_header(), **{name: getattr(manifest, name) for name in _SHARED_FIELDS}}
+    replayed = replay_trace(tmp_path, [header], catalog)
     assert replayed.trace == []
     assert replayed.recovered == []
 

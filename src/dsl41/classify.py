@@ -66,7 +66,8 @@ from dsl41.equiv import canonical_cond
 from dsl41.ir import CatalogIR, CondAttr, JobIR, unquote_jil_value
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import TERMINAL, JobRuntime
-from dsl41.period import RuntimeProfile, job_fingerprints, tz_aliases_of
+from dsl41.period import RuntimeProfile, job_fingerprints, switches_of, tz_aliases_of
+from dsl41.semantics import REGISTRY as SWITCH_REGISTRY
 
 # ------------------------------------------------------------------- nodes
 #
@@ -91,6 +92,12 @@ TZ_BASIS: Final = "tz:basis"
 #: ss10.2's profile mapping, EXACTLY -- which jobs each field reaches.
 #: `retry_horizon_us` is boundary policy and reaches no job: a field that
 #: reached every job would turn a horizon tweak into a full live-work drain.
+#: `semantics` is placed per SWITCH, not per field (DL-252): each switch
+#: is a node of its own (`SWITCH` + name, valued at its effective value),
+#: and a job depends on it exactly when the registry entry's `affects`
+#: says so. A flip can change a run in flight -- a running box whose
+#: `box_success` reads a lookback atom on an iced job completes under one
+#: reading and not the other -- so it reaches those jobs and no others.
 PROFILE_SCHEDULED: Final = ("default_tz", "tz_aliases")
 PROFILE_CMD: Final = (
     "as_machine",
@@ -103,6 +110,15 @@ PROFILE_CMD: Final = (
 )
 PROFILE_FW: Final = ("fw_default_interval_us",)
 PROFILE_NO_JOB: Final = ("retry_horizon_us",)
+PROFILE_SWITCHED: Final = ("semantics",)
+#: one node per semantic switch; see PROFILE_SWITCHED
+SWITCH: Final = "profile:semantics."
+
+
+def _switches_of(job_ir: JobIR) -> tuple[str, ...]:
+    """The semantic switches a flip of which can change this job (DL-252):
+    each registry entry's own `affects`, never a list kept here."""
+    return tuple(name for name, switch in SWITCH_REGISTRY.items() if switch.affects(job_ir))
 
 
 def is_scheduled(job_ir: JobIR) -> bool:
@@ -416,6 +432,9 @@ def _node_values(side: Baseline) -> dict[str, Any]:
     for field in RuntimeProfile.model_fields:
         raw = getattr(profile, field)
         values[PROFILE + field] = tuple(sorted(raw.items())) if isinstance(raw, dict) else raw
+    switches = switches_of(profile)
+    for name in SWITCH_REGISTRY:
+        values[SWITCH + name] = switches.value(name)
     return values
 
 
@@ -509,6 +528,10 @@ class ClassificationGraph:
             # (7) the runtime-profile fields this job's KIND reads
             for field in self._profile_fields(job_ir):
                 self._edge(node, PROFILE + field)
+            # (8) the semantic switches whose reading this job's conditions
+            # depend on (DL-252)
+            for switch in _switches_of(job_ir):
+                self._edge(node, SWITCH + switch)
         for name, machine in catalog.machines.items():
             for component in machine.members:
                 self._edge(MACHINE + name, MACHINE + component.name)
@@ -685,6 +708,9 @@ def _assumption(
     after = opening.catalog.jobs.get(name)
     if row.armed and before is not None and after is not None and _trigger_moved(before, after):
         return ARMED_ASSUMPTION
+    if row.armed and after is not None and {SWITCH + s for s in _switches_of(after)} & set(changed):
+        # a flipped switch changes how the latch's own gate reads (DL-252)
+        return ARMED_ASSUMPTION
     if short & set(changed):
         return RESOURCE_ASSUMPTION
     if before is not None and after is not None:
@@ -831,8 +857,11 @@ def _seeded(
     row says. L001 refuses a condition naming a job the catalog does not
     have, so a valid estate never asks."""
     # the period's own SEM-35 alias table (DL-151): a condition read under a
-    # `timezone:` only that table resolves must not raise here
-    oracle = _TruthOracle(catalog, tz_aliases=tz_aliases_of(profile))
+    # `timezone:` only that table resolves must not raise here; and its own
+    # semantic switches (DL-252), so each side's truth is that side's reading
+    oracle = _TruthOracle(
+        catalog, tz_aliases=tz_aliases_of(profile), semantics=switches_of(profile)
+    )
     store = oracle.store
     store.begin_input()
     for name in sorted(carried.jobs):

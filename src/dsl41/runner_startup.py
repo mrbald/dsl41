@@ -134,9 +134,11 @@ from dsl41.runner_scheduler import Scheduler
 
 
 #: Profile fields NO wired object can report: they act in preflight, over
-#: the catalog, and never on an adapter or a scheduler. They inherit the pin
-#: unless the launcher DECLARES them -- see `_derive_runtime_profile`.
-_UNWIRED_FIELDS: tuple[str, ...] = ("as_machine", "machine_policy")
+#: the catalog, or (the semantic switches, DL-252) inside the oracle, which
+#: reads them from the pin itself, and never on an adapter or a scheduler.
+#: They inherit the pin unless the launcher DECLARES them -- see
+#: `_derive_runtime_profile`.
+_UNWIRED_FIELDS: tuple[str, ...] = ("as_machine", "machine_policy", "semantics")
 
 
 def _derive_runtime_profile(
@@ -157,7 +159,7 @@ def _derive_runtime_profile(
     over `base` for the fields the engine cannot see.
 
     `declared` is what the LAUNCHER was invoked with, and it supplies
-    exactly `_UNWIRED_FIELDS`. Without it those two inherit the pin and can
+    exactly `_UNWIRED_FIELDS`. Without it those fields inherit the pin and can
     therefore never disagree with it -- so a boundary that staged a new
     machine identity opened SILENTLY under the old one, this process still
     answering to the machine names it was started with while the manifest

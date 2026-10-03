@@ -102,6 +102,7 @@ from dsl41.period import (
     quarantine_dir,
     read_or_none,
     read_sentinel,
+    require_manifest_fields,
     runtime_hash,
     seal_dir,
     seal_path,
@@ -1570,6 +1571,11 @@ def _read_artifact(path: Path, model: type[_ArtifactModel]) -> _ArtifactModel | 
         if not isinstance(payload, dict):
             raise EngineError(f"{path}: not a JSON object")
         require_artifact_version(payload)
+        if issubclass(model, StagedManifest):
+            # the committed manifest's completeness rule, at staged ingress
+            # too: a staged pin missing `runtime_profile.semantics` used to
+            # commit with a restored `{}` (DL-252)
+            require_manifest_fields(payload, model, where=str(path))
         return model.model_validate_json(raw, strict=True)
     except (CanonError, ValidationError) as exc:
         raise EngineError(f"{path}: not a {model.__name__} this binary can read ({exc})") from exc

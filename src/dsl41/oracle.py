@@ -95,9 +95,16 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
   (Start Conditions, AutoSys 24.2, ON_ICE downstream-conditions row):
   success/done/notrunning TRUE, failure/terminated/exitcode FALSE -- a
   narrower reading than the blanket-true pin, and the two tables disagree
-  on f()/t()/exitcode. The lookback-atom corner stays an open pin (Q10,
-  section 9), not a citation: the vendor text does not separately address
-  a lookback-qualified atom against an iced job. Ice on a RUNNING job takes
+  on f()/t()/exitcode. For a lookback-qualified atom the AutoSys 24.2
+  "condition Attribute" page is explicit: "If the predecessor job being
+  evaluated for the look-back condition is currently in an ON_ICE status,
+  it always evaluates to true. That is, any look-back evaluation is
+  ignored." That is the default. The Start Conditions table does not
+  separate lookback atoms, so the two pages read f()/t()/exitcode
+  differently and Q10 (section 9) stays open over which a live instance
+  follows. The `ice-lookback` semantic switch selects the table's reading
+  (DL-252): `ordinary` drops the qualifier and applies the table to the
+  lookback atom too. Ice on a RUNNING job takes
   effect at completion either way: atoms read the real in-flight status
   until then ([?] unverified corner, documented). The iced job itself
   never starts on a plain STARTJOB; FORCE_STARTJOB on a non-live iced job
@@ -265,6 +272,7 @@ from dsl41.oracle_state import (
     RuntimeState,
     TraceEntry,
 )
+from dsl41.semantics import DEFAULTS as DEFAULT_SWITCHES, SemanticSwitches
 from dsl41.timezones import (
     MISSING_HOUR,
     REPEATED_HOUR,
@@ -379,8 +387,13 @@ class Oracle:
         carried: CarriedRows | None = None,
         tz_aliases: Mapping[str, str] | None = None,
         default_tz: str | None = None,
+        semantics: SemanticSwitches | None = None,
     ) -> None:
         self.catalog = catalog
+        #: the semantic switches (runner-design ss8a, DL-252): a caller with
+        #: a runtime profile passes the period's own (`period.switches_of`);
+        #: a static tool with no profile gets the registry defaults
+        self.semantics: SemanticSwitches = semantics or DEFAULT_SWITCHES
         self.store = RuntimeState()
         if carried is not None:
             # period-model ss7 phase 3 step 3: carried rows install VERBATIM
@@ -1085,14 +1098,16 @@ class Oracle:
             # Ice on a running job takes effect at completion (the in-flight
             # run is still real); for a non-live iced job, split on whether
             # the atom carries a lookback qualifier (DL-243).
-            if atom.lookback is not None:
+            if atom.lookback is not None and self.semantics.ice_lookback == "true":
                 # SEM-05 + DL-13: a LOOKBACK atom (any kind, zero included)
                 # keeps the blanket pin -- every atom kind true, lookback
-                # ignored. The lookback/ice interaction stays open.
-                # PENDING: Q10 -- the vendor's ON_ICE table (below) covers an
-                # ordinary atom only; a lookback-qualified atom against an
-                # iced predecessor is uncited, pinned at this pre-DL-243
-                # default until a live instance decides it.
+                # ignored -- as the AutoSys 24.2 "condition Attribute" page
+                # states for a look-back condition on an ON_ICE predecessor.
+                # PENDING: Q10 -- the Start Conditions ON_ICE table (below)
+                # does not separate lookback atoms and reads f/t/exitcode
+                # false; which page a live instance follows is open. The
+                # table's reading is the `ice-lookback=ordinary` switch
+                # (DL-252): the qualifier is dropped and the table applies.
                 return True
             # DL-243 (SEM-20): an ORDINARY atom (no lookback qualifier
             # at all) follows the vendor's own ON_ICE truth table instead:

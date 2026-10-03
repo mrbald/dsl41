@@ -22,6 +22,7 @@ from dsl41.cli_common import (
     check_base_tz,
     command_outcome,
     load_catalog_and_ast_or_exit_2,
+    load_semantics,
     load_tz_aliases,
     read_header_of,
     refuse,
@@ -79,6 +80,7 @@ def _next_profile(
     machine_policy: str,
     detached: bool,
     deadman: "float | None",
+    semantics: "list[str] | None" = None,
 ) -> "RuntimeProfile":
     """C2's `RuntimeProfile` from the `--next-*` flags (period-model ss2.1).
 
@@ -107,6 +109,7 @@ def _next_profile(
         )
     tz_aliases = load_tz_aliases(timezone_map)
     check_base_tz(timezone, tz_aliases)
+    overrides = load_semantics(semantics, option="--next-semantics")
     try:
         return runtime_profile_from_cli(
             timezone=timezone,
@@ -115,6 +118,7 @@ def _next_profile(
             machine_policy=machine_policy,
             detached=detached,
             deadman_s=deadman,
+            semantics=overrides,
         )
     except ValidationError as exc:
         raise typer.Exit(refuse(exc, prefix="the next period's runtime profile")) from None
@@ -197,6 +201,13 @@ def seal(
         "--next-deadman",
         help="The next period's supervisor deadman, in seconds. Needs --next-detached.",
     ),
+    next_semantics: list[str] = typer.Option(
+        [],
+        "--next-semantics",
+        metavar="NAME=VALUE",
+        help="The next period's semantic switches. Repeatable. See 'dsl41 run"
+        " --help' for --semantics.",
+    ),  # runner-design ss8a, DL-252
     permit_unknown: bool = PERMIT_UNKNOWN,
     properties: list[Path] = PROPERTIES,
 ) -> None:
@@ -232,6 +243,7 @@ def seal(
         next_machine_policy,
         next_detached,
         next_deadman,
+        next_semantics,
     )
     actor = claimed_actor or default_actor()
     try:

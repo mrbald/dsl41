@@ -318,10 +318,10 @@ GOLDEN_PROFILE_BYTES = (
     b'{"as_machine":["alpha","beta"],"cmd_grace_us":15500000,"deadman_us":90000000,'
     b'"default_tz":"Europe/Zurich","execution_mode":"detached",'
     b'"fw_default_interval_us":30000000,"machine_policy":"local-eligible",'
-    b'"reconcile_settle_us":0,"retry_horizon_us":120000000,"spawn_window_us":0,'
+    b'"reconcile_settle_us":0,"retry_horizon_us":120000000,"semantics":{},"spawn_window_us":0,'
     b'"tz_aliases":{"CET":"Europe/Zurich","EST":"America/New_York"}}'
 )
-GOLDEN_RUNTIME_HASH = "sha256:b00ad496ee749327ba93592ad9b0e4adc4098882dcf919f2f525225a91823d02"
+GOLDEN_RUNTIME_HASH = "sha256:aa82271f28aa992a72f20785b0086775c59270ba003302ac618d008fead36ebf"
 
 
 def test_the_profile_defaults_are_the_engine_s_own() -> None:
@@ -378,6 +378,7 @@ _ALTERNATES: dict[str, Any] = {
     "reconcile_settle_us": 0,
     "spawn_window_us": 0,
     "retry_horizon_us": 120_000_000,
+    "semantics": {"ice-lookback": "ordinary"},
 }
 
 

@@ -23,12 +23,14 @@ from dsl41.boundary import PeriodSealed
 from dsl41.cli_common import (
     PERMIT_UNKNOWN,
     PROPERTIES,
+    SEMANTICS_OPT,
     TIMEZONE_MAP_OPT,
     TIMEZONE_OPT,
     check_base_tz,
     import_tui_or_exit_2,
     load_catalog_and_ast_or_exit_2,
     load_catalog_or_exit_2,
+    load_semantics,
     load_tz_aliases,
     refuse,
     resume_target_period,
@@ -203,6 +205,7 @@ def run(
     ),
     timezone: str = TIMEZONE_OPT,
     timezone_map: Path = TIMEZONE_MAP_OPT,
+    semantics: list[str] = SEMANTICS_OPT,
     permit_unknown: bool = PERMIT_UNKNOWN,
     properties: list[Path] = PROPERTIES,
     access_map: Path = typer.Option(
@@ -259,6 +262,7 @@ def run(
     catalog, parsed, fingerprint = load_catalog_and_ast_or_exit_2(files, permit_unknown, properties)
     tz_aliases = load_tz_aliases(timezone_map)
     check_base_tz(timezone, tz_aliases)
+    overrides = load_semantics(semantics)
     warns = _preflight_or_exit(
         catalog,
         execution=True,
@@ -287,6 +291,7 @@ def run(
         machine_policy=machine_policy,
         detached=detached,
         deadman_s=deadman,
+        semantics=overrides,
     )
     try:
         raise typer.Exit(
@@ -1098,6 +1103,7 @@ def _emit_cadence_check(
                 horizon=horizon,
                 default_tz=timezone,
                 tz_aliases=tz_aliases,
+                semantics=engine.oracle.semantics,
                 producers=fail_sweep_producers(catalog, graph),
                 parked=parked_fw,
                 progress=progress,
@@ -1116,6 +1122,7 @@ def _emit_cadence_check(
                 horizon=horizon,
                 default_tz=timezone,
                 tz_aliases=tz_aliases,
+                semantics=engine.oracle.semantics,
                 injected_start=injected_start,
                 injected_force=injected_force,
                 policy=policy,
@@ -1208,6 +1215,7 @@ def rehearse(
     ),
     timezone: str = TIMEZONE_OPT,
     timezone_map: Path = TIMEZONE_MAP_OPT,
+    semantics: list[str] = SEMANTICS_OPT,
     run_root: Path = typer.Option(
         None, "--run-root", help="Also write the journal under this directory."
     ),
@@ -1270,6 +1278,7 @@ def rehearse(
     from dsl41.runner_startup import start_run
     from dsl41.runner_clock import EngineError, VirtualClock, ZeroDelayCycleError
     from dsl41.runner_scheduler import Scheduler
+    from dsl41.semantics import resolve as resolve_switches
 
     if cadence_policy is not None and not check_cadence:
         raise typer.Exit(refuse("--cadence-policy requires --check-cadence"))
@@ -1283,6 +1292,7 @@ def rehearse(
             )
         )
     catalog, parsed, _ = load_catalog_and_ast_or_exit_2(files, permit_unknown, properties)
+    overrides = load_semantics(semantics)
     start_dt = (
         _naive_utc_arg(start, "--start")
         if start
@@ -1334,7 +1344,9 @@ def rehearse(
                     run_root,
                     parsed,
                     catalog,
-                    runtime_profile_from_cli(timezone=timezone, tz_aliases=tz_aliases),
+                    runtime_profile_from_cli(
+                        timezone=timezone, tz_aliases=tz_aliases, semantics=overrides
+                    ),
                 )
                 if root_is_unused(run_root)
                 else None
@@ -1348,7 +1360,13 @@ def rehearse(
                 staged=staged,
             )
         else:
-            engine = Engine(catalog, clock=clock, adapters=adapters, scheduler=scheduler)
+            engine = Engine(
+                catalog,
+                clock=clock,
+                adapters=adapters,
+                scheduler=scheduler,
+                semantics=resolve_switches(overrides),
+            )
     except EngineError as exc:
         raise typer.Exit(refuse(exc)) from exc
     if warns and engine.journal is not None:
@@ -1684,7 +1702,7 @@ def _replay_lineage(
                 f" {records[0]['period_id']} opens in {root}"
             )
         _run_period(
-            records, opened, where=where, tz_aliases=_period_aliases(root, records[0], where=where)
+            records, opened, where=where, profile=_period_profile(root, records[0], where=where)
         )
         previous, previous_segment = records, segment
 
@@ -1829,20 +1847,20 @@ def _prove_crossing(
         raise typer.Exit(refuse(exc, prefix=where)) from exc
 
 
-def _period_aliases(
-    root: Path, opening: "dict[str, Any]", *, where: str
-) -> "dict[str, str] | None":
-    """This period's SEM-35 alias table, from its own pin (period-model
-    ss2.1). None where the root no longer holds the manifest, which is the
-    same degrade `_period_catalog` makes for the same reason."""
-    from dsl41.period import read_period_manifest, tz_aliases_of
-    from dsl41.runner_clock import EngineError
+def _period_profile(root: Path, opening: "dict[str, Any]", *, where: str) -> "RuntimeProfile":
+    """This period's runtime profile, from a manifest bound to its segment
+    (period-model ss2.1, PR-22): the SEM-35 alias table and the semantic
+    switches a replay must read the way the engine did.
+
+    Required, not degraded (DL-252): a replay under default switches
+    narrates a run the engine may never have made, so a missing or foreign
+    manifest refuses."""
+    from dsl41.runner_history import RunHistoryError, pinned_profile
 
     try:
-        manifest = read_period_manifest(root, int(opening["period_id"]))
-    except EngineError as exc:
+        return pinned_profile(root, opening)
+    except RunHistoryError as exc:
         raise typer.Exit(refuse(exc, prefix=where)) from exc
-    return tz_aliases_of(None if manifest is None else manifest.runtime_profile)
 
 
 def _run_period(
@@ -1850,7 +1868,7 @@ def _run_period(
     opened: "tuple[CatalogIR, CarriedRows | None]",
     *,
     where: str,
-    tz_aliases: "dict[str, str] | None" = None,
+    profile: "RuntimeProfile | None" = None,
 ) -> None:
     """ONE period, replayed and printed. ONE implementation: a
     single-segment read and a lineage that crosses four boundaries differ
@@ -1858,7 +1876,7 @@ def _run_period(
     means."""
     from dsl41.oracle import Oracle
     from dsl41.oracle_state import OracleError
-    from dsl41.period import opening_at
+    from dsl41.period import opening_at, switches_of, tz_aliases_of
     from dsl41.runner_clock import EngineError
     from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, seed_local_executor
     from dsl41.runner_journal import replay_inputs
@@ -1868,7 +1886,14 @@ def _run_period(
     # SEM-35: the period's own alias table (DL-151). A narration that
     # resolved `timezone:` without it refuses the log the engine wrote,
     # because a `ujo_timezones` name is site-local and lives in the pin.
-    oracle = Oracle(catalog, carried=carried, tz_aliases=tz_aliases)
+    # The semantic switches come from the same pin (DL-252), or the replay
+    # would read a condition differently from the engine that wrote the log.
+    oracle = Oracle(
+        catalog,
+        carried=carried,
+        tz_aliases=tz_aliases_of(profile),
+        semantics=switches_of(profile),
+    )
     # reproducing a log means reproducing the genesis the engine replayed it
     # onto, not only the catalog: a routing-table input lands on a table that
     # already holds this engine's own executor (concurrency-model ss8), and a

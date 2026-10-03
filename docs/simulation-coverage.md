@@ -536,7 +536,7 @@ fails the suite.
 | event:ON_HOLD | supported | ir-design ss7 | - |  |  |  | generic | holds a job: it stays startable but does not start |
 | event:ON_ICE | supported | ir-design ss7 | - |  |  |  | generic | ices a job: an ordinary downstream atom follows the vendor ON_ICE table (s/d/n true, f/t/exitcode false), a lookback-qualified atom reads satisfied regardless, and it never runs on a plain start (DL-243) |
 | event:ON_ICE#armed | provisional | SEM-20, oracle.Oracle._handle_oob | Q3d | yes | Q3d |  | none | a pre-existing arm survives the ice round trip untouched |
-| event:ON_ICE#lookback atom | provisional | SEM-20, DL-243, oracle.Oracle._atom_true | Q10 | yes |  |  | none | a LOOKBACK-qualified atom on a non-live iced job keeps the pre-DL-243 blanket-true reading; an ORDINARY atom (no lookback) follows the narrower vendor table instead -- the vendor text does not address the lookback case, so this corner stays pinned rather than cited |
+| event:ON_ICE#lookback atom | provisional | SEM-20, DL-243, oracle.Oracle._atom_true | Q10 | yes |  |  | none | a LOOKBACK-qualified atom on a non-live iced job reads true, lookback ignored, as the AutoSys 24.2 condition attribute page states; an ORDINARY atom (no lookback) follows the Start Conditions on-ice table, which does not separate lookback atoms, so which page a live instance follows stays open. The ice-lookback=ordinary switch selects the table's reading (DL-252) |
 | event:ON_ICE#queued | provisional | DL-50, oracle.Oracle._handle_oob | Qr5 |  |  |  | none | icing a queued job dequeues it and settles it INACTIVE now, rather than leaving it in QUE_WAIT |
 | event:ON_ICE#running | provisional | SEM-05, SEM-20, DL-13, oracle.Oracle._atom_true | - |  |  |  | none | icing a STARTING or RUNNING job does NOT make its atoms read as satisfied: the in-flight run is real, so conditions keep reading the live status until it completes (DL-13); no label was opened for the exception |
 | event:ON_NOEXEC | supported | ir-design ss7 | - |  |  |  | generic | marks a job as not executing; it completes without running |
@@ -580,6 +580,7 @@ fails the suite.
 | profile_field:machine_policy | supported | period-model ss2.1, DL-49 | - |  |  |  | generic | how the one ambiguous machine verdict resolves |
 | profile_field:reconcile_settle_us | supported | period-model ss2.1 | - |  |  |  | generic | how long reconcile waits for late evidence before it decides |
 | profile_field:retry_horizon_us | supported | period-model ss2.1 | - |  |  |  | generic | how far ahead a deferred dispatch retry may be scheduled |
+| profile_field:semantics | supported | period-model ss2.1, runner-design ss8a, DL-252 | - |  |  |  | generic | explicit semantic-switch overrides only, an explicit default normalized away; written {} when there is none |
 | profile_field:spawn_window_us | supported | period-model ss2.1 | - |  |  |  | generic | the window a spawn has to produce its receipt |
 | profile_field:tz_aliases | supported | period-model ss2.1, DL-62 | - |  |  |  | generic | the site-local zone-name table; a name only it resolves fails without it |
 
@@ -591,6 +592,8 @@ fails the suite.
 | profile_alt:execution_mode=tethered | supported | period-model ss2.1 | - |  |  |  | generic | the engine owns the child processes; there is no supervisor |
 | profile_alt:machine_policy=local-eligible | supported | period-model ss2.1 | - |  |  |  | generic | only a MIXED pool runs here, with a warning that pool placement was ignored; a foreign or unreadable machine still refuses |
 | profile_alt:machine_policy=strict | supported | period-model ss2.1 | - |  |  |  | generic | a job whose machine does not resolve local is refused |
+| profile_alt:semantics.ice-lookback=ordinary | supported | runner-design ss8a, SEM-20, DL-243, DL-252 | - |  |  |  | generic | the qualifier is dropped on a non-live iced predecessor and the ordinary on-ice table applies: s, d, n true; f, t, exitcode false |
+| profile_alt:semantics.ice-lookback=true | supported | runner-design ss8a, SEM-05, DL-252 | - |  |  |  | generic | the default: a lookback-qualified atom on a non-live iced predecessor reads true, every atom kind, lookback ignored |
 
 ### adapter_outcome
 
