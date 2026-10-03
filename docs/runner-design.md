@@ -161,7 +161,12 @@ case-sensitive), then the instance's ujo_timezones table supplied as
 at most five reads, the vendor's own bound), then -- only without a map --
 the unique-zoneinfo-city default (Zurich -> Europe/Zurich, a preflight
 WARN). POSIX fixed offsets (`GMT+5`, `IST-5:30`) resolve west-positive;
-POSIX strings with dst rules refuse. The runner injects `STARTJOB` at the
+POSIX strings with dst rules refuse. On a one-hour DST change at 02:00
+local, `start_times` and `start_mins` follow the `dst-start-times` switch
+(§8a, DL-260). The default is the vendor's rules. A start time in the
+missing hour then ticks in the first minute of 03:00, with its minute as
+seconds (2:05 ticks at 3:00:05); that is the one tick that is not on a
+whole minute. The runner injects `STARTJOB` at the
 tick and then computes the next occurrence. The scheduler fires **unconditionally** at the tick. SEM-32
 arm-and-wait on a false condition (Q3, DL-58) and
 run_window closer-edge handling (SEM-33) stay oracle-side, exactly as in
@@ -949,11 +954,12 @@ Static tools that have no runtime profile use the defaults: `equiv`,
 `lint`, `derive`, preflight's oracle and calendar checks, and the genesis
 credit of `rehearse --check-cadence`. The cadence sweeps and the expected
 tick counts use the rehearsal's own switches. The scheduler compiles
-extended calendars under the calendar switches. Those are read back from
-the scheduler into the runtime profile, like its timezone, so a profile
-that disagrees with them is refused as drift before anything durable is
-written. An engine also refuses a scheduler built under other calendar
-switches. Preflight's calendar checks use the defaults, so its dormancy
+extended calendars under the calendar switches and places start instants
+under `dst-start-times` (DL-260). Those switches are read back from the
+scheduler into the runtime profile, like its timezone, so a profile that
+disagrees with them is refused as drift before anything durable is
+written. An engine also refuses a scheduler built under other values of
+them, as a backstop. Preflight's calendar checks use the defaults, so its dormancy
 warning can be wrong for a calendar the switch changes.
 
 | Switch | Values | Default | Documented AutoSys | Why this default |
@@ -963,6 +969,7 @@ warning can be wrong for a calendar the switch changes.
 | `queued-recheck` | `0`, `1`, `2` | `0` | `1` | A job that can queue (it names a resource, or a positive priority makes it check machine load) and leaves QUE_WAIT. The values are the vendor's EvaluateQueuedJobStarts (Administrating > Configure a Scheduler, AutoSys 24.2). `0`: it starts without a recheck. `1`: its `condition`, `run_window` and `exclude_calendar` are checked again, but not `run_calendar`, `days_of_week`, `start_times` or `start_mins`. `2`: `run_calendar` or `days_of_week` is checked for the day too. A job that fails goes INACTIVE without starting, its arm is cleared, and its next start time starts it; a member of a running box that fails its condition waits and keeps the box running, the vendor's ACTIVATED. A `run_window` failure takes DL-246's disposition at that instant (the skip, or one deferral to the opening), and a day failure of a job with no start times of its own is deferred to its next eligible window opening, so no job waits for a tick that never comes. The vendor's default is `1`. The owner kept `0`, dsl41's existing behavior: a queued job met its conditions when it started. Qr6 is decided (DL-50, DL-257). The day and window checks use the oracle's zone, which DL-253 aligns with the scheduler's base zone. |
 | `fw-existence` | `stable`, `immediate` | `stable` | `immediate` | What an FW job with no `watch_file_min_size` does once the watched file exists. `stable`: wait for the size to stay steady across two polls, like a job with a minimum size — dsl41's own choice, because a file still being written is not complete. `immediate`: complete at once, `watch_interval` ignored — the vendor reading. The "watch_interval Attribute" page (AutoSys 24.2) says "If you are monitoring for the existence of a file (not the size) and the file already exists when the job runs, the job completes immediately. The watch_interval attribute is ignored." The "watch_file_min_size Attribute" page says "If you do not specify the watch_file_min_size attribute in your job definition, the job completes if the file exists (the default)." A job with a minimum size is unaffected by this switch either way (§6, E6). |
 | `wekr-first-week` | `first-full`, `partial` | `first-full` | unknown | Where week 1 of a WEKR token's year starts (SEM-37). A WEKR token selects a week of the year whose weeks start on the anchor day. `first-full`: week 1 starts on the first anchor day on or after January 1, and the days before it are in no week, as in the C library's `%U`/`%W` numbering. `partial`: week 1 runs from January 1 to the day before that anchor day. The vendor text does not say; its example, "consider full weeks as those that start on a Monday", supports `first-full`. Both readings agree when January 1 falls on the anchor day, and both count `Mnn` back from the week that holds December 31. The switch reaches every job whose `run_calendar` or `exclude_calendar` has a WEKR token. Q11 is closed (DL-259). |
+| `dst-start-times` | `vendor`, `fold0` | `vendor` | `vendor` | `start_times` and `start_mins` on a one-hour DST change at 02:00 local, the shape DL-249 detects. `vendor`: a start time in the repeated 01:00-01:59 runs once, in the second (standard time) pass. `start_mins` run in both passes. A start time in the missing 02:00-02:59 runs in the first minute of 03:00, its minute read as seconds (2:05 at 3:00:05), and only the first such start time runs. `start_mins` ticks in the missing hour do not exist. `fold0`: dsl41's earlier PEP 495 fold=0 reading. A repeated time runs once, in the first pass, and each missing time runs past the gap (2:05 at 3:05). "Standard Time Changes" and "Daylight Time Changes" (AutoSys 12.1 and 24.2) document the vendor rules. Other change shapes use fold=0 under both values; that is unverified. The scheduler and the oracle read the same value: the runtime profile reads it back from the scheduler, so a disagreeing scheduler is refused before anything durable is written, and the engine refuses one as a backstop. |
 
 ## 9. Time domains (E2)
 
@@ -1263,31 +1270,33 @@ code. None is guess-resolved.
   if the loop starts seconds later. Vendor behavior for an
   event-processor outage that spans a start_times tick is unverified [?].
   A live instance decides fire-late vs skip.
-- **E10** — schedule interpretation defaults (DL-45), split by DL-155: the
-  no-timezone clock half is [V], the rest stays [?]. The cited half:
-  jobs without a per-job `timezone` read their times in the run-level
-  `--timezone` base zone, with UTC as the default. The vendor uses the
-  AutoSys server's zone, which a migrated estate must set explicitly:
-  "The start event for jobs with time-based starting conditions that do
-  not specify a time zone is scheduled based on the time zone under
-  which the scheduler is running" (TechDocs 12.0.01, timezone attribute
-  page). The oracle exposes the same rule as a `default_tz` constructor
-  knob; with none set, the engine clock plays the scheduler's zone. Two
-  halves stay open [?], each behind its `# PENDING: E10` marker in
-  `runner_scheduler.py`: absent `days_of_week` = every day, and DST
-  corners pinned to PEP 495 fold=0 (ambiguous = first occurrence,
-  nonexistent maps past the gap). The vendor documents the DST corners
-  (AutoSys 24.2). "Standard Time Changes": an absolute start between
-  1:00 and 1:59 runs only in the second (standard time) hour, and "Jobs
-  for which the start_mins attribute is set run in both hours."
-  "Daylight Time Changes": an absolute start in the missing hour runs
-  "during the first minute of the next hour" (2:05 runs at 3:00:05), and
-  "If you schedule a job to run more than once during the missing hour
-  (for example, at 2:05 and 2:25), only the first scheduled job run
-  occurs." The fold=0 pin differs on each point. It runs a repeated wall
-  time once, in its first occurrence. It moves a missing-hour start
-  forward by the gap (2:05 runs at 3:05), and it keeps every such start.
-  The pin stays until a decision adopts the vendor rules (DL-250).
+- **E10** — schedule interpretation defaults (DL-45), split by DL-155 and
+  DL-260. The no-timezone clock half is [V]. Jobs without a per-job
+  `timezone` read their times in the run-level `--timezone` base zone,
+  with UTC as the default. The vendor uses the AutoSys server's zone, which
+  a migrated estate must set explicitly: "The start event for jobs with
+  time-based starting conditions that do not specify a time zone is
+  scheduled based on the time zone under which the scheduler is running"
+  (TechDocs 12.0.01, timezone attribute page). The oracle exposes the same
+  rule as a `default_tz` constructor knob; with none set, the engine clock
+  plays the scheduler's zone. The DST half is decided (DL-260): the
+  vendor's rules are the default, and dsl41's earlier PEP 495 fold=0
+  reading stays selectable as `dst-start-times=fold0` (§8a). TechDocs 12.1
+  and 24.2 document the rules. "Standard Time Changes": jobs whose
+  start_time is "between 1:00 and 1:59" run "during the second (standard
+  time) hour", and "Jobs for which the start_mins attribute is set run in
+  both hours." "Daylight Time Changes": an absolute start in the missing
+  hour runs "during the first minute of the next hour" (2:05 runs at
+  3:00:05). "If you schedule a job to run more than once during the
+  missing hour (for example, at 2:05 and 2:25), only the first scheduled
+  job run occurs." Relative (start_mins) jobs "run as expected", so a
+  start_mins tick in the missing hour does not exist. The rules apply to
+  the change shape DL-249 detects: 02:00-02:59 missing for one hour, or
+  01:00-01:59 repeated for one hour. Other shapes keep fold=0 under both
+  values; that is unverified, and the register carries it. Calendar row
+  times (E11) keep fold=0 too. One half stays open [?], behind its
+  `# PENDING: E10` marker in `runner_scheduler.py`: absent
+  `days_of_week` = every day.
 - **E11** — opened by DL-56, closed by DL-58: `run_calendar` with neither
   `start_times` nor `start_mins` is a valid vendor shape. The job fires at
   the calendar row's own time-of-day (`mm/dd/yyyy HH:MM`), and at 00:00

@@ -33,7 +33,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, time, timedelta, timezone, tzinfo
 from typing import Literal, NamedTuple
 from zoneinfo import ZoneInfo, available_timezones
@@ -150,11 +150,14 @@ def resolve_timezone(name: str, aliases: Mapping[str, str] | None = None) -> Res
 # Instants inside the engine and the oracle are NAIVE UTC (runner-design
 # ss5). A time attribute is read in the job's own zone (SEM-35 re-bases every
 # one of them), so every comparison crosses this line exactly twice: in to
-# compare, out to schedule. DST corners follow PEP 495 fold=0 -- a fall-back
-# ambiguous local time is its FIRST occurrence and a spring-forward
-# nonexistent one maps past the gap (runner-design E10). One definition of
-# each direction, because the scheduler and the oracle both cross it and a
-# second spelling is a second DST pin (DL-163).
+# compare, out to schedule. The conversion honours the caller's PEP 495
+# fold and defaults to fold=0 -- a fall-back ambiguous local time is its
+# FIRST occurrence and a spring-forward nonexistent one maps past the gap.
+# Callers that follow the vendor's DST rules pass fold=1 or move the time
+# themselves: run_window (DL-249), absolute must times (DL-253) and start
+# times (`start_time_instants`, DL-260). One definition of each direction,
+# because the scheduler and the oracle both cross it and a second spelling
+# is a second DST pin (DL-163).
 
 
 def to_local(when: datetime, tz: tzinfo | None) -> datetime:
@@ -231,6 +234,77 @@ def dst_change_near(day: date, tz: tzinfo | None, days: int = 2) -> bool:
         if dst_change(other, tz) is not None:
             return True
     return False
+
+
+def vendor_gap_instant(day: date, hour: int, minute: int, tz: tzinfo | None) -> datetime:
+    """A wall time in a spring change's missing hour, as the vendor moves
+    it: into the first minute of the next hour, its minute read as seconds.
+    "Daylight Time Changes": "a job that is scheduled to run on Sundays at
+    2:05 runs at 3:00:05"."""
+    first = to_utc(datetime.combine(day, time(hour + 1, 0)), tz)
+    return first + timedelta(seconds=minute)
+
+
+def start_time_instants(
+    day: date, times: Sequence[tuple[int, int]], tz: tzinfo | None, *, vendor: bool
+) -> list[tuple[int, datetime]]:
+    """The start_times entries `times`, as (hour, minute), on local `day` as
+    engine instants, each paired with its index in `times` and listed in
+    wall-time order. An entry that does not fire that day is left out.
+
+    `vendor` False is the fold=0 conversion of every entry (the
+    `dst-start-times=fold0` switch): a repeated wall time is its first
+    occurrence, and a missing one maps past the gap. `vendor` True applies
+    the documented rules on a change of the shape `dst_change` names
+    (DL-260). TechDocs 12.1 and 24.2, "Standard Time Changes": jobs whose
+    start_time is "between 1:00 and 1:59" run "during the second (standard
+    time) hour". "Daylight Time Changes": a missing-hour start runs "during
+    the first minute of the next hour" (2:05 runs at 3:00:05), and "If you
+    schedule a job to run more than once during the missing hour (for
+    example, at 2:05 and 2:25), only the first scheduled job run occurs."
+    Other shapes keep the fold=0 conversion.
+
+    Under fold=0 a missing wall time can land on a later entry's instant;
+    the earlier wall time is listed first."""
+    change = dst_change(day, tz) if vendor else None
+    instants: list[tuple[int, datetime]] = []
+    gap_taken = False
+    for index in sorted(range(len(times)), key=lambda i: times[i]):
+        hour, minute = times[index]
+        if change == "spring" and hour == MISSING_HOUR:
+            if not gap_taken:
+                gap_taken = True
+                instants.append((index, vendor_gap_instant(day, hour, minute, tz)))
+            continue
+        second = change == "fall" and hour == REPEATED_HOUR
+        local = datetime.combine(day, time(hour, minute)).replace(fold=1 if second else 0)
+        instants.append((index, to_utc(local, tz)))
+    return instants
+
+
+def start_mins_instants(
+    day: date, ticks: Sequence[tuple[int, int]], tz: tzinfo | None, *, vendor: bool
+) -> list[datetime]:
+    """start_mins ticks, as (hour, minute), on local `day` as engine
+    instants, in wall-time order.
+
+    `vendor` False is the fold=0 conversion, as in `start_time_instants`.
+    `vendor` True applies the documented rules on a change of the shape
+    `dst_change` names (DL-260). "Standard Time Changes": "Jobs for which
+    the start_mins attribute is set run in both hours." "Daylight Time
+    Changes": "Jobs with relative time dependencies run as expected", so a
+    tick in the missing hour does not exist: 0, 20 and 40 run at "1:00 ST,
+    1:20 ST, 1:40 ST, 3:00 DT, 3:20 DT, and 3:40 DT"."""
+    change = dst_change(day, tz) if vendor else None
+    instants: list[datetime] = []
+    for hour, minute in ticks:
+        if change == "spring" and hour == MISSING_HOUR:
+            continue
+        local = datetime.combine(day, time(hour, minute))
+        instants.append(to_utc(local, tz))
+        if change == "fall" and hour == REPEATED_HOUR:
+            instants.append(to_utc(local.replace(fold=1), tz))
+    return instants
 
 
 def alias_table(aliases: Mapping[str, str] | None) -> dict[str, str] | None:

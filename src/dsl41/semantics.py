@@ -55,6 +55,9 @@ class Switch:
     #: -- the classifier's edge from a calendar to this switch. A job reaches
     #: such a switch through the calendars it names.
     affects_calendar: Callable[[CalendarIR], bool] = _no_calendar
+    #: whether the scheduler reads this switch to place start instants
+    #: (DL-260); a calendar switch is read by the scheduler anyway
+    scheduler: bool = False
 
 
 def _no_job(job: JobIR, _catalog: CatalogIR) -> bool:
@@ -119,6 +122,16 @@ def _fw_without_min_size(job: JobIR, _catalog: CatalogIR) -> bool:
     return fw_no_min_size(job)
 
 
+def _has_start_ticks(job: JobIR, _catalog: CatalogIR) -> bool:
+    """A schedule with start_times or start_mins: what `dst-start-times`
+    reads. The job's zone is not checked, because a flip is classified
+    without the profile that resolves it; reading every such job as
+    affected never carries a change silently. A running job it reaches is
+    refused (R); a latent one carries a recorded assumption (A)."""
+    schedule = job.schedule
+    return schedule is not None and bool(schedule.start_times or schedule.start_mins)
+
+
 #: The registry. Closed: a name that is not here is refused wherever it is
 #: met, at profile construction and on the command line.
 REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
@@ -176,6 +189,16 @@ REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
                 affects=_no_job,
                 affects_calendar=_reads_wekr,
             ),
+            Switch(
+                name="dst-start-times",
+                values=("vendor", "fold0"),
+                default="vendor",
+                autosys="vendor",
+                description="how start_times and start_mins read the hour a one-hour DST"
+                " change skips or repeats: the vendor's rules, or the fold=0 conversion",
+                affects=_has_start_ticks,
+                scheduler=True,
+            ),
         )
     }
 )
@@ -186,11 +209,21 @@ CALENDAR_SWITCHES: Final[tuple[str, ...]] = tuple(
     name for name, switch in REGISTRY.items() if switch.affects_calendar is not _no_calendar
 )
 
+#: Every switch a scheduler compiles under: the calendar switches and the
+#: ones it reads to place start instants (DL-260). The derived runtime
+#: profile reads each back from the wired scheduler, so the drift gates
+#: refuse a disagreeing scheduler before anything durable is written, and
+#: an engine refuses one as a backstop.
+SCHEDULER_SWITCHES: Final[tuple[str, ...]] = tuple(
+    name for name, switch in REGISTRY.items() if switch.scheduler or name in CALENDAR_SWITCHES
+)
+
 IceLookback = Literal["true", "ordinary"]
 RenewableFree = Literal["Y", "A"]
 QueuedRecheck = Literal["0", "1", "2"]
 FwExistence = Literal["stable", "immediate"]
 WekrFirstWeek = Literal["first-full", "partial"]
+DstStartTimes = Literal["vendor", "fold0"]
 
 
 @dataclass(frozen=True)
@@ -205,6 +238,7 @@ class SemanticSwitches:
     queued_recheck: QueuedRecheck
     fw_existence: FwExistence
     wekr_first_week: WekrFirstWeek
+    dst_start_times: DstStartTimes
 
     def value(self, name: str) -> str:
         """The effective value of the switch called `name`."""

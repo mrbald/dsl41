@@ -17403,3 +17403,121 @@ relitigate an entry; append a new one.
   goes. `_no_job` takes the catalog, as DL-256's `affects` does. Since
   DL-254 ignores ON_ICE on a running job, the `ice-lookback` description
   and its register rows say "on ice", not "on ice and not running".
+- DL-260 Start times follow the vendor's DST rules by default; fold=0 stays
+  selectable as `dst-start-times=fold0` (2026-10-03; timezones.py,
+  semantics.py, runner_scheduler.py, oracle.py, runner.py,
+  runner_startup.py, rehearse_check.py, cli_run.py, runner_ledger.py,
+  simulation_register_rows.py, simulation-coverage.md; runner-design ss5,
+  ss8a and ss15 E10; autosys-semantics SEM-32, SEM-33, SEM-34 and ss8;
+  period-model ss10.2)
+  THE VENDOR. TechDocs 12.1 and 24.2 carry the same text. "Standard Time
+  Changes": "AutoSys Workload Automation only runs jobs for which the
+  start_time attribute is set to between 1:00 and 1:59 during the second
+  (standard time) hour. Jobs for which the start_mins attribute is set run
+  in both hours." "Daylight Time Changes": "a job that is scheduled to run
+  on Sundays at 2:05 runs at 3:00:05 that day; a job that is scheduled to
+  run every day at 2:45 runs at 3:00:45." "If you schedule a job to run
+  more than once during the missing hour (for example, at 2:05 and 2:25),
+  only the first scheduled job run occurs." Relative jobs "run as
+  expected": start_mins 0, 20, 40 run at "1:00 ST, 1:20 ST, 1:40 ST, 3:00
+  DT, 3:20 DT, and 3:40 DT".
+  THE RULE. The owner's rule (DL-252): documented AutoSys behavior is the
+  default, and dsl41's own behavior stays selectable. E10's DST half was a
+  PEP 495 fold=0 pin (DL-45, DL-250). It ran a repeated start time in the
+  first pass, moved a missing-hour start forward by the gap (2:05 at 3:05)
+  and kept every such start. The vendor rules are now the default.
+  THE SWITCH. `dst-start-times`, values `vendor` (default, the documented
+  reading) and `fold0` (the earlier behavior). It reaches every job with
+  `start_times` or `start_mins`. Its `affects` predicate does not check the
+  zone, because the classifier has no resolved zone for a job; over-reaching
+  never carries a change silently. A flip classifies those jobs as a
+  base-zone change does: a running job it reaches is refused (R), and a
+  latent one carries the recorded assumption (A).
+  THE BEHAVIOR. `timezones.start_time_instants` and `start_mins_instants`
+  convert a local day's start times to engine instants. They are the one
+  definition the scheduler ticks from and the oracle names slots from. On a
+  change of the shape DL-249 detects (`dst_change`) and under `vendor`: a
+  start time in 01:00-01:59 takes the second, standard-time pass; start_mins
+  ticks in that hour fire in both passes; the first start time in
+  02:00-02:59 by wall time fires at 03:00 plus its minute as seconds, and
+  later ones in that hour do not fire; start_mins ticks in that hour do not
+  exist. Under `fold0`, on other change shapes, and for calendar row times
+  (E11) the conversion is fold=0, as before. Other shapes are unverified:
+  the register row `job_attr:timezone#dst-other-shape` carries them with no
+  label opened. The vendor gap tick is the one tick that is not on a whole
+  minute.
+  ONE VALUE PER ENGINE. The scheduler takes the resolved switches in its
+  constructor. `wire_from_profile` passes the period's switches, and
+  `rehearse`, its cadence check (`scheduled_ticks`, `play_once`) pass the
+  rehearsal's. The engine refuses a scheduler whose value is not its
+  oracle's, since the two would disagree on where a slot's tick is.
+  `_derive_runtime_profile` reads the switch back from the scheduler, as
+  DL-259 does for the calendar switches, over the registry-derived
+  `SCHEDULER_SWITCHES` (the calendar switches and every entry flagged
+  `scheduler`). So a disagreeing scheduler is refused by the profile drift
+  gate before anything durable is written: no manifest or log at genesis,
+  no successor segment or moved head at a boundary open, no leader record
+  at resume (period-model PR-22b). The Engine check is a backstop over
+  the same tuple.
+  SLOTS. `_start_slot` named a slot by wall-time match first, so with
+  start_times "02:45, 03:45" the 02:45 fold=0 tick at 03:45 EDT named slot
+  1 (DL-253's known gap). It now names the slot by instant: the latest
+  start time of the tick's local day at or before the tick, less than a
+  minute earlier, so an event inside a start time's minute still names it.
+  Under `vendor` each tick usually names its own slot: 02:45 at 03:00:45 is
+  slot 0 and 03:45 is slot 1. Under `fold0` 02:45 and 03:45 share one
+  instant and the scheduler ticks once; that tick names the earlier wall
+  time, 02:45. That is a [?] pin of this project, recorded in SEM-34.
+  `vendor` can collide too: start_times "02:00, 03:00" in America/New_York
+  on 2026-03-08 both convert to 07:00:00 UTC (02:00 moves to 03:00:00, the
+  same instant as the plain 03:00 start). The scheduler ticks once and
+  names slot 0; slot 1's run and its must time never arm. On a spring
+  change day, a moved start that lands on the instant of a listed start
+  shares one tick, named for the earlier wall time; the vendor pages do
+  not say. That is a second [?] pin, recorded in SEM-34. A relative must
+  time runs from the moved tick: the vendor's 2:45 with +5 and +15 is due
+  at 3:05:45 and 3:15:45. The before-tick register rows lose their E10
+  label: both values can reach that pin now, not only `fold0`.
+  Europe/London's spring change skips 01:00-01:59, not 02:00-02:59, so
+  `dst_change` names no shape there (DL-249) and `vendor` keeps the fold=0
+  conversion too: a 01:45 start ticks at 01:45 UTC, and a must_start_times
+  of "02:10" resolves to 01:10 UTC, before the tick.
+  SEM-33. The vendor's 1:15 start inside an 11:30 - 1:30 window "would be
+  calculated for 1:15 ST and the job would not run". Under `vendor` the
+  tick is 1:15 EST, past the window's 1:30 EDT close, and the closer-edge
+  rule skips it, so the example is now modelled.
+  UNCHANGED. E10's other half, absent days_of_week as every day, stays open
+  behind its marker. Absolute must times (DL-253) and run_window (DL-249)
+  keep their rules under both values.
+  VERSION. `STATE_MACHINE_VERSION` moves to 16: ticks move on a DST change
+  day, and a replay names slots and arms must times differently.
+  Tests: test_timezones.py `test_sem32_dst_*` (the two conversions, both
+  values, controls away from a documented change); test_runner_scheduler.py
+  `test_sem32_dst_*` (fall 1:05 once, fall start_mins in both passes, spring
+  2:05 at 3:00:05, spring 2:05 and 2:25 in either listing order, spring
+  start_mins, ordinary days, America/Phoenix, scheduler and oracle agreement
+  on the engine path on both change days, the engine refusing a scheduler on
+  another value) and `test_sem33_dst_a_fall_start_time_*`; test_oracle.py
+  `test_sem32_dst_relative_must_times_*`, `test_sem34_dst_*` and
+  `test_sem34_an_event_inside_*`; test_semantics.py the registry entry, its
+  `affects`, `wire_from_profile`, `rehearse` under both values, and a flip's
+  classifier verdict (R running, carried quiet).
+  Rewritten: test_runner_scheduler.py
+  `test_dst_spring_forward_nonexistent_time_sorts_after_a_later_local_tick`
+  and `test_dst_fall_back_ambiguous_time_fires_at_its_first_occurrence` run
+  under `fold0`, expectations unchanged; test_oracle.py
+  `test_sem34_spring_missing_hour_start_ticks_late_and_its_deadline_is_the_tick`
+  runs under `fold0`, unchanged, and
+  `test_sem34_fall_start_and_must_time_in_the_repeated_hour_take_the_second_pass`
+  runs under both values, its tick at 06:15 UTC under `vendor` and 05:15
+  under `fold0` (it was 05:15), the alarm at 06:30 under both;
+  test_semantics.py's three unknown-switch messages list
+  `dst-start-times, fw-existence, ice-lookback`.
+  Read-back tests: test_semantics.py
+  `test_the_scheduler_switches_are_the_calendar_ones_and_dst_start_times`,
+  `test_unstaged_genesis_pins_the_dst_start_times_its_scheduler_compiled_under`,
+  `test_a_staged_dst_pin_off_the_scheduler_writes_nothing` and
+  `test_a_resume_with_a_scheduler_off_the_dst_pin_writes_nothing`;
+  test_boundary.py
+  `test_pr22b_a_committed_dst_pin_refuses_a_scheduler_off_it_before_the_segment`.
+  Each has a non-triggering twin.

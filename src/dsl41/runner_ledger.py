@@ -107,7 +107,10 @@ from dsl41.runner_clock import EngineError
 #: the week, and the wekr-first-week switch places week 1, so autocal's
 #: compiled day sets and the boundary classification `attest` re-derives
 #: from them can differ from v14.
-STATE_MACHINE_VERSION = 15
+#: 16 since DL-260: start times follow the vendor's DST rules by default and
+#: the oracle names a tick's slot by instant, so ticks move on a DST change
+#: day and a replay names slots and arms must times differently.
+STATE_MACHINE_VERSION = 16
 
 LOCK_NAME = "leader.lock"
 

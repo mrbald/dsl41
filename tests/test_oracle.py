@@ -5299,13 +5299,18 @@ def test_sem34_spring_must_time_before_a_missing_hour_start_moves_to_3_00_59() -
     assert _must_instant(day, start, MustTime(hour=3, minute=10), tz) == datetime(2026, 3, 8, 7, 10)
 
 
+_FOLD0 = resolve_switches({"dst-start-times": "fold0"})
+
+
 def test_sem34_spring_missing_hour_start_ticks_late_and_its_deadline_is_the_tick() -> None:
-    """SEM-34, DL-253 x runner-design E10: the scheduler ticks a 02:45 start
-    at fold=0, 03:45 EDT, which still names the 02:45 slot. Its must
-    complete time, 3:00:59 by the vendor's rule, is already past, so it is
-    due at the tick: a run that began there has not completed and alarms at
-    03:45 EDT."""
-    o = oracle(_abs_jil("sg", "02:45", must_complete="03:00", zone=_NY, gated=False))
+    """SEM-34, DL-253, under dst-start-times=fold0 (DL-260): the scheduler
+    ticks a 02:45 start past the gap, 03:45 EDT, which still names the 02:45
+    slot. Its must complete time, 3:00:59 by the vendor's rule, is already
+    past, so it is due at the tick: a run that began there has not
+    completed and alarms at 03:45 EDT."""
+    o = oracle(
+        _abs_jil("sg", "02:45", must_complete="03:00", zone=_NY, gated=False), semantics=_FOLD0
+    )
     tick = datetime(2026, 3, 8, 7, 45)
     o.feed(ev_at(tick, "STARTJOB", job="sg"))
     assert _timers(o, "sg") == [(tick, "sg", "must_complete")]
@@ -5323,16 +5328,130 @@ def test_sem34_fall_must_time_in_the_repeated_hour_takes_the_first_pass() -> Non
     assert _alarm_times(o, "fa", "MUST_COMPLETE_ALARM") == [datetime(2026, 11, 1, 5, 30)]
 
 
-def test_sem34_fall_start_and_must_time_in_the_repeated_hour_take_the_second_pass() -> None:
+@pytest.mark.parametrize(
+    ("switch", "tick"),
+    [("vendor", datetime(2026, 11, 1, 6, 15)), ("fold0", datetime(2026, 11, 1, 5, 15))],
+)
+def test_sem34_fall_start_and_must_time_in_the_repeated_hour_take_the_second_pass(
+    switch: str, tick: datetime
+) -> None:
     """SEM-34, DL-253: "When the specified start of the job and either the
     must start or must complete times or both occur during the repeated
     hour, CA Workload Automation raises alarms during the second standard
-    time hour." The 01:15 start ticks at fold=0 (E10), 05:15 UTC; its 01:30
-    must start time is 01:30 EST, 06:30 UTC."""
-    o = oracle(_abs_jil("fb", "01:15", must_start="01:30", zone=_NY))
-    o.feed(ev_at(datetime(2026, 11, 1, 5, 15), "STARTJOB", job="fb"))
+    time hour." The 01:15 start ticks at 01:15 EST, 06:15 UTC, under the
+    vendor default, and at 01:15 EDT, 05:15 UTC, under dst-start-times=fold0
+    (DL-260). Either tick names the slot; its 01:30 must start time is
+    01:30 EST, 06:30 UTC."""
+    chosen = resolve_switches({"dst-start-times": switch})
+    o = oracle(_abs_jil("fb", "01:15", must_start="01:30", zone=_NY), semantics=chosen)
+    o.feed(ev_at(tick, "STARTJOB", job="fb"))
     o.feed(ev_at(datetime(2026, 11, 1, 8, 0), "STATUS", job="fb_idle", status="SUCCESS"))
     assert _alarm_times(o, "fb", "MUST_START_ALARM") == [datetime(2026, 11, 1, 6, 30)]
+
+
+@pytest.mark.parametrize(
+    ("switch", "tick", "must_start", "must_complete"),
+    [
+        (
+            "vendor",
+            datetime(2026, 3, 8, 7, 0, 45),
+            datetime(2026, 3, 8, 7, 5, 45),
+            datetime(2026, 3, 8, 7, 15, 45),
+        ),
+        (
+            "fold0",
+            datetime(2026, 3, 8, 7, 45),
+            datetime(2026, 3, 8, 7, 50),
+            datetime(2026, 3, 8, 8, 0),
+        ),
+    ],
+)
+def test_sem32_dst_relative_must_times_run_from_the_moved_start(
+    switch: str, tick: datetime, must_start: datetime, must_complete: datetime
+) -> None:
+    """SEM-34, DL-260, "Daylight Time Changes": "a job that is specified to
+    run at 2:45 with a relative must start time of 5 minutes and a relative
+    must complete time of 15 minutes, runs at 3:00:45 and generates an alarm
+    if it does not start by 3:05:45 or if it does not complete by 3:15:45."
+    The scheduler ticks there under the vendor default; under fold0 it ticks
+    at 03:45 EDT, and the offsets run from that tick."""
+    chosen = resolve_switches({"dst-start-times": switch})
+    o = oracle(
+        _abs_jil("rl", "02:45", must_start="+5", must_complete="+15", zone=_NY),
+        semantics=chosen,
+    )
+    o.feed(ev_at(tick, "STARTJOB", job="rl"))
+    o.feed(ev_at(datetime(2026, 3, 8, 9, 0), "STATUS", job="rl_idle", status="SUCCESS"))
+    assert _alarm_times(o, "rl", "MUST_START_ALARM") == [must_start]
+    assert _alarm_times(o, "rl", "MUST_COMPLETE_ALARM") == [must_complete]
+
+
+def test_sem34_dst_each_vendor_tick_names_its_own_slot() -> None:
+    """SEM-34, DL-260: start_times "02:45, 03:45" with must start times
+    03:30 and 04:30 on 2026-03-08. Under the vendor default 02:45 runs at
+    03:00:45 EDT and names slot 0, due 03:30 EDT; 03:45 names slot 1, due
+    04:30 EDT. DL-253 recorded the gap this closes: the wall-time match
+    named slot 1 for the 02:45 tick."""
+    o = oracle(_abs_jil("tw", "02:45, 03:45", must_start="03:30, 04:30", zone=_NY))
+    o.feed(ev_at(datetime(2026, 3, 8, 7, 0, 45), "STARTJOB", job="tw"))
+    o.feed(ev_at(datetime(2026, 3, 8, 7, 45), "STARTJOB", job="tw"))
+    o.feed(ev_at(datetime(2026, 3, 8, 9, 0), "STATUS", job="tw_idle", status="SUCCESS"))
+    assert _alarm_times(o, "tw", "MUST_START_ALARM") == [
+        datetime(2026, 3, 8, 7, 30),
+        datetime(2026, 3, 8, 8, 30),
+    ]
+
+
+def test_sem34_dst_a_shared_fold0_tick_names_the_earlier_start_time() -> None:
+    """SEM-34, DL-260, under dst-start-times=fold0: 02:45 maps past the gap
+    onto 03:45 EDT, 07:45 UTC, where the scheduler ticks once. The tick
+    names the earlier wall time, 02:45 (slot 0); its 03:30 must time is
+    past, so it is due at the tick. Before DL-260 it named slot 1 and was
+    due at 04:30 EDT."""
+    o = oracle(
+        _abs_jil("tf", "02:45, 03:45", must_start="03:30, 04:30", zone=_NY), semantics=_FOLD0
+    )
+    tick = datetime(2026, 3, 8, 7, 45)
+    o.feed(ev_at(tick, "STARTJOB", job="tf"))
+    o.feed(ev_at(datetime(2026, 3, 8, 9, 0), "STATUS", job="tf_idle", status="SUCCESS"))
+    assert _alarm_times(o, "tf", "MUST_START_ALARM") == [tick]
+
+
+def test_sem34_dst_a_vendor_collision_names_the_earlier_slot() -> None:
+    """SEM-34, DL-260: start_times "02:00, 03:00" in America/New_York on
+    2026-03-08. Under the vendor default both convert to 07:00:00 UTC
+    (02:00 moves to 03:00:00, the plain 03:00 start's own instant), so the
+    scheduler ticks once there. The tick names slot 0, due 07:00:30 UTC;
+    slot 1's run and its 03:30 must time never arm."""
+    o = oracle(_abs_jil("tc", "02:00, 03:00", must_start="02:30, 03:30", zone=_NY))
+    o.feed(ev_at(datetime(2026, 3, 8, 7, 0), "STARTJOB", job="tc"))
+    o.feed(ev_at(datetime(2026, 3, 8, 9, 0), "STATUS", job="tc_idle", status="SUCCESS"))
+    assert _alarm_times(o, "tc", "MUST_START_ALARM") == [datetime(2026, 3, 8, 7, 0, 30)]
+
+
+def test_sem34_dst_vendor_reaches_the_before_tick_pin_on_an_undetected_shape() -> None:
+    """SEM-34, DL-260: Europe/London's spring change skips 01:00-01:59, not
+    02:00-02:59, so `dst_change` names no shape there (DL-249) and `vendor`
+    keeps the fold=0 conversion too: a 01:45 start ticks at 01:45 UTC. Its
+    02:10 must time resolves to 01:10 UTC, before the tick, so the alarm is
+    due at the tick under `vendor`, as it already was under `fold0`."""
+    o = oracle(_abs_jil("lon", "01:45", must_start="02:10", zone="Europe/London"))
+    tick = datetime(2026, 3, 29, 1, 45)
+    o.feed(ev_at(tick, "STARTJOB", job="lon"))
+    o.feed(ev_at(datetime(2026, 3, 29, 3, 0), "STATUS", job="lon_idle", status="SUCCESS"))
+    assert _alarm_times(o, "lon", "MUST_START_ALARM") == [tick]
+
+
+def test_sem34_an_event_inside_a_start_time_s_minute_still_names_it() -> None:
+    """SEM-34, DL-260: slots are named by instant now, and an event less
+    than a minute after a start time's instant still names it, as the
+    wall-time match did. 10:00:30 names the 10:00 slot; 10:01 names none."""
+    o = oracle(_abs_jil("im", "10:00", must_start="10:02", must_complete="10:08"))
+    o.feed(ev_at(_DAY.replace(hour=10, second=30), "STARTJOB", job="im"))
+    assert sorted(t[2] for t in _timers(o, "im")) == ["must_complete", "must_start"]
+    late = oracle(_abs_jil("il", "10:00", must_start="10:02", must_complete="10:08"))
+    late.feed(ev_at(_DAY.replace(hour=10, minute=1), "STARTJOB", job="il"))
+    assert _timers(late, "il") == []
 
 
 # --------------------------------------------------------------------- 20. term_run_time

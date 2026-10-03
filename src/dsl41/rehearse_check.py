@@ -73,8 +73,7 @@ UNMODELED_NOTE = (
 
 
 class CadenceCheckError(ValueError):
-    """A check-mode refusal (policy file, scenario allowlist); the CLI owns
-    the exit code."""
+    """A check-mode refusal (policy file, scenario allowlist); the CLI owns the exit code."""
 
 
 # ------------------------------------------------------------------ policy
@@ -259,10 +258,9 @@ def scheduled_ticks(
     tz_aliases: Mapping[str, str] | None = None,
     semantics: SemanticSwitches | None = None,
 ) -> dict[str, int]:
-    """Per-job tick counts in [start, horizon] from a FRESH Scheduler with
-    the engine's own construction arguments: reset(start) is tick-at-start
-    inclusive and run_until_quiescent is at-or-before-horizon inclusive, so
-    the windows match by construction."""
+    """Per-job tick counts in [start, horizon] from a FRESH Scheduler, switches
+    included: reset(start) is tick-at-start inclusive and run_until_quiescent
+    is at-or-before-horizon inclusive, so the windows match by construction."""
     sched = Scheduler(
         catalog, start=start, default_tz=default_tz, tz_aliases=tz_aliases, semantics=semantics
     )
@@ -1170,10 +1168,9 @@ def play_once(
     tz_aliases: Mapping[str, str] | None = None,
     semantics: SemanticSwitches | None = None,
 ) -> PlayResult:
-    """One journal-free virtual-clock play: the reentrant player the sweeps
-    and tests reuse (DL-184). A ZeroDelayCycleError is caught and returned
-    on the result -- the check's own finding; every other EngineError
-    propagates as the shell failure it is."""
+    """One journal-free virtual-clock play: the reentrant player the sweeps and tests reuse
+    (DL-184). A ZeroDelayCycleError is caught and returned on the result -- the check's own
+    finding; every other EngineError propagates as the shell failure it is."""
     clock = VirtualClock(start)
     scheduler = Scheduler(
         catalog, start=start, default_tz=default_tz, tz_aliases=tz_aliases, semantics=semantics

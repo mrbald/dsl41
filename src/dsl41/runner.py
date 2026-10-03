@@ -223,7 +223,7 @@ from dsl41.runner_journal import (
 from dsl41.runner_ledger import Fence
 from dsl41.seal import Execution, SealedHost, SealedState, implicit_routes
 from dsl41.runner_scheduler import Scheduler
-from dsl41.semantics import CALENDAR_SWITCHES, SemanticSwitches
+from dsl41.semantics import SCHEDULER_SWITCHES, SemanticSwitches
 from dsl41.semantics import DEFAULTS as DEFAULT_SWITCHES
 from dsl41.timezones import alias_table
 
@@ -346,9 +346,12 @@ def _engine_switches(
     an estate runs its period's pin and nothing else; `semantics` is for an
     engine with no estate (a rehearsal without a run root, a harness), and
     one that disagrees with the pin is a caller bug, refused. So is a
-    scheduler built under another calendar switch (DL-259): its extended
-    calendars would fire under one reading while the period records
-    another."""
+    scheduler built under another value of a switch it reads (DL-259,
+    DL-260): its extended calendars, or its start instants, would fire under
+    one reading while the period records and the oracle names slots under
+    another. The derived runtime profile reads those switches back from the
+    scheduler, so a launcher meets this before any durable write; this
+    check is the backstop."""
     if estate is None:
         switches = semantics or DEFAULT_SWITCHES
     else:
@@ -361,10 +364,10 @@ def _engine_switches(
     if scheduler is not None:
         # only the switches the scheduler reads: an embedder's scheduler
         # built under another `ice-lookback` fires the same ticks
-        for name in CALENDAR_SWITCHES:
+        for name in SCHEDULER_SWITCHES:
             if scheduler.semantics.value(name) != switches.value(name):
                 raise EngineError(
-                    f"the scheduler compiled its calendars under {name}="
+                    f"the scheduler compiled under {name}="
                     f"{scheduler.semantics.value(name)}, the engine runs"
                     f" {switches.value(name)} (runner-design ss8a)"
                 )

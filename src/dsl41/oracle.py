@@ -315,8 +315,10 @@ from dsl41.timezones import (
     dst_change,
     dst_change_near,
     resolve_timezone,
+    start_time_instants,
     to_local,
     to_utc,
+    vendor_gap_instant,
 )
 
 #: SEM-02: n() is true unless the job is in one of these (WAIT_REPLY/RESTART/
@@ -330,6 +332,10 @@ _OPENING_SCAN_DAYS: Final = 2 * 366
 
 #: `date.weekday()` (Monday 0) -> the JIL days_of_week token
 _WEEKDAY_TOKENS: Final = ("mo", "tu", "we", "th", "fr", "sa", "su")
+
+#: SEM-34: how long after a start time's instant an event still names its
+#: slot -- the minute the wall-time match used to cover (DL-260)
+_SLOT_MINUTE = timedelta(minutes=1)
 
 
 class InputBatch:
@@ -2580,29 +2586,36 @@ class Oracle:
     # ----------------------------------------------------- clocks, SLAs, timeouts
 
     def _start_slot(self, job_ir: JobIR) -> int | None:
-        """SEM-34: which `start_times` entry the current instant is, read in
-        the job's own timezone. None when the job declares none, or when the
-        instant is not one of them -- an operator's sendevent, say. A
-        start_mins job carries one broadcast offset (DL-248), so it never
-        needs a slot.
+        """SEM-34: which `start_times` entry the current instant is. None
+        when the job declares none, or when the instant is not one of them
+        -- an operator's sendevent, say. A start_mins job carries one
+        broadcast offset (DL-248), so it never needs a slot.
 
-        A start time in a spring change's missing hour has no wall time to
-        match. The scheduler ticks it at the instant `to_utc` gives (fold=0,
-        runner-design E10), so that instant names the slot too (DL-253)."""
+        The slot is named by instant, not by wall time (DL-260). The
+        scheduler and this method convert the start times of the instant's
+        local day, in the job's zone, through one definition,
+        `timezones.start_time_instants`, under the same `dst-start-times`
+        value. So a tick names its own slot on a DST change day too: under
+        `vendor`, a 02:45 start runs at 03:00:45 and a 03:45 start at
+        03:45, each naming its own. An instant names the latest start time
+        at or before it, less than a minute earlier, so an event inside a
+        start time's minute still names it, as the wall-time match did.
+        Under `fold0` a missing-hour start can share an instant with a later
+        start time; the scheduler then ticks once, and the tick names the
+        earlier wall time."""
         schedule = job_ir.schedule
         if schedule is None or not schedule.start_times:
             return None
         assert self._now is not None
         tz = self._job_tz(job_ir)
-        now_local = to_local(self._now, tz)
-        for index, start in enumerate(schedule.start_times):
-            if (start.hour, start.minute) == (now_local.hour, now_local.minute):
-                return index
-        tick = self._now.replace(second=0, microsecond=0)
-        for index, start in enumerate(schedule.start_times):
-            if to_utc(datetime.combine(now_local.date(), _to_time(start)), tz) == tick:
-                return index
-        return None
+        day = to_local(self._now, tz).date()
+        times = [(start.hour, start.minute) for start in schedule.start_times]
+        vendor = self.semantics.dst_start_times == "vendor"
+        best: tuple[datetime, int] | None = None
+        for index, at in start_time_instants(day, times, tz, vendor=vendor):
+            if at <= self._now < at + _SLOT_MINUTE and (best is None or at > best[0]):
+                best = (at, index)
+        return None if best is None else best[1]
 
     def _sla_offset(self, job_ir: JobIR, offsets: list[int]) -> int:
         """SEM-34: "+n minutes from each start time" under the strict count
@@ -2654,9 +2667,10 @@ class Oracle:
 
         A deadline that falls before the tick is due at the tick. Only one
         case reaches that, because lowering refuses a must time below its
-        own start time (SEM-34): a start in a spring change's missing hour
-        ticks at fold=0 (runner-design E10), later than the vendor's first
-        minute of the next hour, where its must time may lie."""
+        own start time (SEM-34): under `dst-start-times=fold0` a start in a
+        spring change's missing hour ticks past the gap, later than the
+        vendor's first minute of the next hour, where its must time may lie
+        (DL-260)."""
         slot = self._start_slot(job_ir)
         schedule = job_ir.schedule
         if slot is None or schedule is None or not schedule.start_times or slot >= len(times):
@@ -2790,15 +2804,6 @@ def _to_time(t: Time) -> dtime:
     return dtime(hour=t.hour, minute=t.minute)
 
 
-def _vendor_gap_instant(day: date, hour: int, minute: int, tz: tzinfo | None) -> datetime:
-    """A wall time in a spring change's missing hour, as the vendor moves
-    it: into the first minute of the next hour, its minute read as seconds.
-    "Daylight Time Changes": "a job that is scheduled to run on Sundays at
-    2:05 runs at 3:00:05"."""
-    first = to_utc(datetime.combine(day, dtime(hour + 1, 0)), tz)
-    return first + timedelta(seconds=minute)
-
-
 def _must_instant(day: date, start: Time, must: MustTime, tz: tzinfo | None) -> datetime:
     """An absolute must time as an engine instant (SEM-34, DL-253). `day`
     is the local calendar day of the start it pairs with. Hours 24-71 land
@@ -2825,16 +2830,16 @@ def _must_instant(day: date, start: Time, must: MustTime, tz: tzinfo | None) -> 
     local = datetime.combine(day + timedelta(days=days), dtime(hour, must.minute))
     change = dst_change(local.date(), tz)
     if change == "spring" and hour == MISSING_HOUR:
-        due = _vendor_gap_instant(local.date(), hour, must.minute, tz)
+        due = vendor_gap_instant(local.date(), hour, must.minute, tz)
     else:
         second = (
             change == "fall" and hour == REPEATED_HOUR and days == 0 and start.hour == REPEATED_HOUR
         )
         due = to_utc(local.replace(fold=1 if second else 0), tz)
     if dst_change(day, tz) == "spring" and start.hour == MISSING_HOUR:
-        runs_at = _vendor_gap_instant(day, start.hour, start.minute, tz)
+        runs_at = vendor_gap_instant(day, start.hour, start.minute, tz)
         if runs_at > due:
-            due = _vendor_gap_instant(day, start.hour, 59, tz)
+            due = vendor_gap_instant(day, start.hour, 59, tz)
     return due
 
 

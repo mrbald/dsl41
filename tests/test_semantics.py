@@ -56,7 +56,12 @@ from dsl41.runner_history import RunHistoryError, replay_trace
 from dsl41.runner_journal import read_journal
 from dsl41.runner_ledger import STATE_MACHINE_VERSION
 from dsl41.runner_scheduler import Scheduler
-from dsl41.runner_startup import _derive_runtime_profile, resume_run, start_run
+from dsl41.runner_startup import (
+    _derive_runtime_profile,
+    resume_run,
+    start_run,
+    wire_from_profile,
+)
 from test_period_identity import GOLDEN_RUNTIME_HASH, _full_profile
 from test_runner_leadership import engine
 
@@ -172,10 +177,20 @@ def test_queued_recheck_refuses_a_calendar_it_cannot_read(calendar: str, message
         oracle.feed(Event(at=T0, kind="STATUS", payload={"job": "hq", "status": "SUCCESS"}))
 
 
+def test_the_dst_start_times_default_is_the_documented_autosys_reading() -> None:
+    """DL-260: the vendor's DST rules for start times are documented
+    ("Standard Time Changes", "Daylight Time Changes"), so they are the
+    default; fold0 keeps dsl41's earlier conversion selectable."""
+    switch = semantics.REGISTRY["dst-start-times"]
+    assert switch.values == ("vendor", "fold0")
+    assert switch.default == "vendor" == switch.autosys
+    assert semantics.DEFAULTS.dst_start_times == "vendor"
+
+
 def test_the_profile_refuses_an_unknown_switch_with_the_known_names() -> None:
     with pytest.raises(ValidationError, match="unknown semantic switch 'ice-lookbak'") as info:
         RuntimeProfile(semantics={"ice-lookbak": "true"})
-    assert "known switches: fw-existence, ice-lookback" in str(info.value)
+    assert "known switches: dst-start-times, fw-existence, ice-lookback" in str(info.value)
 
 
 def test_the_profile_refuses_a_value_outside_the_switch_s_set() -> None:
@@ -195,7 +210,7 @@ def test_the_profile_from_cli_carries_the_overrides() -> None:
     ("words", "message"),
     [
         (["ice-lookback"], "expected NAME=VALUE"),
-        (["nope=true"], "known switches: fw-existence, ice-lookback"),
+        (["nope=true"], "known switches: dst-start-times, fw-existence, ice-lookback"),
         (["ice-lookback=yes"], "is not one of true, ordinary"),
         (["ice-lookback=true", "ice-lookback=ordinary"], "is given twice"),
     ],
@@ -1084,6 +1099,80 @@ def test_a_rehearse_rerun_over_a_claimed_root_pins_the_calendar_switch(tmp_path:
     assert manifest is not None and manifest.runtime_profile.semantics == PARTIAL
 
 
+def test_dst_start_times_affects_exactly_the_jobs_with_start_times_or_start_mins() -> None:
+    """DL-260: a flip moves the ticks of every job with start_times or
+    start_mins, whatever its zone; a calendar-only job and an unscheduled
+    one keep theirs."""
+    affects = semantics.REGISTRY["dst-start-times"].affects
+    catalog = lower_source(
+        "insert_job: st\njob_type: c\nmachine: m1\ncommand: x\n"
+        'date_conditions: 1\nstart_times: "02:05"\n\n'
+        "insert_job: sm\njob_type: c\nmachine: m1\ncommand: x\n"
+        "date_conditions: 1\nstart_mins: 5\ntimezone: UTC\n\n"
+        "insert_job: cal\njob_type: c\nmachine: m1\ncommand: x\n"
+        "date_conditions: 1\nrun_calendar: c1\n\n"
+        "insert_job: plain\njob_type: c\nmachine: m1\ncommand: y\n\n"
+        "calendar: c1\n03/08/2026\n"
+    )
+    assert {name for name, job in catalog.jobs.items() if affects(job, catalog)} == {"st", "sm"}
+
+
+def test_a_dst_start_times_flip_refuses_a_running_job_and_carries_a_quiet_one() -> None:
+    """DL-260: a flip changes where a job's live ticks land, so a running
+    job it reaches is refused (R), as a base-zone change does -- not the
+    recorded-assumption reading. The same job, not live, only carries the
+    changed switch node."""
+    catalog = lower_source(
+        "insert_job: st\njob_type: c\nmachine: m1\ncommand: x\n"
+        'date_conditions: 1\nstart_times: "02:05"\ntimezone: America/New_York\n'
+    )
+    closing = Baseline(catalog=catalog, profile=RuntimeProfile())
+    opening = Baseline(
+        catalog=catalog, profile=RuntimeProfile(semantics={"dst-start-times": "fold0"})
+    )
+    node = SWITCH + "dst-start-times"
+
+    running = classify(
+        closing=closing,
+        opening=opening,
+        carried=CarriedState(
+            jobs={"st": CarriedJob(row=JobRuntime(status="RUNNING", status_at=T0))}, now=T0
+        ),
+    )
+    assert running.by_job["st"].verdict == "R"
+    assert node in running.by_job["st"].changed
+
+    quiet = classify(
+        closing=closing,
+        opening=opening,
+        carried=CarriedState(jobs={"st": CarriedJob(row=JobRuntime(status="INACTIVE"))}, now=T0),
+    )
+    assert quiet.by_job["st"].verdict != "R"
+    assert node in quiet.by_job["st"].changed
+
+
+def test_wire_from_profile_builds_the_scheduler_under_the_profile_s_switch(
+    tmp_path: Path,
+) -> None:
+    """DL-260: `run`, its resume and the offline sealer build the scheduler
+    here, so it reads the period's dst-start-times value, as the engine's
+    oracle does."""
+    catalog = lower_source(
+        "insert_job: dj\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\nstart_times: "02:05"\n'
+    )
+
+    async def wired(profile: RuntimeProfile) -> str:
+        wiring = await wire_from_profile(tmp_path, catalog, profile, start=T0)
+        await wiring.close()
+        assert wiring.scheduler is not None
+        return wiring.scheduler.semantics.dst_start_times
+
+    assert asyncio.run(wired(RuntimeProfile())) == "vendor"
+    fold0 = runtime_profile_from_cli(semantics={"dst-start-times": "fold0"})
+    assert asyncio.run(wired(fold0)) == "fold0"
+
+
 # ------------------------------------------------------------------ the CLI
 
 
@@ -1141,6 +1230,163 @@ def test_rehearse_reads_the_switch_and_records_it(tmp_path: Path) -> None:
     assert "cons INACTIVE->STARTING" not in replayed.stdout
 
 
+_DST_JIL = (
+    "insert_job: dj\njob_type: c\ncommand: x\nmachine: m1\n"
+    'date_conditions: 1\ndays_of_week: all\nstart_times: "02:05, 02:25"\n'
+    "timezone: America/New_York\n"
+)
+
+
+FOLD0 = {"dst-start-times": "fold0"}
+
+
+def _dst_genesis(run_root: Path, scheduler_switches: dict[str, str] | None, staged=None):
+    catalog = lower_source(_DST_JIL)
+    scheduler = Scheduler(catalog, start=T0, semantics=semantics.resolve(scheduler_switches))
+    return catalog, start_run(
+        catalog,
+        run_root,
+        clock=VirtualClock(start=T0),
+        adapters={"CMD": FakeAdapter(default=None)},
+        scheduler=scheduler,
+        staged=staged,
+    )
+
+
+def test_the_scheduler_switches_are_the_calendar_ones_and_dst_start_times() -> None:
+    """DL-260: the tuple the profile reads back from a scheduler is derived
+    from the registry, not kept by hand."""
+    assert set(semantics.SCHEDULER_SWITCHES) == {"wekr-first-week", "dst-start-times"}
+    assert set(semantics.CALENDAR_SWITCHES) == {"wekr-first-week"}
+
+
+@pytest.mark.parametrize(
+    ("scheduler_switches", "pinned"), [(FOLD0, FOLD0), (None, {})], ids=["fold0", "vendor"]
+)
+def test_unstaged_genesis_pins_the_dst_start_times_its_scheduler_compiled_under(
+    tmp_path: Path, scheduler_switches: dict[str, str] | None, pinned: dict[str, str]
+) -> None:
+    """DL-260: with no staged manifest, genesis reads `dst-start-times` back
+    from the wired scheduler, so the pin names the reading that ticks."""
+    run_root = tmp_path / "run"
+    _catalog, live = _dst_genesis(run_root, scheduler_switches)
+    try:
+        assert live.oracle.semantics == semantics.resolve(scheduler_switches)
+    finally:
+        _close(live)
+    manifest = read_period_manifest(run_root)
+    assert manifest is not None
+    assert manifest.runtime_profile.semantics == pinned
+
+
+@pytest.mark.parametrize("staged_switches", [{}, FOLD0], ids=["vendor-pin", "fold0-pin"])
+def test_a_staged_dst_pin_off_the_scheduler_writes_nothing(
+    tmp_path: Path, staged_switches: dict[str, str]
+) -> None:
+    """DL-260, period-model PR-22b: a staged vendor pin over a fold0
+    scheduler is profile drift, refused before the manifest and the log
+    exist. It used to pass the drift gate, write both, and only then be
+    refused in the engine. The twin, a staged fold0 pin, opens."""
+    run_root = tmp_path / "run"
+    catalog = lower_source(_DST_JIL)
+    staged = stage_manifest(
+        catalog,
+        source_bundle_hash=EMPTY_BUNDLE_HASH,
+        profile=RuntimeProfile(semantics=staged_switches),
+        state_machine_version=STATE_MACHINE_VERSION,
+    )
+    if staged_switches != FOLD0:
+        with pytest.raises(EngineError, match="disagrees with the engine's wiring on semantics"):
+            _dst_genesis(run_root, FOLD0, staged)
+        assert not (period_dir(run_root, 1) / "manifest.json").exists()
+        assert not wal_path(run_root, 1).exists()
+        return
+    _catalog, live = _dst_genesis(run_root, FOLD0, staged)
+    _close(live)
+    manifest = read_period_manifest(run_root)
+    assert manifest is not None and manifest.runtime_profile.semantics == FOLD0
+
+
+@pytest.mark.parametrize("resume_switches", [None, FOLD0], ids=["vendor-scheduler", "fold0"])
+def test_a_resume_with_a_scheduler_off_the_dst_pin_writes_nothing(
+    tmp_path: Path, resume_switches: dict[str, str] | None
+) -> None:
+    """DL-260, period-model PR-22b: a period pinned fold0, resumed with a
+    default (vendor) scheduler and no declared profile, is refused by the
+    drift gate: no successor segment, the anchor unchanged, and no leader
+    record. The engine check used to refuse it only after the leader record
+    was appended. The twin, a fold0 scheduler, resumes and appends one."""
+    from dsl41.boundary import EstateAnchor, default_anchor_dir
+    from dsl41.period import wal_segments
+
+    run_root = tmp_path / "run"
+    catalog, live = _dst_genesis(run_root, FOLD0)
+    _close(live)
+    before = read_journal(estate_wal(run_root))
+    segments = wal_segments(run_root)
+    anchor = EstateAnchor(default_anchor_dir(run_root)).read()
+
+    def resume():
+        return asyncio.run(
+            resume_run(
+                catalog,
+                run_root,
+                clock=VirtualClock(start=T0 + timedelta(minutes=1)),
+                adapters={"CMD": FakeAdapter(default=None)},
+                scheduler=Scheduler(
+                    catalog, start=T0, semantics=semantics.resolve(resume_switches)
+                ),
+            )
+        )
+
+    if resume_switches is None:
+        with pytest.raises(EngineError, match="runtime-profile mismatch on semantics"):
+            resume()
+        assert read_journal(estate_wal(run_root)) == before
+        assert wal_segments(run_root) == segments
+        assert EstateAnchor(default_anchor_dir(run_root)).read() == anchor
+        return
+    _close(resume())
+    after = read_journal(estate_wal(run_root))
+    assert [r["rec"] for r in after[len(before) :]][:1] == ["leader"]
+
+
+@pytest.mark.parametrize("switch", ["vendor", "fold0"])
+@pytest.mark.parametrize("rooted", [False, True], ids=["bare", "run-root"])
+def test_rehearse_ticks_under_the_dst_start_times_switch(
+    tmp_path: Path, switch: str, rooted: bool
+) -> None:
+    """DL-260: 02:05 and 02:25 on 2026-03-08 in New York. The vendor runs
+    only the first, at 3:00:05; fold0 runs both, past the gap. The
+    rehearsal's scheduler and oracle read the same value, with or without a
+    run root, so neither path refuses."""
+    jil = tmp_path / "dst.jil"
+    jil.write_text(_DST_JIL)
+    scenario = tmp_path / "scenario.json"
+    scenario.write_text(json.dumps({"events": []}))
+    extra = ["--run-root", str(tmp_path / "run")] if rooted else []
+    result = CliRunner().invoke(
+        app,
+        [
+            "rehearse",
+            str(jil),
+            "--scenario",
+            str(scenario),
+            "--start",
+            "2026-03-08T05:00:00",
+            "--hours",
+            "4",
+            "--format",
+            "summary",
+            "--semantics",
+            f"dst-start-times={switch}",
+            *extra,
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert f"dj runs={1 if switch == 'vendor' else 2}" in result.stdout
+
+
 @pytest.mark.parametrize("damage", ["missing", "foreign"])
 def test_replay_refuses_a_period_whose_manifest_is_not_bound_to_it(
     tmp_path: Path, damage: str
@@ -1174,7 +1420,7 @@ def test_replay_refuses_a_period_whose_manifest_is_not_bound_to_it(
 @pytest.mark.parametrize(
     ("word", "message"),
     [
-        ("ice-lookbak=true", "known switches: fw-existence, ice-lookback"),
+        ("ice-lookbak=true", "known switches: dst-start-times, fw-existence, ice-lookback"),
         ("ice-lookback=maybe", "is not one of true, ordinary"),
         ("ice-lookback", "expected NAME=VALUE"),
     ],

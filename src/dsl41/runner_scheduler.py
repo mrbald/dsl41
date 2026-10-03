@@ -30,6 +30,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, tzinfo
+from typing import Literal
 
 from dsl41.autocal import (
     CalendarRuleError,
@@ -42,7 +43,13 @@ from dsl41.oracle_state import Event
 from dsl41.runner_clock import EngineError
 from dsl41.semantics import DEFAULTS as DEFAULT_SWITCHES
 from dsl41.semantics import SemanticSwitches
-from dsl41.timezones import resolve_timezone, to_local, to_utc
+from dsl41.timezones import (
+    resolve_timezone,
+    start_mins_instants,
+    start_time_instants,
+    to_local,
+    to_utc,
+)
 
 
 # ------------------------------------------------------------------ scheduler (ss5)
@@ -80,14 +87,21 @@ class _SchedulePlan:
     """One job's compiled trigger: eligible day tokens OR an explicit
     run_calendar day source (SEM-31 XOR) -- a standard date set or an
     extended-calendar generator (DL-57) -- an exclude_calendar source to
-    subtract, sorted (hour, minute) ticks per eligible day, and the resolved
-    zone (None = the engine's naive UTC basis directly). `last_date` bounds
-    the occurrence scan past the last explicit date (DL-56); an unbounded
-    extended run source scans to the autocal dormancy ceiling instead."""
+    subtract, sorted (hour, minute) ticks per eligible day, where they come
+    from, and the resolved zone (None = the engine's naive UTC basis
+    directly). `last_date` bounds the occurrence scan past the last explicit
+    date (DL-56); an unbounded extended run source scans to the autocal
+    dormancy ceiling instead."""
 
     days: frozenset[str]
     times: tuple[tuple[int, int], ...]
     tz: tzinfo | None
+    #: where `times` come from: start_times and start_mins follow the
+    #: `dst-start-times` switch on a DST change day (DL-260); calendar row
+    #: times keep the fold=0 conversion
+    source: Literal["start_times", "start_mins", "calendar"] = "calendar"
+    #: the `dst-start-times` switch: True is the vendor's rules
+    vendor_dst: bool = True
     run_dates: frozenset[date] | None = None
     exclude_dates: frozenset[date] = frozenset()
     run_gen: _CalCache | None = None
@@ -110,7 +124,14 @@ class _SchedulePlan:
         return _DAY_CODES[day.weekday()] in self.days
 
     def utc_ticks_on(self, day: date) -> list[datetime]:
-        """This local day's ticks as naive-UTC instants (the engine basis)."""
+        """This local day's ticks as naive-UTC instants (the engine basis).
+        start_times and start_mins convert through the one definition the
+        oracle's slot matching reads too (DL-260)."""
+        if self.source == "start_times":
+            instants = start_time_instants(day, self.times, self.tz, vendor=self.vendor_dst)
+            return [at for _, at in instants]
+        if self.source == "start_mins":
+            return start_mins_instants(day, self.times, self.tz, vendor=self.vendor_dst)
         times = self.times if self.row_times is None else self.row_times.get(day, frozenset())
         ticks = []
         for hour, minute in times:
@@ -162,16 +183,23 @@ class Scheduler:
     offsets), so rehearse under the virtual clock exercises real calendar
     arithmetic (ss5).
 
-    Pinned interpretation defaults (PENDING: E10 -- the open halves are
-    absent days_of_week and the DST fold): absent days_of_week means every
-    day. Jobs without `timezone` read their times in `default_tz`
-    (run-level --timezone), defaulting to UTC; that half is cited since
+    Pinned interpretation defaults (E10): absent days_of_week means every
+    day (the module docstring carries its marker). Jobs without `timezone`
+    read their times in `default_tz` (run-level --timezone), defaulting to
+    UTC; that half is cited since
     DL-155 -- no-timezone start events are "scheduled based on the time
     zone under which the scheduler is running" (TechDocs 12.0.01, timezone
     attribute), so a migrated estate sets the server's zone explicitly.
-    DST corners follow PEP 495 fold=0: a fall-back ambiguous time is
-    its first occurrence, a spring-forward nonexistent time maps past the
-    gap. Schedule blocks with neither start_times nor start_mins trigger
+    DST corners follow the `dst-start-times` switch (DL-260). Its default,
+    `vendor`, applies the documented rules on a one-hour change at 02:00
+    local: a start time in the repeated 01:00-01:59 fires once, in the
+    second pass; start_mins fire in both passes; a start time in the
+    missing 02:00-02:59 fires in the first minute of 03:00 with its minute
+    as seconds, and only the first such start time fires; start_mins ticks
+    in the missing hour do not exist. `fold0`, and every other change
+    shape, use PEP 495 fold=0: a repeated time is its first occurrence, a
+    missing one maps past the gap. Calendar row times always use fold=0.
+    Schedule blocks with neither start_times nor start_mins trigger
     nothing (run_window/SLA are gates/alarms, not triggers).
 
     Standard calendars are honored (DL-56): `run_calendar` day membership
@@ -254,6 +282,9 @@ class Scheduler:
             if run_gen is not None and run_gen.compiled.bound is not None:
                 # cycle-bound extended calendars scan like explicit dates
                 last_date = max(d for d in (last_date, run_gen.compiled.bound) if d is not None)
+            tick_source: Literal["start_times", "start_mins", "calendar"] = (
+                "start_times" if sched.start_times else "start_mins" if own_ticks else "calendar"
+            )
             self._plans[name] = _SchedulePlan(
                 days=frozenset(
                     _DAY_CODES
@@ -264,6 +295,8 @@ class Scheduler:
                 # neither the calendar nor the job supplies one -> 00:00
                 times=self._ticks(sched) if own_ticks else ((0, 0),),
                 tz=_scheduler_tz(sched.timezone, name, tz_aliases) if sched.timezone else base_tz,
+                source=tick_source,
+                vendor_dst=self._semantics.dst_start_times == "vendor",
                 run_dates=run_dates,
                 exclude_dates=exclude_dates,
                 run_gen=run_gen,
@@ -348,8 +381,9 @@ class Scheduler:
     def _occurrence(plan: _SchedulePlan, t: datetime, *, inclusive: bool) -> datetime | None:
         # calendar-date iteration (never aware-datetime + timedelta: absolute
         # arithmetic can skip a 25h fall-back local date); per-day ticks are
-        # sorted AFTER conversion because a fold=0 nonexistent time can land
-        # past a later tick's UTC instant inside a spring-forward gap
+        # sorted AFTER conversion because a missing-hour time can land past
+        # a later tick's UTC instant on a spring-forward day: fold=0 maps
+        # 02:30 past 03:00, and the vendor's 02:05 runs at 03:00:05 (DL-260)
         anchor_date = to_local(t, plan.tz).date()
         # a non-empty weekly day set always hits within 7; explicit dates
         # push the bound past the last one, after which weekly recurrence

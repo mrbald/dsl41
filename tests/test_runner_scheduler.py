@@ -41,6 +41,7 @@ from dsl41.runner_preflight import (
     resolve_machine,
 )
 from dsl41.runner_scheduler import Scheduler
+from dsl41.semantics import resolve as resolve_switches
 from dsl41.timezones import parse_timezone_map
 
 # 2026-07-01 is a Wednesday; 07-03 Fri, 07-04 Sat, 07-05 Sun, 07-06 Mon.
@@ -167,36 +168,41 @@ def test_default_tz_applies_to_jobs_without_their_own_timezone() -> None:
     assert sched.next_occurrence() == datetime(2026, 7, 6, 13, 0)
 
 
+_FOLD0 = resolve_switches({"dst-start-times": "fold0"})
+
+
 def test_dst_spring_forward_nonexistent_time_sorts_after_a_later_local_tick() -> None:
-    """(ss5 _occurrence docstring): 2026-03-08 is America/New_York's
-    spring-forward day -- 02:30 local never happens. PEP 495 fold=0 reads it
-    at its pre-transition (EST, UTC-5) offset, landing at 07:30 UTC -- LATER
-    than the very same day's 03:00 tick (post-transition EDT, UTC-4, 07:00
-    UTC) despite 02:30 being listed first in start_times. Ticks are sorted
-    AFTER UTC conversion, so pop_due returns them in true chronological
-    order, not source order."""
+    """(ss5 _occurrence docstring), under dst-start-times=fold0 (DL-260):
+    2026-03-08 is America/New_York's spring-forward day -- 02:30 local
+    never happens. PEP 495 fold=0 reads it at its pre-transition (EST,
+    UTC-5) offset, landing at 07:30 UTC -- LATER than the very same day's
+    03:00 tick (post-transition EDT, UTC-4, 07:00 UTC) despite 02:30 being
+    listed first in start_times. Ticks are sorted AFTER UTC conversion, so
+    pop_due returns them in true chronological order, not source order.
+    The vendor default reorders them too: `test_sem32_dst_*` below."""
     text = (
         "insert_job: dst_job\njob_type: c\ncommand: x\nmachine: m1\n"
         'date_conditions: 1\ndays_of_week: all\nstart_times: "02:30, 03:00"\n'
         "timezone: America/New_York\n"
     )
-    sched = Scheduler(lower_source(text), start=datetime(2026, 3, 8, 0, 0))
+    sched = Scheduler(lower_source(text), start=datetime(2026, 3, 8, 0, 0), semantics=_FOLD0)
     due = sched.pop_due(datetime(2026, 3, 8, 23, 59))
     assert [e.at for e in due] == [datetime(2026, 3, 8, 7, 0), datetime(2026, 3, 8, 7, 30)]
     assert due[0].at < due[1].at  # strictly increasing despite the label order
 
 
 def test_dst_fall_back_ambiguous_time_fires_at_its_first_occurrence() -> None:
-    """(ss5 docstring, PEP 495 fold=0): 2026-11-01 01:30 America/New_York is
-    ambiguous (it happens twice). fold=0 (the default) picks the FIRST
-    occurrence -- pre-transition EDT, UTC-4 -- landing at 05:30 UTC, not the
-    second (post-transition EST) occurrence at 06:30 UTC."""
+    """(ss5 docstring), under dst-start-times=fold0 (DL-260): 2026-11-01
+    01:30 America/New_York is ambiguous (it happens twice). PEP 495 fold=0
+    picks the FIRST occurrence -- pre-transition EDT, UTC-4 -- landing at
+    05:30 UTC, not the second (post-transition EST) occurrence at 06:30
+    UTC. The vendor default takes the second: `test_sem32_dst_*` below."""
     text = (
         "insert_job: fb_job\njob_type: c\ncommand: x\nmachine: m1\n"
         'date_conditions: 1\ndays_of_week: all\nstart_times: "01:30"\n'
         "timezone: America/New_York\n"
     )
-    sched = Scheduler(lower_source(text), start=datetime(2026, 11, 1, 0, 0))
+    sched = Scheduler(lower_source(text), start=datetime(2026, 11, 1, 0, 0), semantics=_FOLD0)
     assert sched.next_occurrence() == datetime(2026, 11, 1, 5, 30)
 
 
@@ -1896,3 +1902,304 @@ def test_dl253_run_window_is_read_in_a_non_utc_base_zone(tmp_path: Path, pinned:
     transitions = [t.transition for t in engine.oracle.trace() if t.job == "nyrw"]
     assert transitions[:2] == ["INACTIVE->STARTING", "STARTING->RUNNING"]
     assert not any(t.startswith("RUN_WINDOW") for t in transitions)
+
+
+# ------------------------------------------------- DST start times (DL-260)
+#
+# America/New_York. 2026-03-08: 02:00 EST jumps to 03:00 EDT at 07:00 UTC.
+# 2026-11-01: 02:00 EDT falls back to 01:00 EST at 06:00 UTC. The vendor's
+# rules are "Standard Time Changes" and "Daylight Time Changes" (TechDocs
+# 12.1 and 24.2); `fold0` is dsl41's PEP 495 conversion.
+
+_SWITCHES = ("vendor", "fold0")
+
+
+def _dst_ticks(
+    attrs: str,
+    start: datetime,
+    upto: datetime,
+    switch: str,
+    zone: str = "America/New_York",
+) -> list[datetime]:
+    """Every tick in [start, upto] of one daily job with `attrs`."""
+    text = (
+        "insert_job: dj\njob_type: c\ncommand: x\nmachine: m1\n"
+        f"date_conditions: 1\ndays_of_week: all\n{attrs}timezone: {zone}\n"
+    )
+    sched = Scheduler(
+        lower_source(text),
+        start=start,
+        semantics=resolve_switches({"dst-start-times": switch}),
+    )
+    return [e.at for e in sched.pop_due(upto)]
+
+
+@pytest.mark.parametrize(
+    ("switch", "expected"),
+    [("vendor", [datetime(2026, 11, 1, 6, 5)]), ("fold0", [datetime(2026, 11, 1, 5, 5)])],
+)
+def test_sem32_dst_fall_start_time_in_the_repeated_hour_fires_once(
+    switch: str, expected: list[datetime]
+) -> None:
+    """ "a job that is scheduled to run on Sundays at 1:05 runs only at the
+    second 1:05": 01:05 EST, 06:05 UTC. fold0 runs the first, 01:05 EDT.
+    Either way it runs once."""
+    ticks = _dst_ticks(
+        'start_times: "01:05"\n', datetime(2026, 11, 1, 4, 0), datetime(2026, 11, 2, 4, 59), switch
+    )
+    assert ticks == expected
+
+
+@pytest.mark.parametrize(
+    ("switch", "expected"),
+    [
+        ("vendor", [(5, 0), (5, 30), (6, 0), (6, 30)]),
+        ("fold0", [(5, 0), (5, 30)]),
+    ],
+)
+def test_sem32_dst_fall_start_mins_fire_in_both_passes(
+    switch: str, expected: list[tuple[int, int]]
+) -> None:
+    """ "A job that is scheduled to run every 30 minutes runs at 1:00 DT and
+    1:30 DT, then again at 1:00 ST and 1:30 ST": four runs between 05:00
+    and 06:59 UTC. fold0 runs the daylight pass only. 02:00 EST is 07:00."""
+    ticks = _dst_ticks(
+        "start_mins: 0,30\n", datetime(2026, 11, 1, 5, 0), datetime(2026, 11, 1, 6, 59), switch
+    )
+    assert ticks == [datetime(2026, 11, 1, h, m) for h, m in expected]
+
+
+@pytest.mark.parametrize(
+    ("switch", "expected"),
+    [("vendor", [datetime(2026, 3, 8, 7, 0, 5)]), ("fold0", [datetime(2026, 3, 8, 7, 5)])],
+)
+def test_sem32_dst_spring_missing_hour_start_time_runs_in_the_first_minute_of_0300(
+    switch: str, expected: list[datetime]
+) -> None:
+    """ "a job that is scheduled to run on Sundays at 2:05 runs at 3:00:05
+    that day": 07:00:05 UTC. fold0 maps 02:05 past the gap, 03:05 EDT."""
+    ticks = _dst_ticks(
+        'start_times: "02:05"\n', datetime(2026, 3, 8, 5, 0), datetime(2026, 3, 9, 4, 59), switch
+    )
+    assert ticks == expected
+
+
+@pytest.mark.parametrize("listed", ['"02:05, 02:25"', '"02:25, 02:05"'])
+@pytest.mark.parametrize(
+    ("switch", "expected"),
+    [
+        ("vendor", [datetime(2026, 3, 8, 7, 0, 5)]),
+        ("fold0", [datetime(2026, 3, 8, 7, 5), datetime(2026, 3, 8, 7, 25)]),
+    ],
+)
+def test_sem32_dst_spring_only_the_first_missing_hour_start_time_runs(
+    switch: str, expected: list[datetime], listed: str
+) -> None:
+    """ "If you schedule a job to run more than once during the missing hour
+    (for example, at 2:05 and 2:25), only the first scheduled job run
+    occurs": 02:05 at 3:00:05, whatever order start_times lists them in.
+    fold0 keeps both, past the gap."""
+    ticks = _dst_ticks(
+        f"start_times: {listed}\n", datetime(2026, 3, 8, 5, 0), datetime(2026, 3, 9, 4, 59), switch
+    )
+    assert ticks == expected
+
+
+@pytest.mark.parametrize("switch", _SWITCHES)
+def test_sem32_dst_spring_start_mins_have_no_missing_hour_ticks(switch: str) -> None:
+    """ "a job that is specified to run at 0, 20, and 40 minutes after the
+    hour is scheduled for 1:00 ST, 1:20 ST, 1:40 ST, 3:00 DT, 3:20 DT, and
+    3:40 DT". fold0 maps 02:00, 02:20 and 02:40 onto the 03:00 EDT ticks,
+    which fire once, so both values agree."""
+    ticks = _dst_ticks(
+        "start_mins: 0,20,40\n", datetime(2026, 3, 8, 6, 0), datetime(2026, 3, 8, 7, 59), switch
+    )
+    assert ticks == [
+        datetime(2026, 3, 8, h, m) for h, m in ((6, 0), (6, 20), (6, 40), (7, 0), (7, 20), (7, 40))
+    ]
+
+
+@pytest.mark.parametrize("switch", _SWITCHES)
+def test_sem32_dst_ordinary_days_are_unchanged(switch: str) -> None:
+    """Control: a week after each change, 01:05 and 02:05 convert plainly
+    under both values -- EDT on 2026-03-15, EST on 2026-11-08."""
+    attrs = 'start_times: "01:05, 02:05"\n'
+    spring = _dst_ticks(attrs, datetime(2026, 3, 15, 4, 0), datetime(2026, 3, 16, 3, 59), switch)
+    assert spring == [datetime(2026, 3, 15, 5, 5), datetime(2026, 3, 15, 6, 5)]
+    fall = _dst_ticks(attrs, datetime(2026, 11, 8, 5, 0), datetime(2026, 11, 9, 4, 59), switch)
+    assert fall == [datetime(2026, 11, 8, 6, 5), datetime(2026, 11, 8, 7, 5)]
+
+
+@pytest.mark.parametrize("switch", _SWITCHES)
+def test_sem32_dst_a_zone_without_dst_is_unchanged(switch: str) -> None:
+    """Control: America/Phoenix keeps UTC-7 all year, so on New York's
+    change days 01:05 and 02:05 are 08:05 and 09:05 UTC, and start_mins
+    fire once an hour, under both values."""
+    attrs = 'start_times: "01:05, 02:05"\n'
+    for day in (datetime(2026, 3, 8), datetime(2026, 11, 1)):
+        ticks = _dst_ticks(
+            attrs,
+            day + timedelta(hours=7),
+            day + timedelta(hours=30, minutes=59),
+            switch,
+            zone="America/Phoenix",
+        )
+        assert ticks == [day.replace(hour=8, minute=5), day.replace(hour=9, minute=5)]
+        mins = _dst_ticks(
+            "start_mins: 30\n",
+            day + timedelta(hours=7),
+            day + timedelta(hours=10),
+            switch,
+            zone="America/Phoenix",
+        )
+        assert mins == [day.replace(hour=h, minute=30) for h in (7, 8, 9)]
+
+
+@pytest.mark.parametrize(
+    ("switch", "day", "ticks", "alarms"),
+    [
+        (
+            "vendor",
+            datetime(2026, 3, 8),
+            [(6, 15, 0), (7, 0, 45), (7, 45, 0)],
+            [(6, 30), (7, 30), (8, 30)],
+        ),
+        ("fold0", datetime(2026, 3, 8), [(6, 15, 0), (7, 45, 0)], [(6, 30), (7, 45)]),
+        (
+            "vendor",
+            datetime(2026, 11, 1),
+            [(6, 15, 0), (7, 45, 0), (8, 45, 0)],
+            [(6, 30), (8, 30), (9, 30)],
+        ),
+        (
+            "fold0",
+            datetime(2026, 11, 1),
+            [(5, 15, 0), (7, 45, 0), (8, 45, 0)],
+            [(6, 30), (8, 30), (9, 30)],
+        ),
+    ],
+    ids=["spring-vendor", "spring-fold0", "fall-vendor", "fall-fold0"],
+)
+def test_sem32_dst_scheduler_and_oracle_agree_on_the_engine_path(
+    switch: str,
+    day: datetime,
+    ticks: list[tuple[int, int, int]],
+    alarms: list[tuple[int, int]],
+) -> None:
+    """DL-260: the scheduler emits the ticks and the engine's oracle names
+    each tick's slot, under one switch value. `dr` runs at every tick;
+    `dg` is gated and never starts, so each tick's absolute must start time
+    alarms, which shows the slot the oracle named.
+
+    Spring, vendor: 01:15 EST, 02:45 at 03:00:45 EDT and 03:45 EDT name
+    slots 0, 1 and 2; their must times 01:30 EST, 03:30 and 04:30 EDT alarm.
+    Spring, fold0: 02:45 maps onto 03:45 EDT and the scheduler ticks once
+    there. That tick names the earlier wall time, 02:45, whose 03:30 must
+    time is already past, so it is due at the tick; 04:30 is never armed.
+    Fall: 01:15 runs in the second pass (vendor) or the first (fold0); its
+    01:30 must time takes the second pass either way (SEM-34)."""
+    starts = '"01:15, 02:45, 03:45"'
+    text = (
+        "insert_job: dg\njob_type: c\ncommand: x\nmachine: m1\n"
+        f"date_conditions: 1\ndays_of_week: all\nstart_times: {starts}\n"
+        'must_start_times: "01:30, 03:30, 04:30"\ntimezone: America/New_York\n'
+        "condition: s(dg_gate)\n\n"
+        "insert_job: dg_gate\njob_type: c\ncommand: y\nmachine: m1\n\n"
+        "insert_job: dr\njob_type: c\ncommand: x\nmachine: m1\n"
+        f"date_conditions: 1\ndays_of_week: all\nstart_times: {starts}\n"
+        "timezone: America/New_York\n"
+    )
+    catalog = lower_source(text)
+    chosen = resolve_switches({"dst-start-times": switch})
+    start = day + timedelta(hours=4)
+
+    async def scenario() -> Engine:
+        clock = VirtualClock(start=start)
+        scheduler = Scheduler(catalog, start=start, semantics=chosen)
+        adapter = FakeAdapter()
+        engine = Engine(
+            catalog,
+            clock=clock,
+            adapters={"CMD": adapter, "FW": adapter},
+            scheduler=scheduler,
+            semantics=chosen,
+        )
+        await engine.run_until_quiescent(day + timedelta(hours=12))
+        await engine.shutdown()
+        return engine
+
+    engine = asyncio.run(scenario())
+    trace = engine.oracle.trace()
+    starts_at = [t.at for t in trace if t.job == "dr" and t.transition == "INACTIVE->STARTING"]
+    starts_at += [t.at for t in trace if t.job == "dr" and t.transition == "SUCCESS->STARTING"]
+    assert sorted(starts_at) == [day.replace(hour=h, minute=m, second=s) for h, m, s in ticks]
+    alarmed = [t.at for t in trace if t.job == "dg" and t.transition == "MUST_START_ALARM"]
+    assert alarmed == [day.replace(hour=h, minute=m) for h, m in alarms]
+
+
+@pytest.mark.parametrize("switch", _SWITCHES)
+def test_sem32_dst_the_engine_refuses_a_scheduler_on_another_switch_value(switch: str) -> None:
+    """DL-260: an engine whose scheduler and oracle read start times under
+    different dst-start-times values would tick at one instant and name
+    slots from another, so it refuses."""
+    text = (
+        "insert_job: dj\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "02:05"\n'
+    )
+    catalog = lower_source(text)
+    other = "fold0" if switch == "vendor" else "vendor"
+    start = datetime(2026, 3, 8, 0, 0)
+    scheduler = Scheduler(
+        catalog, start=start, semantics=resolve_switches({"dst-start-times": switch})
+    )
+    with pytest.raises(EngineError, match="dst-start-times"):
+        Engine(
+            catalog,
+            clock=VirtualClock(start=start),
+            adapters={"CMD": FakeAdapter(), "FW": FakeAdapter()},
+            scheduler=scheduler,
+            semantics=resolve_switches({"dst-start-times": other}),
+        )
+
+
+@pytest.mark.parametrize(("switch", "runs"), [("vendor", False), ("fold0", True)])
+def test_sem33_dst_a_fall_start_time_after_the_window_s_dt_close_does_not_run(
+    switch: str, runs: bool
+) -> None:
+    """SEM-33, DL-249, DL-260, "Standard Time Changes": "If the job in our
+    example also had a start time of 1:15, the start time would be
+    calculated for 1:15 ST and the job would not run on the day of the time
+    change." The 11:30 - 1:30 window closes at 1:30 DT, 05:30 UTC. Under the
+    vendor default the 01:15 tick is 01:15 EST, 06:15 UTC, past the close and
+    closer to it than to the next opening, so the attempt is skipped. Under
+    fold0 it ticks at 01:15 EDT, inside the window, and runs."""
+    text = (
+        "insert_job: rw\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "01:15"\n'
+        'run_window: "23:30-01:30"\ntimezone: America/New_York\n'
+    )
+    catalog = lower_source(text)
+    chosen = resolve_switches({"dst-start-times": switch})
+    start = datetime(2026, 11, 1, 4, 0)
+
+    async def scenario() -> Engine:
+        scheduler = Scheduler(catalog, start=start, semantics=chosen)
+        adapter = FakeAdapter()
+        engine = Engine(
+            catalog,
+            clock=VirtualClock(start=start),
+            adapters={"CMD": adapter, "FW": adapter},
+            scheduler=scheduler,
+            semantics=chosen,
+        )
+        await engine.run_until_quiescent(datetime(2026, 11, 1, 12, 0))
+        await engine.shutdown()
+        return engine
+
+    trace = [t for t in asyncio.run(scenario()).oracle.trace() if t.job == "rw"]
+    started = [t.at for t in trace if t.transition == "INACTIVE->STARTING"]
+    skipped = [t.at for t in trace if t.transition == "RUN_WINDOW_SKIP"]
+    if runs:
+        assert (started, skipped) == ([datetime(2026, 11, 1, 5, 15)], [])
+    else:
+        assert (started, skipped) == ([], [datetime(2026, 11, 1, 6, 15)])

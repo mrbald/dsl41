@@ -18,6 +18,8 @@ from dsl41.timezones import (
     dst_change_near,
     parse_timezone_map,
     resolve_timezone,
+    start_mins_instants,
+    start_time_instants,
     to_local,
     to_utc,
 )
@@ -112,9 +114,11 @@ def test_the_conversion_carries_the_dst_edges_at_the_default_fold() -> None:
     cross -- a second spelling would have been a second DST pin.
 
     `to_utc` does not IMPOSE fold=0; it honours whatever fold the caller's
-    datetime carries. The scheduler's ticks are plain `datetime`s, whose fold
-    is 0, and that default is what these instants pin. The oracle's window
-    math is the caller that differs. Near a documented DST change,
+    datetime carries. Calendar row ticks, and start times under
+    dst-start-times=fold0, are plain `datetime`s, whose fold is 0, and that
+    default is what these instants pin. The callers that differ follow the
+    vendor's rules: `start_time_instants` passes fold=1 for a start time in
+    the repeated hour (DL-260), and the oracle's window math below. Near a documented DST change,
     `_window_span` passes fold=1 for a window opening in the repeated hour,
     the vendor's standard-time pass (DL-249). A change of another shape, such
     as Europe/Berlin's fall change that repeats 02:00-02:59, keeps the
@@ -225,3 +229,82 @@ def test_sem33_dst_change_near_looks_two_days_either_side() -> None:
     for day in (date.min, date(1, 1, 2), date(9999, 12, 30), date.max):
         assert not dst_change_near(day, ny)
         assert not dst_change_near(day, None)
+
+
+_NY_ZONE = ZoneInfo("America/New_York")
+
+
+@pytest.mark.parametrize("vendor", [True, False], ids=["vendor", "fold0"])
+def test_sem32_dst_start_time_instants_pair_each_instant_with_its_index(vendor: bool) -> None:
+    """DL-260: the one conversion the scheduler ticks and the oracle names
+    slots from. Each instant carries its entry's index in the list as
+    written, and entries come back in wall-time order. On 2026-03-08 in
+    America/New_York the vendor runs the first missing-hour start time at
+    03:00 plus its minute as seconds and drops the second; fold=0 maps both
+    past the gap, where 02:45 shares 03:45's instant."""
+    day = date(2026, 3, 8)
+    times = [(3, 45), (2, 45), (2, 50), (1, 0)]
+    got = start_time_instants(day, times, _NY_ZONE, vendor=vendor)
+    if vendor:
+        assert got == [
+            (3, datetime(2026, 3, 8, 6, 0)),
+            (1, datetime(2026, 3, 8, 7, 0, 45)),
+            (0, datetime(2026, 3, 8, 7, 45)),
+        ]
+    else:
+        assert got == [
+            (3, datetime(2026, 3, 8, 6, 0)),
+            (1, datetime(2026, 3, 8, 7, 45)),
+            (2, datetime(2026, 3, 8, 7, 50)),
+            (0, datetime(2026, 3, 8, 7, 45)),
+        ]
+
+
+@pytest.mark.parametrize("vendor", [True, False], ids=["vendor", "fold0"])
+def test_sem32_dst_conversions_ignore_the_switch_away_from_a_documented_change(
+    vendor: bool,
+) -> None:
+    """DL-260: an ordinary day, a zone without DST, a fixed offset, the
+    engine clock (no zone) and a change of another shape all convert at
+    fold=0 under either switch value. Europe/Berlin's fall change repeats
+    02:00-02:59, so its 02:30 is the first, summer-time pass."""
+    berlin = ZoneInfo("Europe/Berlin")
+    phoenix = ZoneInfo("America/Phoenix")
+    cases = [
+        (date(2026, 3, 15), _NY_ZONE, datetime(2026, 3, 15, 6, 5)),
+        (date(2026, 3, 8), phoenix, datetime(2026, 3, 8, 9, 5)),
+        (date(2026, 3, 8), timezone(timedelta(hours=-5)), datetime(2026, 3, 8, 7, 5)),
+        (date(2026, 3, 8), None, datetime(2026, 3, 8, 2, 5)),
+    ]
+    for day, tz, expected in cases:
+        assert start_time_instants(day, [(2, 5)], tz, vendor=vendor) == [(0, expected)]
+        assert start_mins_instants(day, [(2, 5)], tz, vendor=vendor) == [expected]
+    assert start_time_instants(date(2026, 10, 25), [(2, 30)], berlin, vendor=vendor) == [
+        (0, datetime(2026, 10, 25, 0, 30))
+    ]
+
+
+def test_sem32_dst_start_mins_instants_follow_the_switch() -> None:
+    """DL-260, "Standard Time Changes": start_mins "run in both hours" of
+    the repeated 01:00-01:59; "Daylight Time Changes": no tick exists in the
+    missing hour. fold=0 keeps the first pass only and maps a missing-hour
+    tick past the gap, onto the real tick an hour later."""
+    fall = [(1, 0), (1, 30)]
+    assert start_mins_instants(date(2026, 11, 1), fall, _NY_ZONE, vendor=True) == [
+        datetime(2026, 11, 1, 5, 0),
+        datetime(2026, 11, 1, 6, 0),
+        datetime(2026, 11, 1, 5, 30),
+        datetime(2026, 11, 1, 6, 30),
+    ]
+    assert start_mins_instants(date(2026, 11, 1), fall, _NY_ZONE, vendor=False) == [
+        datetime(2026, 11, 1, 5, 0),
+        datetime(2026, 11, 1, 5, 30),
+    ]
+    spring = [(2, 20), (3, 20)]
+    assert start_mins_instants(date(2026, 3, 8), spring, _NY_ZONE, vendor=True) == [
+        datetime(2026, 3, 8, 7, 20)
+    ]
+    assert start_mins_instants(date(2026, 3, 8), spring, _NY_ZONE, vendor=False) == [
+        datetime(2026, 3, 8, 7, 20),
+        datetime(2026, 3, 8, 7, 20),
+    ]
