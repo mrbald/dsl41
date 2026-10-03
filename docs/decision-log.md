@@ -16767,3 +16767,108 @@ relitigate an entry; append a new one.
   sent ON_ICE to a RUNNING job only to move its revision. An ignored event
   moves nothing, so they now inject a RUNNING status on the running job
   (a CHANGE_STATUS that moves `status_at`), with the same expectations.
+- DL-255 A job waiting on a named resource blocks lower priorities that
+  name it (2026-10-03; capacity.py, oracle.py, runner_preflight.py,
+  runner_ledger.py, simulation_register_rows.py; autosys-semantics ss5
+  resources row; runner-design ss8)
+  THE VENDOR. TechDocs 24.2, How AutoSys Workload Automation Queues
+  Jobs: "The scheduler queues jobs with virtual resource dependencies
+  (whether global or machine-based) based on "like" resource names. A
+  job in the RESWAIT state for one resource name automatically blocks all
+  the lower priority jobs that specify the same resource name. It does
+  not automatically block higher or equal priority jobs that specify the
+  same resource name or a job that specifies a different resource name.
+  The scheduler schedules the job as long as the resources are
+  available." The same page: "The resource dependencies are evaluated
+  after the load balancing attributes are evaluated and the machine has
+  available load units to execute the job." "Jobs with both load
+  balancing and resource attributes that enter the QUE_WAIT state do not
+  consume load units or resources. These jobs do not automatically block
+  lower priority jobs that specify the same resource attribute and a
+  different machine attribute value." "Jobs with both load balancing and
+  resource attributes that enter the RESWAIT state after the load
+  balancing attributes are successfully evaluated do not consume any load
+  units. These jobs do not automatically block lower priority jobs that
+  specify the same machine attribute value and either do not specify the
+  resource attribute or specify a different resource attribute value."
+  Broadcom KB 240816, "AutoSys jobs/resources issue: job stuck in
+  RESWAIT" (AutoSys 12.0): a higher-priority job needing two resources,
+  waiting for the second, blocked lower-priority jobs that needed only
+  the first, although the first was available. The cause it gives is the
+  queueing page's sentence: "A job in the RESWAIT state for one resource
+  name automatically blocks all the lower priority jobs that specify the
+  same resource name."
+  THE DEFECT. DL-247 recorded named-resource blocking as not modelled.
+  A lower-priority job whose units fit started beside a higher-priority
+  job queued on the same resource, on a fresh start and in the
+  readmission scan.
+  THE BEHAVIOR. One: a job is blocked when it has a positive priority,
+  names a sized resource, and a queued job of strictly lower positive
+  priority number names that resource too and is short now on any
+  resource it names. The blocker blocks on every resource it names, not
+  only the short one (KB 240816). dsl41 has no RESWAIT
+  status; that job is QUE_WAIT. The test runs on a fresh start and in the
+  readmission scan. Priority 0 and an unset priority are never blocked,
+  as under DL-247, and never block; this agrees with Qr2's pin that an
+  unset priority sorts behind declared ones among resource waiters. Two: the blocker must have passed its
+  load check. Its load fits now, and no higher-priority load waiter
+  blocks it under DL-247. A job still waiting for load is in QUE_WAIT,
+  not RESWAIT, and the vendor says it does not block on its resource.
+  Three: a queued job holds no units. That was already so, since a start
+  acquires its whole demand at admission; a resource waiter whose load
+  fits does not block on the machine, as DL-247 already said. Four: a
+  block can lift with no unit freed when the blocker returns to its load
+  check. That happens when a start takes load on its machine, or when a
+  new load waiter queues ahead of it. Each such start or enqueue owes
+  DL-247's admit-only scan, and the owed scan now runs when any queued
+  job has a positive priority on a sized machine or a sized resource.
+  The input pays an owed scan at its waiter step, once every referencer
+  it woke has been visited, and no nested transition pays it. DL-247 let
+  the outermost transition pay it; when one input woke several
+  referencers, the next referencer's transition, or a box-start reset,
+  then paid a scan the previous one owed, and a waiter could take
+  capacity ahead of a later referencer. The box-stop scan moves the same
+  way.
+  The other lifts (leaving the queue, ON_HOLD, a box leaving RUNNING)
+  already wake the queue. Five: preflight already refuses a QUANTITY
+  above the resource's amount at every priority (DL-50); its message now
+  also names the block. No other static shape can wedge a waiter: every
+  start checks named resources, so a resource is never over its amount.
+  RECORDED CHOICES. A forced start is blocked too: the vendor's force
+  rule is about load ("runs even if its load exceeds the machine's
+  max_load value"), and the blocking sentence names no exception. A
+  forced start that queues on a resource is readmitted without force, so
+  it then waits for machine load too (DL-247: force lives on the event),
+  although the vendor says a forced job runs even above max_load; that
+  is recorded, not changed. The blocker needs a
+  positive priority, as DL-247's load blocker does; the vendor does not
+  say whether a priority-0 job in RESWAIT blocks. A depletable or FREE=N
+  resource can leave a waiter that never fits, and it then blocks every
+  lower priority naming that resource; the vendor rule implies the same,
+  and the amount left is runtime state preflight cannot see. A box that
+  starts again makes its old queued member count as a load waiter again
+  (DL-247's recorded choice); a resource block this lifts waits for the
+  next queue wake, since a box start owes no scan.
+  SUPERSEDED. DL-247's STILL OPEN items "named-resource blocking" and
+  "the RESWAIT-after-load corner" are settled here. DL-50 (4)'s greedy
+  scan now also stops at a resource waiter. Neither entry is edited.
+  VERSION. `STATE_MACHINE_VERSION` moves up by one: a replay with
+  resource waiters and priorities admits differently.
+  Tests: test_oracle.py `test_dl255_*` (the blocking matrix of lower,
+  forced lower, another resource, equal, higher, zero and unset; the
+  blocked arrival's later start; a block lifted by KILLJOB, ON_ICE and
+  ON_HOLD; a waiter short on one of two resources blocking on both; a
+  box stop lifting a resource-only block; an owed scan waiting for every
+  referencer of the input, with an unrelated job or a box start between
+  them; a load-fitting waiter
+  holding no load; a waiter still short on load, and one blocked on load,
+  not blocking on its resource; a block lifted by a start or an enqueue
+  that takes load); test_resources.py
+  `test_dl255_starts_respect_resource_priority_blocking`, a property over
+  arrivals, forced arrivals and completions on two resources that checks
+  each start against the rows and fails if the rule is removed or
+  narrowed to the short resource;
+  test_runner_scheduler.py
+  `test_preflight_resources_refuses_a_quantity_above_amount_at_every_priority`.
+  No existing test pinned the greedy resource admission, so none was
+  rewritten. DL-247's cheetah traces are unchanged.

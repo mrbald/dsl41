@@ -430,10 +430,12 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             surface="job_attr",
             member="priority",
             klass=SUPPORTED,
-            cite="DL-50, DL-247",
+            cite="DL-50, DL-247, DL-255",
             effect="orders the QUE_WAIT queue, lower number first; a positive priority"
-            " makes a start check machine load, and a job waiting for load blocks every"
-            " lower positive priority on its machine",
+            " makes a start check machine load, a job waiting for load blocks every"
+            " lower positive priority on its machine, and a job past its load check"
+            " that waits on a named resource blocks every lower positive priority"
+            " naming any resource it names",
             trigger=_job(priority="10"),
         ),
         _row(
@@ -1214,8 +1216,11 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             surface="job_attr",
             member="resources",
             klass=SUPPORTED,
-            cite="DL-21, DL-50",
-            effect="the resource groups a start must satisfy before it may run",
+            cite="DL-21, DL-50, DL-255",
+            effect="the resource groups a start must satisfy before it may run; a job"
+            " with a positive priority that waits on any of them blocks every lower"
+            " positive priority naming any of them, a forced start included, and holds"
+            " no load while it waits",
             trigger=_job(RESOURCE_BLOCK, resources="(R0, QUANTITY=1)"),
         ),
         _row(

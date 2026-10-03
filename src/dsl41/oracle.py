@@ -230,10 +230,14 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
   FORCE_STARTJOB skip the check, and every start holds its load. A job
   waiting for load blocks every lower positive priority on the same
   machine, on a fresh start and in the readmission scan (DL-247). A job
+  past its load check and short on any named resource blocks every lower
+  positive priority that names any resource it names, forced or not
+  (DL-255); a queued job holds no load. A job
   leaving the queue and a waiter put on hold wake the queue, since each can
-  lift a block; a box leaving RUNNING owes an admit-only scan, run after
-  the outermost transition's release and referencers, that leaves the
-  stopped box's queued members queued. res_type sets the default
+  lift a block; a box leaving RUNNING, and a start or enqueue that takes
+  machine load, owe an admit-only scan. The input pays it once fully
+  applied, after its releases and every referencer it woke, and it leaves
+  the stopped box's queued members queued. res_type sets the default
   release (R/absent free-on-completion, D never, T is a level GATE that never
   acquires); per-request FREE overrides it (Y success-only, N never, A
   unconditional). A queued job re-validates box-RUNNING/ice/hold at admission
@@ -257,6 +261,7 @@ from dsl41.capacity import (
     CapacityPool,
     DemandEntry,
     checks_load,
+    takes_machine_load,
     to_reservations,
     without_machine_load,
 )
@@ -469,12 +474,14 @@ class Oracle:
         #: takes it up as its next pass, so an admit-only scan cannot swallow
         #: a release's cancellations.
         self._full_scan_requested = False
-        #: DL-247: a box left RUNNING, so the admit-only scan is owed. It
-        #: runs at the waiter step of the outermost transition (DL-50's order:
-        #: release, referencers, waiters), never inside the box rules.
-        self._stop_scan_owed = False
-        #: how many `_after_transition` calls are on the stack
-        self._transition_depth = 0
+        #: DL-247: a block may have lifted with no capacity freed, so the
+        #: admit-only scan is owed: a box left RUNNING, or (DL-255) a start
+        #: or a queued job took a machine's load and so may have sent a
+        #: resource waiter back to its load check. It runs at the waiter step
+        #: of the input (DL-50's order: release, referencers, waiters), once
+        #: every referencer the input woke has been visited; no nested
+        #: transition pays it (DL-255).
+        self._scan_owed = False
         #: SEM-35 name -> zone, resolved once per name (the ladder walks
         #: the whole zoneinfo database for a city default)
         self._tz_cache: dict[str, tzinfo] = {}
@@ -608,7 +615,8 @@ class Oracle:
     def _drain(self) -> None:
         while self._queue:
             self._dispatch(self._queue.popleft())
-            self._run_owed_scan()  # DL-247: a floor; transitions normally pay it
+            # DL-255: the input's waiter step, after all its referencers
+            self._run_owed_scan()
 
     def _emit(self, kind: EventKind, **payload: object) -> None:
         assert self._now is not None
@@ -663,17 +671,11 @@ class Oracle:
         box rules, then the row's own settlement, then the wakes. A batch of
         transitions (`_set_inactive_batch`) runs the same three pieces, with
         every row settled before anything is notified."""
-        self._transition_depth += 1
-        try:
-            if self._box_stopped(job, old, new):
-                self._stop_scan_owed = True
-            self._notify_boxes(job, old, new)
-            released = self._settle_row(job, new)
-            self._notify_wakes(job, new, wake_queue=released or self._lifts_a_block(old, new))
-            if self._transition_depth == 1:
-                self._run_owed_scan()
-        finally:
-            self._transition_depth -= 1
+        if self._box_stopped(job, old, new):
+            self._scan_owed = True
+        self._notify_boxes(job, old, new)
+        released = self._settle_row(job, new)
+        self._notify_wakes(job, new, wake_queue=released or self._lifts_a_block(old, new))
 
     def _notify_boxes(self, job: str, old: str, new: str) -> None:
         """The box rules a transition drives: the parent's member rules, the
@@ -762,15 +764,22 @@ class Oracle:
 
     def _run_owed_scan(self) -> None:
         """DL-247: a box that stopped running lifts the blocks its queued
-        members held, so the queue is scanned when anything waits on machine
-        load. The scan is owed, not run, at the box's own transition; the
-        outermost transition runs it after its release and its referencer
-        wakes, and a scan that ran in between has already paid it. It only
+        members held, so the queue is scanned when a queued job has a
+        positive priority on a sized machine or resource. DL-255 owes the
+        same scan after a start or an enqueue that takes a machine's load:
+        a resource waiter whose load no longer fits, or that a new load
+        waiter now blocks, is back at its load check and stops blocking on
+        its resources. The scan is owed, not run, at the act itself. The
+        input pays it once it is fully applied, after every release and
+        every referencer it woke (DL-255): a transition nested in that input
+        does not, or a scan owed by one referencer's start could admit a
+        waiter ahead of a later referencer. A scan that ran in between has
+        already paid it. It only
         admits: every member of a stopped box stays queued for the next
         release to cancel (DL-158, DL-54)."""
-        while self._stop_scan_owed and not self._in_wake:
-            self._stop_scan_owed = False
-            if self._pool.has_load_waiters(self.store.job):
+        while self._scan_owed and not self._in_wake:
+            self._scan_owed = False
+            if self._pool.has_priority_waiters(self.store.job):
                 self._wake_waiters(keep_stopped=True)
 
     def _set_inactive_batch(
@@ -808,7 +817,7 @@ class Oracle:
             # the queue's wake: capacity released, or a block lifted (DL-247)
             wake = self._settle_row(job, "INACTIVE") or self._lifts_a_block(old, "INACTIVE")
             if self._box_stopped(job, old, "INACTIVE"):
-                self._stop_scan_owed = True
+                self._scan_owed = True
             written.append((job, old, self._runtime(job).run_number, wake))
         if between is not None:
             between()
@@ -826,8 +835,6 @@ class Oracle:
             self._notify_wakes(job, "INACTIVE", wake_queue=wake)
         if owed:
             self._wake_waiters()
-        if self._transition_depth == 0:
-            self._run_owed_scan()
 
     # ------------------------------------------------------------ event dispatch
 
@@ -1677,16 +1684,20 @@ class Oracle:
         # DL-50: atomic admission before RUNNING. Empty demand -> straight to
         # RUNNING, byte-identical to the pre-resource oracle (bisim + the whole
         # existing corpus are untouched: no buckets, no waiters, same cause),
-        # unless a higher-priority load waiter blocks it (DL-247).
+        # unless a higher-priority waiter blocks it (DL-247, DL-255).
         vector = self._pool.demand_vector(job_ir)
         if not self._admissible(job_ir, vector, force=force):
             self._enqueue_waiter(job, cause)
-            return
-        # DL-120: the vector is FROZEN onto the row here. The terminal
-        # transition releases what this run took, never what the catalog says
-        # the job wants by then (PR-20).
-        self.store.reserve(job, to_reservations(vector))
-        self._run(job_ir, cause, had_demand=bool(vector))
+        else:
+            # DL-120: the vector is FROZEN onto the row here. The terminal
+            # transition releases what this run took, never what the catalog
+            # says the job wants by then (PR-20).
+            self.store.reserve(job, to_reservations(vector))
+            self._run(job_ir, cause, had_demand=bool(vector))
+        if takes_machine_load(vector):
+            # DL-255: the held load, or the new load waiter, can send a
+            # resource waiter on this machine back to its load check
+            self._scan_owed = True
 
     def _run(self, job_ir: JobIR, cause: str, *, had_demand: bool) -> None:
         """Start tail once admission has passed: run_number bump, box
@@ -1750,26 +1761,32 @@ class Oracle:
 
     def _admissible(self, job_ir: JobIR, vector: list[DemandEntry], *, force: bool) -> bool:
         """The admission test of a start, fresh or out of the queue (DL-247).
-        A FORCE_STARTJOB checks the named resources only: the forced job
-        "runs even if its load exceeds the machine's max_load value", and so
-        no load waiter blocks it either. A job whose priority is unset or 0
-        does the same: the scheduler "ignores any load unit values" for it.
-        Both still hold their load. Otherwise the job must not be blocked by
-        a higher-priority load waiter on its machine, and every bucket must
-        fit. Force lives on the event, not the row: a forced job that queues
-        on a named resource is readmitted like any other."""
+        A job with a positive priority must not be blocked by a
+        higher-priority waiter on a named resource it names (DL-255); force
+        does not lift that block, since the vendor's force rule is a load
+        rule. A FORCE_STARTJOB then checks the named resources only: the
+        forced job "runs even if its load exceeds the machine's max_load
+        value", and so no load waiter blocks it either. A job whose priority
+        is unset or 0 does the same: the scheduler "ignores any load unit
+        values" for it. Both still hold their load. Otherwise the job must
+        not be blocked by a higher-priority load waiter on its machine, and
+        every bucket must fit. Force lives on the event, not the row: a
+        forced job that queues on a named resource is readmitted like any
+        other."""
         rows, consumed = self.store.job, self.store.consumed
+        if self._pool.resource_blocked(job_ir, rows, consumed, self._counts_as_waiter):
+            return False
         if force or not checks_load(job_ir):
             return self._pool.can_admit(without_machine_load(vector), rows, consumed)
-        if self._pool.load_blocked(job_ir, rows, consumed, self._blocks_on_load):
+        if self._pool.load_blocked(job_ir, rows, consumed, self._counts_as_waiter):
             return False
         return self._pool.can_admit(vector, rows, consumed)
 
-    def _blocks_on_load(self, waiter: str) -> bool:
-        """A queued job that counts toward DL-247's priority blocking: not
-        held, and not a member whose box has stopped running. The readmission
-        scan cancels the latter and keeps the former queued without trying
-        it, so neither is waiting for load."""
+    def _counts_as_waiter(self, waiter: str) -> bool:
+        """A queued job that counts toward priority blocking (DL-247,
+        DL-255): not held, and not a member whose box has stopped running.
+        The readmission scan cancels the latter and keeps the former queued
+        without trying it, so neither is waiting for load or a resource."""
         rt = self._runtime(waiter)
         job_ir = self.catalog.jobs.get(waiter)
         if rt.on_hold or job_ir is None:
@@ -1786,11 +1803,11 @@ class Oracle:
         to a fixpoint. Re-entrancy-guarded: a nested call (a release inside an
         admitted job's cascade) defers to the outer loop's next scan.
         `keep_stopped` leaves a member of a stopped box queued instead of
-        cancelling it (DL-247's box-stop scan). A full scan requested while
+        cancelling it (the owed admit-only scan of DL-247 and DL-255). A full scan requested while
         an admit-only one runs turns its next pass into a full one, so a
         release inside the scan still cancels what a release cancels.
 
-        Every pass pays an owed box-stop scan, since every pass admits."""
+        Every pass pays an owed scan, since every pass admits."""
         if self._in_wake:
             if not keep_stopped:
                 self._full_scan_requested = True
@@ -1798,7 +1815,7 @@ class Oracle:
         self._in_wake = True
         try:
             while True:
-                self._stop_scan_owed = False
+                self._scan_owed = False
                 self._full_scan_requested = False
                 moved = any(
                     self._readmit(job, keep_stopped=keep_stopped) in ("admitted", "cancelled")
@@ -1818,7 +1835,8 @@ class Oracle:
         capacity check; conditions are NOT re-checked (# PENDING: Qr6). The capacity
         check is a fresh start's, so a higher-priority load waiter on the
         same machine keeps this job queued even when its load fits
-        (DL-247)."""
+        (DL-247), and so does a higher-priority waiter on a named resource
+        it names (DL-255)."""
         rt = self._runtime(job)
         job_ir = self.catalog.jobs[job]
         if rt.on_ice:

@@ -812,7 +812,9 @@ ERROR:
   `--resource-capacity` override is a documented future escape hatch.
   Unknown `res_type` (not R/D/T). The same resource named twice in one
   `resources:` list — the demand is ambiguous. A `QUANTITY` above the
-  resource's `amount` — the job would wait in QUE_WAIT forever. A
+  resource's `amount`, at any priority — the job would wait in QUE_WAIT
+  forever, and at a positive priority it would block every lower priority
+  that names the resource (DL-255). A
   `job_load` above its machine's `max_load` on a job with a positive
   `priority` — it would wait forever and block every lower priority on
   that machine (DL-247); priority 0 or unset skips the load check and is
@@ -859,7 +861,24 @@ WARN:
   specify the same machine attribute value", on a fresh start and on
   readmission; a positive priority is blocked even without a `job_load`.
   Named resources gate every start, forced or not. Pools stay outside
-  both rules. This WARN still fires for a pool job at priority 0.
+  both load rules. This WARN still fires for a pool job at priority 0.
+  The oracle applies the vendor's named-resource rule too (DL-255): "A job
+  in the RESWAIT state for one resource name automatically blocks all the
+  lower priority jobs that specify the same resource name. It does not
+  automatically block higher or equal priority jobs that specify the same
+  resource name or a job that specifies a different resource name." The
+  blocked job has a positive priority and may be forced. The blocker has a
+  positive priority, names a resource the blocked job names, is short on
+  any resource it names (Broadcom KB 240816, AutoSys 12.0: a job waiting
+  for its second resource blocks jobs that need only its first), and has
+  passed its load check: its load fits and no higher-priority load waiter blocks it, since
+  jobs still in QUE_WAIT for load "do not automatically block lower
+  priority jobs that specify the same resource attribute". A queued job
+  holds no load: jobs "that enter the RESWAIT state after the load
+  balancing attributes are successfully evaluated do not consume any load
+  units". A start or enqueue that takes machine load can send a resource
+  waiter back to its load check, so it owes an admit-only queue scan. The
+  input pays that scan after every referencer it woke.
 - Cycle in the AND-success skeleton (graphlib `CycleError`): cycles are
   *legal* AutoSys (edge-triggered re-runs, DL-13, L010's territory). Thus
   this rule warns and disables `plan`, and it does not refuse.

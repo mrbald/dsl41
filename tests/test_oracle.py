@@ -6683,6 +6683,305 @@ def test_dl247_a_waiter_short_only_on_a_named_resource_does_not_block() -> None:
     assert _statuses(o, "rw247", "rn247") == {"rw247": "QUE_WAIT", "rn247": "RUNNING"}
 
 
+# ------------------------------------------------- DL-255 named-resource priority blocking
+#
+# R255 has 3 units and a holder with no priority takes 2. `hi255`
+# (priority 5) wants 2 and waits on R255. Each arrival names its own
+# priority and resource; its 1 unit fits every time.
+
+_RES_BLOCK = (
+    "insert_resource: R255\nres_type: R\namount: 3\n\n"
+    "insert_resource: S255\nres_type: R\namount: 3\n\n"
+    "insert_job: rh255\njob_type: c\ncommand: h\nmachine: m9\nresources: (R255, QUANTITY=2)\n\n"
+    "insert_job: hi255\njob_type: c\ncommand: w\nmachine: m9\npriority: 5\n"
+    "resources: (R255, QUANTITY=2)\n\n"
+)
+
+
+def _res_arrival(priority: str, resource: str = "R255") -> str:
+    return (
+        _RES_BLOCK + "insert_job: new255\njob_type: c\ncommand: y\nmachine: m9\n"
+        f"{priority}resources: ({resource}, QUANTITY=1)\n"
+    )
+
+
+def _res_blocked(text: str, event: str = "STARTJOB") -> Oracle | EngineHarness:
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="rh255"))
+    o.feed(ev("STARTJOB", 1, job="hi255"))
+    o.feed(ev(event, 2, job="new255"))
+    return o
+
+
+@pytest.mark.parametrize(
+    ("priority", "resource", "event", "expected"),
+    [
+        ("priority: 9\n", "R255", "STARTJOB", "QUE_WAIT"),
+        ("priority: 9\n", "R255", "FORCE_STARTJOB", "QUE_WAIT"),
+        ("priority: 9\n", "S255", "STARTJOB", "RUNNING"),
+        ("priority: 5\n", "R255", "STARTJOB", "RUNNING"),
+        ("priority: 2\n", "R255", "STARTJOB", "RUNNING"),
+        ("priority: 0\n", "R255", "STARTJOB", "RUNNING"),
+        ("", "R255", "STARTJOB", "RUNNING"),
+    ],
+    ids=["lower", "lower-forced", "other-resource", "equal", "higher", "zero", "unset"],
+)
+def test_dl255_a_resource_waiter_blocks_only_lower_priority_naming_it(
+    priority: str, resource: str, event: str, expected: str
+) -> None:
+    """The vendor: "A job in the RESWAIT state for one resource name
+    automatically blocks all the lower priority jobs that specify the same
+    resource name. It does not automatically block higher or equal priority
+    jobs that specify the same resource name or a job that specifies a
+    different resource name." An unset or zero priority "is not queued
+    behind other jobs". Force skips the load check only, so a forced lower
+    priority is blocked too."""
+    o = _res_blocked(_res_arrival(priority, resource), event)
+    assert _statuses(o, "hi255", "new255") == {"hi255": "QUE_WAIT", "new255": expected}
+
+
+def test_dl255_a_blocked_arrival_starts_after_the_waiter_ahead_of_it() -> None:
+    """The holder's end frees 2 units: `hi255` takes them, then the blocked
+    arrival's 1 unit fits, in the same scan."""
+    o = _res_blocked(_res_arrival("priority: 9\n"))
+    o.feed(ev("STATUS", 3, job="rh255", status="SUCCESS"))
+    assert _statuses(o, "hi255", "new255") == {"hi255": "RUNNING", "new255": "RUNNING"}
+    starts = [t.job for t in o.trace() if t.transition == "QUE_WAIT->STARTING"]
+    assert starts == ["hi255", "new255"]
+
+
+@pytest.mark.parametrize("lift", ["KILLJOB", "ON_ICE", "ON_HOLD"])
+def test_dl255_a_block_lifts_when_the_waiter_leaves_the_queue(lift: str) -> None:
+    """No unit is freed, but the blocker leaves the queue or stops counting:
+    the blocked arrival, whose unit fits, starts at once."""
+    o = _res_blocked(_res_arrival("priority: 9\n"))
+    assert o.store.job["new255"].status == "QUE_WAIT"
+    o.feed(ev(lift, 3, job="hi255"))
+    assert o.store.job["new255"].status == "RUNNING"
+
+
+def test_dl255_a_waiter_short_on_one_resource_blocks_on_every_resource_it_names() -> None:
+    """AutoSys KB 240816 ("AutoSys jobs/resources issue: job stuck in
+    RESWAIT", AutoSys 12.0): a higher-priority job needing two resources and
+    waiting for the second blocked lower-priority jobs needing only the
+    first, which was free, because "A job in the RESWAIT state for one
+    resource name automatically blocks all the lower priority jobs that
+    specify the same resource name". `hi255` wants 2 units of R255 (1 free)
+    and 1 of S255 (free); `new255` (priority 9) wants 1 of S255 and queues.
+    It starts once `hi255` is admitted."""
+    text = _RES_BLOCK.replace(
+        "priority: 5\nresources: (R255, QUANTITY=2)",
+        "priority: 5\nresources: (R255, QUANTITY=2) AND (S255, QUANTITY=1)",
+    ) + (
+        "insert_job: new255\njob_type: c\ncommand: y\nmachine: m9\npriority: 9\n"
+        "resources: (S255, QUANTITY=1)\n"
+    )
+    o = _res_blocked(text)
+    assert _statuses(o, "hi255", "new255") == {"hi255": "QUE_WAIT", "new255": "QUE_WAIT"}
+    o.feed(ev("STATUS", 3, job="rh255", status="SUCCESS"))
+    assert _statuses(o, "hi255", "new255") == {"hi255": "RUNNING", "new255": "RUNNING"}
+    starts = [t.job for t in o.trace() if t.transition == "QUE_WAIT->STARTING"]
+    assert starts == ["hi255", "new255"]
+
+
+def test_dl255_a_stopped_box_lifts_a_resource_only_block_at_once() -> None:
+    """A box leaving RUNNING owes the admit-only scan when a queued job has a
+    positive priority on a sized resource, not only on a sized machine. Box
+    member `bhi255` (priority 1) waits for 2 units of R255 and blocks
+    `blo255` (priority 9, 1 unit). KILLJOB on the box lifts the block, so
+    `blo255` starts at once; the member stays queued for a release to
+    cancel (DL-158, DL-54)."""
+    text = (
+        "insert_resource: R255\nres_type: R\namount: 3\n\n"
+        "insert_job: bh255\njob_type: c\ncommand: h\nmachine: m9\nresources: (R255, QUANTITY=2)\n\n"
+        "insert_job: bx255\njob_type: b\n\n"
+        "insert_job: bhi255\njob_type: c\ncommand: m\nmachine: m9\nbox_name: bx255\n"
+        "priority: 1\nresources: (R255, QUANTITY=2)\n\n"
+        "insert_job: blo255\njob_type: c\ncommand: l\nmachine: m9\npriority: 9\n"
+        "resources: (R255, QUANTITY=1)\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="bh255"))
+    o.feed(ev("STARTJOB", 1, job="bx255"))
+    o.feed(ev("STARTJOB", 2, job="blo255"))
+    assert _statuses(o, "bhi255", "blo255") == {"bhi255": "QUE_WAIT", "blo255": "QUE_WAIT"}
+    o.feed(ev("KILLJOB", 3, job="bx255"))
+    assert _statuses(o, "bx255", "bhi255", "blo255") == {
+        "bx255": "TERMINATED",
+        "bhi255": "QUE_WAIT",
+        "blo255": "RUNNING",
+    }
+
+
+#: Machine rl255 has 80 units and a 30-unit holder; R255 has 2 units, one
+#: held from another machine. `rw255` (priority 5) wants both and loads
+#: rl255; `rn255` (priority 9) wants one, which fits.
+_RES_LOAD = (
+    "insert_machine: rl255\ntype: a\nnode_name: rl255\nmax_load: 80\n\n"
+    "insert_resource: R255\nres_type: R\namount: 2\n\n"
+    "insert_job: lh255\njob_type: c\ncommand: h\nmachine: rl255\njob_load: 30\npriority: 1\n\n"
+    "insert_job: rh255\njob_type: c\ncommand: h\nmachine: m9\nresources: (R255, QUANTITY=1)\n\n"
+    "insert_job: rn255\njob_type: c\ncommand: y\nmachine: m9\npriority: 9\n"
+    "resources: (R255, QUANTITY=1)\n\n"
+)
+
+
+def _rw255(load: int) -> str:
+    return (
+        "insert_job: rw255\njob_type: c\ncommand: w\nmachine: rl255\n"
+        f"job_load: {load}\npriority: 5\nresources: (R255, QUANTITY=2)\n\n"
+    )
+
+
+def test_dl255_a_load_fitting_resource_waiter_holds_no_load() -> None:
+    """The vendor: jobs "that enter the RESWAIT state after the load
+    balancing attributes are successfully evaluated do not consume any load
+    units. These jobs do not automatically block lower priority jobs that
+    specify the same machine attribute value and either do not specify the
+    resource attribute or specify a different resource attribute value."
+    `rw255`'s 40 units fit beside the holder's 30 but are not held, so a
+    lower priority's 40 units fit too."""
+    text = (
+        _RES_LOAD
+        + _rw255(40)
+        + (
+            "insert_job: rx255\njob_type: c\ncommand: x\nmachine: rl255\njob_load: 40\npriority: 9\n"
+        )
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="lh255"))
+    o.feed(ev("STARTJOB", 0, job="rh255"))
+    o.feed(ev("STARTJOB", 1, job="rw255"))
+    assert o.store.job["rw255"].status == "QUE_WAIT"
+    assert o.store.job["rw255"].reservations == ()
+    o.feed(ev("STARTJOB", 2, job="rx255"))
+    assert _statuses(o, "rw255", "rx255") == {"rw255": "QUE_WAIT", "rx255": "RUNNING"}
+    o.feed(ev("STATUS", 3, job="rh255", status="SUCCESS"))
+    assert o.store.job["rw255"].status == "QUE_WAIT"  # 30 + 40 + 40 > 80 now
+    o.feed(ev("STATUS", 4, job="rx255", status="SUCCESS"))
+    assert o.store.job["rw255"].status == "RUNNING"
+
+
+def test_dl255_a_waiter_still_short_on_load_does_not_block_on_its_resource() -> None:
+    """The vendor: resources are evaluated "after the load balancing
+    attributes are evaluated and the machine has available load units", and
+    jobs that "enter the QUE_WAIT state ... do not automatically block lower
+    priority jobs that specify the same resource attribute and a different
+    machine attribute value". `rw255`'s 60 units do not fit beside 30, so it
+    does not block `rn255` on R255."""
+    o = oracle(_RES_LOAD + _rw255(60))
+    o.feed(ev("STARTJOB", 0, job="lh255"))
+    o.feed(ev("STARTJOB", 0, job="rh255"))
+    o.feed(ev("STARTJOB", 1, job="rw255"))
+    o.feed(ev("STARTJOB", 2, job="rn255"))
+    assert _statuses(o, "rw255", "rn255") == {"rw255": "QUE_WAIT", "rn255": "RUNNING"}
+
+
+def test_dl255_a_load_blocked_waiter_does_not_block_on_its_resource() -> None:
+    """`rw255`'s 10 units fit, but `lw255` (priority 2, 60 units) waits for
+    load ahead of it on rl255, so `rw255` is still at its load check and
+    does not block `rn255` on R255."""
+    text = (
+        _RES_LOAD
+        + _rw255(10)
+        + (
+            "insert_job: lw255\njob_type: c\ncommand: l\nmachine: rl255\njob_load: 60\npriority: 2\n"
+        )
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="lh255"))
+    o.feed(ev("STARTJOB", 0, job="lw255"))
+    o.feed(ev("STARTJOB", 0, job="rh255"))
+    o.feed(ev("STARTJOB", 1, job="rw255"))
+    o.feed(ev("STARTJOB", 2, job="rn255"))
+    assert _statuses(o, "lw255", "rw255", "rn255") == {
+        "lw255": "QUE_WAIT",
+        "rw255": "QUE_WAIT",
+        "rn255": "RUNNING",
+    }
+
+
+@pytest.mark.parametrize(
+    ("load", "priority", "expected"),
+    [(40, 0, "RUNNING"), (60, 2, "QUE_WAIT")],
+    ids=["start", "load-waiter"],
+)
+def test_dl255_taking_the_load_lifts_the_resource_block_at_once(
+    load: int, priority: int, expected: str
+) -> None:
+    """`rw255` (40 units) is past its load check and short on R255, so it
+    blocks `rn255`. A priority-0 start that takes 40 units sends it back to
+    its load check (30 + 40 + 40 > 80), and so does a priority-2 job queued
+    for 60 units ahead of it. Either way `rn255` starts at once, with no
+    unit freed."""
+    taker = (
+        "insert_job: zt255\njob_type: c\ncommand: z\nmachine: rl255\n"
+        f"job_load: {load}\npriority: {priority}\n"
+    )
+    o = oracle(_RES_LOAD + _rw255(40) + taker)
+    o.feed(ev("STARTJOB", 0, job="lh255"))
+    o.feed(ev("STARTJOB", 0, job="rh255"))
+    o.feed(ev("STARTJOB", 1, job="rw255"))
+    o.feed(ev("STARTJOB", 2, job="rn255"))
+    assert _statuses(o, "rw255", "rn255") == {"rw255": "QUE_WAIT", "rn255": "QUE_WAIT"}
+    o.feed(ev("STARTJOB", 3, job="zt255"))
+    assert _statuses(o, "zt255", "rw255", "rn255") == {
+        "zt255": expected,
+        "rw255": "QUE_WAIT",
+        "rn255": "RUNNING",
+    }
+
+
+def _referencer_order(between: str) -> str:
+    """R255 has 2 units, one held. `qh255` (priority 5, load 1 on q255m,
+    max_load 1) waits for both units and blocks `ql255` (priority 9, other
+    machine, 1 unit). SET_GLOBAL wakes, in catalog order, `qt255` (priority
+    0, load 1 on q255m), then `between`, then `qc255` (priority 0, 1 unit)."""
+    return (
+        "insert_machine: q255m\ntype: a\nnode_name: q255m\nmax_load: 1\n\n"
+        "insert_resource: R255\nres_type: R\namount: 2\n\n"
+        "insert_job: qr255\njob_type: c\ncommand: h\nmachine: m9\nresources: (R255, QUANTITY=1)\n\n"
+        "insert_job: qh255\njob_type: c\ncommand: w\nmachine: q255m\njob_load: 1\npriority: 5\n"
+        "resources: (R255, QUANTITY=2)\n\n"
+        "insert_job: ql255\njob_type: c\ncommand: l\nmachine: m9\npriority: 9\n"
+        "resources: (R255, QUANTITY=1)\n\n"
+        "insert_job: qt255\njob_type: c\ncommand: t\nmachine: q255m\njob_load: 1\npriority: 0\n"
+        "condition: v(G255) = 1\n\n" + between + "insert_job: qc255\njob_type: c\ncommand: c\n"
+        "machine: m9\npriority: 0\nresources: (R255, QUANTITY=1)\ncondition: v(G255) = 1\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "between",
+    [
+        "",
+        "insert_job: qu255\njob_type: c\ncommand: u\nmachine: m9\ncondition: v(G255) = 1\n\n",
+        "insert_job: qb255\njob_type: b\ncondition: v(G255) = 1\n\n"
+        "insert_job: qm255\njob_type: c\ncommand: m\nmachine: m9\nbox_name: qb255\n\n",
+    ],
+    ids=["no-other-referencer", "unrelated-job", "box-start"],
+)
+def test_dl255_an_owed_scan_waits_for_every_referencer_of_the_input(between: str) -> None:
+    """`qt255`'s start takes q255m's only unit, which sends `qh255` back to
+    its load check and lifts its block on `ql255`: a scan is owed. The input
+    pays it at its waiter step, after every referencer it woke (DL-50's
+    order), so `qc255` takes the last unit first and `ql255` stays queued.
+    A later referencer's own transition, or a box-start reset, does not pay
+    it early."""
+    o = oracle(_referencer_order(between))
+    o.feed(ev("STARTJOB", 0, job="qr255"))
+    o.feed(ev("STARTJOB", 1, job="qh255"))
+    o.feed(ev("STARTJOB", 2, job="ql255"))
+    assert _statuses(o, "qh255", "ql255") == {"qh255": "QUE_WAIT", "ql255": "QUE_WAIT"}
+    o.feed(ev("SET_GLOBAL", 3, name="G255", value="1"))
+    assert _statuses(o, "qt255", "qc255", "ql255", "qh255") == {
+        "qt255": "RUNNING",
+        "qc255": "RUNNING",
+        "ql255": "QUE_WAIT",
+        "qh255": "QUE_WAIT",
+    }
+
+
 # ------------------------------------------------ DL-54 Q2/Q3 additional trace tests
 
 

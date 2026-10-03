@@ -222,6 +222,9 @@ def _resource_preflight(name: str, job: JobIR, catalog: CatalogIR) -> list[Prefl
         honored (stricter than L016's warn; a `--resource-capacity` override is
         a documented future escape hatch, not v1);
       * an unknown res_type (not R/D/T) -- unknown release semantics;
+      * a QUANTITY above the resource's `amount`, at any priority -- it can
+        never be satisfied, and at a positive priority it would also block
+        every lower priority that names the resource forever (DL-255);
       * a malformed job_load/priority/max_load -- a non-integer load;
       * a `job_load` above its machine's `max_load` on a job with a positive
         priority -- it can never fit, and as a load waiter it would block
@@ -306,6 +309,7 @@ def _resource_preflight(name: str, job: JobIR, catalog: CatalogIR) -> list[Prefl
             err(
                 f"resources: {ref.name!r} QUANTITY={ref.quantity} exceeds its amount={capacity}"
                 " -- can never be satisfied, the job would hang in QUE_WAIT forever (DL-50)"
+                " and, at a positive priority, block every lower priority naming it (DL-255)"
             )
         res_type = (resource.res_type or "").strip().upper()
         if res_type and res_type not in RES_TYPES:
