@@ -9,10 +9,11 @@ and why it is the piece to move first when the interpreter needs room.
 DL-120 finished the move. The pool holds NO mutable state: its buckets are
 sized from the catalog and everything else is passed in. Usage is
 
-    used[bucket] = consumed[bucket] + sum(units reserved by the live rows)
+    used[bucket] = consumed[bucket] + sum(units reserved by the rows)
 
 with the held half on `JobRuntime.reservations` and the spent half in
-`RuntimeState.consumed`. The old `_bucket_used` added those two together, and
+`RuntimeState.consumed`. The rows that reserve are the live runs and, since
+DL-256, a job that still holds a renewable's units its run did not free. The old `_bucket_used` added those two together, and
 a sum of a transient and an irreversible fact is a number no seal can rebuild:
 recomputing it from the holders alone refilled every depletable (period-model
 ss5). The waiter queue went the same way -- a rank is `JobRuntime.waiter_seq`,
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
 
     from dsl41.ir import CatalogIR, JobIR, ResourceIR, ResourceRef
     from dsl41.oracle_state import JobRuntime
+    from dsl41.semantics import RenewableFree, SemanticSwitches
 
 #: Sorts a waiter whose priority nothing declares -- and one whose job the
 #: catalog no longer has at all -- behind every declared priority.
@@ -54,7 +56,10 @@ RES_TYPES = frozenset({"R", "D", "T"})
 #: DL-50's per-request FREE overrides, upper-cased: Y release on SUCCESS
 #: only, N never release, A release on any terminal. A code outside the
 #: mapping is a lowering error (`ir._parse_resources`), so `release_policy`
-#: falls back to the res_type default for anything else (DL-209).
+#: falls back to the res_type default for anything else (DL-209). On a
+#: renewable resource the units a policy does not release stay HELD by the
+#: job until RELEASE_RESOURCE or its next run (DL-256); on a depletable they
+#: are spent.
 _FREE_POLICY: dict[str, ReleasePolicy] = {"Y": "success", "N": "never", "A": "completion"}
 #: The domain the register's `free_code` surface enumerates, derived from the
 #: mapping so a fourth code needs one edit, not two (DL-75 review 2026-09-19).
@@ -81,8 +86,15 @@ class CapacityPool:
     caller passes the state, the pool answers. Nothing here can be out of step
     with the rows, because there is nothing here to be out of step."""
 
-    def __init__(self, catalog: CatalogIR) -> None:
+    def __init__(self, catalog: CatalogIR, semantics: SemanticSwitches | None = None) -> None:
         self.catalog = catalog
+        # imported here: `semantics` reads `resource_type` from this module
+        from dsl41.semantics import DEFAULTS
+
+        #: the `renewable-free` semantic switch: what an omitted FREE means
+        #: on a renewable resource (DL-256). The Oracle passes its own
+        #: switches; a caller with no profile gets the registry defaults.
+        self.renewable_free: RenewableFree = (semantics or DEFAULTS).renewable_free
         # DL-50 resource/load buckets: capacity per contended entity, seeded
         # from the catalog (malformed -> skipped; preflight refuses the run).
         #: bucket key -> capacity. `m:<machine>` = max_load, `r:<name>` = amount.
@@ -122,9 +134,24 @@ class CapacityPool:
             key = f"r:{name}"
             if key not in self._bucket_cap:
                 continue  # unsized -> not modelled here (preflight refuses run)
-            units, mode, policy = job_demand(resource_type(self.catalog.resources.get(name)), refs)
+            res_type = resource_type(self.catalog.resources.get(name))
+            units, mode, policy = job_demand(res_type, refs, self.renewable_free)
             vector.append((key, units, mode, policy))
         return vector
+
+    def keeps_held(self, bucket: str) -> bool:
+        """DL-256: whether the units a run's policy does not release stay
+        HELD by the job (True) or are spent into `consumed` (False). A
+        renewable resource holds them: "N -- The units are not freed. To
+        free the resources, issue ... sendevent -E RELEASE_RESOURCE" ("resources
+        Attribute", AutoSys 24.2), and FREE=Y's unmet half holds the same
+        way. A depletable spends them (SEM-16). The machine load is always
+        released, so it never asks. A resource the catalog no longer types
+        reads as renewable, which keeps the units attributable to the job
+        that can still release them."""
+        if not bucket.startswith("r:"):
+            return False
+        return resource_type(self.catalog.resources.get(bucket[2:])) != _DEPLETABLE
 
     def _machine_key(self, job_ir: JobIR) -> str | None:
         """The load bucket of the job's machine, or None when the machine is
@@ -146,17 +173,28 @@ class CapacityPool:
             return None
         return (key, load, "acquire", "completion")
 
-    def used(self, rows: Mapping[str, JobRuntime], consumed: Mapping[str, int]) -> dict[str, int]:
+    def used(
+        self,
+        rows: Mapping[str, JobRuntime],
+        consumed: Mapping[str, int],
+        *,
+        own: str | None = None,
+    ) -> dict[str, int]:
         """Units unavailable per bucket: those PERMANENTLY spent plus those
-        held by live runs (DL-120). One pass over the rows, so the two facts
+        held by the rows -- live runs, and since DL-256 a renewable's units a
+        completed run kept (DL-120). One pass over the rows, so the two facts
         stay separate right up to the addition that needs them together.
+        `own` leaves one job's row out: a start of a job that still holds
+        units re-uses them, so they are available to it and to nobody else.
 
         A `consumed` key the catalog no longer sizes is kept and still counts:
         a period that drops a resource must not refund what an earlier one
         burned, and a later period that brings the resource back must not find
         the quota full again (PR-19a, period-model ss3.3)."""
         used = dict(consumed)
-        for row in rows.values():
+        for name, row in rows.items():
+            if name == own:
+                continue
             for reservation in row.reservations:
                 used[reservation.bucket] = used.get(reservation.bucket, 0) + reservation.units
         return used
@@ -166,12 +204,15 @@ class CapacityPool:
         vector: list[DemandEntry],
         rows: Mapping[str, JobRuntime],
         consumed: Mapping[str, int],
+        *,
+        own: str | None = None,
     ) -> bool:
         """True iff every bucket has room for its demand (gate and acquire share
-        the same free>=units test; keys are guaranteed sized)."""
+        the same free>=units test; keys are guaranteed sized). `own` credits
+        that job's held units to it (`used`, DL-256)."""
         if not vector:
             return True
-        used = self.used(rows, consumed)
+        used = self.used(rows, consumed, own=own)
         return all(used.get(key, 0) + units <= self._bucket_cap[key] for key, units, _, _ in vector)
 
     def load_blocked(
@@ -272,8 +313,11 @@ class CapacityPool:
             entries = self._resource_entries(other)
             if not any(entry[0] in named for entry in entries):
                 continue
+            # a waiter that holds units from an earlier run counts them as
+            # its own, as its admission does (DL-256)
+            own_used = self.used(rows, consumed, own=name) if row.reservations else used
             if not any(
-                used.get(key, 0) + units > self._bucket_cap[key] for key, units, _, _ in entries
+                own_used.get(key, 0) + units > self._bucket_cap[key] for key, units, _, _ in entries
             ):
                 continue
             if not self._passed_load(other, used, rows, counts):
@@ -318,7 +362,8 @@ class CapacityPool:
         """True while this row still holds units. The Oracle releases on the
         edge that LEAVES STARTING/RUNNING (period-model ss5) -- terminal for
         every ordinary run -- before it wakes anything (the release-before-wake
-        gate)."""
+        gate). A row that is not live holds only what that release kept on a
+        renewable resource (DL-256)."""
         return bool(row.reservations)
 
     def sorted_waiters(self, rows: Mapping[str, JobRuntime]) -> list[str]:
@@ -354,6 +399,12 @@ def without_machine_load(vector: list[DemandEntry]) -> list[DemandEntry]:
 def takes_machine_load(vector: list[DemandEntry]) -> bool:
     """True when a demand vector holds load on a sized machine (DL-255)."""
     return any(entry[0].startswith(_MACHINE) for entry in vector)
+
+
+def machine_load(vector: list[DemandEntry]) -> list[DemandEntry]:
+    """The vector's machine-load entry alone: what a FORCE_STARTJOB that
+    re-uses held units still holds (DL-247, DL-256)."""
+    return [entry for entry in vector if entry[0].startswith(_MACHINE)]
 
 
 def job_priority(job_ir: JobIR) -> int:
@@ -405,7 +456,9 @@ def resource_type(resource: ResourceIR | None) -> str:
     return (resource.res_type or "").strip().upper() if resource is not None else ""
 
 
-def requirement_demand(res_type: str, free: str | None) -> tuple[DemandMode, ReleasePolicy | None]:
+def requirement_demand(
+    res_type: str, free: str | None, renewable_free: RenewableFree
+) -> tuple[DemandMode, ReleasePolicy | None]:
     """What one `resources:` group DEMANDS: the mode and, when it holds units,
     the policy that gives them back.
 
@@ -418,11 +471,11 @@ def requirement_demand(res_type: str, free: str | None) -> tuple[DemandMode, Rel
     alone reported a threshold gate as held units released on completion."""
     if res_type == _THRESHOLD:
         return "gate", None
-    return "acquire", release_policy(res_type, free)
+    return "acquire", release_policy(res_type, free, renewable_free)
 
 
 def job_demand(
-    res_type: str, refs: Sequence[ResourceRef]
+    res_type: str, refs: Sequence[ResourceRef], renewable_free: RenewableFree
 ) -> tuple[int, DemandMode, ReleasePolicy | None]:
     """One job's WHOLE demand on one resource: the groups it states there,
     classified by `requirement_demand` and coalesced by `merge_requirements`.
@@ -434,7 +487,7 @@ def job_demand(
     empty -- both callers group by a name a ref stated."""
     total: tuple[int, DemandMode, ReleasePolicy | None] | None = None
     for ref in refs:
-        mode, policy = requirement_demand(res_type, ref.free)
+        mode, policy = requirement_demand(res_type, ref.free, renewable_free)
         entry: tuple[int, DemandMode, ReleasePolicy | None] = (ref.quantity, mode, policy)
         total = entry if total is None else merge_requirements(total, entry)
     assert total is not None
@@ -460,16 +513,21 @@ def merge_requirements(
     )
 
 
-def release_policy(res_type: str, free: str | None) -> ReleasePolicy:
+def release_policy(res_type: str, free: str | None, renewable_free: RenewableFree) -> ReleasePolicy:
     """DL-50: per-request release policy. FREE overrides the res_type default.
     Returns 'completion' (release on any terminal), 'success' (only on SUCCESS),
     or 'never'. res_type is upper-cased; '' (absent) reads as renewable.
+
+    A renewable request with no FREE takes the `renewable-free` switch
+    (DL-256): Y, the vendor's documented default ("resources Attribute",
+    AutoSys 24.2: "Default: Y"), frees on SUCCESS only; A frees on every
+    completion, dsl41's reading before DL-256. A depletable never frees.
 
     PUBLIC because the explore page states the same policy per lock member
     (DL-192), and a second copy of this table would drift from the pool's
     (DL-72). One owner, two readers."""
     # FREE absent, or a code the mapping does not define -> res_type default
-    default: ReleasePolicy = "never" if res_type == _DEPLETABLE else "completion"
+    default = "never" if res_type == _DEPLETABLE else _FREE_POLICY[renewable_free]
     return _FREE_POLICY.get(free or "", default)
 
 

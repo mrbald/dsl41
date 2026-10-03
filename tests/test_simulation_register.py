@@ -1043,7 +1043,9 @@ def _detect_lowered(surface: str, member: str, text: str) -> bool:
     if surface == "demand_mode":
         return any(
             capacity.requirement_demand(
-                capacity.resource_type(catalog.resources.get(ref.name)), ref.free
+                capacity.resource_type(catalog.resources.get(ref.name)),
+                ref.free,
+                semantics.DEFAULTS.renewable_free,
             )[0]
             == member
             for job in catalog.jobs.values()
@@ -1067,7 +1069,9 @@ def _detect_lowered(surface: str, member: str, text: str) -> bool:
     if surface == "release_policy":
         return any(
             capacity.release_policy(
-                capacity.resource_type(catalog.resources.get(ref.name)), ref.free
+                capacity.resource_type(catalog.resources.get(ref.name)),
+                ref.free,
+                semantics.DEFAULTS.renewable_free,
             )
             == member
             for job in catalog.jobs.values()

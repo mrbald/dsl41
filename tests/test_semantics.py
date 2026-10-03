@@ -399,7 +399,28 @@ def test_ice_lookback_affects_exactly_the_jobs_with_a_lookback_atom() -> None:
         "insert_job: lb\njob_type: c\nmachine: m1\ncommand: y\ncondition: e(a, 01.00) = 0\n\n"
         "insert_job: bf\njob_type: b\nbox_failure: t(a, 0)\n"
     )
-    assert {name for name, job in catalog.jobs.items() if affects(job)} == {"lb", "bf"}
+    assert {name for name, job in catalog.jobs.items() if affects(job, catalog)} == {"lb", "bf"}
+
+
+def test_renewable_free_affects_exactly_the_renewable_requests_without_free() -> None:
+    """DL-256: an omitted FREE on a renewable resource, an absent res_type
+    included, is what `renewable-free` reads. An explicit FREE, a depletable
+    and a threshold are outside it."""
+    affects = semantics.REGISTRY["renewable-free"].affects
+    catalog = lower_source(
+        "insert_resource: R1\nres_type: R\namount: 2\n\n"
+        "insert_resource: U1\namount: 2\n\n"
+        "insert_resource: D1\nres_type: D\namount: 2\n\n"
+        "insert_resource: T1\nres_type: T\namount: 2\n\n"
+        "insert_job: r\njob_type: c\nmachine: m1\ncommand: x\nresources: (R1, QUANTITY=1)\n\n"
+        "insert_job: u\njob_type: c\nmachine: m1\ncommand: x\nresources: (U1, QUANTITY=1)\n\n"
+        "insert_job: rf\njob_type: c\nmachine: m1\ncommand: x\n"
+        "resources: (R1, QUANTITY=1, FREE=Y)\n\n"
+        "insert_job: d\njob_type: c\nmachine: m1\ncommand: x\nresources: (D1, QUANTITY=1)\n\n"
+        "insert_job: t\njob_type: c\nmachine: m1\ncommand: x\nresources: (T1, QUANTITY=1)\n\n"
+        "insert_job: none\njob_type: c\nmachine: m1\ncommand: x\n"
+    )
+    assert {name for name, job in catalog.jobs.items() if affects(job, catalog)} == {"r", "u"}
 
 
 # ------------------------------------------------------------------ the CLI

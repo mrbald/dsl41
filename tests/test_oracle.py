@@ -37,9 +37,14 @@ from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event, EventKind, OracleError, TraceEntry
 from dsl41.runner_clock import EngineError
+from dsl41.capacity import CapacityPool
 from dsl41.semantics import SemanticSwitches, resolve as resolve_switches
 
 T0 = datetime(2026, 7, 1, 8, 0)
+
+#: DL-256: dsl41's reading before the vendor default, kept selectable: a
+#: renewable request with no FREE frees its units on every completion
+_FREE_A = resolve_switches({"renewable-free": "A"})
 
 #: flipped by the autouse fixture below; oracle() consults it
 _ENGINE_PATH = False
@@ -5941,7 +5946,9 @@ def test_sem18_a_restart_during_the_cascade_still_wakes_the_resource_waiters() -
     depletable FUEL was used up by its first run. m's own notification is
     skipped because its row moved on. The release still owes the waiters
     their wake, so w is admitted. (The restart used to bypass m through
-    ON_NOEXEC; DL-254 ignores that event on a RUNNING job or box.)"""
+    ON_NOEXEC; DL-254 ignores that event on a RUNNING job or box.) Run
+    under `renewable-free=A` (DL-256): under the vendor default the
+    operator's INACTIVE on a live holder keeps its unit held."""
     text = (
         "insert_resource: LOCK18R\nres_type: R\namount: 1\n\n"
         "insert_resource: FUEL18R\nres_type: D\namount: 1\n\n"
@@ -5952,7 +5959,7 @@ def test_sem18_a_restart_during_the_cascade_still_wakes_the_resource_waiters() -
         "insert_job: w18r\njob_type: c\ncommand: z\nmachine: m1\n"
         "resources: (LOCK18R, QUANTITY=1)\n"
     )
-    o = oracle(text)
+    o = oracle(text, semantics=_FREE_A)
     o.feed(ev("ON_HOLD", 0, job="h18r"))
     o.feed(ev("STARTJOB", 0, job="b18r"))
     o.feed(ev("STARTJOB", 1, job="w18r"))
@@ -6058,19 +6065,24 @@ def test_dl50_counting_pool_admits_up_to_capacity_then_queues() -> None:
     assert o.store.job["p3"].status == "RUNNING"
 
 
-def test_dl50_renewable_default_releases_on_failure() -> None:
-    """FREE absent on a renewable resource frees units on ANY completion, so a
-    FAILED holder still releases -- a waiter admits (# PENDING: Qr1 default)."""
+@pytest.mark.parametrize(
+    ("switch", "waiter"), [("Y", "QUE_WAIT"), ("A", "RUNNING")], ids=["vendor-Y", "free-A"]
+)
+def test_dl50_renewable_default_releases_on_failure(switch: str, waiter: str) -> None:
+    """Qr1, decided by DL-256: FREE absent on a renewable resource reads the
+    `renewable-free` switch. Under Y, the vendor default, a FAILED holder
+    keeps its unit and the waiter stays queued; under A, dsl41's reading
+    before DL-256, it frees on any completion and the waiter admits."""
     text = (
         "insert_resource: RLOCK\nres_type: R\namount: 1\n\n"
         "insert_job: rf1\njob_type: c\ncommand: x\nmachine: m1\nresources: (RLOCK, QUANTITY=1)\n\n"
         "insert_job: rf2\njob_type: c\ncommand: y\nmachine: m1\nresources: (RLOCK, QUANTITY=1)\n"
     )
-    o = oracle(text)
+    o = oracle(text, semantics=resolve_switches({"renewable-free": switch}))
     o.feed(ev("STARTJOB", 0, job="rf1"))
     o.feed(ev("STARTJOB", 0, job="rf2"))
     o.feed(ev("STATUS", 1, job="rf1", status="FAILURE"))
-    assert o.store.job["rf2"].status == "RUNNING"
+    assert o.store.job["rf2"].status == waiter
 
 
 def test_dl50_free_y_holds_the_lock_on_failure() -> None:
@@ -6186,13 +6198,15 @@ def test_dl50_waiters_admit_in_priority_order() -> None:
 
 def test_dl50_killing_a_holder_releases_its_units() -> None:
     """KILLJOB on a RUNNING holder terminates it, and TERMINATED frees units
-    under the default policy, so the waiter admits."""
+    under a policy that frees on every completion, so the waiter admits. Run
+    under `renewable-free=A` (DL-256): under the vendor default the
+    TERMINATED holder keeps them (test_dl256_*)."""
     text = (
         "insert_resource: KLOCK\nres_type: R\namount: 1\n\n"
         "insert_job: kh\njob_type: c\ncommand: x\nmachine: m1\nresources: (KLOCK, QUANTITY=1)\n\n"
         "insert_job: kw\njob_type: c\ncommand: y\nmachine: m1\nresources: (KLOCK, QUANTITY=1)\n"
     )
-    o = oracle(text)
+    o = oracle(text, semantics=_FREE_A)
     o.feed(ev("STARTJOB", 0, job="kh"))
     o.feed(ev("STARTJOB", 0, job="kw"))
     o.feed(ev("KILLJOB", 1, job="kh"))
@@ -6206,19 +6220,432 @@ def test_dl50_self_retriggering_holder_does_not_leak_its_semaphore() -> None:
     BEFORE run N+1 re-acquires, or a unit is stranded forever. `sl` self-loops
     via `condition: s(sl)`; after it finally FAILs (breaking s(sl)) the pool is
     fully free, so `big` (needs the whole amount=2) MUST run -- it wedges in
-    QUE_WAIT under the leak bug."""
+    QUE_WAIT under the leak bug. Run under `renewable-free=A` (DL-256): the
+    failed last run keeps its unit under the vendor default."""
     text = (
         "insert_resource: R\nres_type: R\namount: 2\n\n"
         "insert_job: sl\njob_type: c\ncommand: x\nmachine: m1\n"
         "resources: (R, QUANTITY=1)\ncondition: s(sl)\n\n"
         "insert_job: big\njob_type: c\ncommand: b\nmachine: m1\nresources: (R, QUANTITY=2)\n"
     )
-    o = oracle(text)
+    o = oracle(text, semantics=_FREE_A)
     o.feed(ev("FORCE_STARTJOB", 0, job="sl"))  # seed run 1 (s(sl) false at first)
     o.feed(ev("STATUS", 1, job="sl", status="SUCCESS"))  # completes r1, s(sl) -> re-runs r2
     o.feed(ev("STATUS", 2, job="sl", status="FAILURE"))  # r2 fails, s(sl) false -> stops
     o.feed(ev("STARTJOB", 3, job="big"))
     assert o.store.job["big"].status == "RUNNING"  # pool fully freed; no strand
+
+
+# ------------------- DL-256 renewable-free, RELEASE_RESOURCE, FORCE_STARTJOB reuse
+
+#: one renewable unit, a holder that states no FREE, and a waiter for it
+_HELD_JIL = (
+    "insert_resource: HLOCK\nres_type: R\namount: 1\n\n"
+    "insert_job: h256\njob_type: c\ncommand: x\nmachine: m1\n"
+    "resources: (HLOCK, QUANTITY=1)\n\n"
+    "insert_job: w256\njob_type: c\ncommand: y\nmachine: m1\n"
+    "resources: (HLOCK, QUANTITY=1)\n"
+)
+
+
+def _held_units(o: Oracle | EngineHarness, job: str) -> list[tuple[str, int, str]]:
+    return [(r.bucket, r.units, r.release_policy) for r in o.store.job[job].reservations]
+
+
+def _bucket_used(o: Oracle | EngineHarness, bucket: str) -> int:
+    held = sum(
+        r.units for row in o.store.job.values() for r in row.reservations if r.bucket == bucket
+    )
+    return held + o.store.consumed.get(bucket, 0)
+
+
+def _fail_holder(o: Oracle | EngineHarness, outcome: str, at: float = 1) -> None:
+    if outcome == "TERMINATED":
+        o.feed(ev("KILLJOB", at, job="h256"))
+    else:
+        o.feed(ev("STATUS", at, job="h256", status=outcome))
+
+
+@pytest.mark.parametrize("outcome", ["FAILURE", "TERMINATED"])
+def test_dl256_omitted_free_holds_after_failure_until_release_resource(outcome: str) -> None:
+    """DL-256, vendor default (`renewable-free=Y`): "Y -- Frees the units
+    only if the job completes successfully" ("resources Attribute", 24.2).
+    A FAILURE or TERMINATED holder keeps its unit on its row, the waiter
+    stays queued, and RELEASE_RESOURCE gives the unit back and admits it."""
+    o = oracle(_HELD_JIL)
+    o.feed(ev("STARTJOB", 0, job="h256"))
+    o.feed(ev("STARTJOB", 0, job="w256"))
+    _fail_holder(o, outcome)
+    assert o.store.job["h256"].status == outcome
+    assert _held_units(o, "h256") == [("r:HLOCK", 1, "success")]
+    assert o.store.job["w256"].status == "QUE_WAIT"
+    assert dict(o.store.consumed) == {}  # held by the job, not spent
+    o.feed(ev("STARTJOB", 2, job="w256"))  # a second ask changes nothing
+    assert o.store.job["w256"].status == "QUE_WAIT"
+
+    o.feed(ev("RELEASE_RESOURCE", 3, job="h256"))
+    assert o.store.job["h256"].reservations == ()
+    assert o.store.job["h256"].status == outcome  # no status moves
+    assert o.store.job["w256"].status == "RUNNING"
+    assert _bucket_used(o, "r:HLOCK") == 1  # the waiter's unit, once
+    release = [t for t in o.trace() if t.transition == "RELEASE_RESOURCE"]
+    assert [(t.job, t.cause) for t in release] == [
+        ("h256", "sendevent RELEASE_RESOURCE (frees 1 of HLOCK)")
+    ]
+
+
+def test_dl256_omitted_free_frees_on_success() -> None:
+    """DL-256: the vendor default frees on SUCCESS, so the waiter admits."""
+    o = oracle(_HELD_JIL)
+    o.feed(ev("STARTJOB", 0, job="h256"))
+    o.feed(ev("STARTJOB", 0, job="w256"))
+    o.feed(ev("STATUS", 1, job="h256", status="SUCCESS"))
+    assert o.store.job["h256"].reservations == ()
+    assert o.store.job["w256"].status == "RUNNING"
+
+
+@pytest.mark.parametrize("outcome", ["FAILURE", "TERMINATED"])
+def test_dl256_renewable_free_a_frees_on_every_completion(outcome: str) -> None:
+    """DL-256: `renewable-free=A`, dsl41's reading before DL-256, frees an
+    omitted FREE's units on every completion."""
+    o = oracle(_HELD_JIL, semantics=_FREE_A)
+    o.feed(ev("STARTJOB", 0, job="h256"))
+    o.feed(ev("STARTJOB", 0, job="w256"))
+    _fail_holder(o, outcome)
+    assert o.store.job["h256"].reservations == ()
+    assert o.store.job["w256"].status == "RUNNING"
+
+
+@pytest.mark.parametrize("switch", ["Y", "A"])
+@pytest.mark.parametrize("outcome", ["SUCCESS", "FAILURE"])
+@pytest.mark.parametrize(("free", "frees_on"), [("Y", {"SUCCESS"}), ("N", set()), ("A", None)])
+def test_dl256_explicit_free_is_unchanged_by_the_switch(
+    free: str, frees_on: set[str] | None, outcome: str, switch: str
+) -> None:
+    """DL-256: the switch reads only an OMITTED FREE. An explicit FREE=Y frees
+    on SUCCESS, N never, A always, whatever `renewable-free` says; what a
+    renewable request does not free stays held by the job."""
+    text = _HELD_JIL.replace(
+        "resources: (HLOCK, QUANTITY=1)\n\ninsert_job: w256",
+        f"resources: (HLOCK, QUANTITY=1, FREE={free})\n\ninsert_job: w256",
+    )
+    o = oracle(text, semantics=resolve_switches({"renewable-free": switch}))
+    o.feed(ev("STARTJOB", 0, job="h256"))
+    o.feed(ev("STARTJOB", 0, job="w256"))
+    o.feed(ev("STATUS", 1, job="h256", status=outcome))
+    frees = frees_on is None or outcome in frees_on
+    assert (o.store.job["h256"].reservations == ()) is frees
+    assert o.store.job["w256"].status == ("RUNNING" if frees else "QUE_WAIT")
+    assert dict(o.store.consumed) == {}  # a renewable never spends
+
+
+@pytest.mark.parametrize("outcome", ["FAILURE", "TERMINATED"])
+def test_dl256_force_start_of_a_failed_holder_reuses_its_units(outcome: str) -> None:
+    """DL-256: "When you force start a job in FAILURE or TERMINATED status
+    that has a virtual resource dependency with free=Y or free=N and has not
+    released the virtual resources, the FORCE_STARTJOB event ... schedules
+    the job using the held virtual resources. Before force starting the job,
+    the scheduler does not re-evaluate other resource dependencies." ("Define
+    Virtual Resource Types", 24.2.) The forced run holds the unit it held --
+    no second unit, so the pool is not overcommitted -- and it starts though
+    its other resource, OTHER256, is fully taken; it does not take OTHER256."""
+    text = (
+        _HELD_JIL.replace(
+            "resources: (HLOCK, QUANTITY=1)\n\ninsert_job: w256",
+            "resources: (HLOCK, QUANTITY=1) AND (OTHER256, QUANTITY=1, FREE=A)\n\ninsert_job: w256",
+        )
+        + "\ninsert_resource: OTHER256\nres_type: R\namount: 1\n\n"
+        "insert_job: o256\njob_type: c\ncommand: z\nmachine: m1\n"
+        "resources: (OTHER256, QUANTITY=1)\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="h256"))
+    o.feed(ev("STARTJOB", 0, job="w256"))
+    _fail_holder(o, outcome)
+    assert _held_units(o, "h256") == [("r:HLOCK", 1, "success")]
+    o.feed(ev("STARTJOB", 2, job="o256"))  # takes OTHER256, which h256 freed
+    assert o.store.job["o256"].status == "RUNNING"
+
+    o.feed(ev("FORCE_STARTJOB", 3, job="h256"))
+    assert o.store.job["h256"].status == "RUNNING"
+    assert o.store.job["h256"].run_number == 2
+    assert _held_units(o, "h256") == [("r:HLOCK", 1, "success")]
+    assert _bucket_used(o, "r:HLOCK") == 1  # reused, not taken twice
+    assert _bucket_used(o, "r:OTHER256") == 1  # o256's alone
+    assert o.store.job["w256"].status == "QUE_WAIT"
+    started = [t for t in o.trace() if t.job == "h256" and t.transition.endswith("->STARTING")]
+    assert "starts on its held units" in started[-1].cause
+
+    o.feed(ev("STATUS", 4, job="h256", status="SUCCESS"))
+    assert o.store.job["h256"].reservations == ()
+    assert o.store.job["w256"].status == "RUNNING"
+
+
+def test_dl256_ordinary_restart_of_a_holder_reuses_its_own_units() -> None:
+    """DL-256: an ordinary start of a job that still holds units re-uses
+    them. Its admission counts its own held units as available to it and to
+    nobody else, and the new run's vector replaces them, so the one-unit
+    pool is never counted twice and the waiter stays queued."""
+    o = oracle(_HELD_JIL)
+    o.feed(ev("STARTJOB", 0, job="h256"))
+    o.feed(ev("STARTJOB", 0, job="w256"))
+    o.feed(ev("STATUS", 1, job="h256", status="FAILURE"))
+    o.feed(ev("STARTJOB", 2, job="h256"))
+    assert o.store.job["h256"].status == "RUNNING"
+    assert _held_units(o, "h256") == [("r:HLOCK", 1, "success")]
+    assert _bucket_used(o, "r:HLOCK") == 1
+    assert o.store.job["w256"].status == "QUE_WAIT"
+    o.feed(ev("STATUS", 3, job="h256", status="SUCCESS"))
+    assert o.store.job["w256"].status == "RUNNING"
+
+
+def test_dl256_a_holder_queued_for_another_resource_keeps_its_held_units() -> None:
+    """DL-256: a holder whose restart waits on ANOTHER resource goes to
+    QUE_WAIT still holding its unit; QUE_WAIT is no release edge. When the
+    other resource frees, it is admitted on its own unit."""
+    text = (
+        _HELD_JIL.replace(
+            "resources: (HLOCK, QUANTITY=1)\n\ninsert_job: w256",
+            "resources: (HLOCK, QUANTITY=1) AND (OTHER256, QUANTITY=1, FREE=A)\n\ninsert_job: w256",
+        )
+        + "\ninsert_resource: OTHER256\nres_type: R\namount: 1\n\n"
+        "insert_job: o256\njob_type: c\ncommand: z\nmachine: m1\n"
+        "resources: (OTHER256, QUANTITY=1)\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="h256"))
+    o.feed(ev("STATUS", 1, job="h256", status="FAILURE"))
+    o.feed(ev("STARTJOB", 2, job="o256"))
+    o.feed(ev("STARTJOB", 3, job="h256"))
+    assert o.store.job["h256"].status == "QUE_WAIT"
+    assert _held_units(o, "h256") == [("r:HLOCK", 1, "success")]
+    o.feed(ev("STATUS", 4, job="o256", status="SUCCESS"))
+    assert o.store.job["h256"].status == "RUNNING"
+    assert sorted(_held_units(o, "h256")) == [
+        ("r:HLOCK", 1, "success"),
+        ("r:OTHER256", 1, "completion"),
+    ]
+    assert _bucket_used(o, "r:HLOCK") == 1
+
+
+@pytest.mark.parametrize(
+    ("setup", "reason"),
+    [
+        ([], "sendevent RELEASE_RESOURCE (nothing held)"),
+        (
+            [("STARTJOB", "h256")],
+            "sendevent RELEASE_RESOURCE (no effect: RUNNING; the run's units go back when it ends)",
+        ),
+    ],
+    ids=["holding-nothing", "running"],
+)
+def test_dl256_release_resource_without_held_units_is_a_recorded_no_op(
+    setup: list[tuple[str, str]], reason: str
+) -> None:
+    """DL-256: RELEASE_RESOURCE on a job holding nothing, or on a running job
+    whose units belong to its run, moves nothing and records the marker."""
+    o = oracle(_HELD_JIL)
+    for kind, job in setup:
+        o.feed(ev(kind, 0, job=job))  # type: ignore[arg-type]
+    before = o.store.job["h256"]
+    o.feed(ev("RELEASE_RESOURCE", 1, job="h256"))
+    assert o.store.job["h256"] == before  # nothing moved, the revision included
+    assert [(t.job, t.transition, t.cause) for t in o.trace()][-1] == (
+        "h256",
+        "RELEASE_RESOURCE",
+        reason,
+    )
+
+
+def test_dl256_an_operator_inactive_on_a_failed_holder_keeps_its_units() -> None:
+    """DL-256: only a run's end, RELEASE_RESOURCE or the job's next run moves
+    held units. An operator's CHANGE_STATUS on a job that is not live is no
+    release edge."""
+    o = oracle(_HELD_JIL)
+    o.feed(ev("STARTJOB", 0, job="h256"))
+    o.feed(ev("STARTJOB", 0, job="w256"))
+    o.feed(ev("STATUS", 1, job="h256", status="FAILURE"))
+    o.feed(ev("STATUS", 2, job="h256", status="INACTIVE"))
+    assert _held_units(o, "h256") == [("r:HLOCK", 1, "success")]
+    assert o.store.job["w256"].status == "QUE_WAIT"
+
+
+def test_dl256_a_live_holder_set_inactive_keeps_its_units() -> None:
+    """DL-256, vendor default: an operator's INACTIVE on a RUNNING holder ends
+    the run without a SUCCESS, so FREE=Y's units stay held."""
+    o = oracle(_HELD_JIL)
+    o.feed(ev("STARTJOB", 0, job="h256"))
+    o.feed(ev("STARTJOB", 0, job="w256"))
+    o.feed(ev("STATUS", 1, job="h256", status="INACTIVE"))
+    assert _held_units(o, "h256") == [("r:HLOCK", 1, "success")]
+    assert o.store.job["w256"].status == "QUE_WAIT"
+
+
+def test_dl256_an_on_noexec_bypass_of_a_holder_keeps_its_units() -> None:
+    """DL-256: a bypass is no run -- it takes nothing and frees nothing. The
+    run number moves; the units from the earlier run stay held."""
+    o = oracle(_HELD_JIL)
+    o.feed(ev("STARTJOB", 0, job="h256"))
+    o.feed(ev("STARTJOB", 0, job="w256"))
+    o.feed(ev("STATUS", 1, job="h256", status="FAILURE"))
+    o.feed(ev("ON_NOEXEC", 2, job="h256"))  # FAILURE -> INACTIVE (DL-243)
+    o.feed(ev("STARTJOB", 3, job="h256"))  # bypasses to SUCCESS
+    assert o.store.job["h256"].status == "SUCCESS"
+    assert o.store.job["h256"].run_number == 2
+    assert _held_units(o, "h256") == [("r:HLOCK", 1, "success")]
+    assert o.store.job["w256"].status == "QUE_WAIT"
+
+
+def test_dl256_a_box_reset_of_a_failed_holder_keeps_its_units() -> None:
+    """DL-256 with DL-242: the box start resets a FAILURE member to
+    INACTIVE; that is no release edge, so its units stay held, and its run
+    in the new box cycle re-uses them."""
+    text = (
+        "insert_resource: BLK256\nres_type: R\namount: 1\n\n"
+        "insert_job: b256\njob_type: b\n\n"
+        "insert_job: m256\njob_type: c\ncommand: x\nmachine: m1\nbox_name: b256\n"
+        "resources: (BLK256, QUANTITY=1)\n\n"
+        "insert_job: w256b\njob_type: c\ncommand: y\nmachine: m1\n"
+        "resources: (BLK256, QUANTITY=1)\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="b256"))
+    o.feed(ev("STATUS", 1, job="m256", status="FAILURE"))
+    assert o.store.job["b256"].status == "FAILURE"
+    o.feed(ev("STARTJOB", 2, job="w256b"))
+    assert o.store.job["w256b"].status == "QUE_WAIT"
+    o.feed(ev("STARTJOB", 3, job="b256"))  # resets m256, which then runs again
+    assert o.store.job["m256"].status == "RUNNING"
+    assert o.store.job["m256"].run_number == 2
+    assert _held_units(o, "m256") == [("r:BLK256", 1, "success")]
+    assert _bucket_used(o, "r:BLK256") == 1
+    assert o.store.job["w256b"].status == "QUE_WAIT"
+
+
+def test_dl256_killjob_on_a_holder_that_is_not_running_changes_nothing() -> None:
+    """DL-256: KILLJOB has no run to kill on a FAILURE holder; its units
+    stay held."""
+    o = oracle(_HELD_JIL)
+    o.feed(ev("STARTJOB", 0, job="h256"))
+    o.feed(ev("STATUS", 1, job="h256", status="FAILURE"))
+    before = o.store.job["h256"]
+    o.feed(ev("KILLJOB", 2, job="h256"))
+    assert o.store.job["h256"] == before
+
+
+def _more_jil(quantity: int) -> str:
+    return (
+        "insert_resource: MORE\nres_type: R\namount: 3\n\n"
+        "insert_job: hm\njob_type: c\ncommand: x\nmachine: m1\n"
+        f"resources: (MORE, QUANTITY={quantity})\n\n"
+        "insert_job: om\njob_type: c\ncommand: y\nmachine: m1\nresources: (MORE, QUANTITY=1)\n"
+    )
+
+
+def _rebaseline(o: Oracle, text: str) -> None:
+    """Swap a bare Oracle's catalog in place: the re-baseline a holder's
+    restart can meet (PR-20's own technique)."""
+    o.catalog = lower_source(text)
+    o._pool = CapacityPool(o.catalog)
+
+
+def test_dl256_a_restart_asking_for_more_takes_the_difference_or_queues() -> None:
+    """DL-256: a holder's restart is credited its own units only. With room
+    for the rest it takes the larger demand; without room it queues and
+    keeps what it holds."""
+    o = oracle(_more_jil(1))
+    if isinstance(o, EngineHarness):
+        pytest.skip("the re-baseline swaps the catalog of a bare Oracle")
+    o.feed(ev("STARTJOB", 0, job="hm"))
+    o.feed(ev("STATUS", 1, job="hm", status="FAILURE"))
+    assert _held_units(o, "hm") == [("r:MORE", 1, "success")]
+    _rebaseline(o, _more_jil(2))
+    o.feed(ev("STARTJOB", 2, job="om"))  # 1 held + 1 = 2 of 3
+    o.feed(ev("STARTJOB", 3, job="hm"))  # needs 2, holds 1, one free: fits
+    assert o.store.job["hm"].status == "RUNNING"
+    assert _held_units(o, "hm") == [("r:MORE", 2, "success")]
+    assert _bucket_used(o, "r:MORE") == 3
+    o.feed(ev("STATUS", 4, job="hm", status="FAILURE"))  # holds 2 now
+    _rebaseline(o, _more_jil(3))
+    o.feed(ev("STARTJOB", 5, job="hm"))  # needs 3, holds 2, om has 1: queues
+    assert o.store.job["hm"].status == "QUE_WAIT"
+    assert _held_units(o, "hm") == [("r:MORE", 2, "success")]
+    assert _bucket_used(o, "r:MORE") == 3
+    o.feed(ev("STATUS", 6, job="om", status="SUCCESS"))  # the third unit frees
+    assert o.store.job["hm"].status == "RUNNING"
+    assert _held_units(o, "hm") == [("r:MORE", 3, "success")]
+    assert _bucket_used(o, "r:MORE") == 3
+
+
+def test_dl256_a_restart_on_another_resource_gives_the_old_units_back() -> None:
+    """DL-256: a holder whose restart no longer asks for the held resource
+    takes the new one and frees the old, and the queue is woken for it."""
+    text = (
+        "insert_resource: OLD\nres_type: R\namount: 1\n\n"
+        "insert_resource: NEW\nres_type: R\namount: 1\n\n"
+        "insert_job: ha\njob_type: c\ncommand: x\nmachine: m1\nresources: (OLD, QUANTITY=1)\n\n"
+        "insert_job: wa\njob_type: c\ncommand: y\nmachine: m1\nresources: (OLD, QUANTITY=1)\n"
+    )
+    o = oracle(text)
+    if isinstance(o, EngineHarness):
+        pytest.skip("the re-baseline below swaps the catalog of a bare Oracle")
+    o.feed(ev("STARTJOB", 0, job="ha"))
+    o.feed(ev("STATUS", 1, job="ha", status="FAILURE"))
+    o.feed(ev("STARTJOB", 2, job="wa"))
+    assert o.store.job["wa"].status == "QUE_WAIT"
+    _rebaseline(
+        o,
+        text.replace(
+            "resources: (OLD, QUANTITY=1)\n\ninsert_job: wa",
+            "resources: (NEW, QUANTITY=1)\n\ninsert_job: wa",
+        ),
+    )
+    o.feed(ev("STARTJOB", 3, job="ha"))
+    assert _held_units(o, "ha") == [("r:NEW", 1, "success")]
+    assert o.store.job["wa"].status == "RUNNING"  # the OLD unit came back
+    assert _bucket_used(o, "r:OLD") == 1
+
+
+def test_dl256_two_holders_of_one_resource_release_independently() -> None:
+    """DL-256: units are held per job. Releasing one holder frees its unit
+    alone; the other's restart re-uses its own."""
+    text = (
+        "insert_resource: TWO\nres_type: R\namount: 2\n\n"
+        "insert_job: t1\njob_type: c\ncommand: x\nmachine: m1\nresources: (TWO, QUANTITY=1)\n\n"
+        "insert_job: t2\njob_type: c\ncommand: y\nmachine: m1\nresources: (TWO, QUANTITY=1)\n\n"
+        "insert_job: tw\njob_type: c\ncommand: z\nmachine: m1\nresources: (TWO, QUANTITY=1)\n"
+    )
+    o = oracle(text)
+    for minute, job in enumerate(("t1", "t2")):
+        o.feed(ev("STARTJOB", minute, job=job))
+    o.feed(ev("STATUS", 2, job="t1", status="FAILURE"))
+    o.feed(ev("STATUS", 2, job="t2", status="TERMINATED"))
+    o.feed(ev("STARTJOB", 3, job="tw"))
+    assert o.store.job["tw"].status == "QUE_WAIT"
+    o.feed(ev("RELEASE_RESOURCE", 4, job="t1"))
+    assert o.store.job["t1"].reservations == ()
+    assert _held_units(o, "t2") == [("r:TWO", 1, "success")]
+    assert o.store.job["tw"].status == "RUNNING"
+    o.feed(ev("STARTJOB", 5, job="t2"))  # re-uses its own unit
+    assert o.store.job["t2"].status == "RUNNING"
+    assert _bucket_used(o, "r:TWO") == 2
+
+
+def test_dl256_a_depletable_with_no_free_still_spends() -> None:
+    """DL-256 changes renewables only: a depletable's units are spent at the
+    run's end, failed or not, and no RELEASE_RESOURCE brings them back."""
+    text = (
+        "insert_resource: DFUEL\nres_type: D\namount: 2\n\n"
+        "insert_job: d256\njob_type: c\ncommand: x\nmachine: m1\n"
+        "resources: (DFUEL, QUANTITY=1)\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="d256"))
+    o.feed(ev("STATUS", 1, job="d256", status="FAILURE"))
+    assert o.store.job["d256"].reservations == ()
+    assert dict(o.store.consumed) == {"r:DFUEL": 1}
+    o.feed(ev("RELEASE_RESOURCE", 2, job="d256"))
+    assert dict(o.store.consumed) == {"r:DFUEL": 1}
 
 
 def test_dl50_killing_a_queued_job_removes_it_and_it_never_runs() -> None:
@@ -6927,6 +7354,33 @@ def test_dl255_taking_the_load_lifts_the_resource_block_at_once(
     o.feed(ev("STARTJOB", 3, job="zt255"))
     assert _statuses(o, "zt255", "rw255", "rn255") == {
         "zt255": expected,
+        "rw255": "QUE_WAIT",
+        "rn255": "RUNNING",
+    }
+
+
+def test_dl256_a_forced_start_on_held_units_lifts_the_resource_block_at_once() -> None:
+    """DL-255 with DL-256: a FORCE_STARTJOB of a FAILURE job that holds
+    units runs no admission check, but it still holds its machine load. Its
+    40 units send `rw255` back to its load check (30 + 40 + 40 > 80), so
+    `rn255` starts in the same input, as after any start that takes load."""
+    taker = (
+        "insert_resource: T256\nres_type: R\namount: 1\n\n"
+        "insert_job: zt256\njob_type: c\ncommand: z\nmachine: rl255\njob_load: 40\n"
+        "resources: (T256, QUANTITY=1)\n"
+    )
+    o = oracle(_RES_LOAD + _rw255(40) + taker)
+    o.feed(ev("STARTJOB", 0, job="zt256"))
+    o.feed(ev("STATUS", 0, job="zt256", status="FAILURE"))
+    assert [r.bucket for r in o.store.job["zt256"].reservations] == ["r:T256"]  # held
+    o.feed(ev("STARTJOB", 0, job="lh255"))
+    o.feed(ev("STARTJOB", 0, job="rh255"))
+    o.feed(ev("STARTJOB", 1, job="rw255"))
+    o.feed(ev("STARTJOB", 2, job="rn255"))
+    assert _statuses(o, "rw255", "rn255") == {"rw255": "QUE_WAIT", "rn255": "QUE_WAIT"}
+    o.feed(ev("FORCE_STARTJOB", 3, job="zt256"))
+    assert _statuses(o, "zt256", "rw255", "rn255") == {
+        "zt256": "RUNNING",
         "rw255": "QUE_WAIT",
         "rn255": "RUNNING",
     }

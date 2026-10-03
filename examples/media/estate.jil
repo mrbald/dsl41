@@ -13,21 +13,21 @@ job_type: c
 condition: s(MEDIA_INPUT)
 command: ~{$WORKER}~ low
 profile: ~{$PROFILE}~
-resources: (MEDIA_ENCODE, QUANTITY=1)
+resources: (MEDIA_ENCODE, QUANTITY=1, FREE=A)
 
 insert_job: MEDIA_HIGH
 job_type: c
 condition: s(MEDIA_INPUT)
 command: ~{$WORKER}~ high
 profile: ~{$PROFILE}~
-resources: (MEDIA_ENCODE, QUANTITY=1)
+resources: (MEDIA_ENCODE, QUANTITY=1, FREE=A)
 
 insert_job: MEDIA_POSTER
 job_type: c
 condition: s(MEDIA_INPUT)
 command: ~{$WORKER}~ poster
 profile: ~{$PROFILE}~
-resources: (MEDIA_ENCODE, QUANTITY=1)
+resources: (MEDIA_ENCODE, QUANTITY=1, FREE=A)
 
 insert_job: MEDIA_STAGE
 job_type: c

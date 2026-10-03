@@ -136,6 +136,7 @@ JOB_EVENT_VERBS: frozenset[EventKind] = frozenset(
         "ON_NOEXEC",
         "OFF_NOEXEC",
         "DISARM",  # the DL-158 operator disarm (period-model ss10.4)
+        "RELEASE_RESOURCE",  # frees the units a job still holds (DL-256)
     }
 )
 STATUSES: frozenset[str] = frozenset(get_args(JobStatus))

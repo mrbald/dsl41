@@ -612,6 +612,44 @@ def test_replay_reproduces_a_disarm_trace_to_the_same_state(tmp_path: Path) -> N
     assert fresh.store.job["dis_r"].status == "INACTIVE"
 
 
+def test_replay_reproduces_held_units_and_a_release_resource(tmp_path: Path) -> None:
+    """DL-256: a journal carrying a held unit and a RELEASE_RESOURCE replays
+    to the same state. The holder fails and keeps its unit (an omitted FREE,
+    the vendor default), the waiter queues, the operator releases, and the
+    waiter runs; a fresh Oracle fed the same WAL reaches the identical trace
+    and rows."""
+    text = (
+        "insert_resource: JLOCK\nres_type: R\namount: 1\n\n"
+        "insert_job: jh\njob_type: c\ncommand: x\nmachine: m1\nresources: (JLOCK, QUANTITY=1)\n\n"
+        "insert_job: jw\njob_type: c\ncommand: y\nmachine: m1\nresources: (JLOCK, QUANTITY=1)\n"
+    )
+    adapter = FakeAdapter({("jh", 1): (30.0, 1)}, default=None)
+    script = [
+        ev("STARTJOB", 0, job="jh"),
+        ev("STARTJOB", 0, job="jw"),
+        ev("RELEASE_RESOURCE", 2, job="jh"),
+    ]
+
+    async def scenario() -> Engine:
+        return await _run_virtual(
+            text, tmp_path / "run", script, adapter=adapter, horizon=T0 + timedelta(minutes=5)
+        )
+
+    engine = asyncio.run(scenario())
+    assert engine.oracle.store.job["jh"].status == "FAILURE"
+    assert engine.oracle.store.job["jh"].reservations == ()
+    assert engine.oracle.store.job["jw"].status == "RUNNING"
+
+    records = read_journal(tmp_path / "run" / "journal.jsonl")
+    assert [r["kind"] for r in records if r.get("rec") == "input"].count("RELEASE_RESOURCE") == 1
+    fresh = Oracle(lower_source(text))
+    replay_inputs(fresh, records)
+    assert [t.model_dump() for t in fresh.trace()] == [
+        t.model_dump() for t in engine.oracle.trace()
+    ]
+    assert dict(fresh.store.job) == dict(engine.oracle.store.job)
+
+
 def test_replay_refuses_an_unknown_event_kind_by_name(tmp_path: Path) -> None:
     """protocol-evolution ss1 (the WAL row) at the event alphabet, the wall
     DL-158's compatibility statement names: an `input` record whose kind is

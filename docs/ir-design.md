@@ -391,8 +391,10 @@ trace. `cause` is excluded: it carries names and wording, not semantics.
 class Event(BaseModel):                   # injectable + internally generated
     at: datetime
     kind: Literal["STATUS","STARTJOB","FORCE_STARTJOB","SET_GLOBAL","ON_ICE","OFF_ICE",
-                  "ON_HOLD","OFF_HOLD","ON_NOEXEC","OFF_NOEXEC","DISARM","KILLJOB","TIMER",
-                  "MUST_START_ALARM","MUST_COMPLETE_ALARM"]   # DISARM: DL-158
+                  "ON_HOLD","OFF_HOLD","ON_NOEXEC","OFF_NOEXEC","DISARM",
+                  "RELEASE_RESOURCE","KILLJOB","TIMER",
+                  "MUST_START_ALARM","MUST_COMPLETE_ALARM"]
+                  # DISARM: DL-158; RELEASE_RESOURCE: DL-256
     payload: dict
     source: str | None                    # provenance of an injected event (DL-68); None
                                           #   for oracle-internal and script events

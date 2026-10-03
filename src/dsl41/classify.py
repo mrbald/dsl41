@@ -65,7 +65,7 @@ from dsl41.derive import BoxTree, derive_graph
 from dsl41.equiv import canonical_cond
 from dsl41.ir import CatalogIR, CondAttr, JobIR, unquote_jil_value
 from dsl41.oracle import Oracle
-from dsl41.oracle_state import TERMINAL, JobRuntime
+from dsl41.oracle_state import RESOURCE_BUCKET, TERMINAL, JobRuntime
 from dsl41.period import (
     RuntimeProfile,
     default_tz_of,
@@ -121,10 +121,13 @@ PROFILE_SWITCHED: Final = ("semantics",)
 SWITCH: Final = "profile:semantics."
 
 
-def _switches_of(job_ir: JobIR) -> tuple[str, ...]:
-    """The semantic switches a flip of which can change this job (DL-252):
-    each registry entry's own `affects`, never a list kept here."""
-    return tuple(name for name, switch in SWITCH_REGISTRY.items() if switch.affects(job_ir))
+def _switches_of(job_ir: JobIR, catalog: CatalogIR) -> tuple[str, ...]:
+    """The semantic switches a flip of which can change this job in
+    `catalog` (DL-252): each registry entry's own `affects`, never a list
+    kept here."""
+    return tuple(
+        name for name, switch in SWITCH_REGISTRY.items() if switch.affects(job_ir, catalog)
+    )
 
 
 def is_scheduled(job_ir: JobIR) -> bool:
@@ -398,9 +401,11 @@ def _node_values(side: Baseline) -> dict[str, Any]:
     for name, xinst in catalog.external_instances.items():
         values[XINST + name] = (xinst.xtype, tuple(sorted(xinst.attrs.items())))
     for name, resource in catalog.resources.items():
-        # amount, res_type, and the release-policy default -- which IS
-        # res_type (`capacity.release_policy`: D depletes, anything else
-        # renews), so the pair says all three things ss10.2 names
+        # amount and res_type. res_type decides the release-policy default
+        # (`capacity.release_policy`: D never frees; a renewable reads the
+        # `renewable-free` switch, a node of its own, DL-256) and whether a
+        # run's unfreed units are spent or stay held (`keeps_held`), so the
+        # pair says everything ss10.2 names
         values[RESOURCE + name] = (
             _capacity(resource.capacity_units),
             # exactly as `capacity.release_policy` reads it: stripped and
@@ -465,13 +470,26 @@ class ClassificationGraph:
     sides and the closure must see either: a job whose C2 `machine:` is new
     depends on the new machine, and a job C2 removes still depended on what
     C1 gave it. A union over-approximates in the safe direction -- it can
-    only add a changed node to a closure, never hide one."""
+    only add a changed node to a closure, never hide one.
 
-    def __init__(self, closing: Baseline, opening: Baseline) -> None:
+    A carried row's held units are edges too (DL-256): a job holding units
+    of a resource depends on that resource whether or not it still declares
+    it, so a dependent box's forward closure reaches a resource change
+    through the holder. A caller passing a prebuilt `graph` into `classify`
+    must have built it with the same `carried` `classify` is given, or the
+    held edges and the carried state disagree."""
+
+    def __init__(
+        self, closing: Baseline, opening: Baseline, *, carried: CarriedState | None = None
+    ) -> None:
         self._deps: dict[str, set[str]] = {}
         self._rdeps: dict[str, set[str]] = {}
         for side in (closing, opening):
             self._add_side(side)
+        if carried is not None:
+            for name, carried_job in carried.jobs.items():
+                for resource_node in _held_resources(carried_job.row):
+                    self._edge(JOB + name, resource_node)
         before, after = _node_values(closing), _node_values(opening)
         self.changed: frozenset[str] = frozenset(
             node for node in set(before) | set(after) if before.get(node) != after.get(node)
@@ -549,7 +567,7 @@ class ClassificationGraph:
                 self._edge(node, PROFILE + field)
             # (8) the semantic switches whose reading this job's conditions
             # depend on (DL-252)
-            for switch in _switches_of(job_ir):
+            for switch in _switches_of(job_ir, catalog):
                 self._edge(node, SWITCH + switch)
         for name, machine in catalog.machines.items():
             for component in machine.members:
@@ -613,6 +631,22 @@ RESOURCE_ASSUMPTION: Final = "admission refuses until releases catch up"
 INITIAL_STATUS_ASSUMPTION: Final = (
     "genesis seeding applies to new rows only: the carried row keeps its C1 flags"
 )
+#: DL-256: a job holds units of a resource C2 changes. The units stay on
+#: its row as frozen at acquisition until RELEASE_RESOURCE or its next run.
+HELD_ASSUMPTION: Final = "the units it holds stay held under C2's resource definition"
+
+
+def _held_resources(row: JobRuntime) -> frozenset[str]:
+    """The resource nodes whose units `row` holds, live or held (DL-256).
+    A job's resource dependencies are its declared resources AND these: a
+    FORCE_STARTJOB re-uses held units the job may no longer declare, and a
+    held unit's fate at the run's end reads the resource's type, so a change
+    to the resource must reach the holder whatever its definition says."""
+    return frozenset(
+        RESOURCE + reservation.bucket.removeprefix(RESOURCE_BUCKET)
+        for reservation in row.reservations
+        if reservation.bucket.startswith(RESOURCE_BUCKET)
+    )
 
 
 class JobVerdict(BaseModel):
@@ -698,7 +732,7 @@ def _oversubscribed(opening: Baseline, carried: CarriedState) -> set[str]:
     """The resource nodes C2 lowers below the carried `consumed + held`
     (ss10.3). `CapacityPool.used` is the one place those two facts are added
     (ss5), so it is asked rather than re-derived here."""
-    pool = CapacityPool(opening.catalog)
+    pool = CapacityPool(opening.catalog, switches_of(opening.profile))
     used = pool.used(carried.rows, carried.consumed)
     short: set[str] = set()
     for name, resource in opening.catalog.resources.items():
@@ -727,11 +761,16 @@ def _assumption(
     after = opening.catalog.jobs.get(name)
     if row.armed and before is not None and after is not None and _trigger_moved(before, after):
         return ARMED_ASSUMPTION
-    if row.armed and after is not None and {SWITCH + s for s in _switches_of(after)} & set(changed):
+    switched = (
+        set() if after is None else {SWITCH + s for s in _switches_of(after, opening.catalog)}
+    )
+    if row.armed and switched & set(changed):
         # a flipped switch changes how the latch's own gate reads (DL-252)
         return ARMED_ASSUMPTION
     if short & set(changed):
         return RESOURCE_ASSUMPTION
+    if _held_resources(row) & set(changed):
+        return HELD_ASSUMPTION
     if before is not None and after is not None:
         initial = after.sem.initial_status
         if before.sem.initial_status != initial and not _row_agrees(row, initial):
@@ -789,7 +828,7 @@ def classify(
     is in neither catalog, and a classifier reading the catalogs alone would
     stop listing it while it was still there."""
     if graph is None:
-        graph = ClassificationGraph(closing, opening)
+        graph = ClassificationGraph(closing, opening, carried=carried)
     names = sorted(set(closing.catalog.jobs) | set(opening.catalog.jobs) | set(carried.jobs))
     tiers = _tiers(closing.catalog, carried, names)
     short = _oversubscribed(opening, carried)
@@ -798,7 +837,9 @@ def classify(
     changed_not_live: list[str] = []
     for name in names:
         tier = tiers[name]
-        changed = graph.moved(JOB + name)
+        # DL-256: the resources the row holds are dependencies too
+        held_moved = _held_resources(carried.jobs.get(name, CarriedJob()).row) & graph.changed
+        changed = tuple(sorted(set(graph.moved(JOB + name)) | held_moved))
         #: "removed" is about what C2 can dispatch, so it reads the OPENING
         #: catalog alone: a job C1 dropped and a job dropped two periods ago
         #: are the same fact to a row that is still live under it
@@ -817,6 +858,12 @@ def classify(
             assumption = _assumption(
                 name, changed, closing=closing, opening=opening, carried=carried, short=short
             )
+        elif held_moved and not removed:
+            # a completed job holding units of a resource C2 changes: carried,
+            # with the assumption said out loud (DL-256). A removed holder is
+            # a ghost, and the opening gives its units back
+            verdict = "A"
+            assumption = HELD_ASSUMPTION
         elif removed:
             ghosts.append(name)
         elif changed:

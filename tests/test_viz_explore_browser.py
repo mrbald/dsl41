@@ -1904,7 +1904,7 @@ def test_lock_hub_details_name_every_member(driven_locks: Driven) -> None:
     assert rows[1] == ["capacity", "1 unit"], (driven_locks.engine, rows)
     members = [value for label, value in rows if label == "member"]
     assert members == [
-        "lk_x1 · 1 unit, released on completion",
+        "lk_x1 · 1 unit, released on success",  # no FREE: the vendor default (DL-256)
         "lk_x2 · in box lk_box · 1 unit, never released",
     ], (driven_locks.engine, members)
     assert driven_locks.page.inner_text("#d-title") == "R_ONE"

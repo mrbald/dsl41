@@ -1111,6 +1111,18 @@ class Engine:
             _Pending(at=ev.at, request_id=request_id, ev=ev, envelope=envelope, future=future)
         )
 
+    def observe_opening(self) -> None:
+        """DL-256: a period opened over a removed job that still holds units
+        owes their release to its first input. Admit a time observation for
+        it now, so the waiters do not wait for an unrelated input. Stamped
+        at the latest of the clock, the last admitted instant and the
+        oracle's clock, so time never moves backwards. A no-op when nothing
+        is owed, which includes every resume whose replay already paid it."""
+        if not self.oracle.opening_release_owed:
+            return
+        floors = [t for t in (self.frontiers.at, self.oracle._now) if t is not None]
+        self._push(_Pending(at=max([self.clock.now(), *floors]), request_id=None))
+
     def _push(self, pending: _Pending) -> None:
         """Put one input on the time-ordered queue and wake the loop. The
         arrival counter breaks ties, so two inputs stamped alike keep the

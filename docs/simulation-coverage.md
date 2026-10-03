@@ -333,9 +333,9 @@ fails the suite.
 | id | class | cite | label | marker | protocol | bound | detector | effect |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | release_policy:completion | supported | DL-50, capacity.release_policy | - |  |  |  | generic | units are released on completion |
-| release_policy:completion#free-absent | provisional | DL-50, capacity.release_policy | Qr1 |  |  |  | none | a request with no FREE takes the res_type default, renewable for an absent res_type; the vendor documents FREE's default as Y, free on success only, and the pin stays until decided (DL-250) |
 | release_policy:never | supported | DL-50, capacity.release_policy | - |  |  |  | generic | units are released on never |
 | release_policy:success | supported | DL-50, capacity.release_policy | - |  |  |  | generic | units are released on success |
+| release_policy:success#free-absent | supported | DL-50, DL-256, capacity.release_policy | - |  |  |  | none | Qr1 decided: the vendor default with a switch. A renewable request with no FREE frees on SUCCESS only, the documented default Y, and holds its units after FAILURE or TERMINATED until RELEASE_RESOURCE or the job's next run; renewable-free=A selects free on every completion (DL-256) |
 
 ### cond_rule
 
@@ -544,6 +544,7 @@ fails the suite.
 | event:ON_ICE#queued | provisional | DL-50, oracle.Oracle._handle_oob | Qr5 |  |  |  | none | icing a queued job dequeues it and settles it INACTIVE now, rather than leaving it in QUE_WAIT |
 | event:ON_ICE#running | supported | SEM-20, DL-254, oracle.Oracle._oob_ignored | - |  |  |  | none | ON_ICE sent to a STARTING or RUNNING job is ignored: no flag, no wake, one EVENT_IGNORED trace line; the run completes and reads normally |
 | event:ON_NOEXEC | supported | ir-design ss7, DL-254 | - |  |  |  | generic | marks a job as not executing; it completes without running. It clears a hold and takes a queued job out of the queue, then retries the start; on a box it sets the box INACTIVE with every job it holds and flags every level. Ignored on an iced job, a RUNNING job, a STARTING non-box job and a box holding an iced, live or queued job (DL-254) |
+| event:RELEASE_RESOURCE | supported | ir-design ss7, DL-256 | - |  |  |  | generic | frees every resource unit a job that is not running still holds and wakes the waiters; no status moves |
 | event:SET_GLOBAL | supported | ir-design ss7 | - |  |  |  | generic | sets a global and wakes every job whose condition reads it |
 | event:STARTJOB | supported | ir-design ss7 | - |  |  |  | generic | a schedule tick or operator start; it arms must_start whether or not it starts |
 | event:STATUS | supported | ir-design ss7 | - |  |  |  | generic | sets a job's status and wakes every job whose condition names it; INACTIVE on a box cascades to every job it contains (SEM-18) |
@@ -598,6 +599,8 @@ fails the suite.
 | profile_alt:machine_policy=strict | supported | period-model ss2.1 | - |  |  |  | generic | a job whose machine does not resolve local is refused |
 | profile_alt:semantics.ice-lookback=ordinary | supported | runner-design ss8a, SEM-20, DL-243, DL-252 | - |  |  |  | generic | the qualifier is dropped on a non-live iced predecessor and the ordinary on-ice table applies: s, d, n true; f, t, exitcode false |
 | profile_alt:semantics.ice-lookback=true | supported | runner-design ss8a, SEM-05, DL-252 | - |  |  |  | generic | the default: a lookback-qualified atom on a non-live iced predecessor reads true, every atom kind, lookback ignored |
+| profile_alt:semantics.renewable-free=A | supported | runner-design ss8a, DL-50, DL-256 | - |  |  |  | generic | a renewable request with no FREE frees its units on every completion, dsl41's reading before DL-256 |
+| profile_alt:semantics.renewable-free=Y | supported | runner-design ss8a, DL-256 | - |  |  |  | generic | the default and the vendor's: a renewable request with no FREE frees on SUCCESS only and holds its units after FAILURE or TERMINATED |
 
 ### adapter_outcome
 
@@ -650,6 +653,7 @@ fails the suite.
 | trace_marker:ON_HOLD | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | the job is held: it stays startable but no start goes through |
 | trace_marker:ON_ICE | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | the job is iced: an ordinary downstream atom follows the vendor ON_ICE table (s/d/n true, f/t/exitcode false), a lookback-qualified atom reads satisfied regardless, and it never runs on a plain start (DL-243) |
 | trace_marker:ON_NOEXEC | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | the job is marked not-executing; it completes without running |
+| trace_marker:RELEASE_RESOURCE | supported | ir-design ss7, DL-256, oracle.Oracle._record | - |  |  |  | generic | the units the job still held go back to the pool: an operator release, or a removed job's units at a period opening; a recorded no-op when it holds nothing or is running |
 | trace_marker:RUN_WINDOW_DEFER | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | a start outside the run_window, closer to the next opening, was queued for it |
 | trace_marker:RUN_WINDOW_SKIP | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | a start outside the run_window, closer to the previous close, was dropped; the job reads INACTIVE (DL-246) |
 | trace_marker:SCHED_ARM | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | a schedule tick that could not start the job latched instead |

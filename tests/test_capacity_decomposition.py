@@ -29,6 +29,7 @@ from dsl41.capacity import CapacityPool
 from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import CapacityReservation, Event, JobRuntime, OracleError, RuntimeState
+from dsl41.semantics import resolve
 
 T0 = datetime(2026, 7, 1, 8, 0)
 
@@ -225,6 +226,82 @@ def test_start_may_not_overwrite_reservations() -> None:
     assert store.job["j"].reservations == (_live_reservation(),)
 
 
+def test_held_units_are_taken_over_or_released_only_off_a_live_run() -> None:
+    """DL-256: units a job holds after its run are taken over by its next
+    start or given back by RELEASE_RESOURCE. Both verbs refuse a live row,
+    whose reservations are its own run's; the Oracle never asks that, so a
+    caller that does has missed a release."""
+    held = CapacityReservation(bucket="r:LOCK", units=1, release_policy="success")
+    store = RuntimeState()
+    store.begin_input()
+    store.reserve("j", [held])
+    store.transition("j", "RUNNING", T0)
+    with pytest.raises(OracleError, match="a start may not overwrite its run"):
+        store.take_over_held("j", [held])
+    with pytest.raises(OracleError, match="its run's units release at its end"):
+        store.release_held("j")
+
+    store.transition("j", "FAILURE", T0)
+    store.release_reservations("j", "FAILURE", lambda bucket: True)
+    assert store.job["j"].reservations == (held,)  # kept, not spent
+    assert dict(store.consumed) == {}
+    assert store.release_held("j") == (held,)
+    assert store.job["j"].reservations == ()
+    store.commit_input()
+
+
+def test_a_queued_holder_counts_its_own_held_units_when_it_blocks() -> None:
+    """DL-255 with DL-256: a waiter that holds units from an earlier run is
+    short only if its own admission would be, which credits those units to
+    it. `h` (priority 1) holds R's only unit and fits beside it, so it does
+    not block `l` (priority 5, lower) on S; once S is taken it is short and
+    does."""
+    catalog = lower_source(
+        "insert_resource: R\nres_type: R\namount: 1\n\n"
+        "insert_resource: S\nres_type: R\namount: 1\n\n"
+        "insert_job: h\njob_type: c\ncommand: x\nmachine: m1\npriority: 1\n"
+        "resources: (R, QUANTITY=1) and (S, QUANTITY=1)\n\n"
+        "insert_job: l\njob_type: c\ncommand: x\nmachine: m1\npriority: 5\n"
+        "resources: (S, QUANTITY=1)\n\n"
+        "insert_job: x\njob_type: c\ncommand: x\nmachine: m1\nresources: (S, QUANTITY=1)\n"
+    )
+    pool = CapacityPool(catalog)
+    held = CapacityReservation(bucket="r:R", units=1, release_policy="success")
+    rows = {"h": JobRuntime(status="QUE_WAIT", waiter_seq=1, reservations=(held,))}
+    assert not pool.resource_blocked(catalog.jobs["l"], rows, {}, lambda name: True)
+    taken = CapacityReservation(bucket="r:S", units=1, release_policy="completion")
+    rows["x"] = JobRuntime(status="RUNNING", reservations=(taken,))
+    assert pool.resource_blocked(catalog.jobs["l"], rows, {}, lambda name: True)
+
+
+def _pair_jil(quantity: int) -> str:
+    return (
+        "insert_resource: PAIR\nres_type: R\namount: 2\n\n"
+        f"insert_job: hp\njob_type: c\ncommand: x\nmachine: m1\nresources: (PAIR, QUANTITY={quantity})\n\n"
+        "insert_job: wp\njob_type: c\ncommand: x\nmachine: m1\nresources: (PAIR, QUANTITY=1)\n"
+    )
+
+
+def test_a_restart_that_asks_less_than_it_holds_frees_the_difference() -> None:
+    """DL-256: a holder's restart replaces its held units with the new
+    vector. When a re-baseline lowered its QUANTITY, the difference goes
+    back to the pool at once, and the queue is woken for it."""
+    o = Oracle(lower_source(_pair_jil(2)))
+    o.feed(_ev("STARTJOB", 0, job="hp"))
+    o.feed(_ev("STATUS", 1, job="hp", status="FAILURE"))
+    assert [r.units for r in o.store.job["hp"].reservations] == [2]  # held
+    o.feed(_ev("STARTJOB", 2, job="wp"))
+    assert o.store.job["wp"].status == "QUE_WAIT"
+
+    rebaselined = lower_source(_pair_jil(1))  # the holder now asks for 1
+    o.catalog = rebaselined
+    o._pool = CapacityPool(rebaselined)
+    o.feed(_ev("STARTJOB", 3, job="hp"))
+    assert o.store.job["hp"].status == "RUNNING"
+    assert [r.units for r in o.store.job["hp"].reservations] == [1]
+    assert o.store.job["wp"].status == "RUNNING"  # woken for the freed unit
+
+
 def test_consumed_never_negative() -> None:
     """A seal with `consumed["r:FUEL"] = -3` would open with invented capacity
     (PR-22). Refused at the seed, and again at every commit."""
@@ -323,10 +400,12 @@ def test_a_queued_job_completed_out_of_band_leaves_the_queue() -> None:
 
 
 def test_a_live_holder_reset_to_inactive_releases_its_units() -> None:
-    """Reservations exist exactly while STARTING or RUNNING, so the release
-    edge is LEAVING those statuses, not reaching a terminal one. The units used
-    to strand in a `_held` record no row could see."""
-    o = Oracle(lower_source(_one_lock_jil()))
+    """The release edge is LEAVING STARTING or RUNNING, not reaching a
+    terminal status. The units used to strand in a `_held` record no row
+    could see. Run under `renewable-free=A` (DL-256): there the request
+    frees on every completion; under the vendor default the operator's
+    INACTIVE is not a SUCCESS, and the unit stays held by the job."""
+    o = Oracle(lower_source(_one_lock_jil()), semantics=resolve({"renewable-free": "A"}))
     o.feed(_ev("STARTJOB", 0, job="hold"))
     o.feed(_ev("STARTJOB", 0, job="wq"))
     assert o.store.job["wq"].status == "QUE_WAIT"

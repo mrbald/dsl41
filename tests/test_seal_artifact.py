@@ -1221,8 +1221,10 @@ def _negative_consumed(document: dict[str, Any]) -> None:
 
 @_case("a terminal row still holding units", "still holds")
 def _reservations_after_terminal(document: dict[str, Any]) -> None:
+    # a `completion` reservation is released at every run's end; a row that
+    # is not live may keep only a resource's unreleased units (DL-256)
     document["state"]["jobs"]["latent"]["reservations"] = [
-        {"bucket": "r:FUEL", "units": 1, "release_policy": "never"}
+        {"bucket": "r:FUEL", "units": 1, "release_policy": "completion"}
     ]
 
 
@@ -1481,6 +1483,20 @@ def _aware_timestamp(document: dict[str, Any]) -> None:
 @_case("an A with no sentence", "records its sentence")
 def _a_without_assumption(document: dict[str, Any]) -> None:
     document["classification"]["latent"]["assumption"] = None
+
+
+@pytest.mark.parametrize("policy", ["success", "never"])
+def test_dl256_a_row_that_is_not_live_may_carry_a_resources_held_units(policy: str) -> None:
+    """DL-256: a renewable's units a run did not free stay on its row until
+    RELEASE_RESOURCE or the job's next run, so a seal carries them on a row
+    that is not live, and the opening installs them verbatim."""
+    document = _document()
+    held = {"bucket": "r:FUEL", "units": 1, "release_policy": policy}
+    document["state"]["jobs"]["latent"]["reservations"] = [held]
+    opened = _open(_restamped(document))
+    row = opened.state.jobs["latent"]
+    assert row.status not in ("STARTING", "RUNNING")
+    assert [r.model_dump() for r in row.reservations] == [held]
 
 
 @pytest.mark.parametrize("case", sorted(_INVARIANTS))

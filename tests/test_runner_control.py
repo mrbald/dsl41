@@ -449,6 +449,51 @@ def test_on_hold_off_hold_roundtrip_visible_in_status_flags(short_root: Path) ->
     asyncio.run(scenario())
 
 
+def test_sendevent_release_resource_roundtrip_frees_held_units(short_root: Path) -> None:
+    """DL-256: the wire RELEASE_RESOURCE reaches the oracle through
+    JOB_EVENT_VERBS membership, under the mandatory ss0 expect on the job.
+    The holder fails with an omitted FREE and keeps its unit; the release
+    applies, moves the holder's revision (its reservations are projected)
+    and admits the waiter; it is journaled with source=control."""
+    text = (
+        "insert_resource: CLOCK\nres_type: R\namount: 1\n\n"
+        "insert_job: ch\njob_type: c\ncommand: x\nmachine: m1\nresources: (CLOCK, QUANTITY=1)\n\n"
+        "insert_job: cw\njob_type: c\ncommand: y\nmachine: m1\nresources: (CLOCK, QUANTITY=1)\n"
+    )
+
+    async def scenario() -> None:
+        adapter = FakeAdapter({("ch", 1): (0.0, 1)}, default=None)
+        engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
+        try:
+            assert (await _sendevent(server.path, "STARTJOB", job="ch"))["ok"] is True
+
+            async def failed() -> bool:
+                r = await _control_call(server.path, {"cmd": "status", "job": "ch"})
+                return r["jobs"]["ch"]["status"] == "FAILURE"
+
+            await _wait_for_async(failed)
+            assert (await _sendevent(server.path, "STARTJOB", job="cw"))["ok"] is True
+            queued = await _control_call(server.path, {"cmd": "status", "job": "cw"})
+            assert queued["jobs"]["cw"]["status"] == "QUE_WAIT"
+            before = await _control_call(server.path, {"cmd": "status", "job": "ch"})
+
+            applied = await _sendevent(server.path, "RELEASE_RESOURCE", job="ch")
+            assert applied["ok"] is True and applied["decision"] == "applied"
+            moved = applied["revisions"]["job:ch"]
+            assert moved == before["jobs"]["ch"]["state_rev"] + 1
+            after = await _control_call(server.path, {"cmd": "status", "job": "cw"})
+            assert after["jobs"]["cw"]["status"] == "RUNNING"
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+    records = read_journal(short_root / "run" / "journal.jsonl")
+    releases = [
+        r for r in records if r.get("rec") == "input" and r.get("kind") == "RELEASE_RESOURCE"
+    ]
+    assert len(releases) == 1 and releases[0].get("source") == "control"
+
+
 def test_sendevent_disarm_roundtrip_expect_gated_and_journaled(short_root: Path) -> None:
     """DL-158: the wire DISARM reaches the oracle branch through
     JOB_EVENT_VERBS membership alone -- framing, the mandatory ss0 expect,

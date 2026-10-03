@@ -136,9 +136,10 @@ def sendevent(
         ...,
         metavar="EVENT",
         help="One of STARTJOB, FORCE_STARTJOB, KILLJOB, ON_ICE, OFF_ICE,"
-        " ON_HOLD, OFF_HOLD, ON_NOEXEC, OFF_NOEXEC, DISARM, SET_GLOBAL,"
-        " CHANGE_STATUS. DISARM clears the job's armed latch and does"
-        " nothing else.",
+        " ON_HOLD, OFF_HOLD, ON_NOEXEC, OFF_NOEXEC, DISARM, RELEASE_RESOURCE,"
+        " SET_GLOBAL, CHANGE_STATUS. DISARM clears the job's armed latch and"
+        " does nothing else. RELEASE_RESOURCE frees the resource units a job"
+        " still holds after its run ended.",
     ),
     socket_path: Path = _SOCKET_OPT,
     job: str = typer.Option(

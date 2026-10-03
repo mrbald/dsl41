@@ -1719,14 +1719,14 @@ VALUE_ROWS: tuple[Row, ...] = (
     + (
         _row(
             surface="release_policy",
-            member="completion",
+            member="success",
             facet="free-absent",
-            klass=PROVISIONAL,
-            cite="DL-50, capacity.release_policy",
-            label="Qr1",
-            effect="a request with no FREE takes the res_type default, renewable for an"
-            " absent res_type; the vendor documents FREE's default as Y, free on success"
-            " only, and the pin stays until decided (DL-250)",
+            klass=SUPPORTED,
+            cite="DL-50, DL-256, capacity.release_policy",
+            effect="Qr1 decided: the vendor default with a switch. A renewable request with no"
+            " FREE frees on SUCCESS only, the documented default Y, and holds its units"
+            " after FAILURE or TERMINATED until RELEASE_RESOURCE or the job's next run;"
+            " renewable-free=A selects free on every completion (DL-256)",
             trigger=_job(RESOURCE_BLOCK, resources="(R0, QUANTITY=1)"),
             quiet=_job(RESOURCE_BLOCK, resources="(R0, QUANTITY=1, FREE=A)"),
         ),
@@ -2780,6 +2780,15 @@ SCENARIO_ROWS: tuple[Row, ...] = (
         ),
         _row(
             surface="event",
+            member="RELEASE_RESOURCE",
+            klass=SUPPORTED,
+            cite="ir-design ss7, DL-256",
+            effect="frees every resource unit a job that is not running still holds and wakes"
+            " the waiters; no status moves",
+            trigger=_scn(BASE_JIL, "0 RELEASE_RESOURCE job=J0"),
+        ),
+        _row(
+            surface="event",
             member="KILLJOB",
             klass=SUPPORTED,
             cite="ir-design ss7",
@@ -3157,6 +3166,24 @@ PROFILE_ROWS: tuple[Row, ...] = (
             " on-ice table applies: s, d, n true; f, t, exitcode false",
             trigger='{"semantics": {"ice-lookback": "ordinary"}}',
         ),
+        _row(
+            surface="profile_alt",
+            member="semantics.renewable-free=Y",
+            klass=SUPPORTED,
+            cite="runner-design ss8a, DL-256",
+            effect="the default and the vendor's: a renewable request with no FREE frees on"
+            " SUCCESS only and holds its units after FAILURE or TERMINATED",
+            trigger='{"semantics": {"renewable-free": "Y"}}',
+        ),
+        _row(
+            surface="profile_alt",
+            member="semantics.renewable-free=A",
+            klass=SUPPORTED,
+            cite="runner-design ss8a, DL-50, DL-256",
+            effect="a renewable request with no FREE frees its units on every completion,"
+            " dsl41's reading before DL-256",
+            trigger='{"semantics": {"renewable-free": "A"}}',
+        ),
     )
     + _PROFILE_FACETS
 )
@@ -3464,6 +3491,16 @@ TRACE_MARKER_ROWS: tuple[Row, ...] = (
         cite="ir-design ss7, oracle.Oracle._record",
         effect="an explicit journaled disarm: the latched tick is dropped and nothing else moves",
         trigger=_scn(BASE_JIL, "0 DISARM job=J0"),
+    ),
+    _row(
+        surface="trace_marker",
+        member="RELEASE_RESOURCE",
+        klass=SUPPORTED,
+        cite="ir-design ss7, DL-256, oracle.Oracle._record",
+        effect="the units the job still held go back to the pool: an operator release, or a"
+        " removed job's units at a period opening; a recorded no-op when it holds nothing"
+        " or is running",
+        trigger=_scn(BASE_JIL, "0 RELEASE_RESOURCE job=J0"),
     ),
     _row(
         surface="trace_marker",

@@ -99,7 +99,11 @@ from dsl41.runner_clock import EngineError
 #: 13 since DL-255: a job waiting on a named resource blocks lower
 #: priorities that name it, and a start or enqueue that takes machine load
 #: owes a queue scan, so a replay with resource waiters admits differently.
-STATE_MACHINE_VERSION = 13
+#: 14 since DL-256: a renewable request with no FREE frees its units on
+#: SUCCESS only, held units outlive the run until RELEASE_RESOURCE or the
+#: job's next run, and FORCE_STARTJOB of a holder starts on them, so a
+#: replay with resource demand can derive different state.
+STATE_MACHINE_VERSION = 14
 
 LOCK_NAME = "leader.lock"
 
