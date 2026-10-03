@@ -13,8 +13,8 @@ Decisions pinned here (each with a test; recorded as DL-14 + amendment):
   ss6 sketch says "truth-table over the atom alphabet", but independent
   atoms cannot detect L006's own flagship contradiction s(x)&f(x). Each
   referenced job scope contributes (status in NEVER_RAN/RUNNING/SUCCESS/
-  FAILURE/TERMINATED) x (iced flag -- a LOOKBACK-qualified atom on an iced
-  non-running job is true regardless of kind, SEM-05; an ORDINARY atom
+  FAILURE/TERMINATED/INACTIVE) x (iced flag -- a LOOKBACK-qualified atom on
+  an iced non-running job is true regardless of kind, SEM-05; an ORDINARY atom
   (no lookback) instead follows SEM-20's narrower vendor table, DL-243;
   oracle parity either way) x (age bucket cut by the referenced
   lookback windows) x (zero-freshness flag when zero-lookbacks appear --
@@ -32,6 +32,27 @@ Decisions pinned here (each with a test; recorded as DL-14 + amendment):
   only for completion-by-code). Extra unreachable states can only produce
   false INEQUIVALENCE (a human looks) or a missed L006/L007 warn -- never a
   false claim of equivalence. Conservative direction, documented.
+- NEVER_RAN and INACTIVE are DISTINCT status values, not one collapsed into
+  the other. NEVER_RAN models a job with no status timestamp at all (the
+  oracle's `rt.status_at is None` case): a NOTRUNNING atom is true there
+  with its lookback bypassed, oracle parity ("never-run jobs are notrunning
+  with no timestamp"). INACTIVE models a job WITH a status timestamp whose
+  status is none of RUNNING/SUCCESS/FAILURE/TERMINATED -- an operator
+  CHANGE_STATUS INACTIVE (which needs no prior run: it can set `status_at`
+  on a job that never ran) or DL-243's ON_NOEXEC settling a completed job
+  to INACTIVE. A NOTRUNNING atom is true there too, and d(x) still excludes
+  it (TERMINAL has no INACTIVE member). Only a FINITE lookback tells it
+  apart from NEVER_RAN: a window reads INACTIVE's real `status_at` age
+  (any transition moves `status_at`, INACTIVE's included), while the
+  zero-lookback anchor reads the job's own last REAL end (`last_end_at`,
+  latched only by a terminal transition) -- a later CHANGE_STATUS INACTIVE
+  does not move `last_end_at`, so it cannot make `n(p,0)` fresh for a
+  predecessor that had already ended before its consumer. Bare and
+  indefinite lookbacks read neither timestamp and stay true either way,
+  same as NEVER_RAN, so a job scope with no finite-lookback atom never
+  needs the INACTIVE axis at all (`_distinguishes_inactive` derives this
+  per scope instead of guessing it from atom shape, so a scope that cannot
+  tell the two states apart keeps its pre-INACTIVE enumeration size).
 - Tier b compares CONDITIONS + the derived graph only (ss6 scope);
   schedules are tier a's to compare, and the calendar-free oracle makes
   tier c schedule-blind too -- run tier a for schedule differences.
@@ -431,6 +452,20 @@ def equivalent_tier_a(
 # ----------------------------------------------------- tier b: condition equivalence
 
 _STATUSES = ("NEVER_RAN", "RUNNING", "SUCCESS", "FAILURE", "TERMINATED")
+#: The extra per-job status (module docstring): a job with a status
+#: timestamp whose status is none of RUNNING/SUCCESS/FAILURE/TERMINATED --
+#: an operator CHANGE_STATUS INACTIVE (no prior run required: it can set
+#: `status_at` on a job that never ran), or DL-243's ON_NOEXEC settling a
+#: FAILURE/TERMINATED job. Not every job scope needs it -- `_JobScope.
+#: needs_inactive` (derived in `_alphabet` by `_distinguishes_inactive`)
+#: adds it only where some atom can actually tell it apart from NEVER_RAN,
+#: so a scope with no such atom keeps its pre-existing enumeration size.
+_INACTIVE = "INACTIVE"
+
+
+def _statuses_for(scope: "_JobScope") -> tuple[str, ...]:
+    return (*_STATUSES, _INACTIVE) if scope.needs_inactive else _STATUSES
+
 
 # "this global has no value" is spelled `None` -- a value OUTSIDE the string
 # domain. The alphabet writes it out (`_alphabet`); the evaluator gets it
@@ -452,6 +487,7 @@ class _JobScope(BaseModel):
     has_zero: bool = False  # a zero-lookback atom references this job (Q2)
     exit_cutpoints: list[int] = []  # candidate last-exit-code values
     has_exit: bool = False
+    needs_inactive: bool = False  # some atom distinguishes INACTIVE from NEVER_RAN
 
 
 class _Alphabet(BaseModel):
@@ -479,6 +515,7 @@ def global_regions(conds: "list[Cond]") -> dict[str, list[str | None]]:
 
 def _alphabet(conds: list[Cond]) -> _Alphabet:
     jobs: dict[str, _JobScope] = {}
+    atoms_by_job: dict[str, list[StatusAtom | ExitCodeAtom]] = {}
     global_values: dict[str, set[str]] = {}
     global_numeric: dict[str, bool] = {}
     for cond in conds:
@@ -489,7 +526,9 @@ def _alphabet(conds: list[Cond]) -> _Alphabet:
                 is_num = atom.value.lstrip("-").isdigit()
                 global_numeric[atom.name] = global_numeric.get(atom.name, True) and is_num
                 continue
-            scope = jobs.setdefault(_job_key(atom), _JobScope(key=_job_key(atom)))
+            key = _job_key(atom)
+            scope = jobs.setdefault(key, _JobScope(key=key))
+            atoms_by_job.setdefault(key, []).append(atom)
             lookback = atom.lookback
             if lookback is not None and lookback.kind == "window":
                 assert lookback.minutes is not None
@@ -505,6 +544,13 @@ def _alphabet(conds: list[Cond]) -> _Alphabet:
     for scope in jobs.values():
         scope.windows.sort()
         scope.exit_cutpoints.sort()
+    # Derived, not guessed: add INACTIVE to a scope's status axis only where
+    # some atom referencing it can actually read differently on a
+    # timestamped INACTIVE row than on a NEVER_RAN one. `_distinguishes_inactive`
+    # decides this from each atom's own kind/lookback -- no state construction,
+    # no sweep over the scope's (possibly huge) exit-cutpoint/age/zero domains.
+    for key, scope in jobs.items():
+        scope.needs_inactive = any(_distinguishes_inactive(atom) for atom in atoms_by_job[key])
     globals_: dict[str, list[str | None]] = {}
     for name, values in global_values.items():
         # Region representatives for BOTH comparison behaviors
@@ -544,7 +590,7 @@ class _State(BaseModel):
 def _state_count(alphabet: _Alphabet) -> int:
     total = 1
     for scope in alphabet.jobs.values():
-        per_status = len(_STATUSES) * 2  # x2: iced flag (SEM-05/SEM-20)
+        per_status = len(_statuses_for(scope)) * 2  # x2: iced flag (SEM-05/SEM-20)
         per_age = len(scope.windows) + 1 if scope.windows else 1
         per_day = 2 if scope.has_zero else 1
         per_exit = len(scope.exit_cutpoints) + 1 if scope.has_exit else 1  # +1: None
@@ -565,7 +611,7 @@ def _iter_states(alphabet: _Alphabet):
         ages = range(len(scope.windows) + 1) if scope.windows else [0]
         days = (True, False) if scope.has_zero else (True,)
         exits: list[int | None] = [None, *scope.exit_cutpoints] if scope.has_exit else [None]
-        for status in _STATUSES:
+        for status in _statuses_for(scope):
             for iced in (False, True):
                 for age in ages:
                     for day in days:
@@ -624,6 +670,10 @@ def _eval_cond(cond: Cond, state: _State, alphabet: _Alphabet) -> bool:
         hit = status != "RUNNING"
         if status == "NEVER_RAN":
             return hit  # no timestamp: lookback trivially holds (oracle parity)
+        # INACTIVE (a timestamped status -- operator CHANGE_STATUS, needing
+        # no prior run, or DL-243's ON_NOEXEC on a FAILURE/TERMINATED job)
+        # also hits here, but falls through to the lookback check below
+        # like any other timestamped status: it is NOT a NEVER_RAN.
     elif wanted == "DONE":
         hit = status in TERMINAL
     else:
@@ -650,6 +700,41 @@ def _lookback_holds(
     bucket = state.job_age_bucket.get(key, 0)
     # bucket i means age in (w_{i-1}, w_i]; window w holds iff age <= w
     return bucket <= scope.windows.index(lookback.minutes)
+
+
+def _distinguishes_inactive(atom: StatusAtom | ExitCodeAtom) -> bool:
+    """Whether THIS atom alone can read differently on a timestamped
+    INACTIVE row than on a NEVER_RAN one. Decided from the atom's own kind
+    and lookback -- no `_State` construction, no sweep over a scope's
+    age/zero/exit domains, so a huge `e()` exit-cutpoint domain never pays
+    for a check that can never apply to it (an all-`e()` scope with a
+    100-way exit domain used to take 12.5s here; this reads the rule off
+    the atom in O(1)).
+
+    The rule, read off `_eval_cond`/`_lookback_holds` directly rather than
+    guessed:
+    - An ExitCodeAtom's truth never consults `job_status` at all -- the
+      state model deliberately DECOUPLES exit code from status (module
+      docstring) -- so it reads the identical `job_exit`/lookback result
+      whether the row is NEVER_RAN or INACTIVE: the SAME answer either way
+      (true or false), never a different one. Never distinguishes.
+    - A StatusAtom wanting SUCCESS/FAILURE/TERMINATED/DONE is False for
+      BOTH rows (neither status matches the wanted one, nor sits in
+      TERMINAL) before `_lookback_holds` is even reached -- the lookback
+      never gets a say. Never distinguishes.
+    - A StatusAtom wanting NOTRUNNING is True for both UNLESS the lookback
+      is finite (window or zero): NEVER_RAN bypasses the lookback check
+      entirely (no timestamp to gate it), while INACTIVE -- which DOES
+      carry a timestamp -- runs the normal window/zero check, which can
+      come back False. A bare (`lookback is None`) or indefinite lookback
+      reads no timestamp on either row, so both stay True there too."""
+    if isinstance(atom, ExitCodeAtom):
+        return False
+    return (
+        atom.status == "NOTRUNNING"
+        and atom.lookback is not None
+        and atom.lookback.kind in ("window", "zero")
+    )
 
 
 TierBVerdict = Literal["equivalent", "divergent", "too_large"]
