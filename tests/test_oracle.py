@@ -1647,12 +1647,73 @@ def test_sem20_ordinary_atom_on_an_undefined_iced_lookalike_stays_false() -> Non
     assert transitions(o, "cons_f17u") == []
 
 
+#: DL-254 fixtures: a producer p254 that is live when an operator event
+#: lands, and two consumers that read its completion. The box shape makes
+#: p254 a box whose one member m254 completes it.
+_CONSUMERS_254 = (
+    "insert_job: cs254\njob_type: c\ncommand: y\nmachine: m1\ncondition: s(p254)\n\n"
+    "insert_job: cf254\njob_type: c\ncommand: z\nmachine: m1\ncondition: f(p254)\n"
+)
+_PRODUCER_254 = {
+    "job": "insert_job: p254\njob_type: c\ncommand: x\nmachine: m1\n\n",
+    "box": (
+        "insert_job: p254\njob_type: b\n\n"
+        "insert_job: m254\njob_type: c\ncommand: w\nmachine: m1\nbox_name: p254\n\n"
+    ),
+}
+_LIVE_254 = [
+    ("job", "STARTING"),
+    ("job", "RUNNING"),
+    ("box", "STARTING"),
+    ("box", "RUNNING"),
+]
+
+
+def _live_producer_254(shape: str, live: str) -> Oracle | EngineHarness:
+    """RUNNING through a real start; STARTING through an injected STATUS,
+    the only way a row rests in STARTING between events."""
+    o = oracle(_PRODUCER_254[shape] + _CONSUMERS_254)
+    if live == "RUNNING":
+        o.feed(ev("STARTJOB", 0, job="p254"))
+    else:
+        o.feed(ev("STATUS", 0, job="p254", status="STARTING"))
+    assert o.store.job["p254"].status == live
+    return o
+
+
+def _assert_ignored(o: Oracle | EngineHarness, kind: EventKind, job: str, at: float) -> None:
+    """DL-254: the event changes nothing -- the row is identical, the trace
+    gains one EVENT_IGNORED line and nothing else, and on the engine path
+    no effect is planned."""
+    row = o.store.job[job]
+    trace_len = len(o.trace())
+    effects = len(list(o.engine.outbox.effects())) if isinstance(o, EngineHarness) else 0
+    o.feed(ev(kind, at, job=job))
+    assert o.store.job[job] == row
+    added = o.trace()[trace_len:]
+    assert [(t.job, t.transition) for t in added] == [(job, "EVENT_IGNORED")]
+    assert added[0].cause.startswith(f"sendevent {kind} ignored")
+    if isinstance(o, EngineHarness):
+        assert len(list(o.engine.outbox.effects())) == effects
+
+
+def _complete_with_failure_254(o: Oracle | EngineHarness, shape: str, at: float) -> None:
+    """The live run ends FAILURE; a running box ends through its member."""
+    if shape == "box" and o.store.job["p254"].status == "RUNNING":
+        o.feed(ev("STATUS", at, job="m254", status="FAILURE"))
+    else:
+        o.feed(ev("STATUS", at, job="p254", status="FAILURE"))
+    assert o.store.job["p254"].status == "FAILURE"
+    # the real failure reads normally: f() true, s() false. Had the event
+    # taken effect, the ON_ICE table would read the reverse (DL-243).
+    assert _status(o, "cf254", "cs254") == ["RUNNING", "INACTIVE"]
+
+
 def test_sem20_ordinary_atom_on_a_live_iced_job_reads_the_real_in_flight_status() -> None:
-    """Control: ice on a STARTING/RUNNING job takes effect at completion --
-    the ordinary-atom table (and the DL-13 blanket pin) apply only once the job is
-    non-live; while it is RUNNING, s() still reads false for the real
-    in-flight state (companion to test_ice_on_a_running_job_takes_effect_
-    at_completion, which checks s() after it fails)."""
+    """Control: ON_ICE on a RUNNING job is ignored (DL-254), so there is no
+    live iced job and s() reads the real in-flight RUNNING as false. The
+    name predates DL-254, when the flag was set and read only at
+    completion; DL-243 cites the name."""
     text = (
         "insert_job: prod_f17live\njob_type: c\ncommand: x\nmachine: m1\n\n"
         "insert_job: cons_f17live\njob_type: c\ncommand: y\nmachine: m1\n"
@@ -1661,8 +1722,22 @@ def test_sem20_ordinary_atom_on_a_live_iced_job_reads_the_real_in_flight_status(
     o = oracle(text)
     o.feed(ev("FORCE_STARTJOB", 0, job="prod_f17live"))
     o.feed(ev("ON_ICE", 1, job="prod_f17live"))
+    assert not o.store.job["prod_f17live"].on_ice
     o.feed(ev("STARTJOB", 2, job="cons_f17live"))
     assert transitions(o, "cons_f17live") == []  # still RUNNING for real: s() false
+
+
+@pytest.mark.parametrize(("shape", "live"), _LIVE_254)
+def test_sem20_on_ice_on_a_live_job_is_ignored(shape: str, live: str) -> None:
+    """SEM-20 (DL-254): "Change the Executable Status of a Job" (AutoSys
+    24.2) on JOB_ON_ICE: "The event has no effect on jobs with a status of
+    STARTING or RUNNING." Box or not, no flag is set; the later completion
+    reads normally downstream, and the next plain start runs."""
+    o = _live_producer_254(shape, live)
+    _assert_ignored(o, "ON_ICE", "p254", 1)
+    _complete_with_failure_254(o, shape, 2)
+    o.feed(ev("STARTJOB", 3, job="p254"))
+    assert o.store.job["p254"].status == "RUNNING"
 
 
 def test_sem20_off_ice_later_reads_the_real_status_not_the_vendor_table() -> None:
@@ -1762,6 +1837,69 @@ def test_sem21_held_member_prevents_box_completion() -> None:
     ]
 
 
+@pytest.mark.parametrize(("shape", "live"), _LIVE_254)
+def test_sem21_on_hold_on_a_live_job_is_ignored(shape: str, live: str) -> None:
+    """SEM-21 (DL-254): "Change the Executable Status of a Job" (AutoSys
+    24.2) on JOB_ON_HOLD: "The event has no effect on jobs with a status of
+    STARTING or RUNNING." Box or not, no flag is set; the later completion
+    reads normally downstream, and the next plain start is not held."""
+    o = _live_producer_254(shape, live)
+    _assert_ignored(o, "ON_HOLD", "p254", 1)
+    _complete_with_failure_254(o, shape, 2)
+    o.feed(ev("STARTJOB", 3, job="p254"))
+    assert o.store.job["p254"].status == "RUNNING"
+
+
+@pytest.mark.parametrize("kind", ["ON_ICE", "ON_HOLD", "ON_NOEXEC"])
+@pytest.mark.parametrize("status", ["SUCCESS", "FAILURE"])
+def test_sem21_events_on_a_completed_job_still_apply(kind: EventKind, status: str) -> None:
+    """Control (DL-254): the vendor names STARTING and RUNNING only. On a
+    completed job each event still sets its flag and records its own
+    marker, and the next plain start does not run for real."""
+    o = oracle(_PRODUCER_254["job"] + _CONSUMERS_254)
+    o.feed(ev("STATUS", 0, job="p254", status=status))
+    o.feed(ev(kind, 1, job="p254"))
+    # ON_NOEXEC on FAILURE also moves the job to INACTIVE (DL-243)
+    assert kind in transitions(o, "p254")
+    assert "EVENT_IGNORED" not in transitions(o, "p254")
+    row = o.store.job["p254"]
+    assert (row.on_ice, row.on_hold, row.on_noexec) == (
+        kind == "ON_ICE",
+        kind == "ON_HOLD",
+        kind == "ON_NOEXEC",
+    )
+    o.feed(ev("STARTJOB", 2, job="p254"))
+    # iced or held: no start; noexec: the start bypasses to SUCCESS
+    assert o.store.job["p254"].status != "RUNNING"
+
+
+#: a lock holder h254 and a job q254 queued behind it
+_QUEUED_254 = (
+    "insert_resource: LOCK254\nres_type: R\namount: 1\n\n"
+    "insert_job: h254\njob_type: c\ncommand: x\nmachine: m1\n"
+    "resources: (LOCK254, QUANTITY=1)\n\n"
+    "insert_job: q254\njob_type: c\ncommand: y\nmachine: m1\n"
+    "resources: (LOCK254, QUANTITY=1)\n"
+)
+
+
+@pytest.mark.parametrize("kind", ["ON_ICE", "ON_HOLD"])
+def test_sem21_events_on_a_queued_job_keep_their_handling(kind: EventKind) -> None:
+    """DL-254: the vendor does not name QUE_WAIT, so a queued job keeps the
+    existing handling. ON_ICE dequeues it to INACTIVE (DL-50, Qr5), ON_HOLD
+    keeps it queued and held. ON_NOEXEC has its own test below."""
+    o = oracle(_QUEUED_254)
+    o.feed(ev("STARTJOB", 0, job="h254"))
+    o.feed(ev("STARTJOB", 1, job="q254"))
+    assert o.store.job["q254"].status == "QUE_WAIT"
+    o.feed(ev(kind, 2, job="q254"))
+    assert kind in transitions(o, "q254")
+    assert "EVENT_IGNORED" not in transitions(o, "q254")
+    row = o.store.job["q254"]
+    assert (row.on_ice, row.on_hold) == (kind == "ON_ICE", kind == "ON_HOLD")
+    assert row.status == ("INACTIVE" if kind == "ON_ICE" else "QUE_WAIT")
+
+
 # -------------------------------------------- 14b. SEM-24 status: at definition time
 
 
@@ -1842,9 +1980,9 @@ def test_sem22_noexec_bypass_job_and_box_member_fold_normally() -> None:
 def test_sem22_noexec_box_goes_running_and_every_member_bypasses() -> None:
     """T22b (SEM-22): "Box in ON_NOEXEC scheduled to run -> goes RUNNING,
     members are bypassed to SUCCESS as their conditions are met." The box
-    itself does NOT bypass; each member does, on the box's flag rather than
-    its own, including a member whose condition is only met by an earlier
-    member's bypass. The box then folds normally (SEM-11) -- it waits for
+    itself does NOT bypass; each member does, including a member whose
+    condition is only met by an earlier member's bypass. Each member also
+    took the flag itself when the box was put ON_NOEXEC (DL-254). The box then folds normally (SEM-11) -- it waits for
     every member's bypass, it does not complete on the first one."""
     text = (
         "insert_job: box22b\njob_type: b\n\n"
@@ -1862,9 +2000,9 @@ def test_sem22_noexec_box_goes_running_and_every_member_bypasses() -> None:
         "RUNNING->SUCCESS",
     ]
     # each member bypassed: SUCCESS with no STARTING/RUNNING of its own
-    assert transitions(o, "mem_a22b") == ["INACTIVE->SUCCESS"]
-    assert transitions(o, "mem_b22b") == ["INACTIVE->SUCCESS"]
-    bypass = next(t for t in o.trace() if t.job == "mem_b22b")
+    assert transitions(o, "mem_a22b") == ["ON_NOEXEC", "INACTIVE->SUCCESS"]
+    assert transitions(o, "mem_b22b") == ["ON_NOEXEC", "INACTIVE->SUCCESS"]
+    bypass = [t for t in o.trace() if t.job == "mem_b22b"][-1]
     assert "ON_NOEXEC bypass" in bypass.cause
 
 
@@ -1884,11 +2022,11 @@ def test_sem22_noexec_box_member_whose_condition_never_fires_keeps_the_box_runni
     o = oracle(text)
     o.feed(ev("ON_NOEXEC", 0, job="box22c"))
     o.feed(ev("STARTJOB", 1, job="box22c"))
-    assert transitions(o, "mem_a22c") == ["INACTIVE->SUCCESS"]
-    assert transitions(o, "mem_b22c") == []
+    assert transitions(o, "mem_a22c") == ["ON_NOEXEC", "INACTIVE->SUCCESS"]
+    assert transitions(o, "mem_b22c") == ["ON_NOEXEC"]
     assert transitions(o, "box22c") == ["ON_NOEXEC", "INACTIVE->STARTING", "STARTING->RUNNING"]
     o.feed(ev("STATUS", 2, job="never22c", status="SUCCESS"))  # the condition finally fires
-    assert transitions(o, "mem_b22c") == ["INACTIVE->SUCCESS"]
+    assert transitions(o, "mem_b22c") == ["ON_NOEXEC", "INACTIVE->SUCCESS"]
     assert transitions(o, "box22c") == [
         "ON_NOEXEC",
         "INACTIVE->STARTING",
@@ -1928,7 +2066,7 @@ def test_sem22_noexec_box_bypasses_a_nested_member_box_level_by_level() -> None:
     o = oracle(text)
     o.feed(ev("ON_NOEXEC", 0, job="outer22d"))
     o.feed(ev("STARTJOB", 1, job="outer22d"))
-    assert transitions(o, "grand22d") == ["INACTIVE->SUCCESS"]
+    assert transitions(o, "grand22d") == ["ON_NOEXEC", "INACTIVE->SUCCESS"]
     for box in ("inner22d", "outer22d"):
         assert transitions(o, box)[-3:] == [
             "INACTIVE->STARTING",
@@ -2101,11 +2239,9 @@ def test_sem22_noexec_off_noexec_then_release_a_held_f_consumer_stays_blocked() 
 
 
 def test_sem22_noexec_while_running_then_real_failure_is_not_hidden() -> None:
-    """ON_NOEXEC sent while p is RUNNING is a bare flag set -- the
-    event-time transition only fires for a job that is ALREADY
-    FAILURE/TERMINATED at the moment of the event, so a job still live when
-    ON_NOEXEC arrives is untouched by it. The real failure that follows is
-    therefore not hidden: f(p) sees it fresh and starts. watch_n started
+    """ON_NOEXEC sent while p is RUNNING is ignored (DL-254): no flag, no
+    transition. The real failure that follows is therefore not hidden:
+    f(p) sees it fresh and starts. watch_n started
     earlier, before p was even forced, because p's initial INACTIVE already reads
     n(p) true; with no completion script of its own it is still running
     that first attempt, so the later true-again edge from p's failure finds
@@ -2119,8 +2255,10 @@ def test_sem22_noexec_while_running_then_real_failure_is_not_hidden() -> None:
     o.feed(ev("STARTJOB", 0, job="watch_n"))  # n(p) already true: p is INACTIVE
     assert o.store.job["watch_n"].status == "RUNNING"
     o.feed(ev("FORCE_STARTJOB", 1, job="p"))
-    o.feed(ev("ON_NOEXEC", 2, job="p"))  # p is RUNNING: flag only, no transition
+    o.feed(ev("ON_NOEXEC", 2, job="p"))  # p is RUNNING: ignored (DL-254)
     assert o.store.job["p"].status == "RUNNING"
+    assert not o.store.job["p"].on_noexec
+    assert transitions(o, "p")[-1] == "EVENT_IGNORED"
     o.feed(ev("STATUS", 3, job="p", status="FAILURE"))
     assert o.store.job["p"].status == "FAILURE"  # the real failure is not hidden
     assert transitions(o, "watch_f") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
@@ -2128,12 +2266,12 @@ def test_sem22_noexec_while_running_then_real_failure_is_not_hidden() -> None:
 
 
 def test_sem22_noexec_on_an_iced_job_is_ignored_and_the_job_stays_failure() -> None:
-    """DL-243: "Change the Executable Status of a Job" page -- "The
+    """DL-243, DL-254: "Change the Executable Status of a Job" page -- "The
     scheduler ignores the JOB_ON_NOEXEC event, if sent to: A non-box job
     that is in the STARTING, RUNNING, or ON_ICE status." p fails, is put
-    ON_ICE, then ON_NOEXEC: the event is ignored and p stays FAILURE. Once
-    OFF_ICE lifts the flag, a held f(p) consumer released afterward starts
-    normally against the real FAILURE -- ON_NOEXEC never touched it."""
+    ON_ICE, then ON_NOEXEC: the event is ignored, no flag is set, and p
+    stays FAILURE. Once OFF_ICE lifts the ice, a held f(p) consumer
+    released afterward starts normally against the real FAILURE."""
     text = (
         "insert_job: p\njob_type: c\ncommand: x\nmachine: m1\n\n"
         "insert_job: watch_f\njob_type: c\ncommand: a\nmachine: m1\ncondition: f(p)\n"
@@ -2145,6 +2283,7 @@ def test_sem22_noexec_on_an_iced_job_is_ignored_and_the_job_stays_failure() -> N
     o.feed(ev("ON_ICE", 3, job="p"))
     o.feed(ev("ON_NOEXEC", 4, job="p"))
     assert o.store.job["p"].status == "FAILURE"  # the event is ignored while iced
+    assert not o.store.job["p"].on_noexec
     o.feed(ev("OFF_ICE", 5, job="p"))
     o.feed(ev("OFF_HOLD", 6, job="watch_f"))
     assert transitions(o, "watch_f") == [
@@ -2173,6 +2312,351 @@ def test_sem22_noexec_on_a_failed_box_member_completes_the_box() -> None:
     o.feed(ev("ON_NOEXEC", 2, job="mem1"))
     assert o.store.job["mem1"].status == "INACTIVE"
     assert o.store.job["box1"].status == "SUCCESS"  # the box completes
+
+
+@pytest.mark.parametrize(
+    ("shape", "live"), [("job", "STARTING"), ("job", "RUNNING"), ("box", "RUNNING")]
+)
+def test_sem22_on_noexec_on_a_live_job_is_ignored(shape: str, live: str) -> None:
+    """SEM-22 (DL-254): "Change the Executable Status of a Job" (AutoSys
+    24.2): "The scheduler ignores the JOB_ON_NOEXEC event, if sent to: A
+    non-box job that is in the STARTING, RUNNING, or ON_ICE status; A box
+    job that is in the ON_ICE or RUNNING status." No flag is set, so the
+    real failure reads normally and the next start runs instead of
+    bypassing to SUCCESS."""
+    o = _live_producer_254(shape, live)
+    _assert_ignored(o, "ON_NOEXEC", "p254", 1)
+    _complete_with_failure_254(o, shape, 2)
+    o.feed(ev("STARTJOB", 3, job="p254"))
+    assert o.store.job["p254"].status == "RUNNING"
+    if shape == "box":
+        assert o.store.job["m254"].status == "RUNNING"  # not bypassed
+
+
+def test_sem22_on_noexec_on_a_starting_box_still_sets_the_flag() -> None:
+    """Control (DL-254): the vendor's box list names ON_ICE and RUNNING, not
+    STARTING, so a box resting in STARTING (an injected STATUS) is not
+    ignored. It takes the flag and the box INACTIVE path, like any box."""
+    o = _live_producer_254("box", "STARTING")
+    o.feed(ev("ON_NOEXEC", 1, job="p254"))
+    assert transitions(o, "p254")[-2:] == ["ON_NOEXEC", "STARTING->INACTIVE"]
+    assert o.store.job["p254"].on_noexec
+    assert o.store.job["m254"].on_noexec
+
+
+@pytest.mark.parametrize("shape", ["job", "box"])
+def test_sem22_on_noexec_on_an_iced_job_is_ignored(shape: str) -> None:
+    """SEM-22 (DL-254): ON_NOEXEC on an iced job or box is ignored: "The
+    JOB_ON_NOEXEC event does not supersede the JOB_ON_ICE event and does not
+    overwrite the ON_ICE status with the ON_NOEXEC status." No noexec flag
+    survives the ice, so after OFF_ICE the next start runs for real."""
+    o = oracle(_PRODUCER_254[shape] + _CONSUMERS_254)
+    o.feed(ev("ON_ICE", 0, job="p254"))
+    _assert_ignored(o, "ON_NOEXEC", "p254", 1)
+    assert not o.store.job["p254"].on_noexec
+    o.feed(ev("OFF_ICE", 2, job="p254"))
+    o.feed(ev("STARTJOB", 3, job="p254"))
+    assert o.store.job["p254"].status == "RUNNING"
+    if shape == "box":
+        assert o.store.job["m254"].status == "RUNNING"  # not bypassed
+
+
+def test_sem22_on_noexec_on_a_running_box_does_not_bypass_its_waiting_members() -> None:
+    """SEM-22 (DL-254): ON_NOEXEC on a RUNNING box is ignored, so a member
+    still waiting on its condition runs for real when the condition fires,
+    instead of bypassing to SUCCESS."""
+    text = (
+        "insert_job: b254\njob_type: b\n\n"
+        "insert_job: a254\njob_type: c\ncommand: x\nmachine: m1\nbox_name: b254\n\n"
+        "insert_job: w254\njob_type: c\ncommand: y\nmachine: m1\nbox_name: b254\n"
+        "condition: s(a254)\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="b254"))
+    assert _status(o, "b254", "a254", "w254") == ["RUNNING", "RUNNING", "INACTIVE"]
+    _assert_ignored(o, "ON_NOEXEC", "b254", 1)
+    o.feed(ev("STATUS", 2, job="a254", status="SUCCESS"))
+    assert transitions(o, "w254") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+
+
+def _assert_out_of_the_queue(o: Oracle | EngineHarness, status: str) -> None:
+    row = o.store.job["q254"]
+    assert (row.status, row.on_noexec, row.on_hold) == (status, True, False)
+    assert row.reservations == ()
+    assert row.waiter_seq is None
+    assert "QUE_WAIT->INACTIVE" in transitions(o, "q254")
+    assert o.store.job["h254"].status == "RUNNING"  # still holds the lock
+    if isinstance(o, EngineHarness):
+        assert [e.job for e in o.engine.outbox.effects() if e.kind == "SPAWN"] == ["h254"]
+
+
+def test_sem22_on_noexec_on_a_queued_job_takes_it_out_of_the_queue() -> None:
+    """SEM-22 (DL-254): "If the job is in the QUEWAIT or RESWAIT status, the
+    scheduler removes the job from the load balancing and resource wait
+    queues before placing it in the ON_NOEXEC status." The job leaves the
+    queue for INACTIVE with the flag and no reservation. Its start is then
+    retried: it met its starting conditions, so it bypasses to SUCCESS at
+    once, and no SPAWN is ever planned for it."""
+    o = oracle(_QUEUED_254)
+    o.feed(ev("STARTJOB", 0, job="h254"))
+    o.feed(ev("STARTJOB", 1, job="q254"))
+    assert o.store.job["q254"].status == "QUE_WAIT"
+    o.feed(ev("ON_NOEXEC", 2, job="q254"))
+    assert transitions(o, "q254")[-2:] == ["QUE_WAIT->INACTIVE", "INACTIVE->SUCCESS"]
+    _assert_out_of_the_queue(o, "SUCCESS")
+
+
+def test_sem22_a_dequeued_noexec_job_whose_condition_went_false_waits_for_it() -> None:
+    """SEM-22 (DL-254): the retry reads the conditions now. q254's condition
+    turned false while it queued (conditions are not re-checked in the
+    queue, Qr6), so after ON_NOEXEC it waits INACTIVE and bypasses when the
+    condition fires again."""
+    o = oracle(_QUEUED_254 + "condition: s(x254)\n\ninsert_job: x254\njob_type: c\ncommand: v\n")
+    o.feed(ev("STARTJOB", 0, job="h254"))
+    o.feed(ev("STATUS", 1, job="x254", status="SUCCESS"))
+    assert o.store.job["q254"].status == "QUE_WAIT"
+    o.feed(ev("STATUS", 2, job="x254", status="FAILURE"))
+    o.feed(ev("ON_NOEXEC", 3, job="q254"))
+    _assert_out_of_the_queue(o, "INACTIVE")
+    o.feed(ev("STATUS", 4, job="x254", status="SUCCESS"))
+    assert transitions(o, "q254")[-1] == "INACTIVE->SUCCESS"
+
+
+def test_sem22_on_noexec_supersedes_the_hold_on_a_queued_job() -> None:
+    """SEM-22 (DL-254): "The JOB_ON_NOEXEC event supersedes the JOB_ON_HOLD
+    event effectively overwriting the ON_HOLD status with the ON_NOEXEC
+    status." A held queued job loses the hold, recorded as an OFF_HOLD,
+    leaves the queue and bypasses."""
+    o = oracle(_QUEUED_254)
+    o.feed(ev("STARTJOB", 0, job="h254"))
+    o.feed(ev("STARTJOB", 1, job="q254"))
+    o.feed(ev("ON_HOLD", 2, job="q254"))
+    o.feed(ev("ON_NOEXEC", 3, job="q254"))
+    assert transitions(o, "q254")[-5:] == [
+        "ON_HOLD",
+        "ON_NOEXEC",
+        "OFF_HOLD",
+        "QUE_WAIT->INACTIVE",
+        "INACTIVE->SUCCESS",
+    ]
+    _assert_out_of_the_queue(o, "SUCCESS")
+
+
+@pytest.mark.parametrize("met", [True, False], ids=["condition-met", "condition-unmet"])
+def test_sem22_on_noexec_supersedes_on_hold(met: bool) -> None:
+    """SEM-22 (DL-254): ON_NOEXEC on a held job clears the hold, recorded as
+    an OFF_HOLD with a cause naming ON_NOEXEC, and retries the start as
+    OFF_HOLD does. cs254 waits on s(p254): with the condition met it
+    bypasses at once; otherwise it waits, unheld, and bypasses when the
+    condition fires."""
+    o = oracle(_PRODUCER_254["job"] + _CONSUMERS_254)
+    o.feed(ev("ON_HOLD", 0, job="cs254"))
+    if met:
+        o.feed(ev("STATUS", 1, job="p254", status="SUCCESS"))
+        assert o.store.job["cs254"].status == "INACTIVE"  # held
+    o.feed(ev("ON_NOEXEC", 2, job="cs254"))
+    assert transitions(o, "cs254")[1:3] == ["ON_NOEXEC", "OFF_HOLD"]
+    clear = [t for t in o.trace() if t.job == "cs254" and t.transition == "OFF_HOLD"]
+    assert clear[0].cause == "ON_NOEXEC supersedes ON_HOLD (SEM-22, DL-254)"
+    row = o.store.job["cs254"]
+    assert (row.on_hold, row.on_noexec) == (False, True)
+    if not met:
+        assert row.status == "INACTIVE"
+        o.feed(ev("STATUS", 3, job="p254", status="SUCCESS"))
+    assert transitions(o, "cs254")[-1] == "INACTIVE->SUCCESS"
+
+
+def test_sem22_on_noexec_on_a_held_member_bypasses_and_completes_the_box() -> None:
+    """SEM-22 (DL-254): box B runs a, and h waits on s(a) under a hold; d
+    outside waits on s(h). After a succeeds, ON_NOEXEC h clears the hold
+    and h bypasses at once, so B completes and d starts."""
+    o = oracle(
+        "insert_job: b256\njob_type: b\n\n"
+        "insert_job: a256\njob_type: c\ncommand: x\nmachine: m1\nbox_name: b256\n\n"
+        "insert_job: h256\njob_type: c\ncommand: y\nmachine: m1\nbox_name: b256\n"
+        "condition: s(a256)\n\n"
+        "insert_job: d256\njob_type: c\ncommand: z\nmachine: m1\ncondition: s(h256)\n"
+    )
+    o.feed(ev("ON_HOLD", 0, job="h256"))
+    o.feed(ev("STARTJOB", 1, job="b256"))
+    o.feed(ev("STATUS", 2, job="a256", status="SUCCESS"))
+    assert _status(o, "b256", "h256", "d256") == ["RUNNING", "INACTIVE", "INACTIVE"]
+    o.feed(ev("ON_NOEXEC", 3, job="h256"))
+    assert _status(o, "b256", "h256", "d256") == ["SUCCESS", "SUCCESS", "RUNNING"]
+
+
+def test_sem22_on_noexec_on_a_waiting_subbox_resolves_its_running_parent() -> None:
+    """SEM-22 (DL-254, DL-242): the box event is CHANGE_STATUS INACTIVE on
+    the box. outer runs; its only member, inner, waits on a false
+    condition, so its whole tree is already INACTIVE. ON_NOEXEC inner still
+    runs the INACTIVE->INACTIVE transition, so outer records the resolution
+    and completes, as it does under CHANGE_STATUS inner INACTIVE."""
+    o = oracle(
+        "insert_job: outer257\njob_type: b\n\n"
+        "insert_job: inner257\njob_type: b\nbox_name: outer257\ncondition: s(never257)\n\n"
+        "insert_job: leaf257\njob_type: c\ncommand: x\nmachine: m1\nbox_name: inner257\n\n"
+        "insert_job: never257\njob_type: c\ncommand: y\nmachine: m1\n"
+    )
+    o.feed(ev("STARTJOB", 0, job="outer257"))
+    assert _status(o, "outer257", "inner257", "leaf257") == ["RUNNING", "INACTIVE", "INACTIVE"]
+    o.feed(ev("ON_NOEXEC", 1, job="inner257"))
+    assert transitions(o, "inner257")[-1] == "INACTIVE->INACTIVE"
+    assert o.store.job["outer257"].status == "SUCCESS"
+
+
+def test_sem22_on_noexec_on_a_box_clears_the_exit_code_of_an_inactive_member() -> None:
+    """SEM-22 (DL-254): the box event clears the exit code on every row it
+    covers, a member already INACTIVE included. m failed with exit 7 and
+    was set INACTIVE, keeping the code; after ON_NOEXEC on its box a held
+    e(m) = 7 consumer released later does not start."""
+    o = oracle(
+        "insert_job: b258\njob_type: b\n\n"
+        "insert_job: m258\njob_type: c\ncommand: x\nmachine: m1\nbox_name: b258\n\n"
+        "insert_job: c258\njob_type: c\ncommand: y\nmachine: m1\ncondition: e(m258) = 7\n"
+    )
+    o.feed(ev("ON_HOLD", 0, job="c258"))
+    o.feed(ev("STARTJOB", 1, job="b258"))
+    o.feed(ev("STATUS", 2, job="m258", exit_code=7))
+    o.feed(ev("STATUS", 3, job="m258", status="INACTIVE"))
+    assert (o.store.job["m258"].status, o.store.job["m258"].exit_code) == ("INACTIVE", 7)
+    o.feed(ev("ON_NOEXEC", 4, job="b258"))
+    assert o.store.job["m258"].exit_code is None
+    o.feed(ev("OFF_HOLD", 5, job="c258"))
+    assert o.store.job["c258"].status == "INACTIVE"
+
+
+@pytest.mark.parametrize("shape", ["job", "box"])
+def test_sem22_the_release_retry_does_not_repeat_a_start_the_event_already_made(
+    shape: str,
+) -> None:
+    """SEM-22 (DL-254): q waits on e(a) = 7 and a on n(q). ON_NOEXEC on the
+    held, failed q clears the hold and moves q INACTIVE; that wakes a, and
+    each of a's restart transitions re-fires e(a) = 7, so q bypasses (a box
+    q runs its whole bypass cycle) once per transition, as any consumer
+    re-runs on a fresh satisfaction (DL-13). The release retry that follows
+    sees q's run number moved and adds no start of its own."""
+    q = (
+        "insert_job: q259\njob_type: b\ncondition: e(a259) = 7\n\n"
+        "insert_job: qm259\njob_type: c\ncommand: w\nmachine: m1\nbox_name: q259\n\n"
+        if shape == "box"
+        else "insert_job: q259\njob_type: c\ncommand: x\nmachine: m1\ncondition: e(a259) = 7\n\n"
+    )
+    o = oracle(q + "insert_job: a259\njob_type: c\ncommand: y\nmachine: m1\ncondition: n(q259)\n")
+    o.feed(ev("ON_HOLD", 0, job="q259"))
+    o.feed(ev("STATUS", 1, job="q259", status="FAILURE"))
+    o.feed(ev("STATUS", 2, job="a259", status="SUCCESS", exit_code=7))
+    before = len(o.trace())
+    run = o.store.job["q259"].run_number
+    o.feed(ev("ON_NOEXEC", 3, job="q259"))
+    event = o.trace()[before:]
+    a_moves = [t for t in event if t.job == "a259"]
+    assert [t.transition for t in a_moves] == ["SUCCESS->STARTING", "STARTING->RUNNING"]
+    q_starts = [
+        t
+        for t in event
+        if t.job == "q259"
+        and "bypass" in t.cause
+        or (t.job == "q259" and t.transition.endswith("->STARTING"))
+    ]
+    assert len(q_starts) == 2  # one per a259 transition
+    assert all("status of 'a259' changed" in t.cause for t in q_starts)
+    assert o.store.job["q259"].run_number == run + 2
+    assert o.store.job["q259"].status == "SUCCESS"
+
+
+def _noexec_box_tree() -> Oracle | EngineHarness:
+    """ob255 > {m255, ib255 > {g255, k255}}; f(m255) watches outside."""
+    return oracle(
+        "insert_job: ob255\njob_type: b\nbox_failure: f(m255)\n\n"
+        "insert_job: m255\njob_type: c\ncommand: x\nmachine: m1\nbox_name: ob255\n\n"
+        "insert_job: ib255\njob_type: b\nbox_name: ob255\n\n"
+        "insert_job: g255\njob_type: c\ncommand: y\nmachine: m1\nbox_name: ib255\n\n"
+        "insert_job: k255\njob_type: c\ncommand: z\nmachine: m1\nbox_name: ib255\n\n"
+        "insert_job: wf255\njob_type: c\ncommand: w\nmachine: m1\ncondition: f(m255)\n"
+    )
+
+
+def test_sem22_on_noexec_on_a_box_cascades_inactive_and_flags_every_level() -> None:
+    """SEM-22 (DL-254): "If you send the JOB_ON_NOEXEC event to a box, the
+    effect is the same as sending the CHANGE_STATUS event to INACTIVE for a
+    box. The box enters the ON_NOEXEC status and the scheduler sets the
+    status of all jobs in the box (including all jobs contained in lower
+    level boxes within the box) at all levels to ON_NOEXEC." A completed
+    box goes INACTIVE with every job it holds (the SEM-18 cascade, exit
+    codes cleared), and every level takes the flag. A held member loses its
+    hold. A failed member reads INACTIVE, as DL-243 would have it alone.
+    On the engine path nothing is planned."""
+    o = _noexec_box_tree()
+    o.feed(ev("ON_HOLD", 0, job="k255"))
+    o.feed(ev("STARTJOB", 1, job="ob255"))
+    o.feed(ev("STATUS", 2, job="g255", status="SUCCESS"))
+    o.feed(ev("STATUS", 3, job="m255", exit_code=1))  # FAILURE; box_failure fires
+    assert _status(o, "ob255", "m255", "ib255", "g255", "k255") == [
+        "FAILURE",
+        "FAILURE",
+        "RUNNING",
+        "SUCCESS",
+        "INACTIVE",
+    ]
+    o.feed(ev("STATUS", 4, job="ib255", status="SUCCESS"))
+    effects = len(list(o.engine.outbox.effects())) if isinstance(o, EngineHarness) else 0
+    o.feed(ev("ON_NOEXEC", 5, job="ob255"))
+    tree = ("ob255", "m255", "ib255", "g255", "k255")
+    assert _status(o, *tree) == ["INACTIVE"] * 5
+    assert all(o.store.job[j].on_noexec for j in tree)
+    assert not o.store.job["k255"].on_hold
+    assert o.store.job["m255"].exit_code is None
+    assert o.store.job["wf255"].status == "RUNNING"  # woke on the real FAILURE earlier
+    if isinstance(o, EngineHarness):
+        assert len(list(o.engine.outbox.effects())) == effects
+    o.feed(ev("STARTJOB", 6, job="ob255"))  # the dry run: every member bypasses
+    assert [transitions(o, j)[-1] for j in ("m255", "g255", "k255")] == ["INACTIVE->SUCCESS"] * 3
+
+
+def test_sem22_on_noexec_on_an_inactive_box_moves_no_status() -> None:
+    """SEM-22 (DL-254): a box whose whole tree is already INACTIVE keeps its
+    status, as an INACTIVE job does; only the flags move."""
+    o = _noexec_box_tree()
+    o.feed(ev("ON_NOEXEC", 0, job="ob255"))
+    tree = ("ob255", "m255", "ib255", "g255", "k255")
+    assert all(transitions(o, j) == ["ON_NOEXEC"] for j in tree)
+    assert all(o.store.job[j].on_noexec for j in tree)
+
+
+def test_sem22_off_noexec_on_a_box_clears_every_level() -> None:
+    """SEM-22 (DL-254): "If you send the JOB_OFF_NOEXEC to a box, all jobs
+    in the box (including all jobs that are contained in lower level boxes
+    within the box) are reset". Every flag clears, so the next box run
+    executes its members."""
+    o = _noexec_box_tree()
+    o.feed(ev("ON_NOEXEC", 0, job="ob255"))
+    o.feed(ev("OFF_NOEXEC", 1, job="ob255"))
+    tree = ("ob255", "m255", "ib255", "g255", "k255")
+    assert not any(o.store.job[j].on_noexec for j in tree)
+    assert all(transitions(o, j)[-1] == "OFF_NOEXEC" for j in tree)
+    o.feed(ev("STARTJOB", 2, job="ob255"))
+    assert _status(o, "m255", "g255", "k255") == ["RUNNING"] * 3
+
+
+@pytest.mark.parametrize("inner", ["iced", "running"])
+def test_sem22_on_noexec_on_a_box_with_a_contained_job_in_another_status_is_ignored(
+    inner: str,
+) -> None:
+    """SEM-22 (DL-254): the vendor also ignores ON_NOEXEC for "A box job
+    with jobs (including the jobs contained in lower level boxes) in a
+    status other than the following status: ON_HOLD, ON_NOEXEC, INACTIVE,
+    SUCCESS, FAILURE, ACTIVATED, or TERMINATED." The box is idle; the job
+    two levels down is iced, or RUNNING through a FORCE."""
+    text = (
+        "insert_job: ob254\njob_type: b\n\n"
+        "insert_job: ib254\njob_type: b\nbox_name: ob254\n\n"
+        "insert_job: g254\njob_type: c\ncommand: x\nmachine: m1\nbox_name: ib254\n"
+    )
+    o = oracle(text)
+    o.feed(ev("ON_ICE" if inner == "iced" else "FORCE_STARTJOB", 0, job="g254"))
+    assert o.store.job["ob254"].status == "INACTIVE"
+    _assert_ignored(o, "ON_NOEXEC", "ob254", 1)
+    assert "'g254'" in o.trace()[-1].cause
 
 
 # ------------------------------------------------------------- 16. SEM-23 FORCE_STARTJOB
@@ -5210,11 +5694,11 @@ def test_must_start_alarm_quiet_when_the_run_began_in_time() -> None:
 
 
 def test_ice_on_a_running_job_takes_effect_at_completion() -> None:
-    """DL-13: atoms read the real in-flight status of an
-    iced-but-RUNNING job; the satisfied-by-ice reading applies only once
-    the run completes. ir_c's s() atom is ordinary (no lookback), so once
-    non-live it follows the vendor's ON_ICE table (DL-243), where success
-    is still TRUE -- this test only pins s(), not every atom kind."""
+    """SEM-20 (DL-254): ON_ICE has "no effect on jobs with a status of
+    STARTING or RUNNING". The run's FAILURE is the job's status, so the
+    ordinary s() consumer stays INACTIVE. The name records the DL-13
+    behavior DL-254 replaced, where the ice took effect at completion and
+    the ON_ICE table read s() true; DL-243 cites the name."""
     text = (
         "insert_job: ir_p\njob_type: c\ncommand: x\nmachine: m1\n\n"
         "insert_job: ir_c\njob_type: c\ncommand: y\nmachine: m1\ncondition: s(ir_p)\n"
@@ -5222,10 +5706,10 @@ def test_ice_on_a_running_job_takes_effect_at_completion() -> None:
     o = oracle(text)
     o.feed(ev("FORCE_STARTJOB", 0, job="ir_p"))
     o.feed(ev("ON_ICE", 1, job="ir_p"))
-    assert o.store.job["ir_c"].status == "INACTIVE"  # run still real: s(ir_p) false
-    o.feed(ev("STATUS", 2, job="ir_p", status="FAILURE"))  # run completes (failed!)
-    # now iced and non-live: the vendor's ON_ICE table reads s() true (DL-243)
-    assert o.store.job["ir_c"].status == "RUNNING"
+    assert not o.store.job["ir_p"].on_ice
+    assert o.store.job["ir_c"].status == "INACTIVE"
+    o.feed(ev("STATUS", 2, job="ir_p", status="FAILURE"))
+    assert o.store.job["ir_c"].status == "INACTIVE"
 
 
 def test_sem15_idle_box_recompute_derives_status_from_member_changes() -> None:
@@ -5453,14 +5937,17 @@ def test_sem18_a_wake_during_the_cascade_restarts_the_whole_subtree_together() -
 
 def test_sem18_a_restart_during_the_cascade_still_wakes_the_resource_waiters() -> None:
     """T18 (SEM-18, DL-242) with DL-50: the cascade releases m's lock in
-    phase 1. A phase-2 wake restarts b (`n(b)`), m bypasses to SUCCESS
-    (ON_NOEXEC), and m's own notification is skipped because its run moved.
-    The release still owes the waiters their wake, so w is admitted."""
+    phase 1. A phase-2 wake restarts b (`n(b)`), and m queues again: its
+    depletable FUEL was used up by its first run. m's own notification is
+    skipped because its row moved on. The release still owes the waiters
+    their wake, so w is admitted. (The restart used to bypass m through
+    ON_NOEXEC; DL-254 ignores that event on a RUNNING job or box.)"""
     text = (
         "insert_resource: LOCK18R\nres_type: R\namount: 1\n\n"
+        "insert_resource: FUEL18R\nres_type: D\namount: 1\n\n"
         "insert_job: b18r\njob_type: b\ncondition: n(b18r)\n\n"
         "insert_job: m18r\njob_type: c\ncommand: x\nmachine: m1\nbox_name: b18r\n"
-        "resources: (LOCK18R, QUANTITY=1)\n\n"
+        "resources: (LOCK18R, QUANTITY=1) and (FUEL18R, QUANTITY=1)\n\n"
         "insert_job: h18r\njob_type: c\ncommand: y\nmachine: m1\nbox_name: b18r\n\n"
         "insert_job: w18r\njob_type: c\ncommand: z\nmachine: m1\n"
         "resources: (LOCK18R, QUANTITY=1)\n"
@@ -5470,9 +5957,8 @@ def test_sem18_a_restart_during_the_cascade_still_wakes_the_resource_waiters() -
     o.feed(ev("STARTJOB", 0, job="b18r"))
     o.feed(ev("STARTJOB", 1, job="w18r"))
     assert _status(o, "b18r", "m18r", "w18r") == ["RUNNING", "RUNNING", "QUE_WAIT"]
-    o.feed(ev("ON_NOEXEC", 2, job="m18r"))
     o.feed(ev("STATUS", 3, job="b18r", status="INACTIVE"))
-    assert _status(o, "b18r", "m18r", "w18r") == ["RUNNING", "SUCCESS", "RUNNING"]
+    assert _status(o, "b18r", "m18r", "w18r") == ["RUNNING", "QUE_WAIT", "RUNNING"]
 
 
 def test_sem15_recompute_skips_a_parent_the_injection_itself_started() -> None:

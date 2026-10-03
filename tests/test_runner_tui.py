@@ -2457,8 +2457,9 @@ def test_pilot_the_confirmed_kill_names_the_revision_the_dialog_showed(short_roo
                 shown = app._jobs_snapshot["fz_run"]["state_rev"]
                 assert f"at revision {shown}" in str(app.screen.query_one(Static).content)
 
-                # the estate moves under the operator while the dialog is up
-                nudge = parse_console_command("ON_ICE fz_run", None)
+                # the estate moves under the operator while the dialog is up;
+                # ON_ICE would not move a RUNNING job (DL-254), a status write does
+                nudge = parse_console_command("CHANGE_STATUS fz_run RUNNING", None)
                 assert not isinstance(nudge, str)
                 await app._do_sendevent(nudge)
                 await _wait_for_ui(pilot, lambda: app._jobs_snapshot["fz_run"]["state_rev"] > shown)
