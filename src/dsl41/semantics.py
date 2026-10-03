@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
 from dsl41.capacity import checks_load, resource_type
 from dsl41.conditions import ExitCodeAtom, StatusAtom, iter_atoms
+from dsl41.ir import FwSpec
 
 if TYPE_CHECKING:
     from dsl41.ir import CatalogIR, JobIR
@@ -73,6 +74,28 @@ def _can_queue(job: JobIR, _catalog: CatalogIR) -> bool:
     return bool(job.resources) or checks_load(job)
 
 
+def fw_no_min_size(job: JobIR) -> bool:
+    """Whether `job` is an FW job with no `watch_file_min_size`: what
+    `fw-existence` can change (DL-258). `None` and `0` read the same -- the
+    adapter's own `spec_ir.watch_file_min_size or 0` (runner_adapters.py) --
+    so a job that spells `watch_file_min_size: 0` is folded in here too. A
+    job with a minimum size is unaffected by the switch either way."""
+    return isinstance(job.exec_, FwSpec) and not job.exec_.watch_file_min_size
+
+
+def fw_existence_immediate(job: JobIR, existence: str) -> bool:
+    """Whether `fw-existence=immediate` decides `job`'s FW completion: the
+    switch reads `immediate` and `job` sets no `watch_file_min_size`. A job
+    with a minimum size always needs the steady-size rule, whatever the
+    switch says (runner_adapters.FileWatcherAdapter, runner_startup._resume_watch)."""
+    return existence == "immediate" and fw_no_min_size(job)
+
+
+def _fw_without_min_size(job: JobIR, _catalog: CatalogIR) -> bool:
+    """`fw_no_min_size` in the registry's `affects` shape (DL-256)."""
+    return fw_no_min_size(job)
+
+
 #: The registry. Closed: a name that is not here is refused wherever it is
 #: met, at profile construction and on the command line.
 REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
@@ -108,6 +131,18 @@ REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
                 " exclude_calendar; 2 also whether today is a run day",
                 affects=_can_queue,
             ),
+            Switch(
+                name="fw-existence",
+                values=("stable", "immediate"),
+                default="stable",
+                autosys="immediate",
+                description="what an FW job with no watch_file_min_size does when the watched"
+                " file exists: wait for the size to stay steady across polls like a job with a"
+                " minimum size (stable, dsl41's own choice -- a file still being written is not"
+                " complete), or complete at once, watch_interval ignored (immediate, the vendor"
+                " reading)",
+                affects=_fw_without_min_size,
+            ),
         )
     }
 )
@@ -115,6 +150,7 @@ REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
 IceLookback = Literal["true", "ordinary"]
 RenewableFree = Literal["Y", "A"]
 QueuedRecheck = Literal["0", "1", "2"]
+FwExistence = Literal["stable", "immediate"]
 
 
 @dataclass(frozen=True)
@@ -127,6 +163,7 @@ class SemanticSwitches:
     ice_lookback: IceLookback
     renewable_free: RenewableFree
     queued_recheck: QueuedRecheck
+    fw_existence: FwExistence
 
     def value(self, name: str) -> str:
         """The effective value of the switch called `name`."""
