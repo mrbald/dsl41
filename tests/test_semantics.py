@@ -9,6 +9,7 @@ The oracle's own reading of the switch, on both bisimulation paths, is in
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import dataclasses
 import hashlib
@@ -1581,3 +1582,128 @@ def test_a_staged_manifest_missing_semantics_is_refused_not_restored(tmp_path: P
     asyncio.run(seal())
     live.journal.close()
     assert read_period_manifest(run_root, 2) is None
+
+
+# ------------------------------------------- switches reach every production call
+
+#: Production calls that may leave `semantics` to its default, each with its
+#: reason. Everything else in src passes the switches it runs under.
+_DEFAULT_SWITCHES_ALLOWED: dict[tuple[str, str], str] = {
+    ("equiv.py", "Oracle"): "equiv is a static tool with no runtime profile",
+    ("minify_rules.py", "compile_calendar"): "a parse-validity predicate; no switch changes"
+    " what the calendar parser accepts",
+    ("cli_run.py", "engine.journal.preflight"): "`Journal.preflight` journals WARN items;"
+    " it only shares the name of `runner_preflight.preflight`",
+}
+
+
+def _switch_takers(trees: dict[str, ast.Module]) -> dict[str, int | None]:
+    """Every function or class in src whose `semantics` parameter is an
+    optional `SemanticSwitches` defaulting to None, with the parameter's
+    positional index (None when it is keyword-only)."""
+    takers: dict[str, int | None] = {}
+    for tree in trees.values():
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                for init in node.body:
+                    if isinstance(init, ast.FunctionDef) and init.name == "__init__":
+                        if _optional_switches(init.args):
+                            takers[node.name] = _position(init.args, skip_self=True)
+            elif isinstance(node, ast.FunctionDef) and node.name != "__init__":
+                if _optional_switches(node.args):
+                    takers[node.name] = _position(node.args, skip_self=False)
+    return takers
+
+
+def _position(args: ast.arguments, *, skip_self: bool) -> int | None:
+    names = [a.arg for a in args.posonlyargs + args.args][1 if skip_self else 0 :]
+    return names.index("semantics") if "semantics" in names else None
+
+
+def _optional_switches(args: ast.arguments) -> bool:
+    positional = args.posonlyargs + args.args
+    pairs = list(zip(positional[len(positional) - len(args.defaults) :], args.defaults))
+    pairs += [(a, d) for a, d in zip(args.kwonlyargs, args.kw_defaults) if d is not None]
+    return any(
+        arg.arg == "semantics"
+        and isinstance(default, ast.Constant)
+        and default.value is None
+        and arg.annotation is not None
+        and "SemanticSwitches" in ast.unparse(arg.annotation)
+        for arg, default in pairs
+    )
+
+
+def test_every_production_call_passes_its_semantic_switches() -> None:
+    """A callable that takes optional switches falls back to the registry
+    defaults when a caller omits them. A production caller that holds a
+    profile must pass its switches, or the code it calls reads another
+    reading than the scheduler and the pin: the queued recheck once compiled
+    calendars under the default `wekr-first-week` this way. A call is matched
+    by its bare name (`Oracle(...)`) or by the attribute it reaches
+    (`autocal.compile_calendar(...)`), except a method called on `self` or
+    `cls`. A positional `semantics` argument counts as passed. An entry in
+    the allow-list names the callee as written."""
+    root = Path(semantics.__file__).parent
+    trees = {path.name: ast.parse(path.read_text()) for path in sorted(root.glob("*.py"))}
+    takers = _switch_takers(trees)
+    assert {
+        "Oracle",
+        "Scheduler",
+        "Engine",
+        "CapacityPool",
+        "compile_calendar",
+        "preflight",
+    } <= set(takers)
+    omitted: set[tuple[str, str]] = set()
+    for name, tree in trees.items():
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if isinstance(func, ast.Name):
+                callee = func.id
+            elif isinstance(func, ast.Attribute):
+                receiver = func.value
+                if isinstance(receiver, ast.Name) and receiver.id in ("self", "cls"):
+                    continue
+                callee = func.attr
+            else:
+                continue
+            if callee not in takers:
+                continue
+            if any(kw.arg in ("semantics", None) for kw in node.keywords):
+                continue
+            position = takers[callee]
+            if position is not None and len(node.args) > position:
+                continue
+            omitted.add((name, ast.unparse(func)))
+    assert omitted == set(_DEFAULT_SWITCHES_ALLOWED), (
+        f"calls that omit `semantics`: {sorted(omitted - set(_DEFAULT_SWITCHES_ALLOWED))};"
+        f" stale allow-list entries: {sorted(set(_DEFAULT_SWITCHES_ALLOWED) - omitted)}"
+    )
+
+
+@pytest.mark.parametrize(("switches", "dormant"), [(PARTIAL, False), (None, True)])
+def test_preflight_reads_calendars_under_the_run_s_switches(
+    switches: dict[str, str] | None, dormant: bool
+) -> None:
+    """DL-259's example: `WEKR1#01 & JAN#01 & TUE` selects no day under
+    `first-full` but 2030-01-01 under `partial`. Preflight compiles the
+    calendar under the switches it is given, so its dormancy WARN names the
+    reading the scheduler fires."""
+    from dsl41.runner_preflight import preflight
+
+    catalog = lower_source(
+        "extended_calendar: wk1\ncondition: WEKR1#01 & JAN#01 & TUE\n\n"
+        "insert_job: j\njob_type: c\nmachine: m1\ncommand: x\n"
+        'date_conditions: 1\nrun_calendar: wk1\nstart_times: "08:00"\n'
+    )
+    items = preflight(
+        catalog,
+        execution=False,
+        start=datetime(2026, 7, 1),
+        semantics=semantics.resolve(switches),
+    )
+    warned = any(i.code == "calendar" and "dormant" in i.message for i in items)
+    assert warned is dormant

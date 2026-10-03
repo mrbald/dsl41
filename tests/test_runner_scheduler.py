@@ -1750,7 +1750,7 @@ def test_preflight_oracle_rule_is_armor_pinned_by_injection(
 
     from dsl41.oracle_state import OracleError
 
-    def refuse(_catalog: CatalogIR) -> None:
+    def refuse(_catalog: CatalogIR, **_switches: object) -> None:
         raise OracleError("injected construction refusal")
 
     monkeypatch.setattr(runner_mod, "Oracle", refuse)

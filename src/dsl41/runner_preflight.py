@@ -40,6 +40,7 @@ from dsl41.oracle import Oracle
 from dsl41.period import MachinePolicy as _MachinePolicy
 from dsl41.oracle_state import OracleError
 from dsl41.runner_scheduler import _DAY_CODES
+from dsl41.semantics import SemanticSwitches
 from dsl41.timezones import city_candidates, resolve_timezone, to_local
 
 
@@ -507,7 +508,8 @@ def _calendar_preflight(
     catalog: CatalogIR,
     start: datetime,
     tz_aliases: Mapping[str, str] | None,
-    default_tz: str | None = None,
+    default_tz: str | None,
+    semantics: SemanticSwitches | None,
 ) -> list[PreflightItem]:
     """ERROR/WARN: `run_calendar`/`exclude_calendar` resolution, exhaustion
     and dormancy (DL-56/DL-57) -- every finding here carries `code="calendar"`."""
@@ -543,7 +545,7 @@ def _calendar_preflight(
         # with the interpreter's reason
         try:
             resolved[role] = (
-                compile_calendar(calendar, catalog)
+                compile_calendar(calendar, catalog, semantics)
                 if calendar.kind == "extended"
                 else standard_days(calendar)
             )
@@ -681,7 +683,9 @@ def _retry_preflight(name: str, job: JobIR) -> list[PreflightItem]:
     return items
 
 
-def _oracle_preflight(catalog: CatalogIR) -> list[PreflightItem]:
+def _oracle_preflight(
+    catalog: CatalogIR, semantics: SemanticSwitches | None
+) -> list[PreflightItem]:
     """ERROR: the oracle itself fails to construct over this catalog."""
     items: list[PreflightItem] = []
 
@@ -689,7 +693,7 @@ def _oracle_preflight(catalog: CatalogIR) -> list[PreflightItem]:
         items.append(PreflightItem(severity="ERROR", code="oracle", message=message))
 
     try:
-        Oracle(catalog)
+        Oracle(catalog, semantics=semantics)
     except OracleError as exc:
         err(f"oracle construction failed: {exc}")
     return items
@@ -723,6 +727,7 @@ def preflight(
     start: datetime | None = None,
     default_tz: str | None = None,
     tz_aliases: Mapping[str, str] | None = None,
+    semantics: SemanticSwitches | None = None,
 ) -> list[PreflightItem]:
     """ss8: refuse loudly, run honestly. `execution=False` (rehearse) skips
     the machine/owner identity rules -- they guard real processes, and the
@@ -744,6 +749,11 @@ def preflight(
     `autotimezone -l` output, --timezone-map). SEM-35 names resolve through
     resolve_timezone's ladder; a unique-city default resolution WARNs, an
     unresolvable name ERRORs with the applicable remedy.
+
+    `semantics` are the run's switches: the calendar checks compile extended
+    calendars under them, as the scheduler and the oracle do, so a
+    `wekr-first-week` reading reaches the dormancy and exhaustion probes.
+    None is the registry defaults, for a caller with no profile.
 
     `as_machine` (DL-52) is the identity this runner answers to. Empty = the
     forward hostname (zero-config, no reverse-DNS); non-empty = EXACTLY those
@@ -773,10 +783,12 @@ def preflight(
             items.extend(_machine_preflight(name, job, catalog, local, machine_policy))
             items.extend(_owner_preflight(name, job, user))
             items.extend(_execution_input_preflight(name, job))
-        items.extend(_calendar_preflight(name, job, catalog, start, tz_aliases, default_tz))
+        items.extend(
+            _calendar_preflight(name, job, catalog, start, tz_aliases, default_tz, semantics)
+        )
         items.extend(_timezone_preflight(name, job, tz_aliases))
         items.extend(_retry_preflight(name, job))
         items.extend(_resource_preflight(name, job, catalog))
-    items.extend(_oracle_preflight(catalog))
+    items.extend(_oracle_preflight(catalog, semantics))
     items.extend(_skeleton_cycle_preflight(catalog))
     return items

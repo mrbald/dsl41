@@ -17521,3 +17521,36 @@ relitigate an entry; append a new one.
   test_boundary.py
   `test_pr22b_a_committed_dst_pin_refuses_a_scheduler_off_it_before_the_segment`.
   Each has a non-triggering twin.
+- DL-261 Production paths run under the pinned switches (2026-10-03;
+  oracle.py, runner_preflight.py, runner_startup.py, boundary.py,
+  cli_run.py, equiv.py, minify_rules.py, runner-design ss8a)
+  THE DEFECT. The queued recheck (DL-257) compiled calendars under the
+  default switches. It predates DL-259's `semantics` parameter on
+  `compile_calendar`. Under `wekr-first-week=partial` it read `first-full`
+  while the scheduler read `partial`, so a job could start on an excluded
+  day or be refused on a run day.
+  THE RULE. Preflight, the genesis and resume Engines and the oracle's
+  calendar compile now take the run's switches. `run` and `rehearse` pass
+  their `--semantics` to preflight, and a boundary's preflight passes the
+  staged profile's. This supersedes DL-259's PREFLIGHT paragraph:
+  preflight's calendar checks no longer stay on the defaults. A resume
+  with no estate home no longer runs the defaults while replay reads the
+  pin.
+  STATIC TOOLS. `equiv` and `minify_rules` stay on the defaults. `equiv`
+  is a static tool with no runtime profile. `minify_rules` only asks
+  whether a calendar text parses, and no switch changes what the parser
+  accepts.
+  GUARD. A test scans src for calls to any callable with an optional
+  `SemanticSwitches` parameter, by bare name or by attribute, and fails on
+  a call that omits it, unless the call is allow-listed with its reason.
+  The list holds the two static tools and `Journal.preflight`, a method
+  that only shares a taker's name.
+  VERSION. `STATE_MACHINE_VERSION` stays. Replay differs only under a
+  non-default `wekr-first-week` or `queued-recheck`, and no released
+  build has either switch.
+  Tests: test_oracle.py
+  `test_dl257_the_recheck_reads_an_exclusion_under_the_wekr_switch` and
+  `test_dl257_the_recheck_reads_a_run_day_under_the_wekr_switch`;
+  test_semantics.py
+  `test_every_production_call_passes_its_semantic_switches` and
+  `test_preflight_reads_calendars_under_the_run_s_switches`.

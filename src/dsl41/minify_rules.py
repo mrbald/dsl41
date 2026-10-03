@@ -278,6 +278,8 @@ def _v_calendar_condition(value: str) -> bool:
         conditions=[value.strip()],
     )
     try:
+        # the default switches: this asks whether the text parses, and no
+        # switch changes what the parser accepts (DL-259)
         compile_calendar(cal, catalog)
     except Exception:  # noqa: BLE001 -- see below
         # Deliberately broad. This is a PREDICATE: its answer is yes or no, and

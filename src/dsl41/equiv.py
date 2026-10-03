@@ -945,6 +945,8 @@ def equivalent_tier_c(
     if len(set(mapped_names)) != len(mapped_names):
         raise RenameError("job name collision after rename/fold (tier c)")
     for index, script in enumerate(scripts):
+        # the default switches: equiv is a static tool with no runtime
+        # profile, and compares both catalogs under one reading
         oracle_a = Oracle(a)
         oracle_b = Oracle(b)
         mapped_script = [

@@ -56,6 +56,7 @@ if TYPE_CHECKING:
     from dsl41.runner_preflight import PreflightItem
     from dsl41.runner_startup import Wiring
     from dsl41.seal import CarriedRows
+    from dsl41.semantics import SemanticSwitches
 
 
 # ------------------------------------------------------------------- runner (phase 11)
@@ -79,6 +80,7 @@ def _preflight_or_exit(
     start: "datetime | None" = None,
     default_tz: "str | None" = None,
     tz_aliases: "dict[str, str] | None" = None,
+    semantics: "SemanticSwitches | None" = None,
     warns_to_stderr: bool = False,
 ) -> "list[PreflightItem]":
     """Print ss8 findings; exit 2 on any ERROR; return the WARNs (the caller
@@ -104,6 +106,7 @@ def _preflight_or_exit(
         start=start,
         default_tz=default_tz,
         tz_aliases=tz_aliases,
+        semantics=semantics,
     )
     for item in items:
         target = f" {item.job}" if item.job else ""
@@ -263,6 +266,8 @@ def run(
     tz_aliases = load_tz_aliases(timezone_map)
     check_base_tz(timezone, tz_aliases)
     overrides = load_semantics(semantics)
+    from dsl41.semantics import resolve as resolve_switches
+
     warns = _preflight_or_exit(
         catalog,
         execution=True,
@@ -271,6 +276,7 @@ def run(
         start=datetime.now(UTC).replace(tzinfo=None),
         default_tz=timezone,
         tz_aliases=tz_aliases,
+        semantics=resolve_switches(overrides),
     )
     if deadman is not None and not detached:
         # loud, not silent: without a supervisor there is nothing to hold the
@@ -1306,12 +1312,14 @@ def rehearse(
     )
     tz_aliases = load_tz_aliases(timezone_map)
     check_base_tz(timezone, tz_aliases)
+    switches = resolve_switches(overrides)
     warns = _preflight_or_exit(
         catalog,
         execution=False,
         start=start_dt,
         default_tz=timezone,
         tz_aliases=tz_aliases,
+        semantics=switches,
         warns_to_stderr=output is RehearseFormat.json,
     )
     try:
@@ -1335,7 +1343,6 @@ def rehearse(
             raise typer.Exit(refuse(exc)) from exc
         adapter, parked_fw, no_success = check_adapter(catalog, adapter)
     clock = VirtualClock(start_dt)
-    switches = resolve_switches(overrides)
     scheduler = Scheduler(
         catalog,
         start=start_dt,

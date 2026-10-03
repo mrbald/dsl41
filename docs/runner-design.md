@@ -951,16 +951,18 @@ Defaults live in code. Changing a default changes how existing estates are
 read, so it is a state-machine change and bumps `STATE_MACHINE_VERSION`.
 
 Static tools that have no runtime profile use the defaults: `equiv`,
-`lint`, `derive`, preflight's oracle and calendar checks, and the genesis
-credit of `rehearse --check-cadence`. The cadence sweeps and the expected
+`lint`, `derive`, and the genesis credit of `rehearse --check-cadence`.
+Preflight's oracle and calendar checks use the run's switches: `run` and
+`rehearse` pass their `--semantics`, and a boundary's preflight the staged
+profile's. The cadence sweeps and the expected
 tick counts use the rehearsal's own switches. The scheduler compiles
 extended calendars under the calendar switches and places start instants
 under `dst-start-times` (DL-260). Those switches are read back from the
 scheduler into the runtime profile, like its timezone, so a profile that
 disagrees with them is refused as drift before anything durable is
 written. An engine also refuses a scheduler built under other values of
-them, as a backstop. Preflight's calendar checks use the defaults, so its dormancy
-warning can be wrong for a calendar the switch changes.
+them, as a backstop. A test scans src for calls that leave `semantics` to
+its default; only a short allow-list of static callers may.
 
 | Switch | Values | Default | Documented AutoSys | Why this default |
 | --- | --- | --- | --- | --- |
