@@ -47,6 +47,7 @@ from dsl41 import (
     runner_adapters,
     runner_preflight,
     runner_wrapper,
+    semantics,
 )
 from dsl41.conditions import Lookback, parse_condition
 from dsl41.oracle import Oracle
@@ -501,6 +502,14 @@ def _literal_alternatives() -> set[str]:
     for name, field in RuntimeProfile.model_fields.items():
         if get_origin(field.annotation) is Literal:
             out |= {f"{name}={alt}" for alt in get_args(field.annotation)}
+    # every value of every semantic switch (DL-252): a switch added to the
+    # registry has no row until somebody writes one, and a row naming a
+    # switch or value the registry dropped is stale
+    out |= {
+        f"semantics.{switch.name}={value}"
+        for switch in semantics.REGISTRY.values()
+        for value in switch.values
+    }
     return out
 
 
@@ -872,6 +881,8 @@ def detect(surface: str, member: str, kind: str, text: str) -> bool:
         if surface == "profile_field":
             return member in data
         field, _, alt = member.partition("=")
+        if field.startswith("semantics."):
+            return data.get("semantics", {}).get(field.removeprefix("semantics.")) == alt
         return data.get(field) == alt
     if kind == "cond":
         if not text.strip():

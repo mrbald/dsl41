@@ -869,6 +869,52 @@ graphlib's role is deliberately bounded to that skeleton check plus `plan`
 eligibility is predicate evaluation over the status store. That is the
 oracle's edge-triggered referencer machinery, not a topological order.
 
+## 8a. Semantic switches
+
+A semantic switch names one place where dsl41 can read an estate two
+ways. The rule for defaults (DL-252): where AutoSys behavior is
+documented, dsl41 follows it. Where dsl41's own choice is safer or more
+useful, dsl41 keeps it. Either way, the other reading can be selected
+without a code change, so an incompatibility found after rollout can be
+flipped by the operator.
+
+The switches form a closed registry in `src/dsl41/semantics.py`. Each
+entry has a name, its allowed values, its default, the value that matches
+documented AutoSys behavior, and a one-line description. An unknown name
+or value is refused with the allowed names or values. Nothing is dropped.
+
+Set a switch with `--semantics NAME=VALUE` on `dsl41 run` and
+`dsl41 rehearse`. The option is repeatable. `dsl41 seal` takes
+`--next-semantics NAME=VALUE` for the period it opens. `dsl41 run --help`
+lists every switch and its values.
+
+Overrides are recorded in the period's runtime profile (`semantics`,
+period-model §2.1), so they are part of `runtime_hash`. An explicit
+default, such as `ice-lookback=true`, is the same as no override. Replay, `journal`,
+`runs`, audit and the boundary classifier read the switches from that
+profile, and so use the values the engine ran. A resume or a period
+opening with different switches is refused, the same as a changed
+`--timezone`. A new value takes effect at a period boundary, and the
+boundary classifier treats the jobs each switch names as changed: a
+running box whose `box_success` reads a lookback atom is refused, an
+armed job gated on one is carried with a recorded assumption. Replay
+refuses a period whose manifest is missing or is not bound to its
+segment, because it cannot know which switches the engine ran. Only
+explicit overrides are recorded, and a profile with none writes
+`"semantics": {}`.
+
+Defaults live in code. Changing a default changes how existing estates are
+read, so it is a state-machine change and bumps `STATE_MACHINE_VERSION`.
+
+Static tools that have no runtime profile use the defaults: `equiv`,
+`lint`, `derive`, preflight's oracle check, and the genesis credit of
+`rehearse --check-cadence`. The cadence sweeps replay under the
+rehearsal's own switches.
+
+| Switch | Values | Default | Documented AutoSys | Why this default |
+| --- | --- | --- | --- | --- |
+| `ice-lookback` | `true`, `ordinary` | `true` | `true` | A condition atom with a lookback qualifier whose predecessor is on ice and not running. `true`: the atom is true, lookback ignored. `ordinary`: the qualifier is dropped and the ordinary on-ice table applies (s, d, n true; f, t, exitcode false). The "condition Attribute" page (AutoSys 24.2) says "If the predecessor job being evaluated for the look-back condition is currently in an ON_ICE status, it always evaluates to true. That is, any look-back evaluation is ignored." `ordinary` extends the Start Conditions on-ice table (SEM-20), which does not separate lookback atoms, to the lookback atom. Q10 stays open. |
+
 ## 9. Time domains (E2)
 
 `Clock` protocol: `virtual`, `now()`, `wait_until(t, interrupt)`,

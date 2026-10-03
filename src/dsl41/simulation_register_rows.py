@@ -2744,10 +2744,11 @@ SCENARIO_ROWS: tuple[Row, ...] = (
             cite="SEM-20, DL-243, oracle.Oracle._atom_true",
             label="Q10",
             sites=("oracle.Oracle._atom_true#1",),
-            effect="a LOOKBACK-qualified atom on a non-live iced job keeps the"
-            " pre-DL-243 blanket-true reading; an ORDINARY atom (no lookback) follows"
-            " the narrower vendor table instead -- the vendor text does not address"
-            " the lookback case, so this corner stays pinned rather than cited",
+            effect="a LOOKBACK-qualified atom on a non-live iced job reads true, lookback"
+            " ignored, as the AutoSys 24.2 condition attribute page states; an ORDINARY"
+            " atom (no lookback) follows the Start Conditions on-ice table, which does"
+            " not separate lookback atoms, so which page a live instance follows stays"
+            " open. The ice-lookback=ordinary switch selects the table's reading (DL-252)",
             trigger=_scn(BASE_JIL, "0 ON_ICE job=J0"),
             quiet=_scn(BASE_JIL, "0 ON_HOLD job=J0"),
         ),
@@ -2997,6 +2998,13 @@ PROFILE_ROWS: tuple[Row, ...] = (
             "period-model ss2.1",
             "how far ahead a deferred dispatch retry may be scheduled",
         ),
+        _profile_row(
+            "semantics",
+            '{"ice-lookback": "ordinary"}',
+            "period-model ss2.1, runner-design ss8a, DL-252",
+            "explicit semantic-switch overrides only, an explicit default normalized away;"
+            " written {} when there is none",
+        ),
     )
     + (
         _row(
@@ -3031,6 +3039,24 @@ PROFILE_ROWS: tuple[Row, ...] = (
             cite="period-model ss2.1",
             effect="a supervisor owns the child processes across engine restarts",
             trigger='{"execution_mode": "detached"}',
+        ),
+        _row(
+            surface="profile_alt",
+            member="semantics.ice-lookback=true",
+            klass=SUPPORTED,
+            cite="runner-design ss8a, SEM-05, DL-252",
+            effect="the default: a lookback-qualified atom on a non-live iced predecessor"
+            " reads true, every atom kind, lookback ignored",
+            trigger='{"semantics": {"ice-lookback": "true"}}',
+        ),
+        _row(
+            surface="profile_alt",
+            member="semantics.ice-lookback=ordinary",
+            klass=SUPPORTED,
+            cite="runner-design ss8a, SEM-20, DL-243, DL-252",
+            effect="the qualifier is dropped on a non-live iced predecessor and the ordinary"
+            " on-ice table applies: s, d, n true; f, t, exitcode false",
+            trigger='{"semantics": {"ice-lookback": "ordinary"}}',
         ),
     )
     + _PROFILE_FACETS

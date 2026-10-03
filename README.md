@@ -377,6 +377,11 @@ the unique zone whose city component matches (`Europe/Zurich`), with a
 preflight warning. POSIX fixed offsets (`GMT+5`, west-positive) work. An
 unresolvable name is a preflight error that names the remedy.
 
+Where dsl41's default reading of an estate can differ from AutoSys,
+`--semantics NAME=VALUE` selects the other reading and records it with the
+run; the switches are listed in "Semantic switches",
+[docs/runner-design.md](docs/runner-design.md) §8a.
+
 ### Detached mode
 
 By default a run is tethered: if the engine dies, its jobs terminate, and

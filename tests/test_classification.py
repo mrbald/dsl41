@@ -36,6 +36,7 @@ from dsl41.classify import (
     PROFILE_CMD,
     PROFILE_FW,
     PROFILE_NO_JOB,
+    PROFILE_SWITCHED,
     PROFILE_SCHEDULED,
     RESOURCE,
     RESOURCE_ASSUMPTION,
@@ -368,14 +369,15 @@ _PROFILE_BUMPS: dict[str, object] = {
     "reconcile_settle_us": 1_000_000,
     "spawn_window_us": 1_000_000,
     "retry_horizon_us": 120_000_000,
+    "semantics": {"ice-lookback": "ordinary"},
 }
 
 
 def test_pr37a_the_profile_field_map_covers_every_field() -> None:
-    """ss10.2's mapping is exhaustive over the model, and its four groups do
+    """ss10.2's mapping is exhaustive over the model, and its five groups do
     not overlap. A field nobody placed reaches every job or no job by
     accident -- both are wrong, and both are silent."""
-    groups = (PROFILE_SCHEDULED, PROFILE_CMD, PROFILE_FW, PROFILE_NO_JOB)
+    groups = (PROFILE_SCHEDULED, PROFILE_CMD, PROFILE_FW, PROFILE_NO_JOB, PROFILE_SWITCHED)
     placed = [field for group in groups for field in group]
     assert sorted(placed) == sorted(RuntimeProfile.model_fields)
     assert len(placed) == len(set(placed))
@@ -397,6 +399,10 @@ def test_pr37a_profile_edges_run_from_job_to_field(field: str) -> None:
         **{f: {"sched", "plain"} for f in PROFILE_CMD},
         **{f: {"watcher"} for f in PROFILE_FW},
         **{f: set() for f in PROFILE_NO_JOB},
+        # per switch, through each switch's own node: this estate has no
+        # lookback atom, so no job reaches `ice-lookback` (DL-252; the jobs
+        # that do are in test_semantics.py)
+        **{f: set() for f in PROFILE_SWITCHED},
     }[field]
     graph = ClassificationGraph(_side(_PROFILE_ESTATE), _side(_PROFILE_ESTATE))
     reaching = {
@@ -418,6 +424,10 @@ def test_pr37a_a_changed_profile_field_classifies_exactly_its_own_jobs(field: st
         **{f: {"sched", "plain"} for f in PROFILE_CMD},
         **{f: {"watcher"} for f in PROFILE_FW},
         **{f: set() for f in PROFILE_NO_JOB},
+        # per switch, through each switch's own node: this estate has no
+        # lookback atom, so no job reaches `ice-lookback` (DL-252; the jobs
+        # that do are in test_semantics.py)
+        **{f: set() for f in PROFILE_SWITCHED},
     }[field]
     closing = _side(_PROFILE_ESTATE)
     opening = _side(_PROFILE_ESTATE, **{field: _PROFILE_BUMPS[field]})

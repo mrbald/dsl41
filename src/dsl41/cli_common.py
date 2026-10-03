@@ -25,6 +25,7 @@ from dsl41.ast_jil import JilFile, JilParseError, parse
 from dsl41.ir import CatalogIR, LoweringError, lower_catalog
 from dsl41.timezones import parse_timezone_map, resolve_timezone
 from dsl41.placeholders import PlaceholderError, load_properties, substitute
+from dsl41.semantics import help_text, parse_assignments
 
 if TYPE_CHECKING:
     from dsl41.boundary import EstateWalk, Lineage
@@ -71,6 +72,25 @@ TIMEZONE_MAP_OPT = typer.Option(
     " city name falls back to the one matching zoneinfo city, with a"
     " warning.",
 )  # SEM-35/DL-62
+
+SEMANTICS_OPT = typer.Option(
+    [],
+    "--semantics",
+    metavar="NAME=VALUE",
+    help="Choose how one behavior is read where AutoSys and dsl41's default"
+    " can differ. Repeatable. The choice is recorded with the run, and a"
+    " resume must repeat it. The section on semantic switches in"
+    " docs/runner-design.md explains each one. Switches: " + help_text(),
+)  # runner-design ss8a, DL-252
+
+
+def load_semantics(items: "list[str] | None", *, option: str = "--semantics") -> dict[str, str]:
+    """Parse repeated NAME=VALUE switches; an unknown name or value exits 2
+    with the allowed names or values (DL-252)."""
+    try:
+        return parse_assignments(items or ())
+    except ValueError as exc:
+        raise typer.Exit(refuse(exc, prefix=option)) from exc
 
 
 # --------------------------------------------------- the catalog door

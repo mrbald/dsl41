@@ -141,6 +141,7 @@ from dsl41.period import (
     job_fingerprints,
     opening_at,
     read_period_manifest,
+    switches_of,
     tz_aliases_of,
     check_manifest_against_segment,
     SEGMENT_FIELDS,
@@ -987,12 +988,28 @@ def check_replay_version(opening: Mapping[str, Any], *, where: str = "") -> None
         raise RunHistoryError(str(exc)) from exc
 
 
-def _period_profile(run_root: Path, opening: Mapping[str, Any]) -> "RuntimeProfile | None":
-    """The runtime profile an opening segment's period was pinned with, or
-    None where this root no longer holds the manifest (ss2.1, decision 5's
-    degrade)."""
-    manifest = read_period_manifest(run_root, int(opening["period_id"]))
-    return None if manifest is None else manifest.runtime_profile
+def pinned_profile(run_root: Path, opening: Mapping[str, Any]) -> "RuntimeProfile":
+    """The runtime profile an opening segment's period was pinned with,
+    from a manifest bound to that segment (ss2.1, PR-22).
+
+    Required, not degraded: the profile carries the semantic switches and
+    the alias table the engine read conditions under (DL-252), and a replay
+    under defaults narrates a run the engine may never have made -- a box
+    reported FAILURE that ran as SUCCESS. A missing or foreign manifest
+    refuses."""
+    try:
+        manifest = read_period_manifest(run_root, int(opening["period_id"]))
+        if manifest is None:
+            raise EngineError(
+                f"{run_root}: periods/{int(opening['period_id']):06d}/manifest.json is not"
+                " there -- a replay reads the period's semantic switches and alias table"
+                " from it, and without it would narrate readings the engine may not have"
+                " used (period-model ss2.1, DL-252)"
+            )
+        check_manifest_against_segment(manifest, opening)
+    except EngineError as exc:
+        raise RunHistoryError(str(exc)) from exc
+    return manifest.runtime_profile
 
 
 @dataclass(frozen=True)
@@ -1036,10 +1053,14 @@ def replay_trace(
     # that resolved `timezone:` without it refuses a log the engine wrote
     # (DL-151). A root that no longer holds the manifest degrades to none,
     # which is what every reader here did before the table was wired at all.
+    # the semantic switches come from the same pin (DL-252): a replay under
+    # other switches would narrate conditions the engine never read
+    profile = pinned_profile(run_root, records[0])
     oracle = Oracle(
         catalog,
         carried=carried,
-        tz_aliases=tz_aliases_of(_period_profile(run_root, records[0])),
+        tz_aliases=tz_aliases_of(profile),
+        semantics=switches_of(profile),
     )
     seed_local_executor(oracle.store, LOCAL_EXECUTOR_ID, at=opening_at(records[0]))
     try:

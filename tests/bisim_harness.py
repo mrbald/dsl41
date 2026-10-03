@@ -28,6 +28,7 @@ from dsl41.oracle_state import Event, RuntimeState, TraceEntry
 from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import VirtualClock
+from dsl41.semantics import SemanticSwitches
 
 _LOOP: asyncio.AbstractEventLoop | None = None
 
@@ -45,10 +46,13 @@ class EngineHarness:
     clock never runs ahead of the script -- matching the oracle's own lazy
     timer discipline (timers fire when the script's clock reaches them)."""
 
-    def __init__(self, catalog: CatalogIR) -> None:
+    def __init__(self, catalog: CatalogIR, *, semantics: SemanticSwitches | None = None) -> None:
         adapter = FakeAdapter(default=None)
         self.engine = Engine(
-            catalog, clock=VirtualClock(), adapters={"CMD": adapter, "FW": adapter}
+            catalog,
+            clock=VirtualClock(),
+            adapters={"CMD": adapter, "FW": adapter},
+            semantics=semantics,
         )
 
     @property

@@ -742,6 +742,12 @@ def unquote_jil_value(value: str) -> str:
     return v
 
 
+#: An exit code or lo-hi range with a negative end: `-1`, `-5-3`, `-5--1`,
+#: `1--3`. A bare `-` and other malformed tokens do not match and get the
+#: ordinary malformed-token message.
+_NEGATIVE_CODE_RE = re.compile(r"-\d+(?:--?\d+)?|\d+--\d+")
+
+
 def _split_list(value: str) -> list[str]:
     """Comma-separated JIL list; tolerates newlines (rule-6 continuations) and
     empty segments (trailing commas) -- lexical normalization only."""
@@ -942,6 +948,18 @@ class _Lowerer:
         is semantics."""
         ranges: list[tuple[int, int]] = []
         for token in _split_list(attr.raw_value):
+            if _NEGATIVE_CODE_RE.fullmatch(token):
+                # a well-formed code or range with a negative end is not a
+                # malformed range: say why it is refused instead of
+                # "expected lo-hi"
+                self.err(
+                    f"{attr.key}: negative exit code in {token!r} is not supported: on"
+                    " POSIX an exit status is 0-255, and a job killed by a signal is"
+                    " TERMINATED with no exit code, so a negative code can never match"
+                    " (SEM-09)",
+                    attr.span,
+                )
+                return None
             lo_text, sep, hi_text = token.partition("-")
             try:
                 lo = int(lo_text)

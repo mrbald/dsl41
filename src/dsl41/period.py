@@ -85,6 +85,7 @@ from dsl41.canon import (
 from dsl41.ir import CatalogIR
 from dsl41.runner_clock import EngineError
 from dsl41.runner_procid import durable_create, durable_write, fsync_dir, mkdir_durable
+from dsl41.semantics import SemanticSwitches, check_overrides, resolve
 from dsl41.timezones import alias_table
 
 #: every stored digest is spelled exactly this way; an address outside the
@@ -351,6 +352,21 @@ class RuntimeProfile(BaseModel):
     reconcile_settle_us: Annotated[int, Field(ge=0)] = 5_000_000
     spawn_window_us: Annotated[int, Field(ge=0)] = 5_000_000
     retry_horizon_us: Annotated[int, Field(gt=0)] = 60_000_000
+    #: Semantic-switch OVERRIDES only, name -> value (runner-design ss8a,
+    #: DL-252). A default lives in `semantics.REGISTRY`, never here, so an
+    #: empty map means "every switch at its default" and is written `{}`
+    #: like every other empty collection (ss3.2).
+    semantics: dict[str, str] = {}
+
+    @field_validator("semantics")
+    @classmethod
+    def _known_switches(cls, value: dict[str, str]) -> dict[str, str]:
+        """An unknown name or a value outside the switch's set is refused,
+        never dropped: a pin that silently lost an override would replay a
+        period under semantics it did not run. An explicit default is
+        normalized away (`semantics.check_overrides`), so it hashes as no
+        override and a resume naming it is not drift."""
+        return check_overrides(value)
 
     def with_deadman(self, deadman_us: "int | None") -> "RuntimeProfile":
         """This profile with `deadman_us` re-pinned, re-validated.
@@ -389,6 +405,14 @@ def tz_aliases_of(profile: "RuntimeProfile | None") -> dict[str, str] | None:
     return alias_table(None if profile is None else profile.tz_aliases)
 
 
+def switches_of(profile: "RuntimeProfile | None") -> SemanticSwitches:
+    """The semantic switches a period runs under, from its own pin
+    (DL-252); the registry defaults where there is no profile. Every reader
+    that replays a period's log reads them here, as `tz_aliases_of` is read
+    for the alias table."""
+    return resolve(None if profile is None else profile.semantics)
+
+
 def runtime_profile_from_cli(
     *,
     timezone: str | None = None,
@@ -402,6 +426,7 @@ def runtime_profile_from_cli(
     reconcile_settle_s: float = RECONCILE_SETTLE_S,
     spawn_window_s: float = SPAWN_WINDOW_S,
     retry_horizon_s: float = RETRY_HORIZON_S,
+    semantics: Mapping[str, str] | None = None,
 ) -> RuntimeProfile:
     """The one CLI -> profile normalization (PR-15a).
 
@@ -422,6 +447,7 @@ def runtime_profile_from_cli(
         reconcile_settle_us=to_us(reconcile_settle_s),
         spawn_window_us=to_us(spawn_window_s),
         retry_horizon_us=to_us(retry_horizon_s),
+        semantics=dict(semantics or {}),
     )
 
 
@@ -1508,6 +1534,26 @@ def check_manifest_self_consistent(manifest: StagedManifest, where: str) -> None
         )
 
 
+def require_manifest_fields(
+    payload: Mapping[str, Any], model: type[StagedManifest], *, where: str
+) -> None:
+    """Every field of `model`, and of its nested `runtime_profile`, is on
+    the wire -- for a committed manifest AND a staged one (DL-252): a
+    stored pin with a field absent would silently take the model's default,
+    and a defaulted pin is no pin."""
+    missing = sorted(set(model.model_fields) - set(payload))
+    if missing:
+        raise EngineError(f"{where}: missing {', '.join(missing)}")
+    nested = payload.get("runtime_profile")
+    if isinstance(nested, dict):
+        gone = sorted(set(RuntimeProfile.model_fields) - set(nested))
+        if gone:
+            # the same rule one level down: a profile field restored from
+            # its default would hash back to the recorded runtime_hash
+            # and pass every gate while pinning nothing
+            raise EngineError(f"{where}: runtime_profile missing {', '.join(gone)}")
+
+
 def read_period_manifest(run_root: Path, period_id: int = GENESIS_PERIOD_ID) -> Manifest | None:
     """The committed manifest, or None when this root has none -- pruned,
     or never written -- because a MISSING artifact degrades where a WRONG
@@ -1526,19 +1572,7 @@ def read_period_manifest(run_root: Path, period_id: int = GENESIS_PERIOD_ID) -> 
         payload = decode(raw)  # the ss3.2 ingress: dup keys, floats, surrogates
         if not isinstance(payload, dict):
             raise EngineError(f"{path}: not a JSON object")
-        missing = sorted(set(Manifest.model_fields) - set(payload))
-        if missing:
-            # a stored pin with a field absent would silently take the
-            # model's default -- a defaulted pin is no pin
-            raise EngineError(f"{path}: missing {', '.join(missing)}")
-        nested = payload.get("runtime_profile")
-        if isinstance(nested, dict):
-            gone = sorted(set(RuntimeProfile.model_fields) - set(nested))
-            if gone:
-                # the same rule one level down: a profile field restored from
-                # its default would hash back to the recorded runtime_hash
-                # and pass every gate while pinning nothing
-                raise EngineError(f"{path}: runtime_profile missing {', '.join(gone)}")
+        require_manifest_fields(payload, Manifest, where=str(path))
         # strict in the JSON sense: `"10000000"` never coerces to an int and
         # `true` never to 1, while the wire's list is a tuple's one JSON form
         manifest = Manifest.model_validate_json(raw, strict=True)

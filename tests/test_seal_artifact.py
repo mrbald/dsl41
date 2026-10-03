@@ -406,7 +406,7 @@ def _restamped(document: dict[str, Any]) -> bytes:
 #: field, the key order, the escaping, the datetime spelling or the two
 #: sort rules reds this test, which is the whole point of shipping a
 #: vector rather than a round-trip.
-GOLDEN_DIGEST = "sha256:2b0d6653335c2e156b666393ca385c7f16ab629ece09fe0ce3713503cb28087b"
+GOLDEN_DIGEST = "sha256:1c15539af44dc5b4038987663ad5289850e5921dd560c4c84b67ea0c66d490d2"
 
 GOLDEN_BYTES = (
     b'{"artifact_format_version":1,"baseline_id":"sha256:d92cb0a1b58f92aad'
@@ -418,8 +418,8 @@ GOLDEN_BYTES = (
     b'umption":"the C1 trigger survives under C2 gating","class":"A"},"nig'
     b'htly":{"assumption":null,"class":"carry"}},"clock_domain":"real","cl'
     b'osed_at":"2026-08-19T02:00:00.000000","closes_at_index":5310,"digest'
-    b'":"sha256:2b0d6653335c2e156b666393ca385c7f16ab629ece09fe0ce3713503cb'
-    b'28087b","epoch":7,"estate_id":"nightbank/one","executions":[{"effect'
+    b'":"sha256:1c15539af44dc5b4038987663ad5289850e5921dd560c4c84b67ea0c66'
+    b'd490d2","epoch":7,"estate_id":"nightbank/one","executions":[{"effect'
     b'_id":"e5001:SPAWN:nightly.7","executor_id":"local","generation":0,"i'
     b'ndex":5001,"job":"nightly","kind":"bound","run_dir":"runs/nightly.7"'
     b',"run_id":"3f2504e0-4f89-41d3-9a0c-0305e82c3301","run_number":7},{"e'
@@ -431,12 +431,12 @@ GOLDEN_BYTES = (
     b'ct","kind":"pending_spawn","run_id":"b0c9a1d2-1111-4222-8333-4444555'
     b'56666","run_number":4}],"forced_gate":{"gate":"retry_horizon","horiz'
     b'on_us":60000000,"observed_age_us":2000000},"next_period":{"artifact_'
-    b'format_version":1,"baseline_id":"sha256:71814d73d8f38ae1722ee23adb85'
-    b'f0ab9b699834876fae39c94ada7e5e2e518d","catalog_hash":"sha256:b8a587f'
+    b'format_version":1,"baseline_id":"sha256:46485faff0fceb9e7e890f9d7919'
+    b'e9e39c00345d5a45cf9f2862c8f405e14b87","catalog_hash":"sha256:b8a587f'
     b'87459250e3d9f79f48f1f262924576af9d83424b2ce58b2c9b557e21d","catalog_'
     b'hash_version":2,"clock_domain":"real","first_index":5311,"period_id"'
-    b':3,"runtime_hash":"sha256:731f24c225cef1cc9c395adff88780e6c1d6cc40b2'
-    b'49f8142b54a9993687702c","segment_no":3,"source_bundle_hash":"sha256:'
+    b':3,"runtime_hash":"sha256:5bf65b3b71d02f23034472749bf8fbba4e4be7bf05'
+    b'a0bc2b16afa2d8be11470c","segment_no":3,"source_bundle_hash":"sha256:'
     b'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","s'
     b'tate_machine_version":1},"outbox_pending":[{"at":"2026-08-19T02:00:0'
     b'0.000000","effect_id":"e5309:SPAWN:extract.4","executor_id":"local",'
@@ -451,8 +451,8 @@ GOLDEN_BYTES = (
     b'er":7}],"period_id":2,"prev_seal_digest":"sha256:1111111111111111111'
     b'111111111111111111111111111111111111111111111","request_fingerprint"'
     b':"sha256:22222222222222222222222222222222222222222222222222222222222'
-    b'22222","runtime_hash":"sha256:731f24c225cef1cc9c395adff88780e6c1d6cc'
-    b'40b249f8142b54a9993687702c","scheduler_admitted_through":"2026-08-19'
+    b'22222","runtime_hash":"sha256:5bf65b3b71d02f23034472749bf8fbba4e4be7'
+    b'bf05a0bc2b16afa2d8be11470c","scheduler_admitted_through":"2026-08-19'
     b'T02:00:00.000000","source_bundle_hash":"sha256:e3b0c44298fc1c149afbf'
     b'4c8996fb92427ae41e4649b934ca495991b7852b855","state":{"consumed":{"r'
     b':FUEL":3,"r:GONE":1},"enqueue_counter":12,"globals":{"CAL\xc3\x89NDA'
