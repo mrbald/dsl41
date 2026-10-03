@@ -173,7 +173,7 @@ def test_queued_recheck_refuses_a_calendar_it_cannot_read(calendar: str, message
 def test_the_profile_refuses_an_unknown_switch_with_the_known_names() -> None:
     with pytest.raises(ValidationError, match="unknown semantic switch 'ice-lookbak'") as info:
         RuntimeProfile(semantics={"ice-lookbak": "true"})
-    assert "known switches: ice-lookback" in str(info.value)
+    assert "known switches: fw-existence, ice-lookback" in str(info.value)
 
 
 def test_the_profile_refuses_a_value_outside_the_switch_s_set() -> None:
@@ -193,7 +193,7 @@ def test_the_profile_from_cli_carries_the_overrides() -> None:
     ("words", "message"),
     [
         (["ice-lookback"], "expected NAME=VALUE"),
-        (["nope=true"], "known switches: ice-lookback"),
+        (["nope=true"], "known switches: fw-existence, ice-lookback"),
         (["ice-lookback=yes"], "is not one of true, ordinary"),
         (["ice-lookback=true", "ice-lookback=ordinary"], "is given twice"),
     ],
@@ -488,6 +488,95 @@ def test_a_declared_switch_that_moves_off_the_pin_is_profile_drift() -> None:
     assert moved.semantics == {}
 
 
+def test_fw_existence_is_derived_from_the_wired_adapter_not_the_pin() -> None:
+    """DL-258 fix: `fw-existence` is read back from the wired FW adapter the
+    same way `fw_default_interval_us` is, OVER whatever the pin or
+    `declared` said -- so a caller that wires a disagreeing adapter shows up
+    as drift instead of being silently believed. A declared `ice-lookback`
+    override rides alongside it unchanged: the two switches are
+    independent."""
+    from dsl41.runner_adapters import FileWatcherAdapter
+
+    pinned = RuntimeProfile()  # fw-existence: stable, the default
+    immediate_fw = {"FW": FileWatcherAdapter(existence="immediate")}
+    assert _derive_runtime_profile(None, immediate_fw, None, pinned).semantics == {
+        "fw-existence": "immediate"
+    }
+    pinned_immediate = RuntimeProfile(semantics={"fw-existence": "immediate"})
+    stable_fw = {"FW": FileWatcherAdapter(existence="stable")}
+    assert _derive_runtime_profile(None, stable_fw, None, pinned_immediate).semantics == {}
+    declared = RuntimeProfile(semantics={"ice-lookback": "ordinary"})
+    derived = _derive_runtime_profile(None, immediate_fw, None, pinned, declared)
+    assert derived.semantics == {"ice-lookback": "ordinary", "fw-existence": "immediate"}
+
+
+@pytest.mark.parametrize(
+    ("pinned_existence", "wired_existence"),
+    [("stable", "immediate"), ("immediate", "stable")],
+)
+def test_genesis_refuses_a_staged_profile_the_fw_adapter_disagrees_with(
+    tmp_path: Path, pinned_existence: str, wired_existence: str
+) -> None:
+    """DL-258: a staged profile pinning one `fw-existence` reading over an
+    FW adapter actually wired the other is a fiction, refused before
+    anything is written -- the same gate `_finish_genesis` already runs for
+    every other wired field. Both mismatch directions are checked: the one
+    that would report SUCCESS too early, and the one that would lose it."""
+    from dsl41.runner_adapters import FileWatcherAdapter
+
+    catalog = lower_source("insert_job: w\njob_type: f\nmachine: m1\nwatch_file: /tmp/x\n")
+    staged = stage_manifest(
+        catalog,
+        source_bundle_hash=EMPTY_BUNDLE_HASH,
+        profile=RuntimeProfile(semantics={"fw-existence": pinned_existence}),
+        state_machine_version=STATE_MACHINE_VERSION,
+    )
+    with pytest.raises(EngineError, match="disagrees with the engine's wiring"):
+        start_run(
+            catalog,
+            tmp_path / "run",
+            clock=VirtualClock(start=T0),
+            adapters={"FW": FileWatcherAdapter(existence=wired_existence)},
+            staged=staged,
+        )
+
+
+@pytest.mark.parametrize(
+    ("pinned_existence", "wired_existence"),
+    [("stable", "immediate"), ("immediate", "stable")],
+)
+def test_resume_refuses_an_fw_adapter_disagreeing_with_the_pin(
+    tmp_path: Path, pinned_existence: str, wired_existence: str
+) -> None:
+    """DL-258: the bug this fixes -- `resume_run` with an adapter whose
+    `existence` contradicts the pin used to be accepted silently, because
+    `_derive_runtime_profile` echoed the pin's `semantics` back unchanged.
+    Now the runtime-profile drift gate catches it, before reconciliation
+    runs (no durable write)."""
+    from dsl41.runner_adapters import FileWatcherAdapter
+
+    run_root = tmp_path / "run"
+    catalog = lower_source("insert_job: w\njob_type: f\nmachine: m1\nwatch_file: /tmp/x\n")
+    engine = start_run(
+        catalog,
+        run_root,
+        clock=VirtualClock(start=T0),
+        adapters={"FW": FileWatcherAdapter(existence=pinned_existence)},
+    )
+    asyncio.run(engine.shutdown())
+    engine.journal.close()
+
+    with pytest.raises(EngineError, match="runtime-profile mismatch on semantics"):
+        asyncio.run(
+            resume_run(
+                catalog,
+                run_root,
+                clock=VirtualClock(start=T0),
+                adapters={"FW": FileWatcherAdapter(existence=wired_existence)},
+            )
+        )
+
+
 def test_a_resume_with_a_different_switch_refuses(tmp_path: Path) -> None:
     from dsl41.cli_run import _resume_profile_error
 
@@ -633,6 +722,82 @@ def test_renewable_free_affects_exactly_the_renewable_requests_without_free() ->
     assert {name for name, job in catalog.jobs.items() if affects(job, catalog)} == {"r", "u"}
 
 
+# --------------------------------------------------------------- fw-existence
+
+_FW_ESTATE = (
+    "insert_job: w\njob_type: f\nmachine: m1\nwatch_file: /tmp/x\n\n"
+    "insert_job: wz\njob_type: f\nmachine: m1\nwatch_file: /tmp/y\nwatch_file_min_size: 0\n\n"
+    "insert_job: wm\njob_type: f\nmachine: m1\nwatch_file: /tmp/z\nwatch_file_min_size: 10\n\n"
+    "insert_job: plain\njob_type: c\nmachine: m1\ncommand: x\n"
+)
+
+
+def test_fw_no_min_size_is_true_only_for_an_fw_job_with_no_minimum_size() -> None:
+    """DL-258: `None` and an explicit `0` read the same -- the adapter's own
+    `spec_ir.watch_file_min_size or 0` -- and a non-FW job is never affected."""
+    affects = semantics.REGISTRY["fw-existence"].affects
+    catalog = lower_source(_FW_ESTATE)
+    assert {name for name, job in catalog.jobs.items() if affects(job, catalog)} == {"w", "wz"}
+
+
+def test_fw_existence_immediate_needs_both_the_switch_and_no_minimum_size() -> None:
+    catalog = lower_source(_FW_ESTATE)
+    w, wz, wm = catalog.jobs["w"], catalog.jobs["wz"], catalog.jobs["wm"]
+    assert semantics.fw_existence_immediate(w, "immediate") is True
+    assert semantics.fw_existence_immediate(wz, "immediate") is True
+    assert semantics.fw_existence_immediate(w, "stable") is False
+    assert semantics.fw_existence_immediate(wm, "immediate") is False
+    assert semantics.fw_existence_immediate(wm, "stable") is False
+
+
+def test_a_fw_existence_flip_reaches_exactly_the_no_min_size_fw_jobs() -> None:
+    """ss10.2: the switch's own node reaches an FW job with no
+    `watch_file_min_size` and not one with a minimum size -- the same
+    mechanism `ice-lookback`'s node already proves above."""
+    catalog = lower_source(_FW_ESTATE)
+    result = classify(
+        closing=Baseline(catalog=catalog, profile=RuntimeProfile()),
+        opening=Baseline(
+            catalog=catalog, profile=RuntimeProfile(semantics={"fw-existence": "immediate"})
+        ),
+        carried=CarriedState(
+            jobs={
+                name: CarriedJob(row=JobRuntime(status="INACTIVE"))
+                for name in ("w", "wz", "wm", "plain")
+            },
+            now=T0,
+        ),
+    )
+    node = SWITCH + "fw-existence"
+    assert node in result.changed_nodes
+    assert result.by_job["w"].changed == (node,)
+    assert result.by_job["wz"].changed == (node,)
+    assert result.by_job["wm"].changed == ()
+    assert result.by_job["plain"].changed == ()
+
+
+def test_fw_existence_reaches_the_adapter_from_the_pinned_profile(tmp_path: Path) -> None:
+    """DL-258: `fw-existence` reaches `FileWatcherAdapter` the same way
+    `fw_default_interval_us` does, through `wire_from_profile` -- not a
+    second read of the profile inside the adapter."""
+    from dsl41.runner_adapters import FileWatcherAdapter
+    from dsl41.runner_startup import wire_from_profile
+
+    catalog = lower_source("insert_job: w\njob_type: f\nmachine: m1\nwatch_file: /tmp/x\n")
+
+    async def wire(profile: RuntimeProfile) -> str:
+        wiring = await wire_from_profile(tmp_path, catalog, profile, start=T0)
+        try:
+            fw = wiring.adapters["FW"]
+            assert isinstance(fw, FileWatcherAdapter)
+            return fw.existence
+        finally:
+            await wiring.close()
+
+    assert asyncio.run(wire(RuntimeProfile(semantics={"fw-existence": "immediate"}))) == "immediate"
+    assert asyncio.run(wire(RuntimeProfile())) == "stable"
+
+
 # ------------------------------------------------------------------ the CLI
 
 
@@ -723,7 +888,7 @@ def test_replay_refuses_a_period_whose_manifest_is_not_bound_to_it(
 @pytest.mark.parametrize(
     ("word", "message"),
     [
-        ("ice-lookbak=true", "known switches: ice-lookback"),
+        ("ice-lookbak=true", "known switches: fw-existence, ice-lookback"),
         ("ice-lookback=maybe", "is not one of true, ordinary"),
         ("ice-lookback", "expected NAME=VALUE"),
     ],

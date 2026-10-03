@@ -88,6 +88,7 @@ from dsl41.period import (
     wal_segments,
     write_period_manifest,
     split_run_dir,
+    switches_of,
     tz_aliases_of,
 )
 from dsl41.runner_journal import (
@@ -165,9 +166,18 @@ def _derive_runtime_profile(
     machine identity opened SILENTLY under the old one, this process still
     answering to the machine names it was started with while the manifest
     pinned others (DL-151). A caller that declares nothing keeps the old
-    inheritance, because it has said nothing to hold to the pin."""
+    inheritance, because it has said nothing to hold to the pin.
+
+    `fw-existence`, inside `semantics`, is the one switch with a wired
+    component to read back from -- `_resume_watch` and the live adapter both
+    decide completeness from `FileWatcherAdapter.existence`, not from the
+    profile (DL-258). So it is read back here, like `fw_default_interval_us`,
+    OVER whatever `declared` or `base` said for it: a caller that wires an
+    adapter disagreeing with its own declared switch, or with the pin, must
+    be refused by the drift gate below rather than silently believed."""
     from dsl41.period import RuntimeProfile, to_us
     from dsl41.runner_adapters import FileWatcherAdapter, LocalCommandAdapter
+    from dsl41.semantics import check_overrides
 
     values: dict[str, object] = dict((base or RuntimeProfile()).model_dump())
     if declared is not None:
@@ -188,6 +198,10 @@ def _derive_runtime_profile(
     fw = adapters.get("FW")
     if isinstance(fw, FileWatcherAdapter):
         values["fw_default_interval_us"] = to_us(float(fw.default_interval_s))
+        semantics_overrides = dict(cast("Mapping[str, str]", values.get("semantics") or {}))
+        semantics_overrides.pop("fw-existence", None)
+        semantics_overrides.update(check_overrides({"fw-existence": fw.existence}))
+        values["semantics"] = semantics_overrides
     # the spawn window is a module constant, not an adapter knob: derive it
     # from the value the machine actually runs, so a staged 0 cannot pin a
     # fiction over the real five seconds
@@ -282,7 +296,8 @@ async def wire_from_profile(
         adapters = {
             "CMD": cmd,
             "FW": FileWatcherAdapter(
-                default_interval_s=max(1, round(profile.fw_default_interval_us / 1_000_000))
+                default_interval_s=max(1, round(profile.fw_default_interval_us / 1_000_000)),
+                existence=switches_of(profile).fw_existence,
             ),
         }
         scheduler = Scheduler(
@@ -1251,6 +1266,9 @@ def _resume_watch(
     watch is over. `relaunch=False` is a row that is no longer live (DL-242):
     a completed log is still injected, for the gate to judge, and an
     incomplete one is left alone."""
+    from dsl41.runner_adapters import FileWatcherAdapter
+    from dsl41.semantics import fw_existence_immediate
+
     job = job_ir.name
     if run_dir is None and engine.run_root is not None:
         # the same fallback the preflight makes: a candidate that came from a
@@ -1264,27 +1282,6 @@ def _resume_watch(
         # appeared in the window between the two is held to the same
         # identity, or its fate would be injected as this run's
         _refuse_identity_split(bound, watch.run_id, "the spool's watch.jsonl")
-    if watch is not None and watch.complete:
-        # PR-34a: the last durable line is a completing observation and the row
-        # is still RUNNING -- the engine died between the poll and the STATUS
-        # input. Inject the completion FROM THE LOG, exactly as a CMD's is
-        # injected from status.json; re-polling would decide the watch again
-        # against a world that has moved on.
-        extras: dict[str, object] = {"exit_code": 0}
-        if watch.last_at is None:
-            # WatchLog.complete requires stable_polls >= FW_STABLE_POLLS (2),
-            # and read_watch_log derives stable_polls only from POLL lines,
-            # so a complete watch has at least one poll line and last_at (set
-            # from that line) cannot be None here (WatchLog.complete invariant).
-            raise AssertionError(
-                "a complete watch has at least one poll line, so last_at cannot"
-                " be None (WatchLog.complete invariant)"
-            )
-        extras["ended_at"] = watch.last_at.isoformat()
-        _inject_completion(engine, job, run_number, extras, at=watch.last_at, last_at=last_at)
-        return
-    if not relaunch:
-        return
     adapter = engine.adapters.get("FW")
     if adapter is None:
         # _require_adapters runs at both genesis and resume, before
@@ -1295,6 +1292,39 @@ def _resume_watch(
             "_require_adapters already refuses a resume with an FW job and no FW"
             " adapter wired, so adapter cannot be None here"
         )
+    # DL-258: an `immediate` watch with no minimum size is complete when the
+    # RUN'S FIRST poll already qualifies, not at FW_STABLE_POLLS -- but only
+    # the first: `watch_seq == 2` is exactly one poll line recorded (the
+    # start line plus that one), so a later poll that happens to qualify
+    # does not get the carve-out. The same reading `FileWatcherAdapter.run`
+    # applies live, so a crash between that first poll and the live return
+    # must resolve the same way.
+    immediate = isinstance(adapter, FileWatcherAdapter) and fw_existence_immediate(
+        job_ir, adapter.existence
+    )
+    immediate_first_poll = immediate and watch is not None and watch.watch_seq == 2
+    if watch is not None and (watch.complete or (immediate_first_poll and watch.qualifying)):
+        # PR-34a: the last durable line is a completing observation and the row
+        # is still RUNNING -- the engine died between the poll and the STATUS
+        # input. Inject the completion FROM THE LOG, exactly as a CMD's is
+        # injected from status.json; re-polling would decide the watch again
+        # against a world that has moved on.
+        extras: dict[str, object] = {"exit_code": 0}
+        if watch.last_at is None:
+            # A complete watch (WatchLog.complete, stable_polls >=
+            # FW_STABLE_POLLS) has at least one poll line by construction;
+            # an immediate completion (`watch.qualifying`) defaults False
+            # with no poll line too (read_watch_log). Either way last_at
+            # (set from that line) cannot be None here.
+            raise AssertionError(
+                "a complete or immediately-qualifying watch has at least one poll"
+                " line, so last_at cannot be None (WatchLog invariant)"
+            )
+        extras["ended_at"] = watch.last_at.isoformat()
+        _inject_completion(engine, job, run_number, extras, at=watch.last_at, last_at=last_at)
+        return
+    if not relaunch:
+        return
     # idempotent read: the adapter reconstructs progress from the log and
     # appends no second `start` line. The bound id rides along for the one
     # case with no log to reconstruct from -- a run directory made and then

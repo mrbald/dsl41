@@ -68,6 +68,7 @@ from dsl41.runner_procid import SPOOL_VERSION, fsync_dir, spool_version_supporte
 from dsl41.runner_clock import Clock, EngineError
 from dsl41.runner_journal import repair_tail
 from dsl41.runner_ledger import Proof
+from dsl41.semantics import FwExistence, fw_existence_immediate
 
 if TYPE_CHECKING:  # annotation only: the Journal object is the engine's, not an adapter's
     from dsl41.runner_journal import Journal
@@ -587,8 +588,8 @@ def job_log_paths(job_ir: JobIR, run_number: int, run_root: Path) -> tuple[str, 
 WATCH_LOG = "watch.jsonl"
 
 #: ss6's steady-size rule as a number: two consecutive qualifying polls at the
-#: same size complete the watch ([?] E6). The spool records the count, so the
-#: rule is read the same way live and at resume.
+#: same size complete the watch (`fw-existence=stable`, DL-258). The spool
+#: records the count, so the rule is read the same way live and at resume.
 FW_STABLE_POLLS = 2
 
 
@@ -807,10 +808,14 @@ class FileWatcherAdapter:
     """ss6 FW adapter: poll every watch_interval seconds (default 60 [?]
     PENDING: E6) until watch_file exists with size >= watch_file_min_size
     (unset -> 0) and the size is stable across two consecutive qualifying
-    polls ([?] steady-size reading pinned -- E6). Completes with exit 0.
-    Clock-driven (ctx.clock.sleep_until), so the same code runs in both
-    time domains; polling is an idempotent read, which is why resume may
-    re-dispatch an incomplete watch (module docstring).
+    polls -- `fw-existence=stable`, the default and dsl41's own choice
+    (DL-258). With no minimum size, `fw-existence=immediate` completes on
+    the first qualifying (existing) poll instead, watch_interval ignored
+    for that decision -- the vendor reading. A job with a minimum size
+    always needs the steady-size rule, whatever the switch says. Completes
+    with exit 0. Clock-driven (ctx.clock.sleep_until), so the same code runs
+    in both time domains; polling is an idempotent read, which is why resume
+    may re-dispatch an incomplete watch (module docstring).
 
     Its progress is EVIDENCE, not memory (period-model ss2.2, DL-129). The
     first durable act on dispatch is a `start` line in
@@ -822,8 +827,9 @@ class FileWatcherAdapter:
     run_root there is no spool and the watch is memory-only: that is the
     virtual-domain harness, which has no run-root layout to write into."""
 
-    def __init__(self, *, default_interval_s: int = 60) -> None:
+    def __init__(self, *, default_interval_s: int = 60, existence: FwExistence = "stable") -> None:
         self.default_interval_s = default_interval_s  # PENDING: E6
+        self.existence = existence  # DL-258: the `fw-existence` switch, pinned per period
 
     async def run(self, job_ir: JobIR, run_number: int, ctx: AdapterContext) -> AdapterResult:
         spec_ir = job_ir.exec_
@@ -831,6 +837,16 @@ class FileWatcherAdapter:
             raise EngineError(f"{job_ir.name!r}: FW dispatch without an FwSpec")
         interval = spec_ir.watch_interval or self.default_interval_s
         min_size = spec_ir.watch_file_min_size or 0
+        # DL-258: with no minimum size, `immediate` completes when the
+        # RUN'S FIRST poll already qualifies -- the vendor's narrow carve-out
+        # ("the file already exists when the job runs"), not any later poll
+        # that happens to qualify. Once the first poll has passed without
+        # qualifying, the general rule applies even under `immediate`: the
+        # size must reach the minimum (0 here) and stay steady, the same
+        # FW_STABLE_POLLS rule `stable` always uses. A job with a minimum
+        # size always needs that rule regardless of the switch.
+        immediate = fw_existence_immediate(job_ir, self.existence)
+        first_poll_pending = True
         previous: int | None = None
         stable = 0
         run_id = ctx.run_id
@@ -880,17 +896,23 @@ class FileWatcherAdapter:
                 previous = log.size if log.qualifying else None
                 stable = log.stable_polls
                 next_at = log.next_poll_at(interval)
-                if log.complete:
+                # `watch_seq` counts the start line plus every poll line, so
+                # `== 2` is "exactly one poll recorded" -- the run's first,
+                # and the only one `immediate` may complete from without
+                # a second observation (DL-258).
+                first_poll_pending = log.watch_seq == 1
+                if log.complete or (immediate and log.watch_seq == 2 and log.qualifying):
                     # PR-34a, and the FALLBACK reading of it. The PRIMARY
                     # reader is the resume ladder
                     # (`runner_startup._resume_watch`), which meets the
-                    # same complete log one step earlier and INJECTS the
-                    # completion from it without launching anything. This
-                    # branch answers when a launch happened anyway -- an
+                    # same log one step earlier and INJECTS the completion
+                    # from it without launching anything. This branch
+                    # answers when a launch happened anyway -- an
                     # embedder's re-dispatch, or a watch the ladder handed
-                    # to the adapter -- and it must read `complete` the
-                    # same way, because re-polling would decide the watch
-                    # again against a world that has moved on.
+                    # to the adapter -- and it must read completeness the
+                    # same way (DL-258 included), because re-polling would
+                    # decide the watch again against a world that has
+                    # moved on.
                     return 0
         while True:
             await ctx.clock.sleep_until(next_at)
@@ -928,8 +950,9 @@ class FileWatcherAdapter:
                     },
                 )
             previous = size if qualifying else None
-            if stable >= FW_STABLE_POLLS:
+            if stable >= FW_STABLE_POLLS or (immediate and first_poll_pending and qualifying):
                 return 0
+            first_poll_pending = False
             next_at = at + timedelta(seconds=interval)
 
 

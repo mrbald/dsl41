@@ -17224,3 +17224,101 @@ relitigate an entry; append a new one.
   `test_dl257_a_holder_that_leaves_the_queue_unstarted_keeps_its_held_units`.
   Both slices' switches share the registry: `_can_queue` takes the catalog,
   as DL-256's `affects` signature requires, and ignores it.
+- DL-258 `fw-existence` switch: the vendor's immediate-completion reading
+  for an FW job with no minimum size, selectable (2026-10-03;
+  semantics.py, runner_adapters.py, runner_startup.py,
+  simulation_register_rows.py, runner-design.md ss6/ss8a/ss15 E6)
+  THE QUESTION. ss15's E6 asked two things: the default watch_interval
+  number, and whether an FW job with no watch_file_min_size needs two
+  stable polls or completes on existence alone. This entry decides the
+  second half; the watch_interval number stays open under E6 (DL-250).
+  THE VENDOR TEXT. The "watch_interval Attribute" page (AutoSys 24.2):
+  "If you are monitoring for the existence of a file (not the size) and
+  the file already exists when the job runs, the job completes
+  immediately. The watch_interval attribute is ignored." Its very next
+  sentence gives the general rule the carve-out sits inside: "The job is
+  considered complete when the watched file reaches the minimum size and
+  remains in a steady state ... during the specified interval." The
+  "watch_file_min_size Attribute" page: "The watched file must maintain a
+  steady state during the interval specified in the watch_file attribute.
+  If you do not specify the watch_file_min_size attribute in your job
+  definition, the job completes if the file exists (the default)." The
+  two pages agree with each other, and with dsl41, on the WITH-a-minimum-
+  size case (steady state is required there, under both readings). They
+  disagree on the NO-minimum-size case: dsl41 has always waited for two
+  stable polls there too, by its own choice. The carve-out is narrow --
+  "already exists when the job runs" -- so it is read as the run's FIRST
+  poll only; a file that appears on a later poll falls under the general
+  rule above, the same steady-size wait as `stable`. An earlier draft of
+  this switch completed on ANY first qualifying poll, which over-extended
+  the carve-out to a file that merely appeared mid-watch; corrected before
+  release, with a test pinning it (test_fw_existence_with_the_file_
+  appearing_later).
+  THE DEFAULT (DL-252's owner rule). dsl41's existing behavior is the
+  safer one -- a file still being written looks identical to one that has
+  just appeared -- so `stable` stays the default. `immediate`, the vendor
+  reading, is selectable for an estate whose FW jobs genuinely mean
+  "exists", not "finished".
+  THE SWITCH. `fw-existence`: `stable` (default) or `immediate`, in
+  `semantics.py`'s registry. `affects` is `fw_no_min_size`: an FW job
+  with no `watch_file_min_size`, where `None` and an explicit `0` read
+  the same -- the adapter's own `spec_ir.watch_file_min_size or 0`. A job
+  with a minimum size is unaffected by either value.
+  THE MECHANISM. `FileWatcherAdapter` takes `existence` the same way it
+  already takes `default_interval_s`: `wire_from_profile` reads
+  `switches_of(profile).fw_existence` and passes it in, not a second read
+  of the profile inside the adapter. Under `immediate` with no minimum
+  size, the adapter completes when the RUN'S FIRST poll already qualifies
+  -- the dispatch-time check, if the file is already there -- instead of
+  waiting for `FW_STABLE_POLLS`; growth after that one observation is
+  irrelevant, because there is no size to track. A later poll that happens
+  to qualify gets no carve-out: `first_poll_pending` (live) and
+  `watch.watch_seq == 2` (resumed -- exactly the start line plus one poll)
+  gate it to the run's first observation only, live and on resume alike.
+  `runner_startup._resume_watch` and the adapter's own resumed-log branch
+  read completeness the same way, so a crash between that first poll and
+  the live return resolves identically on resume.
+  WIRING GATE. `fw-existence` has a wired component to read back from --
+  unlike `ice-lookback`, which lives only in the Oracle -- so
+  `_derive_runtime_profile` reads it from the live `FileWatcherAdapter`,
+  the same as `fw_default_interval_us`, OVER whatever the pin or a
+  launcher's `declared` profile said for it. Without this, a caller that
+  wires an adapter whose `existence` disagrees with the pinned profile
+  (genesis's staged-profile check, or `_manifest_profile_drift` on resume)
+  was believed silently: the wired adapter actually decided completion,
+  while the manifest recorded the other reading. Both directions are
+  refused now, before any durable write, at both gates.
+  NO STATE_MACHINE_VERSION CHANGE. The default is unchanged (`stable`),
+  and a switch adds a registry entry, not a profile field (DL-252's
+  ONE-TIME HASH MOVE paragraph): a profile with no override keeps its
+  bytes. The watch's completion is an ADAPTER outcome recorded as a
+  STATUS input like any other run's, so replay reads the recorded
+  completion rather than re-deriving it from `watch.jsonl`; the log stays
+  evidence for mid-watch resume, never a second source of truth, and gains
+  no new field.
+  CLASSIFIER. `fw_no_min_size` is the switch's `affects`, so a boundary
+  that flips `fw-existence` classifies exactly the FW jobs with no minimum
+  size, through the generic ss10.2 switch-node machinery DL-252 built. A
+  live FW watch is already R on any change to its own job (ss10.3), so the
+  switch's edge matters for an inactive or armed row. An armed FW job
+  gated on the switch gets the ordinary ARMED_ASSUMPTION ("the C1 trigger
+  survives under C2 gating") -- a generic sentence that does not say this
+  switch changes a COMPLETION rule, not a trigger. Not fixed: the
+  assumption text is per-boundary, not per-switch, and `ice-lookback`'s
+  armed jobs carry the same imprecision.
+  NOT FIXED: REHEARSAL. `rehearse` runs `FakeAdapter` for FW, which scripts
+  a `(duration, exit_code)` per job and never reads `watch_file` or
+  `watch_file_min_size` at all (`cli_run._scenario_adapter`). So
+  `--semantics fw-existence=immediate` has no observable effect under
+  `rehearse`, exactly as `fw_default_interval_us` already has none there --
+  neither knob reaches a FakeAdapter script. Not fixed, because FakeAdapter
+  modelling real FW completion rules is a separate, larger change.
+  DOCS. runner-design.md's switch table gains the row; ss6's FW adapter
+  paragraph and ss15's E6 entry are rewritten to say the steady-size half
+  is decided and the watch_interval-number half stays open. The register
+  gains `profile_alt:semantics.fw-existence=stable` and
+  `profile_alt:semantics.fw-existence=immediate`, proven the same generic
+  way as `ice-lookback`'s two rows.
+  INTEGRATION. On top of DL-256, whose `affects` takes the catalog too, the
+  registry wraps `fw_no_min_size` in `_fw_without_min_size`; the public
+  one-argument helper is unchanged.

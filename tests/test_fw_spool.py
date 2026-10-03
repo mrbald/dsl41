@@ -377,6 +377,70 @@ def test_pr34a_a_completing_poll_then_a_crash_injects_the_completion_from_the_lo
     assert sources == ["reconcile"]
 
 
+def _catalog_no_min_size(watch_file: Path, *, interval: int = 60):
+    return lower_source(
+        f"insert_job: w\njob_type: f\nwatch_file: {watch_file}\nwatch_interval: {interval}\n"
+    )
+
+
+def test_dl258_an_immediate_qualifying_poll_then_a_crash_injects_from_the_log(
+    tmp_path: Path,
+) -> None:
+    """DL-258's resume ladder: `fw-existence=immediate` with no
+    watch_file_min_size completes on the run's FIRST poll when the file
+    already exists then -- the vendor's narrow carve-out, never a LATER
+    poll that happens to qualify (that falls back to the ordinary
+    FW_STABLE_POLLS rule instead). So a crash between that first poll and
+    the STATUS input must inject the SAME completion the live adapter would
+    have returned, from a log with only one poll line -- the run's first,
+    which already qualifies."""
+    watch_file = tmp_path / "watched"
+    watch_file.write_bytes(b"abcdef")  # present before the job even starts
+    run_root = tmp_path / "run"
+    catalog = _catalog_no_min_size(watch_file)
+
+    async def first() -> None:
+        engine = start_run(
+            catalog,
+            run_root,
+            clock=VirtualClock(start=T0),
+            adapters={"FW": FileWatcherAdapter(existence="immediate")},
+        )
+        engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "w"}))
+        await engine.run_until_quiescent(T0)  # the run's first poll alone completes it
+        assert engine.oracle.store.job["w"].status == "SUCCESS"
+        await _close(engine)
+
+    asyncio.run(first())
+    completed = _lines(run_root)
+    assert completed[-1]["stable_polls"] == 1  # one poll, not FW_STABLE_POLLS's two
+    assert completed[-1]["qualifying"] is True
+
+    records = _journal_records(run_root)
+    cut = next(
+        i
+        for i, r in enumerate(records)
+        if r.get("rec") == "input" and r.get("kind") == "STATUS" and r["payload"]["job"] == "w"
+    )
+    _rewrite_journal(run_root, records[:cut])  # the crash, at the write-ahead point
+    watch_file.unlink()  # the world moved on: a re-poll would never complete
+
+    async def second():
+        engine = await resume_run(
+            catalog,
+            run_root,
+            clock=VirtualClock(start=T0),
+            adapters={"FW": FileWatcherAdapter(existence="immediate")},
+        )
+        await engine.run_until_quiescent(T0 + timedelta(seconds=400))
+        status = engine.oracle.store.job["w"].status
+        await _close(engine)
+        return status
+
+    assert asyncio.run(second()) == "SUCCESS"
+    assert _lines(run_root) == completed, "the injection re-polls nothing"
+
+
 def test_pr34_a_run_directory_with_no_log_is_re_dispatched_under_the_bound_id(
     tmp_path: Path,
 ) -> None:

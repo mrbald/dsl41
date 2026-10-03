@@ -469,6 +469,137 @@ def test_fw_two_immediately_stable_polls_succeed(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+# ------------------------------------- 3a. `fw-existence` switch (DL-258)
+
+
+@pytest.mark.parametrize("existence", ["stable", "immediate"])
+def test_fw_existence_with_the_file_already_present(tmp_path: Path, existence: str) -> None:
+    """No watch_file_min_size. `stable` (default) still needs the
+    dispatch-time check plus one watch_interval poll at the same size --
+    test_fw_two_immediately_stable_polls_succeed's lifecycle with no minimum
+    size. `immediate` (the vendor reading) completes at the dispatch-time
+    check alone, watch_interval ignored."""
+    watch_file = tmp_path / "watched.txt"
+    watch_file.write_bytes(b"abcdef")
+    text = f"insert_job: fwp\njob_type: f\nwatch_file: {watch_file}\nwatch_interval: 60\n"
+
+    async def scenario() -> None:
+        engine = Engine(
+            lower_source(text),
+            clock=VirtualClock(start=T0),
+            adapters={"FW": FileWatcherAdapter(existence=existence)},
+        )
+        engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "fwp"}))
+        await engine.run_until_quiescent(T0)  # only the immediate check has happened
+        if existence == "immediate":
+            assert engine.oracle.store.job["fwp"].status == "SUCCESS"
+        else:
+            assert engine.oracle.store.job["fwp"].status == "RUNNING"
+            await engine.run_until_quiescent(T0 + timedelta(seconds=90))  # poll at +60
+            assert engine.oracle.store.job["fwp"].status == "SUCCESS"
+        await engine.shutdown()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("existence", ["stable", "immediate"])
+def test_fw_existence_with_the_file_appearing_later(tmp_path: Path, existence: str) -> None:
+    """DL-258 (corrected): the vendor's "completes immediately" carve-out is
+    narrow -- "the file already exists when the job runs" -- so it only ever
+    applies to the run's FIRST poll. Here the file is absent at that first
+    poll, so the carve-out's window has already closed by the time it
+    appears; `immediate` then needs the same two consecutive stable polls
+    `stable` always needed (the watch_interval Attribute page's general
+    rule: "the job is considered complete when the watched file reaches the
+    minimum size and remains in a steady state ... during the specified
+    interval"). This pins the fix against the earlier over-extension, where
+    `immediate` completed on ANY first qualifying poll, not just the run's."""
+    watch_file = tmp_path / "watched.txt"
+    text = f"insert_job: fwl\njob_type: f\nwatch_file: {watch_file}\nwatch_interval: 60\n"
+
+    async def scenario() -> None:
+        engine = Engine(
+            lower_source(text),
+            clock=VirtualClock(start=T0),
+            adapters={"FW": FileWatcherAdapter(existence=existence)},
+        )
+        engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "fwl"}))
+        await engine.run_until_quiescent(T0 + timedelta(seconds=30))  # first poll: absent
+        assert engine.oracle.store.job["fwl"].status == "RUNNING"
+        watch_file.write_bytes(b"abcdef")
+        await engine.run_until_quiescent(T0 + timedelta(seconds=90))  # poll at +60: appears
+        assert engine.oracle.store.job["fwl"].status == "RUNNING"  # first-poll window passed
+        await engine.run_until_quiescent(T0 + timedelta(seconds=150))  # poll at +120: same size
+        assert engine.oracle.store.job["fwl"].status == "SUCCESS"
+        await engine.shutdown()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("existence", ["stable", "immediate"])
+def test_fw_existence_with_a_still_growing_file(tmp_path: Path, existence: str) -> None:
+    """No watch_file_min_size, the file grows every poll. `stable` never
+    sees two consecutive polls at the same size, so the job stays RUNNING;
+    `immediate` does not care about size at all and completes on the first
+    poll that sees the file, however much it later grows."""
+    watch_file = tmp_path / "watched.txt"
+    text = f"insert_job: fwg\njob_type: f\nwatch_file: {watch_file}\nwatch_interval: 60\n"
+
+    async def scenario() -> None:
+        engine = Engine(
+            lower_source(text),
+            clock=VirtualClock(start=T0),
+            adapters={"FW": FileWatcherAdapter(existence=existence)},
+        )
+        engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "fwg"}))
+        watch_file.write_bytes(b"a")
+        await engine.run_until_quiescent(T0)  # immediate check: 1 byte
+        if existence == "immediate":
+            assert engine.oracle.store.job["fwg"].status == "SUCCESS"
+        else:
+            assert engine.oracle.store.job["fwg"].status == "RUNNING"
+            watch_file.write_bytes(b"ab")
+            await engine.run_until_quiescent(T0 + timedelta(seconds=60))  # poll at +60: grew
+            assert engine.oracle.store.job["fwg"].status == "RUNNING"
+            watch_file.write_bytes(b"abc")
+            await engine.run_until_quiescent(T0 + timedelta(seconds=120))  # poll at +120: grew
+            assert engine.oracle.store.job["fwg"].status == "RUNNING"
+        await engine.shutdown()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("existence", ["stable", "immediate"])
+def test_fw_existence_does_not_change_a_job_with_a_minimum_size(
+    tmp_path: Path, existence: str
+) -> None:
+    """`fw-existence` only decides a no-minimum-size watch. A job with
+    watch_file_min_size still needs two stable qualifying polls whatever the
+    switch says -- test_fw_two_immediately_stable_polls_succeed's lifecycle,
+    unchanged under both values."""
+    watch_file = tmp_path / "watched.txt"
+    watch_file.write_bytes(b"abcdef")
+    text = (
+        f"insert_job: fwmin\njob_type: f\nwatch_file: {watch_file}\n"
+        "watch_interval: 60\nwatch_file_min_size: 5\n"
+    )
+
+    async def scenario() -> None:
+        engine = Engine(
+            lower_source(text),
+            clock=VirtualClock(start=T0),
+            adapters={"FW": FileWatcherAdapter(existence=existence)},
+        )
+        engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "fwmin"}))
+        await engine.run_until_quiescent(T0)  # only the immediate check has happened
+        assert engine.oracle.store.job["fwmin"].status == "RUNNING"
+        await engine.run_until_quiescent(T0 + timedelta(seconds=90))  # poll at +60: same size
+        assert engine.oracle.store.job["fwmin"].status == "SUCCESS"
+        await engine.shutdown()
+
+    asyncio.run(scenario())
+
+
 # ----------------------------------------------- 4. result mapping (white-box)
 
 

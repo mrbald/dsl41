@@ -1158,9 +1158,12 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             surface="job_attr",
             member="watch_file",
             klass=SUPPORTED,
-            cite="runner-design ss6",
-            effect="the path an FW job polls; the job completes only once the file exists,"
-            " reaches watch_file_min_size, and two consecutive polls agree on its size",
+            cite="runner-design ss6, ss8a, DL-258",
+            effect="the path an FW job polls; with no watch_file_min_size, the default"
+            " (fw-existence=stable) still needs two consecutive polls agreeing on its"
+            " size, while fw-existence=immediate completes on the run's first poll if"
+            " the file already exists then; a minimum size always needs the two-poll"
+            " rule, whatever the switch says",
             trigger=_job(**_FW_JOB),
         ),
         _row(
@@ -3216,6 +3219,24 @@ PROFILE_ROWS: tuple[Row, ...] = (
             effect="as 1, and a job leaving QUE_WAIT on a day that is not a run day by its"
             " run_calendar or days_of_week does not start",
             trigger='{"semantics": {"queued-recheck": "2"}}',
+        ),
+        _row(
+            surface="profile_alt",
+            member="semantics.fw-existence=stable",
+            klass=SUPPORTED,
+            cite="runner-design ss6, ss8a, ss15 E6, DL-258",
+            effect="the default: an FW job with no watch_file_min_size waits for the size to"
+            " stay steady across two polls before completing, like a job with a minimum size",
+            trigger='{"semantics": {"fw-existence": "stable"}}',
+        ),
+        _row(
+            surface="profile_alt",
+            member="semantics.fw-existence=immediate",
+            klass=SUPPORTED,
+            cite="runner-design ss6, ss8a, ss15 E6, DL-250, DL-258",
+            effect="the vendor reading: an FW job with no watch_file_min_size completes as soon"
+            " as the watched file exists, watch_interval ignored",
+            trigger='{"semantics": {"fw-existence": "immediate"}}',
         ),
     )
     + _PROFILE_FACETS

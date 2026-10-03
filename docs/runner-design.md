@@ -234,8 +234,11 @@ warns instead (§8).
 
 **FileWatcherAdapter** (FW): polls every `watch_interval` seconds (default
 60 [?]) until `watch_file` exists with size `>= watch_file_min_size` and
-the size is stable across two consecutive polls ([?] steady-size reading
-pinned — E6). The adapter completes with exit 0.
+the size is stable across two consecutive polls — `fw-existence=stable`,
+the default (DL-258). With no `watch_file_min_size`, `fw-existence=immediate`
+completes on the first poll where the file exists instead, `watch_interval`
+ignored for that decision — the vendor reading; a job with a minimum size
+always needs the steady-size rule. The adapter completes with exit 0.
 
 **Its progress is evidence, not memory** (DL-129; period-model §2.2). Last
 observed size and stable-poll count decide when
@@ -950,6 +953,7 @@ rehearsal's own switches.
 | `ice-lookback` | `true`, `ordinary` | `true` | `true` | A condition atom with a lookback qualifier whose predecessor is on ice and not running. `true`: the atom is true, lookback ignored. `ordinary`: the qualifier is dropped and the ordinary on-ice table applies (s, d, n true; f, t, exitcode false). The "condition Attribute" page (AutoSys 24.2) says "If the predecessor job being evaluated for the look-back condition is currently in an ON_ICE status, it always evaluates to true. That is, any look-back evaluation is ignored." `ordinary` extends the Start Conditions on-ice table (SEM-20), which does not separate lookback atoms, to the lookback atom. Q10 stays open. |
 | `renewable-free` | `Y`, `A` | `Y` | `Y` | A renewable resource request (`res_type: R` or none) that states no FREE. `Y`: the units are freed only when the run ends SUCCESS; after FAILURE or TERMINATED the job holds them until `RELEASE_RESOURCE` or its next run. `A`: the units are freed on every completion, dsl41's reading before DL-256. The "resources Attribute" page (AutoSys 24.2) gives FREE's default: "Default: Y", where "Y -- Frees the units only if the job completes successfully". An explicit FREE is not affected. Qr1 is decided. |
 | `queued-recheck` | `0`, `1`, `2` | `0` | `1` | A job that can queue (it names a resource, or a positive priority makes it check machine load) and leaves QUE_WAIT. The values are the vendor's EvaluateQueuedJobStarts (Administrating > Configure a Scheduler, AutoSys 24.2). `0`: it starts without a recheck. `1`: its `condition`, `run_window` and `exclude_calendar` are checked again, but not `run_calendar`, `days_of_week`, `start_times` or `start_mins`. `2`: `run_calendar` or `days_of_week` is checked for the day too. A job that fails goes INACTIVE without starting, its arm is cleared, and its next start time starts it; a member of a running box that fails its condition waits and keeps the box running, the vendor's ACTIVATED. A `run_window` failure takes DL-246's disposition at that instant (the skip, or one deferral to the opening), and a day failure of a job with no start times of its own is deferred to its next eligible window opening, so no job waits for a tick that never comes. The vendor's default is `1`. The owner kept `0`, dsl41's existing behavior: a queued job met its conditions when it started. Qr6 is decided (DL-50, DL-257). The day and window checks use the oracle's zone, which DL-253 aligns with the scheduler's base zone. |
+| `fw-existence` | `stable`, `immediate` | `stable` | `immediate` | What an FW job with no `watch_file_min_size` does once the watched file exists. `stable`: wait for the size to stay steady across two polls, like a job with a minimum size — dsl41's own choice, because a file still being written is not complete. `immediate`: complete at once, `watch_interval` ignored — the vendor reading. The "watch_interval Attribute" page (AutoSys 24.2) says "If you are monitoring for the existence of a file (not the size) and the file already exists when the job runs, the job completes immediately. The watch_interval attribute is ignored." The "watch_file_min_size Attribute" page says "If you do not specify the watch_file_min_size attribute in your job definition, the job completes if the file exists (the default)." A job with a minimum size is unaffected by this switch either way (§6, E6). |
 
 ## 9. Time domains (E2)
 
@@ -1198,19 +1202,22 @@ code. None is guess-resolved.
   engine death terminates jobs, and resume uses §7's reconciliation ladder.
 - **E5** — profile sourcing failure semantics [?]. Default: the job fails
   with sh's exit code (§6).
-- **E6** — FW steady-size semantics and default watch_interval [?].
-  Default: two stable polls, 60s (§6). The vendor documents part of
-  this (AutoSys 24.2). The "watch_interval Attribute" page gives
-  "Default: 60" and says: "If you are monitoring for the existence of a
-  file (not the size) and the file already exists when the job runs, the
-  job completes immediately. The watch_interval attribute is ignored."
-  The "watch_file_min_size Attribute" page: "If you do not specify the
+- **E6** — FW steady-size semantics: decided (DL-258), via the
+  `fw-existence` switch (§8a). Default `stable`: two stable polls, like a
+  job with a minimum size. `immediate`, the vendor reading, applies only
+  to a job with no `watch_file_min_size`; a job with a minimum size always
+  needs the steady-size rule. The "watch_interval Attribute" page says:
+  "If you are monitoring for the existence of a file (not the size) and
+  the file already exists when the job runs, the job completes
+  immediately. The watch_interval attribute is ignored." The
+  "watch_file_min_size Attribute" page: "If you do not specify the
   watch_file_min_size attribute in your job definition, the job completes
-  if the file exists (the default)." On an agent, "Define a File Watcher
-  Job" says a job with no watch_interval checks the file every 30
-  seconds. The adapter still waits for two stable polls when the file is
-  already there and no minimum size is set. The pin stays until a
-  decision adopts the vendor rule (DL-250).
+  if the file exists (the default)." DEFAULT WATCH_INTERVAL STAYS OPEN
+  [?]: the same "watch_interval Attribute" page (AutoSys 24.2) gives
+  "Default: 60", but on an agent, "Define a File Watcher Job" says a job
+  with no watch_interval checks the file every 30 seconds. The adapter's
+  60s default stays pinned until a decision resolves that disagreement
+  (DL-250).
 - **E7** — verdict for an unobservable exit status (§7). Default: FAILURE
   with cause `exit_status_unobservable`. TERMINATED is reserved for kills
   that actually happened. The vendor's "Lost Control" is the same
