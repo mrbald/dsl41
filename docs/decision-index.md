@@ -55,7 +55,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-42 | Lifecycle tier spin-off: extract-on-trigger, not now | [docs/concurrency-model.md](concurrency-model.md), [docs/runner-design.md](runner-design.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
 | DL-43 | Phase 11a landed: engine determinism pins |  |
 | DL-44 | Phase 11b landed: lifecycle tier + WAL + resume | [docs/concurrency-model.md](concurrency-model.md), [docs/runner-design.md](runner-design.md) |
-| DL-45 | Phase 11c landed: scheduler + preflight + control socket + headless CLI | [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md) |
+| DL-45 | Phase 11c landed: scheduler + preflight + control socket + headless CLI | [docs/blocks/engine-loop.md](blocks/engine-loop.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md) |
 | DL-46 | Phase 11d landed: Textual TUI | [docs/control-protocol.md](control-protocol.md), [docs/deployment-runbook.md](deployment-runbook.md) |
 | DL-47 | Phase 11e landed: `serve` verb |  |
 | DL-48 | Phase 11f landed: supervisor tier + detached mode | [docs/runner-design.md](runner-design.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
@@ -100,19 +100,19 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-87 | every entity carries a revision, and one input moves it at most once | [docs/concurrency-model.md](concurrency-model.md), [docs/runner-design.md](runner-design.md) |
 | DL-88 | the capacity pool gets its own module |  |
 | DL-89 | admission lands: one order for every input, and the log becomes a ledger | [docs/concurrency-model.md](concurrency-model.md), [docs/control-protocol.md](control-protocol.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md) |
-| DL-90 | preconditions become mandatory, and the wire breaks once | [docs/access-model.md](access-model.md), [docs/concurrency-model.md](concurrency-model.md), [docs/control-protocol.md](control-protocol.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md) |
+| DL-90 | preconditions become mandatory, and the wire breaks once | [docs/access-model.md](access-model.md), [docs/blocks/admission.md](blocks/admission.md), [docs/concurrency-model.md](concurrency-model.md), [docs/control-protocol.md](control-protocol.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md) |
 | DL-91 | architecture review | [docs/ir-design.md](ir-design.md) |
 | DL-92 | the operator gets the vocabulary S3 built |  |
 | DL-93 | how S5 is built, and where host state lives | [docs/citation-index.md](citation-index.md), [docs/concurrency-model.md](concurrency-model.md), [docs/control-protocol.md](control-protocol.md), [docs/ir-design.md](ir-design.md) |
 | DL-94 | the routing table lands: four states, three operator verbs, and a drain that holds work instead of losing it | [docs/concurrency-model.md](concurrency-model.md), [docs/control-protocol.md](control-protocol.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md) |
 | DL-95 | the deadman: one interval, one exit, and the two producers the eviction bound was missing | [docs/concurrency-model.md](concurrency-model.md), [docs/period-model.md](period-model.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
-| DL-96 | the effect outbox: intent before the attempt, and the orphaned run that proves why | [docs/concurrency-model.md](concurrency-model.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md) |
+| DL-96 | the effect outbox: intent before the attempt, and the orphaned run that proves why | [docs/blocks/effect-outbox.md](blocks/effect-outbox.md), [docs/concurrency-model.md](concurrency-model.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md) |
 | DL-97 | quarantine gets a producer; the relay does not get built, and why | [docs/concurrency-model.md](concurrency-model.md), [docs/period-model.md](period-model.md) |
 | DL-98 | architecture review after S5 | [docs/concurrency-model.md](concurrency-model.md) |
 | DL-99 | how S6 is built, and where the leader record lives | [docs/citation-index.md](citation-index.md), [docs/concurrency-model.md](concurrency-model.md), [docs/control-protocol.md](control-protocol.md) |
 | DL-100 | election: the lock, the epoch, and the act that used to happen before both | [docs/concurrency-model.md](concurrency-model.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md) |
 | DL-101 | the fence: every append re-proves leadership | [docs/concurrency-model.md](concurrency-model.md), [docs/period-model.md](period-model.md) |
-| DL-102 | the takeover barrier, and the start that gets re-driven rather than failed | [docs/concurrency-model.md](concurrency-model.md), [docs/runner-design.md](runner-design.md) |
+| DL-102 | the takeover barrier, and the start that gets re-driven rather than failed | [docs/blocks/admission.md](blocks/admission.md), [docs/blocks/effect-outbox.md](blocks/effect-outbox.md), [docs/concurrency-model.md](concurrency-model.md), [docs/runner-design.md](runner-design.md) |
 | DL-103 | S6 closes, and the relay's trigger did not fire | [docs/concurrency-model.md](concurrency-model.md) |
 | DL-104 | architecture review after S6 |  |
 | DL-105 | branch coverage over the concurrency tier, and what asking for it found | [docs/risk-map.md](risk-map.md) |
@@ -121,14 +121,14 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-108 | the seeded sweep, and the model that was wrong about the engine | [docs/citation-index.md](citation-index.md), [docs/concurrency-model.md](concurrency-model.md) |
 | DL-109 | the matrix moves onto the proving ground | [docs/citation-index.md](citation-index.md), [docs/concurrency-model.md](concurrency-model.md) |
 | DL-110 | a doc that cites a test is held to it |  |
-| DL-111 | the spec gets worked examples, and the examples find five things the text was wrong about | [docs/concurrency-model.md](concurrency-model.md) |
+| DL-111 | the spec gets worked examples, and the examples find five things the text was wrong about | [docs/blocks/admission.md](blocks/admission.md), [docs/blocks/effect-outbox.md](blocks/effect-outbox.md), [docs/concurrency-model.md](concurrency-model.md) |
 | DL-112 | the layers that were only ever tested by an interpreter meet two processes | [docs/citation-index.md](citation-index.md), [docs/concurrency-model.md](concurrency-model.md) |
 | DL-113 | run history: a projection, not a new record kind | [docs/citation-index.md](citation-index.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/runner-design.md](runner-design.md) |
 | DL-114 | the period model is frozen | [docs/citation-index.md](citation-index.md), [docs/period-model.md](period-model.md) |
 | DL-115 | the directory is not the baseline |  |
 | DL-116 | the lineage fence |  |
 | DL-117 | `baseline_id` is the period's, and derived |  |
-| DL-118 | the atomic `decision` record and control-protocol v3 | [docs/concurrency-model.md](concurrency-model.md), [docs/control-protocol.md](control-protocol.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
+| DL-118 | the atomic `decision` record and control-protocol v3 | [docs/blocks/admission.md](blocks/admission.md), [docs/blocks/effect-outbox.md](blocks/effect-outbox.md), [docs/concurrency-model.md](concurrency-model.md), [docs/control-protocol.md](control-protocol.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
 | DL-119 | the seal artifact and the canonical form |  |
 | DL-120 | capacity decomposed | [docs/concurrency-model.md](concurrency-model.md) |
 | DL-121 | `run_id` is minted in the effect; SPAWN idempotency is durable; FW has a spool |  |
@@ -147,7 +147,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-134 | the estate gets its verbs: the seal an operator runs, the proof that lets a root be archived, and the two ways a root joins a lineage | [docs/deployment-runbook.md](deployment-runbook.md), [docs/runner-design.md](runner-design.md) |
 | DL-135 | what may never be deleted, and the subscriber that stopped losing a period | [docs/control-protocol.md](control-protocol.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/period-model.md](period-model.md), [docs/protocol-evolution.md](protocol-evolution.md) |
 | DL-136 | the boundary era becomes operable, and one reader stops losing a period | [docs/deployment-runbook.md](deployment-runbook.md), [docs/runner-design.md](runner-design.md) |
-| DL-137 | the review after the programme: what ten units of adversarial hardening left behind | [docs/runner-design.md](runner-design.md) |
+| DL-137 | the review after the programme: what ten units of adversarial hardening left behind | [docs/blocks/engine-loop.md](blocks/engine-loop.md), [docs/runner-design.md](runner-design.md) |
 | DL-138 | the legacy read dialects retire, and the contract that governs the next retirement | [docs/citation-index.md](citation-index.md), [docs/concurrency-model.md](concurrency-model.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/period-model.md](period-model.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md) |
 | DL-139 | one decoder for a decision's effects: run history refuses what `read_outbox` refuses |  |
 | DL-140 | an empty map is not "no map": tz_aliases at the wiring boundary |  |
@@ -155,7 +155,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-142 | the replay crosses the boundary: `dsl41 journal` walks a lineage | [docs/deployment-runbook.md](deployment-runbook.md), [docs/period-model.md](period-model.md) |
 | DL-143 | the night under the boundary: ss14's B1 and B2 are built | [docs/period-model.md](period-model.md) |
 | DL-144 | the archive: a seal-only period, by policy, with a receipt in front of it | [docs/deployment-runbook.md](deployment-runbook.md), [docs/period-model.md](period-model.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/risk-map.md](risk-map.md), [docs/runner-design.md](runner-design.md) |
-| DL-145 | the review after the reset: what seven units of building left behind | [docs/access-model.md](access-model.md) |
+| DL-145 | the review after the reset: what seven units of building left behind | [docs/access-model.md](access-model.md), [docs/blocks/engine-loop.md](blocks/engine-loop.md) |
 | DL-146 | three tiers at the perimeter: the access model is designed and the core stays authz-free | [docs/access-model.md](access-model.md), [docs/concurrency-model.md](concurrency-model.md), [docs/control-protocol.md](control-protocol.md), [docs/period-model.md](period-model.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/risk-map.md](risk-map.md), [docs/runner-design.md](runner-design.md) |
 | DL-147 | the conformance round before the freeze: eight review findings, five frozen docs amended, two armed modes named | [docs/access-model.md](access-model.md), [docs/concurrency-model.md](concurrency-model.md), [docs/control-protocol.md](control-protocol.md), [docs/period-model.md](period-model.md), [docs/protocol-evolution.md](protocol-evolution.md) |
 | DL-148 | the second conformance round: forty-two findings held over ten passes, four frozen docs amended, the headerless answers enumerated | [docs/access-model.md](access-model.md), [docs/control-protocol.md](control-protocol.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md) |
@@ -195,7 +195,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-181 | L022, the under-fire twin | [docs/ir-design.md](ir-design.md) |
 | DL-182 | PROPOSAL | [docs/runner-design.md](runner-design.md) |
 | DL-183 | the DL-75 review over arch-review/2026-08-26..HEAD -- the DL-180..182 window |  |
-| DL-184 | (2026-08-31) the DL-182 open items, ruled after a two-round fresh-context adversarial design review (plan and findings on file in the session scratchpad; every... | [docs/runner-design.md](runner-design.md) |
+| DL-184 | (2026-08-31) the DL-182 open items, ruled after a two-round fresh-context adversarial design review (plan and findings on file in the session scratchpad; every... | [docs/blocks/engine-loop.md](blocks/engine-loop.md), [docs/runner-design.md](runner-design.md) |
 | DL-185 | the DL-75 review over arch-review/2026-08-28..HEAD -- the DL-184 window |  |
 | DL-186 | shared Codex and Claude harness instructions |  |
 | DL-187 | operator TUI review follow-up | [docs/runner-design.md](runner-design.md) |
@@ -222,13 +222,13 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-208 | `minify` takes `--properties` like every other catalog-consuming verb |  |
 | DL-209 | Simulation closure by classification: the coverage register (S1 of five) |  |
 | DL-210 | Production readiness, first slice: the supervisor survives its clients and its service manager; the TUI survives a period roll | [docs/concurrency-model.md](concurrency-model.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/runner-design.md](runner-design.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
-| DL-211 | CI measures coverage once, on the interpreter where measuring is free; the two spin tests stop spinning | [docs/agent-workflow.md](agent-workflow.md) |
+| DL-211 | CI measures coverage once, on the interpreter where measuring is free; the two spin tests stop spinning | [docs/agent-workflow.md](agent-workflow.md), [docs/blocks/engine-loop.md](blocks/engine-loop.md) |
 | DL-212 | Preflight names the day the scheduler names: the base zone is the fallback before UTC | [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
 | DL-213 | Preflight always probes the calendars: the anchor defaults to now | [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
 | DL-214 | Architecture review of DL-203 through DL-213: twenty findings acted, seven items declined with their re-find triggers |  |
 | DL-215 | The release publishes only what passed the CI gates and an installed-artifact smoke test, built from locked inputs | [docs/deployment-runbook.md](deployment-runbook.md) |
 | DL-216 | A client that attempted a write reports any failure as delivered, and the server drops an unterminated request | [docs/control-protocol.md](control-protocol.md) |
-| DL-217 | A lost answer is recovered by a pinned exact retry, and a collision says what the id already decided | [docs/control-protocol.md](control-protocol.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/protocol-evolution.md](protocol-evolution.md) |
+| DL-217 | A lost answer is recovered by a pinned exact retry, and a collision says what the id already decided | [docs/blocks/admission.md](blocks/admission.md), [docs/control-protocol.md](control-protocol.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/protocol-evolution.md](protocol-evolution.md) |
 | DL-218 | The deployment example: one launcher holds the command line, the reattach line is the process's own, the units are verified statically, and the service drill is... | [docs/agent-workflow.md](agent-workflow.md), [docs/deployment-runbook.md](deployment-runbook.md) |
 | DL-219 | A restoration drill: quiescent backup and restore, over the real machinery, at a fixed path | [docs/deployment-runbook.md](deployment-runbook.md) |
 | DL-220 | Two mypy flags, not `strict`: `warn_return_any` and `disallow_any_generics`, and `list_runs()` returns a typed reply |  |
@@ -243,10 +243,10 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-229 | supervisor-protocol reconciliation: nine items ruled | [docs/supervisor-protocol.md](supervisor-protocol.md) |
 | DL-230 | The documentation audit lands: ops-model.md is folded and deleted, agent-harness-review.md is deleted | [docs/agent-workflow.md](agent-workflow.md), [docs/citation-index.md](citation-index.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md) |
 | DL-231 | access-model.md is frozen | [docs/access-model.md](access-model.md) |
-| DL-232 | concurrency-model reconciliation: a strictly earlier timer goes before a later command, one KILL per run per batch, and a held SPAWN applies only to a job still... |  |
+| DL-232 | concurrency-model reconciliation: a strictly earlier timer goes before a later command, one KILL per run per batch, and a held SPAWN applies only to a job still... | [docs/blocks/admission.md](blocks/admission.md), [docs/blocks/effect-outbox.md](blocks/effect-outbox.md), [docs/blocks/engine-loop.md](blocks/engine-loop.md) |
 | DL-233 | The DISARM audit distinction is the trace reason, not the revisions map | [docs/control-protocol.md](control-protocol.md), [docs/period-model.md](period-model.md) |
-| DL-234 | Supersession is decided before the routing hold, and a run has its one identity from the instant its SPAWN is planned | [docs/concurrency-model.md](concurrency-model.md), [docs/glossary.md](glossary.md) |
-| DL-235 | CHANGE_STATUS INACTIVE on a launched run: no KILL, the stale-completion gate rejects a completion whose row is not STARTING or RUNNING, and the state-machine... | [docs/autosys-semantics.md](autosys-semantics.md), [docs/runner-design.md](runner-design.md) |
+| DL-234 | Supersession is decided before the routing hold, and a run has its one identity from the instant its SPAWN is planned | [docs/blocks/effect-outbox.md](blocks/effect-outbox.md), [docs/blocks/engine-loop.md](blocks/engine-loop.md), [docs/concurrency-model.md](concurrency-model.md), [docs/glossary.md](glossary.md) |
+| DL-235 | CHANGE_STATUS INACTIVE on a launched run: no KILL, the stale-completion gate rejects a completion whose row is not STARTING or RUNNING, and the state-machine... | [docs/autosys-semantics.md](autosys-semantics.md), [docs/blocks/admission.md](blocks/admission.md), [docs/runner-design.md](runner-design.md) |
 | DL-236 | The workflow examples get an opt-in integration lane at the operator's interfaces | [docs/agent-workflow.md](agent-workflow.md) |
 | DL-237 | Joint review of the workflow examples: what was fixed and what stands | [README.md](../README.md) |
 | DL-238 | CLI help is user prose; design citations live in code comments |  |
