@@ -482,18 +482,45 @@ def _stream_subscribe(socket_path: Path, request: dict[str, Any]) -> None:
     `_control_roundtrip` already reads `ControlClientError` (DL-78):
     `ControlClientError` is the engine's own refusal text, printed as-is;
     `OSError` is a transport failure, prefixed with the socket like every
-    other client here."""
-    from dsl41.runner_control import ControlClientError, subscribe_lines
+    other client here.
 
+    The stream ends at the operator's interrupt, exit 0, or at the engine,
+    exit 2: a hangup, or an answer line such as a backfill refusal
+    (control-protocol ss5, DL-267). Exit 2 names the `--since` to resume
+    from: the last `seq` this command printed, or the ack's cursor when it
+    printed none."""
+    from dsl41.runner_control import (
+        ControlClientError,
+        StreamLineTooLong,
+        resume_cursor,
+        subscribe_lines,
+    )
+
+    cursor: int | None = None
+    streaming = False  # the first line is the ack: a refusal before it is not an end
     try:
         for line in subscribe_lines(socket_path, request):
             typer.echo(line)
+            streaming = True
+            cursor = resume_cursor(line, cursor)
+    except StreamLineTooLong as exc:
+        raise typer.Exit(refuse(exc)) from exc  # no hint: the same cursor meets it again
     except ControlClientError as exc:
-        raise typer.Exit(refuse(exc)) from exc
+        if not streaming:
+            raise typer.Exit(refuse(exc)) from exc
+        raise typer.Exit(refuse(f"{exc} ({_resume_hint(cursor)})")) from exc
     except OSError as exc:
-        raise typer.Exit(refuse(exc, prefix=f"control socket {socket_path}")) from exc
+        why = f"{exc} ({_resume_hint(cursor)})" if streaming else exc
+        raise typer.Exit(refuse(why, prefix=f"control socket {socket_path}")) from exc
     except KeyboardInterrupt:
-        pass
+        return
+    raise typer.Exit(refuse(f"the engine closed the subscribe stream ({_resume_hint(cursor)})"))
+
+
+def _resume_hint(cursor: int | None) -> str:
+    if cursor is None:  # an engine that sent no cursor: the reader's own is all there is
+        return "resubscribe with --since set to the last seq you read"
+    return f"resubscribe with --since {cursor}"
 
 
 def query(
@@ -525,7 +552,8 @@ def query(
     """Read status, traces, explanations and more from a running engine.
 
     The queries are listed under WHAT below. subscribe streams journal
-    records as JSON lines until interrupted.
+    records as JSON lines until interrupted, and exits 2 if the engine
+    closes the stream first; resubscribe with --since.
 
     is-success and is-failed print the job's current status and exit 0
     when it matches (SUCCESS for is-success; FAILURE or TERMINATED for
@@ -538,8 +566,8 @@ def query(
     out.
 
     Exit codes: 0 answered; 1 is-success or is-failed did not match; 2 an
-    unknown query, a missing option, or an engine that refused or could
-    not be reached.
+    unknown query, a missing option, an engine that refused or could
+    not be reached, or a subscribe stream the engine closed.
     """
     # Design: runner-design ss10, ss11, DL-65, concurrency-model ss6
     verb = what.lower()

@@ -903,7 +903,7 @@ def test_subscribe_backfills_since_zero_then_streams_a_live_record_once(short_ro
                 )
                 await writer.drain()
                 ack = json.loads(await asyncio.wait_for(reader.readline(), timeout=2.0))
-                assert ack == {"ok": True, "subscribed": True}
+                assert ack == {"ok": True, "subscribed": True, "since": 0}
 
                 backfilled = []
                 seen_opening = False
@@ -2556,7 +2556,7 @@ def test_pr03_a_subscription_re_proves_the_lineage_before_every_response(
                 )
                 await writer.drain()
                 ack = json.loads(await asyncio.wait_for(reader.readline(), timeout=2.0))
-                assert ack == {"ok": True, "subscribed": True}
+                assert ack == {"ok": True, "subscribed": True, "since": 0}
                 # the journal already holds the opening records, so the FIRST
                 # backfill response hits the re-proof and is the refusal
                 answer = json.loads(await asyncio.wait_for(reader.readline(), timeout=2.0))
@@ -2610,7 +2610,7 @@ def test_pr03_a_backfill_error_from_a_displaced_leader_answers_the_refusal(
                     )
                     await writer.drain()
                     ack = json.loads(await asyncio.wait_for(reader.readline(), timeout=2.0))
-                    assert ack == {"ok": True, "subscribed": True}
+                    assert ack == {"ok": True, "subscribed": True, "since": 0}
                     answer = json.loads(await asyncio.wait_for(reader.readline(), timeout=2.0))
                     assert answer["ok"] is False and "no longer leads" in answer["error"]
                     assert "stranger's segment" not in answer.get("error", "")
@@ -3017,13 +3017,13 @@ def test_dl172_subscribe_lines_refuses_a_record_line_over_the_limit(
     short_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """ss6's bounded read applies to every line, not only the ack: a record
-    line that runs past LINE_LIMIT unterminated is unreadable and the
-    stream cannot resync past it, so it raises rather than yielding a
-    truncated line (DL-151)."""
+    line that runs past the stream line limit (`SUBSCRIBER_BACKLOG_BYTES`
+    since DL-267) unterminated is unreadable and the stream cannot resync
+    past it, so it raises rather than yielding a truncated line (DL-151)."""
     import dsl41.runner_control as control_mod
     from dsl41.runner_control import ControlClientError, subscribe_lines
 
-    monkeypatch.setattr(control_mod, "LINE_LIMIT", 64)
+    monkeypatch.setattr(control_mod, "SUBSCRIBER_BACKLOG_BYTES", 64)  # the stream line limit
     path = short_root / "dl172-overlimit.sock"
     ack = b'{"ok": true, "subscribed": true}\n'
     server = _RawServer(path, ack + b"z" * 100)

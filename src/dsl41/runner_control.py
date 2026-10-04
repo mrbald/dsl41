@@ -94,6 +94,7 @@ import socket as socket_mod
 import time
 import uuid
 
+from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Iterator, Mapping
 from pathlib import Path
 from typing import Any, cast, get_args
@@ -127,7 +128,7 @@ from dsl41.runner_admission import (
 from dsl41.runner_clock import EngineError
 from dsl41.runner_hosts import HOST_VERBS, HostCommand, HostVerb
 from dsl41.seal import StagedNextPeriod
-from dsl41.runner_journal import read_backfill
+from dsl41.runner_journal import best_effort_report, read_backfill
 from dsl41.runner_preflight import and_success_skeleton
 
 #: sendevent verbs whose payload is a single catalog job (1:1 onto EventKind)
@@ -163,6 +164,14 @@ STATUS_FLAG_MARKS: tuple[tuple[str, str], ...] = (
     ("N", "on_noexec"),
     ("A", "armed"),
 )
+
+#: ss5's subscriber budget (DL-267): the encoded bytes one subscription may
+#: hold queued. One command appends its input record, at most three times
+#: its request line (the stream escapes every non-ASCII character), and
+#: then its decision, budgeted at one request line. The bundled clients
+#: read stream lines up to the same bound, so any record that fits the
+#: budget is also one they can read.
+SUBSCRIBER_BACKLOG_BYTES: int = 4 * LINE_LIMIT
 
 
 class ControlServer:
@@ -226,6 +235,12 @@ class ControlServer:
     #: HEALTHY seal never lands in the unknown branch.
     SEAL_TIMEOUT_S = 180.0
 
+    #: ss5's grace at a hangup the server makes for any reason but an
+    #: overflow or a revocation (DL-267): how long a closing connection may
+    #: take to hand its unsent bytes to a reading peer before it is
+    #: aborted. A peer that stopped reading costs a shutdown this much.
+    HANGUP_GRACE_S = 2.0
+
     def __init__(
         self,
         engine: Engine,
@@ -251,6 +266,12 @@ class ControlServer:
         self._drift_checked_at: float | None = None
         self._server: asyncio.Server | None = None
         self._conn_tasks: set[asyncio.Task[Any]] = set()
+        #: set by `close`: a handler cancelled while it holds is shutdown's,
+        #: and gets the hangup grace; any other cancel is an overflow or a
+        #: revocation, which end the connection at once (ss5, DL-267)
+        self._closing = False
+        #: each subscription's backlog budget (ss5); tests lower it
+        self.subscriber_budget = SUBSCRIBER_BACKLOG_BYTES
         #: the armed perimeter, or None = the 0600 owner-only model,
         #: byte-compatible (docs/access-model.md ss4: configured vs absent
         #: is explicit)
@@ -307,12 +328,13 @@ class ControlServer:
             # handler via a scheduled callback -- let it land in _conn_tasks
             # so the cancel sweep below reaches it too
             await asyncio.sleep(0)
+        self._closing = True
         for task in list(self._conn_tasks):
             task.cancel()
         await asyncio.gather(*self._conn_tasks, return_exceptions=True)
         self._conn_tasks.clear()
-        # one more tick: a cancelled handler's writer.close() only SCHEDULES
-        # its connection_lost; without this the transport never detaches from
+        # one more tick: a handler's abort only SCHEDULES its
+        # connection_lost; without this the transport never detaches from
         # the server and its deallocator trips after the loop is gone
         await asyncio.sleep(0)
         if self._server is not None:
@@ -324,6 +346,7 @@ class ControlServer:
         task = asyncio.current_task()
         if task is not None:
             self._conn_tasks.add(task)
+        at_once = False
         try:
             principal = None
             if self.access is not None:
@@ -422,12 +445,35 @@ class ControlServer:
                 await self._send(writer, response)
         except (ConnectionResetError, BrokenPipeError):
             pass  # client hangup mid-write: its problem, not the engine's
+        except asyncio.CancelledError:
+            at_once = not self._closing  # an overflow or a revocation
+            raise
         finally:
+            # still in _conn_tasks: a shutdown waits for this hangup too
+            await self._hang_up(writer, at_once=at_once)
             if task is not None:
                 self._conn_tasks.discard(task)
+
+    async def _hang_up(self, writer: asyncio.StreamWriter, *, at_once: bool) -> None:
+        """End one connection without waiting on a peer that stopped
+        reading (ss5, DL-267). A close keeps the unsent bytes until the peer
+        takes them, so it gets `HANGUP_GRACE_S`, and the abort after that
+        discards what is left. An overflow or a revocation aborts at once."""
+        if not at_once:
             writer.close()
-            with contextlib.suppress(Exception):
-                await writer.wait_closed()
+            try:
+                async with asyncio.timeout(self.HANGUP_GRACE_S):
+                    with contextlib.suppress(Exception):
+                        await writer.wait_closed()
+                return
+            except TimeoutError:
+                pass
+            except asyncio.CancelledError:
+                writer.transport.abort()
+                raise
+        writer.transport.abort()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
 
     @staticmethod
     async def _send(writer: asyncio.StreamWriter, obj: dict[str, Any]) -> None:
@@ -1187,64 +1233,34 @@ class ControlServer:
         if since is not None and not is_wire_int(since):
             await self._send(writer, {"ok": False, "error": "since must be an integer seq"})
             return
-        queue = journal.subscribe()
+        handler = asyncio.current_task()
+
+        def overflowed(why: str) -> None:
+            # ss5's overflow rule (DL-267): the journal has removed the feed
+            # and dropped its backlog. End the stream first; the report is
+            # best effort and comes after
+            if handler is not None:
+                handler.cancel()
+            best_effort_report(f"dsl41: closing a subscribe stream: {why}")
+
+        feed = journal.subscribe(overflowed, budget=self.subscriber_budget)
         try:
             # sample the seam BEFORE the ack yields: a record written during
             # the send takes the next index and would be skipped as "covered"
             # despite never being backfilled (DL-45). The seam is the
             # admission frontier now (concurrency-model ss2) -- the journal
-            # stopped allocating the number when the frontier started to
+            # stopped allocating the number when the frontier started to.
+            # The ack names it: a client that reads no seq'd record still
+            # has a cursor to resume from (ss5, DL-267)
             max_seq = since if since is not None else self.engine.frontiers.committed_index
-            await self._send(writer, {"ok": True, "subscribed": True})
+            await self._send(writer, {"ok": True, "subscribed": True, "since": max_seq})
             if since is not None:
-                try:
-                    backfill = read_backfill(journal.path, since=since)
-                except EngineError as exc:
-                    # the read now spans segments, so it can meet a file
-                    # this one did not write. The ack has gone, so the
-                    # refusal goes on the STREAM -- a handler that raised
-                    # here would hang the client up with no answer at all.
-                    # PR-03 holds for THIS response too: the read yielded,
-                    # and a displaced leader must answer the refusal a
-                    # displaced leader owes, not narrate a lineage it no
-                    # longer leads
-                    lost = self._lineage_lost()
-                    await self._send(writer, lost or {"ok": False, "error": str(exc)})
+                sent = await self._backfill(writer, journal.path, since)
+                if sent is None:
                     return
-                records = backfill.records
-                if backfill.gap_from is not None:
-                    # ss11: a cursor below the earliest retained record is
-                    # told so, explicitly. Silence would read as "nothing
-                    # happened between your cursor and the first line you
-                    # got", which is the one thing that is not true. The
-                    # marker is a RESPONSE, so PR-03's fence runs in front
-                    # of it like every other one
-                    lost = self._lineage_lost()
-                    if lost is not None:
-                        await self._send(writer, lost)
-                        return
-                    await self._send(writer, {"gap": True, "earliest_retained": backfill.gap_from})
-                cut = 0
-                for index, record in enumerate(records):
-                    seq = record.get("seq")
-                    if isinstance(seq, int) and seq <= since:
-                        cut = index + 1
-                for record in records[cut:]:
-                    lost = self._lineage_lost()
-                    if lost is not None:
-                        # PR-03 holds per RESPONSE, not per connection: the
-                        # accept-time check proves nothing about a lineage
-                        # replaced mid-stream, and a displaced leader that
-                        # kept backfilling would publish records for an
-                        # estate it no longer leads
-                        await self._send(writer, lost)
-                        return
-                    seq = record.get("seq")
-                    if isinstance(seq, int):
-                        max_seq = max(max_seq, seq)
-                    await self._send(writer, record)
+                max_seq = max(max_seq, sent)
             while True:
-                record = await queue.get()
+                record = await feed.get()
                 lost = self._lineage_lost()
                 if lost is not None:
                     await self._send(writer, lost)  # same PR-03 rule, live seam
@@ -1256,7 +1272,69 @@ class ControlServer:
                     max_seq = seq
                 await self._send(writer, record)
         finally:
-            journal.unsubscribe(queue)
+            journal.unsubscribe(feed)
+
+    async def _backfill(self, writer: asyncio.StreamWriter, wal: Path, since: int) -> int | None:
+        """Send what a subscriber resuming at `since` is owed, and answer
+        the highest seq sent (`since` if none), or None when the stream
+        ended on a refusal.
+
+        This phase holds the records it read and has not sent yet, outside
+        the subscriber budget: the retained WAL from the segment holding
+        the cursor onward. Each record is released once it is sent, and
+        the list is gone when this returns (ss5, DL-267)."""
+        try:
+            backfill = read_backfill(wal, since=since)
+        except EngineError as exc:
+            # the read now spans segments, so it can meet a file
+            # this one did not write. The ack has gone, so the
+            # refusal goes on the STREAM -- a handler that raised
+            # here would hang the client up with no answer at all.
+            # PR-03 holds for THIS response too: the read yielded,
+            # and a displaced leader must answer the refusal a
+            # displaced leader owes, not narrate a lineage it no
+            # longer leads
+            lost = self._lineage_lost()
+            await self._send(writer, lost or {"ok": False, "error": str(exc)})
+            return None
+        gap_from, records = backfill.gap_from, backfill.records
+        del backfill
+        if gap_from is not None:
+            # ss11: a cursor below the earliest retained record is
+            # told so, explicitly. Silence would read as "nothing
+            # happened between your cursor and the first line you
+            # got", which is the one thing that is not true. The
+            # marker is a RESPONSE, so PR-03's fence runs in front
+            # of it like every other one
+            lost = self._lineage_lost()
+            if lost is not None:
+                await self._send(writer, lost)
+                return None
+            await self._send(writer, {"gap": True, "earliest_retained": gap_from})
+        cut = 0
+        for index, record in enumerate(records):
+            seq = record.get("seq")
+            if isinstance(seq, int) and seq <= since:
+                cut = index + 1
+        pending = deque(records[cut:])
+        del records
+        sent = since
+        while pending:
+            record = pending.popleft()
+            lost = self._lineage_lost()
+            if lost is not None:
+                # PR-03 holds per RESPONSE, not per connection: the
+                # accept-time check proves nothing about a lineage
+                # replaced mid-stream, and a displaced leader that
+                # kept backfilling would publish records for an
+                # estate it no longer leads
+                await self._send(writer, lost)
+                return None
+            seq = record.get("seq")
+            if isinstance(seq, int):
+                sent = max(sent, seq)
+            await self._send(writer, record)
+        return sent
 
 
 # ---------------------------------------------------------------- clients (ss10)
@@ -1347,6 +1425,19 @@ class ControlClientError(RuntimeError):
     def __init__(self, *args: object, delivered: bool = False) -> None:
         super().__init__(*args)
         self.delivered = delivered
+
+
+class StreamLineTooLong(ControlClientError):
+    """A `subscribe` stream line past `SUBSCRIBER_BACKLOG_BYTES` (ss5,
+    DL-267). The stream cannot resync past it, and a resubscription at the
+    same cursor meets the same record again, so this is not an end to
+    resume from by retrying."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(
+            f"record line over the {limit}-byte limit: resubscribing at the same"
+            " cursor meets it again"
+        )
 
 
 def versioned(request: dict[str, Any]) -> dict[str, Any]:
@@ -1612,8 +1703,9 @@ class ControlClient:
         """Yield journal records until the engine hangs up. Raises
         ControlClientError if the connection fails or the engine refuses
         (e.g. a journal-less run)."""
+        limit = SUBSCRIBER_BACKLOG_BYTES  # a stream line may be any record the budget holds
         try:
-            reader, writer = await asyncio.open_unix_connection(str(self.path), limit=LINE_LIMIT)
+            reader, writer = await asyncio.open_unix_connection(str(self.path), limit=limit)
         except OSError as exc:
             raise ControlClientError(str(exc)) from exc
         try:
@@ -1626,7 +1718,10 @@ class ControlClient:
             if (why := _subscribe_refusal(ack_line)) is not None:
                 raise ControlClientError(why)
             while True:
-                line = await reader.readline()
+                try:
+                    line = await reader.readline()
+                except ValueError as exc:  # asyncio's answer to a line over `limit`
+                    raise StreamLineTooLong(limit) from exc
                 if not line:
                     return  # engine gone; the caller decides whether to retry
                 try:
@@ -1635,7 +1730,7 @@ class ControlClient:
                     continue  # torn record: it is only a wake-up signal anyway
                 yield record
         except (OSError, ValueError) as exc:
-            # ValueError is asyncio's answer to a line over LINE_LIMIT: the
+            # ValueError is asyncio's answer to an ack over the limit: the
             # stream cannot resync past it, and ss1 says every failure this
             # client meets leaves as ControlClientError (DL-151)
             raise ControlClientError(str(exc)) from exc
@@ -1746,6 +1841,36 @@ def _subscribe_refusal(ack: bytes) -> str | None:
     return None
 
 
+def _stream_refusal(line: bytes) -> str | None:
+    """The engine's words when a line after the ack is an answer, not a
+    record: ss5's `{"ok": false, ...}` that ends a stream before its hangup
+    (a backfill refusal or a lineage refusal; an overflow sends none). No
+    record has a top-level `ok`, so only a line that spells one is parsed."""
+    if b'"ok"' not in line:
+        return None
+    try:
+        parsed = json.loads(line)
+    except (ValueError, RecursionError):
+        return None  # a torn record is skippable (ss6)
+    if not isinstance(parsed, dict) or parsed.get("ok") is not False:
+        return None
+    return str(parsed.get("error", "the engine ended the stream"))
+
+
+def resume_cursor(line: str, cursor: int | None) -> int | None:
+    """The `since` to resubscribe with once `line` has been read (ss5,
+    DL-267): the ack's `since` at first, then each record's `seq`. A line
+    that names neither leaves the cursor where it was."""
+    try:
+        parsed = json.loads(line)
+    except (ValueError, RecursionError):
+        return cursor
+    if not isinstance(parsed, dict):
+        return cursor
+    value = parsed.get("since") if parsed.get("subscribed") is True else parsed.get("seq")
+    return value if is_wire_int(value) else cursor
+
+
 def subscribe_lines(socket_path: Path, request: dict[str, Any]) -> Iterator[str]:
     """`subscribe`, blocking: the ack line, then journal records, until the
     engine hangs up or the caller stops iterating.
@@ -1761,7 +1886,8 @@ def subscribe_lines(socket_path: Path, request: dict[str, Any]) -> Iterator[str]
     naming of the socket (DL-78) still can, because OSError is exactly what
     that mapping expects. Raises `ControlClientError` for a PROTOCOL
     refusal instead -- the ack said no, or a record line ran past
-    LINE_LIMIT unterminated -- carrying the engine's own words, already
+    `SUBSCRIBER_BACKLOG_BYTES` unterminated (`StreamLineTooLong`) --
+    carrying the engine's own words, already
     complete, with no prefix to add. Two exception types on purpose: a
     caller cannot tell "the socket was gone" from "the engine said no" by
     parsing text, and DL-92's lesson is that a client should never have to.
@@ -1771,7 +1897,11 @@ def subscribe_lines(socket_path: Path, request: dict[str, Any]) -> Iterator[str]
     checking it would print nothing wrong and then wait forever for records
     that can never come. `_subscribe_refusal` is that check, shared with
     `ControlClient.subscribe` (DL-178l) -- reading the ack IS opening the
-    subscription, not a step before it."""
+    subscription, not a step before it.
+
+    An answer line after the ack ends the stream the same way, as a
+    `ControlClientError` carrying the engine's words (ss5, DL-267). A plain
+    hangup ends the iteration; the caller decides what an end means."""
     conn = socket_mod.socket(socket_mod.AF_UNIX)
     try:
         conn.connect(str(socket_path))
@@ -1781,12 +1911,18 @@ def subscribe_lines(socket_path: Path, request: dict[str, Any]) -> Iterator[str]
             if (why := _subscribe_refusal(ack)) is not None:
                 raise ControlClientError(why)
             yield ack.decode("utf-8", "replace").rstrip("\n")
-            while line := stream.readline(LINE_LIMIT + 1):
+            limit = SUBSCRIBER_BACKLOG_BYTES  # any record the budget holds (ss5, DL-267)
+            while line := stream.readline(limit + 1):
                 # an unterminated line comes back AT the limit, and yielding
                 # it would resync nothing -- the stream is unreadable from
-                # here (DL-151)
+                # here (DL-151). A shorter one is the engine closing the
+                # stream mid-line, which an overflow's abort can do
                 if not line.endswith(b"\n"):
-                    raise ControlClientError(f"record line over the {LINE_LIMIT}-byte limit")
+                    if len(line) > limit:
+                        raise StreamLineTooLong(limit)
+                    raise ControlClientError("the engine closed the stream mid-line")
+                if (why := _stream_refusal(line)) is not None:
+                    raise ControlClientError(why)
                 yield line.decode("utf-8", "replace").rstrip("\n")
     finally:
         conn.close()

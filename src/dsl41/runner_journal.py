@@ -65,9 +65,10 @@ import asyncio
 import json
 import os
 import socket
+import sys
 import uuid
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -110,6 +111,79 @@ from dsl41.runner_ledger import STATE_MACHINE_VERSION, Proof
 
 if TYPE_CHECKING:  # annotation only: the WAL stays a leaf of the DL-74 DAG
     from dsl41.runner_preflight import PreflightItem
+
+
+class Subscription:
+    """One live feed of ss10 `subscribe`: the records appended since it
+    began, in append order, under a byte budget (control-protocol ss5,
+    DL-267). The budget is the owner's; the journal only enforces it.
+
+    A record enters an empty backlog. Otherwise it enters only if the
+    backlog plus the record stays within the budget, so the backlog never
+    holds more than the budget or one record, whichever is larger. A
+    refused record removes the feed: the journal drops the backlog and
+    then tells the owner why. The append it came from has already
+    succeeded, and nothing here raises into it."""
+
+    def __init__(self, budget: int, on_overflow: Callable[[str], None] | None) -> None:
+        self.budget = budget
+        self.backlog_bytes = 0
+        #: why the journal removed this feed, or None while it is live
+        self.overflow: str | None = None
+        self._on_overflow = on_overflow
+        self._queue: asyncio.Queue[tuple[dict[str, Any], int]] = asyncio.Queue()
+
+    def offer(self, record: dict[str, Any], size: int) -> bool:
+        """Queue one record of `size` encoded bytes, or answer False when
+        it does not fit. Never blocks and never raises QueueFull: the queue
+        has no count limit, and the budget is checked here."""
+        if self.backlog_bytes and self.backlog_bytes + size > self.budget:
+            self.overflow = (
+                f"subscriber backlog of {self.backlog_bytes} bytes cannot take a"
+                f" {size}-byte record within the {self.budget}-byte budget"
+            )
+            while not self._queue.empty():
+                self._queue.get_nowait()
+            self.backlog_bytes = 0
+            return False
+        self._queue.put_nowait((record, size))
+        self.backlog_bytes += size
+        return True
+
+    def tell_owner(self) -> None:
+        """Hand an overflowed feed's reason to its owner. Best effort: the
+        append behind it is durable and the other feeds have their record,
+        so an owner that raises, or a stderr that cannot take the report,
+        changes nothing."""
+        if self._on_overflow is None or self.overflow is None:
+            return
+        try:
+            self._on_overflow(self.overflow)
+        except Exception as exc:  # noqa: BLE001 -- see the docstring
+            best_effort_report(f"dsl41: subscriber overflow handler failed: {exc!r}")
+
+    async def get(self) -> dict[str, Any]:
+        record, size = await self._queue.get()
+        self.backlog_bytes -= size
+        return record
+
+    def get_nowait(self) -> dict[str, Any]:
+        record, size = self._queue.get_nowait()
+        self.backlog_bytes -= size
+        return record
+
+    def empty(self) -> bool:
+        return self._queue.empty()
+
+
+def best_effort_report(line: str) -> None:
+    """One line on stderr, or nothing. For reports made after a durable
+    append, where a closed or broken stderr must not become the append's
+    failure (control-protocol ss5, DL-267)."""
+    try:
+        print(line, file=sys.stderr, flush=True)
+    except Exception:  # noqa: BLE001, S110 -- a report that cannot be made is dropped
+        pass
 
 
 def dsl41_version() -> str:
@@ -158,9 +232,9 @@ class Journal:
         #: engines the bisimulation harness runs.
         self._lock = lock
         #: live feeds for ss10 subscribe: every appended record is fanned out
-        #: post-write; queues are unbounded (a slow subscriber buffers, the
-        #: WAL never blocks on one)
-        self._subscribers: list[asyncio.Queue[dict[str, Any]]] = []
+        #: post-write. The WAL never blocks on one, and a feed whose backlog
+        #: would pass its budget is removed rather than grown (DL-267)
+        self._subscribers: list[Subscription] = []
 
     @classmethod
     def create(
@@ -412,7 +486,8 @@ class Journal:
         # canon bytes in `boundary` and re-derived on read -- and the
         # control door already refuses a lone surrogate before it can reach
         # dispatch, so canon's extra guarantees buy this writer nothing.
-        self._f.write(json.dumps(rec, sort_keys=True).encode("utf-8") + b"\n")
+        line = json.dumps(rec, sort_keys=True).encode("utf-8") + b"\n"
+        self._f.write(line)
         # UNCONDITIONALLY durable, whatever the journal's per-record policy:
         # a virtual-domain journal buffers and fsyncs on close, and a seal
         # made durable only at close would let the anchor's open->closed CAS
@@ -423,8 +498,7 @@ class Journal:
         # told about a boundary recovery may discard.
         self._f.flush()
         os.fsync(self._f.fileno())
-        for queue in self._subscribers:
-            queue.put_nowait(rec)
+        self._publish(rec, len(line))
 
     def effect_result(self, outcome: EffectOutcome) -> None:
         """What came of one attempt (concurrency-model ss5). Absent means
@@ -475,14 +549,31 @@ class Journal:
             }
         )
 
-    def subscribe(self) -> asyncio.Queue[dict[str, Any]]:
-        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-        self._subscribers.append(queue)
-        return queue
+    def subscribe(
+        self, on_overflow: Callable[[str], None] | None = None, *, budget: int = sys.maxsize
+    ) -> Subscription:
+        """A live feed of every record appended from now on, held to
+        `budget` bytes; the control server passes ss5's. `on_overflow` is
+        called once, synchronously inside the append that overflowed the
+        feed, after the feed is removed and every other feed has the
+        record (control-protocol ss5, DL-267)."""
+        feed = Subscription(budget, on_overflow)
+        self._subscribers.append(feed)
+        return feed
 
-    def unsubscribe(self, queue: asyncio.Queue[dict[str, Any]]) -> None:
-        if queue in self._subscribers:
-            self._subscribers.remove(queue)
+    def unsubscribe(self, feed: Subscription) -> None:
+        if feed in self._subscribers:
+            self._subscribers.remove(feed)
+
+    def _publish(self, record: dict[str, Any], size: int) -> None:
+        """Fan one durable record out to the live feeds. A feed it does
+        not fit is removed, never grown and never left open with a hole in
+        it (control-protocol ss5, DL-267)."""
+        overflowed = [feed for feed in self._subscribers if not feed.offer(record, size)]
+        for feed in overflowed:
+            self._subscribers.remove(feed)
+        for feed in overflowed:  # only once every feed has the record
+            feed.tell_owner()
 
     def _write(self, record: dict[str, Any]) -> None:
         if record.get("rec") not in CURRENT_RECS:
@@ -511,12 +602,12 @@ class Journal:
             # is why there is no background prober: the only proof that goes
             # unchecked is proof nothing was about to rely on.
             self._lock.check()
-        self._f.write(json.dumps(record, sort_keys=True).encode("utf-8") + b"\n")
+        line = json.dumps(record, sort_keys=True).encode("utf-8") + b"\n"
+        self._f.write(line)
         self._f.flush()
         if self._fsync_each:
             os.fsync(self._f.fileno())
-        for queue in self._subscribers:
-            queue.put_nowait(record)
+        self._publish(record, len(line))
 
     def close(self) -> None:
         self.detach()

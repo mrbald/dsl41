@@ -2,7 +2,7 @@
 
 Status: frozen at **v3** (DL-118; v2 was DL-90, v1 DL-78; amended by
 DL-133, DL-135, DL-146, DL-147, DL-148, DL-150, DL-151, DL-158, DL-189,
-DL-216, DL-217 and DL-256). This
+DL-216, DL-217, DL-256 and DL-267). This
 document is normative for the runner's §10 control plane in the same way
 `docs/supervisor-protocol.md` is normative for the §6a lifecycle tier. Each
 change to a frozen item requires a decision-log entry, and each amendment
@@ -61,7 +61,9 @@ CLI's job.
 - **JSON lines**, both directions. One request object per line; one
   response object per line. The stream buffer limit is `LINE_LIMIT`
   (16 MiB): one `status` response covers every job on a single line and
-  overruns asyncio's 64 KiB default at roughly 300 jobs.
+  overruns asyncio's 64 KiB default at roughly 300 jobs. A `subscribe`
+  stream's record lines can be longer, up to the §5 budget
+  (`4 × LINE_LIMIT`, 64 MiB), and a subscriber reads them at that limit.
   A line ends at its `\n` (DL-216). A request fragment that reaches EOF
   without one is dropped unanswered and never parsed: its client died
   mid-write, and a truncated command must not run.
@@ -618,10 +620,14 @@ work was declared rerouteable without proof its executor was dead (§8's
 `{"cmd": "subscribe", "v": 3, "since": <int>?}`. A subscription **owns its
 connection** until hangup, so a client opens a separate connection for it.
 
-The server answers `{"ok": true, "subscribed": true}`, then streams
-journal records (`docs/runner-design.md` §7 record kinds) as raw lines. A
-run with no journal is refused with `{"ok": false, "error": "this run has
-no journal"}`.
+The server answers `{"ok": true, "subscribed": true, "since": <int>}`,
+then streams journal records (`docs/runner-design.md` §7 record kinds) as
+raw lines. The ack's `since` is the stream's cursor (DL-267): the request's
+`since` when it named one, otherwise the admission frontier sampled for
+the seam below. Every seq'd record the stream owes is above it. It is an
+additive answer field, which a v3 client ignores (`docs/protocol-evolution.md`
+§1, DL-217). A run with no journal is refused with `{"ok": false, "error":
+"this run has no journal"}`.
 
 Delivery guarantees, exactly as implemented:
 
@@ -682,6 +688,74 @@ records it could not read. The read is bounded: it walks segments newest
 first and stops at the one holding the cursor, so a cursor inside the live
 period costs one segment however long the lineage is.
 
+**A subscriber that stops reading is removed** (DL-267). Each subscription
+has a backlog: the live records appended for it and not yet written to its
+socket, counted in the bytes of their stream lines. The budget is
+`4 × LINE_LIMIT`, 64 MiB (`SUBSCRIBER_BACKLOG_BYTES`). It is three request
+lines for an input record, because the input carries the request's payload
+and the stream escapes every non-ASCII character, plus one request line
+for the largest decision a bundled client can read. Both bundled readers,
+`ControlClient.subscribe` and the CLI's `subscribe_lines`, read stream
+lines up to the same bound, so every record that fits the budget is one
+they can read.
+
+A record enters an empty backlog. Otherwise it enters only if the backlog
+plus the record stays within the budget. So a reading subscriber whose
+backlog is empty is not removed by one admitted command whose records fit
+the budget, and one record larger than the budget delays a subscriber and
+does not remove it. A larger burst removes even a subscriber that was
+keeping up: the engine applies queued commands without yielding
+(`docs/concurrency-model.md` §4), so its handler cannot drain between
+them. That client resumes from its cursor (§6) and loses nothing. A
+refused record removes the subscription:
+
+- the journal drops the backlog and removes the subscription, after every
+  other subscription has the record;
+- the server then cancels the handler and aborts the transport at once,
+  and reports the reason on its stderr, best effort;
+- the journal append has already succeeded. Nothing from the removal, an
+  owner that raises or a stderr that cannot be written included, reaches
+  the append, the engine loop or any other subscription;
+- the stream ends with EOF, perhaps after a torn last line. It never
+  continues past a missing record. It carries no terminal line: EOF and
+  the §6 cursor are the signal, and the peer that stopped reading could
+  not receive a line anyway.
+
+A subscription's queued backlog is at most the budget or one record,
+whichever is larger, plus one record in the transport beyond its
+high-water mark. The budget counts encoded bytes; the queued records are
+shared Python objects and take more memory than that.
+
+A stream line past `SUBSCRIBER_BACKLOG_BYTES` is unreadable to the bundled
+clients, and resubscribing at the same cursor meets it again. They raise a
+distinct error, `StreamLineTooLong`, and the CLI names no `--since` for
+it.
+
+**The backfill phase is outside the budget.** A subscription with `since`
+holds the backfill records it has read and not yet sent: the retained WAL
+from the segment holding the cursor onward. The retained WAL bounds it,
+not the budget, and each subscription reads its own copy. Each record is
+released once it is sent, and the phase holds nothing once the live
+stream starts. Live records queue against the budget meanwhile, so a
+client that stalls inside its backfill is removed there like any other.
+
+**How the server ends a connection** (DL-267). This covers every
+connection on the control socket, request/response and `subscribe` alike.
+An overflow or an access revocation (`docs/access-model.md` §7) aborts
+the connection at once and discards its unsent bytes. Every other end the
+server makes closes the connection and gives the peer
+`HANGUP_GRACE_S`, 2 s, to take the unsent bytes; then it aborts. These
+ends are a shutdown, the end of a request/response connection after the
+client's EOF, and a stream that ends on a refusal. A reading client
+therefore still receives an answer already queued when the engine shuts
+down, and a peer that stopped reading delays a shutdown by at most the
+grace. A close alone would wait until the peer read, for as long as it
+stayed stalled.
+
+There is no second durable feed. A removed client reconnects with a
+cursor (§6), and the backfill, the seam and the gap marker above give it
+what it missed.
+
 ## 6. Client obligations
 
 - Any transport error must drop the connection. Reusing a connection after
@@ -693,9 +767,21 @@ period costs one segment however long the lineage is.
   the connection, so an unencodable request is the caller's error and
   never a transport outcome.
 - Open every connection with an explicit `LINE_LIMIT`; the default
-  readline buffer fails on real estates.
+  readline buffer fails on real estates. A `subscribe` connection reads
+  its record lines up to the §5 budget, `4 × LINE_LIMIT`, because an
+  escaped input record can be three times a request line (DL-267).
 - A torn line in a `subscribe` stream is skippable — records are a
   wake-up signal, and the WAL on disk is the truth.
+- A `subscribe` stream can end at the engine: EOF, a torn last line, or an
+  `{"ok": false}` line (§5). A client that must not miss records
+  reconnects with a cursor (DL-267): the last `seq` it read, or, when it
+  read none, the ack's `since`. `seq`'d records then arrive exactly once
+  across the two connections; records without a `seq` after that cursor
+  may arrive twice. `dsl41 query subscribe` exits 2 when the engine ends
+  its stream and names the exact `--since` on stderr: the last `seq` it
+  printed, or the ack's `since`. Its records are on stdout, so a
+  monitoring wrapper restarts it with that `--since`. The TUI reconnects
+  after one second and repolls; it needs no cursor.
 
 ## 7. Known gaps (recorded, not fixed — DL-78)
 
