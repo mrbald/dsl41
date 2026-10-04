@@ -17702,3 +17702,95 @@ relitigate an entry; append a new one.
   make the gate read 100% falsely, and the Linux cell had not run. Its two
   minors were an untested `--include` argument and a run-on comment. All
   four were fixed and confirmed in round 2.
+- DL-266 Managed backup quiescence, one upgrade table, and a local
+  service drill (2026-10-04; docs/deployment-runbook.md §2, §2b, §3, §7, §8;
+  examples/nightbank/deploy/dsl41-launch, drill-steps.sh, drill-lib.sh,
+  drill-local.sh;
+  .github/workflows/service-drill.yml; tests/test_nightbank_deploy.py)
+  THE BACKUP. §2b stopped every supervisor with `dsl41 supervise
+  shutdown`. Under shape 1 that command exits the supervisor cleanly, and
+  the unit's `Restart=always` starts it again two seconds later, so the
+  no-writers check could not pass or a copy could start in the gap. §2b
+  now branches by shape. Shape 1 stops the engine unit, seals and audits
+  while the supervisor unit runs, then stops the supervisor unit. It then
+  waits past the longer `RestartSec` and checks that neither unit is
+  `active` or `activating`. Shape 2 and an engine outside any service
+  manager keep `supervise shutdown`. The seal, its position between the
+  two stops and the no-writers check are the same in every shape. No new
+  command.
+  THE UPGRADE. §7 held two defaults for a release note that is silent
+  about resume: "stop, flip, resume" and "an estate change". One table
+  replaces both, and the reader applies three questions in order. A
+  state-machine version change, checked in both venvs whatever the note
+  says, is row 4: drain, a final seal with the old venv, a new estate,
+  and the old venv kept to audit the retained one. A note that does not
+  mark the release resume-safe, or is silent or unclear, is row 2: at a
+  boundary the next period opens in a fresh run root, the conservative
+  default. Only the note can say that a resume across a pair is safe, so
+  every in-place row needs a resume-safe note. A resume-safe note that
+  says the wrapper spec and the supervisor protocol did not change is
+  row 1: stop the engine unit, flip, resume, supervisor kept. Any other
+  resume-safe note is row 3: drain, stop both units, flip, start both,
+  resume. A supervisor serves one run root, so row 2 starts a new one on
+  the new root, from the new venv. Each row lists its shape-1 commands.
+  THE OPEN TRIGGER. The fresh-root opener runs inside the engine unit,
+  in both shapes, so the new root's supervisor and jobs live in the
+  units' cgroups and limits. The example launcher's engine mode passes
+  `--open-from ESTATE_ANCHOR` while an empty file `<RUN_ROOT>.open-from`
+  exists, whatever the root holds, so a roll that stopped after its
+  sentinel is retried identically. It removes the file just before it
+  execs dsl41. Every later start then resumes the opened root. A failed
+  open leaves the unit failed; the operator fixes the cause and creates
+  the trigger again. `--print` shows the opener and keeps the trigger.
+  With no trigger and no sentinel, the launcher refuses a genesis with
+  exit 2 when ESTATE_ANCHOR already holds `anchor.json`, and names the
+  trigger. Otherwise an opener that died before its sentinel would be
+  restarted as a genesis, which writes a foreign sentinel into the root
+  before dsl41 refuses it and so blocks the roll's retry. A genesis with
+  no anchor, row 4's new estate included, is unchanged. A shape-2 wrapper
+  needs the same open mode and the same refusal.
+  Readiness is the unit's state plus a control-socket read.
+  THE VENV LAYOUT. Every release gets `/opt/dsl41/venv-<ver>`, and
+  `/opt/dsl41/venv` becomes a symlink, so every rollback is a flip. §1's
+  commands install a new release with `venv-<new>` in their paths. §1's
+  directory is converted once, with both units stopped, by reinstalling
+  its frozen package list as `venv-<old>`, because `ln -sfn` cannot
+  replace a directory and a venv cannot be moved. The moved directory is
+  dead and is deleted.
+  THE DRILL. The step bodies moved out of the workflow into
+  `drill-steps.sh`. The workflow runs one step per workflow step.
+  `drill-local.sh` runs the same steps in podman with systemd as PID 1 on
+  Ubuntu 24.04, pinned by index digest, at the host's architecture. A test
+  holds the workflow's step list to the script's, whatever form a step's
+  `run:` takes. New steps cover shape-1 quiescence, a copy and restore of
+  the root and the anchor at the recorded paths, and all four rows. Row 4
+  runs from v1.7.0, installed from PyPI (state-machine version 1), to the
+  build under test (16). The kept v1.7.0 venv audits the retained estate,
+  and the new build refuses it and names the version. Rows 1 to 3 use two
+  installs of one build and check which venv each unit's process runs
+  from. They show the mechanics. They do not qualify a version pair, and
+  no pair qualifies for a resume-safe row today.
+  NOT BUILT. The rollbacks of rows 3 and 4 are not drilled. The GitHub
+  dispatch of the extended drill is still to run; the DL-223 pass
+  predates these steps.
+  TESTS. In test_nightbank_deploy.py:
+  `test_the_workflow_runs_the_drill_steps_in_their_order`,
+  `test_the_workflow_run_reader_sees_every_step_form`,
+  `test_the_open_trigger_makes_the_engine_mode_open_from_the_anchor`,
+  `test_the_engine_mode_removes_the_open_trigger_before_it_runs_dsl41`,
+  `test_a_genesis_against_an_existing_anchor_is_refused_and_names_the_trigger`,
+  `test_a_genesis_with_an_anchor_directory_but_no_anchor_proceeds`, and
+  the extended `test_the_drill_names_the_same_paths_and_file_order_as_the_launcher`.
+  The service drill's steps are `quiesce`, `restore`,
+  `upgrade-resume-safe`, `upgrade-fresh-root`, `upgrade-coordinated`,
+  `upgrade-old-release` and `upgrade-state-machine`.
+  THE PLAN'S TABLE. The review plan's table kept the supervisor in the
+  fresh-root row and let a wrapper or supervisor protocol change resume
+  in place on any note. Both were narrowed during review: a supervisor
+  serves one run root, and only a resume-safe note licenses a resume.
+  REVIEW. One Opus reviewer, three rounds. Round 1: two majors, the
+  in-place resume of row 3 without a resume-safe note and a shape-2
+  opener outside the engine unit, and six minors. Round 2: one new major,
+  a crashed opener restarting into a genesis, fixed by the launcher's
+  refusal. Round 3: no material finding; its last minor, that a shape-2
+  wrapper must also copy that refusal, is fixed in the runbook.

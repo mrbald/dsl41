@@ -5,14 +5,18 @@
 # survives an engine stop, a configuration refusal (a changed estate) that
 # does not restart-loop -- the two access-map refusals prove the same
 # systemd claim and are pinned instead in tests/test_nightbank_deploy.py --
-# and a sealed engine that stays stopped until an operator opens the next
-# period.
+# a sealed engine that stays stopped until an operator opens the next
+# period, the managed quiescence and restore of deployment-runbook ss2b,
+# and the four upgrade rows of ss7 (DL-266). Rows 1 to 3 run with two
+# installs of one build: their mechanics, not a qualified version pair.
+# Row 4 runs from v1.7.0 on PyPI to the build under test.
 #
 # Manual only (workflow_dispatch). It is not part of the default gate. It
-# passed every step on 2026-09-29 on GitHub's Ubuntu 24.04 runner (DL-223);
-# no other distribution or systemd version has been observed. Dispatch it
-# again after a change to the units, the launcher or this drill. Each step
-# sources drill-lib.sh for the paths and the waits.
+# passed every step on 2026-09-29 on GitHub's Ubuntu 24.04 runner (DL-223),
+# before the quiescence, restore and upgrade steps existed. Dispatch it
+# again after a change to the units, the launcher or the drill. Each step
+# runs one step of drill-steps.sh; drill-local.sh runs the same steps in a
+# local podman container (DL-266). A test holds this list to the script's.
 
 name: service-drill
 
@@ -36,162 +40,44 @@ jobs:
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
 
       - name: install dsl41, the nightbank estate, the launcher, the map and the units
-        run: |
-          source examples/nightbank/deploy/drill-lib.sh
-          sudo apt-get update -q
-          sudo apt-get install -y -q python3-venv jq
-          sudo useradd --system --user-group --create-home --home-dir /var/lib/dsl41 \
-              --shell /usr/sbin/nologin dsl41
-          sudo python3 -m venv /opt/dsl41/venv
-          # the runtime closure exactly as uv.lock pins it, hash-checked, and
-          # then the package alone: a drill failure cannot be dependency drift
-          uv export --frozen --no-dev --no-emit-project --format requirements-txt \
-              >"$RUNNER_TEMP/runtime.txt"
-          sudo /opt/dsl41/venv/bin/pip install --quiet --require-hashes \
-              -r "$RUNNER_TEMP/runtime.txt"
-          # the package from a wheel uv builds once (its build backend bounded
-          # by pyproject), not a pip build of the workspace
-          uv build --wheel --out-dir "$RUNNER_TEMP/dist"
-          sudo /opt/dsl41/venv/bin/pip install --quiet --no-deps "$RUNNER_TEMP"/dist/dsl41-*.whl
-          sudo /opt/dsl41/venv/bin/pip check
-          sudo install -D -m 0755 examples/nightbank/deploy/dsl41-launch /opt/dsl41/bin/dsl41-launch
-          # the estate is root-owned and read-only to the service, as a
-          # checkout of a tag would be; the night's data and the runs are its
-          sudo install -d -m 0755 /srv/dsl41
-          sudo cp -R examples/nightbank "$NIGHTBANK"
-          sudo chown -R root:root "$NIGHTBANK"
-          sudo chmod -R go-w,a+rX "$NIGHTBANK"
-          sudo install -d -o dsl41 -g dsl41 -m 0700 "$NIGHTBANK/night" "$(dirname "$ROOT")"
-          # nightbank's own prepare_night: data directories, properties and
-          # profile, the region anchors six hours out so no calendar fires
-          # the heredoc is deliberately unquoted so $NIGHTBANK expands; it
-          # must hold no other $ or backtick
-          as_dsl41 /opt/dsl41/venv/bin/python - <<PY
-          import importlib.util
-          from datetime import UTC, datetime, timedelta
-          from importlib.machinery import SourceFileLoader
-          from pathlib import Path
-
-          loader = SourceFileLoader("nightbank", "$NIGHTBANK/bin/nightbank")
-          spec = importlib.util.spec_from_loader(loader.name, loader)
-          module = importlib.util.module_from_spec(spec)
-          loader.exec_module(module)
-          module.prepare_night(
-              Path("$NIGHTBANK/night"),
-              "small",
-              anchor_utc=datetime.now(UTC) + timedelta(hours=6),
-              incidents=True,
-          )
-          PY
-          # one scripted delay: the job the drill starts runs long enough to
-          # outlive an engine stop and start
-          echo "$LONG_JOB late 45" | as_dsl41 tee -a "$NIGHTBANK/night/incidents.conf"
-          sudo install -d -m 0755 /etc/dsl41
-          install_map
-          sudo install -m 0644 examples/nightbank/deploy/dsl41-engine.service \
-              examples/nightbank/deploy/dsl41-supervisor.service /etc/systemd/system/
-          sudo systemctl daemon-reload
-          sudo -u dsl41 /opt/dsl41/bin/dsl41-launch --print
+        run: bash examples/nightbank/deploy/drill-steps.sh install
 
       - name: first start is a genesis, beside a supervisor in its own unit
-        run: |
-          source examples/nightbank/deploy/drill-lib.sh
-          mark=$(date +%s)
-          start_engine
-          is_state "$SUPERVISOR" active || fail "Requires= did not start $SUPERVISOR"
-          line=$(launch_line_since "$mark")
-          echo "$line"
-          [[ $line != *--resume* ]] || fail "the first start was a resume"
-          [[ $line == *"--access-map $MAP"* ]] || fail "no --access-map on the line"
-          sudo test -e "$ROOT/journal.jsonl" || fail "no sentinel after the genesis"
-          # separate cgroups: no supervisor process in the engine's
-          cgroup=/sys/fs/cgroup$(prop "$ENGINE" ControlGroup)
-          while read -r pid; do
-              ! sudo grep -q runner_supervisor "/proc/$pid/cmdline" ||
-                  fail "a supervisor runs in the engine's cgroup"
-          done <"$cgroup/cgroup.procs"
-          ok "the engine's cgroup holds no supervisor"
-          for job in "${QUIESCE[@]}"; do
-              cli sendevent ON_HOLD -J "$job" -S "$SOCK"
-          done
+        run: bash examples/nightbank/deploy/drill-steps.sh first-start
 
       - name: same-root restart resumes
-        run: |
-          source examples/nightbank/deploy/drill-lib.sh
-          invocation=$(prop "$ENGINE" InvocationID)
-          mark=$(date +%s)
-          manual restart
-          wait_up
-          [ "$(prop "$ENGINE" InvocationID)" != "$invocation" ] || fail "no new invocation"
-          line=$(launch_line_since "$mark")
-          echo "$line"
-          [[ $line == *" --run-root $ROOT "* && $line == *" --resume" ]] ||
-              fail "the restart was not a resume of $ROOT"
-          held=$(cli query status --job APAC_EOD_B -S "$SOCK" | jq -r '.jobs.APAC_EOD_B.on_hold')
-          [ "$held" = true ] || fail "the hold did not survive the restart"
-          ok "the operator's holds survived the restart"
+        run: bash examples/nightbank/deploy/drill-steps.sh restart
 
       - name: a detached job survives an engine stop
-        run: |
-          source examples/nightbank/deploy/drill-lib.sh
-          cli sendevent FORCE_STARTJOB -J "$LONG_JOB" -S "$SOCK"
-          wait_for 60 "$LONG_JOB is RUNNING" job_is "$LONG_JOB" RUNNING
-          pids=$(pgrep -f "fakework $LONG_JOB") || fail "no $LONG_JOB process"
-          for pid in $pids; do
-              grep -q "$SUPERVISOR" "/proc/$pid/cgroup" || fail "$pid is not in $SUPERVISOR"
-          done
-          ok "$LONG_JOB runs in the supervisor's cgroup"
-          sudo systemctl stop "$ENGINE"
-          is_state "$ENGINE" inactive || fail "$ENGINE: $(prop "$ENGINE" ActiveState)"
-          for pid in $pids; do
-              sudo kill -0 "$pid" || fail "$pid died with the engine"
-          done
-          cli supervise list --run-root "$ROOT" |
-              jq -e --arg job "$LONG_JOB" '[.runs[].job] | index($job) != null' >/dev/null ||
-              fail "the supervisor does not list $LONG_JOB"
-          ok "$LONG_JOB outlived the engine"
-          start_engine
-          job_is "$LONG_JOB" RUNNING || fail "after reattach: $(job_status "$LONG_JOB")"
-          ok "the restarted engine reattached to $LONG_JOB"
-          wait_for 180 "$LONG_JOB ended in SUCCESS" job_is "$LONG_JOB" SUCCESS
+        run: bash examples/nightbank/deploy/drill-steps.sh detached
 
       - name: a changed estate is refused without a restart loop
-        run: |
-          source examples/nightbank/deploy/drill-lib.sh
-          sudo systemctl stop "$ENGINE"
-          sudo cp "$ESTATE/apac.jil" /tmp/apac.jil.orig
-          sudo sed -i 's/APAC_EXE_TRADES_C --sleep 12 /APAC_EXE_TRADES_C --sleep 13 /' "$ESTATE/apac.jil"
-          ! sudo cmp -s /tmp/apac.jil.orig "$ESTATE/apac.jil" || fail "the edit did not apply"
-          expect_refusal "catalog hash mismatch"
-          sudo cp /tmp/apac.jil.orig "$ESTATE/apac.jil"
-          start_engine
+        run: bash examples/nightbank/deploy/drill-steps.sh refusal
 
       - name: a sealed engine stays stopped until the next period is opened
-        run: |
-          source examples/nightbank/deploy/drill-lib.sh
-          next=()
-          for file in "${FILES[@]}"; do
-              next+=(--next "$ESTATE/$file.jil")
-          done
-          mark=$(date +%s)
-          # the drill's own FORCE_STARTJOB is inside the retry horizon, hence
-          # --force-seal; every --next-* restates the launcher's options
-          cli seal --run-root "$ROOT" "${next[@]}" -p "$PROPERTIES" \
-              --next-detached --next-as-machine localhost --next-machine-policy strict \
-              --next-timezone UTC --force-seal --claimed-actor drill@nightbank
-          assert_stays_stopped 3 "sealed period 1" "$mark"
-          mark=$(date +%s)
-          start_engine
-          launch_line_since "$mark" | grep -q -- ' --resume$' || fail "the opener was not a resume"
-          sudo test -e "$ROOT/wal/000002.jsonl" || fail "period 2 did not open in $ROOT"
-          ok "period 2 opened in place"
+        run: bash examples/nightbank/deploy/drill-steps.sh sealed
+
+      - name: managed quiescence keeps both units stopped past RestartSec
+        run: bash examples/nightbank/deploy/drill-steps.sh quiesce
+
+      - name: a copy of the root and the anchor restores at the recorded paths
+        run: bash examples/nightbank/deploy/drill-steps.sh restore
+
+      - name: upgrade by the resume-safe row resumes the engine and keeps the supervisor
+        run: bash examples/nightbank/deploy/drill-steps.sh upgrade-resume-safe
+
+      - name: upgrade by the silent-note row opens the next period in a fresh root
+        run: bash examples/nightbank/deploy/drill-steps.sh upgrade-fresh-root
+
+      - name: upgrade by the coordinated row replaces both units and resumes the same root
+        run: bash examples/nightbank/deploy/drill-steps.sh upgrade-coordinated
+
+      - name: an estate on the old release, v1.7.0 from PyPI
+        run: bash examples/nightbank/deploy/drill-steps.sh upgrade-old-release
+
+      - name: upgrade by the state-machine row starts a new estate on this build
+        run: bash examples/nightbank/deploy/drill-steps.sh upgrade-state-machine
 
       - name: diagnostics and teardown
         if: always()
-        run: |
-          source examples/nightbank/deploy/drill-lib.sh
-          sudo systemctl status dsl41-engine.service dsl41-supervisor.service --no-pager || true
-          sudo journalctl -u dsl41-engine.service -u dsl41-supervisor.service \
-              -o short-precise --no-pager || true
-          sudo tail -n 100 "$ROOT/supervisor.log" || true
-          sudo systemctl stop dsl41-engine.service dsl41-supervisor.service || true
+        run: bash examples/nightbank/deploy/drill-steps.sh diagnostics

@@ -32,6 +32,8 @@ from test_nightbank_example import NB, _launcher
 DEPLOY = NB / "deploy"
 LAUNCH = DEPLOY / "dsl41-launch"
 DRILL_LIB = DEPLOY / "drill-lib.sh"
+DRILL_STEPS = DEPLOY / "drill-steps.sh"
+DRILL_WORKFLOW = NB.parents[1] / ".github" / "workflows" / "service-drill.yml"
 DSL41 = Path(sys.executable).with_name("dsl41")
 ME = pwd.getpwuid(os.geteuid()).pw_name
 #: the order the launcher names the files in; it is part of the catalog
@@ -172,6 +174,94 @@ def test_the_launcher_resumes_if_and_only_if_the_root_holds_its_sentinel(short_r
     (root / "journal.jsonl").write_text("")
     words = shlex.split(_sh(launcher, "--print").stdout)
     assert words.count("--resume") == 1 and words[-1] == "--resume"
+
+
+def test_the_open_trigger_makes_the_engine_mode_open_from_the_anchor(short_root: Path) -> None:
+    """DL-266: `<RUN_ROOT>.open-from` makes the engine mode pass
+    `--open-from ESTATE_ANCHOR` instead of choosing from the root, for a
+    fresh root and for a root that already holds its sentinel (the
+    identical retry of a roll). --print leaves the trigger in place."""
+    site = _site(short_root)
+    launcher = _configured(short_root, **site)
+    root = short_root / "runs" / "nb"
+    root.mkdir(parents=True)
+    (root / "supervisor.sock").write_text("")
+    trigger = Path(site["RUN_ROOT"] + ".open-from")
+    trigger.write_text("")
+    for sentinel in (False, True):
+        if sentinel:
+            (root / "journal.jsonl").write_text("")
+        printed = _sh(launcher, "--print")
+        assert printed.returncode == 0, printed.stderr
+        words = shlex.split(printed.stdout)
+        assert words[-2:] == ["--open-from", site["ESTATE_ANCHOR"]]
+        assert "--resume" not in words
+        assert trigger.exists()
+
+
+@pytest.mark.parametrize("mode", [("--print",), ("engine",)])
+def test_a_genesis_against_an_existing_anchor_is_refused_and_names_the_trigger(
+    short_root: Path, mode: tuple[str, ...]
+) -> None:
+    """DL-266: with no trigger and no sentinel, an anchor that already holds
+    a lineage refuses the start with exit 2, before dsl41 runs. A genesis
+    there would write a foreign sentinel into the root first, and that
+    blocks the identical retry of a roll whose opener died early."""
+    site = _site(short_root)
+    launcher = _configured(short_root, **site)
+    root = Path(site["RUN_ROOT"])
+    root.mkdir(parents=True)
+    (root / "supervisor.sock").write_text("")
+    anchor = Path(site["ESTATE_ANCHOR"])
+    anchor.mkdir()
+    (anchor / "anchor.json").write_text("{}")
+    refused = _sh(launcher, *mode)
+    assert refused.returncode == 2
+    assert "a genesis would fork it" in refused.stderr
+    assert f"create {site['RUN_ROOT']}.open-from" in refused.stderr
+    assert refused.stdout == ""
+    assert sorted(path.name for path in root.iterdir()) == ["supervisor.sock"]
+
+
+def test_a_genesis_with_an_anchor_directory_but_no_anchor_proceeds(short_root: Path) -> None:
+    """The non-triggering twin: no anchor.json in ESTATE_ANCHOR, so the
+    launcher still chooses a genesis."""
+    site = _site(short_root)
+    launcher = _configured(short_root, **site)
+    Path(site["ESTATE_ANCHOR"]).mkdir(parents=True)
+    printed = _sh(launcher, "--print")
+    assert printed.returncode == 0, printed.stderr
+    words = shlex.split(printed.stdout)
+    assert "--resume" not in words and "--open-from" not in words
+
+
+def test_the_engine_mode_removes_the_open_trigger_before_it_runs_dsl41(
+    short_root: Path,
+) -> None:
+    """DL-266: one shot. The engine mode removes the trigger before it execs
+    dsl41, so the unit's next start resumes the opened root instead of
+    opening it again."""
+    seen = short_root / "argv"
+    fake = short_root / "fake-dsl41"
+    fake.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$@\" >{shlex.quote(str(seen))}\n")
+    fake.chmod(0o755)
+    site = {**_site(short_root), "DSL41": str(fake)}
+    launcher = _configured(short_root, **site)
+    trigger = Path(site["RUN_ROOT"] + ".open-from")
+    (short_root / "runs").mkdir()
+    trigger.write_text("")
+    opened = _sh(launcher, "engine")
+    assert opened.returncode == 0, opened.stderr
+    argv = seen.read_text().splitlines()
+    assert argv[-2:] == ["--open-from", site["ESTATE_ANCHOR"]]
+    assert not trigger.exists()
+    # what the open leaves behind: a root with its sentinel
+    Path(site["RUN_ROOT"]).mkdir()
+    Path(site["RUN_ROOT"], "journal.jsonl").write_text("")
+    restarted = _sh(launcher, "engine")
+    assert restarted.returncode == 0, restarted.stderr
+    argv = seen.read_text().splitlines()
+    assert argv[-1] == "--resume" and "--open-from" not in argv
 
 
 @pytest.mark.parametrize("mode", [("--print",), ("engine",)])
@@ -445,6 +535,7 @@ def test_the_drill_names_the_same_paths_and_file_order_as_the_launcher() -> None
     for launcher_name, drill_name in (
         ("DSL41", "DSL41"),
         ("RUN_ROOT", "ROOT"),
+        ("ESTATE_ANCHOR", "ANCHOR"),
         ("ACCESS_MAP", "MAP"),
         ("ESTATE", "ESTATE"),
         ("PROPERTIES", "PROPERTIES"),
@@ -452,6 +543,47 @@ def test_the_drill_names_the_same_paths_and_file_order_as_the_launcher() -> None
         (launcher_value,) = re.findall(rf"^{launcher_name}=(\S+)$", launcher_text, re.M)
         assert drill_values[drill_name] == launcher_value, (launcher_name, drill_name)
 
+    # the upgrade steps flip the symlink the launcher's dsl41 runs through
+    assert drill_values["DSL41"] == drill_values["VENV"] + "/bin/dsl41"
+
     launcher_order = re.findall(r'"\$ESTATE/(\w+)\.jil"', launcher_text)
     (files_literal,) = re.findall(r"^FILES=\(([^)]*)\)$", drill_text, re.M)
     assert files_literal.split() == launcher_order
+
+
+def _workflow_runs(text: str) -> list[str]:
+    """Every step's `run:` value in a job's steps, in order, whether the key
+    opens the step (`- run: ...`) or follows its `name:`. A block scalar
+    is returned as its indicator (`|` or `>`), so a step body shows up as
+    a value that is not a one-line call."""
+    steps = text[text.index("steps:") :]
+    return re.findall(r"^[ \t]+(?:-[ \t]+)?run:[ \t]*(.*?)[ \t]*$", steps, re.M)
+
+
+def test_the_workflow_run_reader_sees_every_step_form() -> None:
+    text = (
+        "    steps:\n"
+        "      - name: a\n"
+        "        run: bash one.sh\n"
+        "      - run: rm -rf /srv/dsl41\n"
+        "      - name: b\n"
+        "        run: |\n"
+        "          echo body\n"
+    )
+    assert _workflow_runs(text) == ["bash one.sh", "rm -rf /srv/dsl41", "|"]
+
+
+def test_the_workflow_runs_the_drill_steps_in_their_order() -> None:
+    """DL-266: the workflow and drill-local.sh run the same step bodies,
+    which live in drill-steps.sh. The workflow names each step once, in the
+    order `drill-steps.sh --list` gives, then the diagnostics step, which
+    runs whatever came before; it holds no step body of its own."""
+    listed = subprocess.run(
+        ["bash", str(DRILL_STEPS), "--list"], capture_output=True, text=True, timeout=60, check=True
+    ).stdout.split()
+    workflow = DRILL_WORKFLOW.read_text()
+    call = "bash examples/nightbank/deploy/drill-steps.sh"
+    assert _workflow_runs(workflow) == [f"{call} {step}" for step in listed] + [
+        f"{call} diagnostics"
+    ]
+    assert re.search(rf"^\s+if: always\(\)\n\s+run: {call} diagnostics$", workflow, re.M)
