@@ -269,7 +269,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Callable, Mapping
 from datetime import date, datetime, time as dtime, timedelta, tzinfo
-from typing import Final
+from typing import Final, cast
 
 from dsl41.autocal import CalendarRuleError, CompiledCalendar, compile_calendar, standard_days
 from dsl41.canon import CanonError, canonical_bytes
@@ -297,6 +297,7 @@ from dsl41.conditions import (
 from dsl41.ir import CatalogIR, JobIR, MustTime, Semantics, Time
 
 from dsl41.oracle_state import (
+    INJECTABLE_STATUSES,
     LIVE,
     TERMINAL,
     CarriedRows,
@@ -988,18 +989,12 @@ class Oracle:
             # pinned in ir.exit_is_success).
             sem = job_ir.sem if job_ir is not None else Semantics()
             status = "SUCCESS" if sem.exit_is_success(exit_code) else "FAILURE"
-        if status not in (
-            "INACTIVE",
-            "STARTING",
-            "RUNNING",
-            "SUCCESS",
-            "FAILURE",
-            "TERMINATED",
-        ):
+        if not isinstance(status, str) or status not in INJECTABLE_STATUSES:
             raise OracleError(f"unknown status {status!r}")
         code = exit_code if isinstance(exit_code, int) else None
         if status != "INACTIVE" or job_ir is None:
-            self._set_status(job, status, cause="injected STATUS", exit_code=code)
+            # INJECTABLE_STATUSES holds JobStatus members only
+            self._set_status(job, cast(JobStatus, status), cause="injected STATUS", exit_code=code)
             return
         self._inject_inactive(job_ir, code)
 

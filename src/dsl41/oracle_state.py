@@ -48,7 +48,7 @@ import heapq
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from types import MappingProxyType
-from typing import Literal
+from typing import Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -66,6 +66,14 @@ JobStatus = Literal[
     "FAILURE",
     "TERMINATED",
 ]
+
+#: The statuses an injected STATUS event may carry: every `JobStatus` except
+#: QUE_WAIT. QUE_WAIT belongs to the capacity owner (DL-50): the queue
+#: assigns it with a waiter rank and clears it on admission, and an operator
+#: never injects it (DL-264). The oracle's STATUS handler and the control
+#: server's CHANGE_STATUS check both read this one set, so framing cannot
+#: admit a status the oracle refuses.
+INJECTABLE_STATUSES: frozenset[str] = frozenset(get_args(JobStatus)) - {"QUE_WAIT"}
 
 TERMINAL: frozenset[str] = frozenset({"SUCCESS", "FAILURE", "TERMINATED"})
 # Reservations exist exactly while a row is in LIVE (period-model ss5); the

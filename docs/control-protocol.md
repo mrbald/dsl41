@@ -303,8 +303,13 @@ nor the store. A refused read is revision `0`, which is exactly what the
 conditional create names, so the bundled composer reads it that way. Once
 `CHANGE_STATUS` has invented the row, `status` answers it like any job.
 
-`status` must be one of the oracle's `JobStatus` values; the refusal
-lists them.
+`status` must be one of the injectable statuses: `INACTIVE`, `STARTING`,
+`RUNNING`, `SUCCESS`, `FAILURE` or `TERMINATED` (DL-264). `QUE_WAIT` is
+refused. It is an internal state of the capacity owner (DL-50), and the
+oracle gives an injected `QUE_WAIT` no meaning. The refusal comes before
+the journal append, so it consumes no log index, and it lists the
+injectable set. Whether the vendor's `sendevent -s QUE_WAIT` is legal is
+not known; this is a stated support limit, not a claim about the vendor.
 
 ### `host` (S5a, DL-94)
 

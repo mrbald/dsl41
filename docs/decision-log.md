@@ -17628,3 +17628,49 @@ relitigate an entry; append a new one.
   match the reader's message as well as the field, and the
   protocol-evolution sentence names the nested fields the strict read
   also covers.
+- DL-264 CHANGE_STATUS refuses a status the oracle cannot inject
+  (2026-10-04; oracle_state.py, oracle.py, runner_control.py,
+  control-protocol §3)
+  THE DEFECT. The control server accepted every `JobStatus` value for
+  `CHANGE_STATUS`. The oracle's injected-status handler knows six of the
+  seven and raised on `QUE_WAIT`. The engine appends and fsyncs an input
+  before it applies it, so the refused status was already durable. The
+  live loop stopped, and every replay of the log stopped on the same
+  record. No build of the same state-machine version could resume the
+  period. Released v1.7.0 has the same defect.
+  THE RULE. One injectable set lives beside `JobStatus`: every value
+  except `QUE_WAIT`. The oracle's handler and the control server's
+  payload check both read it. A status outside it is refused before the
+  journal append, so it consumes no log index. The refusal lists the set.
+  `QUE_WAIT` stays an internal status of the capacity owner (DL-50); this
+  entry gives it no queue-entry meaning. The dossier has no evidence on
+  whether the vendor's `sendevent -s QUE_WAIT` is legal, so the refusal is
+  a stated support limit.
+  WHERE. The check stays in the control server's sendevent payload
+  translation, beside every other verb's payload check. The review plan
+  had placed it in `parse_envelope`. That function reads only the
+  envelope, leaves payload strings to each verb, and has one caller, the
+  control server. A composition test enumerates the code's own verb and
+  status sets: every payload value the framing accepts must apply
+  without an oracle error. A new verb or status that breaks this fails
+  the suite.
+  WHAT DOES NOT CHANGE. `_gate`, replay and the state-machine version.
+  The next release cannot open a v1.7.0 log, because taking leadership
+  refuses a segment pinned to another state-machine version. Logs it
+  writes cannot hold the input. No estate runs any dsl41 release (owner,
+  2026-10-04), so no repair tool is built. The next release note warns
+  v1.7.0 users never to send `CHANGE_STATUS` with `QUE_WAIT`.
+  TESTS. `test_dl264_change_status_applies_or_is_refused_before_the_wal`
+  sends every `JobStatus` through the real socket, for a catalog job and
+  a `JOB^INST` target. A refused status leaves the WAL's bytes and record
+  count unchanged and consumes no index. `test_dl264_everything_framing_accepts_applies_to_the_oracle`
+  offers the framing every `EventKind` name and every status, and applies
+  each accepted event to an oracle. Both fail on the code before this
+  entry.
+  REVIEW. The Opus reviewer found one major: the socket test compared the
+  one-line `journal.jsonl` sentinel, not the WAL. The fix compares the
+  WAL, and corrects the same sentinel read in five older tests in
+  `test_runner_control.py` and `test_ledger.py`. Its minor, a composition
+  test that missed new verbs, was fixed the same round. It confirmed both
+  in round 2. Codex found no material defect and checked the placement
+  independently.
