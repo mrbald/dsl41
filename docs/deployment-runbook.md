@@ -1160,13 +1160,11 @@ a podman container with systemd as PID 1 on Ubuntu 24.04, as an
 unprivileged user with passwordless sudo, as the runner runs them
 (DL-271). It runs the host's architecture, so on Apple silicon it is arm64, not the runner's
 x86_64.
-The drill passed every step on GitHub's Ubuntu 24.04 runner at d886679
-(DL-223). Since then it gained the `quiesce`, `restore`, `reboot`,
-`upgrade-resume-safe`, `upgrade-fresh-root`, `upgrade-coordinated`,
-`upgrade-old-release`, `upgrade-state-machine` and `retire` steps, and
-its `install` and `first-start` steps now run §0's recipe blocks. None of
-that has run on GitHub. No other distribution or systemd version has been
-observed there. It is not
+The drill passed every step on GitHub's Ubuntu 24.04 runner at c1e6b0c
+(2026-10-04, DL-271), the `quiesce`, `restore`, `reboot`, upgrade and
+`retire` steps and the recipe-driven `install` and `first-start`
+included. Its first pass there was at d886679 (DL-223). No other
+distribution or systemd version has been observed. It is not
 part of the default gate: dispatch it again after a change to the units,
 the launcher or the drill.
 
