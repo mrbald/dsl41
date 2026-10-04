@@ -26,6 +26,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import get_args
 
 import pytest
 import typer
@@ -33,14 +34,22 @@ from typer.testing import CliRunner
 
 from dsl41.cli import app
 from dsl41.ir import lower_source
-from dsl41.oracle_state import Event
+from dsl41.oracle import Oracle
+from dsl41.oracle_state import INJECTABLE_STATUSES, Event, EventKind, JobStatus
 from dsl41.runner import Engine
-from dsl41.runner_startup import start_run
+from dsl41.runner_startup import resume_run, start_run
 from dsl41.runner_admission import PROTOCOL_VERSION, addressed_key
-from dsl41.runner_control import ControlServer, command, read_for, revision_in
+from dsl41.runner_control import (
+    JOB_EVENT_VERBS,
+    STATUSES,
+    ControlServer,
+    command,
+    read_for,
+    revision_in,
+)
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import EngineError, RealClock
-from dsl41.runner_journal import read_journal
+from dsl41.runner_journal import read_journal, replay_inputs
 from dsl41.runner_scheduler import Scheduler
 
 if not sys.platform.startswith(("linux", "darwin")):  # pragma: no cover
@@ -320,7 +329,7 @@ def test_non_string_job_verb_is_refused_as_unknown_verb_wal_unchanged(short_root
     async def scenario() -> None:
         engine, server, loop_task = await _serve(run_root, text)
         try:
-            before = (run_root / "journal.jsonl").read_bytes()
+            before = engine.journal.path.read_bytes()
             resp = await _control_call(
                 server.path,
                 {"cmd": "sendevent", "verb": [], "payload": {"job": "nv_job"}},
@@ -328,7 +337,7 @@ def test_non_string_job_verb_is_refused_as_unknown_verb_wal_unchanged(short_root
             assert resp["ok"] is False
             assert resp["refused"] is True
             assert "unknown verb" in resp["error"]
-            assert (run_root / "journal.jsonl").read_bytes() == before
+            assert engine.journal.path.read_bytes() == before
         finally:
             await _teardown(engine, server, loop_task)
 
@@ -346,7 +355,7 @@ def test_non_string_host_verb_is_refused_as_unknown_host_verb_wal_unchanged(
     async def scenario() -> None:
         engine, server, loop_task = await _serve(run_root, text)
         try:
-            before = (run_root / "journal.jsonl").read_bytes()
+            before = engine.journal.path.read_bytes()
             resp = await _control_call(
                 server.path,
                 {"cmd": "host", "verb": {}, "payload": {"id": "local"}},
@@ -354,7 +363,7 @@ def test_non_string_host_verb_is_refused_as_unknown_host_verb_wal_unchanged(
             assert resp["ok"] is False
             assert resp["refused"] is True
             assert "unknown host verb" in resp["error"]
-            assert (run_root / "journal.jsonl").read_bytes() == before
+            assert engine.journal.path.read_bytes() == before
         finally:
             await _teardown(engine, server, loop_task)
 
@@ -372,7 +381,7 @@ def test_non_string_change_status_status_is_refused_as_unknown_status_wal_unchan
     async def scenario() -> None:
         engine, server, loop_task = await _serve(run_root, text)
         try:
-            before = (run_root / "journal.jsonl").read_bytes()
+            before = engine.journal.path.read_bytes()
             resp = await _control_call(
                 server.path,
                 {
@@ -384,7 +393,7 @@ def test_non_string_change_status_status_is_refused_as_unknown_status_wal_unchan
             assert resp["ok"] is False
             assert resp["refused"] is True
             assert "unknown status" in resp["error"]
-            assert (run_root / "journal.jsonl").read_bytes() == before
+            assert engine.journal.path.read_bytes() == before
         finally:
             await _teardown(engine, server, loop_task)
 
@@ -3026,3 +3035,153 @@ def test_dl172_subscribe_lines_refuses_a_record_line_over_the_limit(
         assert "over the 64-byte limit" in str(caught.value)
     finally:
         server.close()
+
+
+# ------------------------------------------------------------------ DL-264
+# CHANGE_STATUS refuses a status the oracle cannot apply (F1), and the
+# composition test (F6a) proves every payload value framing accepts applies.
+
+_STATUS_JIL = "insert_job: st_job\njob_type: c\ncommand: x\nmachine: m1\n"
+_XINST_JIL = "insert_xinst: PRD\nxtype: a\n\n" + _STATUS_JIL
+
+
+def _inputs_and_decisions(run_root: Path) -> tuple[list[dict], list[dict]]:
+    records = read_journal(run_root / "journal.jsonl")
+    return (
+        [r for r in records if r.get("rec") == "input"],
+        [r for r in records if r.get("rec") == "decision"],
+    )
+
+
+@pytest.mark.parametrize("target", ["st_job", "FEED^PRD"])
+@pytest.mark.parametrize("status", sorted(get_args(JobStatus)))
+def test_dl264_change_status_applies_or_is_refused_before_the_wal(
+    short_root: Path, status: str, target: str
+) -> None:
+    """Every JobStatus, through the real socket, for a catalog job and for a
+    SEM-07 JOB^INST pseudo-entity. An injectable status applies with a durable
+    decision that replays. QUE_WAIT is refused with the WAL untouched and no
+    index consumed. Either way the engine stays up, and a following ordinary
+    command applies and survives a resume of the same run root."""
+    run_root = short_root / "run"
+    injectable = status in INJECTABLE_STATUSES
+    catalog = lower_source(_XINST_JIL)
+
+    async def scenario() -> Engine:
+        engine, server, loop_task = await _serve(run_root, _XINST_JIL)
+        try:
+            assert engine.journal is not None
+            wal_path = engine.journal.path
+            assert wal_path.parent.name == "wal"  # the WAL, not the period sentinel
+            wal_before = wal_path.read_bytes()
+            records_before = len(read_journal(wal_path))
+            index_before = engine.frontiers.committed_index
+            resp = await _sendevent(server.path, "CHANGE_STATUS", job=target, status=status)
+            if injectable:
+                assert resp["ok"] is True
+                assert engine.frontiers.committed_index == index_before + 1
+                inputs, decisions = _inputs_and_decisions(run_root)
+                sent = [r for r in inputs if r["kind"] == "STATUS" and r["source"] == "control"]
+                assert [r["payload"]["status"] for r in sent] == [status]
+                assert [d["decision"] for d in decisions if d["index"] == sent[0]["seq"]] == [
+                    "applied"
+                ]
+                assert engine.oracle.store.job[target].status == status
+            else:
+                assert resp["ok"] is False
+                assert resp["refused"] is True
+                assert status in resp["error"]
+                for name in sorted(INJECTABLE_STATUSES):
+                    assert name in resp["error"]
+                # not one record of any kind, indexed or not
+                assert wal_path.read_bytes() == wal_before
+                assert len(read_journal(wal_path)) == records_before
+                assert engine.frontiers.committed_index == index_before
+            assert not loop_task.done()  # the engine stays up
+            follow = await _sendevent(server.path, "SET_GLOBAL", name="G_AFTER", value="1")
+            assert follow["ok"] is True
+            assert engine.oracle.store.globals_["G_AFTER"].value == "1"
+        finally:
+            await _teardown(engine, server, loop_task)
+        # the log replays from nothing, and the same run root resumes
+        replayed = Oracle(catalog)
+        replay_inputs(replayed, read_journal(run_root / "journal.jsonl"))
+        assert replayed.store.globals_["G_AFTER"].value == "1"
+        if injectable:
+            assert replayed.store.job[target].status == status
+        resumed = await resume_run(
+            catalog,
+            run_root,
+            clock=RealClock(),
+            adapters={"CMD": FakeAdapter()},
+        )
+        try:
+            assert resumed.oracle.store.globals_["G_AFTER"].value == "1"
+            assert resumed.frontiers.applied_index == resumed.frontiers.committed_index
+        finally:
+            await resumed.shutdown()
+            assert resumed.journal is not None
+            resumed.journal.close()
+        return resumed
+
+    asyncio.run(scenario())
+
+
+def test_dl264_the_injectable_set_is_every_status_but_que_wait() -> None:
+    assert set(get_args(JobStatus)) - INJECTABLE_STATUSES == {"QUE_WAIT"}
+    assert INJECTABLE_STATUSES < STATUSES  # STATUSES stays the full parse alphabet
+
+
+def test_dl264_everything_framing_accepts_applies_to_the_oracle(tmp_path: Path) -> None:
+    """F6a. Offer `_event_for` every name in the oracle's event alphabet
+    (`get_args(EventKind)`), plus `CHANGE_STATUS`, the wire name of `STATUS`,
+    each with a payload that carries every field framing reads (job, name,
+    value). `CHANGE_STATUS` and `STATUS` are also offered every status in
+    `STATUSES`, with and without an exit code, on a catalog job and on a
+    JOB^INST pseudo-entity. Whatever framing accepts must apply to an oracle
+    without an OracleError, from a fresh state and with the job running. A
+    new verb branch in `_event_for` that frames an event the oracle refuses
+    fails here without an edit to this test, provided its name is in the
+    event alphabet."""
+    from dsl41.runner_clock import VirtualClock
+
+    catalog = lower_source(_XINST_JIL)
+    engine = start_run(
+        catalog,
+        tmp_path / "run",
+        clock=VirtualClock(start=datetime(2026, 7, 1, 8, 0)),
+        adapters={"CMD": FakeAdapter()},
+    )
+    try:
+        server = ControlServer(engine, tmp_path / "control.sock")
+        fields: dict[str, object] = {"job": "st_job", "name": "G", "value": "v"}
+        requests: list[dict] = []
+        for verb in sorted({*get_args(EventKind), "CHANGE_STATUS"}):
+            if verb not in ("CHANGE_STATUS", "STATUS"):
+                requests.append({"verb": verb, "payload": dict(fields)})
+                continue
+            for status in sorted(STATUSES):
+                for target in ("st_job", "FEED^PRD"):
+                    for extra in ({}, {"exit_code": 3}):
+                        payload = {**fields, "job": target, "status": status, **extra}
+                        requests.append({"verb": verb, "payload": payload})
+        accepted: set[tuple[str, object]] = set()
+        for request in requests:
+            framed = server._event_for(request)
+            if isinstance(framed, dict):
+                assert framed["ok"] is False
+                continue
+            accepted.add((request["verb"], request["payload"].get("status")))
+            for running in (False, True):
+                oracle = Oracle(catalog)
+                if running:
+                    oracle.feed(Event(at=framed.at, kind="STARTJOB", payload={"job": "st_job"}))
+                oracle.feed(framed)  # raises OracleError if framing admitted too much
+        verbs = {verb for verb, _ in accepted}
+        assert verbs >= JOB_EVENT_VERBS | {"SET_GLOBAL", "CHANGE_STATUS"}
+        assert {status for verb, status in accepted if verb == "CHANGE_STATUS"} == (
+            INJECTABLE_STATUSES
+        )
+    finally:
+        assert engine.journal is not None
+        engine.journal.close()

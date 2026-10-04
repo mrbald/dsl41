@@ -104,7 +104,14 @@ from dsl41.boundary import SealRequest
 from dsl41.canon import is_scalar_json, is_scalar_string, is_wire_int
 from dsl41.conditions import GlobalAtom, iter_atoms
 from dsl41.ir import ExecSpec, FwSpec, JobIR
-from dsl41.oracle_state import Event, EventKind, HostRuntime, JobRuntime, JobStatus
+from dsl41.oracle_state import (
+    INJECTABLE_STATUSES,
+    Event,
+    EventKind,
+    HostRuntime,
+    JobRuntime,
+    JobStatus,
+)
 from dsl41.runner import Engine
 from dsl41.runner_access import AccessControl, peer_principal
 from dsl41.runner_adapters import LINE_LIMIT, job_log_paths
@@ -139,6 +146,9 @@ JOB_EVENT_VERBS: frozenset[EventKind] = frozenset(
         "RELEASE_RESOURCE",  # frees the units a job still holds (DL-256)
     }
 )
+#: The parse alphabet of a typed status: every `JobStatus`. The TUI reads it
+#: to tell a status from a job name. It is NOT the set an operator may send;
+#: that is `INJECTABLE_STATUSES`, which leaves out QUE_WAIT (DL-264).
 STATUSES: frozenset[str] = frozenset(get_args(JobStatus))
 
 #: The operator-flag alphabet of the `status` payload and the ORDER both
@@ -823,11 +833,18 @@ class ControlServer:
                 name, sep, inst = job.rpartition("^") if isinstance(job, str) else ("", "", "")
                 if not (sep and name and inst in self.engine.oracle.catalog.external_instances):
                     return error
-            if not (isinstance(status, str) and status in STATUSES):
-                return {
-                    "ok": False,
-                    "error": f"unknown status {status!r} (one of {sorted(STATUSES)})",
-                }
+            if not (isinstance(status, str) and status in INJECTABLE_STATUSES):
+                # DL-264: QUE_WAIT is a JobStatus the capacity owner assigns. The
+                # oracle refuses it as an injected status, and by then the input
+                # is durable and every replay would stop on it. Refuse it here,
+                # before the WAL append.
+                injectable = f"injectable: {sorted(INJECTABLE_STATUSES)}"
+                if isinstance(status, str) and status in STATUSES:
+                    return {
+                        "ok": False,
+                        "error": f"status {status!r} cannot be sent ({injectable})",
+                    }
+                return {"ok": False, "error": f"unknown status {status!r} ({injectable})"}
             status_payload: dict[str, object] = {"job": job, "status": status}
             if "exit_code" in payload:
                 if not isinstance(payload["exit_code"], int) or isinstance(

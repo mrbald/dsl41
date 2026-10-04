@@ -125,10 +125,10 @@ def test_a_refused_resume_leaves_the_log_and_the_estate_untouched(tmp_path: Path
     run_root = tmp_path / "run"
     engine = _start(run_root)
     try:
-        before = (run_root / "journal.jsonl").read_bytes()
+        before = engine.journal.path.read_bytes()
         with pytest.raises(EngineError, match="held by another engine"):
             asyncio.run(_resume(run_root, T0 + timedelta(minutes=1)))
-        assert (run_root / "journal.jsonl").read_bytes() == before  # not one record
+        assert engine.journal.path.read_bytes() == before  # not one record
         assert list((run_root / "runs").iterdir()) == []
     finally:
         _close(engine)
@@ -307,7 +307,7 @@ def test_a_replaced_lock_file_stops_the_engine_that_can_no_longer_prove_it_leads
     async def scenario() -> None:
         engine.inject(_event("STARTJOB", 0))
         await engine.run_until_quiescent(T0 + timedelta(seconds=30))  # lands: still the leader
-        before = (run_root / "journal.jsonl").read_bytes()
+        before = engine.journal.path.read_bytes()
 
         lock_path.unlink()
         usurper = LeaderLock(run_root)
@@ -318,7 +318,7 @@ def test_a_replaced_lock_file_stops_the_engine_that_can_no_longer_prove_it_leads
                 await engine.run_until_quiescent(T0 + timedelta(minutes=2))
             # refused BEFORE the write: an engine that appended and then
             # noticed would have already admitted the input
-            assert (run_root / "journal.jsonl").read_bytes() == before
+            assert engine.journal.path.read_bytes() == before
         finally:
             usurper.release()
 
