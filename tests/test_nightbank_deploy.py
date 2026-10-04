@@ -34,6 +34,7 @@ LAUNCH = DEPLOY / "dsl41-launch"
 DRILL_LIB = DEPLOY / "drill-lib.sh"
 DRILL_STEPS = DEPLOY / "drill-steps.sh"
 DRILL_WORKFLOW = NB.parents[1] / ".github" / "workflows" / "service-drill.yml"
+DRILL_LOCAL = DEPLOY / "drill-local.sh"
 DSL41 = Path(sys.executable).with_name("dsl41")
 ME = pwd.getpwuid(os.geteuid()).pw_name
 #: the order the launcher names the files in; it is part of the catalog
@@ -587,3 +588,35 @@ def test_the_workflow_runs_the_drill_steps_in_their_order() -> None:
         f"{call} diagnostics"
     ]
     assert re.search(rf"^\s+if: always\(\)\n\s+run: {call} diagnostics$", workflow, re.M)
+
+
+def _drill_local_step_users(text: str) -> list[str | None]:
+    """The `--user` of each `podman exec` in drill-local.sh that runs
+    drill-steps.sh, with line continuations joined; None for an exec with
+    no `--user`, which runs as the container's root."""
+    joined = text.replace("\\\n", " ")
+    users: list[str | None] = []
+    for line in joined.splitlines():
+        if "podman exec" in line and "drill-steps.sh" in line:
+            found = re.search(r"--user[ =]+(\S+)", line)
+            users.append(found.group(1) if found else None)
+    return users
+
+
+def test_drill_local_runs_every_step_as_an_unprivileged_sudoer() -> None:
+    """DL-271: drill-local.sh runs each step and the diagnostics as an
+    unprivileged user with passwordless sudo, as GitHub's runner does, so a
+    step that reads a root-only path without sudo fails locally too."""
+    text = DRILL_LOCAL.read_text()
+    assignments = re.findall(r"^\s*user=(\S+)$", text, re.M)
+    assert len(assignments) == 1 and assignments[0] != "root"
+    assert "useradd --create-home --shell /bin/bash $user" in text
+    assert "echo '$user ALL=(ALL) NOPASSWD:ALL' >/etc/sudoers.d/$user" in text
+    assert 'chown -R "$user:$user" /work' in text
+    # the step loop and the diagnostics, both as the user
+    assert _drill_local_step_users(text) == ['"$user"', '"$user"']
+    # and nothing inside those execs climbs back to root
+    joined = text.replace("\\\n", " ")
+    for line in joined.splitlines():
+        if "podman exec" in line and "drill-steps.sh" in line:
+            assert not re.search(r"\bsudo\b|\bsu\b|runuser", line), line

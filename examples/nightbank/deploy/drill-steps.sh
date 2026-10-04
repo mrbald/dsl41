@@ -411,7 +411,7 @@ step_upgrade_state_machine() { # state-machine row: v1.7.0 to this build, a new 
 # of one whole set, the v1.7.0 estate: no kept anchor names its root, and
 # afterwards no kept anchor names a root that is gone.
 step_retire() { # retirement: the estate stays stopped after its units go, the history audits
-    local out unit anchor root named retained next
+    local out unit anchor root named retained next list anchors
     ROOT=$NEW_ROOT
     ANCHOR=$NEW_ROOT.anchor
     SOCK=$ROOT/control.sock
@@ -457,14 +457,19 @@ step_retire() { # retirement: the estate stays stopped after its units go, the h
     # the site deletes the v1.7.0 set: its anchor and the one root it names
     [ "$(roots_named "$OLD_ROOT.anchor" "$OLD_VENV")" = "$OLD_ROOT" ] ||
         fail "$OLD_ROOT.anchor does not name $OLD_ROOT alone"
-    for anchor in "$(dirname "$ROOT")"/*.anchor; do
+    # an array, not a read loop: the recipes the loops run read stdin
+    list=$(anchors_in "$(dirname "$ROOT")")
+    mapfile -t anchors <<<"$list"
+    for anchor in "${anchors[@]}"; do
         [ "$anchor" = "$OLD_ROOT.anchor" ] && continue
         named=$(roots_named "$anchor")
         echo "$anchor names: $named"
         ! grep -qxF -- "$OLD_ROOT" <<<"$named" || fail "$anchor names $OLD_ROOT"
     done
     sudo rm -rf "$OLD_ROOT" "$OLD_ROOT.anchor"
-    for anchor in "$(dirname "$ROOT")"/*.anchor; do
+    list=$(anchors_in "$(dirname "$ROOT")")
+    mapfile -t anchors <<<"$list"
+    for anchor in "${anchors[@]}"; do
         named=$(roots_named "$anchor")
         [ -n "$named" ] || fail "$anchor names no root"
         while read -r root; do
