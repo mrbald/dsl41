@@ -42,3 +42,34 @@ one.
 ## Cards
 
 The list follows the review order.
+
+Semantics core:
+
+- [Job lifecycle and flags](job-lifecycle.md): one job's status, operator
+  flags and schedule arm.
+- [Box execution](box-execution.md): the box start reset, the completion
+  fold, overrides and cascades.
+- [Capacity waiter and reservation](capacity.md): machine load, resources,
+  the QUE_WAIT queue and held units.
+- [Scheduler and timer frontier](scheduler.md): calendar ticks, the resume
+  sweep and the cutoff.
+
+Process tier:
+
+- [Supervisor](supervisor.md): the process that holds detached runs'
+  lifelines, its lease and its lifecycle.
+- [SPAWN idempotency](spawn-idempotency.md): why a replayed SPAWN never
+  starts a second process.
+- [Wrapper](wrapper.md): the per-run recorder that writes `spawn.json` and
+  `status.json`.
+- [FW observation](fw-observation.md): the file watch and its append-only
+  evidence log.
+
+Engine:
+
+- [Engine loop: the work choice](engine-loop.md): how the single writer
+  picks its next act.
+- [Admission and idempotency](admission.md): one ordered path from arrival
+  to a durable decision.
+- [Effect outbox](effect-outbox.md): SPAWN and KILL intent recorded before
+  the attempt, then dispatched or reconciled.

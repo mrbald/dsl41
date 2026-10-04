@@ -286,3 +286,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-276 | A generated index of the decision log | [README.md](../README.md) |
 | DL-277 | The architecture gate checks that cited modules exist and that the README's source map is complete |  |
 | DL-278 | A rolled root whose only segment is torn has an operator recipe | [docs/risk-map.md](risk-map.md) |
+| DL-279 | A review pack for human readers: an architecture overview, a glossary, a risk map and block cards, which link the rules instead of restating them |  |
