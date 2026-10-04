@@ -1,8 +1,8 @@
 # Block cards
 
 A block card is a short reader's page about one runner building block.
-A reviewer reads the architecture overview first, then one card at a
-time.
+A reviewer reads [the architecture overview](../architecture.md) first,
+then one card at a time.
 Cards hold no rules. Each invariant on a card links the decision or the
 contract section that states it. A card never restates a frozen table; it
 links it.

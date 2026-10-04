@@ -18,6 +18,9 @@ boundaries for estates that run for months.
 
 ## Documents
 
+Start with [docs/architecture.md](docs/architecture.md), the architecture
+overview, then the [block cards](docs/blocks/README.md).
+
 Read these in this order:
 
 1. [docs/deployment-runbook.md §0](docs/deployment-runbook.md#0-the-operator-path) - the operator path: tasks, diagrams, recipes, monitoring and retirement
@@ -42,7 +45,7 @@ and [docs/access-model.md](docs/access-model.md).
 A proposed HTTP and WebSocket gateway is specified in
 [docs/gateway.md](docs/gateway.md); nothing of it is built.
 
-Three reader aids sit beside the contracts and hold no rules:
+Three more reader aids sit beside the contracts and hold no rules:
 [docs/glossary.md](docs/glossary.md) defines the runner's terms and links
 each to the section that defines it,
 [docs/risk-map.md](docs/risk-map.md) lists each runner machine with its
@@ -809,6 +812,8 @@ Compiler:
 - `tests/test_docs_links.py`: repository links in the documentation are
   relative and resolve to GitHub's heading ids, the build's rewrite of
   README.md for PyPI (DL-239), and every glossary entry has a link.
+- `tests/test_architecture_doc.py`: every diagram label in the
+  architecture overview names a real module, CLI verb, process or actor.
 - `tests/test_decision_index.py`: the committed decision index is the
   rendering, and the generator's parsing, title and citation rules
   (DL-276).
