@@ -20,14 +20,15 @@ boundaries for estates that run for months.
 
 Read these in this order:
 
-1. [docs/autosys-semantics.md](docs/autosys-semantics.md) - the meaning of JIL (SEM entries)
-2. [docs/stonebranch-semantics.md](docs/stonebranch-semantics.md) - the target model and the AutoSys-to-UC mapping (UCS/M entries)
-3. [docs/ir-design.md](docs/ir-design.md) - AST, IR-F, IR-G, oracle, and equivalence design
-4. [docs/jil-statement-syntax.md](docs/jil-statement-syntax.md) - the statement scanner spec
-5. [docs/decision-log.md](docs/decision-log.md) - the reasons for the decisions
-6. [docs/citation-index.md](docs/citation-index.md) - what every reference token in the sources means
-7. [docs/simulation-coverage.md](docs/simulation-coverage.md) - what the simulation models, refuses, or assumes
-8. [CLAUDE.md](CLAUDE.md) - the shared agent contract and task-specific reading routes
+1. [docs/deployment-runbook.md §0](docs/deployment-runbook.md#0-the-operator-path) - the operator path: tasks, diagrams, recipes, monitoring and retirement
+2. [docs/autosys-semantics.md](docs/autosys-semantics.md) - the meaning of JIL (SEM entries)
+3. [docs/stonebranch-semantics.md](docs/stonebranch-semantics.md) - the target model and the AutoSys-to-UC mapping (UCS/M entries)
+4. [docs/ir-design.md](docs/ir-design.md) - AST, IR-F, IR-G, oracle, and equivalence design
+5. [docs/jil-statement-syntax.md](docs/jil-statement-syntax.md) - the statement scanner spec
+6. [docs/decision-log.md](docs/decision-log.md) - the reasons for the decisions
+7. [docs/citation-index.md](docs/citation-index.md) - what every reference token in the sources means
+8. [docs/simulation-coverage.md](docs/simulation-coverage.md) - what the simulation models, refuses, or assumes
+9. [CLAUDE.md](CLAUDE.md) - the shared agent contract and task-specific reading routes
 
 The runner's design is
 [docs/runner-design.md](docs/runner-design.md).

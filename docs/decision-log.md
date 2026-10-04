@@ -17872,3 +17872,128 @@ relitigate an entry; append a new one.
   Opus found a resume hint that could loop on an unreadable line. Round 3:
   no material finding from either; the last minor, the §2 and §6 client
   read limit, is fixed.
+- DL-268 An operator path at the front of the runbook, a retirement
+  procedure and a monitoring recipe (2026-10-04; docs/deployment-runbook.md
+  §0, §2a, §2b, §3, §4, §7, §8; README.md; examples/nightbank/deploy/drill-lib.sh,
+  drill-steps.sh; .github/workflows/service-drill.yml;
+  tests/test_operator_recipes.py)
+  THE PLACE. The README sent a new operator through eight design documents
+  before the runbook, and the runbook had no picture of the processes and
+  no recipe for a job change. A new §0 in the runbook is the operator's
+  start, and the README's reading list names it first. It is not a new
+  document: DL-230 made the runbook the one operator document. §0 holds a
+  task index, two text diagrams, four recipes, a monitoring table and a
+  retirement procedure. It links to the later sections for detail rather
+  than repeat them; §2b's quiescence and §7's upgrade rows stay where
+  DL-266 put them.
+  THE DIAGRAMS. Diagram 1 draws the two units, the launcher modes, the
+  engine, the supervisor and the wrappers, the files each one owns, and
+  the storage with owner and mode. Its directives are the unit files'
+  own lines. Diagram 2 is the decision flow: an engine stop, an estate
+  stop, a sealed period not yet opened, an in-place transition, a
+  physical roll and a new estate. The prose beside it separates an engine
+  stop from an estate stop and an in-place transition from a new estate,
+  and the stop recipe separates a request replay from a new rerun.
+  THE RECIPES. Install and start as a service: the account, the run
+  roots' directory, the launcher, the access map, both units enabled,
+  the launcher's `--print`, the first start and a bounded wait for the
+  socket, since `active` is not readiness. Configure an estate: one
+  service account owns the root and the units; people act under their
+  own principals through the access map and a `socket_group`; the
+  launcher's run options are the runtime profile; an access check reads
+  `perimeter.jsonl`. Add, change and remove a
+  job: a complete catalog, a check before the window, holds and drain, a
+  swap and an immediate live seal with the launcher's options restated,
+  an in-place open by starting the engine unit, and a verify query. A
+  removed job stays as a ghost. Delta JIL (`update_job`, `delete_job`,
+  `override_job`) is refused by lowering (DL-29), and the recipe says so.
+  Stop, restart, seal and recover: one bullet per move and per exit code.
+  A host reboot is neither an engine stop nor a held estate stop: drain,
+  reboot, and the enabled units resume the same root.
+  THE REBOOT HOLD. The units are enabled at install, so an estate comes
+  back after a reboot, and the engine unit then resumes the root on every
+  boot, a sealed root included: a boot opens its next period in place.
+  §2b names one step for a window a reboot must not end, "hold the estate
+  down across reboots": disable both units before any stop or seal, live
+  seal included, and enable them at the window's end, on its failure and
+  recovery paths too. Only §2b's backup, §7's rows 2 and 4 and a
+  retirement take it; a retirement never releases it. A test holds that
+  only the hold's two blocks disable or enable a unit (the install
+  enables), and that every procedure that takes the hold says where it
+  releases it.
+  THE EXECUTABLE TEXT. A fenced block after a `<!-- recipe: NAME -->` line
+  is a recipe. `tests/test_operator_recipes.py` runs the job recipe three
+  times over one lineage (add, change, remove) against a synthetic estate
+  under the shipped launcher, then the readiness wait, the retirement's
+  audit and list, and, where jq is installed, the sealed-not-opened
+  check. Where the text says `systemctl start dsl41-engine.service`, the
+  test runs that unit's `ExecStart=`, which returns at once as a
+  `Type=simple` start does, and a test pins that equality. The service
+  drill runs the install, first-start and retirement blocks through a new
+  `run_recipe` helper. CI never dispatches the drill, so tests check those
+  blocks by content against the unit files and the launcher, check that
+  every recipe parses, that every recipe is run here, run by the drill or
+  compared, and that no recipe starts a systemd target. Other tests hold
+  the diagram's directives, launcher modes and CLI verbs to the unit
+  files, the launcher and the CLI.
+  MONITORING. A table maps each signal to a command or file that exists:
+  the engine unit's state and exit status (2 a refusal, 3 sealed), the
+  supervisor unit and its log, the leader lock's note (read it, never
+  probe it with `flock`), the control socket, failures and alarms (the
+  subscribe stream as the wake-up, `query trace` for the transition, with
+  the cursor reset when `baseline_id` changes, as the TUI does (DL-210)),
+  free space, and perimeter receipts. The sealed-not-opened signal is the
+  anchor head's `closed` state. No dsl41 command prints it, so the check
+  reads `anchor.json` with jq, a declared prerequisite. A stalled subscriber is removed at
+  DL-267's budget; the text says how a wrapper resubscribes from the
+  cursor `query subscribe` names. A short
+  list states, from the existing contracts, what a failed write does: a
+  WAL append failure leaves its input unapplied and ends the engine with exit 1, a
+  seal fails before or on its record as period-model §7 says, a wrapper
+  exits 3, and the perimeter's receipts keep their own rules. No metrics
+  endpoint.
+  RETIREMENT. No new verb. Disable both units, hold and drain, seal,
+  audit and stop as §2b does. Then remove the two unit files, keeping
+  copies of them, the launcher and the access map with the deployment
+  inputs, so a stray start finds no unit. `systemctl reset-failed` runs
+  on each unit first, since a live seal's exit 3 leaves the engine unit
+  failed and a failed unit outlives its file. After `daemon-reload` only
+  read-only queries check it: each unit reads `LoadState=not-found`,
+  `ActiveState=inactive`. The text never starts a systemd target, which
+  would start other estates' enabled units; the drill does that in its
+  own container only. Keep the roots the registry names, the anchor, the
+  deployment inputs and a venv of the periods' state-machine version
+  under the site's retention decision. Delete only a whole set, an anchor
+  with every root it names, and only when no kept anchor names those
+  roots. `estate prune --estate-anchor A --dry-run` lists them: it is
+  read-only and takes no lock. Run it with a venv of the lineage's
+  state-machine version. A cleanup table names the owner of default
+  job logs, external job output, the supervisor log, the perimeter
+  journal, the system journal, and the roots and anchors. §2a and the
+  table both say: never truncate or rotate `perimeter.jsonl` on its own.
+  §8's decommission row points at the procedure.
+  NOT BUILT. The stop and recover bullets, the configure recipe and the
+  monitoring commands other than the sealed check are not executed by a
+  test. The rollbacks are
+  not drilled. The GitHub dispatch of the extended drill is still to run.
+  TESTS. In test_operator_recipes.py:
+  `test_the_job_recipe_adds_changes_and_removes_a_job`,
+  `test_a_sealed_period_not_yet_opened_shows_on_the_anchor`,
+  `test_the_job_recipe_refuses_a_delta_file`,
+  `test_the_drill_runs_only_recipes_the_runbook_has`,
+  `test_every_recipe_is_run_or_compared`,
+  `test_the_service_install_recipe_installs_what_the_units_and_launcher_name`,
+  `test_the_retirement_unit_recipes_name_each_shipped_unit`,
+  `test_the_process_diagram_names_what_the_units_launcher_and_cli_name`,
+  `test_every_reboot_hold_is_released_where_it_is_taken`
+  and their neighbours; the service drill's steps `install`, `first-start`,
+  `reboot` (the enabled units resume the root at a boot) and `retire`
+  (through §2b's live-seal branch).
+  REVIEW. One Opus reviewer, three rounds. Round 1: three majors (units
+  enabled with no reboot warning, a retirement check that started every
+  enabled unit on the host, an alarm cursor kept across a boundary) and
+  ten minors. Round 2: the first fix reopened, as two majors: a disable
+  with no matching enable on the estate-stop path, and a live-seal backup
+  that skipped the disable. The named reboot hold settles both. Round 3:
+  no material finding; its two minors, a release missing from row 4's
+  rollback and a drill step that released a hold it never took, are fixed.
