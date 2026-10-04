@@ -283,5 +283,5 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-269 | The branch gate covers the state-machine modules | [README.md](../README.md), [docs/risk-map.md](risk-map.md) |
 | DL-270 | The release note answers the upgrade rows, and the integration's corrections | [docs/risk-map.md](risk-map.md) |
 | DL-271 | The drill's steps run unprivileged with sudo, locally as on the runner | [docs/deployment-runbook.md](deployment-runbook.md), [docs/risk-map.md](risk-map.md) |
-| DL-272 | A generated index of the decision log |  |
+| DL-272 | A generated index of the decision log | [README.md](../README.md) |
 | DL-273 | The architecture gate checks that cited modules exist and that the README's source map is complete |  |

@@ -40,6 +40,14 @@ Its frozen contracts are
 [docs/protocol-evolution.md](docs/protocol-evolution.md),
 and [docs/access-model.md](docs/access-model.md).
 
+Three reader aids sit beside the contracts and hold no rules:
+[docs/glossary.md](docs/glossary.md) defines the runner's terms and links
+each to the section that defines it,
+[docs/risk-map.md](docs/risk-map.md) lists each runner machine with its
+branch coverage and open findings, and
+[docs/decision-index.md](docs/decision-index.md) lists every decision-log
+entry with the docs that cite it.
+
 Agent setup, verification commands, and cross-vendor review recipes are in
 [docs/agent-workflow.md](docs/agent-workflow.md).
 Operating the runner on a server (install, systemd, web UI exposure, the
@@ -703,12 +711,14 @@ CLI and scripts:
   cross-module import under `src/`, a citation token with no row in
   [docs/citation-index.md](docs/citation-index.md),
   a `test_...` name in the docs that no test defines, a module file name in
-  the docs that no tracked file has, a `src/dsl41` module the Source map
+  the docs that git does not know, a `src/dsl41` module the Source map
   above does not name, and an IR-F schema
   change without an `IR_VERSION` bump. Size checks are advisory, ratcheted
   against `scripts/arch_baseline.json`. It also reports when a conceptual
   review is due, and which specifications under `docs/` are due a spec
   review (`--spec-status` prints the table).
+- `scripts/render_decision_index.py`: writes `docs/decision-index.md` from
+  the decision log and the tracked docs that cite each entry (DL-272).
 
 ### Tests
 
@@ -792,8 +802,11 @@ Compiler:
 - `tests/test_docs_hygiene.py`: no merge-conflict marker reaches the
   documentation (DL-237).
 - `tests/test_docs_links.py`: repository links in the documentation are
-  relative and resolve, and the build's rewrite of README.md for PyPI
-  (DL-239).
+  relative and resolve to GitHub's heading ids, the build's rewrite of
+  README.md for PyPI (DL-239), and every glossary entry has a link.
+- `tests/test_decision_index.py`: the committed decision index is the
+  rendering, and the generator's parsing, title and citation rules
+  (DL-272).
 - `tests/test_examples.py`: the three workflow examples' catalogs lower
   cleanly with their placeholders resolved (DL-237).
 
