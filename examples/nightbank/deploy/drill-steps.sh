@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# drill-steps.sh -- the steps of the nightbank service drill (DL-218, DL-266).
+# drill-steps.sh -- the steps of the nightbank service drill (DL-218, DL-266,
+# DL-268).
 #
 #   drill-steps.sh --list    print the step names, in the order they run
 #   drill-steps.sh STEP      run one step; exit 0 only if it passed
@@ -15,16 +16,18 @@
 # same-root restart, a detached job that survives an engine stop, a changed
 # estate refused without a restart loop, a sealed engine that stays
 # stopped until an operator opens the next period, the managed quiescence
-# and restore of deployment-runbook ss2b, and the upgrade rows of ss7.
+# and restore of deployment-runbook ss2b, the upgrade rows of ss7, and
+# ss0's retirement. The install, the first start and the retirement run
+# ss0's recipe blocks as the runbook prints them (run_recipe).
 # The two access-map refusals prove the same systemd claim as the changed
 # estate, and are pinned in tests/test_nightbank_deploy.py instead.
 set -euo pipefail
 # shellcheck source=drill-lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/drill-lib.sh"
 
-STEPS=(install first-start restart detached refusal sealed quiesce restore
+STEPS=(install first-start restart detached refusal sealed quiesce restore reboot
     upgrade-resume-safe upgrade-fresh-root upgrade-coordinated upgrade-old-release
-    upgrade-state-machine)
+    upgrade-state-machine retire)
 # runs after the steps whatever they did; not part of --list
 FINALLY=diagnostics
 
@@ -48,8 +51,10 @@ SHORT_JOB=AMER_INV_MACROS_C
 step_install() { # install dsl41, the nightbank estate, the launcher, the map and the units
     sudo apt-get update -q
     sudo apt-get install -y -q python3-venv jq
-    sudo useradd --system --user-group --create-home --home-dir /var/lib/dsl41 \
-        --shell /usr/sbin/nologin dsl41
+    # ss0's service recipe: the account, its directories, the launcher, the
+    # map and the units, enabled; it ends on the launcher's --print
+    run_recipe service-install
+    assert_enablement enabled
     # the runtime closure exactly as uv.lock pins it, hash-checked, and then
     # the package alone: a drill failure cannot be dependency drift. The
     # package is a wheel uv builds once (its build backend bounded by
@@ -60,14 +65,14 @@ step_install() { # install dsl41, the nightbank estate, the launcher, the map an
     (cd "$REPO" && uv build --wheel --out-dir "$SCRATCH/dist")
     install_build "$BUILD_A"
     flip "$BUILD_A"
-    sudo install -D -m 0755 "$REPO/examples/nightbank/deploy/dsl41-launch" "$LAUNCH"
+    # ss1's link, through the symlink, so the recipes' bare dsl41 follows a flip
+    sudo ln -sfn "$VENV/bin/dsl41" /usr/local/bin/dsl41
     # the estate is root-owned and read-only to the service, as a checkout
-    # of a tag would be; the night's data and the runs are its
-    sudo install -d -m 0755 /srv/dsl41
+    # of a tag would be; the night's data is the service's
     sudo cp -R "$REPO/examples/nightbank" "$NIGHTBANK"
     sudo chown -R root:root "$NIGHTBANK"
     sudo chmod -R go-w,a+rX "$NIGHTBANK"
-    sudo install -d -o dsl41 -g dsl41 -m 0700 "$NIGHTBANK/night" "$(dirname "$ROOT")"
+    sudo install -d -o dsl41 -g dsl41 -m 0700 "$NIGHTBANK/night"
     # nightbank's own prepare_night: data directories, properties and
     # profile, the region anchors six hours out so no calendar fires. The
     # heredoc is deliberately unquoted so $NIGHTBANK expands; it must hold
@@ -92,18 +97,16 @@ PY
     # one scripted delay: the job the drill starts runs long enough to
     # outlive an engine stop and start
     echo "$LONG_JOB late 45" | as_dsl41 tee -a "$NIGHTBANK/night/incidents.conf"
-    sudo install -d -m 0755 /etc/dsl41
-    install_map
-    sudo install -m 0644 "$REPO/examples/nightbank/deploy/dsl41-engine.service" \
-        "$REPO/examples/nightbank/deploy/dsl41-supervisor.service" /etc/systemd/system/
-    sudo systemctl daemon-reload
-    sudo -u dsl41 "$LAUNCH" --print
 }
 
 step_first_start() { # first start is a genesis, beside a supervisor in its own unit
-    local mark line cgroup pid
+    local mark line cgroup pid active
     mark=$(date +%s)
-    start_engine
+    # ss0's service recipe, step 5
+    active=$(run_recipe service-start)
+    [ "$active" = $'active\nactive' ] || fail "service-start printed: $active"
+    run_recipe --as-dsl41 wait-answers S="$SOCK"
+    wait_up
     is_state "$SUPERVISOR" active || fail "Requires= did not start $SUPERVISOR"
     line=$(launch_line_since "$mark")
     echo "$line"
@@ -188,7 +191,11 @@ step_sealed() { # a sealed engine stays stopped until the next period is opened
 }
 
 step_quiesce() { # managed quiescence: both units stopped and staying stopped (runbook ss2b)
+    take_hold
     quiesce_shape1
+    # the disabled units stay down through a boot's target, too
+    boot_target
+    assert_units_stay_stopped
 }
 
 step_restore() { # a copy of the root and the anchor, restored at the recorded paths
@@ -212,6 +219,28 @@ step_restore() { # a copy of the root and the anchor, restored at the recorded p
     held=$(cli query status --job APAC_EOD_B -S "$SOCK" | jq -r '.jobs.APAC_EOD_B.on_hold')
     [ "$held" = true ] || fail "the hold did not survive the restore"
     ok "period 3 opened in the restored root with the operator's holds"
+    release_hold
+}
+
+# deployment-runbook ss0's host reboot, as far as a container can stage
+# one: no seal and no reboot hold; both units stop, as a shutdown stops
+# them, and a boot's target starts the enabled units, which resume the
+# same root in the same period.
+step_reboot() { # a host reboot: the enabled units resume the same root at boot
+    local invocation mark
+    wait_for 60 "nothing is live under the supervisor" nothing_live "$ROOT"
+    assert_enablement enabled
+    invocation=$(prop "$ENGINE" InvocationID)
+    sudo systemctl stop "$SUPERVISOR"
+    is_state "$ENGINE" inactive || fail "$ENGINE: $(prop "$ENGINE" ActiveState)"
+    mark=$(date +%s)
+    boot_target
+    wait_up
+    is_state "$SUPERVISOR" active || fail "$SUPERVISOR did not start at boot"
+    [ "$(prop "$ENGINE" InvocationID)" != "$invocation" ] || fail "$ENGINE did not start again"
+    launch_line_since "$mark" | grep -q -- ' --resume$' || fail "the boot start was not a resume"
+    ! sudo test -e "$ROOT/wal/000004.jsonl" || fail "the boot opened a period"
+    ok "the boot resumed period 3 in $ROOT"
 }
 
 # ss7 row 1, a patch marked resume-safe: stop the engine unit, flip, start
@@ -257,6 +286,7 @@ step_upgrade_fresh_root() { # silent-note row: the next period opens in a fresh 
     local mark line
     echo "two installs of one build: this exercises the row, it qualifies no version pair"
     wait_for 60 "nothing is live under the supervisor" nothing_live "$ROOT"
+    take_hold
     quiesce_shape1
     flip "$BUILD_B"
     point_launcher "$ROLLED_ROOT" "$ANCHOR"
@@ -281,6 +311,7 @@ step_upgrade_fresh_root() { # silent-note row: the next period opens in a fresh 
     wait_up
     launch_line_since "$mark" | grep -q -- ' --resume$' || fail "the restart did not resume $ROOT"
     ok "the unit's next start resumed $ROOT"
+    release_hold
 }
 
 # ss7 row 3, resume-safe with a wrapper or supervisor protocol change:
@@ -345,6 +376,7 @@ step_upgrade_state_machine() { # state-machine row: v1.7.0 to this build, a new 
     ANCHOR=$OLD_ROOT.anchor
     SOCK=$ROOT/control.sock
     wait_for 60 "nothing is live under the supervisor" nothing_live "$ROOT"
+    take_hold
     quiesce_shape1
     flip "$BUILD_A"
     version=$(state_machine_version "$BUILD_A")
@@ -358,6 +390,7 @@ step_upgrade_state_machine() { # state-machine row: v1.7.0 to this build, a new 
     line=$(launch_line_since "$mark")
     [[ $line != *--resume* ]] || fail "the new estate's first start was a resume"
     ok "this build (state-machine version $version) leads the new estate $ROOT"
+    release_hold
     # the retained old estate: the kept old venv audits it, the new build
     # refuses it and names the version
     as_dsl41 "$OLD_VENV/bin/dsl41" audit --estate-anchor "$OLD_ROOT.anchor"
@@ -368,6 +401,85 @@ step_upgrade_state_machine() { # state-machine row: v1.7.0 to this build, a new 
     echo "$refused"
     grep -qi 'state.machine' <<<"$refused" || fail "the refusal does not name the version"
     ok "this build refuses the old estate and names the version"
+}
+
+# deployment-runbook ss0's retirement, on the estate row 4 started: take
+# the reboot hold, quiesce through ss2b's live-seal branch (the engine
+# ends failed with exit 3), remove the units with copies
+# kept, and check that a reload, a boot's target and a stray start start
+# nothing, and that the retained history audits. Then the site's deletion
+# of one whole set, the v1.7.0 estate: no kept anchor names its root, and
+# afterwards no kept anchor names a root that is gone.
+step_retire() { # retirement: the estate stays stopped after its units go, the history audits
+    local out unit anchor root named retained next
+    ROOT=$NEW_ROOT
+    ANCHOR=$NEW_ROOT.anchor
+    SOCK=$ROOT/control.sock
+    assert_enablement enabled
+    take_hold
+    for unit in "$ENGINE" "$SUPERVISOR"; do
+        is_state "$unit" active || fail "disabling stopped $unit"
+    done
+    ok "both units disabled and still running"
+    wait_for 60 "nothing is live under the supervisor" nothing_live "$ROOT"
+    # ss2b's live-seal branch this time: the engine ends failed with exit 3,
+    # which retire-remove's reset-failed must clear
+    mapfile -t next < <(next_args)
+    wait_out_retry_horizon
+    cli seal --run-root "$ROOT" --estate-anchor "$ANCHOR" "${next[@]}" -p "$PROPERTIES" \
+        --next-detached --next-as-machine localhost --next-machine-policy strict \
+        --next-timezone UTC --claimed-actor drill@nightbank
+    wait_for 90 "$ENGINE is failed" is_state "$ENGINE" failed
+    [ "$(prop "$ENGINE" ExecMainStatus)" = 3 ] || fail "exit $(prop "$ENGINE" ExecMainStatus), not 3"
+    cli audit --run-root "$ROOT" --estate-anchor "$ANCHOR"
+    sudo systemctl stop "$SUPERVISOR"
+    assert_units_stay_stopped
+    is_state "$ENGINE" failed || fail "$ENGINE: $(prop "$ENGINE" ActiveState)"
+    run_recipe retire-remove RUN_ROOT="$ROOT"
+    retained=/srv/dsl41/retained/${ROOT##*/}
+    for unit in "$ENGINE" "$SUPERVISOR" dsl41-launch nightbank-access.toml; do
+        sudo test -f "$retained/$unit" || fail "no copy of $unit in $retained"
+    done
+    out=$(run_recipe retire-check)
+    echo "$out"
+    [ "$out" = $'LoadState=not-found\nActiveState=inactive\nLoadState=not-found\nActiveState=inactive' ] ||
+        fail "retire-check printed: $out"
+    # container only: a boot's target and a stray start find no unit
+    boot_target
+    ! sudo systemctl start "$ENGINE" 2>/dev/null || fail "$ENGINE started after its removal"
+    for unit in "$ENGINE" "$SUPERVISOR"; do
+        [ "$(prop "$unit" ActiveState)" = inactive ] || fail "$unit is $(prop "$unit" ActiveState)"
+    done
+    assert_no_writers "$ROOT"
+    ok "the retired estate stays stopped: no unit, nothing running"
+    run_recipe --as-dsl41 retire-audit ESTATE_ANCHOR="$ANCHOR"
+    ok "the retired estate's history audits"
+    # the site deletes the v1.7.0 set: its anchor and the one root it names
+    [ "$(roots_named "$OLD_ROOT.anchor" "$OLD_VENV")" = "$OLD_ROOT" ] ||
+        fail "$OLD_ROOT.anchor does not name $OLD_ROOT alone"
+    for anchor in "$(dirname "$ROOT")"/*.anchor; do
+        [ "$anchor" = "$OLD_ROOT.anchor" ] && continue
+        named=$(roots_named "$anchor")
+        echo "$anchor names: $named"
+        ! grep -qxF -- "$OLD_ROOT" <<<"$named" || fail "$anchor names $OLD_ROOT"
+    done
+    sudo rm -rf "$OLD_ROOT" "$OLD_ROOT.anchor"
+    for anchor in "$(dirname "$ROOT")"/*.anchor; do
+        named=$(roots_named "$anchor")
+        [ -n "$named" ] || fail "$anchor names no root"
+        while read -r root; do
+            sudo test -d "$root" || fail "$anchor names $root, which is gone"
+        done <<<"$named"
+        run_recipe --as-dsl41 retire-audit ESTATE_ANCHOR="$anchor"
+    done
+    ok "every kept anchor names roots that exist, and each kept lineage audits"
+}
+
+# the roots ANCHOR's registry names, one per line, from the retire-list
+# recipe run with VENV's dsl41 (the lineage's state-machine version)
+roots_named() { # roots_named ANCHOR [VENV]
+    run_recipe --as-dsl41 retire-list ESTATE_ANCHOR="$1" PATH="${2:-$VENV}/bin:/usr/bin:/bin" |
+        sed -n 's/^  \(\/[^:]*\): .*/\1/p'
 }
 
 step_diagnostics() { # diagnostics and teardown

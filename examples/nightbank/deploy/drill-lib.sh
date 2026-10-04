@@ -1,4 +1,4 @@
-# drill-lib.sh -- helpers for the service drill (DL-218).
+# drill-lib.sh -- helpers for the service drill (DL-218, DL-266, DL-268).
 #
 # Sourced by drill-steps.sh, which holds the step bodies. The workflow
 # .github/workflows/service-drill.yml and drill-local.sh both run those
@@ -34,6 +34,8 @@ FILES=(amer apac calendars emea global infra)
 QUIESCE=(APAC_EOD_B EMEA_EOD_B AMER_EOD_B OPS_HEARTBEAT_C OPS_MONTHLY_ATTRIB_C OPS_QTR_REG_REPORT_C)
 # the job the drill starts by hand; the night's incidents make it run long
 LONG_JOB=OPS_XINST_DEMO_C
+# the operator recipes the drill runs as written (deployment-runbook ss0)
+RUNBOOK=$REPO/docs/deployment-runbook.md
 
 ok() { echo "ok: $*"; }
 fail() {
@@ -44,6 +46,46 @@ fail() {
 # every client command runs as the service account, as an operator's would
 as_dsl41() { (cd / && sudo -u dsl41 -H "$@"); }
 cli() { as_dsl41 "$DSL41" "$@"; }
+
+# The commands of the runbook block marked `<!-- recipe: NAME -->`, the
+# `sh` fence on the line after the marker (DL-268). The drill runs the text
+# an operator reads, so the two cannot drift; a missing block fails.
+recipe() { # recipe NAME
+    local body
+    body=$(awk -v mark="<!-- recipe: $1 -->" '
+        want == 2 && /^```$/ { exit }
+        want == 2 { print; next }
+        want == 1 { if ($0 == "```sh") { want = 2; next } exit }
+        $0 == mark { want = 1 }' "$RUNBOOK")
+    [ -n "$body" ] || fail "no recipe '$1' in $RUNBOOK"
+    printf '%s\n' "$body"
+}
+
+# Run one recipe in bash, as root from the checkout (the service recipe
+# copies files out of it), or as the service account from /, with the
+# variables named. The block goes to stderr first, so the step log shows
+# what ran. --no-errexit is for a block whose commands report a state in
+# their exit codes (systemctl is-active); the caller reads its stdout.
+run_recipe() { # run_recipe [--as-dsl41] [--no-errexit] NAME [VAR=VALUE...]
+    local as=root errexit=-e name body
+    while :; do
+        case $1 in
+            --as-dsl41) as=dsl41 ;;
+            --no-errexit) errexit=+e ;;
+            *) break ;;
+        esac
+        shift
+    done
+    name=$1
+    shift
+    body=$(recipe "$name")
+    printf 'recipe %s:\n%s\n' "$name" "$(sed 's/^/  | /' <<<"$body")" >&2
+    if [ "$as" = root ]; then
+        (cd "$REPO" && sudo env "$@" bash "$errexit" -u -o pipefail -c "$body")
+    else
+        as_dsl41 env "$@" bash "$errexit" -u -o pipefail -c "$body"
+    fi
+}
 
 prop() { systemctl show -p "$2" --value "$1"; }
 is_state() { [ "$(prop "$1" ActiveState)" = "$2" ]; }
@@ -130,11 +172,6 @@ expect_refusal() { # expect_refusal FRAGMENT
     launch_line_since "$mark" | grep -q -- ' --resume$' || fail "the refused start was not a resume"
 }
 
-install_map() {
-    sudo install -o dsl41 -g dsl41 -m 0600 \
-        "$REPO/examples/nightbank/deploy/nightbank-access.toml" "$MAP"
-}
-
 # the seal's --next list: the launcher's estate files, in its order
 next_args() {
     local file
@@ -206,6 +243,35 @@ assert_units_stay_stopped() {
     ok "both units stayed stopped for $((2 * wait + 2))s, past RestartSec=${wait}s"
 }
 
+# Each unit's own `is-enabled` answer is STATE: `systemctl is-enabled A B`
+# exits 0 when either one is enabled, so the units are asked one by one.
+assert_enablement() { # assert_enablement enabled|disabled
+    local unit state
+    for unit in "$ENGINE" "$SUPERVISOR"; do
+        state=$(systemctl is-enabled "$unit" 2>/dev/null || true)
+        [ "$state" = "$1" ] || fail "$unit is $state, not $1"
+    done
+    ok "both units are $1"
+}
+
+# deployment-runbook ss2b's reboot hold, as the runbook prints it: taken
+# before a window a reboot must not end, released at its end
+take_hold() {
+    run_recipe hold-down
+    assert_enablement disabled
+}
+release_hold() {
+    run_recipe hold-release
+    assert_enablement enabled
+}
+
+# A boot's start of multi-user.target, in the drill's own container only:
+# it starts every enabled unit the target wants, on the whole host, so the
+# runbook never tells an operator to run it.
+boot_target() {
+    sudo systemctl start multi-user.target
+}
+
 # deployment-runbook ss2b's no-writers check, on ROOT: no supervisor files,
 # no process holding leader.lock, and no process of the service account
 assert_no_writers() { # assert_no_writers ROOT
@@ -216,7 +282,8 @@ assert_no_writers() { # assert_no_writers ROOT
     ok "no writer is left in $1"
 }
 
-# deployment-runbook ss2b, shape 1, steps 1 to 6: stop the engine unit,
+# deployment-runbook ss2b, shape 1, steps 1 to 6 (the caller takes the
+# reboot hold first): stop the engine unit,
 # seal offline and audit while the supervisor unit runs, stop the
 # supervisor unit, prove both stay stopped and nothing writes
 quiesce_shape1() {

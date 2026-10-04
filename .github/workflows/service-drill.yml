@@ -9,7 +9,9 @@
 # period, the managed quiescence and restore of deployment-runbook ss2b,
 # and the four upgrade rows of ss7 (DL-266). Rows 1 to 3 run with two
 # installs of one build: their mechanics, not a qualified version pair.
-# Row 4 runs from v1.7.0 on PyPI to the build under test.
+# Row 4 runs from v1.7.0 on PyPI to the build under test. The install,
+# the first start and a final retirement run ss0's recipe blocks as the
+# runbook prints them (DL-268).
 #
 # Manual only (workflow_dispatch). It is not part of the default gate. It
 # passed every step on 2026-09-29 on GitHub's Ubuntu 24.04 runner (DL-223),
@@ -63,6 +65,9 @@ jobs:
       - name: a copy of the root and the anchor restores at the recorded paths
         run: bash examples/nightbank/deploy/drill-steps.sh restore
 
+      - name: a host reboot starts the enabled units, which resume the same root
+        run: bash examples/nightbank/deploy/drill-steps.sh reboot
+
       - name: upgrade by the resume-safe row resumes the engine and keeps the supervisor
         run: bash examples/nightbank/deploy/drill-steps.sh upgrade-resume-safe
 
@@ -77,6 +82,9 @@ jobs:
 
       - name: upgrade by the state-machine row starts a new estate on this build
         run: bash examples/nightbank/deploy/drill-steps.sh upgrade-state-machine
+
+      - name: a retired estate stays stopped after a reload, and its history audits
+        run: bash examples/nightbank/deploy/drill-steps.sh retire
 
       - name: diagnostics and teardown
         if: always()

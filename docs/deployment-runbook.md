@@ -12,6 +12,532 @@ components ship in one package:
 | web UI | `dsl41 serve` | thin client; one `dsl41 ui` subprocess per browser session |
 
 Everything below assumes a POSIX server with Python ≥ 3.12 on it.
+§0 is the short path for an operator: tasks, diagrams and recipes.
+
+## 0. The operator path
+
+Start here to run an estate (DL-268). This section lists the tasks, draws
+the processes and the decisions, and gives the recipes. The sections after
+it hold the detail, and the recipes link to them rather than repeat them.
+The commands use the shape-1 example in `examples/nightbank/deploy/` (§3's
+worked example) and its paths. Run `systemctl` and the install commands as
+root. Run the `dsl41` commands that read or write the run root itself
+(`seal`, `audit`, `estate`, `supervise`, `journal`, `runs`) as the service
+account, for example with `sudo -u dsl41 -H`. Send control-socket commands
+(`query`, `sendevent`, `host`, `ui`) as yourself: the access map then names
+you in its receipts ([configure](#recipe-configure-an-estate)).
+
+The recipes name the launcher's configuration through these variables.
+Set them once per shell. The values are the example launcher's:
+
+<!-- recipe: operator-env -->
+```sh
+RUN_ROOT=/srv/dsl41/runs/nightbank-01
+ESTATE_ANCHOR=/srv/dsl41/runs/nightbank-01.anchor
+ESTATE=/srv/dsl41/nightbank/estate/small
+PROPERTIES=/srv/dsl41/nightbank/night/night.properties
+S=$RUN_ROOT/control.sock
+```
+
+Some blocks are marked as recipes in this file's source.
+`tests/test_operator_recipes.py` runs the job recipe, the readiness wait
+and the retirement's audit and list as written, against a synthetic
+estate, with the engine unit's `ExecStart=` in place of `systemctl
+start`. It runs the sealed check where `jq` is installed. The service
+drill (§3's worked example) runs the service and retirement recipes as
+written; CI checks their content but does not run them. The variables
+block is compared with the launcher.
+
+### Task index
+
+| Task | Where |
+| --- | --- |
+| install the package | §1 |
+| install, configure and start as a service | [the service recipe](#recipe-install-and-start-as-a-service) |
+| configure identities, the execution profile, socket exposure and access | [the configure recipe](#recipe-configure-an-estate) |
+| add, change or remove a job | [the job recipe](#recipe-add-change-or-remove-a-job) |
+| stop, restart, seal or recover | [the stop recipe](#recipe-stop-restart-seal-and-recover) |
+| watch an estate | [what to watch](#what-to-watch) |
+| back up and restore | §2b |
+| upgrade dsl41 | §7 |
+| keep or prune history | §2a |
+| retire an estate, and who cleans what | [retiring an estate](#retiring-an-estate) |
+| investigate a night | §4's offline readers, §8 |
+
+### Processes, units and storage
+
+Diagram 1. The names are the example's unit files, launcher modes and
+paths. `RUN_ROOT` and `ESTATE_ANCHOR` are the launcher's values.
+
+<!-- diagram: processes -->
+```text
+systemd
+├── dsl41-supervisor.service    User=dsl41  Restart=always  RestartPreventExitStatus=2
+│     ExecStart=/opt/dsl41/bin/dsl41-launch supervisor
+│     ExecStartPost=/opt/dsl41/bin/dsl41-launch supervisor-ready
+│     └── dsl41 supervise start --run-root RUN_ROOT                 the supervisor
+│           ├── owns RUN_ROOT/supervisor.sock, supervisor.pid, supervisor.lock, supervisor.log
+│           └── one wrapper per detached run, and the run's command, in this unit's cgroup;
+│               they write RUN_ROOT/runs/ and the job's output
+│
+└── dsl41-engine.service        User=dsl41  Restart=on-failure  RestartPreventExitStatus=2 3
+      Requires=dsl41-supervisor.service  After=dsl41-supervisor.service
+      ExecStart=/opt/dsl41/bin/dsl41-launch engine
+      └── dsl41 run ... --run-root RUN_ROOT --estate-anchor ESTATE_ANCHOR --detached   the engine
+            ├── holds RUN_ROOT/leader.lock and ESTATE_ANCHOR/anchor.lock for its whole life
+            ├── writes RUN_ROOT/wal/, seals/, periods/, catalogs/, perimeter.jsonl
+            │   and ESTATE_ANCHOR/anchor.json
+            ├── serves RUN_ROOT/control.sock to dsl41 query, sendevent, seal, ui and serve
+            └── asks the supervisor to spawn and kill over RUN_ROOT/supervisor.sock
+
+storage                               owner and mode              written by
+/opt/dsl41/venv -> venv-<ver>         root                        the installer (§1, §7)
+/opt/dsl41/bin/dsl41-launch           root, 0755                  the installer; reviewed like code
+/etc/dsl41/nightbank-access.toml      dsl41, 0600                 the operator (§4)
+ESTATE files                          root, read-only to dsl41    a checkout of a tag (§2, §6)
+PROPERTIES                            readable by dsl41           the operator
+RUN_ROOT                              dsl41, 0700                 the engine, the supervisor, the wrappers
+job data and output directories       dsl41                       the jobs (the JIL names them)
+ESTATE_ANCHOR                         dsl41, 0700                 the engine, or an offline dsl41 seal
+```
+
+An offline `dsl41 seal` takes both locks itself while no engine runs (§6a).
+Stopping the engine unit leaves the supervisor unit and its runs alone.
+Stopping the supervisor unit ends every command it still runs, and the
+engine unit's `Requires=` stops the engine unit with it.
+
+### Which move
+
+Diagram 2. Read it from the top and take the first branch that fits.
+
+<!-- diagram: decisions -->
+```text
+What has to happen?
+│
+├── the engine process must go, and the estate keeps running        ENGINE STOP
+│   (a crash, an engine restart, a dsl41 patch of row 1)
+│     systemctl stop dsl41-engine.service: detached runs keep running
+│     systemctl start dsl41-engine.service: the launcher passes --resume (§5)
+│
+├── the host must reboot (an OS patch)                               HOST REBOOT
+│     hold the scheduled jobs and drain (§6 steps 1 and 2), then reboot
+│     the enabled units start at boot and the engine resumes the same root
+│     no seal and no reboot hold; nothing that still ran survives
+│
+├── nothing may run or write, even across a reboot                   ESTATE STOP
+│   (a backup, a retirement, upgrade rows 2 and 4)
+│     take the reboot hold, then seal and audit while the supervisor unit
+│     runs, then stop that unit (§2b); release the hold at the end
+│     (a retirement never does); stopping the supervisor unit ends every
+│     running command
+│
+├── the engine unit failed with exit 3                               SEALED, NOT OPENED
+│     the period is sealed and the next one waits; nothing runs until it opens
+│     open it in place (start the engine unit) or in a fresh root (§7 row 2)
+│     an enabled engine unit opens it in place at the next boot
+│
+├── new JIL, properties or run options, and the history continues   TRANSITION
+│   ├── in the same run root                                         IN-PLACE TRANSITION
+│   │     seal, then start the engine unit: it opens period N+1 (§6a)
+│   └── in a fresh run root, same lineage and anchor                 PHYSICAL ROLL
+│         seal, audit, the open trigger, start (§6a, §7 row 2)
+│
+└── a new state-machine version, or a lineage that must not continue   NEW ESTATE
+      a final seal; a new RUN_ROOT and ESTATE_ANCHOR; a genesis (§7 row 4)
+      holds, globals and latches start empty; the old lineage stays readable
+```
+
+An engine stop is not an estate stop. Detached commands outlive the
+engine on purpose (runner-design §6a), so `systemctl stop
+dsl41-engine.service` stops no job. A host reboot stops both units, and
+with them every running command; drain before one (§8's OS-patching row).
+The enabled units then resume the root at boot. An in-place transition is not a new
+estate. It keeps the run root, the anchor and the state: holds, globals,
+latches and run numbers cross the seal (§6a). A new estate keeps none of
+them. §6's fresh-run-root cycle is a new estate too: its root gets an
+anchor of its own.
+
+### Recipe: install and start as a service
+
+1. Install the package (§1). The launcher's `DSL41` is
+   `/opt/dsl41/venv/bin/dsl41`, so install there, or follow §7's venv
+   layout from the start.
+2. From a checkout of the repository at the release's tag (the wheel does
+   not ship the examples), create the service account and its writable
+   directories, and install the launcher, the access map and the units:
+
+<!-- recipe: service-install -->
+```sh
+useradd --system --user-group --create-home --home-dir /var/lib/dsl41 \
+    --shell /usr/sbin/nologin dsl41
+install -D -m 0755 examples/nightbank/deploy/dsl41-launch /opt/dsl41/bin/dsl41-launch
+install -d -m 0755 /srv/dsl41
+install -d -o dsl41 -g dsl41 -m 0700 /srv/dsl41/runs
+install -d -m 0755 /etc/dsl41
+install -o dsl41 -g dsl41 -m 0600 examples/nightbank/deploy/nightbank-access.toml \
+    /etc/dsl41/nightbank-access.toml
+install -m 0644 examples/nightbank/deploy/dsl41-engine.service \
+    examples/nightbank/deploy/dsl41-supervisor.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable dsl41-supervisor.service dsl41-engine.service
+sudo -u dsl41 /opt/dsl41/bin/dsl41-launch --print
+```
+
+3. The service account writes the run roots and their anchors under
+   `/srv/dsl41/runs`, and whatever its jobs write. A job's data
+   directories and its `std_out_file` targets must be the account's:
+   nightbank's jobs write under `/srv/dsl41/nightbank/night`, which the
+   drill creates owned by the account. Put the estate checkout where the launcher's
+   `ESTATE` names it, owned by root and read-only to the account (§2). The
+   access map must be owned by the account and writable by no one else,
+   in a directory owned by root or the account and writable by no one
+   else (access-model §4).
+4. Edit the installed copies, not the checkout: the launcher's
+   CONFIGURATION block, and the run root in both units'
+   `RequiresMountsFor=`. Run `systemctl daemon-reload` after a unit edit.
+   `dsl41-launch --print` shows the command the engine unit will run. It
+   names every estate file, in order, every `-p` and every run option.
+5. Start:
+
+<!-- recipe: service-start -->
+```sh
+systemctl start dsl41-engine.service
+systemctl is-active dsl41-supervisor.service dsl41-engine.service
+```
+
+   `Requires=` starts the supervisor unit first, and both lines print
+   `active`. That is not readiness: a unit that refuses with exit 2 a
+   second later printed `active` too. The first start is a genesis: the
+   launcher passes no `--resume`, and dsl41 creates the estate in the run
+   root, and its anchor. Wait until the engine answers; the last line
+   prints the status, or fails when no engine answered:
+
+<!-- recipe: wait-answers -->
+```sh
+for try in $(seq 90); do
+    dsl41 query status --brief -S "$S" >/dev/null 2>&1 && break
+    sleep 1
+done
+dsl41 query status --brief -S "$S"
+```
+
+   Read the preflight WARNs in `journalctl -u dsl41-engine.service`.
+6. `systemctl enable` makes both units start at boot, and the engine unit
+   then resumes the root on every boot. That includes a sealed root: a
+   boot opens its next period in place. A window that a reboot must not
+   end takes §2b's reboot hold (both units disabled) and releases it at
+   its end: §2b's backup and §7's rows 2 and 4. A retirement takes it for
+   good. A plain host reboot takes no hold.
+
+### Recipe: configure an estate
+
+1. **Identities.** One service account, `dsl41`, runs both units and owns
+   the run root, the anchor and the access map. People do not borrow it
+   for the control socket. Each operator uses their own login, and the
+   map gives each principal a tier (access-model §4): an exact `user:`
+   row wins, then the highest matching `group:` row, then `unmapped`. The
+   example map binds the service account at `adm`, `nightbank-ops` at
+   `ops` and `nightbank-observers` at `read`, and denies everyone else.
+   The commands that need the run root itself (`seal`, `audit`,
+   `estate`, `supervise`) run as the service account, because the root is
+   `0700`; `--claimed-actor you@host` on `seal` names you in its record,
+   as a claim.
+2. **Socket exposure.** With no `socket_group`, only the service account
+   reaches the socket. To let people in, name a group in the map
+   (`socket_group`; the example ships it commented out), create it, and
+   add every person who may reach the socket. The engine then opens the
+   run root to `0710` and the socket to `0660` for that group
+   (access-model §8); the bindings still decide each member's tier.
+   Restart the engine unit after a `socket_group` change: a reload that
+   names another group is refused (access-model §7). The web UI listens
+   on loopback; front it with TLS and authentication (§4).
+3. **Execution profile.** The launcher's run options are the runtime
+   profile: `--detached`, `--as-machine`, `--machine-policy strict` and
+   `--timezone`, plus `--timezone-map` and `--deadman` when used (§3, §5).
+   `--as-machine` is the name the JIL's `machine:` values resolve to. The
+   resume gate refuses a changed profile with exit 2. Change one only at
+   a boundary, with the matching `--next-*` options (§6a).
+4. **Access check.** After a start, as a member of the socket group with
+   a binding, `dsl41 query status --brief -S "$S"` answers. As a member
+   with no binding it is refused, and `perimeter.jsonl` gains an
+   `access_denied` record. Each start's `policy_loaded` record names the
+   map's digest (access-model §6).
+
+### Recipe: add, change or remove a job
+
+A job changes through a complete catalog and a boundary, never through an
+edit of a running estate (§6). Every estate file holds whole
+definitions: the `insert_` forms and the calendar statements. AutoSys
+delta forms (`update_job`, `delete_job`, `override_job`) are refused by
+lowering (DL-18): `dsl41 lint` exits 2 on them, and no estate can load
+them. Add a job by adding
+its `insert_job` block. Change one by editing its block. Remove one by
+deleting its block. A job that a remaining condition still names is a
+lint error (L001).
+
+1. Commit the edit to the estate's repository and tag it. If it adds or
+   removes a file, edit the launcher's file list and the `--next` list
+   below to match, in the same order.
+2. Before the window, check the new tag in a checkout of its own, with
+   `ESTATE` pointing at that checkout. Fix every ERROR:
+
+<!-- recipe: job-check -->
+```sh
+dsl41 lint "$ESTATE/amer.jil" "$ESTATE/apac.jil" "$ESTATE/calendars.jil" \
+    "$ESTATE/emea.jil" "$ESTATE/global.jil" "$ESTATE/infra.jil" -p "$PROPERTIES"
+dsl41 rehearse "$ESTATE/amer.jil" "$ESTATE/apac.jil" "$ESTATE/calendars.jil" \
+    "$ESTATE/emea.jil" "$ESTATE/global.jil" "$ESTATE/infra.jil" -p "$PROPERTIES"
+```
+
+3. In the window, hold the scheduled jobs and let running work finish
+   (§6, steps 1 and 2). `JOB` below is the job's name. A job you change
+   or remove must not be live:
+   `dsl41 query status --job "$JOB" -S "$S"` must show no `STARTING`,
+   `RUNNING` or `QUE_WAIT`, `armed` false and no `pending_timers`.
+   Otherwise the seal refuses a removed job that is executing or latent
+   (armed, `QUE_WAIT`, a live timer) and a changed job that is
+   executing. A changed latent job crosses with a recorded assumption
+   (period-model §10.1, §10.3). A
+   seal also refuses inside the retry horizon after the last operator
+   request, a hold included (§2b); wait it out.
+4. Set `ESTATE` back to the launcher's value, the live checkout: the
+   seal records the paths it reads, and the opener reads the launcher's.
+   Swap the live checkout to the new tag (`git -C "$ESTATE" checkout
+   <tag>`) and seal at once. Between the swap and the seal, a crash
+   restart refuses with exit 2, because the files no longer match the
+   running catalog. The `--next-*` options restate the launcher's run
+   options; they do not inherit them (§6a):
+
+<!-- recipe: job-seal -->
+```sh
+dsl41 seal --run-root "$RUN_ROOT" --estate-anchor "$ESTATE_ANCHOR" \
+    --next "$ESTATE/amer.jil" --next "$ESTATE/apac.jil" --next "$ESTATE/calendars.jil" \
+    --next "$ESTATE/emea.jil" --next "$ESTATE/global.jil" --next "$ESTATE/infra.jil" \
+    -p "$PROPERTIES" \
+    --next-detached --next-as-machine localhost --next-machine-policy strict --next-timezone UTC
+```
+
+   The live engine exits 3, and the engine unit stays failed on purpose.
+   Exit 4 is an unknown outcome: follow §6a's Day 2 before anything else.
+5. Open the next period in place:
+
+<!-- recipe: job-open -->
+```sh
+systemctl start dsl41-engine.service
+```
+
+   The launcher passes `--resume`, and the engine opens period N+1 in the
+   same run root under the new catalog. Wait for it with the
+   `wait-answers` block of the service recipe.
+6. Verify. An added or changed job answers with the definition this
+   period loaded:
+
+<!-- recipe: job-verify -->
+```sh
+dsl41 query spec -J "$JOB" -S "$S"
+```
+
+   A removed job stays as a ghost: its row and its history remain, with
+   no definition (period-model §10). `query spec` answers `unknown job`,
+   and the status row reads `"job_type": null`:
+
+<!-- recipe: job-verify-removed -->
+```sh
+dsl41 query status --job "$JOB" -S "$S"
+```
+
+7. Release the holds with `OFF_HOLD`. A rollback is the same recipe with
+   the previous tag.
+
+### Recipe: stop, restart, seal and recover
+
+- **Engine stop and start.** `systemctl stop dsl41-engine.service`, then
+  `systemctl start dsl41-engine.service`; or `systemctl restart
+  dsl41-engine.service`. The launcher resumes the same root (§5).
+  Detached runs keep running under the supervisor unit. Schedule ticks
+  that fall while the engine is down are dropped and journaled, not fired
+  late (§5). A host reboot is not an engine stop: it stops the supervisor
+  unit too and ends every running command.
+- **Host reboot.** Hold the scheduled jobs and let running work finish
+  (§6, steps 1 and 2), then reboot. The enabled units start at boot, and
+  the launcher resumes the same root. No seal, and no reboot hold.
+- **Estate stop.** For a window that must outlast a reboot: take §2b's
+  reboot hold, then follow §2b's shape-1 steps: stop the engine unit, seal
+  and audit while the supervisor unit runs, stop the supervisor unit, and
+  check that neither comes back. To start again, start the engine unit
+  (it opens the sealed period's successor), then release the hold.
+- **Seal.** Closing a period is an operator act at the estate's cutoff
+  (§6a). A live seal stops the engine with exit 3. The next period opens
+  when you start the engine unit, never through a restart loop.
+- **Recover from a crash.** Exit 1 or a signal: the unit restarts the
+  engine after `RestartSec`, and the launcher resumes the same root.
+  After five failed starts in five minutes the unit stays failed
+  (`StartLimitBurst=5`). Read `journalctl -u dsl41-engine.service`, fix
+  the cause, run `systemctl reset-failed dsl41-engine.service` and start.
+- **Recover from a refusal.** Exit 2 is a configuration refusal, and the
+  unit does not retry it. The last lines of the engine unit's journal name
+  the cause: a changed estate, a resume gate, an access map, a preflight
+  ERROR, or the launcher's own refusal. Fix it and start the unit.
+- **Recover a lost answer: replay the request.** `sendevent` and `host`
+  exit 4 when the answer was lost. Re-send the same arguments with the
+  `--request-id`, `--expect`, `--epoch` and `--baseline` the CLI printed,
+  as the same user on the same host (§4). The engine answers from its
+  first decision and applies nothing twice. A seal that exits 4 needs a
+  read of the estate first (§6a, Day 2).
+- **A new rerun is a different act.** `dsl41 sendevent FORCE_STARTJOB -J
+  JOB -S "$S"` with a fresh request id starts a new run with the next run
+  number. Never compose a fresh request id to retry a lost answer: a new
+  id is a new command.
+- **The supervisor unit restarted.** Its running commands ended with it,
+  and a restart does not bring them back. The engine reconciles what the
+  spool says (§3).
+
+### What to watch
+
+Every signal below is an existing command or file. There is no metrics
+endpoint; feed these into the site's monitoring.
+
+| Signal | Read it with | What it means |
+| --- | --- | --- |
+| engine unit | `systemctl show -p ActiveState -p ExecMainStatus -p NRestarts dsl41-engine.service` | `active` runs. `failed` with status 2 is a configuration refusal; the journal names it. `failed` with status 3 is a sealed period (next row); it lasts until the next start, and an enabled unit starts at boot. A rising `NRestarts` is crash restarts (exit 1); the journal says `engine failed:` and why |
+| sealed, not opened | the check below, on `ESTATE_ANCHOR/anchor.json` | `closed`: a period is sealed and the next is not open, so nothing runs. Alert when it stays `closed` past the window. `open` is normal. `claimed` is an opener at work, or one that crashed (§6a, Day 2) |
+| supervisor unit | `systemctl show -p ActiveState -p NRestarts dsl41-supervisor.service`; `dsl41 supervise list --run-root "$RUN_ROOT"` | the list answers `"ok": true` while the supervisor is up, and shows each run's `wrapper_alive`. A restart of this unit ended the commands it ran |
+| supervisor log | `$RUN_ROOT/supervisor.log`; `journalctl -u dsl41-supervisor.service` | the supervisor's own output, and the unit's starts and stops |
+| leader | `$RUN_ROOT/leader.lock` holds the last leader's `pid`, `host`, `epoch` and `since`; compare `pid` with `systemctl show -p MainPID --value dsl41-engine.service` | the note stays after the engine exits, so it says who led, not who leads. Never probe the lock with `flock`: an engine that starts while a probe holds it refuses with exit 2. Never delete or replace the file: the engine re-checks it before every append and stops when it changed |
+| control socket | `dsl41 query status --brief -S "$S"` | exit 0: the leader answers. Exit 2: no engine, or a refusal |
+| failures and alarms | `dsl41 query subscribe -S "$S"` as the wake-up; then `dsl41 query trace --since N -S "$S"` with the last `last_seq` read. The trace is per period and its `seq` restarts at 1: set the cursor to 0 when the answer's `baseline_id` changes, or when `last_seq` is below the cursor, as the TUI does (DL-210) | the stream carries journal records: a run's end arrives as an `input` record of kind `STATUS` from the `adapter` source. The trace names what it did: a transition to `FAILURE` or `TERMINATED`, or a `MUST_START_ALARM` or `MUST_COMPLETE_ALARM` entry (SEM-34) |
+| free space | `df -P "$RUN_ROOT" "$ESTATE_ANCHOR"`, and every file system a job's `std_out_file` or `std_err_file` writes to | see "when a write fails" below |
+| perimeter receipts | `$RUN_ROOT/perimeter.jsonl`, when the access map is armed | alert on `access_denied` and `policy_reload_failed` records. `stream_revoked` marks a stream that a reload closed (access-model §6, §7) |
+
+The sealed-not-opened check prints the lineage head's state. It needs
+`jq` on the host (`apt-get install jq`); no dsl41 command prints the
+head's state:
+
+<!-- recipe: watch-sealed -->
+```sh
+jq -r .head.state "$ESTATE_ANCHOR/anchor.json"
+```
+
+**Keep the subscriber reading.** A `subscribe` client that stops reading
+is removed once its backlog reaches the engine's budget, 64 MiB
+(control-protocol §5, DL-267). Nothing is lost: `dsl41 query subscribe`
+then exits 2 and names the `--since` to resubscribe with, and the
+backfill and gap rules of control-protocol §5 apply. A monitoring
+wrapper restarts the command with that cursor. Read the stream
+continuously, so a burst does not remove a reader that is only slow.
+
+**When a write fails.** These are the contracts' rules for a full disk or
+an I/O error:
+
+- The WAL. The engine applies an input only after its record is appended
+  and fsynced (runner-design §7). If the append or the fsync fails, the
+  engine does not apply the input, says `engine failed:` and exits 1. The
+  unit restarts it, and resume reads the WAL as it is: it cuts a torn
+  final line, and replays a complete one. A restart that cannot write
+  fails the same way, and the start limit then leaves the unit failed.
+- A seal. A failure before the `seal` record aborts the boundary: the
+  period stays open and `dsl41 seal` exits 2. A failure on the `seal`
+  record itself is an unknown outcome: the engine fail-stops, the seal
+  exits 4, and recovery decides from the WAL (period-model §7; §6a, Day 2).
+- A wrapper that cannot write its status record exits 3 (supervisor-protocol
+  §4). The run's exit status can then be unobservable.
+- Perimeter receipts. An `access_denied` receipt that cannot be written
+  still denies. A `privileged_admitted` receipt is best effort, and the
+  admission stands. A map whose `policy_loaded` receipt cannot be written
+  does not arm (access-model §6).
+
+### Retiring an estate
+
+There is no retire verb. Retiring ends a lineage: nothing will open its
+next period. The procedure keeps the history by default; what to delete,
+and when, is the site's retention decision (§2a).
+
+1. Take §2b's reboot hold (`hold-down`: both units disabled), so a reboot
+   inside the procedure starts nothing. The units keep running. A
+   retirement never releases it.
+
+2. Hold the scheduled jobs, and let running work finish or end it (§6,
+   steps 1 and 2).
+3. Seal, audit and stop, as §2b's shape-1 steps 1 to 6 do. The final seal
+   commits a successor that nobody opens; it is the lineage's closing
+   record. The audit attests the last period.
+4. Remove the estate's units, so that a stray `systemctl start` finds no
+   unit. A start of the old units would resume the retired root and open
+   its successor. Keep copies of the units, the launcher and the access
+   map with the estate's other deployment inputs:
+
+<!-- recipe: retire-remove -->
+```sh
+retained=/srv/dsl41/retained/$(basename "$RUN_ROOT")
+install -d -m 0755 /srv/dsl41/retained
+install -d -m 0700 "$retained"
+cp -p /etc/systemd/system/dsl41-engine.service /etc/systemd/system/dsl41-supervisor.service \
+    /opt/dsl41/bin/dsl41-launch /etc/dsl41/nightbank-access.toml "$retained"/
+systemctl reset-failed dsl41-engine.service || :
+systemctl reset-failed dsl41-supervisor.service || :
+rm /etc/systemd/system/dsl41-engine.service /etc/systemd/system/dsl41-supervisor.service
+```
+
+   The launcher left in `/opt/dsl41/bin` starts nothing without a unit. A
+   later estate on this host installs its own launcher and units (the
+   service recipe).
+5. Check that the estate stays stopped. These are read-only queries after
+   the reload:
+
+<!-- recipe: retire-check -->
+```sh
+systemctl daemon-reload
+systemctl show -p LoadState -p ActiveState dsl41-engine.service
+systemctl show -p LoadState -p ActiveState dsl41-supervisor.service
+```
+
+   Each unit prints `LoadState=not-found` and `ActiveState=inactive`:
+   `reset-failed` above cleared a `failed` state, which a live seal's exit
+   3 leaves on the engine unit and which would otherwise outlive the
+   unit's file. It refuses a unit systemd has already unloaded, which has
+   no failed state to clear; the `|| :` lets that pass. Then
+   run §2b's no-writers check. With a dedicated service account,
+   `pgrep -u dsl41` prints nothing. Drop the estate from monitoring: its
+   head stays `closed` for good.
+6. Keep, under the site's retention decision: every run root the anchor's
+   registry names, the anchor, the deployment inputs (the estate's tag,
+   the properties, the access map and any timezone map, and the copies
+   above), and a venv of the state-machine version the periods ran (§7,
+   row 4). The retained history still audits:
+
+<!-- recipe: retire-audit -->
+```sh
+dsl41 audit --estate-anchor "$ESTATE_ANCHOR"
+```
+
+7. Delete only whole sets: one lineage's anchor together with every root
+   its registry names, and only when no retained anchor names any of those
+   roots. First list the roots each anchor on the host names. The command
+   is read-only and takes no lock; run it once per anchor, with a venv of
+   that lineage's state-machine version:
+
+<!-- recipe: retire-list -->
+```sh
+dsl41 estate prune --estate-anchor "$ESTATE_ANCHOR" --dry-run |
+    sed -n '/^roots planned/,/^would remove/p'
+```
+
+   A root on a kept anchor's list is not yours to delete. Deleting one
+   would make every estate-wide reader of that lineage refuse it as a
+   missing registered root (§2b). A `claimed` head also names its target
+   root; finish or reclaim the claim first (§6a).
+
+Who cleans what:
+
+| What | Where | Owner |
+| --- | --- | --- |
+| default job logs | `RUN_ROOT/logs/<job>.<run>.out` and `.err` | dsl41: `dsl41 estate prune --tombstones` removes them with their run (§2a) |
+| external job output | a job's `std_out_file` and `std_err_file` | the site's log rotation; dsl41 never touches them. Rotate between runs: a run appends |
+| supervisor log | `RUN_ROOT/supervisor.log` | the site. The supervisor appends to it and nothing in dsl41 reads it. Rotate with copy and truncate, or with the supervisor unit stopped |
+| perimeter journal | `RUN_ROOT/perimeter.jsonl` | nobody on its own. Never truncate or rotate `perimeter.jsonl` on its own: truncating it restarts `access_seq`, and later receipts reuse identities that already exist (access-model §6). It goes only with its whole root |
+| system journal | journald, for both units | the site's journald retention. It holds each start's launcher line and the engine's output |
+| run roots and anchors | `/srv/dsl41/runs` | the site's retention decision, applied to whole sets (above); `estate prune` for what §2a licenses inside a root |
+
 
 ## 1. Install
 
@@ -145,6 +671,16 @@ lineage head:
 Backing up a root means backing up the anchor too. It is a sibling of the
 root and not inside it, so `tar czf root.tgz /srv/dsl41/runs/<id>` takes
 the estate and leaves the fence behind.
+
+**Outside the floor, and outside the verb** (DL-268). Three kinds of file
+are not lineage evidence, and `estate prune` never removes them.
+`perimeter.jsonl` holds the access map's receipts (access-model §6).
+Never truncate or rotate `perimeter.jsonl` on its own: truncating it in
+place restarts `access_seq`, and later receipts then reuse identities that
+already exist. It goes only with its whole root. `supervisor.log` is the
+supervisor's own output, and the site rotates it. A job's `std_out_file`
+and `std_err_file` are the site's as well. §0's cleanup table names the
+owner of each.
 
 **The verb.**
 
@@ -293,6 +829,30 @@ still write into the run root. **The order matters and does not commute.**
 How you stop each process depends on the deployment shape (§3). The seal
 between the two stops does not (DL-266).
 
+**Hold the estate down across reboots: the reboot hold** (DL-268). Under shape 1 the units
+are enabled (§0's service recipe), and an enabled engine unit resumes the
+root at every boot: on a sealed root that opens the next period in place.
+A window that a reboot must not end takes the reboot hold first, before any
+stop or seal, live or offline:
+
+<!-- recipe: hold-down -->
+```sh
+systemctl disable dsl41-engine.service dsl41-supervisor.service
+```
+
+It ends by releasing the reboot hold, once the estate may start again, on the
+failure and recovery paths too:
+
+<!-- recipe: hold-release -->
+```sh
+systemctl enable dsl41-supervisor.service dsl41-engine.service
+```
+
+Three procedures take the reboot hold: this backup, §7's rows 2 and 4, and a
+retirement (§0), which never releases it. A stop for a host reboot does
+not take it: there the enabled units are what bring the estate back (§0's
+stop recipe).
+
 The seal is the same in every shape. Seal the period (§6a) and
 `dsl41 audit` it, so what you back up is closed and attested rather than
 open. Do this WHILE a detached period's supervisor is still up. The
@@ -304,12 +864,14 @@ unaccounted-for supervisor behind. A seal, live or offline, refuses inside
 the closing period's retry horizon (period-model §9). The horizon counts
 from the last operator request, an `ON_HOLD` included; wait it out. A live seal
 stops the engine itself with exit 3, so it takes the place of steps 1 to
-3 below.
+3 below. It does not replace the reboot hold: take the reboot hold before a live seal
+as before an offline one.
 
 **Shape 1, a supervisor unit of its own** (the example units):
 
-1. stop the engine unit: `systemctl stop dsl41-engine.service`. The
-   supervisor unit keeps running;
+1. with the reboot hold taken (above), stop the engine unit:
+   `systemctl stop dsl41-engine.service`. The supervisor unit keeps
+   running;
 2. if the period ran detached, confirm the supervisor is still there:
    `dsl41 supervise list --run-root <root>` answers `ok` while it is;
 3. seal offline and audit, as above;
@@ -351,7 +913,9 @@ drill runs shape 1's steps (§3's worked example). It waits past
 them at the recorded paths. It then audits the lineage and opens the next
 period. Under shape 1, start a restored estate with
 `systemctl start dsl41-engine.service`. Its `Requires=` starts the
-supervisor unit first.
+supervisor unit first. Release the reboot hold once the copy is done, or once
+the restored estate runs. If the start fails, fix the cause, start
+again, and then release it.
 
 **The path-equality constraint.** The anchor's registry names each
 period's run root by absolute path (§6a; period-model §1.3). Restoring
@@ -569,7 +1133,9 @@ systemd. It covers the first start, a same-root restart, a detached job
 that survives an engine stop, a changed estate refused without a restart
 loop, and a sealed engine that stays stopped until the next period is
 opened. It also covers §2b's shape-1 quiescence and a restore at the
-recorded paths, and §7's upgrade rows (DL-266). The access-map refusals,
+recorded paths, and §7's upgrade rows (DL-266). It installs and first
+starts the units with §0's service recipe, and ends with §0's retirement
+procedure, both read from this file (DL-268). The access-map refusals,
 their messages and what they leave
 untouched are the claim of `tests/test_nightbank_deploy.py`, which runs in
 CI; the drill's claim is that systemd does not restart a refusal.
@@ -608,7 +1174,7 @@ the launcher or the drill.
   `S=<root>/control.sock` once in ops scripts):
   `dsl41 query status --brief -S $S`, `query is-success -J <job> -S $S`
   (shell exit codes), `query subscribe -S $S` (live journal stream) for
-  feeding the site monitoring.
+  feeding the site monitoring. §0's "What to watch" lists the signals.
 - `sendevent` and `host` exit 4 when the answer was lost, and the recovery
   reference is the retained CLI stderr plus the original arguments: re-run
   those arguments with the `--request-id`, `--expect`, `--epoch` and
@@ -1131,8 +1697,8 @@ pair is resume-safe.
 
 **Row 2, a note that does not say resume-safe.** Work at a boundary.
 First hold the scheduled jobs and let running work finish (§6's window,
-steps 1 and 2). Then run §2b's shape-1 steps 1 to 6 with the old venv.
-A physical roll needs a closing period with no live execution and an
+steps 1 and 2). Take the reboot hold (§2b). Then run §2b's shape-1 steps 1 to 6
+with the old venv. A physical roll needs a closing period with no live execution and an
 attested seal (§6a). Then open the next period in the new root:
 
 ```sh
@@ -1144,6 +1710,7 @@ sudo -u dsl41 touch /srv/dsl41/runs/<new>.open-from   # the one-shot open trigge
 systemctl start dsl41-engine.service
 systemctl is-active dsl41-engine.service              # active
 dsl41 query status --brief -S /srv/dsl41/runs/<new>/control.sock
+systemctl enable dsl41-supervisor.service dsl41-engine.service   # release the reboot hold (§2b)
 ```
 
 `<RUN_ROOT>.open-from` is the launcher's one-shot open trigger. While it
@@ -1162,7 +1729,7 @@ which a roll that stopped after its sentinel needs (§6a). If the opener
 died before its sentinel, the unit's restart finds no trigger and no
 sentinel, and the launcher refuses a genesis against the existing anchor
 with exit 2, so the unit stays down. Create the trigger again and start
-the unit.
+the unit. On either path, release the reboot hold once the engine answers.
 
 A supervisor serves one run root, so the new root gets its own, from the
 new venv. The holds cross the roll; release them with `OFF_HOLD` once the
@@ -1191,7 +1758,8 @@ both units run from the new venv and that the engine resumed.
 
 **Row 4, a state-machine version change.** The new build cannot open the
 old estate's periods, and only the old venv can audit them (§6a). Drain
-as for row 3. Then run §2b's shape-1 steps 1 to 6 with the old venv: stop
+as for row 3. Take the reboot hold (§2b). Then run §2b's shape-1 steps 1 to 6
+with the old venv: stop
 the engine unit, a final seal and audit while the supervisor runs, stop
 the supervisor unit. Then start a new estate:
 
@@ -1201,14 +1769,19 @@ ln -sfn /opt/dsl41/venv-<new> /opt/dsl41/venv
 # and both units' RequiresMountsFor= to match
 systemctl daemon-reload
 systemctl start dsl41-engine.service     # a genesis, no --resume
+systemctl enable dsl41-supervisor.service dsl41-engine.service   # release the reboot hold (§2b)
 /opt/dsl41/venv-<old>/bin/dsl41 audit --estate-anchor <old-anchor>
 ```
+
+If the genesis fails, fix the cause and start the unit again before you
+release the reboot hold.
 
 A new estate carries no state: holds, globals and latches start empty, as
 in §6's fresh-run-root cycle. Keep the old venv for as long as you retain
 the old estate's periods. The rollback is the old venv only: flip back,
-point the launcher back at the old root and anchor, and start the engine
-unit, which opens the old estate's next period. The service drill runs
+point the launcher back at the old root and anchor, start the engine
+unit, which opens the old estate's next period, and release the reboot
+hold. The service drill runs
 this row from v1.7.0, installed from PyPI, to the build under test
 (`upgrade-old-release`, `upgrade-state-machine`).
 
@@ -1229,7 +1802,7 @@ speaks to the supervisor, not the engine, and leaves no WAL record.
 | OS patching, host maintenance | `host drain` lets running work finish while the engine keeps leading (control-protocol §3). With one executor row the engine's own host is the executor, so patching that host is a stop and a resume (§3). A second executor is not built (DL-230): there is no flag for an `executor_id` (`--as-machine` names the machine identity only), and `journal` reads the one local executor |
 | several estates on one host | each estate is its own run root, control socket, `serve` port and capacity pool; nothing is shared between them |
 | standby provisioning, readiness check | not built: follower mode and `standby check` (DL-230) |
-| estate decommission | a final seal, then §2a's floors, `estate prune` and the archive class (DL-135, DL-144). There is no decommission procedure and no retire verb |
+| estate decommission | §0's retirement procedure: disable the units, a final seal and audit, stop, keep the lineage under the site's retention decision, delete only whole sets (DL-268). There is no retire verb |
 
 ### Estate content
 
