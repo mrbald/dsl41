@@ -17674,3 +17674,31 @@ relitigate an entry; append a new one.
   test that missed new verbs, was fixed the same round. It confirmed both
   in round 2. Codex found no material defect and checked the placement
   independently.
+- DL-265 Subprocess coverage is measured and reported (2026-10-04;
+  pyproject.toml, .github/workflows/ci.yml, docs/agent-workflow.md,
+  scripts/branch_coverage.py)
+  THE GAP. DL-105 left the supervisor and the wrapper out of the branch
+  gate because in-process coverage cannot see a subprocess. Nothing
+  printed branch-only numbers for the whole package either: the `Cover`
+  column of `coverage report` mixes statements and branches.
+  THE CHANGE. `[tool.coverage.run]` sets `patch = ["subprocess"]`,
+  `parallel = true` and `sigterm = true`. Each Python subprocess the
+  suite starts measures itself and writes its own data file. The gate
+  list runs `coverage erase` first, so stale data files cannot merge into
+  a new report, and `coverage combine` before `coverage report`. It ends
+  with `scripts/branch_coverage.py`, which prints `covered_branches` over
+  `num_branches` for every module of `src/dsl41`, most missed first, and
+  never fails. CI runs the same list.
+  THE GATE. It does not change: the same nine modules at 100%. Combined
+  data can only add covered arcs. Widening the gate reopens DL-105's
+  scope and gets its own entry.
+  THE NUMBERS. On macOS the supervisor reads 284 of 344 branches (214
+  in-process before this entry) and the wrapper 37 of 52 (2 before). The
+  package reads 7,827 of 8,444 (92.70%, from 90.62%). The Linux 3.14 cell
+  agrees within three branches. A process a test ends with SIGKILL loses
+  its data, so these numbers are floors. The suite under coverage takes
+  about 10 to 20% longer.
+  REVIEW. The Opus reviewer found two majors: stale parallel data could
+  make the gate read 100% falsely, and the Linux cell had not run. Its two
+  minors were an untested `--include` argument and a run-on comment. All
+  four were fixed and confirmed in round 2.
