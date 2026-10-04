@@ -1156,8 +1156,9 @@ untouched are the claim of `tests/test_nightbank_deploy.py`, which runs in
 CI; the drill's claim is that systemd does not restart a refusal.
 The step bodies live in `drill-steps.sh`. The workflow runs them one
 step at a time. `drill-local.sh` runs the same steps on a workstation, in
-a podman container with systemd as PID 1 on Ubuntu 24.04. It runs the
-host's architecture, so on Apple silicon it is arm64, not the runner's
+a podman container with systemd as PID 1 on Ubuntu 24.04, as an
+unprivileged user with passwordless sudo, as the runner runs them
+(DL-271). It runs the host's architecture, so on Apple silicon it is arm64, not the runner's
 x86_64.
 The drill passed every step on GitHub's Ubuntu 24.04 runner at d886679
 (DL-223). Since then it gained the `quiesce`, `restore`, `reboot`,

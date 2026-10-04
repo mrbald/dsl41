@@ -18105,3 +18105,32 @@ relitigate an entry; append a new one.
   release note) and eight minors, all fixed here. Its second round
   confirmed them and added two minors: the row 4 rollback after a failed
   genesis, and a placeholder citation; both are fixed.
+- DL-271 The drill's steps run unprivileged with sudo, locally as on the
+  runner (2026-10-04; examples/nightbank/deploy/drill-lib.sh,
+  drill-steps.sh, drill-local.sh, deployment-runbook.md)
+  THE GAP. The dispatched service drill failed in `retire`. The step
+  looped `for anchor in /srv/dsl41/runs/*.anchor`. GitHub's runner runs
+  each step as an unprivileged user and uses sudo for privileged work.
+  The run roots' directory is the service account's, mode 0700, so the
+  glob matched nothing and the literal pattern reached `dsl41 estate
+  prune --estate-anchor`, which exited 2. Every local run had passed,
+  because `drill-local.sh` ran each step as root.
+  THE RULE. A step lists or reads a path the service account or root owns
+  through sudo. `anchors_in DIR` lists the anchors with `sudo find` and
+  fails on an empty list. The retry-horizon read fails on a file it
+  cannot read instead of treating it as no request. `drill-local.sh` runs
+  every step as `runner`, a user with passwordless sudo in a sudoers
+  drop-in that owns the copied checkout, as the runner user owns its
+  checkout. The step bodies stay shared. Run unprivileged, the unfixed
+  drill failed locally in `retire` with GitHub's message; the fixed drill
+  passes every step.
+  NOT IN SCOPE. The runbook's recipes are unchanged: an operator runs them
+  as root or as the service account (§0), where the paths are readable.
+  An audit of the other steps found no other unprivileged read of a
+  root-only path.
+  TESTS. `test_drill_local_runs_every_step_as_an_unprivileged_sudoer`
+  fails if `drill-local.sh` runs a step or the diagnostics as root, names
+  a second user, or climbs back to root inside the exec.
+  REVIEW. One Opus reviewer: no material finding. Its two minors, a test
+  a sudo wrapper could pass and a stale sentence about the GitHub pass,
+  are fixed.

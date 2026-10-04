@@ -2,7 +2,9 @@
 #
 # Sourced by drill-steps.sh, which holds the step bodies. The workflow
 # .github/workflows/service-drill.yml and drill-local.sh both run those
-# steps, on a host with systemd as PID 1 and sudo. The paths are the ones
+# steps, on a host with systemd as PID 1, as an unprivileged user with
+# passwordless sudo: every read of a path the service account or root owns
+# goes through sudo (DL-271). The paths are the ones
 # dsl41-launch and the units name; the drill installs everything there.
 # Bash, not POSIX sh: the drill is not an example to copy, the launcher and
 # the units are.
@@ -79,7 +81,7 @@ run_recipe() { # run_recipe [--as-dsl41] [--no-errexit] NAME [VAR=VALUE...]
     name=$1
     shift
     body=$(recipe "$name")
-    printf 'recipe %s:\n%s\n' "$name" "$(sed 's/^/  | /' <<<"$body")" >&2
+    printf 'recipe %s:\n  | %s\n' "$name" "${body//$'\n'/$'\n  | '}" >&2
     if [ "$as" = root ]; then
         (cd "$REPO" && sudo env "$@" bash "$errexit" -u -o pipefail -c "$body")
     else
@@ -320,13 +322,25 @@ hold_scheduled() {
     done
 }
 wait_out_retry_horizon() {
-    local last left
-    last=$(cat "$SCRATCH/last-request" 2>/dev/null || echo 0)
+    local last=0 left
+    # no file is no request yet; a file the step cannot read fails (DL-271)
+    [ ! -e "$SCRATCH/last-request" ] || last=$(cat "$SCRATCH/last-request")
     left=$((last + 62 - $(date +%s)))
     if ((left > 0)); then
         echo "waiting ${left}s for the retry horizon after the last request"
         sleep "$left"
     fi
+}
+
+# The estate anchors in DIR, one per line, listed as root (DL-271). The
+# steps run as an unprivileged user with sudo, as GitHub's runner does, and
+# the run roots' directory is the service account's alone: a glob there
+# matches nothing and stays literal. An empty list is a failure.
+anchors_in() { # anchors_in DIR
+    local list
+    list=$(sudo find "$1" -mindepth 1 -maxdepth 1 -name '*.anchor' | sort)
+    [ -n "$list" ] || fail "no *.anchor in $1"
+    printf '%s\n' "$list"
 }
 
 # no command still alive under the supervisor of ROOT
