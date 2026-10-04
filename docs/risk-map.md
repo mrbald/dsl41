@@ -90,10 +90,10 @@ It is a refusal, not damage.
 `_drop_never_opened_segment` in `src/dsl41/runner_startup.py` returns without repair when fewer than two segments exist.
 An identical retry of the roll refuses the same way.
 The rule is in the [period-model §11](period-model.md#11-resume-replay-and-recovery) recovery table and DL-144.
-[Period-model §1.3](period-model.md#13-the-successor-fence) says an ordinary crash between the claim and the head move never needs `--force`.
-Today this crash does: the way out is `dsl41 estate reclaim --force`.
-A fix would let the opener recreate a torn sole segment when the head is claimed by that root.
-No entry yet builds it.
+The runbook has [a recipe](deployment-runbook.md#recipe-recover-a-rolled-root-whose-opening-is-torn) (DL-278): the operator removes the torn segment and the identical opener reopens in place.
+[Period-model §1.3](period-model.md#13-the-successor-fence) says an ordinary crash between the claim and the head move never needs `--force` or a hand step.
+A fix would let the opener recreate a torn sole segment itself when the head is claimed by that root.
+DL-278 records it as not built.
 
 ### Owning modules outside the 100% gate
 

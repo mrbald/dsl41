@@ -2,7 +2,8 @@
 
 A block in docs/deployment-runbook.md whose fence follows a
 `<!-- recipe: NAME -->` line is a recipe. The job recipe, the readiness
-wait, the sealed check and the retirement's audit and list run here, as
+wait, the sealed check, the torn-opening recipe and the retirement's
+audit and list run here, as
 the runbook prints them, against a synthetic estate under the shipped
 launcher. The service, removal and stop-check recipes need systemd: the
 service drill runs them (drill-steps.sh's `run_recipe`), and the tests
@@ -44,6 +45,7 @@ from test_nightbank_deploy import (
     _unit,
 )
 from test_docs_hygiene import ROOT
+from test_runner_supervisor import wait_for
 
 RUNBOOK = ROOT / "docs" / "deployment-runbook.md"
 MARKER = re.compile(r"^<!-- (recipe|diagram): ([a-z-]+) -->$")
@@ -211,6 +213,11 @@ RUN_HERE = {
     "watch-sealed",
     "retire-audit",
     "retire-list",
+    "torn-look",
+    "torn-check",
+    "torn-reopen",
+    "torn-reclaim",
+    "torn-open",
 }
 #: the recipes drill-steps.sh runs as written
 RUN_BY_DRILL = {
@@ -565,4 +572,228 @@ def test_a_sealed_period_not_yet_opened_shows_on_the_anchor(short_root: Path) ->
         engine.start(env)
         assert _ok("watch-sealed", env).strip() == "open"
     finally:
+        engine.teardown()
+
+
+def _launch_once(launcher: Path) -> subprocess.CompletedProcess[str]:
+    """One start of the engine unit that is expected to refuse: the
+    launcher's engine mode, run to its exit."""
+    return subprocess.run(
+        ["sh", str(launcher), "engine"], capture_output=True, text=True, timeout=120
+    )
+
+
+def _shutdown_supervisor(root: str) -> None:
+    """Shape 2's supervisor stop; exit 2 means none was running."""
+    done = subprocess.run(
+        [str(DSL41), "supervise", "shutdown", "--run-root", root],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert done.returncode in (0, 2), done.stdout + done.stderr
+
+
+def _stopped(root: Path) -> None:
+    """Shape 2's stop, then ss2b's no-writers check: no supervisor files."""
+    _shutdown_supervisor(str(root))
+    wait_for(lambda: not (root / "supervisor.pid").exists(), timeout_s=60)
+    wait_for(lambda: not (root / "supervisor.sock").exists(), timeout_s=60)
+
+
+def _check_stops(env: dict[str, str], why: str) -> None:
+    done = _run("torn-check", env)
+    assert done.returncode != 0 and f"stop: {why}" in done.stderr, done.stdout + done.stderr
+
+
+def _each_guard_stops_the_check(root: Path, anchor: Path, env: dict[str, str]) -> None:
+    """Every guard of torn-check the recipe relies on, one at a time: the
+    evidence goes in, the check stops naming it, the evidence comes out."""
+    from dsl41.period import wal_path
+
+    segment = wal_path(root, 2)
+    torn = segment.read_bytes()
+    segment.write_bytes(torn + b"\n")
+    _check_stops(env, "the segment holds a complete line")
+    segment.write_bytes(torn)
+    (root / "wal" / "000003.jsonl").write_bytes(b"")
+    _check_stops(env, "wal/ holds something other than one segment")
+    (root / "wal" / "000003.jsonl").unlink()
+    (root / "runs" / "OPS_PING_C").mkdir(parents=True)
+    _check_stops(env, "runs/ holds run evidence")
+    (root / "runs" / "OPS_PING_C").rmdir()
+    (root / "seals").mkdir(exist_ok=True)
+    (root / "seals" / "000002.json").write_text("{}")
+    _check_stops(env, "the period has a seal")
+    (root / "seals" / "000002.json").unlink()
+    (root / "supervisor.pid").write_text("1\n")
+    _check_stops(env, "a supervisor may still run")
+    (root / "supervisor.pid").unlink()
+    sentinel = root / "journal.jsonl"
+    owned = sentinel.read_bytes()
+    record = json.loads(owned)
+    sentinel.write_text(json.dumps({**record, "claim_id": None}) + "\n")
+    _check_stops(env, "the head's claim did not open this root")
+    sentinel.write_bytes(owned)
+    (claim,) = (anchor / "claims").iterdir()
+    claim.rename(claim.with_suffix(".aside"))
+    _check_stops(env, "the claim file is missing")
+    claim.with_suffix(".aside").rename(claim)
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="the runbook's check reads with jq")
+@pytest.mark.parametrize("cause", ["crash", "crash-fallback", "damage"])
+def test_a_torn_sole_opening_of_a_rolled_root_is_recovered_by_the_recipe(
+    short_root: Path, cause: str
+) -> None:
+    """ss0's torn-opening recipe, as the runbook prints it. Root A seals
+    and is audited; the roll into B leaves B's only segment as part of
+    its first line and nothing after, which resume refuses with `missing
+    segment record`.
+
+    `crash` stops the roll between the segment and the head move: the
+    head stays `claimed` by B. Every guard of the check stops it when
+    its evidence is there; then the segment goes, the identical opener
+    reopens period 2 in B with no reclaim, and B resumes.
+    `crash-fallback` walks the fallback blocks instead: reclaim, then a
+    fresh root C. `damage` finishes the roll, stops B and cuts the
+    durable segment to part of its first line, so every later record is
+    gone too; the head reads `open`, the check finds no run evidence,
+    the anchor comes back from a copy taken before the roll, and C opens
+    the period."""
+    from dsl41.boundary import load_bundle_catalog
+    from dsl41.estate import roll_into_root
+    from dsl41.period import wal_path
+    from dsl41.runner_journal import read_journal
+
+    site = _site(short_root)
+    _write_estate(Path(site["ESTATE"]))
+    root_a, anchor = Path(site["RUN_ROOT"]), Path(site["ESTATE_ANCHOR"])
+    site_b = {**site, "RUN_ROOT": str(short_root / "runs" / "nb-b")}
+    site_c = {**site, "RUN_ROOT": str(short_root / "runs" / "nb-c")}
+    root_b, root_c = Path(site_b["RUN_ROOT"]), Path(site_c["RUN_ROOT"])
+    (short_root / "b").mkdir()
+    (short_root / "c").mkdir()
+    engine = _Engine(short_root, site)
+    engine_b = _Engine(short_root / "b", site_b)
+    engine_c = _Engine(short_root / "c", site_c)
+    env, env_b, env_c = _env(site), _env(site_b), _env(site_c)
+
+    def head() -> dict[str, object]:
+        stored = json.loads((anchor / "anchor.json").read_text())["head"]
+        assert isinstance(stored, dict)
+        return stored
+
+    try:
+        # period 1 in A, sealed live, audited, its supervisor stopped
+        engine.start(env)
+        _ok("job-seal", env)
+        assert engine.exit_code() == 3
+        audited = subprocess.run(
+            [str(DSL41), "audit", "--run-root", str(root_a), "--estate-anchor", str(anchor)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert audited.returncode == 0, audited.stdout + audited.stderr
+        _stopped(root_a)
+        copy = short_root / "copy"
+        shutil.copytree(anchor, copy / "anchor")
+
+        # the roll into B, and B's only segment cut inside its first line
+        if cause == "damage":
+            Path(f"{root_b}.open-from").touch()
+            engine_b.start(env_b)
+            assert engine_b.proc is not None and _stop(engine_b.proc) == 0
+            _stopped(root_b)
+        else:
+
+            class Stopped(Exception):
+                pass
+
+            def crash_point(stage: str) -> None:
+                if stage == "after_opening_segment":
+                    raise Stopped(stage)
+
+            with pytest.raises(Stopped):
+                roll_into_root(
+                    root_b,
+                    anchor_dir=anchor,
+                    catalog_of=lambda root, m: load_bundle_catalog(root, m.source_bundle_hash),
+                    crash_point=crash_point,
+                )
+        segment = wal_path(root_b, 2)
+        first = segment.read_bytes().split(b"\n", 1)[0]
+        segment.write_bytes(first[: len(first) // 2])
+
+        # the unit's start refuses, and so does the identical retry
+        refused = _launch_once(engine_b.launcher)
+        assert refused.returncode == 2
+        assert "missing segment record" in refused.stdout + refused.stderr
+        if cause != "damage":
+            Path(f"{root_b}.open-from").touch()
+            retried = _launch_once(engine_b.launcher)
+            assert retried.returncode == 2
+            assert "missing segment record" in retried.stdout + retried.stderr
+            assert head()["state"] == "claimed"
+
+        # steps 1 to 3: look, stop, check. The refused detached starts
+        # left B's supervisor up, so the look asks it for its runs
+        assert (root_b / "supervisor.sock").exists()
+        looked = _ok("torn-look", env_b).splitlines()
+        assert json.loads(looked[0])["state"] == ("open" if cause == "damage" else "claimed")
+        _stopped(root_b)
+        if cause == "crash":
+            _each_guard_stops_the_check(root_b, anchor, env_b)
+        if cause == "damage":
+            sentinel = root_b / "journal.jsonl"
+            owned = sentinel.read_bytes()
+            sentinel.write_text(json.dumps({**json.loads(owned), "claim_id": None}) + "\n")
+            _check_stops(env_b, "no roll created this root")
+            sentinel.write_bytes(owned)
+        state = "open" if cause == "damage" else "claimed"
+        assert _ok("torn-check", env_b).split() == [state, "000002.jsonl"]
+
+        if cause == "crash":
+            # steps 4 and 5: the identical opener reopens B in place
+            _ok("torn-reopen", env_b)
+            assert sorted(p.name for p in (root_b / "wal").iterdir()) == []
+            line = engine_b.start(env_b)
+            assert line.endswith(f" --open-from {anchor}"), line
+            assert head() == {"state": "open", "period_id": 2, "root": os.path.realpath(root_b)}
+            assert read_journal(segment)[0]["reclaimed"] is None
+            assert engine_b.proc is not None and _stop(engine_b.proc) == 0
+            line = engine_b.start(env_b)
+            assert line.endswith(" --resume"), line
+            return
+
+        if cause == "crash-fallback":
+            _ok("torn-reclaim", env_b)
+            _check_stops(env_b, "the head is closed")
+        else:
+            shutil.rmtree(anchor)
+            shutil.copytree(copy / "anchor", anchor)
+        assert head()["state"] == "closed"
+
+        # step 7: a fresh root C
+        _ok("torn-open", env_c)
+        line = engine_c.start(env_c)
+        assert line.endswith(f" --open-from {anchor}"), line
+        assert head() == {"state": "open", "period_id": 2, "root": os.path.realpath(root_c)}
+        opening = read_journal(wal_path(root_c, 2))[0]
+        assert (opening["reclaimed"] is not None) == (cause == "crash-fallback")
+        # a rerun of the check on B now meets a lineage open elsewhere
+        _check_stops(env_b, "the head names another root")
+
+        # B can no longer resume: the anchor does not name it. C stops
+        # first, or B meets C's anchor lock before the rule
+        assert engine_c.proc is not None and _stop(engine_c.proc) == 0
+        stale = _launch_once(engine_b.launcher)
+        assert stale.returncode == 2
+        assert "this anchor does not name" in stale.stdout + stale.stderr
+        line = engine_c.start(env_c)
+        assert line.endswith(" --resume"), line
+    finally:
+        engine_c.teardown()
+        engine_b.teardown()
         engine.teardown()

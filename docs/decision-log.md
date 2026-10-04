@@ -18563,3 +18563,75 @@ relitigate an entry; append a new one.
   real docs cite only modules that exist.
   REVIEW. One Opus reviewer, three rounds. All findings are fixed; the
   HTML-comment case of (b) is the stated limit above.
+- DL-278 A rolled root whose only segment is torn has an operator recipe
+  (2026-10-05; deployment-runbook.md §0, §6a;
+  tests/test_operator_recipes.py)
+  THE GAP. A physical roll writes the new root's opening segment, then
+  moves the head from `claimed` to `open`. The segment is fsynced before
+  the head moves, so a crash inside that write leaves the segment empty
+  or torn and the head `claimed` by the new root. Resume removes such a
+  segment only when an earlier segment exists in the root
+  (`runner_startup._drop_never_opened_segment`). A rolled root has none,
+  so resume refuses with `missing segment record`, as period-model §11's
+  torn-first-line row states. The identical retry of the roll refuses
+  the same way while the torn file stays: `open_next_period` checks the
+  existing file through `read_journal`. The runbook told the operator to
+  retry, and named no way out.
+  THE RULE. No code changes. §0 gains a recipe. The operator looks
+  before stopping anything: the head, and the supervisor's list. A
+  listed run ends the recipe, with no supported recovery. Then the units
+  stop and §2b's no-writers check runs. One check block then stops at
+  any evidence beyond a torn opening: a head that is not `claimed` or
+  `open` naming this root; for `claimed`, a missing claim file, or a
+  sentinel `claim_id` that is not the head's (the rolled-root
+  discriminator); anything in `wal/` but one segment, or a segment with
+  a complete line; anything in `runs/`; a seal for the period; a
+  `supervisor.pid`.
+  A `claimed` head is the crash, and nothing ran in the root. With the
+  units stopped, the operator removes the torn segment and creates the
+  launcher's open trigger in one step. The identical opener then resumes
+  its own claim in place and writes the opening again. It carries no
+  `reclaimed` stamp. Resume already performs the same removal when an
+  earlier segment exists. `leader.lock`, the sentinel and the anchor are
+  never touched. Only if that retry refuses for another cause does the
+  operator use `estate reclaim --force`, then open in a fresh root.
+  `--force` is needed because the code does not repair a torn sole
+  opening (DL-144 (9a)).
+  An `open` head is damage after the segment was durable, and no verb
+  path exists. When the check finds nothing, the operator restores the
+  anchor from a §2b copy taken after the closing seal and audit and
+  before the roll, and the closing root only if it changed. The period
+  then opens in a fresh root. The runbook states the residual: the fault
+  that cut a durable first line can have cut other durable evidence, so
+  the check is the operator's evidence that nothing ran, not proof.
+  Without such a copy nothing recovers it.
+  NOT BUILT. Two code gaps, recorded and not fixed here. First, the
+  opener should recreate a torn sole segment itself. Period-model §1.3
+  says an ordinary crash between the claim and the head move never
+  needs `--force`; today the operator removes the file by hand, or uses
+  the break-glass. Second, resume of a rolled root whose only segment is
+  gone exits 1, not 2, so the engine unit restarts it in a loop. The
+  recipe removes the segment only together with the open trigger for
+  this reason.
+  NOT IN SCOPE. An in-place root cannot reach this state: it keeps at
+  least two segments (DL-144 (9a)). The check refuses one anyway, by the
+  sentinel's null `claim_id`.
+  TESTS. `test_a_torn_sole_opening_of_a_rolled_root_is_recovered_by_the_recipe`
+  runs the recipe's marked blocks as printed, under the shipped
+  launcher. `crash` stops the roll between the segment and the head
+  move. It checks that each claimed-path guard of the check stops it
+  when its evidence is present, then reopens in place with no reclaim,
+  and resumes. `crash-fallback` walks the reclaim and the fresh root.
+  `damage` cuts a finished roll's segment to part of its first line,
+  restores the anchor, and opens in a fresh root. Both fresh-root cases
+  check that the old root is refused by the resume rule, and that the
+  fresh root resumes.
+  STATED LIMIT. The look step's stop on a listed run is not exercised by
+  a test: it needs a run that outlives the check. A test checks the
+  `.runs` key the stop reads, and a failed `list` stops the step.
+  REVIEW. One Opus reviewer, three rounds. The reviewer and a first
+  ruling disagreed on the `claimed` path (reclaim, or reopen in place);
+  an advisor on Fable ruled for the in-place reopen with reclaim as the
+  fallback, and set the `open` path's conditions. All findings are
+  fixed; the look step's test is the stated limit above, which the
+  reviewer agreed to.
