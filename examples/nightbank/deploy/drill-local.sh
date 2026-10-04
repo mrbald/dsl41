@@ -47,7 +47,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# 2 CPUs and 3 GB: the podman VM is shared with other projects' containers
+# 2 CPUs and 3 GB bound the container, so it leaves room in the podman VM
 podman run --detach --name "$name" --systemd=always --cpus 2 --memory 3g \
     --volume "$tree:/src:ro" "$image" >/dev/null
 for _ in $(seq 60); do

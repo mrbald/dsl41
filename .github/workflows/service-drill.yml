@@ -7,7 +7,7 @@
 # systemd claim and are pinned instead in tests/test_nightbank_deploy.py --
 # a sealed engine that stays stopped until an operator opens the next
 # period, the managed quiescence and restore of deployment-runbook ss2b,
-# and the four upgrade rows of ss7 (DL-266). Rows 1 to 3 run with two
+# a host reboot that the enabled units resume from, and the four upgrade rows of ss7 (DL-266). Rows 1 to 3 run with two
 # installs of one build: their mechanics, not a qualified version pair.
 # Row 4 runs from v1.7.0 on PyPI to the build under test. The install,
 # the first start and a final retirement run ss0's recipe blocks as the
@@ -15,7 +15,8 @@
 #
 # Manual only (workflow_dispatch). It is not part of the default gate. It
 # passed every step on 2026-09-29 on GitHub's Ubuntu 24.04 runner (DL-223),
-# before the quiescence, restore and upgrade steps existed. Dispatch it
+# before the quiescence, restore, reboot, upgrade and retirement steps
+# existed and before the install and first start ran ss0's recipes. Dispatch it
 # again after a change to the units, the launcher or the drill. Each step
 # runs one step of drill-steps.sh; drill-local.sh runs the same steps in a
 # local podman container (DL-266). A test holds this list to the script's.

@@ -1,4 +1,4 @@
-"""Branch gaps in capacity.py that the DL-105 gate list leaves open (F5b).
+"""Branch gaps in capacity.py that the DL-105 gate list leaves open (DL-269).
 
 Each test holds the observable effect of one branch: a returned value, a
 bucket the pool sized or skipped, a start the oracle admitted. The pool is a

@@ -1,4 +1,4 @@
-"""Branch gaps in runner_scheduler.py that the DL-105 gate list leaves open (F5b).
+"""Branch gaps in runner_scheduler.py that the DL-105 gate list leaves open (DL-269).
 
 The refusal the Scheduler states for a calendar that compiles and then fails
 when it generates, an input preflight would have stopped first (runner-design

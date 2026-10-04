@@ -250,16 +250,44 @@ def _chunks() -> list[str]:
     return re.split(r"^(?=#{2,3} |\*\*Row \d)", text, flags=re.M)
 
 
+def _fenced() -> list[tuple[int, str | None, list[str]]]:
+    """Every fenced block of the runbook, marked or not: its opening line
+    number, the recipe or diagram name marked above it, and its lines."""
+    lines = RUNBOOK.read_text(encoding="utf-8").splitlines()
+    found: list[tuple[int, str | None, list[str]]] = []
+    start: int | None = None
+    for number, line in enumerate(lines):
+        if start is None and line.startswith("```"):
+            start = number
+        elif start is not None and line == "```":
+            marker = MARKER.match(lines[start - 1])
+            name = None if marker is None else marker.group(2)
+            found.append((start + 1, name, lines[start + 1 : number]))
+            start = None
+    assert start is None, f"{RUNBOOK.name}:{start}: the fence never closes"
+    return found
+
+
 def test_every_reboot_hold_is_released_where_it_is_taken() -> None:
-    """S4-R14, R17: the reboot hold (both units disabled) is one named step.
-    Only hold-down disables a unit and only hold-release (and the install)
-    enables one; every procedure that takes the hold says where it releases
-    it, except a retirement, which says it never does."""
-    for (kind, name), body in _blocks().items():
-        if kind != "recipe":
-            continue
-        assert ("systemctl disable" in body) == (name == "hold-down"), name
-        assert ("systemctl enable" in body) == (name in ("hold-release", "service-install")), name
+    """DL-268, DL-270: the reboot hold (both units disabled) is one named
+    step. Across every fenced block of the runbook, marked or not, only
+    hold-down disables a unit. A unit is enabled only by the install and by
+    hold-release's command, which a procedure that releases the hold inline
+    marks with a comment. Every procedure that takes the hold says where it
+    releases it, except a retirement, which says it never does."""
+    down, up = recipe("hold-down").strip(), recipe("hold-release").strip()
+    assert down.startswith("systemctl disable ") and up.startswith("systemctl enable ")
+    assert up in recipe("service-install").splitlines()
+    for start, name, body in _fenced():
+        for line in body:
+            command = line.split("#", 1)[0].strip()
+            where = f"{RUNBOOK.name}:{start}"
+            if "systemctl disable" in line:
+                assert name == "hold-down" and command == down, where
+            if "systemctl enable" in line:
+                assert command == up, where
+                if name not in ("hold-release", "service-install"):
+                    assert "# release the reboot hold" in line, where
     taking = [chunk for chunk in _chunks() if re.search(r"[Tt]akes? .{0,10}reboot hold", chunk)]
     assert len(taking) >= 6  # ss0 x3, ss2b, ss7 rows 2 and 4
     for chunk in taking:
@@ -270,7 +298,7 @@ def test_every_reboot_hold_is_released_where_it_is_taken() -> None:
 
 
 def test_no_recipe_starts_a_target() -> None:
-    """S4-R2: a target start starts every enabled unit it wants on the host,
+    """DL-268: a target start starts every enabled unit it wants on the host,
     another estate's included. Only the drill's own container does it."""
     for (kind, name), body in _blocks().items():
         assert ".target" not in body, f"{kind} {name}"
@@ -515,7 +543,7 @@ def test_the_job_recipe_refuses_a_delta_file(short_root: Path) -> None:
 
 @pytest.mark.skipif(shutil.which("jq") is None, reason="the runbook's check reads with jq")
 def test_a_sealed_period_not_yet_opened_shows_on_the_anchor(short_root: Path) -> None:
-    """F9's sealed-not-opened signal: after a seal, and until an operator
+    """The sealed-not-opened signal (DL-268): after a seal, and until an operator
     opens the next period, the lineage head reads `closed` and no engine
     answers; once opened it reads `open` again."""
     site = _site(short_root)
