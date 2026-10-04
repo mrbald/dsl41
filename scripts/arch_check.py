@@ -19,6 +19,10 @@ specific way the tree got worse, never a matter of taste:
    and -- since DL-110 -- a doc naming a `test_...` that no test defines: a
    worked example's citation is what makes it a claim rather than a story,
    and renaming a test is a refactor nobody thinks of as a doc change;
+   the same holds for a module: a doc naming `src/dsl41/<name>.py`, or a
+   backticked bare `<name>.py`, that does not exist, and a src/dsl41/*.py
+   module the README's Source map never names (docs/decision-log.md is
+   exempt: it is append-only history);
 4. an IR-F model shape change without an IR_VERSION bump -- the CatalogIR
    JSON schema is hashed and pinned in IR_SCHEMA_PIN below;
 5. a JobRuntime field or a global assigned outside RuntimeState (DL-82/86) --
@@ -77,6 +81,7 @@ SRC = ROOT / "src" / "dsl41"
 BASELINE_PATH = ROOT / "scripts" / "arch_baseline.json"
 INDEX_PATH = ROOT / "docs" / "citation-index.md"
 TESTS = ROOT / "tests"
+README_PATH = ROOT / "README.md"
 #: docs that may cite a test by name. A frozen spec's worked examples are
 #: claims, and a claim is only worth its citation.
 CITING_DOCS = (ROOT / "docs", ROOT / "CLAUDE.md", ROOT / "README.md")
@@ -646,6 +651,170 @@ def citing_doc_files() -> list[Path]:
     return [f for f in files if f.exists()]
 
 
+# ------------------------------------------ 3c. cited modules exist, source map complete
+
+#: A module path in a doc, in any text position: `src/dsl41/<name>.py`.
+_CITED_SRC_PATH = re.compile(r"src/dsl41/([A-Za-z0-9_]+)\.py")
+#: A bare file name in backticks, no slash: `<name>.py`. A name with a slash is
+#: some other path and out of scope.
+_CITED_BARE_PY = re.compile(r"`([A-Za-z0-9_]+\.py)`")
+#: The trees a bare `<name>.py` may name a file in.
+_PY_TREES = ("src/dsl41", "tests", "scripts", "examples")
+#: Docs the module-citation rule skips. The log is append-only history, and an
+#: old entry names a module that was later renamed or removed. The decision
+#: index is generated from the log's titles, so it carries the same old names
+#: and cannot be edited by hand.
+MODULE_CITATION_EXEMPT_DOCS = ("docs/decision-log.md", "docs/decision-index.md")
+#: (doc, cited name) pairs that cite a missing module on purpose. Empty today.
+#: One entry per pair, with the reason on the line above it.
+MODULE_CITATION_ALLOWLIST: frozenset[tuple[str, str]] = frozenset()
+
+#: Modules the README source map need not list: package plumbing with no design
+#: of its own to describe.
+SOURCE_MAP_EXEMPT = frozenset({"__init__.py", "__main__.py"})
+_SOURCE_MAP_HEADING = re.compile(r"^### Source map[ \t]*$", re.M)
+_HEADING = re.compile(r"^#{1,3} ")
+_FENCE = re.compile(r"^\s*(```|~~~)")
+
+
+def module_citation_docs(root: Path | None = None) -> list[Path]:
+    """README.md and every docs/**/*.md, subdirectories included, minus
+    MODULE_CITATION_EXEMPT_DOCS."""
+    root = ROOT if root is None else root
+    files = [root / "README.md", *sorted((root / "docs").rglob("*.md"))]
+    exempt = {root / name for name in MODULE_CITATION_EXEMPT_DOCS}
+    return [f for f in files if f.exists() and f not in exempt]
+
+
+def tracked_python_files(root: Path | None = None) -> set[str]:
+    """Repo-relative paths of the .py files under _PY_TREES that git knows:
+    tracked, or untracked and not ignored (`--cached --others
+    --exclude-standard`). A new module not yet staged counts, as rule (b) sees
+    it on disk. A gitignored vendor tree or run directory does not, so it
+    cannot satisfy a citation that a clean checkout would reject. When git
+    fails, is absent, or `root` is not the top of its own repository, the
+    check walks the four trees and says so on stderr."""
+    root = ROOT if root is None else root
+    out = None
+    try:
+        # a tree nested in another repository would list nothing from it
+        top = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        owns = top.returncode == 0 and Path(top.stdout.strip()).resolve() == root.resolve()
+    except (OSError, subprocess.SubprocessError):
+        owns = False
+    try:
+        if not owns:
+            raise OSError("not the root of a git repository")
+        out = subprocess.run(
+            [
+                "git",
+                "ls-files",
+                "-z",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "--",
+                *(f"{tree}/*.py" for tree in _PY_TREES),
+            ],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        out = None
+    if out is not None and out.returncode == 0:
+        return {name for name in out.stdout.split("\0") if name}
+    print(
+        "note  not a git top level, or git failed; module citations resolve against a tree walk",
+        file=sys.stderr,
+    )
+    return {
+        path.relative_to(root).as_posix()
+        for tree in _PY_TREES
+        for path in (root / tree).rglob("*.py")
+        if "__pycache__" not in path.parts
+    }
+
+
+def unresolved_module_citations(paths: Iterable[Path], root: Path | None = None) -> list[Finding]:
+    """Blocking: a doc naming a module that is not there.
+
+    `src/dsl41/<name>.py` must be a file git knows at that path. A backticked
+    bare `<name>.py` must be the basename of such a .py file under
+    src/dsl41, tests, scripts or examples (`tracked_python_files`). Other
+    paths are out of scope. Renaming a module is a refactor nobody thinks of
+    as a documentation change, which is the same way a cited test goes
+    missing (DL-110)."""
+    files = tracked_python_files(root)
+    basenames = {name.rsplit("/", 1)[-1] for name in files}
+    findings: list[Finding] = []
+    for path in paths:
+        rel = _rel(path)
+        for index, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            for name in _CITED_SRC_PATH.findall(line):
+                if (rel, f"{name}.py") in MODULE_CITATION_ALLOWLIST:
+                    continue
+                if f"src/dsl41/{name}.py" not in files:
+                    findings.append(
+                        Finding(rel, index, f"cites `src/dsl41/{name}.py`, which does not exist")
+                    )
+            for name in _CITED_BARE_PY.findall(line):
+                if (rel, name) in MODULE_CITATION_ALLOWLIST or name in basenames:
+                    continue
+                findings.append(Finding(rel, index, f"cites `{name}`, which no .py file has"))
+    return findings
+
+
+def source_map_section(readme_text: str) -> str | None:
+    """The text from the `### Source map` heading line to the next heading of
+    level 1 to 3, skipping lines inside a fenced code block; None when the
+    README has no such heading line."""
+    start = _SOURCE_MAP_HEADING.search(readme_text)
+    if start is None:
+        return None
+    lines = readme_text[start.end() :].splitlines(keepends=True)
+    kept: list[str] = []
+    fenced = False
+    for line in lines:
+        if _FENCE.match(line):
+            fenced = not fenced
+        elif not fenced and _HEADING.match(line):
+            break
+        kept.append(line)
+    return "".join(kept)
+
+
+def source_map_gaps(readme: Path, src: Path | None = None) -> list[Finding]:
+    """Blocking: a src/dsl41/*.py module the README's Source map never names.
+
+    The section names a module as `src/dsl41/<name>.py` or, for a family
+    listed together, as a bare backticked `<name>.py`. Either counts. A module
+    in SOURCE_MAP_EXEMPT is skipped. Naming a module in passing under another
+    entry also counts: the check finds a module nobody mentioned, not a weak
+    description. Stated limit: a name in an HTML comment, or in another
+    module's bullet ("imports nothing from `new.py`"), also satisfies it."""
+    src = SRC if src is None else src
+    section = source_map_section(readme.read_text(encoding="utf-8"))
+    rel = _rel(readme)
+    if section is None:
+        return [Finding(rel, 0, "has no `### Source map` section")]
+    named = {f"{n}.py" for n in _CITED_SRC_PATH.findall(section)}
+    named |= set(_CITED_BARE_PY.findall(section))
+    return [
+        Finding(rel, 0, f"Source map does not name `src/dsl41/{path.name}`")
+        for path in sorted(src.glob("*.py"))
+        if path.name not in SOURCE_MAP_EXEMPT and path.name not in named
+    ]
+
+
 # ---------------------------------------------------------------- 3. citations
 
 #: Candidate citation shapes. Uppercase-led because every real namespace is
@@ -887,12 +1056,22 @@ def changed_lines_since_review() -> tuple[int, str] | None:
     return changed, ref
 
 
-#: a log and a registry, not specifications (DL-225, DL-230).
-SPEC_EXCLUDED = ("decision-log.md", "citation-index.md")
+#: a log and a registry, not specifications (DL-225, DL-230); and the reader
+#: aids and generated files, which are not specifications either.
+SPEC_EXCLUDED = (
+    "decision-log.md",
+    "citation-index.md",
+    "glossary.md",
+    "risk-map.md",
+    "decision-index.md",
+    "architecture.md",
+)
 
 
 def spec_documents(root: Path = ROOT) -> list[Path]:
-    """docs/*.md files eligible for a spec review, excluding SPEC_EXCLUDED."""
+    """docs/*.md files eligible for a spec review, excluding SPEC_EXCLUDED.
+    Not recursive on purpose: docs/ subdirectories hold non-normative review
+    material, not specifications."""
     return sorted(p for p in (root / "docs").glob("*.md") if p.name not in SPEC_EXCLUDED)
 
 
@@ -995,6 +1174,8 @@ def main(argv: list[str] | None = None) -> int:
     if patterns:
         blocking += unresolved_citations(src_files, patterns)
     blocking += unresolved_test_citations(citing_doc_files())
+    blocking += unresolved_module_citations(module_citation_docs())
+    blocking += source_map_gaps(README_PATH)
     blocking += ir_schema_findings(IR_SCHEMA_PIN)
     blocking += state_owner_bypasses(src_files)
 

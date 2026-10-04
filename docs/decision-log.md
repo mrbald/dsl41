@@ -18506,3 +18506,60 @@ relitigate an entry; append a new one.
   repository is walked.
   REVIEW. One Opus reviewer, three rounds. All findings are fixed except
   the tracked-only scan, which the reviewer agreed to state as a limit.
+- DL-277 The architecture gate checks that cited modules exist and that the
+  README's source map is complete (2026-10-05; scripts/arch_check.py,
+  tests/test_arch_check.py)
+  THE GAP. DL-110 made a doc's cited test a blocking check. A cited module
+  had no such check. A rename of `src/dsl41/<name>.py` left every doc that
+  named it pointing at nothing, and a new module could ship with no line in
+  the README's Source map.
+  THE RULE. Two blocking checks in `scripts/arch_check.py`, over `README.md`
+  and every `docs/**/*.md`, subdirectories included.
+  (a) Cited modules exist. A text occurrence of `src/dsl41/<name>.py` must
+  exist at that path, in the sense below. A backticked bare `<name>.py`,
+  with no slash, must be the basename of a `.py` file under `src/dsl41/`,
+  `tests/`, `scripts/` or `examples/`. A file counts when git knows it:
+  tracked, or untracked and not ignored (`git ls-files --cached --others
+  --exclude-standard`). A new module not yet staged counts, as rule (b)
+  sees it on disk. A gitignored vendor tree or run directory does not, so
+  it cannot satisfy a citation that a clean checkout would reject. When git
+  fails or is absent, or the root is not the top level of its own
+  repository, the check walks the four trees and prints a note on
+  stderr. Any other path is out of scope, and so is a glob such as
+  `src/dsl41/runner_*.py`.
+  (b) The source map is complete. Every `src/dsl41/*.py` must be named in
+  the README section that starts at the line `### Source map` and ends at
+  the next level 1 to 3 heading outside a fenced code block, as
+  `src/dsl41/<name>.py` or, for a module listed in a family, as a backticked
+  bare `<name>.py`. A missing section is a finding. Naming a module in
+  passing under another entry counts as naming it: the check finds a module
+  nobody mentioned, not a weak description. A name in an HTML comment, or in
+  another module's bullet, also counts. That is a stated limit.
+  EXEMPTIONS. `docs/decision-log.md` is exempt from (a). The log is
+  append-only (the working agreement forbids editing an old entry), and an
+  old entry names a module that was later renamed or removed, rightly.
+  `docs/decision-index.md` is exempt too: it is generated from the log's
+  titles, so it carries the same old names and cannot be edited by hand.
+  `MODULE_CITATION_ALLOWLIST` holds (doc, name) pairs that cite a missing
+  module on purpose. It is empty; each entry it gets carries a one-line
+  reason. `SOURCE_MAP_EXEMPT` holds `__init__.py` and `__main__.py` for (b):
+  package plumbing with no design of its own, stated once for the group.
+  DOC SCANS. The cited-test scan already walked `docs/` recursively. A test
+  now pins that, and that the module scan does the same, because a
+  directory of block pages is planned under `docs/`. The spec-review scan
+  (`spec_documents`) stays flat on purpose: `docs/` subdirectories hold
+  non-normative review material, not specifications. `SPEC_EXCLUDED` also
+  lists `glossary.md`, `risk-map.md`, `decision-index.md` and
+  `architecture.md`: reader aids and generated files, not specifications.
+  NOT IN SCOPE. Whether a Source map entry describes its module correctly.
+  Module names in code comments and docstrings. Paths that are not
+  `src/dsl41/` module paths or bare file names.
+  TESTS. In `tests/test_arch_check.py`: a triggering and a non-triggering
+  fixture for each rule, one test for the allowlist, one for the two
+  exemptions, one for subdirectory coverage, one for known-to-git files
+  (staged, untracked, ignored), one for the walk fallback, one for the
+  section's bounds (fenced comment, heading look-alikes), two
+  `main()` tests that fail if either rule is unwired, and a test that the
+  real docs cite only modules that exist.
+  REVIEW. One Opus reviewer, three rounds. All findings are fixed; the
+  HTML-comment case of (b) is the stated limit above.

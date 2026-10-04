@@ -284,3 +284,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-270 | The release note answers the upgrade rows, and the integration's corrections |  |
 | DL-271 | The drill's steps run unprivileged with sudo, locally as on the runner | [docs/deployment-runbook.md](deployment-runbook.md) |
 | DL-276 | A generated index of the decision log |  |
+| DL-277 | The architecture gate checks that cited modules exist and that the README's source map is complete |  |
