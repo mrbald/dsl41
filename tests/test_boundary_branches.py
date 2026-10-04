@@ -1,5 +1,5 @@
 """Branch tests for `dsl41.boundary` that the boundary, estate and nightbank
-suites do not reach (S6, group c).
+suites do not reach (DL-269).
 
 Normative spec: `docs/period-model.md` ss1.3 (the anchor and its
 transitions), ss2.2 (the `seal` record), ss3.5 (executions), ss6-ss7 (the

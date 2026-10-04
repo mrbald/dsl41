@@ -269,7 +269,7 @@ A job changes through a complete catalog and a boundary, never through an
 edit of a running estate (§6). Every estate file holds whole
 definitions: the `insert_` forms and the calendar statements. AutoSys
 delta forms (`update_job`, `delete_job`, `override_job`) are refused by
-lowering (DL-18): `dsl41 lint` exits 2 on them, and no estate can load
+lowering (DL-29): `dsl41 lint` exits 2 on them, and no estate can load
 them. Add a job by adding
 its `insert_job` block. Change one by editing its block. Remove one by
 deleting its block. A job that a remaining condition still names is a
@@ -420,11 +420,25 @@ jq -r .head.state "$ESTATE_ANCHOR/anchor.json"
 
 **Keep the subscriber reading.** A `subscribe` client that stops reading
 is removed once its backlog reaches the engine's budget, 64 MiB
-(control-protocol §5, DL-267). Nothing is lost: `dsl41 query subscribe`
-then exits 2 and names the `--since` to resubscribe with, and the
-backfill and gap rules of control-protocol §5 apply. A monitoring
-wrapper restarts the command with that cursor. Read the stream
-continuously, so a burst does not remove a reader that is only slow.
+(control-protocol §5, DL-267). Read the stream continuously, so a
+burst does not remove a reader that is only slow. `dsl41 query subscribe`
+exits 2 in three cases, and a monitoring wrapper handles each one:
+
+- The stream ended after the ack: a removal, an engine stop or a
+  backfill refusal. The command names the `--since` to resubscribe with
+  on stderr. Restart it with that cursor. Nothing is lost: the backfill
+  and gap rules of control-protocol §5 apply.
+- The request was refused before the ack, or no engine answered. The
+  stream never started, so the command names no `--since`. Keep the
+  cursor the wrapper already had: the `--since` named at the last end,
+  or none on a first start. Retry with it after a delay. A refusal names
+  its cause on stderr; an access denial needs an operator, not a retry.
+- A stream line was over the budget (`record line over the … limit`).
+  The command names no `--since`, because the same cursor meets the same
+  record again. Do not retry at that cursor; alert. The stream is only
+  the wake-up, and the trace cursor in the table above is the record of
+  transitions, so a restart with no `--since`, from the live frontier,
+  misses no transition the trace reads.
 
 **When a write fails.** These are the contracts' rules for a full disk or
 an I/O error:
@@ -1133,7 +1147,8 @@ systemd. It covers the first start, a same-root restart, a detached job
 that survives an engine stop, a changed estate refused without a restart
 loop, and a sealed engine that stays stopped until the next period is
 opened. It also covers §2b's shape-1 quiescence and a restore at the
-recorded paths, and §7's upgrade rows (DL-266). It installs and first
+recorded paths, a host reboot that the enabled units resume from (§0),
+and §7's upgrade rows (DL-266). It installs and first
 starts the units with §0's service recipe, and ends with §0's retirement
 procedure, both read from this file (DL-268). The access-map refusals,
 their messages and what they leave
@@ -1145,8 +1160,12 @@ a podman container with systemd as PID 1 on Ubuntu 24.04. It runs the
 host's architecture, so on Apple silicon it is arm64, not the runner's
 x86_64.
 The drill passed every step on GitHub's Ubuntu 24.04 runner at d886679
-(DL-223), before the quiescence, restore and upgrade steps existed. No
-other distribution or systemd version has been observed there. It is not
+(DL-223). Since then it gained the `quiesce`, `restore`, `reboot`,
+`upgrade-resume-safe`, `upgrade-fresh-root`, `upgrade-coordinated`,
+`upgrade-old-release`, `upgrade-state-machine` and `retire` steps, and
+its `install` and `first-start` steps now run §0's recipe blocks. None of
+that has run on GitHub. No other distribution or systemd version has been
+observed there. It is not
 part of the default gate: dispatch it again after a change to the units,
 the launcher or the drill.
 
@@ -1778,10 +1797,16 @@ release the reboot hold.
 
 A new estate carries no state: holds, globals and latches start empty, as
 in §6's fresh-run-root cycle. Keep the old venv for as long as you retain
-the old estate's periods. The rollback is the old venv only: flip back,
-point the launcher back at the old root and anchor, start the engine
-unit, which opens the old estate's next period, and release the reboot
-hold. The service drill runs
+the old estate's periods. The rollback is the old venv only, on the old
+estate. Stop both units and flip back. Point the launcher's `RUN_ROOT`
+and `ESTATE_ANCHOR` back at the old estate's, and both units'
+`RequiresMountsFor=` to match; run `systemctl daemon-reload` if a unit
+file changed. Then start the engine unit. `Requires=` starts the
+supervisor unit first, and the engine opens the old estate's next
+period. A rollback after a failed genesis still holds the estate down
+across reboots: once the old estate answers, release the hold with
+`hold-release` (§2b), or the next boot leaves it stopped. The service
+drill runs
 this row from v1.7.0, installed from PyPI, to the build under test
 (`upgrade-old-release`, `upgrade-state-machine`).
 

@@ -1,4 +1,4 @@
-"""Branch gaps in oracle.py that the DL-105 gate list leaves open (F5b).
+"""Branch gaps in oracle.py that the DL-105 gate list leaves open (DL-269).
 
 Each test holds the observable effect of one branch: a status, a trace record,
 a refusal and its message, a timer. The branches are the ones the combined

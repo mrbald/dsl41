@@ -1,5 +1,5 @@
 """Branch tests for `dsl41.retention` that the floors, archive and prune
-suites do not reach (S6, group c).
+suites do not reach (DL-269).
 
 Normative spec: `docs/period-model.md` ss1.1, ss1.3, ss11a, ss12 and ss12a;
 DL-135 (the plan and its observation snapshot) and DL-144 (the archive).

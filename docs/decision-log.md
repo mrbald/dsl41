@@ -18049,3 +18049,59 @@ relitigate an entry; append a new one.
   found a retention test whose KILL shared its SPAWN's period, so a
   mutant that bound KILL effects too survived; the run is now killed in
   the next period.
+- DL-270 The release note answers the upgrade rows, and the integration's
+  corrections (2026-10-04; README.md "Release" and "Tests";
+  docs/deployment-runbook.md §0, §3, §7; docs/control-protocol.md;
+  .github/workflows/service-drill.yml; examples/nightbank/deploy/drill-local.sh;
+  tests/test_operator_recipes.py and the docstrings of the tests DL-264,
+  DL-267, DL-268 and DL-269 added)
+  THE RELEASE NOTE. README's tag template asked whether the WAL format,
+  the state-machine version or a protocol version moved, and said that
+  was what the runbook's upgrade section asks for. §7 (DL-266) picks a
+  row from three other facts. The rule now: the tag message's body
+  states, one line each and in this order, the state-machine version
+  (unchanged, or from N to M), whether the release is resume-safe (yes or
+  no), and whether the wrapper spec and the supervisor protocol changed.
+  It also names any Python module that left the package. README points at
+  §7 for the questions and does not restate their rows.
+  ROW 4'S ROLLBACK. DL-266's text left the new estate running, and
+  DL-268 added a release of a hold the forward path had already released. The rollback now
+  stops both units, flips back, points the launcher and both units'
+  `RequiresMountsFor=` at the old estate, reloads systemd if a unit file
+  changed, and starts the engine unit. A rollback after a failed genesis
+  still holds the estate down, and releases the hold once the old estate
+  answers.
+  THE REBOOT HOLD TEST. DL-268 says a test holds that only the hold's two
+  blocks disable or enable a unit. The test read only marked recipes,
+  and §7's rows 2 and 4 enable both units in unmarked blocks. The test
+  now reads every fenced block of the runbook. Only `hold-down` disables
+  a unit. A unit is enabled only by the install and by `hold-release`'s
+  command; outside those two blocks the line says it releases the reboot
+  hold. A stray `systemctl disable` in row 4's block fails it.
+  THE SUBSCRIBER. §0 now says what a monitoring wrapper does in each
+  exit-2 case of `dsl41 query subscribe`: after the ack it restarts with
+  the named `--since`; on a refusal before the ack or no engine it
+  retries with the cursor it already had; on a stream line over the
+  budget (DL-267) it alerts and does not retry at that cursor. The trace
+  cursor, not the stream, records transitions, so a restart from the live
+  frontier misses none.
+  CITATIONS. Test docstrings had cited finding and review labels that
+  live outside the repository. F1 to F4 are the registered scanner
+  fidelity tokens (citation-index), so those resolved to the wrong
+  meaning. Each now cites the slice's entry. §0 cites DL-29 for the
+  delta-JIL refusal, as lowering and DL-268 do; it had cited DL-18.
+  control-protocol's header lists DL-264, which amended §3.
+  THE DRILL TEXT. The runbook and the workflow header list every drill
+  step added since the GitHub pass at d886679: quiesce, restore, reboot,
+  the five upgrade steps and retire, and the install and first start that
+  now run §0's recipes. None has run on GitHub. The coverage list names
+  the reboot step.
+  CORRECTIONS. DL-268's "the rollbacks are not drilled" is too broad: row
+  1's rollback is drilled (`upgrade-resume-safe`). The other rows'
+  rollbacks are not. The transition list and a gate on its coverage are
+  deferred by the owner; no claim of full transition coverage is made.
+  REVIEW. One Opus reviewer over the whole integration diff, in place of
+  the Codex pass DL-262 asks for, which could not run. One major (the
+  release note) and eight minors, all fixed here. Its second round
+  confirmed them and added two minors: the row 4 rollback after a failed
+  genesis, and a placeholder citation; both are fixed.

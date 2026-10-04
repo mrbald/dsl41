@@ -707,7 +707,7 @@ CLI and scripts:
 
 ### Tests
 
-The suite has 64 test files (`pytest --collect-only -q` shows the current
+The suite has 79 test files (`pytest --collect-only -q` shows the current
 count) and a 31-file synthetic or doc-derived JIL corpus under
 `tests/corpus/`. Every oracle trace test runs twice, against the oracle
 directly and through the engine under a virtual clock, via
@@ -748,6 +748,10 @@ Compiler:
   entries.
 - `tests/test_resources.py`: resource-manager tests that need direct
   oracle access, including the cross-order safety and liveness property.
+- `tests/test_semantics.py`: the semantic-switch registry, the
+  runtime-profile field that records overrides, the path from the command
+  line to the period's pin, and the `ice-lookback` switch across the
+  manifest, the engine and replay (DL-252).
 - `tests/test_autocal.py`: every worked example the vendor docs contain,
   plus one test per pinned default or refusal.
 - `tests/test_autocal_breadth.py`: breadth over the interpreter, the
@@ -778,6 +782,15 @@ Compiler:
 - `tests/test_arch_check.py`: each blocking check of the architecture gate,
   the advisory size ratchet, and the spec-review status, tripped and not
   tripped.
+- `tests/test_branch_coverage_script.py`: the branch-only coverage report,
+  `scripts/branch_coverage.py`, over synthetic coverage JSON (DL-265).
+- `tests/test_docs_hygiene.py`: no merge-conflict marker reaches the
+  documentation (DL-237).
+- `tests/test_docs_links.py`: repository links in the documentation are
+  relative and resolve, and the build's rewrite of README.md for PyPI
+  (DL-239).
+- `tests/test_examples.py`: the three workflow examples' catalogs lower
+  cleanly with their placeholders resolved (DL-237).
 
 Runner:
 
@@ -833,6 +846,10 @@ Runner:
 - `tests/test_runner_control.py`: the control socket verbs and queries,
   subscribe backfill and the live seam, socket hygiene, and the run,
   rehearse, sendevent, and query CLIs.
+- `tests/test_subscriber_bound.py`: on real sockets, a stalled subscriber
+  removed at the backlog budget, a healthy one kept, a reconnect from its
+  cursor that gets the rest exactly once, and a shutdown that a stalled
+  peer cannot hang (DL-267).
 - `tests/test_rehearse_check.py`: `rehearse --check-cadence` and its CLI
   wiring over inline estates.
 - `tests/test_runner_tui.py`: the TUI (skipped without the `[ui]` extra):
@@ -887,6 +904,14 @@ Period boundary:
 - `tests/test_restore_drill.py`: backup, delete, restore at the same path,
   and re-open over the nightbank estate.
 
+Branch gate (DL-269): one test per branch of its module that the other
+suites do not reach, each asserting the branch's observable effect:
+
+- `tests/test_oracle_branches.py`, `tests/test_capacity_branches.py`,
+  `tests/test_scheduler_branches.py`, `tests/test_control_branches.py`,
+  `tests/test_seal_branches.py`, `tests/test_period_branches.py`,
+  `tests/test_retention_branches.py` and `tests/test_boundary_branches.py`.
+
 Training estate:
 
 - `tests/test_nightbank_example.py`: the estate loads, lints clean, and
@@ -897,6 +922,9 @@ Training estate:
   a real supervisor, and a check that every verb the RUNBOOK types exists.
 - `tests/test_nightbank_deploy.py`: the shipped launcher script and the
   systemd units beside it.
+- `tests/test_operator_recipes.py`: the runbook's §0 recipes run as printed
+  against a synthetic estate under the shipped launcher, content checks of
+  the recipes only the service drill runs, and the reboot hold (DL-268).
 
 ## What is not built
 
@@ -947,11 +975,10 @@ behavior change. A module that was never documented as an API may leave the
 package inside a minor bump; the tag message names it.
 
 The annotated tag's message is the release note. Its first line is the
-summary. Its body says whether the WAL format, the state-machine version, or
-a protocol version moved, which is what the upgrade section of
-[docs/deployment-runbook.md](docs/deployment-runbook.md)
-asks a release note for, and it names any Python module that left the
-package.
+summary. Its body answers the questions that
+[the runbook's upgrade section](docs/deployment-runbook.md#7-upgrading-dsl41-itself)
+reads to pick an upgrade row, in the order of the template under "Make a
+release". It also names any Python module that left the package.
 
 ### Make a release
 
@@ -998,11 +1025,14 @@ bash scripts/release_smoke.sh dist exports
 ```
 
 Then tag that commit and push the tag. The first `-m` is the summary; the
-second is the release note's body:
+others are the release note's body, one line per question of the
+runbook's §7, in its order:
 
 ```sh
 git tag -a vX.Y.Z -m "X.Y.Z: one-line summary" \
-  -m "WAL format, state-machine and protocol versions: unchanged (or what moved)."
+  -m "State-machine version: unchanged (or from N to M)." \
+  -m "Resume-safe: yes (or no)." \
+  -m "Wrapper spec and supervisor protocol: unchanged (or which changed)."
 git push origin vX.Y.Z
 ```
 

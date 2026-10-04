@@ -1,5 +1,5 @@
 """Branch tests for `dsl41.period` that the identity and retention suites do
-not reach (S6, group c).
+not reach (DL-269).
 
 Normative spec: `docs/period-model.md` ss1.1 (layout, the bundle), ss2.1
 (the manifest and the segment record), ss3.2 (spellings), ss12 (the archive

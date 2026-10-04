@@ -1,5 +1,5 @@
 """Branch tests for `dsl41.seal` that the sweep in test_seal_artifact.py
-does not reach (S6, group c).
+does not reach (DL-269).
 
 Each test holds one rule of `docs/period-model.md` that a branch of
 `seal.py` implements, with a twin that does not trigger it where the rule

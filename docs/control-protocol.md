@@ -2,7 +2,7 @@
 
 Status: frozen at **v3** (DL-118; v2 was DL-90, v1 DL-78; amended by
 DL-133, DL-135, DL-146, DL-147, DL-148, DL-150, DL-151, DL-158, DL-189,
-DL-216, DL-217, DL-256 and DL-267). This
+DL-216, DL-217, DL-256, DL-264 and DL-267). This
 document is normative for the runner's §10 control plane in the same way
 `docs/supervisor-protocol.md` is normative for the §6a lifecycle tier. Each
 change to a frozen item requires a decision-log entry, and each amendment

@@ -1,4 +1,4 @@
-"""Branch gaps of `runner_control.py` (S6, group b).
+"""Branch gaps of `runner_control.py` (DL-269).
 
 Each test names the rule its branch implements (docs/control-protocol.md) and
 asserts the branch's observable effect: an answer, a refusal and its message,

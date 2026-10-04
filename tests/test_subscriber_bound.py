@@ -1,4 +1,4 @@
-"""A subscriber that stops reading has a fixed backlog budget (F2, DL-267).
+"""A subscriber that stops reading has a fixed backlog budget (DL-267).
 
 control-protocol ss5: past the budget the engine removes the subscriber,
 ends its handler and aborts its transport. The journal append that
@@ -439,7 +439,7 @@ async def _wait_or_fail(condition: Callable[[], bool], mutator: _Mutator, what: 
 def test_dl267_a_stalled_subscriber_is_removed_and_the_estate_keeps_running(
     short_root: Path,
 ) -> None:
-    """The acceptance of F2 end to end, on real sockets: the stalled
+    """DL-267 end to end, on real sockets: the stalled
     stream backpressures, is removed at the budget, and its handler ends
     at once while its peer still reads nothing; a healthy stream gets
     every record; the engine keeps admitting; and a reconnect at the
@@ -689,7 +689,7 @@ def test_dl267_one_command_at_the_line_limit_keeps_a_reading_subscriber(
 def test_dl267_queued_commands_keep_a_reading_subscriber_within_the_bound(
     short_root: Path,
 ) -> None:
-    """The burst R8e is about, on a real socket: many commands queued with
+    """DL-267's burst, on a real socket: many commands queued with
     `Engine.submit` before the loop runs, which it then applies without
     yielding. At every offer the reading subscriber's backlog stays within
     max(budget, one record); past the budget it is removed, and a
@@ -1042,7 +1042,7 @@ def _read_all(fd: int) -> bytes:
 
 
 def test_dl267_a_stalled_monitoring_pipe_recovers_from_its_cursor(short_root: Path) -> None:
-    """The F2 trigger as the runbook sets it up: `query subscribe` feeding
+    """The stall as the runbook sets it up: `query subscribe` feeding
     a consumer that stops reading. The CLI blocks on its stdout, the
     engine removes the stream, and once the consumer reads again the CLI
     reaches EOF and exits 2, naming a `--since` from which a new

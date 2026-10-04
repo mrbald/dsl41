@@ -3038,8 +3038,8 @@ def test_dl172_subscribe_lines_refuses_a_record_line_over_the_limit(
 
 
 # ------------------------------------------------------------------ DL-264
-# CHANGE_STATUS refuses a status the oracle cannot apply (F1), and the
-# composition test (F6a) proves every payload value framing accepts applies.
+# CHANGE_STATUS refuses a status the oracle cannot apply, and the
+# composition test proves every payload value framing accepts applies.
 
 _STATUS_JIL = "insert_job: st_job\njob_type: c\ncommand: x\nmachine: m1\n"
 _XINST_JIL = "insert_xinst: PRD\nxtype: a\n\n" + _STATUS_JIL
@@ -3133,10 +3133,10 @@ def test_dl264_the_injectable_set_is_every_status_but_que_wait() -> None:
 
 
 def test_dl264_everything_framing_accepts_applies_to_the_oracle(tmp_path: Path) -> None:
-    """F6a. Offer `_event_for` every name in the oracle's event alphabet
-    (`get_args(EventKind)`), plus `CHANGE_STATUS`, the wire name of `STATUS`,
-    each with a payload that carries every field framing reads (job, name,
-    value). `CHANGE_STATUS` and `STATUS` are also offered every status in
+    """DL-264's composition test. Offer `_event_for` every name in the
+    oracle's event alphabet (`get_args(EventKind)`), plus `CHANGE_STATUS`,
+    the wire name of `STATUS`, each with a payload that carries every field
+    framing reads (job, name, value). `CHANGE_STATUS` and `STATUS` are also offered every status in
     `STATUSES`, with and without an exit code, on a catalog job and on a
     JOB^INST pseudo-entity. Whatever framing accepts must apply to an oracle
     without an OracleError, from a fresh state and with the job running. A
