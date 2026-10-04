@@ -42,7 +42,7 @@ from dsl41.period import root_is_unused
 
 if TYPE_CHECKING:
     import asyncio
-    from collections.abc import Collection, Iterable, Sequence
+    from collections.abc import Callable, Collection, Iterable, Sequence
     from datetime import datetime
 
     from dsl41.boundary import EstateWalk
@@ -50,7 +50,7 @@ if TYPE_CHECKING:
     from dsl41.rehearse_check import CadencePolicy
     from dsl41.runner_adapters import FakeAdapter
     from dsl41.runner_clock import ZeroDelayCycleError
-    from dsl41.period import RuntimeProfile, StagedManifest
+    from dsl41.period import Manifest, RuntimeProfile, StagedManifest
     from dsl41.runner import Engine
     from dsl41.runner_history import RunRow
     from dsl41.runner_preflight import PreflightItem
@@ -450,12 +450,7 @@ def _resume_profile_error(
     change period semantics with every identity gate green. A root with no
     manifest predates DL-130 and has no pin to hold. The deadman compares
     at its OBSERVED value, for the reason `_observed_profile` gives."""
-    from dsl41.period import (
-        disagreements,
-        read_period_manifest,
-        runtime_hash,
-        to_us,
-    )
+    from dsl41.period import read_period_manifest, to_us
     from dsl41.runner_clock import EngineError
 
     try:
@@ -470,7 +465,16 @@ def _resume_profile_error(
     if manifest is None:
         return None
     observed_deadman = None if running_deadman is None else to_us(running_deadman)
-    observed = profile.with_deadman(observed_deadman)
+    return _profile_mismatch(profile.with_deadman(observed_deadman), manifest)
+
+
+def _profile_mismatch(observed: "RuntimeProfile", manifest: "Manifest") -> "str | None":
+    """The ONE comparison of a launch's options with a period's pin, and its
+    refusal. The resume gate runs it after wiring, at the observed
+    deadman. A physical roll also runs it before it writes, at the pinned
+    deadman, because no supervisor has reported one yet (PR-22b)."""
+    from dsl41.period import disagreements, runtime_hash
+
     if runtime_hash(observed) == manifest.runtime_hash:
         return None
     pinned = manifest.runtime_profile
@@ -480,11 +484,43 @@ def _resume_profile_error(
         name for name, _, _ in disagreements(observed, pinned, type(observed).model_fields)
     )
     return (
-        "runtime-profile mismatch: this resume was launched with different"
+        "runtime-profile mismatch: this run was launched with different"
         f" options than the period pinned ({', '.join(moved) or 'runtime_hash'})."
         " A runtime-profile change is a new period (period-model ss2.1):"
         " re-baseline explicitly with a fresh run root"
     )
+
+
+def _roll_admission(run_root: Path, profile: "RuntimeProfile") -> "Callable[[Manifest], None]":
+    """The gate a physical roll holds its successor's manifest to before it
+    writes (PR-22b). It raises `EngineError` with `_profile_mismatch`'s
+    refusal.
+
+    The deadman is compared at the value the run will observe. A tethered
+    run has none. A detached run with no supervisor at the target starts
+    one at the pinned deadman, so the pin stands. One already running keeps
+    its own interval, so the gate asks it, read-only. The local comparison
+    runs first, and the PING only when that passes."""
+    from dsl41.period import to_us
+    from dsl41.runner_adapters import running_supervisor_deadman
+    from dsl41.runner_clock import EngineError
+
+    detached = profile.execution_mode == "detached"
+
+    def admit(manifest: "Manifest") -> None:
+        pinned = manifest.runtime_profile.deadman_us if detached else None
+        mismatch = _profile_mismatch(profile.with_deadman(pinned), manifest)
+        if mismatch is None and detached:
+            # asked on every call, so the roll's own call observes the
+            # supervisor right before its first write
+            answered, running = running_supervisor_deadman(run_root)
+            if answered:
+                observed = None if running is None else to_us(running)
+                mismatch = _profile_mismatch(profile.with_deadman(observed), manifest)
+        if mismatch is not None:
+            raise EngineError(mismatch)
+
+    return admit
 
 
 def _running_deadman(client: object, asked: "float | None", run_root: Path) -> "float | None":
@@ -582,6 +618,7 @@ async def _serve_run(
     detached = profile.execution_mode == "detached"
     # the ASKED deadman; `_running_deadman` reads back what the host runs
     deadman = None if profile.deadman_us is None else profile.deadman_us / 1_000_000
+    admit: "Callable[[Manifest], None] | None" = None
     if open_from is not None:
         # the roll's READ-ONLY preflight runs before anything is created:
         # a refusal -- the unattested-closing refusal above all -- must
@@ -590,7 +627,7 @@ async def _serve_run(
         from dsl41.estate import check_roll_ready
 
         try:
-            check_roll_ready(run_root, Path(open_from))
+            successor = check_roll_ready(run_root, Path(open_from))
         except EngineError as exc:
             return refuse(exc)
     if access_map is not None:
@@ -604,6 +641,17 @@ async def _serve_run(
         try:
             load_policy(access_map, generation=1)
         except AccessError as exc:
+            return refuse(exc)
+    if open_from is not None:
+        # PR-22b: the options are held to the successor's pin before the
+        # roll writes. This early pass runs after every local check above,
+        # because it may PING a supervisor. It is the fast refusal that
+        # writes nothing; the roll runs the same gate again on the seal it
+        # selects.
+        admit = _roll_admission(run_root, profile)
+        try:
+            admit(successor)
+        except EngineError as exc:
             return refuse(exc)
     # ss1.3's resume rule (DL-224), READ-ONLY and before the lock, the same
     # precedent as the two above: the supervisor wiring below creates its
@@ -665,7 +713,11 @@ async def _serve_run(
             try:
                 check_roll_target(run_root, open_from)
                 rolled = roll_into_root(
-                    run_root, anchor_dir=open_from, catalog_of=lambda _root, _m: catalog, lock=lock
+                    run_root,
+                    anchor_dir=open_from,
+                    catalog_of=lambda _root, _m: catalog,
+                    lock=lock,
+                    admit=admit,
                 )
             except EngineError as exc:
                 return refuse(exc)

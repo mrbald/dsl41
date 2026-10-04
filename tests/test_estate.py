@@ -1073,6 +1073,270 @@ def test_open_from_and_resume_are_the_two_openers_and_you_get_one(tmp_path: Path
     assert both.exit_code == 2 and "the two OPENERS" in both.output
 
 
+def _attested_boundary(base: Path, *next_options: str) -> tuple[Path, Path]:
+    """Period 1 in `base/a`, sealed with `next_options` and audited, so a
+    physical roll may open period 2. Returns C2 and the lineage anchor."""
+    c1, c2, _ = _estate(base / "estate")
+    root_a = base / "a"
+    _native_root(root_a, c1)
+    assert _seal_next(root_a, c2, *next_options).exit_code == 0
+    assert _invoke("audit", "--run-root", str(root_a)).exit_code == 0
+    return c2, default_anchor_dir(root_a)
+
+
+def _refused_before_writing(result: Any, moved: str, root: Path, anchor_dir: Path, period: int):
+    """PR-22b: the refusal names the moved field, `period` has no segment
+    in `root`, and the head still says the period before it is closed."""
+    assert result.exit_code == 2, result.output
+    assert "runtime-profile mismatch" in result.output and f"({moved})" in result.output
+    assert not wal_path(root, period).exists()
+    stored = EstateAnchor(anchor_dir).read()
+    assert stored is not None and isinstance(stored.head, ClosedHead)
+    assert stored.head.period_id == period - 1
+
+
+def _rolls(base: Path, root: Path, anchor_dir: Path, c2: Path, period: int, *options: str):
+    """The twin: a roll with `options` opens `period` in `root`. It runs as
+    a real process, because a roll that succeeds holds its engine open."""
+    extra = ["--open-from", str(anchor_dir), *options]
+    with engine(base, run_root=root, files=[c2], extra=extra) as opened:
+        assert opened.proc.poll() is None
+    assert wal_path(root, period).exists()
+    stored = EstateAnchor(anchor_dir).read()
+    assert stored is not None and isinstance(stored.head, OpenHead)
+    assert stored.head.period_id == period
+
+
+def test_pr22b_a_roll_refuses_a_disagreeing_switch_before_it_writes(
+    short_root: Path,  # noqa: F811
+) -> None:
+    """The seal pinned `dst-start-times=fold0` for period 2. A roll at the
+    default is refused with nothing written, so the retry that names the
+    switch rolls the same boundary."""
+    c2, anchor_dir = _attested_boundary(short_root, "--next-semantics", "dst-start-times=fold0")
+    root_b = short_root / "b"
+    roll = ["run", "--open-from", str(anchor_dir), "--run-root", str(root_b), str(c2)]
+    _refused_before_writing(_invoke(*roll), "semantics", root_b, anchor_dir, 2)
+    _rolls(short_root, root_b, anchor_dir, c2, 2, "--semantics", "dst-start-times=fold0")
+
+
+def test_pr22b_a_roll_refuses_a_disagreeing_timezone_before_it_writes(
+    short_root: Path,  # noqa: F811
+) -> None:
+    """The same gate on a field that is not a switch: period 2 pinned
+    Europe/Zurich, so a roll at the UTC default is refused with nothing
+    written, and the retry that names the zone rolls."""
+    c2, anchor_dir = _attested_boundary(short_root, "--next-timezone", "Europe/Zurich")
+    root_b = short_root / "b"
+    roll = ["run", "--open-from", str(anchor_dir), "--run-root", str(root_b), str(c2)]
+    _refused_before_writing(_invoke(*roll), "default_tz", root_b, anchor_dir, 2)
+    _rolls(short_root, root_b, anchor_dir, c2, 2, "--timezone", "Europe/Zurich")
+
+
+def test_pr22b_a_roll_compares_the_deadman_of_a_supervisor_already_running(
+    short_root: Path,  # noqa: F811
+) -> None:
+    """A detached run reattaches to a supervisor already serving its root,
+    and that supervisor keeps its own deadman. Period 2 pinned 60 and the
+    launch asks 60, but the supervisor at the target runs 90: the roll is
+    refused before it writes. The twin: a supervisor running 60 rolls."""
+    from test_runner_supervisor import start_supervisor
+
+    c2, anchor_dir = _attested_boundary(short_root, "--next-detached", "--next-deadman", "60")
+    root_b = short_root / "b"
+    roll = ["run", "--open-from", str(anchor_dir), "--run-root", str(root_b), str(c2)]
+    detached = ["--detached", "--deadman", "60"]
+    supervisor = start_supervisor(root_b, deadman_s=90)
+    try:
+        _refused_before_writing(_invoke(*roll, *detached), "deadman_us", root_b, anchor_dir, 2)
+        assert _invoke("supervise", "shutdown", "--run-root", str(root_b)).exit_code == 0
+        supervisor.wait(timeout=30)
+        supervisor = start_supervisor(root_b, deadman_s=60)
+        _rolls(short_root, root_b, anchor_dir, c2, 2, *detached)
+    finally:
+        if supervisor.poll() is None:
+            supervisor.terminate()
+            supervisor.wait(timeout=30)
+
+
+def test_pr22b_a_roll_holds_the_seal_it_selects_not_the_one_it_checked_first(
+    short_root: Path,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The early check reads one successor, and the roll selects the head
+    again. Between the two, another root opens period 2, seals period 3
+    under Europe/Zurich and audits it. The roll now opens period 3, and it
+    must hold that period's pin: it is refused before it writes. The twin:
+    the retry that names the zone rolls period 3."""
+    import dsl41.runner_ledger as ledger
+
+    c2, anchor_dir = _attested_boundary(short_root)
+    root_b, root_c = short_root / "b", short_root / "c"
+    real_acquire = ledger.acquire_run_root
+    advanced: list[Path] = []
+
+    def acquire_after_another_boundary(path: Path, *args: Any, **kwargs: Any) -> Any:
+        # runs after the early check passed and before the roll selects
+        if Path(path) == root_b and not advanced:
+            advanced.append(path)
+            _roll(root_c, anchor_dir, c2)
+            sealed = cli(
+                "seal", "--run-root", str(root_c), "--estate-anchor", str(anchor_dir),
+                "--next", str(c2), "--next-timezone", "Europe/Zurich",
+            )  # fmt: skip
+            assert sealed.returncode == 0, sealed.stderr
+            audited = cli("audit", "--run-root", str(root_c), "--estate-anchor", str(anchor_dir))
+            assert audited.returncode == 0, audited.stderr
+        return real_acquire(path, *args, **kwargs)
+
+    monkeypatch.setattr(ledger, "acquire_run_root", acquire_after_another_boundary)
+    roll = ["run", "--open-from", str(anchor_dir), "--run-root", str(root_b), str(c2)]
+    refused = _invoke(*roll)
+    assert advanced, "the interleaving hook never ran"
+    _refused_before_writing(refused, "default_tz", root_b, anchor_dir, 3)
+    _rolls(short_root, root_b, anchor_dir, c2, 3, "--timezone", "Europe/Zurich")
+
+
+def test_pr22b_a_roll_asks_a_supervisor_started_after_the_early_check(
+    short_root: Path,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The early check finds no supervisor at the target, so the pinned 60
+    stands. A supervisor running 90 then starts before the roll. The roll's
+    own gate asks again before the first write, so the roll is refused with
+    nothing written. The twin: a supervisor running 60 passes that gate,
+    and the roll opens period 2."""
+    import dsl41.runner_ledger as ledger
+    from dsl41.cli_run import _roll_admission
+    from dsl41.estate import roll_into_root
+    from dsl41.period import runtime_profile_from_cli
+    from test_runner_supervisor import start_supervisor
+
+    c2, anchor_dir = _attested_boundary(short_root, "--next-detached", "--next-deadman", "60")
+    root_b = short_root / "b"
+    real_acquire = ledger.acquire_run_root
+    started: list[Any] = []
+
+    def acquire_after_a_supervisor_starts(path: Path, *args: Any, **kwargs: Any) -> Any:
+        # runs after the early check and before the roll's own gate
+        if Path(path) == root_b and not started:
+            started.append(start_supervisor(root_b, deadman_s=90))
+        return real_acquire(path, *args, **kwargs)
+
+    monkeypatch.setattr(ledger, "acquire_run_root", acquire_after_a_supervisor_starts)
+    roll = ["run", "--open-from", str(anchor_dir), "--run-root", str(root_b), str(c2)]
+    try:
+        refused = _invoke(*roll, "--detached", "--deadman", "60")
+        assert started, "the interleaving hook never ran"
+        _refused_before_writing(refused, "deadman_us", root_b, anchor_dir, 2)
+        assert _invoke("supervise", "shutdown", "--run-root", str(root_b)).exit_code == 0
+        started[0].wait(timeout=30)
+
+        started.append(start_supervisor(root_b, deadman_s=60))
+        admit = _roll_admission(root_b, runtime_profile_from_cli(detached=True, deadman_s=60))
+        roll_into_root(
+            root_b,
+            anchor_dir=anchor_dir,
+            catalog_of=lambda _root, _m: lower_catalog([parse(c2.read_text(), file=str(c2))]),
+            admit=admit,
+        )
+        assert wal_path(root_b, 2).exists()
+        stored = EstateAnchor(anchor_dir).read()
+        assert stored is not None and isinstance(stored.head, OpenHead)
+        assert stored.head.period_id == 2
+    finally:
+        for supervisor in started:
+            if supervisor.poll() is None:
+                supervisor.terminate()
+                supervisor.wait(timeout=30)
+
+
+def test_pr22b_a_supervisor_that_never_answers_refuses_the_roll(
+    short_root: Path,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A supervisor socket that accepts and never answers PING refuses the
+    roll at the deadline, naming the root and the socket, with nothing
+    written. The deadline is shortened here only to keep the test fast."""
+    import contextlib
+    import socket
+    import threading
+
+    import dsl41.runner_adapters as adapters
+
+    c2, anchor_dir = _attested_boundary(short_root, "--next-detached", "--next-deadman", "60")
+    root_b = short_root / "b"
+    root_b.mkdir()
+    server = socket.socket(socket.AF_UNIX)
+    server.bind(str(root_b / "supervisor.sock"))
+    server.listen()
+    held: list[socket.socket] = []
+
+    def accept_and_never_answer() -> None:
+        with contextlib.suppress(OSError):
+            while True:
+                held.append(server.accept()[0])
+
+    acceptor = threading.Thread(target=accept_and_never_answer, daemon=True)
+    acceptor.start()
+    monkeypatch.setattr(adapters, "PING_TIMEOUT_S", 0.2)
+    roll = ["run", "--open-from", str(anchor_dir), "--run-root", str(root_b), str(c2)]
+    try:
+        refused = _invoke(*roll, "--detached", "--deadman", "60")
+    finally:
+        server.close()
+        for conn in held:
+            conn.close()
+    assert held, "the roll never connected"
+    assert refused.exit_code == 2, refused.output
+    assert "did not answer PING" in refused.output and str(root_b) in refused.output
+    assert read_sentinel(root_b) is None and not wal_path(root_b, 2).exists()
+    stored = EstateAnchor(anchor_dir).read()
+    assert stored is not None and isinstance(stored.head, ClosedHead)
+    assert stored.head.period_id == 1
+
+
+def test_pr22b_an_unattested_boundary_is_refused_before_any_ping(
+    short_root: Path,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every local check runs before the gate asks a supervisor anything,
+    so a refusal the disk can answer never waits on a socket. The twin:
+    attested, the same roll does ask."""
+    import dsl41.runner_adapters as adapters
+
+    asked: list[Path] = []
+
+    def recorded(run_root: Path) -> tuple[bool, float | None]:
+        asked.append(run_root)
+        return False, None
+
+    monkeypatch.setattr(adapters, "running_supervisor_deadman", recorded)
+    c1, c2, _ = _estate(short_root / "estate")
+    root_a, root_b = short_root / "a", short_root / "b"
+    _native_root(root_a, c1)
+    assert _seal_next(root_a, c2, "--next-detached", "--next-deadman", "60").exit_code == 0
+    anchor_dir = default_anchor_dir(root_a)
+    roll = ["run", "--open-from", str(anchor_dir), "--run-root", str(root_b), str(c2)]
+    roll += ["--detached", "--deadman", "60"]
+
+    unattested = _invoke(*roll)
+    assert unattested.exit_code == 2 and "is not attested" in unattested.output
+    assert asked == []
+
+    import dsl41.runner_ledger as ledger
+
+    def held_elsewhere(path: Path, *args: Any, **kwargs: Any) -> Any:
+        # stops the twin at the lock, before the roll writes or runs
+        raise EngineError("held elsewhere for this test")
+
+    assert _invoke("audit", "--run-root", str(root_a)).exit_code == 0
+    monkeypatch.setattr(ledger, "acquire_run_root", held_elsewhere)
+    attested = _invoke(*roll)
+    assert attested.exit_code == 2 and "held elsewhere for this test" in attested.output
+    assert asked == [root_b]
+
+
 # ------------------------------------------------ ss1.3 estate reclaim
 
 
