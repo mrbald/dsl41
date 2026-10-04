@@ -285,3 +285,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-271 | The drill's steps run unprivileged with sudo, locally as on the runner | [docs/deployment-runbook.md](deployment-runbook.md), [docs/risk-map.md](risk-map.md) |
 | DL-276 | A generated index of the decision log | [README.md](../README.md) |
 | DL-277 | The architecture gate checks that cited modules exist and that the README's source map is complete |  |
+| DL-278 | A rolled root whose only segment is torn has an operator recipe | [docs/risk-map.md](risk-map.md) |

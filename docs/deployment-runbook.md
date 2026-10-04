@@ -43,7 +43,8 @@ Some blocks are marked as recipes in this file's source.
 `tests/test_operator_recipes.py` runs the job recipe, the readiness wait
 and the retirement's audit and list as written, against a synthetic
 estate, with the engine unit's `ExecStart=` in place of `systemctl
-start`. It runs the sealed check where `jq` is installed. The service
+start`. It runs the sealed check and the torn-opening recipe where `jq`
+is installed. The service
 drill (§3's worked example) runs the service and retirement recipes as
 written; CI checks their content but does not run them. The variables
 block is compared with the launcher.
@@ -378,6 +379,8 @@ dsl41 query status --job "$JOB" -S "$S"
   unit does not retry it. The last lines of the engine unit's journal name
   the cause: a changed estate, a resume gate, an access map, a preflight
   ERROR, or the launcher's own refusal. Fix it and start the unit.
+  A rolled root that refuses with `missing segment record` has
+  [its own recipe](#recipe-recover-a-rolled-root-whose-opening-is-torn).
 - **Recover a lost answer: replay the request.** `sendevent` and `host`
   exit 4 when the answer was lost. Re-send the same arguments with the
   `--request-id`, `--expect`, `--epoch` and `--baseline` the CLI printed,
@@ -391,6 +394,156 @@ dsl41 query status --job "$JOB" -S "$S"
 - **The supervisor unit restarted.** Its running commands ended with it,
   and a restart does not bring them back. The engine reconciles what the
   spool says (§3).
+
+### Recipe: recover a rolled root whose opening is torn
+
+A physical roll writes the new root's first segment, and then moves the
+lineage head from `claimed` to `open` (§6a). A crash in that write
+leaves the segment empty or torn, and the head `claimed` by the new
+root. In a root that holds an earlier segment, resume removes such a
+segment and opens the period again. A rolled root holds no earlier
+segment, so resume refuses (period-model §11's recovery matrix, its
+torn-first-line row). A retry of the same roll refuses too, while the
+torn file stays. The engine unit fails with exit 2, and its journal
+ends with `<root>/wal/<N>.jsonl: missing segment record`. Set
+`RUN_ROOT` and `S` to the torn root for steps 1 to 5.
+
+1. Look before you stop anything. A stop of the supervisor unit ends
+   every command it runs. This prints the head, and stops when the
+   supervisor still lists a run:
+
+<!-- recipe: torn-look -->
+```sh
+(
+    set -eu
+    jq -c .head "$ESTATE_ANCHOR/anchor.json"
+    if [ -e "$RUN_ROOT/supervisor.sock" ]; then
+        dsl41 supervise list --run-root "$RUN_ROOT" | jq -e '.runs == []' >/dev/null ||
+            { echo "stop: the supervisor lists runs, or does not answer" >&2; exit 1; }
+    fi
+)
+```
+
+   If it stops, something runs under this root. This recipe does not
+   cover that case, and no other supported path does.
+2. Stop both units (`systemctl stop dsl41-engine.service
+   dsl41-supervisor.service`), or under shape 2 the supervisor (`dsl41
+   supervise shutdown --run-root "$RUN_ROOT"`). Then run §2b's
+   no-writers check, with its wait past `RestartSec` under shape 1.
+3. Check the root. The check stops, and says why, at any sign that
+   the root holds more than a torn opening:
+
+<!-- recipe: torn-check -->
+```sh
+(
+    set -eu
+    stop() { echo "stop: $*" >&2; exit 1; }
+    head=$ESTATE_ANCHOR/anchor.json
+    here=$(cd "$RUN_ROOT" && pwd -P)
+    state=$(jq -r .head.state "$head")
+    case $state in
+        claimed)
+            [ "$(jq -r '.head["target_root"]' "$head")" = "$here" ] ||
+                stop "the head's claim is not this root's"
+            id=$(jq -r .head.claim_id "$head")
+            [ -f "$ESTATE_ANCHOR/claims/${id##*:}.json" ] || stop "the claim file is missing"
+            [ "$(jq -r .claim_id "$RUN_ROOT/journal.jsonl")" = "$id" ] ||
+                stop "the head's claim did not open this root: it is not a rolled root"
+            ;;
+        open)
+            [ "$(jq -r .head.root "$head")" = "$here" ] || stop "the head names another root"
+            [ "$(jq -r .claim_id "$RUN_ROOT/journal.jsonl")" != null ] ||
+                stop "no roll created this root: it is not a rolled root"
+            ;;
+        *) stop "the head is $state" ;;
+    esac
+    segment=$(ls -A "$RUN_ROOT/wal")
+    case $segment in
+        [0-9][0-9][0-9][0-9][0-9][0-9].jsonl) ;;
+        *) stop "wal/ holds something other than one segment" ;;
+    esac
+    [ "$(wc -l <"$RUN_ROOT/wal/$segment")" -eq 0 ] || stop "the segment holds a complete line"
+    [ -z "$(ls -A "$RUN_ROOT/runs" 2>/dev/null)" ] || stop "runs/ holds run evidence"
+    [ ! -e "$RUN_ROOT/seals/${segment%.jsonl}.json" ] || stop "the period has a seal"
+    [ ! -e "$RUN_ROOT/supervisor.pid" ] || stop "a supervisor may still run"
+    echo "$state $segment"
+)
+```
+
+   The check prints the head's state and the segment. Only a physical
+   roll writes a `claim_id` into a root's sentinel. A genesis writes
+   none, and an in-place opening leaves the sentinel unchanged. So that
+   field tells a rolled root from any other, for either head. `claimed`
+   is the crash: nothing ran in the root, because its only segment never
+   held a complete record. Go on with step 4. `open` is damage: go to
+   step 6.
+4. With both units still stopped, remove the torn segment and create
+   the launcher's one-shot open trigger, in one step, as the service
+   account. Remove nothing else: not `leader.lock`, not the sentinel,
+   and nothing in the anchor. Resume removes the same file itself when
+   an earlier segment exists (period-model §11), and the opening that
+   replaces it is a pure function of the seal:
+
+<!-- recipe: torn-reopen -->
+```sh
+rm "$RUN_ROOT"/wal/[0-9][0-9][0-9][0-9][0-9][0-9].jsonl && touch "$RUN_ROOT.open-from"
+```
+
+   Do the two together. A start with the segment gone and no trigger
+   resumes instead, and that resume fails with exit 1, so the unit
+   restarts it in a loop.
+5. Start the engine unit (`systemctl start dsl41-engine.service`), and
+   wait for it with the `wait-answers` block. The trigger reruns the
+   identical opener, and it resumes its own claim in this root
+   (period-model §1.3). The engine's journal says `opened period N in
+   <root>`. Nothing is reclaimed, and the opening carries no
+   `reclaimed` stamp. If the start refuses for another cause, fix the
+   cause if you can, create the trigger again (`touch
+   "$RUN_ROOT.open-from"`), and start the unit. The launcher removes the
+   trigger before it runs dsl41. Without it, the start resumes a root
+   with no segment, which fails with exit 1, and the unit restarts it in
+   a loop. If you cannot fix the cause, free the claim with the
+   break-glass of §6a. The code does not repair a torn sole opening (DL-144 (9a)), so
+   a claim it cannot finish is freed only with `--force`. The reclaim
+   records the account that ran it, the service account under §0. Add
+   `--claimed-actor you@host` to name yourself:
+
+<!-- recipe: torn-reclaim -->
+```sh
+dsl41 estate reclaim --estate-anchor "$ESTATE_ANCHOR" --force
+```
+
+   Then open the period in a fresh root, as in step 7. The reclaimed
+   root stays as it is.
+6. `open` head: the segment was durable when the head moved, and was
+   damaged later. No verb path exists for this case. Step 3 found no
+   run evidence, so a restore is allowed. Restore the anchor at its
+   recorded path from a §2b copy taken after the closing period's seal
+   and audit, and before the roll. Restore the closing root too, but
+   only if it changed since that copy. The restored head reads
+   `closed`. Without such a copy, nothing recovers this case. What
+   this does not prove: the fault that cut a durable first line can
+   have cut other durable evidence too. Step 3 reads what is left. It is
+   the operator's evidence that nothing ran, not proof. Leave the
+   damaged root as it is, for that evidence.
+7. Open the period in a fresh root. Edit the launcher's `RUN_ROOT` line
+   and both units' `RequiresMountsFor=`, and run `systemctl
+   daemon-reload`. Set `RUN_ROOT` and `S` in your shell to the new
+   root. `ESTATE_ANCHOR` stays the lineage's. Create the trigger, as
+   the service account, then start the engine unit and wait for it as
+   in step 5:
+
+<!-- recipe: torn-open -->
+```sh
+touch "$RUN_ROOT.open-from"
+```
+
+If the roll ran under §7's row 2, finish that row's tail once the engine
+answers: release the holds with `OFF_HOLD`, and release the reboot hold
+(§2b). After steps 6 or 7 the anchor's registry does not name the old
+root, so no estate-wide reader reads it, and resume refuses it by
+period-model §1.3's resume rule (DL-224). Remove it when the site no
+longer wants it.
 
 ### What to watch
 
@@ -1600,7 +1753,8 @@ IDENTICAL `dsl41 run --open-from` and it resumes; period-model §1.1's
 ownership rule refuses any other roll into it. To roll somewhere else,
 read the head first: `closed` accepts a fresh target root, `claimed`
 accepts only its own — retry it, or reclaim it after proving the claimant
-is gone.
+is gone. A retry that refuses with `missing segment record` refuses
+while the torn segment stays; follow [the torn-opening recipe](#recipe-recover-a-rolled-root-whose-opening-is-torn).
 
 *A command on a rolled root refuses, naming an anchor.* The anchor is the
 LINEAGE's, not the root's, and four verbs take it:
