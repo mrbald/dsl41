@@ -18134,3 +18134,32 @@ relitigate an entry; append a new one.
   REVIEW. One Opus reviewer: no material finding. Its two minors, a test
   a sudo wrapper could pass and a stale sentence about the GitHub pass,
   are fixed.
+- DL-272 A generated index of the decision log (2026-10-05;
+  scripts/render_decision_index.py, docs/decision-index.md,
+  tests/test_decision_index.py)
+  THE GAP. The log holds 279 entries and has no table of contents. A
+  reader who meets a DL id in a spec searches an 18,000-line file, and
+  cannot see which docs cite an entry.
+  THE RULE. `scripts/render_decision_index.py` writes
+  `docs/decision-index.md`: one row per entry, with its id, its title and
+  the docs that cite it. The title is the entry's first sentence, cut
+  before a date parenthetical, and at a word boundary before 160
+  characters. A citation is a whole id; a range `DL-a..DL-b` counts for
+  its two ends, as `scripts/arch_check.py` reads it. The index is
+  generated: regenerate it, never edit it by hand.
+  `tests/test_decision_index.py` fails when the committed index differs
+  from the rendering.
+  STATED LIMITS. Only docs git tracks are scanned, so an untracked
+  scratch file never puts its name into this public index. A new doc not
+  yet staged is therefore missing from a local render; CI's currency test
+  catches that. Ids match as written: `DL-7` is not credited to `DL-07`.
+  When the root is not the top level of its own repository, or git fails,
+  the generator walks the tree and says so on stderr.
+  TESTS. The currency test; a stale index and a new citing doc are
+  detected; the entry count equals the header count; suffixed ids such as
+  `DL-41a`; whole-id matching, including `pre-DL-7`; title cuts (wrapped
+  header, date parenthetical, other parenthetical kept, abbreviations,
+  the 160-character cut); tracked docs only; a tree inside another
+  repository is walked.
+  REVIEW. One Opus reviewer, three rounds. All findings are fixed except
+  the tracked-only scan, which the reviewer agreed to state as a limit.
