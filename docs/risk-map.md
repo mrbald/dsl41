@@ -13,7 +13,7 @@ The last column lists the others.
 | --- | --- | --- | --- | --- |
 | Job lifecycle and flags | `oracle_state.py`, `oracle.py` | [autosys-semantics §0](autosys-semantics.md#0-execution-model-the-frame-everything-else-hangs-on); [runner-design §3](runner-design.md#3-architecture--functional-core-imperative-shell) | `oracle_state.py` 104/104 (100.00%); `oracle.py` 594/594 (100.00%) | none beyond the common one |
 | Box execution | `oracle.py` | [autosys-semantics §2](autosys-semantics.md#2-boxes); [period-model §3.5](period-model.md#35-executions--a-discriminated-lifecycle-not-one-row) | `oracle.py` 594/594 (100.00%) | none beyond the common one |
-| Capacity waiter and reservation | `capacity.py`, `oracle.py` | [period-model §5](period-model.md#5-capacity-decomposed); DL-50, DL-255, DL-256 | `capacity.py` 84/84 (100.00%); `oracle.py` 594/594 (100.00%) | none beyond the common one |
+| Capacity waiter and reservation | `capacity.py`, `oracle.py` | [period-model §5](period-model.md#5-capacity-decomposed); DL-50, DL-255, DL-256 | `capacity.py` 84/84 (100.00%); `oracle.py` 594/594 (100.00%) | [held-unit circular wait](#held-unit-circular-wait) |
 | Scheduler and timer frontier | `runner_scheduler.py`, `runner.py`, `runner_clock.py` | [runner-design §5](runner-design.md#5-scheduler--the-calendar-the-oracle-deliberately-lacks); [period-model §6](period-model.md#6-the-cutoff-barrier) | `runner_scheduler.py` 66/66 (100.00%); `runner.py` 186/186 (100.00%); `runner_clock.py` 14/16 (87.50%) | [outside the 100% gate](#owning-modules-outside-the-100-gate) |
 | Engine work choice | `runner.py` | [runner-design §4](runner-design.md#4-engine-loop--single-writer) | `runner.py` 186/186 (100.00%) | none beyond the common one |
 | Admission and idempotency | `runner_admission.py` | [concurrency-model §4](concurrency-model.md#4-admission-and-application) | `runner_admission.py` 82/82 (100.00%) | none beyond the common one |
@@ -113,6 +113,17 @@ These owning modules in the table are not in that list:
 
 DL-269 names three of them (`runner_supervisor.py`, `runner_wrapper.py`, `runner_adapters.py`) under "STILL OUTSIDE".
 Widening the gate to any of them is the owner's call.
+
+### Held-unit circular wait
+
+Two jobs in one catalog can each hold a resource unit the other needs, and neither can start.
+A reproduction, with renewable resources X and Y of amount 1: job `a` (priority 1) needs X with `FREE=N` and Y with `FREE=A`; job `b` (priority 2) needs Y with `FREE=Y`.
+After each job runs once and fails, `a` holds X and `b` holds Y.
+When both start again, `a` waits in `QUE_WAIT` for Y, and `b` waits behind `a`'s priority (DL-255).
+Only `RELEASE_RESOURCE`, or `KILLJOB` and then `FORCE_STARTJOB`, ends the wait.
+DL-256 accepts hold-and-wait as the vendor's behavior; no entry records this cycle, and no test checks liveness with held units.
+The [capacity card](blocks/capacity.md) lists it under its gaps.
+Whether it needs a warning or a change is the owner's call.
 
 ### Outbox outcome overwrite
 
