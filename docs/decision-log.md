@@ -17603,3 +17603,28 @@ relitigate an entry; append a new one.
   REVISIT. After the next tranche, compare the reviewers' findings per
   slice. If one reviewer rarely adds a finding the other missed, narrow
   the semantic class.
+- DL-263 Anchor and claim reads are strict (2026-10-04; boundary.py,
+  protocol-evolution.md, tests/test_boundary.py)
+  THE GAP. DL-168 made the closed-artifact readers strict in the JSON
+  sense, so a coerced value cannot clear a field's floor. It left
+  `EstateAnchor.read` and `EstateAnchor.read_claim` lax and recorded them
+  as two strict xfails. A JSON `true` in `head.period_id` became `1` and
+  passed `ge=1`. A string `"3"` in a claim's `next_period` became `3` and
+  passed `ge=2`. The anchor is the root of an estate's lineage.
+  THE RULE. Both reads now validate `raw` with
+  `model_validate_json(raw, strict=True)`, as `_read_artifact` does. The
+  decode, object and version gates still run first. A refused field
+  raises the same `EngineError` these reads raise for a malformed file,
+  so no caller changes. The models' own configs do not change.
+  THE TESTS. The two xfails are plain tests now. They keep the names
+  DL-168 cites, because that entry is append-only and DL-110's citation
+  gate resolves them; their docstrings say what they now prove. Each has
+  a non-triggering twin at the field's floor.
+  NOT IN SCOPE. Other lax reads of persisted data were listed, not
+  changed: the catalog read in `ir.py`, `CadencePolicy`, the WAL's
+  `Effect` and `EffectOutcome`, the CLI's `Event`, and `RuntimeProfile`.
+  REVIEW. One round each from an Opus reviewer and Codex: no material
+  findings. The Opus reviewer's two minors were fixed: the refusal tests
+  match the reader's message as well as the field, and the
+  protocol-evolution sentence names the nested fields the strict read
+  also covers.

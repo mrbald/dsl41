@@ -144,10 +144,12 @@ field under ITS OWN config regardless of the outer model's `strict=True`
 carries `strict=True` of its own. `StagedNextPeriod`, the wire's own copy
 of a staged identity, validated at `runner_control.py`'s `_seal`, carries
 the same `strict=True`; every field there is a scalar, so the config alone
-closes the wire ingress, with no call-time override to remember. Anchor
-and claim are lax, an open item on this row: `EstateAnchor.read`'s
-`head.period_id` and `EstateAnchor.read_claim`'s `next_period` both coerce
-(`tests/test_boundary.py`'s two `xfail` cases are the citable record).
+closes the wire ingress, with no call-time override to remember.
+`EstateAnchor.read` and `EstateAnchor.read_claim` read the same way
+(DL-263): `model_validate_json(raw, strict=True)` after the decode and
+version gates (and, for the anchor, the head-state check). Every field
+refuses a coerced value, nested ones included: `head.period_id`, a period
+row's `segment_durable`, and `next_period` in a claim or a reclaimed entry.
 
 `SealRequest`, the wire's own copy of the seal ENVELOPE that carries
 `next_period`, validated at the same `_seal`, carries `strict=True` too
