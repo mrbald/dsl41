@@ -315,6 +315,11 @@ def _tree(
     # keep the pre-existing main() tests off real git; the tests that care
     # about spec review status set their own patch after calling _tree.
     monkeypatch.setattr(arch_check, "spec_review_status", lambda: None)
+    # the doc rules read the real README and docs/; point them at a tree that
+    # fits the one built here, so these tests stay about what they say
+    readme = _write(tmp_path / "README.md", "### Source map\n\n- `src/dsl41/mod.py`: x\n")
+    monkeypatch.setattr(arch_check, "README_PATH", readme)
+    monkeypatch.setattr(arch_check, "module_citation_docs", lambda: [])
 
 
 def test_main_exits_0_and_says_nothing_when_the_tree_is_clean(
@@ -374,9 +379,19 @@ def test_main_escalates_on_accumulated_diff_alone(
 def test_spec_documents_excludes_logs_and_sorts(tmp_path: Path) -> None:
     docs = tmp_path / "docs"
     docs.mkdir()
-    for name in ["zebra.md", "alpha.md", "decision-log.md", "citation-index.md"]:
+    for name in ["zebra.md", "alpha.md", *arch_check.SPEC_EXCLUDED]:
         _write(docs / name, "x")
+    (docs / "blocks").mkdir()
+    _write(docs / "blocks" / "card.md", "x")  # subdirectories hold review material
     assert [p.name for p in arch_check.spec_documents(tmp_path)] == ["alpha.md", "zebra.md"]
+    assert {
+        "decision-log.md",
+        "citation-index.md",
+        "glossary.md",
+        "risk-map.md",
+        "decision-index.md",
+        "architecture.md",
+    } <= set(arch_check.SPEC_EXCLUDED)
 
 
 def test_spec_review_status_reports_per_document_due_states(
@@ -766,3 +781,258 @@ def test_the_real_docs_cite_only_tests_that_exist() -> None:
     the real tree on purpose, because the tree is what the gate protects."""
     assert arch_check.unresolved_test_citations(arch_check.citing_doc_files()) == []
     assert len(arch_check.defined_test_names()) > 500
+
+
+def test_doc_scans_reach_docs_subdirectories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A later slice adds docs/blocks/*.md. The test-citation scan and the
+    module-citation scan both walk docs/ recursively, so a file one level down
+    is read by each."""
+    docs = tmp_path / "docs"
+    (docs / "blocks").mkdir(parents=True)
+    nested = _write(docs / "blocks" / "one.md", "x\n")
+    top = _write(docs / "top.md", "x\n")
+    log = _write(docs / "decision-log.md", "x\n")
+    readme = _write(tmp_path / "README.md", "x\n")
+    monkeypatch.setattr(arch_check, "CITING_DOCS", (docs,))
+    assert set(arch_check.citing_doc_files()) == {nested, top, log}
+    assert set(arch_check.module_citation_docs(tmp_path)) == {nested, top, readme}
+
+
+# ----------------------------------------- 3c. cited modules exist (module citations)
+
+
+def _module_tree(tmp_path: Path) -> Path:
+    """A tiny repo: one module in each of the four .py trees, no docs yet."""
+    for tree, name in (
+        ("src/dsl41", "real_mod.py"),
+        ("tests", "test_real.py"),
+        ("scripts", "tool.py"),
+        ("examples/demo", "demo_job.py"),
+    ):
+        (tmp_path / tree).mkdir(parents=True, exist_ok=True)
+        _write(tmp_path / tree / name, "X = 1\n")
+    (tmp_path / "docs").mkdir()
+    return tmp_path
+
+
+def test_a_doc_citing_a_module_that_does_not_exist_blocks(tmp_path: Path) -> None:
+    root = _module_tree(tmp_path)
+    doc = _write(
+        root / "docs" / "spec.md",
+        "The `src/dsl41/real_mod.py` module is real.\n"
+        "The `src/dsl41/gone_mod.py` module was renamed away.\n"
+        "Bare `real_mod.py`, `test_real.py`, `tool.py` and `demo_job.py` all exist.\n"
+        "Bare `gone_bare.py` does not.\n",
+    )
+    findings = arch_check.unresolved_module_citations([doc], root)
+    assert [(f.line, f.message) for f in findings] == [
+        (2, "cites `src/dsl41/gone_mod.py`, which does not exist"),
+        (4, "cites `gone_bare.py`, which no .py file has"),
+    ]
+
+
+def test_module_citations_that_resolve_or_are_out_of_scope_do_not_block(tmp_path: Path) -> None:
+    root = _module_tree(tmp_path)
+    doc = _write(
+        root / "docs" / "spec.md",
+        "Resolved: `src/dsl41/real_mod.py` and `real_mod.py` and `tool.py`.\n"
+        "Other paths are out of scope: `vendor/missing.py` and `docs/missing.py`.\n"
+        "A glob names a family: `src/dsl41/runner_*.py`. A bare name is not a path: missing.py.\n"
+        "A file name that is not Python: `missing.json`.\n",
+    )
+    assert arch_check.unresolved_module_citations([doc], root) == []
+
+
+def test_the_module_citation_allowlist_names_one_doc_and_one_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _module_tree(tmp_path)
+    doc = _write(root / "docs" / "spec.md", "`src/dsl41/gone_mod.py` and `gone_bare.py`.\n")
+    other = _write(root / "docs" / "other.md", "`src/dsl41/gone_mod.py`.\n")
+    rel = arch_check._rel(doc)
+    monkeypatch.setattr(
+        arch_check,
+        "MODULE_CITATION_ALLOWLIST",
+        frozenset({(rel, "gone_mod.py"), (rel, "gone_bare.py")}),
+    )
+    assert arch_check.unresolved_module_citations([doc], root) == []
+    # an entry covers its own doc only
+    assert len(arch_check.unresolved_module_citations([other], root)) == 1
+
+
+def test_the_decision_log_is_exempt_from_the_module_citation_rule(tmp_path: Path) -> None:
+    root = _module_tree(tmp_path)
+    _write(root / "docs" / "decision-log.md", "- DL-1 `src/dsl41/removed_long_ago.py`\n")
+    _write(root / "docs" / "decision-index.md", "- DL-1 `src/dsl41/removed_long_ago.py`\n")
+    _write(root / "docs" / "spec.md", "x\n")
+    _write(root / "README.md", "x\n")
+    names = [p.name for p in arch_check.module_citation_docs(root)]
+    assert names == ["README.md", "spec.md"]
+
+
+def test_the_real_docs_cite_only_modules_that_exist() -> None:
+    """Pinned-artifact exception, as for the cited tests: the tree is what the
+    gate protects."""
+    docs = arch_check.module_citation_docs()
+    assert arch_check.ROOT / "README.md" in docs
+    assert arch_check.ROOT / "docs" / "decision-log.md" not in docs
+    assert arch_check.unresolved_module_citations(docs) == []
+
+
+# ------------------------------------------------ 3d. README source map is complete
+
+_SOURCE_MAP_README = """# Title
+
+### Source map
+
+- `src/dsl41/named_in_full.py`: a module named by its path.
+- `src/dsl41/cli.py` and `cli_extra.py`: a family, the second member by bare name.
+- `tests/helper.py` is a test file and names no src module.
+
+### Tests
+
+- `src/dsl41/only_in_tests_section.py` is outside the section.
+"""
+
+
+def _source_tree(tmp_path: Path, *names: str) -> Path:
+    src = tmp_path / "src" / "dsl41"
+    src.mkdir(parents=True)
+    for name in names:
+        _write(src / name, "X = 1\n")
+    return src
+
+
+def test_a_module_missing_from_the_source_map_blocks(tmp_path: Path) -> None:
+    src = _source_tree(
+        tmp_path,
+        "__init__.py",
+        "__main__.py",
+        "named_in_full.py",
+        "cli.py",
+        "cli_extra.py",
+        "unlisted.py",
+        "only_in_tests_section.py",
+    )
+    readme = _write(tmp_path / "README.md", _SOURCE_MAP_README)
+    findings = arch_check.source_map_gaps(readme, src)
+    assert [f.message for f in findings] == [
+        "Source map does not name `src/dsl41/only_in_tests_section.py`",
+        "Source map does not name `src/dsl41/unlisted.py`",
+    ]
+
+
+def test_a_complete_source_map_with_exempt_modules_does_not_block(tmp_path: Path) -> None:
+    src = _source_tree(
+        tmp_path, "__init__.py", "__main__.py", "named_in_full.py", "cli.py", "cli_extra.py"
+    )
+    readme = _write(tmp_path / "README.md", _SOURCE_MAP_README)
+    assert arch_check.source_map_gaps(readme, src) == []
+    assert arch_check.SOURCE_MAP_EXEMPT == {"__init__.py", "__main__.py"}
+
+
+def test_a_readme_with_no_source_map_section_blocks(tmp_path: Path) -> None:
+    src = _source_tree(tmp_path, "cli.py")
+    readme = _write(tmp_path / "README.md", "# Title\n\nNo map here.\n")
+    findings = arch_check.source_map_gaps(readme, src)
+    assert len(findings) == 1
+    assert "has no `### Source map` section" in findings[0].message
+
+
+def test_a_fenced_comment_and_a_heading_lookalike_do_not_move_the_source_map(
+    tmp_path: Path,
+) -> None:
+    src = _source_tree(tmp_path, "inside.py", "after_fence.py", "in_tests_prose.py")
+    readme = _write(
+        tmp_path / "README.md",
+        "Prose that mentions the `### Source map` heading in passing.\n\n"
+        "#### Source map of something else\n\n"
+        "### Source map\n\n"
+        "- `src/dsl41/inside.py`: run it:\n\n"
+        "```sh\n# a shell comment, not a heading\nrun\n```\n\n"
+        "- `src/dsl41/after_fence.py`: still inside the section.\n\n"
+        "### Tests\n\n"
+        "- `src/dsl41/in_tests_prose.py` is outside the section.\n",
+    )
+    findings = arch_check.source_map_gaps(readme, src)
+    assert [f.message for f in findings] == [
+        "Source map does not name `src/dsl41/in_tests_prose.py`"
+    ]
+
+
+def test_source_map_heading_must_be_its_own_line(tmp_path: Path) -> None:
+    src = _source_tree(tmp_path, "cli.py")
+    readme = _write(
+        tmp_path / "README.md",
+        "See `### Source map` above.\n\n### Source maps\n\n- `src/dsl41/cli.py`\n",
+    )
+    findings = arch_check.source_map_gaps(readme, src)
+    assert [f.message for f in findings] == ["has no `### Source map` section"]
+
+
+def test_a_cited_module_must_be_known_to_git_not_merely_present(tmp_path: Path) -> None:
+    """A new module not yet staged satisfies a citation, as rule (b) sees it on
+    disk. A gitignored file does not: a clean checkout would not have it."""
+    import subprocess
+
+    root = _module_tree(tmp_path)
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "add", "src", "tests", "scripts", "examples"], cwd=root, check=True)
+    _write(root / ".gitignore", "ignored_*.py\n")
+    _write(root / "src" / "dsl41" / "new_mod.py", "X = 1\n")  # untracked, not ignored
+    _write(root / "scripts" / "new_tool.py", "X = 1\n")
+    _write(root / "src" / "dsl41" / "ignored_mod.py", "X = 1\n")
+    _write(root / "scripts" / "ignored_tool.py", "X = 1\n")
+    doc = _write(
+        root / "docs" / "spec.md",
+        "Staged: `src/dsl41/real_mod.py` and `tool.py`.\n"
+        "Untracked: `src/dsl41/new_mod.py` and `new_tool.py`.\n"
+        "Ignored: `src/dsl41/ignored_mod.py` and `ignored_tool.py`.\n",
+    )
+    findings = arch_check.unresolved_module_citations([doc], root)
+    assert [f.line for f in findings] == [3, 3]
+    files = arch_check.tracked_python_files(root)
+    assert {"src/dsl41/real_mod.py", "src/dsl41/new_mod.py", "scripts/new_tool.py"} <= files
+    assert "scripts/ignored_tool.py" not in files
+
+
+def test_a_tree_nested_in_another_repository_takes_the_walk(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import subprocess
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    root = _module_tree(tmp_path / "inner")
+    assert "src/dsl41/real_mod.py" in arch_check.tracked_python_files(root)
+    assert "resolve against a tree walk" in capsys.readouterr().err
+
+
+def test_the_tree_walk_fallback_says_so_on_stderr(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _module_tree(tmp_path)  # not a git repository
+    assert "src/dsl41/real_mod.py" in arch_check.tracked_python_files(root)
+    assert "resolve against a tree walk" in capsys.readouterr().err
+
+
+def test_main_exits_1_when_the_source_map_misses_a_module(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _tree(tmp_path, monkeypatch, "X = 1\n", drift=10)
+    readme = _write(tmp_path / "README2.md", "### Source map\n\n- nothing listed\n")
+    monkeypatch.setattr(arch_check, "README_PATH", readme)
+    assert arch_check.main([]) == 1
+    assert "Source map does not name `src/dsl41/mod.py`" in capsys.readouterr().out
+
+
+def test_main_exits_1_when_a_doc_cites_a_missing_module(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _tree(tmp_path, monkeypatch, "X = 1\n", drift=10)
+    doc = _write(tmp_path / "spec.md", "See `src/dsl41/no_such_module_anywhere.py`.\n")
+    monkeypatch.setattr(arch_check, "module_citation_docs", lambda: [doc])
+    assert arch_check.main([]) == 1
+    out = capsys.readouterr().out
+    assert "cites `src/dsl41/no_such_module_anywhere.py`, which does not exist" in out

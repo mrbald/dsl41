@@ -558,6 +558,9 @@ Semantics:
   one admitted input as one store transaction.
 - `src/dsl41/capacity.py`: sized buckets (machine `max_load`, resource
   amounts) and the QUE_WAIT queue with its admission order.
+- `src/dsl41/semantics.py`: the closed registry of semantic switches
+  (`--semantics NAME=VALUE`). Each default lives in code, and each switch
+  names the jobs and calendars it can change (DL-252).
 - `src/dsl41/autocal.py`: the extended-calendar rule interpreter: pure
   functions from CalendarIR and CycleIR to day sets, per SEM-36..39.
   Undocumented composition corners run on pinned defaults, so an ordinary
@@ -699,7 +702,9 @@ CLI and scripts:
   mypy. Blocking checks: a body duplicated across modules, a new private
   cross-module import under `src/`, a citation token with no row in
   [docs/citation-index.md](docs/citation-index.md),
-  a `test_...` name in the docs that no test defines, and an IR-F schema
+  a `test_...` name in the docs that no test defines, a module file name in
+  the docs that no tracked file has, a `src/dsl41` module the Source map
+  above does not name, and an IR-F schema
   change without an `IR_VERSION` bump. Size checks are advisory, ratcheted
   against `scripts/arch_baseline.json`. It also reports when a conceptual
   review is due, and which specifications under `docs/` are due a spec
