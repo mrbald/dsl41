@@ -75,7 +75,10 @@ pairs (DL-46/47); do not force older ones.
 ## 2. Filesystem layout
 
 ```
-/opt/dsl41/venv/          the pinned install
+/opt/dsl41/venv-<ver>/    one pinned install per release (§7)
+/opt/dsl41/venv          a symlink to the venv in use; §1's first
+                          install is a directory here until §7
+                          converts it
 /srv/dsl41/estate/        JIL + properties files — a git checkout of a tag,
                           never hand-edited in place
 /srv/dsl41/runs/<id>/     a run root holds one period per baseline and
@@ -286,30 +289,69 @@ copy. Stopping the engine is necessary and not sufficient: a DETACHED
 period's commands run under the supervisor, which outlives the engine by
 design (runner-design §6a), so an engine that has exited still leaves
 `supervisor.sock` and `supervisor.pid` behind, held by a process that can
-still write into the run root. **The order matters and does not commute:**
+still write into the run root. **The order matters and does not commute.**
+How you stop each process depends on the deployment shape (§3). The seal
+between the two stops does not (DL-266).
 
-1. stop the engine (`dsl41 run`'s own SIGINT);
-2. if the period ran detached, confirm the supervisor is still there —
+The seal is the same in every shape. Seal the period (§6a) and
+`dsl41 audit` it, so what you back up is closed and attested rather than
+open. Do this WHILE a detached period's supervisor is still up. The
+offline `seal` command wires a DETACHED period's supervisor client exactly
+as a live engine does (`wire_from_profile`). That client reconnects to a
+supervisor that is still there. If none is, it SPAWNS A FRESH ONE, with no
+deadman. Sealing after the supervisor is down therefore leaves a second,
+unaccounted-for supervisor behind. A seal, live or offline, refuses inside
+the closing period's retry horizon (period-model §9). The horizon counts
+from the last operator request, an `ON_HOLD` included; wait it out. A live seal
+stops the engine itself with exit 3, so it takes the place of steps 1 to
+3 below.
+
+**Shape 1, a supervisor unit of its own** (the example units):
+
+1. stop the engine unit: `systemctl stop dsl41-engine.service`. The
+   supervisor unit keeps running;
+2. if the period ran detached, confirm the supervisor is still there:
    `dsl41 supervise list --run-root <root>` answers `ok` while it is;
-3. seal the period (§6a) — live or offline, whichever applies — and
-   `dsl41 audit` it, so what you back up is closed and attested rather
-   than open. Do this WHILE the detached period's supervisor from step 2
-   is still up: the offline `seal` command wires a DETACHED period's
-   supervisor client exactly as a live engine does
-   (`wire_from_profile`), and that client reconnects to a supervisor
-   that is still there but SPAWNS A FRESH ONE, with no deadman, if none
-   is — sealing after the supervisor is already down leaves a second,
-   unaccounted-for supervisor behind;
+3. seal offline and audit, as above;
+4. stop the supervisor unit: `systemctl stop dsl41-supervisor.service`.
+   Do not use `dsl41 supervise shutdown` here. It exits the supervisor
+   cleanly, and `Restart=always` starts it again `RestartSec` later.
+   Stopping the unit ends every command still running, so do it only
+   once you want them ended. The engine unit `Requires=` this unit, so
+   this stop also stops the engine unit if it still runs;
+5. wait longer than the longer `RestartSec` of the two units (5 s in the
+   example units; wait 12 s). Then check that neither unit came back:
+   `systemctl is-active dsl41-engine.service dsl41-supervisor.service`
+   must print `inactive` or `failed` for each, never `active` or
+   `activating`. `activating` is a unit waiting to restart;
+6. run the no-writers check below.
+
+**Shape 2, and an engine outside any service manager:**
+
+1. stop the engine (`dsl41 run`'s own SIGINT, or its unit);
+2. if the period ran detached, confirm the supervisor is still there:
+   `dsl41 supervise list --run-root <root>` answers `ok` while it is;
+3. seal and audit, as above;
 4. NOW stop the supervisor — `dsl41 supervise shutdown --run-root
    <root>`. It TERM→grace→KILLs anything still running first, so run it
    only once you want every live command ended, not merely observed, and
    only once the seal above no longer needs it;
-5. prove every writer is actually gone before you copy anything: no
-   `supervisor.pid`, no `supervisor.sock`, no engine holding
-   `leader.lock`. `tests/test_restore_drill.py` asserts both files are
-   absent at exactly this point.
+5. run the no-writers check below.
 
-A tethered period has no supervisor and skips steps 2 and 4.
+A tethered period has no supervisor. Under shape 1 it skips step 2; the
+supervisor unit still runs, so step 4 still applies. Under shape 2 it
+skips steps 2 and 4.
+
+**The no-writers check**, in every shape, before you copy anything: no
+`supervisor.pid`, no `supervisor.sock`, no engine holding `leader.lock`.
+`tests/test_restore_drill.py` asserts both files are absent at exactly
+this point, with a supervisor outside any service manager. The service
+drill runs shape 1's steps (§3's worked example). It waits past
+`RestartSec`, copies the root and the anchor, deletes them, and restores
+them at the recorded paths. It then audits the lineage and opens the next
+period. Under shape 1, start a restored estate with
+`systemctl start dsl41-engine.service`. Its `Requires=` starts the
+supervisor unit first.
 
 **The path-equality constraint.** The anchor's registry names each
 period's run root by absolute path (§6a; period-model §1.3). Restoring
@@ -456,7 +498,8 @@ restarted on purpose. An ownership refusal exits 1 and retries after two
 seconds; `StartLimitIntervalSec=0` keeps that retry loop from hitting the
 start limit. Exit 2 is a configuration refusal and is not restarted.
 Stopping the supervisor ends its running jobs. Restarting it does not
-resurrect them; the engine reconciles the spool.
+resurrect them; the engine reconciles the spool. §2b's backup order and
+§7's upgrade rows stop shape 1 this way.
 
 The optional `supervise start --deadman-seconds N` sets a finite positive
 unwatched interval. Omit it for no deadman. The engine reads the running
@@ -504,8 +547,9 @@ them is synthetic.
   names the run root, the lineage anchor, the estate files in their
   order, every `-p`, every run option and `--access-map`. Edit its
   configuration block and review the edit like code. Its header
-  states its rules: when it passes `--resume`, what it refuses, and
-  why it execs `dsl41`. `dsl41-launch --print` prints the command,
+  states its rules: when it passes `--resume`, when its one-shot open
+  trigger makes it pass `--open-from` (§7), what it refuses, and why it
+  execs `dsl41`. `dsl41-launch --print` prints the command,
   shell-quoted, and runs nothing.
 - `dsl41-engine.service` and `dsl41-supervisor.service` are shape 1's
   two units. Both call the launcher. Each repeats the run root once,
@@ -524,14 +568,21 @@ units; that is a static check and starts nothing.
 systemd. It covers the first start, a same-root restart, a detached job
 that survives an engine stop, a changed estate refused without a restart
 loop, and a sealed engine that stays stopped until the next period is
-opened. The access-map refusals, their messages and what they leave
+opened. It also covers §2b's shape-1 quiescence and a restore at the
+recorded paths, and §7's upgrade rows (DL-266). The access-map refusals,
+their messages and what they leave
 untouched are the claim of `tests/test_nightbank_deploy.py`, which runs in
 CI; the drill's claim is that systemd does not restart a refusal.
+The step bodies live in `drill-steps.sh`. The workflow runs them one
+step at a time. `drill-local.sh` runs the same steps on a workstation, in
+a podman container with systemd as PID 1 on Ubuntu 24.04. It runs the
+host's architecture, so on Apple silicon it is arm64, not the runner's
+x86_64.
 The drill passed every step on GitHub's Ubuntu 24.04 runner at d886679
-(DL-223); no other distribution or systemd version has been observed, and
-the workflow has changed since (the setup-uv bump) without a recorded
-re-run. It is not part of the default gate: dispatch it again after a
-change to the units, the launcher or the drill.
+(DL-223), before the quiescence, restore and upgrade steps existed. No
+other distribution or systemd version has been observed there. It is not
+part of the default gate: dispatch it again after a change to the units,
+the launcher or the drill.
 
 ## 4. UI surfaces
 
@@ -985,38 +1036,181 @@ on a timer.
 
 ## 7. Upgrading dsl41 itself
 
-**The upgrade keeps the state (DL-133; period-model §1.1).** `catalog_hash`
-v2 excludes `meta.tool_version`, and `dsl41_version` is not on the
-`segment` record at all, so a patch release does not move a period's
-pins, and the conservative cycle below does not need a fresh run root to
-be safe about the format. Step 3's rollback is the symlink; step 2's
-"fresh run root" reads "stop, flip the symlink, `run --resume`" wherever
-the release notes do not say the WAL format moved. What requires a full
-drain and a new estate is a
-**state-machine version** bump: one executable implements exactly one, and
-a seal whose `next_period` names a different one is refused at readiness
-(period-model §2.1).
+Each release gets its own venv beside the one in use:
+`/opt/dsl41/venv-<ver>`. `/opt/dsl41/venv` is a symlink to the venv in
+use, and the launcher's `DSL41` runs through it (§3's worked example).
+Flipping the symlink is the upgrade's one switch, and flipping it back is
+the rollback. Install the new venv with §1's commands, with
+`/opt/dsl41/venv-<new>` in place of every `/opt/dsl41/venv`. Skip §1's
+`ln -s` line: the existing link already leads through `/opt/dsl41/venv`.
+Never run §1's commands against `/opt/dsl41/venv` itself. Through the
+symlink they would install into the venv in use and leave nothing to flip
+back to. Smoke test the new venv before the window: `dsl41 --help`, and a
+`rehearse` of the current estate with the new venv's `dsl41`. Keep the old
+venv until the new one has run a full cycle.
 
-The `leader` record names the tool version, but resume
-gates on catalog hash, clock domain and runtime profile — not version. Do not lean on
-that: treat an engine upgrade like an estate change unless the release
-note (the annotated tag's message; README "Release") says the journal
-format is resume-compatible across the pair.
-The conservative cycle, which needs no such promise:
+`ln -sfn` replaces a symlink, not a directory: given §1's directory, it
+creates the link inside it. A venv cannot be moved either, because its
+scripts name its own path. So convert §1's layout once, with both units
+stopped:
 
-1. Build the new venv beside the old (`/opt/dsl41/venv-<ver>`), smoke
-   test `dsl41 --help` and a `rehearse` of the current estate with it.
-2. At the next natural baseline boundary (§6 window, or the nightly
-   fresh run root if the site works that way): stop old engine, flip the
-   symlink, start the new version on a **fresh run root**.
-3. Old venv stays until the new one has run a full cycle; rollback is
-   the symlink plus another fresh root.
+```sh
+/opt/dsl41/venv/bin/pip freeze >/opt/dsl41/running.txt
+python3.12 -m venv /opt/dsl41/venv-<old>
+/opt/dsl41/venv-<old>/bin/pip install --no-deps -r /opt/dsl41/running.txt
+/opt/dsl41/venv-<old>/bin/pip check
+mv /opt/dsl41/venv /opt/dsl41/venv.orig
+ln -s /opt/dsl41/venv-<old> /opt/dsl41/venv
+```
 
-A same-venv upgrade mid-life is for patch releases explicitly marked
-resume-safe, nothing else. It installs from the new release's assets as §1
-does, not with `pip install -U`, which would resolve dependencies afresh:
-`pip install --require-hashes -r requirements-<profile>.txt` from the new
-release, then `pip install --no-deps` of its wheel, then `pip check`.
+The frozen list keeps the versions that were running. For a release with
+assets, install its closure and wheel instead, as §1 does. `venv.orig` is
+not a usable venv after the move: its scripts still name
+`/opt/dsl41/venv`, which now leads to `venv-<old>`. Delete it once both
+units run from the link. A process started through the symlink runs from
+the venv the link named when it started, so a kept supervisor keeps its
+own build after a flip.
+
+**What moves with a release.** `catalog_hash` v2 excludes
+`meta.tool_version`, and `dsl41_version` is not on the `segment` record,
+so a release does not move a period's pins (DL-133; period-model §1.1).
+The `leader` record names the tool version, but resume gates on catalog
+hash, clock domain and runtime profile, not on the version. So resume
+does not refuse a new release. Only the release note says whether resuming
+across the pair is safe. The **state-machine version** is different. One
+executable implements exactly one. A seal whose `next_period` names
+another is refused at readiness (period-model §2.1), and resume refuses a
+segment pinned to another. Check it in both venvs, whatever the note says:
+
+```sh
+/opt/dsl41/venv-<ver>/bin/python -c \
+    'from dsl41.runner_ledger import STATE_MACHINE_VERSION as v; print(v)'
+```
+
+**Pick one row (DL-266).** Read the release note: the annotated tag's
+message (README "Release"). Apply these questions in order, and stop at
+the first that picks a row:
+
+1. Did the state-machine version change? Check both venvs as above,
+   whatever the note says. Yes: row 4.
+2. Does the note mark the release resume-safe? No, or the note is silent
+   or unclear: row 2, the conservative default, whatever else changed.
+3. Does the note say that neither the wrapper spec nor the supervisor
+   protocol changed? Yes: row 1. The note names a change to either, or
+   says nothing about them: row 3.
+
+| Row | Use it when | Opener | Supervisor | Rollback |
+| --- | --- | --- | --- | --- |
+| 1 | resume-safe; the note says the wrapper spec and the supervisor protocol did not change; same state-machine version | stop the engine, flip, `run --resume` on the same root | kept; detached jobs keep running | flip back, resume |
+| 2 | the note does not mark the release resume-safe, or is silent or unclear; same state-machine version | at a boundary, the next period opens in a fresh run root (§6a's physical roll); the lineage and its anchor are kept | a new one on the new root, from the new venv | flip back, plus another fresh root |
+| 3 | resume-safe; the note names a wrapper spec or supervisor protocol change, or does not say; same state-machine version | drain detached work, stop both units, flip, start both; the engine resumes the same root | replaced | flip back, replace again |
+| 4 | the state-machine version changed, whatever the note says | drain, a final seal, then a new estate (genesis on a new root and anchor) | replaced | the old venv only, on the old estate; keep it to audit the retained periods |
+
+The commands below are for shape 1 and the example's paths (§3). Under
+shape 2, stop and start the engine where a row stops and starts the engine
+unit. Where a row stops the supervisor unit, run
+`dsl41 supervise shutdown --run-root <root>` once the engine has stopped
+(§2b, shape 2). A starting engine starts a supervisor from its own venv
+when none is running.
+
+**Row 1, resume-safe, with no wrapper or supervisor protocol change.**
+Detached jobs stay alive under the supervisor unit, and the new engine
+reattaches to them:
+
+```sh
+systemctl stop dsl41-engine.service
+ln -sfn /opt/dsl41/venv-<new> /opt/dsl41/venv
+systemctl start dsl41-engine.service     # the launcher passes --resume
+```
+
+The rollback is the same three commands with the old venv. No release
+pair qualifies for this row today. The service drill
+(`drill-steps.sh upgrade-resume-safe`) runs these commands with two
+installs of one build. That proves the mechanics, not that any version
+pair is resume-safe.
+
+**Row 2, a note that does not say resume-safe.** Work at a boundary.
+First hold the scheduled jobs and let running work finish (§6's window,
+steps 1 and 2). Then run §2b's shape-1 steps 1 to 6 with the old venv.
+A physical roll needs a closing period with no live execution and an
+attested seal (§6a). Then open the next period in the new root:
+
+```sh
+ln -sfn /opt/dsl41/venv-<new> /opt/dsl41/venv
+# edit the launcher's RUN_ROOT to the new root, and both units'
+# RequiresMountsFor= to match; ESTATE_ANCHOR stays the lineage's anchor
+systemctl daemon-reload
+sudo -u dsl41 touch /srv/dsl41/runs/<new>.open-from   # the one-shot open trigger
+systemctl start dsl41-engine.service
+systemctl is-active dsl41-engine.service              # active
+dsl41 query status --brief -S /srv/dsl41/runs/<new>/control.sock
+```
+
+`<RUN_ROOT>.open-from` is the launcher's one-shot open trigger. While it
+exists, the engine mode passes `--open-from ESTATE_ANCHOR`. The launcher
+removes the trigger just before it runs dsl41, so every later start of
+the unit resumes the new root. The engine's journal says
+`opened period N in <new root>`. The opener runs inside the engine unit,
+and `Requires=` starts the supervisor unit on the new root first. Under
+shape 2 the opener starts its supervisor inside the engine unit, as every
+shape-2 start does. A shape-2 wrapper must carry the same one-shot open
+mode as the example launcher, and its refusal of a genesis against an
+existing anchor; without the first the opener runs by hand, outside the
+unit, and without the second a crashed opener restarts into a genesis. If the open fails, the unit stays failed. Fix the cause, create
+the trigger again and start the unit. That reruns the identical opener,
+which a roll that stopped after its sentinel needs (§6a). If the opener
+died before its sentinel, the unit's restart finds no trigger and no
+sentinel, and the launcher refuses a genesis against the existing anchor
+with exit 2, so the unit stays down. Create the trigger again and start
+the unit.
+
+A supervisor serves one run root, so the new root gets its own, from the
+new venv. The holds cross the roll; release them with `OFF_HOLD` once the
+engine answers. The rollback is the same procedure with the old venv and
+another fresh root. The service drill runs this row
+(`upgrade-fresh-root`) with two installs of one build.
+
+**Row 3, resume-safe, with a wrapper spec or supervisor protocol
+change.** The engine and the supervisor are deployed together, never one
+at a time (`docs/protocol-evolution.md`). Restarting only the engine
+would leave the old supervisor launching the old wrapper. Hold the
+scheduled jobs and let running work finish (§6's window, steps 1 and 2).
+Wait until `dsl41 supervise list --run-root <root>` shows no run with
+`"wrapper_alive": true`. Then:
+
+```sh
+systemctl stop dsl41-engine.service dsl41-supervisor.service
+ln -sfn /opt/dsl41/venv-<new> /opt/dsl41/venv
+systemctl start dsl41-engine.service     # Requires= starts the supervisor first
+```
+
+Release the holds with `OFF_HOLD` once the engine answers. The rollback is
+the same with the old venv. The service drill runs these commands
+(`upgrade-coordinated`) with two installs of one build, and checks that
+both units run from the new venv and that the engine resumed.
+
+**Row 4, a state-machine version change.** The new build cannot open the
+old estate's periods, and only the old venv can audit them (§6a). Drain
+as for row 3. Then run §2b's shape-1 steps 1 to 6 with the old venv: stop
+the engine unit, a final seal and audit while the supervisor runs, stop
+the supervisor unit. Then start a new estate:
+
+```sh
+ln -sfn /opt/dsl41/venv-<new> /opt/dsl41/venv
+# edit the launcher's RUN_ROOT and ESTATE_ANCHOR to the new estate's,
+# and both units' RequiresMountsFor= to match
+systemctl daemon-reload
+systemctl start dsl41-engine.service     # a genesis, no --resume
+/opt/dsl41/venv-<old>/bin/dsl41 audit --estate-anchor <old-anchor>
+```
+
+A new estate carries no state: holds, globals and latches start empty, as
+in §6's fresh-run-root cycle. Keep the old venv for as long as you retain
+the old estate's periods. The rollback is the old venv only: flip back,
+point the launcher back at the old root and anchor, and start the engine
+unit, which opens the old estate's next period. The service drill runs
+this row from v1.7.0, installed from PyPI, to the build under test
+(`upgrade-old-release`, `upgrade-state-machine`).
 
 ## 8. Operator scenarios
 
@@ -1031,7 +1225,7 @@ speaks to the supervisor, not the engine, and leaves no WAL record.
 | scenario | procedure |
 | --- | --- |
 | initial install, one host | §1 to §3 |
-| engine version upgrade | §7: a patch release marked resume-safe resumes in place; any other release starts on a fresh run root at a boundary. A `state_machine_version` bump is always a new estate (period-model §2.1) |
+| engine version upgrade | §7's questions pick one row. A `state_machine_version` change is always a new estate (period-model §2.1). A note that does not mark the release resume-safe, or is silent or unclear, opens the next period in a fresh run root at a boundary. A resume-safe release resumes the same root; it keeps the supervisor only when the note says the wrapper spec and the supervisor protocol did not change, and otherwise replaces both units together |
 | OS patching, host maintenance | `host drain` lets running work finish while the engine keeps leading (control-protocol §3). With one executor row the engine's own host is the executor, so patching that host is a stop and a resume (§3). A second executor is not built (DL-230): there is no flag for an `executor_id` (`--as-machine` names the machine identity only), and `journal` reads the one local executor |
 | several estates on one host | each estate is its own run root, control socket, `serve` port and capacity pool; nothing is shared between them |
 | standby provisioning, readiness check | not built: follower mode and `standby check` (DL-230) |
