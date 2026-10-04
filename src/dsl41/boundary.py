@@ -575,12 +575,11 @@ class EstateAnchor:
                 raise EngineError(f"{self.path}: not a JSON object")
             require_artifact_version(payload)  # DL-157
             _check_head_state(self.path, payload)
-            # DL-168: still LAX -- unlike `_read_artifact`, this does not read
-            # `raw` strict-in-the-JSON-sense, so a laundered `head.period_id`
-            # (`true` clearing its `ge=1` floor) is not refused. Reported, not
-            # fixed (out of that entry's scope); see
-            # test_dl168_an_anchor_still_launders_a_nested_int_field.
-            return Anchor.model_validate(payload)
+            # DL-263: strict in the JSON sense from `raw`, as `_read_artifact`
+            # does (DL-168). `decode` above stays first, so the gates inspect
+            # the same payload pydantic then validates; a laundered
+            # `head.period_id` (`true` clearing its `ge=1` floor) now refuses.
+            return Anchor.model_validate_json(raw, strict=True)
         except (CanonError, ValidationError) as exc:
             raise EngineError(f"{self.path}: not an anchor this binary can read ({exc})") from exc
 
@@ -607,11 +606,10 @@ class EstateAnchor:
             if not isinstance(payload, dict):
                 raise EngineError(f"{path}: not a JSON object")
             require_artifact_version(payload)  # DL-157
-            # DL-168: still LAX, same gap as `EstateAnchor.read` above -- a
-            # laundered `next_period` (a numeric string clearing its `ge=2`
-            # floor) is not refused. Reported, not fixed; see
-            # test_dl168_a_claim_still_launders_its_int_field.
-            return Claim.model_validate(payload)
+            # DL-263: strict in the JSON sense from `raw`, same rule as
+            # `EstateAnchor.read` above -- a laundered `next_period` (a
+            # numeric string clearing its `ge=2` floor) now refuses.
+            return Claim.model_validate_json(raw, strict=True)
         except (CanonError, ValidationError) as exc:
             raise EngineError(f"{path}: not a claim this binary can read ({exc})") from exc
 

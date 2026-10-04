@@ -2074,29 +2074,12 @@ def test_dl168_every_closed_artifact_reader_refuses_a_laundered_int_field(
     sequentially in one function and was wrongly called "parametrized" in
     the DL entry -- a review finding, corrected there and here).
 
-    Anchor and claim are deliberately NOT here: both still launder (see
-    the two `xfail` cases below) and are out of DL-168's scope by the
-    brief's own ruling -- reported, not fixed."""
+    Anchor and claim are not in this table: they refuse through their own
+    tests below (DL-263), which also pin the valid edge value."""
     case(tmp_path)
 
 
-@pytest.mark.xfail(strict=True, reason="DL-168: EstateAnchor.read() is lax -- reported, not fixed")
-def test_dl168_an_anchor_still_launders_a_nested_int_field(tmp_path: Path) -> None:
-    """DL-168's ruling covers `_read_artifact` (staged manifest, candidate)
-    and `StagedNextPeriod`. `EstateAnchor.read()` was out of that scope and
-    was not touched: it still calls `Anchor.model_validate(payload)` lax,
-    and `head.period_id` (`Field(ge=1)`) accepts a laundered `true` --
-    coerced to `1`, which satisfies the floor, so nothing downstream
-    notices. Verified against the real class before this test was written
-    (CLAUDE.md: fidelity is tested, not asserted). This `xfail` is the
-    citable record of the finding; it should start passing, and then be
-    promoted to a real assertion, the day Anchor gets the same fix.
-
-    `match="period_id"` (a review finding): a bare `pytest.raises(
-    EngineError)` would XPASS -- and read as "Anchor got fixed" -- on ANY
-    future `EngineError` `.read()` happens to raise, laundering-related or
-    not. Matching the field name pins the xfail to the actual mechanism a
-    real fix would refuse through."""
+def _write_anchor_file(tmp_path: Path, period_id: Any) -> Path:
     from dsl41.boundary import ANCHOR_NAME
     from dsl41.canon import ARTIFACT_FORMAT_VERSION
 
@@ -2107,34 +2090,43 @@ def test_dl168_an_anchor_still_launders_a_nested_int_field(tmp_path: Path) -> No
             {
                 "artifact_format_version": ARTIFACT_FORMAT_VERSION,
                 "estate_id": "e",
-                "head": {"state": "open", "period_id": True, "root": str(tmp_path / "r")},
+                "head": {"state": "open", "period_id": period_id, "root": str(tmp_path / "r")},
                 "periods": {},
             },
             sort_keys=True,
         ).encode()
         + b"\n"
     )
-    with pytest.raises(EngineError, match="period_id"):
+    return anchor_dir
+
+
+def test_dl168_an_anchor_still_launders_a_nested_int_field(tmp_path: Path) -> None:
+    """DL-263: `EstateAnchor.read()` reads strict in the JSON sense, as
+    `_read_artifact` does (DL-168). `head.period_id` (`Field(ge=1)`) with a
+    laundered `true` used to coerce to `1`, satisfy the floor, and pass.
+
+    The match pins the refusal to the reader and the field, so an unrelated
+    `EngineError` cannot satisfy the test. The name is the one DL-168's
+    entry cites (an append-only log); it records the finding, and the test
+    now proves the fix."""
+    anchor_dir = _write_anchor_file(tmp_path, True)
+    with pytest.raises(EngineError, match=r"(?s)not an anchor this binary can read.*period_id"):
         EstateAnchor(anchor_dir).read()
 
 
-@pytest.mark.xfail(
-    strict=True, reason="DL-168: EstateAnchor.read_claim() is lax -- reported, not fixed"
-)
-def test_dl168_a_claim_still_launders_its_int_field(tmp_path: Path) -> None:
-    """The mirror finding on `read_claim`. `next_period` (`Field(ge=2)`) is
-    Claim's only int field, and its floor happens to catch a `true`
-    coercion by accident (`True` coerces to `1`, and `1 < 2` refuses on the
-    bound regardless of strictness) -- so `true` does not discriminate
-    here. A numeric string does: `"3"` coerces to `3` under a lax reader,
-    `3 >= 2` passes the bound, and nothing refuses it. `read_claim` still
-    calls `Claim.model_validate(payload)` lax, same as `EstateAnchor.read()`
-    above. `match="next_period"` for the same reason as the anchor case."""
+def test_dl263_an_anchor_with_the_floor_period_id_still_reads(tmp_path: Path) -> None:
+    """Non-triggering twin: a valid anchor at the `ge=1` floor reads."""
+    anchor = EstateAnchor(_write_anchor_file(tmp_path, 1)).read()
+    assert anchor is not None
+    assert anchor.head.state == "open"
+    assert anchor.head.period_id == 1
+
+
+def _write_claim_file(tmp_path: Path, next_period: Any) -> EstateAnchor:
     from dsl41.boundary import CLAIMS_DIR
     from dsl41.canon import ARTIFACT_FORMAT_VERSION
 
     anchor_dir = tmp_path / "anchor"
-    anchor = EstateAnchor(anchor_dir)
     claims_dir = anchor_dir / CLAIMS_DIR
     claims_dir.mkdir(parents=True)
     (claims_dir / "c1.json").write_bytes(
@@ -2144,7 +2136,7 @@ def test_dl168_a_claim_still_launders_its_int_field(tmp_path: Path) -> None:
                 "claim_id": "c1",
                 "estate_id": "e1",
                 "prev_seal_digest": "sha256:" + "a" * 64,
-                "next_period": "3",
+                "next_period": next_period,
                 "target_root": str(anchor_dir / "r"),
                 "claimed_at": "2026-08-24T00:00:00.000000",
                 "diag": {},
@@ -2153,8 +2145,28 @@ def test_dl168_a_claim_still_launders_its_int_field(tmp_path: Path) -> None:
         ).encode()
         + b"\n"
     )
-    with pytest.raises(EngineError, match="next_period"):
+    return EstateAnchor(anchor_dir)
+
+
+def test_dl168_a_claim_still_launders_its_int_field(tmp_path: Path) -> None:
+    """DL-263: `read_claim` reads strict in the JSON sense, same rule as the
+    anchor. `next_period` (`Field(ge=2)`) is Claim's only bounded int field. Its
+    floor catches a `true` by accident (`True` coerces to `1`, and `1 < 2`
+    refuses under any reader), so `true` does not discriminate. A numeric
+    string does: `"3"` coerced to `3` under the old lax read and cleared
+    the bound. The match pins the reader and the field. The name is the one
+    DL-168's entry cites; the test now proves the fix."""
+    anchor = _write_claim_file(tmp_path, "3")
+    with pytest.raises(EngineError, match=r"(?s)not a claim this binary can read.*next_period"):
         anchor.read_claim("c1")
+
+
+def test_dl263_a_claim_with_the_floor_next_period_still_reads(tmp_path: Path) -> None:
+    """Non-triggering twin: a valid claim at the `ge=2` floor reads."""
+    claim = _write_claim_file(tmp_path, 2).read_claim("c1")
+    assert claim is not None
+    assert claim.next_period == 2
+    assert claim.claim_id == "c1"
 
 
 # ------------------------------- DL-170: SealRequest itself is strict too
