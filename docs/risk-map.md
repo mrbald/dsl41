@@ -1,6 +1,6 @@
 # Risk map of the runner machines
 
-Measured at `50621d1` on 2026-10-05.
+Measured at `7962f73` on 2026-10-05.
 
 This page lists each runner machine with its branch coverage and its open findings.
 Low coverage and open findings show a reviewer where to look first.
@@ -11,22 +11,22 @@ The last column lists the others.
 
 | Machine | Owning modules | Contract | Branch coverage per module | Open findings |
 | --- | --- | --- | --- | --- |
-| Job lifecycle and flags | `oracle_state.py`, `oracle.py` | [autosys-semantics §0](autosys-semantics.md#0-execution-model-the-frame-everything-else-hangs-on); [runner-design §3](runner-design.md#3-architecture--functional-core-imperative-shell) | `oracle_state.py` 104/104 (100.00%); `oracle.py` 594/594 (100.00%) | none beyond the common one |
-| Box execution | `oracle.py` | [autosys-semantics §2](autosys-semantics.md#2-boxes); [period-model §3.5](period-model.md#35-executions--a-discriminated-lifecycle-not-one-row) | `oracle.py` 594/594 (100.00%) | none beyond the common one |
-| Capacity waiter and reservation | `capacity.py`, `oracle.py` | [period-model §5](period-model.md#5-capacity-decomposed); DL-50, DL-255, DL-256 | `capacity.py` 84/84 (100.00%); `oracle.py` 594/594 (100.00%) | [held-unit circular wait](#held-unit-circular-wait) |
-| Scheduler and timer frontier | `runner_scheduler.py`, `runner.py`, `runner_clock.py` | [runner-design §5](runner-design.md#5-scheduler--the-calendar-the-oracle-deliberately-lacks); [period-model §6](period-model.md#6-the-cutoff-barrier) | `runner_scheduler.py` 66/66 (100.00%); `runner.py` 186/186 (100.00%); `runner_clock.py` 14/16 (87.50%) | [outside the 100% gate](#owning-modules-outside-the-100-gate) |
+| Job lifecycle and flags | `oracle_state.py`, `oracle.py`, `conditions.py` | [autosys-semantics §0](autosys-semantics.md#0-execution-model-the-frame-everything-else-hangs-on); [runner-design §3](runner-design.md#3-architecture--functional-core-imperative-shell) | `oracle_state.py` 104/104 (100.00%); `oracle.py` 594/594 (100.00%); `conditions.py` 44/46 (95.65%) | [outside the 100% gate](#owning-modules-outside-the-100-gate) |
+| Box execution | `oracle.py`, `oracle_state.py` | [autosys-semantics §2](autosys-semantics.md#2-boxes); [period-model §3.5](period-model.md#35-executions--a-discriminated-lifecycle-not-one-row) | `oracle.py` 594/594 (100.00%); `oracle_state.py` 104/104 (100.00%) | none beyond the common one |
+| Capacity waiter and reservation | `capacity.py`, `oracle.py`, `oracle_state.py` | [period-model §5](period-model.md#5-capacity-decomposed); DL-50, DL-255, DL-256 | `capacity.py` 84/84 (100.00%); `oracle.py` 594/594 (100.00%); `oracle_state.py` 104/104 (100.00%) | [held-unit circular wait](#held-unit-circular-wait) |
+| Scheduler and timer frontier | `runner_scheduler.py`, `runner.py`, `runner_clock.py`, `runner_startup.py`, `runner_journal.py`, `autocal.py` | [runner-design §5](runner-design.md#5-scheduler--the-calendar-the-oracle-deliberately-lacks); [period-model §6](period-model.md#6-the-cutoff-barrier) | `runner_scheduler.py` 66/66 (100.00%); `runner.py` 186/186 (100.00%); `runner_clock.py` 14/16 (87.50%); `runner_startup.py` 182/182 (100.00%); `runner_journal.py` 146/146 (100.00%); `autocal.py` 207/224 (92.41%) | [outside the 100% gate](#owning-modules-outside-the-100-gate) |
 | Engine work choice | `runner.py` | [runner-design §4](runner-design.md#4-engine-loop--single-writer) | `runner.py` 186/186 (100.00%) | none beyond the common one |
-| Admission and idempotency | `runner_admission.py` | [concurrency-model §4](concurrency-model.md#4-admission-and-application) | `runner_admission.py` 82/82 (100.00%) | none beyond the common one |
-| Effect outbox | `runner_effects.py`, `runner_startup.py` | [concurrency-model §5](concurrency-model.md#5-effects); [period-model §11](period-model.md#11-resume-replay-and-recovery) | `runner_effects.py` 48/48 (100.00%); `runner_startup.py` 182/182 (100.00%) | [outcome overwrite](#outbox-outcome-overwrite) |
+| Admission and idempotency | `runner_admission.py`, `runner.py`, `runner_journal.py` | [concurrency-model §4](concurrency-model.md#4-admission-and-application) | `runner_admission.py` 82/82 (100.00%); `runner.py` 186/186 (100.00%); `runner_journal.py` 146/146 (100.00%) | none beyond the common one |
+| Effect outbox | `runner_effects.py`, `runner_startup.py`, `runner.py`, `runner_journal.py`, `boundary.py` | [concurrency-model §5](concurrency-model.md#5-effects); [period-model §11](period-model.md#11-resume-replay-and-recovery) | `runner_effects.py` 48/48 (100.00%); `runner_startup.py` 182/182 (100.00%); `runner.py` 186/186 (100.00%); `runner_journal.py` 146/146 (100.00%); `boundary.py` 284/284 (100.00%) | [outcome overwrite](#outbox-outcome-overwrite) |
 | Leadership and takeover | `runner_ledger.py`, `runner_startup.py`, `runner_procid.py` | [concurrency-model §7](concurrency-model.md#7-leadership-relay-takeover); [period-model §2.4](period-model.md#24-leader-and-the-epoch) | `runner_ledger.py` 22/22 (100.00%); `runner_startup.py` 182/182 (100.00%); `runner_procid.py` 26/32 (81.25%) | [one-host limit](#stated-limits); [outside the 100% gate](#owning-modules-outside-the-100-gate) |
 | Host routing | `oracle_state.py`, `runner_hosts.py` | [concurrency-model §8](concurrency-model.md#8-host-lifecycle-active-passive-quarantined-evicted) | `oracle_state.py` 104/104 (100.00%); `runner_hosts.py` 32/32 (100.00%) | [one-host limit](#stated-limits) |
 | Control exchange and subscription | `runner_control.py`, `runner_journal.py`, `cli_control.py` | [control-protocol §2](control-protocol.md#2-transport-and-framing-frozen); [§5](control-protocol.md#5-streaming-verb-subscribe) | `runner_control.py` 306/306 (100.00%); `runner_journal.py` 146/146 (100.00%); `cli_control.py` 80/94 (85.11%) | [control-protocol known gaps](#stated-limits); [outside the 100% gate](#owning-modules-outside-the-100-gate) |
 | Access policy and stream authorization | `runner_access.py` | [access-model §5](access-model.md#5-the-enforcement-point); [§7](access-model.md#7-reload-and-revocation) | `runner_access.py` 90/90 (100.00%) | none beyond the common one |
-| Supervisor ownership, transport, lease | `runner_supervisor.py`, `runner_adapters.py`, `runner_procid.py` | [supervisor-protocol §1](supervisor-protocol.md#1-roles); [§5](supervisor-protocol.md#5-supervisor-socket-protocol-frozen--phase-11f-dl-48) | `runner_supervisor.py` 284/344 (82.56%); `runner_adapters.py` 267/330 (80.91%); `runner_procid.py` 26/32 (81.25%) | [outside the 100% gate](#owning-modules-outside-the-100-gate) |
-| SPAWN idempotency | `runner_supervisor.py`, `runner_adapters.py`, `runner_procid.py` | [supervisor-protocol §3](supervisor-protocol.md#3-spool-format-frozen); [period-model §11a](period-model.md#11a-spawn-idempotency-that-outlives-the-supervisor) | `runner_supervisor.py` 284/344 (82.56%); `runner_adapters.py` 267/330 (80.91%); `runner_procid.py` 26/32 (81.25%) | [outside the 100% gate](#owning-modules-outside-the-100-gate) |
-| Wrapper and command | `runner_wrapper.py`, `runner_adapters.py`, `runner_procid.py` | [supervisor-protocol §2](supervisor-protocol.md#2-wrapper-input-spec-frozen); [§4](supervisor-protocol.md#4-wrapper-behavior-frozen-semantics) | `runner_wrapper.py` 37/52 (71.15%); `runner_adapters.py` 267/330 (80.91%); `runner_procid.py` 26/32 (81.25%) | [outside the 100% gate](#owning-modules-outside-the-100-gate) |
-| FW observation | `runner_adapters.py`, `runner.py`, `runner_startup.py`, `boundary.py` | [runner-design §6](runner-design.md#6-adapters); [period-model §13.6 (PR-34)](period-model.md#136-live-execution) | `runner_adapters.py` 267/330 (80.91%); `runner.py` 186/186 (100.00%); `runner_startup.py` 182/182 (100.00%); `boundary.py` 284/284 (100.00%) | [outside the 100% gate](#owning-modules-outside-the-100-gate) |
-| Seal and successor lineage | `boundary.py`, `seal.py`, `period.py`, `estate.py` | [period-model §1.3](period-model.md#13-the-successor-fence); [§7](period-model.md#7-the-seal-operation) | `boundary.py` 284/284 (100.00%); `seal.py` 186/186 (100.00%); `period.py` 164/164 (100.00%); `estate.py` 23/32 (71.88%) | [torn sole opening segment](#torn-sole-opening-segment-of-a-rolled-root); [outside the 100% gate](#owning-modules-outside-the-100-gate) |
+| Supervisor ownership, transport, lease | `runner_supervisor.py`, `runner_adapters.py`, `runner_procid.py` | [supervisor-protocol §1](supervisor-protocol.md#1-roles); [§5](supervisor-protocol.md#5-supervisor-socket-protocol-frozen--phase-11f-dl-48) | `runner_supervisor.py` 284/344 (82.56%); `runner_adapters.py` 268/330 (81.21%); `runner_procid.py` 26/32 (81.25%) | [outside the 100% gate](#owning-modules-outside-the-100-gate) |
+| SPAWN idempotency | `runner_supervisor.py`, `runner_adapters.py`, `runner_procid.py`, `canon.py`, `runner_startup.py` | [supervisor-protocol §3](supervisor-protocol.md#3-spool-format-frozen); [period-model §11a](period-model.md#11a-spawn-idempotency-that-outlives-the-supervisor) | `runner_supervisor.py` 284/344 (82.56%); `runner_adapters.py` 268/330 (81.21%); `runner_procid.py` 26/32 (81.25%); `canon.py` 57/58 (98.28%); `runner_startup.py` 182/182 (100.00%) | [outside the 100% gate](#owning-modules-outside-the-100-gate) |
+| Wrapper and command | `runner_wrapper.py`, `runner_adapters.py`, `runner_procid.py` | [supervisor-protocol §2](supervisor-protocol.md#2-wrapper-input-spec-frozen); [§4](supervisor-protocol.md#4-wrapper-behavior-frozen-semantics) | `runner_wrapper.py` 37/52 (71.15%); `runner_adapters.py` 268/330 (81.21%); `runner_procid.py` 26/32 (81.25%) | [outside the 100% gate](#owning-modules-outside-the-100-gate) |
+| FW observation | `runner_adapters.py`, `runner.py`, `runner_startup.py`, `boundary.py` | [runner-design §6](runner-design.md#6-adapters); [period-model §13.6 (PR-34)](period-model.md#136-live-execution) | `runner_adapters.py` 268/330 (81.21%); `runner.py` 186/186 (100.00%); `runner_startup.py` 182/182 (100.00%); `boundary.py` 284/284 (100.00%) | [outside the 100% gate](#owning-modules-outside-the-100-gate) |
+| Seal and successor lineage | `boundary.py`, `seal.py`, `period.py`, `estate.py` | [period-model §1.3](period-model.md#13-the-successor-fence); [§7](period-model.md#7-the-seal-operation) | `boundary.py` 284/284 (100.00%); `seal.py` 186/186 (100.00%); `period.py` 164/164 (100.00%); `estate.py` 24/32 (75.00%) | [torn sole opening segment](#torn-sole-opening-segment-of-a-rolled-root); [outside the 100% gate](#owning-modules-outside-the-100-gate) |
 | Audit, archive, retention | `attest.py`, `retention.py` | [period-model §11](period-model.md#11-resume-replay-and-recovery); [§12a](period-model.md#12a-the-archive--pr-q3s-answer-dl-144) | `attest.py` 73/82 (89.02%); `retention.py` 318/318 (100.00%) | [outside the 100% gate](#owning-modules-outside-the-100-gate) |
 
 `runner_supervisor.py` and `runner_wrapper.py` run as subprocesses of the engine.
@@ -44,20 +44,21 @@ A remaining tie keeps the table's order.
 
 | Rank | Machine | Weakest module | Pooled |
 | --- | --- | --- | --- |
-| 1 | Wrapper and command | `runner_wrapper.py` 37/52 (71.15%) | 330/414 (79.71%) |
-| 2 | Seal and successor lineage | `estate.py` 23/32 (71.88%) | 657/666 (98.65%) |
-| 3 | Supervisor ownership, transport, lease | `runner_adapters.py` 267/330 (80.91%) | 577/706 (81.73%) |
-| 4 | SPAWN idempotency | `runner_adapters.py` 267/330 (80.91%) | 577/706 (81.73%) |
-| 5 | FW observation | `runner_adapters.py` 267/330 (80.91%) | 919/982 (93.58%) |
+| 1 | Wrapper and command | `runner_wrapper.py` 37/52 (71.15%) | 331/414 (79.95%) |
+| 2 | Seal and successor lineage | `estate.py` 24/32 (75.00%) | 658/666 (98.80%) |
+| 3 | Supervisor ownership, transport, lease | `runner_adapters.py` 268/330 (81.21%) | 578/706 (81.87%) |
+| 4 | SPAWN idempotency | `runner_adapters.py` 268/330 (81.21%) | 817/946 (86.36%) |
+| 5 | FW observation | `runner_adapters.py` 268/330 (81.21%) | 920/982 (93.69%) |
 
-Machines 6 to 9 follow:
+Machines 6 to 10 follow:
 
 6. Leadership and takeover: `runner_procid.py` 26/32 (81.25%); pooled 230/236 (97.46%)
 7. Control exchange and subscription: `cli_control.py` 80/94 (85.11%); pooled 532/546 (97.44%)
-8. Scheduler and timer frontier: `runner_clock.py` 14/16 (87.50%); pooled 266/268 (99.25%)
+8. Scheduler and timer frontier: `runner_clock.py` 14/16 (87.50%); pooled 801/820 (97.68%)
 9. Audit, archive, retention: `attest.py` 73/82 (89.02%); pooled 391/400 (97.75%)
+10. Job lifecycle and flags: `conditions.py` 44/46 (95.65%); pooled 742/744 (99.73%)
 
-The other 8 machines have every owning module at 100.00%.
+The other 7 machines have every owning module at 100.00%.
 
 ## Closed by DL-263..DL-271
 
@@ -91,7 +92,7 @@ It is a refusal, not damage.
 An identical retry of the roll refuses the same way.
 The rule is in the [period-model §11](period-model.md#11-resume-replay-and-recovery) recovery table and DL-144.
 The runbook has [a recipe](deployment-runbook.md#recipe-recover-a-rolled-root-whose-opening-is-torn) (DL-278): the operator removes the torn segment and the identical opener reopens in place.
-[Period-model §1.3](period-model.md#13-the-successor-fence) says an ordinary crash between the claim and the head move never needs `--force` or a hand step.
+[Period-model §1.3](period-model.md#13-the-successor-fence) says an ordinary crash between the claim and the head move never needs `--force`.
 A fix would let the opener recreate a torn sole segment itself when the head is claimed by that root.
 DL-278 records it as not built.
 
@@ -103,13 +104,16 @@ These owning modules in the table are not in that list:
 | Module | Branches | Machines |
 | --- | --- | --- |
 | `runner_wrapper.py` | 37/52 (71.15%) | Wrapper and command |
-| `estate.py` | 23/32 (71.88%) | Seal and successor lineage |
-| `runner_adapters.py` | 267/330 (80.91%) | Supervisor; SPAWN idempotency; Wrapper and command; FW observation |
+| `estate.py` | 24/32 (75.00%) | Seal and successor lineage |
+| `runner_adapters.py` | 268/330 (81.21%) | Supervisor; SPAWN idempotency; Wrapper and command; FW observation |
 | `runner_procid.py` | 26/32 (81.25%) | Leadership and takeover; Supervisor; SPAWN idempotency; Wrapper and command |
 | `runner_supervisor.py` | 284/344 (82.56%) | Supervisor; SPAWN idempotency |
 | `cli_control.py` | 80/94 (85.11%) | Control exchange and subscription |
 | `runner_clock.py` | 14/16 (87.50%) | Scheduler and timer frontier |
 | `attest.py` | 73/82 (89.02%) | Audit, archive, retention |
+| `autocal.py` | 207/224 (92.41%) | Scheduler and timer frontier |
+| `conditions.py` | 44/46 (95.65%) | Job lifecycle and flags |
+| `canon.py` | 57/58 (98.28%) | SPAWN idempotency |
 
 DL-269 names three of them (`runner_supervisor.py`, `runner_wrapper.py`, `runner_adapters.py`) under "STILL OUTSIDE".
 Widening the gate to any of them is the owner's call.
@@ -140,6 +144,7 @@ No entry yet.
 The rollbacks of rows 2, 3 and 4 of the runbook's upgrade table are not drilled.
 Row 1's rollback is drilled (DL-270, "CORRECTIONS").
 The stop and recover bullets, the configure recipe and the monitoring commands other than the sealed-period check are not run by a test (DL-268).
+The torn-opening recipe that the recover bullet links is run by a test (DL-278).
 No release pair qualifies for a resume-safe row today (DL-266).
 
 ### Stated limits

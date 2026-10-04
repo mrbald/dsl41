@@ -18,10 +18,10 @@ boundaries for estates that run for months.
 
 ## Documents
 
-Start with [docs/architecture.md](docs/architecture.md), the architecture
-overview, then the [block cards](docs/blocks/README.md).
-
-Read these in this order:
+To review the design, start with the architecture overview,
+[docs/architecture.md](docs/architecture.md), then the
+[block cards](docs/blocks/README.md).
+For everything else, read these in this order:
 
 1. [docs/deployment-runbook.md §0](docs/deployment-runbook.md#0-the-operator-path) - the operator path: tasks, diagrams, recipes, monitoring and retirement
 2. [docs/autosys-semantics.md](docs/autosys-semantics.md) - the meaning of JIL (SEM entries)
