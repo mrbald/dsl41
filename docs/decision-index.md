@@ -245,7 +245,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-231 | access-model.md is frozen | [docs/access-model.md](access-model.md) |
 | DL-232 | concurrency-model reconciliation: a strictly earlier timer goes before a later command, one KILL per run per batch, and a held SPAWN applies only to a job still... |  |
 | DL-233 | The DISARM audit distinction is the trace reason, not the revisions map | [docs/control-protocol.md](control-protocol.md), [docs/period-model.md](period-model.md) |
-| DL-234 | Supersession is decided before the routing hold, and a run has its one identity from the instant its SPAWN is planned | [docs/concurrency-model.md](concurrency-model.md) |
+| DL-234 | Supersession is decided before the routing hold, and a run has its one identity from the instant its SPAWN is planned | [docs/concurrency-model.md](concurrency-model.md), [docs/glossary.md](glossary.md) |
 | DL-235 | CHANGE_STATUS INACTIVE on a launched run: no KILL, the stale-completion gate rejects a completion whose row is not STARTING or RUNNING, and the state-machine... | [docs/autosys-semantics.md](autosys-semantics.md), [docs/runner-design.md](runner-design.md) |
 | DL-236 | The workflow examples get an opt-in integration lane at the operator's interfaces | [docs/agent-workflow.md](agent-workflow.md) |
 | DL-237 | Joint review of the workflow examples: what was fixed and what stands | [README.md](../README.md) |
