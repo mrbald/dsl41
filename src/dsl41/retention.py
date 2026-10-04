@@ -99,7 +99,6 @@ from dsl41.boundary import (
     check_seal_record,
 )
 from dsl41.canon import is_wire_int
-from dsl41.runner_procid import fsync_dir
 from dsl41.runner_effects import RUN_ID_RE
 from dsl41.period import (
     ARCHIVE_CLASS,
@@ -649,7 +648,14 @@ def _archive_receipts(
         receipt = verify_archive_receipt(run_root, period_id)
         if receipt is None:
             continue
-        if receipt.estate_id != stored.estate_id:
+        # unreachable on one assumption: `plan_retention` read the sentinel
+        # ONCE and refused an anchor of another estate, and
+        # `verify_archive_receipt` bound the receipt to the sentinel it read
+        # from disk, so receipt and anchor name one estate if both reads
+        # agree. The two reads are separate; only a concurrent in-place
+        # rewrite of the sentinel between them breaks that, and no dsl41
+        # writer rewrites a sentinel. It also fires if either gate is removed
+        if receipt.estate_id != stored.estate_id:  # pragma: no cover -- see above
             raise EngineError(
                 f"{archive_receipt_path(run_root, period_id)}: estate"
                 f" {receipt.estate_id} under an anchor naming {stored.estate_id} -- a"
@@ -990,7 +996,11 @@ def _opening_period(run_root: Path, current: int) -> int | None:
     opening = read_journal(wal_path(run_root, current))[0].get("opens_from_seal")
     if isinstance(opening, Mapping):
         period_id = opening.get("period_id")
-        if is_wire_int(period_id):
+        # the false arm is unreachable: `read_journal` runs `check_segment_record`
+        # on the first record unconditionally (DL-138), and its schema makes a
+        # present `opens_from_seal` exactly `{period_id: wire int, digest}`. It
+        # opens only if that check stops covering the opening record
+        if is_wire_int(period_id):  # pragma: no branch -- see above
             return period_id
     return None
 
@@ -2293,15 +2303,3 @@ def _file_size(path: Path) -> int:
         return path.stat().st_size
     except OSError:
         return 0
-
-
-def _fsync_parent(path: Path) -> None:
-    """A deletion is a directory-entry write, and a rename without an
-    `fsync` of the parent is not durable across a power loss. The same
-    rule the liturgy applies to every create applies to every unlink.
-
-    A failure PROPAGATES: a suppressed fsync error would report a removal
-    as done while a power cut can bring the entry back -- and for a
-    tombstone pair that resurrection is the half that authorizes a
-    spawn."""
-    fsync_dir(path.parent)

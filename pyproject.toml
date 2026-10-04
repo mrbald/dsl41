@@ -149,26 +149,36 @@ sigterm = true
 # came to be proven as a function while the wiring that acts on it was never
 # once exercised (DL-105).
 #
-# Deliberately NOT listed: runner_supervisor.py and runner_wrapper.py. They run
-# as separate PROCESSES, so in-process coverage read them at ~18% however well
-# tested they were. DL-265 changed that. [tool.coverage.run] now measures those
-# processes, and `coverage combine` adds their data. Both modules are measured.
-# They stay outside this gate until the owner widens it (F5b). Their numbers
-# print in `scripts/branch_coverage.py`. The CLI, TUI, viz and compiler tiers
-# are not concurrency and get the suite's ordinary scrutiny, not this one.
+# DL-269 widened the gate past the concurrency tier to the modules that own
+# the other state machines: the oracle and its capacity queue, the scheduler,
+# the control server, and the period, seal, retention and boundary code.
+#
+# Deliberately NOT listed: runner_supervisor.py, runner_wrapper.py and
+# runner_adapters.py. DL-265 measures the supervisor and wrapper processes
+# too, and their numbers print in `scripts/branch_coverage.py`; widening the
+# gate to them is the owner's call. The CLI, TUI, viz and compiler tiers are
+# not state machines and get the suite's ordinary scrutiny, not this one.
 include = [
+    "src/dsl41/boundary.py",
+    "src/dsl41/capacity.py",
+    "src/dsl41/oracle.py",
     "src/dsl41/oracle_state.py",
+    "src/dsl41/period.py",
+    "src/dsl41/retention.py",
     "src/dsl41/runner.py",
     # the access perimeter (DL-146) is decision-shaped the same way: an
     # authorization guard whose false arm nothing takes is an untested
     # refusal, which on this module means an untested DENIAL path
     "src/dsl41/runner_access.py",
     "src/dsl41/runner_admission.py",
+    "src/dsl41/runner_control.py",
     "src/dsl41/runner_effects.py",
     "src/dsl41/runner_hosts.py",
     "src/dsl41/runner_journal.py",
     "src/dsl41/runner_ledger.py",
+    "src/dsl41/runner_scheduler.py",
     "src/dsl41/runner_startup.py",
+    "src/dsl41/seal.py",
 ]
 fail_under = 100
 show_missing = true
