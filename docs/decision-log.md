@@ -17554,3 +17554,52 @@ relitigate an entry; append a new one.
   test_semantics.py
   `test_every_production_call_passes_its_semantic_switches` and
   `test_preflight_reads_calendars_under_the_run_s_switches`.
+- DL-262 Review by change class, single-ruling escalation, and narrower
+  peer passes (2026-10-04; CLAUDE.md, docs/agent-workflow.md,
+  .claude/settings.json)
+  THE EVIDENCE. The AutoSys remediation (DL-240..DL-261) gave every slice
+  a Claude reviewer and a Codex peer. Codex first rounds found 42 material
+  defects over 22 slices, second rounds 22 over 17, and third rounds 3
+  over 2. Its review of what integration changed found the only
+  cross-slice defect. The two reviewers' overlap was measured on one slice
+  only, where both found the same major defect. A Codex pass costs about
+  as much as a Claude reviewer, and each one ran the full suite. The late
+  rounds on one fix hardened against a supervisor started by hand in a
+  short window and against a stopped supervisor.
+  THE MODELS. Anthropic's model guidance
+  (platform.claude.com/docs/en/about-claude/models/choosing-a-model) rates
+  Claude Opus 5.5 near Fable 5.1 on most work at a lower price. Its Sonnet
+  5.5 prompting guide says effort above `high` starts extra review rounds
+  on its own. This entry assumes Opus behaves the same way. The project's
+  Claude default moves from Fable 5.1 at `xhigh` to Opus 5.5 at `high`. A
+  single hard ruling goes to a stronger model in a read-only advisor role.
+  The whole session does not move.
+  THE CLASSES. The change's class sets the reviewers (CLAUDE.md
+  "Self-review"). The semantic class keeps both vendors at any size. It
+  covers what a compiled or run estate does, any version constant, any
+  rule `docs/` freezes, and instruction policy, as this entry is. Any
+  other multi-file change gets one Claude reviewer. Slices built apart and
+  integrated together also get one Codex pass over the integration. Before
+  this entry, "Self-review" asked for one reviewer on every multi-file
+  change, and "Boss and peer work" asked for both vendors on the
+  highest-impact work. The semantic class makes that second rule concrete,
+  and the first now reaches single-file semantic changes too.
+  THE ROUNDS. Rounds count per change, three at most. The cap was practice
+  before; this entry writes it down. Only the reviewer that raised a
+  finding confirms its fix. A material finding open after round three goes
+  to the owner. From round two on, a finding becomes a stated limit only
+  when it needs a deliberately hostile operator or an unsupported
+  operation, cannot corrupt durable state, and cannot cause a launch, a
+  kill or an emitted artifact. The reviewer that raised it must agree. A
+  decision-log entry records it: the change's own entry, or a new one.
+  Each ruling names the reviewer of the finding it settles.
+  THE PEERS. Codex passes probe the change under review. They run no full
+  suite unless asked and call no other model. First rounds run at `xhigh`,
+  confirmation rounds at `high`. Slices run in parallel only on disjoint
+  files.
+  WHAT STAYS. Every change in the two review classes is reviewed before
+  commit, so the 2026-08-25 gap stays closed. The gates and DL-206's
+  amendments do not change.
+  REVISIT. After the next tranche, compare the reviewers' findings per
+  slice. If one reviewer rarely adds a finding the other missed, narrow
+  the semantic class.

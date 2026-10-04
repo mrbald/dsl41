@@ -16,7 +16,8 @@ CI installs with `--locked`, which also checks the lock against `pyproject.toml`
 a stale lock passes `--frozen` locally and fails in CI.
 
 Project model defaults live in `.codex/config.toml` and
-`.claude/settings.json`. The boss uses those frontier defaults at xhigh.
+`.claude/settings.json`. A Claude boss runs at the Claude defaults: Opus at
+`high` since DL-262. A Codex boss runs at the Codex setting.
 Codex loads project configuration only in trusted projects.
 Check effective model and effort after a CLI or model upgrade.
 Launch flags, environment, user settings, and managed settings may affect them.
@@ -118,6 +119,12 @@ codex exec --sandbox read-only --ephemeral --json \
 
 Run from the repository. The JSON output does not identify the served model;
 record the selection and that gap, as Setup says.
+A Codex pass costs about as much as a Claude reviewer.
+Brief it for targeted probes of the change under review.
+It runs no full test suite unless the brief asks.
+It calls no other model.
+Use `xhigh` for a first review round and `high` for a round that confirms
+fixes (DL-262).
 Use an ordinary persistent session if later resumption is needed.
 Keep existing permission controls. Do not bypass them to make a peer run succeed.
 

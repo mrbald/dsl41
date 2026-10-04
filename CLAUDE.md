@@ -80,10 +80,13 @@ All ten compiler phases in DL-03 are implemented; their order remains normative.
 
 ## Boss and peer work
 
-The boss uses the configured frontier model at xhigh effort.
+The boss uses the configured top-level model and effort.
+It sends a single hard ruling to a stronger model in a read-only advisor
+role, instead of raising the whole session (DL-262).
 It chooses the model, effort, and delegation for other work.
 Use both vendors' frontier models for the highest-impact exploration,
-planning, and review, including semantic and instruction-policy changes.
+planning, and review.
+For review, that is the semantic class under "Self-review".
 Exchange independent findings before reconciling material disagreements.
 Use `docs/agent-workflow.md` for CLI recipes and review handoffs.
 
@@ -107,11 +110,35 @@ load.
 
 ## Self-review
 
-After implementing any multi-file change, run an adversarial self-review
-subagent before committing. Look specifically for: over-claiming or leaking
-tests, duplicate records, orphaned tests from bad inserts, clock-domain
-mixups, and flaky timing assertions -- these are recurring defect classes in
-this codebase.
+Run an adversarial review before committing a change in one of these
+classes. The class sets the reviewers (DL-262):
+- Semantic class, at any size: one Claude reviewer subagent and one Codex
+  pass. It covers a change to what a compiled or run estate does: lowering,
+  the oracle, the runner, the scheduler, or calendars. It also covers any
+  version constant, any rule `docs/` freezes, and instruction policy. The
+  frozen rules are the runner contracts listed under "Read for the task"
+  and the rules DL-225 names.
+- Any other multi-file change: one Claude reviewer subagent. Examples are a
+  refactor that keeps behavior, tests, docs, tooling, and the browser or TUI
+  front ends.
+- In addition, slices built apart and integrated together get one Codex
+  pass over what the integration changed. Each slice keeps its own review.
+
+Count review rounds per change, three at most.
+Only the reviewer that raised a finding confirms its fix.
+A material finding still open after round three goes to the owner.
+From round two on, a finding may become a stated limit instead of a fix.
+It qualifies only when it needs a deliberately hostile operator or an
+unsupported operation, such as a process stopped or a supervisor started
+by hand. It must not be able to corrupt durable state or cause an external
+effect: a launch, a kill, or an emitted artifact. The reviewer that raised
+it must agree. A decision-log entry records the limit: the change's own
+entry, or a new one.
+Each ruling on a finding names the reviewer that raised it.
+
+Look specifically for: over-claiming or leaking tests, duplicate records,
+orphaned tests from bad inserts, clock-domain mixups, and flaky timing
+assertions -- these are recurring defect classes in this codebase.
 
 ## Agent allocation
 
@@ -139,11 +166,14 @@ Four local amendments override it where they differ (DL-206):
   clause allows re-running after a tier drop; this project does not, and
   answers low-tier report risk by not dropping the tier that far.
 - The prior's exceptions never waive this file's gates: the full suite and
-  the multi-file adversarial review above are required whatever it would
+  the adversarial review above are required whatever it would
   allow skipping (see "Python and verification").
 Still choose tier, review-or-none and context mode EXPLICITLY before any
 delegation -- never default to inherit. A multi-slice plan sheet carries an
 allocation column.
+Run slices in parallel only when their files are disjoint. A slice that
+shares files with one not yet integrated starts from the integrated tip
+(DL-262).
 
 Subagents run every command in the foreground and never end a turn
 waiting on a background command -- the completion wake-up is unreliable
