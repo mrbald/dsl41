@@ -93,8 +93,17 @@ jobs:
       # modules and argues the scope). `coverage run` replaces the bare pytest
       # rather than joining it -- running the suite twice to measure it once is
       # a minute of CI for nothing. The report step is what fails the build.
+      # DL-265: the run also measures the supervisor and wrapper subprocesses,
+      # which write one data file each, so `coverage combine` comes before the
+      # report. The gate is unchanged. The branch report prints branch-only
+      # numbers for the whole package and never fails the build.
+      # The erase mirrors docs/agent-workflow.md. A fresh checkout has no
+      # data files, so here it does nothing.
+      - run: uv run coverage erase
       - run: uv run coverage run -m pytest -q
+      - run: uv run coverage combine
       - run: uv run coverage report
+      - run: uv run python scripts/branch_coverage.py
       # DL-218: a static check of the example service units; no unit is
       # started. The launcher is installed at the path both units exec, so
       # verify's executable check resolves the real file rather than being

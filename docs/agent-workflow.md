@@ -45,16 +45,27 @@ uv run ruff check src tests examples
 uv run ruff format --check src tests scripts examples
 uv run mypy src tests/uc_oracle.py
 uv run python scripts/arch_check.py
+uv run coverage erase
 uv run coverage run -m pytest -q
+uv run coverage combine
 uv run coverage report
+uv run python scripts/branch_coverage.py
 ```
 
 The mypy line names `tests/uc_oracle.py` beside `src`: it is a fully
 annotated executable spec under `tests/`, and nothing else holds it to the
 type gate (DL-193).
 
+The erase comes first because parallel data files from an earlier run would
+merge into the next combine and could hide a branch the last run missed.
 The coverage invocation runs the full suite once.
+It also measures every Python subprocess the suite starts, the supervisor and
+the wrapper included (DL-265). Each process writes its own data file, so
+`coverage combine` must run before `coverage report`. A process that a test
+ends with SIGKILL loses its data.
 The coverage report enforces the scoped branch-coverage requirement.
+The branch report prints branch-only numbers for every module of `src/dsl41`,
+most missed branches first, then the package total. It is a report, not a gate.
 Keep this list aligned with `.github/workflows/ci.yml`. The one CI check not in
 it is `systemd-analyze verify` over `examples/nightbank/deploy/*.service`
 (DL-218); it needs Linux.
