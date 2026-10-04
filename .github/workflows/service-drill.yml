@@ -14,10 +14,10 @@
 # runbook prints them (DL-268).
 #
 # Manual only (workflow_dispatch). It is not part of the default gate. It
-# passed every step on 2026-09-29 on GitHub's Ubuntu 24.04 runner (DL-223),
-# before the quiescence, restore, reboot, upgrade and retirement steps
-# existed and before the install and first start ran ss0's recipes. Dispatch it
-# again after a change to the units, the launcher or the drill. Each step
+# passed every step on GitHub's Ubuntu 24.04 runner at c1e6b0c on
+# 2026-10-04 (DL-271), every step above included; its first pass there was
+# on 2026-09-29 (DL-223). Dispatch it again after a change to the units, the
+# launcher or the drill. Each step
 # runs one step of drill-steps.sh; drill-local.sh runs the same steps in a
 # local podman container (DL-266). A test holds this list to the script's.
 
