@@ -74,7 +74,8 @@ The UC bundle is a file. dsl41 writes nothing to a live controller.
 
 The operator starts the engine, and optionally the supervisor, with
 `dsl41`. A detached engine starts a missing supervisor itself (DL-210).
-The supervisor and the wrappers start by file path, not through the CLI.
+The supervisor and the wrappers run by file path, not as a module of the package.
+`dsl41 supervise start` and the engine both start the supervisor that way.
 The runner keeps state in two stores: the [run root](glossary.md#run-root)
 and the lineage [anchor](glossary.md#anchor).
 

@@ -95,6 +95,7 @@ stateDiagram-v2
 ## Open findings
 
 See the row "Job lifecycle and flags" in [the risk map](../risk-map.md).
+Its own finding is [owning modules outside the 100% gate](../risk-map.md#owning-modules-outside-the-100-gate), for `conditions.py`.
 Every machine shares the [no transition inventory](../risk-map.md#no-transition-inventory) finding.
 
 ## Gaps found

@@ -9,7 +9,7 @@ It decides nothing about what runs; the engine's oracle does.
 ## Fate
 
 The code and the contract carry over unchanged. It needs none of the storage capabilities.
-Reason: `src/dsl41/runner_supervisor.py` imports nothing from dsl41 and never reads the WAL or the ledger; its [lease](../glossary.md#lease) and run table are in memory, and its records are files in the [run root](../glossary.md#run-root).
+Reason: `src/dsl41/runner_supervisor.py` imports nothing from the dsl41 package but its two stdlib-only siblings, `runner_procid.py` and `canon.py` ([supervisor-protocol §1](../supervisor-protocol.md#1-roles)), and never reads the WAL or the ledger; its [lease](../glossary.md#lease) and run table are in memory, and its records are files in the [run root](../glossary.md#run-root).
 One limit is about transport, not storage: a lease freed on EOF needs a local socket ([supervisor-protocol §5](../supervisor-protocol.md#5-supervisor-socket-protocol-frozen--phase-11f-dl-48), "Constraint on any future non-local transport").
 
 ## Interface

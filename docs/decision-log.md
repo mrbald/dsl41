@@ -18610,7 +18610,9 @@ relitigate an entry; append a new one.
   says an ordinary crash between the claim and the head move never
   needs `--force`; today the operator removes the file by hand, or uses
   the break-glass. Second, resume of a rolled root whose only segment is
-  gone exits 1, not 2, so the engine unit restarts it in a loop. The
+  gone exits 1, not 2, so the engine unit restarts it in a loop
+  (`_resume_under_lock` in runner_startup.py reads
+  `estate_wal(run_root)`, a segment that no longer exists). The
   recipe removes the segment only together with the open trigger for
   this reason.
   NOT IN SCOPE. An in-place root cannot reach this state: it keeps at
@@ -18638,7 +18640,8 @@ relitigate an entry; append a new one.
 - DL-279 A review pack for human readers: an architecture overview, a
   glossary, a risk map and block cards, which link the rules instead of
   restating them (2026-10-05; docs/architecture.md, docs/glossary.md,
-  docs/risk-map.md, docs/blocks/, tests/test_architecture_doc.py)
+  docs/risk-map.md, docs/blocks/, README.md "Documents" and "Tests",
+  tests/test_architecture_doc.py)
   THE GAP. The docs hold about 31,000 lines and had no entry point for a
   human reviewer: no overview of the runner, no glossary, and state
   machines described only in prose, spread across seven contracts.
@@ -18667,6 +18670,9 @@ relitigate an entry; append a new one.
   row to a test: both or neither, and neither is built. Cards for the
   blocks not covered here: leadership, host routing, control, access,
   seal and lineage, audit and retention.
+  STATED LIMIT. A card's gap evidence names source line numbers as they
+  were when the card was written. No gate checks them, so they drift as
+  the code moves; the named function or file is the durable pointer.
   REVIEW. One Opus reviewer per slice, at most three rounds each. All
   findings are fixed. The gaps the cards found are open questions for
   the owner.

@@ -85,7 +85,7 @@ stateDiagram-v2
 
 See the row "SPAWN idempotency" in [the risk map](../risk-map.md).
 The map ranks it fourth among the [least-tested machines](../risk-map.md#least-tested-machines).
-The risk map's three owning modules for this row are [outside the 100% gate](../risk-map.md#owning-modules-outside-the-100-gate). `canon.py` is outside the gate too and the map does not measure it; `runner_startup.py` is inside the gate.
+Four of the risk map's five owning modules for this row are [outside the 100% gate](../risk-map.md#owning-modules-outside-the-100-gate): `runner_supervisor.py`, `runner_adapters.py`, `runner_procid.py` and `canon.py`. `runner_startup.py` is inside the gate.
 The common finding, [no transition inventory](../risk-map.md#no-transition-inventory), applies too.
 
 ## Gaps found
