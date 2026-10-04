@@ -997,11 +997,11 @@ class SupervisorConn:
     here and once in cli.py, which is one place too many for a rule a frozen
     document owns."""
 
-    def __init__(self, sock_path: Path) -> None:
+    def __init__(self, sock_path: Path, *, timeout_s: float = 60.0) -> None:
         self.conn = socket.socket(socket.AF_UNIX)
         # SHUTDOWN replies only AFTER waiting for wrappers (frozen ss5 order),
         # which spans the spawn-record wait plus per-run grace windows
-        self.conn.settimeout(60.0)
+        self.conn.settimeout(timeout_s)
         self.conn.connect(str(sock_path))
         self.buf = b""
         #: DL-80: the incarnation rides every mutating verb beside the token
@@ -1051,6 +1051,44 @@ class SupervisorConn:
 
     def close(self) -> None:
         self.conn.close()
+
+
+#: How long a physical roll waits for a supervisor already serving its
+#: target to answer one PING. A PING answers at once, so a supervisor that
+#: has not answered in this time is stopped or wedged.
+PING_TIMEOUT_S = 5.0
+
+
+def running_supervisor_deadman(run_root: Path) -> tuple[bool, float | None]:
+    """Whether a supervisor already serves `run_root`, and the deadman it
+    reports. Read-only: one PING, no lease, never a spawn. `(False, None)`
+    when nothing listens on the socket.
+
+    A physical roll asks this before it writes, because a supervisor that
+    is already up keeps its own interval (period-model PR-22b). One that
+    accepts and does not answer within `PING_TIMEOUT_S` refuses the roll:
+    its deadman is unknown, and so is the one the run would keep."""
+    sock_path = run_root / "supervisor.sock"
+    try:
+        conn = SupervisorConn(sock_path, timeout_s=PING_TIMEOUT_S)
+    except (FileNotFoundError, ConnectionRefusedError):
+        return False, None
+    except OSError as exc:
+        raise EngineError(f"{run_root}: cannot reach the supervisor at {sock_path}: {exc}") from exc
+    try:
+        reply = conn.send({"cmd": "PING"})
+    except (OSError, ValueError) as exc:
+        raise EngineError(
+            f"{run_root}: the supervisor at {sock_path} did not answer PING within"
+            f" {PING_TIMEOUT_S}s ({exc}). A roll needs its deadman before it writes:"
+            " resume or stop that supervisor, then retry"
+        ) from exc
+    finally:
+        conn.close()
+    reported = reply.get("deadman_s")
+    if isinstance(reported, int | float) and not isinstance(reported, bool):
+        return True, float(reported)
+    return True, None
 
 
 class SupervisorRunRow(BaseModel):

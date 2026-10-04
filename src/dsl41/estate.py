@@ -88,6 +88,7 @@ def roll_into_root(
     catalog_of: Callable[[Path, Manifest], CatalogIR],
     lock: Proof | None = None,
     crash_point: CrashPoint = no_crash,
+    admit: Callable[[Manifest], None] | None = None,
 ) -> Rolled:
     """ss7's second opener: open `next_period` into a fresh root.
 
@@ -104,21 +105,29 @@ def roll_into_root(
 
     The caller holds `leader.lock` on `new_root` already, because starting
     a supervisor or staging bytes into a root is an act on an estate this
-    process may turn out not to lead."""
+    process may turn out not to lead.
+
+    `admit` is the caller's gate on the manifest this roll opens under. It
+    runs on the seal this call selected, before the first write, and
+    refuses by raising `EngineError`. The claim below holds that selection:
+    it refuses a head that no longer names this seal. So a gate that
+    passed here judged the period that opens, and a refusal leaves no
+    segment and an unmoved head (PR-22b)."""
     # read BEFORE the lock: the claim below is a compare-and-swap that
     # re-reads under it and refuses a head that moved, so this read only
     # has to be good enough to compute a claim_id -- and the sentinel must
     # be durable before that claim exists at all (PR-01a)
     anchor, closing_root, seal = _roll_source_or_refuse(anchor_dir, new_root)
     opening = seal.next_period
-    manifest = read_period_manifest(closing_root, opening.period_id)
-    if manifest is None:
-        raise EngineError(
-            f"{closing_root}: periods/{opening.period_id:06d}/manifest.json is not"
-            " there -- the boundary installed it before the record that names it, so"
-            " a roll that cannot find it is rolling from a pruned root"
-            " (period-model ss7)"
-        )
+    manifest = _successor_manifest(closing_root, seal)
+    if admit is not None:
+        # The gate may PING a supervisor at the target. One started after
+        # that PING and before the writes below is not seen here: the run's
+        # post-wiring gate still refuses it, but with the period already
+        # open. The window is a few local writes long, and closing it would
+        # need a lock that a starting supervisor does not take, so it is
+        # accepted.
+        admit(manifest)
     claim_id = claim_id_for(
         prev_seal_digest=seal.digest,
         next_period=opening.period_id,
@@ -173,8 +182,8 @@ def _roll_source_or_refuse(anchor_dir: Path, new_root: Path) -> tuple[EstateAnch
     that holds the closing seal, and the seal itself -- read and checked,
     or a refusal naming what is wrong.
 
-    `check_roll_ready` is exactly this pass and nothing else -- it exists so
-    a refusal writes nothing, not even the target directory -- and
+    `check_roll_ready` is this pass and the successor's manifest read -- it
+    exists so a refusal writes nothing, not even the target directory -- and
     `roll_into_root` runs it again authoritatively under the locks. Two
     copies of it meant two wordings of one refusal (DL-152)."""
     anchor = EstateAnchor(anchor_dir)
@@ -210,6 +219,23 @@ def _roll_source_or_refuse(anchor_dir: Path, new_root: Path) -> tuple[EstateAnch
         )
     verify_attestation(closing_root, period_id)
     return anchor, closing_root, seal
+
+
+def _successor_manifest(closing_root: Path, seal: Seal) -> Manifest:
+    """The committed manifest of the period `seal` opens, read from the
+    root that closed it. The roll opens under it, and its read-only
+    preflight hands it to the caller so the launch options are held to the
+    pin before anything is written (PR-22b)."""
+    opening = seal.next_period
+    manifest = read_period_manifest(closing_root, opening.period_id)
+    if manifest is None:
+        raise EngineError(
+            f"{closing_root}: periods/{opening.period_id:06d}/manifest.json is not"
+            " there -- the boundary installed it before the record that names it, so"
+            " a roll that cannot find it is rolling from a pruned root"
+            " (period-model ss7)"
+        )
+    return manifest
 
 
 def _roll_source(stored: Anchor, anchor: EstateAnchor, new_root: Path) -> tuple[Path, int, str]:
@@ -312,11 +338,16 @@ def import_boundary(source: Path, target: Path, *, seal: Seal, manifest: Manifes
     verify_attestation(target, period_id)
 
 
-def check_roll_ready(new_root: Path, anchor_dir: Path) -> None:
+def check_roll_ready(new_root: Path, anchor_dir: Path) -> Manifest:
     """`run --open-from`'s READ-ONLY preflight, run by the CLI BEFORE it
     creates the new root or takes its lock: the lineage exists, the head
     is a closed one this roll can succeed, the closing seal is the head's
     and carries nothing live, and the closing period is ATTESTED.
+
+    Returns the committed manifest of the period the roll would open. The
+    caller holds its launch options to that pin here, because a refusal
+    after the roll would leave the successor open (period-model ss7,
+    PR-22b).
 
     Every check re-runs authoritatively inside `roll_into_root` under the
     locks; this pass exists so a refusal -- the unattested-roll refusal
@@ -326,7 +357,8 @@ def check_roll_ready(new_root: Path, anchor_dir: Path) -> None:
     never revoked, and a head that moves between this read and the locked
     one is refused there."""
     check_roll_target(new_root, anchor_dir)
-    _roll_source_or_refuse(anchor_dir, new_root)
+    _, closing_root, seal = _roll_source_or_refuse(anchor_dir, new_root)
+    return _successor_manifest(closing_root, seal)
 
 
 def check_roll_target(new_root: Path, anchor_dir: Path) -> None:
