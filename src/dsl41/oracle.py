@@ -563,9 +563,6 @@ class Oracle:
 
     # ------------------------------------------------------------------ plumbing
 
-    def _boxes(self) -> list[str]:
-        return [n for n, j in self.catalog.jobs.items() if j.job_type == "BOX"]
-
     def _members(self, box: str) -> list[str]:
         return [n for n, j in self.catalog.jobs.items() if j.box.box_name == box]
 
@@ -611,7 +608,10 @@ class Oracle:
         live: list[tuple[datetime, str, str]] = []
         for due, _, ev in self.store.timers():
             job = ev.payload.get("job")
-            if not isinstance(job, str):
+            if not isinstance(job, str):  # pragma: no cover -- see below
+                # Unreachable: every timer the oracle arms names its job (the
+                # deadline checks and the run_window deferral both build the
+                # payload from a job name), so no heap entry lacks one.
                 continue
             check = ev.payload.get("check")
             if check is None:
@@ -849,7 +849,7 @@ class Oracle:
         *,
         clear_exit_code: bool = False,
         exit_code: int | None = None,
-        between: Callable[[], None] | None = None,
+        between: Callable[[], None],
     ) -> None:
         """Move several jobs to INACTIVE as one act (DL-242): the box-start
         reset (SEM-10) and the box INACTIVE cascade (SEM-18). `rows` pairs
@@ -880,8 +880,7 @@ class Oracle:
             if self._box_stopped(job, old, "INACTIVE"):
                 self._scan_owed = True
             written.append((job, old, self._runtime(job).run_number, wake))
-        if between is not None:
-            between()
+        between()
         owed = False
         for job, before, run_number, wake in written:
             rt = self._runtime(job)
@@ -1182,7 +1181,9 @@ class Oracle:
                     if self._runtime(member).on_noexec:
                         self.store.set_flags(member, on_noexec=False)
                         self._record(member, "OFF_NOEXEC", f"box {job!r} taken OFF_NOEXEC (DL-254)")
-        elif kind == "DISARM":
+        elif kind == "DISARM":  # pragma: no branch -- see below
+            # The fall-through arm is unreachable: `_dispatch` passes exactly the seven
+            # operator kinds, and each has an arm in this chain.
             # period-model ss10.4 (DL-158): the explicit journaled disarm.
             # The drop is the WHOLE effect: no status move, no wake, no
             # timer. An unarmed target is an accepted, recorded no-op (the
@@ -1415,7 +1416,11 @@ class Oracle:
     def _lookback_ok(self, rt: JobRuntime, lookback: Lookback | None, evaluator: str) -> bool:
         if lookback is None or lookback.kind == "indefinite":
             return True
-        if rt.status_at is None:
+        if rt.status_at is None:  # pragma: no cover -- see below
+            # Unreachable: `store.transition` stamps status_at on every status write.
+            # A row never written is INACTIVE with no exit code, which no status atom
+            # matches except n(), answered above, and an exit-code atom needs an exit
+            # code. Every row that gets here has transitioned.
             return False
         assert self._now is not None
         if lookback.kind == "zero":
@@ -1684,7 +1689,11 @@ class Oracle:
         again since the deferral, or a rebaseline moved the job into another
         box or out of one. The current box run decides the job afresh."""
         job = ev.payload.get("job")
-        if not isinstance(job, str):
+        if not isinstance(job, str):  # pragma: no cover -- see below
+            # Unreachable: both callers hold a payload job that is already a str.
+            # `pending_timers` filters on it before it asks, and no armed timer
+            # lacks one (see there); the dispatch reads the event through
+            # `_required_job` first.
             return None
         job_ir = self.catalog.jobs.get(job)
         current = job_ir.box.box_name if job_ir is not None else None
@@ -1979,7 +1988,10 @@ class Oracle:
 
         Every pass pays an owed scan, since every pass admits."""
         if self._in_wake:
-            if not keep_stopped:
+            if not keep_stopped:  # pragma: no branch -- see below
+                # The arm with keep_stopped True is unreachable: its one caller,
+                # `_run_owed_scan`, loops under `not self._in_wake`, so it never runs
+                # nested. Every nested call comes from a release, with keep_stopped False.
                 self._full_scan_requested = True
             return
         self._in_wake = True
@@ -2010,7 +2022,12 @@ class Oracle:
         (Qr6, decided), and otherwise `_queued_recheck` decides (DL-257)."""
         rt = self._runtime(job)
         job_ir = self.catalog.jobs[job]
-        if rt.on_ice:
+        if rt.on_ice:  # pragma: no cover -- see below
+            # Unreachable: a job never waits while iced. A plain start of an iced job
+            # is refused before it can queue, a FORCE_STARTJOB clears the flag first
+            # (`_attempt_start`), and ON_ICE on a QUE_WAIT job dequeues it at once
+            # (`_handle_oob`). The flag is set nowhere else, so a waiter with it set
+            # would mean one of those three had changed.
             return self._cancel_waiter(job, "iced while queued")
         box = job_ir.box.box_name
         if box is not None and self._runtime(box).status != "RUNNING":
@@ -2250,7 +2267,9 @@ class Oracle:
         pending = deque([box])
         while pending:
             for member in self._members(pending.popleft()):
-                if member in seen:
+                if member in seen:  # pragma: no cover -- see below
+                    # Unreachable: the CatalogIR validator refuses a containment
+                    # cycle, and each job has one box, so no member repeats.
                     continue
                 seen.add(member)
                 if skip_live and self._runtime(member).status in LIVE | {"QUE_WAIT"}:
@@ -2421,7 +2440,11 @@ class Oracle:
         )
         for box in chain[1:]:  # [0] is the direct parent
             box_ir = self.catalog.jobs.get(box)
-            if box_ir is None:
+            if box_ir is None:  # pragma: no cover -- see below
+                # Unreachable: lowering refuses a box_name the catalog does not define,
+                # and `_ancestor_boxes` only follows `box.box_name` links. The direct
+                # parent, `chain[0]`, is indexed without a guard in `_on_member_transition`
+                # for the same reason.
                 return
             if self._runtime(box).status != "RUNNING":
                 continue  # not evaluating: SEM-13 sticky, or already folded
@@ -2438,7 +2461,11 @@ class Oracle:
         (DL-242), so it fires when every other member is terminal. With
         every member INACTIVE the default verdict is SUCCESS."""
         members = self._members(box)
-        if not members:
+        if not members:  # pragma: no cover -- see below
+            # Unreachable: both callers reach here from a transition of a member
+            # they found through that member's own `box.box_name`, so `_members(box)`
+            # holds at least that member. It would take a catalog edited between the
+            # transition and this call to empty it.
             return
         statuses = [s for s in (self._runtime(m).status for m in members) if s != "INACTIVE"]
         if not all(s in TERMINAL for s in statuses):
@@ -2599,7 +2626,12 @@ class Oracle:
         start time; the scheduler then ticks once, and the tick names the
         earlier wall time."""
         schedule = job_ir.schedule
-        if schedule is None or not schedule.start_times:
+        if schedule is None or not schedule.start_times:  # pragma: no cover -- see below
+            # Unreachable from JIL: both callers need a start-times schedule. A
+            # multi-offset relative must time and any absolute one are refused at
+            # lowering unless start_times exist (SEM-34, DL-248, DL-253); a single
+            # relative offset broadcasts and never asks for a slot (`_sla_offset`);
+            # `_slot_deadline` returns first for a job with no schedule.
             return None
         assert self._now is not None
         tz = self._job_tz(job_ir)
@@ -2642,7 +2674,11 @@ class Oracle:
         assert self._now is not None
         deadline: datetime | None
         if spec.kind == "relative":
-            if not spec.offsets_min:
+            if not spec.offsets_min:  # pragma: no cover -- see below
+                # Unreachable from JIL: lowering refuses an empty must_start_times or
+                # must_complete_times value ("empty value"), and SlaSpec requires
+                # offsets_min for a relative spec. Only an IR edited after lowering holds
+                # []; it would arm no deadline, which is what this returns.
                 return None
             deadline = self._now + timedelta(minutes=self._sla_offset(job_ir, spec.offsets_min))
         else:

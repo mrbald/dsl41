@@ -1860,7 +1860,13 @@ def _check_request_id(ctx: StagedContext) -> None:
             " STARTJOB and a seal cannot both name authoritative decisions"
             " (control-protocol ss3, PR-30c)"
         ) from exc
-    if prior is not None:
+    # unreachable: a seal is decided by its `seal` record and never enters the
+    # DecisionIndex (only the ordinary admission path and replay write to it),
+    # and the index stores `runner_admission.fingerprint` values while this
+    # lookup passes `seal_fingerprint`, a different shape. `lookup` returns a
+    # prior only on EQUAL fingerprints, so an id spent on another command
+    # raises `RequestCollision` above and this arm needs a sha256 collision
+    if prior is not None:  # pragma: no cover -- see above
         raise EngineError(
             f"request_id {ctx.boundary_request.request_id} already decided at index"
             f" {prior.index} in this period: a seal is a command like any other"
@@ -2121,8 +2127,11 @@ def executions_at(
                 )
             )
             continue
-        if state != "applied":
-            continue  # retired or indeterminate: no live execution to carry
+        # `live_spawns` yields only `pending` and `applied` SPAWNs (its last
+        # line filters on exactly those two), and `pending` continued above,
+        # so `state` is `applied` here. It differs only if that filter widens
+        if state != "applied":  # pragma: no cover -- see above
+            continue
         run_dir = run_root / "runs" / f"{effect.job}.{effect.run_number}"
         run_id = _require_run_id(effect)
         if (run_dir / WATCH_LOG).exists():

@@ -17997,3 +17997,55 @@ relitigate an entry; append a new one.
   that skipped the disable. The named reboot hold settles both. Round 3:
   no material finding; its two minors, a release missing from row 4's
   rollback and a drill step that released a hold it never took, are fixed.
+- DL-269 The branch gate covers the state-machine modules (2026-10-04;
+  pyproject.toml, .github/workflows/ci.yml, oracle.py, runner_scheduler.py,
+  runner_control.py, retention.py, boundary.py, tests/test_*_branches.py,
+  tests/test_seal_artifact.py)
+  THE SCOPE. DL-105 held nine concurrency-tier modules at 100% of their
+  branches. The ops-readiness review measured the rest of the package and
+  found the other state-machine owners outside the gate. The owner took
+  its default: widen in two steps. Both steps land here. The gate now
+  also holds `oracle.py`, `capacity.py`, `runner_scheduler.py`,
+  `runner_control.py`, `seal.py`, `period.py`, `retention.py` and
+  `boundary.py`, seventeen modules in all. On e107d49 these eight missed
+  146 branches.
+  THE RULE. It is DL-105's, unchanged. A missed branch is closed by a
+  test that asserts its observable effect, or excluded by a pragma whose
+  comment names the invariant that makes it unreachable. `# pragma: no
+  branch` excludes only the arm that cannot run and follows the same
+  rule. A private helper with no caller is deleted, not covered. A branch
+  that only forged state reaches gets a pragma, not a test. "Lowering
+  refuses X" is an invariant where the module reads IR that lowering
+  produced, as runner catalogs are re-lowered from bundle JIL.
+  WHAT CHANGED IN SOURCE. Twenty-two pragma comments: eleven in the
+  oracle, two in the scheduler, five in the control server, two in
+  retention and two in boundary. `Oracle._boxes` and
+  `retention._fsync_parent` had no caller and are deleted.
+  `_set_inactive_batch` takes `between` as a required argument; both
+  callers passed it. `_seal` loses an `except AdmissionRefused` arm that
+  returned what the `EngineError` arm after it returns.
+  THE TESTS. Eight new files, `tests/test_<module>_branches.py` for
+  oracle, capacity, scheduler, control, seal, period, retention and
+  boundary, split so three executors could work on disjoint files. Each
+  test was checked against an in-memory mutant of its branch. One branch
+  keeps code whose removal changes no outcome: the early return in
+  `_leave_queue_unstarted`, which states the stale-reading rule. One
+  existing test, `test_an_in_memory_seal_mutated_after_validation_cannot_open`,
+  refused inside `to_bytes` instead of the opener it names; it now calls
+  `open_from_seal` directly.
+  STILL OUTSIDE. The supervisor, the wrapper and the adapters. DL-265
+  measures them: 60, 15 and 63 missed branches on its tree. Widening the
+  gate to them is the owner's call. The CLI, TUI, viz and compiler tiers
+  stay outside, as DL-105 says.
+  REVIEW. One Opus reviewer per module group, two rounds each. They found
+  tests that only executed their branch (two mutants survived one of
+  them), tests that reached a branch through state no public path makes,
+  names that claimed more than their test checks, dead code covered
+  instead of deleted, and a premise check that fails on Python 3.12. All
+  were fixed and confirmed. A Codex pass over the integrated groups found
+  a PR-28a test whose fixture was refused at phase 1, so it never reached
+  the phase-2 rule it names. That pass did not finish, and an Opus
+  reviewer did the integration pass. It confirmed the PR-28a fix and
+  found a retention test whose KILL shared its SPAWN's period, so a
+  mutant that bound KILL effects too survived; the run is now killed in
+  the next period.

@@ -344,7 +344,9 @@ class ControlServer:
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         task = asyncio.current_task()
-        if task is not None:
+        # asyncio runs a client_connected_cb coroutine as a task
+        # (StreamReaderProtocol.connection_made), so a handler always has one
+        if task is not None:  # pragma: no branch
             self._conn_tasks.add(task)
         at_once = False
         try:
@@ -451,7 +453,7 @@ class ControlServer:
         finally:
             # still in _conn_tasks: a shutdown waits for this hangup too
             await self._hang_up(writer, at_once=at_once)
-            if task is not None:
+            if task is not None:  # pragma: no branch -- the same task as above
                 self._conn_tasks.discard(task)
 
     async def _hang_up(self, writer: asyncio.StreamWriter, *, at_once: bool) -> None:
@@ -686,12 +688,11 @@ class ControlServer:
             committed = await asyncio.wait_for(
                 self.engine.submit_seal(parsed), timeout=self.SEAL_TIMEOUT_S
             )
-        except AdmissionRefused as exc:
-            return {"ok": False, "error": str(exc), "refused": True}
         except EngineError as exc:
             # a readiness or phase-2 refusal: C1 is still open and correct,
             # and the cutoff work already admitted stays as legitimate C1
-            # activity (ss7's exit codes)
+            # activity (ss7's exit codes). Also the one-seal-at-a-time refusal
+            # `submit_seal` sets (AdmissionRefused is an EngineError)
             return {"ok": False, "error": str(exc), "refused": True}
         except TimeoutError:
             return {
@@ -959,7 +960,9 @@ class ControlServer:
             if self.engine.run_root is not None and job_ir is not None and job_ir.job_type == "CMD":
                 if rt.run_number >= 1:
                     log_out, log_err = job_log_paths(job_ir, rt.run_number, self.engine.run_root)
-                elif isinstance(job_ir.exec_, ExecSpec):
+                # lowering refuses a CMD job without a command, so a CMD job's
+                # `exec_` is always an ExecSpec
+                elif isinstance(job_ir.exec_, ExecSpec):  # pragma: no branch
                     # never ran: only explicit std files exist to tail
                     log_out, log_err = job_ir.exec_.std_out_file, job_ir.exec_.std_err_file
             jobs[name] = {
@@ -1174,7 +1177,9 @@ class ControlServer:
         catalog = self.engine.oracle.catalog
         for name in sorted(self.engine.live_jobs()):
             job_ir = catalog.jobs.get(name)
-            if job_ir is None:
+            # the engine's `_live` is keyed by the catalog job it dispatched,
+            # and the catalog never changes under a running engine
+            if job_ir is None:  # pragma: no cover
                 continue
             watching = self._fw_watching(job_ir)
             if watching is None:
@@ -1239,7 +1244,8 @@ class ControlServer:
             # ss5's overflow rule (DL-267): the journal has removed the feed
             # and dropped its backlog. End the stream first; the report is
             # best effort and comes after
-            if handler is not None:
+            # `_subscribe` is awaited only by the connection handler's task
+            if handler is not None:  # pragma: no branch
                 handler.cancel()
             best_effort_report(f"dsl41: closing a subscribe stream: {why}")
 

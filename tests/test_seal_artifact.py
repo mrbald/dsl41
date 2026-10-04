@@ -1833,9 +1833,12 @@ def test_an_in_memory_seal_mutated_after_validation_cannot_open() -> None:
     before an engine seeds itself, and a digest recomputed over the
     mutation would otherwise bless it."""
     seal = _seal()
+    # taken BEFORE the mutation, and `open_from_seal` called directly: `_open`
+    # serializes first and would refuse in `to_bytes`, never reaching the opener
+    manifest = _manifest_of(json.loads(seal.to_bytes()))
     seal.classification["smuggled"] = SealedVerdict(verdict="R")
     with pytest.raises(EngineError, match="mutated after validation"):
-        _open(seal, expected_digest=digest(seal.to_payload()))
+        open_from_seal(seal, expected_digest=digest(seal.to_payload()), manifest=manifest)
 
 
 def test_i1_a_segment_declaring_another_period_refuses() -> None:

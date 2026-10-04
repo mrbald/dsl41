@@ -273,9 +273,12 @@ class Scheduler:
                     exclude_gen = _CalCache(source)
                 else:
                     exclude_dates = frozenset(source)
-            if sched.days_of_week is not None and not sched.days_of_week:
-                # lowering rejects an empty list; a hand-built IR carrying one
-                # would exhaust _occurrence's scan -- refuse comprehensibly
+            if sched.days_of_week is not None and not sched.days_of_week:  # pragma: no cover
+                # Unreachable: lowering rejects an empty days_of_week ("empty
+                # value"), and a runner catalog is always re-lowered from its
+                # bundle's JIL (boundary.load_bundle_catalog). A hand-built IR
+                # carrying one would exhaust _occurrence's scan, so it is
+                # refused comprehensibly here.
                 raise EngineError(f"{name}: days_of_week is empty; nothing to schedule")
             explicit = (run_dates or frozenset()) | exclude_dates
             last_date = max(explicit) if explicit else None
@@ -412,4 +415,9 @@ class Scheduler:
                     return utc_tick
         if plan.run_dates is not None or plan.run_gen is not None or plan.exclude_gen is not None:
             return None  # calendar exhausted/fully excluded: dormant, not an error (DL-56/57)
-        raise EngineError("no scheduler occurrence within a year (unreachable: validated block)")
+        # Unreachable: lowering refuses an unknown day token and an empty list,
+        # so a plan without a calendar holds a weekday that recurs within 7 days
+        # of any start, and a runner catalog is re-lowered from bundle JIL.
+        raise EngineError(  # pragma: no cover
+            "no scheduler occurrence within a year (unreachable: validated block)"
+        )
