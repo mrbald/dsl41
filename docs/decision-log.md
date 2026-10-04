@@ -18635,3 +18635,38 @@ relitigate an entry; append a new one.
   fallback, and set the `open` path's conditions. All findings are
   fixed; the look step's test is the stated limit above, which the
   reviewer agreed to.
+- DL-279 A review pack for human readers: an architecture overview, a
+  glossary, a risk map and block cards, which link the rules instead of
+  restating them (2026-10-05; docs/architecture.md, docs/glossary.md,
+  docs/risk-map.md, docs/blocks/, tests/test_architecture_doc.py)
+  THE GAP. The docs hold about 31,000 lines and had no entry point for a
+  human reviewer: no overview of the runner, no glossary, and state
+  machines described only in prose, spread across seven contracts.
+  THE RULE. Four reader pages sit beside the contracts and hold no rules.
+  `docs/architecture.md` is the entry point: context, containers, engine
+  components, and one control input traced end to end, in the order the
+  code runs it. `docs/glossary.md` defines the runner's terms.
+  `docs/risk-map.md` lists each runner machine with its branch coverage
+  and open findings, stamped with the commit it measures.
+  `docs/blocks/` holds one card per building block, in the shape
+  `docs/blocks/README.md` sets. Every page links each rule to its
+  decision or contract section, and never restates a frozen table. A
+  card's state diagram is an illustration: it carries no row ids and
+  makes no coverage claim, because no transition inventory exists (the
+  risk map's common finding). A card's fate line names the storage
+  capabilities of concurrency-model §1 the block needs. A gap a card
+  finds is listed on the card, never settled there.
+  GATES. The architecture gate's doc scans cover `docs/blocks/`, so a
+  test or module a card names must exist (DL-110, DL-277). The reader
+  pages are excluded from spec review (DL-277).
+  `tests/test_architecture_doc.py` fails when a diagram label in the
+  overview names no real module, CLI verb, process or actor.
+  `tests/test_docs_links.py` resolves every link to GitHub's heading id
+  and checks that every glossary entry has a link.
+  NOT IN SCOPE. Transition tables with row ids, and a gate that maps each
+  row to a test: both or neither, and neither is built. Cards for the
+  blocks not covered here: leadership, host routing, control, access,
+  seal and lineage, audit and retention.
+  REVIEW. One Opus reviewer per slice, at most three rounds each. All
+  findings are fixed. The gaps the cards found are open questions for
+  the owner.
