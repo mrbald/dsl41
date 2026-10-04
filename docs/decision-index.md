@@ -1,0 +1,286 @@
+# Decision index
+
+This file is generated from the decision log; regenerate it with `uv run python scripts/render_decision_index.py`.
+
+| Entry | Title | Cited by |
+| --- | --- | --- |
+| DL-01 | New repo, dsl42 as quarry; forcing-function-first design (round-trip + equivalence as honesty checks) instead of constitution-first |  |
+| DL-02 | IR is AutoSys-shaped first; vendor neutrality emerges at Layer G |  |
+| DL-03 | Feature order: round-trip fidelity -> linter -> Mermaid -> equivalence validator -> DSL (extracted from corpus patterns, not designed up front) | [README.md](../README.md), [docs/ir-design.md](ir-design.md) |
+| DL-04 | Kept from dsl42 verbatim: pure compiler, no runtime; failed translation is a loud classified error, never silent loss | [docs/stonebranch-semantics.md](stonebranch-semantics.md), [docs/uc-edge-schema.md](uc-edge-schema.md) |
+| DL-05 | Statement layer = hand scanner (spec: jil-statement-syntax.md); lark only for condition expressions |  |
+| DL-06 | Q1 precedence: both candidate grammars ship behind a switch; sentinel test proves they differ; losing rule deleted after live verification | [docs/live-instance-runbook.md](live-instance-runbook.md) |
+| DL-07 | passthrough is strict-by-default: unknown attribute = lowering error unless allow-listed as inert (ir-design ss4) | [README.md](../README.md), [docs/ir-design.md](ir-design.md), [docs/jil-statement-syntax.md](jil-statement-syntax.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-08 | UC backend client generated from /resources/openapi.json (UCS-12), not hand-written | [docs/stonebranch-semantics.md](stonebranch-semantics.md), [docs/uc-edge-schema.md](uc-edge-schema.md) |
+| DL-09 | AGPL + commercial dual license; CLA from day one; clean-room corpus policy |  |
+| DL-10 | Repo codename dsl41; public product name decided later |  |
+| DL-11 | Linter phase readings (lint.py docstring is normative detail): L001 checks local refs against the catalog and cross-instance refs only for a declared xinst... | [docs/ir-design.md](ir-design.md) |
+| DL-12 | Derive phase readings (derive.py docstring is normative detail): n() mutex pairs, never components (exclusion is not transitive); the instantaneous... | [docs/autosys-semantics.md](autosys-semantics.md), [docs/ir-design.md](ir-design.md), [docs/stonebranch-semantics.md](stonebranch-semantics.md) |
+| DL-13 | Oracle phase readings (oracle.py docstring is normative detail): SEM-11 fold gate is literal -- a box cannot complete while any non-bypassed member has not run,... | [docs/autosys-semantics.md](autosys-semantics.md), [docs/control-protocol.md](control-protocol.md), [docs/ir-design.md](ir-design.md), [docs/live-instance-runbook.md](live-instance-runbook.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-14 | Equivalence phase readings (equiv.py docstring is normative detail): tier b enumerates per-job STATE SPACE (status x lookback age buckets x Q2 same-day flag x... | [docs/ir-design.md](ir-design.md) |
+| DL-14a | Amendment after the phase-8 adversarial review (both findings were confirmed false-equivalence claims, violating DL-14's own invariant): (1) string-global... |  |
+| DL-15 | UC-backend U3-independent slice (backend_uc.py docstring is normative detail): compile_to_uc() raises BlockedOnU3 unconditionally -- emitting records against a... |  |
+| DL-16 | UC twin (backend_uc.UcModel/compile_twin + uc_oracle.py; docstrings are normative detail): compile_twin lowers E/A rows to an in-memory UC model (the structure... | [docs/stonebranch-semantics.md](stonebranch-semantics.md), [docs/uc-edge-schema.md](uc-edge-schema.md) |
+| DL-16a | Amendment after the UC-twin adversarial review (three MAJORs, all confirmed): (1) UcEdgeCondition gained `cancelled` -- UC separates Cancelled from Failed... | [docs/uc-edge-schema.md](uc-edge-schema.md) |
+| DL-17 | DSL phase readings (dsl.py docstring is normative detail): the surface is exactly the four D2-named builders (job/box/sequence/ parallel) plus record... |  |
+| DL-18 | Estate-shape hardening | [docs/autosys-semantics.md](autosys-semantics.md), [docs/ir-design.md](ir-design.md), [docs/jil-statement-syntax.md](jil-statement-syntax.md) |
+| DL-19 | `~{$NAME}~` placeholder resolver as a NON-CORE preprocessor (placeholders.py + `dsl41 resolve`, 2026-07-09) |  |
+| DL-20 | Estate-scale hardening |  |
+| DL-21 | `resources:` job attribute -- the 11.3+ resource-object job side | [docs/autosys-semantics.md](autosys-semantics.md), [docs/ir-design.md](ir-design.md), [docs/simulation-coverage.md](simulation-coverage.md), [docs/stonebranch-semantics.md](stonebranch-semantics.md) |
+| DL-22 | Preprocessing as a first-class CLI step |  |
+| DL-23 | `dsl41 lint --suppress CODE` | [docs/autosys-semantics.md](autosys-semantics.md) |
+| DL-24 | L015 severity split | [docs/ir-design.md](ir-design.md) |
+| DL-25 | Dangling-name audit | [docs/ir-design.md](ir-design.md) |
+| DL-26 | L007 vacuous-pin false positive |  |
+| DL-27 | `rename_job` recognized at the statement layer | [docs/jil-statement-syntax.md](jil-statement-syntax.md) |
+| DL-28 | insert_xinst plumbing carried opaquely | [docs/ir-design.md](ir-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-29 | Full 12.1 subcommand inventory at the statement layer | [docs/deployment-runbook.md](deployment-runbook.md), [docs/jil-statement-syntax.md](jil-statement-syntax.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-30 | Rule 4b: one attribute pair per attribute line, loudly | [docs/jil-statement-syntax.md](jil-statement-syntax.md) |
+| DL-31 | Mid-line `#` is value text | [docs/jil-statement-syntax.md](jil-statement-syntax.md) |
+| DL-32 | 12.x attribute lanes completed for CMD/BOX/FW scope | [docs/autosys-semantics.md](autosys-semantics.md), [docs/ir-design.md](ir-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-33 | success_codes / fail_codes complete the SEM-09 boundary | [docs/autosys-semantics.md](autosys-semantics.md), [docs/ir-design.md](ir-design.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md), [docs/stonebranch-semantics.md](stonebranch-semantics.md) |
+| DL-34 | Accepted leniencies vs the 12.x syntax pages |  |
+| DL-34a | Adversarial-review addendum |  |
+| DL-35 | Viz emits a Markdown report, not a bare Mermaid body |  |
+| DL-35a | Adversarial-review addendum |  |
+| DL-36 | Calendar exports accepted; L018 dangling-calendar rule | [docs/autosys-semantics.md](autosys-semantics.md), [docs/ir-design.md](ir-design.md), [docs/jil-statement-syntax.md](jil-statement-syntax.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-37 | Decompiler completeness + parallel() emission |  |
+| DL-37a | Adversarial-review addendum |  |
+| DL-38 | Closed fold registry: T-001..T-007, opt-out, composition | [docs/citation-index.md](citation-index.md), [docs/ir-design.md](ir-design.md) |
+| DL-38a | Adversarial-review addendum |  |
+| DL-39 | Job-name identity: semantic (unescaped) everywhere in IR | [docs/control-protocol.md](control-protocol.md), [docs/jil-statement-syntax.md](jil-statement-syntax.md), [docs/runner-design.md](runner-design.md) |
+| DL-40 | Review fixes: wiring name gate, fold-gating contract, worklist completeness |  |
+| DL-41 | Runner (phase 11): prod-grade single-node executor as a sans-IO shell over the oracle | [docs/runner-design.md](runner-design.md) |
+| DL-41a | Lifecycle amendment: per-run wrapper shim + supervisor tier; E4 dissolved, E7 opened | [docs/control-protocol.md](control-protocol.md), [docs/live-instance-runbook.md](live-instance-runbook.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
+| DL-42 | Lifecycle tier spin-off: extract-on-trigger, not now | [docs/concurrency-model.md](concurrency-model.md), [docs/runner-design.md](runner-design.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
+| DL-43 | Phase 11a landed: engine determinism pins |  |
+| DL-44 | Phase 11b landed: lifecycle tier + WAL + resume | [docs/concurrency-model.md](concurrency-model.md), [docs/runner-design.md](runner-design.md) |
+| DL-45 | Phase 11c landed: scheduler + preflight + control socket + headless CLI | [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md) |
+| DL-46 | Phase 11d landed: Textual TUI | [docs/control-protocol.md](control-protocol.md), [docs/deployment-runbook.md](deployment-runbook.md) |
+| DL-47 | Phase 11e landed: `serve` verb |  |
+| DL-48 | Phase 11f landed: supervisor tier + detached mode | [docs/runner-design.md](runner-design.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
+| DL-49 | insert_machine virtual/real pools + runner machine resolution | [docs/autosys-semantics.md](autosys-semantics.md), [docs/citation-index.md](citation-index.md), [docs/concurrency-model.md](concurrency-model.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-50 | Resource/load manager: the oracle HONORS resources; preflight refuses the unmodelable | [README.md](../README.md), [docs/autosys-semantics.md](autosys-semantics.md), [docs/citation-index.md](citation-index.md), [docs/concurrency-model.md](concurrency-model.md), [docs/control-protocol.md](control-protocol.md), [docs/ir-design.md](ir-design.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-51 | Reference-of-record: legacy JIL is the input of record, evolved via the Python master, never silently diverged | [docs/ir-design.md](ir-design.md) |
+| DL-52 | Explicit machine identity: the runner is TOLD what machine it is; FQDN matching is retired | [docs/deployment-runbook.md](deployment-runbook.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-53 | Open-questions doc sweep: nine of the fifteen parked questions close from public vendor docs | [docs/autosys-semantics.md](autosys-semantics.md), [docs/ir-design.md](ir-design.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md), [docs/stonebranch-semantics.md](stonebranch-semantics.md), [docs/uc-edge-schema.md](uc-edge-schema.md) |
+| DL-54 | Q2/Q3 behavioral unit | [docs/autosys-semantics.md](autosys-semantics.md), [docs/control-protocol.md](control-protocol.md), [docs/ir-design.md](ir-design.md), [docs/live-instance-runbook.md](live-instance-runbook.md), [docs/runner-design.md](runner-design.md), [docs/stonebranch-semantics.md](stonebranch-semantics.md) |
+| DL-55 | U3 base-serializer unit | [docs/ir-design.md](ir-design.md), [docs/stonebranch-semantics.md](stonebranch-semantics.md), [docs/uc-edge-schema.md](uc-edge-schema.md) |
+| DL-56 | Runner honors standard calendars; extended stay materialize-only | [docs/autosys-semantics.md](autosys-semantics.md), [docs/live-instance-runbook.md](live-instance-runbook.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-57 | Extended calendars interpreted: SEM-36..39 doc-freeze, autocal interpreter, IR repeat-key lanes | [docs/autosys-semantics.md](autosys-semantics.md), [docs/ir-design.md](ir-design.md), [docs/jil-statement-syntax.md](jil-statement-syntax.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-58 | Citation sweep closes Q2b/Q3/Q7/Q8a/Q8e/E11, flips two wrong pins | [docs/autosys-semantics.md](autosys-semantics.md), [docs/ir-design.md](ir-design.md), [docs/live-instance-runbook.md](live-instance-runbook.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md), [docs/stonebranch-semantics.md](stonebranch-semantics.md) |
+| DL-59 | Demo-grade determinism: open-composition refusals become pinned defaults | [docs/autosys-semantics.md](autosys-semantics.md), [docs/jil-statement-syntax.md](jil-statement-syntax.md), [docs/live-instance-runbook.md](live-instance-runbook.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-60 | Q9 resolved at the [F] tier; five export-format compatibility fixes | [docs/autosys-semantics.md](autosys-semantics.md), [docs/jil-statement-syntax.md](jil-statement-syntax.md), [docs/live-instance-runbook.md](live-instance-runbook.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-61 | `dsl41 viz --whole-graph` |  |
+| DL-62 | SEM-35 timezone-name resolution: the ujo_timezones ladder + `--timezone-map` | [docs/autosys-semantics.md](autosys-semantics.md), [docs/live-instance-runbook.md](live-instance-runbook.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-63 | nightbank operator-training sandbox |  |
+| DL-64 | operator-visibility batch from the first nightbank training night | [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md) |
+| DL-65 | navigation & observability at estate scale | [docs/control-protocol.md](control-protocol.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md) |
+| DL-66 | recovery, artifact, and truthfulness hardening | [docs/control-protocol.md](control-protocol.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/runner-design.md](runner-design.md) |
+| DL-67 | the zoomed log is a real pager; operator verbs unreachable while paging |  |
+| DL-68 | trigger visibility: what started this job, what starts the next one | [docs/control-protocol.md](control-protocol.md), [docs/ir-design.md](ir-design.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-69 | Q3d opened — does ON_ICE discard a latched tick | [docs/autosys-semantics.md](autosys-semantics.md), [docs/live-instance-runbook.md](live-instance-runbook.md) |
+| DL-70 | viz gains --fixed-scale and a self-contained --html report |  |
+| DL-71 | viz gains --explore: an interactive cytoscape.js navigation page |  |
+| DL-72 | deduplication and vocabulary: one process-identity module, one status-letter table, one connected-components implementation, one set of public names across the... | [docs/runner-design.md](runner-design.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
+| DL-73 | IR-F carries conditions as (cond, span) pairs, IR-G edges carry their atom, IR-G stops copying IR-F for the display layer; ir_version 0.1 -> 0.2 | [docs/ir-design.md](ir-design.md) |
+| DL-74 | structure: runner.py split along the seams its own test files already used, and the Oracle's capacity subsystem extracted as a _CapacityPool | [docs/runner-design.md](runner-design.md) |
+| DL-75 | user surface, citations, and a signal-driven architecture review | [docs/citation-index.md](citation-index.md) |
+| DL-76 | the single-chart offline page returns as `--format html-chart` |  |
+| DL-77 | the explore page was fatally broken in Safari, and nothing in the suite ever ran it |  |
+| DL-78 | the ss10 control plane becomes a module and a frozen document | [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md) |
+| DL-79 | the supervisor lease is fenced by incumbency, not by a label | [docs/concurrency-model.md](concurrency-model.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
+| DL-80 | the supervisor lease carries an incarnation id | [docs/concurrency-model.md](concurrency-model.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
+| DL-81 | an explicit start against a live job is no longer silent |  |
+| DL-82 | StatusStore owns every JobRuntime field and every global | [docs/concurrency-model.md](concurrency-model.md) |
+| DL-83 | a signal in the spawn window is retryable, not a no-op; and the state-owner gate derives what it watches | [docs/concurrency-model.md](concurrency-model.md), [docs/period-model.md](period-model.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
+| DL-84 | the concurrency model is frozen: mandatory optimistic locking, globally at-most-once effects, and an operator-owned host lifecycle | [docs/concurrency-model.md](concurrency-model.md) |
+| DL-85 | the model harness lands before the code it validates, and an adapter call turns out not to be an effect application |  |
+| DL-86 | the state owner: frozen rows, maps that cannot escape, and one verb per kind of change | [docs/concurrency-model.md](concurrency-model.md), [docs/ir-design.md](ir-design.md) |
+| DL-87 | every entity carries a revision, and one input moves it at most once | [docs/concurrency-model.md](concurrency-model.md), [docs/runner-design.md](runner-design.md) |
+| DL-88 | the capacity pool gets its own module |  |
+| DL-89 | admission lands: one order for every input, and the log becomes a ledger | [docs/concurrency-model.md](concurrency-model.md), [docs/control-protocol.md](control-protocol.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md) |
+| DL-90 | preconditions become mandatory, and the wire breaks once | [docs/access-model.md](access-model.md), [docs/concurrency-model.md](concurrency-model.md), [docs/control-protocol.md](control-protocol.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md) |
+| DL-91 | architecture review | [docs/ir-design.md](ir-design.md) |
+| DL-92 | the operator gets the vocabulary S3 built |  |
+| DL-93 | how S5 is built, and where host state lives | [docs/citation-index.md](citation-index.md), [docs/concurrency-model.md](concurrency-model.md), [docs/control-protocol.md](control-protocol.md), [docs/ir-design.md](ir-design.md) |
+| DL-94 | the routing table lands: four states, three operator verbs, and a drain that holds work instead of losing it | [docs/concurrency-model.md](concurrency-model.md), [docs/control-protocol.md](control-protocol.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md) |
+| DL-95 | the deadman: one interval, one exit, and the two producers the eviction bound was missing | [docs/concurrency-model.md](concurrency-model.md), [docs/period-model.md](period-model.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
+| DL-96 | the effect outbox: intent before the attempt, and the orphaned run that proves why | [docs/concurrency-model.md](concurrency-model.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md) |
+| DL-97 | quarantine gets a producer; the relay does not get built, and why | [docs/concurrency-model.md](concurrency-model.md), [docs/period-model.md](period-model.md) |
+| DL-98 | architecture review after S5 | [docs/concurrency-model.md](concurrency-model.md) |
+| DL-99 | how S6 is built, and where the leader record lives | [docs/citation-index.md](citation-index.md), [docs/concurrency-model.md](concurrency-model.md), [docs/control-protocol.md](control-protocol.md) |
+| DL-100 | election: the lock, the epoch, and the act that used to happen before both | [docs/concurrency-model.md](concurrency-model.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md) |
+| DL-101 | the fence: every append re-proves leadership | [docs/concurrency-model.md](concurrency-model.md), [docs/period-model.md](period-model.md) |
+| DL-102 | the takeover barrier, and the start that gets re-driven rather than failed | [docs/concurrency-model.md](concurrency-model.md), [docs/runner-design.md](runner-design.md) |
+| DL-103 | S6 closes, and the relay's trigger did not fire | [docs/concurrency-model.md](concurrency-model.md) |
+| DL-104 | architecture review after S6 |  |
+| DL-105 | branch coverage over the concurrency tier, and what asking for it found |  |
+| DL-106 | the engine loop and the run lifecycle stop sharing a file | [docs/runner-design.md](runner-design.md) |
+| DL-107 | how S7 is built, and what CM-14 can honestly close on one host |  |
+| DL-108 | the seeded sweep, and the model that was wrong about the engine | [docs/citation-index.md](citation-index.md), [docs/concurrency-model.md](concurrency-model.md) |
+| DL-109 | the matrix moves onto the proving ground | [docs/citation-index.md](citation-index.md), [docs/concurrency-model.md](concurrency-model.md) |
+| DL-110 | a doc that cites a test is held to it |  |
+| DL-111 | the spec gets worked examples, and the examples find five things the text was wrong about | [docs/concurrency-model.md](concurrency-model.md) |
+| DL-112 | the layers that were only ever tested by an interpreter meet two processes | [docs/citation-index.md](citation-index.md), [docs/concurrency-model.md](concurrency-model.md) |
+| DL-113 | run history: a projection, not a new record kind | [docs/citation-index.md](citation-index.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/runner-design.md](runner-design.md) |
+| DL-114 | the period model is frozen | [docs/citation-index.md](citation-index.md), [docs/period-model.md](period-model.md) |
+| DL-115 | the directory is not the baseline |  |
+| DL-116 | the lineage fence |  |
+| DL-117 | `baseline_id` is the period's, and derived |  |
+| DL-118 | the atomic `decision` record and control-protocol v3 | [docs/concurrency-model.md](concurrency-model.md), [docs/control-protocol.md](control-protocol.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
+| DL-119 | the seal artifact and the canonical form |  |
+| DL-120 | capacity decomposed | [docs/concurrency-model.md](concurrency-model.md) |
+| DL-121 | `run_id` is minted in the effect; SPAWN idempotency is durable; FW has a spool |  |
+| DL-122 | `catalog_hash` v2, `source_bundle_hash`, `RuntimeProfile` |  |
+| DL-123 | classification, latches, the retry horizon |  |
+| DL-124 | the seal operation |  |
+| DL-125 | adoption |  |
+| DL-126 | `deadman_s` leaves the host semantic projection | [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-127 | retention floors |  |
+| DL-128 | canonical form: "control character" is Unicode Cc | [docs/period-model.md](period-model.md) |
+| DL-129 | SPAWN idempotency outlives the supervisor, and the watch keeps a log | [docs/runner-design.md](runner-design.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
+| DL-130 | a period gets its name, its inputs and its launch options | [docs/concurrency-model.md](concurrency-model.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/ir-design.md](ir-design.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md) |
+| DL-131 | the classifier reads a graph nobody had, in two directions | [docs/citation-index.md](citation-index.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/period-model.md](period-model.md) |
+| DL-132 | the period writes itself down: one sidecar, and the two functions over it |  |
+| DL-133 | the period gets a boundary: the anchor, the cutoff, and the three writes that end a period | [docs/citation-index.md](citation-index.md), [docs/concurrency-model.md](concurrency-model.md), [docs/control-protocol.md](control-protocol.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md) |
+| DL-134 | the estate gets its verbs: the seal an operator runs, the proof that lets a root be archived, and the two ways a root joins a lineage | [docs/deployment-runbook.md](deployment-runbook.md), [docs/runner-design.md](runner-design.md) |
+| DL-135 | what may never be deleted, and the subscriber that stopped losing a period | [docs/control-protocol.md](control-protocol.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/period-model.md](period-model.md), [docs/protocol-evolution.md](protocol-evolution.md) |
+| DL-136 | the boundary era becomes operable, and one reader stops losing a period | [docs/deployment-runbook.md](deployment-runbook.md), [docs/runner-design.md](runner-design.md) |
+| DL-137 | the review after the programme: what ten units of adversarial hardening left behind | [docs/runner-design.md](runner-design.md) |
+| DL-138 | the legacy read dialects retire, and the contract that governs the next retirement | [docs/citation-index.md](citation-index.md), [docs/concurrency-model.md](concurrency-model.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/period-model.md](period-model.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md) |
+| DL-139 | one decoder for a decision's effects: run history refuses what `read_outbox` refuses |  |
+| DL-140 | an empty map is not "no map": tz_aliases at the wiring boundary |  |
+| DL-141 | the estate answers as one: the cross-root walk lands for four verbs | [docs/deployment-runbook.md](deployment-runbook.md), [docs/runner-design.md](runner-design.md) |
+| DL-142 | the replay crosses the boundary: `dsl41 journal` walks a lineage | [docs/deployment-runbook.md](deployment-runbook.md), [docs/period-model.md](period-model.md) |
+| DL-143 | the night under the boundary: ss14's B1 and B2 are built | [docs/period-model.md](period-model.md) |
+| DL-144 | the archive: a seal-only period, by policy, with a receipt in front of it | [docs/deployment-runbook.md](deployment-runbook.md), [docs/period-model.md](period-model.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md) |
+| DL-145 | the review after the reset: what seven units of building left behind | [docs/access-model.md](access-model.md) |
+| DL-146 | three tiers at the perimeter: the access model is designed and the core stays authz-free | [docs/access-model.md](access-model.md), [docs/concurrency-model.md](concurrency-model.md), [docs/control-protocol.md](control-protocol.md), [docs/period-model.md](period-model.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md) |
+| DL-147 | the conformance round before the freeze: eight review findings, five frozen docs amended, two armed modes named | [docs/access-model.md](access-model.md), [docs/concurrency-model.md](concurrency-model.md), [docs/control-protocol.md](control-protocol.md), [docs/period-model.md](period-model.md), [docs/protocol-evolution.md](protocol-evolution.md) |
+| DL-148 | the second conformance round: forty-two findings held over ten passes, four frozen docs amended, the headerless answers enumerated | [docs/access-model.md](access-model.md), [docs/control-protocol.md](control-protocol.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md) |
+| DL-149 | the DL-148 code follow-ups land and the loader's escape class closes whole | [docs/access-model.md](access-model.md) |
+| DL-150 | the conformance round over the whole spec set: what eighteen sweeps found, what the code still owes, and what was deliberately left open | [docs/access-model.md](access-model.md), [docs/concurrency-model.md](concurrency-model.md), [docs/control-protocol.md](control-protocol.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
+| DL-151 | the DL-150 code ledger is paid: what the fixes closed, what verification refuted, and what stays owed with its blocking question | [docs/access-model.md](access-model.md), [docs/citation-index.md](citation-index.md), [docs/concurrency-model.md](concurrency-model.md), [docs/control-protocol.md](control-protocol.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/ir-design.md](ir-design.md), [docs/jil-statement-syntax.md](jil-statement-syntax.md), [docs/period-model.md](period-model.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md), [docs/stonebranch-semantics.md](stonebranch-semantics.md), [docs/supervisor-protocol.md](supervisor-protocol.md), [docs/uc-edge-schema.md](uc-edge-schema.md) |
+| DL-152 | the review after the perimeter: what the access work and two conformance rounds left behind | [docs/access-model.md](access-model.md) |
+| DL-153 | f()/d() joins the latch discipline: every M04/M05 edge is A-class and the same-cycle detector picks the assumption, never the class | [docs/stonebranch-semantics.md](stonebranch-semantics.md) |
+| DL-154 | the run_window skip inside a live box is a bypass: the member goes INACTIVE, casts no vote, and the box runs the completion door | [docs/autosys-semantics.md](autosys-semantics.md), [docs/live-instance-runbook.md](live-instance-runbook.md) |
+| DL-155 | the E10 timezone half closes by citation: a job without a timezone runs on the scheduler's own clock, which the oracle's engine clock already was | [docs/autosys-semantics.md](autosys-semantics.md), [docs/live-instance-runbook.md](live-instance-runbook.md), [docs/runner-design.md](runner-design.md) |
+| DL-156 | the crash window closes to the fold's own authority: replay's recovered verdicts are read, and records alone refuse to decide | [docs/runner-design.md](runner-design.md) |
+| DL-157 | the absent-version question closes: closed artifacts and evidence refuse it by name, the wrapper spool passes it, and the matrix now says so | [docs/protocol-evolution.md](protocol-evolution.md) |
+| DL-158 | the operator disarm verb lands: DISARM drops the latch and nothing else | [docs/access-model.md](access-model.md), [docs/autosys-semantics.md](autosys-semantics.md), [docs/control-protocol.md](control-protocol.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/ir-design.md](ir-design.md), [docs/live-instance-runbook.md](live-instance-runbook.md), [docs/period-model.md](period-model.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md) |
+| DL-159 | the F2 fixpoint for the split-off inline pair lands: the canonical renderer re-splits the subject, the parser does not change |  |
+| DL-160 | the rule-4/4b detector covers continuation lines: the guard runs on the joined value with seeded quote state, date rows stay exempt | [docs/jil-statement-syntax.md](jil-statement-syntax.md) |
+| DL-161 | rule 5 follows the majority: a whitespace-preceded line-final `/*` opens a multi-line comment, unterminated at EOF is loud, quoting is the glob escape | [docs/jil-statement-syntax.md](jil-statement-syntax.md), [docs/live-instance-runbook.md](live-instance-runbook.md) |
+| DL-162 | the start gate gets one name: four readers stop spelling the same partition and L011 says why it must not | [docs/ir-design.md](ir-design.md) |
+| DL-162a | amendment to DL-162, from its own adversarial review: the locality test the four readers shared was unsound, and DL-162 said three things about itself that were... | [docs/ir-design.md](ir-design.md) |
+| DL-163 | SEM-35 gets a phase-free home, and the conversion stops being spelled three times | [docs/runner-design.md](runner-design.md) |
+| DL-164 | per-job non-edge constructs get one channel and one report section: M17 joins the bundle ledger, and R-class edges and redesign flags stop double-printing in... |  |
+| DL-165 | the lead and replay state-machine-version gates become one door with a mode argument, and the absent-field split between them stays |  |
+| DL-166 | the resume tick sweep gets ONE dedup rule, and the seal cannot be its only source | [docs/period-model.md](period-model.md) |
+| DL-167 | the review after the tier: eleven findings over the drift since arch-review/2026-08-24, nine acted in three batches, two declined |  |
+| DL-168 | a closed artifact is read strict in the JSON sense from its own bytes, and a staged identity strict from its wire payload, at every reader DL-157's row names | [docs/period-model.md](period-model.md), [docs/protocol-evolution.md](protocol-evolution.md) |
+| DL-169 | the offline seal retry answers from lineage, not from a glob | [docs/period-model.md](period-model.md) |
+| DL-170 | SealRequest turns strict; the wire gate keeps its voice, for a reason DL-152's own wording never gave it | [docs/protocol-evolution.md](protocol-evolution.md) |
+| DL-171 | the resume target is the lineage's own answer: `Lineage` refuses its own illegal combination, and its two callers stop half-checking it by hand |  |
+| DL-172 | the third client folds in beside the other two: presentation stays in the CLI, DL-78's line re-held | [docs/control-protocol.md](control-protocol.md) |
+| DL-173 | the credential is one object, stamped in one place |  |
+| DL-174 | a journaled adjudication is an accounting: the resume sweep reads its own `drop` records too, and a drop-set frontier stops re-dropping | [docs/period-model.md](period-model.md) |
+| DL-175 | the S-EDGE class closes at five sites, and stays open at a sixth its own review found |  |
+| DL-176 | the seventh S-EDGE site pays DL-175's own deferred residue: the interactive explore page |  |
+| DL-177 | the duplicate-body gate learns its own module, and its own shadow |  |
+| DL-178 | the factorization review: each repeated rule gets one owner |  |
+| DL-179 | the drift review after the payoff: residue at the edges of shipped merges |  |
+| DL-180 | the first field feedback batch: five gaps surfaced by rehearsing a reported double fire | [docs/ir-design.md](ir-design.md) |
+| DL-181 | L022, the under-fire twin | [docs/ir-design.md](ir-design.md) |
+| DL-182 | PROPOSAL | [docs/runner-design.md](runner-design.md) |
+| DL-183 | the DL-75 review over arch-review/2026-08-26..HEAD -- the DL-180..182 window |  |
+| DL-184 | (2026-08-31) the DL-182 open items, ruled after a two-round fresh-context adversarial design review (plan and findings on file in the session scratchpad; every... | [docs/runner-design.md](runner-design.md) |
+| DL-185 | the DL-75 review over arch-review/2026-08-28..HEAD -- the DL-184 window |  |
+| DL-186 | shared Codex and Claude harness instructions |  |
+| DL-187 | operator TUI review follow-up | [docs/runner-design.md](runner-design.md) |
+| DL-188 | the DL-75 review over arch-review/2026-08-31..HEAD -- the DL-187 window |  |
+| DL-189 | the decommission review: four cuts, one test gap, eleven scope rows deferred | [docs/citation-index.md](citation-index.md), [docs/concurrency-model.md](concurrency-model.md), [docs/control-protocol.md](control-protocol.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md) |
+| DL-190 | the explore page collapses boxes, and its focus items trace through them |  |
+| DL-191 | the explore page shows the boolean structure of a condition |  |
+| DL-192 | the explore page draws the locks |  |
+| DL-193 | architecture review after the explore-page window | [docs/agent-workflow.md](agent-workflow.md), [docs/ir-design.md](ir-design.md) |
+| DL-194 | JIL stays the durable and exchange form; IR-F is the in-process interface |  |
+| DL-195 | the release-scope review before 1.4.0: the docs a user reads match the tree, and the release note lives in the tag |  |
+| DL-196 | the explore page's navigation is three layers: selection, highlight and visibility |  |
+| DL-197 | DL-196 slice (1): a lock hub's menu offers no walk |  |
+| DL-198 | DL-196 slice (2): a fold runs no layout, and "arrange" is the one control that moves nodes on purpose |  |
+| DL-199 | DL-196 slice (3): the three layers, the toolbar, the menus and find |  |
+| DL-200 | DL-196 slice (4): the marquee, Escape, the disabled states and the hints |  |
+| DL-201 | the DL-75 review over the navigation remodel, and the rework it asked for |  |
+| DL-202 | the browser suite gets a real per-test reset, and can be run in subsets |  |
+| DL-203 | the lint rule set is named in pyproject rather than inherited from ruff's default |  |
+| DL-204 | the explore page keeps its controls in two compact header rows |  |
+| DL-205 | ss14 B2 row 3 pins its instant instead of racing it `test_b2_a_restarted_supervisor_cannot_prove_the_seal` asserted the ss8 reconciliation refusal over a window... | [docs/supervisor-protocol.md](supervisor-protocol.md) |
+| DL-206 | the hats block holds the core's wiring stanza and nothing else |  |
+| DL-207 | `minify` emits a de-identified estate, and an unclassified attribute stops it |  |
+| DL-208 | `minify` takes `--properties` like every other catalog-consuming verb |  |
+| DL-209 | Simulation closure by classification: the coverage register (S1 of five) |  |
+| DL-210 | Production readiness, first slice: the supervisor survives its clients and its service manager; the TUI survives a period roll | [docs/concurrency-model.md](concurrency-model.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/runner-design.md](runner-design.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
+| DL-211 | CI measures coverage once, on the interpreter where measuring is free; the two spin tests stop spinning | [docs/agent-workflow.md](agent-workflow.md) |
+| DL-212 | Preflight names the day the scheduler names: the base zone is the fallback before UTC | [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-213 | Preflight always probes the calendars: the anchor defaults to now | [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-214 | Architecture review of DL-203 through DL-213: twenty findings acted, seven items declined with their re-find triggers |  |
+| DL-215 | The release publishes only what passed the CI gates and an installed-artifact smoke test, built from locked inputs | [docs/deployment-runbook.md](deployment-runbook.md) |
+| DL-216 | A client that attempted a write reports any failure as delivered, and the server drops an unterminated request | [docs/control-protocol.md](control-protocol.md) |
+| DL-217 | A lost answer is recovered by a pinned exact retry, and a collision says what the id already decided | [docs/control-protocol.md](control-protocol.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/protocol-evolution.md](protocol-evolution.md) |
+| DL-218 | The deployment example: one launcher holds the command line, the reattach line is the process's own, the units are verified statically, and the service drill is... | [docs/agent-workflow.md](agent-workflow.md), [docs/deployment-runbook.md](deployment-runbook.md) |
+| DL-219 | A restoration drill: quiescent backup and restore, over the real machinery, at a fixed path | [docs/deployment-runbook.md](deployment-runbook.md) |
+| DL-220 | Two mypy flags, not `strict`: `warn_return_any` and `disallow_any_generics`, and `list_runs()` returns a typed reply |  |
+| DL-221 | Architecture review of DL-215 through DL-220: twenty-four findings acted, five items declined with their re-find triggers |  |
+| DL-222 | Actions are pinned to commits and the `pypi` environment requires the owner's approval; a tag ruleset and `skip-existing` are declined |  |
+| DL-223 | The service drill and the release rehearsal ran and pass on main; DL-218's NOT RUN is retired | [docs/deployment-runbook.md](deployment-runbook.md) |
+| DL-224 | `run --resume` refuses a root its anchor does not name; DL-219's open item closes | [docs/deployment-runbook.md](deployment-runbook.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md) |
+| DL-225 | Specification review: one document per pass, present state only, reconciled with the code; per-document stamps and an advisory gate line | [docs/agent-workflow.md](agent-workflow.md) |
+| DL-226 | Resume kill of a surviving command group is a verified-leader group kill, and E8's TERMINATED pin is vendor-cited | [docs/runner-design.md](runner-design.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
+| DL-227 | protocol-evolution reconciliation: the absent-version rule is restated per row, and three readers get the refusals the matrix promises | [docs/protocol-evolution.md](protocol-evolution.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
+| DL-228 | control-protocol reconciliation: the DISARM audit distinction reads the target's revision, the scalar-string rule covers the fields a verb reads, and a... | [docs/control-protocol.md](control-protocol.md) |
+| DL-229 | supervisor-protocol reconciliation: nine items ruled | [docs/supervisor-protocol.md](supervisor-protocol.md) |
+| DL-230 | The documentation audit lands: ops-model.md is folded and deleted, agent-harness-review.md is deleted | [docs/agent-workflow.md](agent-workflow.md), [docs/citation-index.md](citation-index.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md) |
+| DL-231 | access-model.md is frozen | [docs/access-model.md](access-model.md) |
+| DL-232 | concurrency-model reconciliation: a strictly earlier timer goes before a later command, one KILL per run per batch, and a held SPAWN applies only to a job still... |  |
+| DL-233 | The DISARM audit distinction is the trace reason, not the revisions map | [docs/control-protocol.md](control-protocol.md), [docs/period-model.md](period-model.md) |
+| DL-234 | Supersession is decided before the routing hold, and a run has its one identity from the instant its SPAWN is planned | [docs/concurrency-model.md](concurrency-model.md) |
+| DL-235 | CHANGE_STATUS INACTIVE on a launched run: no KILL, the stale-completion gate rejects a completion whose row is not STARTING or RUNNING, and the state-machine... | [docs/autosys-semantics.md](autosys-semantics.md), [docs/runner-design.md](runner-design.md) |
+| DL-236 | The workflow examples get an opt-in integration lane at the operator's interfaces | [docs/agent-workflow.md](agent-workflow.md) |
+| DL-237 | Joint review of the workflow examples: what was fixed and what stands | [README.md](../README.md) |
+| DL-238 | CLI help is user prose; design citations live in code comments |  |
+| DL-239 | Repository links in README.md are relative; the package readme rewrites them at build time | [README.md](../README.md) |
+| DL-240 | Real execution refuses three carried-but-unapplied inputs at preflight: envvars, $$-global substitution, chk_files | [docs/autosys-semantics.md](autosys-semantics.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-241 | `term_run_time: 0` arms no timer; it means no run-time limit | [docs/autosys-semantics.md](autosys-semantics.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-242 | Box-cycle state: a box start resets its members, an operator's INACTIVE resolves a member and cascades from a box, and an idle box ignores INACTIVE members | [docs/autosys-semantics.md](autosys-semantics.md), [docs/runner-design.md](runner-design.md), [docs/stonebranch-semantics.md](stonebranch-semantics.md) |
+| DL-243 | ON_NOEXEC as an event-time INACTIVE transition, the ON_ICE ordinary-atom truth table, and FORCE_STARTJOB clearing ON_ICE/ON_HOLD on a non-live job | [docs/autosys-semantics.md](autosys-semantics.md), [docs/ir-design.md](ir-design.md), [docs/simulation-coverage.md](simulation-coverage.md), [docs/stonebranch-semantics.md](stonebranch-semantics.md) |
+| DL-244 | An unspecified holiday action makes a holcal date a non-workday regardless of its weekday, and WORKDAYS excludes it too | [docs/autosys-semantics.md](autosys-semantics.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-245 | Scanner inventory gains update_blob/update_glob; a literal auto_blobt blob region stops a phantom statement | [docs/jil-statement-syntax.md](jil-statement-syntax.md) |
+| DL-246 | run_window at box start and for standalone jobs: a box start decides a waiting member's window disposition, and a standalone skip moves the job to INACTIVE | [docs/autosys-semantics.md](autosys-semantics.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-247 | Machine load is checked only for a positive priority but held by every start, and a load waiter blocks lower priorities on its machine | [README.md](../README.md), [docs/autosys-semantics.md](autosys-semantics.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-248 | A relative must_complete deadline belongs to the schedule slot: the tick arms it at tick plus that slot's offset, and a single relative must-time offset also... | [docs/autosys-semantics.md](autosys-semantics.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-249 | run_window endpoints across a DST change follow the vendor's rules | [docs/autosys-semantics.md](autosys-semantics.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-250 | Vendor support limits and evidence for pinned defaults, with no behavior change; Q11 opens for the WEKR reading | [docs/autosys-semantics.md](autosys-semantics.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-251 | Escaped-colon time values accepted; must_*_times above 23:59 stays a refusal, now named | [docs/autosys-semantics.md](autosys-semantics.md), [docs/jil-statement-syntax.md](jil-statement-syntax.md) |
+| DL-252 | Semantic switches: production-selectable readings, first switch ice-lookback; negative exit codes refused with their reason | [README.md](../README.md), [docs/autosys-semantics.md](autosys-semantics.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-253 | Absolute must_start_times and must_complete_times are accepted over 00:00-71:59 and armed as alarms; must_start arms one deadline at a time | [docs/autosys-semantics.md](autosys-semantics.md), [docs/ir-design.md](ir-design.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-254 | ON_ICE, ON_HOLD and ON_NOEXEC are ignored where the vendor says they are | [docs/autosys-semantics.md](autosys-semantics.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-255 | A job waiting on a named resource blocks lower priorities that name it | [docs/autosys-semantics.md](autosys-semantics.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-256 | Renewable FREE follows the vendor default; held units, RELEASE_RESOURCE and the FORCE_STARTJOB reuse rule | [docs/access-model.md](access-model.md), [docs/autosys-semantics.md](autosys-semantics.md), [docs/control-protocol.md](control-protocol.md), [docs/ir-design.md](ir-design.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-257 | Semantic switch queued-recheck: what a job leaving QUE_WAIT re-checks, the vendor's EvaluateQueuedJobStarts; default 0 | [README.md](../README.md), [docs/autosys-semantics.md](autosys-semantics.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-258 | `fw-existence` switch: the vendor's immediate-completion reading for an FW job with no minimum size, selectable | [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-259 | WEKR selects a week of the year; the wekr-first-week switch places week 1; Q11 closed | [docs/autosys-semantics.md](autosys-semantics.md), [docs/citation-index.md](citation-index.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-260 | Start times follow the vendor's DST rules by default; fold=0 stays selectable as `dst-start-times=fold0` | [docs/autosys-semantics.md](autosys-semantics.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-261 | Production paths run under the pinned switches |  |
+| DL-262 | Review by change class, single-ruling escalation, and narrower peer passes | [docs/agent-workflow.md](agent-workflow.md) |
+| DL-263 | Anchor and claim reads are strict | [docs/protocol-evolution.md](protocol-evolution.md) |
+| DL-264 | CHANGE_STATUS refuses a status the oracle cannot inject | [docs/control-protocol.md](control-protocol.md) |
+| DL-265 | Subprocess coverage is measured and reported | [README.md](../README.md), [docs/agent-workflow.md](agent-workflow.md) |
+| DL-266 | Managed backup quiescence, one upgrade table, and a local service drill | [docs/deployment-runbook.md](deployment-runbook.md) |
+| DL-267 | A stalled subscriber is removed at a fixed byte budget | [README.md](../README.md), [docs/control-protocol.md](control-protocol.md), [docs/deployment-runbook.md](deployment-runbook.md) |
+| DL-268 | An operator path at the front of the runbook, a retirement procedure and a monitoring recipe | [README.md](../README.md), [docs/deployment-runbook.md](deployment-runbook.md) |
+| DL-269 | The branch gate covers the state-machine modules | [README.md](../README.md) |
+| DL-270 | The release note answers the upgrade rows, and the integration's corrections |  |
+| DL-271 | The drill's steps run unprivileged with sudo, locally as on the runner | [docs/deployment-runbook.md](deployment-runbook.md) |
+| DL-276 | A generated index of the decision log |  |
