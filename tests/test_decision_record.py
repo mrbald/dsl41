@@ -909,7 +909,7 @@ def test_subscribe_forwards_decision_at_least_once_across_the_seam(short_root: P
                 )
                 await writer.drain()
                 ack = json.loads(await asyncio.wait_for(reader.readline(), timeout=2.0))
-                assert ack == {"ok": True, "subscribed": True}
+                assert ack == {"ok": True, "subscribed": True, "since": 0}
 
                 backfilled: list[dict[str, Any]] = []
                 while not any(r.get("kind") == "ON_HOLD" for r in backfilled):
@@ -980,7 +980,7 @@ def test_cli_query_subscribe_names_the_version_and_streams(short_root: Path) -> 
             assert proc.stdout is not None
             try:
                 first = json.loads(await asyncio.wait_for(proc.stdout.readline(), timeout=20.0))
-                assert first == {"ok": True, "subscribed": True}, first
+                assert first == {"ok": True, "subscribed": True, "since": 0}, first
                 seen: list[dict[str, Any]] = []
                 while not any(r.get("rec") == "decision" for r in seen):
                     seen.append(

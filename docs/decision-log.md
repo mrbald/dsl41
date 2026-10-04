@@ -17794,3 +17794,81 @@ relitigate an entry; append a new one.
   a crashed opener restarting into a genesis, fixed by the launcher's
   refusal. Round 3: no material finding; its last minor, that a shape-2
   wrapper must also copy that refusal, is fixed in the runbook.
+- DL-267 A stalled subscriber is removed at a fixed byte budget
+  (2026-10-04; runner_journal.py, runner_control.py, cli_control.py,
+  control-protocol §5 and §6, tests/test_subscriber_bound.py)
+  THE GAP. Each subscribe stream had an unbounded queue in the engine.
+  A client that stopped reading, such as a monitoring pipe whose consumer
+  stalled, grew that queue for as long as the stall lasted. The handler
+  sat in `drain` with no deadline. A second defect sat behind it: a
+  handler's teardown closed the transport and waited for it to close. A
+  close keeps unsent bytes until the peer reads them, so a peer that
+  stopped reading held the handler forever, and server shutdown waited on
+  it and hung. That held for request/response connections too, and for
+  a revoked stream.
+  THE BUDGET. Each subscription may hold `4 × LINE_LIMIT`, 64 MiB, of
+  live records not yet written to its socket, counted in stream-line
+  bytes. That is three request lines for an input record, because the
+  stream escapes non-ASCII characters, plus one request line for the
+  largest decision a bundled client can read. Both bundled readers take
+  stream lines up to the same bound.
+  THE RULE. A record enters an empty backlog; otherwise only if backlog
+  plus record stays within the budget. The queued backlog is therefore at
+  most the budget or one record, whichever is larger, plus one record in
+  the transport. A reading subscriber with an empty backlog is not
+  removed by one admitted command whose records fit the budget. A larger
+  burst removes it, because the engine applies queued commands without
+  yielding (concurrency-model §4); the client resumes from its cursor
+  and loses nothing. A refused record removes the subscription. The
+  journal drops its backlog and tells the owner only after every other
+  subscription has the record. The owner cancels the handler first, then
+  reports on stderr, best effort. The append has already succeeded, and
+  no failure in the removal, a broken stderr included, reaches it. The
+  stream ends with EOF and no terminal line: EOF and the §6 cursor are
+  the signal.
+  THE BACKFILL. It is outside the budget and bounded by the retained WAL
+  from the cursor's segment. Each record is released once sent, and the
+  phase holds nothing once the live stream starts.
+  THE HANGUP. On every control connection, an overflow or a revocation
+  aborts at once. Every other end the server makes closes and gives the
+  peer 2 s (`HANGUP_GRACE_S`) to take its unsent bytes, then aborts. A
+  reading client still gets an answer queued at shutdown, and a stalled
+  peer delays a shutdown by at most the grace.
+  THE CURSOR. The ack names `since`: the request's, or the admission
+  frontier sampled for the seam. It is an additive answer field, so it is
+  not a new dialect (DL-217). A client reconnects with the last `seq` it
+  read or, having read none, the ack's `since`. The existing backfill,
+  seam and gap rules cover the rest. There is no second durable feed.
+  THE CLIENTS. `dsl41 query subscribe` exits 2 when the engine ends its
+  stream, by a hangup, a torn line or an answer line. It names the exact
+  `--since` on stderr. An operator interrupt still exits 0. A stream line
+  past the budget raises `StreamLineTooLong` and names no `--since`,
+  since resubscribing at the same cursor would meet it again. The TUI and
+  the served TUI are unchanged: they reconnect after one second and
+  repoll.
+  TESTS. `tests/test_subscriber_bound.py`, on real sockets and real
+  mutations. A stalled stream backpressures, is removed at the budget,
+  and its handler ends at once. A healthy stream gets every record, and
+  the engine keeps admitting. A reconnect at the last `seq` gets the rest
+  exactly once. The same holds for a stall inside the backfill and for a
+  CLI pipe whose consumer stops. Other tests cover a request of
+  LINE_LIMIT bytes, ASCII and three-times escaped, with a reading
+  subscriber; a burst past the budget, from the journal and from many
+  queued `Engine.submit` commands on a real socket, with the bound held
+  at every offer; an over-limit stream line; a broken stderr; an
+  overflow at the `seal` record; and shutdown with a stalled stream, a
+  stalled request peer and a reading client of a large answer. Each was
+  shown to fail with its fix removed.
+  REVIEW. Opus and Codex, three rounds each. Round 1: both found that a
+  broken stderr in the removal could raise after the durable write. Opus
+  added a shutdown hang on the normal-return path, an abort that cut a
+  reading client's answer, a reconnect with no cursor and a test that
+  could not fail. Codex added backfill lists held for the life of the
+  stream, and an input at the line limit evicting a reading subscriber
+  under the first 8 MiB budget. Round 2: Codex found the exemption the
+  rework had added for a waiting subscriber left the backlog uncapped. The
+  reviewers disagreed on it, and the Fable advisor ruled to drop it,
+  narrowing the earlier rule to one command whose records fit the budget.
+  Opus found a resume hint that could loop on an unreadable line. Round 3:
+  no material finding from either; the last minor, the §2 and §6 client
+  read limit, is fixed.

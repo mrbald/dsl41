@@ -4453,7 +4453,7 @@ def test_pr49_the_backfill_spans_segments_after_a_boundary(tmp_path: Path) -> No
         streamed = _subscribed(opened, run_root, since=0)
     finally:
         _close(opened)
-    assert streamed[0] == {"ok": True, "subscribed": True}
+    assert streamed[0] == {"ok": True, "subscribed": True, "since": 0}
     body = streamed[1:]
     assert [r["period_id"] for r in body if r.get("rec") == "segment"] == [1, 2]
     # both admitted inputs, each exactly once, in estate index order
@@ -4566,7 +4566,7 @@ def test_pr49_a_cursor_inside_the_live_period_reads_one_segment(tmp_path: Path) 
         ]
         wal_path(run_root, 1).write_bytes(b"{not a record at all\n")
         streamed = _subscribed(opened, run_root, since=under_c2[0])
-        assert streamed[0] == {"ok": True, "subscribed": True}
+        assert streamed[0] == {"ok": True, "subscribed": True, "since": under_c2[0]}
         assert not any(r.get("ok") is False for r in streamed[1:])
         assert not any(r.get("gap") for r in streamed[1:])
         # and the counterpart, from the same damaged root: a cursor that
@@ -4590,7 +4590,7 @@ def test_a_foreign_file_under_wal_refuses_the_backfill_on_the_stream(tmp_path: P
     try:
         (run_root / "wal" / "notes.txt").write_text("an operator's note\n")
         streamed = _subscribed(opened, run_root, since=0)
-        assert streamed[0] == {"ok": True, "subscribed": True}
+        assert streamed[0] == {"ok": True, "subscribed": True, "since": 0}
         assert streamed[1]["ok"] is False and "not a segment file" in streamed[1]["error"]
         assert len(streamed) == 2  # refused, not refused-and-then-streamed
         # the counterpart: remove it and the same subscription works
