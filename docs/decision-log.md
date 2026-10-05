@@ -19038,7 +19038,8 @@ relitigate an entry; append a new one.
   register's `event:ON_ICE` row (revision 3) and Q6 row name the moment.
   The completion door adds 74 lines to oracle.py and the register rows grow
   by 4; scripts/arch_baseline.json takes the new sizes with this entry
-  (DL-283's practice).
+  (DL-283's practice), with runner_adapters.py's 2-line shrink from
+  DL-284's docstrings.
   REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass, the
   Fable pass in place of Codex at the owner's instruction. The Opus reviewer
   found that an ice on a queued member skipped the box overrides, that a
@@ -19128,16 +19129,16 @@ relitigate an entry; append a new one.
   caller over an unrefused catalog still applies the code, as it runs an
   unsized resource unthrottled (DL-50 (5), enforcement is preflight). No
   state-machine version move: no replayed input derives anything new.
-  NOT RESUME-SAFE FOR SUCH AN ESTATE. Preflight runs at `run --resume`, at
-  the live boundary check (`validate_staged` over the successor catalog)
-  and in the offline sealer (`boundary.preflight_errors`). An estate that
-  ran with a depletable and FREE=Y or FREE=A is refused at each of them
-  after the upgrade, so the release is not resume-safe for it
-  (deployment-runbook §7 row 2). The owner fixes the catalog first.
+  UPGRADES. Preflight runs at `run --resume`, at the live boundary check
+  (`validate_staged` over the successor catalog) and in the offline sealer
+  (`boundary.preflight_errors`); each refuses such a catalog. DL-285 moves
+  the state-machine version, so the next release is deployment-runbook §7
+  row 4 (drain, final seal, new estate) and no `run --resume` crosses it:
+  the new estate's first run refuses the catalog until it drops FREE or
+  writes FREE=N. Row 2 would apply only to a later same-version release.
   RELEASE NOTE (one line for the tag message): "Preflight now refuses
-  FREE=Y or FREE=A on a depletable resource (DL-287); an estate using it
-  is not resume-safe: run --resume, the boundary check and the offline
-  sealer refuse it until the catalog drops FREE or writes FREE=N."
+  FREE=Y or FREE=A on a depletable resource (DL-287); drop FREE or write
+  FREE=N before the new estate's first run."
   REGISTER. `free_code:A#depletable` and `free_code:Y#depletable` are
   REFUSED rows citing `runner_preflight._resource_preflight`; their effect
   names Q12. Q12 carries no label there, since a label names a pinned
