@@ -87,6 +87,7 @@ stateDiagram-v2
 - `test_dl256_omitted_free_holds_after_failure_until_release_resource`
 - `test_dl256_force_start_of_a_failed_holder_reuses_its_units`
 - `test_dl256_held_units_never_overcommit_under_force_and_release`
+- `test_dl256_a_circular_wait_over_held_units_breaks_by_an_operator_act`
 - `test_dl256_held_units_cross_the_seal_until_release_resource`
 - `test_dl256_a_row_that_is_not_live_may_carry_a_resources_held_units`
 - `test_dl257_a_queued_job_whose_condition_went_false`
@@ -101,16 +102,13 @@ Every machine shares the [no transition inventory](../risk-map.md#no-transition-
 ## Gaps found
 
 - A circular wait over held units can be built in one catalog with no operator act.
-  - Resources X and Y are renewable, amount 1. Job a has priority 1 and requests (X, QUANTITY=1, FREE=N) AND (Y, QUANTITY=1, FREE=A). Job b has priority 2 and requests (Y, QUANTITY=1, FREE=Y).
-  - Sequence: STARTJOB a, a ends FAILURE; STARTJOB b, b ends FAILURE; STARTJOB a; STARTJOB b.
-  - Result, reproduced through `Oracle.feed`: a is QUE_WAIT holding r:X, and b is QUE_WAIT holding r:Y.
-  - a cannot proceed: it is short on Y, which b holds. A holder that cannot be admitted queues and keeps its held units (`oracle.py:1822-1823`, DL-256 at `decision-log.md:16964-16968`).
-  - b cannot proceed: its own held Y would fit, but a has a lower priority number, names Y and is short, so a blocks b (`oracle.py:1956`; `capacity.py:271-327`, with a's own units credited at `capacity.py:318`, DL-255).
-  - Only RELEASE_RESOURCE, or KILLJOB followed by FORCE_STARTJOB, breaks the wait.
-  - DL-256 accepts hold-and-wait, and DL-255 records a waiter that never fits; no DL entry records this cycle.
-  - The claim of no hold-and-wait still stands in the module docstring of `oracle.py` (lines 224-225) and in the docstring of `test_dl50_admission_never_overcommits_and_is_deadlock_free` (`tests/test_resources.py:67-68`). That test checks liveness only for SUCCESS completions on one resource. No test checks liveness with held units.
-- Two comments say reservations exist exactly while a row is live: the comment above `LIVE` in `oracle_state.py`, and the `_settle_row` docstring in `oracle.py`.
-  Since DL-256 a row that is not live may keep held units (`may_outlive_run`).
+  [DL-286](../decision-log.md) records it as a stated limit, with no static check; the [risk map](../risk-map.md#held-unit-circular-wait) gives the reproduction.
+  - DL-256's hold-and-wait composes with DL-255's priority block: a higher-priority holder waits for a unit that a lower-priority holder keeps, and blocks that holder.
+  - Only an operator act breaks it: RELEASE_RESOURCE on the job that holds the lacked unit, or KILLJOB on either job and then FORCE_STARTJOB on it.
+    RELEASE_RESOURCE on the blocking waiter frees its own units but leaves the wait.
+    A forced start of a holder runs on its held units without the unit it lacks (DL-256's reuse rule).
+  - `test_dl256_a_circular_wait_over_held_units_breaks_by_an_operator_act` and `test_dl256_releasing_the_blockers_own_held_unit_leaves_the_circular_wait` pin both.
+    The DL-50 liveness property covers SUCCESS completions only, and its docstring says so.
 - `release_policy` in `capacity.py` says a depletable never frees, as SEM-16 and DL-50 do.
   The code applies an explicit `FREE` code to a depletable too: one with `FREE=A` frees its units when its run completes, so they are never consumed.
   Preflight does not refuse that combination.

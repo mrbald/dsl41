@@ -100,8 +100,8 @@ Every machine shares the [no transition inventory](../risk-map.md#no-transition-
 
 ## Gaps found
 
-- SEM-22 says: "The bypass overrides manual status changes to members while the box is ON_NOEXEC."
-  DL-254 "NOT MODELED" records a different vendor sentence: CHANGE_STATUS has no effect on an ON_NOEXEC job, and a box CHANGE_STATUS INACTIVE leaves ON_NOEXEC members' status alone.
-  The code reads the SEM-22 sentence as inherited bypass: a member bypasses on its own flag or any containing box's (`_noexec_bypasses` docstring, `oracle.py`).
-  Neither sentence blocks an injected STATUS: `Oracle._handle_status` has no flag check.
-  The SEM-22 entry carries no not-modeled note for either sentence.
+- An injected STATUS still moves a job that is ON_NOEXEC: `Oracle._handle_status` has no flag check.
+  The vendor says CHANGE_STATUS has no effect on an ON_NOEXEC job, and a box CHANGE_STATUS INACTIVE leaves ON_NOEXEC members' status alone.
+  [SEM-22](../autosys-semantics.md#sem-22--on_noexec-v) records both rules in a not-modeled note that points at [DL-254](../decision-log.md).
+  It also marks the inherited bypass, a member bypassing under a flagged box, as a project pin with no vendor source, and names the corners it decides.
+  Whether the oracle should follow the vendor rules is the owner's decision; DL-254 deferred it.

@@ -6,8 +6,9 @@ BOTH oracle-direct and engine arms; this file adds:
 
   * the cross-order SAFETY + LIVENESS property (DL-50): the deterministic
     oracle picks one representative trace, so we certify -- across permuted
-    admissible orders -- that no bucket is ever over-committed and that the run
-    is deadlock-free (every runnable job eventually admits). A failure here is
+    admissible orders -- that no bucket is ever over-committed and that a run
+    whose completions all succeed is deadlock-free (every runnable job
+    eventually admits; held units are DL-286's stated limit). A failure here is
     a real bug OR a real order-dependence, surfaced, not hidden;
   * depletable (res_type D) and FREE=N: units that never return;
   * machine load with priorities, arrivals, completions and FORCE starts:
@@ -64,9 +65,12 @@ def test_dl50_admission_never_overcommits_and_is_deadlock_free(data: st.DataObje
     """For any capacity, any set of runnable demands, and ANY order of same-
     instant STARTJOBs and completions: (1) no bucket is ever over-committed
     (the safety invariant that makes the manager trustworthy), and (2) every
-    job eventually admits (deadlock-freedom -- the all-or-nothing acquire has
-    no hold-and-wait). Demands are clamped to <= capacity so each job CAN run;
-    an unclamped q>capacity would legitimately hang (a distinct, refused case)."""
+    job eventually admits (deadlock-freedom -- every completion is SUCCESS,
+    so no job holds units from an earlier run, and the all-or-nothing acquire
+    then has no hold-and-wait). Units held from an earlier run can build a
+    circular wait; that is a stated limit (DL-286), pinned in test_oracle.py.
+    Demands are clamped to <= capacity so each job CAN run; an unclamped
+    q>capacity would legitimately hang (a distinct, refused case)."""
     capacity = data.draw(st.integers(min_value=1, max_value=4))
     demands = data.draw(st.lists(st.integers(min_value=1, max_value=4), min_size=2, max_size=6))
     demands = [min(d, capacity) for d in demands]

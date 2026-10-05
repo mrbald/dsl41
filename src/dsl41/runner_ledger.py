@@ -110,7 +110,10 @@ from dsl41.runner_clock import EngineError
 #: 16 since DL-260: start times follow the vendor's DST rules by default and
 #: the oracle names a tick's slot by instant, so ticks move on a DST change
 #: day and a replay names slots and arms must times differently.
-STATE_MACHINE_VERSION = 16
+#: 17 since DL-285: an ON_ICE on a member that has not run in a RUNNING box
+#: runs the box's completion check, so a replay with such an event can
+#: complete a box that v16 left RUNNING.
+STATE_MACHINE_VERSION = 17
 
 LOCK_NAME = "leader.lock"
 

@@ -76,7 +76,9 @@ JobStatus = Literal[
 INJECTABLE_STATUSES: frozenset[str] = frozenset(get_args(JobStatus)) - {"QUE_WAIT"}
 
 TERMINAL: frozenset[str] = frozenset({"SUCCESS", "FAILURE", "TERMINATED"})
-# Reservations exist exactly while a row is in LIVE (period-model ss5); the
+# A run's reservations are taken while a row is in LIVE (period-model ss5)
+# and released on leaving it, except the units a renewable's policy does not
+# free: those stay on a row that is not live (DL-256, `may_outlive_run`). The
 # release edge (DL-120), the SPAWN edge (DL-232) and the completion gate
 # (DL-235) read it.
 LIVE: frozenset[str] = frozenset({"STARTING", "RUNNING"})

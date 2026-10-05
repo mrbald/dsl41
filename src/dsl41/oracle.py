@@ -221,8 +221,11 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
   `resources:` semaphore units (QUANTITY vs insert_resource `amount`) -- before
   RUNNING. If any bucket is short it enters QUE_WAIT and is admitted later, in
   deterministic (priority, enqueue-seq, name) order, when a holder's terminal
-  release frees room. All-or-nothing acquire => no resource hold-and-wait, so
-  no deadlock over held units; QUANTITY=1 shared == mutex. Priority blocking
+  release frees room. All-or-nothing acquire => a job that holds nothing from
+  an earlier run never holds and waits; QUANTITY=1 shared == mutex. A holder
+  of units kept from an earlier run (DL-256) queues with them, and with
+  DL-255's priority block two such holders can wait on each other for ever:
+  a stated limit, broken only by an operator act (DL-286). Priority blocking
   (below) can still starve a lower-priority job while a higher-priority
   waiter cannot fit; preflight refuses a load that can never fit, which
   bounds that wait to feasible loads (DL-247). Only a job with a
@@ -742,7 +745,7 @@ class Oracle:
         box = job_ir.box.box_name
         if box is not None:
             self._on_member_transition(box, job, old, new)
-            self._on_descendant_transition(job, new)
+            self._on_descendant_transition(job, new, resolved=self._resolves(box, job, old, new))
         if job_ir.job_type == "BOX" and new in TERMINAL:
             self._disarm_members(job)
 
@@ -783,10 +786,12 @@ class Oracle:
         DL-120: the release edge is LEAVING the live statuses, not reaching
         a terminal one. The two coincide for every ordinary run and differ
         only for an injected STATUS INACTIVE on a live holder, which used to
-        strand the units in a `_held` record no row could see. Reservations
-        exist exactly while STARTING or RUNNING (period-model ss5), so the
-        release is on that same edge; a non-SUCCESS exit spends what a
-        depletable was always going to spend.
+        strand the units in a `_held` record no row could see. A run's
+        reservations are taken on entering STARTING or RUNNING (period-model
+        ss5), so the release is on the edge that leaves them; a non-SUCCESS
+        exit spends what a depletable was always going to spend. What the
+        policy does not free stays on a row that is no longer live (DL-256,
+        below; `may_outlive_run`).
 
         DL-256: a renewable's units that the policy does not free (FREE=N,
         and FREE=Y or an omitted FREE under `renewable-free=Y` after a
@@ -1123,6 +1128,7 @@ class Oracle:
         # the rows are frozen (DL-86), so hold the value, not a stale row
         status = self._runtime(job).status
         if kind == "ON_ICE":
+            iced = self._runtime(job).on_ice  # a second ice resolves nothing
             self.store.set_flags(job, on_ice=True)
             self._record(job, "ON_ICE", "sendevent ON_ICE")
             if status == "QUE_WAIT":
@@ -1133,7 +1139,11 @@ class Oracle:
                 self.store.dequeue_waiter(job)
                 self._set_status(job, "INACTIVE", cause="iced while queued (DL-50)")
             else:
-                # SEM-20: downstream conditions now treat this job as satisfied
+                # SEM-20, DL-285: the box rules first, as a transition runs
+                # them before its wakes; then downstream conditions treat
+                # this job as satisfied
+                if not iced:
+                    self._ice_resolves_member(job, status)
                 self._wake_referencers(job, cause=f"{job!r} put ON_ICE")
         elif kind == "OFF_ICE":
             self.store.set_flags(job, on_ice=False)
@@ -1739,12 +1749,12 @@ class Oracle:
         # already INACTIVE: no transition to ride -- run the same door here,
         # then the ancestors' transitive overrides, as a resolved INACTIVE
         # transition would (SEM-12, DL-242)
-        box_ir = self.catalog.jobs[box]
-        if not self._apply_box_overrides(
-            box, box_ir, job_ir.name, "INACTIVE", completion_moment=True
-        ) and self._all_members_done(box):
-            self._fold_box_default(box, box_ir)
-        self._on_descendant_transition(job_ir.name, "INACTIVE")
+        self._completion_door(box, job_ir.name, "INACTIVE", completion_moment=True)
+        self._on_descendant_transition(
+            job_ir.name,
+            "INACTIVE",
+            resolved=self._resolves(box, job_ir.name, "INACTIVE", "INACTIVE"),
+        )
 
     def _ancestor_boxes(self, job: str) -> list[str]:
         """Containing boxes, innermost first (SEM-17). Lowering rejects
@@ -1763,12 +1773,17 @@ class Oracle:
     def _noexec_bypasses(self, job_ir: JobIR) -> bool:
         """SEM-22: True when this start bypasses to SUCCESS instead of
         running. A job bypasses on its own ON_NOEXEC flag, and a member also
-        bypasses while a box that contains it is ON_NOEXEC ("the bypass
-        overrides manual status changes to members while the box is
-        ON_NOEXEC"). A BOX never bypasses: an ON_NOEXEC box "goes RUNNING,
-        members are bypassed to SUCCESS as their conditions are met", so the
-        rule is applied once per box level and a member box walks its own
-        members too."""
+        bypasses while a box that contains it is ON_NOEXEC. No vendor text
+        states that inheritance (SEM-22 [?]). DL-254's cascade flags every
+        job in the tree when a box is put ON_NOEXEC, so the inheritance
+        decides only corners where a member lacks the flag under a flagged
+        box: a box flagged at definition time, whose members do not take
+        the flag (SEM-24); a member taken OFF_NOEXEC alone under a flagged
+        box; and a job that a later period's catalog adds to, or moves
+        under, a flagged box. A BOX never bypasses: an
+        ON_NOEXEC box "goes RUNNING, members are bypassed to SUCCESS as
+        their conditions are met", so the rule is applied once per box
+        level and a member box walks its own members too."""
         if job_ir.job_type == "BOX":
             return False
         if self._runtime(job_ir.name).on_noexec:
@@ -2382,22 +2397,86 @@ class Oracle:
         if box_rt.status == "TERMINATED":
             return  # SEM-13: sticky until the next box start
         # SEM-12 gating: overrides are evaluated on member transitions. An
-        # INACTIVE verdict that resolves the member -- a window skip
-        # (DL-154) or an injected STATUS INACTIVE (DL-242) -- is a
-        # completion moment: the full completion door runs, overrides first,
-        # the default fold only if none fired.
-        resolved = new == "INACTIVE" and member in box_rt.window_skipped_members
-        if box_rt.status == "RUNNING" and (new in TERMINAL | {"RUNNING"} or resolved):
-            if self._apply_box_overrides(box, box_ir, member, new, completion_moment=resolved):
-                return
-        if box_rt.status == "RUNNING" and self._all_members_done(box):
-            self._fold_box_default(box, box_ir)
+        # INACTIVE verdict that resolves the member is a completion moment:
+        # the full completion door runs, overrides first, the default fold
+        # only if none fired.
+        resolved = self._resolves(box, member, old, new)
+        if box_rt.status == "RUNNING":
+            self._completion_door(
+                box,
+                member,
+                new,
+                completion_moment=resolved,
+                overrides=new in TERMINAL | {"RUNNING"} or resolved,
+            )
         elif box_rt.status not in LIVE and new in TERMINAL:
             # SEM-15 [C]: a member change on a non-running box re-derives the
             # box's status (TERMINATED already returned above, SEM-13 sticky)
             self._idle_box_recompute(box, box_ir, cause=f"member {member!r} changed")
 
-    def _on_descendant_transition(self, member: str, new: str) -> None:
+    def _completion_door(
+        self, box: str, member: str, new: str, *, completion_moment: bool, overrides: bool = True
+    ) -> None:
+        """The completion door of a RUNNING box (SEM-11, SEM-12): the
+        overrides first when `overrides`, then the default fold only if none
+        fired and every member is done. A member transition, a window skip
+        on a member already INACTIVE (DL-154) and an ON_ICE on a member that
+        has not run (DL-285) all pass through it."""
+        box_ir = self.catalog.jobs[box]
+        if overrides and self._apply_box_overrides(
+            box, box_ir, member, new, completion_moment=completion_moment
+        ):
+            return
+        if self._all_members_done(box):
+            self._fold_box_default(box, box_ir)
+
+    def _resolves(self, box: str, member: str, old: str, new: str) -> bool:
+        """Whether an INACTIVE transition resolves `member` in a RUNNING run
+        of its parent `box` (SEM-11's carve-outs): a window skip (DL-154) or
+        an operator's INACTIVE (DL-242), both marked on the box row, or an
+        ON_ICE that takes a queued member that has not run out of the queue
+        (DL-285). Only that ice moves an iced row from QUE_WAIT."""
+        box_rt = self._runtime(box)
+        return (
+            new == "INACTIVE"
+            and box_rt.status == "RUNNING"
+            and (
+                member in box_rt.window_skipped_members
+                or (
+                    old == "QUE_WAIT"
+                    and self._runtime(member).on_ice
+                    and member not in box_rt.ran_members
+                )
+            )
+        )
+
+    def _ice_resolves_member(self, job: str, status: str) -> None:
+        """SEM-20 (DL-285): the vendor removes an iced job from all
+        conditions and logic, and `_all_members_done` skips it, so an ON_ICE
+        on a member of a RUNNING box is a completion moment for that box and
+        every RUNNING ancestor, as a window skip is (DL-154). The flag moves
+        no status, so no transition carries the check; it runs here, for an
+        ice that is not queued (a queued member's INACTIVE transition
+        carries it, `_resolves`). A member that ran keeps its vote, and one
+        already resolved or iced was already out of the fold: neither is a
+        completion moment. A box that is not RUNNING re-derives nothing
+        (SEM-15 reads a member's status, which the ice does not move)."""
+        job_ir = self.catalog.jobs.get(job)
+        box = job_ir.box.box_name if job_ir is not None else None
+        if box is None:
+            return
+        box_rt = self._runtime(box)
+        if (
+            box_rt.status != "RUNNING"
+            or job in box_rt.ran_members
+            or job in box_rt.window_skipped_members
+        ):
+            return
+        self._completion_door(box, job, status, completion_moment=True)
+        if self._runtime(box).status == "RUNNING":  # else its transition walked up
+            self._on_descendant_transition(job, status, resolved=True)
+
+    def _on_descendant_transition(self, member: str, new: str, *, resolved: bool) -> None:
         """SEM-12's "inside the box" is TRANSITIVE -- a grandchild is inside
         every box above it, which is what derive._is_inside implements for
         the static edge classification. So each ancestor ABOVE the direct
@@ -2408,17 +2487,12 @@ class Oracle:
         Only the SEM-12 override evaluation walks up. The default fold
         (SEM-11) and the SEM-15 idle recompute read an ancestor's OWN
         members, which a descendant transition does not move; they reach the
-        ancestor through the direct parent's own transition."""
+        ancestor through the direct parent's own transition.
+
+        `resolved`: the member was resolved in its parent's RUNNING run
+        (`_resolves`, or an ice), which is a completion moment for every
+        ancestor, as it is for the parent."""
         chain = self._ancestor_boxes(member)
-        # a resolved INACTIVE (window skip, DL-154; operator, DL-242) is a
-        # completion moment for every ancestor, as it is for the parent
-        parent = self._runtime(chain[0]) if chain else None
-        resolved = (
-            new == "INACTIVE"
-            and parent is not None
-            and parent.status == "RUNNING"
-            and member in parent.window_skipped_members
-        )
         for box in chain[1:]:  # [0] is the direct parent
             box_ir = self.catalog.jobs.get(box)
             if box_ir is None:  # pragma: no cover -- see below

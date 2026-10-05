@@ -1773,6 +1773,204 @@ def test_sem20_off_ice_later_reads_the_real_status_not_the_vendor_table() -> Non
     ]
 
 
+def _ice_box(box: str, *, extra: str = "") -> str:
+    """A box with a member that runs and a member whose condition never
+    fires, so only an ON_ICE can take the waiter out of the fold."""
+    return (
+        f"insert_job: {box}\njob_type: b\n{extra}\n"
+        f"insert_job: {box}_run\njob_type: c\ncommand: x\nmachine: m1\nbox_name: {box}\n\n"
+        f"insert_job: {box}_wait\njob_type: c\ncommand: y\nmachine: m1\nbox_name: {box}\n"
+        f"condition: s({box}_never)\n\n"
+        f"insert_job: {box}_never\njob_type: c\ncommand: z\nmachine: m1\n\n"
+    )
+
+
+@pytest.mark.parametrize(("ran", "folded"), [("SUCCESS", "SUCCESS"), ("FAILURE", "FAILURE")])
+def test_sem20_ice_on_the_last_waiting_member_completes_a_running_box(
+    ran: str, folded: str
+) -> None:
+    """SEM-20 [V], SEM-11 (DL-285): an iced job "is removed from all
+    conditions/logic", so an ON_ICE on the last member still waiting in a
+    RUNNING box runs the completion check at once. The fold votes over the
+    member that ran: its SUCCESS folds SUCCESS, its FAILURE folds FAILURE.
+    Before DL-285 the box stayed RUNNING until the next member transition."""
+    o = oracle(_ice_box("bx20i"))
+    o.feed(ev("STARTJOB", 0, job="bx20i"))
+    o.feed(ev("STATUS", 1, job="bx20i_run", status=ran))
+    assert o.store.job["bx20i"].status == "RUNNING"
+    o.feed(ev("ON_ICE", 2, job="bx20i_wait"))
+    assert transitions(o, "bx20i_wait") == ["ON_ICE"]  # the ice moves no status
+    assert transitions(o, "bx20i")[-1] == f"RUNNING->{folded}"
+    assert o.store.job["bx20i"].status_at == T0 + timedelta(minutes=2)
+
+
+def test_sem20_ice_on_a_waiting_member_fires_a_met_box_success() -> None:
+    """SEM-20, SEM-12 (DL-285): the ice is a completion moment, so a
+    box_success that reads a job outside the box, met since the last
+    member completion, fires on the ice. The specified box_success
+    suppresses the default fold, so only the override can end the run."""
+    o = oracle(
+        _ice_box("bx20o", extra="box_success: s(bx20o_ext)\n")
+        + "insert_job: bx20o_ext\njob_type: c\ncommand: e\nmachine: m1\n"
+    )
+    o.feed(ev("STARTJOB", 0, job="bx20o"))
+    o.feed(ev("STATUS", 1, job="bx20o_run", status="SUCCESS"))
+    o.feed(ev("STATUS", 2, job="bx20o_ext", status="SUCCESS"))  # no completion moment
+    assert o.store.job["bx20o"].status == "RUNNING"
+    o.feed(ev("ON_ICE", 3, job="bx20o_wait"))
+    [done] = [t for t in o.trace() if t.job == "bx20o" and t.transition == "RUNNING->SUCCESS"]
+    assert done.cause == "box_success override met (SEM-12)"
+
+
+def test_sem20_ice_on_a_waiting_grandchild_completes_the_subbox_and_its_parent() -> None:
+    """SEM-20, SEM-11, SEM-17 (DL-285): the ice runs the direct parent's
+    completion check. The subbox's own SUCCESS is a member transition of
+    the outer box, which then folds too."""
+    o = oracle(
+        "insert_job: bx20g\njob_type: b\n\n" + _ice_box("bx20g_sub", extra="box_name: bx20g\n")
+    )
+    o.feed(ev("STARTJOB", 0, job="bx20g"))
+    o.feed(ev("STATUS", 1, job="bx20g_sub_run", status="SUCCESS"))
+    assert _status(o, "bx20g", "bx20g_sub") == ["RUNNING", "RUNNING"]
+    o.feed(ev("ON_ICE", 2, job="bx20g_sub_wait"))
+    assert _status(o, "bx20g", "bx20g_sub") == ["SUCCESS", "SUCCESS"]
+
+
+def test_sem20_ice_on_a_member_that_ran_changes_nothing() -> None:
+    """SEM-20, SEM-11 (DL-285): a member that ran this execution keeps its
+    vote, so an ice on it is no completion moment. A box_success met since
+    the last member completion therefore does not fire, and the box keeps
+    waiting for its other member."""
+    o = oracle(
+        _ice_box("bx20r", extra="box_success: s(bx20r_ext)\n")
+        + "insert_job: bx20r_ext\njob_type: c\ncommand: e\nmachine: m1\n"
+    )
+    o.feed(ev("STARTJOB", 0, job="bx20r"))
+    o.feed(ev("STATUS", 1, job="bx20r_run", status="SUCCESS"))
+    o.feed(ev("STATUS", 2, job="bx20r_ext", status="SUCCESS"))
+    before = transitions(o, "bx20r")
+    o.feed(ev("ON_ICE", 3, job="bx20r_run"))
+    assert transitions(o, "bx20r") == before
+    assert o.store.job["bx20r"].status == "RUNNING"
+
+
+def test_sem15_ice_on_a_member_of_an_idle_box_rederives_nothing() -> None:
+    """SEM-15, SEM-20 (DL-285): the ice check is for a RUNNING box only.
+    An idle box re-derives on a member's status change, and the ice moves
+    no status, so a box that never ran stays INACTIVE. A check without
+    that guard would fold this one-member box SUCCESS."""
+    o = oracle(
+        "insert_job: bx20n\njob_type: b\n\n"
+        "insert_job: bx20n_m\njob_type: c\ncommand: x\nmachine: m1\nbox_name: bx20n\n"
+    )
+    o.feed(ev("ON_ICE", 0, job="bx20n_m"))
+    assert transitions(o, "bx20n") == []
+    assert o.store.job["bx20n"].status == "INACTIVE"
+
+
+def test_sem20_ice_on_a_queued_member_is_a_completion_moment() -> None:
+    """SEM-20, SEM-12 (DL-285, DL-50): an ice on a queued member settles it
+    INACTIVE through a transition, and that transition resolves it, so the
+    box's overrides run. The box_success reads only a global set since the
+    last member completion; the specified override suppresses the default
+    fold, so only a completion moment can end the run."""
+    o = oracle(
+        "insert_resource: QL20\nres_type: R\namount: 1\n\n"
+        "insert_global: GQ20\nvalue: 0\n\n"
+        "insert_job: bx20q_hold\njob_type: c\ncommand: h\nmachine: m1\n"
+        "resources: (QL20, QUANTITY=1)\n\n"
+        "insert_job: bx20q\njob_type: b\nbox_success: v(GQ20) = 1\n\n"
+        "insert_job: bx20q_run\njob_type: c\ncommand: x\nmachine: m1\nbox_name: bx20q\n\n"
+        "insert_job: bx20q_wait\njob_type: c\ncommand: y\nmachine: m1\nbox_name: bx20q\n"
+        "resources: (QL20, QUANTITY=1)\n"
+    )
+    o.feed(ev("STARTJOB", 0, job="bx20q_hold"))
+    o.feed(ev("STARTJOB", 1, job="bx20q"))
+    assert o.store.job["bx20q_wait"].status == "QUE_WAIT"
+    o.feed(ev("STATUS", 2, job="bx20q_run", status="SUCCESS"))
+    o.feed(ev("SET_GLOBAL", 3, name="GQ20", value="1"))  # no completion moment
+    assert o.store.job["bx20q"].status == "RUNNING"
+    o.feed(ev("ON_ICE", 4, job="bx20q_wait"))
+    assert o.store.job["bx20q_wait"].status == "INACTIVE"
+    [done] = [t for t in o.trace() if t.job == "bx20q" and t.transition == "RUNNING->SUCCESS"]
+    assert done.cause == "box_success override met (SEM-12)"
+
+
+def test_sem20_ice_on_a_queued_member_that_ran_is_no_completion_moment() -> None:
+    """SEM-20, SEM-11 (DL-285): a member that ran keeps its vote, also when
+    a forced re-start queued it again. The ice dequeues it to INACTIVE,
+    but that transition resolves nothing, so a box_success over a global
+    set since the last completion moment does not fire."""
+    o = oracle(
+        "insert_resource: QR20\nres_type: R\namount: 1\n\n"
+        "insert_global: GR20\nvalue: 0\n\n"
+        "insert_job: bx20k_hold\njob_type: c\ncommand: h\nmachine: m1\n"
+        "resources: (QR20, QUANTITY=1, FREE=Y)\n\n"
+        "insert_job: bx20k\njob_type: b\nbox_success: v(GR20) = 1\n\n"
+        "insert_job: bx20k_q\njob_type: c\ncommand: y\nmachine: m1\nbox_name: bx20k\n"
+        "resources: (QR20, QUANTITY=1, FREE=A)\n\n"
+        "insert_job: bx20k_w\njob_type: c\ncommand: y\nmachine: m1\nbox_name: bx20k\n"
+        "condition: s(bx20k_never)\n\n"
+        "insert_job: bx20k_never\njob_type: c\ncommand: z\nmachine: m1\n"
+    )
+    o.feed(ev("STARTJOB", 0, job="bx20k"))
+    o.feed(ev("STATUS", 1, job="bx20k_q", status="SUCCESS"))
+    o.feed(ev("STARTJOB", 2, job="bx20k_hold"))  # takes the unit
+    o.feed(ev("FORCE_STARTJOB", 3, job="bx20k_q"))  # ran, queues again
+    assert o.store.job["bx20k_q"].status == "QUE_WAIT"
+    o.feed(ev("SET_GLOBAL", 4, name="GR20", value="1"))  # no completion moment
+    o.feed(ev("ON_ICE", 5, job="bx20k_q"))
+    assert o.store.job["bx20k_q"].status == "INACTIVE"
+    assert o.store.job["bx20k"].status == "RUNNING"
+
+
+def test_sem20_ice_in_a_subbox_is_a_completion_moment_for_the_outer_box() -> None:
+    """SEM-20, SEM-12 (DL-285): an ice is a completion moment for every
+    RUNNING ancestor, as a window skip is. The subbox's own box_success
+    never holds, so it stays RUNNING and its transition cannot carry the
+    moment up; the outer box's external box_success, met since the last
+    member completion, fires on the ice itself."""
+    o = oracle(
+        "insert_job: bx20u\njob_type: b\nbox_success: s(bx20u_ext)\n\n"
+        + _ice_box("bx20u_sub", extra="box_name: bx20u\nbox_success: s(bx20u_sub_never)\n")
+        + "insert_job: bx20u_ext\njob_type: c\ncommand: e\nmachine: m1\n"
+    )
+    o.feed(ev("STARTJOB", 0, job="bx20u"))
+    o.feed(ev("STATUS", 1, job="bx20u_sub_run", status="SUCCESS"))
+    o.feed(ev("STATUS", 2, job="bx20u_ext", status="SUCCESS"))  # no completion moment
+    assert _status(o, "bx20u", "bx20u_sub") == ["RUNNING", "RUNNING"]
+    o.feed(ev("ON_ICE", 3, job="bx20u_sub_wait"))
+    assert _status(o, "bx20u", "bx20u_sub") == ["SUCCESS", "RUNNING"]
+    [done] = [t for t in o.trace() if t.job == "bx20u" and t.transition == "RUNNING->SUCCESS"]
+    assert done.cause == "box_success override met (SEM-12)"
+
+
+@pytest.mark.parametrize(
+    "first",
+    [ev("ON_ICE", 2, job="bx20t_wait"), ev("STATUS", 2, job="bx20t_wait", status="INACTIVE")],
+    ids=["iced", "resolved"],
+)
+def test_sem20_ice_on_a_member_already_out_of_the_fold_is_no_completion_moment(
+    first: Event,
+) -> None:
+    """SEM-20 (DL-285): a member already iced, or already resolved by an
+    operator's INACTIVE (DL-242), was out of the fold before the ice, so a
+    later ON_ICE on it is no completion moment. A box_success met since
+    that first act therefore does not fire."""
+    o = oracle(
+        _ice_box("bx20t", extra="box_success: s(bx20t_ext)\n")
+        + "insert_job: bx20t_ext\njob_type: c\ncommand: e\nmachine: m1\n"
+    )
+    o.feed(ev("STARTJOB", 0, job="bx20t"))
+    o.feed(ev("STATUS", 1, job="bx20t_run", status="SUCCESS"))
+    o.feed(first)  # a completion moment, with the override still unmet
+    o.feed(ev("STATUS", 3, job="bx20t_ext", status="SUCCESS"))
+    before = transitions(o, "bx20t")
+    o.feed(ev("ON_ICE", 4, job="bx20t_wait"))
+    assert transitions(o, "bx20t") == before
+    assert o.store.job["bx20t"].status == "RUNNING"
+
+
 # --------------------------------------------------------------------- 14. SEM-21 ON_HOLD
 
 
@@ -6547,6 +6745,78 @@ def test_dl256_a_holder_queued_for_another_resource_keeps_its_held_units() -> No
     assert _bucket_used(o, "r:HLOCK") == 1
 
 
+#: DL-286: `ca256` (priority 1) keeps X after a FAILURE (FREE=N) and frees Y
+#: (FREE=A); `cb256` (priority 2) keeps Y after a FAILURE (FREE=Y).
+_CYCLE_JIL = (
+    "insert_resource: CX256\nres_type: R\namount: 1\n\n"
+    "insert_resource: CY256\nres_type: R\namount: 1\n\n"
+    "insert_job: ca256\njob_type: c\ncommand: x\nmachine: m1\npriority: 1\n"
+    "resources: (CX256, QUANTITY=1, FREE=N) AND (CY256, QUANTITY=1, FREE=A)\n\n"
+    "insert_job: cb256\njob_type: c\ncommand: y\nmachine: m1\npriority: 2\n"
+    "resources: (CY256, QUANTITY=1, FREE=Y)\n"
+)
+
+
+def _circular_wait(o: Oracle | EngineHarness) -> None:
+    """Build the held-unit circular wait of DL-286 with no operator act
+    beyond starts: each job queues holding the unit the other one needs or
+    is blocked behind."""
+    o.feed(ev("STARTJOB", 0, job="ca256"))
+    o.feed(ev("STATUS", 1, job="ca256", status="FAILURE"))
+    o.feed(ev("STARTJOB", 2, job="cb256"))
+    o.feed(ev("STATUS", 3, job="cb256", status="FAILURE"))
+    o.feed(ev("STARTJOB", 4, job="ca256"))  # short on Y, which cb256 holds
+    o.feed(ev("STARTJOB", 5, job="cb256"))  # Y fits, but ca256 blocks it (DL-255)
+    assert _held_units(o, "ca256") == [("r:CX256", 1, "never")]
+    assert _held_units(o, "cb256") == [("r:CY256", 1, "success")]
+    assert _status(o, "ca256", "cb256") == ["QUE_WAIT", "QUE_WAIT"]
+
+
+@pytest.mark.parametrize(
+    "remedy",
+    [
+        [("RELEASE_RESOURCE", "cb256")],
+        [("KILLJOB", "ca256"), ("FORCE_STARTJOB", "ca256")],
+        [("KILLJOB", "cb256"), ("FORCE_STARTJOB", "cb256")],
+    ],
+    ids=["release-the-lacked-unit", "kill-and-force-the-blocker", "kill-and-force-the-holder"],
+)
+def test_dl256_a_circular_wait_over_held_units_breaks_by_an_operator_act(
+    remedy: list[tuple[EventKind, str]],
+) -> None:
+    """DL-286, a stated limit: DL-256's hold-and-wait composed with DL-255's
+    priority block builds a circular wait that no start or completion
+    breaks. Each documented remedy breaks it, and both jobs then run.
+    RELEASE_RESOURCE must free the unit the blocking waiter lacks."""
+    o = oracle(_CYCLE_JIL)
+    _circular_wait(o)
+    ran: set[str] = set()
+    minute = 6
+    for kind, job in remedy:
+        o.feed(ev(kind, minute, job=job))
+        minute += 1
+    for _ in range(2):  # end each run that started, so the other may admit
+        for job in ("ca256", "cb256"):
+            if o.store.job[job].status == "RUNNING":
+                ran.add(job)
+                o.feed(ev("STATUS", minute, job=job, status="SUCCESS"))
+                minute += 1
+    assert ran == {"ca256", "cb256"}
+
+
+def test_dl256_releasing_the_blockers_own_held_unit_leaves_the_circular_wait() -> None:
+    """DL-286: RELEASE_RESOURCE on the higher-priority waiter frees the unit
+    it holds, but it is still short on the unit the other job holds, so it
+    still blocks that job. The wait stands; DL-286 names the holder of the
+    lacked unit as the one to release."""
+    o = oracle(_CYCLE_JIL)
+    _circular_wait(o)
+    o.feed(ev("RELEASE_RESOURCE", 6, job="ca256"))
+    assert o.store.job["ca256"].reservations == ()
+    assert _held_units(o, "cb256") == [("r:CY256", 1, "success")]
+    assert _status(o, "ca256", "cb256") == ["QUE_WAIT", "QUE_WAIT"]
+
+
 @pytest.mark.parametrize(
     ("setup", "reason"),
     [
@@ -7974,9 +8244,12 @@ def test_dl257_a_rejected_member_does_not_inherit_an_earlier_skip(mode: str) -> 
 #: `br257` restarts itself through the bypassing `wr257` whenever it succeeds,
 #: and succeeds as soon as `xr257` does. `xr257` is armed and was iced past
 #: its gate, so the first edge that wakes it is `mr257` leaving the queue.
+#: The ice is a completion moment of `br257` (DL-285) while G257 is still 0,
+#: so `box_success` reads the global too: the ice alone does not end the run.
 _RESTARTING_257 = (
     _EXCLUSIONS_257["standard"] + _LOCKED_257 + "insert_global: G257\nvalue: 0\n\n"
-    "insert_job: br257\njob_type: b\nbox_success: s(xr257)\ncondition: s(wr257)\n\n"
+    "insert_job: br257\njob_type: b\nbox_success: s(xr257) & v(G257) = 1\n"
+    "condition: s(wr257)\n\n"
     "insert_job: wr257\njob_type: c\ncommand: x\nmachine: m1\nstatus: ON_NOEXEC\n"
     "condition: s(br257)\n\n"
     "insert_job: xr257\njob_type: c\ncommand: x\nmachine: m1\nbox_name: br257\n"
