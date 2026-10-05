@@ -51,8 +51,9 @@ stateDiagram-v2
 ## Invariants
 
 - One task owns the oracle, and nothing else writes it ([runner-design §4](../runner-design.md#4-engine-loop--single-writer)).
-- A timer firing and a calendar tick are inputs. Each takes the one admission order ([concurrency-model §4](../concurrency-model.md#4-admission-and-application); ticks: [DL-45](../decision-log.md) item 2).
+- A timer firing and a calendar tick are inputs. Each takes the one admission order ([concurrency-model §4](../concurrency-model.md#4-admission-and-application); ticks: [DL-45](../decision-log.md) item 2, narrowed by [DL-284](../decision-log.md)).
 - The choice is one decision with a fixed priority: input, then tick, then timer. The truth table lives in the `_next_work` docstring; [DL-145](../decision-log.md) keeps its branch count as the domain's.
+- Outside a seal ([period-model §6](../period-model.md#6-the-cutoff-barrier) step 2), a tick pops before any later-due event and any same-or-later-due timer. A queued input stamped at the tick's instant goes first ([DL-45](../decision-log.md) item 2, narrowed by [DL-284](../decision-log.md); `test_dl137_a_tick_and_an_input_stamped_alike_feed_the_input_first`).
 - On a real clock the loop commits to work only once its instant is due. An earlier instant is waited out, and an input that arrives during the wait makes the loop choose again ([DL-45](../decision-log.md) item 1).
 - On a real clock a timer due strictly before a due queued input fires first, as its own input ([DL-232](../decision-log.md); [concurrency-model §0](../concurrency-model.md#0-the-invariant)).
 - While `sealing` is set, `Engine._push` refuses new externally requested inputs and `_next_work` takes no tick. The seal itself drains the queue and admits the ticks due at or before its cutoff ([period-model §6](../period-model.md#6-the-cutoff-barrier) steps 2 and 4).
@@ -99,5 +100,4 @@ The [risk map](../risk-map.md) row "Engine work choice" lists none beyond the co
 
 ## Gaps found
 
-- DL-45 item 2 says a tick pops before any same-or-later-due timer or event commits. The code takes a queued input stamped at the same instant as a tick first: the tick row needs the tick strictly before the queue head. `test_dl137_a_tick_and_an_input_stamped_alike_feed_the_input_first` pins the code's order. A tick still goes before a timer due at the same instant.
-- The code cites DL-137 for the five-way choice. DL-137 lists that fold as deferred. No entry records that it landed; DL-145 then lists the branch count as declined for change.
+None.

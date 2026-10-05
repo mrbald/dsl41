@@ -1281,7 +1281,7 @@ def _pending_spawn_unmatched(document: dict[str, Any]) -> None:
 @_case("a watch with no start line", "greater than or equal to 1")
 def _watch_seq_zero(document: dict[str, Any]) -> None:
     # ss3.5: a dispatched watch always has `watch_seq >= 1`, because the
-    # adapter's first durable act is a `start` line
+    # adapter's first durable record is a `start` line
     document["executions"][1]["watch_seq"] = 0
 
 

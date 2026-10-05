@@ -52,7 +52,9 @@ Duties, in order (ss6a Tier 0):
 status.json outcomes (frozen in docs/supervisor-protocol.md):
   exited(exit_code) | signaled(signal) -- how the command itself ended;
   terminated(cause="parent lost")      -- the wrapper killed it on EOF;
-  spawn_failed(error)                  -- /bin/sh could not be spawned at all.
+  spawn_failed(error)                  -- the command's stdin, stdout or
+                                          stderr could not be opened, or
+                                          /bin/sh could not be spawned (DL-150).
 The engine maps: exited -> raw exit_code through SEM-09 oracle-side;
 signaled/terminated -> STATUS TERMINATED (a kill that actually happened);
 spawn_failed -> STATUS FAILURE. A missing status.json is the one thing this
@@ -77,8 +79,10 @@ depend only on that.
 
 Wrapper input: a JSON spec on stdin (see docs/supervisor-protocol.md).
 The wrapper is parent-agnostic: engine (11b) and supervisor (11f) spawn it
-identically. Its own exit code is only a notification (0 = a status record
-was written; 2 = spec/setup error; 3 = record write failed, e.g. ENOSPC) --
+identically. Its own exit code is only a notification: 0 = a status record
+was written; 1 = an unreadable spec or a missing required key; 2 = the spec
+refusal (supervisor-protocol ss4 step 6, DL-229 item 8); 3 = a record write
+failed, e.g. ENOSPC.
 status.json is the sole data channel for the command's outcome.
 """
 

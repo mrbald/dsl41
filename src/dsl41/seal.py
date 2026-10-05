@@ -384,7 +384,7 @@ class FwWatch(BaseModel):
     index: int = Field(ge=0)
     run_id: str
     #: the count of durable `watch.jsonl` lines at T. At least 1: the
-    #: adapter's first durable act on dispatch is a `start` line, and a
+    #: adapter's first durable record on dispatch is a `start` line, and a
     #: watch not yet dispatched is a `pending_spawn` rather than this
     watch_seq: int = Field(ge=1)
     #: the last observed size, or null before the first poll

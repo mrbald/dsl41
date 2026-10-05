@@ -50,7 +50,7 @@ stateDiagram-v2
 - One `run_id` maps to one `(job, run_number)`, which maps to one directory (§11a). `run_dir` is compared as a resolved path (§2).
 - The whole frozen spec is checked before anything durable, and an unknown key is refused (§2; DL-129).
 - Write order: `mkdir`, index, receipt, fork, reply, answer. Index before receipt; receipt before the fork (§11a; DL-129).
-- A replay resolves through the index, never the incoming path, and answers from the directory. The answer for each state is the frozen table in [supervisor-protocol §5](../supervisor-protocol.md#5-supervisor-socket-protocol-frozen--phase-11f-dl-48) and the crash-point table in [period-model §11a](../period-model.md#11a-spawn-idempotency-that-outlives-the-supervisor).
+- A replay resolves through the index and answers from the directory. The incoming path is read in one case only: no index entry (DL-150, DL-151). The answer for each state is the frozen table in [supervisor-protocol §5](../supervisor-protocol.md#5-supervisor-socket-protocol-frozen--phase-11f-dl-48) and the crash-point table in [period-model §11a](../period-model.md#11a-spawn-idempotency-that-outlives-the-supervisor).
 - Absence means no index entry and no receipt at the computed path. A record that exists and cannot be read is never absence (§5 "Absent means ENOENT and nothing else"; DL-229 item 4).
 - `in_progress` is retryable and not a completion. `collision` and `indeterminate` are final, and the engine's E7 policy decides the run (§5; DL-129).
 - The supervisor makes a [detached](../glossary.md#detached) run's directory; the engine makes it only for a [tethered](../glossary.md#tethered) run (§11a; DL-129).
@@ -90,4 +90,4 @@ The common finding, [no transition inventory](../risk-map.md#no-transition-inven
 
 ## Gaps found
 
-- The answer table in [period-model §11a](../period-model.md#11a-spawn-idempotency-that-outlives-the-supervisor) has a "no index entry" row that answers first application, with no carve-out for a receipt at the computed path that names the same `run_id`. [Supervisor-protocol §5](../supervisor-protocol.md#5-supervisor-socket-protocol-frozen--phase-11f-dl-48) answers that case from the directory in its prose, not in its table, and `_resolve_replay` does the same. DL-151 has ruled ("The incoming-path receipt read is the contract"), restated by DL-229 item 4; period-model §11a's table is the stale text. No test pins this state.
+None.

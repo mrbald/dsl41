@@ -8,10 +8,12 @@ four modules of §1) is extracted (DL-42 triggers), this document is its
 public API. Each change to a frozen item requires a decision-log entry.
 
 The tier is deliberately dumb. It records process lifecycle facts durably
-and does nothing else. It has no conditions, no retries, and no policy.
-The time bounds it does keep are lifecycle bounds
-only: the lease TTL, the SHUTDOWN waits and the optional deadman (all
-§5) (DL-150). None of them decides what runs. Scheduling semantics
+and does nothing else. It has no conditions, no retries, no policy, and no
+scheduling timers. The time bounds it does keep are lifecycle bounds only
+(DL-150): the lease TTL, the SHUTDOWN waits, the two-second output drain at
+teardown, the startup PING probe, and the optional deadman (all §5). The
+supervisor loop also reaps on a one-second tick, so a coalesced SIGCHLD is
+not missed. None of them decides what runs. Scheduling semantics
 live in the orchestrator (dsl41's oracle). Dashboards of meaning live in
 the orchestrator's UI (DL-42 item 6).
 

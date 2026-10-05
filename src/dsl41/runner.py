@@ -305,9 +305,9 @@ class _Pending:
 
 
 class _Do(Enum):
-    """What the loop does next (DL-137). One name per alternative, so the
-    act is decided once -- in `Engine._next_work`, which owns the whole
-    choice -- and carried out once, in `run_until_quiescent`."""
+    """What the loop does next (fold deferred by DL-137, landed per DL-150; DL-145
+    keeps the branch count). One name per alternative, so the act is decided once -- in
+    `Engine._next_work`, which owns the whole choice -- and carried out once, in `run_until_quiescent`."""
 
     #: take the queue head -- an input already raised
     EVENT = auto()
@@ -1253,9 +1253,9 @@ class Engine:
         self._activity.set()
 
     def _next_work(self, horizon: datetime, now: datetime) -> _Work:
-        """Choose the loop's next act. One decision, five named outcomes,
-        where the 11c loop had three chained-negation booleans in front of
-        two fall-through branches (DL-137).
+        """Choose the loop's next act. One decision, five named outcomes, where the 11c loop
+        had three chained-negation booleans in front of two fall-through branches. DL-137
+        deferred this fold, DL-150 records it landed, and DL-145 keeps the branch count.
 
         The booleans were `take_event`, `take_sched` and `fire_timer`, each
         re-stating the negation of the ones before it. Read them as three

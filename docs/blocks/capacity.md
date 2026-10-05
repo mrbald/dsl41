@@ -111,9 +111,6 @@ Every machine shares the [no transition inventory](../risk-map.md#no-transition-
   - The claim of no hold-and-wait still stands in the module docstring of `oracle.py` (lines 224-225) and in the docstring of `test_dl50_admission_never_overcommits_and_is_deadlock_free` (`tests/test_resources.py:67-68`). That test checks liveness only for SUCCESS completions on one resource. No test checks liveness with held units.
 - Two comments say reservations exist exactly while a row is live: the comment above `LIVE` in `oracle_state.py`, and the `_settle_row` docstring in `oracle.py`.
   Since DL-256 a row that is not live may keep held units (`may_outlive_run`).
-- Period-model §5 says `sorted_waiters` "does an unguarded `self.catalog.jobs[j]`" and raises `KeyError`.
-  The code uses `.get`.
-  §5 names a documented default without stating it; the code's default sorts a missing job as an unset priority, behind every declared one (`capacity.py:374-387`).
 - `release_policy` in `capacity.py` says a depletable never frees, as SEM-16 and DL-50 do.
   The code applies an explicit `FREE` code to a depletable too: one with `FREE=A` frees its units when its run completes, so they are never consumed.
   Preflight does not refuse that combination.
