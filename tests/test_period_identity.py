@@ -324,11 +324,25 @@ GOLDEN_PROFILE_BYTES = (
 GOLDEN_RUNTIME_HASH = "sha256:aa82271f28aa992a72f20785b0086775c59270ba003302ac618d008fead36ebf"
 
 
+def test_the_profile_fields_default_to_the_seconds_constants_unmoved() -> None:
+    """The microsecond fields read the seconds constants (one source), and
+    the numbers are the ones every pinned manifest already carries."""
+    from dsl41.period import RECONCILE_SETTLE_S, RETRY_HORIZON_S, to_us
+
+    profile = RuntimeProfile()
+    assert profile.fw_default_interval_us == to_us(FW_DEFAULT_INTERVAL_S) == 60_000_000
+    assert profile.cmd_grace_us == to_us(CMD_GRACE_S) == 10_000_000
+    assert profile.reconcile_settle_us == to_us(RECONCILE_SETTLE_S) == 5_000_000
+    assert profile.spawn_window_us == to_us(SPAWN_WINDOW_S) == 5_000_000
+    assert profile.retry_horizon_us == to_us(RETRY_HORIZON_S) == 60_000_000
+
+
 def test_the_profile_defaults_are_the_engine_s_own() -> None:
     """A profile that disagreed with the running engine would pin a
     fiction. The four durations with an engine counterpart are asserted
     against it, so moving an adapter default fails here rather than
-    quietly making every later manifest untrue."""
+    quietly making every later manifest untrue. The numbers themselves are
+    pinned by `test_the_profile_fields_default_to_the_seconds_constants_unmoved`."""
     from dsl41.runner_adapters import (
         FileWatcherAdapter,
         LocalCommandAdapter,

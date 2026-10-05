@@ -123,7 +123,7 @@ from dsl41.period import (
     write_sentinel,
     SEGMENT_FIELDS,
 )
-from dsl41.oracle_state import JobRuntime
+from dsl41.oracle_state import LIVE, JobRuntime
 from dsl41.runner_admission import DecisionIndex, RequestCollision
 from dsl41.runner_clock import EngineError
 from dsl41.runner_effects import Effect, EffectOutcome, Outbox
@@ -139,7 +139,6 @@ from dsl41.runner_procid import (
     proc_start_token,
 )
 from dsl41.seal import (
-    LIVE_STATUS,
     BoundRun,
     BoundaryRequest,
     CommittedNextPeriod,
@@ -216,6 +215,16 @@ class BoundaryFailStop(EngineError):
     after a seal, which recovery rightly refuses. So once any seal bytes may
     have been written the engine fail-stops and reports the outcome
     unknown; recovery decides (PR-28d)."""
+
+
+class BoundaryRefusal(EngineError):
+    """A pre-PONR refusal of the boundary: the control code is `seal_refused`
+    (control-protocol ss2), fixed here as `AdmissionRefused` fixes its codes.
+    Some of the checks that raise it also serve audit and retention, where
+    the code is unread."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="seal_refused")
 
 
 class SealRequest(BaseModel):
@@ -1572,7 +1581,7 @@ def _read_artifact(path: Path, model: type[_ArtifactModel]) -> _ArtifactModel | 
     try:
         payload = decode(raw)
         if not isinstance(payload, dict):
-            raise EngineError(f"{path}: not a JSON object", code="seal_refused")
+            raise BoundaryRefusal(f"{path}: not a JSON object")
         require_artifact_version(payload)
         if issubclass(model, StagedManifest):
             # the committed manifest's completeness rule, at staged ingress
@@ -1581,8 +1590,8 @@ def _read_artifact(path: Path, model: type[_ArtifactModel]) -> _ArtifactModel | 
             require_manifest_fields(payload, model, where=str(path))
         return model.model_validate_json(raw, strict=True)
     except (CanonError, ValidationError) as exc:
-        raise EngineError(
-            f"{path}: not a {model.__name__} this binary can read ({exc})", code="seal_refused"
+        raise BoundaryRefusal(
+            f"{path}: not a {model.__name__} this binary can read ({exc})"
         ) from exc
 
 
@@ -1601,11 +1610,10 @@ def load_bundle_catalog(
             permit_unknown=permit_unknown,
         )
     except (JilParseError, LoweringError) as exc:
-        raise EngineError(
+        raise BoundaryRefusal(
             f"{run_root}: bundle {source_bundle_hash} does not load ({exc}):"
             " a catalog that cannot be rebuilt from its own bundle cannot be"
             " validated or audited (period-model ss7)",
-            code="seal_refused",
         ) from exc
 
 
@@ -1761,55 +1769,49 @@ def validate_staged(ctx: StagedContext) -> Classification:
         try:
             check_artifact_version({"artifact_format_version": value})
         except CanonError:
-            raise EngineError(
+            raise BoundaryRefusal(
                 f"{name} carries artifact_format_version {value}: this binary implements"
                 f" {ARTIFACT_FORMAT_VERSION} (period-model ss8, PR-08d)",
-                code="seal_refused",
             ) from None
     disagree = [
         f"{field}: candidate {named!r} vs staged bytes {stored!r}"
         for field, named, stored in disagreements(staged, bytes_, StagedNextPeriod.model_fields)
     ]
     if disagree:
-        raise EngineError(
+        raise BoundaryRefusal(
             f"the request names a candidate the staged bytes do not describe"
             f" ({'; '.join(disagree)}): the engine validates exactly the staged"
             " bytes the fingerprint names (period-model ss7)",
-            code="seal_refused",
         )
     # the version BEFORE the hash: the catalog hash covers `ir_version`, so a
     # candidate an older build staged would otherwise read as a tampered
     # bundle rather than as the version it is (DL-253)
     if staged.state_machine_version != ctx.state_machine_version:
-        raise EngineError(
+        raise BoundaryRefusal(
             f"the candidate names state_machine_version {staged.state_machine_version} and"
             f" this period runs v{ctx.state_machine_version}: one executable implements one"
             " version, so an SM bump is a full drain and a new estate, never a transition"
             " (period-model ss2.1, PR-17)",
-            code="seal_refused",
         )
     recomputed = catalog_hash_v2(ctx.c2)
     if recomputed != staged.catalog_hash:
-        raise EngineError(
+        raise BoundaryRefusal(
             f"the staged bundle hashes to {recomputed} and the candidate pins"
             f" {staged.catalog_hash}: the boundary would open a catalog it did not"
             " validate (period-model ss7 phase 1)",
-            code="seal_refused",
         )
     profile_hash = runtime_hash(bytes_.runtime_profile)
     if profile_hash != staged.runtime_hash:
-        raise EngineError(
+        raise BoundaryRefusal(
             f"the staged runtime profile hashes to {profile_hash} and the candidate pins"
             f" {staged.runtime_hash}: a tampered profile beside the original hash would"
             " pass every shared-field comparison (period-model ss7 phase 1)",
-            code="seal_refused",
         )
     errors = preflight_errors(ctx.c2, bytes_.runtime_profile, at=ctx.at)
     if errors:
-        raise EngineError(
+        raise BoundaryRefusal(
             f"the staged estate does not pass preflight ({'; '.join(errors)}):"
             " refuse loudly, run honestly (runner-design ss8)",
-            code="seal_refused",
         )
     _check_request_id(ctx)
     verdict = classify(
@@ -1818,11 +1820,10 @@ def validate_staged(ctx: StagedContext) -> Classification:
         carried=ctx.carried_state,
     )
     if verdict.refused:
-        raise EngineError(
+        raise BoundaryRefusal(
             f"the classification refuses the boundary ({', '.join(verdict.refused)}):"
             " a period never opens over live work whose closure changed"
             " (period-model ss10.1)",
-            code="seal_refused",
         )
     return verdict
 
@@ -1869,12 +1870,11 @@ def _check_request_id(ctx: StagedContext) -> None:
         # the index refuses before it can answer. Re-raised in this rule's
         # own words, because "reuse an id only for an exact retry" does not
         # tell a sealer which of its two ids is the problem
-        raise EngineError(
+        raise BoundaryRefusal(
             f"request_id {ctx.boundary_request.request_id} already names another command"
             f" in this period ({exc}): one request_id, one command -- an ordinary"
             " STARTJOB and a seal cannot both name authoritative decisions"
             " (control-protocol ss3, PR-30c)",
-            code="seal_refused",
         ) from exc
     # unreachable: a seal is decided by its `seal` record and never enters the
     # DecisionIndex (only the ordinary admission path and replay write to it),
@@ -1883,11 +1883,10 @@ def _check_request_id(ctx: StagedContext) -> None:
     # prior only on EQUAL fingerprints, so an id spent on another command
     # raises `RequestCollision` above and this arm needs a sha256 collision
     if prior is not None:  # pragma: no cover -- see above
-        raise EngineError(
+        raise BoundaryRefusal(
             f"request_id {ctx.boundary_request.request_id} already decided at index"
             f" {prior.index} in this period: a seal is a command like any other"
             " (control-protocol ss3, PR-30c)",
-            code="seal_refused",
         )
 
 
@@ -1924,10 +1923,9 @@ def validate_boundary(ctx: BoundaryContext) -> Classification:
     (PR-28a). Deriving it here rather than comparing it afterwards is the
     difference between an enforced rule and a tautology."""
     if not (ctx.at == ctx.post_barrier_state.now):
-        raise EngineError(
+        raise BoundaryRefusal(
             f"the carried state is not at the cutoff ({ctx.post_barrier_state.now} vs"
             f" T {ctx.at}): C1 owns every tick <= T (period-model ss6)",
-            code="seal_refused",
         )
     verdict = classify(
         closing=ctx.staged.c1,
@@ -1935,11 +1933,10 @@ def validate_boundary(ctx: BoundaryContext) -> Classification:
         carried=ctx.post_barrier_state,
     )
     if verdict.refused:
-        raise EngineError(
+        raise BoundaryRefusal(
             f"the post-barrier classification refuses the boundary"
             f" ({', '.join(verdict.refused)}): the cutoff's own admissions created live"
             " work whose closure C2 changes (period-model ss7 phase 2, PR-28a)",
-            code="seal_refused",
         )
     return verdict
 
@@ -1951,28 +1948,25 @@ def check_candidate(ctx: BoundaryContext, *, sidecar: Seal, record: Mapping[str,
     A failure here refuses the commit; C1 has advanced and is still open,
     and the caller's `abort_boundary` puts admission back."""
     if ctx.committed.first_index != sidecar.closes_at_index + 1:
-        raise EngineError(
+        raise BoundaryRefusal(
             f"the opening's first_index {ctx.committed.first_index} is not"
             f" closes_at_index + 1 ({sidecar.closes_at_index + 1}): I2 makes every index"
             " estate-monotone (period-model ss3.4, PR-05b)",
-            code="seal_refused",
         )
     check_seal_record(record)
     disagree = _record_disagreements(sidecar, record)
     if disagree:
-        raise EngineError(
+        raise BoundaryRefusal(
             f"the `seal` record disagrees with the sidecar it names"
             f" ({'; '.join(disagree)}): recovery selects the sidecar by these"
             " fields and refuses a wrong one (period-model ss2.2)",
-            code="seal_refused",
         )
     if not (sidecar.state.now == sidecar.scheduler_admitted_through == ctx.at):
-        raise EngineError(
+        raise BoundaryRefusal(
             f"the snapshot is not at the cutoff (now {sidecar.state.now.isoformat()},"
             f" admitted through {sidecar.scheduler_admitted_through.isoformat()},"
             f" T {ctx.at.isoformat()}): C1 owns every tick <= T and C2 every tick after"
             " it (period-model ss6)",
-            code="seal_refused",
         )
     # phase 3's load, over the in-memory candidates: an opening that only
     # validated at resume would commit a boundary nothing can open
@@ -2169,11 +2163,10 @@ def executions_at(
                 None if watch_prefix is None else watch_prefix.get((effect.job, effect.run_number))
             )
             if watch_prefix is not None and bound is None:
-                raise EngineError(
+                raise BoundaryRefusal(
                     f"{effect.job}.{effect.run_number}: watch.jsonl exists but the seal"
                     " being re-derived carries no fw_watch entry for this run -- the"
                     " evidence and the claim disagree (period-model ss11)",
-                    code="seal_refused",
                 )
             log = read_watch_log(run_dir, prefix=bound)
             assert log is not None  # the file exists and the fold refuses a bad one
@@ -2182,11 +2175,10 @@ def executions_at(
                 # reconciliation and names another run is a stranger's, and
                 # a seal that read its progress would relabel that
                 # stranger's state as this run's and commit it
-                raise EngineError(
+                raise BoundaryRefusal(
                     f"{effect.job}.{effect.run_number}: watch.jsonl names run_id"
                     f" {log.run_id!r} but the bound run is {run_id!r} -- refusing to"
                     " seal a stranger's watch (DL-118)",
-                    code="seal_refused",
                 )
             job_ir = catalog.jobs.get(effect.job)
             spec = getattr(job_ir, "exec_", None) if job_ir is not None else None
@@ -2207,20 +2199,18 @@ def executions_at(
             continue
         spawn = load_json(run_dir / "spawn.json")
         if spawn is None:
-            raise EngineError(
+            raise BoundaryRefusal(
                 f"{effect.job}.{effect.run_number}: an applied SPAWN with no spawn.json"
                 " and no watch.jsonl -- ss8 requires every applied CMD SPAWN to be bound"
                 " or terminal before the seal commits, and the sealer waits (PR-27)",
-                code="seal_refused",
             )
         if not spool_names_run(spawn, run_id=run_id):
             # same DL-118 rule as the watch log: existence is not identity
             # (DL-178y: `spool_names_run` is the one owner of this check)
-            raise EngineError(
+            raise BoundaryRefusal(
                 f"{effect.job}.{effect.run_number}: spawn.json reports run_id"
                 f" {spawn.get('run_id')!r} but the bound run is {run_id!r} -- refusing"
                 " to seal a stranger's binding (DL-118)",
-                code="seal_refused",
             )
         out.append(
             BoundRun(
@@ -2249,7 +2239,7 @@ def live_spawns(outbox: Outbox, rows: Mapping[str, JobRuntime]) -> list[tuple[Ef
         if effect.kind != "SPAWN":
             continue
         row = rows.get(effect.job)
-        if row is None or row.run_number != effect.run_number or row.status not in LIVE_STATUS:
+        if row is None or row.run_number != effect.run_number or row.status not in LIVE:
             continue
         state = outbox.state_of(effect.effect_id)
         if state in ("pending", "applied"):
@@ -2272,11 +2262,10 @@ def executing_jobs(outbox: Outbox, rows: Mapping[str, JobRuntime]) -> dict[str, 
 
 def _require_run_id(effect: Effect) -> str:
     if effect.run_id is None:
-        raise EngineError(
+        raise BoundaryRefusal(
             f"{effect.effect_id}: a SPAWN with no run_id -- a run root written before"
             " DL-118 cannot be sealed, because the boundary carries the binding the"
             " effect was supposed to mint (period-model ss2.3, PR-36a)",
-            code="seal_refused",
         )
     return effect.run_id
 
@@ -2466,10 +2455,9 @@ def _prepare_install(
         crash_point("after_committed_manifest")
         return _Install(staging=None, supersedes=None)
     if installed is None and target.exists():
-        raise EngineError(
+        raise BoundaryRefusal(
             f"{target} exists and carries no candidate.json: the boundary will not"
             " blindly reuse a period directory it cannot identify (period-model ss7)",
-            code="seal_refused",
         )
     staging = staging_dir(run_root, staged.stage_digest)
     if read_candidate(staging) is None:
@@ -2477,10 +2465,9 @@ def _prepare_install(
         # and the install: a second client, or a retention sweep, removed
         # the staged directory while the barrier ran. Refused, because the
         # alternative is renaming a directory that is not there
-        raise EngineError(
+        raise BoundaryRefusal(
             f"{staging}: no staged candidate at this digest -- the request names bytes"
             " that were never staged (period-model ss7)",
-            code="seal_refused",
         )
     durable_write(
         str(staging / "manifest.json"),

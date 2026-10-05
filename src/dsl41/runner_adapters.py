@@ -65,6 +65,7 @@ from dsl41.canon import (
 )
 from dsl41.ir import ExecSpec, FwSpec, JobIR
 from dsl41.runner_procid import SPOOL_VERSION, fsync_dir, spool_version_supported, write_all
+from dsl41.period import CMD_GRACE_S, FW_DEFAULT_INTERVAL_S, RECONCILE_SETTLE_S, SPAWN_WINDOW_S
 from dsl41.runner_clock import Clock, EngineError
 from dsl41.runner_journal import repair_tail
 from dsl41.runner_ledger import Proof
@@ -449,7 +450,7 @@ class LocalCommandAdapter:
     process ONLY and is closed in a finally: engine death EOFs every
     wrapper (tethered semantics, ss6a)."""
 
-    def __init__(self, *, grace_seconds: float = 10.0) -> None:
+    def __init__(self, *, grace_seconds: float = CMD_GRACE_S) -> None:
         self.grace_seconds = grace_seconds
 
     async def run(self, job_ir: JobIR, run_number: int, ctx: AdapterContext) -> AdapterResult:
@@ -827,7 +828,12 @@ class FileWatcherAdapter:
     run_root there is no spool and the watch is memory-only: that is the
     virtual-domain harness, which has no run-root layout to write into."""
 
-    def __init__(self, *, default_interval_s: int = 60, existence: FwExistence = "stable") -> None:
+    def __init__(
+        self,
+        *,
+        default_interval_s: int = int(FW_DEFAULT_INTERVAL_S),
+        existence: FwExistence = "stable",
+    ) -> None:
         self.default_interval_s = default_interval_s  # PENDING: E6
         self.existence = existence  # DL-258: the `fw-existence` switch, pinned per period
 
@@ -1756,8 +1762,8 @@ class SupervisedCommandAdapter:
         self,
         client: SupervisorClient,
         *,
-        grace_seconds: float = 10.0,
-        settle_seconds: float = 5.0,
+        grace_seconds: float = CMD_GRACE_S,
+        settle_seconds: float = RECONCILE_SETTLE_S,
     ) -> None:
         self.client = client
         self.grace_seconds = grace_seconds
@@ -1963,7 +1969,7 @@ class SupervisedCommandAdapter:
     #: the run ends, or this bound elapses. Matches the supervisor's own
     #: shutdown wait (DL-48), which fixed this hazard for SHUTDOWN and left the
     #: per-run signal path exposed.
-    _SPAWN_WINDOW_S = 5.0
+    _SPAWN_WINDOW_S = SPAWN_WINDOW_S
     _SPAWN_POLL_S = 0.02
 
     async def _signal_when_addressable(

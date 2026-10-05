@@ -1027,17 +1027,24 @@ class Backfill:
     records: list[dict[str, Any]]
 
 
+class BackfillRefused(EngineError):
+    """A refusal on the backfill read; the control code is `backfill_refused`
+    (control-protocol ss2)."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="backfill_refused")
+
+
 def read_backfill(path: Path | str, *, since: int) -> Backfill:
     """The records a subscriber resuming at `since` may still be owed
     (DL-135). A refusal from any check below reaches the subscriber as
     `backfill_refused` (control-protocol ss2). The checks are shared with
-    replay and audit, which read no code, so the code is set here, at the
-    one door the stream reads through."""
+    replay and audit, which read no code, so the refusal is re-raised as a
+    `BackfillRefused` here, at the one door the stream reads through."""
     try:
         return _read_backfill(path, since=since)
     except EngineError as exc:
-        exc.code = "backfill_refused"
-        raise
+        raise BackfillRefused(str(exc)) from exc
 
 
 def _read_backfill(path: Path | str, *, since: int) -> Backfill:
