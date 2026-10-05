@@ -1478,12 +1478,37 @@ implementation returns exit 2 with the engine frozen behind §6 step 2.
 After an abort a command, a tick and an FW poll all proceed (PR-28b). **The
 reversible interval runs from §6 step 2's freeze to the instant before the
 `seal` append begins, and is exception-safe**: every non-commit exit inside it
-— a phase-2 refusal, a committed-manifest write or fsync failure, a rename or
-directory-fsync failure, a sidecar write failure, any unexpected exception —
+not named below — a phase-2 refusal, a committed-manifest write or fsync
+failure, a rename or directory-fsync failure, a sidecar write failure, any
+other unexpected exception —
 runs `abort_boundary` while the fence is still valid; a fence loss inside the
 interval **fail-stops** rather than reopening admission, on DL-101's rule.
 An abort that ran only on validation failure would leave a live engine
 frozen behind a freeze it never lifts after an `ENOSPC` on the sidecar.
+**Three more kinds of exception fail-stop** (DL-274). The first is an
+exception while an attempt admitted during the seal is not fully applied.
+That attempt is a drained one or the cutoff's own time observation. The
+window opens when the attempt takes its index and closes when its admission
+line, decision, outbox entries and answer are all done. Inside it the
+engine's memory may disagree with the WAL. The second is a WAL append that
+fails anywhere in the interval, such as an effect outcome that dispatch
+writes. The failed line may be torn or whole. An abort would reopen C1 over
+either state, and the next record would land behind it. So no abort runs.
+The seal request is not answered, and neither is an attempt whose answer was
+still owed. Recovery repairs the WAL tail and rebuilds from the WAL, and the
+period stays open. An attempt whose decision is missing is applied through
+the gate (DL-156). That recovered application writes no effect record, so a
+start recovered this way launches nothing. Its row stands for the resume
+ladder, its untraced-start sweep and the operator to settle (runner-design
+§7). The third is a `clock_regressed` before the index on an engine-made
+input, such as an adapter completion, a tick or a routing observation. It
+has no one to answer, and a refusal would lose it while C1 reopens. So the
+seal stops the engine, and resume observes the input again. A request that
+hits `clock_regressed` is answered refused with that code, and the seal
+refuses. The cutoff's own time observation belongs to the seal, so the seal
+refuses on it too. Every other exception
+still aborts and refuses, among them the drain's own timeout and a failure
+in settling with no unfinished append.
 
 **The `seal` append is the point of no return, and a failure there is an
 unknown outcome, not an abort.** The writer flushes the whole line before
@@ -2394,7 +2419,7 @@ whole.
 | PR-30e | a committed seal's exact retry arriving under the new baseline is answered before the baseline gate — **after a physical roll, a B restart, A's removal, and lawful pruning of A's WAL**, from the imported sidecar's `boundary_request`; the same retry two periods later is refused as stale |
 | PR-30g | power loss **after** the committed seal: `periods/N+1/` and its `manifest.json` survive — on **both** the fresh-install path (four fsyncs) and the same-stage reuse path (its in-place liturgy); with any one fsync removed the test fails |
 | PR-28e | a `rejected` and an applied-no-op control attempt arriving after §6 step 2 are refused at admission; one admitted just before the cut has its `decision` durable before the sidecar is written; the active seal request is **not** waited on and the seal commits |
-| PR-28b | after **every** non-commit exit **before the seal append** — phase-2 refusal, and fault injection at each manifest/sidecar write, rename, fsync and pre-commit fence check — `abort_boundary` has run: a control command is admitted, a scheduled tick fires, an FW poll appends; a fence loss inside the interval fail-stops instead |
+| PR-28b | after **every** non-commit exit **before the seal append** — phase-2 refusal, and fault injection at each manifest/sidecar write, rename, fsync and pre-commit fence check — `abort_boundary` has run: a control command is admitted, a scheduled tick fires, an FW poll appends; a fence loss inside the interval fail-stops instead; so do an exception while an attempt admitted during the seal is not fully applied, a failed WAL append, and a `clock_regressed` on an engine-made input, which leave no `seal` record; a request that hits `clock_regressed` is answered refused; resume rebuilds from the WAL with the period open, and a start whose decision was missing launches nothing (DL-274) |
 | PR-28d | fault injection **on the seal append itself** — write error mid-line, `fsync` error after a complete line, power loss after flush before fsync: the engine fail-stops with an unknown outcome, never reopens admission; recovery then finds a complete line → `fsync`s the WAL and only then promotes it, **with power loss injected before and after that confirming `fsync`, and with the confirming `fsync` itself raising** — before it the seal may vanish and no successor exists; after it the seal is durable; when it raises, no anchor transition, no successor segment, admission stays closed, and a repeated recovery stays fail-stopped — a torn or absent line → truncated and C1 reopened, a line with records after it → refused |
 | PR-28c | one operator hold, one **pre-armed** job and one held, **initially unarmed** job, a tick at T for the latter, then both a refused and a committed boundary: the pre-armed row is exactly as the operator left it; the initially unarmed row is `armed: true` with exactly the one legitimate C1 revision increment the tick caused — in **both** outcomes, so an abort that restored a pre-freeze snapshot fails; after the commit the operator's `OFF_HOLD` in C2 produces exactly one start |
 | PR-30f | crash before and after the engine's committed-manifest write, before the rename: the retry re-validates, overwrites with its own, and the installed `periods/N+1/` holds both files |

@@ -2688,6 +2688,243 @@ def test_pr28b_a_fence_loss_inside_the_interval_fail_stops(tmp_path: Path) -> No
     _close(engine)
 
 
+def _raise_once(real, exc: BaseException, *, after: bool = False):
+    """Wrap `real` so its first call raises `exc` -- after running `real`
+    when `after` is set -- and every later call is `real` itself."""
+    fired: list[bool] = []
+
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        if fired:
+            return real(*args, **kwargs)
+        fired.append(True)
+        if after:
+            real(*args, **kwargs)
+        raise exc
+
+    return wrapper
+
+
+class _FailingWal:
+    """The WAL file, except that the first write of one record kind raises
+    `exc` before any byte lands. Everything else passes through."""
+
+    def __init__(self, f: Any, rec: str, exc: BaseException) -> None:
+        self._f = f
+        self._marker = f'"rec": "{rec}"'.encode()
+        self._exc = exc
+        self.fired = False
+
+    def write(self, data: bytes) -> int:
+        if not self.fired and self._marker in data:
+            self.fired = True
+            raise self._exc
+        return self._f.write(data)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._f, name)
+
+
+#: the faults before the attempt's decision is durable, and after it
+_UNDECIDED = ("admit_after_write", "apply", "decision")
+
+
+@pytest.mark.parametrize("fault", [*_UNDECIDED, "outbox", "effect_result"])
+def test_pr28b_an_exception_while_a_drained_attempt_applies_fail_stops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    """DL-274: an exception in the seal's drain from an attempt's admission
+    until the attempt is fully applied, or in any WAL append, stops the
+    engine.
+
+    Memory may then disagree with the WAL, or the WAL tail may be torn, and
+    an abort would reopen C1 over that state. So no abort runs, the seal
+    is not answered, no `seal` record exists, and resume rebuilds from the
+    WAL in a period that is still open. A start whose decision was never
+    durable is re-decided through the gate (DL-156) and launches nothing:
+    the outbox is rebuilt from decision records only."""
+    import dsl41.runner as runner_mod
+    from dsl41.runner_admission import Envelope
+
+    run_root = tmp_path / "run"
+    engine = _genesis(run_root)
+    staged = _stage(run_root, C2_JIL)
+    assert engine.journal is not None
+    injected: BaseException
+    if fault == "admit_after_write":  # the line is written and durable, then admit raises
+        injected = OSError(5, "injected failure after the admission line")
+        monkeypatch.setattr(
+            engine.journal, "admit", _raise_once(engine.journal.admit, injected, after=True)
+        )
+    elif fault == "apply":  # the oracle raises inside the batch
+        injected = RuntimeError("injected oracle fault")
+        monkeypatch.setattr(
+            runner_mod, "apply_attempt", _raise_once(runner_mod.apply_attempt, injected)
+        )
+    elif fault == "decision":  # the decision writer refuses
+        injected = EngineError("injected decision write failure")
+        monkeypatch.setattr(
+            engine.journal, "decision", _raise_once(engine.journal.decision, injected)
+        )
+    elif fault == "outbox":  # the decision is durable; the in-memory outbox misses its SPAWN
+        injected = RuntimeError("injected outbox failure")
+        monkeypatch.setattr(engine.outbox, "record", _raise_once(engine.outbox.record, injected))
+    else:  # the attempt is fully applied; dispatch's effect_result append fails
+        injected = OSError(28, "injected ENOSPC")
+        failing = _FailingWal(engine.journal._f, "effect_result", injected)
+        engine.journal._f = failing  # type: ignore[assignment]
+    expect = {"job:a": engine.oracle.store.revision("job:a")}
+
+    async def scenario() -> None:
+        decided = engine.submit(
+            Event(at=T0, kind="STARTJOB", payload={"job": "a"}),
+            Envelope(request_id="r-ext", expect=expect, epoch=engine.epoch),
+        )
+        sealed = engine.submit_seal(_request(engine, staged))
+        with pytest.raises(type(injected)) as stopped:
+            await engine.run_until_quiescent(T0)
+        assert stopped.value is injected  # the loop re-raised it unchanged
+        assert any("DL-274" in note for note in stopped.value.__notes__)
+        assert not sealed.done()  # no `refused`, no answer at all
+        # the attempt's own answer comes with its full application, and only then
+        assert decided.done() is (fault == "effect_result")
+
+    asyncio.run(scenario())
+    if fault == "effect_result":
+        assert failing.fired
+    assert engine.sealing is True and engine.barrier.parked is True  # no abort ran
+    records = read_journal(engine.journal.path)
+    _close(engine)
+    admitted = [r for r in records if r.get("request_id") == "r-ext" and r["rec"] == "input"]
+    assert len(admitted) == 1
+    index = admitted[0]["seq"]
+    decisions = [r for r in records if r["rec"] == "decision" and r["index"] == index]
+    assert len(decisions) == (0 if fault in _UNDECIDED else 1)
+    assert not [r for r in records if r["rec"] in ("seal", "effect_result")]
+
+    opened = _resume(run_root, C1_JIL)
+    assert opened.estate is not None and opened.estate.manifest.period_id == 1
+    assert opened.oracle.store.runtime("a").run_number == 1
+    spawns = [e for e in opened.outbox.effects() if e.kind == "SPAWN" and e.job == "a"]
+    if fault in _UNDECIDED:
+        # the recovered verdict has no effect record: nothing launches, and
+        # the row stands for the resume ladder and the operator
+        assert spawns == []
+        assert "a" not in opened.live_jobs()
+    else:
+        assert len(spawns) == 1  # rebuilt from the durable decision, dispatched once
+        assert "a" in opened.live_jobs()
+    _close(opened)
+
+
+def test_pr28b_a_clock_regression_in_the_drain_still_refuses(tmp_path: Path) -> None:
+    """DL-274's other side: `Frontiers.admit` refuses before anything is
+    appended, so nothing durable is undecided. The seal refuses, the
+    abort runs, and C1 admits again. The input the drain popped is
+    answered refused with the same code, not dropped unanswered."""
+    from dsl41.runner_admission import AdmissionRefused, Envelope
+
+    run_root = tmp_path / "run"
+    engine = _genesis(run_root)
+    staged = _stage(run_root, C2_JIL)
+    later = T0 + timedelta(minutes=5)
+
+    async def scenario() -> tuple[EngineError, BaseException | None]:
+        engine.inject(Event(at=later, kind="SET_GLOBAL", payload={"name": "G", "value": "1"}))
+        await engine.run_until_quiescent(later)
+        # stamped before the frontier: the drain admits it and regresses
+        popped = engine.submit(
+            Event(at=T0, kind="SET_GLOBAL", payload={"name": "G", "value": "0"}),
+            Envelope(
+                request_id="r-behind",
+                expect={"global:G": engine.oracle.store.revision("global:G")},
+                epoch=engine.epoch,
+            ),
+        )
+        refusal = await _refusal(engine, _request(engine, staged))
+        assert popped.done()
+        return refusal, popped.exception()  # type: ignore[attr-defined]
+
+    refusal, answered = asyncio.run(scenario())
+    assert refusal.code == "clock_regressed"
+    assert isinstance(answered, AdmissionRefused) and answered.code == "clock_regressed"
+    assert [rid for rid, _ in engine.refusals] == ["r-behind"]
+    assert engine.sealing is False and engine.barrier.parked is False
+    engine.inject(Event(at=later, kind="SET_GLOBAL", payload={"name": "G", "value": "2"}))
+    asyncio.run(engine.run_until_quiescent(later))
+    assert engine.oracle.store.global_value("G") == "2"  # C1 is open
+    assert engine.journal is not None
+    records = read_journal(engine.journal.path)
+    _close(engine)
+    assert not [r for r in records if r.get("payload", {}).get("value") == "0"]
+
+
+def test_pr28b_a_clock_regression_on_an_engine_made_input_in_the_drain_fail_stops(
+    tmp_path: Path,
+) -> None:
+    """DL-274: an adapter completion stamped behind the frontier has no one
+    to answer. A refusal would lose it while C1 reopens, so the seal stops
+    the engine instead, as the main loop would on the same raise. Nothing
+    reaches the WAL, and the period is still open at resume."""
+    run_root = tmp_path / "run"
+    engine = _genesis(run_root)
+    staged = _stage(run_root, C2_JIL)
+    later = T0 + timedelta(minutes=5)
+
+    async def scenario() -> None:
+        engine.inject(Event(at=later, kind="SET_GLOBAL", payload={"name": "G", "value": "1"}))
+        await engine.run_until_quiescent(later)
+        # an engine-made completion, stamped before the frontier
+        engine.inject(
+            Event(at=T0, kind="STATUS", payload={"job": "a", "run_number": 1, "exit_code": 0}),
+            source="adapter",
+        )
+        sealed = engine.submit_seal(_request(engine, staged))
+        with pytest.raises(EngineError) as stopped:
+            await engine.run_until_quiescent(later)
+        assert stopped.value.code == "clock_regressed"
+        assert any("DL-274" in note for note in stopped.value.__notes__)
+        assert not sealed.done()  # no `refused`, no answer at all
+
+    asyncio.run(scenario())
+    assert engine.sealing is True and engine.barrier.parked is True  # no abort ran
+    assert engine.refusals == []  # not refused, so not lost behind a reopened C1
+    assert engine.journal is not None
+    records = read_journal(engine.journal.path)
+    _close(engine)
+    assert not [r for r in records if r.get("kind") == "STATUS" or r["rec"] == "seal"]
+    opened = _resume(run_root, C1_JIL, clock=VirtualClock(start=later))
+    assert opened.estate is not None and opened.estate.manifest.period_id == 1
+    _close(opened)
+
+
+def test_pr28b_a_drain_timeout_after_a_decided_attempt_still_refuses(tmp_path: Path) -> None:
+    """DL-274's other side: the drain's own timeout raises after the
+    drained attempt's decision is durable. Nothing is undecided, so the
+    seal refuses and the abort runs."""
+    run_root = tmp_path / "run"
+    engine = _genesis(run_root)
+    engine.QUIESCE_WAIT_S = -1.0  # every drain is already past its deadline
+    staged = _stage(run_root, C2_JIL)
+
+    async def scenario() -> EngineError:
+        engine.inject(
+            Event(at=T0, kind="SET_GLOBAL", payload={"name": "G", "value": "1"}),
+            request_id="r-drained",
+        )
+        return await _refusal(engine, _request(engine, staged))
+
+    refusal = asyncio.run(scenario())
+    assert refusal.code == "seal_not_settling"
+    assert engine.sealing is False and engine.barrier.parked is False
+    assert engine.journal is not None
+    records = read_journal(engine.journal.path)
+    _close(engine)
+    admitted = [r for r in records if r.get("request_id") == "r-drained" and r["rec"] == "input"]
+    assert len(admitted) == 1
+    decided = [r for r in records if r["rec"] == "decision" and r["index"] == admitted[0]["seq"]]
+    assert len(decided) == 1
+
+
 def test_an_estate_that_never_settles_refuses_rather_than_hangs(tmp_path: Path) -> None:
     """ss6 step 2's drain is bounded: a boundary over a moving state is not
     a boundary, and a wedged tier must refuse rather than hang."""
