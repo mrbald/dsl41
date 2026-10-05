@@ -18885,3 +18885,18 @@ relitigate an entry; append a new one.
   fixed and confirmed by the reviewer that raised it. A Fable pass over
   the wave-1 integration, in place of Codex at the owner's instruction,
   found no material defect.
+- DL-283 The architecture baseline is re-armed after the review of
+  2026-10-05 (2026-10-05; scripts/arch_baseline.json)
+  THE RULE. A complete architecture review re-arms the size baseline from
+  the merged tree, so the gate measures drift from that review, as DL-221
+  did. This re-arm follows DL-282's fixes on main.
+  THE MOVES. `arch_check.py --update-baseline` on the merged tree: two
+  branchy-function rows move; eleven long-function rows move and ten are
+  new; eighteen long-module rows move and one is new. The growth since
+  DL-221 comes from slices reviewed in their own entries (the AutoSys
+  remediation DL-240..DL-261, ops readiness DL-263..DL-271, DL-272..DL-282).
+  No size finding of this review is accepted by the re-arm: DL-282 lists
+  the review's findings, and none was a size row.
+  STAMP. main is stamped `arch-review/<timestamp>` once this merges. The
+  earlier stamp on the reviewed commit 5097b59 stays; the gate reads the
+  newest tag.
