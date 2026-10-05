@@ -1021,12 +1021,68 @@ def test_access_sighup_reloads_the_live_engine(short_root: Path) -> None:
             loaded = [r for r in _receipts(run_root) if r["rec"] == "policy_loaded"]
             if [r["generation"] for r in loaded] == [1, 2]:
                 break
+            if proc.poll() is not None:
+                # a negative status is the signal that killed it (-1 is SIGHUP)
+                raise AssertionError(
+                    f"engine exited with status {proc.returncode} before the generation-2"
+                    f" receipt: {_receipts(run_root)}"
+                )
             time.sleep(0.05)
         else:
             raise AssertionError(f"no generation-2 receipt: {_receipts(run_root)}")
     finally:
         proc.terminate()
         proc.wait(timeout=30)
+
+
+def test_access_run_installs_signal_handlers_before_the_socket_binds(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ss7: a peer that waits for control.sock and then sends SIGHUP must
+    never meet the default action. The handlers are installed before the
+    bind, so the engine survives that SIGHUP. Checked deterministically: the
+    state at the bind, not a race against it. Each handler at the bind must
+    differ from the one the running loop held before `_serve_run` (asyncio's
+    Runner already owns SIGINT inside `asyncio.run`, so the default is not the
+    baseline). After a refused bind the handlers stay until the loop closes."""
+    import signal as signal_mod
+
+    from dsl41 import cli_run
+    from dsl41.period import RuntimeProfile
+    from dsl41.runner_clock import EngineError
+
+    sigs = (signal_mod.SIGINT, signal_mod.SIGTERM, signal_mod.SIGHUP)
+    baseline: dict[int, object] = {}
+    at_bind: dict[int, object] = {}
+    after_refusal: dict[int, object] = {}
+
+    async def refusing_start(self: ControlServer) -> None:
+        at_bind.update({sig: signal_mod.getsignal(sig) for sig in sigs})
+        raise EngineError("test: stop at the bind")
+
+    def recording_refuse(exc: Exception) -> int:
+        after_refusal.update({sig: signal_mod.getsignal(sig) for sig in sigs})
+        return 2
+
+    monkeypatch.setattr(ControlServer, "start", refusing_start)
+    monkeypatch.setattr(cli_run, "refuse", recording_refuse)
+    map_path = _map_granting(short_root / "roles.toml", "ops")
+
+    async def scenario() -> int:
+        baseline.update({sig: signal_mod.getsignal(sig) for sig in sigs})
+        return await cli_run._serve_run(
+            lower_source(TEXT),
+            short_root / "run",
+            False,
+            [],
+            profile=RuntimeProfile(),
+            access_map=map_path,
+        )
+
+    assert asyncio.run(scenario()) == 2
+    for sig in sigs:
+        assert at_bind[sig] is not baseline[sig], sig
+    assert after_refusal == at_bind
 
 
 def test_access_seq_recovery_arms(tmp_path: Path) -> None:

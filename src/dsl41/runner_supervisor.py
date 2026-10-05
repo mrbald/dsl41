@@ -565,8 +565,10 @@ class Supervisor:
     def run(self) -> int:
         try:
             self._set_subreaper()
-            self._bind()
+            # handlers first: supervisor.pid and supervisor.sock are published
+            # by _bind, and a peer that sees either must not meet a default action
             self._install_signals()
+            self._bind()
             assert self._listen is not None
             self._sel.register(self._listen, selectors.EVENT_READ, ("listen", None))
             self._sel.register(self._chld_r, selectors.EVENT_READ, ("chld", None))

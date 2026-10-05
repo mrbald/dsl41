@@ -18441,3 +18441,39 @@ relitigate an entry; append a new one.
   reviewer found the lost unanswered request and the lost engine-made
   input on `clock_regressed`; both are fixed. Every finding was confirmed
   fixed by the reviewer that raised it, within three rounds.
+- DL-275 Signal handlers are armed before a socket is published
+  (2026-10-05; cli_run.py, runner_control.py, runner_supervisor.py,
+  access-model.md, deployment-runbook.md)
+  THE GAP. `dsl41 run` bound `control.sock` and only then installed its
+  SIGINT, SIGTERM and SIGHUP handlers. A peer that waited for the socket
+  file and sent SIGHUP at once could meet the default action, which
+  stops the process: the engine exited 129 instead of reloading its
+  access map. The CI coverage job failed once on exactly this, in
+  `test_access_sighup_reloads_the_live_engine`. The supervisor had the
+  same order: it published `supervisor.pid` and `supervisor.sock` before
+  it installed its handlers.
+  THE RULE. A process installs its signal handlers before it publishes a
+  socket or a pid file a peer waits on. `_serve_run` arms SIGINT, SIGTERM
+  and, with an access map, SIGHUP before `ControlServer.start`; the
+  supervisor runs `_install_signals` before `_bind`. On a refused start
+  the handlers stay until teardown, as on the success path, so an
+  inherited SIG_IGN is not turned into the default action. A group-arming
+  failure after the bind now closes the server, so no socket is left
+  bound. access-model §7 states the guarantee: a SIGHUP sent once the
+  socket answers is a reload; a socket file alone proves nothing, because
+  a crashed run can leave one behind.
+  TESTS. `test_access_run_installs_signal_handlers_before_the_socket_binds`
+  and `test_supervisor_signal_handlers_are_installed_before_the_socket_is_published`
+  record the handlers at the bind and fail on the old order. The
+  group-arming refusal test asserts the socket is gone. The existing
+  SIGHUP test reports the engine's exit status if it dies.
+  NOT IN SCOPE. A resumed root can hold a dead run's socket file before
+  arming; readiness is an answer, not the file, and the runbook's
+  recipes already wait for an answer.
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass,
+  the Fable pass in place of Codex at the owner's instruction. The Opus
+  reviewer found that removing the handlers on a refused start reset an
+  inherited SIG_IGN, that a group-arming failure left the socket bound,
+  and that the new test's SIGINT check could not fail; all are fixed. The
+  Fable pass found the supervisor's same order and the missing contract
+  sentence; both are fixed.
