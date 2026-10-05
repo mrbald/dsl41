@@ -249,20 +249,33 @@ class CadenceCheck(BaseModel):
 # ----------------------------------------------------------- expectations
 
 
+@dataclass(frozen=True)
+class Interpretation:
+    """How a play reads the estate: base zone, alias table (DL-151) and switches
+    (DL-252), as one value. None is the scheduler's and the engine's default.
+    `expected_bounds` takes none: a static estimate reads the defaults (DL-252)."""
+
+    default_tz: str | None = None
+    tz_aliases: Mapping[str, str] | None = None
+    semantics: SemanticSwitches | None = None
+
+
 def scheduled_ticks(
     catalog: CatalogIR,
     *,
     start: datetime,
     horizon: datetime,
-    default_tz: str | None = None,
-    tz_aliases: Mapping[str, str] | None = None,
-    semantics: SemanticSwitches | None = None,
+    reading: Interpretation = Interpretation(),
 ) -> dict[str, int]:
     """Per-job tick counts in [start, horizon] from a FRESH Scheduler, switches
     included: reset(start) is tick-at-start inclusive and run_until_quiescent
     is at-or-before-horizon inclusive, so the windows match by construction."""
     sched = Scheduler(
-        catalog, start=start, default_tz=default_tz, tz_aliases=tz_aliases, semantics=semantics
+        catalog,
+        start=start,
+        default_tz=reading.default_tz,
+        tz_aliases=reading.tz_aliases,
+        semantics=reading.semantics,
     )
     counts: dict[str, int] = {}
     for ev in sched.pop_due(horizon):
@@ -356,9 +369,7 @@ def run_fail_sweep(
     *,
     start: datetime,
     horizon: datetime,
-    default_tz: str | None = None,
-    tz_aliases: Mapping[str, str] | None = None,
-    semantics: SemanticSwitches | None = None,
+    reading: Interpretation = Interpretation(),
     producers: Iterable[str],
     parked: Collection[str] = (),
     progress: "Callable[[str], None] | None" = None,
@@ -418,9 +429,7 @@ def run_fail_sweep(
             horizon=horizon,
             adapter=case_adapter,
             events=list(events),
-            default_tz=default_tz,
-            tz_aliases=tz_aliases,
-            semantics=semantics,
+            reading=reading,
         )
         suppressed = {
             name: baseline_runs.get(name, 0) - runs
@@ -655,9 +664,7 @@ def run_flag_sweep(
     *,
     start: datetime,
     horizon: datetime,
-    default_tz: str | None = None,
-    tz_aliases: Mapping[str, str] | None = None,
-    semantics: SemanticSwitches | None = None,
+    reading: Interpretation = Interpretation(),
     injected_start: Mapping[str, int] | None = None,
     injected_force: Mapping[str, int] | None = None,
     policy: CadencePolicy | None = None,
@@ -719,9 +726,7 @@ def run_flag_sweep(
             horizon=horizon,
             adapter=adapter,
             events=[*events, *case_events],
-            default_tz=default_tz,
-            tz_aliases=tz_aliases,
-            semantics=semantics,
+            reading=reading,
         )
         if result.cycle is not None:
             findings.append(_cycle_finding(result.cycle, case=case_id))
@@ -1156,20 +1161,22 @@ def play_once(
     horizon: datetime,
     adapter: FakeAdapter,
     events: Iterable[Event] = (),
-    default_tz: str | None = None,
-    tz_aliases: Mapping[str, str] | None = None,
-    semantics: SemanticSwitches | None = None,
+    reading: Interpretation = Interpretation(),
 ) -> PlayResult:
     """One journal-free virtual-clock play: the reentrant player the sweeps and tests reuse
     (DL-184). A ZeroDelayCycleError is caught and returned on the result -- the check's own
     finding; every other EngineError propagates as the shell failure it is."""
     clock = VirtualClock(start)
     scheduler = Scheduler(
-        catalog, start=start, default_tz=default_tz, tz_aliases=tz_aliases, semantics=semantics
+        catalog,
+        start=start,
+        default_tz=reading.default_tz,
+        tz_aliases=reading.tz_aliases,
+        semantics=reading.semantics,
     )
     adapters = {"CMD": adapter, "FW": adapter}
     engine = Engine(
-        catalog, clock=clock, adapters=adapters, scheduler=scheduler, semantics=semantics
+        catalog, clock=clock, adapters=adapters, scheduler=scheduler, semantics=reading.semantics
     )
     before = {name: engine.oracle.store.runtime(name).run_number for name in catalog.jobs}
     for ev in events:

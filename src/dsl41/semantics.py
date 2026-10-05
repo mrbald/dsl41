@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, cast, get_args
 from dsl41.capacity import checks_load, resource_type
 from dsl41.conditions import ExitCodeAtom, StatusAtom, iter_atoms
 from dsl41.ir import FwSpec
+from dsl41.timezones import DstStartTimes
 
 if TYPE_CHECKING:
     from dsl41.ir import CalendarIR, CatalogIR, JobIR
@@ -143,7 +144,7 @@ RenewableFree = Literal["Y", "A"]
 QueuedRecheck = Literal["0", "1", "2"]
 FwExistence = Literal["stable", "immediate"]
 WekrFirstWeek = Literal["first-full", "partial"]
-DstStartTimes = Literal["vendor", "fold0"]
+# DstStartTimes is spelled in `timezones`, the phase-free module that reads it.
 
 
 #: The registry. Closed: a name that is not here is refused wherever it is

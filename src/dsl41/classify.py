@@ -68,10 +68,9 @@ from dsl41.oracle import Oracle
 from dsl41.oracle_state import RESOURCE_BUCKET, TERMINAL, JobRuntime
 from dsl41.period import (
     RuntimeProfile,
-    default_tz_of,
     job_fingerprints,
+    oracle_reading,
     switches_of,
-    tz_aliases_of,
 )
 from dsl41.semantics import REGISTRY as SWITCH_REGISTRY
 
@@ -928,12 +927,7 @@ def _seeded(
     # the period's own SEM-35 alias table (DL-151): a condition read under a
     # `timezone:` only that table resolves must not raise here; and its own
     # semantic switches (DL-252), so each side's truth is that side's reading
-    oracle = _TruthOracle(
-        catalog,
-        default_tz=default_tz_of(profile),
-        tz_aliases=tz_aliases_of(profile),
-        semantics=switches_of(profile),
-    )
+    oracle = _TruthOracle(catalog, **oracle_reading(profile))
     store = oracle.store
     store.begin_input()
     for name in sorted(carried.jobs):

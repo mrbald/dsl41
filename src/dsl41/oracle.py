@@ -1365,9 +1365,7 @@ class Oracle:
     # -------------------------------------------------------- condition evaluation
 
     def _atom_true(self, atom: StatusAtom | ExitCodeAtom, evaluator: str) -> bool:
-        name = (
-            atom.job.name if atom.job.instance is None else f"{atom.job.name}^{atom.job.instance}"
-        )
+        name = atom.job.key
         rt = self.store.job.get(name)
         if rt is None:
             return False  # SEM-06: undefined -> permanently, silently false
@@ -2620,9 +2618,8 @@ class Oracle:
         tz = self._job_tz(job_ir)
         day = to_local(self._now, tz).date()
         times = [(start.hour, start.minute) for start in schedule.start_times]
-        vendor = self.semantics.dst_start_times == "vendor"
         best: tuple[datetime, int] | None = None
-        for index, at in start_time_instants(day, times, tz, vendor=vendor):
+        for index, at in start_time_instants(day, times, tz, dst=self.semantics.dst_start_times):
             if at <= self._now < at + _SLOT_MINUTE and (best is None or at > best[0]):
                 best = (at, index)
         return None if best is None else best[1]
@@ -2807,10 +2804,8 @@ def _entity_keys(cond: Cond) -> set[str]:
     for atom in iter_atoms(cond):
         if isinstance(atom, GlobalAtom):
             keys.add(f"g:{atom.name}")
-        elif atom.job.instance is None:
-            keys.add(atom.job.name)
         else:
-            keys.add(f"{atom.job.name}^{atom.job.instance}")
+            keys.add(atom.job.key)
     return keys
 
 

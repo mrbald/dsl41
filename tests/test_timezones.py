@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from dsl41.timezones import (
+    DstStartTimes,
     alias_table,
     dst_change,
     dst_change_near,
@@ -234,8 +235,8 @@ def test_sem33_dst_change_near_looks_two_days_either_side() -> None:
 _NY_ZONE = ZoneInfo("America/New_York")
 
 
-@pytest.mark.parametrize("vendor", [True, False], ids=["vendor", "fold0"])
-def test_sem32_dst_start_time_instants_pair_each_instant_with_its_index(vendor: bool) -> None:
+@pytest.mark.parametrize("dst", ["vendor", "fold0"])
+def test_sem32_dst_start_time_instants_pair_each_instant_with_its_index(dst: DstStartTimes) -> None:
     """DL-260: the one conversion the scheduler ticks and the oracle names
     slots from. Each instant carries its entry's index in the list as
     written, and entries come back in wall-time order. On 2026-03-08 in
@@ -244,8 +245,8 @@ def test_sem32_dst_start_time_instants_pair_each_instant_with_its_index(vendor: 
     past the gap, where 02:45 shares 03:45's instant."""
     day = date(2026, 3, 8)
     times = [(3, 45), (2, 45), (2, 50), (1, 0)]
-    got = start_time_instants(day, times, _NY_ZONE, vendor=vendor)
-    if vendor:
+    got = start_time_instants(day, times, _NY_ZONE, dst=dst)
+    if dst == "vendor":
         assert got == [
             (3, datetime(2026, 3, 8, 6, 0)),
             (1, datetime(2026, 3, 8, 7, 0, 45)),
@@ -260,9 +261,9 @@ def test_sem32_dst_start_time_instants_pair_each_instant_with_its_index(vendor: 
         ]
 
 
-@pytest.mark.parametrize("vendor", [True, False], ids=["vendor", "fold0"])
+@pytest.mark.parametrize("dst", ["vendor", "fold0"])
 def test_sem32_dst_conversions_ignore_the_switch_away_from_a_documented_change(
-    vendor: bool,
+    dst: DstStartTimes,
 ) -> None:
     """DL-260: an ordinary day, a zone without DST, a fixed offset, the
     engine clock (no zone) and a change of another shape all convert at
@@ -277,9 +278,9 @@ def test_sem32_dst_conversions_ignore_the_switch_away_from_a_documented_change(
         (date(2026, 3, 8), None, datetime(2026, 3, 8, 2, 5)),
     ]
     for day, tz, expected in cases:
-        assert start_time_instants(day, [(2, 5)], tz, vendor=vendor) == [(0, expected)]
-        assert start_mins_instants(day, [(2, 5)], tz, vendor=vendor) == [expected]
-    assert start_time_instants(date(2026, 10, 25), [(2, 30)], berlin, vendor=vendor) == [
+        assert start_time_instants(day, [(2, 5)], tz, dst=dst) == [(0, expected)]
+        assert start_mins_instants(day, [(2, 5)], tz, dst=dst) == [expected]
+    assert start_time_instants(date(2026, 10, 25), [(2, 30)], berlin, dst=dst) == [
         (0, datetime(2026, 10, 25, 0, 30))
     ]
 
@@ -290,21 +291,21 @@ def test_sem32_dst_start_mins_instants_follow_the_switch() -> None:
     missing hour. fold=0 keeps the first pass only and maps a missing-hour
     tick past the gap, onto the real tick an hour later."""
     fall = [(1, 0), (1, 30)]
-    assert start_mins_instants(date(2026, 11, 1), fall, _NY_ZONE, vendor=True) == [
+    assert start_mins_instants(date(2026, 11, 1), fall, _NY_ZONE, dst="vendor") == [
         datetime(2026, 11, 1, 5, 0),
         datetime(2026, 11, 1, 6, 0),
         datetime(2026, 11, 1, 5, 30),
         datetime(2026, 11, 1, 6, 30),
     ]
-    assert start_mins_instants(date(2026, 11, 1), fall, _NY_ZONE, vendor=False) == [
+    assert start_mins_instants(date(2026, 11, 1), fall, _NY_ZONE, dst="fold0") == [
         datetime(2026, 11, 1, 5, 0),
         datetime(2026, 11, 1, 5, 30),
     ]
     spring = [(2, 20), (3, 20)]
-    assert start_mins_instants(date(2026, 3, 8), spring, _NY_ZONE, vendor=True) == [
+    assert start_mins_instants(date(2026, 3, 8), spring, _NY_ZONE, dst="vendor") == [
         datetime(2026, 3, 8, 7, 20)
     ]
-    assert start_mins_instants(date(2026, 3, 8), spring, _NY_ZONE, vendor=False) == [
+    assert start_mins_instants(date(2026, 3, 8), spring, _NY_ZONE, dst="fold0") == [
         datetime(2026, 3, 8, 7, 20),
         datetime(2026, 3, 8, 7, 20),
     ]

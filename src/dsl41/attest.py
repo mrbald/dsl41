@@ -93,14 +93,12 @@ from dsl41.period import (
     read_archive_receipt,
     read_or_none,
     read_sentinel,
-    switches_of,
-    tz_aliases_of,
-    default_tz_of,
+    oracle_reading,
     wrote_period,
 )
 from dsl41.runner_clock import EngineError
-from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, seed_local_executor
-from dsl41.runner_journal import dsl41_version, read_journal, replay_inputs
+from dsl41.runner_hosts import LOCAL_EXECUTOR_ID
+from dsl41.runner_journal import dsl41_version, read_journal, replay_period
 from dsl41.runner_ledger import STATE_MACHINE_VERSION, next_epoch
 from dsl41.runner_procid import durable_create, make_durable
 from dsl41.seal import (
@@ -741,15 +739,8 @@ def rederive_seal(run_root: Path, period_id: int, *, stored: Seal | None = None)
     carried = carried_from_opening(run_root, opening, closing)
     # SEM-35: the period's own alias table, or a job whose `timezone:` only
     # that table resolves refuses the log this estate really wrote (DL-151)
-    oracle = Oracle(
-        c1,
-        carried=carried,
-        default_tz=default_tz_of(closing.runtime_profile),
-        tz_aliases=tz_aliases_of(closing.runtime_profile),
-        semantics=switches_of(closing.runtime_profile),
-    )
-    seed_local_executor(oracle.store, LOCAL_EXECUTOR_ID, at=opening_at(opening))
-    replay = replay_inputs(
+    oracle = Oracle(c1, carried=carried, **oracle_reading(closing.runtime_profile))
+    replay = replay_period(
         oracle,
         records,
         outbox=carried_outbox(_opened_runtime(run_root, opening, closing), at=opening_at(opening)),

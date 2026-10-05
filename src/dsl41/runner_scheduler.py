@@ -44,6 +44,7 @@ from dsl41.runner_clock import EngineError
 from dsl41.semantics import DEFAULTS as DEFAULT_SWITCHES
 from dsl41.semantics import SemanticSwitches
 from dsl41.timezones import (
+    DstStartTimes,
     resolve_timezone,
     start_mins_instants,
     start_time_instants,
@@ -100,8 +101,8 @@ class _SchedulePlan:
     #: `dst-start-times` switch on a DST change day (DL-260); calendar row
     #: times keep the fold=0 conversion
     source: Literal["start_times", "start_mins", "calendar"] = "calendar"
-    #: the `dst-start-times` switch: True is the vendor's rules
-    vendor_dst: bool = True
+    #: the `dst-start-times` switch
+    dst_start_times: DstStartTimes = "vendor"
     run_dates: frozenset[date] | None = None
     exclude_dates: frozenset[date] = frozenset()
     run_gen: _CalCache | None = None
@@ -128,10 +129,10 @@ class _SchedulePlan:
         start_times and start_mins convert through the one definition the
         oracle's slot matching reads too (DL-260)."""
         if self.source == "start_times":
-            instants = start_time_instants(day, self.times, self.tz, vendor=self.vendor_dst)
+            instants = start_time_instants(day, self.times, self.tz, dst=self.dst_start_times)
             return [at for _, at in instants]
         if self.source == "start_mins":
-            return start_mins_instants(day, self.times, self.tz, vendor=self.vendor_dst)
+            return start_mins_instants(day, self.times, self.tz, dst=self.dst_start_times)
         times = self.times if self.row_times is None else self.row_times.get(day, frozenset())
         ticks = []
         for hour, minute in times:
@@ -299,7 +300,7 @@ class Scheduler:
                 times=self._ticks(sched) if own_ticks else ((0, 0),),
                 tz=_scheduler_tz(sched.timezone, name, tz_aliases) if sched.timezone else base_tz,
                 source=tick_source,
-                vendor_dst=self._semantics.dst_start_times == "vendor",
+                dst_start_times=self._semantics.dst_start_times,
                 run_dates=run_dates,
                 exclude_dates=exclude_dates,
                 run_gen=run_gen,

@@ -496,12 +496,6 @@ class _Alphabet(BaseModel):
     globals_: dict[str, list[str | None]] = {}  # name -> candidate values (None == unset)
 
 
-def _job_key(atom: StatusAtom | ExitCodeAtom) -> str:
-    if atom.job.instance is None:
-        return atom.job.name
-    return f"{atom.job.name}^{atom.job.instance}"
-
-
 def global_regions(conds: "list[Cond]") -> dict[str, list[str | None]]:
     """Per referenced global, the region-representative values covering every
     comparison the conditions make: numeric cutpoints v-1/v/v+1 for int-able
@@ -527,7 +521,7 @@ def _alphabet(conds: list[Cond]) -> _Alphabet:
                 is_num = atom.value.lstrip("-").isdigit()
                 global_numeric[atom.name] = global_numeric.get(atom.name, True) and is_num
                 continue
-            key = _job_key(atom)
+            key = atom.job.key
             scope = jobs.setdefault(key, _JobScope(key=key))
             atoms_by_job.setdefault(key, []).append(atom)
             lookback = atom.lookback
@@ -646,7 +640,7 @@ def _eval_cond(cond: Cond, state: _State, alphabet: _Alphabet) -> bool:
         if actual is None:  # unset: no comparison holds (never a literal)
             return False
         return compare_value(actual, cond.op, cond.value)
-    key = _job_key(cond)
+    key = cond.job.key
     status = state.job_status.get(key, "NEVER_RAN")
     if state.job_iced.get(key, False):
         # Oracle parity (DL-243, DL-254): the iced reading holds whatever

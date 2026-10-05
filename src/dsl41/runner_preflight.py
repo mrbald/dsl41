@@ -33,7 +33,7 @@ from dsl41.autocal import (
     compile_calendar,
     standard_days,
 )
-from dsl41.capacity import RES_TYPES
+from dsl41.capacity import RES_TYPES, resource_type
 from dsl41.conditions import And, Cond, Paren, StatusAtom
 from dsl41.ir import CatalogIR, ExecSpec, JobIR, MachineIR, unquote_jil_value
 from dsl41.oracle import Oracle
@@ -312,7 +312,7 @@ def _resource_preflight(name: str, job: JobIR, catalog: CatalogIR) -> list[Prefl
                 " -- can never be satisfied, the job would hang in QUE_WAIT forever (DL-50)"
                 " and, at a positive priority, block every lower priority naming it (DL-255)"
             )
-        res_type = (resource.res_type or "").strip().upper()
+        res_type = resource_type(resource)
         if res_type and res_type not in RES_TYPES:
             err(
                 f"resource {ref.name!r} res_type {resource.res_type!r} is not R/D/T --"

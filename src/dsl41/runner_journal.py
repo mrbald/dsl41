@@ -107,7 +107,7 @@ from dsl41.runner_codes import STORED_CODES
 from pydantic import ValidationError
 
 from dsl41.runner_effects import Effect, EffectOutcome, Outbox, is_valid_run_id
-from dsl41.runner_hosts import HostCommand
+from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, HostCommand, seed_local_executor
 from dsl41.runner_ledger import STATE_MACHINE_VERSION, Proof
 
 if TYPE_CHECKING:  # annotation only: the WAL stays a leaf of the DL-74 DAG
@@ -1373,6 +1373,22 @@ def replay_inputs(
             replay.recovered.append(applied.result)
         replay.frontiers = replay.frontiers.admit(attempt.at).record(attempt.index)
     return replay
+
+
+def replay_period(
+    oracle: Oracle, records: list[dict[str, Any]], *, outbox: Outbox | None = None
+) -> Replay:
+    """Replay one period's log offline onto `oracle`, built for the period
+    (`period.oracle_reading`) with the rows it opened with: this engine's
+    own executor is seeded at the opening instant, then `replay_inputs`.
+
+    Reproducing a log means reproducing the genesis the engine replayed it
+    onto, not only the catalog: a routing-table input lands on a table that
+    already holds this engine's own executor (concurrency-model ss8), and a
+    replay without it would decide "no such host" where the run decided
+    otherwise. The stamp only reaches `last_contact`, which no input reads."""
+    seed_local_executor(oracle.store, LOCAL_EXECUTOR_ID, at=opening_at(records[0]))
+    return replay_inputs(oracle, records, outbox=outbox)
 
 
 def scheduler_frontier(records: list[dict[str, Any]]) -> datetime:

@@ -211,11 +211,11 @@ from dsl41.runner_hosts import (
 )
 from dsl41.period import (
     CMD_GRACE_S,
+    OracleReading,
     StagedManifest,
-    default_tz_of,
+    oracle_reading,
     staging_dir,
     switches_of,
-    tz_aliases_of,
 )
 from dsl41.runner_journal import (
     Journal,
@@ -438,22 +438,22 @@ class Engine:
     ) -> None:
         # SEM-35: the base zone and alias table the oracle reads a job's time
         # attributes in. The period's pinned profile when there is one, which
-        # is what every replay of this log reads (`default_tz_of`), else the
+        # is what every replay of this log reads (`oracle_reading`), else the
         # scheduler's own: the two halves of one engine must read a job's
         # zone the same way (DL-62, DL-253). Empty aliases read as absent.
-        profile = estate.manifest.runtime_profile if estate is not None else None
-        if profile is not None:
-            default_tz, tz_aliases = default_tz_of(profile), tz_aliases_of(profile)
+        switches = _engine_switches(estate, semantics, scheduler, adapters)
+        if estate is not None:
+            # the zone and aliases from the pin; the switches as checked above
+            reading = OracleReading(
+                **{**oracle_reading(estate.manifest.runtime_profile), "semantics": switches}
+            )
         else:
-            default_tz = scheduler.default_tz if scheduler is not None else None
-            tz_aliases = alias_table(scheduler.tz_aliases if scheduler is not None else None)
-        self.oracle = Oracle(
-            catalog,
-            carried=carried,
-            default_tz=default_tz,
-            tz_aliases=tz_aliases,
-            semantics=_engine_switches(estate, semantics, scheduler, adapters),
-        )
+            reading = OracleReading(
+                default_tz=scheduler.default_tz if scheduler is not None else None,
+                tz_aliases=alias_table(scheduler.tz_aliases if scheduler is not None else None),
+                semantics=switches,
+            )
+        self.oracle = Oracle(catalog, carried=carried, **reading)
         #: concurrency-model ss2/ss8: the execution host this engine dispatches
         #: to. One engine per run root owns one local executor; machine names
         #: resolve to a relay through the routing table (ss5) and there is no

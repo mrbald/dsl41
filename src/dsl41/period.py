@@ -58,7 +58,7 @@ import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Any, Final, Literal
+from typing import Annotated, Any, Final, Literal, TypedDict
 
 from pydantic import (
     BaseModel,
@@ -424,6 +424,27 @@ def switches_of(profile: "RuntimeProfile | None") -> SemanticSwitches:
     that replays a period's log reads them here, as `tz_aliases_of` is read
     for the alias table."""
     return resolve(None if profile is None else profile.semantics)
+
+
+class OracleReading(TypedDict):
+    """The keywords an `Oracle` reads a period under: its base zone, its
+    alias table and its semantic switches."""
+
+    default_tz: str | None
+    tz_aliases: dict[str, str] | None
+    semantics: SemanticSwitches
+
+
+def oracle_reading(profile: "RuntimeProfile | None") -> OracleReading:
+    """How an `Oracle` reads a period: `Oracle(catalog, **oracle_reading(p))`.
+    The one place a profile becomes an interpreter. A reader that replays a
+    period's log builds its oracle here, so an input the pin gains reaches
+    every replay at once instead of site by site (DL-151, DL-252, DL-253)."""
+    return OracleReading(
+        default_tz=default_tz_of(profile),
+        tz_aliases=tz_aliases_of(profile),
+        semantics=switches_of(profile),
+    )
 
 
 def runtime_profile_from_cli(

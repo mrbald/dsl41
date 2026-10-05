@@ -182,6 +182,11 @@ def to_utc(local: datetime, tz: tzinfo | None) -> datetime:
 MISSING_HOUR = 2
 REPEATED_HOUR = 1
 
+#: The `dst-start-times` switch's values (DL-260). Defined here, where the
+#: value is read, so this module still imports nothing from `dsl41`;
+#: `semantics` registers the switch from this alias.
+DstStartTimes = Literal["vendor", "fold0"]
+
 
 def _offsets(local: datetime, tz: tzinfo) -> tuple[timedelta | None, timedelta | None]:
     """The UTC offset of wall time `local` at fold=0 and at fold=1 (PEP 495)."""
@@ -246,15 +251,15 @@ def vendor_gap_instant(day: date, hour: int, minute: int, tz: tzinfo | None) -> 
 
 
 def start_time_instants(
-    day: date, times: Sequence[tuple[int, int]], tz: tzinfo | None, *, vendor: bool
+    day: date, times: Sequence[tuple[int, int]], tz: tzinfo | None, *, dst: DstStartTimes
 ) -> list[tuple[int, datetime]]:
     """The start_times entries `times`, as (hour, minute), on local `day` as
     engine instants, each paired with its index in `times` and listed in
     wall-time order. An entry that does not fire that day is left out.
 
-    `vendor` False is the fold=0 conversion of every entry (the
-    `dst-start-times=fold0` switch): a repeated wall time is its first
-    occurrence, and a missing one maps past the gap. `vendor` True applies
+    `dst` "fold0" is the fold=0 conversion of every entry (the
+    `dst-start-times` switch): a repeated wall time is its first
+    occurrence, and a missing one maps past the gap. `dst` "vendor" applies
     the documented rules on a change of the shape `dst_change` names
     (DL-260). TechDocs 12.1 and 24.2, "Standard Time Changes": jobs whose
     start_time is "between 1:00 and 1:59" run "during the second (standard
@@ -266,7 +271,7 @@ def start_time_instants(
 
     Under fold=0 a missing wall time can land on a later entry's instant;
     the earlier wall time is listed first."""
-    change = dst_change(day, tz) if vendor else None
+    change = dst_change(day, tz) if dst == "vendor" else None
     instants: list[tuple[int, datetime]] = []
     gap_taken = False
     for index in sorted(range(len(times)), key=lambda i: times[i]):
@@ -283,19 +288,19 @@ def start_time_instants(
 
 
 def start_mins_instants(
-    day: date, ticks: Sequence[tuple[int, int]], tz: tzinfo | None, *, vendor: bool
+    day: date, ticks: Sequence[tuple[int, int]], tz: tzinfo | None, *, dst: DstStartTimes
 ) -> list[datetime]:
     """start_mins ticks, as (hour, minute), on local `day` as engine
     instants, in wall-time order.
 
-    `vendor` False is the fold=0 conversion, as in `start_time_instants`.
-    `vendor` True applies the documented rules on a change of the shape
+    `dst` "fold0" is the fold=0 conversion, as in `start_time_instants`.
+    `dst` "vendor" applies the documented rules on a change of the shape
     `dst_change` names (DL-260). "Standard Time Changes": "Jobs for which
     the start_mins attribute is set run in both hours." "Daylight Time
     Changes": "Jobs with relative time dependencies run as expected", so a
     tick in the missing hour does not exist: 0, 20 and 40 run at "1:00 ST,
     1:20 ST, 1:40 ST, 3:00 DT, 3:20 DT, and 3:40 DT"."""
-    change = dst_change(day, tz) if vendor else None
+    change = dst_change(day, tz) if dst == "vendor" else None
     instants: list[datetime] = []
     for hour, minute in ticks:
         if change == "spring" and hour == MISSING_HOUR:

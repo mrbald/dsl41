@@ -66,10 +66,10 @@ them as two would break every client twice:
 
 - **Every request names `"v": 3`** -- the version handshake control-protocol
   ss7 recorded as a known gap. No fallback to an older version:
-  concurrency-model ss0 refuses a caller that does not name one, and "accept
-  it unversioned for compatibility" is exactly the opt-out ss0 forbids. The
-  check sits in `_handle`, ahead of the subscribe branch, so no door is left
-  unversioned. v3 is DL-118: `result` and standalone `effect` become one
+  control-protocol ss2 refuses a request that names none or another one
+  (DL-90, DL-118), so "accept it unversioned for compatibility" is not an
+  option. The check sits in `_handle`, ahead of the subscribe branch, so no
+  door is left unversioned. v3 is DL-118: `result` and standalone `effect` become one
   `decision`, and a v2 client on `rec == "effect"` goes blind.
 - **A mutation carries the ss6 envelope and is answered with its
   decision.** The flat `event`/`job`/`name` fields became `verb` +
@@ -105,6 +105,7 @@ from dsl41.boundary import SealRequest
 from dsl41.canon import is_scalar_json, is_scalar_string, is_wire_int
 from dsl41.conditions import GlobalAtom, iter_atoms
 from dsl41.ir import ExecSpec, FwSpec, JobIR
+from dsl41.period import FW_DEFAULT_INTERVAL_S
 from dsl41.oracle_state import (
     INJECTABLE_STATUSES,
     Event,
@@ -410,8 +411,9 @@ class ControlServer:
                     )
                     continue
                 if request.get("v") != PROTOCOL_VERSION:
-                    # ss0 refuses a caller that does not name a version, and it
-                    # is checked HERE so that subscribe -- which owns its
+                    # control-protocol ss2 refuses a request that names no
+                    # version or another one (DL-90, DL-118), and it is checked
+                    # HERE so that subscribe -- which owns its
                     # connection and never reaches _respond -- cannot be the
                     # one unversioned door left open (DL-90). It carries
                     # `refused` for the reason the envelope doors do: this is
@@ -666,8 +668,9 @@ class ControlServer:
         The CLI stages C2 first and names the staged bytes by
         `stage_digest`; the engine validates exactly those bytes, performs
         the cutoff in its single-writer loop, and then exits with code 3
-        ("sealed; period N+1 is ready to open"). It does NOT load C2 into
-        itself: a transition is a restart, not a reload (DL-65)."""
+        ("sealed period N at DIGEST; period N+1 is ready to open"). It does
+        NOT load C2 into itself: a transition is a restart, not a reload
+        (DL-65)."""
         if (wire := _seal_wire_error(request)) is not None:
             return _failure("invalid_argument", f"malformed seal request: {wire}", refused=True)
         # left key-by-key on purpose (DL-170): `_seal_wire_error` above
@@ -1154,10 +1157,8 @@ class ControlServer:
             for atom in iter_atoms(job_ir.sem.condition.cond):
                 if isinstance(atom, GlobalAtom):
                     globals_.add(atom.name)
-                elif atom.job.instance is None:
-                    upstream.add(atom.job.name)
                 else:
-                    upstream.add(f"{atom.job.name}^{atom.job.instance}")
+                    upstream.add(atom.job.key)
         members = (
             sorted(n for n, j in oracle.catalog.jobs.items() if j.box.box_name == job)
             if job_ir.job_type == "BOX"
@@ -1181,7 +1182,9 @@ class ControlServer:
         if not isinstance(job_ir.exec_, FwSpec) or job_ir.name not in self.engine.live_jobs():
             return None
         spec = job_ir.exec_
-        default = getattr(self.engine.adapters.get("FW"), "default_interval_s", 60)
+        # an int, as the adapter's own default is: the number goes on the wire
+        fallback = int(FW_DEFAULT_INTERVAL_S)
+        default = getattr(self.engine.adapters.get("FW"), "default_interval_s", fallback)
         return {
             "file": spec.watch_file,
             "interval": spec.watch_interval or default,

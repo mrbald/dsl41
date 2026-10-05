@@ -357,6 +357,7 @@ LITERAL_ALT_EXCLUDED = frozenset(
         "autocal.ActionCategory",  # cal_action, whose members are its pairs
         "period.MachinePolicy",  # profile_alt:machine_policy=*
         "period.RuntimeProfile.execution_mode",  # profile_alt:execution_mode=*
+        "timezones.DstStartTimes",  # profile_alt:semantics.dst-start-times=*
         # the estate-layout sentinel is part of the period model's on-disk
         # contract, closed by that document's own obligations (DL-209)
         "period.Sentinel.rec",

@@ -32,11 +32,6 @@ from dsl41.minify import (
 )
 from dsl41.minify_rules import INERT_COMMAND, Klass, class_counts, classify
 
-# The reader that turns grammars/condition.lark into terminal name -> body.
-# Imported, not re-spelled: it is one grammar and this file pins four of its
-# terminals (DL-75 review 2026-09-19).
-from test_simulation_register import _terminal_bodies
-
 runner = CliRunner()
 
 CORPUS = Path(__file__).parent / "corpus"
@@ -972,14 +967,30 @@ def test_the_calendar_condition_predicate_cannot_escape() -> None:
 
 # --------------------------------------- the copies, pinned to their sources
 #
-# minify's policy half hand-copies three closed sets and four grammar
-# terminals. Every one of those copies is REQUIRED: the sources are private
-# names in `dsl41.ir` and `dsl41.conditions`, and a private cross-module
-# import in src/ is a coupling neither module promised (DL-74, gate 2 of
-# scripts/arch_check.py). Tests are exempt from that gate, so the pin lives
-# here -- the house pattern from tests/test_simulation_register.py (DL-75
-# review 2026-09-19). Without it the copies are true only until someone edits
-# one side.
+# minify's policy half hand-copies three closed sets. Every one of those
+# copies is REQUIRED: the sources are private names in `dsl41.ir`, and a
+# private cross-module import in src/ is a coupling the module never promised
+# (DL-74, gate 2 of scripts/arch_check.py). Tests are exempt from that gate,
+# so the pin lives here -- the house pattern from
+# tests/test_simulation_register.py (DL-75 review 2026-09-19). Without it the
+# copies are true only until someone edits one side. The four grammar
+# terminals are not copied: minify reads them through
+# `conditions.terminal_pattern`.
+
+
+def test_two_character_operators_keep_their_comparand() -> None:
+    """The comparand tail takes CMP_OP from the grammar, whose alternatives
+    list `<=`, `>=` and `!=` ahead of `<`, `>` and `=`. Matched the other way
+    round, `<=` would read as `<` and the `=` would join the comparand."""
+    from dsl41.minify import _Allocator, rewrite_condition
+
+    text = (
+        'v(ACMEA) <= "ACMEQ1" & v(ACMEB)<=ACMEB1 & v(ACMEC) >= "ACMEQ2"'
+        ' | v(ACMED)>=ACMEB2 & v(ACMEE) != "ACMEQ3" & v(ACMEF)!=ACMEB3'
+    )
+    assert rewrite_condition(text, _Allocator(set(), {})) == (
+        'v(g1) <= "v1" & v(g2)<=v2 & v(g3) >= "v3" | v(g4)>=v4 & v(g5) != "v5" & v(g6)!=v6'
+    )
 
 
 def test_the_bool_spellings_copy_the_ir_set() -> None:
@@ -998,36 +1009,6 @@ def test_the_day_tokens_copy_the_ir_sets() -> None:
     from dsl41.minify_rules import _DAY_TOKENS
 
     assert _DAY_TOKENS == ir._DAY_TOKENS | set(ir._DAY_FULL)
-
-
-def _terminal_regex(body: str) -> str:
-    """The body of a terminal written as one `/regex/`, without the slashes."""
-    match = re.fullmatch(r"\s*/((?:[^/\\]|\\.)*)/\s*", body)
-    assert match is not None, body
-    return match.group(1)
-
-
-def test_the_condition_regexes_copy_the_grammar_terminals() -> None:
-    """minify re-lexes the identifier inside an atom, because the parser
-    throws the lark token's offsets away. The four regexes that do it are
-    condition.lark's terminals character for character, so a grammar edit that
-    widens JOB_NAME mis-splices here unless it is made in both files. The leak
-    guard is a backstop, not a check of this."""
-    from dsl41 import minify
-
-    bodies = _terminal_bodies()
-    assert minify._JOB_NAME_RE.pattern == _terminal_regex(bodies["JOB_NAME"])
-    assert minify._INSTANCE_RE.pattern == _terminal_regex(bodies["INSTANCE_NAME"])
-    assert minify._GLOBAL_NAME_RE.pattern == _terminal_regex(bodies["GLOBAL_NAME"])
-
-    operators = re.findall(r'"((?:[^"\\]|\\.)*)"', bodies["CMP_OP"])
-    assert operators, bodies["CMP_OP"]
-    quoted = _terminal_regex(bodies["QUOTED"])
-    bare = _terminal_regex(bodies["BARE_VALUE"])
-    expected = r"\)\s*(?:" + "|".join(operators) + r")\s*(" + quoted + "|" + bare + ")"
-    # The source spells the quote character `\"` inside a `"`-delimited raw
-    # string; the grammar spells the same character bare. Nothing else differs.
-    assert minify._COMPARAND_RE.pattern.replace('\\"', '"') == expected
 
 
 def test_every_modelled_job_attribute_is_classified() -> None:

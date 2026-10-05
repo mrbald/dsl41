@@ -208,7 +208,7 @@ def rule_l001(catalog: CatalogIR) -> list[Violation]:
                             ),
                             jobs=[job.name],
                             span=span,
-                            detail=f"{ref.name}^{ref.instance}",
+                            detail=ref.key,
                         )
                     )
     return out
