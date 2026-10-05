@@ -18480,7 +18480,7 @@ relitigate an entry; append a new one.
 - DL-276 A generated index of the decision log (2026-10-05;
   scripts/render_decision_index.py, docs/decision-index.md,
   tests/test_decision_index.py)
-  THE GAP. The log holds 279 entries and has no table of contents. A
+  THE GAP. The log holds about 280 entries and has no table of contents. A
   reader who meets a DL id in a spec searches an 18,000-line file, and
   cannot see which docs cite an entry.
   THE RULE. `scripts/render_decision_index.py` writes
@@ -18642,7 +18642,7 @@ relitigate an entry; append a new one.
   restating them (2026-10-05; docs/architecture.md, docs/glossary.md,
   docs/risk-map.md, docs/blocks/, README.md "Documents" and "Tests",
   tests/test_architecture_doc.py)
-  THE GAP. The docs hold about 31,000 lines and had no entry point for a
+  THE GAP. The docs hold about 33,000 lines and had no entry point for a
   human reviewer: no overview of the runner, no glossary, and state
   machines described only in prose, spread across seven contracts.
   THE RULE. Four reader pages sit beside the contracts and hold no rules.
@@ -18650,7 +18650,9 @@ relitigate an entry; append a new one.
   components, and one control input traced end to end, in the order the
   code runs it. `docs/glossary.md` defines the runner's terms.
   `docs/risk-map.md` lists each runner machine with its branch coverage
-  and open findings, stamped with the commit it measures.
+  and open findings. Its stamp names the main commit whose `src/` was
+  measured, never a branch commit, because a rebase merge gives a branch's
+  commits new ids.
   `docs/blocks/` holds one card per building block, in the shape
   `docs/blocks/README.md` sets. Every page links each rule to its
   decision or contract section, and never restates a frozen table. A
@@ -18670,9 +18672,21 @@ relitigate an entry; append a new one.
   row to a test: both or neither, and neither is built. Cards for the
   blocks not covered here: leadership, host routing, control, access,
   seal and lineage, audit and retention.
+  RECONCILED. The pages state DL-272..DL-275: every `ok: false` control
+  answer carries a stable code, the gateway is specified only, a seal can
+  fail-stop, and signal handlers are armed before a socket is published.
+  The glossary defines code, fail-stop and gateway. The risk map lists
+  DL-274 as closing DL-272's OPEN item, and adds one open finding from
+  DL-274's NOT IN SCOPE: a replayed oracle fault stops every resume.
   STATED LIMIT. A card's gap evidence names source line numbers as they
   were when the card was written. No gate checks them, so they drift as
   the code moves; the named function or file is the durable pointer.
   REVIEW. One Opus reviewer per slice, at most three rounds each. All
   findings are fixed. The gaps the cards found are open questions for
-  the owner.
+  the owner. The reconciliation with DL-272..DL-275 had one Opus reviewer
+  and a Fable integration pass in place of Codex. Both found the same
+  major: the pages said every seal fail-stop leaves the period open. That
+  holds for a fence loss and DL-274's cases only. A failure at or after
+  the `seal` append is an unknown outcome that recovery may commit
+  (period-model §7, PR-28d); the glossary and the engine-loop and FW cards
+  now say so. The minors and nits are fixed.

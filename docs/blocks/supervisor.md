@@ -27,7 +27,7 @@ stateDiagram-v2
     [*] --> Starting
     Starting --> Refused: lock held, PING answered, or live pid record
     Refused --> [*]: exit 1, the caller may retry
-    Starting --> Serving: pid record written, socket published
+    Starting --> Serving: handlers installed, then pid record and socket published
     state Serving {
         [*] --> Unleased
         Unleased --> Leased: ACQUIRE
@@ -56,6 +56,7 @@ stateDiagram-v2
 - Pushes are notifications. The spool is the truth across a restart, and `LIST` shows this incarnation's memory only (§5; DL-205).
 - A handler that raises is answered `internal:` and never ends the process, and a client that stops reading never blocks the loop (§5; DL-210).
 - The deadman is opt-in. With it, no live leaseholder for N seconds ends the process (§5 "The deadman"; DL-95).
+- Signal handlers are installed before `supervisor.pid` and `supervisor.sock` are published, so a peer that sees either never meets a signal's default action ([DL-275](../decision-log.md); `_install_signals` before `_bind`).
 - The module is stdlib-only and runs by file path ([supervisor-protocol §1](../supervisor-protocol.md#1-roles); DL-42).
 
 ## Failure and recovery
@@ -80,7 +81,7 @@ stateDiagram-v2
 - Signals and shutdown: `test_signal_pid_reuse_guard_refuses_spoofed_spawn`, `test_signal_in_the_spawn_window_is_not_ready_not_a_noop`, `test_shutdown_orderly_records_signaled_never_parent_lost`, `test_shutdown_waits_for_late_spawn_record`.
 - Deadman: `test_cm10_the_deadman_fires_and_takes_its_wrappers_with_it`, `test_a_live_leaseholder_reprieves_the_deadman`, `test_a_supervisor_with_no_deadman_outlives_its_controller`.
 - Engine and supervisor deaths: `test_sigkill_engine_detached_survives_and_reattaches`, `test_kill_supervisor_midrun_engine_resolves_via_spool`, `test_detach_stop_sigint_then_resume_reattaches`, `test_oracle_kill_detached_terminates`.
-- Ownership and transport: `test_dl210_lock_loser_exits_one_and_can_retry`, `test_dl210_pid_guard_requires_proven_absence`, `test_dl210_nonreader_cannot_block_reaping_ping_or_shutdown`, `test_full_listen_backlog_does_not_let_client_unlink_live_socket`.
+- Ownership and transport: `test_supervisor_signal_handlers_are_installed_before_the_socket_is_published`, `test_dl210_lock_loser_exits_one_and_can_retry`, `test_dl210_pid_guard_requires_proven_absence`, `test_dl210_nonreader_cannot_block_reaping_ping_or_shutdown`, `test_full_listen_backlog_does_not_let_client_unlink_live_socket`.
 
 ## Open findings
 

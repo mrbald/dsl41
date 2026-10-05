@@ -19,7 +19,8 @@ Every durable write happens after the choice, in admission, dispatch or the seal
 - `Engine._next_work(horizon, now) -> _Work`. `_Work.do` is one of the five `_Do` names: `EVENT`, `TICK`, `TIMER`, `QUIESCE`, `WAIT`. `_Work.at` is the tick, the timer's stamp or the wake target.
 - `Engine.run_until_quiescent(horizon) -> list[Event]` runs the loop and returns the events the oracle emitted.
 - The queue is a heap of `_Pending` inputs ordered by `(at, arrival number)`. These fill it: `Engine.inject`, `Engine.submit`, `Engine.submit_host`, `Engine.inject_host`, `Engine.observe_opening`, scheduler ticks, adapter completions, reconciliation injections at resume (`_inject_completion`) and the seal's cutoff ticks (`Engine._cutoff`).
-- `Engine._push` refuses an external request while a seal is running.
+- `Engine._push` refuses an external request while a seal is running, with the code `period_sealing` ([control-protocol §2](../control-protocol.md#2-transport-and-framing-frozen)).
+- `Engine._seal_boundary` runs one queued seal inside the loop to its outcome.
 - `EVENT` and `TIMER` go through `Engine._admit_and_apply` and then `Engine._dispatch` (the [effect outbox](effect-outbox.md)).
 - `TICK` waits for the tick and queues its `STARTJOB` inputs.
 - `WAIT` blocks until the target instant or queue activity, then the loop chooses again.
@@ -33,6 +34,7 @@ stateDiagram-v2
     Settle --> Boundary: a seal request is waiting
     Boundary --> Settle: seal refused, period stays open
     Boundary --> [*]: seal committed
+    Boundary --> [*]: fail-stop, no abort and no answer
     Settle --> Choose
     Choose --> TakeInput: a queued input is takeable
     Choose --> TakeTick: a calendar tick is takeable
@@ -59,6 +61,9 @@ stateDiagram-v2
 
 ## Failure and recovery
 
+- A seal has three exits: commit, refusal and [fail-stop](../glossary.md#fail-stop). A refusal runs `abort_boundary`, and the loop carries on in the open period. A fail-stop raises out of the loop with no abort.
+- One kind of fail-stop comes before the `seal` append: a fence loss, an exception while an attempt admitted during the seal is not fully applied, a failed WAL append, or a `clock_regressed` on an engine-made input. The last three are [DL-274](../decision-log.md)'s; `_seal_boundary` adds a note naming it. After a fence loss or one of DL-274's cases, resume rebuilds from the WAL, and the period stays open.
+- The other kind is a failure at or after the `seal` append, an anchor close after a durable seal line included. `commit_boundary` raises `BoundaryFailStop`, and the outcome is unknown. Recovery decides: it commits a complete seal line once its `fsync` succeeds, and it truncates a torn or absent line and reopens the period ([period-model §7](../period-model.md#7-the-seal-operation), PR-28d).
 - An adapter task that died with an exception is re-raised by `Engine._settle`, and the engine stops. Resume rebuilds the estate from the log ([period-model §11](../period-model.md#11-resume-replay-and-recovery)).
 - A condition cycle that makes no progress at one instant raises `ZeroDelayCycleError` with the instant and the jobs it started ([DL-184](../decision-log.md)).
 - A crash anywhere in the loop loses no choice: the choice is not durable. Resume replays the log and the new loop chooses afresh ([period-model §11](../period-model.md#11-resume-replay-and-recovery) steps 6 to 8).
@@ -66,7 +71,7 @@ stateDiagram-v2
 
 ## Owning modules
 
-- `src/dsl41/runner.py`: `Engine._next_work`, `Engine.run_until_quiescent`, `Engine._push`, `_Do`, `_Work`.
+- `src/dsl41/runner.py`: `Engine._next_work`, `Engine.run_until_quiescent`, `Engine._push`, `Engine._seal_boundary`, `_Do`, `_Work`.
 - Inputs to the choice come from `src/dsl41/runner_clock.py` (the clock) and `src/dsl41/runner_scheduler.py` (the ticks).
 
 ## Tests
@@ -84,6 +89,9 @@ stateDiagram-v2
 - `test_a_timer_due_before_the_last_admitted_instant_is_stamped_at_that_instant`
 - `test_horizon_discipline_time_only_moves_forward_across_calls`
 - `test_zero_delay_cycle_raises_engine_error_instead_of_livelocking`
+- `test_pr28b_a_fence_loss_inside_the_interval_fail_stops`
+- `test_pr28b_an_exception_while_a_drained_attempt_applies_fail_stops`
+- `test_pr28b_a_drain_timeout_after_a_decided_attempt_still_refuses`
 
 ## Open findings
 

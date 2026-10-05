@@ -64,6 +64,7 @@ stateDiagram-v2
 - A run directory exists with no `start` line. Resume dispatches the watch again under the bound `run_id`.
 - Leadership is lost. The fence check raises before the append, so no line lands (PR-03, cited in §3.5).
 - A seal aborts. The barrier is released and the parked poll proceeds (PR-28b).
+- A seal [fail-stops](../glossary.md#fail-stop). No abort runs, so the barrier is not released, and the engine stops. After a fence loss or one of [DL-274](../decision-log.md)'s cases, resume rebuilds from the WAL with the period still open. After a failure at or after the `seal` append, the outcome is unknown and recovery decides ([period-model §7](../period-model.md#7-the-seal-operation), PR-28d).
 - A log that cannot be read, or that names another run, stops the engine with an error. It is never read as "not dispatched".
 - A resume whose catalog has an FW run and no FW adapter wired refuses.
 

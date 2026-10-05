@@ -32,6 +32,7 @@ A dashed node or edge in the diagrams below is specified only.
 | TUI and web TUI | built | [runner-design §11](runner-design.md#11-ui--one-textual-app-terminal-and-web-e3) |
 | Periods: seal, lineage anchor, audit, retention | built | README Status; [period-model](period-model.md) |
 | Remote relay and shared store for more than one job host | specified only | [concurrency-model §7](concurrency-model.md#7-leadership-relay-takeover) |
+| HTTP and WebSocket gateway in front of the control socket | specified only; status proposed | [gateway](gateway.md); DL-273 |
 | Authentication of a web session | outside dsl41: a reverse proxy or an ssh tunnel provides it | [runner-design §11](runner-design.md#11-ui--one-textual-app-terminal-and-web-e3); [access-model §9](access-model.md#9-the-web-tier) |
 
 ## 2. Context
@@ -132,6 +133,10 @@ flowchart TB
   ([control-protocol §2](control-protocol.md#2-transport-and-framing-frozen)).
   Every client goes through it, even the TUI that `dsl41 run --ui` runs
   inside the engine's process.
+  Every `ok: false` answer carries a stable [code](glossary.md#code) beside
+  its prose (DL-272).
+  The proposed [gateway](glossary.md#gateway) would be one more client of
+  this socket; it is not built.
 - **Supervisor.** It keeps job processes alive across an engine restart.
   It runs only in [detached](glossary.md#detached) mode. Its socket
   protocol is
@@ -191,6 +196,11 @@ flowchart TB
 - **Engine loop.** One asyncio task. It is the only writer of the oracle
   ([runner-design §4](runner-design.md#4-engine-loop--single-writer)).
   Every input, from any source, goes through it.
+  It also runs a queued seal. A seal commits, refuses or
+  [fail-stops](glossary.md#fail-stop). A refusal aborts the boundary, and
+  the period stays open. A fail-stop stops the engine with no abort and no
+  answer, and recovery rebuilds from the WAL
+  ([period-model §7](period-model.md#7-the-seal-operation); DL-274).
 - **Admission.** The one admission order for every input
   ([concurrency-model §4](concurrency-model.md#4-admission-and-application)).
   It answers an exact retry from the decision index by
@@ -214,6 +224,9 @@ flowchart TB
   it gives each peer a tier and writes receipts to `perimeter.jsonl`
   ([perimeter](glossary.md#perimeter);
   [access-model §5](access-model.md#5-the-enforcement-point)).
+  `SIGHUP` reloads the map. The engine arms that handler before it binds
+  `control.sock`, so a `SIGHUP` sent once the socket answers is a reload
+  ([access-model §7](access-model.md#7-reload-and-revocation); DL-275).
 - **Leadership fence and startup.** They take possession of a run root and
   the lineage, and prove both before each append and each dispatch
   ([concurrency-model §7](concurrency-model.md#7-leadership-relay-takeover);
@@ -259,7 +272,7 @@ sequenceDiagram
   Eng->>Eng: dispatch, fence check
   Eng->>Ad: launch the adapter task
   Eng->>Jr: effect outcome applied
-  Ctl-->>Op: the decision
+  Ctl-->>Op: the answer, with a code if it is ok false
   Ad->>Sup: SPAWN over supervisor.sock
   Sup->>Sup: write receipt.json
   Sup->>Wr: start the wrapper
@@ -284,6 +297,12 @@ Where the real order differs from a simple list of hops:
   ([control-protocol §3](control-protocol.md#3-mutating-verbs-sendevent-host-seal)).
 - The access gate runs before the control server routes the request
   ([access-model §5](access-model.md#5-the-enforcement-point)).
+- Any step can end the request early with an `ok: false` answer. It carries
+  a stable [code](glossary.md#code), such as `access_denied` from the gate
+  or `stale_epoch` from admission. The code table is in
+  [control-protocol §2](control-protocol.md#2-transport-and-framing-frozen).
+- A rejected decision stores its code in the WAL, so an exact retry answers
+  the same code ([period-model §2.3](period-model.md#23-decision--one-atomic-batch); DL-272).
 - The WAL takes two records per input. The attempt is appended before the
   oracle sees it. The decision and its planned effects are appended
   together after the oracle decides. So the outbox entry is durable before

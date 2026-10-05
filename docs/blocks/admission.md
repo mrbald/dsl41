@@ -32,6 +32,7 @@ Monotone epoch allocation is not listed. Step 2 compares the envelope's epoch wi
 - `Engine._admit_and_apply` in `runner.py` strings the steps together. `Engine.submit` and `Engine.submit_host` return an awaitable decision.
 - WAL records: `input`, `host` or `advance` at step 4, and `decision` at step 7.
 - On the wire, the four outcomes are those of [control-protocol §3](../control-protocol.md#3-mutating-verbs-sendevent-host-seal).
+- A refusal raises `AdmissionRefused`, or `EnvelopeError` from `parse_envelope`; each carries a required [code](../glossary.md#code). A rejection's `ApplyResult` carries its code too. The codes are in `runner_codes.py`, and the table is [control-protocol §2](../control-protocol.md#2-transport-and-framing-frozen)'s.
 
 ## States
 
@@ -60,6 +61,7 @@ stateDiagram-v2
 - `expect` and `epoch` are in the fingerprint, so one verb at two revisions is two commands ([DL-90](../decision-log.md); [control-protocol §3](../control-protocol.md#3-mutating-verbs-sendevent-host-seal)).
 - The epoch check comes after deduplication ([concurrency-model §4](../concurrency-model.md#4-admission-and-application) step 2; [DL-90](../decision-log.md)).
 - A collision refusal carries the decision the id already holds ([DL-217](../decision-log.md)).
+- Every `ok: false` answer carries a stable code. A rejected `decision` stores its code, so an exact retry answers the same code. `Journal.decision` refuses a rejection whose code is outside `STORED_CODES` ([DL-272](../decision-log.md); [period-model §2.3](../period-model.md#23-decision--one-atomic-batch)).
 - The step-4 batch is one line ([DL-111](../decision-log.md)), and so is the step-7 batch ([DL-118](../decision-log.md)).
 - A timer that fires inside an input's own batch does not invalidate its precondition. One due strictly earlier fires first and does ([concurrency-model §0](../concurrency-model.md#0-the-invariant); [DL-232](../decision-log.md)).
 - The stale-completion gate judges only engine-made completions ([runner-design §4](../runner-design.md#4-engine-loop--single-writer); [DL-235](../decision-log.md)).
@@ -69,7 +71,8 @@ stateDiagram-v2
 
 - Crash after step 4 and before step 7: replay applies the attempt through the gate ([concurrency-model §4](../concurrency-model.md#4-admission-and-application)). Its effects were never recorded. A command start it decided fails at resume, and a file watch starts again ([DL-102](../decision-log.md); `_resume_untraced_starts`).
 - An id admitted but undecided at lookup raises `EngineError`, and the engine stops ([concurrency-model §4](../concurrency-model.md#4-admission-and-application) step 2).
-- A stamp earlier than the frontier, or a decision out of index order, raises `EngineError` from `Frontiers`, and the engine stops.
+- A stamp earlier than the frontier, or a decision out of index order, raises `EngineError` from `Frontiers`, and the engine stops. During a seal, a request whose stamp is behind the frontier is answered refused with `clock_regressed` instead. An engine-made input in that case still stops the engine, so resume observes it again ([concurrency-model §4](../concurrency-model.md#4-admission-and-application); [DL-274](../decision-log.md)).
+- An exception after the index is taken and before its decision, outbox entries and answer are all done stops the engine, and so does a failed WAL append. A seal does not turn either into a refusal: it [fail-stops](../glossary.md#fail-stop), and `Engine._applying` and `Journal.append_unfinished` record the window ([period-model §7](../period-model.md#7-the-seal-operation); [DL-274](../decision-log.md)).
 - A replay whose revisions differ from the logged decision raises "replay diverged" from `apply_attempt`. A changed gate re-decides a crash-window attempt differently, which is why [DL-235](../decision-log.md) moved the state-machine version.
 - A leader that lost its lock appends nothing: `Journal._write` refuses first ([concurrency-model §1](../concurrency-model.md#1-storage--frozen)).
 - A caller with no decision after 5 s is told the outcome is unknown, and retries under the same id ([control-protocol §3](../control-protocol.md#3-mutating-verbs-sendevent-host-seal)).
@@ -77,6 +80,7 @@ stateDiagram-v2
 ## Owning modules
 
 - `src/dsl41/runner_admission.py`: the envelope, the fingerprint, the decision index, the frontiers and `apply_attempt`.
+- `src/dsl41/runner_codes.py`: the control codes and the stored-code set.
 - `src/dsl41/runner.py`: `Engine._admit_and_apply`, `Engine.submit`, `Engine.submit_host`, `Engine._refuse`.
 - `src/dsl41/runner_journal.py`: `Journal.admit`, `Journal.decision`, `read_attempts`, `read_decisions`, `replay_inputs`.
 
@@ -100,10 +104,15 @@ stateDiagram-v2
 - `test_a_refusal_leaves_nothing_in_the_log_and_a_rejection_leaves_a_decision`
 - `test_a_collision_carries_the_ids_earlier_decision_applied_or_rejected`
 - `test_the_stale_gate_rejects_a_completion_for_a_row_an_operator_set_inactive`
+- `test_a_rejection_is_written_with_its_code_and_one_without_is_refused`
+- `test_a_rejected_retry_answers_the_stored_code_and_a_record_without_one_omits_it`
+- `test_pr28b_an_exception_while_a_drained_attempt_applies_fail_stops`
+- `test_pr28b_a_clock_regression_in_the_drain_still_refuses`
+- `test_pr28b_a_clock_regression_on_an_engine_made_input_in_the_drain_fail_stops`
 
 ## Open findings
 
-The [risk map](../risk-map.md) row "Admission and idempotency" lists none beyond the common one, [no transition inventory](../risk-map.md#no-transition-inventory).
+The [risk map](../risk-map.md) row "Admission and idempotency" lists [a replayed oracle fault](../risk-map.md#a-replayed-oracle-fault-stops-every-resume), beside the common one, [no transition inventory](../risk-map.md#no-transition-inventory).
 
 ## Gaps found
 
