@@ -18241,3 +18241,90 @@ relitigate an entry; append a new one.
   minor, a bypass of the completeness test, is fixed. The Fable pass found
   one major, the wording of the OPEN paragraph, and four minors; all are
   fixed. Each fix was confirmed by the reviewer that raised it.
+- DL-273 An HTTP and WebSocket gateway is specified as proposed
+  (2026-10-05; docs/gateway.md)
+  THE SPEC. `docs/gateway.md` specifies a gateway that puts HTTP and
+  WebSocket in front of `control.sock`. Its status is proposed: it is not
+  normative until a later entry accepts it, and nothing is built. It adds
+  no meaning; control-protocol and access-model stay the contracts.
+  PRECONDITION. DL-272 adds the code table this spec maps from. A later
+  entry that accepts the spec also adds the gateway API's row to
+  protocol-evolution §1.
+  THE PROCESS MODEL. One gateway process per exposed tier, read and ops,
+  each under its own OS service account. Adm has no socket verbs, so it
+  has no gateway. Each process is a client of `control.sock`, never
+  in-process with the engine: the perimeter tells tiers apart by kernel
+  credential. The estate is armed group-open, and the role map grants each
+  account its tier, as access-model §9 does for the served TUI. The
+  gateway refuses to start as root. Before each upstream connect it
+  refuses the request when it owns the socket, when the socket has no
+  group bits, or when no socket exists between periods, because an
+  unarmed or owner-run gateway would admit every verb. Every route is
+  mounted in every tier, and the engine's perimeter is the only authority.
+  The gateway is an optional extra; the core keeps its three runtime
+  dependencies.
+  THE API. One route per control `cmd`, queries as GET and the three
+  mutations as POST, plus a health route. The body passes `request_id`,
+  `expect`, `epoch` and `baseline_id` through unchanged and may not name
+  `cmd`, `v` or `claimed_actor`. `request_id` is a UUID version 4, since
+  every human of a tier shares one principal. The read header stays in
+  the answer body. OpenAPI is the contract artifact. `/api/v1` changes
+  only by addition.
+  ERRORS. An `ok: false` answer becomes `application/problem+json`. For a
+  mutation, the outcome markers decide the class and the code picks the
+  status; an unknown outcome always maps to a 5xx, and an answer without
+  a known `code` maps from its marker alone. For a query, the marker is
+  not consulted: the code alone picks the status, and a query error
+  without a known code is 500. The
+  code-to-HTTP table lives in the gateway spec, not in control-protocol,
+  which stays transport-neutral.
+  RETRIES. The browser owns `request_id` and the only retry policy. It
+  saves the id and pins before the first send, treats any answer that is
+  neither a 200 nor a problem with a marker as unknown, and retries only
+  under the same id. A refused retry says nothing about the original
+  (DL-217). A seal the engine refused is never re-sent; the browser
+  re-reads. A `gateway_` refusal is not the engine's. The gateway retries
+  nothing and opens one upstream connection per request. A browser
+  disconnect cancels nothing upstream, its own request included; the
+  gateway reads and logs the outcome. Deadlines are ordered engine <
+  gateway < proxy. After a physical roll the gateway is repointed at the
+  new root's socket, and the next period's engine answers a committed
+  seal's retry.
+  THE STREAM. Each upstream `subscribe` line is one WebSocket frame. Each
+  browser has a bounded byte queue under DL-267's admission rule, at
+  least `4 × LINE_LIMIT`, which also covers the backfill. Overflow closes
+  that browser's socket with a distinct close code, and the browser
+  resumes with `since`. The gap marker keeps its meaning and is never an
+  overflow signal.
+  IDENTITY. With a map armed, the engine overwrites `claimed_actor` with
+  the gateway's OS account (access-model §3). Receipts name the service
+  account, not the human. This is a stated limit of the first version,
+  and engine attribution stays the service account. The gateway's access
+  log joins a human to a journaled mutation by `request_id` and is kept
+  at least as long as the WAL segments it joins. The engine attests none
+  of it. Per-human attribution waits for `web-session-principal-v2`
+  (access-model §9, §11). Revoking one human inside a tier is the proxy's
+  or the gateway's job.
+  SECURITY. Eleven acceptance criteria: a proxy contract of three trusted
+  headers, an Origin allow-list, CSRF tokens for cookie auth, no tokens in
+  URLs or logs, a backend only the proxy reaches (a Unix socket, or TLS
+  with a client certificate), per-user and global limits, size limits,
+  TLS at the proxy, session end closing sockets, `no-store`, and the
+  fail-closed socket check at start and before each upstream connect.
+  TESTS. The spec lists nine acceptance tests a future implementation must
+  pass, on real sockets and a real engine behind a stub proxy.
+  OUT OF SCOPE. The web application and its seal flow, several engines
+  per gateway, high availability, and log file serving.
+  REVIEW. One Opus reviewer and one Fable advisor, on 2026-10-05. The
+  advisor stood in for the Codex pass DL-262 asks for: Codex was
+  unavailable, and the owner directed the substitution. Round one: the
+  reviewer raised one blocker, five majors and thirteen minors; the
+  advisor four majors and nine minors. All were accepted and fixed. The
+  blocker classified every query error as an unknown outcome. Round two
+  was a confirmation pass, each finding checked by the reviewer that
+  raised it. The reviewer confirmed eighteen fixed and one partial (a
+  missing test), and found one new major and three minors. The major: the
+  seal retry rule could loop until a refused seal committed; a refused
+  seal now stops the retry. The advisor confirmed twelve fixed and one
+  partial (the health route under the trusted-header rule), with three
+  nits and no new material defect. All of round two is fixed.
