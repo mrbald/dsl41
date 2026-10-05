@@ -709,6 +709,7 @@ def test_a_collision_carries_the_ids_earlier_decision_applied_or_rejected(
             assert reused.returncode == 2, reused.stderr
             answer = json.loads(reused.stdout)
             assert answer["ok"] is False and answer["refused"] is True
+            assert answer["code"] == "request_id_reused"
             # the additive field leaves the classification alone (DL-217)
             assert control.outcome_of(answer) == control.REFUSED
             assert "decision" not in answer and "index" not in answer
@@ -717,6 +718,7 @@ def test_a_collision_carries_the_ids_earlier_decision_applied_or_rejected(
                 "request_id": "c-1",
                 "decision": "applied",
                 "reason": None,
+                "code": None,
                 "revisions": first["revisions"],
             }
             assert "baseline_id" in answer  # the header is the responding engine's
@@ -741,6 +743,8 @@ def test_a_collision_carries_the_ids_earlier_decision_applied_or_rejected(
             nested = json.loads(reused.stdout)["original_decision"]
             assert nested["decision"] == "rejected"
             assert nested["reason"] == lost_race["error"]
+            # the stored code, the one the live rejection answered with
+            assert nested["code"] == lost_race["code"] == "precondition_failed"
             assert (
                 f"request_id c-2 was decided earlier: rejected at index {lost_race['index']}:"
                 f" {lost_race['error']}"
@@ -764,6 +768,7 @@ def test_the_tui_shows_the_collision_as_both_facts() -> None:
                 "request_id": "x",
                 "decision": "applied",
                 "reason": None,
+                "code": None,
                 "revisions": {},
             },
         },
@@ -811,7 +816,12 @@ def test_a_collision_with_an_undecided_original_carries_nothing_nested(
             await _teardown(engine, server, loop_task)
 
     answer = asyncio.run(scenario())
-    assert answer == {"ok": False, "error": "reused", "refused": True}
+    assert answer == {
+        "ok": False,
+        "code": "request_id_reused",
+        "error": "reused",
+        "refused": True,
+    }
 
 
 # ------------------------------------- review rework: the rest of DL-216/217
@@ -1029,6 +1039,7 @@ def test_a_collision_after_a_same_period_restart_carries_the_decision_from_the_w
                 "request_id": "w-1",
                 "decision": "applied",
                 "reason": None,
+                "code": None,
                 "revisions": first["revisions"],
             }
             assert "request_id w-1 was decided earlier: applied" in reused.stderr
@@ -1036,3 +1047,70 @@ def test_a_collision_after_a_same_period_restart_carries_the_decision_from_the_w
             await _teardown(resumed, server, loop_task)
 
     asyncio.run(scenario())
+
+
+def test_a_rejected_retry_answers_the_stored_code_and_a_record_without_one_omits_it(
+    short_root: Path,
+) -> None:
+    """protocol-evolution ss7 for the `code` a rejected decision stores
+    (period-model ss2.3). After a same-period restart the decision index is
+    rebuilt from the WAL, and an exact retry is answered from it. A record
+    this build wrote carries its code, so the retry answers exactly what the
+    live rejection answered. A record written before codes existed has none:
+    it still replays, and its retry answers without `code` rather than with
+    one guessed from the prose."""
+    run_root = short_root / "run"
+    header = {"baseline_id", "epoch", "applied_index"}
+
+    async def scenario() -> tuple[dict, dict, dict, dict]:
+        engine, server, loop_task = await _serve(run_root)
+        try:
+            read = await _call(server.path, {"cmd": "status", "job": "j", "v": 3})
+
+            def lost_race(request_id: str) -> dict[str, Any]:
+                return {
+                    "v": 3,
+                    "cmd": "sendevent",
+                    "baseline_id": read["baseline_id"],
+                    "epoch": read["epoch"],
+                    "request_id": request_id,
+                    "verb": "ON_HOLD",
+                    "payload": {"job": "j"},
+                    "expect": {"job:j": read["jobs"]["j"]["state_rev"] + 99},
+                }
+
+            live_new = await _call(server.path, lost_race("coded"))
+            live_old = await _call(server.path, lost_race("pre-code"))
+            assert engine.journal is not None
+            wal = engine.journal.path
+        finally:
+            await _teardown(engine, server, loop_task)
+
+        # the second decision, as a writer from before codes left it
+        lines = wal.read_bytes().splitlines(keepends=True)
+        for position, line in enumerate(lines):
+            record = json.loads(line)
+            if record.get("rec") == "decision" and record["request_id"] == "pre-code":
+                assert record.pop("code") == "precondition_failed"
+                lines[position] = json.dumps(record, sort_keys=True).encode("utf-8") + b"\n"
+        wal.write_bytes(b"".join(lines))
+
+        resumed, server, loop_task = await _resume_served(run_root)
+        try:
+            new_retry = await _call(server.path, lost_race("coded"))
+            old_retry = await _call(server.path, lost_race("pre-code"))
+        finally:
+            await _teardown(resumed, server, loop_task)
+        return live_new, live_old, new_retry, old_retry
+
+    live_new, live_old, new_retry, old_retry = asyncio.run(scenario())
+    assert (live_new["decision"], live_new["code"]) == ("rejected", "precondition_failed")
+    assert live_old["code"] == "precondition_failed"
+    # the retry IS the original answer, apart from the responding engine's header
+    assert {k: v for k, v in new_retry.items() if k not in header} == {
+        k: v for k, v in live_new.items() if k not in header
+    }
+    assert old_retry["decision"] == "rejected" and old_retry["index"] == live_old["index"]
+    assert old_retry["error"] == live_old["error"]
+    assert "code" not in old_retry
+    assert control.outcome_of(old_retry) == control.REJECTED

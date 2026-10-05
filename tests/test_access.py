@@ -329,6 +329,7 @@ def test_access_read_tier_queries_serve_and_mutations_refuse(short_root: Path) -
             denied = await _call(server.path, _envelope("STARTJOB", "acc_job", status))
             assert denied == {
                 "ok": False,
+                "code": "access_denied",
                 "refused": True,
                 "error": f"os/{ME} holds read tier; sendevent:STARTJOB needs ops tier",
             }
@@ -520,6 +521,7 @@ def test_access_no_resolvable_credential_refuses_connection(
             reader, writer = await asyncio.open_unix_connection(str(server.path))
             line = json.loads(await asyncio.wait_for(reader.readline(), timeout=2.0))
             assert line["refused"] is True
+            assert line["code"] == "peer_unauthenticated"
             assert "credential" in line["error"]
             # server closed the connection
             assert await asyncio.wait_for(reader.read(), timeout=2.0) == b""

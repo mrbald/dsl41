@@ -601,6 +601,9 @@ Runner:
   execution host, retire superseded and re-drive pending, dispatch).
 - `src/dsl41/runner_clock.py`: the Clock protocol, VirtualClock, RealClock,
   and EngineError.
+- `src/dsl41/runner_codes.py`: the stable codes of the control protocol's
+  `ok: false` answers, and the typed rejection a gate returns. It imports
+  nothing from dsl41.
 - `src/dsl41/runner_adapters.py`: the adapter contract and every adapter:
   FakeAdapter, LocalCommandAdapter (each command under the wrapper),
   FileWatcherAdapter, the detached path (SupervisorClient and

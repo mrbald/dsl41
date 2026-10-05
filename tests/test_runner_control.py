@@ -336,6 +336,7 @@ def test_non_string_job_verb_is_refused_as_unknown_verb_wal_unchanged(short_root
             )
             assert resp["ok"] is False
             assert resp["refused"] is True
+            assert resp["code"] == "unknown_verb"
             assert "unknown verb" in resp["error"]
             assert engine.journal.path.read_bytes() == before
         finally:
@@ -362,6 +363,7 @@ def test_non_string_host_verb_is_refused_as_unknown_host_verb_wal_unchanged(
             )
             assert resp["ok"] is False
             assert resp["refused"] is True
+            assert resp["code"] == "unknown_verb"
             assert "unknown host verb" in resp["error"]
             assert engine.journal.path.read_bytes() == before
         finally:
@@ -392,6 +394,7 @@ def test_non_string_change_status_status_is_refused_as_unknown_status_wal_unchan
             )
             assert resp["ok"] is False
             assert resp["refused"] is True
+            assert resp["code"] == "unknown_status"
             assert "unknown status" in resp["error"]
             assert engine.journal.path.read_bytes() == before
         finally:
@@ -803,7 +806,7 @@ def test_plan_waves_for_a_chain_and_a_cycle_refuses(short_root: Path) -> None:
         engine2, server2, loop_task2 = await _serve(short_root / "run_cycle", cycle_text)
         try:
             resp2 = await _control_call(server2.path, {"cmd": "plan"})
-            assert resp2["ok"] is False
+            assert resp2["ok"] is False and resp2["code"] == "plan_cycle"
         finally:
             await _teardown(engine2, server2, loop_task2)
 
@@ -2707,6 +2710,7 @@ def test_a_deeply_nested_request_is_answered_bad_request_and_stays_in_sync(
                 await writer.drain()
                 answer = json.loads(await asyncio.wait_for(reader.readline(), timeout=5.0))
                 assert answer["ok"] is False and answer["refused"] is True
+                assert answer["code"] == "malformed_request"
                 assert answer["error"].startswith("bad request: ")
                 writer.write(json.dumps(_versioned({"cmd": "status"})).encode() + b"\n")
                 await writer.drain()
@@ -2762,6 +2766,7 @@ def test_true_is_not_a_sequence_number_on_trace_or_subscribe(short_root: Path) -
             traced = await _control_call(server.path, {"cmd": "trace", "since": True})
             assert traced["ok"] is False
             assert traced["error"] == "since must be an integer trace seq"
+            assert traced["code"] == "invalid_argument"
             reader, writer = await asyncio.open_unix_connection(str(server.path))
             try:
                 writer.write(
@@ -2769,7 +2774,11 @@ def test_true_is_not_a_sequence_number_on_trace_or_subscribe(short_root: Path) -
                 )
                 await writer.drain()
                 answer = json.loads(await asyncio.wait_for(reader.readline(), timeout=5.0))
-                assert answer == {"ok": False, "error": "since must be an integer seq"}
+                assert answer == {
+                    "ok": False,
+                    "code": "invalid_argument",
+                    "error": "since must be an integer seq",
+                }
             finally:
                 writer.close()
                 with contextlib.suppress(Exception):
@@ -3090,6 +3099,7 @@ def test_dl264_change_status_applies_or_is_refused_before_the_wal(
             else:
                 assert resp["ok"] is False
                 assert resp["refused"] is True
+                assert resp["code"] == "status_not_injectable"
                 assert status in resp["error"]
                 for name in sorted(INJECTABLE_STATUSES):
                     assert name in resp["error"]

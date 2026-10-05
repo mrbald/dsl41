@@ -126,6 +126,7 @@ from dsl41.runner_admission import (
     parse_envelope,
 )
 from dsl41.runner_clock import EngineError
+from dsl41.runner_codes import UNKNOWN_OUTCOME_CODES, Code
 from dsl41.runner_hosts import HOST_VERBS, HostCommand, HostVerb
 from dsl41.seal import StagedNextPeriod
 from dsl41.runner_journal import best_effort_report, read_backfill
@@ -172,6 +173,19 @@ STATUS_FLAG_MARKS: tuple[tuple[str, str], ...] = (
 #: read stream lines up to the same bound, so any record that fits the
 #: budget is also one they can read.
 SUBSCRIBER_BACKLOG_BYTES: int = 4 * LINE_LIMIT
+
+
+def _failure(code: Code, error: str, *, refused: bool = False) -> dict[str, Any]:
+    """Every `ok: false` answer this server builds, but the rejected
+    decision (ss2's code table). The code names the reason and `error` keeps
+    the prose. `refused` is the outcome marker: it says nothing was
+    admitted, so an unknown-outcome code never carries it."""
+    if refused and code in UNKNOWN_OUTCOME_CODES:
+        raise ValueError(f"{code} is an unknown outcome and cannot be a refusal")
+    answer: dict[str, Any] = {"ok": False, "code": code, "error": error}
+    if refused:
+        answer["refused"] = True
+    return answer
 
 
 class ControlServer:
@@ -360,12 +374,12 @@ class ControlServer:
                 if principal is None:
                     await self._send(
                         writer,
-                        {
-                            "ok": False,
-                            "refused": True,
-                            "error": "access control is armed and this peer has no"
+                        _failure(
+                            "peer_unauthenticated",
+                            "access control is armed and this peer has no"
                             " resolvable kernel credential (access-model ss3)",
-                        },
+                            refused=True,
+                        ),
                     )
                     return
             while True:
@@ -388,7 +402,7 @@ class ControlServer:
                     # died unreplied, which ss2 forbids (the DL-149 escape
                     # class, closed at the framing gate; DL-151)
                     await self._send(
-                        writer, {"ok": False, "error": f"bad request: {exc}", "refused": True}
+                        writer, _failure("malformed_request", f"bad request: {exc}", refused=True)
                     )
                     continue
                 if request.get("v") != PROTOCOL_VERSION:
@@ -402,13 +416,13 @@ class ControlServer:
                     # timeout, has to say that nothing was admitted (DL-92)
                     await self._send(
                         writer,
-                        {
-                            "ok": False,
-                            "refused": True,
-                            "error": f"protocol version {request.get('v')!r}: this engine"
+                        _failure(
+                            "unsupported_version",
+                            f"protocol version {request.get('v')!r}: this engine"
                             f' speaks v{PROTOCOL_VERSION} -- name it as {{"v":'
                             f" {PROTOCOL_VERSION}}}",
-                        },
+                            refused=True,
+                        ),
                     )
                     continue
                 if self.access is not None and principal is not None:
@@ -420,7 +434,7 @@ class ControlServer:
                         principal, request.get("cmd"), request.get("verb")
                     )
                     if not allowed:
-                        await self._send(writer, {"ok": False, "refused": True, "error": why})
+                        await self._send(writer, _failure("access_denied", why, refused=True))
                         continue
                     # ss3: the authenticated spelling replaces the claim
                     request["claimed_actor"] = principal.spelling
@@ -443,7 +457,7 @@ class ControlServer:
                 except Exception as exc:  # noqa: BLE001 -- a query bug must
                     # answer ok:false, never kill the connection unreplied
                     # (the client would only see a timeout; DL-45)
-                    response = {"ok": False, "error": f"internal error: {exc!r}"}
+                    response = _failure("internal_error", f"internal error: {exc!r}")
                 await self._send(writer, response)
         except (ConnectionResetError, BrokenPipeError):
             pass  # client hangup mid-write: its problem, not the engine's
@@ -531,13 +545,13 @@ class ControlServer:
             pass
         else:
             return None
-        return {
-            "ok": False,
-            "refused": True,
-            "error": "this engine can no longer prove it leads this estate's lineage:"
+        return _failure(
+            "lineage_lost",
+            "this engine can no longer prove it leads this estate's lineage:"
             " the anchor was deleted or replaced. Nothing is answered from a lineage"
             " this process does not lead (period-model ss1.3, PR-03)",
-        }
+            refused=True,
+        )
 
     async def _dispatch(self, request: dict[str, Any]) -> dict[str, Any]:
         cmd = request.get("cmd")
@@ -566,16 +580,16 @@ class ControlServer:
         if cmd == "globals":
             names = request.get("names")
             if not isinstance(names, list):
-                return {"ok": False, "error": "globals requires a list of names"}
+                return _failure("invalid_argument", "globals requires a list of names")
             return self._globals(names)
         if cmd == "plan":
             return self._plan()
-        return {"ok": False, "error": f"unknown cmd {cmd!r}", "refused": True}
+        return _failure("unknown_cmd", f"unknown cmd {cmd!r}", refused=True)
 
     def _check_job(self, job: object) -> dict[str, Any] | None:
         if isinstance(job, str) and job in self.engine.oracle.catalog.jobs:
             return None
-        return {"ok": False, "error": f"unknown job {job!r}"}
+        return _failure("unknown_job", f"unknown job {job!r}")
 
     async def _sendevent(self, request: dict[str, Any]) -> dict[str, Any]:
         """One externally requested mutation, through the ss4 admission
@@ -590,7 +604,7 @@ class ControlServer:
         half fired timers, so it happened."""
         payload_ev = self._event_for(request)
         if isinstance(payload_ev, dict):
-            return payload_ev | {"refused": True}
+            return _failure(payload_ev["code"], payload_ev["error"], refused=True)
         ev = payload_ev
         try:
             envelope = parse_envelope(
@@ -604,7 +618,7 @@ class ControlServer:
             # to tell "nothing happened and nothing was written" from "a
             # decision went against you", because only the first is safe to
             # re-compose and send again unchanged
-            return {"ok": False, "error": str(exc), "refused": True}
+            return _failure(exc.code, str(exc), refused=True)
         return await self._decision(self.engine.submit(ev, envelope), kind=ev.kind)
 
     async def _host(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -619,13 +633,13 @@ class ControlServer:
         mandate and not one per verb set."""
         parsed = self._host_command_for(request)
         if isinstance(parsed, dict):
-            return parsed | {"refused": True}
+            return _failure(parsed["code"], parsed["error"], refused=True)
         try:
             envelope = parse_envelope(
                 request, addressed=parsed.key, baseline_id=self.engine.baseline_id
             )
         except EnvelopeError as exc:
-            return {"ok": False, "error": str(exc), "refused": True}
+            return _failure(exc.code, str(exc), refused=True)
         return await self._decision(self.engine.submit_host(parsed, envelope), kind=parsed.verb)
 
     async def _seal(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -651,7 +665,7 @@ class ControlServer:
         ("sealed; period N+1 is ready to open"). It does NOT load C2 into
         itself: a transition is a restart, not a reload (DL-65)."""
         if (wire := _seal_wire_error(request)) is not None:
-            return {"ok": False, "error": f"malformed seal request: {wire}", "refused": True}
+            return _failure("invalid_argument", f"malformed seal request: {wire}", refused=True)
         # left key-by-key on purpose (DL-170): `_seal_wire_error` above
         # already proves every REQUIRED field present and every field
         # wire-typed except `next_period` (validated below, on its own
@@ -673,7 +687,7 @@ class ControlServer:
                 claimed_actor=request.get("claimed_actor") or "",
             )
         except (KeyError, TypeError, ValueError, ValidationError) as exc:
-            return {"ok": False, "error": f"malformed seal request: {exc}", "refused": True}
+            return _failure("invalid_argument", f"malformed seal request: {exc}", refused=True)
         answered = self._committed_seal(parsed)
         if answered is not None:
             return answered
@@ -683,7 +697,7 @@ class ControlServer:
             # answers a committed seal whatever else rides beside it
             parse_envelope(request, addressed=None, baseline_id=self.engine.baseline_id)
         except EnvelopeError as exc:
-            return {"ok": False, "error": str(exc), "refused": True}
+            return _failure(exc.code, str(exc), refused=True)
         try:
             committed = await asyncio.wait_for(
                 self.engine.submit_seal(parsed), timeout=self.SEAL_TIMEOUT_S
@@ -692,15 +706,16 @@ class ControlServer:
             # a readiness or phase-2 refusal: C1 is still open and correct,
             # and the cutoff work already admitted stays as legitimate C1
             # activity (ss7's exit codes). Also the one-seal-at-a-time refusal
-            # `submit_seal` sets (AdmissionRefused is an EngineError)
-            return {"ok": False, "error": str(exc), "refused": True}
+            # `submit_seal` sets (AdmissionRefused is an EngineError). A raise
+            # site that named no code answers the neutral `engine_error`
+            return _failure(exc.code or "engine_error", str(exc), refused=True)
         except TimeoutError:
-            return {
-                "ok": False,
-                "error": f"no boundary outcome within {self.SEAL_TIMEOUT_S}s: the seal may"
+            return _failure(
+                "seal_timeout",
+                f"no boundary outcome within {self.SEAL_TIMEOUT_S}s: the seal may"
                 " still commit -- re-read before retrying, and retry only under"
                 f" request_id {parsed.request_id}",
-            }
+            )
         return _seal_answer(committed.record)
 
     def _committed_seal(self, parsed: SealRequest) -> dict[str, Any] | None:
@@ -717,14 +732,14 @@ class ControlServer:
         if record is None or record.get("request_id") != parsed.request_id:
             return None
         if record.get("request_fingerprint") != parsed.fingerprint:
-            return {
-                "ok": False,
-                "refused": True,
-                "error": f"request_id {parsed.request_id} named the boundary that closed"
+            return _failure(
+                "seal_retry_mismatch",
+                f"request_id {parsed.request_id} named the boundary that closed"
                 f" period {record.get('period_id')} under a different envelope: force is an"
                 " authorization and the actor is attribution, and neither may be swapped"
                 " under a retry (period-model ss2.2, PR-30c)",
-            }
+                refused=True,
+            )
         return _seal_answer(record)
 
     async def _decision(self, submitted: Awaitable[ApplyResult], *, kind: str) -> dict[str, Any]:
@@ -744,12 +759,12 @@ class ControlServer:
             # decision rides beside it, nested, so a caller whose retry no
             # longer matches can learn what the first command did without
             # that decision ever reading as this request's own (DL-217)
-            refusal: dict[str, Any] = {"ok": False, "error": str(exc), "refused": True}
+            refusal = _failure(exc.code, str(exc), refused=True)
             if exc.original is not None:
                 refusal["original_decision"] = exc.original.model_dump(mode="json")
             return refusal
         except AdmissionRefused as exc:
-            return {"ok": False, "error": str(exc), "refused": True}
+            return _failure(exc.code, str(exc), refused=True)
         except TimeoutError:
             # not a decision and not a refusal: we do not know. Saying so is
             # the only honest answer -- the input may be durably admitted and
@@ -757,11 +772,11 @@ class ControlServer:
             # This is the ONE ok:false a mutation can be answered with that
             # does not carry `refused`, which is what lets `outcome_of` read
             # the absence as uncertainty rather than as a fourth kind of no.
-            return {
-                "ok": False,
-                "error": f"no decision within {self.DECISION_TIMEOUT_S}s: the engine loop is"
+            return _failure(
+                "decision_timeout",
+                f"no decision within {self.DECISION_TIMEOUT_S}s: the engine loop is"
                 " not draining. The command may still be admitted -- re-read before retrying.",
-            }
+            )
         answer: dict[str, Any] = {
             "ok": result.decision == "applied",
             "kind": kind,
@@ -772,6 +787,11 @@ class ControlServer:
         }
         if result.reason is not None:
             answer["error"] = result.reason
+        if result.code is not None:
+            # the STORED code (period-model ss2.3), so an exact retry answers
+            # what the first answer said; a record written before codes
+            # existed has none, and its answer omits the field
+            answer["code"] = result.code
         return answer
 
     def _host_command_for(self, request: dict[str, Any]) -> HostCommand | dict[str, Any]:
@@ -785,20 +805,20 @@ class ControlServer:
         verb = request.get("verb")
         payload = request.get("payload")
         if not isinstance(payload, dict):
-            return {"ok": False, "error": f"payload must be an object, got {payload!r}"}
+            return _failure("invalid_argument", f"payload must be an object, got {payload!r}")
         if not (isinstance(verb, str) and verb in HOST_VERBS):
-            return {
-                "ok": False,
-                "error": f"unknown host verb {verb!r} (one of {sorted(HOST_VERBS)})",
-            }
+            return _failure(
+                "unknown_verb", f"unknown host verb {verb!r} (one of {sorted(HOST_VERBS)})"
+            )
         host_id = payload.get("id")
         if not isinstance(host_id, str) or not host_id:
-            return {"ok": False, "error": "a host verb addresses a host by id"}
+            return _failure("invalid_argument", "a host verb addresses a host by id")
         if not is_scalar_string(host_id):
-            return {"ok": False, "error": "host id carries an unpaired surrogate"}  # PR-10a
+            # PR-10a
+            return _failure("invalid_argument", "host id carries an unpaired surrogate")
         force = payload.get("force", False)
         if not isinstance(force, bool):
-            return {"ok": False, "error": f"force must be a boolean, got {force!r}"}
+            return _failure("invalid_argument", f"force must be a boolean, got {force!r}")
         # the membership check above already proved `verb` is one of
         # HOST_VERBS's members, a subset of HostVerb's literals; mypy only
         # sees `str` past an isinstance guard, so the cast states what the
@@ -822,7 +842,7 @@ class ControlServer:
         elif isinstance(ids, list) and all(isinstance(name, str) for name in ids):
             names = list(ids)
         else:
-            return {"ok": False, "error": "ids must be a list of host id strings"}
+            return _failure("invalid_argument", "ids must be a list of host id strings")
         return {
             "ok": True,
             "executor": self.engine.executor_id,
@@ -852,7 +872,7 @@ class ControlServer:
         verb = request.get("verb")
         payload = request.get("payload")
         if not isinstance(payload, dict):
-            return {"ok": False, "error": f"payload must be an object, got {payload!r}"}
+            return _failure("invalid_argument", f"payload must be an object, got {payload!r}")
         at = self.engine.clock.now()
         if isinstance(verb, str) and verb in JOB_EVENT_VERBS:
             job = payload.get("job")
@@ -862,9 +882,9 @@ class ControlServer:
         elif verb == "SET_GLOBAL":
             name, value = payload.get("name"), payload.get("value")
             if not (isinstance(name, str) and name):
-                return {"ok": False, "error": "SET_GLOBAL requires a global name"}
+                return _failure("invalid_argument", "SET_GLOBAL requires a global name")
             if not isinstance(value, str):
-                return {"ok": False, "error": "SET_GLOBAL requires a string value"}
+                return _failure("invalid_argument", "SET_GLOBAL requires a string value")
             ev = Event(at=at, kind="SET_GLOBAL", payload={"name": name, "value": value})
         elif verb == "CHANGE_STATUS":
             job, status = payload.get("job"), payload.get("status")
@@ -887,11 +907,10 @@ class ControlServer:
                 # before the WAL append.
                 injectable = f"injectable: {sorted(INJECTABLE_STATUSES)}"
                 if isinstance(status, str) and status in STATUSES:
-                    return {
-                        "ok": False,
-                        "error": f"status {status!r} cannot be sent ({injectable})",
-                    }
-                return {"ok": False, "error": f"unknown status {status!r} ({injectable})"}
+                    return _failure(
+                        "status_not_injectable", f"status {status!r} cannot be sent ({injectable})"
+                    )
+                return _failure("unknown_status", f"unknown status {status!r} ({injectable})")
             status_payload: dict[str, object] = {"job": job, "status": status}
             if "exit_code" in payload:
                 if not isinstance(payload["exit_code"], int) or isinstance(
@@ -899,17 +918,17 @@ class ControlServer:
                 ):
                     # `true` is an int in Python and would reach the WAL as one
                     # (DL-151); the envelope's own gates already exclude bool
-                    return {"ok": False, "error": "exit_code must be an integer"}
+                    return _failure("invalid_argument", "exit_code must be an integer")
                 status_payload["exit_code"] = payload["exit_code"]
             ev = Event(at=at, kind="STATUS", payload=status_payload)
         else:
-            return {"ok": False, "error": f"unknown verb {verb!r}"}
+            return _failure("unknown_verb", f"unknown verb {verb!r}")
         if not is_scalar_json(ev.payload):
             # PR-10a: a lone surrogate is a legal Python str and a legal JSON
             # escape, and canonicalization raises on one -- a single admitted
             # SET_GLOBAL value would leave the estate unsealable, so the door
             # refuses it and nothing is written (period-model ss3.2).
-            return {"ok": False, "error": "payload carries an unpaired surrogate"}
+            return _failure("invalid_argument", "payload carries an unpaired surrogate")
         return ev
 
     def _spec_drift(self) -> bool | None:
@@ -941,7 +960,7 @@ class ControlServer:
         job = request.get("job")
         if job is not None:
             if not isinstance(job, str) or (job not in catalog.jobs and job not in store.job):
-                return {"ok": False, "error": f"unknown job {job!r}"}
+                return _failure("unknown_job", f"unknown job {job!r}")
             names = [job]
         else:
             names = sorted(set(catalog.jobs) | set(store.job))
@@ -1020,7 +1039,7 @@ class ControlServer:
         answers: dict[str, Any] = {}
         for name in names:
             if not isinstance(name, str):
-                return {"ok": False, "error": f"global name must be a string, got {name!r}"}
+                return _failure("invalid_argument", f"global name must be a string, got {name!r}")
             row = store.globals_.get(name)
             answers[name] = {
                 "present": row is not None,
@@ -1032,7 +1051,7 @@ class ControlServer:
     def _trace(self, request: dict[str, Any]) -> dict[str, Any]:
         since = request.get("since", 0)
         if not is_wire_int(since):
-            return {"ok": False, "error": "since must be an integer trace seq"}
+            return _failure("invalid_argument", "since must be an integer trace seq")
         entries = self.engine.oracle.trace()
         return {
             "ok": True,
@@ -1197,11 +1216,10 @@ class ControlServer:
         try:
             sorter.prepare()
         except graphlib.CycleError as exc:
-            return {
-                "ok": False,
-                "error": "plan disabled: cycle in the AND-success skeleton"
-                f" ({' -> '.join(exc.args[1])})",
-            }
+            return _failure(
+                "plan_cycle",
+                f"plan disabled: cycle in the AND-success skeleton ({' -> '.join(exc.args[1])})",
+            )
         waves: list[list[str]] = []
         while sorter.is_active():
             ready = sorted(sorter.get_ready())
@@ -1232,11 +1250,11 @@ class ControlServer:
             return
         journal = self.engine.journal
         if journal is None:
-            await self._send(writer, {"ok": False, "error": "this run has no journal"})
+            await self._send(writer, _failure("no_journal", "this run has no journal"))
             return
         since = request.get("since")
         if since is not None and not is_wire_int(since):
-            await self._send(writer, {"ok": False, "error": "since must be an integer seq"})
+            await self._send(writer, _failure("invalid_argument", "since must be an integer seq"))
             return
         handler = asyncio.current_task()
 
@@ -1301,7 +1319,7 @@ class ControlServer:
             # displaced leader owes, not narrate a lineage it no
             # longer leads
             lost = self._lineage_lost()
-            await self._send(writer, lost or {"ok": False, "error": str(exc)})
+            await self._send(writer, lost or _failure(exc.code or "engine_error", str(exc)))
             return None
         gap_from, records = backfill.gap_from, backfill.records
         del backfill

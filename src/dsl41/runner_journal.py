@@ -103,6 +103,7 @@ from dsl41.period import (
     write_period_manifest,
 )
 from dsl41.runner_clock import EngineError
+from dsl41.runner_codes import STORED_CODES
 from pydantic import ValidationError
 
 from dsl41.runner_effects import Effect, EffectOutcome, Outbox, is_valid_run_id
@@ -432,7 +433,16 @@ class Journal:
         refuses one that does not: `generation` on every effect, `run_id`
         on every SPAWN (DL-118, PR-16/PR-36a). The model's None defaults
         exist so a hand-built record validates before this gate reads it --
-        a fresh effect reaching this method without them is a planner bug."""
+        a fresh effect reaching this method without them is a planner bug.
+        The same holds for a rejection's `code` (period-model ss2.3): a
+        native rejection names one of the append-only `STORED_CODES`, and a
+        reader never requires one, because a record written before codes
+        existed has none."""
+        if result.decision == "rejected" and result.code not in STORED_CODES:
+            raise EngineError(
+                f"decision {result.index}: a native rejection names its stored code"
+                f" at birth, and this one names {result.code!r}"
+            )
         for effect in effects:
             if (
                 effect.generation is None
@@ -452,6 +462,7 @@ class Journal:
                 "request_id": result.request_id,
                 "decision": result.decision,
                 "reason": result.reason,
+                "code": result.code,
                 "revisions": result.revisions,
                 "legacy_batch": False,
                 "effects": [effect.model_dump(mode="json") for effect in effects],
@@ -1011,7 +1022,19 @@ class Backfill:
 
 def read_backfill(path: Path | str, *, since: int) -> Backfill:
     """The records a subscriber resuming at `since` may still be owed
-    (DL-135).
+    (DL-135). A refusal from any check below reaches the subscriber as
+    `backfill_refused` (control-protocol ss2). The checks are shared with
+    replay and audit, which read no code, so the code is set here, at the
+    one door the stream reads through."""
+    try:
+        return _read_backfill(path, since=since)
+    except EngineError as exc:
+        exc.code = "backfill_refused"
+        raise
+
+
+def _read_backfill(path: Path | str, *, since: int) -> Backfill:
+    """`read_backfill`'s body.
 
     `read_journal` reads ONE segment, which is what an appender, a replay
     and an audit each want: I1 makes a segment a period. A subscriber
@@ -1177,6 +1200,9 @@ def read_decisions(records: list[dict[str, Any]]) -> DecisionIndex:
                 request_id=str(record["request_id"]),
                 decision=record["decision"],
                 reason=record.get("reason"),
+                # absent on a record written before codes existed: null,
+                # never required, never checked against the registry
+                code=record.get("code"),
                 revisions=record.get("revisions") or {},
             )
         )

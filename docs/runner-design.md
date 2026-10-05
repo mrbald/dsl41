@@ -445,7 +445,7 @@ Record kinds:
   event: the interpreter never reads a host row, so this one is applied to
   the state owner rather than fed. Under its own key rather than
   `payload`, so no record shape spells one field name two ways.
-- `decision` — `{index, request_id, decision, reason, revisions,
+- `decision` — `{index, request_id, decision, reason, code, revisions,
   legacy_batch, effects}`: the whole §4 step-7 batch in one line (DL-118,
   `docs/period-model.md` §2.3): the decision the attempt at `index` got,
   the revisions it moved, and every effect it planned. `index`, not `seq`,
@@ -1154,7 +1154,7 @@ refusal — a distributed concern, DL-49 future track).
 
 ## 14. Module layout and phasing
 
-The house layout is flat, with no `runner` subpackage: eighteen
+The house layout is flat, with no `runner` subpackage: nineteen
 `runner*.py` sibling modules. The first seven were split along the seams
 their test files use (DL-74, DL-78); the later ones were added under the
 same rule, each documented by the entry that built it. Nothing is
@@ -1168,8 +1168,12 @@ the split cannot decay into a second name for one file.
   The server owns its own file (DL-78): every query handler is a pure
   projection, and what it shares with the loop is the loop's *task*, not
   its single-writer invariant.
-- `runner_clock.py`: the §9 clock domains, plus `EngineError` at the bottom
-  of the import graph.
+- `runner_clock.py`: the §9 clock domains, plus `EngineError`, which every
+  runner module above it raises.
+- `runner_codes.py`: the stable codes of the control protocol's `ok: false`
+  answers and the append-only set a rejected decision stores (DL-272). It
+  imports nothing from dsl41 and sits below `runner_clock.py`, at the
+  bottom of the import graph.
 - `runner_scheduler.py`: the §5 scheduler, turning its ticks into UTC
   instants through `timezones.py` (SEM-35 name resolution and the one
   naive-UTC ↔ local conversion, phase-free and shared with the oracle,

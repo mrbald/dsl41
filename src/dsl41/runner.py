@@ -660,7 +660,8 @@ class Engine:
             future.set_exception(
                 AdmissionRefused(
                     f"a boundary is already in flight (request_id"
-                    f" {self._seal.request.request_id}): one seal at a time"
+                    f" {self._seal.request.request_id}): one seal at a time",
+                    code="seal_in_flight",
                 )
             )
         else:
@@ -734,7 +735,8 @@ class Engine:
         if estate is None or self.journal is None:
             raise AdmissionRefused(
                 "this engine leads no lineage: a run root with no estate anchor and no"
-                " WAL has no boundary to close (period-model ss1.3)"
+                " WAL has no boundary to close (period-model ss1.3)",
+                code="no_lineage",
             )
         if request.epoch != self.epoch:
             # the same rule the ss4 order applies to every other external
@@ -742,7 +744,8 @@ class Engine:
             # a client still talking to a superseded leader is refused
             raise AdmissionRefused(
                 f"epoch {request.epoch} is not this leader's {self.epoch}:"
-                " re-read and re-compose against the current leader"
+                " re-read and re-compose against the current leader",
+                code="stale_epoch",
             )
         staged_ctx, staged_manifest = self._readiness(request, estate)
         self.sealing = True  # step 2
@@ -768,7 +771,8 @@ class Engine:
                     f"input(s) {', '.join(late)} arrived stamped after the cutoff"
                     " T: they are C2's, and this boundary refuses rather than"
                     " snapshotting a state that has moved past its own T"
-                    " (period-model ss6)"
+                    " (period-model ss6)",
+                    code="seal_input_after_cutoff",
                 )
             if self._queue:
                 # a completion at or before T that landed while the proof
@@ -787,7 +791,8 @@ class Engine:
             if time.monotonic() > deadline:
                 raise EngineError(
                     "inputs keep arriving during the ss8 supervisor proof: the estate"
-                    f" is not settling within {self.QUIESCE_WAIT_S}s (period-model ss8)"
+                    f" is not settling within {self.QUIESCE_WAIT_S}s (period-model ss8)",
+                    code="seal_not_settling",
                 )
         forced_gate = retry_horizon_gate(
             read_journal(self.journal.path),
@@ -829,7 +834,8 @@ class Engine:
             raise AdmissionRefused(
                 f"the request stages {request.stage_digest} and its next_period digests to"
                 f" {request.next_period.stage_digest}: the candidate is not the one the"
-                " request names (period-model ss7)"
+                " request names (period-model ss7)",
+                code="stage_digest_mismatch",
             )
         staged_manifest = staged_bytes_for(
             estate.run_root, request.stage_digest, next_period=estate.manifest.period_id + 1
@@ -838,7 +844,8 @@ class Engine:
             raise AdmissionRefused(
                 f"{staging_dir(estate.run_root, request.stage_digest)}: nothing is staged"
                 " at this digest -- stage C2 before asking for the boundary that opens it"
-                " (period-model ss7)"
+                " (period-model ss7)",
+                code="nothing_staged",
             )
         now = self.clock.now()
         context = StagedContext(
@@ -876,7 +883,8 @@ class Engine:
                     "the input queue is still filling after"
                     f" {self.QUIESCE_WAIT_S}s of draining: the estate is not settling,"
                     " and a boundary over a moving state is not a boundary"
-                    " (period-model ss6 step 2)"
+                    " (period-model ss6 step 2)",
+                    code="seal_not_settling",
                 )
 
     async def _cutoff(self, at: datetime) -> None:
@@ -925,7 +933,8 @@ class Engine:
                 raise EngineError(
                     f"the estate is not quiescent at the cutoff: {reason}."
                     " A seal refuses rather than snapshots a half-run ladder, an unbound"
-                    " spawn or a half-recorded poll (period-model ss8)"
+                    " spawn or a half-recorded poll (period-model ss8)",
+                    code="seal_not_quiescent",
                 )
             await asyncio.sleep(0 if self.clock.virtual else 0.01)
 
@@ -952,7 +961,8 @@ class Engine:
                 raise EngineError(
                     "this estate runs detached and the engine holds no supervisor"
                     " client: the ss8 supervisor clauses cannot be proved over its"
-                    " live executions, so the seal refuses (period-model ss8, PR-27)"
+                    " live executions, so the seal refuses (period-model ss8, PR-27)",
+                    code="seal_supervisor_unproven",
                 )
             return
         bound = {(e.job, e.run_number): e for e in carried if e.kind == "bound"}
@@ -965,12 +975,14 @@ class Engine:
             raise EngineError(
                 f"the supervisor is unreachable and this estate carries live detached"
                 f" work ({exc}): quiescence is unprovable, the seal refuses"
-                " (period-model ss8, PR-27)"
+                " (period-model ss8, PR-27)",
+                code="seal_supervisor_unproven",
             ) from exc
         if not isinstance(listing, SupervisorListSuccess):
             raise EngineError(
                 f"the supervisor refused LIST ({listing.error}): quiescence is"
-                " unprovable, the seal refuses (period-model ss8, PR-27)"
+                " unprovable, the seal refuses (period-model ss8, PR-27)",
+                code="seal_supervisor_unproven",
             )
         held = self.supervisor.incarnation
         got = listing.incarnation
@@ -979,7 +991,8 @@ class Engine:
                 f"the supervisor's LIST is from incarnation"
                 f" {got!r} but this engine's lease names"
                 f" {held!r}: a restarted supervisor's history is not proof"
-                " (period-model ss8, PR-27)"
+                " (period-model ss8, PR-27)",
+                code="seal_supervisor_unproven",
             )
         rows = {(r.job, r.run_number): r for r in listing.runs}
         for key, entry in sorted(bound.items()):
@@ -988,13 +1001,15 @@ class Engine:
                 raise EngineError(
                     f"{key[0]}.{key[1]}: bound run {entry.run_id} is not in the"
                     " leased incarnation's LIST -- a carried non-terminal row the"
-                    " sweep cannot account for refuses the seal (period-model ss8)"
+                    " sweep cannot account for refuses the seal (period-model ss8)",
+                    code="seal_run_unaccounted",
                 )
             if row.run_id != entry.run_id:
                 raise EngineError(
                     f"{key[0]}.{key[1]}: the supervisor's LIST names run_id"
                     f" {row.run_id!r} but the bound run is {entry.run_id!r} --"
-                    " an identity split at the seal refuses (DL-118)"
+                    " an identity split at the seal refuses (DL-118)",
+                    code="seal_run_unaccounted",
                 )
         for key, row in sorted(rows.items()):
             if not row.wrapper_alive:
@@ -1005,7 +1020,8 @@ class Engine:
                     f"{key[0]}.{key[1]}: the supervisor holds live run"
                     f" {row.run_id!r} the seal's executions do not carry --"
                     " the sweep found evidence quiescence cannot account for"
-                    " (period-model ss8, PR-27)"
+                    " (period-model ss8, PR-27)",
+                    code="seal_run_unaccounted",
                 )
 
     def _not_quiescent(self, estate: EstateHome) -> str | None:
@@ -1157,7 +1173,8 @@ class Engine:
                 pending,
                 AdmissionRefused(
                     "this period is sealing: nothing externally requested is admitted"
-                    " after the cutoff (period-model ss6 step 2)"
+                    " after the cutoff (period-model ss6 step 2)",
+                    code="period_sealing",
                 ),
             )
             return
@@ -1503,7 +1520,8 @@ class Engine:
                 pending,
                 AdmissionRefused(
                     f"epoch {envelope.epoch} is not this leader's {self.epoch}:"
-                    " re-read and re-compose against the current leader"
+                    " re-read and re-compose against the current leader",
+                    code="stale_epoch",
                 ),
             )
             return []
@@ -1769,7 +1787,10 @@ class Engine:
         for _, _, pending in self._queue:
             if pending.future is not None and not pending.future.done():
                 pending.future.set_exception(
-                    AdmissionRefused("engine shut down before this input was admitted")
+                    AdmissionRefused(
+                        "engine shut down before this input was admitted",
+                        code="engine_shutting_down",
+                    )
                 )
         tasks = [run.task for run in self._live.values()] + self._reaping
         self._live.clear()

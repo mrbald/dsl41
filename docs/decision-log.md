@@ -18134,3 +18134,110 @@ relitigate an entry; append a new one.
   REVIEW. One Opus reviewer: no material finding. Its two minors, a test
   a sudo wrapper could pass and a stale sentence about the GitHub pass,
   are fixed.
+- DL-272 Every `ok: false` control answer carries a stable `code`, and a
+  rejected decision stores it (2026-10-05; runner_codes.py,
+  runner_clock.py, runner_admission.py, runner_hosts.py, runner_journal.py,
+  runner.py, boundary.py, runner_control.py, control-protocol.md,
+  period-model.md, concurrency-model.md, runner-design.md,
+  access-model.md)
+  THE GAP. control-protocol §7 gap 4: errors were prose, so a
+  programmatic client could not branch on them. Matching the prose was
+  the only way, and the prose is free to change.
+  THE FIELD. Every `ok: false` answer carries `code` beside `error`:
+  headerless answers, query errors and `subscribe` stream lines
+  included. A code names the reason, never the outcome. `refused` and
+  `decision` keep their meaning and their presence on every answer, and
+  no `error` text changed. An `unknown` outcome (`internal_error`,
+  `decision_timeout`, `seal_timeout`) never carries `refused`. One helper,
+  `_failure`, builds every `ok: false` answer and every refusal, requires
+  a code, and refuses an unknown-outcome code with `refused`. The rejected
+  decision answer is the one exception: it reads the stored code. A test
+  walks the server module's syntax tree and fails on any other way of
+  writing `ok: false` or `refused`. Denials carry `access_denied` and
+  `peer_unauthenticated`, so access-model §11 no longer lists denial codes
+  as deferred.
+  WHY IT IS ADDITIVE. protocol-evolution's rule for an additive answer
+  field (DL-217) settles the wire: control-protocol §2 says consumers
+  ignore unknown fields, so the field takes no version bump and none of
+  the four steps of protocol-evolution §2, as long as it changes no
+  answer's classification. It changes none: `outcome_of` is untouched,
+  and a retry answered without a code still classifies as rejected. The
+  control-socket row of protocol-evolution §1 says the same. The bundled
+  clients print only `error`. The WAL side is settled below.
+  THE STORED CODE. A rejected `decision` record stores `code` beside
+  `reason` (period-model §2.3). An exact retry, and `original_decision`
+  on a collision, answer from that record, so a retry answers what the
+  first answer said. That is the recovery path after `decision_timeout`,
+  so a code missing there would fail the client that needs it most.
+  `ApplyResult` holds only that an application carries no code. That a
+  native rejection carries a registry code is the writer's rule, in
+  `Journal.decision`, as `generation` and `run_id` already are. The reader
+  takes `record.get("code")`: a record written before this entry reads
+  null and its answer omits the field. The reader never requires a code
+  and never checks it against the registry; a stored code is opaque.
+  The codes a rejection may store are `STORED_CODES`: `precondition_failed`,
+  the nine host codes and `stale_completion`. That set is append-only, and
+  the writer refuses a rejection whose code is outside it. Renaming or
+  retiring a stored code is an entry of its own.
+  NO VERSION BUMP. STATE_MACHINE_VERSION stays 16. runner_ledger.py's
+  rule is to bump it when a build derives different state from an
+  identical log, and never for anything a replay cannot see.
+  `apply_attempt` passes a durable decision through and compares only
+  revisions; the code never enters the gate's verdict. Nothing digests a
+  WAL line's bytes, the seal carries no decision index, and run history
+  reads `decision`, never `reason` or `code`. The reset clause is not
+  used: nothing becomes unreadable, so no instance is ever retired.
+  THE SET. 48 codes, in `runner_codes.py`, which imports nothing from
+  dsl41. The code table in control-protocol §2 lists the same set, and a
+  test compares them. Pure request-shape errors fold into one
+  `invalid_argument`, on the gRPC precedent: the prose names the field,
+  and the client's next move is the same for all of them. Codes stay
+  apart where the client's action differs: `expect_required`,
+  `baseline_mismatch`, `stale_epoch`, the `unknown_*` codes,
+  `status_not_injectable`, and `host_evicted` (re-register) against
+  `host_already_evicted` (nothing to do). `host_evicted` is also stored
+  on the leader's own reachability observation against an evicted host.
+  That rejection answers no client, but it is journaled, and the writer
+  rule needs a code for it; this corrects the B1 ruling that gave it none.
+  The boundary's own pre-PONR refusals share `seal_refused`, tagged at
+  their 24 raise sites because no single wrapper covers them; the
+  retry-horizon gate has its own code. A check on the same path that
+  names no code, such as the `seal` record check or a period loader,
+  answers `engine_error`. A
+  backfill refusal is `backfill_refused`, set where `read_backfill`
+  returns, because its checks are shared with replay and audit.
+  `stale_completion` is stored on a rejected engine-made completion and
+  answers no client request. A code-less EngineError at a catch site
+  answers `engine_error`. The table's client-action column carries the
+  retry guidance; there is no `retryable` field and no `detail` field.
+  HTTP status lives in gateway.md, not in the transport-neutral control
+  protocol.
+  OPEN. The seal catch in `_seal` answers every EngineError as a refusal.
+  An EngineError can escape `_drain_admitted` after `journal.admit`: the
+  decision writer's own refusal, or the oracle raising inside
+  `apply_attempt`. That leaves a durably admitted attempt with no
+  decision, while the boundary aborts and the seal answers `engine_error`
+  with `refused: true`. That is not a clean refusal. `clock_regressed` is
+  outside this class: `Frontiers.admit` runs before `journal.admit`, so
+  nothing is appended. This entry changes no marker and no behavior; the
+  case is recorded as open for a later semantic slice.
+  TESTS. protocol-evolution §7, for the `decision` row:
+  `test_a_rejected_retry_answers_the_stored_code_and_a_record_without_one_omits_it`
+  replays a rejection with a code and one without after a same-period
+  restart; the first retry equals the live answer, the second omits
+  `code`. `test_a_rejection_is_written_with_its_code_and_one_without_is_refused`
+  pins the writer rule, the stored-code set and the stored
+  `stale_completion`. The crash-window re-decision (DL-156) carries its
+  code in
+  `test_cm07_an_attempt_admitted_without_a_result_is_applied_through_the_gate`.
+  `tests/test_control_codes.py` pins the table against the registry, the
+  one helper, the unknown-outcome rule and the `engine_error` fallback.
+  The 17 whole-answer tests carry the code, and every wire-reachable code
+  is asserted over the socket or at its origin.
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass,
+  the Fable pass in place of Codex at the owner's instruction (Codex quota
+  out). The stored-code ruling (Q1) was a Fable advisor ruling. The Opus
+  reviewer found six minors and two nits; all are fixed, and its round-two
+  minor, a bypass of the completeness test, is fixed. The Fable pass found
+  one major, the wording of the OPEN paragraph, and four minors; all are
+  fixed. Each fix was confirmed by the reviewer that raised it.
