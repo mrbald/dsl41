@@ -62,7 +62,7 @@ stateDiagram-v2
 
 ## Failure and recovery
 
-- The oracle sizes only buckets it can read. Preflight refuses an unsized resource, an unknown `res_type` and a demand that can never fit ([runner-design §8](../runner-design.md#8-preflight--refuse-loudly-run-honestly), [DL-50](../decision-log.md), [DL-247](../decision-log.md)).
+- The oracle sizes only buckets it can read. Preflight refuses an unsized resource, an unknown `res_type`, `FREE=Y` or `FREE=A` on a depletable ([DL-287](../decision-log.md)) and a demand that can never fit ([runner-design §8](../runner-design.md#8-preflight--refuse-loudly-run-honestly), [DL-50](../decision-log.md), [DL-247](../decision-log.md)).
 - KILLJOB on a queued job dequeues and terminates it. ON_ICE dequeues it to INACTIVE ([DL-50](../decision-log.md)).
 - A waiter that can never fit at runtime, such as one on a spent depletable, blocks lower priorities that name that resource. Preflight cannot see it ([DL-255](../decision-log.md)).
 - Held units cross a seal on the row. A holder that the next catalog removes gives its units back at the opening ([period-model §5](../period-model.md#5-capacity-decomposed), [DL-256](../decision-log.md)).
@@ -90,6 +90,8 @@ stateDiagram-v2
 - `test_dl256_a_circular_wait_over_held_units_breaks_by_an_operator_act`
 - `test_dl256_held_units_cross_the_seal_until_release_resource`
 - `test_dl256_a_row_that_is_not_live_may_carry_a_resources_held_units`
+- `test_preflight_resources_refuses_free_y_or_a_on_a_depletable`
+- `test_preflight_resources_accepts_free_n_on_a_depletable_and_y_or_a_on_a_renewable`
 - `test_dl257_a_queued_job_whose_condition_went_false`
 - `test_the_capacity_pool_never_changes_without_a_row_change`
 
@@ -109,6 +111,7 @@ Every machine shares the [no transition inventory](../risk-map.md#no-transition-
     A forced start of a holder runs on its held units without the unit it lacks (DL-256's reuse rule).
   - `test_dl256_a_circular_wait_over_held_units_breaks_by_an_operator_act` and `test_dl256_releasing_the_blockers_own_held_unit_leaves_the_circular_wait` pin both.
     The DL-50 liveness property covers SUCCESS completions only, and its docstring says so.
-- `release_policy` in `capacity.py` says a depletable never frees, as SEM-16 and DL-50 do.
-  The code applies an explicit `FREE` code to a depletable too: one with `FREE=A` frees its units when its run completes, so they are never consumed.
-  Preflight does not refuse that combination.
+- `release_policy` in `capacity.py` applies an explicit `FREE` code to a depletable too, as DL-50 (3) states: with `FREE=A` its units would free when the run completes and never be consumed.
+  The vendor documents `FREE` for renewable resources only, and what it does on a depletable is open (Q12, [autosys-semantics §9](../autosys-semantics.md#9-open-questions-and-their-pinned-defaults)).
+  Preflight refuses `FREE=Y` and `FREE=A` on a depletable and accepts `FREE=N`, which matches the default ([DL-287](../decision-log.md)).
+  An oracle-direct caller is not refused; `test_preflight_resources_refuses_free_y_or_a_on_a_depletable` and its accepting twin pin the gate.

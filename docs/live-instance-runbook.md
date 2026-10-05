@@ -245,6 +245,84 @@ is FAILURE, the flip is the same, in a harder form. Capture `autorep -J
 dsl41_q6_box -d` in each case. Cleanup: run
 `jil <<< "delete_box: dsl41_q6_box"`.
 
+### Q12 — FREE on a depletable resource (~3 minutes, runs up to four short jobs)
+
+"resources Attribute" (AutoSys 24.2) documents FREE as "Optional for
+renewable virtual resources only". dsl41's preflight refuses FREE=Y and
+FREE=A on a depletable and accepts FREE=N (DL-287); the oracle would
+apply the code. This probe reads what the vendor does from job behavior.
+Each resource has 2 units; each `_b` job asks for both, so it runs only
+when no unit is spent.
+
+```
+jil <<'EOF'
+insert_resource: dsl41_q12_res
+res_type: D
+amount: 2
+insert_resource: dsl41_q12y_res
+res_type: D
+amount: 2
+insert_job: dsl41_q12
+job_type: c
+machine: <M>
+command: sleep 45
+resources: (dsl41_q12_res, QUANTITY=1, FREE=A)
+insert_job: dsl41_q12_b
+job_type: c
+machine: <M>
+command: /bin/true
+resources: (dsl41_q12_res, QUANTITY=2)
+insert_job: dsl41_q12_y
+job_type: c
+machine: <M>
+command: /bin/false
+resources: (dsl41_q12y_res, QUANTITY=1, FREE=Y)
+insert_job: dsl41_q12_yb
+job_type: c
+machine: <M>
+command: /bin/true
+resources: (dsl41_q12y_res, QUANTITY=2)
+insert_job: dsl41_q12_n
+job_type: c
+machine: <M>
+command: /bin/true
+resources: (dsl41_q12_res, QUANTITY=1, FREE=N)
+EOF
+sendevent -E FORCE_STARTJOB -J dsl41_q12
+sleep 10; sendevent -E FORCE_STARTJOB -J dsl41_q12_b
+sleep 5; autorep -J dsl41_q12%        # mid-run: dsl41_q12_b in RESWAIT
+autorep -V dsl41_q12_res -d           # secondary capture, flag unverified
+sleep 60; autorep -J dsl41_q12%       # after dsl41_q12 ends
+sendevent -E FORCE_STARTJOB -J dsl41_q12_y
+sleep 15; sendevent -E FORCE_STARTJOB -J dsl41_q12_yb
+sleep 15; autorep -J dsl41_q12_y%
+```
+
+Read jil's output first. If it rejects a FREE=A or FREE=Y line, the
+refusal stands and becomes [V]. If it rejects the FREE=N line, the
+refusal extends to FREE=N. `dsl41_q12_n` is never started; it only tests
+the definition. Mid-run, `dsl41_q12_b` in RESWAIT confirms that
+`dsl41_q12` took one unit (1 free); if `dsl41_q12_b` ran, the probe read
+nothing. After `dsl41_q12` ends:
+
+- `dsl41_q12_b` runs: FREE=A returned the unit, as on a renewable. The
+  oracle's reading stands, and the refusal could go.
+- `dsl41_q12_b` stays in RESWAIT: the unit is spent, and FREE is ignored
+  on a depletable. Preflight could accept Y and A, and `release_policy`
+  would ignore the code there.
+
+`dsl41_q12_y` fails. If `dsl41_q12_yb` then stays in RESWAIT (1 free),
+FREE=Y freed nothing on FAILURE: success-only, the oracle's Y, unless the
+FREE=A run showed FREE ignored. If it runs (2 free), the unit came back
+unconditionally. Capture jil's output and
+every `autorep` output; the `-V` read is secondary, since its flag is not
+checked against the 24.2 autorep page. Cleanup: run
+`sendevent -E KILLJOB -J <job>` for a job still in RESWAIT (if it stays
+queued, `sendevent -E CHANGE_STATUS -s INACTIVE -J <job>`), then
+`jil <<< "delete_job: <job>"` for each of the five jobs, then
+`jil <<< "delete_resource: dsl41_q12_res"` and
+`jil <<< "delete_resource: dsl41_q12y_res"`.
+
 ### Q3c — does a member's latched tick survive into the next box run
 
 This protocol is timing-sensitive. Pick a `HH:MM` value ~3 minutes in

@@ -821,8 +821,10 @@ ERROR:
   set, or with no parseable `amount` — an unsized semaphore cannot be
   honored (DL-50: fail-closed, stricter than L016's warn). A
   `--resource-capacity` override is a documented future escape hatch.
-  Unknown `res_type` (not R/D/T). The same resource named twice in one
-  `resources:` list — the demand is ambiguous. A `QUANTITY` above the
+  Unknown `res_type` (not R/D/T). FREE=Y or FREE=A on a `res_type: D`
+  resource: release semantics undocumented (DL-287, Q12); FREE=N accepted.
+  The same resource named twice in one `resources:` list — the demand is
+  ambiguous. A `QUANTITY` above the
   resource's `amount`, at any priority — the job would wait in QUE_WAIT
   forever, and at a positive priority it would block every lower priority
   that names the resource (DL-255). A

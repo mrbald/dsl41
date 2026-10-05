@@ -1677,6 +1677,54 @@ def test_preflight_resources_refuses_a_quantity_above_amount_at_every_priority(
     assert "amount=2" in item.message and "DL-255" in item.message
 
 
+def test_preflight_resources_refuses_free_y_or_a_on_a_depletable(monkeypatch) -> None:
+    """DL-287: the vendor documents FREE for renewables only ("Optional for
+    renewable virtual resources only"), so FREE=Y or FREE=A on a depletable has
+    unknown release semantics (Q12) and is refused. Each is refused alone, on
+    its own resource, so one job's refusal cannot stand in for the other's."""
+    monkeypatch.setattr(socket_mod, "getfqdn", lambda *a: "test.host")
+    text = (
+        "insert_resource: DY\nres_type: D\namount: 4\n\n"
+        "insert_resource: DA\nres_type: D\namount: 4\n\n"
+        "insert_job: dy\njob_type: c\ncommand: x\nmachine: localhost\n"
+        "resources: (DY, QUANTITY=1, FREE=Y)\n\n"
+        "insert_job: da\njob_type: c\ncommand: x\nmachine: localhost\n"
+        "resources: (DA, QUANTITY=1, FREE=A)\n"
+    )
+    items = preflight(lower_source(text))
+    errors = [i for i in items if i.code == "resources" and i.severity == "ERROR"]
+    assert sorted(i.job for i in errors) == ["da", "dy"]
+    for item in errors:
+        assert "depletable" in item.message and "Q12" in item.message
+        assert "Optional for renewable virtual resources only" in item.message
+    assert "FREE=Y" in next(i.message for i in errors if i.job == "dy")
+    assert "FREE=A" in next(i.message for i in errors if i.job == "da")
+
+
+def test_preflight_resources_accepts_free_n_on_a_depletable_and_y_or_a_on_a_renewable(
+    monkeypatch,
+) -> None:
+    """DL-287's non-triggering half: FREE=N on a depletable matches its
+    never-release default, and FREE=Y or FREE=A on a renewable is documented
+    (DL-256). A depletable with no FREE is not refused either. None of these
+    raises a `resources` item."""
+    monkeypatch.setattr(socket_mod, "getfqdn", lambda *a: "test.host")
+    text = (
+        "insert_resource: DN\nres_type: D\namount: 4\n\n"
+        "insert_resource: RR\nres_type: R\namount: 4\n\n"
+        "insert_job: dn\njob_type: c\ncommand: x\nmachine: localhost\n"
+        "resources: (DN, QUANTITY=1, FREE=N)\n\n"
+        "insert_job: d0\njob_type: c\ncommand: x\nmachine: localhost\n"
+        "resources: (DN, QUANTITY=1)\n\n"
+        "insert_job: ry\njob_type: c\ncommand: x\nmachine: localhost\n"
+        "resources: (RR, QUANTITY=1, FREE=Y)\n\n"
+        "insert_job: ra\njob_type: c\ncommand: x\nmachine: localhost\n"
+        "resources: (RR, QUANTITY=1, FREE=A)\n"
+    )
+    items = preflight(lower_source(text))
+    assert not any(i.code == "resources" for i in items)
+
+
 def test_preflight_resources_clean_without_load_priority_or_resources() -> None:
     text = "insert_job: rl0\njob_type: c\ncommand: x\nmachine: localhost\n"
     items = preflight(lower_source(text))
