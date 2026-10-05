@@ -252,6 +252,13 @@ For every input, in log order:
    caller's result.
 
 Steps 5–7 must not yield to another state-changing input.
+An exception after step 3 assigns the index, until step 7 completes, stops
+the engine, and so does a failed WAL append. Replay rebuilds the attempt
+and applies it through the gate when its decision is missing (DL-156). That
+recovered application writes no effect record, so it launches nothing. A
+seal does not turn such an exception into a refusal (`period-model.md` §7,
+DL-274). In a seal, step 3's `clock_regressed` refuses a request but stops
+the engine for an engine-made input, which has no one to answer.
 
 **Worked example — one operator kill, three lines.** A job running at run 1,
 revision 1. An operator sends `KILLJOB` naming that revision. This is what

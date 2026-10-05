@@ -519,6 +519,17 @@ class Engine:
         #: the same freeze, seen by an FW task at its poll boundary (ss3.5)
         self.barrier = SealBarrier()
         self._seal: _PendingSeal | None = None
+        #: the index of an admitted attempt that is not yet fully applied:
+        #: its admission line, decision, outbox entries and answer. Set when
+        #: the frontier admits it and cleared when `_admit_and_apply`
+        #: returns. A seal that meets an exception while it is set
+        #: fail-stops instead of refusing, because memory may then disagree
+        #: with the WAL (DL-274).
+        self._applying: int | None = None
+        #: the kind of a queued input with no one to answer that the seal's
+        #: drain could not admit (`clock_regressed`). Refusing it would lose
+        #: it while C1 reopens, so the seal fail-stops instead (DL-274).
+        self._unadmitted: str | None = None
 
     def note_executor_contact(self) -> None:
         """Stamp positive contact with this engine's own execution host
@@ -670,8 +681,10 @@ class Engine:
         return future
 
     def abort_boundary(self) -> None:
-        """ss7: EVERY non-commit exit inside the reversible interval runs
-        this, while the fence is still valid.
+        """ss7: every non-commit exit inside the reversible interval runs
+        this, while the fence is still valid -- except the two that
+        fail-stop in `_seal_boundary`: a fence loss (PR-28b) and an exception
+        that leaves memory or the WAL in doubt (DL-274).
 
         It clears the sealing flag, reopens control admission, restarts
         scheduler admission and unparks FW tasks -- and it TOUCHES NO ROW,
@@ -687,13 +700,16 @@ class Engine:
     async def _seal_boundary(self) -> None:
         """One queued boundary, run to its outcome inside the loop.
 
-        Three exits and they are three different facts: a commit raises
+        Four exits and they are four different facts: a commit raises
         `PeriodSealed` and the engine stops with code 3; a refusal answers
         the request, aborts, and C1 carries on -- the cutoff work already
         admitted stays as legitimate C1 activity; and a fail-stop after the
         `seal` append propagates WITHOUT an abort, because reopening
         admission behind a possibly-durable seal line is the one thing
-        recovery cannot repair."""
+        recovery cannot repair. The fourth is DL-274's: an exception while
+        an attempt admitted during the seal is not fully applied, while a
+        WAL append is unfinished, or that leaves an engine-made input
+        unadmitted, propagates without an abort too."""
         pending, self._seal = self._seal, None
         assert pending is not None
         try:
@@ -711,6 +727,31 @@ class Engine:
                 # that cannot prove it leads does not get to reopen
                 # admission. It cannot un-run what happened; it turns a
                 # divergence into a recorded stop (PR-28b)
+                raise
+            if self._applying is not None:
+                # an attempt admitted during the seal is not fully applied
+                # (DL-274): memory may disagree with the WAL. An abort would
+                # reopen C1 over that state. Stop instead: neither request
+                # is answered, and resume rebuilds from the WAL, applying an
+                # undecided attempt through the gate (DL-156)
+                exc.add_note(
+                    f"DL-274: the seal stopped the engine with attempt {self._applying}"
+                    " admitted and not fully applied; resume rebuilds it from the WAL"
+                )
+                raise
+            if self._unadmitted is not None:
+                exc.add_note(
+                    f"DL-274: the seal stopped the engine rather than lose an unadmitted"
+                    f" {self._unadmitted} input; resume observes it again"
+                )
+                raise
+            if self.journal is not None and self.journal.append_unfinished:
+                # a WAL append failed: its line may be torn or whole, and an
+                # abort would let the next record land behind it (DL-274)
+                exc.add_note(
+                    "DL-274: the seal stopped the engine on an unfinished WAL append;"
+                    " resume repairs the tail"
+                )
                 raise
             self.abort_boundary()
             if not pending.future.done():
@@ -1525,8 +1566,26 @@ class Engine:
                 ),
             )
             return []
-        self.frontiers = self.frontiers.admit(pending.at)
+        try:
+            self.frontiers = self.frontiers.admit(pending.at)
+        except EngineError as exc:
+            if self.sealing and pending.future is not None:
+                # the seal refuses on this and C1 reopens, so the request it
+                # popped is answered rather than dropped (DL-274)
+                self._refuse(pending, AdmissionRefused(str(exc), code=exc.code or "engine_error"))
+            elif self.sealing and (pending.ev is not None or pending.host is not None):
+                # an engine-made input -- a completion, a tick, a routing
+                # observation -- has no one to answer: a refusal would lose
+                # it while C1 reopens, so the seal stops instead (DL-274).
+                # The cutoff's own time observation is neither: it belongs
+                # to the seal, and a retry chooses a new T
+                self._unadmitted = pending.ev.kind if pending.ev is not None else "host"
+            raise
         index = self.frontiers.committed_index
+        # the window opens with the frontier: memory has moved, and the
+        # admission line may follow. `_write` flushes before it fsyncs, so
+        # an exception out of `admit` does not prove the line absent either
+        self._applying = index
         attempt = self._attempt(pending, index, fp)
         if self.journal is not None:
             self.journal.admit(attempt)  # WAL-append + fsync BEFORE apply (ss7)
@@ -1558,6 +1617,7 @@ class Engine:
             assert applied.result.reason is not None
             self.drops.append((ev, applied.result.reason))
         self._answer(pending, applied.result)
+        self._applying = None
         return applied.emitted
 
     def _plan_effects(self, applied: Applied, index: int) -> list[Effect]:

@@ -236,6 +236,11 @@ class Journal:
         #: post-write. The WAL never blocks on one, and a feed whose backlog
         #: would pass its budget is removed rather than grown (DL-267)
         self._subscribers: list[Subscription] = []
+        #: True from the start of an append's bytes until the append
+        #: returns. An exception leaves it set, because a failed append
+        #: does not prove its line absent or whole. A seal that meets an
+        #: exception while it is set fail-stops instead of refusing (DL-274).
+        self.append_unfinished = False
 
     @classmethod
     def create(
@@ -614,11 +619,13 @@ class Journal:
             # unchecked is proof nothing was about to rely on.
             self._lock.check()
         line = json.dumps(record, sort_keys=True).encode("utf-8") + b"\n"
+        self.append_unfinished = True
         self._f.write(line)
         self._f.flush()
         if self._fsync_each:
             os.fsync(self._f.fileno())
         self._publish(record, len(line))
+        self.append_unfinished = False
 
     def close(self) -> None:
         self.detach()

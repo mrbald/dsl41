@@ -18335,3 +18335,109 @@ relitigate an entry; append a new one.
   fixed. A Fable pass over the integration of DL-272 and this entry,
   standing in for DL-262's Codex integration pass, found no material
   defect; its minors are fixed.
+- DL-274 A seal fail-stops on an attempt it has not fully applied, a
+  failed WAL append, or an engine-made input it cannot admit (2026-10-05;
+  runner.py, runner_journal.py, period-model.md, concurrency-model.md,
+  control-protocol.md)
+  THE GAP. DL-272's OPEN item, and one more site of its kind. The seal
+  admits attempts through `_admit_and_apply`: the drained ones and the
+  cutoff's own time observation. `_seal_boundary` treated every exception
+  other than `BoundaryFailStop` as a pre-commit refusal: it ran
+  `abort_boundary`, answered the seal `refused`, and reopened C1. An
+  exception after the frontier assigned an index left memory ahead of the
+  WAL. Before the `decision` record, the attempt had no decision. After it,
+  the outbox, `_dispatched` or the decision index could disagree with the
+  WAL. The decision writer's own refusal, an oracle raise inside
+  `apply_attempt` and an `outbox.record` failure all reach this window. A
+  failed WAL append after the attempt was applied had the same effect.
+  `_dispatch` writes `effect_result` after it resolves the outbox entry in
+  memory, and an ENOSPC there left a possibly torn line at the tail. In
+  every case C1 reopened over a state the log does not describe, and the
+  next record could land behind a torn line. Last, a `clock_regressed` in
+  the drain dropped the popped input unanswered. For an adapter completion
+  or a tick, that lost the input while C1 reopened.
+  THE RULE. Three kinds of exception in the seal's reversible interval
+  fail-stop as `BoundaryFailStop` does. The first is an exception while an
+  attempt admitted during the seal is not fully applied: from the moment
+  it takes its index until its admission line, decision, outbox entries
+  and answer are all done. The second is a WAL append that fails anywhere
+  in the interval, including one an adapter task makes and `_settle`
+  re-raises. The third is a `clock_regressed` before the index on an
+  engine-made input: an adapter completion, a tick or a routing
+  observation, which has no one to answer. The main loop stops on the same
+  raise, and resume observes the input again through the status ladder
+  or the missed-tick policy. No abort runs. The seal request is not answered, and
+  neither is an attempt whose answer was still owed. The connection drops,
+  so the client reads those outcomes as unknown. No `seal` record exists.
+  Recovery repairs the WAL tail and rebuilds from the WAL, and the period
+  stays open. An attempt whose decision is missing is applied through the
+  gate (DL-156). That recovered application writes no effect record,
+  because resume rebuilds the outbox from decision records only. So a
+  start recovered this way launches nothing. Its row stands for the resume
+  ladder, its untraced-start sweep and the operator to settle
+  (runner-design §7). This is DL-156's crash-window posture, unchanged.
+  The fence rule (DL-101) is checked first and also fail-stops.
+  THE MECHANISM. Three fields record these as state; no exception type
+  changes. `Engine._applying` holds the attempt's index from the frontier
+  assignment until `_admit_and_apply` returns. It opens before
+  `journal.admit`, because `_write` flushes before it fsyncs: an exception
+  out of `admit` does not prove the line absent. `Journal.append_unfinished`
+  is set before an append's bytes and cleared when the append returns, so
+  a failed append leaves it set. `Engine._unadmitted` names the kind of
+  an engine-made input that hit `clock_regressed` during a seal.
+  `_seal_boundary` re-raises when any of them is set, and adds a note
+  naming DL-274 and the attempt index or input kind, so the stop is not
+  anonymous. The main loop is unchanged; it already stops on any such
+  exception. An engine with no WAL never reaches the drain: its seal
+  refuses first with `no_lineage`.
+  WHAT STILL REFUSES. Every other exception aborts and refuses. Among them
+  are the drain's own timeout and a failure in `_settle` with no
+  unfinished append. A `clock_regressed` on a request refuses too: the
+  request is answered refused with that code and listed in `refusals`,
+  where before it was dropped unanswered. A `clock_regressed` on the
+  cutoff's own time observation refuses as well, because that observation
+  belongs to the seal and a retry chooses a new T.
+  THE CONTRACTS. period-model §7 and its PR-28b row, concurrency-model §4
+  and control-protocol §3.
+  TESTS.
+  `test_pr28b_an_exception_while_a_drained_attempt_applies_fail_stops`
+  injects five faults. Three come before the decision is durable: an
+  admission line that is written and then raises, an oracle raise in
+  `apply_attempt`, and a decision writer that raises. Two come after it:
+  an `outbox.record` that raises, and an ENOSPC on the `effect_result`
+  write. Each time the loop re-raises the injected exception with a DL-274
+  note, the seal is not answered, the barrier stays parked, and the WAL
+  holds the input and no `seal` or `effect_result` record. The attempt's
+  own answer exists only in the `effect_result` case. After resume, period
+  1 is still open. For the three undecided faults, the outbox holds no
+  SPAWN and nothing runs. For the other two, it holds one SPAWN, dispatched
+  once. Each fault fails with its flag check removed, and the outbox fault
+  also fails when the window closes at the decision record.
+  `test_pr28b_a_clock_regression_in_the_drain_still_refuses` pins that
+  refusal for a request, its `clock_regressed` answer and its `refusals`
+  entry.
+  `test_pr28b_a_clock_regression_on_an_engine_made_input_in_the_drain_fail_stops`
+  pins the stop for an adapter completion stamped behind the frontier: the
+  error carries the code and a DL-274 note, the seal is not answered, no
+  refusal is listed, the WAL holds neither the completion nor a `seal`
+  record, and period 1 is open at resume. It fails without the field
+  check. `test_pr28b_a_drain_timeout_after_a_decided_attempt_still_refuses`
+  pins the timeout refusal.
+  NOT IN SCOPE. A deterministic oracle fault re-raises in
+  `replay_inputs`, which re-runs `apply_attempt` on the undecided attempt.
+  The engine then fails at every resume, and no contract names a remedy.
+  That is not new: the main loop has met it since DL-156, and the engine
+  before this entry met it at its next restart. The fix only surfaces it
+  at once. The offline `dsl41 seal` maps any non-boundary loop exception to
+  exit 2. That stays true here: the boundary did not commit, and the
+  period is open. runner-design §7 describes no seal abort, so it is
+  unchanged.
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass,
+  the Fable pass in place of Codex at the owner's instruction. Both found,
+  independently, that the first ruling left a failed `effect_result`
+  append in `_dispatch` as a refusal; the journal flag closes it. The
+  Fable pass also found that the text overstated recovery: a recovered
+  application launches nothing, and the tests now assert it. The Opus
+  reviewer found the lost unanswered request and the lost engine-made
+  input on `clock_regressed`; both are fixed. Every finding was confirmed
+  fixed by the reviewer that raised it, within three rounds.

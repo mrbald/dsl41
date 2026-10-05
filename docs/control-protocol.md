@@ -545,7 +545,14 @@ does not restart-loop a sealed engine, and without signalling detached
 work. It does not load C2 into itself: a transition is a restart, not a
 reload (DL-65). The answer's timeout is longer than a mutation's, because
 a boundary drains every admitted attempt and waits an unbound spawn and an
-unresolved KILL ladder out; a timeout is `unknown`, never a refusal.
+unresolved KILL ladder out; a timeout is `unknown`, never a refusal. If the
+engine stops during a seal because an attempt admitted there is not fully
+applied, because a WAL append failed, or because an engine-made input could
+not be admitted, the seal gets no answer, and neither
+does an attempt whose answer was still owed. The connection drops, and the
+client reads those outcomes as `unknown`. The seal did not commit: recovery
+rebuilds from the WAL, and the period stays open (DL-274, `period-model.md`
+§7).
 
 ## 4. Query verbs (frozen response shapes)
 
