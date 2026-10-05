@@ -107,6 +107,4 @@ Every machine shares the [no transition inventory](../risk-map.md#no-transition-
 
 ## Gaps found
 
-- The docstring of `Scheduler.pop_due` says ticks missed across downtime "never reach this path".
-  The resume sweep in `runner_startup.py` derives them through `pop_due` and then drops them.
-  A comment there says `pop_due` "is the only source of both an admitted and a dropped tick".
+None.

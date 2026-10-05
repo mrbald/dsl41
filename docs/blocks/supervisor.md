@@ -93,4 +93,4 @@ The common finding, [no transition inventory](../risk-map.md#no-transition-inven
 
 ## Gaps found
 
-- [runner-design §6a](../runner-design.md#6a-process-lifecycle-tiers-dl-41a) says the supervisor has "no timers", and so does the module docstring of `runner_supervisor.py`, which later calls the deadman "not purely reactive". The [supervisor-protocol preamble](../supervisor-protocol.md#supervisor-protocol--the-lifecycle-tiers-public-contract), amended by DL-150, names three lifecycle bounds: the lease TTL, the SHUTDOWN waits and the optional deadman. DL-150 has ruled; runner-design §6a and the docstring are stale. The preamble's list is itself incomplete: §5 also bounds the startup PING probe and the teardown flush, and the loop reaps on a one-second tick.
+None.

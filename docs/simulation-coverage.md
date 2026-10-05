@@ -582,7 +582,7 @@ fails the suite.
 | profile_field:default_tz | supported | period-model ss2.1, SEM-35 | - |  |  |  | generic | the zone a job with no timezone of its own is read in |
 | profile_field:execution_mode | supported | period-model ss2.1 | - |  |  |  | generic | whether the engine owns the child processes or a supervisor does |
 | profile_field:fw_default_interval_us | supported | period-model ss2.1 | - |  |  |  | generic | the poll interval an FW job with no watch_interval uses |
-| profile_field:fw_default_interval_us#rounding | provisional | runner_startup.wire_from_profile, period-model ss2.1 | - |  |  |  | none | startup converts the microsecond profile field to WHOLE SECONDS for the watcher and clamps it to at least one, so a sub-second interval is not what the profile asked for. No label was opened for the conversion |
+| profile_field:fw_default_interval_us#rounding | provisional | runner_startup.wire_from_profile, period-model ss2.1 | - |  |  |  | none | no shipped surface sets a value that is not whole seconds. A hand-pinned one is wired rounded half to even (at least 1 s), not at the pinned interval, and resume refuses it as profile drift. No label was opened for the conversion |
 | profile_field:machine_policy | supported | period-model ss2.1, DL-49 | - |  |  |  | generic | how the one ambiguous machine verdict resolves |
 | profile_field:reconcile_settle_us | supported | period-model ss2.1 | - |  |  |  | generic | how long reconcile waits for late evidence before it decides |
 | profile_field:retry_horizon_us | supported | period-model ss2.1 | - |  |  |  | generic | how far ahead a deferred dispatch retry may be scheduled |

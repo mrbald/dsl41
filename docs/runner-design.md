@@ -241,15 +241,16 @@ warns instead (§8).
 60 [?]) until `watch_file` exists with size `>= watch_file_min_size` and
 the size is stable across two consecutive polls — `fw-existence=stable`,
 the default (DL-258). With no `watch_file_min_size`, `fw-existence=immediate`
-completes on the first poll where the file exists instead, `watch_interval`
-ignored for that decision — the vendor reading; a job with a minimum size
-always needs the steady-size rule. The adapter completes with exit 0.
+completes only when the run's first poll finds the file — the vendor reading.
+A file that appears at a later poll waits for a steady size, as under
+`stable`. A job with a minimum size always needs the steady-size rule. The
+adapter completes with exit 0.
 
 **Its progress is evidence, not memory** (DL-129; period-model §2.2). Last
 observed size and stable-poll count decide when
 a watch completes, and a restart resets both. So the watch has a spool, and it
 is append-only: `runs/<job>.<run_number>/watch.jsonl`, a `start` line on
-dispatch — the first durable act, so a dispatched watch always has one — then
+dispatch — the first durable record, so a dispatched watch always has one — then
 one line per poll, fsynced, *including* polls that changed nothing. The line
 is appended **before** progress moves or a completion is emitted, so an
 observation that changed the watch is never one an audit cannot see.
@@ -287,7 +288,9 @@ supervisor → wrappers. The supervisor exists for exactly one reason: jobs
 that must SURVIVE engine restarts (upgrades, crash isolation). The
 supervisor is deliberately dumb (postmaster / s6-supervise philosophy):
 SPAWN, SIGNAL, LIST, SHUTDOWN, fork wrappers, reap, forward completions.
-It has no timers, no conditions, and no configuration reload. Its own-bug
+It has no scheduling timers, no conditions, and no configuration reload.
+Its only time bounds are lifecycle bounds, which the
+[supervisor-protocol preamble](supervisor-protocol.md) lists (DL-150). Its own-bug
 crash surface is near zero. Wrappers hold ITS lifeline (below). Thus even
 `kill -9` of the supervisor keeps
 "supervisor death ⇒ all jobs terminate and are recorded". On restart, the

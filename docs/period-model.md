@@ -1063,10 +1063,12 @@ audit of C1 sees C2's evidence. With a log, the seal's
   audit derives a completed watch where the seal carries a live one;
 - **a torn final line truncates**, exactly as the WAL's does.
 
-The adapter's **first durable act on dispatch is a `start` line** —
+The adapter's **first durable record on dispatch is a `start` line** —
 `{artifact_format_version, kind: "start", at, run_id}` — before its first poll, so a dispatched watch always has
 `watch_seq ≥ 1`; a watch not yet dispatched is a `pending_spawn`, not an
-`fw_watch`. `next_poll_at` is then exactly: **after `start` and no poll line,
+`fw_watch`. The run directory is made and its parent fsynced before the
+`start` line. A crash between the two leaves a directory with no `start`
+line, and resume dispatches the watch again under its bound `run_id`. `next_poll_at` is then exactly: **after `start` and no poll line,
 `start.at`** (the first poll is immediate); **after a poll line, `poll.at +
 interval`**. PR-34 asserts those two timestamps directly, not through the
 helper that computes them.
@@ -1213,10 +1215,11 @@ observation for it, so the waiters do not wait for an unrelated input;
 replay applies the same input. A live ghost is refused at the boundary
 (§10.1), so it never reaches an opening.
 
-`sorted_waiters` does an unguarded `self.catalog.jobs[j]`; a waiter absent from
-the catalog raises `KeyError`. §10 classifies that R, and the lookup takes a
-documented default so the classifier is a gate rather than the only thing
-between an operator and a crash.
+`sorted_waiters` gives a waiter absent from the catalog the unset priority:
+it sorts behind every declared priority, then by enqueue order and name. §10
+classifies a QUE_WAIT job removed by the next catalog R (PR-40), so the
+boundary refuses that state first. The default is the floor under that gate:
+a classifier bug misorders the queue rather than crashing admission.
 
 ## 6. The cutoff barrier
 
@@ -2058,8 +2061,9 @@ indeterminate, and a run that provably never reached the supervisor is lost.
    wrapper_pid, spawned_at}` — the answer as first given;
 6. answer the engine.
 
-A replayed SPAWN resolves the directory **through the index**, never through
-the incoming path, and answers from the directory, not memory:
+A replayed SPAWN resolves the directory **through the index**, and answers
+from the directory, not memory. The incoming path is read in one case only:
+no index entry (DL-150, DL-151).
 
 | directory state | answer |
 | --- | --- |
@@ -2072,9 +2076,10 @@ the incoming path, and answers from the directory, not memory:
 | index entry → directory with no `receipt.json` | crash between index and receipt: indeterminate, same rule |
 | index entry names a directory that does not exist | impossible by write order (`mkdir` precedes the index); treated as indeterminate if ever seen |
 | index entry unreadable, or naming a `run_id` that is not its own filename | **indeterminate**. Corruption is not absence: "no index entry" AUTHORIZES a spawn, so an entry that cannot be read must never answer as one that is not there |
-| no index entry | first application — an orphan directory at the incoming path with no index and no receipt is a crash between `mkdir` and index and is reused, because nothing durable names its run |
+| no index entry, and a `receipt.json` at the incoming path names **this** `run_id` | answered from that directory, by the rows above — the index was lost under a live receipt, and losing an index never authorizes a second process (DL-151) |
 | no index entry, and **another** `run_id`'s index names this `(job, run_number)` | collision: the same crash under a different id, refused. The index is scanned for that owner here and only here — after a crash, never on a healthy spawn |
 | no index entry, no receipt, and the directory holds a `spawn.json` or a `status.json` | **indeterminate** — a run made under the old rule, where the engine owned the directory and no receipt was ever written. It holds that run's evidence, and forking into it would overwrite it |
+| nothing else | first application — an orphan directory at the incoming path with no index and no receipt is a crash between `mkdir` and index and is reused, because nothing durable names its run |
 
 Writing the receipt *before* the spawn is the safe direction: the failure mode
 is a run that never happened being reported unknown, which E7 already handles;

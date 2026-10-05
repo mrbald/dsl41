@@ -92,4 +92,4 @@ The common finding, [no transition inventory](../risk-map.md#no-transition-inven
 
 ## Gaps found
 
-- The module docstring of `runner_wrapper.py` says exit 2 is a "spec/setup error", which is broader than the contract, and that `spawn_failed` means "/bin/sh could not be spawned at all", which is narrower. [§4](../supervisor-protocol.md#4-wrapper-behavior-frozen-semantics) step 6 says 2 is the spec refusal (DL-229 item 8), and [§3](../supervisor-protocol.md#statusjson--written-by-the-wrapper-before-reaping) also puts a failure to open stdin, stdout or stderr under `spawn_failed` (DL-150). Those entries have ruled; the docstring is stale, and the code follows the contract.
+None.

@@ -59,6 +59,7 @@ stateDiagram-v2
 - One planning call plans at most one KILL per run ([DL-232](../decision-log.md)).
 - The [ghost-run](../glossary.md#ghost-run) gate decides at planning, and a run counts as dispatched from its plan ([DL-234](../decision-log.md)).
 - The outcome states are four, and `indeterminate` is not `pending` ([concurrency-model §5](../concurrency-model.md#5-effects); [DL-111](../decision-log.md)).
+- `Outbox.result_for` gives the known result or `outcome_unavailable`. Nothing in the local engine asks for it; its caller would be the relay, which is not built ([DL-97](../decision-log.md); [DL-284](../decision-log.md)). Locally an indeterminate effect refuses the seal ([concurrency-model §5](../concurrency-model.md#5-effects) and the [CM-06 row](../concurrency-model.md#9-the-proving-ground)).
 - At resume a pending SPAWN with a spool trace is applied, and one with none is re-driven ([DL-102](../decision-log.md)). A recorded KILL is re-driven, and so is a live wrapper under a terminal row ([period-model §11](../period-model.md#11-resume-replay-and-recovery) step 7).
 
 ## Failure and recovery
@@ -111,5 +112,4 @@ The [risk map](../risk-map.md) row "Effect outbox" lists [outbox outcome overwri
 
 ## Gaps found
 
-- The concurrency-model §5 bullet that says `executor_id` and the complete effect payload take part in the fingerprint has no pointer to §5's own correction further down, which says effect fingerprints are not built (DL-111 item 3). A reader of the bullet alone takes it as built.
-- Concurrency-model §5 says an exact retry of an effect gets its known result or `outcome_unavailable`. `Outbox.result_for` gives that answer, but no module under `src/dsl41/` calls it; only tests do. No control verb asks for an effect's result. Yet [DL-96](../decision-log.md) says it closes CM-06's `outcome_unavailable`, and the CM-06 row of [concurrency-model §9](../concurrency-model.md#9-the-proving-ground) says `outcome_unavailable` landed.
+None.

@@ -3046,9 +3046,9 @@ _PROFILE_FACETS: tuple[Row, ...] = (
         facet="rounding",
         klass=PROVISIONAL,
         cite="runner_startup.wire_from_profile, period-model ss2.1",
-        effect="startup converts the microsecond profile field to WHOLE SECONDS for the"
-        " watcher and clamps it to at least one, so a sub-second interval is not what"
-        " the profile asked for. No label was opened for the conversion",
+        effect="no shipped surface sets a value that is not whole seconds. A hand-pinned one"
+        " is wired rounded half to even (at least 1 s), not at the pinned interval, and"
+        " resume refuses it as profile drift. No label was opened for the conversion",
         trigger='{"fw_default_interval_us": 500000}',
         quiet='{"fw_default_interval_us": 30000000}',
     ),

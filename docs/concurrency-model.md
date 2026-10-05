@@ -349,7 +349,8 @@ prevent.
   and a new effect*, plus proof (§8) that the old executor cannot still
   apply the old one.
 - `executor_id` and the complete effect payload participate in the
-  fingerprint.
+  fingerprint. Not built: no effect carries a fingerprint; see the
+  correction "'…reject collisions' is not built" below (DL-111 item 3).
 - Machine and pool names resolve to a relay through a frozen routing
   table; `insert_machine` resolution (DL-49/52) is the input to that
   resolution and remote routing is its output.
@@ -361,7 +362,10 @@ whether the signal landed.
 
 `pending` → `applied(result)` | `indeterminate`. An exact retry returns
 the original result only when that result is *known*; otherwise it
-reconciles, or answers `outcome_unavailable`. Tombstones carry
+reconciles, or answers `outcome_unavailable`. `Outbox.result_for` gives
+that answer. Nothing in the local engine asks for it: the engine re-drives
+only pending effects. Its caller would be the relay, which is not built
+(DL-97, DL-284). Tombstones carry
 fingerprints and reject collisions. `effect_id` is the dedup identity;
 `(incarnation, token)` is a **fencing precondition**, not part of the
 dedup key.
@@ -434,10 +438,12 @@ ways (`test_a_recorded_kill_is_resolved_from_the_spool_three_ways`):
 | absent | `indeterminate` | nothing observed it (E7) |
 
 The third row is the one two states cannot express. `state_of` reads back
-`indeterminate`, and `result_for` answers the caller `outcome_unavailable`
-rather than an outcome object — a retry is told "nobody can say", which is
+`indeterminate`, and `result_for` answers `outcome_unavailable` rather than
+an outcome object. A retry would be told "nobody can say", which is
 neither the success nor the failure a two-state model would have to
-invent. The effect leaves `pending()`, so no later drain re-drives it
+invent. No local caller asks `result_for`; its caller would be the relay,
+which is not built (DL-97, DL-284). Locally, an indeterminate effect refuses the seal. The effect
+leaves `pending()`, so no later drain re-drives it
 blindly: *nothing was tried* and *something was tried and cannot be
 reported on* stay different facts.
 
@@ -1023,7 +1029,7 @@ Obligations. Tests are named `test_cmNN_*`, on the house convention of
 | CM-03 | corroborating property, generator widened | landed (DL-87) |
 | CM-04 | timers fire before the gate (`term_run_time` fixture) | landed (DL-89) |
 | CM-05 | dedup precedes admission: a retry advances no logical time | landed (DL-89) |
-| CM-06 | retry / fingerprint / eviction, incl. `outcome_unavailable` | retry + fingerprint landed (DL-90); `outcome_unavailable` landed (DL-96); every eviction precondition landed with S5d (DL-97) and is pinned by the CM-11 tests |
+| CM-06 | retry / fingerprint / eviction, incl. `outcome_unavailable` | retry + fingerprint landed (DL-90); the `outcome_unavailable` answer exists (DL-96) and has no consumer: its caller would be the relay, which is not built (DL-97, DL-284); every eviction precondition landed with S5d (DL-97) and is pinned by the CM-11 tests |
 | CM-07 | two-pass replay, incl. admitted-without-result | landed (DL-89) |
 | CM-08 | bisimulation unchanged | landed: the phase-11a gate, which every SEM trace already runs through both interpreters. No `test_cm08_*` of its own -- the obligation is that the existing suite stays green |
 | CM-09 | at-least-once delivery **and** at-most-once application; superseded effects retired; quarantine holds | application half + supersession landed (DL-96); quarantine holds landed (DL-97); local delivery landed (DL-102: the barrier re-drives a pending SPAWN and a pending KILL); both re-proved against real processes at S7c (DL-112) -- an engine that really died in the outbox window, and a quarantine set by renewals that really failed; remote delivery waits on the relay |

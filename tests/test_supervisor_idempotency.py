@@ -406,6 +406,54 @@ def test_pr36_a_replay_resolves_through_the_index_not_the_incoming_path(
     os.kill(command_pid, signal.SIGKILL)
 
 
+def test_pr36_a_lost_index_under_a_live_receipt_answers_from_the_directory(
+    sup_root: Path, sups
+) -> None:
+    """period-model ss11a's carve-out (DL-151): no index entry, but the
+    incoming path holds a receipt for THIS run_id. The directory answers.
+    Losing an index must never authorize a second process."""
+    root = sup_root
+    spec = _spec(root, "j", 1, "true")
+    first = sups().spawn_run(spec)
+    run_dir = root / "runs" / "j.1"
+    wait_for((run_dir / "status.json").exists)
+    record = run_dir / "spawn.json"
+    before = record.read_bytes()
+    _index(root).unlink()  # only the index entry; the receipt stays
+
+    fresh = sups()
+    again = fresh.spawn_run(spec)
+    assert again == {
+        "ok": True,
+        "run_id": RUN_ID,
+        "wrapper_pid": first["wrapper_pid"],
+        "spawned_at": first["spawned_at"],
+        "duplicate": True,
+    }
+    assert fresh.runs == {}  # the replay forked no wrapper
+    assert record.read_bytes() == before  # one wrapper, one record
+
+
+def test_pr36_a_lost_index_over_an_unspawned_receipt_is_indeterminate(sup_root: Path, sups) -> None:
+    """The case only the receipt read protects: a crash after the receipt,
+    then the index entry lost. The directory holds no `spawn.json` or
+    `status.json`, so without the receipt read it would pass for an orphan
+    and be reused. It answers indeterminate, and nothing forks."""
+    root = sup_root
+    spec = _spec(root, "j", 1, "true")
+    first = sups()
+    crash_at(first, "after_receipt")
+    with pytest.raises(_Boom):
+        first.spawn_run(spec)
+    _index(root).unlink()  # only the index entry; the receipt stays
+
+    fresh = sups()
+    reply = fresh.spawn_run(spec)
+    assert reply["ok"] is False and reply["error"] == "indeterminate"
+    assert fresh.runs == {}  # the replay forked no wrapper
+    assert not (root / "runs" / "j.1" / "spawn.json").exists()
+
+
 def test_pr36_the_run_id_grammar_is_enforced_at_the_wire(sup_root: Path, sups) -> None:
     """ss11a: `run_id` names a directory entry here, so it is refused BEFORE
     anything is created -- the supervisor accepted any string until DL-129."""

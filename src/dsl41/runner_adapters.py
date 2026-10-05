@@ -806,27 +806,25 @@ def append_watch_line(path: Path, record: dict[str, Any]) -> None:
 
 
 class FileWatcherAdapter:
-    """ss6 FW adapter: poll every watch_interval seconds (default 60 [?]
-    PENDING: E6) until watch_file exists with size >= watch_file_min_size
-    (unset -> 0) and the size is stable across two consecutive qualifying
-    polls -- `fw-existence=stable`, the default and dsl41's own choice
-    (DL-258). With no minimum size, `fw-existence=immediate` completes on
-    the first qualifying (existing) poll instead, watch_interval ignored
-    for that decision -- the vendor reading. A job with a minimum size
-    always needs the steady-size rule, whatever the switch says. Completes
-    with exit 0. Clock-driven (ctx.clock.sleep_until), so the same code runs
-    in both time domains; polling is an idempotent read, which is why resume
-    may re-dispatch an incomplete watch (module docstring).
+    """ss6 FW adapter: poll every watch_interval seconds (default 60 [?] PENDING: E6) until
+    watch_file exists with size >= watch_file_min_size (unset -> 0) and the size is stable
+    across two consecutive qualifying polls -- `fw-existence=stable`, the default and dsl41's
+    own choice (DL-258). With no minimum size, `fw-existence=immediate` completes only when
+    the run's FIRST poll finds the file -- the vendor reading; a file that appears later waits
+    for a steady size, as under `stable`. A job with a minimum size always needs the
+    steady-size rule, whatever the switch says. Completes with exit 0. Clock-driven
+    (ctx.clock.sleep_until), so the same code runs in both time domains; polling is an
+    idempotent read, which is why resume may re-dispatch an incomplete watch (module docstring).
 
-    Its progress is EVIDENCE, not memory (period-model ss2.2, DL-129). The
-    first durable act on dispatch is a `start` line in
-    `runs/<job>.<run_number>/watch.jsonl`, and then one line per poll,
-    fsynced, INCLUDING polls that changed nothing -- appended before
-    progress is updated or completion is emitted, so an observation that
-    moved the watch is never one an audit cannot see. A resumed watch
-    reconstructs from the log and appends no second `start`. Without a
-    run_root there is no spool and the watch is memory-only: that is the
-    virtual-domain harness, which has no run-root layout to write into."""
+    Its progress is EVIDENCE, not memory (period-model ss2.2, DL-129). The first durable
+    record on dispatch is a `start` line in `runs/<job>.<run_number>/watch.jsonl`, then one
+    line per poll, fsynced, INCLUDING polls that changed nothing -- appended before progress
+    is updated or completion is emitted, so an observation that moved the watch is never one
+    an audit cannot see. A resumed watch reconstructs from the log and appends no second
+    `start`. The run directory is made and its parent fsynced before the `start` line; a
+    crash between the two leaves no `start` line, and resume dispatches the watch again
+    under its bound run_id. Without a run_root there is no spool and the watch is
+    memory-only: that is the virtual-domain harness, which has no run-root layout."""
 
     def __init__(
         self,

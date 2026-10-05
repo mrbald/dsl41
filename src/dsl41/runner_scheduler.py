@@ -362,9 +362,10 @@ class Scheduler:
     def pop_due(self, upto: datetime) -> list[Event]:
         """Consume every tick due at or before `upto` and return its STARTJOB
         event, stamped at the tick and ordered by (tick, job). A stalled-but-
-        alive engine therefore fires its backlog late but truthfully stamped;
-        ticks missed across DOWNTIME never reach this path -- resume drops
-        and journals them instead (PENDING: E9)."""
+        alive engine therefore fires its backlog late but truthfully stamped.
+        Ticks missed across DOWNTIME come through here too: resume's sweep
+        derives them with this call, then drops and journals them rather
+        than admitting them (PENDING: E9)."""
         due: list[tuple[datetime, str]] = []
         exhausted: list[str] = []
         for job, tick in self._next.items():

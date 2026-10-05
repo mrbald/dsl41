@@ -18900,3 +18900,78 @@ relitigate an entry; append a new one.
   STAMP. main is stamped `arch-review/<timestamp>` once this merges. The
   earlier stamp on the reviewed commit 5097b59 stays; the gate reads the
   newest tag.
+- DL-284 Runner contracts and comments match the code; two entries are
+  narrowed (2026-10-05; card gaps G4, G6-G12, G14-G17)
+  THE RULE. Each change below brings a contract or a code comment to the
+  behavior already built. No behavior changes. Two tests are added.
+  DL-96 NARROWED. DL-96 said it closes CM-06's `outcome_unavailable`. The
+  answer exists: `Outbox.result_for` gives the known result or
+  `outcome_unavailable`. It has no consumer: the local engine re-drives
+  only pending effects, and an indeterminate effect refuses the seal. Its
+  caller would be the relay, which is not built (DL-97). Concurrency-model
+  §5, the CM-06 row and the effect-outbox card say so.
+  DL-45 ITEM 2 NARROWED. Item 2 said a tick pops before any same-or-later-due
+  timer or event. The loop takes a queued input stamped at the tick's
+  instant first, so the rule is: outside a seal (period-model §6 step 2),
+  a tick pops before any later-due event and any same-or-later-due timer.
+  Under sealing the tick row is off. Feeds stay non-decreasing.
+  `test_dl137_a_tick_and_an_input_stamped_alike_feed_the_input_first`
+  pins the order, and DL-145 keeps the branch count. No code changes.
+  THE FIVE-WAY CHOICE LANDED. DL-137 deferred folding the loop's three
+  chained booleans into one `_next_work` choice. DL-150 rules that
+  DL-137's deferred list has landed, and DL-145 keeps the branch count.
+  `runner.py` now cites the three entries that way.
+  CONTRACT AND COMMENT RECONCILIATIONS.
+  - Period-model §5: `sorted_waiters` gives a waiter absent from the
+    catalog the unset priority; it does not raise `KeyError` (G4).
+  - Concurrency-model §5: the fingerprint bullet points at the correction
+    "'…reject collisions' is not built", DL-111 item 3 (G6).
+  - Runner-design §6 and the FW adapter docstring: under `immediate`, only
+    the run's first poll may complete a watch without a steady size,
+    DL-258 (G10).
+  - Period-model §3.5, runner-design §6, the FW adapter docstring and the
+    `fw_watch.watch_seq` comments in seal.py and its test: the
+    `start` line is the first durable record, not the first act. The run
+    directory is made and its parent fsynced first. A crash between the
+    two leaves a directory with no `start` line, and resume dispatches the
+    watch again under its bound `run_id` (G11).
+  - Simulation register row `profile_field:fw_default_interval_us#rounding`:
+    no shipped surface sets a value that is not whole seconds; a
+    hand-pinned one is wired rounded half to even, at least one second,
+    and resume refuses it as profile drift. The row stays provisional
+    (G12).
+  - `Scheduler.pop_due`: resume's sweep derives missed ticks through it
+    and drops them (G14).
+  - Period-model §11a's table gains the receipt carve-out that DL-151
+    ruled: no index entry, and a receipt at the incoming path for this
+    `run_id`, answers from the directory, never as a first application.
+    First application is the table's last row, "nothing else". §11a, the
+    supervisor module docstring and the spawn-idempotency card use §5's
+    wording: the incoming path is read in one case only, no index entry
+    (DL-150, DL-151). The `_resolve_replay` docstring says the same (G15).
+  - Runner-design §6a and the supervisor module docstring: no scheduling
+    timers; its only time bounds are lifecycle bounds. The
+    supervisor-protocol preamble lists them all: the lease TTL, the
+    SHUTDOWN waits, the two-second output drain at teardown, the startup
+    PING probe and the optional deadman, plus the loop's one-second reap
+    tick (G16).
+  - The wrapper module docstring: `spawn_failed` also covers a failure to
+    open stdin, stdout or stderr (DL-150). Exit 2 is the spec refusal only
+    (DL-229 item 8); exit 1 is an unreadable spec or a missing required
+    key (G17).
+  THE TESTS. `test_pr36_a_lost_index_under_a_live_receipt_answers_from_the_directory`
+  spawns, removes only the index entry, and replays from a fresh
+  supervisor. The answer is the frozen duplicate envelope, and no wrapper
+  forks. With the receipt branch of `_resolve_replay` removed, the
+  directory's `spawn.json` still blocks a fork (the old-rule row answers
+  indeterminate), so this test pins the answer, not the fork.
+  `test_pr36_a_lost_index_over_an_unspawned_receipt_is_indeterminate`
+  crashes after the receipt, removes the index entry, and replays. The
+  answer is indeterminate, and no wrapper forks. With the receipt branch
+  removed, the directory passes for an orphan and a second wrapper forks,
+  so this test pins the case only the carve-out protects.
+  REVIEW. One Opus reviewer and one Fable advisor pass, the Fable pass in
+  place of Codex at the owner's instruction. Both found that the first
+  lost-index test did not prove the fork it named; a second test now pins
+  it, and every other finding is fixed and was confirmed by the reviewer
+  that raised it.

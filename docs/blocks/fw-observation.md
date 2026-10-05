@@ -56,6 +56,7 @@ stateDiagram-v2
 - The seal barrier parks every FW task at a poll boundary before T. The seal's `fw_watch` entry is a fold of the first `watch_seq` lines (§3.5).
 - Completion: `stable`, the default, needs two steady qualifying polls. `immediate` completes on the run's first poll only, and only for a job with no minimum size (DL-258).
 - The interval is the job's `watch_interval`, else the profile's `fw_default_interval_us` (§2.1). Adapters never retry and never time out (the module docstring of `runner_adapters.py`).
+- The wiring rounds the microsecond profile interval to whole seconds, at least one. No shipped surface sets a value that is not whole seconds; resume refuses a hand-pinned one as profile drift. `profile_field:fw_default_interval_us#rounding` in [simulation-coverage](../simulation-coverage.md#profile_field) keeps it provisional.
 
 ## Failure and recovery
 
@@ -92,6 +93,4 @@ The common finding, [no transition inventory](../risk-map.md#no-transition-inven
 
 ## Gaps found
 
-- [Runner-design §6](../runner-design.md#6-adapters) says `immediate` "completes on the first poll where the file exists". DL-258 has ruled that only the run's first poll counts, and the code follows it; a file that appears later waits for a steady size. DL-258 says §6 was rewritten, but the sentence keeps the draft wording, so §6 is stale.
-- [Period-model §3.5](../period-model.md#35-executions--a-discriminated-lifecycle-not-one-row) calls the `start` line the adapter's first durable act on dispatch. The adapter first creates the run directory and fsyncs its parent. Resume handles a directory with no `start` line by dispatching again. No contract or DL entry names that state; it is unresolved.
-- The profile states the default interval in microseconds. `wire_from_profile` and the engine convert it with `max(1, round(us / 1_000_000))`, so a sub-second or fractional value is not what the profile states. This is already listed as provisional: `profile_field:fw_default_interval_us#rounding` in [simulation-coverage](../simulation-coverage.md#profile_field).
+None.

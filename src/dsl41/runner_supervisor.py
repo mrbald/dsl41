@@ -23,10 +23,10 @@ jobs' parent never died (DL-41a item 8).
 
 It is deliberately DUMB (postmaster / s6-supervise philosophy): SPAWN, SIGNAL,
 LIST, SHUTDOWN, PING, and the lease verbs -- fork wrappers, reap them, forward
-exit notifications. No timers, no conditions, no policy; the oracle decides
-kills, the supervisor just relays one signal per SIGNAL call. Near-zero own-bug
-crash surface. Surviving ITS OWN death is Tier 2's job (init system) -- the
-supervisor never restarts itself.
+exit notifications. No scheduling timers, no conditions, no policy; its only time bounds are
+lifecycle bounds (supervisor-protocol preamble, DL-150). The oracle decides kills; the
+supervisor relays one signal per SIGNAL call. Near-zero own-bug crash surface. Surviving ITS
+OWN death is Tier 2's job (init system) -- the supervisor never restarts itself.
 
 Protocol (frozen in docs/supervisor-protocol.md ss5): JSON lines over a named
 SOCK_STREAM unix socket (0600 + same-uid peer-cred check on every accept).
@@ -45,8 +45,8 @@ second execution. So a DETACHED run's directory is created HERE, on receipt,
 and three files make the tombstone: the `runs/.by_run_id/<run_id>` index (the
 first durable thing that names the run), `receipt.json` (written BEFORE the
 wrapper is forked), and `reply.json` (the answer as first given). A replay
-resolves through the index, never through the incoming path, and answers from
-the directory, not from memory.
+resolves through the index and answers from the directory, not from memory; the
+incoming path is read in one case only: no index entry (DL-150, DL-151).
 
 The DEADMAN (stage S5b, DL-95; docs/concurrency-model.md ss8) is the one
 thing here that is not purely reactive, and it is deliberately the smallest
@@ -1082,10 +1082,10 @@ class Supervisor:
     ) -> dict[str, Any] | None:
         """The ss11a answer table, or None for "first application".
 
-        Resolution goes through the INDEX, never through the incoming path:
-        the index is the first durable thing that names a run_id, so it is
-        the only thing that can prove one was received. The incoming path is
-        consulted only to refuse a collision on it."""
+        Resolution goes through the INDEX first: it is the first durable thing that names a
+        run_id. With no index entry, the incoming path's receipt is read (DL-151): one for
+        another run_id is a collision; one for this run_id means the index was lost under a
+        live receipt, so the directory answers, never a first application."""
         index = _load_tombstone(self.index_path(run_id), "index")
         if index is _INVALID:
             # corruption is not absence: "no index entry" AUTHORIZES a spawn,
