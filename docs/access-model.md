@@ -1,7 +1,7 @@
 # Access model — three tiers at the perimeter
 
 Status: **frozen (DL-231; design DL-146, amended by DL-147, DL-148, DL-149,
-DL-150, DL-151, DL-152, DL-158 and DL-256).** It is the design of record for
+DL-150, DL-151, DL-152, DL-158, DL-256 and DL-272).** It is the design of record for
 `runner_access.py`, the control-plane gate and the served web TUI. Each
 change to a frozen item requires a decision-log entry, the same rule as
 `docs/control-protocol.md`. The web session's authentication half (§9) is
@@ -230,8 +230,8 @@ Per request:
    second classification axis (one gate; the dispatcher already owns
    verb validity, DL-145 defect 2); it appears in the receipt label only.
 4. Compare granted tier with required tier.
-5. Denied → perimeter receipt (§6), answer `ok: false, refused: true`
-   with prose naming the tier gap. A denial consumes no engine index and
+5. Denied → perimeter receipt (§6), answer `ok: false, refused: true,
+   code: "access_denied"` with prose naming the tier gap. A denial consumes no engine index and
    advances no engine time. Like every answer sent before routing — the
    malformed line, the version refusal, the credential refusal — the
    denial carries no read header: the header is stamped only on the
