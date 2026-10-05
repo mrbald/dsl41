@@ -579,6 +579,17 @@ def test_control_client_subscribe_raises_on_a_refused_subscribe(short_root: Path
             with pytest.raises(ControlClientError):
                 async for _record in client.subscribe():
                     pass
+            # the same refusal on the raw socket, with its stable code
+            reader, writer = await asyncio.open_unix_connection(str(server.path))
+            try:
+                writer.write(b'{"cmd": "subscribe", "v": 3}\n')
+                await writer.drain()
+                line = json.loads(await asyncio.wait_for(reader.readline(), timeout=5.0))
+            finally:
+                writer.close()
+                with contextlib.suppress(Exception):
+                    await writer.wait_closed()
+            assert line == {"ok": False, "code": "no_journal", "error": "this run has no journal"}
         finally:
             await client.close()
             loop_task.cancel()

@@ -178,7 +178,7 @@ async def _seal(engine, request: SealRequest):
     return sealed.value.boundary
 
 
-async def _refused(engine, request: SealRequest) -> str:
+async def _refusal(engine, request: SealRequest) -> EngineError:
     """Drive the loop over a boundary that must NOT commit, and hand back
     the refusal. The loop keeps running afterwards, which is the property
     `abort_boundary` exists for."""
@@ -187,7 +187,12 @@ async def _refused(engine, request: SealRequest) -> str:
     assert future.done()
     with pytest.raises(EngineError) as refused:
         future.result()
-    return str(refused.value)
+    return refused.value
+
+
+async def _refused(engine, request: SealRequest) -> str:
+    """`_refusal`'s prose, for the cases that pin only the prose."""
+    return str(await _refusal(engine, request))
 
 
 def _close(engine) -> None:
@@ -669,8 +674,9 @@ def test_pr30_a_recent_attempt_refuses_unforced_and_records_the_gate_when_forced
     for decision in ("applied", "rejected"):
         records = [_attempt(1, T0, expect={"job:a": 1}), _decision(1, decision)]
         at = T0 + timedelta(seconds=2)
-        with pytest.raises(EngineError, match="retry_horizon_us"):
+        with pytest.raises(EngineError, match="retry_horizon_us") as refused:
             retry_horizon_gate(records, horizon_us=60_000_000, at=at, force_seal=False)
+        assert refused.value.code == "seal_retry_horizon"
         gate = retry_horizon_gate(records, horizon_us=60_000_000, at=at, force_seal=True)
         assert gate is not None
         assert gate.gate == "retry_horizon" and gate.observed_age_us == 2_000_000
@@ -740,8 +746,9 @@ def test_pr28e_admission_closes_at_the_cut(tmp_path: Path) -> None:
             Event(at=T0, kind="STARTJOB", payload={"job": "a"}),
             Envelope(request_id="r1", expect={"job:a": 0}, epoch=engine.epoch),
         )
-        with pytest.raises(AdmissionRefused, match="this period is sealing"):
+        with pytest.raises(AdmissionRefused, match="this period is sealing") as refused:
             await future
+        assert refused.value.code == "period_sealing"
         assert not engine._queue  # nothing admitted: no index, no record
         # the engine's OWN door stays open: the drain has to finish
         engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "a"}), source="scheduler")
@@ -760,10 +767,11 @@ def test_pr28_readiness_refuses_while_c1_is_open_and_untouched(tmp_path: Path) -
 
     # the request's own digest must agree with its candidate
     other = _stage(run_root, C1_JIL)
-    message = asyncio.run(
-        _refused(engine, _request(engine, staged, stage_digest=other.stage_digest))
+    refusal = asyncio.run(
+        _refusal(engine, _request(engine, staged, stage_digest=other.stage_digest))
     )
-    assert "is not the one the request names" in message
+    assert "is not the one the request names" in str(refusal)
+    assert refusal.code == "stage_digest_mismatch"
     # the state-machine version is not a client's to choose: staged for
     # real, so the refusal is the SM gate's and not the staging gate's
     catalog, sources = _catalog(C2_JIL, name="v2.jil")
@@ -774,8 +782,10 @@ def test_pr28_readiness_refuses_while_c1_is_open_and_untouched(tmp_path: Path) -
         state_machine_version=STATE_MACHINE_VERSION + 1,
     )
     bumped = stage_next_period(run_root, staged_manifest=bumped_manifest)
-    message = asyncio.run(_refused(engine, _request(engine, bumped)))
-    assert "one executable implements one version" in message
+    refusal = asyncio.run(_refusal(engine, _request(engine, bumped)))
+    assert "one executable implements one version" in str(refusal)
+    # one of the open family of boundary checks: one code for all of them
+    assert refusal.code == "seal_refused"
     # and the engine is still open for business afterwards (PR-28b)
     engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "a"}))
     assert asyncio.run(engine.run_until_quiescent(T0)) != []
@@ -2358,6 +2368,7 @@ def test_pr30e_a_committed_seals_exact_retry_is_answered_from_the_new_period(
     # PR-30c: one `request_id`, a different envelope -> a collision, refused
     collision = asyncio.run(server._seal({**wire, "force_seal": True}))
     assert collision["refused"] is True and "under a retry" in collision["error"]
+    assert collision["code"] == "seal_retry_mismatch"
     _close(opened)
 
 
@@ -2373,6 +2384,7 @@ def test_a_seal_request_under_a_foreign_baseline_is_refused(tmp_path: Path) -> N
     staged = _stage(run_root, C2_JIL)
     answer = asyncio.run(server._seal(_seal_request_wire(engine, staged, baseline_id="other")))
     assert answer["refused"] is True and "baseline_id" in answer["error"]
+    assert answer["code"] == "baseline_mismatch"
     _close(engine)
 
 
@@ -2449,8 +2461,9 @@ def test_an_engine_with_no_lineage_has_no_boundary_to_close(tmp_path: Path) -> N
     async def scenario() -> None:
         future = engine.submit_seal(_request(engine, staged))
         await engine.run_until_quiescent(T0)
-        with pytest.raises(AdmissionRefused, match="leads no lineage"):
+        with pytest.raises(AdmissionRefused, match="leads no lineage") as refused:
             future.result()
+        assert refused.value.code == "no_lineage"
 
     asyncio.run(scenario())
 
@@ -2461,8 +2474,8 @@ def test_a_seal_composed_against_a_superseded_leader_is_refused(tmp_path: Path) 
     run_root = tmp_path / "run"
     engine = _genesis(run_root)
     staged = _stage(run_root, C2_JIL)
-    message = asyncio.run(_refused(engine, _request(engine, staged, epoch=engine.epoch + 5)))
-    assert "is not this leader's" in message
+    refusal = asyncio.run(_refusal(engine, _request(engine, staged, epoch=engine.epoch + 5)))
+    assert "is not this leader's" in str(refusal) and refusal.code == "stale_epoch"
     _close(engine)
 
 
@@ -2473,8 +2486,9 @@ def test_a_digest_nothing_was_staged_under_is_refused(tmp_path: Path) -> None:
     import shutil
 
     shutil.rmtree(staging_dir(run_root, staged.stage_digest))
-    message = asyncio.run(_refused(engine, _request(engine, staged)))
-    assert "nothing is staged at this digest" in message
+    refusal = asyncio.run(_refusal(engine, _request(engine, staged)))
+    assert "nothing is staged at this digest" in str(refusal)
+    assert refusal.code == "nothing_staged"
     _close(engine)
 
 
@@ -2905,7 +2919,7 @@ def test_pr30_the_gate_reads_a_real_wal_not_a_synthetic_one(tmp_path: Path) -> N
     engine = _genesis(run_root)
     staged = _stage(run_root, C2_JIL)
 
-    async def scenario() -> str:
+    async def scenario() -> EngineError:
         decided = engine.submit(
             Event(at=T0, kind="ON_HOLD", payload={"job": "b"}),
             Envelope(request_id="r-ext", expect={"job:b": 1}, epoch=engine.epoch),
@@ -2916,11 +2930,13 @@ def test_pr30_the_gate_reads_a_real_wal_not_a_synthetic_one(tmp_path: Path) -> N
         # much as a state change, so a CAS loser holds the gate exactly as
         # an applied command would (ss3.1)
         assert (await decided).decision == "rejected"
-        return await _refused(engine, _request(engine, staged))
+        return await _refusal(engine, _request(engine, staged))
 
-    message = asyncio.run(scenario())
+    refusal = asyncio.run(scenario())
+    message = str(refusal)
     assert "retry_horizon_us" in message  # the gate is engaged, not empty
     assert "--force-seal" in message
+    assert refusal.code == "seal_retry_horizon"
     # forced, it commits and RECORDS the override -- so the log alone shows
     # a forced boundary (ss3.1's truth table)
     boundary = asyncio.run(_seal(engine, _request(engine, staged, force_seal=True)))
@@ -3771,22 +3787,26 @@ def test_pr27_the_seal_proves_the_supervisor_before_it_commits(tmp_path: Path) -
         }
         return stub_row(**{**fields, **overrides})
 
-    cases: list[tuple[_StubSupervisor, str]] = [
-        (_StubSupervisor(unreachable=True), "quiescence is unprovable"),
+    unproven, unaccounted = "seal_supervisor_unproven", "seal_run_unaccounted"
+    cases: list[tuple[_StubSupervisor, str, str]] = [
+        (_StubSupervisor(unreachable=True), "quiescence is unprovable", unproven),
         (
             _StubSupervisor(listing=stub_refusal("internal: boom")),
             "refused LIST (internal: boom)",
+            unproven,
         ),
         (
             _StubSupervisor(listing=stub_listing(incarnation="inc-2", runs=[row()])),
             "restarted supervisor's history is not proof",
+            unproven,
         ),
-        (_StubSupervisor(), "not in the leased incarnation's LIST"),
+        (_StubSupervisor(), "not in the leased incarnation's LIST", unaccounted),
         (
             _StubSupervisor(
                 listing=stub_listing(incarnation="inc-1", runs=[row(run_id=str(uuid.uuid4()))])
             ),
             "identity split at the seal",
+            unaccounted,
         ),
         (
             _StubSupervisor(
@@ -3796,11 +3816,13 @@ def test_pr27_the_seal_proves_the_supervisor_before_it_commits(tmp_path: Path) -
                 )
             ),
             "evidence quiescence cannot account for",
+            unaccounted,
         ),
     ]
-    for stub, fragment in cases:
+    for stub, fragment, code in cases:
         engine.supervisor = stub  # type: ignore[assignment]
-        assert fragment in asyncio.run(_refused(engine, _request(engine, staged)))
+        refusal = asyncio.run(_refusal(engine, _request(engine, staged)))
+        assert fragment in str(refusal) and refusal.code == code
     engine.supervisor = _StubSupervisor(  # type: ignore[assignment]
         listing=stub_listing(incarnation="inc-1", runs=[row()])
     )
@@ -3967,9 +3989,10 @@ def test_a_tethered_estate_with_a_live_command_refuses_the_seal(tmp_path: Path) 
     engine = _genesis(run_root)  # default profile: tethered, the CLI default
     engine.QUIESCE_WAIT_S = 0.05
     _bind_a(engine, run_root)
-    message = asyncio.run(_refused(engine, _request(engine, _stage(run_root, C2_JIL))))
-    assert "tethered estate with live command(s) a.1" in message
-    assert "full drain" in message
+    refusal = asyncio.run(_refusal(engine, _request(engine, _stage(run_root, C2_JIL))))
+    assert "tethered estate with live command(s) a.1" in str(refusal)
+    assert "full drain" in str(refusal)
+    assert refusal.code == "seal_not_quiescent"
     _close(engine)
 
 
@@ -3981,10 +4004,11 @@ def test_a_detached_estate_without_a_client_cannot_prove_the_seal(tmp_path: Path
     engine = _genesis(run_root, profile=DETACHED)
     _bind_a(engine, run_root)
     assert engine.supervisor is None
-    message = asyncio.run(
-        _refused(engine, _request(engine, _stage(run_root, C2_JIL, profile=DETACHED)))
+    refusal = asyncio.run(
+        _refusal(engine, _request(engine, _stage(run_root, C2_JIL, profile=DETACHED)))
     )
-    assert "holds no supervisor client" in message
+    assert "holds no supervisor client" in str(refusal)
+    assert refusal.code == "seal_supervisor_unproven"
     _close(engine)
 
 
@@ -4063,8 +4087,9 @@ def test_inputs_that_never_stop_arriving_during_the_proof_time_out(tmp_path: Pat
 
     stub = _NeverSettles()
     engine.supervisor = stub  # type: ignore[assignment]
-    message = asyncio.run(_refused(engine, _request(engine, _stage(run_root, C2_JIL))))
-    assert "inputs keep arriving during the ss8 supervisor proof" in message
+    refusal = asyncio.run(_refusal(engine, _request(engine, _stage(run_root, C2_JIL))))
+    assert "inputs keep arriving during the ss8 supervisor proof" in str(refusal)
+    assert refusal.code == "seal_not_settling"
     assert stub.calls > 1  # more than one pass really happened before the timeout
     _close(engine)
 
@@ -4246,8 +4271,9 @@ def test_an_input_stamped_after_t_refuses_the_boundary(tmp_path: Path) -> None:
             return await super().list_runs()
 
     engine.supervisor = _LateInjecting()  # type: ignore[assignment]
-    message = asyncio.run(_refused(engine, _request(engine, _stage(run_root, C2_JIL))))
-    assert "stamped after the cutoff" in message
+    refusal = asyncio.run(_refusal(engine, _request(engine, _stage(run_root, C2_JIL))))
+    assert "stamped after the cutoff" in str(refusal)
+    assert refusal.code == "seal_input_after_cutoff"
     # C1 is open and correct: the late input applies as ordinary C1 work now
     asyncio.run(engine.run_until_quiescent(T0 + timedelta(hours=1)))
     assert engine.oracle.store.global_value("LATE") == "no"
@@ -4592,6 +4618,7 @@ def test_a_foreign_file_under_wal_refuses_the_backfill_on_the_stream(tmp_path: P
         streamed = _subscribed(opened, run_root, since=0)
         assert streamed[0] == {"ok": True, "subscribed": True, "since": 0}
         assert streamed[1]["ok"] is False and "not a segment file" in streamed[1]["error"]
+        assert streamed[1]["code"] == "backfill_refused"
         assert len(streamed) == 2  # refused, not refused-and-then-streamed
         # the counterpart: remove it and the same subscription works
         (run_root / "wal" / "notes.txt").unlink()

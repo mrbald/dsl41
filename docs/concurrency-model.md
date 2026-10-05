@@ -2,8 +2,8 @@
 
 Status: frozen (DL-84; amended by DL-86, DL-90, DL-94, DL-95, DL-96,
 DL-97, DL-100, DL-101, DL-102, DL-103, DL-109, DL-111, DL-112, DL-118,
-DL-120, DL-130, DL-138, DL-147, DL-150, DL-151 and DL-210, each cited where
-it applies). Normative for every input that reaches
+DL-120, DL-130, DL-138, DL-147, DL-150, DL-151, DL-210 and DL-272, each
+cited where it applies). Normative for every input that reaches
 the oracle and every effect that leaves the engine, in the same way
 `docs/control-protocol.md` is normative for the control plane and
 `docs/supervisor-protocol.md` for the lifecycle tier. Each change to a
@@ -263,7 +263,7 @@ the keys in reading order rather than the sorted order the writer emits:
  "source":"control","fingerprint":"…","expect":{"job:nightly":1},"epoch":1,
  "request_id":"k1"}
 {"rec":"decision","index":2,"request_id":"k1","decision":"applied","reason":null,
- "revisions":{"job:nightly":2},"legacy_batch":false,
+ "code":null,"revisions":{"job:nightly":2},"legacy_batch":false,
  "effects":[{"effect_id":"e2:KILL:nightly.1","kind":"KILL","job":"nightly",
  "run_number":1,"run_id":"…","executor_id":"local","generation":0,
  "index":2,"at":"…T02:00:30"}]}
@@ -298,8 +298,8 @@ Now change one thing at a time:
   it different from a rejection
   (`test_a_refusal_leaves_nothing_in_the_log_and_a_rejection_leaves_a_decision`).
 - **`expect` naming revision 1 after something moved it to 2.** Rejected —
-  a decision, at an index, with `reason` set. It happened; it is in the
-  log; replay honours it rather than re-deciding
+  a decision, at an index, with `reason` and `code` set (DL-272). It
+  happened; it is in the log; replay honours it rather than re-deciding
   (`test_cm06_a_command_composed_against_a_stale_revision_is_rejected`).
 - **A `term_run_time` deadline due one second earlier.** It fires as its
   own verbless input, takes the index, moves the revision — and the

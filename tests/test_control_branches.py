@@ -173,7 +173,11 @@ def test_a_query_that_raises_answers_internal_error_and_the_stream_stays_in_sync
 
                 fault.setattr(engine.oracle, "pending_timers", boom)
                 broken = await _ask(reader, writer, {"cmd": "status"})
-            assert broken == {"ok": False, "error": "internal error: RuntimeError('boom')"}
+            assert broken == {
+                "ok": False,
+                "code": "internal_error",
+                "error": "internal error: RuntimeError('boom')",
+            }
             recovered = await _ask(reader, writer, {"cmd": "status"})
             assert recovered["ok"] is True
         finally:
@@ -242,6 +246,7 @@ def test_a_seal_nothing_drains_is_unknown_and_a_second_one_is_refused(
             )
             assert first == {
                 "ok": False,
+                "code": "seal_timeout",
                 "error": "no boundary outcome within 0.2s: the seal may still commit --"
                 " re-read before retrying, and retry only under request_id r-first",
             }
@@ -251,6 +256,7 @@ def test_a_seal_nothing_drains_is_unknown_and_a_second_one_is_refused(
             )
             assert second == {
                 "ok": False,
+                "code": "seal_in_flight",
                 "refused": True,
                 "error": "a boundary is already in flight (request_id r-first): one seal at a time",
             }
@@ -272,6 +278,7 @@ def test_a_seal_reads_claimed_actor_as_a_string_or_not_at_all(short_root: Path) 
             )
             assert refused == {
                 "ok": False,
+                "code": "invalid_argument",
                 "refused": True,
                 "error": "malformed seal request: claimed_actor must be a string, got 7",
             }
@@ -304,6 +311,7 @@ def test_a_payload_that_is_not_an_object_is_refused_for_job_and_host_verbs(
             )
             assert job == {
                 "ok": False,
+                "code": "invalid_argument",
                 "refused": True,
                 "error": "payload must be an object, got []",
             }
@@ -315,6 +323,7 @@ def test_a_payload_that_is_not_an_object_is_refused_for_job_and_host_verbs(
             )
             assert host == {
                 "ok": False,
+                "code": "invalid_argument",
                 "refused": True,
                 "error": "payload must be an object, got 'local'",
             }
@@ -345,6 +354,7 @@ def test_a_host_id_with_an_unpaired_surrogate_is_refused_at_the_door(
             )
             assert lone == {
                 "ok": False,
+                "code": "invalid_argument",
                 "refused": True,
                 "error": "host id carries an unpaired surrogate",
             }
@@ -370,7 +380,11 @@ def test_hosts_ids_are_a_list_of_strings_or_absent(short_root: Path) -> None:
                 refused = _body(
                     await _control_call(server.path, {"cmd": "hosts", "ids": bad}), engine
                 )
-                assert refused == {"ok": False, "error": "ids must be a list of host id strings"}
+                assert refused == {
+                    "ok": False,
+                    "code": "invalid_argument",
+                    "error": "ids must be a list of host id strings",
+                }
             empty = _body(await _control_call(server.path, {"cmd": "hosts", "ids": []}), engine)
             assert empty["ok"] is True and empty["hosts"] == {}
         finally:
@@ -402,6 +416,7 @@ def test_set_global_refuses_a_missing_name_and_a_non_string_value(short_root: Pa
                 )
                 assert refused == {
                     "ok": False,
+                    "code": "invalid_argument",
                     "refused": True,
                     "error": "SET_GLOBAL requires a global name",
                 }
@@ -419,6 +434,7 @@ def test_set_global_refuses_a_missing_name_and_a_non_string_value(short_root: Pa
                 )
                 assert refused == {
                     "ok": False,
+                    "code": "invalid_argument",
                     "refused": True,
                     "error": "SET_GLOBAL requires a string value",
                 }
@@ -443,9 +459,17 @@ def test_explain_refuses_a_job_the_catalog_does_not_hold(short_root: Path) -> No
         engine, server, loop_task = await _serve(short_root / "run", _ONE_JOB)
         try:
             unknown = await _control_call(server.path, {"cmd": "explain", "job": "nope"})
-            assert _body(unknown, engine) == {"ok": False, "error": "unknown job 'nope'"}
+            assert _body(unknown, engine) == {
+                "ok": False,
+                "code": "unknown_job",
+                "error": "unknown job 'nope'",
+            }
             nameless = await _control_call(server.path, {"cmd": "explain"})
-            assert _body(nameless, engine) == {"ok": False, "error": "unknown job None"}
+            assert _body(nameless, engine) == {
+                "ok": False,
+                "code": "unknown_job",
+                "error": "unknown job None",
+            }
         finally:
             await _teardown(engine, server, loop_task)
 
@@ -617,7 +641,12 @@ def test_pr03_a_live_record_is_not_published_once_the_lineage_is_displaced(
             engine.journal.preflight([])
             (default_anchor_dir(run_root) / "anchor.lock").unlink()  # displaced, same turn
             refusal = json.loads(await asyncio.wait_for(reader.readline(), timeout=3.0))
-            assert refusal == {"ok": False, "refused": True, "error": _DISPLACED}
+            assert refusal == {
+                "ok": False,
+                "code": "lineage_lost",
+                "refused": True,
+                "error": _DISPLACED,
+            }
             assert await asyncio.wait_for(reader.readline(), timeout=3.0) == b""
         finally:
             await _hang_up(writer)
@@ -683,7 +712,7 @@ def test_pr03_the_gap_marker_is_a_response_and_a_displaced_leader_sends_the_refu
 
     answered = asyncio.run(scenario())
     _close(rolled)
-    assert answered == [{"ok": False, "refused": True, "error": _DISPLACED}]
+    assert answered == [{"ok": False, "code": "lineage_lost", "refused": True, "error": _DISPLACED}]
 
 
 # ------------------------------------------------ ss6 what a client claims

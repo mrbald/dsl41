@@ -53,7 +53,7 @@ from dsl41.runner_admission import (
     fingerprint,
 )
 from dsl41.runner_clock import EngineError, VirtualClock
-from dsl41.runner_journal import Journal, read_journal, replay_inputs
+from dsl41.runner_journal import Journal, read_decisions, read_journal, replay_inputs
 
 T0 = datetime(2026, 7, 1, 8, 0)
 
@@ -277,6 +277,9 @@ def test_a_rejection_carries_its_reason_and_an_application_carries_none() -> Non
         ApplyResult(index=1, request_id="r", decision="rejected")
     with pytest.raises(ValidationError, match="carries its reason"):
         ApplyResult(index=1, request_id="r", decision="applied", reason="gated")
+    # the code rides with the reason: an application carries none either
+    with pytest.raises(ValidationError, match="carries no code"):
+        ApplyResult(index=1, request_id="r", decision="applied", code="precondition_failed")
 
 
 # ------------------------------------------------------------------- the frontiers
@@ -313,8 +316,9 @@ def test_admission_time_never_goes_backwards() -> None:
     admitted but not yet applied. Refused at admission, so nothing is
     appended for an input that could never be applied."""
     frontiers = Frontiers().admit(T0 + timedelta(minutes=5))
-    with pytest.raises(EngineError, match="backwards"):
+    with pytest.raises(EngineError, match="backwards") as refused:
         frontiers.admit(T0)
+    assert refused.value.code == "clock_regressed"
 
 
 # --------------------------------------------------------------- the decision index
@@ -395,7 +399,11 @@ def test_cm07_a_durably_rejected_attempt_is_not_applied_on_replay(tmp_path: Path
         [
             *start_applied,
             ApplyResult(
-                index=2, request_id="r2", decision="rejected", reason="refused by an operator"
+                index=2,
+                request_id="r2",
+                decision="rejected",
+                reason="refused by an operator",
+                code="stale_completion",
             ),
         ],
     )
@@ -438,7 +446,55 @@ def test_cm07_an_attempt_admitted_without_a_result_is_applied_through_the_gate(
     assert oracle.store.job["j"].status == "SUCCESS"  # the current run's exit landed
     assert [r.decision for r in replay.recovered] == ["applied", "applied", "rejected"]
     assert replay.recovered[2].reason == "run_number mismatch"
+    # the re-decision names its code as the live gate would (DL-156)
+    assert [r.code for r in replay.recovered] == [None, None, "stale_completion"]
     assert replay.frontiers.applied_index == 3
+
+
+def test_a_rejection_is_written_with_its_code_and_one_without_is_refused(
+    tmp_path: Path,
+) -> None:
+    """period-model ss2.3: a native rejection names its registry code at
+    birth, and the writer refuses one that does not. The stale-completion
+    gate's verdict is stored, so it carries `stale_completion` though no
+    socket ever answers it; the reader takes the code back as it was
+    written."""
+    attempts = [
+        _attempt(1, 0, _ev("STARTJOB", 0, job="j")),
+        _attempt(2, 1, _ev("STATUS", 1, job="j", run_number=0, exit_code=0), source="adapter"),
+    ]
+    results = _as_the_engine_decided(tmp_path, _SOLO_JIL, attempts)
+    assert (results[1].decision, results[1].code) == ("rejected", "stale_completion")
+    records = _write_log(tmp_path / "run" / "journal.jsonl", _SOLO_JIL, attempts, results)
+    stored = [r for r in records if r["rec"] == "decision"]
+    assert [(r["decision"], r["code"]) for r in stored] == [
+        ("applied", None),
+        ("rejected", "stale_completion"),
+    ]
+    reread = read_decisions(records).for_index(2)
+    assert reread is not None and reread.code == "stale_completion"
+
+    journal = Journal.create(
+        tmp_path / "refused" / "journal.jsonl",
+        catalog=lower_source(_SOLO_JIL),
+        clock_domain="virtual",
+        started_at=T0,
+    )
+    try:
+        journal.admit(attempts[0])
+        # a registry code that no gate stores is refused too: the stored
+        # set is append-only, the rest of the registry is not
+        for code in (None, "not_a_registry_code", "decision_timeout"):
+            rejection = ApplyResult(
+                index=1, request_id="r1", decision="rejected", reason="gated", code=code
+            )
+            with pytest.raises(EngineError, match="names its stored code"):
+                journal.decision(rejection, [])
+    finally:
+        journal.close()
+    assert not [
+        r for r in read_journal(tmp_path / "refused" / "journal.jsonl") if r["rec"] == "decision"
+    ]
 
 
 def test_cm07_a_durable_application_is_not_re_decided(tmp_path: Path) -> None:

@@ -540,14 +540,14 @@ def _evict_bound(engine) -> float:
     row = store.host(LOCAL_EXECUTOR_ID)
     gated = HostCommand(verb="evict", host_id=LOCAL_EXECUTOR_ID)
     reason = host_rejection_reason(store, gated, at, grace_s=grace_s)
-    assert reason is not None
+    assert reason is not None and reason.code == "eviction_bound_pending"
     assert row.last_contact is not None and row.deadman_s is not None
     bound = row.deadman_s + kill_allowance(grace_s)
     bound += skew_allowance(bound)  # ss8: skew covers the WHOLE wait, not the deadman
     waited = (at - row.last_contact).total_seconds()
-    assert f"was in contact {waited:.1f}s ago" in reason
-    assert f"the ss8 bound is {bound:.1f}s" in reason
-    assert f"wait {bound - waited:.1f}s more" in reason
+    assert f"was in contact {waited:.1f}s ago" in reason.reason
+    assert f"the ss8 bound is {bound:.1f}s" in reason.reason
+    assert f"wait {bound - waited:.1f}s more" in reason.reason
     # CM-11's other half, against the same produced preconditions: the wait is
     # skippable, and only by saying so
     forced = HostCommand(verb="evict", host_id=LOCAL_EXECUTOR_ID, force=True)

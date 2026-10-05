@@ -98,6 +98,7 @@ from dsl41.canon import is_scalar_string, is_wire_int
 from dsl41.period import CMD_GRACE_S
 from dsl41.oracle_state import LIVE, TERMINAL, Event, EventKind, RuntimeState
 from dsl41.runner_clock import EngineError
+from dsl41.runner_codes import Code, Rejection
 from dsl41.runner_hosts import HostCommand, apply_host_command, host_rejection_reason
 
 #: The wire version of the ss6 envelope. There is no earlier version to fall
@@ -188,7 +189,13 @@ class EnvelopeError(EngineError):
     """A request refused at the door (concurrency-model ss4 step 1). Its
     message is what the caller is told, so it names the field and what a
     good one looks like -- a refusal an operator cannot act on is a refusal
-    they will route around."""
+    they will route around. Its `code` is required: the raise site names
+    the reason, and the socket answers it (control-protocol ss2)."""
+
+    code: Code
+
+    def __init__(self, message: str, *, code: Code) -> None:
+        super().__init__(message, code=code)
 
 
 class Envelope(BaseModel):
@@ -223,11 +230,11 @@ def addressed_key(kind: str, payload: Mapping[str, Any]) -> str:
     if kind == "SET_GLOBAL":
         name = payload.get("name")
         if not isinstance(name, str) or not name:
-            raise EnvelopeError("SET_GLOBAL addresses a global by name")
+            raise EnvelopeError("SET_GLOBAL addresses a global by name", code="invalid_argument")
         return RuntimeState.global_key(name)
     job = payload.get("job")
     if not isinstance(job, str) or not job:
-        raise EnvelopeError(f"{kind} addresses a job by name")
+        raise EnvelopeError(f"{kind} addresses a job by name", code="invalid_argument")
     return RuntimeState.job_key(job)
 
 
@@ -248,19 +255,22 @@ def parse_envelope(
     if version != PROTOCOL_VERSION:
         raise EnvelopeError(
             f"protocol version {version!r}: this engine speaks v{PROTOCOL_VERSION}"
-            f' -- name it as {{"v": {PROTOCOL_VERSION}}}'
+            f' -- name it as {{"v": {PROTOCOL_VERSION}}}',
+            code="unsupported_version",
         )
     named_baseline = request.get("baseline_id")
     if named_baseline != baseline_id:
         raise EnvelopeError(
             f"baseline_id {named_baseline!r} is not this run's {baseline_id!r}:"
-            " a revision read from another baseline names nothing here"
+            " a revision read from another baseline names nothing here",
+            code="baseline_mismatch",
         )
     request_id = request.get("request_id")
     if not isinstance(request_id, str) or not request_id:
         raise EnvelopeError(
             "request_id is required: without one a timed-out command cannot be"
-            " retried safely, because nothing could recognise the retry"
+            " retried safely, because nothing could recognise the retry",
+            code="invalid_argument",
         )
     epoch = request.get("epoch")
     if not is_wire_int(epoch):
@@ -270,17 +280,23 @@ def parse_envelope(
         # wire break that shipping it early was supposed to avoid. Every read
         # publishes the current epoch beside the revision, so a caller that
         # can compose an `expect` already has it.
-        raise EnvelopeError(f"epoch is required and must be an integer, got {epoch!r}")
+        raise EnvelopeError(
+            f"epoch is required and must be an integer, got {epoch!r}", code="invalid_argument"
+        )
     actor = request.get("claimed_actor")
     if actor is not None and not isinstance(actor, str):
-        raise EnvelopeError(f"claimed_actor must be a string, got {actor!r}")
+        raise EnvelopeError(
+            f"claimed_actor must be a string, got {actor!r}", code="invalid_argument"
+        )
     # PR-10a: every string the envelope carries into the WAL is a Unicode
     # scalar string, or the estate could never be sealed while the record
     # stood. The payload's strings are the verb's business; these are the
     # envelope's own.
     for name, value in (("request_id", request_id), ("claimed_actor", actor)):
         if isinstance(value, str) and not is_scalar_string(value):
-            raise EnvelopeError(f"{name} carries an unpaired surrogate (PR-10a)")
+            raise EnvelopeError(
+                f"{name} carries an unpaired surrogate (PR-10a)", code="invalid_argument"
+            )
     return Envelope(
         request_id=request_id,
         expect=_parse_expect(request, addressed=addressed),
@@ -302,7 +318,8 @@ def _parse_expect(request: Mapping[str, Any], *, addressed: str | None) -> dict[
         if "expect" in request:
             raise EnvelopeError(
                 "expect is not allowed on a command that addresses no row:"
-                " a boundary is not a row mutation (period-model ss2.2)"
+                " a boundary is not a row mutation (period-model ss2.2)",
+                code="invalid_argument",
             )
         return {}
     expect = request.get("expect")
@@ -310,18 +327,26 @@ def _parse_expect(request: Mapping[str, Any], *, addressed: str | None) -> dict[
         raise EnvelopeError(
             f'expect is required: name the revision you read, as {{"{addressed}": N}}'
             f" (read it from `status`/`global`/`hosts`; 0 means the entity is still"
-            " absent)"
+            " absent)",
+            code="expect_required",
         )
     if not isinstance(expect, dict):
-        raise EnvelopeError(f'expect must be an object like {{"{addressed}": N}}, got {expect!r}')
+        raise EnvelopeError(
+            f'expect must be an object like {{"{addressed}": N}}, got {expect!r}',
+            code="invalid_argument",
+        )
     if set(expect) != {addressed}:
         raise EnvelopeError(
             f"expect names {sorted(expect)} but this command addresses {addressed!r}:"
-            " a precondition names the addressed entity and nothing else"
+            " a precondition names the addressed entity and nothing else",
+            code="invalid_argument",
         )
     revision = expect[addressed]
     if not is_wire_int(revision) or revision < 0:
-        raise EnvelopeError(f"expect[{addressed!r}] must be a revision (a non-negative integer)")
+        raise EnvelopeError(
+            f"expect[{addressed!r}] must be a revision (a non-negative integer)",
+            code="invalid_argument",
+        )
     return {addressed: revision}
 
 
@@ -390,7 +415,13 @@ class ApplyResult(BaseModel):
     """What one admitted input decided (concurrency-model ss4 step 7), with
     the revisions it moved -- the ss3 changed set, which is what a client
     that named an `expect` needs back and what a later precondition will be
-    checked against."""
+    checked against.
+
+    `code` is the stable code of a rejection's reason (period-model ss2.3).
+    The model holds only that an application carries none. That a native
+    rejection carries one is the WRITER's rule (`Journal.decision`), so a
+    record written before codes existed still reads, with `code` None. A
+    stored code is opaque here: `str`, never checked against the registry."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -398,12 +429,15 @@ class ApplyResult(BaseModel):
     request_id: str
     decision: Literal["applied", "rejected"]
     reason: str | None = None
+    code: str | None = None
     revisions: dict[str, int] = {}
 
     @model_validator(mode="after")
     def _reason_iff_rejected(self) -> ApplyResult:
         if (self.decision == "rejected") != (self.reason is not None):
             raise ValueError("a rejection carries its reason and an application carries none")
+        if self.decision == "applied" and self.code is not None:
+            raise ValueError("an application carries no code")
         return self
 
 
@@ -439,7 +473,9 @@ class Frontiers(BaseModel):
     def admit(self, at: datetime) -> Frontiers:
         """Steps 3-4: take the next index at a non-decreasing stamp."""
         if self.at is not None and at < self.at:
-            raise EngineError(f"admission time went backwards: {at} < {self.at}")
+            raise EngineError(
+                f"admission time went backwards: {at} < {self.at}", code="clock_regressed"
+            )
         return Frontiers(
             committed_index=self.committed_index + 1,
             applied_index=self.applied_index,
@@ -464,7 +500,13 @@ class Frontiers(BaseModel):
 class AdmissionRefused(EngineError):
     """Refused at ss4 steps 1-2: nothing appended, no index consumed, no
     clock moved. The caller may compose a new command; there is nothing to
-    retry, because there is nothing in the log to retry against."""
+    retry, because there is nothing in the log to retry against. Its `code`
+    is required, as `EnvelopeError`'s is."""
+
+    code: Code
+
+    def __init__(self, message: str, *, code: Code) -> None:
+        super().__init__(message, code=code)
 
 
 class RequestCollision(AdmissionRefused):
@@ -477,7 +519,7 @@ class RequestCollision(AdmissionRefused):
     command, without promoting that decision into the retry's own outcome."""
 
     def __init__(self, message: str, *, original: ApplyResult | None = None) -> None:
-        super().__init__(message)
+        super().__init__(message, code="request_id_reused")
         self.original = original
 
 
@@ -525,7 +567,7 @@ class DecisionIndex:
         return result
 
 
-def precondition_reason(oracle: Oracle, expect: Mapping[str, int]) -> str | None:
+def precondition_reason(oracle: Oracle, expect: Mapping[str, int]) -> Rejection | None:
     """The ss0 check: did the entity move since the caller read it?
 
     Read after the batch's time half has applied (ss4 orders step 5 before
@@ -538,14 +580,15 @@ def precondition_reason(oracle: Oracle, expect: Mapping[str, int]) -> str | None
     for key, want in expect.items():
         actual = oracle.store.revision(key)
         if actual != want:
-            return (
+            return Rejection(
+                "precondition_failed",
                 f"precondition failed: {key} is at revision {actual}, not the {want}"
-                " this command was composed against"
+                " this command was composed against",
             )
     return None
 
 
-def stale_reason(oracle: Oracle, ev: Event) -> str | None:
+def stale_reason(oracle: Oracle, ev: Event) -> Rejection | None:
     """The runner-design ss4 stale-completion gate, as a function of state.
 
     It is the only precondition the estate has today, and it guards ONLY
@@ -553,17 +596,18 @@ def stale_reason(oracle: Oracle, ev: Event) -> str | None:
     row the oracle no longer holds live -- a terminal status, or a status
     an operator injected, such as INACTIVE (DL-235) -- is a report about a
     run that no longer exists. Pure, so replay reaches the same verdict the
-    live engine did without an Engine to ask (S3 puts `expect` beside it)."""
+    live engine did without an Engine to ask (S3 puts `expect` beside it).
+    Every verdict is stored as `stale_completion`; no socket answers one."""
     job = ev.job()
     if job is None:
         return None
     rt = oracle.store.job.get(job)
     if rt is None or rt.run_number != ev.payload.get("run_number"):
-        return "run_number mismatch"
+        return Rejection("stale_completion", "run_number mismatch")
     if rt.status in TERMINAL:
-        return "job already terminal"
+        return Rejection("stale_completion", "job already terminal")
     if rt.status not in LIVE:
-        return f"job not live: {rt.status}"
+        return Rejection("stale_completion", f"job not live: {rt.status}")
     return None
 
 
@@ -604,12 +648,14 @@ def apply_attempt(
     only for a LIVE gate, which always has the engine's own.
     """
     ev = attempt.event()
+    rejection: Rejection | None = None
+    decision: Literal["applied", "rejected"]
     with oracle.batch(attempt.at) as batch:  # step 5: the time half, timers first
         if decided is not None:
-            decision, reason = decided.decision, decided.reason
+            decision = decided.decision
         else:
-            reason = _gate(oracle, attempt, ev, grace_s=grace_s)  # step 6
-            decision = "rejected" if reason is not None else "applied"
+            rejection = _gate(oracle, attempt, ev, grace_s=grace_s)  # step 6
+            decision = "rejected" if rejection is not None else "applied"
         if decision == "applied":
             if ev is not None:
                 batch.feed(ev)
@@ -634,19 +680,22 @@ def apply_attempt(
         or ApplyResult(
             index=attempt.index,
             request_id=attempt.request_id,
-            decision=decision,  # type: ignore[arg-type]
-            reason=reason,
+            decision=decision,
+            reason=None if rejection is None else rejection.reason,
+            code=None if rejection is None else rejection.code,
             revisions=batch.revisions,
         ),
         emitted=batch.emitted,
     )
 
 
-def _gate(oracle: Oracle, attempt: Attempt, ev: Event | None, *, grace_s: float) -> str | None:
+def _gate(
+    oracle: Oracle, attempt: Attempt, ev: Event | None, *, grace_s: float
+) -> Rejection | None:
     if attempt.expect is not None:
-        reason = precondition_reason(oracle, attempt.expect)
-        if reason is not None:
-            return reason  # ss0, and it outranks everything below
+        rejection = precondition_reason(oracle, attempt.expect)
+        if rejection is not None:
+            return rejection  # ss0, and it outranks everything below
     if attempt.host is not None:
         # ss8's own preconditions sit HERE for the reason `expect` does: they
         # read mutable state, so a verdict reached at the door would answer

@@ -639,7 +639,7 @@ from a list kept beside it, so a field added here is compared for free.
 
 ```json
 {"rec": "decision", "index": 5310, "request_id": "…", "decision": "applied",
- "reason": null, "revisions": {"job:nightly": 13},
+ "reason": null, "code": null, "revisions": {"job:nightly": 13},
  "legacy_batch": false,
  "effects": [{"effect_id": "e5310:KILL:nightly.7", "kind": "KILL",
               "job": "nightly", "run_number": 7, "run_id": "…", "index": 5310,
@@ -689,6 +689,18 @@ subscribe cursor and a decision shares its attempt's number (DL-89).
 protocol is **v3**, on the precedent DL-90 set (v1 was removed, not
 deprecated), because a compatibility projection would be a second record
 shape for one fact. `effect_result` is unchanged.
+
+A decision written from DL-272 on carries `code`. It is null on an
+application. On a rejection it is the code of the reason
+(`control-protocol.md` §2), written beside the prose `reason`, and the
+writer refuses a rejection without one. The codes a rejection may store
+are an append-only set (`runner_codes.STORED_CODES`). A decision written
+before DL-272 has no `code`, and a reader takes the absence as null. The
+reader treats a stored code as opaque: it never requires one and never
+checks it against the registry. A replay derives nothing from it, so it
+changes no state and needs no `state_machine_version` bump. An exact retry
+and `original_decision` answer the stored code. This field is additive,
+unlike the change above.
 
 There is deliberately **no transition record**. A period opens because a
 `segment` says so and closes because a `seal` says so; the seal's

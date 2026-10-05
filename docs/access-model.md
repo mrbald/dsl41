@@ -526,7 +526,6 @@ courtesy; the server refusal is the authority either way.
 - `web-session-principal-v2` (§9): per-session web identity.
 - Supervisor socket under the gate: possible later (§2).
 - Splitting CLI `seal` staging (adm) from committing (ops) (§10).
-- Error codes on denials (control-protocol §7 gap 4 stands).
 
 ## 12. Test obligations
 

@@ -52,6 +52,7 @@ from typing import Any, Literal, get_args
 from pydantic import BaseModel, ConfigDict
 
 from dsl41.oracle_state import HostRuntime, HostState, RuntimeState
+from dsl41.runner_codes import Rejection
 
 #: The id of the executor an engine runs on its own machine. One engine per
 #: run root owns exactly one local executor (control-protocol ss2's socket
@@ -202,7 +203,7 @@ def host_rejection_reason(
     *,
     grace_s: float,
     actor: str | None = None,
-) -> str | None:
+) -> Rejection | None:
     """ss8's preconditions: why this command must not apply, or None.
 
     A REJECTION, not a refusal (control-protocol ss3). Every check below
@@ -218,12 +219,13 @@ def host_rejection_reason(
     the attempt's `claimed_actor`, which force needs and the other verbs do
     not. Both are the input's own
     facts -- journaled with it -- so replay reaches this verdict from the
-    same values."""
+    same values. The code is as pure over the row as the prose is."""
     row = store.host(cmd.host_id)
     if row is None:
-        return (
+        return Rejection(
+            "unknown_host",
             f"no host {cmd.host_id!r} in the routing table: a host joins it by"
-            " registering, never by being addressed"
+            " registering, never by being addressed",
         )
     if cmd.verb == "evict":
         return _evict_reason(row, cmd, at, grace_s=grace_s, actor=actor)
@@ -235,35 +237,41 @@ def host_rejection_reason(
         # returns by re-registering at its new generation (ss8), which is
         # where the fence is checked.
         if row.state == "evicted":
-            return (
+            return Rejection(
+                "host_evicted",
                 f"host {cmd.host_id!r} was evicted at generation {row.generation}:"
                 " reaching it again does not un-evict it, and it may not be routed"
-                " to until it re-registers at that generation and self-fences (ss8)"
+                " to until it re-registers at that generation and self-fences (ss8)",
             )
         return None
     if row.state == "quarantined":
-        return (
+        return Rejection(
+            "host_quarantined",
             f"host {cmd.host_id!r} is quarantined: the leader set that because the host"
             " stopped answering and clears it when the host answers again, holding its"
-            " jobs meanwhile (ss7). An operator state change would not make it reachable"
+            " jobs meanwhile (ss7). An operator state change would not make it reachable",
         )
     if row.state == "evicted":
-        return (
+        return Rejection(
+            "host_evicted",
             f"host {cmd.host_id!r} was evicted at generation {row.generation}: it returns"
             " by re-registering at that generation and self-fencing first, not by an"
-            " operator state change (ss8)"
+            " operator state change (ss8)",
         )
     return None
 
 
 def _evict_reason(
     row: HostRuntime, cmd: HostCommand, at: datetime, *, grace_s: float, actor: str | None
-) -> str | None:
+) -> Rejection | None:
     """ss8's three eviction preconditions, in the order that costs least to
     explain. A refusal reports the remaining wait, so the operator waits
     rather than guesses."""
     if row.state == "evicted":
-        return f"host {cmd.host_id!r} is already evicted, at generation {row.generation}"
+        return Rejection(
+            "host_already_evicted",
+            f"host {cmd.host_id!r} is already evicted, at generation {row.generation}",
+        )
     if cmd.force:
         # ss8: attributed, not forbidden -- and "attributed" is the WHOLE of
         # force's safety story, so a force that names nobody has none. The
@@ -272,39 +280,44 @@ def _evict_reason(
         # Checked here rather than at the door so the perimeter has already
         # had its chance to stamp an authenticated principal (DL-146).
         if actor is None or not actor.strip():
-            return (
+            return Rejection(
+                "force_needs_actor",
                 f"host {cmd.host_id!r}: --force skips the ss8 preconditions, so the"
                 " record is the only safety story it has -- name who is asking in"
-                " `claimed_actor`. An unattributed force is refused"
+                " `claimed_actor`. An unattributed force is refused",
             )
         return None
     if row.state != "quarantined":
-        return (
+        return Rejection(
+            "host_not_quarantined",
             f"host {cmd.host_id!r} is {row.state}: eviction needs the leader's own durable"
             " record that the host is unreachable (ss8 precondition 1), which is the"
             " `quarantined` state. Draining does not assert that, and out-of-band"
-            " knowledge that the machine is dead is what --force is for"
+            " knowledge that the machine is dead is what --force is for",
         )
     if row.deadman_s is None:
-        return (
+        return Rejection(
+            "host_no_deadman",
             f"host {cmd.host_id!r} runs no deadman (ss8 precondition 2): nothing bounds"
             " when its wrappers die, so no wait can prove its work is safe to reroute."
-            " --force is the only eviction such a host can have, and it is recorded as one"
+            " --force is the only eviction such a host can have, and it is recorded as one",
         )
     if row.last_contact is None:
-        return (
+        return Rejection(
+            "host_never_contacted",
             f"host {cmd.host_id!r} has never been in contact, so the ss8 bound has no"
-            " start: nothing here can say how long its wrappers have had to die"
+            " start: nothing here can say how long its wrappers have had to die",
         )
     kill_s = kill_allowance(grace_s)
     bound = row.deadman_s + kill_s
     bound += skew_allowance(bound)
     waited = (at - row.last_contact).total_seconds()
     if waited <= bound:
-        return (
+        return Rejection(
+            "eviction_bound_pending",
             f"host {cmd.host_id!r} was in contact {waited:.1f}s ago and the ss8 bound is"
             f" {bound:.1f}s (deadman {row.deadman_s:.1f}s + kill {kill_s:.1f}s + skew):"
-            f" wait {bound - waited:.1f}s more, or --force with proof it is dead"
+            f" wait {bound - waited:.1f}s more, or --force with proof it is dead",
         )
     return None
 

@@ -68,6 +68,7 @@ from dsl41.runner_admission import (
     stale_reason,
 )
 from dsl41.runner_clock import RealClock, VirtualClock
+from dsl41.runner_codes import Rejection
 from dsl41.runner_hosts import HostCommand
 from dsl41.runner_control import APPLIED, REFUSED, REJECTED, UNKNOWN, ControlServer, outcome_of
 from dsl41.runner_journal import read_journal, replay_inputs
@@ -931,6 +932,7 @@ def test_every_door_refuses_an_unversioned_caller(short_root: Path) -> None:
             ):
                 answer = await _call(server.path, request)
                 assert answer["ok"] is False
+                assert answer["code"] == "unsupported_version"
                 assert "this engine speaks v3" in answer["error"]
             # the connection stays usable: a refusal is not a hangup
             good = await _call(server.path, {"cmd": "status", "v": PROTOCOL_VERSION})
@@ -1042,6 +1044,7 @@ def test_a_command_with_no_decision_is_answered_i_do_not_know(short_root: Path) 
                 },
             )
             assert answer["ok"] is False
+            assert answer["code"] == "decision_timeout"
             assert "no decision within" in answer["error"]
             assert "re-read before retrying" in answer["error"]
             # neither applied nor refused: the answer claims no decision, and
@@ -1078,6 +1081,7 @@ def test_the_socket_refuses_a_mutation_that_names_no_revision(short_root: Path) 
                 },
             )
             assert answer["ok"] is False and "expect is required" in answer["error"]
+            assert answer["code"] == "expect_required"
             # `refused`, not a rejection: a machine client must be able to tell
             # "nothing was written" from "a decision went against you", since
             # only the first is safe to re-send unchanged
@@ -1206,8 +1210,11 @@ def test_a_caller_parked_on_a_decision_is_told_when_the_engine_stops() -> None:
         engine = _engine()
         future = engine.submit(_ev("ON_HOLD", 1, job="j"), _envelope("r1", "job:j", 0))
         await engine.shutdown()  # without ever running the loop
-        with pytest.raises(AdmissionRefused, match="shut down before this input was admitted"):
+        with pytest.raises(
+            AdmissionRefused, match="shut down before this input was admitted"
+        ) as refused:
             await future
+        assert refused.value.code == "engine_shutting_down"
 
     asyncio.run(scenario())
 
@@ -1252,19 +1259,30 @@ def test_every_ok_false_a_mutation_can_meet_says_whether_it_was_admitted(
                     "expect": {"job:j": rev},
                 } | over
 
+            # each door's stable code rides beside the marker, never instead
             refusals = {
-                "unversioned": envelope(v=None),
-                "unknown cmd": envelope(cmd="nonsense"),
-                "unknown job": envelope(payload={"job": "ghost"}),
-                "no expect": envelope(expect=None),
-                "foreign baseline": envelope(baseline_id="someone-elses-run"),
-                "stale epoch": envelope(epoch=read["epoch"] - 1, request_id="sweep-2"),
-                "bad status": envelope(verb="CHANGE_STATUS", payload={"job": "j", "status": "?"}),
+                "unversioned": (envelope(v=None), "unsupported_version"),
+                "unknown cmd": (envelope(cmd="nonsense"), "unknown_cmd"),
+                "unknown job": (envelope(payload={"job": "ghost"}), "unknown_job"),
+                "no expect": (envelope(expect=None), "expect_required"),
+                "foreign baseline": (
+                    envelope(baseline_id="someone-elses-run"),
+                    "baseline_mismatch",
+                ),
+                "stale epoch": (
+                    envelope(epoch=read["epoch"] - 1, request_id="sweep-2"),
+                    "stale_epoch",
+                ),
+                "bad status": (
+                    envelope(verb="CHANGE_STATUS", payload={"job": "j", "status": "?"}),
+                    "unknown_status",
+                ),
             }
-            for label, request in refusals.items():
+            for label, (request, code) in refusals.items():
                 answer = await _call(server.path, request)
                 assert answer["ok"] is False, label
                 assert answer["refused"] is True, label
+                assert answer["code"] == code, label
                 assert outcome_of(answer) == REFUSED, label
 
             # the framing door, which no composed request can reach: it is
@@ -1274,6 +1292,7 @@ def test_every_ok_false_a_mutation_can_meet_says_whether_it_was_admitted(
                 answer = await _call_line(server.path, line)
                 assert answer["ok"] is False, line
                 assert answer["refused"] is True, line
+                assert answer["code"] == "malformed_request", line
                 assert outcome_of(answer) == REFUSED, line
 
             # a decision that goes against the caller is NOT one of these: it
@@ -1281,6 +1300,7 @@ def test_every_ok_false_a_mutation_can_meet_says_whether_it_was_admitted(
             lost = await _call(server.path, envelope(expect={"job:j": rev + 99}))
             assert lost["ok"] is False
             assert "refused" not in lost
+            assert lost["code"] == "precondition_failed"
             assert outcome_of(lost) == REJECTED
             assert isinstance(lost["index"], int)
 
@@ -1642,7 +1662,7 @@ def test_the_stale_gate_rejects_a_completion_for_a_row_an_operator_set_inactive(
     oracle.feed(Event(at=T0, kind="STATUS", payload={"job": "j", "status": "INACTIVE"}))
     run_number = oracle.store.job["j"].run_number
     ev = Event(at=T0, kind="STATUS", payload={"job": "j", "run_number": run_number, "exit_code": 0})
-    assert stale_reason(oracle, ev) == "job not live: INACTIVE"
+    assert stale_reason(oracle, ev) == Rejection("stale_completion", "job not live: INACTIVE")
 
 
 def test_the_stale_gate_passes_a_completion_for_a_starting_or_a_running_row() -> None:
@@ -1673,7 +1693,7 @@ def test_the_stale_gate_still_names_a_terminal_row_already_terminal() -> None:
     oracle.feed(Event(at=T0, kind="STATUS", payload={"job": "j", "status": "TERMINATED"}))
     run_number = oracle.store.job["j"].run_number
     ev = Event(at=T0, kind="STATUS", payload={"job": "j", "run_number": run_number, "exit_code": 0})
-    assert stale_reason(oracle, ev) == "job already terminal"
+    assert stale_reason(oracle, ev) == Rejection("stale_completion", "job already terminal")
 
 
 def test_the_stale_gate_checks_run_number_before_liveness() -> None:
@@ -1690,4 +1710,4 @@ def test_the_stale_gate_checks_run_number_before_liveness() -> None:
         kind="STATUS",
         payload={"job": "j", "run_number": stale_run_number, "exit_code": 0},
     )
-    assert stale_reason(oracle, ev) == "run_number mismatch"
+    assert stale_reason(oracle, ev) == Rejection("stale_completion", "run_number mismatch")

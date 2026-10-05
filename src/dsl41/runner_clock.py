@@ -10,7 +10,8 @@ Phase 11b (ss6-ss7; DL-41a/DL-42 pin the lifecycle semantics):
 
 EngineError lives here too: it is the shell's one refusal type, every module
 above raises it, and this module is the bottom of the runner import DAG
-(DL-74).
+(DL-74). Below it sits only `runner_codes`, the registry an EngineError
+takes its optional code from.
 """
 
 from __future__ import annotations
@@ -21,11 +22,21 @@ import heapq
 from datetime import UTC, datetime
 from typing import Protocol
 
+from dsl41.runner_codes import Code
+
 
 class EngineError(RuntimeError):
     """A shell-level refusal (never a semantics verdict): the engine detected
     it cannot make progress -- e.g. the zero-delay-cycle guard in
-    run_until_quiescent. Loud by design (CLAUDE.md: no silent loss)."""
+    run_until_quiescent. Loud by design (CLAUDE.md: no silent loss).
+
+    `code` is the stable control code of the reason, when the raise site
+    names one (control-protocol §2). A control catch site answers a
+    code-less one as `engine_error`; it never reads the prose."""
+
+    def __init__(self, *args: object, code: Code | None = None) -> None:
+        super().__init__(*args)
+        self.code: Code | None = code
 
 
 class ZeroDelayCycleError(EngineError):

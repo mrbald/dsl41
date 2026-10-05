@@ -231,6 +231,7 @@ def test_a_time_observation_is_admitted_as_an_attempt_with_no_verb(tmp_path: Pat
         "request_id": "r1",
         "decision": "applied",
         "reason": None,
+        "code": None,
         "revisions": {},
         "legacy_batch": False,
         "effects": [],

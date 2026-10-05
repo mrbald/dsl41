@@ -2,7 +2,7 @@
 
 Status: frozen at **v3** (DL-118; v2 was DL-90, v1 DL-78; amended by
 DL-133, DL-135, DL-146, DL-147, DL-148, DL-150, DL-151, DL-158, DL-189,
-DL-216, DL-217, DL-256, DL-264 and DL-267). This
+DL-216, DL-217, DL-256, DL-264, DL-267 and DL-272). This
 document is normative for the runner's §10 control plane in the same way
 `docs/supervisor-protocol.md` is normative for the §6a lifecycle tier. Each
 change to a frozen item requires a decision-log entry, and each amendment
@@ -79,9 +79,11 @@ CLI's job.
   the one unversioned door left open. A refusal does not close the
   connection: the next line on it may be well-formed.
 - The answer to a request is `{"ok": true, …}` or
-  `{"ok": false, "error": "<message>"}`. Errors are human-readable
-  strings, **not** stable codes. The other lines a server writes are the
-  §5 shapes — journal records and the gap marker — and carry no `ok`.
+  `{"ok": false, "code": "<code>", "error": "<message>"}` (DL-272).
+  `code` is stable and names the reason; the code table below lists
+  every one. `error` is human-readable prose and may change. The other
+  lines a server writes are the §5 shapes — journal records and the gap
+  marker — and carry no `ok`.
 - Responses carry the **read header**: `baseline_id`, `epoch` and
   `applied_index` (`docs/concurrency-model.md` §6). A revision means
   nothing without the log it was read from, and a client that cannot
@@ -94,13 +96,14 @@ CLI's job.
   itself (§4, PR-03), the internal-error answer of a handler that
   raised, and every line `subscribe` writes on its own connection
   (§5). None of them names a revision.
-- A malformed line answers `{"ok": false, "error": "bad request: …"}` and
-  the stream stays in sync. That holds for invalid JSON **within**
-  `LINE_LIMIT`. A line over the limit is a framing failure the reader
-  cannot answer past: the connection closes with no answer, and the caller
-  reads it as a transport error. A handler that raises answers
-  `{"ok": false, "error": "internal error: …"}` rather than dying
-  unreplied — a client must never see a bare timeout for a query bug.
+- A malformed line answers `{"ok": false, "code": "malformed_request",
+  "error": "bad request: …"}` and the stream stays in sync. That holds for
+  invalid JSON **within** `LINE_LIMIT`. A line over the limit is a framing
+  failure the reader cannot answer past: the connection closes with no
+  answer, and the caller reads it as a transport error. A handler that
+  raises answers `{"ok": false, "code": "internal_error", "error":
+  "internal error: …"}` rather than dying unreplied — a client must never
+  see a bare timeout for a query bug.
 - Consumers must ignore unknown fields (forward compatibility).
 
 **Socket lifecycle.** On start the server probes an existing socket file
@@ -119,6 +122,88 @@ door in front of it — see §7.
 by AutoSys nature, and the engine's single-writer loop serializes every
 injection. The lease guards the supervisor tier, which spawns without
 semantics.
+
+**Error codes** (DL-272). Every `ok: false` answer carries a `code`:
+headerless answers, query errors and the `ok: false` lines of a
+`subscribe` stream included. A code names the reason, never the outcome.
+`refused` and `decision` keep their meaning, and one code can appear
+under more than one outcome: `unknown_job` is a query error under
+`status` and a refusal under `sendevent`. An `unknown` outcome never
+carries `refused`, whatever its code.
+
+A rejected answer's `code` is the one its `decision` record stores
+(`docs/period-model.md` §2.3). An exact retry is answered from that
+record, so it answers the same code as the first answer. A `decision`
+written before DL-272 stores no code, and an answer replayed from it
+omits the field. A client must tolerate a missing `code`.
+
+`code` is an additive field: consumers ignore what they do not know
+(above), so a client written before it keeps working. A code is never
+renamed in place; a new code, or a retired one, is a decision-log entry.
+
+The client action says what a client does next:
+
+- **re-read; retry a mutation only under the same request_id**: the
+  outcome is unknown (§3). Re-read first. A mutation is retried only
+  under its original `request_id`, with the same envelope. A query has
+  no id to retry under.
+- **re-read then decide**: the state moved, or the request named a
+  stale view of it; read again before composing anything.
+- **fix the request**: the request is wrong as sent; sending it again
+  unchanged gets the same answer.
+- **wait**: a condition clears on its own; send again later.
+- **operator**: a person has to act on the estate or the engine.
+
+| code | outcome class | reasons | client action |
+|---|---|---|---|
+| `peer_unauthenticated` | refused | access control is armed and the peer has no kernel credential | operator |
+| `malformed_request` | refused | the line is not a JSON object | fix the request |
+| `unsupported_version` | refused | `v` is absent or is not `3` | fix the request |
+| `access_denied` | refused | the perimeter denies this principal the command or verb (`docs/access-model.md` §5) | operator |
+| `internal_error` | unknown | a handler raised | re-read; retry a mutation only under the same request_id |
+| `lineage_lost` | refused | this engine can no longer prove it leads the estate's lineage (§4) | operator |
+| `unknown_cmd` | refused | `cmd` names no command | fix the request |
+| `invalid_argument` | refused, query or stream | a field is absent or has the wrong shape or type; `error` names the field | fix the request |
+| `plan_cycle` | query | the AND-success skeleton has a cycle, so `plan` is disabled | operator |
+| `unknown_job` | query, or refused on a mutation | the job is not in the catalog (for `status`: in neither the catalog nor the store) | fix the request |
+| `no_journal` | stream | the run has no journal to stream | operator |
+| `backfill_refused` | stream | the backfill met a journal file it cannot read as this estate's | operator |
+| `unknown_verb` | refused | `verb` names no `sendevent` verb or no `host` verb | fix the request |
+| `unknown_status` | refused | `CHANGE_STATUS` names no status | fix the request |
+| `status_not_injectable` | refused | `CHANGE_STATUS` names a status an operator may not send (`QUE_WAIT`) | fix the request |
+| `baseline_mismatch` | refused | `baseline_id` is not this run's | re-read then decide |
+| `expect_required` | refused | a mutation that addresses a row carries no `expect` | fix the request |
+| `request_id_reused` | refused | the `request_id` was admitted for a different command | fix the request |
+| `stale_epoch` | refused | `epoch` is not the current leader's | re-read then decide |
+| `period_sealing` | refused | the period is sealing and admits no external request | wait |
+| `engine_shutting_down` | refused | the engine shut down before the input was admitted | wait |
+| `decision_timeout` | unknown | no decision arrived within the window | re-read; retry a mutation only under the same request_id |
+| `precondition_failed` | rejected | the addressed entity is not at the revision `expect` names | re-read then decide |
+| `unknown_host` | rejected | no host with this id is in the routing table | fix the request |
+| `host_quarantined` | rejected | the host is quarantined, which the leader sets and clears | wait |
+| `host_evicted` | rejected | the host was evicted; it returns by re-registering. The leader's own reachability observation against an evicted host stores this code too, and answers no client | operator |
+| `host_already_evicted` | rejected | `evict` addresses a host that is already evicted | re-read then decide |
+| `force_needs_actor` | rejected | a forced eviction names no actor | fix the request |
+| `host_not_quarantined` | rejected | a gated eviction addresses a host that is not quarantined | operator |
+| `host_no_deadman` | rejected | a gated eviction addresses a host that runs no deadman | operator |
+| `host_never_contacted` | rejected | a gated eviction addresses a host never in contact | operator |
+| `eviction_bound_pending` | rejected | the eviction bound has not passed; `error` names the remaining wait | wait |
+| `seal_retry_mismatch` | refused | a `seal` names the committed boundary's `request_id` under a different envelope | fix the request |
+| `seal_in_flight` | refused | another boundary is in flight | wait |
+| `no_lineage` | refused | the engine leads no lineage, so there is no boundary to close | operator |
+| `stage_digest_mismatch` | refused | `stage_digest` does not match the digest of `next_period` | fix the request |
+| `nothing_staged` | refused | nothing is staged at `stage_digest` | fix the request |
+| `seal_input_after_cutoff` | refused | an input arrived stamped after the cutoff | wait |
+| `seal_not_settling` | refused | inputs keep arriving while the boundary drains or proves | wait |
+| `seal_not_quiescent` | refused | the estate is not quiescent at the cutoff | wait |
+| `seal_supervisor_unproven` | refused | the supervisor clauses cannot be proved: no client, unreachable, a refused `LIST`, or another incarnation | operator |
+| `seal_run_unaccounted` | refused | the supervisor's `LIST` and the carried executions disagree | operator |
+| `seal_retry_horizon` | refused | an external attempt is younger than the closing period's retry horizon | wait |
+| `clock_regressed` | refused | admission time moved backwards during the cutoff | operator |
+| `seal_refused` | refused | one of the boundary's own pre-commit refusals: the candidate, its validation, the snapshot or the install. A check on the same path that names no code answers `engine_error` | operator |
+| `seal_timeout` | unknown | no boundary outcome arrived within the window | re-read; retry a mutation only under the same request_id |
+| `stale_completion` | rejected, stored only | the stale-completion gate rejected an engine-made completion; it is stored, and no client request is answered with it | none |
+| `engine_error` | refused | an engine refusal whose raise site names no code | operator |
 
 ## 3. Mutating verbs: sendevent, host, seal
 
@@ -202,15 +287,15 @@ command is refused as a collision. `expect` participates in the
 fingerprint, so the same verb at two revisions is two commands.
 
 **A `sendevent` or `host` collision refusal carries the id's earlier
-decision** (DL-217). When the id already holds one, the
-refusal adds
-`"original_decision": {index, request_id, decision, reason, revisions}`,
-the decision's own fields. The answer stays a refusal of this request:
-`ok: false`, `refused: true`, and the read header of the engine that
-answered. The nested decision belongs to the earlier command and is never
-this request's outcome. An id admitted but not yet decided carries no
-`original_decision`. The `seal` verb keeps its own retry route (below) and
-never carries the field.
+decision** (DL-217). When the id already holds one, the refusal adds
+`"original_decision": {index, request_id, decision, reason, code, revisions}`,
+the decision's own fields. `code` is the stored one, null on
+an application and on a decision written before DL-272. The answer stays a
+refusal of this request: `ok: false`, `refused: true`, and the read header
+of the engine that answered. The nested decision belongs to the earlier
+command and is never this request's outcome. An id admitted but not yet
+decided carries no `original_decision`. The `seal` verb keeps its own
+retry route (below) and never carries the field.
 
 **Recovering a lost answer.** The fingerprint covers `baseline_id`,
 `epoch` and `expect`. A retry must place the values its original placed,
@@ -626,8 +711,8 @@ raw lines. The ack's `since` is the stream's cursor (DL-267): the request's
 `since` when it named one, otherwise the admission frontier sampled for
 the seam below. Every seq'd record the stream owes is above it. It is an
 additive answer field, which a v3 client ignores (`docs/protocol-evolution.md`
-§1, DL-217). A run with no journal is refused with `{"ok": false, "error":
-"this run has no journal"}`.
+§1, DL-217). A run with no journal is refused with `{"ok": false, "code":
+"no_journal", "error": "this run has no journal"}`.
 
 Delivery guarantees, exactly as implemented:
 
@@ -682,11 +767,12 @@ other, so the leader re-proves the lineage in front of it (PR-03).
 **The backfill can refuse on the stream** (DL-135). It reads files this
 subscription's own period did not write, so it can meet a foreign name
 under `wal/` or a closed segment whose tail is missing. Either is
-`{"ok": false, "error": …}` sent *after* the ack and then a hangup —
-never a hangup with no answer, and never a stream that silently skips the
-records it could not read. The read is bounded: it walks segments newest
-first and stops at the one holding the cursor, so a cursor inside the live
-period costs one segment however long the lineage is.
+`{"ok": false, "code": "backfill_refused", "error": …}` sent *after* the
+ack and then a hangup — never a hangup with no answer, and never a stream
+that silently skips the records it could not read. The read is bounded:
+it walks segments newest first and stops at the one holding the cursor,
+so a cursor inside the live period costs one segment however long the
+lineage is.
 
 **A subscriber that stops reading is removed** (DL-267). Each subscription
 has a backlog: the live records appended for it and not yet written to its
@@ -807,5 +893,5 @@ multihost track (`docs/decision-log.md` DL-78) has to address each one.
    guarantee rests on a local `flock` and a local `bind()`. A non-local
    controller would need both a transport and a replacement for that
    guarantee.
-4. **Errors are prose, not codes.** Fine for a human at a terminal and for
-   the TUI; a programmatic client cannot branch on them reliably.
+4. ~~Errors are prose, not codes~~ — **closed** by DL-272 (§2): every
+   `ok: false` answer carries a stable `code` beside the prose `error`.
