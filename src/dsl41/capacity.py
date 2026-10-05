@@ -521,7 +521,13 @@ def release_policy(res_type: str, free: str | None, renewable_free: RenewableFre
     A renewable request with no FREE takes the `renewable-free` switch
     (DL-256): Y, the vendor's documented default ("resources Attribute",
     AutoSys 24.2: "Default: Y"), frees on SUCCESS only; A frees on every
-    completion, dsl41's reading before DL-256. A depletable never frees.
+    completion, dsl41's reading before DL-256. A depletable with no FREE
+    never frees.
+
+    An explicit FREE code overrides the default on every res_type (DL-50
+    (3)), a depletable included. The vendor documents FREE for renewables
+    only, so preflight refuses FREE=Y and FREE=A on a depletable (DL-287,
+    Q12); FREE=N there matches the default. A direct caller is not refused.
 
     PUBLIC because the explore page states the same policy per lock member
     (DL-192), and a second copy of this table would drift from the pool's

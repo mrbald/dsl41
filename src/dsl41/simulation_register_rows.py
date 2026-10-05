@@ -38,6 +38,7 @@ JOB_BLOCK = "insert_job: J0\njob_type: c\ncommand: true\nmachine: M0"
 #: the same job with a machine-load demand, so a pool WARN has something to fire on
 LOADED_JOB_BLOCK = JOB_BLOCK + "\njob_load: 1"
 RESOURCE_BLOCK = "insert_resource: R0\nres_type: R\namount: 4"
+DEPLETABLE_BLOCK = RESOURCE_BLOCK.replace("res_type: R", "res_type: D")
 BOX_BLOCK = "insert_job: BOX0\njob_type: b"
 CYCLE_NAME = "CY0"
 CYCLE_BLOCK = f"cycle: {CYCLE_NAME}\nstart_date: 01/01/2026\nend_date: 03/31/2026"
@@ -1725,6 +1726,18 @@ VALUE_ROWS: tuple[Row, ...] = (
         cite="DL-50",
         effect="FREE={member} overrides the resource's release default for one request",
         trigger=lambda m: _job(RESOURCE_BLOCK, resources=f"(R0, QUANTITY=1, FREE={m})"),
+    )
+    + _rows(
+        "free_code",
+        ("A", "Y"),
+        facet="depletable",
+        klass=REFUSED,
+        cite="runner_preflight._resource_preflight, DL-287",
+        effect="FREE={member} on a depletable is refused at preflight: the vendor documents"
+        " FREE for renewables only, and its effect there is open (Q12). FREE=N on a"
+        " depletable runs; an oracle-direct caller is not refused",
+        trigger=lambda m: _job(DEPLETABLE_BLOCK, resources=f"(R0, QUANTITY=1, FREE={m})"),
+        quiet=_job(DEPLETABLE_BLOCK, resources="(R0, QUANTITY=1, FREE=N)"),
     )
     + _rows(
         "release_policy",

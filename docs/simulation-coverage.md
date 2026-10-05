@@ -326,8 +326,10 @@ fails the suite.
 | id | class | cite | label | marker | protocol | bound | detector | effect |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | free_code:A | supported | DL-50 | - |  |  |  | generic | FREE=A overrides the resource's release default for one request |
+| free_code:A#depletable | refused | runner_preflight._resource_preflight, DL-287 | - |  |  |  | none | FREE=A on a depletable is refused at preflight: the vendor documents FREE for renewables only, and its effect there is open (Q12). FREE=N on a depletable runs; an oracle-direct caller is not refused |
 | free_code:N | supported | DL-50 | - |  |  |  | generic | FREE=N overrides the resource's release default for one request |
 | free_code:Y | supported | DL-50 | - |  |  |  | generic | FREE=Y overrides the resource's release default for one request |
+| free_code:Y#depletable | refused | runner_preflight._resource_preflight, DL-287 | - |  |  |  | none | FREE=Y on a depletable is refused at preflight: the vendor documents FREE for renewables only, and its effect there is open (Q12). FREE=N on a depletable runs; an oracle-direct caller is not refused |
 
 ### release_policy
 

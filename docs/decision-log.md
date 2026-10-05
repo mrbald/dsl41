@@ -19090,3 +19090,86 @@ relitigate an entry; append a new one.
   triage's "release either holder" to the tested one; the Fable pass asked
   for the vendor tiers behind the cycle and for the forced job's missing
   unit to be stated. Both are in the text.
+- DL-287 Preflight refuses FREE=Y and FREE=A on a depletable resource
+  (2026-10-05; runner_preflight.py `_resource_preflight`, capacity.py
+  `release_policy` docstring, simulation_register_rows.py,
+  autosys-semantics.md resources row and §9, citation-index.md `Q` row,
+  live-instance-runbook.md Q12 protocol, runner-design.md §8,
+  blocks/capacity.md,
+  simulation-coverage.md)
+  THE GAP. DL-50 (3) says res_type sets the default release and a
+  per-request FREE overrides it; `release_policy` applies the code on every
+  res_type. A depletable request with FREE=A therefore frees its units when
+  the run completes and never spends them, and FREE=Y frees them on
+  SUCCESS. The depletable becomes a renewable in effect. Preflight did not
+  refuse the combination.
+  VENDOR TEXT [V]. "resources Attribute" (AutoSys 24.2), quoted in DL-256:
+  "free=Y | N | A (Optional for renewable virtual resources only)". No
+  vendor text says what the scheduler does with FREE=Y or FREE=A on a
+  depletable: it might reject the definition, ignore the code, or free the
+  units. This is open as Q12 in the dossier's §9; the runbook's Q12
+  protocol settles it.
+  THE RULE. Preflight ERRORs (code `resources`, both run and rehearse) on
+  a requirement with FREE=Y or FREE=A whose resource has `res_type: D`. The
+  message quotes the vendor clause and calls the release semantics
+  unknown, as DL-50 (5) does for a res_type outside R/D/T. FREE=N on a
+  depletable is accepted: it matches the depletable default, never free. A
+  depletable with no FREE is unchanged
+  (test_dl256_a_depletable_with_no_free_still_spends). FREE on a renewable
+  is unchanged. FREE on a threshold (T) is inert, since a threshold holds
+  nothing, so it is accepted. The message's remedy: drop FREE or write
+  FREE=N, or retype the resource R if it is renewable.
+  WHY A REFUSAL, NOT A SWITCHED PIN. Both candidate pins, free as the code
+  says or ignore the code, are guesses: no vendor text backs either.
+  Nothing in the corpus or the examples uses a depletable with FREE, so
+  the refusal costs no known estate. DL-50 (5) set the precedent: an
+  unknown release semantics is refused at preflight, not pinned.
+  ORACLE UNCHANGED. The oracle keeps DL-50 (3)'s table: an oracle-direct
+  caller over an unrefused catalog still applies the code, as it runs an
+  unsized resource unthrottled (DL-50 (5), enforcement is preflight). No
+  state-machine version move: no replayed input derives anything new.
+  NOT RESUME-SAFE FOR SUCH AN ESTATE. Preflight runs at `run --resume`, at
+  the live boundary check (`validate_staged` over the successor catalog)
+  and in the offline sealer (`boundary.preflight_errors`). An estate that
+  ran with a depletable and FREE=Y or FREE=A is refused at each of them
+  after the upgrade, so the release is not resume-safe for it
+  (deployment-runbook §7 row 2). The owner fixes the catalog first.
+  RELEASE NOTE (one line for the tag message): "Preflight now refuses
+  FREE=Y or FREE=A on a depletable resource (DL-287); an estate using it
+  is not resume-safe: run --resume, the boundary check and the offline
+  sealer refuse it until the catalog drops FREE or writes FREE=N."
+  REGISTER. `free_code:A#depletable` and `free_code:Y#depletable` are
+  REFUSED rows citing `runner_preflight._resource_preflight`; their effect
+  names Q12. Q12 carries no label there, since a label names a pinned
+  default and this is a refusal. The base `free_code` rows keep revision 1:
+  the oracle branch behind them did not change.
+  NAMESPACE. Q12, not a Qr number: it asks about vendor behavior that a
+  live instance settles, which is the Q series. The Qr series holds
+  runner-side design questions (citation-index.md). The Q row now runs to
+  Q12.
+  WHAT WOULD CHANGE IT. A vendor text or the runbook's Q12 probe showing the
+  scheduler's behavior for FREE on a depletable. If it ignores the code,
+  preflight could accept Y and A with the never-free default and
+  `release_policy` would ignore FREE on a depletable. If it frees the
+  units as on a renewable, the refusal could go and the oracle would stand
+  as it is. If jil rejects the definition, the refusal stands and becomes
+  [V]. If jil rejects FREE=N on a depletable too, the refusal extends to
+  FREE=N. The probe reads job behavior: a QUANTITY=2 job on a 2-unit
+  resource runs after the FREE=A job ends only if the unit came back, and
+  a FREE=Y run that fails shows success-only or unconditional release.
+  TESTS. tests/test_runner_scheduler.py:
+  test_preflight_resources_refuses_free_y_or_a_on_a_depletable (triggering)
+  and
+  test_preflight_resources_accepts_free_n_on_a_depletable_and_y_or_a_on_a_renewable
+  (non-triggering: FREE=N and no FREE on a depletable, FREE=Y and FREE=A on
+  a renewable). The register's fixture test checks that the new rows'
+  trigger is refused.
+  The register rows grow by 13 lines; scripts/arch_baseline.json takes the
+  new size with this entry (DL-283's practice).
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass, the
+  Fable pass in place of Codex at the owner's instruction. The Fable pass
+  made the Q12 probe read job behavior instead of an unverified autorep
+  flag and added the FREE=N insert; the Opus reviewer found the refusal
+  missing from runner-design §8 and the resume-safety consequence unstated.
+  All findings are fixed and were confirmed by the reviewer that raised
+  them.

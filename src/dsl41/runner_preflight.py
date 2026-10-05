@@ -223,6 +223,7 @@ def _resource_preflight(name: str, job: JobIR, catalog: CatalogIR) -> list[Prefl
         honored (stricter than L016's warn; a `--resource-capacity` override is
         a documented future escape hatch, not v1);
       * an unknown res_type (not R/D/T) -- unknown release semantics;
+      * FREE=Y or FREE=A on a depletable -- FREE is renewable-only (DL-287, Q12);
       * a QUANTITY above the resource's `amount`, at any priority -- it can
         never be satisfied, and at a positive priority it would also block
         every lower priority that names the resource forever (DL-255);
@@ -317,6 +318,13 @@ def _resource_preflight(name: str, job: JobIR, catalog: CatalogIR) -> list[Prefl
             err(
                 f"resource {ref.name!r} res_type {resource.res_type!r} is not R/D/T --"
                 " unknown release semantics (DL-50)"
+            )
+        if res_type == "D" and ref.free in ("Y", "A"):
+            err(
+                f"resource {ref.name!r} is depletable and FREE={ref.free} is undocumented there:"
+                ' "Optional for renewable virtual resources only" ("resources Attribute",'
+                " AutoSys 24.2) -- unknown release semantics (DL-50, DL-287, Q12); drop FREE"
+                " or write FREE=N, or retype the resource R if it is renewable"
             )
     return items
 
