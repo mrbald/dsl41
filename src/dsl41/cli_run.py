@@ -861,18 +861,18 @@ async def _serve_run(
             estate_fingerprint=estate_fingerprint,
             access=access,
         )
-        try:
-            await server.start()
-        except EngineError as exc:
-            return refuse(exc)
-        typer.echo(f"engine up; control socket: {server.path}")
-        loop_task = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
+        # Handlers go in BEFORE the socket is bound, so that a SIGHUP sent
+        # once control.sock has been bound by THIS engine is a reload, not a
+        # kill. A socket file left by a crashed run can exist earlier than
+        # this point; a signal before the handlers exist keeps its default
+        # action. A signal that lands before the loop task exists only sets
+        # `stop` or reloads.
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
         for sig in (signal_mod.SIGINT, signal_mod.SIGTERM):
             try:
                 loop.add_signal_handler(sig, stop.set)
-            except (NotImplementedError, ValueError):
+            except (NotImplementedError, ValueError, RuntimeError):
                 # non-main-thread embedding (test harnesses): stoppable only by
                 # engine failure; the real CLI always has the main thread
                 pass
@@ -881,8 +881,15 @@ async def _serve_run(
             # policy and writes the receipt, never kills the engine
             try:
                 loop.add_signal_handler(signal_mod.SIGHUP, access.reload)
-            except (NotImplementedError, ValueError):
+            except (NotImplementedError, ValueError, RuntimeError):
                 pass
+        try:
+            await server.start()
+        except EngineError as exc:
+            # the handlers stay until `loop.close()`, as on the success path
+            return refuse(exc)
+        typer.echo(f"engine up; control socket: {server.path}")
+        loop_task = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
         stop_task = asyncio.ensure_future(stop.wait())
         ui_task: asyncio.Task[Any] | None = None
         tui = None

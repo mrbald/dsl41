@@ -2688,6 +2688,40 @@ def test_dl210_failed_private_publish_cleans_up_and_releases_lock(short_root, mo
         successor._teardown()
 
 
+@pytest.fixture(autouse=True)
+def _restore_signal_handlers():
+    """`Supervisor.run()` installs process-wide handlers before it binds, so an
+    in-process run that fails at the bind leaves them behind. Put back what
+    each test found."""
+    sigs = (signal.SIGCHLD, signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+    saved = {sig: signal.getsignal(sig) for sig in sigs}
+    yield
+    for sig, handler in saved.items():
+        signal.signal(sig, handler)
+
+
+def test_supervisor_signal_handlers_are_installed_before_the_socket_is_published(
+    short_root, monkeypatch
+):
+    """A peer that polls for supervisor.pid or supervisor.sock must not meet a
+    default signal action: the handlers go in before `_bind` publishes either."""
+    sup = runner_supervisor.Supervisor(str(short_root))
+    sigs = (signal.SIGCHLD, signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+    at_bind = {}
+
+    def stop_at_bind():
+        at_bind.update({sig: signal.getsignal(sig) for sig in sigs})
+        raise SystemExit("test: stop at the bind")
+
+    monkeypatch.setattr(sup, "_bind", stop_at_bind)
+    with pytest.raises(SystemExit, match="stop at the bind"):
+        sup.run()
+    assert at_bind[signal.SIGTERM] == sup._on_term_signal
+    assert at_bind[signal.SIGINT] == sup._on_term_signal
+    assert at_bind[signal.SIGCHLD] == sup._on_chld_signal
+    assert at_bind[signal.SIGHUP] == signal.SIG_IGN
+
+
 @pytest.mark.parametrize(
     ("chunks", "answered"),
     [

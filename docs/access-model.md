@@ -1,7 +1,7 @@
 # Access model — three tiers at the perimeter
 
 Status: **frozen (DL-231; design DL-146, amended by DL-147, DL-148, DL-149,
-DL-150, DL-151, DL-152, DL-158, DL-256 and DL-272).** It is the design of record for
+DL-150, DL-151, DL-152, DL-158, DL-256, DL-272 and DL-275).** It is the design of record for
 `runner_access.py`, the control-plane gate and the served web TUI. Each
 change to a frozen item requires a decision-log entry, the same rule as
 `docs/control-protocol.md`. The web session's authentication half (§9) is
@@ -360,7 +360,11 @@ other retention choice (`deployment-runbook.md` §2a); the act is adm.
 ## 7. Reload and revocation
 
 Policy is an immutable snapshot with a generation number. Reload is
-explicit: write a temp file, fsync, rename, `SIGHUP`. Install is
+explicit: write a temp file, fsync, rename, `SIGHUP`. The engine arms its
+`SIGHUP` handler before it binds `control.sock` (DL-275), so a `SIGHUP`
+sent once the socket answers is a reload. A socket file alone proves
+nothing: a crashed run can leave one behind, and before the handler is
+armed the signal keeps its default action, which stops the process. Install is
 receipt-gated, in this order: validate the complete candidate, sync the
 `policy_loaded` receipt, then install the snapshot — a policy change
 that cannot be receipted does not happen, and the old snapshot stays

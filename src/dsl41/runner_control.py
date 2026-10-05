@@ -329,6 +329,10 @@ class ControlServer:
                 os.chown(self.path, -1, policy.socket_gid)
                 os.chmod(self.path, 0o660)
             except OSError as exc:
+                # bound but not armed: do not leave a listening socket behind a
+                # refusal. close() runs only on this path, after OUR bind, so
+                # it never unlinks a live engine's socket
+                await self.close()
                 raise EngineError(f"cannot arm control socket for group {group!r}: {exc}") from exc
 
     async def close(self) -> None:

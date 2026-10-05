@@ -142,6 +142,8 @@ def test_a_socket_group_the_process_cannot_grant_refuses_to_serve(short_root: Pa
             assert str(refused.value).startswith(
                 f"cannot arm control socket for group {foreign.gr_name!r}: "
             )
+            # the refusal does not leave a bound socket behind it
+            assert not (short_root / "armed.sock").exists()
         finally:
             await armed.close()
             await _teardown(engine, plain, loop_task)

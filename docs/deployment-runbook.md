@@ -1182,7 +1182,8 @@ the launcher or the drill.
 - The socket's own perimeter is off unless you arm it. `dsl41 run
   --access-map <file>` loads a role map that gives each OS peer one of
   three tiers; a configured path that is missing or invalid refuses
-  startup, and SIGHUP reloads it. A map that also names a socket group
+  startup, and SIGHUP reloads it once the socket answers (access-model
+  §7). A map that also names a socket group
   is what opens the run root to `0710` and the socket to `0660`; without
   one, the gate is live and the `0600` owner-only modes stand. Omit the
   option and nothing changes at all. `docs/access-model.md` is the
