@@ -453,8 +453,9 @@ class InitialStatusRow(NamedTuple):
 #: ON_NOEXEC is M21 path-level Skip.
 #:
 #: TOTAL over `ir.InitialStatus`, and the ONE place the fact is written
-#: (DL-152): the twin's exclusions read it, `lint.rule_l020` derives its
-#: skip set from `control` rather than hand-listing two statuses, and
+#: (DL-152): the twin's exclusions read it, `lint.rule_l020` keys its
+#: trigger on the skip set derived from `control` (its atom value reads
+#: AutoSys truth, one row per status, DL-281), and
 #: `tests/uc_oracle.py`'s module prose points here instead of restating it. A new
 #: `InitialStatus` member with no row here fails
 #: `test_every_initial_status_names_a_uc_control`, where it used to be a

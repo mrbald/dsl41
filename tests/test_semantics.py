@@ -35,6 +35,7 @@ from dsl41.classify import (
     classify,
 )
 from dsl41.cli import app
+from dsl41.conditions import ExitCodeAtom, StatusAtom, parse_condition
 from dsl41.ir import LoweringError, lower_source
 from dsl41.oracle_state import Event, JobRuntime
 from dsl41.period import (
@@ -728,6 +729,33 @@ def test_ice_lookback_affects_exactly_the_jobs_with_a_lookback_atom() -> None:
         "insert_job: bf\njob_type: b\nbox_failure: t(a, 0)\n"
     )
     assert {name for name, job in catalog.jobs.items() if affects(job, catalog)} == {"lb", "bf"}
+
+
+@pytest.mark.parametrize(
+    ("text", "under_true", "under_ordinary"),
+    [
+        ("s(a)", True, True),
+        ("d(a)", True, True),
+        ("n(a)", True, True),
+        ("f(a)", False, False),
+        ("t(a)", False, False),
+        ("e(a) = 0", False, False),
+        ("f(a, 0)", True, False),
+        ("t(a, 01.00)", True, False),
+        ("e(a, 01.00) = 0", True, False),
+        ("s(a, 0)", True, True),
+    ],
+)
+def test_iced_atom_truth_is_the_on_ice_row_under_each_switch_value(
+    text: str, under_true: bool, under_ordinary: bool
+) -> None:
+    """SEM-05/SEM-20, DL-243, DL-252: an ordinary atom follows the vendor
+    ON_ICE table; a lookback atom is pinned true only under
+    `ice-lookback=true`."""
+    atom = parse_condition(text)
+    assert isinstance(atom, (StatusAtom, ExitCodeAtom))
+    assert semantics.iced_atom_truth(atom, "true") is under_true
+    assert semantics.iced_atom_truth(atom, "ordinary") is under_ordinary
 
 
 def test_renewable_free_affects_exactly_the_renewable_requests_without_free() -> None:

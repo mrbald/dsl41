@@ -171,8 +171,9 @@ class DerivedEdge(BaseModel):
 
 
 def start_gates(graph: DerivedGraph) -> dict[str, list[DerivedEdge]]:
-    """The start-gate edges indexed by CONSUMER -- the one index L020, L021,
-    L022 and the cadence check's wake walk each read. DL-162 homed the
+    """The start-gate edges indexed by CONSUMER -- the one index L021, L022
+    and the cadence check's wake walk each read. L020 reads the condition
+    tree instead (DL-243, DL-281). DL-162 homed the
     predicate (`is_start_gate`), arch-review 2026-08-28 homed the index,
     and DL-185 moved it HERE: its inputs are all IR-G, and lint was only
     hosting it."""

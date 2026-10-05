@@ -18736,3 +18736,91 @@ relitigate an entry; append a new one.
   REVIEW. One Opus reviewer (refactor class): no blocker; its two low
   findings, a leftover placeholder and a silent pass for an unhandled
   adapter switch, are fixed and confirmed by the reviewer.
+- DL-281 The ON_ICE atom row is one helper, and lint reads an ON_NOEXEC
+  predecessor through its bypass (2026-10-05; semantics.py, oracle.py,
+  equiv.py, lint.py, rehearse_check.py, backend_uc.py, derive.py,
+  simulation_register_rows.py; autosys-semantics.md SEM-22 and §9 Q10,
+  ir-design.md §9 L020 row, stonebranch-semantics.md M19,
+  citation-index.md, simulation-coverage.md; tests/test_semantics.py,
+  tests/test_derive.py; narrows the lint reading of DL-243; architecture
+  review 2026-10-05, C1)
+  THE GAP. The truth of a job atom whose predecessor is ON_ICE was
+  written four times: `Oracle._atom_true`, equiv's `_eval_cond`, lint's
+  `_ice_atom_value` and rehearse_check's `genesis_truth`. DL-243 needed
+  four edits for one rule change, and Q10's answer would need four again.
+  Only the oracle reads the `ice-lookback` switch. DL-252 rules that the
+  static readers use the default, but that showed only as a missing
+  argument. The copies also differed in scope. Lint applied the ON_ICE
+  row to every producer that translates to a UC Skip, so to ON_NOEXEC
+  too. There a lookback-qualified f(), t() or exit-code atom read true,
+  through the SEM-05 blanket pin.
+  THE RULING. An advisor on Fable ruled. ON_NOEXEC is not an ON_ICE
+  state. The vendor reads a NOEXEC predecessor as INACTIVE until its own
+  start bypasses it to SUCCESS (SEM-22, DL-243). The oracle gets both
+  halves from the stored status, and equiv and `genesis_truth` already
+  match it. The SEM-05 pin and the `ice-lookback` switch apply to an
+  iced predecessor only (SEM-05, DL-252). A bypass never yields FAILURE,
+  TERMINATED or an exit code, so lint's reading was wrong in one corner:
+  lookback-qualified f(), t() and exit-code atoms against ON_NOEXEC. On
+  every other atom the two readings agree, so L020's other verdicts
+  stand. Lint's direction-1 coverage of ON_NOEXEC stays (M21, DL-151).
+  THE RULE. `semantics.iced_atom_truth(atom, ice_lookback)` is the ON_ICE
+  row, for an iced producer only. Under `ice-lookback=true` a
+  lookback-qualified atom is true. Otherwise success, done and
+  notrunning are true, and failure, terminated and exit-code atoms are
+  false. The oracle passes its switch value. equiv, `genesis_truth` and
+  lint pass `DEFAULTS.ice_lookback`, so DL-252 is visible at each call
+  site. The helper lives in semantics.py, beside the switch type, which
+  already imports the atom types from conditions.py.
+  The `# PENDING: Q10` marker moves with the row, from `_atom_true` to
+  `iced_atom_truth`. The register row `event:ON_ICE#lookback atom` now
+  cites and sites `semantics.iced_atom_truth`; Q10 in autosys-semantics
+  §9 and the citation index name the same place.
+  Lint reads an ON_NOEXEC producer through its own projection, with no
+  switch: an exit-code atom, or a failure or terminated atom, is false
+  whatever its lookback; every other atom is true. SEM-22 states this
+  projection for L020 only: `genesis_truth` reads an ON_NOEXEC seed as
+  never run, not as a bypass.
+  L020's trigger still keys on `SKIP_TRANSLATED`, the skip half of
+  `backend_uc.INITIAL_STATUS_CONTROL`. Its atom value is AutoSys truth,
+  so `_ice_atom_value` reads one row per status, ON_ICE and ON_NOEXEC.
+  `test_backend_uc.py` pins `SKIP_TRANSLATED` to those two statuses.
+  `rule_l020` reads the condition tree and never read the derived graph.
+  It moves from `GRAPH_RULES` to `RULES` and drops the graph argument.
+  Its findings now come after L019 in the report, in the IR-F block.
+  LINT CHANGE. One corner. A consumer whose condition is, for example,
+  `f(nx, 0)` with `nx` ON_NOEXEC, now fires L020's blocking direction
+  (2) instead of the original direction (1). The L020 messages, the
+  ir-design L020 row and the M19 row scope the lookback clause to
+  ON_ICE. The corpus header already scoped it to an iced producer and is
+  unchanged. No corpus fixture changes its findings; the corpus has no
+  ON_NOEXEC producer.
+  NO RUNTIME CHANGE. The oracle, equiv and `genesis_truth` read as
+  before. STATE_MACHINE_VERSION stays.
+  TESTS. test_semantics.py
+  `test_iced_atom_truth_is_the_on_ice_row_under_each_switch_value` covers
+  the row under both switch values. test_derive.py
+  `test_l020_noexec_lookback_atom_fires_the_blocking_direction` is the
+  trigger, over f(), t() and exit-code atoms with a lookback: direction
+  2, not 1. `test_l020_noexec_lookback_atom_on_a_bypass_status_runs_the_consumer`
+  is the non-trigger, over s(), d() and n() atoms with a lookback:
+  direction 1. The noexec twin is a unit test by choice, not a corpus
+  fixture, so the corpus counts stay put. The existing L020 tests call
+  the rule without a graph.
+  STATED LIMIT. The projection assumes the ON_NOEXEC predecessor's own
+  start arrives. One that never meets its start conditions stays
+  INACTIVE (DL-243, source 2). Lint keeps DL-151's direction-1 contract
+  on that half and does not model it.
+  NOT IN SCOPE. Q10 stays open. `_ice_cond_value`'s three-valued walk
+  is unchanged; this is not DL-185's declined And/Or/Paren merge.
+  EVIDENCE THAT WOULD CHANGE THIS. A vendor page saying lookback atoms
+  against a NOEXEC predecessor are ignored or always true, or that a
+  bypass records exit code 0.
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass,
+  the Fable pass in place of Codex at the owner's instruction. The scope
+  question was a Fable advisor ruling. The Opus reviewer diffed the old
+  and new L020 over 4608 generated catalogs: 324 verdicts change, every
+  one an ON_NOEXEC producer under a lookback f/t/e atom. Both reviewers
+  found the Q10 marker's old home still named in two docs; that and the
+  other doc findings are fixed and were confirmed by the reviewer that
+  raised them.
