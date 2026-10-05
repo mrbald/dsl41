@@ -2638,8 +2638,12 @@ def test_a_hidden_node_is_immune_to_the_marquee(driven_locks: Driven) -> None:
     _ready(d)
     _clear_selection(d)
     box = _rendered_bbox(d, "cy.$id('lk_h')")
-    d.page.evaluate("() => { cy.$id('lk_h').addClass('hidden'); }")
-    d.page.wait_for_timeout(200)
+    # The marquee reads the drawn-elements cache that cytoscape's next frame
+    # refreshes after a class change; drag only once that frame is drawn.
+    d.page.evaluate(
+        "() => new Promise(done => { cy.one('render', () => done());"
+        " cy.$id('lk_h').addClass('hidden'); })"
+    )
     try:
         _drag(
             d,
@@ -3435,8 +3439,13 @@ def test_short_narrow_graph_menu_scrolls_to_first_and_last_actions_without_zoom(
     d.page.wait_for_function("() => cy.zoom() !== 1")
     d.page.evaluate("() => { cy.zoom(1); cy.pan({x:0,y:0}); }")
     for x, y in ((20, 20), (180, 68), (310, 97), (310, 120)):
+        # Cytoscape applies a class change lazily, at its next frame, and its
+        # hit test reads the drawn-elements cache that frame refreshes. A
+        # right-click before that frame misses the just-unhidden C and opens
+        # the canvas menu. The move always draws, so the frame arrives.
         d.page.evaluate(
-            "p => { cy.nodes().unselect(); cy.$id('C').removeClass('hidden').position(p); }",
+            "p => new Promise(done => { cy.one('render', () => done());"
+            " cy.nodes().unselect(); cy.$id('C').removeClass('hidden').position(p); })",
             {"x": x, "y": y},
         )
         point = _client_point(d, "C")
