@@ -88,6 +88,7 @@ stateDiagram-v2
 - `test_dl256_force_start_of_a_failed_holder_reuses_its_units`
 - `test_dl256_held_units_never_overcommit_under_force_and_release`
 - `test_dl256_a_circular_wait_over_held_units_breaks_by_an_operator_act`
+- `test_dl256_releasing_the_blockers_own_held_unit_leaves_the_circular_wait`
 - `test_dl256_held_units_cross_the_seal_until_release_resource`
 - `test_dl256_a_row_that_is_not_live_may_carry_a_resources_held_units`
 - `test_preflight_resources_refuses_free_y_or_a_on_a_depletable`
