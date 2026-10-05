@@ -18824,3 +18824,64 @@ relitigate an entry; append a new one.
   found the Q10 marker's old home still named in two docs; that and the
   other doc findings are fixed and were confirmed by the reviewer that
   raised them.
+- DL-282 Architecture review of 2026-10-05: what was acted on and what
+  was declined (2026-10-05; reviewed commit 5097b59; DL-75's procedure)
+  THE REVIEW. scripts/arch_check.py reported a review due. The review ran
+  on 5097b59 in two halves: the runner and its contracts' code, and the
+  compiler, DSL, UC backend, viz, lint and tooling. It found 23 items;
+  one was found by both halves (switch value sets written twice).
+  ACTED. All behavior-preserving unless stated.
+  Compiler half: `classify(graph=)` had no caller, and held-unit edges
+  were added twice (C2). Rule 12 runs the shared value-tail path, and a
+  closed trailing comment now gets its own one-line span instead of
+  sharing its statement's growing span; render output is unchanged (C3).
+  `derive.local_job` and `JobRef.key` replace the hand-written
+  "defined here" checks and `name^INST` keys (C4). `--tier` and
+  `--direction` are Enums; typer's error wording and metavars replace the
+  hand-written ones, and the removed-viz-flag guidance now follows
+  typer's value check, as DL-75 did for `--format` (C6). Classify and
+  preflight normalise `res_type` through `capacity.resource_type`; the
+  pinned ResourceIR docstring keeps its wording and a field comment gives
+  the current reason (C7). Each absolute must time is parsed once (C8).
+  arch_check has one git helper and one lines-changed helper (C9a, C9b).
+  The DST switch value stays an enum across the timezones boundary
+  (C10). rehearse_check passes one interpretation record (C11). Minify
+  builds its four terminals from the condition grammar (C12). The ON_ICE
+  atom row is one helper, and lint's ON_NOEXEC reading is DL-281 (C1).
+  Runner half: one period-oracle reading and one replay-one-period helper
+  (R1, first half). `oracle_state.LIVE` replaces `seal.LIVE_STATUS` and
+  four inline tuples (R2). `BoundaryRefusal` carries `seal_refused` at the
+  boundary's 24 pre-PONR raise sites, and `read_backfill` raises
+  `BackfillRefused`, so DL-272's "tagged at their 24 raise sites" now
+  means typed raises, not a keyword at each site (R3). The profile
+  defaults come from one source (R4). One profile-drift walk (R5). One
+  exact-retry rule for the live and the offline seal (R6). The registry
+  names a switch's wired reader, DL-280 (R7). One confirmed-resume
+  refusal helper (R9). Each switch's value set is written once (R10, C5).
+  DECLINED.
+  C9(c): the two citing-doc sets in arch_check stay different. A test
+  named in a decision entry is frozen by design (DL-193). A module named
+  in an old entry is history, and old entries are never edited, so module
+  names are checked only where the text is live.
+  C13: the two `Klass` enums and two `classify` functions keep their
+  names. The module path tells them apart, and renaming them would churn
+  many modules and tests for little gain.
+  R8: the CLI resume gate stays beside the core gate. It also refuses a
+  `retry_horizon_us` drift and a sub-second FW interval rounding that the
+  core gate does not see; removing it would narrow refusals.
+  R1, second half: the manifest, bundle and carry assembly at the four
+  operator entry points stays as written. Each entry point has its own
+  refusal order, and the saving does not pay for the risk.
+  LOAD-BEARING, LEFT ALONE. Both halves named what looks complex and is
+  not: the vendor-irregular DST rule sets, the three-valued condition
+  walks (DL-185), DL-274's three fail-stop facts, the schema walk and
+  kind dispatcher (DL-137, DL-138), the IR schema pin, the simulation
+  register's literal rows, and citation density.
+  STAMP. main is stamped `arch-review/<timestamp>` at the reviewed commit
+  5097b59 once this entry merges.
+  REVIEW. The two halves were reviewed independently by an Opus reviewer
+  and a Fable advisor; the ON_NOEXEC scope was a Fable advisor ruling
+  (DL-281). Each fix slice had one Opus reviewer, and every finding was
+  fixed and confirmed by the reviewer that raised it. A Fable pass over
+  the wave-1 integration, in place of Codex at the owner's instruction,
+  found no material defect.
