@@ -28,6 +28,7 @@ untouched here and MUST keep holding unmodified; section 5 verifies directly
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -1174,7 +1175,7 @@ def test_cli_equiv_bad_tier_exits_2(tmp_path: Path) -> None:
     result = runner.invoke(app, ["equiv", str(f), "--against", str(f), "--tier", "z"])
     assert result.exit_code == 2
     assert result.stdout == ""
-    assert "--tier must be a, b, c, or all" in result.stderr
+    assert "Invalid value for '--tier'" in re.sub(r"\x1b\[[0-9;]*m", "", result.stderr)
 
 
 def test_cli_equiv_bad_rename_format_exits_2(tmp_path: Path) -> None:

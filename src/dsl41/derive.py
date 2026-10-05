@@ -81,6 +81,7 @@ from pydantic import BaseModel, field_validator, model_validator
 from dsl41.ast_jil import SourceSpan
 from dsl41.conditions import (
     And,
+    Atom,
     Cond,
     ExitCodeAtom,
     GlobalAtom,
@@ -197,7 +198,13 @@ def local_producer(edge: DerivedEdge, catalog: CatalogIR) -> str | None:
     None for a global (no job), for a cross-instance producer, and for a job
     the catalog does not define -- three different reasons, one answer,
     because every caller wants the same thing: a name it can look up."""
-    atom = edge.atom
+    return local_job(edge.atom, catalog)
+
+
+def local_job(atom: Atom, catalog: CatalogIR) -> str | None:
+    """`local_producer`'s test on a bare atom, for the readers that hold an
+    atom and no edge: the catalog job it names, or None for a global, a
+    cross-instance ref, or a job the catalog does not define (DL-162a)."""
     if isinstance(atom, GlobalAtom) or atom.job.instance is not None:
         return None
     return atom.job.name if atom.job.name in catalog.jobs else None
