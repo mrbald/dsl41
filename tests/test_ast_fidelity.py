@@ -646,6 +646,24 @@ def test_rule_4b_guard_covers_continuation_lines() -> None:
         parse("insert_job: j\nstart_times: 10:00,\n 11:00 owner: bob\n")
 
 
+def test_closed_trailing_comment_spans_only_its_own_line() -> None:
+    """A closed `/* */` after a value owns a one-line span, not the growing
+    span of the statement or continued attribute it trails."""
+    stmt = parse("insert_job: j /* t */\njob_type: CMD\ncommand: x\n").statements[0]
+    assert (stmt.span.line_start, stmt.span.line_end) == (1, 3)
+    (comment,) = stmt.comments
+    assert (comment.span.line_start, comment.span.line_end) == (1, 1)
+
+    attr = (
+        parse("insert_job: j\nrun_calendar: cal /* t */\n continued\njob_type: CMD\n")
+        .statements[0]
+        .attrs[0]
+    )
+    assert (attr.span.line_start, attr.span.line_end) == (2, 3)
+    (comment,) = attr.comments
+    assert (comment.span.line_start, comment.span.line_end) == (2, 2)
+
+
 def test_rule_4b_continuation_guard_closes_the_run_calendar_lane() -> None:
     """The one fold that reached the backend with no downstream check: a
     run_calendar continuation in a calendar-free set. L018 stays quiet when

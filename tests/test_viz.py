@@ -1136,7 +1136,19 @@ def test_cli_viz_bad_direction_exits_2() -> None:
         app, ["viz", "--direction", "diagonal", str(CORPUS_DIR / "sem10_box_basic.jil")]
     )
     assert result.exit_code == 2
-    assert "--direction" in result.stderr
+    assert "--direction" in re.sub(r"\x1b\[[0-9;]*m", "", result.stderr)
+
+
+def test_cli_viz_direction_values_are_the_renderers_directions() -> None:
+    """`VizDirection` is cli_compile's closed set for `--direction`; the
+    command hands its value to the renderers under a cast, so the set must
+    stay `viz.Direction` plus auto."""
+    from typing import get_args
+
+    from dsl41.cli_compile import VizDirection
+    from dsl41.viz import Direction
+
+    assert {d.value for d in VizDirection} == {*get_args(Direction), "auto"}
 
 
 def test_cli_viz_lowering_refusal_exits_2() -> None:

@@ -574,6 +574,12 @@ class ResourceIR(BaseModel):
     backend lands, and typing amount/res_type before a consumer exists would
     be speculation."""
 
+    # The docstring above is in the pinned IR-F schema (arch_check.IR_SCHEMA_PIN),
+    # so it keeps its v1 wording. The current reason for the opaque fields:
+    # `res_type` is carried verbatim. The runtime readers normalise it (classify
+    # and capacity through `capacity.resource_type`, preflight inline); equiv
+    # compares it as written. A malformed `amount` or an unknown `res_type` is refused
+    # at preflight, not at lowering (DL-50).
     name: str
     res_type: str | None = None  # JIL `res_type:` -- verbatim
     attrs: dict[str, str] = {}
@@ -1450,17 +1456,17 @@ class _Lowerer:
             # ahead of the current calendar day" (DL-253). The hour is
             # checked here, before MustTime's own bound, so the message
             # names the limit rather than a pydantic constraint.
-            wide = _HHMM_RE.fullmatch(t.strip().replace("\\:", ":"))
-            if wide is not None and int(wide.group(1)) > 71:
-                self.err(
-                    f"{attr.key}: {t.strip()}: hour {int(wide.group(1))} is outside the"
-                    " vendor's Limits of 00:00-71:59 for the absolute form (SEM-34: two"
-                    " calendar days ahead of the current calendar day)",
-                    attr.span,
-                )
-                return None
             try:
-                times.append(MustTime.parse(t))
+                hour, minute = _parse_hhmm(t)
+                if hour > 71:
+                    self.err(
+                        f"{attr.key}: {t.strip()}: hour {hour} is outside the"
+                        " vendor's Limits of 00:00-71:59 for the absolute form (SEM-34: two"
+                        " calendar days ahead of the current calendar day)",
+                        attr.span,
+                    )
+                    return None
+                times.append(MustTime(hour=hour, minute=minute))
             except ValueError as exc:
                 self.err(f"{attr.key}: {exc}", attr.span)
                 return None

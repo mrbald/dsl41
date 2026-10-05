@@ -59,7 +59,7 @@ from typing import Any, Final, Literal
 from pydantic import BaseModel, ConfigDict
 
 from dsl41.autocal import CalendarRuleError, semantic_key, standard_rows
-from dsl41.capacity import CapacityPool
+from dsl41.capacity import CapacityPool, resource_type
 from dsl41.conditions import Cond, GlobalAtom, iter_atoms
 from dsl41.derive import BoxTree, derive_graph
 from dsl41.equiv import canonical_cond
@@ -409,9 +409,9 @@ def _node_values(side: Baseline) -> dict[str, Any]:
         # pair says everything ss10.2 names
         values[RESOURCE + name] = (
             _capacity(resource.capacity_units),
-            # exactly as `capacity.release_policy` reads it: stripped and
-            # upper-cased, so `r` and `R` are one renewable policy
-            (resource.res_type or "").strip().upper() or None,
+            # `capacity.resource_type`: stripped and upper-cased, so `r` and
+            # `R` are one renewable policy
+            resource_type(resource) or None,
         )
     for name, machine in catalog.machines.items():
         # "the fields resolution actually reads": the load bucket's size,
@@ -476,9 +476,7 @@ class ClassificationGraph:
     A carried row's held units are edges too (DL-256): a job holding units
     of a resource depends on that resource whether or not it still declares
     it, so a dependent box's forward closure reaches a resource change
-    through the holder. A caller passing a prebuilt `graph` into `classify`
-    must have built it with the same `carried` `classify` is given, or the
-    held edges and the carried state disagree."""
+    through the holder."""
 
     def __init__(
         self, closing: Baseline, opening: Baseline, *, carried: CarriedState | None = None
@@ -822,7 +820,6 @@ def classify(
     closing: Baseline,
     opening: Baseline,
     carried: CarriedState,
-    graph: ClassificationGraph | None = None,
 ) -> Classification:
     """ss10's verdict over one boundary: C1 (`closing`) against C2
     (`opening`) at the carried state.
@@ -833,8 +830,7 @@ def classify(
     are in that union because a ghost is retained: at the next boundary it
     is in neither catalog, and a classifier reading the catalogs alone would
     stop listing it while it was still there."""
-    if graph is None:
-        graph = ClassificationGraph(closing, opening, carried=carried)
+    graph = ClassificationGraph(closing, opening, carried=carried)
     names = sorted(set(closing.catalog.jobs) | set(opening.catalog.jobs) | set(carried.jobs))
     tiers = _tiers(closing.catalog, carried, names)
     short = _oversubscribed(opening, carried)
@@ -843,9 +839,10 @@ def classify(
     changed_not_live: list[str] = []
     for name in names:
         tier = tiers[name]
-        # DL-256: the resources the row holds are dependencies too
+        # DL-256: the resources the row holds are dependencies too; the graph
+        # carries them as edges, so `changed` already holds them
         held_moved = _held_resources(carried.jobs.get(name, CarriedJob()).row) & graph.changed
-        changed = tuple(sorted(set(graph.moved(JOB + name)) | held_moved))
+        changed = graph.moved(JOB + name)
         #: "removed" is about what C2 can dispatch, so it reads the OPENING
         #: catalog alone: a job C1 dropped and a job dropped two periods ago
         #: are the same fact to a row that is still live under it

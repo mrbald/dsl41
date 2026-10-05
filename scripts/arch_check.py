@@ -695,43 +695,23 @@ def tracked_python_files(root: Path | None = None) -> set[str]:
     fails, is absent, or `root` is not the top of its own repository, the
     check walks the four trees and says so on stderr."""
     root = ROOT if root is None else root
-    out = None
-    try:
-        # a tree nested in another repository would list nothing from it
-        top = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-            timeout=20,
-            check=False,
+    # a tree nested in another repository would list nothing from it
+    top = _git("-C", str(root), "rev-parse", "--show-toplevel")
+    listing = None
+    if top is not None and Path(top).resolve() == root.resolve():
+        listing = _git(
+            "-C",
+            str(root),
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--",
+            *(f"{tree}/*.py" for tree in _PY_TREES),
         )
-        owns = top.returncode == 0 and Path(top.stdout.strip()).resolve() == root.resolve()
-    except (OSError, subprocess.SubprocessError):
-        owns = False
-    try:
-        if not owns:
-            raise OSError("not the root of a git repository")
-        out = subprocess.run(
-            [
-                "git",
-                "ls-files",
-                "-z",
-                "--cached",
-                "--others",
-                "--exclude-standard",
-                "--",
-                *(f"{tree}/*.py" for tree in _PY_TREES),
-            ],
-            cwd=root,
-            capture_output=True,
-            text=True,
-            timeout=20,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        out = None
-    if out is not None and out.returncode == 0:
-        return {name for name in out.stdout.split("\0") if name}
+    if listing is not None:
+        return {name for name in listing.split("\0") if name}
     print(
         "note  not a git top level, or git failed; module citations resolve against a tree walk",
         file=sys.stderr,
@@ -1040,6 +1020,16 @@ def _git(*args: str) -> str | None:
     return out.stdout.strip() if out.returncode == 0 else None
 
 
+def _lines_changed_since(ref: str, *paths: str) -> int | None:
+    """Insertions plus deletions between `ref` and HEAD, under `paths` when
+    given; None when git cannot say."""
+    scope = ("--", *paths) if paths else ()
+    stat = _git("diff", "--shortstat", ref, "HEAD", *scope)
+    if stat is None:
+        return None
+    return sum(int(n) for n in re.findall(r"(\d+) (?:insertion|deletion)", stat))
+
+
 def changed_lines_since_review() -> tuple[int, str] | None:
     """(changed lines, what we counted from) since the most recent
     arch-review/<date> tag, or the branch point when there is no such tag."""
@@ -1049,10 +1039,9 @@ def changed_lines_since_review() -> tuple[int, str] | None:
         ref = _git("merge-base", "HEAD", "main")
     if not ref:
         return None
-    stat = _git("diff", "--shortstat", ref, "HEAD")
-    if stat is None:
+    changed = _lines_changed_since(ref)
+    if changed is None:
         return None
-    changed = sum(int(n) for n in re.findall(r"(\d+) (?:insertion|deletion)", stat))
     return changed, ref
 
 
@@ -1096,11 +1085,7 @@ def spec_review_status(root: Path = ROOT) -> list[SpecStatus] | None:
         rel = str(doc.relative_to(root))
         tags = _git("tag", "--list", f"spec-review/{doc.stem}/*", "--sort=-creatordate")
         tag = tags.splitlines()[0] if tags else None
-        changed: int | None = None
-        if tag is not None:
-            stat = _git("diff", "--shortstat", tag, "HEAD", "--", "src")
-            if stat is not None:
-                changed = sum(int(n) for n in re.findall(r"(\d+) (?:insertion|deletion)", stat))
+        changed = _lines_changed_since(tag, "src") if tag is not None else None
         due = tag is None or changed is None or changed > REVIEW_DIFF_LINES
         statuses.append(SpecStatus(rel, tag, changed, due))
     return statuses

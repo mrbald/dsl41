@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, cast
 
 import typer
 
@@ -30,6 +30,7 @@ from dsl41.placeholders import PlaceholderError, load_properties, substitute
 if TYPE_CHECKING:  # type-only: equiv's runtime import stays deferred (below)
     from dsl41.minify import MinifyRefusal
     from dsl41.equiv import TierAResult, TierBCatalogResult, TierCResult
+    from dsl41.viz import Direction
 
 
 def _emit(body: str, out: "Path | None") -> None:
@@ -124,12 +125,21 @@ def _print_tier_c(result: TierCResult) -> bool:
     return not result.equivalent
 
 
+class EquivTier(str, Enum):
+    """`equiv --tier`: one tier, or all three."""
+
+    a = "a"
+    b = "b"
+    c = "c"
+    all = "all"
+
+
 def equiv(
     files: list[Path] = typer.Argument(..., help="JIL files of catalog A."),
     against: list[Path] = typer.Option(
         ..., "--against", "-b", help="JIL files of catalog B. Repeatable."
     ),
-    tier: str = typer.Option("all", "--tier", help="Tiers to run: a, b, c or all."),
+    tier: EquivTier = typer.Option(EquivTier.all, "--tier", help="Tiers to run: a, b, c or all."),
     rename: list[str] = typer.Option(
         [], "--rename", help="Job name mapping from A to B as OLD=NEW. Repeatable."
     ),
@@ -165,8 +175,6 @@ def equiv(
         equivalent_tier_c,
     )
 
-    if tier not in ("a", "b", "c", "all"):
-        raise typer.Exit(refuse(f"--tier must be a, b, c, or all, got {tier!r}"))
     rename_map: dict[str, str] = {}
     for pair in rename:
         old, sep, new = pair.partition("=")
@@ -183,15 +191,15 @@ def equiv(
             )
             raise typer.Exit(0)
         divergent = False
-        if tier in ("a", "all"):
+        if tier in (EquivTier.a, EquivTier.all):
             divergent |= _print_tier_a(
                 equivalent_tier_a(catalog_a, catalog_b, rename=rename_map, case_fold=case_fold)
             )
-        if tier in ("b", "all"):
+        if tier in (EquivTier.b, EquivTier.all):
             divergent |= _print_tier_b(
                 equivalent_tier_b(catalog_a, catalog_b, rename=rename_map, case_fold=case_fold)
             )
-            if tier == "b":
+            if tier is EquivTier.b:
                 # tier b reads set(A.jobs) & set(B.jobs) and compares edges,
                 # not the node list: two disjoint catalogs can both come back
                 # equivalent. Tier (a) owns the job-set question (ir-design
@@ -201,7 +209,7 @@ def equiv(
                     " a job present in one catalog alone is tier (a)'s question"
                     " (ir-design ss6) -- run --tier a or --tier all to settle it"
                 )
-        if tier in ("c", "all"):
+        if tier in (EquivTier.c, EquivTier.all):
             divergent |= _print_tier_c(
                 equivalent_tier_c(
                     catalog_a,
@@ -440,6 +448,15 @@ def resolve(
     _emit(merged, out)
 
 
+class VizDirection(str, Enum):
+    """`viz --direction`: the chart directions plus auto, which picks one per
+    component. The values are `viz.Direction` and "auto"."""
+
+    auto = "auto"
+    LR = "LR"
+    TD = "TD"
+
+
 class VizFormat(str, Enum):
     """The five viz outputs, exclusive by construction (DL-75). They used to
     be three booleans -- eight combinations for five modes, plus a precedence
@@ -532,8 +549,8 @@ def viz(
         " when this flag is given.",
         show_default="12; no folds under --format explore",
     ),
-    direction: str = typer.Option(
-        "auto",
+    direction: VizDirection = typer.Option(
+        VizDirection.auto,
         "--direction",
         help="Chart direction: auto, LR or TD. auto chooses per component in the"
         " report, html and explore formats, and means LR for chart and html-chart.",
@@ -580,8 +597,9 @@ def viz(
     from dsl41.viz import DEFAULT_COLLAPSE_THRESHOLD, to_markdown, to_mermaid
 
     _refuse_removed_viz_flags(whole_graph, html, explore)
-    if direction not in ("auto", "LR", "TD"):
-        raise typer.Exit(refuse(f"--direction must be auto, LR, or TD, got {direction!r}"))
+    # The Enum is the closed set; `Direction | auto` is the same set the
+    # renderers take (a test keeps the two equal).
+    chosen = cast("Direction | Literal['auto']", direction.value)
     if output_format is VizFormat.explore:
         _refuse_undeliverable_viz_flags(fixed_scale=fixed_scale)
     catalog = load_catalog_or_exit_2(files, permit_unknown, properties)
@@ -597,7 +615,7 @@ def viz(
         report = to_explore_html(
             catalog,
             title=title,
-            direction=direction,  # type: ignore[arg-type]  # validated above
+            direction=chosen,
             collapse_threshold=collapse_threshold,
         )
     elif output_format is VizFormat.html:
@@ -607,7 +625,7 @@ def viz(
             catalog,
             title=title,
             collapse_threshold=collapse_threshold,
-            direction=direction,  # type: ignore[arg-type]  # validated above
+            direction=chosen,
             include_singletons=include_singletons,
         )
     elif output_format is VizFormat.html_chart:
@@ -617,13 +635,13 @@ def viz(
             catalog,
             title=title,
             collapse_threshold=collapse_threshold,
-            direction=direction,  # type: ignore[arg-type]  # validated above
+            direction=chosen,
         )
     elif output_format is VizFormat.chart:
         report = to_mermaid(
             catalog,
             collapse_threshold=collapse_threshold,
-            direction="LR" if direction == "auto" else direction,  # type: ignore[arg-type]
+            direction="LR" if chosen == "auto" else chosen,
             elk=elk,
             fixed_scale=fixed_scale,
         )
@@ -632,7 +650,7 @@ def viz(
             catalog,
             title=title,
             collapse_threshold=collapse_threshold,
-            direction=direction,  # type: ignore[arg-type]  # validated above
+            direction=chosen,
             include_singletons=include_singletons,
             elk=elk,
             fixed_scale=fixed_scale,

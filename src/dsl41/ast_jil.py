@@ -553,7 +553,6 @@ class _Scanner:
                 sep = rest[: len(rest) - len(rest.lstrip(" \t"))]
                 candidate = rest[len(sep) :]
                 span = self._span(i, i)
-                k = i
                 # Rule 12 (DL-245): the vendor's "JIL Syntax Rules" rule 8
                 # scopes the literal <auto_blobt> meta-tag to the blob_input
                 # attribute, anchored at the value's own start ("blob_input:
@@ -562,7 +561,7 @@ class _Scanner:
                 # comment, or a quoted `"<auto_blobt>"`, must still go
                 # through the normal rule-4b/rule-5 handling below.
                 blob_open = key.lower() == "blob_input" and candidate.startswith(_BLOB_OPEN)
-                literal_prefix_lines = 0
+                literal, tail, k = "", candidate, i
                 if blob_open:
                     # Rule 12: an open <auto_blobt> meta-tag makes every
                     # character up to its closer literal -- "JIL does not
@@ -579,71 +578,48 @@ class _Scanner:
                     # it runs through the ordinary value-tail pipeline below,
                     # exactly like any attribute's value.
                     literal, tail, k = self._scan_blob_literal(i, candidate)
-                    literal_prefix_lines = literal.count("\n")
-                    # `at_start=False`: offset 0 of `tail` is glued to the
-                    # closer's own `>` (DL-245), a real non-whitespace
-                    # character the split/mask walks never see -- a `/*`
-                    # glued there opens nothing (rule 5), so it must not be
-                    # read as a legitimate comment opener just because it
-                    # sits at `tail`'s own offset 0.
-                    tail_value, gap, ctext, cpost, copen = _split_trailing_comment(
-                        tail, at_start=False
-                    )
-                    value = literal + tail_value
-                    pair_source = tail_value
-                    pair_source_at_start = False
-                    closer_span = self._span(k, k)
-                    if copen:
-                        tc, k = self._scan_block_comment(k, gap, ctext, [])
-                        tc.attachment = "trailing"
-                        tc.trailing_block = True
-                        trailing: Comment | None = tc
-                    else:
-                        trailing = (
-                            Comment(
-                                text=ctext,
-                                span=closer_span,
-                                attachment="trailing",
-                                indent=gap,
-                                post=cpost,
-                                # The region can span many lines, so a closed
-                                # (single-line) tail comment rides the LAST
-                                # value line, not the first -- the same
-                                # placement `trailing_block` gives a rule-5
-                                # multi-line opener (DL-161).
-                                trailing_block=True,
-                            )
-                            if ctext
-                            else None
-                        )
+                literal_prefix_lines = literal.count("\n")
+                # `at_start=not blob_open`: after a blob closer, offset 0 of
+                # `tail` is glued to the closer's own `>` (DL-245), a real
+                # non-whitespace character the split/mask walks never see --
+                # a `/*` glued there opens nothing (rule 5), so it must not be
+                # read as a legitimate comment opener just because it sits at
+                # `tail`'s own offset 0.
+                tail_value, gap, ctext, cpost, copen = _split_trailing_comment(
+                    tail, at_start=not blob_open
+                )
+                value = literal + tail_value
+                if copen:
+                    # Rule 5 (DL-161): the trailing marker opens a multi-line
+                    # comment. Its body lines are consumed HERE, by the same
+                    # walk a full-line comment uses, so the scan loop never
+                    # sees them: the rule-6 continuation branch and its
+                    # seeded 4b detector (DL-160) run only on true value
+                    # lines. Open at EOF is the loud `unterminated block
+                    # comment` error at the opener line (the closer's line
+                    # after a blob region).
+                    tc, k = self._scan_block_comment(k, gap, ctext, [])
+                    tc.attachment = "trailing"
+                    tc.trailing_block = True
+                    trailing: Comment | None = tc
                 else:
-                    value, gap, ctext, cpost, copen = _split_trailing_comment(candidate)
-                    pair_source = value
-                    pair_source_at_start = True
-                    if copen:
-                        # Rule 5 (DL-161): the trailing marker opens a multi-line
-                        # comment. Its body lines are consumed HERE, by the same
-                        # walk a full-line comment uses, so the scan loop never
-                        # sees them: the rule-6 continuation branch and its
-                        # seeded 4b detector (DL-160) run only on true value
-                        # lines. Open at EOF is the loud `unterminated block
-                        # comment` error at the opener line.
-                        tc, k = self._scan_block_comment(i, gap, ctext, [])
-                        tc.attachment = "trailing"
-                        tc.trailing_block = True
-                        trailing = tc
-                    else:
-                        trailing = (
-                            Comment(
-                                text=ctext,
-                                span=span,
-                                attachment="trailing",
-                                indent=gap,
-                                post=cpost,
-                            )
-                            if ctext
-                            else None
+                    trailing = (
+                        Comment(
+                            text=ctext,
+                            span=self._span(k, k),
+                            attachment="trailing",
+                            indent=gap,
+                            post=cpost,
+                            # A blob region can span many lines, so a closed
+                            # (single-line) tail comment rides the LAST value
+                            # line, not the first -- the same placement
+                            # `trailing_block` gives a rule-5 multi-line
+                            # opener (DL-161).
+                            trailing_block=blob_open,
                         )
+                        if ctext
+                        else None
+                    )
                 comments, blanks, pend_c, pend_b = pend_c, pend_b, [], []
                 if key.lower() in SUBCOMMANDS:
                     cur = self._make_statement(
@@ -676,7 +652,7 @@ class _Scanner:
                             self.file,
                             i + 1,
                         )
-                    # `pair_source` is the whole value for an ordinary
+                    # `tail_value` is the whole value for an ordinary
                     # attribute, and just the tail after the closer for a
                     # rule-12 literal region (DL-245): the region itself is
                     # exempt from rule 4b by the vendor's own words, but text
@@ -685,7 +661,7 @@ class _Scanner:
                     # `at_start=False` there too (the tail's own offset 0 is
                     # glued to the closer's `>`, so a glued `/*` there must
                     # not be masked as a closed comment, hiding a real pair).
-                    masked = _mask_closed_blocks(pair_source, at_start=pair_source_at_start)
+                    masked = _mask_closed_blocks(tail_value, at_start=not blob_open)
                     if (pair := _find_inline_pair(masked)) is not None:
                         # Rule 4b (DL-30): JIL permits several `attr: value`
                         # statements on one line; swallowing the second pair

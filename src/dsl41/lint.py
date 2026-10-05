@@ -107,7 +107,7 @@ from dsl41.conditions import (
     iter_atoms,
     lookback_pitfalls,
 )
-from dsl41.derive import DerivedGraph, derive_graph, local_producer, start_gates
+from dsl41.derive import DerivedGraph, derive_graph, local_job, local_producer, start_gates
 from dsl41.ir import TIME_CLUSTER, CatalogIR, ExecSpec, FwSpec, unquote_jil_value
 
 Severity = Literal["error", "warn", "info"]
@@ -953,9 +953,7 @@ def _ice_atom_value(catalog: CatalogIR, atom: StatusAtom | ExitCodeAtom) -> str:
     the open Q10 question) regardless of kind. An ORDINARY atom (no
     lookback at all) follows the narrower table: success/done/notrunning
     true, failure/terminated/exitcode false."""
-    if atom.job.instance is not None:
-        return "unknown"
-    local = atom.job.name if atom.job.name in catalog.jobs else None
+    local = local_job(atom, catalog)
     if local is None or catalog.jobs[local].sem.initial_status not in SKIP_TRANSLATED:
         return "unknown"
     if atom.lookback is not None:
@@ -1047,23 +1045,21 @@ def rule_l020(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
             continue
         cond = job.sem.condition.cond
         local_atoms = [
-            atom
+            (atom, local)
             for atom in iter_atoms(cond)
-            if not isinstance(atom, GlobalAtom)
-            and atom.job.instance is None
-            and atom.job.name in catalog.jobs
+            if not isinstance(atom, GlobalAtom) and (local := local_job(atom, catalog)) is not None
         ]
         iced_atoms = [
-            atom
-            for atom in local_atoms
-            if catalog.jobs[atom.job.name].sem.initial_status in SKIP_TRANSLATED
+            (atom, local)
+            for atom, local in local_atoms
+            if catalog.jobs[local].sem.initial_status in SKIP_TRANSLATED
         ]
         if not iced_atoms:
             continue
         value = _ice_cond_value(catalog, cond)
         if value == "false":
             blocked = sorted(
-                {atom.job.name for atom in iced_atoms if _ice_atom_value(catalog, atom) == "false"}
+                {local for atom, local in iced_atoms if _ice_atom_value(catalog, atom) == "false"}
             )
             if not blocked:
                 continue
@@ -1089,7 +1085,7 @@ def rule_l020(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
             continue  # (2) fired; (1)'s premise (AutoSys runs it) cannot also hold
         if value != "true":
             continue
-        sources = sorted({atom.job.name for atom in local_atoms})
+        sources = sorted({local for _atom, local in local_atoms})
         if not all(catalog.jobs[src].sem.initial_status in SKIP_TRANSLATED for src in sources):
             continue  # a live predecessor converges with UC -- not this divergence
         listed = ", ".join(repr(src) for src in sources)
