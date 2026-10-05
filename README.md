@@ -39,6 +39,8 @@ Its frozen contracts are
 [docs/period-model.md](docs/period-model.md),
 [docs/protocol-evolution.md](docs/protocol-evolution.md),
 and [docs/access-model.md](docs/access-model.md).
+A proposed HTTP and WebSocket gateway is specified in
+[docs/gateway.md](docs/gateway.md); nothing of it is built.
 
 Agent setup, verification commands, and cross-vendor review recipes are in
 [docs/agent-workflow.md](docs/agent-workflow.md).
