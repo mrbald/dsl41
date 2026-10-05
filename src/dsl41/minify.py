@@ -146,6 +146,7 @@ from dsl41.conditions import (
     escape_job_name,
     iter_atoms,
     parse_condition,
+    terminal_pattern,
     unescape_job_name,
 )
 from dsl41.ir import (
@@ -431,13 +432,15 @@ def _job_type_of(stmt: JilStatement) -> str | None:
 
 # ------------------------------------------------------------ conditions
 
-#: JOB_NAME and GLOBAL_NAME as condition.lark spells them; the instance suffix
-#: and the comparand tail likewise. Matching the grammar's own character
-#: classes is what keeps the rewrite byte-exact outside the identifier.
-_JOB_NAME_RE = re.compile(r"(?:[^\s(),^&|:\\]|\\:)+")
-_INSTANCE_RE = re.compile(r"[A-Za-z0-9_#@$]+")
-_GLOBAL_NAME_RE = re.compile(r"[^\s(),=<>!&|]+")
-_COMPARAND_RE = re.compile(r"\)\s*(?:!=|<=|>=|=|<|>)\s*(\"[^\"]*\"|[^\s()&|]+)")
+#: condition.lark's own terminals: JOB_NAME, INSTANCE_NAME, GLOBAL_NAME, and the
+#: comparand tail from CMP_OP, QUOTED and BARE_VALUE. Matching the grammar's own
+#: character classes is what keeps the rewrite byte-exact outside the identifier.
+_JOB_NAME_RE = re.compile(terminal_pattern("JOB_NAME"))
+_INSTANCE_RE = re.compile(terminal_pattern("INSTANCE_NAME"))
+_GLOBAL_NAME_RE = re.compile(terminal_pattern("GLOBAL_NAME"))
+_COMPARAND_RE = re.compile(
+    r"\)\s*{}\s*({}|{})".format(*map(terminal_pattern, ("CMP_OP", "QUOTED", "BARE_VALUE")))
+)
 
 
 def _splice(text: str, start: int, end: int, replacement: str) -> str:

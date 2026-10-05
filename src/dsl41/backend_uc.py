@@ -281,7 +281,7 @@ def render_migration_report(catalog: CatalogIR, graph: DerivedGraph | None = Non
     if graph.external_boundary:
         lines += ["", "## External boundary (M33 — cross-instance producers)", ""]
         for ref in graph.external_boundary:
-            lines.append(f"- `{ref.name}^{ref.instance}`")
+            lines.append(f"- `{ref.key}`")
     if calendars:
         lines += [
             "",

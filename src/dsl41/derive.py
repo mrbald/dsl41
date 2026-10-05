@@ -618,7 +618,7 @@ def _edge_for_ref(
                 " a migration design decision, not a translation (SEM-07)",
             )
         return DerivedEdge(
-            src=f"{atom.job.name}^{atom.job.instance}",
+            src=atom.job.key,
             dst=ref.dst,
             via=via,
             atom=atom,

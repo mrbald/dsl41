@@ -1112,6 +1112,7 @@ def _emit_cadence_check(
 
     from dsl41.derive import derive_graph
     from dsl41.rehearse_check import (
+        Interpretation,
         compare,
         expected_bounds,
         fail_sweep_producers,
@@ -1126,14 +1127,10 @@ def _emit_cadence_check(
         for name in catalog.jobs
     }
     graph = derive_graph(catalog)
-    ticks = scheduled_ticks(
-        catalog,
-        start=start_dt,
-        horizon=horizon,
-        default_tz=timezone,
-        tz_aliases=tz_aliases,
-        semantics=engine.oracle.semantics,
+    reading = Interpretation(
+        default_tz=timezone, tz_aliases=tz_aliases, semantics=engine.oracle.semantics
     )
+    ticks = scheduled_ticks(catalog, start=start_dt, horizon=horizon, reading=reading)
     bounds = expected_bounds(
         catalog,
         graph,
@@ -1162,9 +1159,7 @@ def _emit_cadence_check(
                 events,
                 start=start_dt,
                 horizon=horizon,
-                default_tz=timezone,
-                tz_aliases=tz_aliases,
-                semantics=engine.oracle.semantics,
+                reading=reading,
                 producers=fail_sweep_producers(catalog, graph),
                 parked=parked_fw,
                 progress=progress,
@@ -1181,9 +1176,7 @@ def _emit_cadence_check(
                 events,
                 start=start_dt,
                 horizon=horizon,
-                default_tz=timezone,
-                tz_aliases=tz_aliases,
-                semantics=engine.oracle.semantics,
+                reading=reading,
                 injected_start=injected_start,
                 injected_force=injected_force,
                 policy=policy,
@@ -1944,10 +1937,9 @@ def _run_period(
     means."""
     from dsl41.oracle import Oracle
     from dsl41.oracle_state import OracleError
-    from dsl41.period import default_tz_of, opening_at, switches_of, tz_aliases_of
+    from dsl41.period import oracle_reading
     from dsl41.runner_clock import EngineError
-    from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, seed_local_executor
-    from dsl41.runner_journal import replay_inputs
+    from dsl41.runner_journal import replay_period
 
     catalog, carried = opened
     named = f"{where}: " if where else ""
@@ -1957,21 +1949,9 @@ def _run_period(
     # The semantic switches come from the same pin (DL-252), or the replay
     # would read a condition differently from the engine that wrote the log.
     # The base zone comes from it too (DL-253).
-    oracle = Oracle(
-        catalog,
-        carried=carried,
-        default_tz=default_tz_of(profile),
-        tz_aliases=tz_aliases_of(profile),
-        semantics=switches_of(profile),
-    )
-    # reproducing a log means reproducing the genesis the engine replayed it
-    # onto, not only the catalog: a routing-table input lands on a table that
-    # already holds this engine's own executor (concurrency-model ss8), and a
-    # replay without it would decide "no such host" where the run decided
-    # otherwise. The stamp only reaches `last_contact`, which no input reads.
-    seed_local_executor(oracle.store, LOCAL_EXECUTOR_ID, at=opening_at(records[0]))
+    oracle = Oracle(catalog, carried=carried, **oracle_reading(profile))
     try:
-        replay_inputs(oracle, records)
+        replay_period(oracle, records)
     except (OracleError, EngineError) as exc:
         raise typer.Exit(refuse(exc, prefix=f"{named}replay failed")) from exc
     for entry in oracle.trace():

@@ -576,9 +576,9 @@ class ResourceIR(BaseModel):
 
     # The docstring above is in the pinned IR-F schema (arch_check.IR_SCHEMA_PIN),
     # so it keeps its v1 wording. The current reason for the opaque fields:
-    # `res_type` is carried verbatim. The runtime readers normalise it (classify
-    # and capacity through `capacity.resource_type`, preflight inline); equiv
-    # compares it as written. A malformed `amount` or an unknown `res_type` is refused
+    # `res_type` is carried verbatim. The runtime readers (classify, capacity and
+    # preflight) normalise it through `capacity.resource_type`; equiv compares it
+    # as written. A malformed `amount` or an unknown `res_type` is refused
     # at preflight, not at lowering (DL-50).
     name: str
     res_type: str | None = None  # JIL `res_type:` -- verbatim

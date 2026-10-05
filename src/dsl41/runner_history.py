@@ -139,19 +139,15 @@ from dsl41.period import (
     disagreements,
     is_opening,
     job_fingerprints,
-    opening_at,
     read_period_manifest,
-    switches_of,
-    tz_aliases_of,
-    default_tz_of,
+    oracle_reading,
     check_manifest_against_segment,
     SEGMENT_FIELDS,
 )
 from dsl41.runner_adapters import load_json, spool_names_run
 from dsl41.runner_admission import ApplyResult
 from dsl41.runner_clock import EngineError
-from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, seed_local_executor
-from dsl41.runner_journal import decision_effects, read_journal, replay_inputs
+from dsl41.runner_journal import decision_effects, read_journal, replay_period
 from dsl41.runner_ledger import check_state_machine_version
 
 
@@ -1035,8 +1031,8 @@ def replay_trace(
 ) -> SegmentReplay:
     """The trace decision 2 needs, reconstructed exactly as `audit` does:
     an Oracle seeded with the rows this period OPENED with, this engine's
-    own executor seeded (S6a routing reads it, `cli.py`'s `journal` command
-    docstring explains why), then `replay_inputs` -- whose recovered
+    own executor seeded and the log replayed by `replay_period` (S6a
+    routing reads the seed; its docstring explains why), whose recovered
     crash-window verdicts ride back beside the trace (DL-156).
 
     A foreign `state_machine_version` refuses here before anything is
@@ -1057,16 +1053,9 @@ def replay_trace(
     # the semantic switches come from the same pin (DL-252): a replay under
     # other switches would narrate conditions the engine never read
     profile = pinned_profile(run_root, records[0])
-    oracle = Oracle(
-        catalog,
-        carried=carried,
-        default_tz=default_tz_of(profile),
-        tz_aliases=tz_aliases_of(profile),
-        semantics=switches_of(profile),
-    )
-    seed_local_executor(oracle.store, LOCAL_EXECUTOR_ID, at=opening_at(records[0]))
+    oracle = Oracle(catalog, carried=carried, **oracle_reading(profile))
     try:
-        replay = replay_inputs(oracle, records)
+        replay = replay_period(oracle, records)
     except OracleError as exc:
         raise RunHistoryError(f"{run_root}: replay failed ({exc})") from exc
     return SegmentReplay(trace=oracle.trace(), recovered=replay.recovered)

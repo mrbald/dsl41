@@ -105,6 +105,12 @@ class JobRef(BaseModel):
     name: str
     instance: str | None = None  # cross-instance '^INST' (SEM-07)
 
+    @property
+    def key(self) -> str:
+        """The job's identity: `name` when local, `name^INST` when
+        cross-instance (DL-162a). Runtime rows and edges are keyed by it."""
+        return self.name if self.instance is None else f"{self.name}^{self.instance}"
+
 
 class StatusAtom(BaseModel):
     kind: Literal["status"] = "status"
@@ -273,6 +279,13 @@ def _parser() -> Lark:
         parser="lalr",
         propagate_positions=True,
     )
+
+
+def terminal_pattern(name: str) -> str:
+    """The regex condition.lark gives terminal `name`, as the parser
+    compiled it. A reader that re-lexes inside a parsed atom matches with
+    the grammar's own pattern, never a copy (minify)."""
+    return {terminal.name: terminal.pattern.to_regexp() for terminal in _parser().terminals}[name]
 
 
 def parse_condition(text: str) -> Cond:
