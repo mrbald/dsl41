@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Final, Literal, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, cast, get_args
 
 from dsl41.capacity import checks_load, resource_type
 from dsl41.conditions import ExitCodeAtom, StatusAtom, iter_atoms
@@ -55,9 +55,12 @@ class Switch:
     #: -- the classifier's edge from a calendar to this switch. A job reaches
     #: such a switch through the calendars it names.
     affects_calendar: Callable[[CalendarIR], bool] = _no_calendar
-    #: whether the scheduler reads this switch to place start instants
-    #: (DL-260); a calendar switch is read by the scheduler anyway
-    scheduler: bool = False
+    #: the wired component outside the oracle that reads this switch, so the
+    #: one the derived runtime profile reads it back from: the scheduler, to
+    #: place start instants (DL-260), or the FW adapter, to decide a watch
+    #: complete (DL-258); None when no wired component reads it. A calendar
+    #: switch is read by the scheduler anyway (DL-259).
+    reader: Literal["scheduler", "fw"] | None = None
 
 
 def _no_job(job: JobIR, _catalog: CatalogIR) -> bool:
@@ -132,6 +135,17 @@ def _has_start_ticks(job: JobIR, _catalog: CatalogIR) -> bool:
     return schedule is not None and bool(schedule.start_times or schedule.start_mins)
 
 
+#: Each switch's values, in the order the help and the docs list them. The
+#: one spelling: the registry reads its `values` from these, so the typed
+#: view and the runtime check cannot hold different sets.
+IceLookback = Literal["true", "ordinary"]
+RenewableFree = Literal["Y", "A"]
+QueuedRecheck = Literal["0", "1", "2"]
+FwExistence = Literal["stable", "immediate"]
+WekrFirstWeek = Literal["first-full", "partial"]
+DstStartTimes = Literal["vendor", "fold0"]
+
+
 #: The registry. Closed: a name that is not here is refused wherever it is
 #: met, at profile construction and on the command line.
 REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
@@ -140,7 +154,7 @@ REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
         for switch in (
             Switch(
                 name="ice-lookback",
-                values=("true", "ordinary"),
+                values=get_args(IceLookback),
                 default="true",
                 autosys="true",
                 description="what a condition atom with a lookback qualifier reads when its"
@@ -149,7 +163,7 @@ REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
             ),
             Switch(
                 name="renewable-free",
-                values=("Y", "A"),
+                values=get_args(RenewableFree),
                 default="Y",
                 autosys="Y",
                 description="what a renewable resource request with no FREE does with its"
@@ -159,7 +173,7 @@ REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
             ),
             Switch(
                 name="queued-recheck",
-                values=("0", "1", "2"),
+                values=get_args(QueuedRecheck),
                 default="0",
                 autosys="1",
                 description="what a job leaving QUE_WAIT re-checks before it starts, as the"
@@ -169,7 +183,7 @@ REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
             ),
             Switch(
                 name="fw-existence",
-                values=("stable", "immediate"),
+                values=get_args(FwExistence),
                 default="stable",
                 autosys="immediate",
                 description="what an FW job with no watch_file_min_size does when the watched"
@@ -178,10 +192,11 @@ REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
                 " complete), or complete at once, watch_interval ignored (immediate, the vendor"
                 " reading)",
                 affects=_fw_without_min_size,
+                reader="fw",
             ),
             Switch(
                 name="wekr-first-week",
-                values=("first-full", "partial"),
+                values=get_args(WekrFirstWeek),
                 default="first-full",
                 autosys="unknown",
                 description="where week 1 of a WEKR token's year starts: on the first anchor"
@@ -191,13 +206,13 @@ REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
             ),
             Switch(
                 name="dst-start-times",
-                values=("vendor", "fold0"),
+                values=get_args(DstStartTimes),
                 default="vendor",
                 autosys="vendor",
                 description="how start_times and start_mins read the hour a one-hour DST"
                 " change skips or repeats: the vendor's rules, or the fold=0 conversion",
                 affects=_has_start_ticks,
-                scheduler=True,
+                reader="scheduler",
             ),
         )
     }
@@ -215,15 +230,18 @@ CALENDAR_SWITCHES: Final[tuple[str, ...]] = tuple(
 #: refuse a disagreeing scheduler before anything durable is written, and
 #: an engine refuses one as a backstop.
 SCHEDULER_SWITCHES: Final[tuple[str, ...]] = tuple(
-    name for name, switch in REGISTRY.items() if switch.scheduler or name in CALENDAR_SWITCHES
+    name
+    for name, switch in REGISTRY.items()
+    if switch.reader == "scheduler" or name in CALENDAR_SWITCHES
 )
 
-IceLookback = Literal["true", "ordinary"]
-RenewableFree = Literal["Y", "A"]
-QueuedRecheck = Literal["0", "1", "2"]
-FwExistence = Literal["stable", "immediate"]
-WekrFirstWeek = Literal["first-full", "partial"]
-DstStartTimes = Literal["vendor", "fold0"]
+#: Every switch a wired adapter reads (DL-258, DL-280): today the FW
+#: adapter's `fw-existence`. The derived runtime profile reads each back
+#: from the wired adapter, and an engine refuses a disagreeing one as a
+#: backstop, as for `SCHEDULER_SWITCHES`.
+ADAPTER_SWITCHES: Final[tuple[str, ...]] = tuple(
+    name for name, switch in REGISTRY.items() if switch.reader == "fw"
+)
 
 
 @dataclass(frozen=True)

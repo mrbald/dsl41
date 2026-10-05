@@ -52,7 +52,7 @@ from typing import Any, cast
 from dsl41 import runner_procid as _procid
 from dsl41.ir import CatalogIR, JobIR
 from dsl41.oracle_state import LIVE, Event, TERMINAL
-from dsl41.runner import Engine
+from dsl41.runner import Engine, adapter_switch
 from dsl41.runner_adapters import (
     JobAdapter,
     fsync_dir,
@@ -133,14 +133,14 @@ from dsl41.runner_ledger import (
     next_epoch,
 )
 from dsl41.runner_scheduler import Scheduler
-from dsl41.semantics import SCHEDULER_SWITCHES, check_overrides
+from dsl41.semantics import ADAPTER_SWITCHES, SCHEDULER_SWITCHES, check_overrides
 
 
 #: Profile fields NO wired object can report: they act in preflight or over
 #: the catalog, and never on an adapter or a scheduler. They inherit the pin
 #: unless the launcher DECLARES them -- see `_derive_runtime_profile`.
 #: `semantics` is wired: the scheduler reports the switches it compiles
-#: under and a wired FW adapter `fw-existence`; the rest are declared or
+#: under and a wired adapter the switches it reads; the rest are declared or
 #: inherited the same way (DL-252, DL-258, DL-259, DL-260).
 _UNWIRED_FIELDS: tuple[str, ...] = ("as_machine", "machine_policy")
 
@@ -173,9 +173,10 @@ def _derive_runtime_profile(
     The semantic switches start from `declared`, else `base` (DL-252). The
     ones a wired component acts on are read back over that: the switches the
     scheduler compiled under, its calendar switches (DL-259) and
-    `dst-start-times` (DL-260), and `fw-existence` from a wired
-    `FileWatcherAdapter` (DL-258). So wiring that disagrees with its
-    own declaration, or with the pin, is refused by the drift gate."""
+    `dst-start-times` (DL-260), and the switches a wired adapter reads,
+    `fw-existence` from a `FileWatcherAdapter` (DL-258, DL-280). So wiring
+    that disagrees with its own declaration, or with the pin, is refused by
+    the drift gate."""
     from dsl41.period import RuntimeProfile, to_us
     from dsl41.runner_adapters import FileWatcherAdapter, LocalCommandAdapter
 
@@ -205,8 +206,12 @@ def _derive_runtime_profile(
     fw = adapters.get("FW")
     if isinstance(fw, FileWatcherAdapter):
         values["fw_default_interval_us"] = to_us(float(fw.default_interval_s))
-        # the adapter decides FW completeness, not the profile (DL-258)
-        switches["fw-existence"] = fw.existence
+    # the adapter decides FW completeness, not the profile (DL-258): the
+    # switches a wired adapter reads are read back like the scheduler's
+    for name in ADAPTER_SWITCHES:
+        wired = adapter_switch(adapters, name)
+        if wired is not None:
+            switches[name] = wired
     values["semantics"] = check_overrides(switches)
     # the spawn window is a module constant, not an adapter knob: derive it
     # from the value the machine actually runs, so a staged 0 cannot pin a
@@ -396,10 +401,12 @@ def _require_adapters(catalog: CatalogIR, adapters: Mapping[str, JobAdapter], wh
         )
 
 
-def _profile_drift(derived: RuntimeProfile, pinned: RuntimeProfile) -> list[str]:
+def profile_drift(derived: RuntimeProfile, pinned: RuntimeProfile) -> list[str]:
     """Which profile fields moved -- names only, because the caller reports
     the drift rather than the values. The walk is `period.disagreements`
-    (DL-137), the same one every artifact comparison uses."""
+    (DL-137), the same one every artifact comparison uses. The one walk for
+    the core's gates here and the CLI's (`cli_run._profile_mismatch`); each
+    keeps its own refusal sentence (DL-152)."""
     return sorted(name for name, _, _ in disagreements(derived, pinned, type(derived).model_fields))
 
 
@@ -424,7 +431,7 @@ def _manifest_profile_drift(
     derived = _derive_runtime_profile(
         scheduler, adapters, deadman_s, base=manifest.runtime_profile, declared=declared
     )
-    return _profile_drift(derived, manifest.runtime_profile)
+    return profile_drift(derived, manifest.runtime_profile)
 
 
 def start_run(
@@ -560,7 +567,7 @@ def _finish_genesis(
                 f"staged state_machine_version {staged.state_machine_version}: this"
                 f" build runs {STATE_MACHINE_VERSION}"
             )
-        drift = _profile_drift(derived, staged.runtime_profile)
+        drift = profile_drift(derived, staged.runtime_profile)
         if drift:
             # the pin must describe the machine that runs: a staged profile
             # the wiring disagrees with is a fiction, refused before it is

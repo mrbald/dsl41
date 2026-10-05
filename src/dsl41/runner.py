@@ -174,6 +174,7 @@ from dsl41.classify import Baseline, CarriedState, carried_from_oracle
 from dsl41.runner_adapters import (
     AdapterContext,
     DetachSignal,
+    FileWatcherAdapter,
     JobAdapter,
     SealBarrier,
     SupervisorClient,
@@ -223,7 +224,7 @@ from dsl41.runner_journal import (
 from dsl41.runner_ledger import Fence
 from dsl41.seal import Execution, SealedHost, SealedState, implicit_routes
 from dsl41.runner_scheduler import Scheduler
-from dsl41.semantics import SCHEDULER_SWITCHES, SemanticSwitches
+from dsl41.semantics import ADAPTER_SWITCHES, SCHEDULER_SWITCHES, SemanticSwitches
 from dsl41.semantics import DEFAULTS as DEFAULT_SWITCHES
 from dsl41.timezones import alias_table
 
@@ -339,8 +340,25 @@ def _raise_if_failed(task: asyncio.Task[None]) -> None:
             raise exc  # adapter bug: fail loudly, never guess
 
 
+def adapter_switch(adapters: Mapping[str, JobAdapter], name: str) -> str | None:
+    """The value of adapter switch `name` (`ADAPTER_SWITCHES`) that the
+    wired adapter runs, or None when no adapter that reads it is wired: the
+    adapter's analogue of `Scheduler.semantics.value` (DL-258, DL-280). An
+    adapter switch this function has no read for is a code bug, raised, so
+    a new `reader="fw"` entry cannot pass the drift gates unread."""
+    fw = adapters.get("FW")
+    if name == "fw-existence":
+        return fw.existence if isinstance(fw, FileWatcherAdapter) else None
+    if name in ADAPTER_SWITCHES:
+        raise ValueError(f"adapter switch {name!r} has no read in runner.adapter_switch")
+    return None
+
+
 def _engine_switches(
-    estate: EstateHome | None, semantics: SemanticSwitches | None, scheduler: Scheduler | None
+    estate: EstateHome | None,
+    semantics: SemanticSwitches | None,
+    scheduler: Scheduler | None,
+    adapters: Mapping[str, JobAdapter],
 ) -> SemanticSwitches:
     """The semantic switches an engine runs (DL-252). An engine that leads
     an estate runs its period's pin and nothing else; `semantics` is for an
@@ -351,7 +369,10 @@ def _engine_switches(
     one reading while the period records and the oracle names slots under
     another. The derived runtime profile reads those switches back from the
     scheduler, so a launcher meets this before any durable write; this
-    check is the backstop."""
+    check is the backstop. The same holds for a wired adapter built under
+    another value of a switch it reads (DL-258, DL-280), once a pin or
+    `semantics` names a reading: an engine with neither has no reading for
+    its adapters to disagree with."""
     if estate is None:
         switches = semantics or DEFAULT_SWITCHES
     else:
@@ -369,6 +390,14 @@ def _engine_switches(
                 raise EngineError(
                     f"the scheduler compiled under {name}="
                     f"{scheduler.semantics.value(name)}, the engine runs"
+                    f" {switches.value(name)} (runner-design ss8a)"
+                )
+    if estate is not None or semantics is not None:
+        for name in ADAPTER_SWITCHES:
+            wired = adapter_switch(adapters, name)
+            if wired is not None and wired != switches.value(name):
+                raise EngineError(
+                    f"the wired adapter runs {name}={wired}, the engine runs"
                     f" {switches.value(name)} (runner-design ss8a)"
                 )
     return switches
@@ -423,7 +452,7 @@ class Engine:
             carried=carried,
             default_tz=default_tz,
             tz_aliases=tz_aliases,
-            semantics=_engine_switches(estate, semantics, scheduler),
+            semantics=_engine_switches(estate, semantics, scheduler, adapters),
         )
         #: concurrency-model ss2/ss8: the execution host this engine dispatches
         #: to. One engine per run root owns one local executor; machine names

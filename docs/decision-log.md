@@ -18690,3 +18690,49 @@ relitigate an entry; append a new one.
   the `seal` append is an unknown outcome that recovery may commit
   (period-model §7, PR-28d); the glossary and the engine-loop and FW cards
   now say so. The minors and nits are fixed.
+- DL-280 The registry names the wired component that reads a switch, and
+  the engine holds a wired adapter to the switches it reads (2026-10-05;
+  semantics.py, runner.py, runner_startup.py; extends DL-258 and DL-260;
+  architecture review 2026-10-05, R7)
+  THE GAP. DL-260 made "the scheduler reads this switch" a registry fact:
+  a `scheduler` flag on `Switch`, the derived `SCHEDULER_SWITCHES`, a
+  read-back loop in `_derive_runtime_profile` and a backstop in the
+  engine. DL-258's `fw-existence` is read by the FW adapter, and that fact
+  lived only in code: one hand-written read-back line in
+  `_derive_runtime_profile`, and no engine backstop.
+  THE RULE. `Switch.reader` names the wired component outside the oracle
+  that reads the switch: `"scheduler"`, `"fw"`, or None. It replaces the
+  `scheduler` flag; `SCHEDULER_SWITCHES` is now the calendar switches and
+  every entry whose reader is the scheduler, the same set as before.
+  `ADAPTER_SWITCHES` is every entry whose reader is an adapter, derived
+  the same way; today it is `fw-existence` alone. `runner.adapter_switch`
+  reads one such switch from the wired adapters, or None when no adapter
+  that reads it is wired. `_derive_runtime_profile` reads each adapter
+  switch back over that, as it reads the scheduler's, so the profile
+  drift gates see a disagreeing adapter before anything durable is
+  written (DL-258's rule, unchanged). `_engine_switches` refuses a wired
+  adapter whose value is not the engine's, as it refuses a scheduler.
+  THE BACKSTOP'S SCOPE. A deliberate difference from the scheduler check.
+  The adapter check runs when the engine has a
+  reading to hold the adapter to: a pinned period, or `semantics` passed
+  explicitly. An engine with neither (a harness with no run root) runs
+  the registry defaults for the oracle, and its FW adapter decides FW
+  completeness on its own, as before. The scheduler check is not scoped
+  this way, because the oracle names slots under the scheduler's switches
+  even with no pin. Holding an estate-less adapter to the defaults would
+  refuse harnesses that wire `immediate` alone, a behavior change with no
+  safety gain: nothing records that engine's reading.
+  BEHAVIOR. None with valid wiring. Every production path wires the FW
+  adapter from the profile it pins (`wire_from_profile`), and the drift
+  gates read it back first, so the backstop only catches a mismatch the
+  wiring cannot produce today. Its refusal reads "the wired adapter runs
+  NAME=VALUE, the engine runs VALUE (runner-design ss8a)".
+  NOT BUILT. A per-adapter registry of switch readers. One adapter reads
+  one switch; `adapter_switch` names it directly, and a test holds every
+  `ADAPTER_SWITCHES` entry readable from a wired `FileWatcherAdapter`.
+  An `ADAPTER_SWITCHES` entry with no read there raises, so a new
+  `reader="fw"` switch cannot pass the read-back and the backstop unread.
+  A second adapter switch adds a branch there and a reader value here.
+  REVIEW. One Opus reviewer (refactor class): no blocker; its two low
+  findings, a leftover placeholder and a silent pass for an unhandled
+  adapter switch, are fixed and confirmed by the reviewer.

@@ -29,6 +29,7 @@ from dsl41.semantics import help_text, parse_assignments
 
 if TYPE_CHECKING:
     from dsl41.boundary import EstateWalk, Lineage
+    from dsl41.runner_clock import EngineError
 
 
 # ------------------------------------------------- the shared options
@@ -481,6 +482,25 @@ def resume_target_period(run_root: Path) -> int:
     if lineage is not None:
         return lineage.target_period(active_period(run_root))
     return active_period(run_root)
+
+
+def confirmed_resume_refusal(run_root: Path, anchor_dir: "Path | None") -> "EngineError | None":
+    """ss1.3's resume rule (DL-224) for a CLI route that resumes, before it
+    stages anything or wires a supervisor: the refusal, or None. The caller
+    holds `leader.lock`.
+
+    It reads first without the anchor lock, writing nothing. A refusal read
+    that way can be stale, so it stands only once a second read under the
+    anchor lock confirms it (`boundary.resume_root_refusal`, `locked=True`);
+    a root that then passes resumes as any other does. Under the locks every
+    refusal counts, a busy anchor lock included, since `resume_run` would
+    raise it after the caller had staged and wired. `resume_run` repeats the
+    check under both locks either way."""
+    from dsl41.boundary import resume_root_refusal
+
+    if resume_root_refusal(run_root, anchor_dir) is None:
+        return None
+    return resume_root_refusal(run_root, anchor_dir, locked=True)
 
 
 def say_next(run_root: Path, estate_anchor: "Path | None") -> None:

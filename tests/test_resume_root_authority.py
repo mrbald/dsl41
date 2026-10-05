@@ -550,11 +550,12 @@ def test_pr57_a_reclaim_after_the_pre_check_is_refused_under_the_locks(
 
 
 def test_pr57_a_corrupt_anchor_on_a_held_root_still_reports_the_holder(tmp_path: Path) -> None:
-    """The pre-check reports only the rule's refusal. A corrupt anchor.json
-    passes it, so a root another engine holds says so first, as before."""
+    """The pre-check reports only the rule's refusal: a corrupt anchor.json
+    passes it. A root another engine holds says so first, as before."""
     root = tmp_path / "a"
     _root_with_head(root, "open")
     (default_anchor_dir(root) / "anchor.json").write_text("{not json\n")
+    assert resume_root_refusal(root, None) is None  # the unlocked read passes it
     jil = tmp_path / "estate.jil"
     jil.write_text(C1_JIL)
     held = acquire_run_root(root)

@@ -2372,6 +2372,22 @@ def test_pr30e_a_committed_seals_exact_retry_is_answered_from_the_new_period(
     _close(opened)
 
 
+def test_pr30c_the_exact_retry_rule_has_three_outcomes() -> None:
+    """ss2.2's one rule for both retry doors, the live route and the
+    offline sealer: another request_id is not a retry, the same id and
+    fingerprint is exact, and the same id under another is a collision."""
+    from dsl41.runner_control import committed_retry
+
+    def rule(request_id: str, fingerprint: str) -> str | None:
+        return committed_retry(
+            request_id, fingerprint, committed_request_id="r1", committed_fingerprint="f1"
+        )
+
+    assert rule("r2", "f1") is None
+    assert rule("r1", "f1") == "exact"
+    assert rule("r1", "f2") == "collision"
+
+
 def test_a_seal_request_under_a_foreign_baseline_is_refused(tmp_path: Path) -> None:
     """The generic v3 gate still applies to everything the retry route does
     not answer: a request composed against another baseline names nothing

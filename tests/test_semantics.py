@@ -15,6 +15,7 @@ import dataclasses
 import hashlib
 import json
 import re
+import typing
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -120,6 +121,16 @@ def test_the_typed_view_has_one_attribute_per_switch() -> None:
         assert getattr(semantics.DEFAULTS, name.replace("-", "_")) == switch.default
     assert semantics.resolve() == semantics.DEFAULTS
     assert semantics.resolve(ORDINARY).ice_lookback == "ordinary"
+
+
+def test_each_typed_attribute_holds_its_registry_switch_value_set() -> None:
+    """The registry reads each switch's values from its `Literal` (C5/R10),
+    so the one hand-kept link left is which alias annotates which
+    attribute. An attribute annotated with another switch's alias would
+    type-check values the registry refuses."""
+    hints = typing.get_type_hints(semantics.SemanticSwitches)
+    for name, switch in semantics.REGISTRY.items():
+        assert typing.get_args(hints[name.replace("-", "_")]) == switch.values, name
 
 
 def test_the_ice_lookback_default_is_the_documented_autosys_reading() -> None:
@@ -921,6 +932,53 @@ def test_an_engine_refuses_a_scheduler_built_under_other_calendar_switches() -> 
         scheduler=Scheduler(catalog, start=T0),
         semantics=semantics.resolve(ORDINARY),
     )
+
+
+def test_the_adapter_switches_are_the_ones_the_fw_adapter_reads() -> None:
+    """DL-258, DL-280: the tuple the profile reads back from a wired adapter
+    is derived from the registry, and every switch in it is one
+    `adapter_switch` can read from a wired `FileWatcherAdapter`; with no
+    such adapter there is nothing to read."""
+    from dsl41.runner import adapter_switch
+    from dsl41.runner_adapters import FileWatcherAdapter
+
+    assert semantics.ADAPTER_SWITCHES == ("fw-existence",)
+    wired = {"FW": FileWatcherAdapter(existence="immediate")}
+    for name in semantics.ADAPTER_SWITCHES:
+        assert adapter_switch(wired, name) == "immediate", name
+        assert adapter_switch({"CMD": FakeAdapter(default=None)}, name) is None, name
+    assert adapter_switch(wired, "ice-lookback") is None
+
+
+def test_an_adapter_switch_with_no_read_is_a_code_bug(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DL-280: a registry entry gaining an adapter reader without a read in
+    `adapter_switch` raises, rather than being skipped by the read-back and
+    the backstop."""
+    from dsl41 import runner
+
+    monkeypatch.setattr(runner, "ADAPTER_SWITCHES", (*runner.ADAPTER_SWITCHES, "ice-lookback"))
+    with pytest.raises(ValueError, match="'ice-lookback' has no read"):
+        runner.adapter_switch({}, "ice-lookback")
+
+
+def test_an_engine_refuses_an_fw_adapter_built_under_another_fw_existence() -> None:
+    """The backstop `_engine_switches` holds for the scheduler holds for
+    the adapters too (DL-280), once the engine is given a reading: a pin or
+    `semantics`. An engine with neither has none to disagree with, so a
+    harness that wires an `immediate` adapter alone runs as before."""
+    from dsl41.runner_adapters import FileWatcherAdapter
+
+    catalog = lower_source("insert_job: w\njob_type: f\nmachine: m1\nwatch_file: /tmp/x\n")
+    immediate = {"FW": FileWatcherAdapter(existence="immediate")}
+    with pytest.raises(EngineError, match="fw-existence=immediate, the engine runs stable"):
+        Engine(catalog, clock=VirtualClock(T0), adapters=immediate, semantics=semantics.DEFAULTS)
+    Engine(
+        catalog,
+        clock=VirtualClock(T0),
+        adapters=immediate,
+        semantics=semantics.resolve({"fw-existence": "immediate"}),
+    )
+    Engine(catalog, clock=VirtualClock(T0), adapters=immediate)
 
 
 def _wekr_genesis(run_root: Path, scheduler_switches: dict[str, str] | None, staged=None):
