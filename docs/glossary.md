@@ -35,11 +35,22 @@ Its id, `claim_id`, is derived from the previous seal, the next period and
 the target root.
 See [period-model.md §1.3](period-model.md#13-the-successor-fence).
 
+### code
+
+The stable error code on every `ok: false` control answer, beside the prose
+`error`. A client branches on `code`; the prose may change. A code names the
+reason, not the outcome. A rejected `decision` stores its code, so an exact
+retry answers the same one; a decision written before DL-272 stores none.
+The control-protocol code table lists every code and the client's next move;
+`runner_codes.py` holds the same set.
+See [control-protocol.md §2](control-protocol.md#2-transport-and-framing-frozen)
+and [period-model.md §2.3](period-model.md#23-decision--one-atomic-batch).
+
 ### decision
 
 The WAL record that closes one admitted input. One `decision` line holds the
 outcome (`applied` or `rejected`), the revisions that moved and the effects the
-input implies.
+input implies. A rejected one also stores its [code](#code).
 See [period-model.md §2.3](period-model.md#23-decision--one-atomic-batch) and
 [concurrency-model.md §4](concurrency-model.md#4-admission-and-application).
 
@@ -82,6 +93,21 @@ compares it with the current revision.
 See [concurrency-model.md §0](concurrency-model.md#0-the-invariant) and
 [§6](concurrency-model.md#6-the-envelope-and-reads).
 
+### fail-stop
+
+The engine stops instead of refusing, and runs no abort. It is used where an
+abort would reopen admission over a state the WAL does not describe. The seal
+gets no answer, and recovery rebuilds from the WAL. A seal fail-stops in two
+kinds of case. Before the `seal` append: a fence loss, and DL-274's three
+cases, which are an exception while an attempt admitted during the seal is
+not fully applied, a failed WAL append, and a `clock_regressed` on an
+engine-made input. After those, the period stays open. At or after the `seal`
+append, including an anchor close after a durable seal line, the outcome is
+unknown. Recovery commits the seal when the line is complete and its `fsync`
+succeeds; it truncates a torn or absent line and reopens the period (PR-28d).
+See [period-model.md §7](period-model.md#7-the-seal-operation) and
+[concurrency-model.md §4](concurrency-model.md#4-admission-and-application).
+
 ### fencing token
 
 The integer `token` a supervisor issues with each lease. Mutating supervisor
@@ -89,6 +115,13 @@ verbs carry it beside the incarnation; the concurrency model also uses the
 phrase for the leader's epoch.
 See [supervisor-protocol.md §5](supervisor-protocol.md#5-supervisor-socket-protocol-frozen--phase-11f-dl-48)
 and [concurrency-model.md §1](concurrency-model.md#1-storage--frozen).
+
+### gateway
+
+A proposed HTTP and WebSocket front for `control.sock`: one process per
+exposed tier, each a client of the socket. Its status is proposed, and
+nothing of it is built (DL-273).
+See [gateway.md](gateway.md).
 
 ### ghost
 

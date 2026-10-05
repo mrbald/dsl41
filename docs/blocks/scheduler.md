@@ -65,6 +65,7 @@ stateDiagram-v2
 - An extended calendar the interpreter cannot read is refused loudly. Materializing it to a standard calendar is the workaround ([DL-57](../decision-log.md)).
 - After a crash, resume re-derives from the frontier and drops what it missed, once per tick ([DL-174](../decision-log.md)). A crash between two same-instant ticks leaves one unjournaled; the inclusive anchor finds it and drops it ([DL-45](../decision-log.md), [DL-166](../decision-log.md)).
 - During a seal, tick admission is frozen and the cutoff admits every tick through its instant ([period-model §6](../period-model.md#6-the-cutoff-barrier)).
+- A tick that hits `clock_regressed` in the seal's drain has no one to answer, so the seal [fail-stops](../glossary.md#fail-stop) the engine instead of refusing. Resume observes the tick again through the missed-tick policy ([period-model §7](../period-model.md#7-the-seal-operation); [DL-274](../decision-log.md)).
 - Open: whether the vendor fires or skips a tick missed during an outage (E9), and absent `days_of_week` read as every day (E10) ([runner-design §15](../runner-design.md#15-open-questions-e-series)).
 
 ## Owning modules

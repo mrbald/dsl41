@@ -69,6 +69,8 @@ stateDiagram-v2
 - A log that records one effect id twice with different content, or an outcome for an unknown effect: `Outbox` raises `EngineError`.
 - An engine that died during the kill ladder leaves a live wrapper under a terminal row. Resume kills it whatever the KILL effect says ([period-model §11](../period-model.md#11-resume-replay-and-recovery) step 7).
 - A leader that lost its lock launches nothing: `_dispatch` re-proves the fence first ([concurrency-model §1](../concurrency-model.md#1-storage--frozen)).
+- During a seal, an `outbox.record` that raises, or a failed `effect_result` append, [fail-stops](../glossary.md#fail-stop) the engine instead of refusing the seal. Resume rebuilds the outbox from the WAL's decision records ([period-model §7](../period-model.md#7-the-seal-operation); [DL-274](../decision-log.md)).
+- An attempt whose decision never reached the WAL is applied through the gate at resume, and that application records no effect, so it launches nothing. Its row is left to the resume ladder and the untraced-start sweep ([concurrency-model §4](../concurrency-model.md#4-admission-and-application); [DL-274](../decision-log.md)).
 
 ## Owning modules
 
@@ -101,6 +103,7 @@ stateDiagram-v2
 - `test_pr34_a_start_line_resolves_a_pending_spawn`
 - `test_pr33_a_live_wrapper_under_a_terminal_row_is_re_driven`
 - `test_the_fence_stops_the_spawn_and_not_only_the_record`
+- `test_pr28b_an_exception_while_a_drained_attempt_applies_fail_stops`
 
 ## Open findings
 
