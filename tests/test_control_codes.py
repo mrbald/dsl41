@@ -170,3 +170,52 @@ def test_a_code_less_engine_error_at_the_seal_door_answers_engine_error(tmp_path
         assert asyncio.run(server._seal(wire))["code"] == "seal_refused"
     finally:
         _close(engine)
+
+
+def test_the_boundary_refusals_carry_their_code_by_type_not_by_keyword() -> None:
+    """`BoundaryRefusal` and `BackfillRefused` each fix their registry code in
+    the constructor; no raise site in boundary.py spells `seal_refused`; and
+    the named pre-PONR check functions in boundary.py contain no bare
+    `EngineError(` call, so each of their refusals is a `BoundaryRefusal`."""
+    from dsl41 import boundary
+    from dsl41.runner_journal import BackfillRefused
+
+    assert boundary.BoundaryRefusal("x").code == "seal_refused"
+    assert BackfillRefused("x").code == "backfill_refused"
+    assert {"seal_refused", "backfill_refused"} <= CODES
+    tree = ast.parse(Path(boundary.__file__).read_text(encoding="utf-8"))
+    # the constructor is the one place the code is spelled
+    spelled = [
+        node.lineno
+        for owner in tree.body
+        if not (isinstance(owner, ast.ClassDef) and owner.name == "BoundaryRefusal")
+        for node in ast.walk(owner)
+        if isinstance(node, ast.keyword)
+        and node.arg == "code"
+        and isinstance(node.value, ast.Constant)
+        and node.value.value == "seal_refused"
+    ]
+    assert spelled == []
+    pre_ponr = {
+        "validate_staged",
+        "validate_boundary",
+        "check_candidate",
+        "executions_at",
+        "_require_run_id",
+        "_prepare_install",
+        "_read_artifact",
+        "_check_request_id",
+        "load_bundle_catalog",
+    }
+    found = {n.name for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in pre_ponr}
+    assert found == pre_ponr
+    bare = [
+        (fn.name, node.lineno)
+        for fn in tree.body
+        if isinstance(fn, ast.FunctionDef) and fn.name in pre_ponr
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "EngineError"
+    ]
+    assert bare == []

@@ -118,9 +118,10 @@ GENESIS_PERIOD_ID: Final[int] = 1
 GENESIS_SEGMENT_NO: Final[int] = 1
 GENESIS_FIRST_INDEX: Final[int] = 1
 
-#: ss2.1 defaults, in seconds as the CLI spells them. The engine's own
-#: defaults (`runner_adapters`, `runner_startup`) are the same numbers; a
-#: profile that disagreed with the running engine would pin a fiction.
+#: ss2.1 defaults, in seconds as the CLI spells them. The one source: the
+#: profile's microsecond fields and the engine's own defaults
+#: (`runner_adapters`, `runner_startup`) all read these, because a profile
+#: that disagreed with the running engine would pin a fiction.
 FW_DEFAULT_INTERVAL_S: Final[float] = 60.0
 CMD_GRACE_S: Final[float] = 10.0
 RECONCILE_SETTLE_S: Final[float] = 5.0
@@ -130,6 +131,11 @@ SPAWN_WINDOW_S: Final[float] = 5.0
 #: (PR-47e). The gate itself is a later unit -- this is the value it will
 #: read.
 RETRY_HORIZON_S: Final[float] = 60.0
+
+
+def to_us(seconds: float) -> int:
+    """ss2.1's conversion, exactly: `round(seconds * 1_000_000)`."""
+    return round(seconds * 1_000_000)
 
 
 # --------------------------------------------------------------- catalog hash
@@ -347,11 +353,11 @@ class RuntimeProfile(BaseModel):
     machine_policy: MachinePolicy = "strict"
     execution_mode: Literal["tethered", "detached"] = "tethered"
     deadman_us: Annotated[int, Field(gt=0)] | None = None
-    fw_default_interval_us: Annotated[int, Field(gt=0)] = 60_000_000
-    cmd_grace_us: Annotated[int, Field(gt=0)] = 10_000_000
-    reconcile_settle_us: Annotated[int, Field(ge=0)] = 5_000_000
-    spawn_window_us: Annotated[int, Field(ge=0)] = 5_000_000
-    retry_horizon_us: Annotated[int, Field(gt=0)] = 60_000_000
+    fw_default_interval_us: Annotated[int, Field(gt=0)] = to_us(FW_DEFAULT_INTERVAL_S)
+    cmd_grace_us: Annotated[int, Field(gt=0)] = to_us(CMD_GRACE_S)
+    reconcile_settle_us: Annotated[int, Field(ge=0)] = to_us(RECONCILE_SETTLE_S)
+    spawn_window_us: Annotated[int, Field(ge=0)] = to_us(SPAWN_WINDOW_S)
+    retry_horizon_us: Annotated[int, Field(gt=0)] = to_us(RETRY_HORIZON_S)
     #: Semantic-switch OVERRIDES only, name -> value (runner-design ss8a,
     #: DL-252). A default lives in `semantics.REGISTRY`, never here, so an
     #: empty map means "every switch at its default" and is written `{}`
@@ -383,11 +389,6 @@ class RuntimeProfile(BaseModel):
 def runtime_hash(profile: RuntimeProfile) -> str:
     """sha256 over the ss3.2 canonical form of `profile`, `"sha256:..."`."""
     return hash_over(profile.model_dump(mode="json"))
-
-
-def to_us(seconds: float) -> int:
-    """ss2.1's conversion, exactly: `round(seconds * 1_000_000)`."""
-    return round(seconds * 1_000_000)
 
 
 def default_tz_of(profile: "RuntimeProfile | None") -> str | None:

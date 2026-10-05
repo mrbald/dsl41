@@ -90,6 +90,7 @@ from dsl41.oracle_state import (
     GlobalRuntime,
     HostRuntime,
     HostState,
+    LIVE,
     JobRuntime,
     may_outlive_run,
 )
@@ -158,14 +159,6 @@ def _estate_relative(value: str) -> str:
 #: seal embeds -- `Event`, `Effect`, `JobRuntime` -- are not this module's
 #: to annotate, and `_canon_ready` is the backstop that catches them.
 NaiveUtc = Annotated[datetime, AfterValidator(_naive_utc)]
-
-#: The two job statuses an execution entry may stand behind (ss3.5's
-#: one-way join). A RUNNING or STARTING row MAY lack an entry -- a
-#: `CHANGE_STATUS STARTING` overwrite produces exactly that and is safe to
-#: carry (PR-22a) -- but an entry with no live row is an execution nothing
-#: owns.
-LIVE_STATUS: Final[frozenset[str]] = frozenset({"STARTING", "RUNNING"})
-
 
 # ------------------------------------------------------------ the request
 
@@ -534,7 +527,7 @@ def _check_reservations(jobs: Mapping[str, JobRuntime]) -> None:
     (DL-256, `may_outlive_run`); and one bucket appears at most once in it
     (ss3.2's "after duplicate-bucket rejection")."""
     for name, row in sorted(jobs.items()):
-        if row.status not in LIVE_STATUS and not all(map(may_outlive_run, row.reservations)):
+        if row.status not in LIVE and not all(map(may_outlive_run, row.reservations)):
             raise ValueError(
                 f"job {name!r}: status {row.status} still holds a machine load or a"
                 " reservation released on completion -- the run's end releases those,"
@@ -1034,6 +1027,10 @@ def _check_order(seal: Seal) -> None:
             raise ValueError(f"{what} is not in (index, effect_id) order (ss3.2)")
 
 
+# ss3.5's one-way join: an execution entry stands behind a LIVE row. A
+# RUNNING or STARTING row MAY lack an entry -- a `CHANGE_STATUS STARTING`
+# overwrite produces exactly that and is safe to carry (PR-22a) -- but an
+# entry with no live row is an execution nothing owns.
 def _check_join(seal: Seal) -> None:
     """ss3.5's join, ONE WAY, over dispatchable rows.
 
@@ -1059,7 +1056,7 @@ def _check_join(seal: Seal) -> None:
             )
         entries[entry.effect_id] = entry
         row = seal.state.jobs.get(entry.job)
-        if row is None or row.status not in LIVE_STATUS:
+        if row is None or row.status not in LIVE:
             status = "no row" if row is None else row.status
             raise ValueError(
                 f"execution {entry.effect_id!r} names job {entry.job!r} with {status}:"

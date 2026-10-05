@@ -942,7 +942,7 @@ class Oracle:
         elif kind == "KILLJOB":
             job = self._required_job(ev)
             status = self._runtime(job).status
-            if status in ("STARTING", "RUNNING"):
+            if status in LIVE:
                 self._terminate(job, cause="KILLJOB")
             elif status == "QUE_WAIT":
                 # DL-50 (review MAJOR): a kill on a QUEUED job must not be
@@ -2411,7 +2411,7 @@ class Oracle:
                 return
         if box_rt.status == "RUNNING" and self._all_members_done(box):
             self._fold_box_default(box, box_ir)
-        elif box_rt.status not in ("RUNNING", "STARTING") and new in TERMINAL:
+        elif box_rt.status not in LIVE and new in TERMINAL:
             # SEM-15 [C]: a member change on a non-running box re-derives the
             # box's status (TERMINATED already returned above, SEM-13 sticky)
             self._idle_box_recompute(box, box_ir, cause=f"member {member!r} changed")
@@ -2590,7 +2590,7 @@ class Oracle:
         for member in self._members(box):
             member_ir = self.catalog.jobs[member]
             rt = self._runtime(member)
-            if member_ir.box.job_terminator and rt.status in ("STARTING", "RUNNING"):
+            if member_ir.box.job_terminator and rt.status in LIVE:
                 self._terminate(member, cause=f"job_terminator: box {box!r} ended")
 
     # ------------------------------------------------------------- re-evaluation
@@ -2757,7 +2757,7 @@ class Oracle:
             return False
         if rt.run_number > tick_run + 1:
             return True
-        return rt.run_number == tick_run + 1 and rt.status not in ("STARTING", "RUNNING")
+        return rt.run_number == tick_run + 1 and rt.status not in LIVE
 
     def _arm_term_run_time(self, job_ir: JobIR) -> None:
         assert self._now is not None
