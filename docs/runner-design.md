@@ -961,7 +961,10 @@ under `dst-start-times` (DL-260). Those switches are read back from the
 scheduler into the runtime profile, like its timezone, so a profile that
 disagrees with them is refused as drift before anything durable is
 written. An engine also refuses a scheduler built under other values of
-them, as a backstop. A test scans src for calls that leave `semantics` to
+them, as a backstop. The switch a wired adapter reads (`fw-existence`) is
+read back from the adapter the same way, and an engine given a pin or
+`semantics` refuses an adapter built under another value (DL-280). A test
+scans src for calls that leave `semantics` to
 its default; only a short allow-list of static callers may.
 
 | Switch | Values | Default | Documented AutoSys | Why this default |
