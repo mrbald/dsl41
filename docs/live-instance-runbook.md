@@ -236,7 +236,9 @@ sleep 60; autorep -J dsl41_q6_box%
 ```
 
 If the final box status is SUCCESS, ice satisfies box_success (dsl41's
-SEM-05/DL-13 pin — Q6 closes as pinned). If the box stays RUNNING after
+SEM-05/DL-13 pin — Q6 closes as pinned). dsl41 also completes the box at
+the ice itself when the iced member has not run in a RUNNING box (DL-285);
+that completion rests on this pin, so a flip moves it too. If the box stays RUNNING after
 `dsl41_q6_n` completes, box_success does NOT read the iced member as
 success (flip: the "not scheduled" clause wins). If the final box status
 is FAILURE, the flip is the same, in a harder form. Capture `autorep -J

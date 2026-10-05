@@ -18975,3 +18975,118 @@ relitigate an entry; append a new one.
   lost-index test did not prove the fork it named; a second test now pins
   it, and every other finding is fixed and was confirmed by the reviewer
   that raised it.
+- DL-285 An ON_ICE on a member that has not run re-runs its RUNNING box's
+  completion check (2026-10-05; oracle `_handle_oob`, `_ice_resolves_member`,
+  `_completion_door`; SEM-11, SEM-20; runner_ledger.py)
+  THE GAP. DL-154 recorded it as found: `_all_members_done` skips an iced
+  member, but the ON_ICE branch of `_handle_oob` only woke referencers. The
+  completion check runs off a status transition, and the ice moves no
+  status, so a box whose last waiting member was iced stayed RUNNING until
+  the next member transition. The QUE_WAIT sub-case already completed the
+  box, since its ice settles the member INACTIVE through a transition.
+  THE RULE. An ON_ICE on a member that has not run in its direct parent's
+  RUNNING run is a completion moment, exactly as the other resolved-member
+  carve-outs are: the parent's completion door runs (overrides first, then
+  the default fold if none fired and every member is done), and every
+  RUNNING ancestor's overrides run through the same walk a window skip
+  uses (`_on_descendant_transition`). The door is one helper,
+  `_completion_door`, shared with the member transition and with the window
+  skip of a member already INACTIVE (DL-154). An ice on a queued member
+  settles it INACTIVE through a transition (DL-50); `_resolves` counts that
+  transition as resolving when the member has not run, so it carries the same moment. An ice that is
+  not queued moves no status, so `_ice_resolves_member` runs the moment on
+  the event, before the ice's wakes, as a transition runs its box rules
+  before its own. No completion moment: an ice on a member that ran (it
+  keeps its vote), a second ice on a member already iced, an ice on a
+  member already resolved (`window_skipped_members`), and an ice in a box
+  that is not RUNNING (SEM-15 reads members' statuses; the ice moves none).
+  VENDOR TIERS. SEM-20 [V]: an iced job is removed from all conditions and
+  logic (the dossier's wording, not a vendor quotation). SEM-11 [V]: a box
+  cannot complete before all members run or are bypassed. That the check
+  runs at the ice, not at the next transition, is [C]: it composes the two
+  rules, and no vendor text states the moment. An override that reads the
+  iced member reads it as satisfied, which is Q6's provisional pin (SEM-12,
+  live-instance-runbook Q6): a Q6 flip changes what such an override sees
+  at this new moment, and the register's Q6 row and the runbook's Q6
+  outcome text say so. A vendor text saying an ON_ICE on a waiting member
+  leaves a RUNNING box waiting would reverse this entry.
+  STATE MACHINE. `STATE_MACHINE_VERSION` moves 16 -> 17: a replay with such
+  an ice derives SUCCESS or FAILURE where v16 left the box RUNNING. Version
+  16 is unreleased, and the next release already needs a drain and a new
+  estate, so the bump costs no extra upgrade step. Nothing outside
+  runner_ledger.py pins the number: tests, the boundary, attest and the
+  drill read the constant.
+  TESTS. tests/test_oracle.py, both bisimulation arms:
+  test_sem20_ice_on_the_last_waiting_member_completes_a_running_box
+  (SUCCESS and FAILURE votes),
+  test_sem20_ice_on_a_waiting_member_fires_a_met_box_success,
+  test_sem20_ice_on_a_waiting_grandchild_completes_the_subbox_and_its_parent,
+  test_sem20_ice_on_a_member_that_ran_changes_nothing,
+  test_sem15_ice_on_a_member_of_an_idle_box_rederives_nothing,
+  test_sem20_ice_on_a_queued_member_is_a_completion_moment,
+  test_sem20_ice_on_a_queued_member_that_ran_is_no_completion_moment,
+  test_sem20_ice_in_a_subbox_is_a_completion_moment_for_the_outer_box,
+  test_sem20_ice_on_a_member_already_out_of_the_fold_is_no_completion_moment
+  (iced, resolved).
+  test_dl257_a_deferral_belongs_to_the_box_run_it_was_made_in iced a member
+  of a RUNNING box whose `box_success` named it, so the ice now ends the
+  run. Its fixture's `box_success` also reads the global the test sets
+  after the ice, which keeps the run open as the test needs; the test's
+  claim is unchanged.
+  DOCS. SEM-11 lists the ice as its third carve-out; SEM-20 points at it.
+  The box-execution card's gap is closed and its invariant added. The
+  register's `event:ON_ICE` row (revision 3) and Q6 row name the moment.
+  The completion door adds 74 lines to oracle.py and the register rows grow
+  by 4; scripts/arch_baseline.json takes the new sizes with this entry
+  (DL-283's practice).
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass, the
+  Fable pass in place of Codex at the owner's instruction. The Opus reviewer
+  found that an ice on a queued member skipped the box overrides, that a
+  second ice ran a second moment, and that a queued member which had run
+  still counted; the Fable pass found the ice reached the parent but not the
+  ancestors. All are fixed with tests and were confirmed by the reviewer
+  that raised them.
+- DL-286 A circular wait over held units is a stated limit (2026-10-05;
+  docs/risk-map.md; oracle and oracle_state comments; tests)
+  THE CYCLE. DL-256 lets a holder that cannot be admitted queue with its
+  held units, and DL-255 lets a short higher-priority waiter block lower
+  priorities that name its resources. Composed, two jobs can wait on each
+  other with no operator act. Renewable X and Y, amount 1; `a` (priority 1)
+  requests (X, FREE=N) AND (Y, FREE=A); `b` (priority 2) requests
+  (Y, FREE=Y). After each runs once and fails, `a` holds X and `b` holds Y.
+  When both start again, `a` waits for Y, and `b`, whose held Y fits, waits
+  behind `a`.
+  EVIDENCE. The block is DL-255 [V] ("How AutoSys Workload Automation
+  Queues Jobs", KB 240816). The queued holder keeping its units is DL-256's
+  pin for an ordinary start of a holder, where the vendor is silent; the
+  vendor documents only the held units after FAILURE or TERMINATED and the
+  FORCE_STARTJOB reuse. A vendor text or live probe showing that an
+  ordinary start of a holder drops its held units, or that a holder does
+  not queue while holding them, would remove the cycle and reverse this
+  entry.
+  THE LIMIT. dsl41 records the cycle and adds no static check or runtime
+  breaker. Only an operator act
+  breaks it: RELEASE_RESOURCE on the job that holds the unit the blocking
+  waiter lacks (`b`), a vendor-documented verb quoted in DL-256; or KILLJOB
+  on either job and then FORCE_STARTJOB on it. A forced start of a holder
+  runs on its held units and does not check or take the unit it lacks
+  (DL-256's reuse rule), so a forced `a` runs without Y. RELEASE_RESOURCE on the
+  blocking waiter (`a`) frees X, but `a` is still short on Y and still
+  blocks `b`, so the wait stands.
+  CLAIMS CORRECTED. The oracle module docstring and the docstring of
+  test_dl50_admission_never_overcommits_and_is_deadlock_free said the
+  all-or-nothing acquire excludes hold-and-wait. Both now scope that to a
+  job holding nothing from an earlier run; the property test completes
+  every run with SUCCESS, so it never builds held units.
+  COMMENTS (G3). The comment above `oracle_state.LIVE` and the
+  `_settle_row` docstring said reservations exist exactly while a row is
+  live. Since DL-256 a row that is not live may keep a renewable's held
+  units (`may_outlive_run`); both now say so.
+  TESTS. test_dl256_a_circular_wait_over_held_units_breaks_by_an_operator_act
+  (three remedies) and
+  test_dl256_releasing_the_blockers_own_held_unit_leaves_the_circular_wait,
+  both bisimulation arms. No code change and no version move.
+  REVIEW. The same two reviewers. The stated remedy was corrected from the
+  triage's "release either holder" to the tested one; the Fable pass asked
+  for the vendor tiers behind the cycle and for the forced job's missing
+  unit to be stated. Both are in the text.

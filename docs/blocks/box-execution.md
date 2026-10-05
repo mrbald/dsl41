@@ -15,9 +15,9 @@ A live box has no effect and no execution entry ([period-model §3.5](../period-
 
 ## Interface
 
-- Inputs: the same `Oracle.feed` inputs as any job, aimed at a box or a member: STARTJOB, FORCE_STARTJOB, KILLJOB, STATUS, ON_NOEXEC, OFF_NOEXEC.
+- Inputs: the same `Oracle.feed` inputs as any job, aimed at a box or a member: STARTJOB, FORCE_STARTJOB, KILLJOB, STATUS, ON_ICE, ON_NOEXEC, OFF_NOEXEC.
 - Box row: `JobRuntime.ran_members` holds the members started in this run; `JobRuntime.window_skipped_members` holds the members resolved in it. `RuntimeState.start_run`, `record_resolution` and `void_resolution` write them.
-- Oracle steps: `_reset_box_cycle`, `_on_box_started`, `_decide_windows_at_box_start`, `_on_member_transition`, `_on_descendant_transition`, `_apply_box_overrides`, `_all_members_done`, `_fold_box_default`, `_idle_box_recompute`, `_inject_inactive`, `_noexec_box`.
+- Oracle steps: `_reset_box_cycle`, `_on_box_started`, `_decide_windows_at_box_start`, `_on_member_transition`, `_resolves`, `_completion_door`, `_ice_resolves_member`, `_on_descendant_transition`, `_apply_box_overrides`, `_all_members_done`, `_fold_box_default`, `_idle_box_recompute`, `_inject_inactive`, `_noexec_box`.
 - Outputs: box STATUS events and trace lines. Member starts and kills reach the engine as the members' own events.
 
 ## States
@@ -49,6 +49,7 @@ The diagram leaves out the idle re-derivation edges between INACTIVE, SUCCESS an
 - A member runs at most once per box run unless forced ([SEM-10](../autosys-semantics.md#sem-10--box-membership-and-start-rule-v), [SEM-23](../autosys-semantics.md#sem-23--force_startjob-vs-startjob-c)).
 - The default fold waits for every member; a member that never starts hangs the box ([SEM-11](../autosys-semantics.md#sem-11--box-runningcompletion-v), [DL-13](../decision-log.md)).
 - An operator's INACTIVE and a run_window skip resolve a member and run the full completion door ([DL-154](../decision-log.md), [DL-242](../decision-log.md)).
+- An ON_ICE on a member that has not run in a RUNNING box is a completion moment for that box and its RUNNING ancestors, as a resolved member is. A member that ran keeps its vote, a second ice or an ice on a resolved member does nothing, and an idle box re-derives nothing ([SEM-20](../autosys-semantics.md#sem-20--on_ice-v), [DL-285](../decision-log.md)).
 - A box start decides each waiting run_window member at once ([SEM-33](../autosys-semantics.md#sem-33--run_window-is-a-gate-not-a-trigger-v), [DL-246](../decision-log.md)).
 - Override gating, with "inside" read transitively ([SEM-12](../autosys-semantics.md#sem-12--box_success--box_failure-override--with-evaluation-gating-v), [DL-12](../decision-log.md)).
 - TERMINATED is sticky ([SEM-13](../autosys-semantics.md#sem-13--box-terminated-is-sticky-v)). Terminators cascade both ways ([SEM-14](../autosys-semantics.md#sem-14--box_terminator--job_terminator-vc)).
@@ -76,6 +77,7 @@ The diagram leaves out the idle re-derivation edges between INACTIVE, SUCCESS an
 - `test_sem11_default_fold_all_success`
 - `test_sem11_member_set_inactive_completes_a_running_box`
 - `test_sem11_waiting_member_still_hangs_the_box`
+- `test_sem20_ice_on_the_last_waiting_member_completes_a_running_box`
 - `test_sem12b_external_box_success_hung_running_then_fires_when_member_completes_after`
 - `test_sem12c_box_success_over_a_grandchild_fires_transitively`
 - `test_sem13_terminated_box_is_sticky_then_restarts_fresh`
@@ -95,7 +97,4 @@ Every machine shares the [no transition inventory](../risk-map.md#no-transition-
 
 ## Gaps found
 
-- ON_ICE on a member that has not run, in a RUNNING box, does not re-run the completion check.
-  `_all_members_done` skips an iced member, but the ON_ICE branch of `Oracle._handle_oob` only wakes referencers.
-  The fold then waits for the next member transition.
-  DL-154 records this as found and not fixed. SEM-20 says an iced job is removed from all logic.
+None.

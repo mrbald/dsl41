@@ -1112,11 +1112,13 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             member="box_success",
             facet="iced-member",
             klass=PROVISIONAL,
-            cite="SEM-12, SEM-20",
+            cite="SEM-12, SEM-20, DL-285",
             label="Q6",
             protocol="Q6",
             effect="an iced member is read as satisfied inside box_success, the same way"
-            " it is read inside an ordinary condition",
+            " it is read inside an ordinary condition; an ice on a member that has not"
+            " run in its RUNNING box is itself a completion moment, so such a box_success"
+            " fires on the ice (DL-285)",
             trigger=_job(
                 BOX_BLOCK,
                 box_name="BOX0",
@@ -2728,13 +2730,15 @@ SCENARIO_ROWS: tuple[Row, ...] = (
         _row(
             surface="event",
             member="ON_ICE",
-            revision=2,
+            revision=3,
             klass=SUPPORTED,
-            cite="ir-design ss7, DL-254",
+            cite="ir-design ss7, DL-254, DL-285",
             effect="ices a job: an ordinary downstream atom follows the vendor ON_ICE table"
             " (s/d/n true, f/t/exitcode false), a lookback-qualified atom reads satisfied"
             " regardless, and it never runs on a plain start (DL-243); ignored on a"
-            " STARTING or RUNNING job (DL-254)",
+            " STARTING or RUNNING job (DL-254); on a member that has not run in its"
+            " RUNNING box, a completion moment for that box and its RUNNING ancestors"
+            " (DL-285)",
             trigger=_scn(BASE_JIL, "0 ON_ICE job=J0"),
         ),
         _row(

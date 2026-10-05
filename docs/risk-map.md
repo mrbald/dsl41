@@ -130,10 +130,12 @@ Two jobs in one catalog can each hold a resource unit the other needs, and neith
 A reproduction, with renewable resources X and Y of amount 1: job `a` (priority 1) needs X with `FREE=N` and Y with `FREE=A`; job `b` (priority 2) needs Y with `FREE=Y`.
 After each job runs once and fails, `a` holds X and `b` holds Y.
 When both start again, `a` waits in `QUE_WAIT` for Y, and `b` waits behind `a`'s priority (DL-255).
-Only `RELEASE_RESOURCE`, or `KILLJOB` and then `FORCE_STARTJOB`, ends the wait.
-DL-256 accepts hold-and-wait as the vendor's behavior; no entry records this cycle, and no test checks liveness with held units.
+Only an operator act ends the wait: `RELEASE_RESOURCE` on `b`, which holds the unit `a` lacks, or `KILLJOB` on either job and then `FORCE_STARTJOB` on it.
+A forced start of a holder runs on its held units and does not check or take the unit it lacks (DL-256's reuse rule), so a forced `a` runs without Y.
+`RELEASE_RESOURCE` on `a` frees X, but `a` is still short on Y and still blocks `b`.
+[DL-286](decision-log.md) records the cycle as a stated limit, with no static check.
+`test_dl256_a_circular_wait_over_held_units_breaks_by_an_operator_act` and `test_dl256_releasing_the_blockers_own_held_unit_leaves_the_circular_wait` reproduce it.
 The [capacity card](blocks/capacity.md) lists it under its gaps.
-Whether it needs a warning or a change is the owner's call.
 
 ### A replayed oracle fault stops every resume
 

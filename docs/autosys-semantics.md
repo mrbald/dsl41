@@ -215,8 +215,9 @@ The box stays RUNNING while any member is running. The box cannot complete befor
 run (or are bypassed). Default: box SUCCESS if and only if all members ended SUCCESS. Box
 FAILURE if at least one member failed (evaluated after all members complete). A member that
 ended TERMINATED counts as failed for this fold; SEM-14 kills land here.
-Two carve-outs to the literal fold resolve a member as INACTIVE. Each is a completion moment
-and runs the full completion door: overrides first, then the default fold.
+Three carve-outs to the literal fold take a member out of it. Each is a
+completion moment and runs the full completion door: overrides first, then the default fold.
+The first two resolve the member as INACTIVE.
 - A run_window skip inside a live box run is an explicit INACTIVE verdict (DL-13, DL-154),
   including the one a box start decides (DL-246). The member leaves the run and casts no vote in the fold **[C]** (mechanism tier; SEM-33's vendor
   quotes pin the verdict and the completion, not the bookkeeping).
@@ -225,12 +226,23 @@ and runs the full completion door: overrides first, then the default fold.
   state of a job in a box to INACTIVE affects the box's completion status as if the INACTIVE
   job returned a status of SUCCESS." This holds for a member that ran, one that failed, and
   one that still waited. DL-235 still holds for a launched run: no kill.
+- An ON_ICE on a member that has not run in this box run (DL-285). SEM-20 **[V]** removes an
+  iced job from all conditions and logic, and SEM-11 **[V]** lets a box complete once every
+  member ran or was bypassed, so the fold skips the iced member. The ice moves no status, so
+  the check runs on the event itself; an ice on a queued member settles it INACTIVE (DL-50),
+  and that transition carries the check. That the check runs at the ice, rather than at the
+  next member transition, is **[C]**: it composes the two vendor rules, and no vendor text
+  states the moment. An override that reads the iced member reads it as satisfied, which is
+  Q6's pin. A member that ran keeps its vote, so an ice on it is no completion moment;
+  neither is an ice on a member already iced or resolved. A box that is not RUNNING
+  re-derives nothing, since SEM-15 reads members' statuses.
 
-The box row records both kinds in `window_skipped_members`; the member's own later start voids its
-mark. A resolved member stays settled if an operator later gives it a status that is not
-live; the fold still votes over members that ran. A resolved member is a completion moment
+The box row records the first two kinds in `window_skipped_members`; the member's own later
+start voids its mark. An iced member carries its own flag. A resolved member stays settled if
+an operator later gives it a status that is not live; the fold still votes over members that
+ran. A resolved or iced member is a completion moment
 for every running ancestor's overrides too, since "inside" is transitive (SEM-12). A member
-whose condition never fires inside the run, and that nobody resolves, still hangs the box:
+whose condition never fires inside the run, and that nobody resolves or ices, still hangs the box:
 waiting reads INACTIVE without the mark.
 
 ### SEM-12 · box_success / box_failure override — with evaluation gating **[V]**
@@ -345,6 +357,8 @@ it.
   runs (an ordinary s() atom, true under both tables). **[V]**
 - OFF_ICE: the job does **not** run even if its starting conditions currently hold. It waits
   for conditions to *reoccur*. **[V]**
+- An iced member that has not run is out of its RUNNING box's fold, so the ON_ICE itself runs
+  the box's completion check (DL-285, SEM-11's third carve-out).
 - ON_ICE sent to a STARTING or RUNNING job, box or not, is ignored (DL-254). **[V]** Source:
   "sendevent Command -- Change the Executable Status of a Job" (AutoSys 24.2), JOB_ON_ICE:
   "The event has no effect on jobs with a status of STARTING or RUNNING." The oracle sets no
@@ -378,16 +392,24 @@ it.
 Bypass-execution mode: the scheduler processes the job through its lifecycle but does not run
 it. The job (and boxes that contain it) evaluate as SUCCESS, and downstream runs normally. Box
 in ON_NOEXEC scheduled to run → goes RUNNING, members are bypassed to SUCCESS as their
-conditions are met, box returns to ON_NOEXEC afterward. The bypass overrides manual status
-changes to members while the box is ON_NOEXEC. This is the "dry-run wiring" state.
+conditions are met, box returns to ON_NOEXEC afterward. This is the "dry-run wiring" state.
 *Model note:* the box sentence is applied at **each box level**, so a member box of an
 ON_NOEXEC box also goes RUNNING and bypasses its own members; the dry run walks the whole
-tree. A member bypasses on its own flag or on any containing box's, and the bypass counts as
+tree. A member bypasses on its own flag or on any containing box's. No vendor text states
+that inheritance **[?]**. Since a box ON_NOEXEC event flags every job in the tree (DL-254),
+it decides only corners where a member lacks the flag under a flagged box: a box flagged at
+definition time, whose members do not take the flag (SEM-24); a member taken OFF_NOEXEC alone
+under a flagged box; and a job that a later period's catalog adds to, or moves under, a
+flagged box. The bypass counts as
 that member's start for the run: it joins the box's ran set, so the SEM-11 fold waits for
 every member's bypass, and a member whose condition never fires keeps the box RUNNING like any
 member that never ran. The bypass is also the tick's run for SEM-34, so a bypassed job raises
 no MUST_START_ALARM. The vendor text states one box level; applying it per level is this
 project's pin. **[?]**
+*Not modeled (DL-254):* the same vendor page says CHANGE_STATUS has no effect on an ON_NOEXEC
+job, and that a box CHANGE_STATUS INACTIVE leaves ON_NOEXEC members' status alone. The
+oracle's injected STATUS has no flag check, so it still moves a flagged job. DL-254 left
+that behavior for a separate decision, which is the owner's.
 
 DL-254: the scheduler ignores some ON_NOEXEC events. **[V]** Source: "sendevent Command --
 Change the Executable Status of a Job" (AutoSys 24.2): "The scheduler ignores the

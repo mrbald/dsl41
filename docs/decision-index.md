@@ -296,3 +296,5 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-282 | Architecture review of 2026-10-05: what was acted on and what was declined |  |
 | DL-283 | The architecture baseline is re-armed after the review of 2026-10-05 |  |
 | DL-284 | Runner contracts and comments match the code; two entries are narrowed | [docs/blocks/effect-outbox.md](blocks/effect-outbox.md), [docs/blocks/engine-loop.md](blocks/engine-loop.md), [docs/concurrency-model.md](concurrency-model.md) |
+| DL-285 | An ON_ICE on a member that has not run re-runs its RUNNING box's completion check | [docs/autosys-semantics.md](autosys-semantics.md), [docs/blocks/box-execution.md](blocks/box-execution.md), [docs/live-instance-runbook.md](live-instance-runbook.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-286 | A circular wait over held units is a stated limit | [docs/blocks/capacity.md](blocks/capacity.md), [docs/risk-map.md](risk-map.md) |
