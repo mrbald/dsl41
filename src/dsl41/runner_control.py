@@ -97,7 +97,7 @@ import uuid
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Iterator, Mapping
 from pathlib import Path
-from typing import Any, cast, get_args
+from typing import Any, Final, Literal, cast, get_args
 
 from pydantic import ValidationError
 
@@ -733,15 +733,22 @@ class ControlServer:
         boundary again, and only a committed seal is ever deduplicated."""
         estate = self.engine.estate
         record = estate.prior_seal_record if estate is not None else None
-        if record is None or record.get("request_id") != parsed.request_id:
+        if record is None:
             return None
-        if record.get("request_fingerprint") != parsed.fingerprint:
+        retry = committed_retry(
+            parsed.request_id,
+            parsed.fingerprint,
+            committed_request_id=record.get("request_id"),
+            committed_fingerprint=record.get("request_fingerprint"),
+        )
+        if retry is None:
+            return None
+        if retry == "collision":
             return _failure(
                 "seal_retry_mismatch",
                 f"request_id {parsed.request_id} named the boundary that closed"
-                f" period {record.get('period_id')} under a different envelope: force is an"
-                " authorization and the actor is attribution, and neither may be swapped"
-                " under a retry (period-model ss2.2, PR-30c)",
+                f" period {record.get('period_id')} under a different envelope: "
+                + RETRY_SWAP_REASON,
                 refused=True,
             )
         return _seal_answer(record)
@@ -1413,6 +1420,34 @@ def _seal_wire_error(request: Mapping[str, Any]) -> str | None:
     if actor is not None and not isinstance(actor, str):
         return f"claimed_actor must be a string, got {actor!r}"
     return None
+
+
+#: Why a committed boundary's request_id may not name another envelope: the
+#: one sentence both retry doors quote (period-model ss2.2, PR-30c).
+RETRY_SWAP_REASON: Final[str] = (
+    "force is an authorization and the actor is attribution, and neither may be"
+    " swapped under a retry (period-model ss2.2, PR-30c)"
+)
+
+
+def committed_retry(
+    request_id: str,
+    fingerprint: str,
+    *,
+    committed_request_id: object,
+    committed_fingerprint: object,
+) -> Literal["exact", "collision"] | None:
+    """ss2.2's exact-retry rule against the boundary that committed: None
+    when the request names another request_id, "exact" when it names the
+    same one under the same fingerprint, and "collision" under another.
+    An exact retry is answered with the original decision; a collision is
+    refused with `RETRY_SWAP_REASON` (PR-30c, PR-30e). The one rule for
+    both doors: the live route (`ControlServer._committed_seal`, over the
+    `seal` record) and the offline sealer (`cli_estate`, over the seal
+    sidecar). Each keeps its own answer shape and exit code."""
+    if committed_request_id != request_id:
+        return None
+    return "exact" if committed_fingerprint == fingerprint else "collision"
 
 
 def _seal_answer(record: Mapping[str, Any]) -> dict[str, Any]:

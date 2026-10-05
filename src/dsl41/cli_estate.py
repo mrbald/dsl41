@@ -21,6 +21,7 @@ from dsl41.cli_common import (
     PROPERTIES,
     check_base_tz,
     command_outcome,
+    confirmed_resume_refusal,
     load_catalog_and_ast_or_exit_2,
     load_semantics,
     load_tz_aliases,
@@ -455,23 +456,17 @@ async def _offline_seal(
         SealRequest,
         load_bundle_catalog,
         preflight_errors,
-        resume_root_refusal,
     )
     from dsl41.runner_clock import EngineError, RealClock
     from dsl41.period import read_period_manifest
     from dsl41.runner_startup import resume_run, wire_from_profile
 
     # ss1.3's resume rule (DL-224), before anything below stages C2 into the
-    # root or wires a supervisor: this sealer resumes the root. A refusal
-    # read without the anchor lock can be stale, so it is confirmed under
-    # it before it stands (`leader.lock` is already held). Under the locks
-    # every refusal counts, a busy anchor lock included, since `resume_run`
-    # would raise it after the staging below; `resume_run` repeats the
-    # check under both locks either way.
-    if resume_root_refusal(run_root, estate_anchor) is not None:
-        refusal = resume_root_refusal(run_root, estate_anchor, locked=True)
-        if refusal is not None:
-            return refuse(refusal)
+    # root or wires a supervisor: this sealer resumes the root, and
+    # `leader.lock` is already held
+    refusal = confirmed_resume_refusal(run_root, estate_anchor)
+    if refusal is not None:
+        return refuse(refusal)
     try:
         # the period this sealer will CLOSE, which on a root with a
         # committed boundary is the one the resume below opens (DL-151):
@@ -577,19 +572,26 @@ def _answer_from_committed(
     The live path gets this from the engine of period N+1, which keeps the
     `seal` record it opened from (`ControlServer._committed_seal`). An
     offline sealer submits to its own engine and passes no such door, so the
-    same rule is applied here to the same evidence -- the sidecar -- with
-    the same two outcomes: an EXACT retry is the original answer, and the
-    same id under a different envelope is a collision, because force is an
-    authorization and the actor is attribution and neither may be swapped
-    under a retry (PR-30c, PR-30e)."""
+    same rule (`runner_control.committed_retry`) is applied here to the
+    same evidence -- the sidecar -- with the same two outcomes: an EXACT
+    retry is the original answer, and the same id under a different
+    envelope is a collision (PR-30c, PR-30e)."""
+    from dsl41.runner_control import RETRY_SWAP_REASON, committed_retry
+
     if seal is None:
         return None
-    if seal.request_fingerprint != request.fingerprint:
+    retry = committed_retry(
+        request.request_id,
+        request.fingerprint,
+        committed_request_id=seal.boundary_request.request_id,
+        committed_fingerprint=seal.request_fingerprint,
+    )
+    if retry is None:
+        return None
+    if retry == "collision":
         return refuse(
             f"request_id {request.request_id} already named the boundary that closed"
-            f" period {seal.period_id} under a different envelope: force is an"
-            " authorization and the actor is attribution, and neither may be swapped"
-            " under a retry (period-model ss2.2, PR-30c)"
+            f" period {seal.period_id} under a different envelope: " + RETRY_SWAP_REASON
         )
     typer.echo(
         f"period {seal.period_id} was already closed by request_id"

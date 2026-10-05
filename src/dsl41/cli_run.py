@@ -27,6 +27,7 @@ from dsl41.cli_common import (
     TIMEZONE_MAP_OPT,
     TIMEZONE_OPT,
     check_base_tz,
+    confirmed_resume_refusal,
     import_tui_or_exit_2,
     load_catalog_and_ast_or_exit_2,
     load_catalog_or_exit_2,
@@ -473,16 +474,14 @@ def _profile_mismatch(observed: "RuntimeProfile", manifest: "Manifest") -> "str 
     refusal. The resume gate runs it after wiring, at the observed
     deadman. A physical roll also runs it before it writes, at the pinned
     deadman, because no supervisor has reported one yet (PR-22b)."""
-    from dsl41.period import disagreements, runtime_hash
+    from dsl41.period import runtime_hash
+    from dsl41.runner_startup import profile_drift
 
     if runtime_hash(observed) == manifest.runtime_hash:
         return None
-    pinned = manifest.runtime_profile
-    # names only: the caller reports WHICH options moved, and the walk is
-    # `period.disagreements` like every other artifact comparison (DL-137)
-    moved = sorted(
-        name for name, _, _ in disagreements(observed, pinned, type(observed).model_fields)
-    )
+    # names only: the caller reports WHICH options moved, by the core's
+    # own drift walk (DL-137)
+    moved = profile_drift(observed, manifest.runtime_profile)
     return (
         "runtime-profile mismatch: this run was launched with different"
         f" options than the period pinned ({', '.join(moved) or 'runtime_hash'})."
@@ -653,15 +652,6 @@ async def _serve_run(
             admit(successor)
         except EngineError as exc:
             return refuse(exc)
-    # ss1.3's resume rule (DL-224), READ-ONLY and before the lock, the same
-    # precedent as the two above: the supervisor wiring below creates its
-    # log, lock, socket and pid file, and a refused resume would leave that
-    # supervisor running. A refusal read without locks can be stale, so it
-    # is only acted on once the locks below confirm it; `resume_run`
-    # repeats the check under both locks either way.
-    from dsl41.boundary import resume_root_refusal
-
-    unconfirmed = resume_root_refusal(run_root, anchor_dir) if resume else None
     # ACQUIRE first (S6a, concurrency-model ss7). Earlier than the engine's
     # own entry points would, because the next thing this function does is
     # START a supervisor and take its lease -- an act on an estate this
@@ -683,14 +673,14 @@ async def _serve_run(
     wiring: "Wiring | None" = None
     engine: "Engine | None" = None
     try:
-        if unconfirmed is not None:
-            # confirm under the anchor lock too, in `resume_run`'s order:
-            # exit 2 tells the units never to restart, so a refusal from a
-            # snapshot another process has since moved past must not stand.
-            # A root that now passes resumes exactly as any other does. Under
-            # the locks every refusal counts -- a busy anchor lock included --
-            # since `resume_run` would raise it after the wiring below.
-            refusal = resume_root_refusal(run_root, anchor_dir, locked=True)
+        if resume:
+            # ss1.3's resume rule (DL-224), before anything is staged and
+            # before the supervisor wiring below creates its log, lock,
+            # socket and pid file: a refused resume would leave that
+            # supervisor running. Exit 2 tells the units never to restart,
+            # so a refusal from a stale snapshot must not stand -- the
+            # helper confirms it under the anchor lock.
+            refusal = confirmed_resume_refusal(run_root, anchor_dir)
             if refusal is not None:
                 return refuse(refusal)
         # stage period 1 UNDER the lock (period-model ss1.1): a used run root is
