@@ -309,7 +309,7 @@ from dsl41.oracle_state import (
     RuntimeState,
     TraceEntry,
 )
-from dsl41.semantics import DEFAULTS as DEFAULT_SWITCHES, SemanticSwitches
+from dsl41.semantics import DEFAULTS as DEFAULT_SWITCHES, SemanticSwitches, iced_atom_truth
 from dsl41.timezones import (
     MISSING_HOUR,
     REPEATED_HOUR,
@@ -1375,26 +1375,9 @@ class Oracle:
             # The flag reads the same whatever the stored status: ON_ICE on
             # a STARTING/RUNNING job is ignored (DL-254) and a plain start
             # refuses an iced job, so only an injected STATUS can make an
-            # iced row live. Split on whether the atom carries a lookback
-            # qualifier (DL-243) and on the `ice-lookback` switch (DL-252).
-            if atom.lookback is not None and self.semantics.ice_lookback == "true":
-                # SEM-05 + DL-13: a LOOKBACK atom (any kind, zero included)
-                # keeps the blanket pin -- every atom kind true, lookback
-                # ignored -- as the AutoSys 24.2 "condition Attribute" page
-                # states for a look-back condition on an ON_ICE predecessor.
-                # PENDING: Q10 -- the Start Conditions ON_ICE table (below)
-                # does not separate lookback atoms and reads f/t/exitcode
-                # false; which page a live instance follows is open. The
-                # table's reading is the `ice-lookback=ordinary` switch
-                # (DL-252): the qualifier is dropped and the table applies.
-                return True
-            # DL-243 (SEM-20): an ORDINARY atom (no lookback qualifier
-            # at all) follows the vendor's own ON_ICE truth table instead:
-            # success/done/notrunning true, failure/terminated/exitcode
-            # false.
-            if isinstance(atom, ExitCodeAtom):
-                return False
-            return atom.status in ("SUCCESS", "DONE", "NOTRUNNING")
+            # iced row live. The row and its open Q10 split live in
+            # `iced_atom_truth`; the oracle passes its switch (DL-252).
+            return iced_atom_truth(atom, self.semantics.ice_lookback)
         if isinstance(atom, ExitCodeAtom):
             if rt.exit_code is None or not self._lookback_ok(rt, atom.lookback, evaluator):
                 return False

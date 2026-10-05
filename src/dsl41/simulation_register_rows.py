@@ -2864,9 +2864,9 @@ SCENARIO_ROWS: tuple[Row, ...] = (
             member="ON_ICE",
             facet="lookback atom",
             klass=PROVISIONAL,
-            cite="SEM-20, DL-243, oracle.Oracle._atom_true",
+            cite="SEM-20, DL-243, semantics.iced_atom_truth",
             label="Q10",
-            sites=("oracle.Oracle._atom_true#1",),
+            sites=("semantics.iced_atom_truth#1",),
             effect="a LOOKBACK-qualified atom on an iced job reads true, lookback"
             " ignored, as the AutoSys 24.2 condition attribute page states; an ORDINARY"
             " atom (no lookback) follows the Start Conditions on-ice table, which does"

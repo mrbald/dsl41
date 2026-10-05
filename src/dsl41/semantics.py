@@ -302,6 +302,31 @@ def resolve(overrides: Mapping[str, str] | None = None) -> SemanticSwitches:
 DEFAULTS: Final[SemanticSwitches] = resolve()
 
 
+def iced_atom_truth(atom: StatusAtom | ExitCodeAtom, ice_lookback: IceLookback) -> bool:
+    """What a job atom reads when its predecessor is ON_ICE. The flag reads
+    the same whatever the stored status (DL-254).
+
+    An atom with a lookback qualifier, zero included, keeps the blanket
+    pin under `ice-lookback=true`: every atom kind is true and the
+    lookback is ignored (SEM-05, DL-13). Q10 is open: the Start
+    Conditions ON_ICE table does not separate lookback atoms, and
+    `ice-lookback=ordinary` applies that table to them (DL-252).
+
+    An ordinary atom, with no lookback qualifier, follows the vendor's
+    ON_ICE table (SEM-20, DL-243): success, done and notrunning are true;
+    failure, terminated and exit-code atoms are false.
+
+    The oracle passes its switch value. Static readers pass
+    `DEFAULTS.ice_lookback` (DL-252). An ON_NOEXEC predecessor is not
+    this row (DL-281)."""
+    if atom.lookback is not None and ice_lookback == "true":
+        # PENDING: Q10 -- which vendor page a live instance follows.
+        return True
+    if isinstance(atom, ExitCodeAtom):
+        return False
+    return atom.status in ("SUCCESS", "DONE", "NOTRUNNING")
+
+
 def parse_assignments(items: Iterable[str]) -> dict[str, str]:
     """`NAME=VALUE` words, as the CLI takes them, into checked overrides.
 

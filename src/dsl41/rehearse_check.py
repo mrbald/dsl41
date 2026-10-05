@@ -58,7 +58,7 @@ from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import VirtualClock, ZeroDelayCycleError
 from dsl41.runner_scheduler import Scheduler
-from dsl41.semantics import SemanticSwitches
+from dsl41.semantics import DEFAULTS, SemanticSwitches, iced_atom_truth
 
 #: The check-mode scenario event allowlist (DL-184): injected starts carry a
 #: +1 budget on their target; a scripted STATUS forges the counts under test.
@@ -483,23 +483,15 @@ def genesis_truth(catalog: CatalogIR) -> Callable[[StatusAtom | ExitCodeAtom], b
     -- never a terminal -- so s/f/d/t and exit-code atoms are FALSE at
     genesis, with two exceptions the slice review caught the first draft
     missing: bare or qualified n() is TRUE (a never-run partner is
-    notrunning, oracle's own reading), and an ON_ICE seed satisfies every
-    atom naming that job IF the atom carries a lookback qualifier (SEM-05,
-    the DL-13 blanket pin) -- DL-243 narrowed this for an ORDINARY atom (no
-    lookback at all) to the vendor's ON_ICE table instead (SEM-20):
-    success/done/notrunning true, failure/terminated/exitcode false, same
-    split as `Oracle._atom_true` at the default switches, which a static
-    estimate reads like lint does (DL-252)."""
+    notrunning, oracle's own reading), and an atom naming an ON_ICE seed
+    reads the iced row (`iced_atom_truth`, SEM-05/SEM-20, DL-243) at the
+    default switch, as a static estimate reads it (DL-252)."""
 
     def truth(atom: StatusAtom | ExitCodeAtom) -> bool:
         if atom.job.instance is None:
             job = catalog.jobs.get(atom.job.name)
             if job is not None and job.sem.initial_status == "ON_ICE":
-                if atom.lookback is not None:
-                    return True
-                if isinstance(atom, ExitCodeAtom):
-                    return False
-                return atom.status in ("SUCCESS", "DONE", "NOTRUNNING")
+                return iced_atom_truth(atom, DEFAULTS.ice_lookback)
         if isinstance(atom, ExitCodeAtom):
             return False
         return atom.status == "NOTRUNNING"

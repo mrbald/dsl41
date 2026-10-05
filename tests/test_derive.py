@@ -1053,7 +1053,7 @@ def test_l020_fires_when_every_immediate_predecessor_translates_to_skip() -> Non
         "condition: s(icy) & s(skipped_path)\n"
     )
     catalog = lower_source(text)
-    (violation,) = rule_l020(catalog, derive_graph(catalog))
+    (violation,) = rule_l020(catalog)
     assert violation.code == "L020"
     assert violation.severity == "warn"
     assert violation.jobs == ["downstream"]
@@ -1071,7 +1071,7 @@ def test_l020_quiet_when_one_predecessor_still_runs() -> None:
         "condition: s(icy2) & s(livewire)\n"
     )
     catalog = lower_source(text)
-    assert rule_l020(catalog, derive_graph(catalog)) == []
+    assert rule_l020(catalog) == []
 
 
 def test_l020_fires_the_blocking_direction_on_a_hidden_ordinary_conjunct() -> None:
@@ -1089,7 +1089,7 @@ def test_l020_fires_the_blocking_direction_on_a_hidden_ordinary_conjunct() -> No
         "condition: f(ice, 9999) & f(ice) & s(live)\n"
     )
     catalog = lower_source(text)
-    (violation,) = rule_l020(catalog, derive_graph(catalog))
+    (violation,) = rule_l020(catalog)
     assert violation.jobs == ["hidden_conjunct"]
     assert violation.detail == "ice"
     assert "can never be satisfied" in violation.message
@@ -1111,7 +1111,7 @@ def test_l020_quiet_on_a_disjunct_a_live_alternative_still_converges() -> None:
         "condition: f(p) | s(q)\n"
     )
     catalog = lower_source(text)
-    assert rule_l020(catalog, derive_graph(catalog)) == []
+    assert rule_l020(catalog) == []
 
 
 def test_l020_fires_the_blocking_direction_even_with_a_global_gate() -> None:
@@ -1127,7 +1127,7 @@ def test_l020_fires_the_blocking_direction_even_with_a_global_gate() -> None:
         "condition: f(icy) & v(G) = 1\n"
     )
     catalog = lower_source(text)
-    (violation,) = rule_l020(catalog, derive_graph(catalog))
+    (violation,) = rule_l020(catalog)
     assert violation.jobs == ["g_cons"]
     assert violation.detail == "icy"
     assert "can never be satisfied" in violation.message
@@ -1142,13 +1142,13 @@ def test_l020_quiet_on_a_held_predecessor_and_on_a_box_override_ref() -> None:
         "insert_job: after_hold\njob_type: c\ncommand: y\nmachine: m1\n"
         "condition: s(onhold)\n"
     )
-    assert rule_l020(held, derive_graph(held)) == []
+    assert rule_l020(held) == []
     override = lower_source(
         "insert_job: icebox\njob_type: b\nbox_success: s(frozen)\n\n"
         "insert_job: frozen\njob_type: c\ncommand: x\nmachine: m1\n"
         "box_name: icebox\nstatus: ON_ICE\n"
     )
-    assert rule_l020(override, derive_graph(override)) == []
+    assert rule_l020(override) == []
 
 
 def test_l020_quiet_when_the_consumer_itself_translates_to_skip() -> None:
@@ -1161,7 +1161,7 @@ def test_l020_quiet_when_the_consumer_itself_translates_to_skip() -> None:
         "status: ON_ICE\ncondition: s(icy3)\n"
     )
     catalog = lower_source(text)
-    assert rule_l020(catalog, derive_graph(catalog)) == []
+    assert rule_l020(catalog) == []
 
 
 def test_l020_fires_on_the_corpus_fixtures() -> None:
@@ -1177,13 +1177,51 @@ def test_l020_fires_on_the_corpus_fixtures() -> None:
     by its message, not just its job name, is what catches a regression that
     merges the two directions' filters back together."""
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
-    violations = {v.jobs[0]: v for v in rule_l020(catalog, derive_graph(catalog))}
+    violations = {v.jobs[0]: v for v in rule_l020(catalog)}
     assert set(violations) == {"l20_consumer", "l20_never_runs", "l20_lookback_rescued"}
     assert "AutoSys runs the consumer" in violations["l20_consumer"].message
     assert "translates to a UC Skip" in violations["l20_consumer"].message
     assert "AutoSys runs the consumer" in violations["l20_lookback_rescued"].message
     assert "can never be satisfied" in violations["l20_never_runs"].message
     assert "AutoSys never starts the consumer" in violations["l20_never_runs"].message
+
+
+@pytest.mark.parametrize("atom", ["f(nx, 0)", "t(nx, 01.00)", "e(nx, 01.00) = 0"])
+def test_l020_noexec_lookback_atom_fires_the_blocking_direction(atom: str) -> None:
+    """DL-281, the noexec twin of l20_lookback_rescued. The SEM-05 blanket
+    pin is ON_ICE only. A bypass ends in SUCCESS with no exit code, so a
+    failure, terminated or exit-code atom on an ON_NOEXEC producer reads
+    false whatever its lookback. The consumer can never start in AutoSys:
+    direction 2, not direction 1."""
+    text = (
+        "insert_job: nx\njob_type: c\ncommand: x\nmachine: m1\nstatus: ON_NOEXEC\n\n"
+        "insert_job: nx_cons\njob_type: c\ncommand: y\nmachine: m1\n"
+        f"condition: {atom}\n"
+    )
+    catalog = lower_source(text)
+    (violation,) = rule_l020(catalog)
+    assert violation.jobs == ["nx_cons"]
+    assert violation.detail == "nx"
+    assert "can never be satisfied through 'nx' (ON_NOEXEC)" in violation.message
+    assert "AutoSys runs the consumer" not in violation.message
+
+
+@pytest.mark.parametrize("atom", ["s(nx, 0)", "d(nx, 01.00)", "n(nx, 0)"])
+def test_l020_noexec_lookback_atom_on_a_bypass_status_runs_the_consumer(atom: str) -> None:
+    """DL-281's non-trigger for the blocking direction: a success, done or
+    notrunning atom reads true against an ON_NOEXEC producer, lookback or
+    not. Its only predecessor translates to a UC Skip, so the original
+    direction fires instead."""
+    text = (
+        "insert_job: nx\njob_type: c\ncommand: x\nmachine: m1\nstatus: ON_NOEXEC\n\n"
+        "insert_job: nx_cons\njob_type: c\ncommand: y\nmachine: m1\n"
+        f"condition: {atom}\n"
+    )
+    catalog = lower_source(text)
+    (violation,) = rule_l020(catalog)
+    assert violation.detail == "nx"
+    assert "AutoSys runs the consumer" in violation.message
+    assert "can never be satisfied" not in violation.message
 
 
 def test_l021_fires_for_the_condition_only_double_fire_shape() -> None:
@@ -1675,7 +1713,7 @@ def test_a_job_named_like_a_cross_instance_ref_is_not_its_producer() -> None:
     assert edge.src in catalog.jobs  # the collision itself, still present
     assert local_producer(edge, catalog) is None  # and no longer believed
     assert rule_l009(catalog, graph) == []
-    assert rule_l020(catalog, graph) == []
+    assert rule_l020(catalog) == []
 
 
 def test_l020_reads_a_global_gate_as_no_predecessor_at_all() -> None:
@@ -1690,7 +1728,7 @@ def test_l020_reads_a_global_gate_as_no_predecessor_at_all() -> None:
         "condition: s(sg3_icy) & v(SG3_FLAG) = 1\n"
     )
     catalog = lower_source(text)
-    (violation,) = rule_l020(catalog, derive_graph(catalog))
+    (violation,) = rule_l020(catalog)
     assert violation.jobs == ["sg3_cons"]
     assert violation.detail == "sg3_icy"  # the global is not listed as a predecessor
 

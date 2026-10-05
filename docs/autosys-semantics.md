@@ -451,6 +451,10 @@ before it (FAILURE/TERMINATED already satisfies NOTRUNNING) and stays true; only
 LOOKBACK-qualified `n()` atom can newly turn true by this specific transition, from the
 refreshed timestamp.
 
+DL-281: lint's L020 projects a definition-time ON_NOEXEC predecessor onto its bypass, which
+ends in SUCCESS with no exit code, so a failure, terminated or exit-code atom reads false
+whatever its lookback and every other atom reads true.
+
 ### SEM-23 · FORCE_STARTJOB vs STARTJOB **[C]**
 STARTJOB honors nothing extra (it *is* the normal start event). FORCE_STARTJOB starts the job
 regardless of conditions. Force-started runs still emit normal status events, so forced runs
@@ -1426,7 +1430,8 @@ holds the probe that would settle it.
   any look-back evaluation is ignored." The ON_ICE truth table on "Start Conditions" (AutoSys
   Workload Automation 24.2) does not separate lookback atoms and reads f()/t()/exitcode
   false. The default follows the condition Attribute page: every atom kind true, lookback
-  ignored (the DL-13 blanket pin, SEM-05). `# PENDING: Q10` marks the branch in `_atom_true`.
+  ignored (the DL-13 blanket pin, SEM-05). `# PENDING: Q10` marks the branch in
+  `semantics.iced_atom_truth`.
   A live instance icing a predecessor referenced by both an ordinary and a lookback-qualified
   atom on the same consumer job would settle which page it follows. The table's reading is
   selectable without a code change (DL-252): `--semantics ice-lookback=ordinary` drops the

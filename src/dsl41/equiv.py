@@ -112,6 +112,7 @@ from dsl41.ir import (
 )
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import TERMINAL, Event, TraceEntry
+from dsl41.semantics import DEFAULTS, iced_atom_truth
 
 STATE_CEILING = 2**18
 
@@ -648,18 +649,10 @@ def _eval_cond(cond: Cond, state: _State, alphabet: _Alphabet) -> bool:
     key = _job_key(cond)
     status = state.job_status.get(key, "NEVER_RAN")
     if state.job_iced.get(key, False):
-        # SEM-05/SEM-20 oracle parity (DL-243, DL-254): the iced reading
-        # holds whatever the status, since ON_ICE on a RUNNING job is
-        # ignored. A LOOKBACK atom (any kind, zero
-        # included) still satisfies every atom kind, lookback ignored
-        # (SEM-05's blanket pin). An ORDINARY atom (no lookback qualifier
-        # at all) instead follows SEM-20's narrower vendor truth table:
-        # success/done/notrunning true, failure/terminated/exitcode false.
-        if cond.lookback is not None:
-            return True
-        if isinstance(cond, ExitCodeAtom):
-            return False
-        return cond.status in ("SUCCESS", "DONE", "NOTRUNNING")
+        # Oracle parity (DL-243, DL-254): the iced reading holds whatever
+        # the status, since ON_ICE on a RUNNING job is ignored. A static
+        # reader takes the default switch (DL-252).
+        return iced_atom_truth(cond, DEFAULTS.ice_lookback)
     if isinstance(cond, ExitCodeAtom):
         code = state.job_exit.get(key)
         if code is None or not _lookback_holds(cond.lookback, key, state, alphabet):

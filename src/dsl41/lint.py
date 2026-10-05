@@ -36,6 +36,12 @@ Decisions pinned here (each with a test):
 - L005 reads the SEM-30 dead-config routing decision from lowering: time
   attributes with falsy/absent date_conditions sit verbatim in
   JobIR.passthrough, which is exactly where this rule looks.
+- L020 iced consumer (M19/M21, the last Part II requirement-3 detector)
+  reads the consumer's condition tree, not the derived graph, so it is an
+  IR-F rule (DL-243, DL-281). When every immediate predecessor translates
+  to a UC Skip, AutoSys runs the consumer (SEM-05/SEM-20/SEM-22) while UC
+  cascades the skip (UCS-02). One live predecessor converges, so the rule
+  needs ALL of them.
 
 Phase-5 graph-rule readings (each with a test):
 - What counts as a start gate is `DerivedEdge.is_start_gate`, in derive, and
@@ -65,11 +71,6 @@ Phase-5 graph-rule readings (each with a test):
 - L014 UC-side name collision (UCS-12): lowering already refuses exact
   duplicates, so the linter's residual check is case-insensitive collision
   (UC name addressing is the migration hazard); error severity per ss9.
-- L020 iced consumer (M19, the last Part II requirement-3 detector): every
-  immediate predecessor translates to a UC Skip, so AutoSys runs the
-  consumer (SEM-05/SEM-20) while UC cascades the skip (UCS-02). One live
-  predecessor converges, so the rule needs ALL of them; predecessors are
-  the `is_start_gate` edges above.
 - L021 condition-only multi-fire (DL-180): an unscheduled, unboxed consumer
   with >=2 wake sources and >=1 unqualified latch can fire more than once
   per cycle -- the s(A)&s(B) double fire, and bare n() as guard-turned-
@@ -109,6 +110,7 @@ from dsl41.conditions import (
 )
 from dsl41.derive import DerivedGraph, derive_graph, local_job, local_producer, start_gates
 from dsl41.ir import TIME_CLUSTER, CatalogIR, ExecSpec, FwSpec, unquote_jil_value
+from dsl41.semantics import DEFAULTS, iced_atom_truth
 
 Severity = Literal["error", "warn", "info"]
 
@@ -941,26 +943,31 @@ def rule_l014(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
 
 
 def _ice_atom_value(catalog: CatalogIR, atom: StatusAtom | ExitCodeAtom) -> str:
-    """ "true"/"false"/"unknown" for one atom, substituting the vendor's
-    ON_ICE truth table (SEM-20, DL-243) for a definition-time iced/noexec
-    LOCAL producer and leaving every other producer (live, undefined,
-    cross-instance) UNKNOWN -- this analysis resolves only the ice/noexec
-    dimension, the conservative direction for everything else (DL-162a: a
-    cross-instance `src` is the composite `name^INST`, read off the atom's
-    `instance`, never off `src in catalog.jobs`).
+    """ "true"/"false"/"unknown" for one atom whose LOCAL producer is
+    seeded ON_ICE or ON_NOEXEC at definition time. Every other producer
+    (live, undefined, cross-instance) is UNKNOWN: this analysis resolves
+    only the ice/noexec dimension, the conservative direction for
+    everything else (DL-162a: a cross-instance `src` is the composite
+    `name^INST`, read off the atom's `instance`, never off
+    `src in catalog.jobs`).
 
-    A LOOKBACK-qualified atom keeps the DL-13 blanket-true pin (SEM-05,
-    the open Q10 question) regardless of kind. An ORDINARY atom (no
-    lookback at all) follows the narrower table: success/done/notrunning
-    true, failure/terminated/exitcode false."""
+    An ON_ICE producer reads the iced row at the default switch
+    (`iced_atom_truth`, DL-243, DL-252). An ON_NOEXEC producer reads its
+    bypass projection (SEM-22, DL-281): a bypass ends in SUCCESS and
+    records no exit code, so an exit-code atom and a failure or
+    terminated atom are false whatever the lookback, and every other
+    atom is true."""
     local = local_job(atom, catalog)
-    if local is None or catalog.jobs[local].sem.initial_status not in SKIP_TRANSLATED:
+    if local is None:
         return "unknown"
-    if atom.lookback is not None:
-        return "true"
-    if isinstance(atom, ExitCodeAtom):
+    status = catalog.jobs[local].sem.initial_status
+    if status == "ON_ICE":
+        return "true" if iced_atom_truth(atom, DEFAULTS.ice_lookback) else "false"
+    if status != "ON_NOEXEC":
+        return "unknown"
+    if isinstance(atom, ExitCodeAtom) or atom.status in ("FAILURE", "TERMINATED"):
         return "false"
-    return "true" if atom.status in ("SUCCESS", "DONE", "NOTRUNNING") else "false"
+    return "true"
 
 
 def _ice_cond_value(catalog: CatalogIR, cond: Cond) -> str:
@@ -1001,21 +1008,25 @@ def _ice_cond_value(catalog: CatalogIR, cond: Cond) -> str:
     return _ice_atom_value(catalog, cond)
 
 
-def rule_l020(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
+def rule_l020(catalog: CatalogIR) -> list[Violation]:
     """Iced/noexec consumer (M19/M21; Part II requirement 3's last
     detector), decided by evaluating the job's own `condition:` tree under
-    the vendor's ON_ICE truth table (SEM-20, DL-243) rather than grouping
+    the vendor's ON_ICE truth table (SEM-20, DL-243) and the ON_NOEXEC
+    bypass projection (SEM-22, DL-281) rather than grouping
     `DerivedEdge.is_start_gate` edges per producer with `any()` (the prior
-    design, which the docstring below's two divergences both broke). `graph`
-    is unused: the condition tree alone is both necessary and sufficient
-    once box-override attrs (`box_success`/`box_failure`, never a start
-    gate) are excluded by reading `job.sem.condition` directly.
+    design, which the docstring below's two divergences both broke). The
+    condition tree alone is both necessary and sufficient once
+    box-override attrs (`box_success`/`box_failure`, never a start gate)
+    are excluded by reading `job.sem.condition` directly.
 
     Which statuses translate to UC Skip is NOT listed here: `backend_uc`'s
     `INITIAL_STATUS_CONTROL` says what UC does with each definition-time
     status, and `SKIP_TRANSLATED` is the "skip" half of that one table
-    (DL-152). ON_HOLD is M20 Hold -- it blocks downstream on BOTH sides, so
-    it is not this rule's business.
+    (DL-152). The trigger keys on that set. The atom value is AutoSys
+    truth, so `_ice_atom_value` reads one row per status, ON_ICE and
+    ON_NOEXEC (DL-281); `test_backend_uc.py` pins the set to those two.
+    ON_HOLD is M20 Hold -- it blocks downstream on BOTH sides, so it is not
+    this rule's business.
 
     Two divergences, opposite directions, both read off `_ice_cond_value`.
     (1) The whole condition evaluates to TRUE under the ice/noexec
@@ -1029,10 +1040,11 @@ def rule_l020(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
     check, so it cannot manufacture a false trigger on its own; it can
     still make the WHOLE condition unknown, correctly suppressing one. (2)
     The whole condition evaluates to FALSE: at least one iced/noexec
-    producer is gated by an ordinary failure/terminated/exitcode atom with
-    no lookback and no satisfying alternative ANYWHERE in the condition
-    that could rescue it, so AutoSys can never start the consumer at all
-    (a definition-time seed never un-ices itself in a static catalog) --
+    producer is gated by a failure/terminated/exitcode atom (for an iced
+    producer, one with no lookback) and no satisfying alternative ANYWHERE
+    in the condition could rescue it, so AutoSys can never start the
+    consumer at all (a definition-time seed never un-ices itself in a
+    static catalog) --
     while UC's skip cascade, blind to which AutoSys atom kind an edge
     stands for, may still resolve the dependency and start it. The message
     names each such producer's actual seeded status (ON_ICE or
@@ -1071,9 +1083,10 @@ def rule_l020(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
                     code="L020",
                     severity="warn",
                     message=(
-                        f"{name!r}'s condition can never be satisfied through {named}: an"
-                        " ordinary failure/terminated/exitcode atom reads false against a"
-                        " definition-time iced/noexec producer (DL-243), so AutoSys never"
+                        f"{name!r}'s condition can never be satisfied through {named}: a"
+                        " failure/terminated/exitcode atom reads false against a"
+                        " definition-time noexec producer, and against an iced one when it"
+                        " has no lookback qualifier (DL-243, DL-281), so AutoSys never"
                         " starts the consumer through it, while UC's skip cascade may still"
                         " resolve the dependency and start it (M19/M21, UCS-02)"
                     ),
@@ -1096,9 +1109,9 @@ def rule_l020(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
                 message=(
                     f"every immediate predecessor of {name!r} ({listed}) translates to"
                     " a UC Skip (M19/M21): AutoSys runs the consumer -- an iced/noexec"
-                    " producer satisfies an ordinary success/done/notrunning atom, or any"
-                    " lookback-qualified atom (DL-243, open question Q10) -- while UC"
-                    " cascades the skip onto it (UCS-02)"
+                    " producer satisfies a success/done/notrunning atom, and an iced one"
+                    " also any lookback-qualified atom (DL-243, open question Q10) --"
+                    " while UC cascades the skip onto it (UCS-02)"
                 ),
                 jobs=[name],
                 span=job.span,
@@ -1340,6 +1353,7 @@ RULES: tuple[tuple[str, RuleFn], ...] = (
     ("L017", rule_l017),
     ("L018", rule_l018),
     ("L019", rule_l019),
+    ("L020", rule_l020),
 )
 
 GRAPH_RULES: tuple[tuple[str, GraphRuleFn], ...] = (
@@ -1350,7 +1364,6 @@ GRAPH_RULES: tuple[tuple[str, GraphRuleFn], ...] = (
     ("L012", rule_l012),
     ("L013", rule_l013),
     ("L014", rule_l014),
-    ("L020", rule_l020),
     ("L021", rule_l021),
     ("L022", rule_l022),
 )
