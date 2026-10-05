@@ -293,3 +293,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-279 | A review pack for human readers: an architecture overview, a glossary, a risk map and block cards, which link the rules instead of restating them |  |
 | DL-280 | The registry names the wired component that reads a switch, and the engine holds a wired adapter to the switches it reads | [docs/runner-design.md](runner-design.md) |
 | DL-281 | The ON_ICE atom row is one helper, and lint reads an ON_NOEXEC predecessor through its bypass | [docs/autosys-semantics.md](autosys-semantics.md), [docs/ir-design.md](ir-design.md), [docs/stonebranch-semantics.md](stonebranch-semantics.md) |
+| DL-282 | Architecture review of 2026-10-05: what was acted on and what was declined |  |
