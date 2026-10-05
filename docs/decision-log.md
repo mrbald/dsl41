@@ -18153,9 +18153,9 @@ relitigate an entry; append a new one.
   a code, and refuses an unknown-outcome code with `refused`. The rejected
   decision answer is the one exception: it reads the stored code. A test
   walks the server module's syntax tree and fails on any other way of
-  writing `ok: false` or `refused`. Denials carry `access_denied` and
-  `peer_unauthenticated`, so access-model §11 no longer lists denial codes
-  as deferred.
+  writing `ok: false` or `refused`. A denial carries `access_denied` and
+  the credential refusal `peer_unauthenticated`, so access-model §11 no
+  longer lists denial codes as deferred.
   WHY IT IS ADDITIVE. protocol-evolution's rule for an additive answer
   field (DL-217) settles the wire: control-protocol §2 says consumers
   ignore unknown fields, so the field takes no version bump and none of
@@ -18203,9 +18203,9 @@ relitigate an entry; append a new one.
   their 24 raise sites because no single wrapper covers them; the
   retry-horizon gate has its own code. A check on the same path that
   names no code, such as the `seal` record check or a period loader,
-  answers `engine_error`. A
-  backfill refusal is `backfill_refused`, set where `read_backfill`
-  returns, because its checks are shared with replay and audit.
+  answers `engine_error`. A backfill refusal is `backfill_refused`, set
+  where `read_backfill` returns, because its checks are shared with replay
+  and audit.
   `stale_completion` is stored on a rejected engine-made completion and
   answers no client request. A code-less EngineError at a catch site
   answers `engine_error`. The table's client-action column carries the
@@ -18240,7 +18240,9 @@ relitigate an entry; append a new one.
   reviewer found six minors and two nits; all are fixed, and its round-two
   minor, a bypass of the completeness test, is fixed. The Fable pass found
   one major, the wording of the OPEN paragraph, and four minors; all are
-  fixed. Each fix was confirmed by the reviewer that raised it.
+  fixed. Each fix was confirmed by the reviewer that raised it. A Fable
+  pass over the integration with DL-273, standing in for DL-262's Codex
+  integration pass, found no material defect; its minors are fixed.
 - DL-273 An HTTP and WebSocket gateway is specified as proposed
   (2026-10-05; docs/gateway.md)
   THE SPEC. `docs/gateway.md` specifies a gateway that puts HTTP and
@@ -18275,9 +18277,8 @@ relitigate an entry; append a new one.
   status; an unknown outcome always maps to a 5xx, and an answer without
   a known `code` maps from its marker alone. For a query, the marker is
   not consulted: the code alone picks the status, and a query error
-  without a known code is 500. The
-  code-to-HTTP table lives in the gateway spec, not in control-protocol,
-  which stays transport-neutral.
+  without a known code is 500. The code-to-HTTP table lives in the
+  gateway spec, not in control-protocol, which stays transport-neutral.
   RETRIES. The browser owns `request_id` and the only retry policy. It
   saves the id and pins before the first send, treats any answer that is
   neither a 200 nor a problem with a marker as unknown, and retries only
@@ -18327,4 +18328,10 @@ relitigate an entry; append a new one.
   seal retry rule could loop until a refused seal committed; a refused
   seal now stops the retry. The advisor confirmed twelve fixed and one
   partial (the health route under the trusted-header rule), with three
-  nits and no new material defect. All of round two is fixed.
+  nits and no new material defect. All of round two is fixed. Round
+  three confirmed every round-two fix and raised three minors: the health
+  route now runs the socket check, the entry's wording matches criterion
+  11, and only an engine's refusal stops a seal retry. All three are
+  fixed. A Fable pass over the integration of DL-272 and this entry,
+  standing in for DL-262's Codex integration pass, found no material
+  defect; its minors are fixed.
