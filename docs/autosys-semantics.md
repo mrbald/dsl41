@@ -1467,7 +1467,7 @@ holds the probe that would settle it.
   default `first-full` puts them in no week, and `--semantics wekr-first-week=partial` makes
   them week 1. SEM-37 states both readings. A live instance generating `WEKR1#02` for 2014
   would settle the choice: January 13–19 under `first-full`, January 6–12 under `partial`.
-- Q12 (§5 `resources` row, DL-287): open, parked. What the vendor does with FREE on a
+- Q12 (§5 `resources` row, DL-287): descoped (2026-10-07). What the vendor does with FREE on a
   depletable resource. "resources Attribute" (AutoSys 24.2) documents FREE as "Optional for
   renewable virtual resources only" and says nothing of FREE=Y or FREE=A on a depletable.
   The page has the same text in every version from 11.3.6 to 24.2. A search of the vendor
@@ -1475,9 +1475,10 @@ holds the probe that would settle it.
   case. The vendor might reject the definition, ignore the code, or free the units. No
   default is pinned: preflight refuses FREE=Y and FREE=A on a depletable and accepts FREE=N,
   which matches the depletable default. The oracle applies the code to a direct caller, as
-  DL-50 states. Parked: the refusal is loud, so no compiled estate depends on the answer.
-  The runbook's Q12 protocol settles it: whether jil accepts each FREE code, and whether a
-  QUANTITY=2 job runs after the FREE=A job ends and after the FREE=Y job fails.
+  DL-50 states. Descoped: the refusal is loud, so no compiled estate depends on the answer,
+  and the case is not pursued. If it is ever needed, the runbook's Q12 protocol settles it:
+  whether jil accepts each FREE code, and whether a QUANTITY=2 job runs after the FREE=A job
+  ends and after the FREE=Y job fails.
 
 ## Sources
 Primary: Broadcom TechDocs, AutoSys Workload Automation 12.0/12.0.01/12.1/12.1.01 (Basic Box
