@@ -391,6 +391,8 @@ def test_spec_documents_excludes_logs_and_sorts(tmp_path: Path) -> None:
         "risk-map.md",
         "decision-index.md",
         "architecture.md",
+        "stonebranch-semantics.md",
+        "uc-edge-schema.md",
     } <= set(arch_check.SPEC_EXCLUDED)
 
 

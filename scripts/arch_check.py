@@ -1045,8 +1045,9 @@ def changed_lines_since_review() -> tuple[int, str] | None:
     return changed, ref
 
 
-#: a log and a registry, not specifications (DL-225, DL-230); and the reader
-#: aids and generated files, which are not specifications either.
+#: a log and a registry, not specifications (DL-225, DL-230); the reader
+#: aids and generated files, which are not specifications either; and the
+#: UC documents, whose topic is descoped (DL-288).
 SPEC_EXCLUDED = (
     "decision-log.md",
     "citation-index.md",
@@ -1054,6 +1055,8 @@ SPEC_EXCLUDED = (
     "risk-map.md",
     "decision-index.md",
     "architecture.md",
+    "stonebranch-semantics.md",
+    "uc-edge-schema.md",
 )
 
 

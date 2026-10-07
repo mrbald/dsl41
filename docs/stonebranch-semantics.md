@@ -253,8 +253,8 @@ This part is the register of the U series. A closed question names where its rul
 U4, U5, U6a, U7 and U8 were closed from vendor documentation (DL-53). An open question carries
 a `# PENDING: Un` marker where the code holds a provisional default.
 
-- U1: OPEN. Native OR-join / "Any" completion criteria in 7.x workflows (UCS-03). It decides
-  the M12 lowering (`# PENDING: U1`, derive.py).
+- U1: OPEN, descoped (DL-288). Native OR-join / "Any" completion criteria in 7.x workflows
+  (UCS-03). It decides the M12 lowering (`# PENDING: U1`, derive.py).
 - U2: closed (DL-53). Workflow-status derivation is in UCS-04: member failure →
   Running/Problems, and the workflow continues to run; Success if and only if all members are
   Success/Finished/Skipped; a workflow instance is never Failed ("Displaying Task Instance
@@ -266,10 +266,10 @@ a `# PENDING: Un` marker where the code holds a provisional default.
   is doc-frozen in `docs/uc-edge-schema.md` from the docs site (UC 8.0), cross-verified
   against two OSS clients. `dsl41 uc` emits exactly this subset and quarantines WHOLE any
   workflow with an inexpressible edge (a `Cancelled` edge condition does not exist, so M06
-  t() edges quarantine). **U3b: OPEN.** Rich condition forms (Exit Code / Step Condition /
-  Variable + variableCondition, vertex conditionExpression), the live openapi.json pull, and
-  write-path verification (one live POST + GET readback). The API client stays
-  generated-from-OpenAPI (DL-08). `# PENDING: U3b`, backend_uc.py.
+  t() edges quarantine). **U3b: OPEN, descoped (DL-288).** Rich condition forms (Exit Code /
+  Step Condition / Variable + variableCondition, vertex conditionExpression), the live
+  openapi.json pull, and write-path verification (one live POST + GET readback). The API
+  client stays generated-from-OpenAPI (DL-08). `# PENDING: U3b`, backend_uc.py.
 - U4: closed (DL-53; M08, M31). The mechanism is the per-task "Exit Code Processing" field
   (Success/Failure Exitcode Range, Success/Failure Output Contains), default Success Exitcode
   Range ("Linux Unix Task Properties"). The exit-code range value is a required field with NO
@@ -281,8 +281,8 @@ a `# PENDING: Un` marker where the code holds a provisional default.
   Zone field is documented ("Triggering by Date and Time"; the quote sits in the Trigger-Now
   execution section, and the equivalent field-table text is unretrieved, a cosmetic residue).
   U6b, calendar parity with AutoSys extended calendars (M24), including any multi-calendar
-  AND/OR algebra for run/exclude combinations: OPEN. No documented algebra found. U6b lives
-  in the migration report's question table; it has no code switch.
+  AND/OR algebra for run/exclude combinations: OPEN, descoped (DL-288). No documented
+  algebra found. U6b lives in the migration report's question table; it has no code switch.
 - U7: closed (DL-53). The M29 overrun mechanism is Late Finish + Abort Action (a composite;
   see the M29 caveat). Auto-retry applies to Failed status only ("auto-retry of tasks in
   FAILED status", Retry Exit Codes field). "Suppress Intermediate Failures" is a Re-run

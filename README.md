@@ -67,7 +67,8 @@ not built: the remote relay and shared store that multihost execution needs
 §7), rich UC condition forms with write-path verification (they need a live
 controller), and the decompiler's custom-pattern option (`--patterns`). The
 open questions that need a live instance are listed under
-[What is not built](#what-is-not-built).
+[What is not built](#what-is-not-built). The UC backend is descoped until
+further notice (DL-288): it stays built and tested, and gets no new work.
 
 ## Install
 
@@ -961,7 +962,8 @@ Training estate:
   [docs/concurrency-model.md](docs/concurrency-model.md)
   §7.
 - Rich UC condition forms, the live OpenAPI pull, write-path verification,
-  and the generated client (U3b). They need a live controller.
+  and the generated client (U3b). They need a live controller. UC work is
+  descoped until further notice (DL-288).
 - The decompiler's custom-pattern option (`--patterns` recognizer and
   expander pairs).
 
@@ -971,8 +973,8 @@ AutoSys instance; Q6 has no code switch. The resource-manager questions
 Qr2-Qr4 are stated in DL-50; DL-247 narrows Qr2. Qr6 is decided: dsl41
 keeps its default, and the `queued-recheck` switch selects the vendor's
 readings (DL-257). The UC questions
-U1 and U3b need a live controller; U6b lives in the migration report's
-question table. The
+U1, U3b and U6b are descoped (DL-288); U1 and U3b would need a live
+controller, and U6b lives in the migration report's question table. The
 runner questions E5-E10 are in
 [docs/runner-design.md](docs/runner-design.md)
 §15. The probe protocols that would settle them are in

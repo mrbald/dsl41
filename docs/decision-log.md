@@ -19174,3 +19174,37 @@ relitigate an entry; append a new one.
   missing from runner-design §8 and the resume-safety consequence unstated.
   All findings are fixed and were confirmed by the reviewer that raised
   them.
+- DL-288 The UC backend and Q12 are descoped until further notice
+  (2026-10-07; README.md Status and "What is not built",
+  scripts/arch_check.py `SPEC_EXCLUDED`, tests/test_arch_check.py,
+  autosys-semantics.md resources row and §9 Q12, stonebranch-semantics.md
+  U1, U3b and U6b, citation-index.md `Q` row)
+  THE RULING. The owner descoped two topics. Work focuses on the runner.
+  UC. The Stonebranch Universal Controller backend stays built, tested and
+  shipped: `dsl41 uc`, `dsl41 report`, backend_uc.py and their tests are
+  unchanged, and the R-row refusals, the A-row assumptions and the U3b
+  rich-emission gate still hold. It gets no new work. The UC questions U1,
+  U3b and U6b are not pursued; their entries say so. This narrows DL-225's
+  spec-review scope: stonebranch-semantics.md and uc-edge-schema.md leave
+  the spec-review list. `SPEC_EXCLUDED` names them, so arch_check no longer
+  reports them due.
+  Q12. What the vendor does with FREE=Y or FREE=A on a depletable resource
+  stays unknown. A search of the vendor documentation, KB articles and
+  community threads found nothing beyond "Optional for renewable virtual
+  resources only". Preflight's refusal in run and rehearse (DL-287) stays,
+  so no estate the runner runs depends on the answer. The compiler verbs
+  (`lint`, `report`, `uc`, `equiv`) still accept such a catalog, and
+  `equiv`'s oracle applies the code, as DL-50 states. The runbook's Q12
+  protocol stays for anyone who needs the case.
+  WHAT WOULD CHANGE IT. The owner lifting either descope. For UC, removing
+  the two documents from `SPEC_EXCLUDED` returns them to the spec-review
+  list. Both would come back due at once: more than 800 lines under src/
+  have changed since their stamps.
+  REVIEW. Docs and tooling class: one Opus reviewer. It found one medium
+  finding, wording that described the owner's deployment, and four lows: the
+  missing DL-225 pointer, the U entries and the README line without the
+  descope, the citation-index row and the resources row still calling Q12
+  open, and an over-claim that no compiled estate depends on Q12. It also
+  noted the wrong reason for "come back due". All are fixed here, and the
+  reviewer confirmed them. Its note that the spec-review skill still names
+  stonebranch-semantics.md is out of scope: that skill is instruction text.
