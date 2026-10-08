@@ -63,7 +63,14 @@ from typing import Final, Literal, cast, get_args
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from dsl41.state_machine import STRICT_ENV, StateMachine, Transition, TransitionError, Violation
+from dsl41.state_machine import (
+    STRICT_ENV,
+    VIOLATION_LOG_PREFIX,
+    StateMachine,
+    Transition,
+    TransitionError,
+    Violation,
+)
 
 
 class OracleError(ValueError):
@@ -1552,7 +1559,7 @@ class RuntimeState:
             )
         for subject, violation in orphans:
             sys.stderr.write(
-                f"dsl41: dropped a transition violation noted outside an InputBatch:"
+                f"{VIOLATION_LOG_PREFIX} noted outside an InputBatch, dropped:"
                 f" {subject} {violation.transition} {violation.old}->{violation.new}:"
                 f" {violation.reason}\n"
             )

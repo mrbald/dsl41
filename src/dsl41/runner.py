@@ -148,7 +148,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal, get_args
 
 from dsl41.ir import CatalogIR, JobIR
 from dsl41.oracle import Oracle
@@ -191,11 +191,13 @@ from dsl41.runner_admission import (
     Envelope,
     Frontiers,
     RequestCollision,
+    SealInFlight,
     Applied,
     TransitionStop,
     ViolationPolicy,
     apply_attempt,
     fingerprint,
+    report_violation,
 )
 from dsl41.runner_clock import Clock, EngineError, ZeroDelayCycleError
 from dsl41.runner_effects import (
@@ -228,7 +230,7 @@ from dsl41.seal import Execution, SealedHost, SealedState, implicit_routes
 from dsl41.runner_scheduler import Scheduler
 from dsl41.semantics import ADAPTER_SWITCHES, SCHEDULER_SWITCHES, SemanticSwitches
 from dsl41.semantics import DEFAULTS as DEFAULT_SWITCHES
-from dsl41.state_machine import TransitionError
+from dsl41.state_machine import StateMachine, Transition, TransitionError
 from dsl41.timezones import alias_table
 
 
@@ -261,10 +263,127 @@ class _PendingSeal:
     DECISION is the `seal` record, which is why it cannot ride the ordinary
     admission order -- before the seal a crash would leave a durable
     "applied" for a boundary that never happened, and after it records
-    after a seal are forbidden (ss2.2)."""
+    after a seal are forbidden (ss2.2).
+
+    `phase` is where this boundary is in `SEAL_BOUNDARY`. `_seal_move` reads
+    it as the transition's old state and writes the new one; `submit_seal`'s
+    in-flight refusal also reads it, to name it. A shutdown's CancelledError
+    leaves it where it was: that exit takes no named transition
+    (`_boundary_exits`)."""
 
     request: SealRequest
     future: asyncio.Future[CommittedBoundary]
+    phase: SealPhase = "requested"
+
+
+#: One boundary's phases in the engine (period-model ss6-7). `requested`
+#: until the loop runs it; `frozen` from ss6 step 2 (admission frozen, FW
+#: polls parked) through the drain, the cutoff and quiescence; `committing`
+#: inside `commit_boundary` (step 8). The exits: `aborted` reopens C1,
+#: `sealed` stops the engine with the period closed, `stopped` stops it
+#: without an abort.
+SealPhase = Literal["requested", "frozen", "committing", "aborted", "sealed", "stopped"]
+
+SEAL_FREEZE: Final = Transition[SealPhase](
+    "seal_boundary.01",
+    frozenset({"requested"}),
+    "loop turn",
+    "frozen",
+    guard="the engine leads a lineage; the epoch is current; readiness passes",
+    effect="freeze admission; park FW polls",
+    cite="period-model ss6 step 2, ss8, PR-28c",
+)
+SEAL_COMMIT: Final = Transition[SealPhase](
+    "seal_boundary.02",
+    frozenset({"frozen"}),
+    "quiesced",
+    "committing",
+    guard="drained, cut off at T, quiescent, and the supervisor proof holds",
+    effect="commit_boundary (step 8)",
+    cite="period-model ss6 steps 3-8, PR-27",
+)
+SEAL_SEALED: Final = Transition[SealPhase](
+    "seal_boundary.03",
+    frozenset({"committing"}),
+    "commit returns",
+    "sealed",
+    effect="answer the request; raise PeriodSealed",
+    cite="period-model ss7",
+)
+SEAL_ABORT: Final = Transition[SealPhase](
+    "seal_boundary.04",
+    frozenset({"requested", "frozen", "committing"}),
+    "exception",
+    "aborted",
+    guard="before the seal append; the fence is intact; no attempt applying, no"
+    " input unadmitted, no append unfinished",
+    effect="abort_boundary; fail the request; C1 carries on",
+    cite="period-model ss7, PR-28b",
+)
+SEAL_FENCE_LOST: Final = Transition[SealPhase](
+    "seal_boundary.05",
+    frozenset({"requested", "frozen", "committing"}),
+    "exception",
+    "stopped",
+    guard="the fence is lost",
+    effect="raise without an abort",
+    cite="period-model ss7, DL-101, PR-28b",
+)
+SEAL_IN_DOUBT: Final = Transition[SealPhase](
+    "seal_boundary.06",
+    frozenset({"frozen"}),
+    "exception",
+    "stopped",
+    guard="an attempt is admitted and not fully applied, an engine-made input is"
+    " unadmitted, or a WAL append is unfinished",
+    effect="note why; raise without an abort",
+    cite="DL-274",
+)
+SEAL_PAST_PONR: Final = Transition[SealPhase](
+    "seal_boundary.07",
+    frozenset({"committing"}),
+    "BoundaryFailStop",
+    "stopped",
+    guard="past the point of no return",
+    effect="raise without an abort",
+    cite="period-model ss7",
+)
+SEAL_TRANSITION_STOP: Final = Transition[SealPhase](
+    "seal_boundary.08",
+    frozenset({"frozen"}),
+    "TransitionStop",
+    "stopped",
+    guard="the run option on-transition-violation is stop; a drained input's decision is durable",
+    effect="raise without an abort",
+    cite="concurrency-model ss4, DL-292",
+)
+
+#: The engine's seal boundary (period-model ss6-7), one per seal request.
+#: `_boundary_exits` is its exit table and `_run_boundary` its straight-line
+#: body. A request while another boundary is queued or running is refused
+#: `seal_in_flight` (`SealInFlight`) and never becomes a boundary.
+SEAL_BOUNDARY: Final[StateMachine[SealPhase]] = StateMachine(
+    name="seal_boundary",
+    states=frozenset(get_args(SealPhase)),
+    initial="requested",
+    finals=frozenset({"aborted", "sealed", "stopped"}),
+    transitions=(
+        SEAL_FREEZE,
+        SEAL_COMMIT,
+        SEAL_SEALED,
+        SEAL_ABORT,
+        SEAL_FENCE_LOST,
+        SEAL_IN_DOUBT,
+        SEAL_PAST_PONR,
+        SEAL_TRANSITION_STOP,
+    ),
+)
+
+
+def _seal_move(pending: _PendingSeal, t: Transition[SealPhase], new: SealPhase) -> None:
+    """Move one boundary to `new` through its declared transition."""
+    old, pending.phase = pending.phase, new
+    report_violation(SEAL_BOUNDARY.take(t, old, new))
 
 
 @dataclass
@@ -561,13 +680,14 @@ class Engine:
         #: the lineage's `anchor.lock` (PR-03). The journal holds the same
         #: object, so an append and a dispatch cannot prove different things.
         self.fence: Fence | None = fence
-        #: ss6 step 2's freeze. An ENGINE flag, not a row field: the barrier
-        #: freezes ADMISSION and holds no job, so an abort restores nothing
-        #: on any row and a committed seal carries every `on_hold` exactly
-        #: as the operator left it (PR-28c).
-        self.sealing = False
-        #: the same freeze, seen by an FW task at its poll boundary (ss3.5)
+        #: ss6 step 2's freeze, seen by an FW task at its poll boundary
+        #: (ss3.5) and by admission (`sealing`). An ENGINE fact, not a row
+        #: field: the barrier freezes ADMISSION and holds no job, so an
+        #: abort restores nothing on any row and a committed seal carries
+        #: every `on_hold` exactly as the operator left it (PR-28c).
         self.barrier = SealBarrier()
+        #: the one boundary queued or running; `submit_seal` refuses another
+        #: while it is set, and `_seal_boundary` clears it when it exits
         self._seal: _PendingSeal | None = None
         #: the index of an admitted attempt that is not yet fully applied:
         #: its admission line, decision, outbox entries and answer. Set when
@@ -583,6 +703,12 @@ class Engine:
         #: `--on-transition-violation` (concurrency-model ss4). An engine run
         #: option, set before the loop runs; replay never reads it.
         self.on_violation: ViolationPolicy = "refuse"
+
+    @property
+    def sealing(self) -> bool:
+        """ss6 step 2: admission is frozen for a boundary. The barrier's
+        `parked`, read under the name admission uses; one fact."""
+        return self.barrier.parked
 
     def note_executor_contact(self) -> None:
         """Stamp positive contact with this engine's own execution host
@@ -721,11 +847,15 @@ class Engine:
         must observe a state nothing else can move."""
         future: asyncio.Future[CommittedBoundary] = asyncio.get_running_loop().create_future()
         if self._seal is not None:
+            # queued or running: one boundary at a time, a retry of the same
+            # request_id included. The committed seal's retry is answered by
+            # the control server from the next period (ss2.2)
             future.set_exception(
-                AdmissionRefused(
+                SealInFlight(
                     f"a boundary is already in flight (request_id"
-                    f" {self._seal.request.request_id}): one seal at a time",
-                    code="seal_in_flight",
+                    f" {self._seal.request.request_id}, {self._seal.phase}): one seal at a"
+                    " time",
+                    in_flight_request_id=self._seal.request.request_id,
                 )
             )
         else:
@@ -746,7 +876,6 @@ class Engine:
         engine frozen behind ss6 step 2; draft 21 ran the abort only on
         validation failure, and an `ENOSPC` on the sidecar left a live
         engine frozen behind a freeze it would never lift (PR-28b)."""
-        self.sealing = False
         self.barrier.release()
         self._activity.set()
 
@@ -762,14 +891,32 @@ class Engine:
         recovery cannot repair. The fourth is DL-274's: an exception while
         an attempt admitted during the seal is not fully applied, while a
         WAL append is unfinished, or that leaves an engine-made input
-        unadmitted, propagates without an abort too."""
-        pending, self._seal = self._seal, None
+        unadmitted, propagates without an abort too.
+
+        The request stays in `_seal` until this returns or raises, so
+        `submit_seal` refuses a second one for the whole boundary, not only
+        while it is queued."""
+        pending = self._seal
         assert pending is not None
         try:
-            committed = await self._run_boundary(pending.request)
-        except (BoundaryFailStop, TransitionStop):
+            await self._boundary_exits(pending)
+        finally:
+            self._seal = None
+
+    async def _boundary_exits(self, pending: _PendingSeal) -> None:
+        """`SEAL_BOUNDARY`'s exit table: each exit names its transition. A
+        shutdown's CancelledError is not an `Exception` and passes through
+        with no named transition: the engine is stopping, and the request's
+        future goes with it."""
+        try:
+            committed = await self._run_boundary(pending)
+        except BoundaryFailStop:
+            _seal_move(pending, SEAL_PAST_PONR, "stopped")
+            raise
+        except TransitionStop:
             # a stop after a durable decision is the operator's chosen halt,
             # not a refusal: an abort would reopen C1 and carry on
+            _seal_move(pending, SEAL_TRANSITION_STOP, "stopped")
             raise
         except Exception as exc:
             # not just EngineError: an OSError from a pre-PONR write, fsync
@@ -782,6 +929,7 @@ class Engine:
                 # that cannot prove it leads does not get to reopen
                 # admission. It cannot un-run what happened; it turns a
                 # divergence into a recorded stop (PR-28b)
+                _seal_move(pending, SEAL_FENCE_LOST, "stopped")
                 raise
             if self._applying is not None:
                 # an attempt admitted during the seal is not fully applied
@@ -793,12 +941,14 @@ class Engine:
                     f"DL-274: the seal stopped the engine with attempt {self._applying}"
                     " admitted and not fully applied; resume rebuilds it from the WAL"
                 )
+                _seal_move(pending, SEAL_IN_DOUBT, "stopped")
                 raise
             if self._unadmitted is not None:
                 exc.add_note(
                     f"DL-274: the seal stopped the engine rather than lose an unadmitted"
                     f" {self._unadmitted} input; resume observes it again"
                 )
+                _seal_move(pending, SEAL_IN_DOUBT, "stopped")
                 raise
             if self.journal is not None and self.journal.append_unfinished:
                 # a WAL append failed: its line may be torn or whole, and an
@@ -807,11 +957,14 @@ class Engine:
                     "DL-274: the seal stopped the engine on an unfinished WAL append;"
                     " resume repairs the tail"
                 )
+                _seal_move(pending, SEAL_IN_DOUBT, "stopped")
                 raise
             self.abort_boundary()
+            _seal_move(pending, SEAL_ABORT, "aborted")
             if not pending.future.done():
                 pending.future.set_exception(exc)
             return
+        _seal_move(pending, SEAL_SEALED, "sealed")
         if not pending.future.done():
             pending.future.set_result(committed)
         # the control server's turn to write the answer before this loop
@@ -821,12 +974,15 @@ class Engine:
             await asyncio.sleep(0)
         raise PeriodSealed(committed)
 
-    async def _run_boundary(self, request: SealRequest) -> CommittedBoundary:
+    async def _run_boundary(self, pending: _PendingSeal) -> CommittedBoundary:
         """ss6's steps 2-8, in the single-writer loop.
 
         Step 1 is the OPERATOR's -- the runbook's hold set, placed before
         the seal -- and this barrier never touches `on_hold`: it freezes
-        ADMISSION, which is an engine flag, and holds no job."""
+        ADMISSION, which is an engine flag, and holds no job. It moves the
+        boundary from `requested` to `frozen` to `committing`; every exit is
+        `_seal_boundary`'s."""
+        request = pending.request
         estate = self.estate
         if estate is None or self.journal is None:
             raise AdmissionRefused(
@@ -844,8 +1000,8 @@ class Engine:
                 code="stale_epoch",
             )
         staged_ctx, staged_manifest = self._readiness(request, estate)
-        self.sealing = True  # step 2
-        self.barrier.park()
+        self.barrier.park()  # step 2
+        _seal_move(pending, SEAL_FREEZE, "frozen")
         await self._drain_admitted()
         at = self.clock.now()  # step 3
         await self._cutoff(at)  # steps 4-6
@@ -896,6 +1052,7 @@ class Engine:
             at=at,
             force_seal=request.force_seal,
         )
+        _seal_move(pending, SEAL_COMMIT, "committing")
         return commit_boundary(  # step 8
             run_root=estate.run_root,
             anchor=estate.anchor,
@@ -1613,6 +1770,7 @@ class Engine:
             # the leader that held that epoch), while an UNSEEN old-epoch
             # request is refused -- it was composed by a client still talking
             # to a leader that has been superseded.
+            self.decisions.refuse(pending.request_id)
             self._refuse(
                 pending,
                 AdmissionRefused(
@@ -1628,6 +1786,7 @@ class Engine:
             if self.sealing and pending.future is not None:
                 # the seal refuses on this and C1 reopens, so the request it
                 # popped is answered rather than dropped (DL-274)
+                self.decisions.refuse(pending.request_id)
                 self._refuse(pending, AdmissionRefused(str(exc), code=exc.code or "engine_error"))
             elif self.sealing and (pending.ev is not None or pending.host is not None):
                 # an engine-made input -- a completion, a tick, a routing
@@ -1640,6 +1799,7 @@ class Engine:
         if pending.control:  # before the frontier moves: a refusal takes no index
             refusal = self._dry_apply(pending, admitted.committed_index, fp)
             if refusal is not None:
+                self.decisions.refuse(pending.request_id)
                 self._refuse(pending, refusal)
                 return []
         self.frontiers = admitted
@@ -1670,8 +1830,13 @@ class Engine:
             if effect.kind == "SPAWN":
                 # a run has its one identity from its plan (DL-234): a held
                 # or retired SPAWN still counts, so a STARTING overwrite at
-                # the same run number plans no second one -- the rule resume
-                # rebuilds `_dispatched` by
+                # the same run number plans no second one. Resume does not
+                # re-run this rule: it rebuilds `_dispatched` from every
+                # row's run number (runner_startup, period-model ss3.3). The
+                # two agree on a dispatchable row: it reaches run N through
+                # a decision that planned run N's SPAWN, or through an
+                # attempt whose decision never landed, whose start resume
+                # handles itself (`_resume_untraced_starts`)
                 self._dispatched[effect.job] = max(
                     self._dispatched.get(effect.job, 0), effect.run_number
                 )

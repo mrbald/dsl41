@@ -1322,8 +1322,10 @@ class OpenedRuntime(BaseModel):
     3. `consumed` and `enqueue_counter` are installed, never renormalized:
        redefining a rank as `1 + max(active)` would buy one integer in
        exchange for proving that renormalisation equals genesis replay.
-    4. `dispatched` below is rebuilt, not carried -- it is derived state,
-       and its reconstruction is normative (ss3.3).
+    4. the ghost-run gate `_dispatched` is not carried: it is derived
+       state, and its reconstruction is normative (ss3.3). Resume rebuilds
+       it from every row with `run_number > 0` after the replay
+       (`runner_startup`), which covers the carried rows too.
     5. `last_contact` and the host deadman are NOT seeded: a new leader
        over-waits rather than evicting early, and the row's deadman stays
        null until the host re-registers in the new period.
@@ -1352,12 +1354,6 @@ class OpenedRuntime(BaseModel):
     outbox_pending: tuple[Effect, ...] = ()
     executions: tuple[Execution, ...] = ()
     classification: dict[str, SealedVerdict] = {}
-    #: ss3.3's ghost-run gate: `{job: run_number}` for every row that has
-    #: run. NOT a cache -- `plan_effects` plans a SPAWN only when
-    #: `run_number > dispatched[job]`, so an opener that left it empty
-    #: would let a legal `CHANGE_STATUS STARTING` on a job that completed
-    #: run 7 plan run 7 again (PR-18a)
-    dispatched: dict[str, int] = {}
 
     @property
     def host_rows(self) -> dict[str, HostRuntime]:
@@ -1488,9 +1484,6 @@ def open_from_seal(
         outbox_pending=opened.outbox_pending,
         executions=opened.executions,
         classification=dict(opened.classification),
-        dispatched={
-            job: row.run_number for job, row in opened.state.jobs.items() if row.run_number > 0
-        },
     )
 
 

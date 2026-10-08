@@ -56,13 +56,14 @@ stateDiagram-v2
 - Outside a seal ([period-model §6](../period-model.md#6-the-cutoff-barrier) step 2), a tick pops before any later-due event and any same-or-later-due timer. A queued input stamped at the tick's instant goes first ([DL-45](../decision-log.md) item 2, narrowed by [DL-284](../decision-log.md); `test_dl137_a_tick_and_an_input_stamped_alike_feed_the_input_first`).
 - On a real clock the loop commits to work only once its instant is due. An earlier instant is waited out, and an input that arrives during the wait makes the loop choose again ([DL-45](../decision-log.md) item 1).
 - On a real clock a timer due strictly before a due queued input fires first, as its own input ([DL-232](../decision-log.md); [concurrency-model §0](../concurrency-model.md#0-the-invariant)).
-- While `sealing` is set, `Engine._push` refuses new externally requested inputs and `_next_work` takes no tick. The seal itself drains the queue and admits the ticks due at or before its cutoff ([period-model §6](../period-model.md#6-the-cutoff-barrier) steps 2 and 4).
+- While `sealing` is true, `Engine._push` refuses new externally requested inputs and `_next_work` takes no tick. The seal itself drains the queue and admits the ticks due at or before its cutoff ([period-model §6](../period-model.md#6-the-cutoff-barrier) steps 2 and 4).
 - Every admitted input ends in a dispatch pass ([DL-234](../decision-log.md)).
 - Work at one clock instant has a budget. The floor is `INSTANT_BUDGET_FLOOR` ([DL-211](../decision-log.md)).
 
 ## Failure and recovery
 
-- A seal has three exits: commit, refusal and [fail-stop](../glossary.md#fail-stop). A refusal runs `abort_boundary`, and the loop carries on in the open period. A fail-stop raises out of the loop with no abort.
+- A seal has three exits: commit, refusal and [fail-stop](../glossary.md#fail-stop). A refusal runs `abort_boundary`, and the loop carries on in the open period. A fail-stop raises out of the loop with no abort. `SEAL_BOUNDARY` names the phases and every exit, `--on-transition-violation stop` in the seal's drain included ([state machines](../state-machines.md#seal_boundary); [DL-292](../decision-log.md)).
+- `Engine.sealing` reads `SealBarrier.parked`: the freeze is one fact.
 - One kind of fail-stop comes before the `seal` append: a fence loss, an exception while an attempt admitted during the seal is not fully applied, a failed WAL append, or a `clock_regressed` on an engine-made input. The last three are [DL-274](../decision-log.md)'s; `_seal_boundary` adds a note naming it. After a fence loss or one of DL-274's cases, resume rebuilds from the WAL, and the period stays open.
 - The other kind is a failure at or after the `seal` append, an anchor close after a durable seal line included. `commit_boundary` raises `BoundaryFailStop`, and the outcome is unknown. Recovery decides: it commits a complete seal line once its `fsync` succeeds, and it truncates a torn or absent line and reopens the period ([period-model §7](../period-model.md#7-the-seal-operation), PR-28d).
 - An adapter task that died with an exception is re-raised by `Engine._settle`, and the engine stops. Resume rebuilds the estate from the log ([period-model §11](../period-model.md#11-resume-replay-and-recovery)).

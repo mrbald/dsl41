@@ -2482,6 +2482,138 @@ def test_the_live_seal_answers_on_that_same_ladder_and_names_the_opener(
         assert ("dsl41 run --resume" in printed.out) is opens, answer
 
 
+_SEAL_JIL = "insert_job: seal_flight_job\njob_type: c\ncommand: x\nmachine: m1\n"
+
+
+def _in_flight(in_flight_request_id: str) -> dict[str, object]:
+    return {
+        "ok": False,
+        "refused": True,
+        "code": "seal_in_flight",
+        "error": f"a boundary is already in flight (request_id {in_flight_request_id}, frozen)",
+        "in_flight_request_id": in_flight_request_id,
+    }
+
+
+@pytest.mark.parametrize(
+    ("in_flight", "code", "says"),
+    [
+        (
+            "req-9",
+            4,
+            "your seal req-9 is still in flight; outcome unknown; retry later under"
+            " --request-id req-9",
+        ),
+        ("req-other", 2, "another boundary (req-other) is in flight; this request did nothing"),
+    ],
+)
+def test_the_live_seal_reads_seal_in_flight_by_whose_boundary_it_is(
+    monkeypatch, capsys, tmp_path: Path, in_flight: str, code: int, says: str
+) -> None:
+    """control-protocol ss3: a `seal_in_flight` refusal names the boundary in
+    flight. The live seal's own id still running is `unknown` (4); another's
+    is a no-op (2), and the CLI does not claim the period is still open."""
+    import dsl41.runner_control as control_mod
+    from dsl41.cli_estate import _live_seal
+    from dsl41.period import runtime_profile_from_cli
+
+    run_root = tmp_path / "root"
+    run_root.mkdir()
+    (run_root / "control.sock").touch()
+    estate = tmp_path / "c2.jil"
+    estate.write_text(_SEAL_JIL)
+    header = {"ok": True, "baseline_id": "b-1", "epoch": 1}
+
+    def fake_roundtrip(_path, request, **_kw):
+        return header if request.get("cmd") == "status" else _in_flight(in_flight)
+
+    monkeypatch.setattr(control_mod, "roundtrip", fake_roundtrip)
+    got = _live_seal(
+        run_root,
+        None,
+        [estate],
+        runtime_profile_from_cli(timezone="UTC"),
+        permit_unknown=False,
+        properties=None,
+        force_seal=False,
+        actor="ops@t",
+        request_id="req-9",
+    )
+    assert got == code
+    err = capsys.readouterr().err
+    assert says in err
+    assert "still open" not in err
+
+
+def test_seal_in_flight_by_id_is_the_live_seals_reading_only(monkeypatch, capsys) -> None:
+    """The per-code reading is opt-in: without it the same reply is the plain
+    refusal it is on the wire (exit 2)."""
+    import dsl41.runner_control as control_mod
+    from dsl41.cli_common import command_outcome
+
+    monkeypatch.setattr(control_mod, "roundtrip", lambda *_a, **_kw: _in_flight("req-9"))
+    request = {"cmd": "seal", "request_id": "req-9"}
+    assert command_outcome(Path("/nowhere.sock"), request) == 2
+    assert "still in flight" not in capsys.readouterr().err
+    assert command_outcome(Path("/nowhere.sock"), request, seal_in_flight_by_id=True) == 4
+
+
+@pytest.mark.parametrize(("ours", "code"), [(True, 4), (False, 2)])
+def test_a_live_seal_against_a_boundary_in_flight_end_to_end(
+    short_root: Path, capsys, ours: bool, code: int
+) -> None:
+    """The real server and the real CLI path over the socket. One boundary
+    is held queued (the engine's loop is not running, so it never starts);
+    a live seal under that boundary's own request_id exits 4, and under
+    another exits 2, each saying which."""
+    import types
+
+    from dsl41.cli_estate import _live_seal
+    from dsl41.period import runtime_profile_from_cli
+
+    run_root = short_root / "run"
+    estate = short_root / "c2.jil"
+    estate.write_text(_SEAL_JIL)
+
+    async def scenario() -> tuple[int, dict[str, object]]:
+        engine = start_run(
+            lower_source(_SEAL_JIL),
+            run_root,
+            clock=RealClock(),
+            adapters={"CMD": FakeAdapter()},
+            hold_open=True,
+        )
+        server = ControlServer(engine, run_root / "control.sock")
+        await server.start()
+        try:
+            # only its request_id is read while it waits in the queue
+            held = engine.submit_seal(types.SimpleNamespace(request_id="r-held"))  # type: ignore[arg-type]
+            got = await asyncio.to_thread(
+                _live_seal,
+                run_root,
+                None,
+                [estate],
+                runtime_profile_from_cli(timezone="UTC"),
+                permit_unknown=False,
+                properties=None,
+                force_seal=False,
+                actor="ops@t",
+                request_id="r-held" if ours else "r-other",
+            )
+            assert not held.done()  # the held boundary is untouched
+            held.cancel()
+            return got, json.loads(capsys.readouterr().out.splitlines()[0])
+        finally:
+            await server.close()
+            await engine.shutdown()
+            assert engine.journal is not None
+            engine.journal.close()
+
+    got, answer = asyncio.run(scenario())
+    assert got == code
+    assert answer["code"] == "seal_in_flight" and answer["in_flight_request_id"] == "r-held"
+
+
 def test_a_live_seal_on_a_rolled_root_prints_the_lineage_anchor(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:

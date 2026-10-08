@@ -227,8 +227,10 @@ def seal(
     change is a restart, not a reload.
 
     Exit codes: 0 the boundary committed; 2 it did not commit and the
-    period is still open; 4 the outcome is unknown, and the printed
-    request_id is the only safe way to retry.
+    period is still open, or another boundary was in flight and this
+    request did nothing; 4 the outcome is unknown, or this request's own
+    seal is still in flight, and the printed request_id is the only safe
+    way to retry.
     """
     # Design: period-model ss7
     import asyncio
@@ -419,6 +421,9 @@ def _live_seal(
         # ss7 publishes 0/2/4 for this verb and 3 means something else here
         # (a sealed ENGINE exits 3); see `command_outcome`
         rejected_as_unknown=True,
+        # one boundary at a time: a refusal that names THIS request's id is
+        # its own boundary still running (unknown, 4), another id is a no-op (2)
+        seal_in_flight_by_id=True,
     )
 
 

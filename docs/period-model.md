@@ -968,7 +968,7 @@ that.
 | the decision index | `_by_index` is log-local; §9 handles retries |
 | `unresolved` / `outcome_unknown` | a projection; derives from the bound executor's quarantine (`hosts`) plus the absence of evidence (`executions`), both carried |
 | `_trace`, `_emitted`, `_queue`, `_in_wake` | transient or derived |
-| `_dispatched` | **derived, and its reconstruction is normative**: `{job: run_number for every row with run_number > 0}`, exactly as `runner_startup.py` seeds it at resume. It is not a cache — `plan_effects` plans a SPAWN only when `run_number > _dispatched[job]`, so an opener that left it empty would let a legal `CHANGE_STATUS STARTING` on a job that completed run 7 plan run 7 **again**, and once the SPAWN tombstone is lawfully pruned, execute it (PR-18a). `open_from_seal` step 5 rebuilds it |
+| `_dispatched` | **derived, and its reconstruction is normative**: `{job: run_number for every row with run_number > 0}`, exactly as `runner_startup.py` seeds it at resume. It is not a cache — `plan_effects` plans a SPAWN only when `run_number > _dispatched[job]`, so an opener that left it empty would let a legal `CHANGE_STATUS STARTING` on a job that completed run 7 plan run 7 **again**, and once the SPAWN tombstone is lawfully pruned, execute it (PR-18a). `open_from_seal` does not hold it: resume rebuilds it over the oracle's rows after the segment's replay, and those rows include the carried ones |
 | `_referencers`, `_bucket_cap` | derived from the catalog |
 | `Scheduler._next`, `_CalCache` | replaced by the §6 watermark |
 | `spec_drift` | disk state |
@@ -1375,8 +1375,11 @@ dsl41 seal --run-root <root> --estate-anchor <dir> \
 mode), 2 when it did **not** commit — the period is still open, and C1 may
 legitimately have advanced first: an offline sealer's `leader` record and
 reconciliation decisions, a live cutoff's admitted ticks, are C1 activity, not
-damage — 4 when the answer was
-`unknown` — printing the `request_id`, exactly as `sendevent` does — and the
+damage; a live `seal_in_flight` refusal naming another boundary also exits 2:
+this request did nothing, and that boundary may still commit — 4 when the
+answer was `unknown`, or a `seal_in_flight` refusal names this request's own
+`request_id` (its boundary is still running) — printing the `request_id`,
+exactly as `sendevent` does — and the
 live *engine* exits 3 ("sealed; period N+1 is ready to open"), distinct from
 its 0/1/2, so an init system does not restart-loop a sealed engine (PR-30b).
 
@@ -1541,8 +1544,8 @@ every field it shares with `next_period` must agree. Both facts are
 required: an opening that skipped either would seed an engine from a
 self-consistent sidecar that is not the one the lineage names, or under a
 manifest that is not this boundary's. It returns an **`OpenedRuntime`** —
-the carried `state`, the outbox, the executions, the classification, the
-opening identity, and the ghost-run gate `_dispatched` — and **not** an
+the carried `state`, the outbox, the executions, the classification and
+the opening identity — and **not** an
 `Engine`: `Engine.__init__` takes a clock and adapters, calls `clock.now()`
 and seeds the host row, none of which a pure function may do. The
 catalog-derived half — referencers, the capacity pool, the scheduler
@@ -1559,10 +1562,11 @@ not return an `Engine` without reaching past its context. The load:
    one; a naive "construct C2 then overwrite" would seed carried entities
    first and move revisions;
 4. seed only genuinely new rows (SEM-24 flags, declared globals);
-5. rebuild the ghost-run gate `_dispatched` from every row with
-   `run_number > 0` (§3.3) — the pure function's own output; referencers,
-   capacity, the scheduler and adapter routing are the loader's, because they
-   are derived from C2 and not from the seal;
+5. leave the ghost-run gate `_dispatched` to resume, which rebuilds it from
+   every row with `run_number > 0` after the segment's replay (§3.3), the
+   carried rows included; referencers, capacity, the scheduler and adapter
+   routing are the loader's too, because they are derived from C2 and not
+   from the seal;
 6. validate: timer tokens unique, positive and ≤ `timer_seq` — two equal
    `(due, token)` entries would force the heap to compare two non-orderable
    `Event` objects; unique positive `waiter_seq`;

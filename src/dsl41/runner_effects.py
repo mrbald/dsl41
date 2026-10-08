@@ -70,12 +70,13 @@ import re
 
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from datetime import datetime
-from typing import Final, Literal
+from typing import Final, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from dsl41.oracle_state import LIVE, TERMINAL, Event, JobRuntime
 from dsl41.runner_clock import EngineError
+from dsl41.state_machine import StateMachine, Transition
 
 #: ss5's effect alphabet. SHUTDOWN is not here, and what defers it is no
 #: longer a missing identity: the incarnation is allocated by the supervisor
@@ -140,6 +141,13 @@ class Effect(BaseModel):
     generation: int | None = Field(default=None, strict=True)
 
 
+#: What became of one attempt: ss5's three outcomes.
+Outcome = Literal["applied", "indeterminate", "retired"]
+#: One effect's state: `absent` before it is recorded, `pending` until it has
+#: an outcome, then the outcome. Nothing leaves an outcome (ss5).
+EffectState = Literal["absent", "pending", "applied", "indeterminate", "retired"]
+
+
 class EffectOutcome(BaseModel):
     """What became of one attempt (ss5). `applied` carries what the host
     reported; `indeterminate` carries why nothing can be said."""
@@ -147,7 +155,7 @@ class EffectOutcome(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     effect_id: str
-    state: Literal["applied", "indeterminate", "retired"]
+    state: Outcome
     #: the process identity the spool named, once it names one -- the
     #: OBSERVED half. The intended half lives on the Effect since DL-118
     #: (minted at birth); the two agree by construction on the live path and
@@ -162,6 +170,61 @@ def effect_id_for(index: int, kind: EffectKind, job: str, run_number: int) -> st
     unique -- and a derived id means replay reconstructs the same outbox
     without a uuid whose value the log would have to be trusted for."""
     return f"e{index}:{kind}:{job}.{run_number}"
+
+
+EFFECT_RECORD: Final = Transition[EffectState](
+    "effect.01",
+    frozenset({"absent"}),
+    "record",
+    "pending",
+    guard="the id is unseen; the run_id binding stays one-to-one both ways",
+    effect="bind the run_id both ways",
+    cite="concurrency-model ss4 step 7, ss5, DL-96, DL-118",
+)
+EFFECT_APPLIED: Final = Transition[EffectState](
+    "effect.02",
+    frozenset({"pending"}),
+    "resolve",
+    "applied",
+    guard="dispatched; or resume found the run on the host or a kill landed; or a"
+    " replayed effect_result; or a carried execution",
+    cite="concurrency-model ss5, DL-96, period-model ss3.5",
+)
+EFFECT_RETIRED: Final = Transition[EffectState](
+    "effect.03",
+    frozenset({"pending"}),
+    "resolve",
+    "retired",
+    guard="superseded at dispatch; or resume finds the run it would kill has exited",
+    cite="concurrency-model ss5, DL-111, DL-232",
+)
+EFFECT_INDETERMINATE: Final = Transition[EffectState](
+    "effect.04",
+    frozenset({"pending"}),
+    "resolve",
+    "indeterminate",
+    guard="resume finds no status and no live wrapper for a kill",
+    effect="an exact retry answers outcome_unavailable",
+    cite="concurrency-model ss5, CM-06, DL-111",
+)
+
+#: One effect's lifecycle (ss5). An outcome is final: `Outbox.resolve`
+#: refuses a second one. A pending SPAWN held by a host that routes nothing
+#: stays pending, and an exact replay of a recorded effect is a no-op;
+#: neither moves the state.
+EFFECT: Final[StateMachine[EffectState]] = StateMachine(
+    name="effect",
+    states=frozenset(get_args(EffectState)),
+    initial="absent",
+    finals=frozenset({"applied", "indeterminate", "retired"}),
+    transitions=(EFFECT_RECORD, EFFECT_APPLIED, EFFECT_RETIRED, EFFECT_INDETERMINATE),
+)
+
+_RESOLVE: Final[dict[Outcome, Transition[EffectState]]] = {
+    "applied": EFFECT_APPLIED,
+    "retired": EFFECT_RETIRED,
+    "indeterminate": EFFECT_INDETERMINATE,
+}
 
 
 class Outbox:
@@ -235,13 +298,22 @@ class Outbox:
             self._runs_by_id[effect.run_id] = run
         self._order.append(effect.effect_id)
         self._effects[effect.effect_id] = effect
+        # the id was unseen above, so the move is absent -> pending by construction
+        EFFECT.take(EFFECT_RECORD, "absent", self._state(effect.effect_id))
 
     def resolve(self, outcome: EffectOutcome) -> None:
         """Record what became of one attempt. STRICT on association: an
         outcome for an effect this outbox never saw means the log lost the
         record that said what was meant, and an outcome naming a different
         run_id than its effect bound is a stranger's fate filed under this
-        run's intent -- both refuse (DL-118)."""
+        run's intent -- both refuse (DL-118).
+
+        An outcome is final (ss5): a second one is refused, through the
+        effect machine's own check, before anything is written. Every live
+        writer resolves only pending effects, so live this never fires; on
+        replay a log that holds two outcomes for one effect stops resume
+        (period-model ss11). Under the test suite's strict variable the
+        check raises `TransitionError` instead."""
         effect = self._effects.get(outcome.effect_id)
         if effect is None:
             raise EngineError(
@@ -257,13 +329,25 @@ class Outbox:
                 f"outcome for {outcome.effect_id} names run_id {outcome.run_id!r} but the"
                 f" effect bound {effect.run_id!r} -- a stranger's fate refused (DL-118)"
             )
+        old = self._state(outcome.effect_id)
+        violation = EFFECT.take(_RESOLVE[outcome.state], old, outcome.state)
+        if violation is not None:
+            raise EngineError(
+                f"outcome {outcome.state} for {outcome.effect_id}: the effect is already"
+                f" {old}, and an outcome is final ({violation.transition}: {violation.reason})"
+                " (concurrency-model ss5)"
+            )
         self._outcomes[outcome.effect_id] = outcome
 
-    def state_of(self, effect_id: str) -> str | None:
+    def state_of(self, effect_id: str) -> EffectState | None:
         """`pending` | `applied` | `indeterminate` | `retired`, or None for an
         effect this outbox never saw."""
         if effect_id not in self._effects:
             return None
+        return self._state(effect_id)
+
+    def _state(self, effect_id: str) -> EffectState:
+        """The state of an effect this outbox has recorded."""
         outcome = self._outcomes.get(effect_id)
         return "pending" if outcome is None else outcome.state
 

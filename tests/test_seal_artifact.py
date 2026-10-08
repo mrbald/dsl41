@@ -938,27 +938,6 @@ def test_pr16b_a_route_crosses_with_its_revision() -> None:
     assert opened.state.routes["batch"].state_rev == 5
 
 
-def test_pr18a_the_ghost_run_gate_is_rebuilt_from_the_rows() -> None:
-    """ss3.3: `_dispatched` is derived and its reconstruction is
-    normative -- `{job: run_number for every row with run_number > 0}`,
-    exactly as resume seeds it. An opener that left it empty would let a
-    `CHANGE_STATUS STARTING` on a completed job plan its run number
-    again."""
-    opened = _open(GOLDEN_BYTES)
-    assert opened.dispatched == {
-        "extract": 4,
-        "latent": 9,
-        "night_box": 2,
-        "nightly": 7,
-        "queued": 3,
-        "watcher": 1,
-    }
-    # the row that never ran is NOT in the gate: `_dispatched[job]` holds a
-    # run number and 0 is not one -- `runner_startup` seeds it the same way
-    assert opened.state.jobs["idle"].run_number == 0
-    assert "idle" not in opened.dispatched
-
-
 def test_ss3_3_the_seeding_order_is_stated_where_the_loader_reads_it() -> None:
     """The five rules ss7 step 3-5 pins live on `OpenedRuntime`, because
     the loader that seeds an engine reads them there. A doc-string test,

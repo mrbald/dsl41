@@ -34,6 +34,10 @@ from typing import Literal
 
 HITS_ENV = "DSL41_TRANSITION_HITS"
 STRICT_ENV = "DSL41_TRANSITION_STRICT"
+#: The start of every stderr line that reports a violation no trace line
+#: carries, so one journal pattern catches them all (deployment runbook,
+#: "What to watch").
+VIOLATION_LOG_PREFIX = "dsl41: transition violation"
 
 type Mark = Literal["spec-only", "unreachable"]
 

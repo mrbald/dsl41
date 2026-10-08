@@ -512,3 +512,173 @@ stateDiagram-v2
 | supervisor_client.03 | connected | EOF or a read error on this epoch's connection |  | fail the pending request, the next request reconnects | lost | supervisor-protocol ss5, runner-design ss7, DL-48 |  |
 | supervisor_client.04 | connected, lost | a request cancelled mid-flight |  | fail the pending request and close the writer, since the stream has no correlation ids and the reply in flight could reach the next request | lost | DL-48 |  |
 | supervisor_client.05 | connected, disconnected, lost | close |  | cancel the renewal, reader and LIST tasks, then close the writer | closed | DL-48 |  |
+
+## host
+
+```mermaid
+stateDiagram-v2
+    state "active" as s0
+    state "evicted" as s1
+    state "passive" as s2
+    state "quarantined" as s3
+    state c6 <<choice>>
+    [*] --> s0
+    s0 --> s0 : host.01 activate / none: the row does not move and no revision moves
+    s0 --> s2 : host.02 drain / new effects are held, running work continues
+    s2 --> s0 : host.03 activate / held starts dispatch again
+    s2 --> s2 : host.04 drain / none: the row does not move and no revision moves
+    s0 --> s3 : host.05 quarantine [the leader's renewal failed five times in a row] / remember the state it interrupts
+    s2 --> s3 : host.05 quarantine [the leader's renewal failed five times in a row] / remember the state it interrupts
+    s3 --> s3 : host.06 quarantine / none: repeated unreachability is one fact
+    s3 --> c6 : host.07 reinstate [the host answered again] / put back the state quarantine interrupted, and forget it
+    c6 --> s0
+    c6 --> s2
+    s0 --> s0 : host.08 reinstate / none: nothing to put back
+    s2 --> s2 : host.09 reinstate / none: nothing to put back
+    s3 --> s1 : host.10 evict [the host runs a deadman, was in contact, and has been silent past deadman + kill + skew] / generation += 1, forced_by = none, forget the interrupted state
+    s0 --> s1 : host.11 evict (force) [claimed_actor names who asks] / generation += 1, forced_by = the actor, forget the interrupted state
+    s2 --> s1 : host.11 evict (force) [claimed_actor names who asks] / generation += 1, forced_by = the actor, forget the interrupted state
+    s3 --> s1 : host.11 evict (force) [claimed_actor names who asks] / generation += 1, forced_by = the actor, forget the interrupted state
+    s1 --> s0 : host.12 register [the relay presents the current generation and has self-fenced] / the relay's held jobs run as new runs with new effect ids
+```
+
+| Id | Source | Trigger | Guard | Effect | Target | Cite | Mark |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| host.01 | active | activate |  | none: the row does not move and no revision moves | active | concurrency-model ss8 |  |
+| host.02 | active | drain |  | new effects are held, running work continues | passive | concurrency-model ss8, CM-13 |  |
+| host.03 | passive | activate |  | held starts dispatch again | active | concurrency-model ss8 |  |
+| host.04 | passive | drain |  | none: the row does not move and no revision moves | passive | concurrency-model ss8 |  |
+| host.05 | active, passive | quarantine | the leader's renewal failed five times in a row | remember the state it interrupts | quarantined | concurrency-model ss7, ss8, DL-97, DL-291 |  |
+| host.06 | quarantined | quarantine |  | none: repeated unreachability is one fact | quarantined | DL-97 |  |
+| host.07 | quarantined | reinstate | the host answered again | put back the state quarantine interrupted, and forget it | active, passive | concurrency-model ss8, DL-97 |  |
+| host.08 | active | reinstate |  | none: nothing to put back | active | concurrency-model ss8, DL-111 |  |
+| host.09 | passive | reinstate |  | none: nothing to put back | passive | concurrency-model ss8, DL-111 |  |
+| host.10 | quarantined | evict | the host runs a deadman, was in contact, and has been silent past deadman + kill + skew | generation += 1, forced_by = none, forget the interrupted state | evicted | concurrency-model ss8 preconditions 1-3, DL-151 |  |
+| host.11 | active, passive, quarantined | evict (force) | claimed_actor names who asks | generation += 1, forced_by = the actor, forget the interrupted state | evicted | concurrency-model ss8, DL-111, DL-151 |  |
+| host.12 | evicted | register | the relay presents the current generation and has self-fenced | the relay's held jobs run as new runs with new effect ids | active | concurrency-model ss8 (eviction is fenced on return), period-model ss3.3 | spec-only |
+
+## admission
+
+```mermaid
+stateDiagram-v2
+    state "admitted" as s0
+    state "applied" as s1
+    state "rejected" as s2
+    state "unseen" as s3
+    [*] --> s3
+    s3 --> s0 : admission.01 input [the epoch is current, the stamp is not behind the frontier, a control input's dry apply is clean] / take the next index, append the attempt line, note the fingerprint
+    s0 --> s1 : admission.02 decide [the gate passes, or a replayed durable decision says applied] / the decision line, with the outbox entries it implies
+    s0 --> s2 : admission.03 decide [a precondition, the stale-completion gate or a host guard rejects, or a replayed durable decision says rejected] / the decision line, with its stored code
+    s3 --> s3 : admission.04 input [a stale epoch, a stamp behind the frontier while the seal answers, the dry apply faults or breaks a declared transition] / answer the refusal, no index is taken and nothing is logged
+    s1 --> s1 : admission.05 input [the same fingerprint] / answer the stored decision, no index, no clock
+    s2 --> s2 : admission.06 input [the same fingerprint] / answer the stored decision and its code, no index, no clock
+    s1 --> s1 : admission.07 input [another fingerprint] / refuse request_id_reused, carrying the earlier decision
+    s2 --> s2 : admission.08 input [another fingerprint] / refuse request_id_reused, carrying the earlier decision
+    s0 --> s0 : admission.09 input [another fingerprint] / refuse request_id_reused, with no decision to carry
+    s0 --> s0 : admission.10 input [the same fingerprint] / raise: a second writer is applying inputs, or steps 5-7 yielded
+```
+
+| Id | Source | Trigger | Guard | Effect | Target | Cite | Mark |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| admission.01 | unseen | input | the epoch is current, the stamp is not behind the frontier, a control input's dry apply is clean | take the next index, append the attempt line, note the fingerprint | admitted | concurrency-model ss4 steps 2-4, DL-292 |  |
+| admission.02 | admitted | decide | the gate passes, or a replayed durable decision says applied | the decision line, with the outbox entries it implies | applied | concurrency-model ss4 steps 5-7, DL-118 |  |
+| admission.03 | admitted | decide | a precondition, the stale-completion gate or a host guard rejects, or a replayed durable decision says rejected | the decision line, with its stored code | rejected | concurrency-model ss4, DL-235, DL-272 |  |
+| admission.04 | unseen | input | a stale epoch, a stamp behind the frontier while the seal answers, the dry apply faults or breaks a declared transition | answer the refusal, no index is taken and nothing is logged | unseen | concurrency-model ss4 steps 2-3, DL-90, DL-274, DL-292 |  |
+| admission.05 | applied | input | the same fingerprint | answer the stored decision, no index, no clock | applied | concurrency-model ss4 step 2, CM-05 |  |
+| admission.06 | rejected | input | the same fingerprint | answer the stored decision and its code, no index, no clock | rejected | concurrency-model ss4 step 2, CM-05, DL-272 |  |
+| admission.07 | applied | input | another fingerprint | refuse request_id_reused, carrying the earlier decision | applied | concurrency-model ss4 step 2, DL-217 |  |
+| admission.08 | rejected | input | another fingerprint | refuse request_id_reused, carrying the earlier decision | rejected | concurrency-model ss4 step 2, DL-217 |  |
+| admission.09 | admitted | input | another fingerprint | refuse request_id_reused, with no decision to carry | admitted | concurrency-model ss4 step 2, DL-217 |  |
+| admission.10 | admitted | input | the same fingerprint | raise: a second writer is applying inputs, or steps 5-7 yielded | admitted | concurrency-model ss4 step 2 |  |
+
+## effect
+
+```mermaid
+stateDiagram-v2
+    state "absent" as s0
+    state "applied" as s1
+    state "indeterminate" as s2
+    state "pending" as s3
+    state "retired" as s4
+    [*] --> s0
+    s0 --> s3 : effect.01 record [the id is unseen, the run_id binding stays one-to-one both ways] / bind the run_id both ways
+    s3 --> s1 : effect.02 resolve [dispatched, or resume found the run on the host or a kill landed, or a replayed effect_result, or a carried execution]
+    s3 --> s4 : effect.03 resolve [superseded at dispatch, or resume finds the run it would kill has exited]
+    s3 --> s2 : effect.04 resolve [resume finds no status and no live wrapper for a kill] / an exact retry answers outcome_unavailable
+    s1 --> [*]
+    s2 --> [*]
+    s4 --> [*]
+```
+
+| Id | Source | Trigger | Guard | Effect | Target | Cite | Mark |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| effect.01 | absent | record | the id is unseen, the run_id binding stays one-to-one both ways | bind the run_id both ways | pending | concurrency-model ss4 step 7, ss5, DL-96, DL-118 |  |
+| effect.02 | pending | resolve | dispatched, or resume found the run on the host or a kill landed, or a replayed effect_result, or a carried execution |  | applied | concurrency-model ss5, DL-96, period-model ss3.5 |  |
+| effect.03 | pending | resolve | superseded at dispatch, or resume finds the run it would kill has exited |  | retired | concurrency-model ss5, DL-111, DL-232 |  |
+| effect.04 | pending | resolve | resume finds no status and no live wrapper for a kill | an exact retry answers outcome_unavailable | indeterminate | concurrency-model ss5, CM-06, DL-111 |  |
+
+## subscription
+
+```mermaid
+stateDiagram-v2
+    state "absent" as s0
+    state "backfill" as s1
+    state "closed" as s2
+    state "live" as s3
+    state "removed" as s4
+    [*] --> s0
+    s0 --> s1 : subscription.01 subscribe [the lineage is held and the run has a journal] / join the fan-out, the ack names the cursor
+    s1 --> s3 : subscription.02 backfill sent [no refusal on the stream, with no `since` there is nothing to send] / send the queued live records past the seam
+    s1 --> s4 : subscription.03 append [the record does not fit the backlog budget] / drop the backlog, leave the fan-out, tell the owner, which ends the stream
+    s3 --> s4 : subscription.03 append [the record does not fit the backlog budget] / drop the backlog, leave the fan-out, tell the owner, which ends the stream
+    s1 --> s2 : subscription.04 stream ends [the client is gone, a refusal went on the stream, the lineage was lost, or the handler was cancelled] / leave the fan-out
+    s3 --> s2 : subscription.04 stream ends [the client is gone, a refusal went on the stream, the lineage was lost, or the handler was cancelled] / leave the fan-out
+    s2 --> [*]
+    s4 --> [*]
+```
+
+| Id | Source | Trigger | Guard | Effect | Target | Cite | Mark |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| subscription.01 | absent | subscribe | the lineage is held and the run has a journal | join the fan-out, the ack names the cursor | backfill | control-protocol ss5, DL-45, DL-267 |  |
+| subscription.02 | backfill | backfill sent | no refusal on the stream, with no `since` there is nothing to send | send the queued live records past the seam | live | control-protocol ss5, DL-45, DL-135 |  |
+| subscription.03 | backfill, live | append | the record does not fit the backlog budget | drop the backlog, leave the fan-out, tell the owner, which ends the stream | removed | control-protocol ss5, DL-267 |  |
+| subscription.04 | backfill, live | stream ends | the client is gone, a refusal went on the stream, the lineage was lost, or the handler was cancelled | leave the fan-out | closed | control-protocol ss5, PR-03, period-model ss11 |  |
+
+## seal_boundary
+
+```mermaid
+stateDiagram-v2
+    state "aborted" as s0
+    state "committing" as s1
+    state "frozen" as s2
+    state "requested" as s3
+    state "sealed" as s4
+    state "stopped" as s5
+    [*] --> s3
+    s3 --> s2 : seal_boundary.01 loop turn [the engine leads a lineage, the epoch is current, readiness passes] / freeze admission, park FW polls
+    s2 --> s1 : seal_boundary.02 quiesced [drained, cut off at T, quiescent, and the supervisor proof holds] / commit_boundary (step 8)
+    s1 --> s4 : seal_boundary.03 commit returns / answer the request, raise PeriodSealed
+    s1 --> s0 : seal_boundary.04 exception [before the seal append, the fence is intact, no attempt applying, no input unadmitted, no append unfinished] / abort_boundary, fail the request, C1 carries on
+    s2 --> s0 : seal_boundary.04 exception [before the seal append, the fence is intact, no attempt applying, no input unadmitted, no append unfinished] / abort_boundary, fail the request, C1 carries on
+    s3 --> s0 : seal_boundary.04 exception [before the seal append, the fence is intact, no attempt applying, no input unadmitted, no append unfinished] / abort_boundary, fail the request, C1 carries on
+    s1 --> s5 : seal_boundary.05 exception [the fence is lost] / raise without an abort
+    s2 --> s5 : seal_boundary.05 exception [the fence is lost] / raise without an abort
+    s3 --> s5 : seal_boundary.05 exception [the fence is lost] / raise without an abort
+    s2 --> s5 : seal_boundary.06 exception [an attempt is admitted and not fully applied, an engine-made input is unadmitted, or a WAL append is unfinished] / note why, raise without an abort
+    s1 --> s5 : seal_boundary.07 BoundaryFailStop [past the point of no return] / raise without an abort
+    s2 --> s5 : seal_boundary.08 TransitionStop [the run option on-transition-violation is stop, a drained input's decision is durable] / raise without an abort
+    s0 --> [*]
+    s4 --> [*]
+    s5 --> [*]
+```
+
+| Id | Source | Trigger | Guard | Effect | Target | Cite | Mark |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| seal_boundary.01 | requested | loop turn | the engine leads a lineage, the epoch is current, readiness passes | freeze admission, park FW polls | frozen | period-model ss6 step 2, ss8, PR-28c |  |
+| seal_boundary.02 | frozen | quiesced | drained, cut off at T, quiescent, and the supervisor proof holds | commit_boundary (step 8) | committing | period-model ss6 steps 3-8, PR-27 |  |
+| seal_boundary.03 | committing | commit returns |  | answer the request, raise PeriodSealed | sealed | period-model ss7 |  |
+| seal_boundary.04 | committing, frozen, requested | exception | before the seal append, the fence is intact, no attempt applying, no input unadmitted, no append unfinished | abort_boundary, fail the request, C1 carries on | aborted | period-model ss7, PR-28b |  |
+| seal_boundary.05 | committing, frozen, requested | exception | the fence is lost | raise without an abort | stopped | period-model ss7, DL-101, PR-28b |  |
+| seal_boundary.06 | frozen | exception | an attempt is admitted and not fully applied, an engine-made input is unadmitted, or a WAL append is unfinished | note why, raise without an abort | stopped | DL-274 |  |
+| seal_boundary.07 | committing | BoundaryFailStop | past the point of no return | raise without an abort | stopped | period-model ss7 |  |
+| seal_boundary.08 | frozen | TransitionStop | the run option on-transition-violation is stop, a drained input's decision is durable | raise without an abort | stopped | concurrency-model ss4, DL-292 |  |

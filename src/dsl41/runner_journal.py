@@ -72,7 +72,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, Literal, get_args
 
 from dsl41.canon import is_wire_int
 from dsl41.ir import CatalogIR
@@ -86,6 +86,7 @@ from dsl41.runner_admission import (
     Frontiers,
     apply_attempt,
     fingerprint,
+    report_violation,
 )
 from dsl41.period import (
     Manifest,
@@ -109,10 +110,66 @@ from pydantic import ValidationError
 from dsl41.runner_effects import Effect, EffectOutcome, Outbox, is_valid_run_id
 from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, HostCommand, seed_local_executor
 from dsl41.runner_ledger import STATE_MACHINE_VERSION, Proof
-from dsl41.state_machine import TransitionError
+from dsl41.state_machine import StateMachine, Transition, TransitionError
 
 if TYPE_CHECKING:  # annotation only: the WAL stays a leaf of the DL-74 DAG
     from dsl41.runner_preflight import PreflightItem
+
+
+#: One feed's state (control-protocol ss5). `backfill` from the subscribe
+#: until the backfill is sent, while live records already queue; `live`
+#: after; `removed` when the journal dropped it on overflow; `closed` when
+#: its stream ended for any other reason.
+SubscriptionState = Literal["absent", "backfill", "live", "removed", "closed"]
+
+SUB_SUBSCRIBE: Final = Transition[SubscriptionState](
+    "subscription.01",
+    frozenset({"absent"}),
+    "subscribe",
+    "backfill",
+    guard="the lineage is held and the run has a journal",
+    effect="join the fan-out; the ack names the cursor",
+    cite="control-protocol ss5, DL-45, DL-267",
+)
+SUB_LIVE: Final = Transition[SubscriptionState](
+    "subscription.02",
+    frozenset({"backfill"}),
+    "backfill sent",
+    "live",
+    guard="no refusal on the stream; with no `since` there is nothing to send",
+    effect="send the queued live records past the seam",
+    cite="control-protocol ss5, DL-45, DL-135",
+)
+SUB_OVERFLOW: Final = Transition[SubscriptionState](
+    "subscription.03",
+    frozenset({"backfill", "live"}),
+    "append",
+    "removed",
+    guard="the record does not fit the backlog budget",
+    effect="drop the backlog; leave the fan-out; tell the owner, which ends the stream",
+    cite="control-protocol ss5, DL-267",
+)
+SUB_CLOSE: Final = Transition[SubscriptionState](
+    "subscription.04",
+    frozenset({"backfill", "live"}),
+    "stream ends",
+    "closed",
+    guard="the client is gone, a refusal went on the stream, the lineage was lost,"
+    " or the handler was cancelled",
+    effect="leave the fan-out",
+    cite="control-protocol ss5, PR-03, period-model ss11",
+)
+
+#: One `subscribe` feed (control-protocol ss5). A removed feed's handler
+#: still unsubscribes when its stream ends; that finds nothing to leave and
+#: takes no transition.
+SUBSCRIPTION: Final[StateMachine[SubscriptionState]] = StateMachine(
+    name="subscription",
+    states=frozenset(get_args(SubscriptionState)),
+    initial="absent",
+    finals=frozenset({"removed", "closed"}),
+    transitions=(SUB_SUBSCRIBE, SUB_LIVE, SUB_OVERFLOW, SUB_CLOSE),
+)
 
 
 class Subscription:
@@ -125,7 +182,10 @@ class Subscription:
     holds more than the budget or one record, whichever is larger. A
     refused record removes the feed: the journal drops the backlog and
     then tells the owner why. The append it came from has already
-    succeeded, and nothing here raises into it."""
+    succeeded, and nothing here raises into it.
+
+    Its state is `SUBSCRIPTION`'s. `removed` is derived from `overflow`; the other
+    states are stored."""
 
     def __init__(self, budget: int, on_overflow: Callable[[str], None] | None) -> None:
         self.budget = budget
@@ -134,16 +194,36 @@ class Subscription:
         self.overflow: str | None = None
         self._on_overflow = on_overflow
         self._queue: asyncio.Queue[tuple[dict[str, Any], int]] = asyncio.Queue()
+        self._phase: Literal["backfill", "live", "closed"] = "backfill"
+        report_violation(SUBSCRIPTION.take(SUB_SUBSCRIBE, "absent", self.state))
+
+    @property
+    def state(self) -> SubscriptionState:
+        return "removed" if self.overflow is not None else self._phase
+
+    def go_live(self) -> None:
+        """The backfill is sent: the handler now reads the live queue."""
+        old = self.state
+        self._phase = "live"
+        report_violation(SUBSCRIPTION.take(SUB_LIVE, old, self.state))
+
+    def close(self) -> None:
+        """The stream ended and the feed left the fan-out."""
+        old = self.state
+        self._phase = "closed"
+        report_violation(SUBSCRIPTION.take(SUB_CLOSE, old, self.state))
 
     def offer(self, record: dict[str, Any], size: int) -> bool:
         """Queue one record of `size` encoded bytes, or answer False when
         it does not fit. Never blocks and never raises QueueFull: the queue
         has no count limit, and the budget is checked here."""
         if self.backlog_bytes and self.backlog_bytes + size > self.budget:
+            old = self.state
             self.overflow = (
                 f"subscriber backlog of {self.backlog_bytes} bytes cannot take a"
                 f" {size}-byte record within the {self.budget}-byte budget"
             )
+            report_violation(SUBSCRIPTION.take(SUB_OVERFLOW, old, self.state))
             while not self._queue.empty():
                 self._queue.get_nowait()
             self.backlog_bytes = 0
@@ -579,8 +659,11 @@ class Journal:
         return feed
 
     def unsubscribe(self, feed: Subscription) -> None:
+        """The feed's stream ended. A feed the journal already removed on
+        overflow is not in the fan-out, and stays `removed`."""
         if feed in self._subscribers:
             self._subscribers.remove(feed)
+            feed.close()
 
     def _publish(self, record: dict[str, Any], size: int) -> None:
         """Fan one durable record out to the live feeds. A feed it does
@@ -1308,9 +1391,15 @@ def read_outbox(records: list[dict[str, Any]], outbox: Outbox | None = None) -> 
             for parsed in decision_effects(record):
                 outbox.record(parsed)
         elif record.get("rec") == "effect_result":
-            outbox.resolve(
-                EffectOutcome.model_validate({k: v for k, v in record.items() if k != "rec"})
-            )
+            outcome = EffectOutcome.model_validate({k: v for k, v in record.items() if k != "rec"})
+            try:
+                outbox.resolve(outcome)
+            except EngineError as exc:
+                # an outcome the outbox refuses -- for an unknown effect, a
+                # stranger's run_id, or a second outcome -- stops replay
+                # naming the effect, as a raising input does (period-model
+                # ss11)
+                raise OutcomeReplayFault(outcome, exc) from exc
     return outbox
 
 
@@ -1321,7 +1410,11 @@ class ReplayFault(EngineError):
     deployment runbook gives the two ways out: deploy a fix, or roll back to
     the release that wrote the log. Nothing skips the input.
 
-    The cause's `code`, if it has one, rides on; the cause is chained."""
+    The cause's `code`, if it has one, rides on; the cause is chained.
+    `index` is the input's, or None when the fault is in a record that is
+    not an input (`OutcomeReplayFault`)."""
+
+    index: int | None
 
     def __init__(self, attempt: Attempt, cause: Exception) -> None:
         if attempt.kind is not None:
@@ -1337,6 +1430,23 @@ class ReplayFault(EngineError):
             code=cause.code if isinstance(cause, EngineError) else None,
         )
         self.index = attempt.index
+
+
+class OutcomeReplayFault(ReplayFault):
+    """A logged `effect_result` the outbox refused when this build replayed
+    it: an outcome for an effect it never saw, one naming another run_id,
+    or a second outcome for one effect (concurrency-model ss5). A
+    `ReplayFault`, so resume stops with the same advice: deploy a fix, or
+    roll back to the release that wrote the log."""
+
+    def __init__(self, outcome: EffectOutcome, cause: EngineError) -> None:
+        EngineError.__init__(
+            self,
+            f"replay stopped at the {outcome.state} outcome of effect {outcome.effect_id}:"
+            f" {type(cause).__name__}: {cause}",
+            code=cause.code,
+        )
+        self.index = None
 
 
 @dataclass

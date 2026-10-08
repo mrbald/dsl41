@@ -123,6 +123,7 @@ from dsl41.runner_admission import (
     ApplyResult,
     EnvelopeError,
     RequestCollision,
+    SealInFlight,
     addressed_key,
     parse_envelope,
 )
@@ -715,7 +716,12 @@ class ControlServer:
             # activity (ss7's exit codes). Also the one-seal-at-a-time refusal
             # `submit_seal` sets (AdmissionRefused is an EngineError). A raise
             # site that named no code answers the neutral `engine_error`
-            return _failure(exc.code or "engine_error", str(exc), refused=True)
+            answer = _failure(exc.code or "engine_error", str(exc), refused=True)
+            if isinstance(exc, SealInFlight):
+                # additive (ss2: consumers ignore unknown fields): the client
+                # tells its own boundary, still running, from another's
+                answer["in_flight_request_id"] = exc.in_flight_request_id
+            return answer
         except TimeoutError:
             return _failure(
                 "seal_timeout",
@@ -1297,6 +1303,7 @@ class ControlServer:
                 if sent is None:
                     return
                 max_seq = max(max_seq, sent)
+            feed.go_live()
             while True:
                 record = await feed.get()
                 lost = self._lineage_lost()

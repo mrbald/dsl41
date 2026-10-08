@@ -343,6 +343,7 @@ def command_outcome(
     *,
     on_applied: Callable[[], None] | None = None,
     rejected_as_unknown: bool = False,
+    seal_in_flight_by_id: bool = False,
     retry_command: str | None = None,
 ) -> int:
     """Send one ss6 command envelope and answer with its outcome: DL-92's
@@ -377,6 +378,14 @@ def command_outcome(
     stale the day that handler grows a decision, while the test does not
     (DL-145). Widening ss7's table is ss7's call, not this slice's.
 
+    `seal_in_flight_by_id` is the live seal's other per-code reading. A
+    `seal_in_flight` refusal names the boundary in flight
+    (`in_flight_request_id`, control-protocol ss3). When that is THIS
+    request's own id, its boundary is still running and the outcome is
+    unknown: exit 4. When it is another's, this request did nothing: exit 2,
+    without the promise that the period is still open, because the other
+    boundary may yet commit it.
+
     `retry_command` names the command an exact retry has to be sent as when
     it is not the one the operator typed: `release-held` sends one OFF_HOLD
     per job, and its retry is the one-job `sendevent` (DL-217).
@@ -406,6 +415,20 @@ def command_outcome(
     outcome = outcome_of(response)
     if rejected_as_unknown and outcome == REJECTED:
         outcome = UNKNOWN
+    if seal_in_flight_by_id and response.get("code") == "seal_in_flight":
+        own = request.get("request_id")
+        in_flight = response.get("in_flight_request_id")
+        if in_flight == own:
+            typer.echo(
+                f"your seal {own} is still in flight; outcome unknown; retry later under"
+                f" --request-id {own}",
+                err=True,
+            )
+            return 4
+        typer.echo(
+            f"another boundary ({in_flight}) is in flight; this request did nothing", err=True
+        )
+        return 2
     if outcome == APPLIED and on_applied is not None:
         on_applied()
     if outcome == REFUSED:

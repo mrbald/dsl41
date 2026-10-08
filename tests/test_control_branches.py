@@ -260,7 +260,8 @@ def test_a_seal_nothing_drains_is_unknown_and_a_second_one_is_refused(
                 "ok": False,
                 "code": "seal_in_flight",
                 "refused": True,
-                "error": "a boundary is already in flight (request_id r-first): one seal at a time",
+                "error": "a boundary is already in flight (request_id r-first, requested): one seal at a time",
+                "in_flight_request_id": "r-first",
             }
         finally:
             await _teardown(engine, server, loop_task)

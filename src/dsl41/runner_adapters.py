@@ -130,9 +130,10 @@ class DetachSignal:
 class SealBarrier:
     """ss6 step 2's park, seen from an adapter (period-model ss3.5, DL-133).
 
-    The engine sets `parked` before it chooses T; every FW task checks it
-    at its POLL BOUNDARY -- after the sleep and before the observation --
-    and waits there. Nothing else is needed to "await any poll in flight":
+    `parked` is the one record of the freeze: the engine's admission reads
+    it as `Engine.sealing`. The engine sets it before it chooses T; every
+    FW task checks it at its POLL BOUNDARY -- after the sleep and before
+    the observation -- and waits there. Nothing else is needed to "await any poll in flight":
     a poll's observation, its `watch.jsonl` append and its progress update
     contain no `await`, so a poll cannot be in flight across a yield, and a
     task still asleep cannot append before it wakes into this check.

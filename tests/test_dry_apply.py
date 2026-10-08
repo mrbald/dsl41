@@ -852,7 +852,7 @@ def test_production_drops_an_orphan_violation_to_stderr_with_no_trace_line(
     oracle.feed(_start())
     assert _markers(oracle) == []
     err = capsys.readouterr().err
-    assert err.count("dropped a transition violation noted outside an InputBatch") == 1
+    assert err.count("dsl41: transition violation noted outside an InputBatch, dropped:") == 1
     assert "host:local job_status.99 STARTING->RUNNING: a fake violation" in err
     oracle.feed(_start(T0 + timedelta(minutes=1)))
     assert capsys.readouterr().err == ""  # written once
