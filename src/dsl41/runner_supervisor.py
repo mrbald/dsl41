@@ -395,20 +395,39 @@ PROCESS_PUBLISHED: Transition[ProcessState] = Transition(
     effect="listen, chmod 0600, write supervisor.pid, rename the socket to supervisor.sock",
     cite=f"{_SP5}, DL-210, DL-275",
 )
+# From `shutting_down`, rows 05 and 06 run the wait again. Only an error in a
+# SHUTDOWN's wait leaves that state at rest: the dispatch answers the error, and
+# the process stays `shutting_down` for the rest of the loop pass, where a
+# pipelined SHUTDOWN or a latched signal can still arrive.
 PROCESS_SHUTDOWN: Transition[ProcessState] = Transition(
     "supervisor_process.05",
-    frozenset({"serving"}),
+    frozenset({"serving", "shutting_down"}),
     "SHUTDOWN",
     "shutting_down",
-    guard="this incarnation, then the current token",
+    guard=(
+        "this incarnation, then the current token, and from shutting_down only after an"
+        " error ended the previous wait and the dispatch answered it"
+    ),
+    effect=(
+        "from shutting_down the wait runs again and sends TERM to each live command group,"
+        " again for any the first wait reached"
+    ),
     cite=f"{_SP5} SHUTDOWN, DL-80",
 )
 PROCESS_SIGNALLED: Transition[ProcessState] = Transition(
     "supervisor_process.06",
-    frozenset({"serving"}),
+    frozenset({"serving", "shutting_down"}),
     "SIGTERM or SIGINT",
     "shutting_down",
-    effect="the handler only latches the signal and the loop takes this, so one during startup waits",
+    guard=(
+        "from shutting_down only after an error ended the wait of a SHUTDOWN in this loop"
+        " pass and the dispatch answered it"
+    ),
+    effect=(
+        "the handler only latches the signal and the loop takes this, so one during startup"
+        " waits, and from shutting_down the wait runs again and sends TERM to each live"
+        " command group, again for any the first wait reached"
+    ),
     cite=f"{_SP5} SHUTDOWN, DL-275",
 )
 PROCESS_DRAINED: Transition[ProcessState] = Transition(

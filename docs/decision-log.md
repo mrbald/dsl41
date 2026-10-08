@@ -19662,3 +19662,57 @@ relitigate an entry; append a new one.
   exact retry the two disagreed, then converged in an exchange: the server
   keeps the contract's refusal, and the CLI maps it by id. All findings are
   fixed and confirmed by the reviewer that raised them.
+- DL-296 Every state machine has an exhaustive event-by-state test
+  (2026-10-08; tests/test_exhaustive_engine.py, tests/test_exhaustive_process.py,
+  tests/test_wrapper_branches.py; src/dsl41/runner_supervisor.py
+  (`supervisor_process` rows 05 and 06), docs/state-machines.md)
+  THE RULE. Covering every declared transition proves each row is exercised.
+  It does not prove a table is complete: a move in a state the suite never
+  builds stays unseen until production, where the default policy would
+  refuse a legitimate control input (DL-292). DL-293 found one such gap in
+  the job machine. Every machine now has a test that builds each state its
+  builder reaches, applies every event its code accepts, under the strict
+  variable it sets itself, and asserts a declared transition or the code's
+  own refusal, never an undeclared move. Each test's docstring names what
+  its builder leaves out, and each was shown to fail when one row is
+  removed.
+  THE TESTS. tests/test_exhaustive_engine.py covers `host`, `admission`,
+  `effect`, `subscription`, `seal_boundary`, `runtime_assembly`, `job_flags`
+  and `job_holding`; tests/test_exhaustive_process.py covers
+  `supervisor_process`, `supervisor_lease`, `supervisor_client`,
+  `anchor_head` and `period_row`. The designed refusals of `effect` (a
+  second outcome) and `runtime_assembly` (a commit with no input open,
+  finishing genesis inside the genesis input) are listed and asserted, not
+  excluded. Hits from cells that take a production transition count toward
+  the gate; violations never do.
+  A MISSING ROW. `supervisor_process` rows 05 and 06 now also list
+  `shutting_down` as a source. An error during a SHUTDOWN's wait leaves the
+  process there for the rest of the loop pass; a second SHUTDOWN in the same
+  write, or a SIGTERM before the pass ends, runs the orderly shutdown again,
+  which ends in order as supervisor-protocol §5 says. The code was right; the
+  table was not. No code changed.
+  A DEFECT, PINNED. An input with no request id is named `engine:<n>` by the
+  engine, and a client may send that same id. A later engine-made input then
+  takes the client's id, overwrites its decision, and the client's retry is
+  refused as a reused id; replay shows the same collision. The test pins
+  today's behavior on the wire, live and on replay, so the fix flips it
+  (DL-297).
+  FOUND FOR LATER. In the supervisor: a RENEW with a non-finite or huge
+  `ttl_s` moves the deadline before failing, so the lease may never expire;
+  while a pass is shutting down after an error, other requests, SPAWN
+  included, are still dispatched; and with no second trigger, that error
+  path tears down with live wrappers and exits 0.
+  ALSO. A wrapper race test is skipped where `os.waitid` is missing (macOS
+  before Python 3.13), as the same file already does for the waitid route.
+  The local matrix (macOS and Linux, Python 3.12 to 3.14, lint, units) is
+  green on the integrated branch.
+  REVIEW. Tests class for the engine tests: one Opus reviewer, three rounds;
+  it required a wire-side pin, exact counts, private hits for the designed
+  refusals, a real cancellation cell, and a bounded wait, which was applied
+  after round three. Semantic class for the process tests, because of the
+  row change: one Opus reviewer and one Fable advisor pass, the Fable pass in
+  place of Codex at the owner's instruction. Both confirmed the widening by
+  narrowing each row and seeing exactly the predicted cases fail. Their test
+  findings (a socket leak, a reply accepted without a taken transition, two
+  incomplete "left out" lists) are fixed and confirmed by the reviewer that
+  raised them.
