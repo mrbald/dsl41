@@ -401,6 +401,7 @@ def test_wrapper_keeps_waiting_through_a_wakeup_that_is_neither_an_exit_nor_eof(
     assert "cause" not in status
 
 
+@pytest.mark.skipif(not hasattr(os, "waitid"), reason="the race needs os.waitid's WNOWAIT")
 def test_wrapper_completion_beats_parent_loss_when_the_exit_lands_with_the_eof(
     tmp_path: Path,
 ) -> None:
