@@ -8,8 +8,9 @@ Modes (argv[1]); argv[2] is a file this process appends one line to per probe
 event, so a test can wait on the event instead of sleeping:
 - full_self_pipe: the SIGCHLD self-pipe is already full, so the handler's
   write fails with EAGAIN. One line per refused write.
-- count_observes: nothing is patched but the exit probe, which notes each
-  call and then runs the real one, so a test can wait for a wake-up it sent.
+- count_observes: nothing is patched but the exit probe, which runs the real
+  one and then notes the call, so a test can wait for a look it caused to
+  finish.
 - completion_beats_parent_loss: the first exit probe blocks until the command
   has exited and reports "still running", so the lifeline EOF is read with the
   exit already there. One line per probe.
@@ -83,8 +84,9 @@ def count_observes(event_path: str) -> None:
     real_observe = runner_wrapper._observe_exit
 
     def observe(child: Any) -> Any:
+        observed = real_observe(child)
         _note(event_path)
-        return real_observe(child)
+        return observed
 
     runner_wrapper._observe_exit = observe
 

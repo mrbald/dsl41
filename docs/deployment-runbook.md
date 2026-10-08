@@ -1252,6 +1252,11 @@ then `Restart=always` starts it again. A deadman exit is also clean and is
 restarted on purpose. An ownership refusal exits 1 and retries after two
 seconds; `StartLimitIntervalSec=0` keeps that retry loop from hitting the
 start limit. Exit 2 is a configuration refusal and is not restarted.
+A shutdown whose wait fails twice exits 1 and is restarted; the
+supervisor log names both errors. Its commands then end as on any
+supervisor crash: the unit's stop sends them TERM, so a wrapper may
+record `signaled 15`, and a wrapper still running after `TimeoutStopSec`
+is killed with no record.
 Stopping the supervisor ends its running jobs. Restarting it does not
 resurrect them; the engine reconciles the spool. §2b's backup order and
 §7's upgrade rows stop shape 1 this way.

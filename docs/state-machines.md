@@ -413,19 +413,19 @@ stateDiagram-v2
     s5 --> s2 : supervisor_process.02 start [the published socket answers PING, or the pid record does not prove its owner absent] / exit 1, another supervisor owns this root
     s5 --> s0 : supervisor_process.03 start [lock taken and no other owner] / sweep private sockets, reclaim the published path, bind the private socket
     s0 --> s3 : supervisor_process.04 publish / listen, chmod 0600, write supervisor.pid, rename the socket to supervisor.sock
-    s3 --> s4 : supervisor_process.05 SHUTDOWN [this incarnation, then the current token, and from shutting_down only after an error ended the previous wait and the dispatch answered it] / from shutting_down the wait runs again and sends TERM to each live command group, again for any the first wait reached
-    s4 --> s4 : supervisor_process.05 SHUTDOWN [this incarnation, then the current token, and from shutting_down only after an error ended the previous wait and the dispatch answered it] / from shutting_down the wait runs again and sends TERM to each live command group, again for any the first wait reached
-    s3 --> s4 : supervisor_process.06 SIGTERM or SIGINT [from shutting_down only after an error ended the wait of a SHUTDOWN in this loop pass and the dispatch answered it] / the handler only latches the signal and the loop takes this, so one during startup waits, and from shutting_down the wait runs again and sends TERM to each live command group, again for any the first wait reached
-    s4 --> s4 : supervisor_process.06 SIGTERM or SIGINT [from shutting_down only after an error ended the wait of a SHUTDOWN in this loop pass and the dispatch answered it] / the handler only latches the signal and the loop takes this, so one during startup waits, and from shutting_down the wait runs again and sends TERM to each live command group, again for any the first wait reached
+    s3 --> s4 : supervisor_process.05 SHUTDOWN [this incarnation, then the current token]
+    s3 --> s4 : supervisor_process.06 SIGTERM or SIGINT [from shutting_down only after an error ended the wait of a SHUTDOWN in this loop pass and the dispatch answered it] / the handler only latches the signal and the loop takes this, so one during startup waits, and from shutting_down the errored SHUTDOWN's answer is sent and the wait runs again, sending TERM to each live command group again
+    s4 --> s4 : supervisor_process.06 SIGTERM or SIGINT [from shutting_down only after an error ended the wait of a SHUTDOWN in this loop pass and the dispatch answered it] / the handler only latches the signal and the loop takes this, so one during startup waits, and from shutting_down the errored SHUTDOWN's answer is sent and the wait runs again, sending TERM to each live command group again
     s4 --> s6 : supervisor_process.07 every wrapper reaped, or the wait bound passed / TERM each command group, KILL it after its grace, KILL every survivor at the bound
     s3 --> s6 : supervisor_process.08 tick [a deadman is set and no live leaseholder for that many seconds] / log the reason
     s6 --> s6 : supervisor_process.09 SIGTERM or SIGINT [latched during a shutdown that already ran in this loop pass] / none
     s2 --> s1 : supervisor_process.10 teardown / flush replies for up to 2 s, drop every connection, unlink what this incarnation published, close the open lifelines and the lock
     s6 --> s1 : supervisor_process.10 teardown / flush replies for up to 2 s, drop every connection, unlink what this incarnation published, close the open lifelines and the lock
-    s0 --> s1 : supervisor_process.11 teardown [an error ended startup or the loop] / the same cleanup as supervisor_process.10, main exits 1 on an OSError
-    s3 --> s1 : supervisor_process.11 teardown [an error ended startup or the loop] / the same cleanup as supervisor_process.10, main exits 1 on an OSError
-    s4 --> s1 : supervisor_process.11 teardown [an error ended startup or the loop] / the same cleanup as supervisor_process.10, main exits 1 on an OSError
-    s5 --> s1 : supervisor_process.11 teardown [an error ended startup or the loop] / the same cleanup as supervisor_process.10, main exits 1 on an OSError
+    s0 --> s1 : supervisor_process.11 teardown [an error ended startup or the loop] / the same cleanup as supervisor_process.10, main exits 1
+    s3 --> s1 : supervisor_process.11 teardown [an error ended startup or the loop] / the same cleanup as supervisor_process.10, main exits 1
+    s4 --> s1 : supervisor_process.11 teardown [an error ended startup or the loop] / the same cleanup as supervisor_process.10, main exits 1
+    s5 --> s1 : supervisor_process.11 teardown [an error ended startup or the loop] / the same cleanup as supervisor_process.10, main exits 1
+    s4 --> s4 : supervisor_process.12 the loop pass ends [an error ended a SHUTDOWN's wait in this pass, the dispatch answered it, and no signal is latched] / send the errored SHUTDOWN's answer, then run the wait once more, which sends TERM to each live command group again, an error in it ends the loop through supervisor_process.11
     s1 --> [*]
 ```
 
@@ -435,13 +435,14 @@ stateDiagram-v2
 | supervisor_process.02 | starting | start | the published socket answers PING, or the pid record does not prove its owner absent | exit 1, another supervisor owns this root | refused | supervisor-protocol ss5, DL-210 |  |
 | supervisor_process.03 | starting | start | lock taken and no other owner | sweep private sockets, reclaim the published path, bind the private socket | bound | supervisor-protocol ss5, DL-210 |  |
 | supervisor_process.04 | bound | publish |  | listen, chmod 0600, write supervisor.pid, rename the socket to supervisor.sock | serving | supervisor-protocol ss5, DL-210, DL-275 |  |
-| supervisor_process.05 | serving, shutting_down | SHUTDOWN | this incarnation, then the current token, and from shutting_down only after an error ended the previous wait and the dispatch answered it | from shutting_down the wait runs again and sends TERM to each live command group, again for any the first wait reached | shutting_down | supervisor-protocol ss5 SHUTDOWN, DL-80 |  |
-| supervisor_process.06 | serving, shutting_down | SIGTERM or SIGINT | from shutting_down only after an error ended the wait of a SHUTDOWN in this loop pass and the dispatch answered it | the handler only latches the signal and the loop takes this, so one during startup waits, and from shutting_down the wait runs again and sends TERM to each live command group, again for any the first wait reached | shutting_down | supervisor-protocol ss5 SHUTDOWN, DL-275 |  |
+| supervisor_process.05 | serving | SHUTDOWN | this incarnation, then the current token |  | shutting_down | supervisor-protocol ss5 SHUTDOWN, DL-80 |  |
+| supervisor_process.06 | serving, shutting_down | SIGTERM or SIGINT | from shutting_down only after an error ended the wait of a SHUTDOWN in this loop pass and the dispatch answered it | the handler only latches the signal and the loop takes this, so one during startup waits, and from shutting_down the errored SHUTDOWN's answer is sent and the wait runs again, sending TERM to each live command group again | shutting_down | supervisor-protocol ss5 SHUTDOWN, DL-275 |  |
 | supervisor_process.07 | shutting_down | every wrapper reaped, or the wait bound passed |  | TERM each command group, KILL it after its grace, KILL every survivor at the bound | stopped | supervisor-protocol ss5 SHUTDOWN, DL-48, DL-150 |  |
 | supervisor_process.08 | serving | tick | a deadman is set and no live leaseholder for that many seconds | log the reason | stopped | supervisor-protocol ss5 The deadman, DL-95 |  |
 | supervisor_process.09 | stopped | SIGTERM or SIGINT | latched during a shutdown that already ran in this loop pass | none | stopped | supervisor-protocol ss5 SHUTDOWN |  |
 | supervisor_process.10 | refused, stopped | teardown |  | flush replies for up to 2 s, drop every connection, unlink what this incarnation published, close the open lifelines and the lock | closed | supervisor-protocol ss5, DL-210 |  |
-| supervisor_process.11 | bound, serving, shutting_down, starting | teardown | an error ended startup or the loop | the same cleanup as supervisor_process.10, main exits 1 on an OSError | closed | supervisor-protocol ss5, DL-210 |  |
+| supervisor_process.11 | bound, serving, shutting_down, starting | teardown | an error ended startup or the loop | the same cleanup as supervisor_process.10, main exits 1 | closed | supervisor-protocol ss5, DL-210 |  |
+| supervisor_process.12 | shutting_down | the loop pass ends | an error ended a SHUTDOWN's wait in this pass, the dispatch answered it, and no signal is latched | send the errored SHUTDOWN's answer, then run the wait once more, which sends TERM to each live command group again, an error in it ends the loop through supervisor_process.11 | shutting_down | supervisor-protocol ss5 SHUTDOWN |  |
 
 ## supervisor_lease
 

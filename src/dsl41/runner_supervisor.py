@@ -395,23 +395,16 @@ PROCESS_PUBLISHED: Transition[ProcessState] = Transition(
     effect="listen, chmod 0600, write supervisor.pid, rename the socket to supervisor.sock",
     cite=f"{_SP5}, DL-210, DL-275",
 )
-# From `shutting_down`, rows 05 and 06 run the wait again. Only an error in a
-# SHUTDOWN's wait leaves that state at rest: the dispatch answers the error, and
-# the process stays `shutting_down` for the rest of the loop pass, where a
-# pipelined SHUTDOWN or a latched signal can still arrive.
+# Only an error in a SHUTDOWN's wait leaves `shutting_down` at rest: the
+# dispatch answers the error, and the process stays there for the rest of the
+# loop pass. Nothing more is dispatched then. A signal latched before the pass
+# ends runs the wait again through row 06; without one, row 12 does.
 PROCESS_SHUTDOWN: Transition[ProcessState] = Transition(
     "supervisor_process.05",
-    frozenset({"serving", "shutting_down"}),
+    frozenset({"serving"}),
     "SHUTDOWN",
     "shutting_down",
-    guard=(
-        "this incarnation, then the current token, and from shutting_down only after an"
-        " error ended the previous wait and the dispatch answered it"
-    ),
-    effect=(
-        "from shutting_down the wait runs again and sends TERM to each live command group,"
-        " again for any the first wait reached"
-    ),
+    guard="this incarnation, then the current token",
     cite=f"{_SP5} SHUTDOWN, DL-80",
 )
 PROCESS_SIGNALLED: Transition[ProcessState] = Transition(
@@ -425,8 +418,8 @@ PROCESS_SIGNALLED: Transition[ProcessState] = Transition(
     ),
     effect=(
         "the handler only latches the signal and the loop takes this, so one during startup"
-        " waits, and from shutting_down the wait runs again and sends TERM to each live"
-        " command group, again for any the first wait reached"
+        " waits, and from shutting_down the errored SHUTDOWN's answer is sent and the wait"
+        " runs again, sending TERM to each live command group again"
     ),
     cite=f"{_SP5} SHUTDOWN, DL-275",
 )
@@ -473,8 +466,22 @@ PROCESS_ABORTED: Transition[ProcessState] = Transition(
     "teardown",
     "closed",
     guard="an error ended startup or the loop",
-    effect="the same cleanup as supervisor_process.10; main exits 1 on an OSError",
+    effect="the same cleanup as supervisor_process.10; main exits 1",
     cite=f"{_SP5}, DL-210",
+)
+PROCESS_RETRIED: Transition[ProcessState] = Transition(
+    "supervisor_process.12",
+    frozenset({"shutting_down"}),
+    "the loop pass ends",
+    "shutting_down",
+    guard="an error ended a SHUTDOWN's wait in this pass, the dispatch answered it, and no"
+    " signal is latched",
+    effect=(
+        "send the errored SHUTDOWN's answer, then run the wait once more, which sends TERM to"
+        " each live command group again; an error in it ends the loop through"
+        " supervisor_process.11"
+    ),
+    cite=f"{_SP5} SHUTDOWN",
 )
 
 #: SIGKILL ends the process in any state and runs no code, so no row is taken
@@ -499,6 +506,7 @@ SUPERVISOR_PROCESS: StateMachine[ProcessState] = StateMachine(
         PROCESS_REPEAT,
         PROCESS_TEARDOWN,
         PROCESS_ABORTED,
+        PROCESS_RETRIED,
     ),
 )
 
@@ -705,8 +713,10 @@ class Supervisor:
 
     @property
     def _running(self) -> bool:
-        """Requests are read and dispatched until the loop stops."""
-        return self.state in ("starting", "bound", "serving", "shutting_down")
+        """Requests are read and dispatched only while serving. From
+        `shutting_down` on nothing more is dispatched, SPAWN included, even
+        when an error ended a SHUTDOWN's wait and the loop pass goes on."""
+        return self.state == "serving"
 
     # -- startup ------------------------------------------------------------
 
@@ -909,6 +919,11 @@ class Supervisor:
                 self._reap()
                 if self._shutdown_requested:
                     self._orderly_shutdown(PROCESS_SIGNALLED)
+                elif self.state == "shutting_down":
+                    # an error ended a SHUTDOWN's wait and the dispatch answered
+                    # it: run the wait once more rather than leave the wrappers
+                    # to lifeline EOF; a second error ends the loop and main exits 1
+                    self._orderly_shutdown(PROCESS_RETRIED)
                 elif self.state == "serving" and self._deadman_expired():
                     self._move(PROCESS_DEADMAN, "stopped")
         finally:
@@ -1022,7 +1037,7 @@ class Supervisor:
         self._dispatch_buffer(conn)
 
     def _dispatch_buffer(self, conn: _Conn) -> None:
-        while not conn.paused and self._connected(conn):
+        while self._running and not conn.paused and self._connected(conn):
             if b"\n" not in conn.buf:
                 if len(conn.buf) >= self._request_line_limit:
                     if not conn.discarding:
@@ -1037,8 +1052,6 @@ class Supervisor:
                 conn.discarding = False
             else:
                 self._dispatch(conn, line)
-            if not self._running:
-                return
 
     def _connected(self, conn: _Conn) -> bool:
         return self._conns.get(conn.sock.fileno()) is conn
@@ -1326,10 +1339,12 @@ class Supervisor:
                 return refusal, None
 
     def _grant(self, conn: _Conn, msg: _Acquire) -> dict[str, Any]:
-        """Mint a token and make `conn` the holder's connection."""
+        """Mint a token and make `conn` the holder's connection. The expiry is
+        computed first: a ttl_s it cannot represent raises before anything,
+        the token counter included, changes."""
+        expires_at = datetime.fromtimestamp(time.time() + msg.ttl_s, UTC).isoformat()
         token = self._next_token
         self._next_token += 1  # monotonic: never regresses while any run is alive
-        expires_at = datetime.fromtimestamp(time.time() + msg.ttl_s, UTC).isoformat()
         previous = self.lease
         self.lease = _Lease(
             msg.controller_id, token, time.monotonic() + msg.ttl_s, expires_at, conn
@@ -1345,14 +1360,18 @@ class Supervisor:
         }
 
     def _extend(self, req: dict[str, Any], taken: Transition[LeasePhase]) -> _LeaseAnswer:
-        """RENEW: the token check first, then ttl_s."""
+        """RENEW: the token check first, then ttl_s. Everything is computed
+        before the record changes, as in `_grant`: a ttl_s whose expiry cannot
+        be represented (inf, nan, 1e20) raises here, the dispatch belt answers
+        it, and the lease stays as it was."""
         if (err := self._check_token(req)) is not None:
             return err, None
         assert self.lease is not None  # the token check passed
         ttl_s = float(req.get("ttl_s", 60))
+        expires_at = datetime.fromtimestamp(time.time() + ttl_s, UTC).isoformat()
         self.lease.deadline = time.monotonic() + ttl_s
-        self.lease.expires_at = datetime.fromtimestamp(time.time() + ttl_s, UTC).isoformat()
-        return {"ok": True, "expires_at": self.lease.expires_at}, taken
+        self.lease.expires_at = expires_at
+        return {"ok": True, "expires_at": expires_at}, taken
 
     def _drop_lease(self, req: dict[str, Any]) -> _LeaseAnswer:
         """RELEASE: the token check, then the record goes."""
@@ -1822,7 +1841,18 @@ class Supervisor:
             return err
         # ss5 order: wait for wrappers FIRST, reply {ok}, exit, unlink -- the
         # earlier reply-then-teardown also double-sent {ok} (review fix, DL-48)
-        self._orderly_shutdown(PROCESS_SHUTDOWN)
+        try:
+            self._orderly_shutdown(PROCESS_SHUTDOWN)
+        except Exception as exc:
+            # the dispatch answers it `internal:` and the wait runs again at
+            # the end of this loop pass (row 06 or 12); the log keeps the cause
+            print(
+                f"supervisor: the shutdown wait failed ({type(exc).__name__}: {exc});"
+                " running it once more",
+                file=sys.stderr,
+                flush=True,
+            )
+            raise
         return {"ok": True}
 
     def _orderly_shutdown(self, trigger: Transition[ProcessState]) -> None:
@@ -1830,17 +1860,22 @@ class Supervisor:
         gone). Lifelines stay OPEN until each wrapper exits, so wrappers observe
         the command deaths and record signaled/exited -- never parent-lost.
 
-        `trigger` is the transition that asked for it: SHUTDOWN or a signal. A
-        signal latched while a shutdown ran is consumed after the stop, finds
-        the process stopped, and does nothing more. No SHUTDOWN request is
-        dispatched after the stop."""
+        `trigger` is the transition that asked for it: SHUTDOWN, a signal, or
+        the end of a loop pass in which an error ended this wait. A signal
+        latched while a shutdown ran is consumed after the stop, finds the
+        process stopped, and does nothing more. No request is dispatched once
+        the process is shutting down."""
         self._shutdown_requested = False
         match self.state:
             case "stopped":
                 self._move(PROCESS_REPEAT, "stopped")
                 return
-            case _:
-                self._move(trigger, "shutting_down")
+            case "shutting_down":
+                # the wait runs again after an error: the errored SHUTDOWN's
+                # answer goes out now, not after this second wait
+                for conn in list(self._conns.values()):
+                    self._writable(conn, resume=False)
+        self._move(trigger, "shutting_down")
         live = [r for r in self.runs.values() if r.wrapper_rc is None]
         # a JUST-spawned wrapper may not have written spawn.json yet, and
         # _signal_command is a silent no-op without it -- the wrapper would

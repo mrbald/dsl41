@@ -19823,3 +19823,51 @@ relitigate an entry; append a new one.
   owner's instruction, reviewed the two fixes: both correct and minimal,
   with no caller-visible change. All findings are fixed and confirmed by the
   reviewer that raised them.
+- DL-300 Four supervisor and wrapper fixes: a stopped command is not an exit, a
+  lease with no representable expiry changes nothing, nothing is dispatched
+  while shutting down, and a failed shutdown wait is retried once
+  (2026-10-08; src/dsl41/runner_supervisor.py, src/dsl41/runner_wrapper.py;
+  docs/supervisor-protocol.md §5 (lease verbs, SHUTDOWN) and its amendment
+  list; docs/deployment-runbook.md (the supervisor unit);
+  docs/state-machines.md; tests/conftest.py, tests/test_runner_supervisor.py,
+  tests/test_supervisor_branches.py, tests/test_wrapper_branches.py,
+  tests/wrapper_branch_driver.py, tests/test_exhaustive_process.py)
+  A STOPPED COMMAND. On macOS, `waitid(WEXITED)` also reports a stopped
+  child, so a command stopped with SIGSTOP was recorded as `signaled 17`
+  while it was still alive (DL-294 recorded it). The wrapper now treats a
+  stopped, continued or trapped report as "still running"; only a real exit
+  or a death by signal ends the wait. Linux never reported these there.
+  A LEASE WITH NO REPRESENTABLE EXPIRY. RENEW wrote the deadline before
+  computing the expiry, so a `ttl_s` of 1e20, an infinity or a NaN left a
+  lease that never expired or expired at once (DL-296 found it). RENEW and
+  ACQUIRE now compute everything first, including the token number, and
+  write nothing when the expiry cannot be represented. Such a request gets
+  the existing `internal:` answer, as ACQUIRE already gave, so the wire does
+  not change. A representable non-positive `ttl_s` keeps §5's meaning: an
+  expired lease.
+  NOTHING DISPATCHED WHILE SHUTTING DOWN. After an error ended a SHUTDOWN's
+  wait, other requests, SPAWN included, were still dispatched for the rest
+  of the loop pass. `_running` is now true only in `serving`, and the
+  dispatch buffer checks it before each request. `supervisor_process.05`
+  takes only `serving` as its source again, narrowing DL-296's widening;
+  `.06` keeps `shutting_down`, because a signal does not pass through
+  `_running`.
+  A FAILED SHUTDOWN WAIT. With no second trigger, that error path tore down
+  with live wrappers and exited 0. Now the supervisor logs one line naming
+  the error, writes the pending `internal:` answer, and runs the wait once
+  more (`supervisor_process.12`). If that run succeeds it stops in order and
+  exits 0; if it fails, or the cleanup before it fails, it exits 1, which the
+  unit restarts. The rerun sends each live command group a second TERM. In
+  the worst case the two waits take about twice the bounded wait.
+  STATED LIMITS. A client that is not reading, or has a large backlog of
+  pushes ahead of the answer, may get the `internal:` answer only in
+  teardown's flush, or not at all. Exit 1 after a twice-failed wait lets
+  systemd stop the commands as on any supervisor crash, so a wrapper may
+  record `signaled 15`, or nothing after the unit's stop timeout.
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass, the
+  Fable pass in place of Codex at the owner's instruction, three rounds.
+  Reverting each fix in a scratch copy fails its tests. The reviewers found
+  the first failed wait unlogged, an over-claiming runbook sentence, a token
+  number used up before a bad expiry failed, the answer delayed behind the
+  second wait, and wording in §5 that over-promised delivery. All are fixed
+  and confirmed by the reviewer that raised them.

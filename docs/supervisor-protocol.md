@@ -2,7 +2,8 @@
 
 Status: the spool format and the wrapper input spec are frozen (DL-42
 item 3), and the supervisor socket protocol is frozen (DL-48); amended by
-DL-129, DL-150, DL-151 and DL-210, each cited where it applies. This
+DL-129, DL-150, DL-151, DL-210, DL-291 and DL-300, each cited where it
+applies. This
 document is the future extraction boundary. If the lifecycle tier (the
 five modules of §1) is extracted (DL-42 triggers), this document is its
 public API. Each change to a frozen item requires a decision-log entry.
@@ -516,7 +517,9 @@ like any unknown field.
   `{ok: false, error: "bad_controller_id"}`, checked before `ttl_s` and
   before any lease state (DL-150). `ttl_s` is optional on `ACQUIRE` and on `RENEW`,
   and defaults to 60 s. The supervisor puts no bound on it: a zero or
-  negative value makes a lease that is already expired. `ACQUIRE` is the
+  negative value makes a lease that is already expired. A value whose
+  expiry is not a representable time (`inf`, `nan`, `1e20`) is answered
+  `internal:` and changes no lease state (DL-300). `ACQUIRE` is the
   one lease verb that does not
   require the incarnation: a free lease is granted without one, and the
   incarnation is read only to test incumbency against a live lease.
@@ -707,6 +710,16 @@ checked first, and then a stale/expired token →
   it records the command's own ending if the command has ended, and
   `terminated / parent lost` only if it has to kill it. The promise above
   is bounded, not absolute.
+
+  If an error ends that wait, the supervisor logs one line,
+  `supervisor: the shutdown wait failed (<type>: <message>); running it
+  once more`, and the SHUTDOWN is answered `internal:`. No request is
+  dispatched after it. The supervisor writes its queued answers once,
+  without blocking, then runs the wait once more and exits; a client that
+  is not reading, or has a large backlog of pushes ahead of the answer,
+  may get it only in teardown's two-second flush, or not at all. If that
+  run fails, or the cleanup before it fails, it exits 1, and each wrapper
+  still alive runs §4 step 5 on its own (DL-300).
 
 **Pushes.** When the supervisor reaps a wrapper, the connection that
 holds the current lease receives async lines
