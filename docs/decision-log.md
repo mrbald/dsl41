@@ -19479,3 +19479,76 @@ relitigate an entry; append a new one.
   found that `dsl41 runs` printed a traceback on the new replay error, the
   same channel leak, and silent refusals in rehearse's sweeps. All are fixed
   and confirmed by the reviewer that raised them.
+- DL-293 The oracle's job lifecycle, flags, holding and assembly are state
+  machines, and every ignored event is a declared internal transition
+  (2026-10-08; src/dsl41/oracle_state.py, oracle.py, classify.py,
+  cli_control.py, machines.py, simulation_register_rows.py;
+  docs/state-machines.md, docs/simulation-coverage.md,
+  docs/concurrency-model.md §3, docs/blocks/job-lifecycle.md;
+  scripts/arch_check.py `_STATE_MAPS`; tests/batch_harness.py,
+  tests/test_job_machines.py, tests/test_oracle.py, tests/test_runtime_state.py,
+  tests/test_capacity_decomposition.py, tests/test_dry_apply.py,
+  tests/fork_harness.py, tests/test_seal_artifact.py,
+  tests/test_simulation_register.py, tests/test_arch_check.py)
+  THE MACHINES (DL-289). `job_status` has 58 transitions over the seven job
+  statuses: the job rows, the box rows, and internal transitions. An
+  injected STATUS targets the set of injectable statuses, not any status.
+  The idle-box rows are exact: each leaves its own target out of its
+  sources, so a same-status move is rejected. `job_flags` has 17 transitions
+  over four orthogonal regions (ice, hold, no-exec, arm); it has no initial
+  state, because its seed is an install. `job_holding` has eight (none,
+  reserved, held, DL-256). `runtime_assembly` has seven; its one `_phase`
+  replaces four flags. Box execution and the capacity waiter are folded into
+  these tables. The gate covers every transition; none is marked.
+  INTERNAL TRANSITIONS. An event the oracle ignores is now a declared
+  internal transition (UML: an effect with no state change), one row per
+  state it occurs in: KILLJOB on an idle job, START_REFUSED, and the DL-254
+  ignored ON_ICE, ON_HOLD and ON_NOEXEC, including ON_NOEXEC on a queued box
+  with an iced member. So the table says what happens to a job on every
+  event.
+  WIRING. Every status write passes through `RuntimeState.transition`, which
+  requires the transition and notes `take`'s result on DL-292's channel.
+  `move_flag` replaces `set_flags` and `set_armed`; `stay` takes an internal
+  transition and writes nothing; `seed_job` is the one install-shaped verb,
+  for the constructor's seed and classify's seeding, and takes no
+  transition. concurrency-model §3's owner-verb list says so, and
+  arch_check's `_STATE_MAPS` names `_phase`. `FAILED`, `IDLE` and
+  `JOB_STATUSES` name sets that were spelled out at several sites.
+  `open_period` had no production caller and is removed.
+  EVERY TAKE IN AN INPUT. The three job machines are taken only inside an
+  InputBatch. tests/batch_harness.py, installed on all three SEM paths
+  (direct, engine and fork), proves it and proves the channel is empty when
+  an input begins. The seeds take no job transition.
+  COMPLETENESS. Covering every declared transition does not prove the table
+  is complete. An exhaustive test sends every operator verb, under the
+  strict variable, to each of 153 states its builder reaches (plain job,
+  resource job, box and resource box; every status; ice or hold; a box
+  member idle, iced, running or queued): 1683 sends. Each must take a
+  declared transition or be refused by the oracle's own rule, and no
+  violation may be traced. It found the queued-box ON_NOEXEC row missing; a
+  probe of 286 states it does not build found nothing more.
+  BEHAVIOR CHANGE. KILLJOB on a job that is not running or queued now writes
+  one `EVENT_IGNORED` trace line. Nothing else changes: no row, revision,
+  timer or emission. The trace is not sealed or attested, so
+  STATE_MACHINE_VERSION does not move; replaying an old log through
+  `journal` or `runs` shows the extra line. The assembly refuses misuse no
+  production path makes: a second install, an install after genesis
+  finished, finishing genesis inside the genesis input, and a commit with
+  no input open. Its refusals raise OracleError, because assembly is not an
+  input and has no channel.
+  OPEN. RELEASE_RESOURCE's two no-op trace lines are not yet internal
+  transitions of `job_holding`.
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass, the
+  Fable pass in place of Codex at the owner's instruction, three rounds.
+  Both found the same medium finding twice: first an ignored-KILLJOB row
+  that admitted sixteen moves where the code makes four, then, after the
+  ignored events became internal transitions, the missing queued-box
+  ON_NOEXEC row, which the default policy would have refused as a
+  violation. The Opus reviewer also found stale simulation register rows,
+  inexact idle-box rows and a test that asserted less than its name; the
+  Fable pass found a hardcoded holding source, an unguarded set-target
+  cast and an untested arm transition. All are fixed and confirmed by the
+  reviewer that raised them. Both reviewers' last test items (the
+  exhaustive test sets the strict variable itself, checks the trace for
+  violation lines, and claims only the states its builder reaches) were
+  applied after round three.

@@ -26,6 +26,9 @@ What is here:
 
 - **`OracleError`**, raised on both sides of the split, so it is defined on
   the side that has no dependencies.
+- **The job's machines.** `job_status`, `job_flags` and `job_holding`
+  declare every move of a job row; `runtime_assembly` declares how a state
+  is assembled and when an input is open (docs/state-machines.md).
 - **The violation channel.** `RuntimeState.note_violation` collects the
   `Violation`s that `StateMachine.take` returns during an input, and the
   input's commit drains them (`InputBatch`). A check never raises in
@@ -56,11 +59,11 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from types import MappingProxyType
-from typing import Literal, get_args
+from typing import Final, Literal, cast, get_args
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from dsl41.state_machine import STRICT_ENV, TransitionError, Violation
+from dsl41.state_machine import STRICT_ENV, StateMachine, Transition, TransitionError, Violation
 
 
 class OracleError(ValueError):
@@ -77,21 +80,31 @@ JobStatus = Literal[
     "TERMINATED",
 ]
 
+#: Every job status: the state set of the `job_status` machine.
+JOB_STATUSES: frozenset[JobStatus] = frozenset(get_args(JobStatus))
+
 #: The statuses an injected STATUS event may carry: every `JobStatus` except
 #: QUE_WAIT. QUE_WAIT belongs to the capacity owner (DL-50): the queue
 #: assigns it with a waiter rank and clears it on admission, and an operator
 #: never injects it (DL-264). The oracle's STATUS handler and the control
 #: server's CHANGE_STATUS check both read this one set, so framing cannot
 #: admit a status the oracle refuses.
-INJECTABLE_STATUSES: frozenset[str] = frozenset(get_args(JobStatus)) - {"QUE_WAIT"}
+INJECTABLE_STATUSES: frozenset[JobStatus] = JOB_STATUSES - {"QUE_WAIT"}
 
-TERMINAL: frozenset[str] = frozenset({"SUCCESS", "FAILURE", "TERMINATED"})
+TERMINAL: frozenset[JobStatus] = frozenset({"SUCCESS", "FAILURE", "TERMINATED"})
+#: The terminal statuses that are not SUCCESS, named once: a failed vote in
+#: the SEM-11 fold and the SEM-15 recompute, the box end that cascades to
+#: job_terminator members (SEM-14), the FORCE_STARTJOB that starts on held
+#: units (DL-256), and the CLI's `is-failed` predicate.
+FAILED: frozenset[JobStatus] = frozenset({"FAILURE", "TERMINATED"})
 # A run's reservations are taken while a row is in LIVE (period-model ss5)
 # and released on leaving it, except the units a renewable's policy does not
 # free: those stay on a row that is not live (DL-256, `may_outlive_run`). The
 # release edge (DL-120), the SPAWN edge (DL-232) and the completion gate
 # (DL-235) read it.
-LIVE: frozenset[str] = frozenset({"STARTING", "RUNNING"})
+LIVE: frozenset[JobStatus] = frozenset({"STARTING", "RUNNING"})
+#: A job that may start: INACTIVE or terminal.
+IDLE: frozenset[JobStatus] = frozenset({"INACTIVE", "SUCCESS", "FAILURE", "TERMINATED"})
 
 EventKind = Literal[
     "STATUS",
@@ -406,6 +419,863 @@ class CarriedRows(BaseModel):
     now: datetime | None = None
 
 
+# ------------------------------------------------------------- the job's machines
+#
+# A job row has three regions, each a declared machine (docs/state-machines.md):
+# its status, its flags (ice, hold, noexec and the scheduled-tick arm), and the
+# capacity it holds. Box execution and the capacity waiter are rows of the
+# status table: a box has no state field of its own, and the waiter is the
+# QUE_WAIT status with its rank. The rule code in `oracle.py` decides each move
+# and names the transition it takes; the verbs below check it against the
+# table and note a mismatch on the violation channel. They never refuse.
+
+_ANY: frozenset[JobStatus] = JOB_STATUSES
+_QUEUED: frozenset[JobStatus] = frozenset({"QUE_WAIT"})
+_STARTING: frozenset[JobStatus] = frozenset({"STARTING"})
+_RUNNING: frozenset[JobStatus] = frozenset({"RUNNING"})
+#: a box that is not running and not sticky TERMINATED (SEM-13, SEM-15)
+_IDLE_BOX: frozenset[JobStatus] = frozenset({"INACTIVE", "QUE_WAIT", "SUCCESS", "FAILURE"})
+
+JOB_BYPASS: Final = Transition[JobStatus](
+    "job_status.01",
+    IDLE,
+    "start",
+    "SUCCESS",
+    guard="not a box; the job, or a box above it, is ON_NOEXEC",
+    effect="start_run; no capacity is taken",
+    cite="SEM-22, DL-54",
+)
+JOB_START: Final = Transition[JobStatus](
+    "job_status.02",
+    IDLE,
+    "start",
+    "STARTING",
+    guard="not a box; the gates hold; inside the run window; admissible",
+    effect="arm term_run_time; start_run; reserve, or take over held units",
+    cite="SEM-10, DL-50, DL-120",
+)
+JOB_QUEUE: Final = Transition[JobStatus](
+    "job_status.03",
+    IDLE,
+    "start",
+    "QUE_WAIT",
+    guard="the gates hold; inside the run window; not admissible",
+    effect="enqueue_waiter allocates the rank",
+    cite="DL-50, DL-247, DL-255",
+)
+JOB_FORCE_ON_HELD: Final = Transition[JobStatus](
+    "job_status.04",
+    FAILED,
+    "FORCE_STARTJOB",
+    "STARTING",
+    guard="the job holds units from an earlier run",
+    effect="start on the held units and the machine load; no admission test",
+    cite="DL-256",
+)
+JOB_RUN: Final = Transition[JobStatus](
+    "job_status.05",
+    _STARTING,
+    "started",
+    "RUNNING",
+    guard="not a box; still STARTING at this run",
+    cite="SEM-10",
+)
+JOB_WINDOW_SKIP: Final = Transition[JobStatus](
+    "job_status.06",
+    TERMINAL,
+    "start",
+    "INACTIVE",
+    guard="standalone; outside run_window, closer to the previous close",
+    cite="SEM-33, DL-246",
+)
+JOB_WINDOW_SKIP_MEMBER: Final = Transition[JobStatus](
+    "job_status.07",
+    TERMINAL,
+    "start",
+    "INACTIVE",
+    guard="its box is RUNNING and it has not run there; outside run_window,"
+    " closer to the previous close",
+    effect="record_resolution; the box's completion door runs",
+    cite="SEM-33, DL-154",
+)
+JOB_READMIT: Final = Transition[JobStatus](
+    "job_status.08",
+    _QUEUED,
+    "readmit",
+    "STARTING",
+    guard="its box is RUNNING; not held; admissible; queued-recheck passes",
+    effect="dequeue_waiter; reserve; start_run",
+    cite="DL-50, DL-257",
+)
+JOB_CANCEL_WAITER: Final = Transition[JobStatus](
+    "job_status.09",
+    _QUEUED,
+    "readmit",
+    "INACTIVE",
+    guard="its box is not RUNNING; a full scan",
+    effect="dequeue_waiter",
+    cite="DL-50, DL-247",
+)
+JOB_LEAVE_QUEUE: Final = Transition[JobStatus](
+    "job_status.10",
+    _QUEUED,
+    "readmit",
+    "INACTIVE",
+    guard="queued-recheck fails",
+    effect="disarm; dequeue_waiter; void_resolution; then defer or skip",
+    cite="DL-257",
+)
+JOB_KILL_QUEUED: Final = Transition[JobStatus](
+    "job_status.11",
+    _QUEUED,
+    "KILLJOB",
+    "TERMINATED",
+    effect="dequeue_waiter; disarm",
+    cite="DL-50, DL-54",
+)
+JOB_ICE_QUEUED: Final = Transition[JobStatus](
+    "job_status.12",
+    _QUEUED,
+    "ON_ICE",
+    "INACTIVE",
+    effect="set ON_ICE; dequeue_waiter",
+    cite="DL-50, DL-285",
+)
+JOB_NOEXEC_QUEUED: Final = Transition[JobStatus](
+    "job_status.13",
+    _QUEUED,
+    "ON_NOEXEC",
+    "INACTIVE",
+    guard="not a box; not ignored",
+    effect="set ON_NOEXEC; dequeue_waiter; clear the exit code; retry the start",
+    cite="DL-254",
+)
+JOB_KILL: Final = Transition[JobStatus](
+    "job_status.14",
+    LIVE,
+    "KILLJOB",
+    "TERMINATED",
+    effect="a box kills its job_terminator members",
+    cite="SEM-14",
+)
+JOB_TERM_RUN_TIME: Final = Transition[JobStatus](
+    "job_status.15",
+    _RUNNING,
+    "TIMER term_run_time",
+    "TERMINATED",
+    guard="the timer's run is the row's run",
+    effect="a box kills its job_terminator members",
+    cite="autosys-semantics ss5",
+)
+JOB_TERMINATOR: Final = Transition[JobStatus](
+    "job_status.16",
+    LIVE,
+    "box ends FAILURE or TERMINATED",
+    "TERMINATED",
+    guard="a member with job_terminator",
+    effect="a box kills its own job_terminator members",
+    cite="SEM-14",
+)
+STATUS_EXIT_SUCCESS: Final = Transition[JobStatus](
+    "job_status.17",
+    _ANY,
+    "STATUS exit_code",
+    "SUCCESS",
+    guard="exit_is_success",
+    effect="release the run's units on leaving STARTING or RUNNING",
+    cite="SEM-09",
+)
+STATUS_EXIT_FAILURE: Final = Transition[JobStatus](
+    "job_status.18",
+    _ANY,
+    "STATUS exit_code",
+    "FAILURE",
+    guard="not exit_is_success",
+    effect="release the run's units on leaving STARTING or RUNNING",
+    cite="SEM-09",
+)
+STATUS_INJECTED: Final = Transition[JobStatus](
+    "job_status.19",
+    _ANY,
+    "STATUS status",
+    INJECTABLE_STATUSES,
+    guard="the status is not INACTIVE, or the job has no catalog entry",
+    effect="release the run's units on leaving STARTING or RUNNING",
+    cite="DL-13, DL-264",
+)
+STATUS_INACTIVE: Final = Transition[JobStatus](
+    "job_status.20",
+    _ANY,
+    "STATUS INACTIVE",
+    "INACTIVE",
+    guard="a catalog job, not a box",
+    effect="record_resolution when its box is RUNNING; SEM-15 on an idle box",
+    cite="DL-242, DL-235",
+)
+NOEXEC_COMPLETED: Final = Transition[JobStatus](
+    "job_status.21",
+    FAILED,
+    "ON_NOEXEC",
+    "INACTIVE",
+    guard="not a box; not ignored",
+    effect="set ON_NOEXEC; clear the exit code",
+    cite="SEM-22, DL-243",
+)
+BOX_RESET: Final = Transition[JobStatus](
+    "job_status.22",
+    TERMINAL,
+    "box start",
+    "INACTIVE",
+    guard="contained; not live or queued",
+    effect="one batch around the box's STARTING; clear the exit code",
+    cite="SEM-10, DL-242",
+)
+BOX_CASCADE: Final = Transition[JobStatus](
+    "job_status.23",
+    JOB_STATUSES - {"INACTIVE"},
+    "box set INACTIVE",
+    "INACTIVE",
+    guard="contained",
+    effect="one batch with the box's own row; the box runs inside lose their arms",
+    cite="SEM-18, DL-242",
+)
+BOX_START: Final = Transition[JobStatus](
+    "job_status.24",
+    IDLE,
+    "start",
+    "STARTING",
+    guard="a box; the gates hold; inside the run window; admissible",
+    effect="start_run; reset the contained jobs around this write",
+    cite="SEM-10, DL-242",
+)
+BOX_RUN: Final = Transition[JobStatus](
+    "job_status.25",
+    _STARTING,
+    "started",
+    "RUNNING",
+    guard="a box; still STARTING at this run",
+    effect="auto_hold members; attempt every member; decide the run windows",
+    cite="SEM-10, SEM-33, DL-246",
+)
+BOX_SUCCESS_OVERRIDE: Final = Transition[JobStatus](
+    "job_status.26",
+    _RUNNING,
+    "member moves",
+    "SUCCESS",
+    guard="box_success holds",
+    cite="SEM-12",
+)
+BOX_FAILURE_OVERRIDE: Final = Transition[JobStatus](
+    "job_status.27",
+    _RUNNING,
+    "member moves",
+    "FAILURE",
+    guard="box_failure holds",
+    effect="kill the job_terminator members",
+    cite="SEM-12, SEM-14",
+)
+BOX_FOLD_SUCCESS: Final = Transition[JobStatus](
+    "job_status.28",
+    _RUNNING,
+    "completion moment",
+    "SUCCESS",
+    guard="every member done; no failed vote; no box_success",
+    cite="SEM-11",
+)
+BOX_FOLD_FAILURE: Final = Transition[JobStatus](
+    "job_status.29",
+    _RUNNING,
+    "completion moment",
+    "FAILURE",
+    guard="every member done; a failed vote; no box_failure",
+    effect="kill the job_terminator members",
+    cite="SEM-11, SEM-14",
+)
+BOX_TERMINATOR: Final = Transition[JobStatus](
+    "job_status.30",
+    _RUNNING,
+    "member ends FAILURE",
+    "TERMINATED",
+    guard="the member has box_terminator",
+    effect="kill the job_terminator members",
+    cite="SEM-14",
+)
+#: The idle-box re-derive by its verdict: the status differs, so each row's
+#: sources leave out its own target (SEM-15)
+IDLE_BOX_OVERRIDE: Final[Mapping[JobStatus, Transition[JobStatus]]] = MappingProxyType(
+    {
+        "SUCCESS": Transition[JobStatus](
+            "job_status.31",
+            _IDLE_BOX - {"SUCCESS"},
+            "member ends, or a member set INACTIVE",
+            "SUCCESS",
+            guard="every member that is not INACTIVE is terminal; box_success holds",
+            cite="SEM-15",
+        ),
+        "FAILURE": Transition[JobStatus](
+            "job_status.32",
+            _IDLE_BOX - {"FAILURE"},
+            "member ends, or a member set INACTIVE",
+            "FAILURE",
+            guard="every member that is not INACTIVE is terminal; box_failure holds",
+            cite="SEM-15",
+        ),
+    }
+)
+IDLE_BOX_DERIVE: Final[Mapping[JobStatus, Transition[JobStatus]]] = MappingProxyType(
+    {
+        "SUCCESS": Transition[JobStatus](
+            "job_status.33",
+            _IDLE_BOX - {"SUCCESS"},
+            "member ends, or a member set INACTIVE",
+            "SUCCESS",
+            guard="every member that is not INACTIVE is terminal; no override holds;"
+            " no member failed; no box_success",
+            cite="SEM-15, DL-242",
+        ),
+        "FAILURE": Transition[JobStatus](
+            "job_status.34",
+            _IDLE_BOX - {"FAILURE"},
+            "member ends, or a member set INACTIVE",
+            "FAILURE",
+            guard="every member that is not INACTIVE is terminal; no override holds;"
+            " a member failed; no box_failure",
+            cite="SEM-15, DL-242",
+        ),
+    }
+)
+BOX_STATUS_INACTIVE: Final = Transition[JobStatus](
+    "job_status.35",
+    _ANY,
+    "STATUS INACTIVE",
+    "INACTIVE",
+    guard="a box",
+    effect="the SEM-18 cascade, one batch",
+    cite="SEM-18, DL-242",
+)
+BOX_NOEXEC: Final = Transition[JobStatus](
+    "job_status.36",
+    JOB_STATUSES - {"RUNNING"},
+    "ON_NOEXEC",
+    "INACTIVE",
+    guard="a box; not ignored; a job in its tree is not INACTIVE, or its parent is RUNNING",
+    effect="flag the tree; the SEM-18 cascade, one batch",
+    cite="DL-254",
+)
+
+
+def _stays(
+    first: int,
+    trigger: str,
+    statuses: tuple[JobStatus, ...],
+    *,
+    guard: str,
+    effect: str,
+    cite: str,
+) -> Mapping[JobStatus, Transition[JobStatus]]:
+    """Internal transitions (UML: an effect with no state change), one per
+    status the event meets, each with that status as its source and its
+    target. Ids run from `first` in the order given. `RuntimeState.stay`
+    picks the row by the job's status."""
+    return MappingProxyType(
+        {
+            status: Transition[JobStatus](
+                f"job_status.{first + index}",
+                frozenset({status}),
+                trigger,
+                status,
+                guard=guard,
+                effect=effect,
+                cite=cite,
+            )
+            for index, status in enumerate(statuses)
+        }
+    )
+
+
+_IDLE_ORDER: tuple[JobStatus, ...] = ("INACTIVE", "SUCCESS", "FAILURE", "TERMINATED")
+_ALL_ORDER: tuple[JobStatus, ...] = (
+    "INACTIVE",
+    "QUE_WAIT",
+    "STARTING",
+    "RUNNING",
+    "SUCCESS",
+    "FAILURE",
+    "TERMINATED",
+)
+
+#: KILLJOB on a job that is not running or queued kills nothing
+KILL_IGNORED: Final = _stays(
+    37,
+    "KILLJOB",
+    _IDLE_ORDER,
+    guard="not running or queued",
+    effect="an EVENT_IGNORED trace line",
+    cite="DL-64, DL-81",
+)
+#: an explicit start the SEM-10 gates refuse, and a deferred start or scan
+#: that has gone stale
+START_REFUSED: Final = _stays(
+    41,
+    "start refused",
+    _ALL_ORDER,
+    guard="already live or queued; a member whose box is not RUNNING, or that ran in this"
+    " box execution; a stale deferred start or scan",
+    effect="a START_REFUSED trace line",
+    cite="DL-64, DL-81, DL-246, DL-257",
+)
+ICE_IGNORED: Final = _stays(
+    48,
+    "ON_ICE",
+    ("STARTING", "RUNNING"),
+    guard="the vendor ignores it for a live job",
+    effect="an EVENT_IGNORED trace line",
+    cite="DL-254",
+)
+HOLD_IGNORED: Final = _stays(
+    50,
+    "ON_HOLD",
+    ("STARTING", "RUNNING"),
+    guard="the vendor ignores it for a live job",
+    effect="an EVENT_IGNORED trace line",
+    cite="DL-254",
+)
+NOEXEC_IGNORED: Final = _stays(
+    52,
+    "ON_NOEXEC",
+    ("INACTIVE", "STARTING", "RUNNING", "SUCCESS", "FAILURE", "TERMINATED", "QUE_WAIT"),
+    guard="the job is ON_ICE; a job STARTING or RUNNING; a box RUNNING, or with a job"
+    " inside that is ON_ICE, live or queued (a queued box only so)",
+    effect="an EVENT_IGNORED trace line",
+    cite="DL-254",
+)
+
+JOB_STATUS: Final[StateMachine[JobStatus]] = StateMachine(
+    name="job_status",
+    states=JOB_STATUSES,
+    initial="INACTIVE",
+    finals=frozenset(),
+    transitions=(
+        JOB_BYPASS,
+        JOB_START,
+        JOB_QUEUE,
+        JOB_FORCE_ON_HELD,
+        JOB_RUN,
+        JOB_WINDOW_SKIP,
+        JOB_WINDOW_SKIP_MEMBER,
+        JOB_READMIT,
+        JOB_CANCEL_WAITER,
+        JOB_LEAVE_QUEUE,
+        JOB_KILL_QUEUED,
+        JOB_ICE_QUEUED,
+        JOB_NOEXEC_QUEUED,
+        JOB_KILL,
+        JOB_TERM_RUN_TIME,
+        JOB_TERMINATOR,
+        STATUS_EXIT_SUCCESS,
+        STATUS_EXIT_FAILURE,
+        STATUS_INJECTED,
+        STATUS_INACTIVE,
+        NOEXEC_COMPLETED,
+        BOX_RESET,
+        BOX_CASCADE,
+        BOX_START,
+        BOX_RUN,
+        BOX_SUCCESS_OVERRIDE,
+        BOX_FAILURE_OVERRIDE,
+        BOX_FOLD_SUCCESS,
+        BOX_FOLD_FAILURE,
+        BOX_TERMINATOR,
+        *IDLE_BOX_OVERRIDE.values(),
+        *IDLE_BOX_DERIVE.values(),
+        BOX_STATUS_INACTIVE,
+        BOX_NOEXEC,
+        *KILL_IGNORED.values(),
+        *START_REFUSED.values(),
+        *ICE_IGNORED.values(),
+        *HOLD_IGNORED.values(),
+        *NOEXEC_IGNORED.values(),
+    ),
+)
+
+#: A `job_flags` state is one region's value. The four regions are orthogonal,
+#: so the machine has no single initial state: each region starts off, unless
+#: the catalog's initial status seeds it (SEM-24), and a seed is not a move.
+type FlagState = Literal[
+    "ice_off", "ice_on", "hold_off", "hold_on", "noexec_off", "noexec_on", "arm_off", "arm_on"
+]
+#: Each flag state's row field and value.
+FLAG_FIELDS: Final[Mapping[FlagState, tuple[str, bool]]] = MappingProxyType(
+    {
+        "ice_off": ("on_ice", False),
+        "ice_on": ("on_ice", True),
+        "hold_off": ("on_hold", False),
+        "hold_on": ("on_hold", True),
+        "noexec_off": ("on_noexec", False),
+        "noexec_on": ("on_noexec", True),
+        "arm_off": ("armed", False),
+        "arm_on": ("armed", True),
+    }
+)
+_FLAG_STATE: Final[Mapping[tuple[str, bool], FlagState]] = MappingProxyType(
+    {field: state for state, field in FLAG_FIELDS.items()}
+)
+
+ICE_ON: Final = Transition[FlagState](
+    "job_flags.01",
+    frozenset({"ice_off", "ice_on"}),
+    "ON_ICE",
+    "ice_on",
+    guard="not STARTING or RUNNING (else ignored); a second ice changes nothing",
+    effect="a queued job leaves the queue; a first ice on a member is a completion moment",
+    cite="SEM-20, DL-254, DL-285",
+)
+ICE_OFF: Final = Transition[FlagState](
+    "job_flags.02",
+    frozenset({"ice_on", "ice_off"}),
+    "OFF_ICE",
+    "ice_off",
+    effect="no re-evaluation: conditions must reoccur",
+    cite="SEM-20",
+)
+FORCE_CLEARS_ICE: Final = Transition[FlagState](
+    "job_flags.03",
+    frozenset({"ice_on"}),
+    "FORCE_STARTJOB",
+    "ice_off",
+    guard="not live",
+    effect="the start goes on",
+    cite="SEM-23, DL-243",
+)
+HOLD_ON: Final = Transition[FlagState](
+    "job_flags.04",
+    frozenset({"hold_off", "hold_on"}),
+    "ON_HOLD",
+    "hold_on",
+    guard="not STARTING or RUNNING (else ignored)",
+    effect="a held waiter blocks no one",
+    cite="SEM-21, DL-254, DL-247",
+)
+HOLD_OFF: Final = Transition[FlagState](
+    "job_flags.05",
+    frozenset({"hold_on", "hold_off"}),
+    "OFF_HOLD",
+    "hold_off",
+    effect="attempt the start, or wake the queue for a queued job",
+    cite="SEM-21, DL-50",
+)
+FORCE_CLEARS_HOLD: Final = Transition[FlagState](
+    "job_flags.06",
+    frozenset({"hold_on"}),
+    "FORCE_STARTJOB",
+    "hold_off",
+    guard="not live",
+    effect="the start goes on",
+    cite="SEM-23, DL-243",
+)
+NOEXEC_CLEARS_HOLD: Final = Transition[FlagState](
+    "job_flags.07",
+    frozenset({"hold_on"}),
+    "ON_NOEXEC",
+    "hold_off",
+    guard="not ignored",
+    effect="ON_NOEXEC supersedes ON_HOLD; the start is retried",
+    cite="DL-254",
+)
+AUTO_HOLD: Final = Transition[FlagState](
+    "job_flags.08",
+    frozenset({"hold_off"}),
+    "box start",
+    "hold_on",
+    guard="a member with auto_hold",
+    cite="autosys-semantics ss5",
+)
+NOEXEC_ON: Final = Transition[FlagState](
+    "job_flags.09",
+    frozenset({"noexec_off", "noexec_on"}),
+    "ON_NOEXEC",
+    "noexec_on",
+    guard="not ignored; the job, or every job in a box's tree",
+    cite="SEM-22, DL-254",
+)
+NOEXEC_OFF: Final = Transition[FlagState](
+    "job_flags.10",
+    frozenset({"noexec_on", "noexec_off"}),
+    "OFF_NOEXEC",
+    "noexec_off",
+    cite="DL-243",
+)
+BOX_NOEXEC_OFF: Final = Transition[FlagState](
+    "job_flags.11",
+    frozenset({"noexec_on"}),
+    "OFF_NOEXEC on its box",
+    "noexec_off",
+    guard="contained in the box",
+    cite="DL-254",
+)
+ARM: Final = Transition[FlagState](
+    "job_flags.12",
+    frozenset({"arm_off"}),
+    "scheduled tick blocked",
+    "arm_on",
+    guard="held or its condition false; a schedule; a member's box is RUNNING",
+    effect="a SCHED_ARM trace line",
+    cite="SEM-32, DL-54",
+)
+START_CONSUMES_ARM: Final = Transition[FlagState](
+    "job_flags.13",
+    frozenset({"arm_on", "arm_off"}),
+    "actual start",
+    "arm_off",
+    effect="start_run",
+    cite="DL-54",
+)
+DISARM: Final = Transition[FlagState](
+    "job_flags.14",
+    frozenset({"arm_on", "arm_off"}),
+    "DISARM",
+    "arm_off",
+    effect="a DISARM trace line",
+    cite="DL-158",
+)
+BOX_END_DISARMS: Final = Transition[FlagState](
+    "job_flags.15",
+    frozenset({"arm_on"}),
+    "box run ends",
+    "arm_off",
+    guard="a member; its box reaches a terminal status or is set INACTIVE",
+    effect="a SCHED_DISARM trace line",
+    cite="DL-54",
+)
+QUEUE_LEFT_DISARMS: Final = Transition[FlagState](
+    "job_flags.16",
+    frozenset({"arm_on"}),
+    "leave QUE_WAIT unstarted",
+    "arm_off",
+    effect="a SCHED_DISARM trace line",
+    cite="DL-257",
+)
+KILL_DISARMS: Final = Transition[FlagState](
+    "job_flags.17",
+    frozenset({"arm_on", "arm_off"}),
+    "KILLJOB on QUE_WAIT",
+    "arm_off",
+    cite="DL-54",
+)
+
+JOB_FLAGS: Final[StateMachine[FlagState]] = StateMachine(
+    name="job_flags",
+    states=frozenset(FLAG_FIELDS),
+    initial=None,
+    finals=frozenset(),
+    transitions=(
+        ICE_ON,
+        ICE_OFF,
+        FORCE_CLEARS_ICE,
+        HOLD_ON,
+        HOLD_OFF,
+        FORCE_CLEARS_HOLD,
+        NOEXEC_CLEARS_HOLD,
+        AUTO_HOLD,
+        NOEXEC_ON,
+        NOEXEC_OFF,
+        BOX_NOEXEC_OFF,
+        ARM,
+        START_CONSUMES_ARM,
+        DISARM,
+        BOX_END_DISARMS,
+        QUEUE_LEFT_DISARMS,
+        KILL_DISARMS,
+    ),
+)
+
+#: A `job_holding` state: `reserved` is a run's vector, frozen at its
+#: admission; `held` is what a renewable's policy kept on the row after the
+#: run (DL-256). The verbs that write `reservations` name the move.
+type HoldingState = Literal["none", "reserved", "held"]
+
+RESERVE: Final = Transition[HoldingState](
+    "job_holding.01",
+    frozenset({"none"}),
+    "admitted start",
+    "reserved",
+    guard="the vector is not empty",
+    effect="reserve",
+    cite="DL-120",
+)
+TAKE_OVER_HELD: Final = Transition[HoldingState](
+    "job_holding.02",
+    frozenset({"held"}),
+    "admitted start",
+    frozenset({"reserved", "none"}),
+    guard="the job holds units from an earlier run; none when the new vector is empty",
+    effect="take_over_held: the new vector replaces the held units",
+    cite="DL-256",
+)
+FORCE_ON_HELD_UNITS: Final = Transition[HoldingState](
+    "job_holding.03",
+    frozenset({"held"}),
+    "FORCE_STARTJOB",
+    "reserved",
+    guard="FAILURE or TERMINATED",
+    effect="take_over_held: the held units plus the machine load",
+    cite="DL-256",
+)
+RELEASE_ALL: Final = Transition[HoldingState](
+    "job_holding.04",
+    frozenset({"reserved"}),
+    "leave STARTING or RUNNING",
+    "none",
+    guard="the policy frees every unit",
+    cite="DL-50, DL-120",
+)
+RELEASE_KEEP_HELD: Final = Transition[HoldingState](
+    "job_holding.05",
+    frozenset({"reserved"}),
+    "leave STARTING or RUNNING",
+    "held",
+    guard="a renewable's unit is not freed and is kept",
+    effect="what is neither freed nor kept is spent",
+    cite="DL-256",
+)
+RELEASE_SPEND: Final = Transition[HoldingState](
+    "job_holding.06",
+    frozenset({"reserved"}),
+    "leave STARTING or RUNNING",
+    "none",
+    guard="a unit is not freed and none is kept",
+    effect="consumed += the units not freed",
+    cite="SEM-16, DL-120",
+)
+HELD_RELEASED: Final = Transition[HoldingState](
+    "job_holding.07",
+    frozenset({"held"}),
+    "RELEASE_RESOURCE",
+    "none",
+    guard="not live",
+    effect="wake the waiters",
+    cite="DL-256",
+)
+HELD_RELEASED_AT_OPENING: Final = Transition[HoldingState](
+    "job_holding.08",
+    frozenset({"held"}),
+    "first input of a period",
+    "none",
+    guard="the job left the catalog",
+    effect="wake the waiters",
+    cite="DL-256",
+)
+
+JOB_HOLDING: Final[StateMachine[HoldingState]] = StateMachine(
+    name="job_holding",
+    states=frozenset({"none", "reserved", "held"}),
+    initial="none",
+    finals=frozenset(),
+    transitions=(
+        RESERVE,
+        TAKE_OVER_HELD,
+        FORCE_ON_HELD_UNITS,
+        RELEASE_ALL,
+        RELEASE_KEEP_HELD,
+        RELEASE_SPEND,
+        HELD_RELEASED,
+        HELD_RELEASED_AT_OPENING,
+    ),
+)
+
+# --------------------------------------------------------------- assembly
+#
+# How a `RuntimeState` is put together before it runs, and the open input.
+# One phase replaces four flags. A move the table does not declare is
+# refused: these moves are not inputs, so a violation has no channel to ride
+# and raises, as an anchor move does (DL-224).
+
+type AssemblyPhase = Literal[
+    "fresh", "installed", "genesis_input", "genesis", "constructed", "seeded", "input", "live"
+]
+#: the phases with an input open
+_OPEN: Final[frozenset[AssemblyPhase]] = frozenset({"genesis_input", "input"})
+
+_INSTALL: Final = Transition[AssemblyPhase](
+    "runtime_assembly.01",
+    frozenset({"fresh"}),
+    "install",
+    "installed",
+    guard="nothing installed, committed or seeded",
+    effect="carried rows land verbatim, revisions included",
+    cite="period-model ss7",
+)
+_BEGIN_GENESIS: Final = Transition[AssemblyPhase](
+    "runtime_assembly.02",
+    frozenset({"fresh", "installed", "genesis"}),
+    "begin_input",
+    "genesis_input",
+    guard="construction is not finished",
+    effect="open the genesis seed's input",
+    cite="DL-87",
+)
+_COMMIT_GENESIS: Final = Transition[AssemblyPhase](
+    "runtime_assembly.03",
+    frozenset({"genesis_input"}),
+    "commit_input",
+    "genesis",
+    effect="one revision per changed entity",
+    cite="DL-87",
+)
+_FINISH_GENESIS: Final = Transition[AssemblyPhase](
+    "runtime_assembly.04",
+    frozenset({"fresh", "installed", "genesis"}),
+    "finish_genesis",
+    "constructed",
+    guard="once; not seeded",
+    effect="the genesis seed is not an input to the seed latch",
+    cite="DL-132",
+)
+_SEED_PERIOD: Final = Transition[AssemblyPhase](
+    "runtime_assembly.05",
+    frozenset({"fresh", "installed", "constructed"}),
+    "seed_period",
+    "seeded",
+    guard="the period is 1 or more",
+    effect="set the period id",
+    cite="period-model ss3.5, DL-132",
+)
+_BEGIN_INPUT: Final = Transition[AssemblyPhase](
+    "runtime_assembly.06",
+    frozenset({"constructed", "seeded", "live"}),
+    "begin_input",
+    "input",
+    effect="drop orphan violations; snapshot on first touch",
+    cite="DL-87, concurrency-model ss3",
+)
+_COMMIT_INPUT: Final = Transition[AssemblyPhase](
+    "runtime_assembly.07",
+    frozenset({"input"}),
+    "commit_input",
+    "live",
+    effect="check capacity; one revision per changed entity",
+    cite="DL-87, DL-120",
+)
+
+RUNTIME_ASSEMBLY: Final[StateMachine[AssemblyPhase]] = StateMachine(
+    name="runtime_assembly",
+    states=frozenset(
+        {"fresh", "installed", "genesis_input", "genesis", "constructed", "seeded", "input", "live"}
+    ),
+    initial="fresh",
+    finals=frozenset(),
+    transitions=(
+        _INSTALL,
+        _BEGIN_GENESIS,
+        _COMMIT_GENESIS,
+        _FINISH_GENESIS,
+        _SEED_PERIOD,
+        _BEGIN_INPUT,
+        _COMMIT_INPUT,
+    ),
+)
+
+
 class RuntimeState:
     """The authoritative state of one Oracle: job rows, global rows, and the
     timer heap. SEM-01 latching applies throughout -- a recorded status is
@@ -414,11 +1284,14 @@ class RuntimeState:
     DL-82 made this the single write path; DL-86 makes escape IMPOSSIBLE
     rather than merely detected. The rows are frozen, the maps are private
     and published only as read-only views, and every write goes through a
-    verb that names what changed (`transition`, `start_run`, `set_flags`,
-    `set_armed`, `set_global`, `enqueue_timer`, and the capacity verbs: DL-120's
+    verb that names what changed (`transition`, `start_run`, `move_flag`,
+    `set_global`, `enqueue_timer`, and the capacity verbs: DL-120's
     `reserve`, `release_reservations`, `enqueue_waiter`, `dequeue_waiter`,
-    `seed_consumed`, and DL-256's `take_over_held` and `release_held`). No caller assembles a field dict, so no caller can
-    invent a field combination the verbs do not.
+    `seed_consumed`, and DL-256's `take_over_held` and `release_held`). No
+    caller assembles a field dict, so no caller can invent a field
+    combination the verbs do not. The verbs that move a job's status, flags
+    or held capacity take the declared transition of that move (the job's
+    machines, above); `install` and `seed_job` install rows and take none.
 
     The reason is the concurrency model, not tidiness. Optimistic locking
     needs one place where "this entity changed" is observable exactly once
@@ -455,16 +1328,16 @@ class RuntimeState:
         self._timers: list[tuple[datetime, int, Event]] = []  # heap of (due, token, ev)
         self._timer_seq = 0
         #: which period this state machine is running (period-model ss3.5,
-        #: DL-132). PRIVATE, moved only by `open_period` -- 1 until a seal
-        #: exists to move it -- and stamped onto every row's `start_period`
-        #: at its actual start. Not per-input state: it moves exactly once
-        #: per period, at the boundary, never inside one.
+        #: DL-132). PRIVATE, set only by `seed_period` -- 1 until a seal
+        #: exists to open a later one -- and stamped onto every row's
+        #: `start_period` at its actual start. Not per-input state: a period
+        #: opens in a new state built over the carried rows (`Oracle`).
         self._period_id: int = 1
-        #: seed-versus-advance is EXPLICIT, never inferred from state:
-        #: `seed_period` is legal exactly once, before any committed input
-        self._period_seeded: bool = False
-        self._inputs_committed: int = 0
-        self._genesis_finished: bool = False
+        #: the `runtime_assembly` phase: how far assembly has come, and
+        #: whether an input is open. Seed-versus-advance is EXPLICIT, never
+        #: inferred from the rows: `seed_period` is legal exactly once,
+        #: before any committed input.
+        self._phase: AssemblyPhase = "fresh"
         #: DL-120: bucket key -> units PERMANENTLY spent (SEM-16 depletion,
         #: and `never`/unmet-`success` holds a terminal transition kept). The
         #: held half lives on the rows; this half belongs to no row, which is
@@ -480,7 +1353,6 @@ class RuntimeState:
         #: DL-87 input transaction: entity key -> its projection at FIRST
         #: touch within the open input. Empty and inert outside one.
         self._snapshots: dict[str, object] = {}
-        self._in_input = False
         #: the violation channel: (subject, violation) pairs since the last
         #: drain. `InputBatch` drains it; `begin_input` drops orphans.
         self._violations: list[tuple[str, Violation]] = []
@@ -647,7 +1519,7 @@ class RuntimeState:
         only move through the mutators below, so the touched set cannot be
         under-approximated by construction -- which is the direction ss3
         says must not be got wrong."""
-        if self._in_input and key not in self._snapshots:
+        if self._phase in _OPEN and key not in self._snapshots:
             self._snapshots[key] = self._projection(key)
 
     def begin_input(self) -> None:
@@ -656,10 +1528,11 @@ class RuntimeState:
         ONE input and share its revision, which is what makes `expect`
         checkable -- a client that read revision 12 must be invalidated by
         the whole of the next input, not by its first transition."""
-        if self._in_input:
+        if self._phase in _OPEN:
             raise OracleError("input already open: inputs do not nest")
         self._drop_orphan_violations()
-        self._in_input = True
+        constructing = self._phase in _BEGIN_GENESIS.source
+        self._assemble(_BEGIN_GENESIS if constructing else _BEGIN_INPUT)
         self._snapshots = {}
 
     def _drop_orphan_violations(self) -> None:
@@ -687,9 +1560,10 @@ class RuntimeState:
     def commit_input(self) -> list[str]:
         """Close the transaction and increment each CHANGED entity exactly
         once. Returns the changed keys in a stable order -- S2's outbox and
-        `ApplyResult` need the list, not just the effect."""
-        self._in_input = False
-        self._inputs_committed += 1
+        `ApplyResult` need the list, not just the effect. Committing with no
+        input open is refused: the table has no such move."""
+        genesis = self._phase == "genesis_input"
+        self._assemble(_COMMIT_GENESIS if genesis else _COMMIT_INPUT)
         snapshots, self._snapshots = self._snapshots, {}
         self._check_capacity(snapshots)
         changed = [key for key, before in snapshots.items() if self._projection(key) != before]
@@ -754,16 +1628,23 @@ class RuntimeState:
     def transition(
         self,
         job: str,
+        t: Transition[JobStatus],
         status: JobStatus,
         at: datetime | None,
         exit_code: int | None = None,
         *,
         clear_exit_code: bool = False,
     ) -> None:
-        """Record a status change. `last_end_at` latches on every terminal
-        transition -- the Q2 anchor is the job's OWN last end (DL-54) -- and
-        an exit code is written only when one was reported. A box-start
-        reset clears it instead (`clear_exit_code`, SEM-10, DL-242)."""
+        """Record a status change, the declared `job_status` transition `t`.
+        Every status write is one of these, except an install (`install`,
+        `seed_job`). The check notes a mismatch on the violation channel
+        and never refuses the write.
+
+        `last_end_at` latches on every terminal transition -- the Q2 anchor
+        is the job's OWN last end (DL-54) -- and an exit code is written
+        only when one was reported. A box-start reset clears it instead
+        (`clear_exit_code`, SEM-10, DL-242)."""
+        self.note_violation(job, JOB_STATUS.take(t, self.runtime(job).status, status))
         fields: dict[str, object] = {"status": status, "status_at": at}
         if status in TERMINAL:
             fields["last_end_at"] = at
@@ -773,6 +1654,16 @@ class RuntimeState:
             fields["exit_code"] = None
         self._replace(job, **fields)
 
+    def stay(self, job: str, rows: Mapping[JobStatus, Transition[JobStatus]]) -> None:
+        """Take an internal `job_status` transition: its effect runs, and
+        the status and the row do not move (UML: an effect with no state
+        change). `rows` holds one row per status the event may meet; the
+        job's status picks it. A status with no row is noted against the
+        first, as a move its table does not declare."""
+        status = self.runtime(job).status
+        t = rows.get(status) or next(iter(rows.values()))
+        self.note_violation(job, JOB_STATUS.take(t, status, status))
+
     def start_run(self, job: str, *, cause: str, box: str | None, is_box: bool) -> None:
         """Everything one actual start changes, in one act: the run_number
         bump, the arm it consumes (Q3/DL-54 -- the ACTUAL start consumes it,
@@ -781,9 +1672,9 @@ class RuntimeState:
         and a box starting resets its own.
 
         A box that is itself a member does both, to two different rows."""
+        self.move_flag(job, START_CONSUMES_ARM)
         self._replace(
             job,
-            armed=False,
             run_number=self.runtime(job).run_number + 1,
             started_by=cause,
             start_period=self._period_id,
@@ -827,31 +1718,48 @@ class RuntimeState:
         if member in marks:
             self._replace(box, window_skipped_members=marks - {member})
 
-    def set_flags(
+    def move_flag(self, job: str, t: Transition[FlagState]) -> None:
+        """Set one SEM-20/21/22 flag, or the SEM-32 arm (DL-54), by the
+        declared `job_flags` transition `t`. Its target names the flag and
+        its value, so a caller cannot touch another flag."""
+        target = cast(FlagState, t.target)
+        field, value = FLAG_FIELDS[target]
+        old = _FLAG_STATE[(field, getattr(self.runtime(job), field))]
+        self.note_violation(job, JOB_FLAGS.take(t, old, target))
+        self._replace(job, **{field: value})
+
+    def seed_job(
         self,
         job: str,
         *,
-        on_ice: bool | None = None,
-        on_hold: bool | None = None,
-        on_noexec: bool | None = None,
+        status: JobStatus = "INACTIVE",
+        status_at: datetime | None = None,
+        last_end_at: datetime | None = None,
+        exit_code: int | None = None,
+        on_ice: bool = False,
+        on_hold: bool = False,
+        on_noexec: bool = False,
+        armed: bool = False,
     ) -> None:
-        """Set the SEM-20/21/22 out-of-band flags. `None` means unchanged, so
-        a caller naming one flag cannot silently clear the other two."""
-        fields = {
-            name: value
-            for name, value in (
-                ("on_ice", on_ice),
-                ("on_hold", on_hold),
-                ("on_noexec", on_noexec),
-            )
-            if value is not None
-        }
-        if fields:
-            self._replace(job, **fields)
-
-    def set_armed(self, job: str, armed: bool) -> None:
-        """Latch or consume a scheduled tick (SEM-32 arm-and-wait, DL-54)."""
-        self._replace(job, armed=armed)
+        """Install a row's lifecycle fields as given: an install, like
+        `install`, not a move, so no machine is taken. Two callers seed
+        rows: the Oracle's genesis seed sets the SEM-24 definition-time
+        flags of a new job, and classify's throwaway interpreter rebuilds
+        carried rows to read condition truth. A QUE_WAIT row gets a waiter
+        rank, so the input's commit finds the rank it requires."""
+        self._replace(
+            job,
+            status=status,
+            status_at=status_at,
+            last_end_at=last_end_at,
+            exit_code=exit_code,
+            on_ice=on_ice,
+            on_hold=on_hold,
+            on_noexec=on_noexec,
+            armed=armed,
+        )
+        if status == "QUE_WAIT":
+            self.enqueue_waiter(job)
 
     def set_global(self, name: str, value: str) -> None:
         """Latch a global's value (SEM-06). The revision carries over: only
@@ -885,21 +1793,36 @@ class RuntimeState:
         `take_over_held` instead (DL-256)."""
         if self.runtime(job).reservations:
             raise OracleError(f"{job!r} already holds reservations: a start may not overwrite")
+        if reservations:  # reserving nothing is no move
+            self.note_violation(job, JOB_HOLDING.take(RESERVE, "none", "reserved"))
         self._replace(job, reservations=tuple(reservations))
 
-    def take_over_held(self, job: str, reservations: Sequence[CapacityReservation]) -> None:
+    def take_over_held(
+        self,
+        job: str,
+        t: Transition[HoldingState],
+        reservations: Sequence[CapacityReservation],
+    ) -> None:
         """DL-256: a job that is not live and still holds a renewable's units
         from an earlier run starts on them. Its admission credited those
         units to it, so the new run's vector REPLACES them rather than adding
         to them, and nothing is counted twice. A live row is refused: its
-        reservations are its own run's."""
+        reservations are its own run's. `t` is the `job_holding` move: an
+        admitted start, or a FORCE_STARTJOB on the held units."""
         row = self.runtime(job)
         if row.status in LIVE:
             raise OracleError(f"{job!r} is {row.status}: a start may not overwrite its run")
+        old: HoldingState = "held" if row.reservations else "none"
+        new: HoldingState = "reserved" if reservations else "none"
+        self.note_violation(job, JOB_HOLDING.take(t, old, new))
         self._replace(job, reservations=tuple(reservations))
 
     def release_reservations(
-        self, job: str, new_status: str, keeps_held: Callable[[str], bool] | None = None
+        self,
+        job: str,
+        old_status: str,
+        new_status: str,
+        keeps_held: Callable[[str], bool] | None = None,
     ) -> None:
         """Settle a run's vector on the edge that leaves STARTING/RUNNING
         (DL-120). What the policy frees goes back to the pool. What it does
@@ -908,6 +1831,9 @@ class RuntimeState:
         renewable resource's unreleased units belong to the job until
         RELEASE_RESOURCE or its next run).
 
+        `old_status` is the status the row left: the row itself is already
+        written, so only the edge says whether the units were a run's
+        (`reserved`, leaving STARTING or RUNNING) or units already held.
         `new_status` is whatever the row is moving to -- a terminal status for
         every ordinary run, and INACTIVE for an injected STATUS on a live
         holder, which used to strand the units. The halves are one act
@@ -930,18 +1856,27 @@ class RuntimeState:
                 kept.append(reservation)
             else:
                 spent[reservation.bucket] = spent.get(reservation.bucket, 0) + reservation.units
+        move = RELEASE_KEEP_HELD if kept else RELEASE_SPEND if spent else RELEASE_ALL
+        held: HoldingState = "reserved" if old_status in LIVE else "held"
+        self.note_violation(job, JOB_HOLDING.take(move, held, "held" if kept else "none"))
         self._replace(job, reservations=tuple(kept))  # validates first; the spend cannot raise
         for bucket, units in spent.items():
             self._consumed[bucket] = self._consumed.get(bucket, 0) + units
 
-    def release_held(self, job: str) -> tuple[CapacityReservation, ...]:
+    def release_held(
+        self, job: str, t: Transition[HoldingState]
+    ) -> tuple[CapacityReservation, ...]:
         """RELEASE_RESOURCE (DL-256): give back every unit a job that is not
         live still holds, and return what was given back. A live row's
         reservations belong to its run and are released at its end, so it
-        is refused here; the Oracle records that case as a no-op."""
+        is refused here; the Oracle records that case as a no-op. `t` is
+        the `job_holding` move: the operator's verb, or a period opening
+        that gives back a removed job's units."""
         row = self.runtime(job)
         if row.status in LIVE:
             raise OracleError(f"{job!r} is {row.status}: its run's units release at its end")
+        old: HoldingState = "held" if row.reservations else "none"
+        self.note_violation(job, JOB_HOLDING.take(t, old, "none"))
         self._replace(job, reservations=())
         return row.reservations
 
@@ -1021,13 +1956,24 @@ class RuntimeState:
 
         ONE-SHOT: a second call after real inputs would launder a used
         state back to fresh and let `seed_period` skip a live lineage --
-        the exact bypass the latch exists to close."""
-        if self._genesis_finished:
+        the exact bypass the latch exists to close. Inside the genesis
+        input it is refused too: construction ends after that input
+        commits."""
+        if self._phase in ("constructed", "input", "live"):
             raise ValueError("finish_genesis twice: construction happens once")
-        if self._period_seeded:
+        if self._phase == "seeded":
             raise ValueError("finish_genesis after seed_period: construction comes first")
-        self._genesis_finished = True
-        self._inputs_committed = 0
+        self._assemble(_FINISH_GENESIS)
+
+    def _assemble(self, t: Transition[AssemblyPhase]) -> None:
+        """Take one `runtime_assembly` move. A move the table does not
+        declare raises before the phase changes: assembly is not an input,
+        so a violation has no channel to ride (concurrency-model ss4)."""
+        new = cast(AssemblyPhase, t.target)
+        violation = RUNTIME_ASSEMBLY.take(t, self._phase, new)
+        if violation is not None:
+            raise OracleError(f"{t.trigger} in assembly phase {self._phase}: {violation.reason}")
+        self._phase = new
 
     def install(self, carried: CarriedRows) -> None:
         """Install carried rows VERBATIM -- revisions included -- as the
@@ -1044,11 +1990,12 @@ class RuntimeState:
         that has already been seeded, and the constructor's own catalog
         seed still has to run over these rows. The assembler calls
         `seed_period` after it (ss3.5's latch, DL-132)."""
-        if self._in_input or self._inputs_committed or self._period_seeded:
+        if self._phase != "fresh":
             raise ValueError(
                 "install on a used state: carried rows are assembly's first act, and a"
                 " live state advances through its own inputs alone (period-model ss7)"
             )
+        self._assemble(_INSTALL)
         self._jobs = dict(carried.jobs)
         self._globals = dict(carried.globals_)
         self._hosts = dict(carried.hosts)
@@ -1065,33 +2012,18 @@ class RuntimeState:
         or host rows would look untouched to any job-row inference and let
         a live lineage skip. Legal exactly once, and never after a
         committed input; the seal's own I2 and lineage bounds hold the
-        seeded number to the lineage."""
-        if self._in_input:
+        seeded number to the lineage. A period opens in a new state over
+        the carried rows, so a live state never moves its period."""
+        if self._phase in _OPEN:
             raise ValueError("seed_period inside an input: assembly precedes inputs")
-        if self._period_seeded or self._inputs_committed:
+        if self._phase not in _SEED_PERIOD.source:
             raise ValueError(
                 "seed_period on a used state: seeding is assembly's first act, and a"
-                " live state advances through open_period alone (I2)"
+                " live state never moves its period (I2)"
             )
         if period_id < 1:
             raise ValueError(f"seed_period({period_id}): periods count from 1 (I2)")
-        self._period_seeded = True
-        self._period_id = period_id
-
-    def open_period(self, period_id: int) -> None:
-        """Advance the period counter by exactly one (period-model ss3.5,
-        DL-132): the boundary's write on a LIVE state, never inside an
-        input. A skip would let `start_period` name a period no seal
-        describes, and a repeat would re-open a period that closed. A fresh
-        assembly seeds through `seed_period` instead."""
-        if self._in_input:
-            raise ValueError("open_period inside an input: the boundary is not an input")
-        if period_id != self._period_id + 1:
-            raise ValueError(
-                f"open_period({period_id}) from period {self._period_id}: periods"
-                " advance by exactly one (I2)"
-            )
-        self._period_seeded = True  # an advanced state is a used one
+        self._assemble(_SEED_PERIOD)
         self._period_id = period_id
 
     def touch_host(self, host_id: str, at: datetime) -> None:

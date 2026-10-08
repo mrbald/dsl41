@@ -57,13 +57,10 @@ STORE_COPIED = frozenset(
         "_timers",
         "_timer_seq",
         "_period_id",
-        "_period_seeded",
-        "_inputs_committed",
-        "_genesis_finished",
+        "_phase",
         "_consumed",
         "_enqueue_counter",
         "_snapshots",
-        "_in_input",
         "_violations",
     }
 )
@@ -88,16 +85,10 @@ def state_bytes(oracle: Oracle) -> bytes:
         # shared the list would reorder it here first
         "timers": [[_when(due), token, _event(ev)] for due, token, ev in store._timers],
         "timer_seq": store.timer_seq,
-        "period": [
-            store._period_id,
-            store._period_seeded,
-            store._inputs_committed,
-            store._genesis_finished,
-        ],
+        "period": [store._period_id, store._phase],
         "consumed": dict(store.consumed),
         "enqueue_counter": store.enqueue_counter,
         "snapshots": sorted(store._snapshots),
-        "in_input": store._in_input,
         "violations": [[subject, repr(v)] for subject, v in store._violations],
         "trace": [entry.model_dump(mode="json") for entry in oracle._trace],
         "emitted": [_event(ev) for ev in oracle._emitted],

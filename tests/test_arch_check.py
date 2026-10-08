@@ -675,6 +675,23 @@ def test_reaching_past_the_read_only_views_blocks(tmp_path: Path) -> None:
     ]
 
 
+def test_rebinding_the_assembly_phase_outside_the_owner_blocks(tmp_path: Path) -> None:
+    """The assembly phase is a scalar on the owner: a rebind from outside it
+    would skip the `runtime_assembly` table. The removed seed flags are no
+    longer watched, and another class's own `_phase` is not the owner's."""
+    mod = _write(
+        tmp_path / "runner.py",
+        "def poke(engine):\n"
+        "    engine.oracle.store._phase = 'live'\n"
+        "    engine.oracle.store._period_seeded = True\n\n\n"
+        "class Other:\n"
+        "    def __init__(self):\n"
+        "        self._phase = 'fresh'\n",
+    )
+    findings = arch_check.state_owner_bypasses([mod])
+    assert [f.message.split(":")[0] for f in findings] == ["rebinds store._phase directly"]
+
+
 def test_setattr_outside_the_owner_blocks(tmp_path: Path) -> None:
     """The hole an assignment walk cannot see: setattr()'s attribute name is a
     runtime value, so no field-name check applies to it. Since DL-86 froze

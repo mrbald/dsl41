@@ -299,11 +299,71 @@ from dsl41.conditions import (
     compare_int,
     compare_value,
 )
-from dsl41.ir import CatalogIR, JobIR, MustTime, Semantics, Time
+from dsl41.ir import CatalogIR, CondAttr, JobIR, MustTime, Semantics, Time
 
 from dsl41.oracle_state import (
+    ARM,
+    AUTO_HOLD,
+    BOX_CASCADE,
+    BOX_END_DISARMS,
+    BOX_FAILURE_OVERRIDE,
+    BOX_FOLD_FAILURE,
+    BOX_FOLD_SUCCESS,
+    BOX_NOEXEC,
+    BOX_NOEXEC_OFF,
+    BOX_RESET,
+    BOX_RUN,
+    BOX_START,
+    BOX_STATUS_INACTIVE,
+    BOX_SUCCESS_OVERRIDE,
+    BOX_TERMINATOR,
+    DISARM,
+    FAILED,
+    FORCE_CLEARS_HOLD,
+    FORCE_CLEARS_ICE,
+    FORCE_ON_HELD_UNITS,
+    HELD_RELEASED,
+    HELD_RELEASED_AT_OPENING,
+    HOLD_IGNORED,
+    HOLD_OFF,
+    HOLD_ON,
+    ICE_IGNORED,
+    ICE_OFF,
+    ICE_ON,
+    IDLE_BOX_DERIVE,
+    IDLE_BOX_OVERRIDE,
     INJECTABLE_STATUSES,
+    JOB_BYPASS,
+    JOB_CANCEL_WAITER,
+    JOB_FORCE_ON_HELD,
+    JOB_ICE_QUEUED,
+    JOB_KILL,
+    JOB_KILL_QUEUED,
+    JOB_LEAVE_QUEUE,
+    JOB_NOEXEC_QUEUED,
+    JOB_QUEUE,
+    JOB_READMIT,
+    JOB_RUN,
+    JOB_START,
+    JOB_TERM_RUN_TIME,
+    JOB_TERMINATOR,
+    JOB_WINDOW_SKIP,
+    JOB_WINDOW_SKIP_MEMBER,
+    KILL_DISARMS,
+    KILL_IGNORED,
     LIVE,
+    NOEXEC_CLEARS_HOLD,
+    NOEXEC_COMPLETED,
+    NOEXEC_IGNORED,
+    NOEXEC_OFF,
+    NOEXEC_ON,
+    QUEUE_LEFT_DISARMS,
+    STATUS_EXIT_FAILURE,
+    STATUS_EXIT_SUCCESS,
+    STATUS_INACTIVE,
+    START_REFUSED,
+    STATUS_INJECTED,
+    TAKE_OVER_HELD,
     TERMINAL,
     CarriedRows,
     Event,
@@ -316,7 +376,7 @@ from dsl41.oracle_state import (
     TraceEntry,
 )
 from dsl41.semantics import DEFAULTS as DEFAULT_SWITCHES, SemanticSwitches, iced_atom_truth
-from dsl41.state_machine import Violation
+from dsl41.state_machine import Transition, Violation
 from dsl41.timezones import (
     MISSING_HOUR,
     REPEATED_HOUR,
@@ -340,6 +400,13 @@ _OPENING_SCAN_DAYS: Final = 2 * 366
 
 #: `date.weekday()` (Monday 0) -> the JIL days_of_week token
 _WEEKDAY_TOKENS: Final = ("mo", "tu", "we", "th", "fr", "sa", "su")
+
+#: the internal transitions of each operator event `_oob_ignored` may ignore
+_IGNORED_ROWS: Final[Mapping[str, Mapping[JobStatus, Transition[JobStatus]]]] = {
+    "ON_ICE": ICE_IGNORED,
+    "ON_HOLD": HOLD_IGNORED,
+    "ON_NOEXEC": NOEXEC_IGNORED,
+}
 
 #: SEM-34: how long after a start time's instant an event still names its
 #: slot -- the minute the wall-time match used to cover (DL-260)
@@ -513,7 +580,7 @@ class Oracle:
                 continue  # ss7 phase 3 step 4: a carried row keeps its C1 flags
             # SEM-24: definition-time state seeds the SEM-20/21/22 flags
             initial = job_ir.sem.initial_status
-            self.store.set_flags(
+            self.store.seed_job(
                 name,
                 on_hold=initial == "ON_HOLD",
                 on_ice=initial == "ON_ICE",
@@ -742,6 +809,14 @@ class Oracle:
         assert self._now is not None
         self._emitted.append(Event(at=self._now, kind=kind, payload=dict(payload)))
 
+    def _ignore(
+        self, job: str, rows: Mapping[JobStatus, Transition[JobStatus]], marker: str, cause: str
+    ) -> None:
+        """An event that changes nothing: take its internal transition for
+        the job's status, and write its trace line."""
+        self.store.stay(job, rows)
+        self._record(job, marker, cause)
+
     def _record(self, job: str, transition: str, cause: str) -> None:
         assert self._now is not None
         self._trace.append(TraceEntry(at=self._now, job=job, transition=transition, cause=cause))
@@ -774,14 +849,21 @@ class Oracle:
     def _set_status(
         self,
         job: str,
-        status: JobStatus,
+        t: Transition[JobStatus],
         cause: str,
         exit_code: int | None = None,
         *,
+        status: JobStatus | None = None,
         clear_exit_code: bool = False,
     ) -> None:
+        """Move `job` by the declared transition `t`. `status` names the
+        target only where `t` lets the payload or the rule choose one."""
+        if status is None:
+            if isinstance(t.target, frozenset):
+                raise OracleError(f"{t.id} lets the payload choose its target: name the status")
+            status = t.target
         old = self._runtime(job).status
-        self.store.transition(job, status, self._now, exit_code, clear_exit_code=clear_exit_code)
+        self.store.transition(job, t, status, self._now, exit_code, clear_exit_code=clear_exit_code)
         self._record(job, f"{old}->{status}", cause)
         self._emit("STATUS", job=job, status=status)
         self._after_transition(job, old, status)
@@ -822,7 +904,7 @@ class Oracle:
         for member in self._members(box):
             m_rt = self.store.job.get(member)
             if m_rt is not None and m_rt.armed:
-                self.store.set_armed(member, False)
+                self.store.move_flag(member, BOX_END_DISARMS)
                 self._record(
                     member,
                     "SCHED_DISARM",
@@ -864,7 +946,7 @@ class Oracle:
             self.store.dequeue_waiter(job)
         released = old in LIVE and new not in LIVE and self._pool.holds(self._runtime(job))
         if released:
-            self.store.release_reservations(job, new, self._pool.keeps_held)
+            self.store.release_reservations(job, old, new, self._pool.keeps_held)
         return released
 
     @staticmethod
@@ -912,15 +994,15 @@ class Oracle:
 
     def _set_inactive_batch(
         self,
-        rows: list[tuple[str, str]],
+        rows: list[tuple[str, str, Transition[JobStatus]]],
         *,
         clear_exit_code: bool = False,
         exit_code: int | None = None,
         between: Callable[[], None],
     ) -> None:
         """Move several jobs to INACTIVE as one act (DL-242): the box-start
-        reset (SEM-10) and the box INACTIVE cascade (SEM-18). `rows` pairs
-        each job with its trace cause, in order.
+        reset (SEM-10) and the box INACTIVE cascade (SEM-18). `rows` names
+        each job with its trace cause and its declared transition, in order.
 
         Phase 1 writes every row -- store, trace record, STATUS emission --
         and settles it (rank, reservations). Phase 2 then runs the box rules
@@ -936,10 +1018,12 @@ class Oracle:
         `exit_code` is written on the first row only (an injected STATUS
         may carry one); `clear_exit_code` clears it on every row."""
         written: list[tuple[str, str, int, bool]] = []
-        for index, (job, cause) in enumerate(rows):
+        for index, (job, cause, t) in enumerate(rows):
             old = self._runtime(job).status
             code = exit_code if index == 0 else None
-            self.store.transition(job, "INACTIVE", self._now, code, clear_exit_code=clear_exit_code)
+            self.store.transition(
+                job, t, "INACTIVE", self._now, code, clear_exit_code=clear_exit_code
+            )
             self._record(job, f"{old}->INACTIVE", cause)
             self._emit("STATUS", job=job, status="INACTIVE")
             # the queue's wake: capacity released, or a block lifted (DL-247)
@@ -991,14 +1075,14 @@ class Oracle:
                 cause = f"run_window-deferred {deferred}"
                 stale = self._deferral_is_stale(ev)
                 if stale is not None:
-                    self._record(job, "START_REFUSED", f"{stale} ({cause})")
+                    self._ignore(job, START_REFUSED, "START_REFUSED", f"{stale} ({cause})")
                     return
                 if DEFERRED_RESCAN_KEY in ev.payload:
                     self._resume_opening_scan(job, ev.payload[DEFERRED_RESCAN_KEY], deferred)
                     return
             refused = self._attempt_start(job, force=force, scheduled=True, cause=cause)
             if refused is not None:
-                self._record(job, "START_REFUSED", f"{refused} ({cause})")
+                self._ignore(job, START_REFUSED, "START_REFUSED", f"{refused} ({cause})")
         elif kind == "SET_GLOBAL":
             name = ev.payload.get("name")
             value = ev.payload.get("value")
@@ -1010,7 +1094,7 @@ class Oracle:
             job = self._required_job(ev)
             status = self._runtime(job).status
             if status in LIVE:
-                self._terminate(job, cause="KILLJOB")
+                self._terminate(job, JOB_KILL, cause="KILLJOB")
             elif status == "QUE_WAIT":
                 # DL-50 (review MAJOR): a kill on a QUEUED job must not be
                 # silently dropped and then admitted on the next release -- a
@@ -1019,8 +1103,19 @@ class Oracle:
                 self.store.dequeue_waiter(job)
                 # Q3 (DL-54): the kill consumes a latched arm -- the queued
                 # attempt was the tick's run and it just got killed.
-                self.store.set_armed(job, False)
-                self._set_status(job, "TERMINATED", cause="KILLJOB (dequeued from QUE_WAIT, DL-50)")
+                self.store.move_flag(job, KILL_DISARMS)
+                self._set_status(
+                    job, JOB_KILL_QUEUED, cause="KILLJOB (dequeued from QUE_WAIT, DL-50)"
+                )
+            else:
+                # nothing to kill, and the trace says so, as START_REFUSED
+                # does for a start with no effect (DL-81)
+                self._ignore(
+                    job,
+                    KILL_IGNORED,
+                    "EVENT_IGNORED",
+                    f"KILLJOB ignored: the job is {status}, not running or queued",
+                )
         elif kind in (
             "ON_ICE",
             "OFF_ICE",
@@ -1047,6 +1142,7 @@ class Oracle:
         status = ev.payload.get("status")
         exit_code = ev.payload.get("exit_code")
         job_ir = self.catalog.jobs.get(job)
+        move = STATUS_INJECTED
         if status is None:
             if not isinstance(exit_code, int):
                 raise OracleError("STATUS requires payload.status or integer payload.exit_code")
@@ -1054,15 +1150,20 @@ class Oracle:
             # plus the explicit success_codes/fail_codes sets (Q7 corners
             # pinned in ir.exit_is_success).
             sem = job_ir.sem if job_ir is not None else Semantics()
-            status = "SUCCESS" if sem.exit_is_success(exit_code) else "FAILURE"
+            success = sem.exit_is_success(exit_code)
+            status = "SUCCESS" if success else "FAILURE"
+            move = STATUS_EXIT_SUCCESS if success else STATUS_EXIT_FAILURE
         if not isinstance(status, str) or status not in INJECTABLE_STATUSES:
             raise OracleError(f"unknown status {status!r}")
         code = exit_code if isinstance(exit_code, int) else None
         if status != "INACTIVE" or job_ir is None:
             # INJECTABLE_STATUSES holds JobStatus members only
-            self._set_status(job, cast(JobStatus, status), cause="injected STATUS", exit_code=code)
+            self._set_status(
+                job, move, cause="injected STATUS", exit_code=code, status=cast(JobStatus, status)
+            )
             return
-        self._inject_inactive(job_ir, code)
+        move = BOX_STATUS_INACTIVE if job_ir.job_type == "BOX" else STATUS_INACTIVE
+        self._inject_inactive(job_ir, code, move)
 
     def _status(self, job: str) -> str:
         return self._runtime(job).status
@@ -1071,6 +1172,7 @@ class Oracle:
         self,
         job_ir: JobIR,
         code: int | None,
+        move: Transition[JobStatus],
         *,
         clear_exit_code: bool = False,
         cause: str = "injected STATUS",
@@ -1080,6 +1182,8 @@ class Oracle:
         DL-243 reuses this path for ON_NOEXEC on a completed FAILURE/
         TERMINATED job (`cause` names that call instead; `clear_exit_code`
         drops the previous run's code, same as the SEM-10 box-start reset).
+        `move` is the job's own declared transition; a box's contained jobs
+        take the cascade's.
 
         In a RUNNING box the member resolves: "affects the box's completion
         status as if the INACTIVE job returned a status of SUCCESS"
@@ -1104,7 +1208,7 @@ class Oracle:
             self.store.record_resolution(box, job)
         if job_ir.job_type != "BOX":
             self._set_status(
-                job, "INACTIVE", cause=cause, exit_code=code, clear_exit_code=clear_exit_code
+                job, move, cause=cause, exit_code=code, clear_exit_code=clear_exit_code
             )
         else:
             cascade_cause = (
@@ -1121,7 +1225,7 @@ class Oracle:
                     self._disarm_members(each)
 
             self._set_inactive_batch(
-                [(job, cause)] + [(j, cascade_cause) for j in inner],
+                [(job, cause, move)] + [(j, cascade_cause, BOX_CASCADE) for j in inner],
                 exit_code=code,
                 clear_exit_code=clear_exit_code,
                 between=disarm,
@@ -1182,16 +1286,17 @@ class Oracle:
     def _handle_oob(self, kind: EventKind, job: str) -> None:
         ignored = self._oob_ignored(kind, job)
         if ignored is not None:
-            # DL-254: no flag, no transition, no wake -- only the trace line,
-            # the START_REFUSED shape for an operator event that did nothing
-            self._record(job, "EVENT_IGNORED", ignored)
+            # DL-254: no flag, no status move, no wake -- only the trace
+            # line, the START_REFUSED shape for an operator event that did
+            # nothing
+            self._ignore(job, _IGNORED_ROWS[kind], "EVENT_IGNORED", ignored)
             return
         # the status BEFORE the flag change -- a flag never moves a status, but
         # the rows are frozen (DL-86), so hold the value, not a stale row
         status = self._runtime(job).status
         if kind == "ON_ICE":
             iced = self._runtime(job).on_ice  # a second ice resolves nothing
-            self.store.set_flags(job, on_ice=True)
+            self.store.move_flag(job, ICE_ON)
             self._record(job, "ON_ICE", "sendevent ON_ICE")
             if status == "QUE_WAIT":
                 # DL-50 (review NIT): an iced job never runs -- drop it from the
@@ -1199,7 +1304,7 @@ class Oracle:
                 # until a later release cancels it. _set_status wakes referencers,
                 # so on_ice-satisfaction (SEM-20) still propagates.
                 self.store.dequeue_waiter(job)
-                self._set_status(job, "INACTIVE", cause="iced while queued (DL-50)")
+                self._set_status(job, JOB_ICE_QUEUED, cause="iced while queued (DL-50)")
             else:
                 # SEM-20, DL-285: the box rules first, as a transition runs
                 # them before its wakes; then downstream conditions treat
@@ -1208,7 +1313,7 @@ class Oracle:
                     self._ice_resolves_member(job, status)
                 self._wake_referencers(job, cause=f"{job!r} put ON_ICE")
         elif kind == "OFF_ICE":
-            self.store.set_flags(job, on_ice=False)
+            self.store.move_flag(job, ICE_OFF)
             self._record(job, "OFF_ICE", "sendevent OFF_ICE")
             # SEM-20: deliberately NO re-evaluation -- conditions must reoccur
             # PENDING: Q3d (DL-69) -- a pre-existing arm survives the ice
@@ -1218,12 +1323,12 @@ class Oracle:
             # on ICE, clear rt.armed in the ON_ICE branch (SCHED_DISARM) and
             # amend SEM-20/32 -- protocol in docs/live-instance-runbook.md.
         elif kind == "ON_HOLD":
-            self.store.set_flags(job, on_hold=True)
+            self.store.move_flag(job, HOLD_ON)
             self._record(job, "ON_HOLD", "sendevent ON_HOLD")
             if status == "QUE_WAIT":
                 self._wake_waiters()  # DL-247: a held waiter blocks no one
         elif kind == "OFF_HOLD":
-            self.store.set_flags(job, on_hold=False)
+            self.store.move_flag(job, HOLD_OFF)
             self._record(job, "OFF_HOLD", "sendevent OFF_HOLD")
             if status == "QUE_WAIT":
                 self._wake_waiters()  # DL-50: a held-while-queued job re-attempts
@@ -1245,13 +1350,13 @@ class Oracle:
             # (DL-254): "If you send the JOB_OFF_NOEXEC to a box, all jobs in
             # the box (including all jobs that are contained in lower level
             # boxes within the box) are reset".
-            self.store.set_flags(job, on_noexec=False)
+            self.store.move_flag(job, NOEXEC_OFF)
             self._record(job, "OFF_NOEXEC", "sendevent OFF_NOEXEC")
             job_ir = self.catalog.jobs.get(job)
             if job_ir is not None and job_ir.job_type == "BOX":
                 for member in self._contained(job, skip_live=False):
                     if self._runtime(member).on_noexec:
-                        self.store.set_flags(member, on_noexec=False)
+                        self.store.move_flag(member, BOX_NOEXEC_OFF)
                         self._record(member, "OFF_NOEXEC", f"box {job!r} taken OFF_NOEXEC (DL-254)")
         elif kind == "DISARM":  # pragma: no branch -- see below
             # The fall-through arm is unreachable: `_dispatch` passes exactly the seven
@@ -1265,7 +1370,7 @@ class Oracle:
             # stays the ENGINE's marker for scheduler-caused drops (the Q3c
             # box fold), so an audit reader can tell the two apart.
             was_armed = self._runtime(job).armed
-            self.store.set_armed(job, False)
+            self.store.move_flag(job, DISARM)
             reason = "sendevent DISARM" if was_armed else "sendevent DISARM (no latch)"
             self._record(job, "DISARM", reason)
 
@@ -1276,11 +1381,11 @@ class Oracle:
         status." The hold is cleared and recorded like an OFF_HOLD. Returns
         True when a hold was cleared: the caller then retries the start, as
         OFF_HOLD does, once its own transitions are done."""
-        self.store.set_flags(job, on_noexec=True)
+        self.store.move_flag(job, NOEXEC_ON)
         self._record(job, "ON_NOEXEC", cause)
         if not self._runtime(job).on_hold:
             return False
-        self.store.set_flags(job, on_hold=False)
+        self.store.move_flag(job, NOEXEC_CLEARS_HOLD)
         self._record(job, "OFF_HOLD", "ON_NOEXEC supersedes ON_HOLD (SEM-22, DL-254)")
         return True
 
@@ -1315,14 +1420,16 @@ class Oracle:
             self._inject_inactive(
                 job_ir,
                 None,
+                JOB_NOEXEC_QUEUED,
                 clear_exit_code=True,
                 cause="ON_NOEXEC takes a queued job out of the queue (DL-254)",
             )
             released = True
-        elif status in ("FAILURE", "TERMINATED"):
+        elif status in FAILED:
             self._inject_inactive(
                 job_ir,
                 None,
+                NOEXEC_COMPLETED,
                 clear_exit_code=True,
                 cause="ON_NOEXEC settles a completed job to INACTIVE (DL-243)",
             )
@@ -1371,6 +1478,7 @@ class Oracle:
             self._inject_inactive(
                 box_ir,
                 None,
+                BOX_NOEXEC,
                 clear_exit_code=True,
                 cause="ON_NOEXEC on a box: CHANGE_STATUS INACTIVE (DL-254)",
             )
@@ -1397,7 +1505,7 @@ class Oracle:
         instant; the waiters then wake in DL-50's order."""
         owed, self._opening_release = self._opening_release, []
         for job in owed:
-            freed = self.store.release_held(job)
+            freed = self.store.release_held(job, HELD_RELEASED_AT_OPENING)
             units = ", ".join(f"{held.units} of {held.bucket[2:]}" for held in freed)
             self._record(
                 job,
@@ -1429,7 +1537,7 @@ class Oracle:
         if not rt.reservations:
             self._record(job, "RELEASE_RESOURCE", "sendevent RELEASE_RESOURCE (nothing held)")
             return
-        freed = self.store.release_held(job)
+        freed = self.store.release_held(job, HELD_RELEASED)
         units = ", ".join(f"{held.units} of {held.bucket[2:]}" for held in freed)
         self._record(job, "RELEASE_RESOURCE", f"sendevent RELEASE_RESOURCE (frees {units})")
         self._wake_waiters()
@@ -1545,7 +1653,7 @@ class Oracle:
             # vendor's "returns to an executable state" case (sendevent Start
             # Jobs page) -- clear the flag the same way an OFF_ICE would,
             # with a cause naming the force, then fall through to start.
-            self.store.set_flags(job, on_ice=False)
+            self.store.move_flag(job, FORCE_CLEARS_ICE)
             self._record(job, "OFF_ICE", f"FORCE_STARTJOB clears ON_ICE (SEM-23, DL-243; {cause})")
             rt = self._runtime(job)
         if rt.on_hold and not force:
@@ -1556,7 +1664,7 @@ class Oracle:
         if rt.on_hold and force:
             # SEM-23/DL-243: same FORCE_STARTJOB rule for ON_HOLD -- the
             # vendor groups ON_HOLD with ON_ICE as "non-executable" states.
-            self.store.set_flags(job, on_hold=False)
+            self.store.move_flag(job, FORCE_CLEARS_HOLD)
             self._record(
                 job, "OFF_HOLD", f"FORCE_STARTJOB clears ON_HOLD (SEM-23, DL-243; {cause})"
             )
@@ -1604,7 +1712,7 @@ class Oracle:
         box = job_ir.box.box_name
         if box is not None and self._runtime(box).status != "RUNNING":
             return  # member ticks only count while the box runs (Q3 pin)
-        self.store.set_armed(job_ir.name, True)
+        self.store.move_flag(job_ir.name, ARM)
         self._record(job_ir.name, "SCHED_ARM", f"scheduled tick {why}; armed (SEM-32, DL-54/58)")
 
     def _job_tz(self, job_ir: JobIR) -> tzinfo | None:
@@ -1793,7 +1901,7 @@ class Oracle:
             if self._runtime(job_ir.name).status != "INACTIVE":
                 self._set_status(
                     job_ir.name,
-                    "INACTIVE",
+                    JOB_WINDOW_SKIP,
                     cause="run_window skip: closer to previous close (SEM-33, DL-246)",
                 )
             return
@@ -1806,7 +1914,7 @@ class Oracle:
             # the transition runs the completion door itself: the mark is
             # already visible, so _on_member_transition treats this edge
             # as the member's resolution moment
-            self._set_status(job_ir.name, "INACTIVE", cause=cause)
+            self._set_status(job_ir.name, JOB_WINDOW_SKIP_MEMBER, cause=cause)
             return
         # already INACTIVE: no transition to ride -- run the same door here,
         # then the ancestors' transitive overrides, as a resolved INACTIVE
@@ -1867,7 +1975,7 @@ class Oracle:
                 box=job_ir.box.box_name,
                 is_box=False,
             )
-            self._set_status(job, "SUCCESS", cause=f"ON_NOEXEC bypass ({cause})")
+            self._set_status(job, JOB_BYPASS, cause=f"ON_NOEXEC bypass ({cause})")
             return
         # DL-50: atomic admission before RUNNING. Empty demand -> straight to
         # RUNNING, byte-identical to the pre-resource oracle (bisim + the whole
@@ -1875,7 +1983,7 @@ class Oracle:
         # unless a higher-priority waiter blocks it (DL-247, DL-255).
         vector = self._pool.demand_vector(job_ir)
         rt = self._runtime(job)
-        if force and rt.reservations and rt.status in ("FAILURE", "TERMINATED"):
+        if force and rt.reservations and rt.status in FAILED:
             self._start_on_held(job_ir, vector, cause)
         elif not self._admissible(job_ir, vector, force=force):
             self._enqueue_waiter(job, cause)
@@ -1884,7 +1992,8 @@ class Oracle:
             # transition releases what this run took, never what the catalog
             # says the job wants by then (PR-20).
             freed = self._acquire(job, vector)
-            self._run(job_ir, cause, had_demand=bool(vector))
+            move = BOX_START if job_ir.job_type == "BOX" else JOB_START
+            self._run(job_ir, move, cause, had_demand=bool(vector))
             if freed:
                 self._wake_waiters()
         if takes_machine_load(vector):
@@ -1906,7 +2015,7 @@ class Oracle:
         if not held:
             self.store.reserve(job, reservations)
             return False
-        self.store.take_over_held(job, reservations)
+        self.store.take_over_held(job, TAKE_OVER_HELD, reservations)
         demand: dict[str, int] = {}
         for reservation in reservations:
             demand[reservation.bucket] = demand.get(reservation.bucket, 0) + reservation.units
@@ -1927,19 +2036,23 @@ class Oracle:
         job = job_ir.name
         held = self._runtime(job).reservations
         load = to_reservations(machine_load(vector))
-        self.store.take_over_held(job, held + load)
+        self.store.take_over_held(job, FORCE_ON_HELD_UNITS, held + load)
         self._run(
             job_ir,
+            JOB_FORCE_ON_HELD,
             f"{cause}; starts on its held units, other resources not re-evaluated (DL-256)",
             had_demand=True,
         )
 
-    def _run(self, job_ir: JobIR, cause: str, *, had_demand: bool) -> None:
+    def _run(
+        self, job_ir: JobIR, move: Transition[JobStatus], cause: str, *, had_demand: bool
+    ) -> None:
         """Start tail once admission has passed: run_number bump, box
         bookkeeping, STARTING -> RUNNING, box member launch (SEM-10). A box
         resets its contained jobs around its STARTING transition (DL-242):
         the rows are written before it, so its wakes read the new cycle,
-        and their notifications run after it, while the box is STARTING."""
+        and their notifications run after it, while the box is STARTING.
+        `move` is the declared transition into STARTING."""
         job = job_ir.name
         self._arm_term_run_time(job_ir)  # reads run_number before the bump
         # one act: the arm this start consumes (Q3/DL-54 -- the ACTUAL start
@@ -1955,7 +2068,7 @@ class Oracle:
         run_number = self._runtime(job).run_number
 
         def starting() -> None:
-            self._set_status(job, "STARTING", cause=cause)
+            self._set_status(job, move, cause=cause)
 
         if job_ir.job_type == "BOX":
             self._reset_box_cycle(job, starting)
@@ -1973,7 +2086,7 @@ class Oracle:
             else "QUE_WAIT collapses to immediate (ss7 non-goal)"
         )
         if job_ir.job_type != "BOX":
-            self._set_status(job, "RUNNING", cause=running_cause)
+            self._set_status(job, JOB_RUN, cause=running_cause)
             return
         # SEM-33 (DL-246): the window decisions of every box this start
         # begins -- its own, and any subbox started by RUNNING's wakes or by a
@@ -1982,7 +2095,7 @@ class Oracle:
         if outermost:
             self._window_starts = []
         try:
-            self._set_status(job, "RUNNING", cause=running_cause)
+            self._set_status(job, BOX_RUN, cause=running_cause)
             self._on_box_started(job, run_number)
             starts = self._window_starts
         finally:
@@ -2033,7 +2146,7 @@ class Oracle:
 
     def _enqueue_waiter(self, job: str, cause: str) -> None:
         self.store.enqueue_waiter(job)
-        self._set_status(job, "QUE_WAIT", cause=f"waiting for resources ({cause})")
+        self._set_status(job, JOB_QUEUE, cause=f"waiting for resources ({cause})")
 
     def _wake_waiters(self, *, keep_stopped: bool = False) -> None:
         """Admit queued jobs whose full vector now fits, in deterministic order,
@@ -2103,7 +2216,9 @@ class Oracle:
         self.store.dequeue_waiter(job)
         # a held excess freed here is seen by the running scan's next pass
         self._acquire(job, vector)
-        self._run(job_ir, cause="resources freed (QUE_WAIT admitted, DL-50)", had_demand=True)
+        self._run(
+            job_ir, JOB_READMIT, cause="resources freed (QUE_WAIT admitted, DL-50)", had_demand=True
+        )
         return "admitted"
 
     def _queued_recheck(self, job_ir: JobIR) -> tuple[str, str] | None:
@@ -2198,7 +2313,7 @@ class Oracle:
         job = job_ir.name
         mode = self.semantics.queued_recheck
         if self._runtime(job).armed:
-            self.store.set_armed(job, False)
+            self.store.move_flag(job, QUEUE_LEFT_DISARMS)
             self._record(
                 job,
                 "SCHED_DISARM",
@@ -2214,7 +2329,7 @@ class Oracle:
             # run must not complete the box past it
             self.store.void_resolution(box, job)
         run_number = self._runtime(job).run_number
-        self._set_status(job, "INACTIVE", cause=cause)
+        self._set_status(job, JOB_LEAVE_QUEUE, cause=cause)
         rt = self._runtime(job)
         if rt.status != "INACTIVE" or rt.run_number != run_number:
             return "cancelled"  # a wake of the transition already moved it on
@@ -2286,8 +2401,9 @@ class Oracle:
         """A continuation timer of `_defer_to_next_opening` fired: scan on
         from here, unless the job has started since or is not INACTIVE now."""
         if self._rescan_superseded(job, run) or self._runtime(job).status != "INACTIVE":
-            self._record(
+            self._ignore(
                 job,
+                START_REFUSED,
                 "START_REFUSED",
                 f"the job has moved on since the scan stopped -- no effect (DL-257; {cause})",
             )
@@ -2311,7 +2427,7 @@ class Oracle:
 
     def _cancel_waiter(self, job: str, why: str) -> str:
         self.store.dequeue_waiter(job)
-        self._set_status(job, "INACTIVE", cause=f"QUE_WAIT cancelled: {why} (DL-50)")
+        self._set_status(job, JOB_CANCEL_WAITER, cause=f"QUE_WAIT cancelled: {why} (DL-50)")
         return "cancelled"
 
     def _contained(self, box: str, *, skip_live: bool) -> list[str]:
@@ -2360,11 +2476,11 @@ class Oracle:
             f"box {box!r} started: statuses from the previous box cycle are not retained"
             " (SEM-10, DL-242)"
         )
-        rows: list[tuple[str, str]] = []
+        rows: list[tuple[str, str, Transition[JobStatus]]] = []
         for job in self._contained(box, skip_live=True):
             rt = self._runtime(job)
             if rt.status != "INACTIVE":
-                rows.append((job, cause))
+                rows.append((job, cause, BOX_RESET))
             elif rt.exit_code is not None:
                 self.store.clear_exit_code(job)
         self._set_inactive_batch(rows, clear_exit_code=True, between=starting)
@@ -2375,7 +2491,7 @@ class Oracle:
             if member_ir.sem.auto_hold:
                 rt = self._runtime(member)
                 if not rt.on_hold:
-                    self.store.set_flags(member, on_hold=True)
+                    self.store.move_flag(member, AUTO_HOLD)
                     self._record(member, "ON_HOLD", "auto_hold on box start (dossier ss5)")
         # members with no conditions start immediately; others when theirs hold
         cause = f"box {box!r} started"
@@ -2454,7 +2570,9 @@ class Oracle:
         if new == "FAILURE" and self.catalog.jobs[member].box.box_terminator:
             if box_rt.status == "RUNNING":
                 # SEM-14: member failure terminates the containing box
-                self._terminate(box, cause=f"box_terminator member {member!r} failed")
+                self._terminate(
+                    box, BOX_TERMINATOR, cause=f"box_terminator member {member!r} failed"
+                )
                 return
         if box_rt.status == "TERMINATED":
             return  # SEM-13: sticky until the next box start
@@ -2587,25 +2705,28 @@ class Oracle:
         statuses = [s for s in (self._runtime(m).status for m in members) if s != "INACTIVE"]
         if not all(s in TERMINAL for s in statuses):
             return
-        for attr, target in (
+        verdicts: tuple[tuple[CondAttr | None, JobStatus], ...] = (
             (box_ir.sem.box_success, "SUCCESS"),
             (box_ir.sem.box_failure, "FAILURE"),
-        ):
+        )
+        for attr, target in verdicts:
             if attr is not None and self._cond_true(attr.cond, box):
                 if self._runtime(box).status != target:
                     self._set_status(
                         box,
-                        target,  # type: ignore[arg-type]
+                        IDLE_BOX_OVERRIDE[target],
                         cause=f"idle-box override recompute (SEM-15): {cause}",
                     )
                 return
-        any_failed = any(s in ("FAILURE", "TERMINATED") for s in statuses)
+        any_failed = any(s in FAILED for s in statuses)
         derived: JobStatus = "FAILURE" if any_failed else "SUCCESS"
         suppressed = (
             box_ir.sem.box_failure is not None if any_failed else box_ir.sem.box_success is not None
         )
         if not suppressed and self._runtime(box).status != derived:
-            self._set_status(box, derived, cause=f"idle-box recompute (SEM-15): {cause}")
+            self._set_status(
+                box, IDLE_BOX_DERIVE[derived], cause=f"idle-box recompute (SEM-15): {cause}"
+            )
 
     def _apply_box_overrides(
         self, box: str, box_ir: JobIR, member: str, new: str, *, completion_moment: bool = False
@@ -2633,7 +2754,7 @@ class Oracle:
             if self._cond_true(cond, box):
                 self._set_status(
                     box,
-                    target,  # type: ignore[arg-type]
+                    BOX_SUCCESS_OVERRIDE if target == "SUCCESS" else BOX_FAILURE_OVERRIDE,
                     cause=f"box_{target.lower()} override met (SEM-12)",
                 )
                 self._on_box_completed(box)
@@ -2680,12 +2801,16 @@ class Oracle:
         ran = self._runtime(box).ran_members
         members = [m for m in self._members(box) if m in ran]
         statuses = [self._runtime(m).status for m in members]
-        any_failed = any(s in ("FAILURE", "TERMINATED") for s in statuses)
+        any_failed = any(s in FAILED for s in statuses)
         if not any_failed and box_ir.sem.box_success is None:
-            self._set_status(box, "SUCCESS", cause="default box fold: all members SUCCESS (SEM-11)")
+            self._set_status(
+                box, BOX_FOLD_SUCCESS, cause="default box fold: all members SUCCESS (SEM-11)"
+            )
             self._on_box_completed(box)
         elif any_failed and box_ir.sem.box_failure is None:
-            self._set_status(box, "FAILURE", cause="default box fold: a member failed (SEM-11)")
+            self._set_status(
+                box, BOX_FOLD_FAILURE, cause="default box fold: a member failed (SEM-11)"
+            )
             self._on_box_completed(box)
         # else: specified-but-unmet override suppresses the default -> RUNNING
 
@@ -2693,11 +2818,11 @@ class Oracle:
         # kill members still running? Only via job_terminator on TERMINATED/
         # FAILURE (SEM-14); SUCCESS completion leaves stragglers alone (they
         # were bypassed or the fold would not have fired).
-        if self._runtime(box).status in ("FAILURE", "TERMINATED"):
+        if self._runtime(box).status in FAILED:
             self._cascade_job_terminators(box)
 
-    def _terminate(self, job: str, cause: str) -> None:
-        self._set_status(job, "TERMINATED", cause=cause)
+    def _terminate(self, job: str, move: Transition[JobStatus], cause: str) -> None:
+        self._set_status(job, move, cause=cause)
         job_ir = self.catalog.jobs.get(job)
         if job_ir is not None and job_ir.job_type == "BOX":
             self._cascade_job_terminators(job)
@@ -2708,7 +2833,7 @@ class Oracle:
             member_ir = self.catalog.jobs[member]
             rt = self._runtime(member)
             if member_ir.box.job_terminator and rt.status in LIVE:
-                self._terminate(member, cause=f"job_terminator: box {box!r} ended")
+                self._terminate(member, JOB_TERMINATOR, cause=f"job_terminator: box {box!r} ended")
 
     # ------------------------------------------------------------- re-evaluation
 
@@ -2917,7 +3042,9 @@ class Oracle:
             return True  # stale deadline from an earlier run of this job
         if check == "term_run_time":
             if rt.status == "RUNNING":
-                self._terminate(job, cause="term_run_time exceeded (dossier ss5)")
+                self._terminate(
+                    job, JOB_TERM_RUN_TIME, cause="term_run_time exceeded (dossier ss5)"
+                )
         return True
 
 

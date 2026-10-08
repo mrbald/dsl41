@@ -28,6 +28,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import date, datetime, timedelta
 
+import batch_harness
 import pytest
 from bisim_harness import EngineHarness
 from fork_harness import ForkCheckedOracle
@@ -54,7 +55,7 @@ _HARNESSES: list[EngineHarness] = []
 
 
 @pytest.fixture(autouse=True, params=["direct", "engine", "fork"])
-def sem_path(request: pytest.FixtureRequest) -> Iterator[str]:
+def sem_path(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     """Bisimulation gate (runner-design ss13, DL-41 decision 9): every SEM
     trace test in this module runs Oracle-direct and through
     Engine(VirtualClock, inert FakeAdapter), and must behave identically;
@@ -65,13 +66,19 @@ def sem_path(request: pytest.FixtureRequest) -> Iterator[str]:
     The third run is the fork leak test (concurrency-model ss4): an
     Oracle-direct run whose every input is applied first on `Oracle.fork()`.
     The dry apply must leave the original byte-equal, and the fork must
-    reach the real apply's result (fork_harness.ForkCheckedOracle)."""
+    reach the real apply's result (fork_harness.ForkCheckedOracle).
+
+    On every path, each move of the job's machines must be taken inside an
+    InputBatch, and the violation channel must be empty at every
+    `begin_input` (batch_harness)."""
     global _ENGINE_PATH, _FORK_PATH
     _ENGINE_PATH = request.param == "engine"
     _FORK_PATH = request.param == "fork"
+    misplaced = batch_harness.install(monkeypatch)
     yield request.param
     _ENGINE_PATH = _FORK_PATH = False
     _close_harnesses()
+    assert misplaced == []
 
 
 def _close_harnesses() -> None:
@@ -6101,6 +6108,33 @@ def test_sem15_idle_box_ignores_inactive_members() -> None:
     assert derive.cause.startswith("idle-box recompute (SEM-15)")
 
 
+def test_sem15_an_idle_box_takes_its_override_when_one_holds() -> None:
+    """SEM-15 [C]: an idle box re-derives from its members, and a box
+    override that holds decides the verdict (job_status.31, .32); with none
+    holding, the default verdict stands (job_status.33, .34)."""
+    text = (
+        "insert_job: box15o\njob_type: b\nbox_failure: f(o15_a)\n\n"
+        "insert_job: o15_a\njob_type: c\ncommand: x\nmachine: m1\nbox_name: box15o\n\n"
+        "insert_job: o15_b\njob_type: c\ncommand: y\nmachine: m1\nbox_name: box15o\n\n"
+        "insert_job: box15s\njob_type: b\nbox_success: s(o15_c)\n\n"
+        "insert_job: o15_c\njob_type: c\ncommand: z\nmachine: m1\nbox_name: box15s\n"
+    )
+    o = oracle(text)
+    o.feed(ev("FORCE_STARTJOB", 0, job="o15_a"))
+    o.feed(ev("STATUS", 1, job="o15_a", status="SUCCESS"))  # the override is false
+    o.feed(ev("STATUS", 2, job="o15_a", status="FAILURE"))  # now it holds
+    assert [(t.transition, t.cause) for t in o.trace() if t.job == "box15o"] == [
+        ("INACTIVE->SUCCESS", "idle-box recompute (SEM-15): member 'o15_a' changed"),
+        ("SUCCESS->FAILURE", "idle-box override recompute (SEM-15): member 'o15_a' changed"),
+    ]
+    o.feed(ev("STATUS", 3, job="o15_c", status="FAILURE"))  # box_success suppresses SUCCESS
+    o.feed(ev("STATUS", 4, job="o15_c", status="SUCCESS"))
+    assert [(t.transition, t.cause) for t in o.trace() if t.job == "box15s"] == [
+        ("INACTIVE->FAILURE", "idle-box recompute (SEM-15): member 'o15_c' changed"),
+        ("FAILURE->SUCCESS", "idle-box override recompute (SEM-15): member 'o15_c' changed"),
+    ]
+
+
 def test_sem15_all_inactive_members_and_an_injected_inactive_derive_success() -> None:
     """T15 (SEM-15 [V], DL-242): "if the status of the same job is being updated
     to INACTIVE and all the other jobs inside the box are already in
@@ -6932,6 +6966,127 @@ def test_dl256_killjob_on_a_holder_that_is_not_running_changes_nothing() -> None
     before = o.store.job["h256"]
     o.feed(ev("KILLJOB", 2, job="h256"))
     assert o.store.job["h256"] == before
+
+
+def test_killjob_on_a_job_that_is_not_running_or_queued_is_ignored_with_a_trace_line() -> None:
+    """KILLJOB on a job that is not running or queued kills nothing. It is
+    an internal transition, one row per idle status (job_status.37-40): at
+    every one of them the row and its revision stay, and one EVENT_IGNORED
+    line says so, as START_REFUSED does for a start with no effect (DL-81).
+    A kill that lands writes no such line."""
+    o = oracle("insert_job: k\njob_type: c\ncommand: x\n")
+
+    def ignored_kill(minute: float) -> None:
+        before = (o.store.job["k"], o.store.revision("job:k"))
+        o.feed(ev("KILLJOB", minute, job="k"))
+        assert (o.store.job["k"], o.store.revision("job:k")) == before
+
+    ignored_kill(0)  # INACTIVE
+    o.feed(ev("STARTJOB", 1, job="k"))
+    o.feed(ev("STATUS", 2, job="k", status="SUCCESS"))
+    ignored_kill(3)  # SUCCESS
+    o.feed(ev("STARTJOB", 4, job="k"))
+    o.feed(ev("STATUS", 5, job="k", status="FAILURE"))
+    ignored_kill(6)  # FAILURE
+    o.feed(ev("STARTJOB", 7, job="k"))
+    before = o.store.revision("job:k")
+    o.feed(ev("KILLJOB", 8, job="k"))  # RUNNING: the kill lands
+    assert o.store.revision("job:k") == before + 1
+    ignored_kill(9)  # TERMINATED
+    ran = ("STARTING->RUNNING", "QUE_WAIT collapses to immediate (ss7 non-goal)")
+    assert [(t.transition, t.cause) for t in o.trace() if t.job == "k"] == [
+        ("EVENT_IGNORED", "KILLJOB ignored: the job is INACTIVE, not running or queued"),
+        ("INACTIVE->STARTING", "STARTJOB event"),
+        ran,
+        ("RUNNING->SUCCESS", "injected STATUS"),
+        ("EVENT_IGNORED", "KILLJOB ignored: the job is SUCCESS, not running or queued"),
+        ("SUCCESS->STARTING", "STARTJOB event"),
+        ran,
+        ("RUNNING->FAILURE", "injected STATUS"),
+        ("EVENT_IGNORED", "KILLJOB ignored: the job is FAILURE, not running or queued"),
+        ("FAILURE->STARTING", "STARTJOB event"),
+        ran,
+        ("RUNNING->TERMINATED", "KILLJOB"),
+        ("EVENT_IGNORED", "KILLJOB ignored: the job is TERMINATED, not running or queued"),
+    ]
+
+
+_IGNORE_JIL = (
+    "insert_resource: IGL\nres_type: R\namount: 1\n\n"
+    "insert_job: igh\njob_type: c\ncommand: h\nmachine: m1\nresources: (IGL, QUANTITY=1)\n\n"
+    "insert_job: ig\njob_type: c\ncommand: x\nmachine: m1\nresources: (IGL, QUANTITY=1)\n\n"
+    "insert_job: igb\njob_type: b\n\n"
+    "insert_job: igm\njob_type: c\ncommand: y\nmachine: m1\nbox_name: igb\n\n"
+    "insert_job: igr\njob_type: b\nresources: (IGL, QUANTITY=1)\n\n"
+    "insert_job: igrm\njob_type: c\ncommand: z\nmachine: m1\nbox_name: igr\n"
+)
+
+#: the inputs that leave a job at each status, before the ignored event
+_REACH: dict[str, list[tuple[EventKind, dict[str, object]]]] = {
+    "INACTIVE": [],
+    "QUE_WAIT": [("STARTJOB", {"job": "igh"}), ("STARTJOB", {})],
+    "STARTING": [("STATUS", {"status": "STARTING"})],
+    "RUNNING": [("STARTJOB", {})],
+    "SUCCESS": [("STATUS", {"status": "SUCCESS"})],
+    "FAILURE": [("STATUS", {"status": "FAILURE"})],
+    "TERMINATED": [("STATUS", {"status": "TERMINATED"})],
+}
+_IDLE = ("INACTIVE", "SUCCESS", "FAILURE", "TERMINATED")
+
+
+@pytest.mark.parametrize(
+    ("event", "job", "status", "marker"),
+    [
+        *(("KILLJOB", "ig", s, "EVENT_IGNORED") for s in _IDLE),
+        *(("STARTJOB", "ig", s, "START_REFUSED") for s in ("QUE_WAIT", "STARTING", "RUNNING")),
+        *(("STARTJOB", "igm", s, "START_REFUSED") for s in _IDLE),
+        *(("ON_ICE", "ig", s, "EVENT_IGNORED") for s in ("STARTING", "RUNNING")),
+        *(("ON_HOLD", "ig", s, "EVENT_IGNORED") for s in ("STARTING", "RUNNING")),
+        *(("ON_NOEXEC", "ig", s, "EVENT_IGNORED") for s in ("STARTING", "RUNNING", *_IDLE)),
+        ("ON_NOEXEC", "igr", "QUE_WAIT", "EVENT_IGNORED"),
+    ],
+)
+def test_an_event_with_no_effect_is_an_internal_transition_of_the_job(
+    event: EventKind, job: str, status: str, marker: str
+) -> None:
+    """KILLJOB on an idle job, a refused explicit start, and the ON_ICE,
+    ON_HOLD and ON_NOEXEC the vendor ignores (DL-254) each take one internal
+    transition per status they meet (job_status.37-58). The row and its
+    revision stay, and one trace line names the event. An idle job meets
+    ON_NOEXEC ignored only while iced, and a queued box only while a job
+    inside it is iced, live or queued; a member's start is refused while its
+    box is not RUNNING (SEM-10)."""
+    o = oracle(_IGNORE_JIL)
+    steps = _REACH[status] + ([("ON_ICE", {})] if event == "ON_NOEXEC" and status in _IDLE else [])
+    if job == "igr":  # a resource-bearing box, queued with an iced member
+        steps = [("ON_ICE", {"job": "igrm"}), *steps]
+    for minute, (kind, payload) in enumerate(steps):
+        o.feed(ev(kind, minute, **{"job": job, **payload}))
+    assert o.store.job[job].status == status
+    before = (o.store.job[job], o.store.revision(f"job:{job}"))
+    o.feed(ev(event, len(steps), job=job))
+    assert (o.store.job[job], o.store.revision(f"job:{job}")) == before
+    assert o.trace()[-1].job == job and o.trace()[-1].transition == marker
+
+
+def test_dl54_killjob_on_a_queued_job_consumes_its_latched_arm() -> None:
+    """A scheduled tick blocked by ON_HOLD arms the job; OFF_HOLD starts it
+    into QUE_WAIT, which keeps the arm; KILLJOB dequeues it, terminates it
+    and consumes the arm (job_flags.17 from arm_on)."""
+    o = oracle(
+        "insert_resource: L17\nres_type: R\namount: 1\n\n"
+        "insert_job: h17\njob_type: c\ncommand: h\nmachine: m1\nresources: (L17, QUANTITY=1)\n\n"
+        "insert_job: k17\njob_type: c\ncommand: k\nmachine: m1\nresources: (L17, QUANTITY=1)\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "08:00"\n'
+    )
+    o.feed(ev("STARTJOB", 0, job="h17"))
+    o.feed(ev("ON_HOLD", 0, job="k17"))
+    o.feed(ev("STARTJOB", 0, job="k17"))  # the tick: blocked ON_HOLD, so it arms
+    assert o.store.job["k17"].armed
+    o.feed(ev("OFF_HOLD", 1, job="k17"))
+    assert (o.store.job["k17"].status, o.store.job["k17"].armed) == ("QUE_WAIT", True)
+    o.feed(ev("KILLJOB", 2, job="k17"))
+    assert (o.store.job["k17"].status, o.store.job["k17"].armed) == ("TERMINATED", False)
 
 
 def _more_jil(quantity: int) -> str:

@@ -145,8 +145,9 @@ effect, so the WAL, the wrapper spec and the spool name one key
 **Owner.** `RuntimeState`: frozen `JobRuntime`, `GlobalRuntime` and
 `HostRuntime` rows; private job, global, host, timer and capacity state;
 typed operations for every one of them (`transition`, `start_run`,
-`set_flags`, `set_armed`, `set_global`, `enqueue_timer`, the §8 host verbs
-and the DL-120 capacity five). No mutable map escapes and no
+`move_flag` for one flag or the arm, `stay` for a status move that writes
+nothing, `seed_job` to install a row, `set_global`, `enqueue_timer`, the §8
+host verbs and the DL-120 capacity five). No mutable map escapes and no
 generic `setattr` reaches a row. `StatusStore` (DL-82) is the intermediate
 form and is replaced here — this evolves it, it does not undo it. Note
 that `model_copy(update=)` does **not** validate, so the owner needs a

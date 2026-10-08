@@ -10,9 +10,10 @@ taken and the violation becomes a trace line, and under `stop` the
 engine halts once the decision is durable. A logged input that raises on
 replay stops replay with an error that names it.
 
-No machine calls `StateMachine.take` yet, so every violation here is a
-fake one, noted on the store's channel by a patched `transition`. The
-fork leak test over the SEM corpus is the `fork` param of test_oracle.py.
+Every violation here is a fake one, noted on the store's channel by a
+patched `transition`, so a test chooses which move breaks; the job's real
+transitions all match their tables. The fork leak test over the SEM corpus
+is the `fork` param of test_oracle.py.
 """
 
 from __future__ import annotations
@@ -45,7 +46,7 @@ from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.runner_hosts import HostCommand
 from dsl41.runner_journal import ReplayFault, read_journal, replay_inputs
 from dsl41.runner_startup import resume_run, start_run
-from dsl41.state_machine import TransitionError, Violation
+from dsl41.state_machine import Transition, TransitionError, Violation
 
 T0 = datetime(2026, 7, 1, 8, 0)
 _JIL = "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\n"
@@ -64,13 +65,14 @@ def _on_status(
     def transition(
         self: RuntimeState,
         job: str,
+        t: Transition[JobStatus],
         new: JobStatus,
         at: datetime | None,
         exit_code: int | None = None,
         *,
         clear_exit_code: bool = False,
     ) -> None:
-        real(self, job, new, at, exit_code, clear_exit_code=clear_exit_code)
+        real(self, job, t, new, at, exit_code, clear_exit_code=clear_exit_code)
         if new == status:
             act(self, job)
 
@@ -147,7 +149,7 @@ def test_the_fork_copies_every_mutable_attribute_and_shares_only_fixed_ones() ->
     for name in STORE_COPIED:
         value = getattr(oracle.store, name)
         assert getattr(twin.store, name) == value, name
-        if not isinstance(value, (bool, int)):
+        if not isinstance(value, (bool, int, str)):
             assert getattr(twin.store, name) is not value, name
     oracle._window_starts = None
     assert oracle.fork()._window_starts is None

@@ -28,7 +28,18 @@ import pytest
 from dsl41.capacity import CapacityPool
 from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
-from dsl41.oracle_state import CapacityReservation, Event, JobRuntime, OracleError, RuntimeState
+from dsl41.oracle_state import (
+    ARM,
+    HELD_RELEASED,
+    JOB_QUEUE,
+    STATUS_INJECTED,
+    TAKE_OVER_HELD,
+    CapacityReservation,
+    Event,
+    JobRuntime,
+    OracleError,
+    RuntimeState,
+)
 from dsl41.semantics import resolve
 
 T0 = datetime(2026, 7, 1, 8, 0)
@@ -178,12 +189,14 @@ def test_reservations_only_while_starting_or_running() -> None:
     store = RuntimeState()
     store.begin_input()
     store.reserve("j", [_live_reservation()])
-    store.transition("j", "RUNNING", T0)
+    store.transition("j", STATUS_INJECTED, "RUNNING", T0)
     assert store.commit_input() == ["job:j"]
     assert store.job["j"].reservations == (_live_reservation(),)
 
     store.begin_input()
-    store.transition("j", "SUCCESS", T0)  # the release that must accompany it is missing
+    store.transition(
+        "j", STATUS_INJECTED, "SUCCESS", T0
+    )  # the release that must accompany it is missing
     with pytest.raises(OracleError, match="holds capacity at status SUCCESS"):
         store.commit_input()
 
@@ -192,7 +205,7 @@ def test_waiter_seq_iff_que_wait() -> None:
     store = RuntimeState()
     store.begin_input()
     store.enqueue_waiter("j")
-    store.transition("j", "QUE_WAIT", T0)
+    store.transition("j", JOB_QUEUE, "QUE_WAIT", T0)
     store.commit_input()
     assert store.job["j"].waiter_seq == 1
 
@@ -202,7 +215,7 @@ def test_waiter_seq_iff_que_wait() -> None:
         store.commit_input()
 
     store.begin_input()  # ...and a queue with no rank
-    store.transition("m", "QUE_WAIT", T0)
+    store.transition("m", JOB_QUEUE, "QUE_WAIT", T0)
     with pytest.raises(OracleError, match="a rank is held exactly while QUE_WAIT"):
         store.commit_input()
 
@@ -218,10 +231,10 @@ def test_start_may_not_overwrite_reservations() -> None:
         store.reserve("j", [_live_reservation()])
 
     # the release makes the row reservable again, which is the only way back
-    store.transition("j", "SUCCESS", T0)
-    store.release_reservations("j", "SUCCESS")
+    store.transition("j", STATUS_INJECTED, "SUCCESS", T0)
+    store.release_reservations("j", "RUNNING", "SUCCESS")
     store.reserve("j", [_live_reservation()])
-    store.transition("j", "RUNNING", T0)
+    store.transition("j", STATUS_INJECTED, "RUNNING", T0)
     store.commit_input()
     assert store.job["j"].reservations == (_live_reservation(),)
 
@@ -235,17 +248,17 @@ def test_held_units_are_taken_over_or_released_only_off_a_live_run() -> None:
     store = RuntimeState()
     store.begin_input()
     store.reserve("j", [held])
-    store.transition("j", "RUNNING", T0)
+    store.transition("j", STATUS_INJECTED, "RUNNING", T0)
     with pytest.raises(OracleError, match="a start may not overwrite its run"):
-        store.take_over_held("j", [held])
+        store.take_over_held("j", TAKE_OVER_HELD, [held])
     with pytest.raises(OracleError, match="its run's units release at its end"):
-        store.release_held("j")
+        store.release_held("j", HELD_RELEASED)
 
-    store.transition("j", "FAILURE", T0)
-    store.release_reservations("j", "FAILURE", lambda bucket: True)
+    store.transition("j", STATUS_INJECTED, "FAILURE", T0)
+    store.release_reservations("j", "RUNNING", "FAILURE", lambda bucket: True)
     assert store.job["j"].reservations == (held,)  # kept, not spent
     assert dict(store.consumed) == {}
-    assert store.release_held("j") == (held,)
+    assert store.release_held("j", HELD_RELEASED) == (held,)
     assert store.job["j"].reservations == ()
     store.commit_input()
 
@@ -313,7 +326,7 @@ def test_consumed_never_negative() -> None:
 
     store._consumed["r:FUEL"] = -3  # reaching past the owner, which is the case
     store.begin_input()
-    store.set_armed("j", True)
+    store.move_flag("j", ARM)
     with pytest.raises(OracleError, match="cannot be negative"):
         store.commit_input()
 
@@ -323,20 +336,20 @@ def test_enqueue_counter_bounds_waiter_seq() -> None:
     for job in ("a", "b"):
         store.begin_input()
         store.enqueue_waiter(job)
-        store.transition(job, "QUE_WAIT", T0)
+        store.transition(job, JOB_QUEUE, "QUE_WAIT", T0)
         store.commit_input()
     assert store.enqueue_counter == 2
     assert max(store.job[j].waiter_seq or 0 for j in ("a", "b")) == store.enqueue_counter
 
     store.begin_input()  # dequeuing does not give the rank back
     store.dequeue_waiter("b")
-    store.transition("b", "INACTIVE", T0)
+    store.transition("b", STATUS_INJECTED, "INACTIVE", T0)
     store.commit_input()
     assert store.enqueue_counter == 2
 
     store._enqueue_counter = 0  # a carried counter below the ranks it allocated
     store.begin_input()
-    store.set_armed("a", True)
+    store.move_flag("a", ARM)
     with pytest.raises(OracleError, match="above the allocator's"):
         store.commit_input()
 
