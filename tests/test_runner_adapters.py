@@ -23,6 +23,7 @@ anything that surprised us or contradicted the design doc.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import signal
 import subprocess
@@ -1299,6 +1300,276 @@ def test_dl210_close_during_connect_never_publishes_a_new_reader(tmp_path: Path,
             reader.feed_eof()
 
     asyncio.run(scenario())
+
+
+# ------------------------------------- the client's connection and renewal
+
+
+def test_client_phase_reads_the_transport(tmp_path: Path) -> None:
+    """supervisor_client's phase is derived: closed wins, then a set `lost`
+    event, then whether a writer is held."""
+
+    async def scenario() -> list[str]:
+        client = SupervisorClient(tmp_path)
+        seen = [client.phase()]
+        wire = _ClientWire(client)
+        seen.append(client.phase())
+        client._on_lost(client.lost)  # the reader saw EOF
+        seen.append(client.phase())
+        await client.close()
+        seen.append(client.phase())
+        wire.stream.feed_eof()
+        return seen
+
+    assert asyncio.run(scenario()) == ["disconnected", "connected", "lost", "closed"]
+
+
+def test_a_request_cancelled_after_its_connection_was_lost_still_poisons(
+    tmp_path: Path,
+) -> None:
+    """supervisor_client.04 from lost. The reader fails the pending request,
+    and the request is cancelled before it resumes: it must still drop the
+    writer, so nothing more is written to a stream whose state is unknown."""
+
+    async def scenario() -> tuple[str, bool]:
+        client = SupervisorClient(tmp_path)
+        wire = _ClientWire(client)
+        request = asyncio.ensure_future(client.list_runs())
+        await wire.expect("LIST")
+        client._on_lost(client.lost)  # EOF: the pending future fails
+        request.cancel()  # ...and the request is cancelled before it resumes
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        state = (client.phase(), client._writer is None)
+        await client.close()
+        return state
+
+    assert asyncio.run(scenario()) == ("lost", True)
+
+
+class _ScriptedRequests:
+    """A `SupervisorClient._request` double. It answers each call from the
+    script, raises a scripted exception, and parks once the script is spent."""
+
+    def __init__(self, script: list[Any]) -> None:
+        self.script = list(script)
+        self.commands: list[str] = []
+        self.drained = asyncio.Event()
+
+    async def __call__(self, obj: dict[str, Any], *, _connect: bool = True) -> dict[str, Any]:
+        self.commands.append(obj["cmd"])
+        if not self.script:
+            self.drained.set()
+            await asyncio.Event().wait()  # parks until the test cancels it
+        step = self.script.pop(0)
+        if isinstance(step, Exception):
+            raise step
+        return step
+
+
+_ACK = {"ok": True, "token": 1, "incarnation": "inc-1"}
+_RENEWED = {"ok": True, "expires_at": "2026-10-08T00:00:00+00:00"}
+
+
+def _outage(failures: int) -> list[Any]:
+    from dsl41.runner_adapters import SupervisorUnavailable
+
+    return [SupervisorUnavailable("synthetic outage") for _ in range(failures)]
+
+
+def _run_renewals(tmp_path: Path, monkeypatch, script: list[Any]) -> tuple[list[str], bool]:
+    monkeypatch.setattr(SupervisorClient, "_RENEW_EVERY_S", 0.0)
+    monkeypatch.setattr(SupervisorClient, "_RETRY_EVERY_S", 0.0)
+
+    async def scenario() -> tuple[list[str], bool]:
+        client = SupervisorClient(tmp_path)
+        events: list[str] = []
+        client.on_contact = lambda: events.append("contact")
+        client.on_unreachable = lambda: events.append("unreachable")
+        requests = _ScriptedRequests([_ACK, *script])
+        monkeypatch.setattr(client, "_request", requests)
+        try:
+            await client.acquire()
+            await asyncio.wait_for(requests.drained.wait(), 5)
+            assert client._renew_task is not None
+            return events, client._renew_task.done()
+        finally:
+            await client.close()
+
+    return asyncio.run(scenario())
+
+
+def test_renewal_reports_unreachable_once_per_outage_and_keeps_retrying(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """Five consecutive failed renewals report the host unreachable once
+    (concurrency-model ss8), and the loop keeps retrying: it is what renews
+    the lease once the supervisor answers. The first success after an
+    outage reports contact, which reinstates the host; a second outage is
+    reported again."""
+    events, done = _run_renewals(tmp_path, monkeypatch, [*_outage(7), _RENEWED, *_outage(5)])
+    assert events == ["contact", "unreachable", "contact", "unreachable"]
+    assert not done  # still renewing
+    err = capsys.readouterr().err
+    assert err.count("renewal failed 5 times") == 2
+    assert "renewed after 7 failed renewals" in err
+
+
+def test_fewer_than_five_failed_renewals_report_nothing(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """The non-triggering side: four failures, then a success, are a blip."""
+    events, done = _run_renewals(tmp_path, monkeypatch, [*_outage(4), _RENEWED, *_outage(4)])
+    assert events == ["contact", "contact"]
+    assert not done
+    assert capsys.readouterr().err == ""
+
+
+def test_an_error_in_one_renewal_is_logged_and_counted_not_fatal(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """An unexpected error in one renewal (here a raising `on_contact`) is one
+    stderr line and one failed renewal; the loop keeps its pacing and the next
+    renewal lands. A second ACQUIRE while the loop runs keeps that loop (the
+    non-triggering side of `_keep_renewing`)."""
+    monkeypatch.setattr(SupervisorClient, "_RENEW_EVERY_S", 0.0)
+    monkeypatch.setattr(SupervisorClient, "_RETRY_EVERY_S", 0.0)
+
+    async def scenario() -> None:
+        client = SupervisorClient(tmp_path)
+        contacts: list[int] = []
+
+        def contact() -> None:
+            contacts.append(len(contacts))
+            if len(contacts) == 3:  # the loop's first renewal
+                raise RuntimeError("synthetic contact failure")
+
+        client.on_contact = contact
+        requests = _ScriptedRequests([_ACK, _ACK, _RENEWED, _RENEWED])
+        monkeypatch.setattr(client, "_request", requests)
+        try:
+            await client.acquire()
+            first = client._renew_task
+            await client.acquire()
+            assert client._renew_task is first  # one loop, not two
+            await asyncio.wait_for(requests.drained.wait(), 5)
+            assert first is not None and not first.done()
+            assert requests.commands == ["ACQUIRE", "ACQUIRE", "RENEW", "RENEW", "RENEW"]
+            assert len(contacts) == 4  # the renewal after the error landed
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+    err = capsys.readouterr().err
+    assert err.count("renewal failed on RuntimeError('synthetic contact failure')") == 1
+
+
+def test_a_raising_unreachable_report_is_logged_and_renewal_continues(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """A raising `on_unreachable` must not end the loop: the lease would then
+    lapse one TTL later. The error is logged once, the loop keeps its pacing,
+    and the next renewal lands and reports contact."""
+    monkeypatch.setattr(SupervisorClient, "_RENEW_EVERY_S", 0.0)
+    monkeypatch.setattr(SupervisorClient, "_RETRY_EVERY_S", 0.0)
+
+    async def scenario() -> tuple[bool, list[str]]:
+        client = SupervisorClient(tmp_path)
+        events: list[str] = []
+        client.on_contact = lambda: events.append("contact")
+
+        def unreachable() -> None:
+            events.append("unreachable")
+            raise RuntimeError("synthetic report failure")
+
+        client.on_unreachable = unreachable
+        requests = _ScriptedRequests([_ACK, *_outage(5), _RENEWED])
+        monkeypatch.setattr(client, "_request", requests)
+        try:
+            await client.acquire()
+            await asyncio.wait_for(requests.drained.wait(), 5)
+            assert client._renew_task is not None
+            return client._renew_task.done(), events
+        finally:
+            await client.close()
+
+    done, events = asyncio.run(scenario())
+    assert not done
+    assert events == ["contact", "unreachable", "contact"]
+    err = capsys.readouterr().err
+    assert err.count("reporting the supervisor unreachable failed on RuntimeError") == 1
+
+
+def test_a_reacquire_reply_landing_while_close_awaits_starts_no_loop(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A reconnect's re-ACQUIRE reply lands while `close` awaits its tasks.
+    The reconnect must not start a renewal loop on the closed client: nothing
+    would ever cancel it, and it would report the host unreachable into an
+    engine that is shutting down."""
+
+    async def scenario() -> asyncio.Task[None] | None:
+        client = SupervisorClient(tmp_path)
+        client.token = 7  # a lease was held, so the reconnect re-ACQUIREs
+        gate = asyncio.Event()
+        pending = asyncio.Event()
+
+        async def request(obj: dict[str, Any], *, _connect: bool = True) -> dict[str, Any]:
+            pending.set()
+            await gate.wait()
+            return _ACK
+
+        async def connect() -> bool:
+            return True
+
+        monkeypatch.setattr(client, "_request", request)
+        monkeypatch.setattr(client, "_try_connect", connect)
+        reconnecting = asyncio.ensure_future(client.reconnect())
+        await asyncio.wait_for(pending.wait(), 5)
+        closing = asyncio.ensure_future(client.close())
+        await asyncio.sleep(0)  # close marks the client closed and awaits its LIST task
+        assert client._closed and not closing.done()
+        gate.set()  # the reply lands now
+        await asyncio.wait_for(asyncio.gather(reconnecting, closing), 5)
+        task = client._renew_task
+        if task is not None:
+            task.cancel()  # a leak must not outlive the test
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        return task
+
+    assert asyncio.run(scenario()) is None
+
+
+def test_the_renewal_loop_ends_when_the_client_closes(tmp_path: Path, monkeypatch) -> None:
+    """The loop checks the client between renewals, so a renewal in flight
+    when the client closes is the last one, even with no cancel."""
+    monkeypatch.setattr(SupervisorClient, "_RENEW_EVERY_S", 0.0)
+
+    async def scenario() -> bool:
+        client = SupervisorClient(tmp_path)
+        gate = asyncio.Event()
+        calls: list[str] = []
+
+        async def request(obj: dict[str, Any], *, _connect: bool = True) -> dict[str, Any]:
+            calls.append(obj["cmd"])
+            if obj["cmd"] == "RENEW":
+                await gate.wait()
+                return _RENEWED
+            return _ACK
+
+        monkeypatch.setattr(client, "_request", request)
+        await client.acquire()
+        loop = client._renew_task
+        assert loop is not None
+        while calls != ["ACQUIRE", "RENEW"]:
+            await asyncio.sleep(0)
+        client._closed = True  # what `close` sets before it cancels anything
+        gate.set()
+        await asyncio.wait_for(loop, 5)
+        return calls == ["ACQUIRE", "RENEW"]
+
+    assert asyncio.run(scenario())
 
 
 def test_dl75_the_per_wait_list_recheck_interval_is_seconds_not_poll_counts(

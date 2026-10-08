@@ -19326,3 +19326,74 @@ relitigate an entry; append a new one.
   stale test docstrings, a repeat test that could not fail, and wording on
   the tolerance. All are fixed and confirmed by the reviewer that raised
   them.
+- DL-291 The supervisor tier is three state machines, and lease renewal
+  never stops while the client is open
+  (2026-10-08; src/dsl41/runner_supervisor.py, src/dsl41/runner_adapters.py,
+  src/dsl41/machines.py, docs/state-machines.md,
+  docs/supervisor-protocol.md preamble, §1 and §6, LICENSING.md item 6,
+  docs/blocks/supervisor.md,
+  tests/test_runner_supervisor.py, tests/test_runner_adapters.py,
+  tests/test_runner_leadership.py)
+  THE BUG. The engine's supervisor client stopped renewing its lease for
+  good after five failed renewals. `acquire` started a renewal loop only
+  when none had ever existed, and `reconnect` re-acquired without one. So
+  after an outage the reconnect reinstated the host and took a lease that
+  nothing renewed. When it lapsed, SIGNAL answered `stale_token`, and a
+  supervisor with a deadman exited and killed its wrappers.
+  THE FIX. The renewal loop now ends only when it is cancelled or the
+  client is closed. At the fifth consecutive failure it reports the host
+  unreachable, once per outage, and keeps retrying every second. Its first
+  success after an outage logs one line and reports contact, which
+  reinstates the host. A renewal that raises an unexpected error, and an
+  unreachable report whose callback raises, are each logged once and do not
+  end the loop. `acquire` and a landed re-acquire start a loop when none
+  runs and the client is open. Renewal stays the client's policy
+  (supervisor-protocol §5, DL-150), and nothing on the wire changes. This
+  narrows DL-48 item 11 and DL-97: the client no longer "gives up"; the
+  quarantine producer is the fifth failure of an outage.
+  THE MACHINES (DL-289). `supervisor_process` is stored state with seven
+  states (starting, bound, serving, shutting_down, stopped, refused,
+  closed) and eleven transitions. It replaces three flags; `_running` is
+  derived from it, and teardown reads what it owns from the state it ends
+  in. `supervisor_lease` is derived from the lease record and the monotonic
+  clock by `lease_phase` (free, live, orphaned, expired), with seven
+  transitions; no field is added. Expiry is a time event that no code takes,
+  so it has no row. `supervisor_client` is derived from the transport by
+  `SupervisorClient.phase()` (disconnected, connected, lost, closed), with
+  five transitions; the token is data, not a state. The gate covers all 23
+  transitions; none is marked. The supervisor reaches state_machine.py by
+  path, as it reaches canon.py (DL-42), so supervisor-protocol §1's
+  extraction set is now five files. The owner ruled that code
+  factorization comes first and the license earmark follows the code: the
+  earmark in §6 and LICENSING.md item 6 now names state_machine.py too, as
+  DL-72 and DL-129 widened it for procid and canon. state_machine.py
+  imports only the standard library, which the earmark requires.
+  BEHAVIOR NOTES. A SIGTERM or SIGINT latched while a shutdown runs is now a
+  no-op after the stop (`supervisor_process.09`); before, it re-ran the
+  bounded wait. The deadman is no longer evaluated in a pass that already
+  stopped; it could only print there. A second teardown returns at once.
+  STATED LIMIT. A client fenced out by another live holder now retries every
+  second without end, reporting unreachable once per outage, instead of
+  stopping after five tries. It takes the lease as soon as that holder's
+  connection drops. On one host only `dsl41 supervise` holds a competing
+  lease, and only after the engine's own connection is gone. If
+  `on_contact` raised on every renewal, landed renewals would count as
+  failures and the host would be reported unreachable, but the lease would
+  not lapse.
+  NOT CHANGED. The wire, STATE_MACHINE_VERSION, and branch coverage of the
+  process tier, which rose: runner_supervisor.py from 82.85% to 85.41%, and
+  runner_adapters.py from 81.21% to 81.90%.
+  TESTS. test_renewal_resumes_after_the_client_gave_up reproduces the bug
+  with real processes and fails at the base. Others pin the loop's end on
+  close, the race of a re-acquire reply landing during close, one raising
+  renewal, a raising unreachable report, once-per-outage reporting, the
+  lease phases, an orphaned lease renewing from a new connection, a
+  non-positive ttl, the second shutdown and the second teardown.
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass, the
+  Fable pass in place of Codex at the owner's instruction. The Opus
+  reviewer confirmed the bug at the base. It found one medium finding, a
+  loop that could start after close, and later a raising unreachable report
+  that ended the loop. The Fable pass agreed with keeping the loop alive and
+  found a loop that an unexpected error still ended, and an unguarded
+  second teardown. Both found stale wording. All are fixed, over three
+  rounds, and confirmed by the reviewer that raised them.

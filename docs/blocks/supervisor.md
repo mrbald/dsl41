@@ -9,7 +9,7 @@ It decides nothing about what runs; the engine's oracle does.
 ## Fate
 
 The code and the contract carry over unchanged. It needs none of the storage capabilities.
-Reason: `src/dsl41/runner_supervisor.py` imports nothing from the dsl41 package but its two stdlib-only siblings, `runner_procid.py` and `canon.py` ([supervisor-protocol §1](../supervisor-protocol.md#1-roles)), and never reads the WAL or the ledger; its [lease](../glossary.md#lease) and run table are in memory, and its records are files in the [run root](../glossary.md#run-root).
+Reason: `src/dsl41/runner_supervisor.py` imports nothing from the dsl41 package but its three stdlib-only siblings, `runner_procid.py`, `canon.py` and `state_machine.py` ([supervisor-protocol §1](../supervisor-protocol.md#1-roles)), and never reads the WAL or the ledger; its [lease](../glossary.md#lease) and run table are in memory, and its records are files in the [run root](../glossary.md#run-root).
 One limit is about transport, not storage: a lease freed on EOF needs a local socket ([supervisor-protocol §5](../supervisor-protocol.md#5-supervisor-socket-protocol-frozen--phase-11f-dl-48), "Constraint on any future non-local transport").
 
 ## Interface
@@ -64,7 +64,7 @@ stateDiagram-v2
 - Engine crash: the wrappers keep running. Resume re-acquires at once, because the dead holder's connection is gone, then reattaches live runs and sends the rest to the spool ladder (DL-48 item 6; DL-79).
 - Supervisor killed with -9: each wrapper takes lifeline EOF, kills its group and records in its own time. The engine tries one reconnect, then reads the spool ([runner-design §7](../runner-design.md#7-journal-and-recovery-e1-prod-grade); DL-205). A restarted supervisor has a new incarnation and an empty `LIST`.
 - A request cancelled mid-flight: the client closes that connection and reconnects, and the fresh token fences the old one (DL-48 item 9).
-- Five failed renewals in a row: the client gives up and the leader marks the host unreachable ([concurrency-model §8](../concurrency-model.md#8-host-lifecycle-active-passive-quarantined-evicted); DL-210). Outcomes still resolve from the spool.
+- Five failed renewals in a row: the client reports the host unreachable, once per outage, and keeps retrying; the leader marks the host unreachable ([concurrency-model §8](../concurrency-model.md#8-host-lifecycle-active-passive-quarantined-evicted); DL-210). Outcomes still resolve from the spool. The first renewal that succeeds again reports contact, which reinstates the host.
 - A dropped push: the next reply to the holder carries `pushes_dropped`, and the client re-asks `LIST` (§5 "Pushes"; DL-210).
 - A start that loses the lock exits 1. The client respawns up to three times inside its connect window (DL-210).
 

@@ -36,7 +36,7 @@ from datetime import datetime
 
 from test_runner_lifecycle import module_imports, procid_import_branches
 
-from dsl41 import canon, runner_procid, runner_supervisor, runner_wrapper
+from dsl41 import canon, runner_procid, runner_supervisor, runner_wrapper, state_machine
 from dsl41.ir import lower_source
 from dsl41.runner_startup import resume_run
 from dsl41.runner_adapters import (
@@ -179,21 +179,24 @@ def teardown_supervisor(run_root: Path, proc: subprocess.Popen) -> None:
 def test_supervisor_imports_are_stdlib_only() -> None:
     """DL-42 item 3 / spec ss1: the supervisor is the future extraction
     boundary alongside the wrapper -- stdlib only, nothing from dsl41. Its
-    non-stdlib RUNTIME imports are the two sibling stdlib-only modules it
+    non-stdlib RUNTIME imports are the three sibling stdlib-only modules it
     reaches by the DL-72 by-path rule: runner_procid, which it shares with
     the wrapper (that module's own boundary is pinned in
     tests/test_runner_lifecycle.py, whose reader also owns the runtime-vs-
-    type-time distinction the next test relies on), and canon, the one
+    type-time distinction the next test relies on); canon, the one
     implementation of the ss3.2 canonical form the DL-129 tombstone files
     are written in -- copying an encoder into this tier would have been a
-    second implementation of a byte format audit compares against."""
+    second implementation of a byte format audit compares against; and
+    state_machine, the shared core its process and lease machines are
+    declared with."""
     non_stdlib = sorted(module_imports(SUPERVISOR) - set(sys.stdlib_module_names))
-    assert non_stdlib == ["canon", "runner_procid"], (
+    assert non_stdlib == ["canon", "runner_procid", "state_machine"], (
         f"supervisor imports outside stdlib: {non_stdlib}"
     )
-    assert sorted(module_imports(Path(canon.__file__)) - set(sys.stdlib_module_names)) == [], (
-        "canon must stay stdlib-only to be importable inside the tier"
-    )
+    for sibling in (Path(canon.__file__), Path(state_machine.__file__)):
+        assert sorted(module_imports(sibling) - set(sys.stdlib_module_names)) == [], (
+            f"{sibling.name} must stay stdlib-only to be importable inside the tier"
+        )
 
 
 def test_supervisor_procid_calls_are_type_checked() -> None:
@@ -913,6 +916,71 @@ def test_renew_loop_reacquires_after_lease_lapse(short_root: Path) -> None:
         assert isinstance(listing, SupervisorListSuccess)  # the client is still usable
     finally:
         teardown_supervisor(short_root, proc)
+
+
+def test_renewal_resumes_after_the_client_gave_up(short_root: Path, monkeypatch) -> None:
+    """Five failed renewals quarantine the host (concurrency-model ss8). The
+    lease must not lapse once the supervisor answers again.
+
+    A restarted supervisor (Tier 2) answers the next request's reconnect,
+    and that reconnect re-ACQUIREs. The client must keep renewing from
+    there (supervisor-protocol ss5: the engine renews every 20 s while it
+    holds the lease). Otherwise the lease lapses one TTL later, every
+    mutating verb answers `stale_token`, and a supervisor started with a
+    deadman exits and takes its wrappers with it.
+
+    The window below is one TTL plus the deadman plus a margin, measured
+    from the re-ACQUIRE. Inside it the lease must stay listed, a mutating
+    verb must pass the token check, and the deadman supervisor must live."""
+    monkeypatch.setattr(SupervisorClient, "_TTL_S", 1.0)
+    monkeypatch.setattr(SupervisorClient, "_RENEW_EVERY_S", 0.2)
+    monkeypatch.setattr(SupervisorClient, "_RETRY_EVERY_S", 0.05)
+    deadman = 1.5
+    first = start_supervisor(short_root)
+    procs = [first]
+
+    async def scenario() -> tuple[list[object], dict, int | None]:
+        client = SupervisorClient(short_root)
+        gave_up: list[float] = []
+        client.on_unreachable = lambda: gave_up.append(time.monotonic())
+        try:
+            await client.ensure_running()
+            await client.acquire()
+            first.kill()
+            first.wait()
+            deadline = time.monotonic() + 15
+            while not gave_up:
+                assert time.monotonic() < deadline, (
+                    "the renewal loop never reported the host unreachable"
+                )
+                await asyncio.sleep(0.02)
+            # Tier 2 restarts the supervisor, this time with a deadman
+            procs.append(start_supervisor(short_root, deadman_s=deadman))
+            leases: list[object] = []
+            listing = await client.list_runs()  # the reconnect re-ACQUIREs
+            reacquired_at = time.monotonic()
+            while time.monotonic() < reacquired_at + 1.0 + deadman + 0.5:
+                assert isinstance(listing, SupervisorListSuccess)
+                leases.append(listing.lease)
+                if listing.lease is None:
+                    break
+                await asyncio.sleep(0.1)
+                listing = await client.list_runs()
+            # a well-formed run id this supervisor never saw: the token check
+            # comes first, so a live token answers unknown_run
+            answer = await client.signal("00000000-0000-4000-8000-000000000000", "TERM")
+            return leases, answer, procs[-1].poll()
+        finally:
+            await client.close()
+
+    try:
+        leases, answer, exit_code = asyncio.run(scenario())
+    finally:
+        for proc in procs:
+            teardown_supervisor(short_root, proc)
+    assert leases and all(lease is not None for lease in leases), leases
+    assert answer == {"ok": False, "error": "unknown_run"}, answer
+    assert exit_code is None  # the deadman did not fire
 
 
 def test_dl137_unknown_fields_are_ignored_in_both_directions(short_root: Path) -> None:
@@ -2830,7 +2898,13 @@ def test_dl210_main_configuration_and_usage_refuse_with_two(short_root, capsys, 
 
 def test_dl210_lock_close_error_does_not_mask_clean_exit(short_root, monkeypatch):
     sup = runner_supervisor.Supervisor(str(short_root))
-    sup._running = False
+    bind = sup._bind
+
+    def bind_then_stop() -> None:
+        bind()
+        sup.state = "stopped"  # skip the loop: the clean exit is what is under test
+
+    monkeypatch.setattr(sup, "_bind", bind_then_stop)
     close = runner_supervisor.os.close
 
     def close_lock(fd):
@@ -3056,3 +3130,214 @@ def test_dl210_a_killed_unreaped_supervisor_is_absent_not_an_owner(short_root: P
     finally:
         old.wait()
     teardown_supervisor(short_root, new)
+
+
+# ------------------------------------------- the process and lease machines
+
+
+def test_lease_phase_reads_the_record_and_the_monotonic_clock() -> None:
+    """ss5's lease modes, derived. The deadline instant itself is expired, as
+    `_lease_active` always read it, and so is a NaN deadline."""
+    phase = runner_supervisor.lease_phase
+    lease = runner_supervisor._Lease
+    holder = object()  # stands for the holder's open connection
+    assert phase(None, 0.0) == "free"
+    assert phase(lease("h", 1, 10.0, "", holder), 9.0) == "live"
+    assert phase(lease("h", 1, 10.0, "", None), 9.0) == "orphaned"
+    assert phase(lease("h", 1, 10.0, "", holder), 10.0) == "expired"
+    assert phase(lease("h", 1, 10.0, "", None), 11.0) == "expired"
+    assert phase(lease("h", 1, float("nan"), "", holder), 0.0) == "expired"
+
+
+def _exchange(sup, conn, peer, request: dict) -> dict:
+    sup._dispatch(conn, json.dumps({"v": 1, **request}).encode("utf-8"))
+    return _flush_reply(sup, conn, peer)
+
+
+def _phase(sup) -> str:
+    return runner_supervisor.lease_phase(sup.lease, time.monotonic())
+
+
+def test_an_orphaned_lease_renews_from_a_new_connection_and_stays_orphaned(
+    queued_supervisor,
+) -> None:
+    """supervisor_lease.04 and .05 from orphaned. RENEW and RELEASE check the
+    incarnation and then the token, nothing else (ss5), so a new connection
+    that holds both renews an orphaned lease. RENEW does not adopt that
+    connection: the lease stays orphaned and pushes keep dropping until an
+    ACQUIRE. A wrong token renews nothing."""
+    sup, connect = queued_supervisor
+    holder, holder_peer = connect()
+    granted = _exchange(sup, holder, holder_peer, {"cmd": "ACQUIRE", "controller_id": "e"})
+    sup._drop_conn(holder)
+    assert _phase(sup) == "orphaned"
+    other, peer = connect()
+    creds = {"incarnation": sup.incarnation, "token": granted["token"]}
+    deadline = sup.lease.deadline
+    stale = {**creds, "token": granted["token"] + 1}
+    assert _exchange(sup, other, peer, {"cmd": "RENEW", **stale})["error"] == "stale_token"
+    assert sup.lease.deadline == deadline
+    assert _exchange(sup, other, peer, {"cmd": "RENEW", "ttl_s": 120, **creds})["ok"] is True
+    assert sup.lease.deadline > deadline
+    assert _phase(sup) == "orphaned"
+    assert _exchange(sup, other, peer, {"cmd": "RELEASE", **creds}) == {"ok": True}
+    assert _phase(sup) == "free"
+
+
+def test_a_ttl_that_is_not_positive_grants_and_renews_into_expired(queued_supervisor) -> None:
+    """ss5 puts no bound on ttl_s: zero or negative makes a lease that is
+    already expired. That is why the grant, re-key and renew transitions of
+    supervisor_lease target a choice of live or expired. A positive ttl_s is
+    the non-triggering case."""
+    sup, connect = queued_supervisor
+    conn, peer = connect()
+    first = _exchange(sup, conn, peer, {"cmd": "ACQUIRE", "controller_id": "e", "ttl_s": 60})
+    assert _phase(sup) == "live"
+    incumbent = {"incarnation": sup.incarnation, "token": first["token"]}
+    rekey = {"cmd": "ACQUIRE", "controller_id": "e", "ttl_s": 0, **incumbent}
+    assert _exchange(sup, conn, peer, rekey)["ok"] is True
+    assert _phase(sup) == "expired"
+    again = _exchange(sup, conn, peer, {"cmd": "ACQUIRE", "controller_id": "e", "ttl_s": 60})
+    assert _phase(sup) == "live"
+    creds = {"incarnation": sup.incarnation, "token": again["token"]}
+    assert _exchange(sup, conn, peer, {"cmd": "RENEW", "ttl_s": -1, **creds})["ok"] is True
+    assert _phase(sup) == "expired"
+    assert _exchange(sup, conn, peer, {"cmd": "ACQUIRE", "controller_id": "e", "ttl_s": 0})["ok"]
+    assert _phase(sup) == "expired"
+    assert _exchange(sup, conn, peer, {"cmd": "LIST"})["lease"] is None
+
+
+def test_a_second_shutdown_request_in_one_loop_pass_does_nothing_more(
+    short_root: Path, monkeypatch
+) -> None:
+    """supervisor_process.09. A SIGTERM that lands while SHUTDOWN waits sets
+    the latch again, and the loop consumes it after the stop: the shutdown
+    already ran, so the request is answered and nothing runs twice. The first
+    request is the non-triggering case: it runs the shutdown. `_reap` is
+    stubbed because an in-process reap would wait on the test runner's
+    children."""
+    sup = runner_supervisor.Supervisor(str(short_root))
+    reaps: list[str] = []
+    monkeypatch.setattr(sup, "_reap", lambda: reaps.append(sup.state))
+    sup._bind()
+    try:
+        sup._shutdown_requested = True
+        sup._orderly_shutdown(runner_supervisor.PROCESS_SIGNALLED)
+        assert sup.state == "stopped" and reaps and set(reaps) == {"shutting_down"}
+        ran = len(reaps)
+        sup._shutdown_requested = True  # a signal during the shutdown
+        sup._orderly_shutdown(runner_supervisor.PROCESS_SIGNALLED)
+        assert sup.state == "stopped" and not sup._shutdown_requested
+        assert len(reaps) == ran  # no second wait
+    finally:
+        sup._teardown()
+    assert sup.state == "closed"
+    assert not Path(sup.sock_path).exists() and not Path(sup.pid_path).exists()
+
+
+def test_an_error_during_shutdown_still_unlinks_what_was_published(
+    short_root: Path, monkeypatch
+) -> None:
+    """supervisor_process.11 from shutting_down. Teardown reads what this
+    incarnation owns off the state it ends from: from shutting_down that is
+    the published socket and the pid record."""
+    sup = runner_supervisor.Supervisor(str(short_root))
+
+    def broken_reap() -> None:
+        raise OSError(errno.EIO, "synthetic reap failure")
+
+    monkeypatch.setattr(sup, "_reap", broken_reap)
+    sup._bind()
+    assert sup.state == "serving"
+    with pytest.raises(OSError, match="synthetic reap failure"):
+        sup._orderly_shutdown(runner_supervisor.PROCESS_SHUTDOWN)
+    assert sup.state == "shutting_down"
+    sup._teardown()
+    assert sup.state == "closed"
+    assert not Path(sup.sock_path).exists() and not Path(sup.pid_path).exists()
+
+
+def test_sigterm_during_a_shutdown_wait_is_answered_once(short_root: Path) -> None:
+    """The process path behind supervisor_process.09. SHUTDOWN is waiting out
+    a command's grace when SIGTERM arrives. The SHUTDOWN is answered once, the
+    supervisor exits 0 and unlinks its socket and pid record, and the wrapper
+    records the command's own ending, never "parent lost". This pins the
+    behavior; it also passes at the base commit, where the second shutdown
+    found nothing live. The in-process test above is the one that catches a
+    regression."""
+    proc = start_supervisor(short_root)
+    cli = RawClient(short_root)
+    run_dir = short_root / "runs" / "j.1"
+    marker = short_root / "termed"
+    command = f"trap 'touch {marker}' TERM; while :; do sleep 0.1; done"
+    replies: list[dict] = []
+    try:
+        tok = cli.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "A", "ttl_s": 60})["token"]
+        cli.send({"v": 1, "cmd": "SPAWN", "token": tok, "spec": _spec(run_dir, command)})
+        wait_for(lambda: (run_dir / "spawn.json").exists())
+        shutdown = threading.Thread(
+            target=lambda: replies.append(cli.send({"v": 1, "cmd": "SHUTDOWN", "token": tok}))
+        )
+        shutdown.start()
+        wait_for(marker.exists)  # the command took TERM: the grace wait is on
+        os.kill(proc.pid, signal.SIGTERM)
+        shutdown.join(timeout=15)
+        assert proc.wait(timeout=15) == 0
+        assert replies == [{"ok": True}]
+        status = json.loads((run_dir / "status.json").read_text())
+        assert status["outcome"] == "signaled" and status.get("cause") != "parent lost"
+        assert not (short_root / "supervisor.sock").exists()
+        assert not (short_root / "supervisor.pid").exists()
+    finally:
+        cli.close()
+        teardown_supervisor(short_root, proc)
+
+
+def test_ensure_running_on_a_connected_client_supersedes_the_connection(
+    short_root: Path,
+) -> None:
+    """supervisor_client.02. A second connect replaces a live connection: the
+    old writer is closed, the old reader is cancelled, and the new epoch
+    answers. The first connect is the non-triggering case (.01)."""
+    proc = start_supervisor(short_root)
+
+    async def scenario() -> tuple[list[str], bool, bool]:
+        client = SupervisorClient(short_root)
+        phases = [client.phase()]
+        try:
+            await client.ensure_running()
+            phases.append(client.phase())
+            old_writer, old_lost = client._writer, client.lost
+            await client.ensure_running()
+            phases.append(client.phase())
+            assert old_writer is not None and old_writer.is_closing()
+            listing = await client.list_runs()
+            return phases, client.lost is not old_lost, isinstance(listing, SupervisorListSuccess)
+        finally:
+            await client.close()
+
+    try:
+        phases, new_epoch, answered = asyncio.run(scenario())
+    finally:
+        teardown_supervisor(short_root, proc)
+    assert phases == ["disconnected", "connected", "connected"]
+    assert new_epoch and answered
+
+
+def test_a_second_teardown_takes_no_transition(short_root: Path) -> None:
+    """supervisor_process has `closed` as its final state, so a second
+    teardown returns at once: it takes no transition from a final state (the
+    test plugin raises on one) and releases nothing twice. The first
+    teardown is the non-triggering case."""
+    sup = runner_supervisor.Supervisor(str(short_root))
+    sup._bind()
+    sup._teardown()
+    assert sup.state == "closed" and sup._lock_fd is None
+    successor = runner_supervisor.Supervisor(str(short_root))
+    successor._bind()  # the root is free
+    try:
+        sup._teardown()
+        assert sup.state == "closed"
+        assert Path(successor.sock_path).exists()  # nothing of the successor's was unlinked
+    finally:
+        successor._teardown()

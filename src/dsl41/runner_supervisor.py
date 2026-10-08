@@ -4,10 +4,11 @@ Normative spec: docs/runner-design.md ss6a (Tier 1) + docs/supervisor-protocol.m
 ss5 (the socket protocol this module freezes) + DL-41a/DL-42/DL-48. STDLIB ONLY:
 this module imports nothing from dsl41 and nothing third-party -- the same
 enforced extraction boundary as runner_wrapper.py (DL-42; import-graph test in
-tests/test_runner_supervisor.py), its only non-stdlib imports being two sibling
+tests/test_runner_supervisor.py), its only non-stdlib imports being three sibling
 stdlib-only modules under the same by-path rule (DL-72): runner_procid, which
-the wrapper shares, and canon, which is the one implementation of the ss3.2
-canonical form the ss11a tombstone files are written in. The engine runs it BY
+the wrapper shares; canon, which is the one implementation of the ss3.2
+canonical form the ss11a tombstone files are written in; and state_machine, the
+shared core that checks the process and lease transitions below. The engine runs it BY
 FILE PATH (``sys.executable <this file> --run-root <root>``), never ``-m``:
 ``-m`` would import the dsl41 package __init__ and drag third-party imports
 into the supervisor's runtime.
@@ -87,7 +88,7 @@ import time
 import uuid
 from collections import deque
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 # DL-72: the durability liturgy and the (pid, start-time) PID-reuse guard live
 # in the sibling stdlib-only runner_procid -- one copy, shared with the wrapper
@@ -105,7 +106,9 @@ from typing import TYPE_CHECKING, Any
 # dsl41.canon and this file's `canon` holds both, so `dsl41.canon.CanonError`
 # does not catch the `CanonError` raised in here. Nothing crosses that line
 # today (the supervisor answers its own canon errors), and a future in-process
-# caller must catch by the name it imported.
+# caller must catch by the name it imported. The same holds for `state_machine`:
+# the machines declared here are instances of the top-level module's classes,
+# and under the test plugin their `TransitionError` is that module's.
 #
 # The TYPE_CHECKING branch names the same file under the name mypy maps it to
 # (it cannot see one file under two names), which is what keeps verify_alive
@@ -136,6 +139,7 @@ if TYPE_CHECKING:
         utc_now_iso,
         verify_alive,
     )
+    from dsl41.state_machine import StateMachine, Transition
 else:
     from canon import (  # noqa: E402
         ARTIFACT_FORMAT_VERSION,
@@ -160,6 +164,7 @@ else:
         utc_now_iso,
         verify_alive,
     )
+    from state_machine import StateMachine, Transition  # noqa: E402
 
 if _PROCID_DIR_ADDED:
     sys.path.remove(_PROCID_DIR)
@@ -341,6 +346,276 @@ class _Conn:
         self.discarding = False
 
 
+# --------------------------------------------------------- state machines
+#
+# Two machines live in this process, declared with the shared core
+# (state_machine.py, reached by path like canon). Each declaration is the
+# transition table; the code that moves a state names the transition it takes
+# and calls `take`, which checks and records and never changes what happens.
+
+#: The process lifecycle. `Supervisor.state` stores it.
+type ProcessState = Literal[
+    "starting", "bound", "serving", "shutting_down", "stopped", "refused", "closed"
+]
+
+_SP5 = "supervisor-protocol ss5"
+
+PROCESS_LOCK_HELD: Transition[ProcessState] = Transition(
+    "supervisor_process.01",
+    frozenset({"starting"}),
+    "start",
+    "refused",
+    guard="supervisor.lock is held",
+    effect="exit 1, another supervisor owns this root",
+    cite=f"{_SP5}, DL-210",
+)
+PROCESS_OWNER_LIVE: Transition[ProcessState] = Transition(
+    "supervisor_process.02",
+    frozenset({"starting"}),
+    "start",
+    "refused",
+    guard="the published socket answers PING, or the pid record does not prove its owner absent",
+    effect="exit 1, another supervisor owns this root",
+    cite=f"{_SP5}, DL-210",
+)
+PROCESS_BOUND: Transition[ProcessState] = Transition(
+    "supervisor_process.03",
+    frozenset({"starting"}),
+    "start",
+    "bound",
+    guard="lock taken and no other owner",
+    effect="sweep private sockets, reclaim the published path, bind the private socket",
+    cite=f"{_SP5}, DL-210",
+)
+PROCESS_PUBLISHED: Transition[ProcessState] = Transition(
+    "supervisor_process.04",
+    frozenset({"bound"}),
+    "publish",
+    "serving",
+    effect="listen, chmod 0600, write supervisor.pid, rename the socket to supervisor.sock",
+    cite=f"{_SP5}, DL-210, DL-275",
+)
+PROCESS_SHUTDOWN: Transition[ProcessState] = Transition(
+    "supervisor_process.05",
+    frozenset({"serving"}),
+    "SHUTDOWN",
+    "shutting_down",
+    guard="this incarnation, then the current token",
+    cite=f"{_SP5} SHUTDOWN, DL-80",
+)
+PROCESS_SIGNALLED: Transition[ProcessState] = Transition(
+    "supervisor_process.06",
+    frozenset({"serving"}),
+    "SIGTERM or SIGINT",
+    "shutting_down",
+    effect="the handler only latches the signal and the loop takes this, so one during startup waits",
+    cite=f"{_SP5} SHUTDOWN, DL-275",
+)
+PROCESS_DRAINED: Transition[ProcessState] = Transition(
+    "supervisor_process.07",
+    frozenset({"shutting_down"}),
+    "every wrapper reaped, or the wait bound passed",
+    "stopped",
+    effect="TERM each command group, KILL it after its grace, KILL every survivor at the bound",
+    cite=f"{_SP5} SHUTDOWN, DL-48, DL-150",
+)
+PROCESS_DEADMAN: Transition[ProcessState] = Transition(
+    "supervisor_process.08",
+    frozenset({"serving"}),
+    "tick",
+    "stopped",
+    guard="a deadman is set and no live leaseholder for that many seconds",
+    effect="log the reason",
+    cite=f"{_SP5} The deadman, DL-95",
+)
+PROCESS_REPEAT: Transition[ProcessState] = Transition(
+    "supervisor_process.09",
+    frozenset({"stopped"}),
+    "SIGTERM or SIGINT",
+    "stopped",
+    guard="latched during a shutdown that already ran in this loop pass",
+    effect="none",
+    cite=f"{_SP5} SHUTDOWN",
+)
+PROCESS_TEARDOWN: Transition[ProcessState] = Transition(
+    "supervisor_process.10",
+    frozenset({"stopped", "refused"}),
+    "teardown",
+    "closed",
+    effect=(
+        "flush replies for up to 2 s, drop every connection, unlink what this incarnation"
+        " published, close the open lifelines and the lock"
+    ),
+    cite=f"{_SP5}, DL-210",
+)
+PROCESS_ABORTED: Transition[ProcessState] = Transition(
+    "supervisor_process.11",
+    frozenset({"starting", "bound", "serving", "shutting_down"}),
+    "teardown",
+    "closed",
+    guard="an error ended startup or the loop",
+    effect="the same cleanup as supervisor_process.10; main exits 1 on an OSError",
+    cite=f"{_SP5}, DL-210",
+)
+
+#: SIGKILL ends the process in any state and runs no code, so no row is taken
+#: for it: each wrapper takes lifeline EOF and records in its own time (ss5,
+#: DL-205).
+SUPERVISOR_PROCESS: StateMachine[ProcessState] = StateMachine(
+    name="supervisor_process",
+    states=frozenset(
+        {"starting", "bound", "serving", "shutting_down", "stopped", "refused", "closed"}
+    ),
+    initial="starting",
+    finals=frozenset({"closed"}),
+    transitions=(
+        PROCESS_LOCK_HELD,
+        PROCESS_OWNER_LIVE,
+        PROCESS_BOUND,
+        PROCESS_PUBLISHED,
+        PROCESS_SHUTDOWN,
+        PROCESS_SIGNALLED,
+        PROCESS_DRAINED,
+        PROCESS_DEADMAN,
+        PROCESS_REPEAT,
+        PROCESS_TEARDOWN,
+        PROCESS_ABORTED,
+    ),
+)
+
+#: The lease's phase (ss5 lease verbs). It is derived, never stored: see
+#: `lease_phase`.
+type LeasePhase = Literal["free", "live", "orphaned", "expired"]
+
+
+def lease_phase(lease: _Lease | None, now: float) -> LeasePhase:
+    """The phase of the lease record at monotonic time `now` (ss5).
+
+    free: no record. expired: `now` is not before the deadline, which is also
+    how a NaN deadline reads. orphaned: unexpired, and the holder's connection
+    is gone. live: unexpired, with the holder's connection open.
+
+    Expiry has no row in SUPERVISOR_LEASE, and the generated table shows no
+    edge into `expired` from live or orphaned. In UML terms it is a time
+    event, after(ttl_s) from the last grant or renewal, and no code takes it:
+    nothing writes the record when the deadline passes. This function reads
+    it off the clock instead. The verbs list `expired` among their sources,
+    and a ttl_s that is not positive targets it directly."""
+    if lease is None:
+        return "free"
+    if not now < lease.deadline:
+        return "expired"
+    return "orphaned" if lease.conn is None else "live"
+
+
+_LEASE_CITE = f"{_SP5} lease verbs"
+
+LEASE_GRANT: Transition[LeasePhase] = Transition(
+    "supervisor_lease.01",
+    frozenset({"free", "expired", "orphaned"}),
+    "ACQUIRE",
+    frozenset({"live", "expired"}),
+    guard="controller_id is a non-empty string",
+    effect=(
+        "mint a token, keep the dropped-push notice for the same controller_id;"
+        " a ttl_s that is not positive grants a lease that is already expired"
+    ),
+    cite=f"{_LEASE_CITE}, DL-79, DL-150",
+)
+LEASE_REKEY: Transition[LeasePhase] = Transition(
+    "supervisor_lease.02",
+    frozenset({"live"}),
+    "ACQUIRE",
+    frozenset({"live", "expired"}),
+    guard="the incumbent, with this incarnation and the current token",
+    effect="re-key with a fresh token, and the old one dies",
+    cite=f"{_LEASE_CITE}, DL-79, DL-80",
+)
+LEASE_RENEW: Transition[LeasePhase] = Transition(
+    "supervisor_lease.03",
+    frozenset({"live"}),
+    "RENEW",
+    frozenset({"live", "expired"}),
+    guard="this incarnation, then the current token",
+    effect="move the deadline to now + ttl_s",
+    cite=f"{_LEASE_CITE}, DL-150",
+)
+LEASE_RENEW_ORPHANED: Transition[LeasePhase] = Transition(
+    "supervisor_lease.04",
+    frozenset({"orphaned"}),
+    "RENEW",
+    frozenset({"orphaned", "expired"}),
+    guard="this incarnation, then the current token",
+    effect="move the deadline to now + ttl_s; pushes still drop until an ACQUIRE",
+    cite=f"{_LEASE_CITE}, DL-150",
+)
+LEASE_RELEASE: Transition[LeasePhase] = Transition(
+    "supervisor_lease.05",
+    frozenset({"live", "orphaned"}),
+    "RELEASE",
+    "free",
+    guard="this incarnation, then the current token",
+    effect="drop the record",
+    cite=f"{_LEASE_CITE}, DL-150",
+)
+LEASE_HOLDER_GONE: Transition[LeasePhase] = Transition(
+    "supervisor_lease.06",
+    frozenset({"live"}),
+    "the holder's connection closes",
+    "orphaned",
+    effect="forget the connection, so pushes drop and any controller may ACQUIRE",
+    cite=f"{_LEASE_CITE}, DL-150",
+)
+LEASE_GONE_EXPIRED: Transition[LeasePhase] = Transition(
+    "supervisor_lease.07",
+    frozenset({"expired"}),
+    "the holder's connection closes",
+    "expired",
+    effect="forget the connection",
+    cite=f"{_LEASE_CITE}",
+)
+
+#: A refusal changes nothing and takes no transition: bad_controller_id,
+#: lease_held, wrong_incarnation, stale_token. SPAWN, SIGNAL and SHUTDOWN read
+#: the lease and never write it.
+SUPERVISOR_LEASE: StateMachine[LeasePhase] = StateMachine(
+    name="supervisor_lease",
+    states=frozenset({"free", "live", "orphaned", "expired"}),
+    initial="free",
+    finals=frozenset(),
+    transitions=(
+        LEASE_GRANT,
+        LEASE_REKEY,
+        LEASE_RENEW,
+        LEASE_RENEW_ORPHANED,
+        LEASE_RELEASE,
+        LEASE_HOLDER_GONE,
+        LEASE_GONE_EXPIRED,
+    ),
+)
+
+
+class _Acquire(NamedTuple):
+    """An ACQUIRE that passed its own checks: controller_id, then ttl_s (ss5)."""
+
+    controller_id: str
+    ttl_s: float
+    req: dict[str, Any]
+
+
+class _Renew(NamedTuple):
+    req: dict[str, Any]
+
+
+class _Release(NamedTuple):
+    req: dict[str, Any]
+
+
+#: the lease's own messages, dispatched to one handler per phase
+type _LeaseMessage = _Acquire | _Renew | _Release
+type _LeaseAnswer = tuple[dict[str, Any], Transition[LeasePhase] | None]
+
+
 class Supervisor:
     """One supervisor per run_root; owns the socket, the wrapper lifelines, and
     the single-controller lease. Single-threaded selectors loop (SIGCHLD
@@ -362,10 +637,12 @@ class Supervisor:
         self._unleased_since: float | None = None
         self.sock_path = os.path.join(run_root, "supervisor.sock")
         self.pid_path = os.path.join(run_root, "supervisor.pid")
+        #: the process lifecycle (SUPERVISOR_PROCESS). Teardown reads what to
+        #: unlink off it: `bound` owns the private socket path, and every state
+        #: from `serving` on owns the published one.
+        self.state: ProcessState = "starting"
         self._lock_fd: int | None = None
         self._private_path = os.path.join(run_root, f".s.{os.getpid()}")
-        self._private_bound = False
-        self._published = False
         self._socket_inode: int | None = None
         self.boot_id = current_boot_id()
         #: DL-80: identity of THIS supervisor process, minted per start. The
@@ -392,13 +669,25 @@ class Supervisor:
         self._chld_r, self._chld_w = os.pipe()
         os.set_blocking(self._chld_r, False)
         os.set_blocking(self._chld_w, False)
-        self._running = True
+        #: SIGTERM or SIGINT arrived. The handler sets only this; the loop takes
+        #: the transition. A handler that wrote `state` could interrupt another
+        #: write of it, and a signal during startup must wait for `serving`.
         self._shutdown_requested = False
         self._backlog_bytes = _test_limit("DSL41_SUPERVISOR_TEST_BACKLOG_BYTES", BACKLOG_BYTES)
         self._request_line_limit = _test_limit(
             "DSL41_SUPERVISOR_TEST_REQUEST_LINE_LIMIT", REQUEST_LINE_LIMIT
         )
         self._accept_log_at = float("-inf")
+
+    def _move(self, t: Transition[ProcessState], new: ProcessState) -> None:
+        """Take a declared process transition: check it, record it, store it."""
+        SUPERVISOR_PROCESS.take(t, self.state, new)
+        self.state = new
+
+    @property
+    def _running(self) -> bool:
+        """Requests are read and dispatched until the loop stops."""
+        return self.state in ("starting", "bound", "serving", "shutting_down")
 
     # -- startup ------------------------------------------------------------
 
@@ -490,17 +779,20 @@ class Supervisor:
             for attempt in range(3):
                 deadline = started + (attempt + 1) / 3
                 if self._probe_answered(deadline):
+                    self._move(PROCESS_OWNER_LIVE, "refused")
                     raise SystemExit("another supervisor owns this root")
                 delay = deadline - time.monotonic()
                 if delay > 0:
                     time.sleep(delay)
         if not self._pid_owner_absent():
+            self._move(PROCESS_OWNER_LIVE, "refused")
             raise SystemExit("another supervisor owns this root")
 
     def _bind(self) -> None:
         try:
             self._lock_fd = flock_exclusive(os.path.join(self.run_root, "supervisor.lock"))
         except LockHeld as exc:
+            self._move(PROCESS_LOCK_HELD, "refused")
             raise SystemExit("another supervisor owns this root") from exc
         # Sweep private sockets only, under the exclusion lock. Ordinary
         # files or symlinks with this prefix are not ours to remove.
@@ -517,7 +809,7 @@ class Supervisor:
         try:
             self._listen = socket.socket(socket.AF_UNIX)
             self._listen.bind(self._private_path)
-            self._private_bound = True
+            self._move(PROCESS_BOUND, "bound")
             self._listen.listen(64)
         finally:
             os.umask(old_umask)
@@ -534,8 +826,7 @@ class Supervisor:
             },
         )
         os.rename(self._private_path, self.sock_path)
-        self._private_bound = False
-        self._published = True
+        self._move(PROCESS_PUBLISHED, "serving")
         self._listen.setblocking(False)
 
     def _install_signals(self) -> None:
@@ -579,7 +870,7 @@ class Supervisor:
                 file=sys.stderr,
                 flush=True,
             )
-            while self._running:
+            while self.state == "serving":
                 for key, mask in self._sel.select(timeout=1.0):
                     tag, payload = key.data
                     if tag == "listen":
@@ -588,7 +879,7 @@ class Supervisor:
                         self._drain_chld()
                         self._reap()
                         if self._shutdown_requested:
-                            self._orderly_shutdown()
+                            self._orderly_shutdown(PROCESS_SIGNALLED)
                     elif tag == "conn":
                         if mask & selectors.EVENT_WRITE:
                             self._writable(payload)
@@ -598,9 +889,9 @@ class Supervisor:
                 # load; the select timeout gives an unconditional reap tick
                 self._reap()
                 if self._shutdown_requested:
-                    self._orderly_shutdown()
-                elif self._deadman_expired():
-                    self._running = False
+                    self._orderly_shutdown(PROCESS_SIGNALLED)
+                elif self.state == "serving" and self._deadman_expired():
+                    self._move(PROCESS_DEADMAN, "stopped")
         finally:
             self._teardown()
         return 0
@@ -616,7 +907,7 @@ class Supervisor:
         process is, kill -9 included. An expired lease whose connection is
         open means a controller that stopped renewing, which is a controller
         that has stopped watching."""
-        return self._lease_active() and self.lease is not None and self.lease.conn is not None
+        return lease_phase(self.lease, time.monotonic()) == "live"
 
     def _deadman_expired(self) -> bool:
         """Has this supervisor been unwatched for T_deadman (ss8)?
@@ -740,7 +1031,15 @@ class Supervisor:
             self._sel.unregister(conn.sock)
         self._conns.pop(conn.sock.fileno(), None)
         if self.lease is not None and self.lease.conn is conn:
+            now = time.monotonic()
+            before = lease_phase(self.lease, now)
             self.lease.conn = None  # pushes drop until the holder re-ACQUIREs
+            match before:
+                case "live":
+                    taken = LEASE_HOLDER_GONE
+                case _:  # expired: the record stays expired
+                    taken = LEASE_GONE_EXPIRED
+            SUPERVISOR_LEASE.take(taken, before, lease_phase(self.lease, now))
         conn.sock.close()
         conn.buf = b""
         conn.out.clear()
@@ -891,7 +1190,9 @@ class Supervisor:
     # -- lease --------------------------------------------------------------
 
     def _lease_active(self) -> bool:
-        return self.lease is not None and time.monotonic() < self.lease.deadline
+        """Unexpired: live or orphaned. LIST reports such a lease, and only
+        such a lease passes the token check."""
+        return lease_phase(self.lease, time.monotonic()) in ("live", "orphaned")
 
     def _check_token(self, req: dict[str, Any]) -> dict[str, Any] | None:
         """Every mutating verb: the request must name THIS incarnation (DL-80)
@@ -915,48 +1216,106 @@ class Supervisor:
         controller_id = req.get("controller_id")
         if not isinstance(controller_id, str) or not controller_id:
             return {"ok": False, "error": "bad_controller_id"}
-        ttl_s = float(req.get("ttl_s", 60))
-        # DL-79. A LIVE lease -- unexpired AND its holder's connection still
-        # open -- yields only to the holder itself, and the holder proves
-        # incumbency by presenting its CURRENT token. controller_id is a
-        # label, not a credential: any client may send any string, and until
-        # DL-79 a matching one took the lease away from a live holder. That
-        # was safe only because one run_root had one engine, which the
-        # engine's own control-socket bind enforced ON THIS MACHINE; the
-        # moment a second host can serve the same logical run, the label
-        # stops discriminating and the partitioned OLD leader fences out the
-        # new one.
-        #
-        # The ORPHANED case -- lease unexpired, holder's connection gone --
-        # stays freely grantable, and that is what lets a crashed engine's
-        # resume re-acquire without waiting out the TTL. It is sound here
-        # because the kernel closes this AF_UNIX fd only when the holder
-        # process is gone (kill -9 included), so EOF is proof of death.
-        # A NON-LOCAL transport breaks that inference: a relay must not close
-        # the supervisor-side connection while its controller lives, or this
-        # branch must become TTL-gated. Recorded, not yet needed.
-        #
-        # The token proves incumbency, not authenticity -- it is a small
-        # monotone integer. Authentication is the same-uid peer-cred gate on
-        # accept (ss1); a same-uid process is already inside the trust
-        # boundary and can signal the engine directly.
-        if self._lease_active() and self.lease is not None and self.lease.conn is not None:
-            incumbent = req.get("incarnation") == self.incarnation and _is_wire_int_equal(
-                req.get("token"), self.lease.token
-            )
-            if not incumbent:
-                return {
+        return self._lease_verb(conn, _Acquire(controller_id, float(req.get("ttl_s", 60)), req))
+
+    def _h_renew(self, conn: _Conn, req: dict[str, Any]) -> dict[str, Any]:
+        return self._lease_verb(conn, _Renew(req))
+
+    def _h_release(self, conn: _Conn, req: dict[str, Any]) -> dict[str, Any]:
+        return self._lease_verb(conn, _Release(req))
+
+    def _lease_verb(self, conn: _Conn, msg: _LeaseMessage) -> dict[str, Any]:
+        """Dispatch a lease verb to the handler of the lease's current phase,
+        and take the transition that handler names (SUPERVISOR_LEASE)."""
+        before = lease_phase(self.lease, time.monotonic())
+        match before:
+            case "live":
+                reply, taken = self._lease_live(conn, msg)
+            case "orphaned":
+                reply, taken = self._lease_orphaned(conn, msg)
+            case _:
+                reply, taken = self._lease_unheld(conn, msg)
+        if taken is not None:
+            SUPERVISOR_LEASE.take(taken, before, lease_phase(self.lease, time.monotonic()))
+        return reply
+
+    def _lease_live(self, conn: _Conn, msg: _LeaseMessage) -> _LeaseAnswer:
+        """A LIVE lease -- unexpired AND its holder's connection still open --
+        yields only to the holder itself, and the holder proves incumbency by
+        presenting its CURRENT token (DL-79). controller_id is a label, not a
+        credential: any client may send any string, and until DL-79 a matching
+        one took the lease away from a live holder. That was safe only because
+        one run_root had one engine, which the engine's own control-socket bind
+        enforced ON THIS MACHINE; the moment a second host can serve the same
+        logical run, the label stops discriminating and the partitioned OLD
+        leader fences out the new one.
+
+        The token proves incumbency, not authenticity -- it is a small monotone
+        integer. Authentication is the same-uid peer-cred gate on accept (ss1);
+        a same-uid process is already inside the trust boundary and can signal
+        the engine directly."""
+        assert self.lease is not None  # the phase is live
+        match msg:
+            case _Acquire(req=req) if req.get("incarnation") == self.incarnation and (
+                _is_wire_int_equal(req.get("token"), self.lease.token)
+            ):
+                return self._grant(conn, msg), LEASE_REKEY
+            case _Acquire():
+                refusal = {
                     "ok": False,
                     "error": "lease_held",
                     "holder": self.lease.holder,
                     "expires_at": self.lease.expires_at,
                 }
+                return refusal, None
+            case _Renew(req=req):
+                return self._extend(req, LEASE_RENEW)
+            case _:
+                return self._drop_lease(msg.req)
+
+    def _lease_orphaned(self, conn: _Conn, msg: _LeaseMessage) -> _LeaseAnswer:
+        """An ORPHANED lease -- unexpired, its holder's connection gone -- is
+        freely grantable, and that is what lets a crashed engine's resume
+        re-acquire without waiting out the TTL. It is sound here because the
+        kernel closes this AF_UNIX fd only when the holder process is gone
+        (kill -9 included), so EOF is proof of death. A NON-LOCAL transport
+        breaks that inference: a relay must not close the supervisor-side
+        connection while its controller lives, or this branch must become
+        TTL-gated. Recorded, not yet needed.
+
+        RENEW and RELEASE still pass with this incarnation and the current
+        token, from any connection (ss5 checks nothing else)."""
+        match msg:
+            case _Acquire():
+                return self._grant(conn, msg), LEASE_GRANT
+            case _Renew(req=req):
+                return self._extend(req, LEASE_RENEW_ORPHANED)
+            case _:
+                return self._drop_lease(msg.req)
+
+    def _lease_unheld(self, conn: _Conn, msg: _LeaseMessage) -> _LeaseAnswer:
+        """No record, or an expired one: ACQUIRE grants; RENEW and RELEASE
+        have nothing to act on and are refused."""
+        match msg:
+            case _Acquire():
+                return self._grant(conn, msg), LEASE_GRANT
+            case _:
+                refusal = self._check_token(msg.req)
+                # an unheld lease never passes the token check: time does not
+                # run backwards, so an expired lease cannot turn active
+                assert refusal is not None
+                return refusal, None
+
+    def _grant(self, conn: _Conn, msg: _Acquire) -> dict[str, Any]:
+        """Mint a token and make `conn` the holder's connection."""
         token = self._next_token
         self._next_token += 1  # monotonic: never regresses while any run is alive
-        expires_at = datetime.fromtimestamp(time.time() + ttl_s, UTC).isoformat()
+        expires_at = datetime.fromtimestamp(time.time() + msg.ttl_s, UTC).isoformat()
         previous = self.lease
-        self.lease = _Lease(controller_id, token, time.monotonic() + ttl_s, expires_at, conn)
-        if previous is not None and previous.holder == controller_id:
+        self.lease = _Lease(
+            msg.controller_id, token, time.monotonic() + msg.ttl_s, expires_at, conn
+        )
+        if previous is not None and previous.holder == msg.controller_id:
             self.lease.pushes_dropped = previous.pushes_dropped
             self.lease.drops = previous.drops
         return {
@@ -966,20 +1325,22 @@ class Supervisor:
             "incarnation": self.incarnation,  # DL-80: pair it with the token
         }
 
-    def _h_renew(self, _conn: _Conn, req: dict[str, Any]) -> dict[str, Any]:
+    def _extend(self, req: dict[str, Any], taken: Transition[LeasePhase]) -> _LeaseAnswer:
+        """RENEW: the token check first, then ttl_s."""
         if (err := self._check_token(req)) is not None:
-            return err
-        assert self.lease is not None
+            return err, None
+        assert self.lease is not None  # the token check passed
         ttl_s = float(req.get("ttl_s", 60))
         self.lease.deadline = time.monotonic() + ttl_s
         self.lease.expires_at = datetime.fromtimestamp(time.time() + ttl_s, UTC).isoformat()
-        return {"ok": True, "expires_at": self.lease.expires_at}
+        return {"ok": True, "expires_at": self.lease.expires_at}, taken
 
-    def _h_release(self, _conn: _Conn, req: dict[str, Any]) -> dict[str, Any]:
+    def _drop_lease(self, req: dict[str, Any]) -> _LeaseAnswer:
+        """RELEASE: the token check, then the record goes."""
         if (err := self._check_token(req)) is not None:
-            return err
+            return err, None
         self.lease = None
-        return {"ok": True}
+        return {"ok": True}, LEASE_RELEASE
 
     # -- spawn / signal -----------------------------------------------------
 
@@ -1442,14 +1803,25 @@ class Supervisor:
             return err
         # ss5 order: wait for wrappers FIRST, reply {ok}, exit, unlink -- the
         # earlier reply-then-teardown also double-sent {ok} (review fix, DL-48)
-        self._orderly_shutdown()
+        self._orderly_shutdown(PROCESS_SHUTDOWN)
         return {"ok": True}
 
-    def _orderly_shutdown(self) -> None:
+    def _orderly_shutdown(self, trigger: Transition[ProcessState]) -> None:
         """The one place the supervisor escalates TERM->KILL (the engine may be
         gone). Lifelines stay OPEN until each wrapper exits, so wrappers observe
-        the command deaths and record signaled/exited -- never parent-lost."""
+        the command deaths and record signaled/exited -- never parent-lost.
+
+        `trigger` is the transition that asked for it: SHUTDOWN or a signal. A
+        signal latched while a shutdown ran is consumed after the stop, finds
+        the process stopped, and does nothing more. No SHUTDOWN request is
+        dispatched after the stop."""
         self._shutdown_requested = False
+        match self.state:
+            case "stopped":
+                self._move(PROCESS_REPEAT, "stopped")
+                return
+            case _:
+                self._move(trigger, "shutting_down")
         live = [r for r in self.runs.values() if r.wrapper_rc is None]
         # a JUST-spawned wrapper may not have written spawn.json yet, and
         # _signal_command is a silent no-op without it -- the wrapper would
@@ -1487,7 +1859,7 @@ class Supervisor:
                 self._reap()
                 break
             time.sleep(0.02)
-        self._running = False
+        self._move(PROCESS_DRAINED, "stopped")
 
     # -- reaping ------------------------------------------------------------
 
@@ -1549,9 +1921,20 @@ class Supervisor:
             self.runs.pop(self._completed.popleft(), None)
 
     def _teardown(self) -> None:
-        # One deadline for all clients, including a SHUTDOWN reply. No
-        # requests are dispatched after shutdown, even if reads are ready.
-        self._running = False
+        if self.state == "closed":
+            return  # closed is final: a second teardown has nothing to release
+        # What this incarnation owns is read off the state it ends from.
+        entered = self.state
+        published = entered in ("serving", "shutting_down", "stopped")
+        private_bound = entered == "bound"
+        # Closed first, so no request is dispatched while replies flush, even
+        # if reads are ready. One deadline for all clients, including a
+        # SHUTDOWN reply.
+        match entered:
+            case "stopped" | "refused":
+                self._move(PROCESS_TEARDOWN, "closed")
+            case _:
+                self._move(PROCESS_ABORTED, "closed")
         deadline = time.monotonic() + 2.0
         while any(conn.out for conn in self._conns.values()):
             remaining = deadline - time.monotonic()
@@ -1565,17 +1948,17 @@ class Supervisor:
         if self._listen is not None:
             with contextlib.suppress(Exception):
                 self._listen.close()
-        if self._published:
+        if published:
             with contextlib.suppress(OSError):
                 if os.stat(self.sock_path).st_ino == self._socket_inode:
                     os.unlink(self.sock_path)
-        if self._published or self._private_bound:
+        if published or private_bound:
             with contextlib.suppress(RecursionError):
                 record = _load_json(self.pid_path)
                 if record is not None and record.get("incarnation") == self.incarnation:
                     with contextlib.suppress(OSError):
                         os.unlink(self.pid_path)
-        if self._private_bound:
+        if private_bound:
             with contextlib.suppress(OSError):
                 os.unlink(self._private_path)
         for run in self.runs.values():

@@ -5,7 +5,15 @@ from __future__ import annotations
 from typing import Any
 
 from dsl41.boundary import ANCHOR_HEAD, PERIOD_ROW
+from dsl41.runner_adapters import SUPERVISOR_CLIENT
+from dsl41.runner_supervisor import SUPERVISOR_LEASE, SUPERVISOR_PROCESS
 from dsl41.state_machine import StateMachine
 
 # Later slices add each machine here.
-MACHINES: tuple[StateMachine[Any], ...] = (ANCHOR_HEAD, PERIOD_ROW)
+MACHINES: tuple[StateMachine[Any], ...] = (
+    ANCHOR_HEAD,
+    PERIOD_ROW,
+    SUPERVISOR_PROCESS,
+    SUPERVISOR_LEASE,
+    SUPERVISOR_CLIENT,
+)
