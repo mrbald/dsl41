@@ -153,11 +153,18 @@ sigterm = true
 # the other state machines: the oracle and its capacity queue, the scheduler,
 # the control server, and the period, seal, retention and boundary code.
 #
-# Deliberately NOT listed: runner_supervisor.py, runner_wrapper.py and
-# runner_adapters.py. DL-265 measures the supervisor and wrapper processes
-# too, and their numbers print in `scripts/branch_coverage.py`; widening the
-# gate to them is the owner's call. The CLI, TUI, viz and compiler tiers are
-# not state machines and get the suite's ordinary scrutiny, not this one.
+# The supervisor, the wrapper and their shared process-identity helpers are
+# listed too. DL-265 measures those processes. `teardown_supervisor` ends a
+# supervisor with SIGTERM so its data is written; the tests that simulate a
+# crash still SIGKILL, and lose that process's data. A platform arm is driven
+# through a stand-in for `sys.platform`, `/proc`, `ps` or the socket module, and
+# a wake-up the wrapper would otherwise get only from its own `ps` probes (macOS)
+# is sent by the test, so the number does not depend on the host.
+#
+# Deliberately NOT listed: runner_adapters.py. Its numbers print in
+# `scripts/branch_coverage.py`; widening the gate to it is the owner's call.
+# The CLI, TUI, viz and compiler tiers are not state machines and get the
+# suite's ordinary scrutiny, not this one.
 include = [
     "src/dsl41/boundary.py",
     "src/dsl41/capacity.py",
@@ -176,8 +183,11 @@ include = [
     "src/dsl41/runner_hosts.py",
     "src/dsl41/runner_journal.py",
     "src/dsl41/runner_ledger.py",
+    "src/dsl41/runner_procid.py",
     "src/dsl41/runner_scheduler.py",
     "src/dsl41/runner_startup.py",
+    "src/dsl41/runner_supervisor.py",
+    "src/dsl41/runner_wrapper.py",
     "src/dsl41/seal.py",
     # the shared state-machine core and its registry
     "src/dsl41/state_machine.py",

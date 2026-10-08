@@ -305,3 +305,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-291 | The supervisor tier is three state machines, and lease renewal never stops while the client is open |  |
 | DL-292 | A control input is dry-applied before it is admitted, a transition violation has one channel and one policy, and a replayed fault names its input |  |
 | DL-293 | The oracle's job lifecycle, flags, holding and assembly are state machines, and every ignored event is a declared internal transition |  |
+| DL-294 | The supervisor, the wrapper and process identity join the 100% branch gate |  |

@@ -19552,3 +19552,41 @@ relitigate an entry; append a new one.
   exhaustive test sets the strict variable itself, checks the trace for
   violation lines, and claims only the states its builder reaches) were
   applied after round three.
+- DL-294 The supervisor, the wrapper and process identity join the 100% branch
+  gate
+  (2026-10-08; pyproject.toml `[tool.coverage.report]`, tests/conftest.py,
+  tests/test_runner_supervisor.py, tests/test_supervisor_branches.py,
+  tests/test_wrapper_branches.py, tests/test_procid_branches.py,
+  tests/wrapper_branch_driver.py, src/dsl41/runner_supervisor.py (one pragma
+  comment), README.md (test count))
+  THE GATE. runner_supervisor.py, runner_wrapper.py and runner_procid.py are
+  now in the 100% branch gate (DL-105). This narrows DL-269's "STILL
+  OUTSIDE" list to runner_adapters.py, which follows once its own changes
+  settle. Missed branches went from 54 of 370, 15 of 52 and 6 of 32 to none,
+  on macOS and on Linux (Python 3.12 and 3.14). One branch carries a pragma:
+  the supervisor's run loop has no fourth selector tag, because only three
+  are registered.
+  WHY HALF THE MISSES WERE NOT MISSES. About half the supervisor's missed
+  branches were already driven by real-process tests. The tests' teardown
+  ended the supervisor with SIGKILL, and a process killed that way loses its
+  coverage data (DL-265). `teardown_supervisor` now kills the command groups,
+  sends SIGTERM, waits up to 15 seconds, and only then sends SIGKILL, with
+  one warning line naming the test. Tests that simulate a crash still send
+  SIGKILL themselves. The 48 teardowns cost about 5 seconds in all.
+  HOST INDEPENDENCE. The platform arms (peer credentials, the subreaper,
+  /proc against `ps`, waitid against waitpid) run through stand-ins, so the
+  gate does not depend on the host. One wrapper branch, a wake-up that is
+  neither the child's exit nor the lifeline's end of file, was reached on
+  macOS only because the wrapper's own `ps` probes raise SIGCHLD; Linux reads
+  /proc and forks nothing. A test now sends SIGCHLD itself while the command
+  waits, so both hosts take the branch.
+  OPEN. On macOS, `waitid(WEXITED)` also reports a stopped child, so a
+  command stopped with SIGSTOP is recorded as `signaled 17` while it is
+  still alive (runner_wrapper.py, the exit observation). Linux reports only
+  exits there. It needs its own fix and review.
+  REVIEW. Tests class: one Opus reviewer. It found the Linux-only gap, the
+  stopped-child bug, a misleading gate comment, several tests that asserted
+  less than their names claimed, a fake pid of 1 that a regression could
+  signal, and a race test that could leave a process behind. All are fixed
+  except the stopped-child bug, which is recorded above, and the reviewer
+  confirmed them.

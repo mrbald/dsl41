@@ -166,11 +166,25 @@ class RawClient:
 
 
 def teardown_supervisor(run_root: Path, proc: subprocess.Popen) -> None:
-    """Best-effort: kill any surviving command groups + the supervisor."""
-    _kill_group(run_root)
+    """Best-effort: kill any surviving command groups, then stop the supervisor.
+
+    SIGTERM first: it shuts down in order and exits, which lets coverage write
+    the process's data (DL-265); a SIGKILLed process loses it. SIGKILL only if
+    the orderly stop does not finish."""
+    _kill_group(run_root, supervisor=False)
     if proc.poll() is None:
-        proc.kill()
-        proc.wait()
+        proc.terminate()
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            test = os.environ.get("PYTEST_CURRENT_TEST", "?")
+            print(
+                f"teardown_supervisor: SIGTERM did not stop the supervisor in 15 s; "
+                f"SIGKILL, so its coverage data is lost ({test})",
+                file=sys.stderr,
+            )
+            proc.kill()
+            proc.wait()
 
 
 # ------------------------------------------------------ import boundary + unit
@@ -1999,7 +2013,9 @@ def test_oracle_kill_detached_terminates(short_root: Path) -> None:
     wait_for(lambda: not pid_alive(spawn["command_pid"]))  # zombie until the wrapper reaps
 
 
-def _kill_group(run_root: Path) -> None:
+def _kill_group(run_root: Path, *, supervisor: bool = True) -> None:
+    """SIGKILL every recorded command group, and the supervisor itself unless
+    `supervisor` is false (the orderly stop in `teardown_supervisor`)."""
     runs = run_root / "runs"
     if runs.is_dir():
         for entry in runs.iterdir():
@@ -2010,35 +2026,9 @@ def _kill_group(run_root: Path) -> None:
                     if isinstance(pgid, int):
                         os.killpg(pgid, signal.SIGKILL)
     sup = run_root / "supervisor.pid"
-    if sup.exists():
+    if supervisor and sup.exists():
         with contextlib.suppress(Exception):
             os.kill(json.loads(sup.read_text())["pid"], signal.SIGKILL)
-
-
-@pytest.fixture
-def queued_supervisor(short_root: Path):
-    """In-process selector with real sockets and explicit descriptor cleanup."""
-    sup = runner_supervisor.Supervisor(str(short_root))
-    peers = []
-
-    def connect():
-        server, peer = socket.socketpair()
-        server.setblocking(False)
-        peer.settimeout(1)
-        conn = runner_supervisor._Conn(server)
-        sup._conns[server.fileno()] = conn
-        sup._sel.register(server, selectors.EVENT_READ, ("conn", conn))
-        peers.append(peer)
-        return conn, peer
-
-    yield sup, connect
-    for conn in list(sup._conns.values()):
-        sup._drop_conn(conn)
-    for peer in peers:
-        peer.close()
-    for fd in (sup._chld_r, sup._chld_w):
-        os.close(fd)
-    sup._sel.close()
 
 
 def _flush_reply(sup, conn, peer):
