@@ -101,7 +101,7 @@ stateDiagram-v2
     s3 --> s0 : job_status.27 member moves [box_failure holds] / kill the job_terminator members
     s3 --> s5 : job_status.28 completion moment [every member done, no failed vote, no box_success]
     s3 --> s0 : job_status.29 completion moment [every member done, a failed vote, no box_failure] / kill the job_terminator members
-    s3 --> s6 : job_status.30 member ends FAILURE [the member has box_terminator] / kill the job_terminator members
+    s3 --> s6 : job_status.30 member ends FAILURE or TERMINATED [the member has box_terminator, a TERMINATED end only under box-terminator-on-terminated=true] / kill the job_terminator members
     s0 --> s5 : job_status.31 member ends, or a member set INACTIVE [every member that is not INACTIVE is terminal, box_success holds]
     s1 --> s5 : job_status.31 member ends, or a member set INACTIVE [every member that is not INACTIVE is terminal, box_success holds]
     s2 --> s5 : job_status.31 member ends, or a member set INACTIVE [every member that is not INACTIVE is terminal, box_success holds]
@@ -131,13 +131,13 @@ stateDiagram-v2
     s5 --> s5 : job_status.38 KILLJOB [not running or queued] / an EVENT_IGNORED trace line
     s0 --> s0 : job_status.39 KILLJOB [not running or queued] / an EVENT_IGNORED trace line
     s6 --> s6 : job_status.40 KILLJOB [not running or queued] / an EVENT_IGNORED trace line
-    s1 --> s1 : job_status.41 start refused [already live or queued, a member whose box is not RUNNING, or that ran in this box execution, a stale deferred start or scan] / a START_REFUSED trace line
-    s2 --> s2 : job_status.42 start refused [already live or queued, a member whose box is not RUNNING, or that ran in this box execution, a stale deferred start or scan] / a START_REFUSED trace line
-    s4 --> s4 : job_status.43 start refused [already live or queued, a member whose box is not RUNNING, or that ran in this box execution, a stale deferred start or scan] / a START_REFUSED trace line
-    s3 --> s3 : job_status.44 start refused [already live or queued, a member whose box is not RUNNING, or that ran in this box execution, a stale deferred start or scan] / a START_REFUSED trace line
-    s5 --> s5 : job_status.45 start refused [already live or queued, a member whose box is not RUNNING, or that ran in this box execution, a stale deferred start or scan] / a START_REFUSED trace line
-    s0 --> s0 : job_status.46 start refused [already live or queued, a member whose box is not RUNNING, or that ran in this box execution, a stale deferred start or scan] / a START_REFUSED trace line
-    s6 --> s6 : job_status.47 start refused [already live or queued, a member whose box is not RUNNING, or that ran in this box execution, a stale deferred start or scan] / a START_REFUSED trace line
+    s1 --> s1 : job_status.41 start refused [already live or queued, a member whose box is not RUNNING, or that ran in this box execution, or was taken off ice in it, a stale deferred start or scan] / a START_REFUSED trace line
+    s2 --> s2 : job_status.42 start refused [already live or queued, a member whose box is not RUNNING, or that ran in this box execution, or was taken off ice in it, a stale deferred start or scan] / a START_REFUSED trace line
+    s4 --> s4 : job_status.43 start refused [already live or queued, a member whose box is not RUNNING, or that ran in this box execution, or was taken off ice in it, a stale deferred start or scan] / a START_REFUSED trace line
+    s3 --> s3 : job_status.44 start refused [already live or queued, a member whose box is not RUNNING, or that ran in this box execution, or was taken off ice in it, a stale deferred start or scan] / a START_REFUSED trace line
+    s5 --> s5 : job_status.45 start refused [already live or queued, a member whose box is not RUNNING, or that ran in this box execution, or was taken off ice in it, a stale deferred start or scan] / a START_REFUSED trace line
+    s0 --> s0 : job_status.46 start refused [already live or queued, a member whose box is not RUNNING, or that ran in this box execution, or was taken off ice in it, a stale deferred start or scan] / a START_REFUSED trace line
+    s6 --> s6 : job_status.47 start refused [already live or queued, a member whose box is not RUNNING, or that ran in this box execution, or was taken off ice in it, a stale deferred start or scan] / a START_REFUSED trace line
     s4 --> s4 : job_status.48 ON_ICE [the vendor ignores it for a live job] / an EVENT_IGNORED trace line
     s3 --> s3 : job_status.49 ON_ICE [the vendor ignores it for a live job] / an EVENT_IGNORED trace line
     s4 --> s4 : job_status.50 ON_HOLD [the vendor ignores it for a live job] / an EVENT_IGNORED trace line
@@ -182,7 +182,7 @@ stateDiagram-v2
 | job_status.27 | RUNNING | member moves | box_failure holds | kill the job_terminator members | FAILURE | SEM-12, SEM-14 |  |
 | job_status.28 | RUNNING | completion moment | every member done, no failed vote, no box_success |  | SUCCESS | SEM-11 |  |
 | job_status.29 | RUNNING | completion moment | every member done, a failed vote, no box_failure | kill the job_terminator members | FAILURE | SEM-11, SEM-14 |  |
-| job_status.30 | RUNNING | member ends FAILURE | the member has box_terminator | kill the job_terminator members | TERMINATED | SEM-14 |  |
+| job_status.30 | RUNNING | member ends FAILURE or TERMINATED | the member has box_terminator, a TERMINATED end only under box-terminator-on-terminated=true | kill the job_terminator members | TERMINATED | SEM-14 |  |
 | job_status.31 | FAILURE, INACTIVE, QUE_WAIT | member ends, or a member set INACTIVE | every member that is not INACTIVE is terminal, box_success holds |  | SUCCESS | SEM-15 |  |
 | job_status.32 | INACTIVE, QUE_WAIT, SUCCESS | member ends, or a member set INACTIVE | every member that is not INACTIVE is terminal, box_failure holds |  | FAILURE | SEM-15 |  |
 | job_status.33 | FAILURE, INACTIVE, QUE_WAIT | member ends, or a member set INACTIVE | every member that is not INACTIVE is terminal, no override holds, no member failed, no box_success |  | SUCCESS | SEM-15, DL-242 |  |
@@ -193,13 +193,13 @@ stateDiagram-v2
 | job_status.38 | SUCCESS | KILLJOB | not running or queued | an EVENT_IGNORED trace line | SUCCESS | DL-64, DL-81 |  |
 | job_status.39 | FAILURE | KILLJOB | not running or queued | an EVENT_IGNORED trace line | FAILURE | DL-64, DL-81 |  |
 | job_status.40 | TERMINATED | KILLJOB | not running or queued | an EVENT_IGNORED trace line | TERMINATED | DL-64, DL-81 |  |
-| job_status.41 | INACTIVE | start refused | already live or queued, a member whose box is not RUNNING, or that ran in this box execution, a stale deferred start or scan | a START_REFUSED trace line | INACTIVE | DL-64, DL-81, DL-246, DL-257 |  |
-| job_status.42 | QUE_WAIT | start refused | already live or queued, a member whose box is not RUNNING, or that ran in this box execution, a stale deferred start or scan | a START_REFUSED trace line | QUE_WAIT | DL-64, DL-81, DL-246, DL-257 |  |
-| job_status.43 | STARTING | start refused | already live or queued, a member whose box is not RUNNING, or that ran in this box execution, a stale deferred start or scan | a START_REFUSED trace line | STARTING | DL-64, DL-81, DL-246, DL-257 |  |
-| job_status.44 | RUNNING | start refused | already live or queued, a member whose box is not RUNNING, or that ran in this box execution, a stale deferred start or scan | a START_REFUSED trace line | RUNNING | DL-64, DL-81, DL-246, DL-257 |  |
-| job_status.45 | SUCCESS | start refused | already live or queued, a member whose box is not RUNNING, or that ran in this box execution, a stale deferred start or scan | a START_REFUSED trace line | SUCCESS | DL-64, DL-81, DL-246, DL-257 |  |
-| job_status.46 | FAILURE | start refused | already live or queued, a member whose box is not RUNNING, or that ran in this box execution, a stale deferred start or scan | a START_REFUSED trace line | FAILURE | DL-64, DL-81, DL-246, DL-257 |  |
-| job_status.47 | TERMINATED | start refused | already live or queued, a member whose box is not RUNNING, or that ran in this box execution, a stale deferred start or scan | a START_REFUSED trace line | TERMINATED | DL-64, DL-81, DL-246, DL-257 |  |
+| job_status.41 | INACTIVE | start refused | already live or queued, a member whose box is not RUNNING, or that ran in this box execution, or was taken off ice in it, a stale deferred start or scan | a START_REFUSED trace line | INACTIVE | DL-64, DL-81, DL-246, DL-257, SEM-20 |  |
+| job_status.42 | QUE_WAIT | start refused | already live or queued, a member whose box is not RUNNING, or that ran in this box execution, or was taken off ice in it, a stale deferred start or scan | a START_REFUSED trace line | QUE_WAIT | DL-64, DL-81, DL-246, DL-257, SEM-20 |  |
+| job_status.43 | STARTING | start refused | already live or queued, a member whose box is not RUNNING, or that ran in this box execution, or was taken off ice in it, a stale deferred start or scan | a START_REFUSED trace line | STARTING | DL-64, DL-81, DL-246, DL-257, SEM-20 |  |
+| job_status.44 | RUNNING | start refused | already live or queued, a member whose box is not RUNNING, or that ran in this box execution, or was taken off ice in it, a stale deferred start or scan | a START_REFUSED trace line | RUNNING | DL-64, DL-81, DL-246, DL-257, SEM-20 |  |
+| job_status.45 | SUCCESS | start refused | already live or queued, a member whose box is not RUNNING, or that ran in this box execution, or was taken off ice in it, a stale deferred start or scan | a START_REFUSED trace line | SUCCESS | DL-64, DL-81, DL-246, DL-257, SEM-20 |  |
+| job_status.46 | FAILURE | start refused | already live or queued, a member whose box is not RUNNING, or that ran in this box execution, or was taken off ice in it, a stale deferred start or scan | a START_REFUSED trace line | FAILURE | DL-64, DL-81, DL-246, DL-257, SEM-20 |  |
+| job_status.47 | TERMINATED | start refused | already live or queued, a member whose box is not RUNNING, or that ran in this box execution, or was taken off ice in it, a stale deferred start or scan | a START_REFUSED trace line | TERMINATED | DL-64, DL-81, DL-246, DL-257, SEM-20 |  |
 | job_status.48 | STARTING | ON_ICE | the vendor ignores it for a live job | an EVENT_IGNORED trace line | STARTING | DL-254 |  |
 | job_status.49 | RUNNING | ON_ICE | the vendor ignores it for a live job | an EVENT_IGNORED trace line | RUNNING | DL-254 |  |
 | job_status.50 | STARTING | ON_HOLD | the vendor ignores it for a live job | an EVENT_IGNORED trace line | STARTING | DL-254 |  |
@@ -226,8 +226,8 @@ stateDiagram-v2
     state "noexec_on" as s7
     s4 --> s5 : job_flags.01 ON_ICE [not STARTING or RUNNING (else ignored), a second ice changes nothing] / a queued job leaves the queue, a first ice on a member is a completion moment
     s5 --> s5 : job_flags.01 ON_ICE [not STARTING or RUNNING (else ignored), a second ice changes nothing] / a queued job leaves the queue, a first ice on a member is a completion moment
-    s4 --> s4 : job_flags.02 OFF_ICE / no re-evaluation: conditions must reoccur
-    s5 --> s4 : job_flags.02 OFF_ICE / no re-evaluation: conditions must reoccur
+    s4 --> s4 : job_flags.02 OFF_ICE / no re-evaluation: conditions must reoccur. From ice_on only, under off-ice-in-running-box=next-run: a member of a RUNNING box that has not run there sits that run out
+    s5 --> s4 : job_flags.02 OFF_ICE / no re-evaluation: conditions must reoccur. From ice_on only, under off-ice-in-running-box=next-run: a member of a RUNNING box that has not run there sits that run out
     s5 --> s4 : job_flags.03 FORCE_STARTJOB [not live] / the start goes on
     s2 --> s3 : job_flags.04 ON_HOLD [not STARTING or RUNNING (else ignored)] / a held waiter blocks no one
     s3 --> s3 : job_flags.04 ON_HOLD [not STARTING or RUNNING (else ignored)] / a held waiter blocks no one
@@ -255,7 +255,7 @@ stateDiagram-v2
 | Id | Source | Trigger | Guard | Effect | Target | Cite | Mark |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | job_flags.01 | ice_off, ice_on | ON_ICE | not STARTING or RUNNING (else ignored), a second ice changes nothing | a queued job leaves the queue, a first ice on a member is a completion moment | ice_on | SEM-20, DL-254, DL-285 |  |
-| job_flags.02 | ice_off, ice_on | OFF_ICE |  | no re-evaluation: conditions must reoccur | ice_off | SEM-20 |  |
+| job_flags.02 | ice_off, ice_on | OFF_ICE |  | no re-evaluation: conditions must reoccur. From ice_on only, under off-ice-in-running-box=next-run: a member of a RUNNING box that has not run there sits that run out | ice_off | SEM-20 |  |
 | job_flags.03 | ice_on | FORCE_STARTJOB | not live | the start goes on | ice_off | SEM-23, DL-243 |  |
 | job_flags.04 | hold_off, hold_on | ON_HOLD | not STARTING or RUNNING (else ignored) | a held waiter blocks no one | hold_on | SEM-21, DL-254, DL-247 |  |
 | job_flags.05 | hold_off, hold_on | OFF_HOLD |  | attempt the start, or wake the queue for a queued job | hold_off | SEM-21, DL-50 |  |

@@ -312,3 +312,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-298 | Seven more modules join the 100% branch gate |  |
 | DL-299 | The engine-side supervisor adapters join the 100% branch gate, and two resource leaks are closed |  |
 | DL-300 | Four supervisor and wrapper fixes: a stopped command is not an exit, a lease with no representable expiry changes nothing, nothing is dispatched while shutting... | [docs/supervisor-protocol.md](supervisor-protocol.md) |
+| DL-301 | A member taken off ice in a running box sits out that run, and box_terminator fires on TERMINATED as well as FAILURE; both are switches |  |

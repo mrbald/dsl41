@@ -113,7 +113,12 @@ from dsl41.runner_clock import EngineError
 #: 17 since DL-285: an ON_ICE on a member that has not run in a RUNNING box
 #: runs the box's completion check, so a replay with such an event can
 #: complete a box that v16 left RUNNING.
-STATE_MACHINE_VERSION = 17
+#: 18 since DL-301 (SEM-14 and SEM-20's box clauses): a member taken off
+#: ice while its box runs sits that run out, and a box_terminator member that ends
+#: TERMINATED terminates its box (both by default, each behind a switch),
+#: so a replay with such an event can complete or terminate a box that v17
+#: left RUNNING.
+STATE_MACHINE_VERSION = 18
 
 LOCK_NAME = "leader.lock"
 

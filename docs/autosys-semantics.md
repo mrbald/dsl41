@@ -237,8 +237,15 @@ The first two resolve the member as INACTIVE.
   neither is an ice on a member already iced or resolved. A box that is not RUNNING
   re-derives nothing, since SEM-15 reads members' statuses.
 
+A fourth way out is no completion moment of its own. A member taken off ice while the box
+runs, before it ran in that run, stays out of the fold until the box's next run (SEM-20's box
+clause, under the default `off-ice-in-running-box=next-run`). The ice already took it out, so
+the OFF_ICE changes nothing the fold reads, and the box completes without it.
+
 The box row records the first two kinds in `window_skipped_members`; the member's own later
-start voids its mark. An iced member carries its own flag. A resolved member stays settled if
+start voids its mark. An iced member carries its own flag. A member taken off ice in the run
+carries a mark in `iced_out_members`; a forced start of it voids the mark, and the forced run
+votes. While a forced start of it is queued or live, the fold waits for it. A resolved member stays settled if
 an operator later gives it a status that is not live; the fold still votes over members that
 ran. A resolved or iced member is a completion moment
 for every running ancestor's overrides too, since "inside" is transitive (SEM-12). A member
@@ -266,9 +273,28 @@ changes, until the next box start.
 
 ### SEM-14 · box_terminator / job_terminator **[V/C]**
 Control flow, not alarms:
-- `box_terminator: 1` on a member — if this member FAILs, terminate the containing box.
-- `job_terminator: 1` on a member — if the containing box terminates/fails, terminate this member.
+- `box_terminator: 1` on a member: if this member ends FAILURE or TERMINATED, terminate the
+  containing box. **[V]** "Force the Job or the Box to Stop Running" (AutoSys 12.1 and 24.2,
+  the same text): "This attribute specifies that if the job completes with a FAILURE or
+  TERMINATED status, the box terminates." The reference page "box_terminator -- Terminate Box
+  on Job Failure" (AutoSys 24.2) gives the mechanism: "The scheduler sends a KILLJOB event to
+  terminate the parent box." Its value line names FAILURE only: "Instructs the scheduler to
+  terminate the parent box when the job ends in FAILURE." Its own example "terminates the
+  containing Box job if the job you are defining fails or is terminated". The default follows
+  the scheduling guide and the example: a TERMINATED end counts. That covers a KILLJOB on a
+  running member, an injected TERMINATED, and a KILLJOB on a queued member, which DL-50
+  dequeues to TERMINATED. A `term_run_time` kill and a subbox with box_terminator that ends
+  TERMINATED count the same. The `box-terminator-on-terminated` semantic switch keeps dsl41's
+  earlier reading, FAILURE only, as `false` (runner-design §8a).
+- `job_terminator: 1` on a member: if the containing box ends FAILURE or TERMINATED,
+  terminate this member. **[V]** "job_terminator Attribute -- Kill a Job if Its Box Fails"
+  (AutoSys 24.2): "The job_terminator attribute specifies whether to use a KILLJOB event to
+  terminate the job if its containing box job completes with a FAILURE or TERMINATED status."
 Members killed this way end with status TERMINATED (this matters for `d()`/`t()` consumers).
+A box_terminator member killed by its own box's job_terminator cascade does not end the box
+again: the box has already ended. Whether an operator's CHANGE_STATUS FAILURE or TERMINATED on
+a RUNNING box kills its job_terminator members is open (Q14, section 9); the oracle kills
+none.
 
 ### SEM-15 · Member status changes can ripple upward **[V/C]**
 A CHANGE_STATUS/FORCE_STARTJOB on a member of a *non-running* box can change the box's derived
@@ -329,6 +355,9 @@ DL-235 treats an injected INACTIVE: no kill is planned, its reservations release
 process's later exit is rejected as "job not live: INACTIVE", and resume does not relaunch
 it.
 
+CHANGE_STATUS RUNNING on a box is open (Q13, section 9): the oracle writes the status and
+nothing else.
+
 ---
 
 ## 3. Out-of-band status manipulation
@@ -357,6 +386,29 @@ it.
   runs (an ordinary s() atom, true under both tables). **[V]**
 - OFF_ICE: the job does **not** run even if its starting conditions currently hold. It waits
   for conditions to *reoccur*. **[V]**
+- OFF_ICE on a member of a RUNNING box that has not run in that run: the member sits the run
+  out. **[V]** "Start Conditions" (AutoSys 24.2 and 12.0, the same sentence): "If a job is
+  contained in a running box when it is taken off ice, the scheduler does not restart the job
+  until the following run of the box, even if its starting conditions recur during the
+  existing run of the box." "Job States" (AutoSys 24.2): "Jobs that are contained in running
+  boxes start the next time their starting conditions recur and a new run of their containing
+  box begins." The member stays out of the fold, so the box completes without it (SEM-11): the
+  "following run of the box" cannot begin unless the current one ends. That holds for the
+  default fold. A `box_success` or `box_failure` that names the member reads it as any
+  override reads a member that has not run, so such a box may still wait for it (SEM-12); the
+  vendor text does not address overrides. A plain start of it in that run is refused with one
+  START_REFUSED line; FORCE_STARTJOB still starts it (SEM-23), and the forced run votes. A
+  forced start that queues keeps the box waiting. The force is a one-shot override: if the
+  forced attempt leaves the queue unstarted (`queued-recheck` 1 or 2, DL-257), the mark
+  stays, the member is out of the fold again, and its recurring condition does not start it
+  in this run; only another FORCE_STARTJOB does. The box's next start clears the mark. A member that ran in the run
+  keeps its vote and is not marked. The rule applies at a subbox's own parent too. The OFF_ICE
+  does not undo the ice's completion moment (DL-285). The Web UI help (AutoSys 24.0, the
+  monitoring guide's job-command page) reads the other way: "If the specified job is in a box
+  job with a RUNNING status, the scheduler attempts to start it, conditions permitting." The
+  scheduling guide sets the default; the `off-ice-in-running-box` semantic switch keeps the
+  Web UI reading, dsl41's earlier behavior, as `same-run` (runner-design §8a). The runbook's
+  "SEM-20 box clause" protocol settles which reading a live instance follows.
 - An iced member that has not run is out of its RUNNING box's fold, so the ON_ICE itself runs
   the box's completion check (DL-285, SEM-11's third carve-out).
 - ON_ICE sent to a STARTING or RUNNING job, box or not, is ignored (DL-254). **[V]** Source:
@@ -497,6 +549,18 @@ later gate (`run_window`) still refuses the start, because the return to an exec
 the event's own effect, not conditioned on the start succeeding. `ON_NOEXEC` is not named in
 the vendor sentence and is untouched by FORCE. A job that is already STARTING/RUNNING/QUE_WAIT
 is still refused: the same page states concurrent runs of one job are unsupported.
+
+The refusal of a force on a STARTING or RUNNING job, box or not, models the
+`RESTRICT_FORCE_STARTJOB` configuration. **[V]** "Events" (AutoSys 24.2), FORCE_STARTJOB: "The
+product does not support concurrent runs of the same job. Errors may cause a job to stop
+progressing after the agent executes it. To avoid simultaneous executions, do not force start
+a job while it is in the STARTING or RUNNING state. In this case, change the status of the
+job. The RESTRICT_FORCE_STARTJOB environment variable enables you to force the scheduler to
+reject force start attempts on jobs that are executing." With the variable unset, the vendor
+starts a second run that it calls unsupported, and the oracle's one status per job cannot
+hold two runs. So there is no second reading to select and no switch. An estate whose
+scheduler runs with the variable unset can diverge here: an operator's force on a live job
+starts a second run there, and dsl41 refuses it.
 
 ### SEM-24 · `status:` at definition time **[V]**
 Estate-shaped JIL carries `status: ON_HOLD` on `insert_job` (including on box jobs): the job
@@ -1241,10 +1305,36 @@ member completes the box and a waiting member still hangs it (SEM-11, DL-242:
 T12a internal box_success early-exit, T12b external box_success hung-RUNNING,
 T12c box_success over a grandchild fires transitively (SEM-12) ·
 T13 sticky TERMINATED box (SEM-13) · T14 terminator cascade both directions (SEM-14) ·
+a box_terminator member ending TERMINATED, killed, injected or dequeued, ends its box under
+`box-terminator-on-terminated=true` and leaves it RUNNING under `false` (SEM-14:
+`test_sem14_a_terminated_box_terminator_member_terminates_its_box`,
+`test_sem14_under_false_a_terminated_box_terminator_member_leaves_its_box_running`,
+`test_sem14_a_failed_box_terminator_member_terminates_its_box_under_both_values`,
+`test_sem14_a_terminated_member_without_box_terminator_leaves_its_box_running`,
+`test_sem14_a_killed_queued_box_terminator_member_reads_the_switch`,
+`test_sem14_a_box_terminator_member_ended_by_term_run_time_reads_the_switch`,
+`test_sem14_a_box_terminator_subbox_that_ends_terminated_reads_the_switch`) ·
 T15 idle box ignores INACTIVE members, the single-member table (SEM-15, DL-242:
 `test_sem15_*`) · T18 box INACTIVE cascades to every contained job (SEM-18, DL-242:
 `test_sem18_*`) ·
 T20a ice downstream fires, T20b off-ice does not immediately run (SEM-20) ·
+a member taken off ice in its running box sits the run out under
+`off-ice-in-running-box=next-run` and may start under `same-run` (SEM-20:
+`test_sem20_off_ice_in_a_running_box_completes_the_box_without_the_member`,
+`test_sem20_under_same_run_off_ice_in_a_running_box_hangs_the_box`,
+`test_sem20_off_ice_in_a_running_box_and_a_recurring_condition`,
+`test_sem20_a_plain_start_of_a_member_taken_off_ice_in_its_running_box`,
+`test_sem20_a_forced_start_runs_a_member_taken_off_ice_and_it_votes`,
+`test_sem20_a_member_taken_off_ice_runs_in_the_box_s_next_run`,
+`test_sem20_off_ice_on_a_member_that_ran_keeps_its_vote`,
+`test_sem20_off_ice_while_the_box_is_idle_sets_no_mark`,
+`test_sem20_off_ice_on_a_member_that_was_not_iced_sets_no_mark`,
+`test_sem20_a_forced_member_queued_after_its_off_ice_keeps_the_box_waiting`,
+`test_sem20_a_forced_member_that_leaves_the_queue_unstarted_keeps_sitting_out`,
+`test_sem20_a_marked_member_set_running_keeps_the_box_waiting`,
+`test_sem20_off_ice_in_an_idle_subbox_of_a_running_box_sets_no_mark`,
+`test_sem20_ice_on_a_member_taken_off_ice_is_no_completion_moment`,
+`test_sem20_a_subbox_taken_off_ice_in_its_running_parent_sits_the_run_out`) ·
 ordinary vs lookback atoms on a non-live iced job follow different tables, DL-243
 (SEM-20/SEM-05, Q10 residue: `test_sem20_ordinary_atoms_on_an_iced_job_follow_the_vendor_table`,
 `test_sem20_lookback_atoms_on_an_iced_job_stay_true`,
@@ -1479,6 +1569,35 @@ holds the probe that would settle it.
   runs depends on the answer, and the case is not pursued. If it is ever needed, the
   runbook's Q12 protocol settles it: whether jil accepts each FREE code, and whether a
   QUANTITY=2 job runs after the FREE=A job ends and after the FREE=Y job fails.
+- Q13 (SEM-18): open. What CHANGE_STATUS RUNNING does to a box. "sendevent
+  Command -- Change the Status of a Job" (AutoSys 24.2) states a permission check: "If you
+  issue the sendevent command to change the status of a box to the RUNNING status, AutoSys
+  Workload Automation verifies that the security policy grants you access to send both the
+  CHANGE_STATUS and STARTJOB or FORCE_STARTJOB events", FORCE_STARTJOB "To change the status
+  of a box that specifies a condition attribute value". For a box in non-execution mode the
+  same page says: "Changing the status of a non-execution box job to the RUNNING status starts
+  the box job." The next sentence draws the contrast for a job that is not a box: "Changing
+  the status of a non-box job to RUNNING changes the status of the job in the database but
+  does not cause the job to execute." That the event starts an ordinary box too is a
+  reasonable inference from that contrast, not a vendor sentence. Three things stay unknown: whether the box-cycle reset runs (SEM-10),
+  whether the box's own condition is honored, and whether members with no condition start or
+  only wait. The oracle writes RUNNING and nothing else: no reset, no new run, no member
+  start. A member with no condition then never starts, so the box cannot complete. Since no
+  box start runs, the previous run's per-run marks stay on the box row, as its ran members
+  do: a member taken off ice in that run is still refused a plain start (SEM-20). The
+  documented rerun recipes use STARTJOB, FORCE_STARTJOB and CHANGE_STATUS INACTIVE, not this
+  event. No switch: neither reading is defined well enough to implement. No code marker.
+  The runbook's Q13 protocol settles it.
+- Q14 (SEM-14): open. Whether CHANGE_STATUS FAILURE or TERMINATED on a
+  RUNNING box kills its job_terminator members. "Events" (AutoSys 24.2), CHANGE_STATUS: "The
+  scheduler initiates any action that depends on the status of the job." "job_terminator
+  Attribute -- Kill a Job if Its Box Fails" (AutoSys 24.2) kills a member "if its containing
+  box job completes with a FAILURE or TERMINATED status". Together they lean to the kill, but
+  an operator's status write is not clearly a completion. The oracle writes the box's status
+  and kills no member; the live members finish on their own and vote nowhere, and jobs
+  downstream of the box read the written status. This cannot hang or wrongly complete a box,
+  since the box is already terminal. No switch, no code marker. The runbook's Q14 protocol
+  settles it.
 
 ## Sources
 Primary: Broadcom TechDocs, AutoSys Workload Automation 12.0/12.0.01/12.1/12.1.01 (Basic Box
@@ -1496,7 +1615,11 @@ Concepts, Box Job Completion State, Must Start/Complete Times, Manage Common Job
 Start Conditions, Job States: the Q2a/Q3/SEM-21 quotes), the monitoring guide's Manage Job
 Events pages (off-hold/STARTJOB event semantics, 12.1.01), administration pages
 (`MaxRestartTrys`, `KillSignals`), system-states reference (Events), Getting Started (AutoSys
-Architecture), Broadcom KB 186248 (global variables), KB 11013 (scheduler-outage event
+Architecture), the box terminator pages (Force the Job or the Box to Stop Running, 12.1 and
+24.2; the 24.2 `box_terminator` and `job_terminator` attribute pages: SEM-14), Start
+Conditions 12.0 and 24.2 and Job States 24.2 (the OFF_ICE box clause, SEM-20), sendevent
+Command -- Change the Status of a Job 24.2 (Q13), the 24.0 Web UI help job-command page (the
+conflicting OFF_ICE reading, SEM-20), Broadcom KB 186248 (global variables), KB 11013 (scheduler-outage event
 recovery, Q5 corroboration). Calendar entries (SEM-36..39, DL-57): Manage Calendars
 (12.0.01/12.1), Date Condition Keywords (12.0.01/12.1, byte-identical), Define Extended
 Calendars (12.0 scheduling guide, the federal-holiday worked example; 12.1.01 menu variant),

@@ -33,7 +33,8 @@ Ground rules (corpus hygiene per CLAUDE.md and LICENSING.md):
 - Record each answer as: a dossier SEM amendment that quotes the
   observation, a DL entry, and trace/fixture tests. Then retire the
   `# PENDING:` marker if the item has one (DL-06: a resolution deletes
-  its switch or marker). Q6 is dossier-only and carries no code marker.
+  its switch or marker). Q6, Q13 and Q14 are dossier-only and carry no
+  code marker.
 
 ## 1. Source catalog (re-fetch before relying on one)
 
@@ -322,6 +323,196 @@ queued, `sendevent -E CHANGE_STATUS -s INACTIVE -J <job>`), then
 `jil <<< "delete_job: <job>"` for each of the five jobs, then
 `jil <<< "delete_resource: dsl41_q12_res"` and
 `jil <<< "delete_resource: dsl41_q12y_res"`.
+
+### Q13 — CHANGE_STATUS RUNNING on a box (~3 minutes, runs /bin/true up to four times)
+
+The vendor documents a permission check for this event on a box, and
+that it starts a box in non-execution mode. dsl41 writes RUNNING and
+starts nothing (dossier §9, Q13). Box `_p` has a member with no
+condition and one gated on it; box `_q` has a condition that never
+holds.
+
+```
+jil <<'EOF'
+insert_job: dsl41_q13_p
+job_type: b
+insert_job: dsl41_q13_p1
+job_type: c
+box_name: dsl41_q13_p
+machine: <M>
+command: /bin/true
+insert_job: dsl41_q13_p2
+job_type: c
+box_name: dsl41_q13_p
+machine: <M>
+command: /bin/true
+condition: s(dsl41_q13_p1)
+insert_job: dsl41_q13_never
+job_type: c
+machine: <M>
+command: /bin/true
+insert_job: dsl41_q13_q
+job_type: b
+condition: s(dsl41_q13_never)
+insert_job: dsl41_q13_q1
+job_type: c
+box_name: dsl41_q13_q
+machine: <M>
+command: /bin/true
+EOF
+autorep -J dsl41_q13_p -d             # the run number before
+sendevent -E CHANGE_STATUS -s RUNNING -J dsl41_q13_p
+sleep 5;  autorep -J dsl41_q13_p% -d
+sleep 30; autorep -J dsl41_q13_p% -d
+sendevent -E CHANGE_STATUS -s RUNNING -J dsl41_q13_q
+sleep 30; autorep -J dsl41_q13_q% -d
+```
+
+For `_p`, read whether `_p1` and `_p2` go ACTIVATED, whether `_p1`
+starts, whether the box's run number moves, and whether the box
+completes. If `_p1` runs, `_p2` follows and the box ends SUCCESS, the
+event starts the box like a STARTJOB, and the oracle's status write is
+the gap to fix. If nothing moves and the box stays RUNNING, the oracle
+matches. For `_q`, a box that runs anyway means the event acts as a
+force; a box that does not means its condition is honored. Then, while
+`_p` is RUNNING (start it with `sendevent -E STARTJOB -J dsl41_q13_p`
+after putting `_p1` ON_HOLD), send the event again and read whether the
+run number moves. Read the event_demon log for a STARTJOB or
+FORCE_STARTJOB the scheduler generated. Capture every `autorep` output.
+Cleanup: run `jil <<< "delete_box: dsl41_q13_p"`,
+`jil <<< "delete_box: dsl41_q13_q"` and
+`jil <<< "delete_job: dsl41_q13_never"`.
+
+### Q14 — CHANGE_STATUS FAILURE or TERMINATED on a running box (~2 minutes, runs two sleeps)
+
+Whether an operator's terminal status on a RUNNING box kills its
+job_terminator members. dsl41 kills none (dossier §9, Q14).
+
+```
+jil <<'EOF'
+insert_job: dsl41_q14_r
+job_type: b
+insert_job: dsl41_q14_jt
+job_type: c
+box_name: dsl41_q14_r
+machine: <M>
+command: sleep 600
+job_terminator: 1
+insert_job: dsl41_q14_plain
+job_type: c
+box_name: dsl41_q14_r
+machine: <M>
+command: sleep 600
+EOF
+sendevent -E STARTJOB -J dsl41_q14_r
+sleep 20; autorep -J dsl41_q14_r%     # both members RUNNING
+sendevent -E CHANGE_STATUS -s TERMINATED -J dsl41_q14_r
+sleep 20; autorep -J dsl41_q14_r%
+```
+
+If `_jt` ends TERMINATED and `_plain` keeps RUNNING, the status write
+triggers the job_terminator kill; the event_demon log shows a KILLJOB
+for `_jt`. If both keep RUNNING, the oracle matches. Kill both members,
+wait for the box to settle, and repeat with `-s FAILURE`. As the control,
+repeat once more with `sendevent -E KILLJOB -J dsl41_q14_r`, which kills
+`_jt` by SEM-14's documented rule. Capture every `autorep` output and
+the event_demon log lines for each step. Cleanup: run
+`sendevent -E KILLJOB -J <job>` for a member still running, then
+`jil <<< "delete_box: dsl41_q14_r"`.
+
+### SEM-20 box clause — OFF_ICE inside a running box (~7 minutes, runs up to six short jobs)
+
+"Start Conditions" (AutoSys 24.2 and 12.0) and "Job States" (24.2) say a
+job taken off ice inside a running box waits for the box's next run; the
+Web UI help (24.0) says the scheduler attempts to start it. dsl41's
+default `off-ice-in-running-box=next-run` follows the guides: the member
+sits the run out and the box completes without it. `same-run` follows
+the Web UI help. Member `_c` waits on `_a`; `_k` keeps the box running
+past the OFF_ICE.
+
+```
+jil <<'EOF'
+insert_job: dsl41_oi
+job_type: b
+insert_job: dsl41_oi_a
+job_type: c
+box_name: dsl41_oi
+machine: <M>
+command: sleep 20
+insert_job: dsl41_oi_c
+job_type: c
+box_name: dsl41_oi
+machine: <M>
+command: /bin/true
+condition: s(dsl41_oi_a)
+insert_job: dsl41_oi_k
+job_type: c
+box_name: dsl41_oi
+machine: <M>
+command: sleep 120
+EOF
+sendevent -E JOB_ON_ICE -J dsl41_oi_c
+sendevent -E STARTJOB -J dsl41_oi
+sleep 30; autorep -J dsl41_oi%        # _a SUCCESS, _c ON_ICE, _k RUNNING
+sendevent -E JOB_OFF_ICE -J dsl41_oi_c
+sleep 5;  autorep -J dsl41_oi%
+sendevent -E FORCE_STARTJOB -J dsl41_oi_a
+sleep 30; autorep -J dsl41_oi%        # _a SUCCESS again: _c's condition recurs
+sleep 90; autorep -J dsl41_oi% -d     # after _k ends
+```
+
+Readings, after `_k` ends:
+
+- `_c` never ran and the box is SUCCESS: the guides hold, and so does
+  the default `next-run`.
+- `_c` ran after `_a`'s second SUCCESS: the Web UI reading holds;
+  `same-run` matches it, and the default would flip.
+- `_c` never ran and the box stays RUNNING: the member is kept out of
+  the run but still blocks the box. Neither switch value matches; the
+  box-completion half of the default is wrong.
+
+Then start the box again (`sendevent -E STARTJOB -J dsl41_oi`) and
+check that `_c` runs after `_a` in that run. Capture every `autorep`
+output and the event_demon log lines for `_c`. Cleanup: run
+`sendevent -E KILLJOB -J <job>` for a member still running, then
+`jil <<< "delete_box: dsl41_oi"`.
+
+Nested variant (~3 minutes). dsl41 marks a member at its direct box
+only: a member of a subbox that has not started yet, inside a running
+box, is not marked when it is taken off ice, and runs once the subbox
+starts. Whether "contained in a running box" reaches through the subbox
+is open.
+
+```
+jil <<'EOF'
+insert_job: dsl41_oin
+job_type: b
+insert_job: dsl41_oin_g
+job_type: c
+box_name: dsl41_oin
+machine: <M>
+command: sleep 40
+insert_job: dsl41_oin_s
+job_type: b
+box_name: dsl41_oin
+condition: s(dsl41_oin_g)
+insert_job: dsl41_oin_c
+job_type: c
+box_name: dsl41_oin_s
+machine: <M>
+command: /bin/true
+EOF
+sendevent -E JOB_ON_ICE -J dsl41_oin_c
+sendevent -E STARTJOB -J dsl41_oin
+sleep 10; autorep -J dsl41_oin%       # outer RUNNING, _s waiting on _g
+sendevent -E JOB_OFF_ICE -J dsl41_oin_c
+sleep 60; autorep -J dsl41_oin% -d    # after _g ends and _s starts
+```
+
+If `_c` runs once `_s` starts, dsl41's direct-box reading holds. If `_c`
+never runs and `_s` ends SUCCESS without it, the vendor reads the rule
+through the subbox; the mark would then belong on every running box
+above the member. Cleanup: run `jil <<< "delete_box: dsl41_oin"`.
 
 ### Q3c — does a member's latched tick survive into the next box run
 

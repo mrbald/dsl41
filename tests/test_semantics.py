@@ -71,6 +71,8 @@ from test_runner_leadership import engine
 T0 = datetime(2026, 7, 1, 8, 0)
 ORDINARY = {"ice-lookback": "ordinary"}
 RECHECK = {"queued-recheck": "1"}
+#: the head of the refusal's sorted list of known switch names
+_KNOWN = "known switches: box-terminator-on-terminated, dst-start-times, fw-existence, ice-lookback"
 
 #: `qc` queues behind `hq` on LOCK while its condition s(up) holds; `up`
 #: then fails, and `hq` ends: the shape where `queued-recheck` 0 and 1
@@ -203,7 +205,7 @@ def test_the_dst_start_times_default_is_the_documented_autosys_reading() -> None
 def test_the_profile_refuses_an_unknown_switch_with_the_known_names() -> None:
     with pytest.raises(ValidationError, match="unknown semantic switch 'ice-lookbak'") as info:
         RuntimeProfile(semantics={"ice-lookbak": "true"})
-    assert "known switches: dst-start-times, fw-existence, ice-lookback" in str(info.value)
+    assert _KNOWN in str(info.value)
 
 
 def test_the_profile_refuses_a_value_outside_the_switch_s_set() -> None:
@@ -223,7 +225,7 @@ def test_the_profile_from_cli_carries_the_overrides() -> None:
     ("words", "message"),
     [
         (["ice-lookback"], "expected NAME=VALUE"),
-        (["nope=true"], "known switches: dst-start-times, fw-existence, ice-lookback"),
+        (["nope=true"], _KNOWN),
         (["ice-lookback=yes"], "is not one of true, ordinary"),
         (["ice-lookback=true", "ice-lookback=ordinary"], "is given twice"),
     ],
@@ -1204,6 +1206,78 @@ def test_dst_start_times_affects_exactly_the_jobs_with_start_times_or_start_mins
     assert {name for name, job in catalog.jobs.items() if affects(job, catalog)} == {"st", "sm"}
 
 
+def test_the_box_switch_defaults_are_the_documented_autosys_readings() -> None:
+    """SEM-20 and SEM-14: both box switches default to the vendor's reading,
+    and the other value keeps dsl41's earlier behavior."""
+    off_ice = semantics.REGISTRY["off-ice-in-running-box"]
+    assert off_ice.values == ("next-run", "same-run")
+    assert off_ice.default == "next-run" == off_ice.autosys
+    terminator = semantics.REGISTRY["box-terminator-on-terminated"]
+    assert terminator.values == ("true", "false")
+    assert terminator.default == "true" == terminator.autosys
+
+
+_BOX_SWITCH_JIL = (
+    "insert_job: b\njob_type: b\n\n"
+    "insert_job: bt\njob_type: c\nmachine: m1\ncommand: x\nbox_name: b\nbox_terminator: 1\n\n"
+    "insert_job: m\njob_type: c\nmachine: m1\ncommand: x\nbox_name: b\n\n"
+    "insert_job: sb\njob_type: b\nbox_name: b\n\n"
+    "insert_job: sbm\njob_type: c\nmachine: m1\ncommand: x\nbox_name: sb\n\n"
+    "insert_job: lone\njob_type: c\nmachine: m1\ncommand: x\nbox_terminator: 1\n"
+)
+
+
+def test_off_ice_in_running_box_affects_exactly_the_jobs_inside_a_box() -> None:
+    """SEM-20: a flip changes what an OFF_ICE does to any job inside a box,
+    a subbox included; a job outside every box is not reached."""
+    affects = semantics.REGISTRY["off-ice-in-running-box"].affects
+    catalog = lower_source(_BOX_SWITCH_JIL)
+    assert {name for name, job in catalog.jobs.items() if affects(job, catalog)} == {
+        "bt",
+        "m",
+        "sb",
+        "sbm",
+    }
+
+
+def test_box_terminator_on_terminated_affects_exactly_the_box_terminator_members() -> None:
+    """SEM-14: a flip changes only a box member with box_terminator. A job
+    outside every box with the attribute has no box to end."""
+    affects = semantics.REGISTRY["box-terminator-on-terminated"].affects
+    catalog = lower_source(_BOX_SWITCH_JIL)
+    assert {name for name, job in catalog.jobs.items() if affects(job, catalog)} == {"bt"}
+
+
+@pytest.mark.parametrize(
+    ("switch", "value"),
+    [("off-ice-in-running-box", "same-run"), ("box-terminator-on-terminated", "false")],
+)
+def test_a_box_switch_flip_reaches_a_running_box_through_its_member(
+    switch: str, value: str
+) -> None:
+    """ss10.2, SEM-14, SEM-20: a flip of either box switch changes the
+    member it names, and a box depends on every member, so the running box
+    is refused; the job outside every box is not changed."""
+    catalog = lower_source(_BOX_SWITCH_JIL)
+    closing = Baseline(catalog=catalog, profile=RuntimeProfile())
+    opening = Baseline(catalog=catalog, profile=RuntimeProfile(semantics={switch: value}))
+    node = SWITCH + switch
+    result = classify(
+        closing=closing,
+        opening=opening,
+        carried=CarriedState(
+            jobs={
+                "b": CarriedJob(row=JobRuntime(status="RUNNING", status_at=T0)),
+                "bt": CarriedJob(row=JobRuntime(status="RUNNING", status_at=T0)),
+            },
+            now=T0,
+        ),
+    )
+    assert node in result.by_job["bt"].changed
+    assert result.by_job["b"].verdict == "R"
+    assert node not in result.by_job["lone"].changed
+
+
 def test_a_dst_start_times_flip_refuses_a_running_job_and_carries_a_quiet_one() -> None:
     """DL-260: a flip changes where a job's live ticks land, so a running
     job it reaches is refused (R), as a base-zone change does -- not the
@@ -1507,7 +1581,7 @@ def test_replay_refuses_a_period_whose_manifest_is_not_bound_to_it(
 @pytest.mark.parametrize(
     ("word", "message"),
     [
-        ("ice-lookbak=true", "known switches: dst-start-times, fw-existence, ice-lookback"),
+        ("ice-lookbak=true", _KNOWN),
         ("ice-lookback=maybe", "is not one of true, ordinary"),
         ("ice-lookback", "expected NAME=VALUE"),
     ],

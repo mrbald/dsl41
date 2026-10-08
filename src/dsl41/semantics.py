@@ -121,6 +121,18 @@ def fw_existence_immediate(job: JobIR, existence: str) -> bool:
     return existence == "immediate" and fw_no_min_size(job)
 
 
+def _box_member(job: JobIR, _catalog: CatalogIR) -> bool:
+    """A job inside a box, a subbox included: what `off-ice-in-running-box`
+    reads when the job is taken off ice while its box runs (SEM-20)."""
+    return job.box.box_name is not None
+
+
+def _has_box_terminator(job: JobIR, _catalog: CatalogIR) -> bool:
+    """A member with `box_terminator`: what `box-terminator-on-terminated`
+    reads when the member ends TERMINATED (SEM-14)."""
+    return job.box.box_name is not None and job.box.box_terminator
+
+
 def _fw_without_min_size(job: JobIR, _catalog: CatalogIR) -> bool:
     """`fw_no_min_size` in the registry's `affects` shape (DL-256)."""
     return fw_no_min_size(job)
@@ -144,6 +156,8 @@ RenewableFree = Literal["Y", "A"]
 QueuedRecheck = Literal["0", "1", "2"]
 FwExistence = Literal["stable", "immediate"]
 WekrFirstWeek = Literal["first-full", "partial"]
+OffIceInRunningBox = Literal["next-run", "same-run"]
+BoxTerminatorOnTerminated = Literal["true", "false"]
 # DstStartTimes is spelled in `timezones`, the phase-free module that reads it.
 
 
@@ -215,6 +229,26 @@ REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
                 affects=_has_start_ticks,
                 reader="scheduler",
             ),
+            Switch(
+                name="off-ice-in-running-box",
+                values=get_args(OffIceInRunningBox),
+                default="next-run",
+                autosys="next-run",
+                description="what a member taken off ice while its box runs does, if it has"
+                " not run in that run: it sits the run out and the box completes without it"
+                " (next-run), or it may start in that run (same-run)",
+                affects=_box_member,
+            ),
+            Switch(
+                name="box-terminator-on-terminated",
+                values=get_args(BoxTerminatorOnTerminated),
+                default="true",
+                autosys="true",
+                description="whether a box_terminator member that ends TERMINATED terminates"
+                " its running box, as one that ends FAILURE does (true), or only FAILURE"
+                " does (false)",
+                affects=_has_box_terminator,
+            ),
         )
     }
 )
@@ -258,6 +292,8 @@ class SemanticSwitches:
     fw_existence: FwExistence
     wekr_first_week: WekrFirstWeek
     dst_start_times: DstStartTimes
+    off_ice_in_running_box: OffIceInRunningBox
+    box_terminator_on_terminated: BoxTerminatorOnTerminated
 
     def value(self, name: str) -> str:
         """The effective value of the switch called `name`."""

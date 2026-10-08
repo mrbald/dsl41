@@ -1494,6 +1494,165 @@ def test_sem14_terminator_cascade_both_directions() -> None:
     assert transitions(o, "cons14_t") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
 
 
+#: A box with a box_terminator member, a job_terminator member, a member
+#: gated on the first, and a consumer outside the box that reads t(box)
+def _terminator_box(box: str) -> str:
+    return (
+        f"insert_job: {box}\njob_type: b\n\n"
+        f"insert_job: {box}_bt\njob_type: c\ncommand: x\nmachine: m1\nbox_name: {box}\n"
+        "box_terminator: 1\n\n"
+        f"insert_job: {box}_jt\njob_type: c\ncommand: y\nmachine: m1\nbox_name: {box}\n"
+        "job_terminator: 1\n\n"
+        f"insert_job: {box}_w\njob_type: c\ncommand: z\nmachine: m1\nbox_name: {box}\n"
+        f"condition: s({box}_bt)\n\n"
+        f"insert_job: {box}_tb\njob_type: c\ncommand: t\nmachine: m1\ncondition: t({box})\n"
+    )
+
+
+_TERMINATED_ONLY_FAILURE = resolve_switches({"box-terminator-on-terminated": "false"})
+
+
+@pytest.mark.parametrize(
+    "end",
+    [ev("KILLJOB", 1, job="bx14k_bt"), ev("STATUS", 1, job="bx14k_bt", status="TERMINATED")],
+    ids=["killjob", "status"],
+)
+def test_sem14_a_terminated_box_terminator_member_terminates_its_box(end: Event) -> None:
+    """SEM-14, default `box-terminator-on-terminated=true`: "Force the Job
+    or the Box to Stop Running" (AutoSys 12.1, 24.2): "if the job completes
+    with a FAILURE or TERMINATED status, the box terminates." A killed
+    box_terminator member terminates the box, the job_terminator member
+    dies with it, and the t(box) consumer starts. Before, the box stayed
+    RUNNING for ever: its other member waits on s() of the killed one."""
+    o = oracle(_terminator_box("bx14k"))
+    o.feed(ev("STARTJOB", 0, job="bx14k"))
+    o.feed(end)
+    assert _status(o, "bx14k", "bx14k_bt", "bx14k_jt", "bx14k_w") == [
+        "TERMINATED",
+        "TERMINATED",
+        "TERMINATED",
+        "INACTIVE",
+    ]
+    [done] = [t for t in o.trace() if t.job == "bx14k" and t.transition == "RUNNING->TERMINATED"]
+    assert done.cause == "box_terminator member 'bx14k_bt' ended TERMINATED (SEM-14)"
+    assert transitions(o, "bx14k_tb") == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+
+
+@pytest.mark.parametrize(
+    "end",
+    [ev("KILLJOB", 1, job="bx14f_bt"), ev("STATUS", 1, job="bx14f_bt", status="TERMINATED")],
+    ids=["killjob", "status"],
+)
+def test_sem14_under_false_a_terminated_box_terminator_member_leaves_its_box_running(
+    end: Event,
+) -> None:
+    """SEM-14, `box-terminator-on-terminated=false`: dsl41's reading before
+    the switch, FAILURE only. The killed member does not terminate the box,
+    so the box keeps RUNNING and nothing outside it starts."""
+    o = oracle(_terminator_box("bx14f"), semantics=_TERMINATED_ONLY_FAILURE)
+    o.feed(ev("STARTJOB", 0, job="bx14f"))
+    o.feed(end)
+    assert _status(o, "bx14f", "bx14f_bt", "bx14f_jt") == ["RUNNING", "TERMINATED", "RUNNING"]
+    assert transitions(o, "bx14f_tb") == []
+
+
+@pytest.mark.parametrize("value", ["true", "false"])
+def test_sem14_a_failed_box_terminator_member_terminates_its_box_under_both_values(
+    value: str,
+) -> None:
+    """SEM-14: a FAILURE ends the box under both switch values; the switch
+    reads only a TERMINATED end."""
+    o = oracle(
+        _terminator_box("bx14b"),
+        semantics=resolve_switches({"box-terminator-on-terminated": value}),
+    )
+    o.feed(ev("STARTJOB", 0, job="bx14b"))
+    o.feed(ev("STATUS", 1, job="bx14b_bt", status="FAILURE"))
+    assert _status(o, "bx14b", "bx14b_jt") == ["TERMINATED", "TERMINATED"]
+
+
+@pytest.mark.parametrize("value", ["true", "false"])
+def test_sem14_a_terminated_member_without_box_terminator_leaves_its_box_running(
+    value: str,
+) -> None:
+    """SEM-14: only a member with box_terminator ends its box. A killed
+    member without it, here the job_terminator one, leaves the box RUNNING
+    under both switch values."""
+    o = oracle(
+        _terminator_box("bx14n"),
+        semantics=resolve_switches({"box-terminator-on-terminated": value}),
+    )
+    o.feed(ev("STARTJOB", 0, job="bx14n"))
+    o.feed(ev("STATUS", 1, job="bx14n_jt", status="TERMINATED"))
+    assert _status(o, "bx14n", "bx14n_bt") == ["RUNNING", "RUNNING"]
+
+
+@pytest.mark.parametrize(("value", "box"), [("true", "TERMINATED"), ("false", "RUNNING")])
+def test_sem14_a_box_terminator_member_ended_by_term_run_time_reads_the_switch(
+    value: str, box: str
+) -> None:
+    """SEM-14, dossier ss5: term_run_time ends the member TERMINATED, so
+    under the default it ends the box and kills the job_terminator member;
+    under `false` the box keeps RUNNING."""
+    o = oracle(
+        "insert_job: bx14r\njob_type: b\n\n"
+        "insert_job: bx14r_bt\njob_type: c\ncommand: x\nmachine: m1\nbox_name: bx14r\n"
+        "box_terminator: 1\nterm_run_time: 5\n\n"
+        "insert_job: bx14r_jt\njob_type: c\ncommand: y\nmachine: m1\nbox_name: bx14r\n"
+        "job_terminator: 1\n\n"
+        "insert_job: bx14r_clock\njob_type: c\ncommand: z\nmachine: m1\n",
+        semantics=resolve_switches({"box-terminator-on-terminated": value}),
+    )
+    o.feed(ev("STARTJOB", 0, job="bx14r"))
+    o.feed(ev("STATUS", 6, job="bx14r_clock", status="SUCCESS"))  # past the limit
+    jt = "TERMINATED" if value == "true" else "RUNNING"
+    assert _status(o, "bx14r", "bx14r_bt", "bx14r_jt") == [box, "TERMINATED", jt]
+
+
+@pytest.mark.parametrize(("value", "box"), [("true", "TERMINATED"), ("false", "RUNNING")])
+def test_sem14_a_box_terminator_subbox_that_ends_terminated_reads_the_switch(
+    value: str, box: str
+) -> None:
+    """SEM-14, SEM-17: a subbox with box_terminator is a member of its
+    parent. A KILLJOB ends it TERMINATED, which under the default ends the
+    parent; under `false` the parent keeps RUNNING."""
+    o = oracle(
+        "insert_job: bx14s\njob_type: b\n\n"
+        "insert_job: bx14s_m\njob_type: c\ncommand: m\nmachine: m1\nbox_name: bx14s\n\n"
+        "insert_job: bx14s_sub\njob_type: b\nbox_name: bx14s\nbox_terminator: 1\n\n"
+        "insert_job: bx14s_sub_m\njob_type: c\ncommand: s\nmachine: m1\n"
+        "box_name: bx14s_sub\n",
+        semantics=resolve_switches({"box-terminator-on-terminated": value}),
+    )
+    o.feed(ev("STARTJOB", 0, job="bx14s"))
+    assert o.store.job["bx14s_sub"].status == "RUNNING"
+    o.feed(ev("KILLJOB", 1, job="bx14s_sub"))
+    assert _status(o, "bx14s", "bx14s_sub") == [box, "TERMINATED"]
+
+
+@pytest.mark.parametrize(("value", "box"), [("true", "TERMINATED"), ("false", "RUNNING")])
+def test_sem14_a_killed_queued_box_terminator_member_reads_the_switch(value: str, box: str) -> None:
+    """SEM-14, DL-50: KILLJOB on a queued member dequeues it TERMINATED,
+    which "completes with TERMINATED", so under the default it ends the box
+    as a killed running member does; under `false` the box keeps
+    RUNNING."""
+    o = oracle(
+        "insert_resource: QB14\nres_type: R\namount: 1\n\n"
+        "insert_job: bx14q_hold\njob_type: c\ncommand: h\nmachine: m1\n"
+        "resources: (QB14, QUANTITY=1)\n\n"
+        "insert_job: bx14q\njob_type: b\n\n"
+        "insert_job: bx14q_bt\njob_type: c\ncommand: x\nmachine: m1\nbox_name: bx14q\n"
+        "box_terminator: 1\nresources: (QB14, QUANTITY=1)\n\n"
+        "insert_job: bx14q_m\njob_type: c\ncommand: y\nmachine: m1\nbox_name: bx14q\n",
+        semantics=resolve_switches({"box-terminator-on-terminated": value}),
+    )
+    o.feed(ev("STARTJOB", 0, job="bx14q_hold"))
+    o.feed(ev("STARTJOB", 1, job="bx14q"))
+    assert o.store.job["bx14q_bt"].status == "QUE_WAIT"
+    o.feed(ev("KILLJOB", 2, job="bx14q_bt"))
+    assert _status(o, "bx14q", "bx14q_bt") == [box, "TERMINATED"]
+
+
 # --------------------------------------------------------------------- 13. SEM-20 ON_ICE
 
 
@@ -1988,6 +2147,316 @@ def test_sem20_ice_on_a_member_already_out_of_the_fold_is_no_completion_moment(
     o.feed(ev("ON_ICE", 4, job="bx20t_wait"))
     assert transitions(o, "bx20t") == before
     assert o.store.job["bx20t"].status == "RUNNING"
+
+
+#: `off-ice-in-running-box=same-run`: dsl41's reading before the switch
+_SAME_RUN = resolve_switches({"off-ice-in-running-box": "same-run"})
+
+
+def _off_ice_box(box: str, extra: str = "") -> str:
+    """Box `box`: `a` with no condition, `c` gated on s(a), `k` with no
+    condition."""
+    return (
+        f"insert_job: {box}\njob_type: b\n{extra}\n"
+        f"insert_job: {box}_a\njob_type: c\ncommand: a\nmachine: m1\nbox_name: {box}\n\n"
+        f"insert_job: {box}_c\njob_type: c\ncommand: c\nmachine: m1\nbox_name: {box}\n"
+        f"condition: s({box}_a)\n\n"
+        f"insert_job: {box}_k\njob_type: c\ncommand: k\nmachine: m1\nbox_name: {box}\n\n"
+    )
+
+
+def _iced_then_thawed(o: Oracle | EngineHarness, box: str) -> None:
+    """Ice `c`, start the box, end `a`, then take `c` off ice while the box
+    runs."""
+    o.feed(ev("ON_ICE", 0, job=f"{box}_c"))
+    o.feed(ev("STARTJOB", 1, job=box))
+    o.feed(ev("STATUS", 2, job=f"{box}_a", status="SUCCESS"))
+    o.feed(ev("OFF_ICE", 3, job=f"{box}_c"))
+
+
+def test_sem20_off_ice_in_a_running_box_completes_the_box_without_the_member() -> None:
+    """SEM-20, default `off-ice-in-running-box=next-run`: "Start Conditions"
+    (AutoSys 24.2, 12.0): "If a job is contained in a running box when it
+    is taken off ice, the scheduler does not restart the job until the
+    following run of the box". The member stays out of the fold, so the
+    box completes without it when its last other member ends."""
+    o = oracle(_off_ice_box("bx20x"))
+    _iced_then_thawed(o, "bx20x")
+    assert o.store.job["bx20x"].iced_out_members == frozenset({"bx20x_c"})
+    [off] = [t for t in o.trace() if t.job == "bx20x_c" and t.transition == "OFF_ICE"]
+    assert off.cause == (
+        "sendevent OFF_ICE; taken off ice in its running box 'bx20x': sits out this run (SEM-20)"
+    )
+    o.feed(ev("STATUS", 4, job="bx20x_k", status="SUCCESS"))
+    assert transitions(o, "bx20x")[-1] == "RUNNING->SUCCESS"
+    assert transitions(o, "bx20x_c") == ["ON_ICE", "OFF_ICE"]
+
+
+def test_sem20_under_same_run_off_ice_in_a_running_box_hangs_the_box() -> None:
+    """SEM-20, `off-ice-in-running-box=same-run`: the member re-enters the
+    fold with no run, so the box stays RUNNING after its last other member
+    ends, as before the switch."""
+    o = oracle(_off_ice_box("bx20y"), semantics=_SAME_RUN)
+    _iced_then_thawed(o, "bx20y")
+    assert o.store.job["bx20y"].iced_out_members == frozenset()
+    o.feed(ev("STATUS", 4, job="bx20y_k", status="SUCCESS"))
+    assert o.store.job["bx20y"].status == "RUNNING"
+
+
+@pytest.mark.parametrize(("semantics", "starts"), [(None, False), (_SAME_RUN, True)])
+def test_sem20_off_ice_in_a_running_box_and_a_recurring_condition(
+    semantics: SemanticSwitches | None, starts: bool
+) -> None:
+    """SEM-20: "even if its starting conditions recur during the existing
+    run of the box". Under `next-run` a recurring s(a) does not start the
+    member in this run; under `same-run` it does."""
+    o = oracle(_off_ice_box("bx20r6"), semantics=semantics)
+    _iced_then_thawed(o, "bx20r6")
+    o.feed(ev("FORCE_STARTJOB", 4, job="bx20r6_a"))
+    o.feed(ev("STATUS", 5, job="bx20r6_a", status="SUCCESS"))
+    started = ["INACTIVE->STARTING", "STARTING->RUNNING"]
+    assert transitions(o, "bx20r6_c") == ["ON_ICE", "OFF_ICE"] + (started if starts else [])
+
+
+@pytest.mark.parametrize(("semantics", "refused"), [(None, True), (_SAME_RUN, False)])
+def test_sem20_a_plain_start_of_a_member_taken_off_ice_in_its_running_box(
+    semantics: SemanticSwitches | None, refused: bool
+) -> None:
+    """SEM-20: under `next-run` an operator's STARTJOB of the member in
+    this run is refused with a START_REFUSED line; under `same-run` it
+    starts, its condition met."""
+    o = oracle(_off_ice_box("bx20p"), semantics=semantics)
+    _iced_then_thawed(o, "bx20p")
+    o.feed(ev("STARTJOB", 4, job="bx20p_c"))
+    lines = [t for t in o.trace() if t.job == "bx20p_c"]
+    if refused:
+        assert lines[-1].transition == "START_REFUSED"
+        assert lines[-1].cause == (
+            "taken off ice during this 'bx20p' execution -- it waits for the box's next"
+            " run; a start now needs FORCE_STARTJOB (SEM-20) (STARTJOB event)"
+        )
+    else:
+        assert [t.transition for t in lines][-2:] == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+
+
+def test_sem20_a_forced_start_runs_a_member_taken_off_ice_and_it_votes() -> None:
+    """SEM-20, SEM-23: FORCE_STARTJOB overrides the off-ice mark. The member
+    runs in this box run, its start voids the mark, and its FAILURE folds
+    the box FAILURE."""
+    o = oracle(_off_ice_box("bx20f"))
+    _iced_then_thawed(o, "bx20f")
+    o.feed(ev("FORCE_STARTJOB", 4, job="bx20f_c"))
+    assert o.store.job["bx20f"].iced_out_members == frozenset()
+    o.feed(ev("STATUS", 5, job="bx20f_k", status="SUCCESS"))
+    assert o.store.job["bx20f"].status == "RUNNING"  # waits for the forced run
+    o.feed(ev("STATUS", 6, job="bx20f_c", status="FAILURE"))
+    assert transitions(o, "bx20f")[-1] == "RUNNING->FAILURE"
+
+
+def test_sem20_a_member_taken_off_ice_runs_in_the_box_s_next_run() -> None:
+    """SEM-20: "until the following run of the box". The next box start
+    clears the mark, and the member starts there on its own condition."""
+    o = oracle(_off_ice_box("bx20n2"))
+    _iced_then_thawed(o, "bx20n2")
+    o.feed(ev("STATUS", 4, job="bx20n2_k", status="SUCCESS"))
+    assert o.store.job["bx20n2"].status == "SUCCESS"
+    o.feed(ev("STARTJOB", 5, job="bx20n2"))
+    assert o.store.job["bx20n2"].iced_out_members == frozenset()
+    o.feed(ev("STATUS", 6, job="bx20n2_a", status="SUCCESS"))
+    assert transitions(o, "bx20n2_c")[-2:] == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+
+
+def test_sem20_off_ice_on_a_member_that_ran_keeps_its_vote() -> None:
+    """SEM-20: a member that ran in this box run keeps its vote, so an
+    OFF_ICE on it sets no mark. A plain start is refused as a second run
+    (SEM-10), not as an off-ice one."""
+    o = oracle(_off_ice_box("bx20v"))
+    o.feed(ev("STARTJOB", 0, job="bx20v"))
+    o.feed(ev("STATUS", 1, job="bx20v_k", status="SUCCESS"))
+    o.feed(ev("ON_ICE", 2, job="bx20v_k"))
+    o.feed(ev("OFF_ICE", 3, job="bx20v_k"))
+    assert o.store.job["bx20v"].iced_out_members == frozenset()
+    o.feed(ev("STARTJOB", 4, job="bx20v_k"))
+    [refused] = [t for t in o.trace() if t.job == "bx20v_k" and t.transition == "START_REFUSED"]
+    assert refused.cause.startswith("already ran in this 'bx20v' execution")
+
+
+def test_sem20_off_ice_while_the_box_is_idle_sets_no_mark() -> None:
+    """SEM-20: the rule is for a running box only. An OFF_ICE while the box
+    is idle sets no mark, and the member starts in the next box run on its
+    own condition; so does a job outside any box."""
+    o = oracle(
+        _off_ice_box("bx20d") + "insert_job: bx20d_out\njob_type: c\ncommand: o\nmachine: m1\n"
+    )
+    o.feed(ev("ON_ICE", 0, job="bx20d_c"))
+    o.feed(ev("OFF_ICE", 1, job="bx20d_c"))
+    # checked before any box start, which would clear a mark anyway
+    assert o.store.job["bx20d"].iced_out_members == frozenset()
+    assert [t.cause for t in o.trace() if t.job == "bx20d_c"][-1] == "sendevent OFF_ICE"
+    o.feed(ev("ON_ICE", 1, job="bx20d_out"))
+    o.feed(ev("OFF_ICE", 1, job="bx20d_out"))
+    o.feed(ev("STARTJOB", 2, job="bx20d"))
+    o.feed(ev("STATUS", 3, job="bx20d_a", status="SUCCESS"))
+    assert transitions(o, "bx20d_c")[-2:] == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+    o.feed(ev("STARTJOB", 4, job="bx20d_out"))
+    assert transitions(o, "bx20d_out")[-1] == "STARTING->RUNNING"
+
+
+def _queued_off_ice_box(box: str) -> str:
+    """Box `box` as `_off_ice_box`, with `c` also needing the one unit of
+    a resource that `{box}_hold`, outside the box, takes first."""
+    return (
+        f"insert_resource: {box.upper()}R\nres_type: R\namount: 1\n\n"
+        f"insert_job: {box}_hold\njob_type: c\ncommand: h\nmachine: m1\n"
+        f"resources: ({box.upper()}R, QUANTITY=1)\n\n"
+        f"insert_job: {box}\njob_type: b\n\n"
+        f"insert_job: {box}_a\njob_type: c\ncommand: a\nmachine: m1\nbox_name: {box}\n\n"
+        f"insert_job: {box}_c\njob_type: c\ncommand: c\nmachine: m1\nbox_name: {box}\n"
+        f"condition: s({box}_a)\nresources: ({box.upper()}R, QUANTITY=1)\n\n"
+        f"insert_job: {box}_k\njob_type: c\ncommand: k\nmachine: m1\nbox_name: {box}\n\n"
+    )
+
+
+def _force_queues(o: Oracle | EngineHarness, box: str) -> None:
+    """`hold` takes the unit, `c` is iced across the box start and taken
+    off ice in the run, then forced: it queues behind `hold`."""
+    o.feed(ev("STARTJOB", 0, job=f"{box}_hold"))
+    _iced_then_thawed(o, box)
+    o.feed(ev("FORCE_STARTJOB", 4, job=f"{box}_c"))
+    assert o.store.job[f"{box}_c"].status == "QUE_WAIT"
+
+
+@pytest.mark.parametrize("semantics", [None, _SAME_RUN], ids=["next-run", "same-run"])
+def test_sem20_a_forced_member_queued_after_its_off_ice_keeps_the_box_waiting(
+    semantics: SemanticSwitches | None,
+) -> None:
+    """SEM-20, SEM-23, DL-50: FORCE_STARTJOB overrides the sit-out also when
+    the forced start queues on a named resource. The queued member keeps
+    the box RUNNING; once admitted it runs, and the box completes after it
+    ends, with its vote. Both switch values agree."""
+    o = oracle(_queued_off_ice_box("bx20q2"), semantics=semantics)
+    _force_queues(o, "bx20q2")
+    o.feed(ev("STATUS", 5, job="bx20q2_k", status="SUCCESS"))
+    assert o.store.job["bx20q2"].status == "RUNNING"
+    o.feed(ev("STATUS", 6, job="bx20q2_hold", status="SUCCESS"))  # frees the unit
+    assert transitions(o, "bx20q2_c")[-2:] == ["QUE_WAIT->STARTING", "STARTING->RUNNING"]
+    assert o.store.job["bx20q2"].status == "RUNNING"
+    o.feed(ev("STATUS", 7, job="bx20q2_c", status="FAILURE"))
+    assert transitions(o, "bx20q2")[-1] == "RUNNING->FAILURE"
+
+
+@pytest.mark.parametrize("k_ended", [True, False], ids=["box-completes", "box-still-runs"])
+def test_sem20_a_forced_member_that_leaves_the_queue_unstarted_keeps_sitting_out(
+    k_ended: bool,
+) -> None:
+    """SEM-20, DL-257: the force is a one-shot override. Under
+    `queued-recheck=1` the forced member's condition s(a) is false when it
+    leaves the queue (an operator's INACTIVE on `a`, which counts as SUCCESS
+    in the fold), so it goes INACTIVE unstarted and keeps its off-ice mark.
+    If `k` has ended, the box completes SUCCESS at that exit, without it.
+    If `k` still runs, the box waits for `k` only. Either way a recurring
+    s(a) does not start the member; a second FORCE_STARTJOB does."""
+    o = oracle(_queued_off_ice_box("bx20l"), semantics=resolve_switches({"queued-recheck": "1"}))
+    _force_queues(o, "bx20l")
+    o.feed(ev("STATUS", 5, job="bx20l_a", status="INACTIVE"))  # s(a) turns false
+    if k_ended:
+        o.feed(ev("STATUS", 6, job="bx20l_k", status="SUCCESS"))
+    o.feed(ev("STATUS", 7, job="bx20l_hold", status="SUCCESS"))  # c leaves the queue
+    assert o.store.job["bx20l_c"].status == "INACTIVE"
+    assert o.store.job["bx20l"].iced_out_members == frozenset({"bx20l_c"})
+    assert o.store.job["bx20l"].status == ("SUCCESS" if k_ended else "RUNNING")
+    before = transitions(o, "bx20l_c")
+    o.feed(ev("STATUS", 8, job="bx20l_a", status="SUCCESS"))  # s(a) recurs
+    assert transitions(o, "bx20l_c") == before
+    if not k_ended:
+        o.feed(ev("STATUS", 9, job="bx20l_k", status="SUCCESS"))  # completes without c
+        assert o.store.job["bx20l"].status == "SUCCESS"
+    o.feed(ev("FORCE_STARTJOB", 10, job="bx20l_c"))
+    assert transitions(o, "bx20l_c")[-2:] == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+
+
+def test_sem20_a_marked_member_set_running_keeps_the_box_waiting() -> None:
+    """SEM-20, SEM-11: the fold skips a marked member only while it is not
+    live or queued. An operator's STATUS RUNNING on it is no start, so the
+    mark stays, but the box waits for the live member and completes once
+    it ends."""
+    o = oracle(_off_ice_box("bx20g2"))
+    _iced_then_thawed(o, "bx20g2")
+    o.feed(ev("STATUS", 4, job="bx20g2_c", status="RUNNING"))
+    assert o.store.job["bx20g2"].iced_out_members == frozenset({"bx20g2_c"})
+    o.feed(ev("STATUS", 5, job="bx20g2_k", status="SUCCESS"))
+    assert o.store.job["bx20g2"].status == "RUNNING"
+    o.feed(ev("STATUS", 6, job="bx20g2_c", status="SUCCESS"))
+    assert transitions(o, "bx20g2")[-1] == "RUNNING->SUCCESS"
+
+
+def test_sem20_off_ice_in_an_idle_subbox_of_a_running_box_sets_no_mark() -> None:
+    """SEM-20: the mark is set at the member's direct box only. A member of
+    a subbox that has not started, inside a RUNNING parent, sets no mark
+    when taken off ice, and runs once the subbox starts in the parent's
+    run. Whether the vendor reads "contained in a running box"
+    transitively is open; the runbook's SEM-20 box clause protocol has a
+    nested variant."""
+    o = oracle(
+        "insert_job: bx20e\njob_type: b\n\n"
+        "insert_job: bx20e_m\njob_type: c\ncommand: m\nmachine: m1\nbox_name: bx20e\n\n"
+        "insert_job: bx20e_s\njob_type: b\nbox_name: bx20e\ncondition: s(bx20e_m)\n\n"
+        "insert_job: bx20e_c\njob_type: c\ncommand: c\nmachine: m1\nbox_name: bx20e_s\n"
+    )
+    o.feed(ev("ON_ICE", 0, job="bx20e_c"))
+    o.feed(ev("STARTJOB", 1, job="bx20e"))
+    o.feed(ev("OFF_ICE", 2, job="bx20e_c"))
+    assert o.store.job["bx20e"].iced_out_members == frozenset()
+    assert o.store.job["bx20e_s"].iced_out_members == frozenset()
+    o.feed(ev("STATUS", 3, job="bx20e_m", status="SUCCESS"))  # the subbox starts
+    assert transitions(o, "bx20e_c")[-2:] == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+
+
+def test_sem20_off_ice_on_a_member_that_was_not_iced_sets_no_mark() -> None:
+    """SEM-20: the rule is for a job taken off ice. An OFF_ICE on a waiting
+    member that was never iced sets no mark, and the member starts on its
+    condition in the same box run."""
+    o = oracle(_off_ice_box("bx20w"))
+    o.feed(ev("STARTJOB", 0, job="bx20w"))
+    o.feed(ev("OFF_ICE", 1, job="bx20w_c"))
+    assert o.store.job["bx20w"].iced_out_members == frozenset()
+    o.feed(ev("STATUS", 2, job="bx20w_a", status="SUCCESS"))
+    assert transitions(o, "bx20w_c")[-2:] == ["INACTIVE->STARTING", "STARTING->RUNNING"]
+
+
+def test_sem20_ice_on_a_member_taken_off_ice_is_no_completion_moment() -> None:
+    """SEM-20 (DL-285): a member taken off ice in this run is still out of
+    the fold, so a second ON_ICE on it is no completion moment. A
+    box_success met since the last completion moment does not fire."""
+    o = oracle(
+        _off_ice_box("bx20z", extra="box_success: s(bx20z_ext)\n")
+        + "insert_job: bx20z_ext\njob_type: c\ncommand: e\nmachine: m1\n"
+    )
+    _iced_then_thawed(o, "bx20z")
+    o.feed(ev("STATUS", 4, job="bx20z_ext", status="SUCCESS"))
+    before = transitions(o, "bx20z")
+    o.feed(ev("ON_ICE", 5, job="bx20z_c"))
+    assert transitions(o, "bx20z") == before
+    assert o.store.job["bx20z"].status == "RUNNING"
+
+
+def test_sem20_a_subbox_taken_off_ice_in_its_running_parent_sits_the_run_out() -> None:
+    """SEM-20, SEM-17: the same rule at a subbox's own parent. The subbox is
+    taken off ice while the outer box runs, so it does not start in that
+    run, and the outer box completes without it."""
+    o = oracle(
+        "insert_job: bx20s\njob_type: b\n\n"
+        "insert_job: bx20s_m\njob_type: c\ncommand: m\nmachine: m1\nbox_name: bx20s\n\n"
+        + _off_ice_box("bx20s_sub", extra="box_name: bx20s\n")
+    )
+    o.feed(ev("ON_ICE", 0, job="bx20s_sub"))
+    o.feed(ev("STARTJOB", 1, job="bx20s"))
+    o.feed(ev("OFF_ICE", 2, job="bx20s_sub"))
+    assert o.store.job["bx20s"].iced_out_members == frozenset({"bx20s_sub"})
+    o.feed(ev("STARTJOB", 3, job="bx20s_sub"))
+    assert o.store.job["bx20s_sub"].status == "INACTIVE"
+    o.feed(ev("STATUS", 4, job="bx20s_m", status="SUCCESS"))
+    assert o.store.job["bx20s"].status == "SUCCESS"
 
 
 # --------------------------------------------------------------------- 14. SEM-21 ON_HOLD
@@ -8432,8 +8901,15 @@ def test_dl257_a_deferral_belongs_to_the_box_run_it_was_made_in(mode: str) -> No
     """The member's day rejection wakes `xr257`, whose bypass completes the
     box, which restarts at once. The deferral the rejection would make
     belongs to the run that just ended: it is not attached to the new run
-    (DL-246), so no timer starts the member there."""
-    o = oracle(_RESTARTING_257, semantics=_recheck_257(mode))
+    (DL-246), so no timer starts the member there.
+
+    The shape needs `xr257` back in the run after its OFF_ICE, so it runs
+    under `off-ice-in-running-box=same-run`; under the default `next-run`
+    the member sits the run out (SEM-20) and no edge can complete it."""
+    o = oracle(
+        _RESTARTING_257,
+        semantics=resolve_switches({"queued-recheck": mode, "off-ice-in-running-box": "same-run"}),
+    )
     o.feed(ev("STARTJOB", -60, job="hq257"))
     o.feed(ev("FORCE_STARTJOB", -60, job="br257"))  # 07:00: mr257 deferred to 08:00
     o.feed(ev("STARTJOB", 0, job="xr257"))  # 08:00: mr257 queues; xr257's tick arms
