@@ -407,7 +407,9 @@ _STATE_OWNER = "RuntimeState"
 #: adds `timer_seq` beside it: the seal carries the timer allocator's
 #: high-water mark exactly as it carries the waiter allocator's, and a gate
 #: that protected one of the two would be narrower the day after it was
-#: written.
+#: written. The assembly phase (`_phase`, the `runtime_assembly` machine)
+#: replaced the three seed-and-genesis flags; it is a scalar too, so a
+#: rebind from outside the owner would skip the machine.
 _STATE_MAPS = (
     "_jobs",
     "_globals",
@@ -417,9 +419,7 @@ _STATE_MAPS = (
     "_enqueue_counter",
     "_timer_seq",
     "_period_id",
-    "_period_seeded",
-    "_inputs_committed",
-    "_genesis_finished",
+    "_phase",
     "job",
     "globals_",
     "hosts",

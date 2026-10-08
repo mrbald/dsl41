@@ -20,6 +20,7 @@ from typing import Any
 import typer
 
 from dsl41.cli_common import command_outcome, import_tui_or_exit_2, read_header_of, refuse
+from dsl41.oracle_state import FAILED
 from dsl41.runner_access import REQUIRED_TIER, Tier
 
 
@@ -465,9 +466,9 @@ _QUERY_VERBS: tuple[str, ...] = tuple(
     for verb, tier in REQUIRED_TIER.items()
     if tier is Tier.READ and verb not in _QUERY_ELSEWHERE
 )
-_QUERY_PREDICATES: dict[str, tuple[str, ...]] = {
-    "is-success": ("SUCCESS",),
-    "is-failed": ("FAILURE", "TERMINATED"),
+_QUERY_PREDICATES: dict[str, frozenset[str]] = {
+    "is-success": frozenset({"SUCCESS"}),
+    "is-failed": FAILED,
 }
 
 

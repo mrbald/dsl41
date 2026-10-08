@@ -471,13 +471,16 @@ def _keyword_constants(keyword: str) -> set[str]:
 
 def _trace_markers() -> set[str]:
     """Every constant marker `Oracle._record` writes: a trace line that is
-    not an `OLD->NEW` status transition."""
+    not an `OLD->NEW` status transition. `Oracle._ignore` writes its marker,
+    the third argument, through `_record` beside an internal transition."""
     tree = ast.parse((SRC / "oracle.py").read_text(encoding="utf-8"))
     out: set[str] = set()
+    position = {"_record": 1, "_ignore": 2}
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-            if node.func.attr == "_record" and len(node.args) >= 2:
-                arg = node.args[1]
+            index = position.get(node.func.attr)
+            if index is not None and len(node.args) > index:
+                arg = node.args[index]
                 if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
                     if "->" not in arg.value:
                         out.add(arg.value)

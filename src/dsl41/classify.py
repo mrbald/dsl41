@@ -913,12 +913,12 @@ def _seeded(
 ) -> _TruthOracle:
     """An interpreter over `catalog` holding the carried rows.
 
-    Seeded through `RuntimeState`'s verbs, which are the only write path
-    (DL-86). Two of them are ordering, not ceremony: a `last_end_at` latches
-    on a TERMINAL edge only, so a row that ended and started again replays
-    its end first or an n() lookback loses its anchor; and a rank is held
-    exactly while QUE_WAIT, so a carried waiter is enqueued or the input
-    refuses to close.
+    Seeded through `RuntimeState.seed_job`, an install: rebuilding a row is
+    not a move of the job's machines, so it names no transition (DL-86 keeps
+    the store the only write path). A terminal row's last end is its status
+    time, as the terminal edge latched it; a row that ended and started
+    again keeps its earlier end, or an n() lookback loses its anchor. A
+    carried waiter gets a rank, since the input refuses to close without one.
 
     Every carried row is seeded, including a ghost's -- the row is retained
     across the boundary (ss10.1), so an atom naming it must read what the
@@ -932,14 +932,17 @@ def _seeded(
     store.begin_input()
     for name in sorted(carried.jobs):
         row = carried.jobs[name].row
-        store.set_flags(name, on_ice=row.on_ice, on_hold=row.on_hold, on_noexec=row.on_noexec)
-        if row.last_end_at is not None and row.status not in TERMINAL:
-            store.transition(name, "SUCCESS", row.last_end_at)
-        if row.status == "QUE_WAIT":
-            store.enqueue_waiter(name)
-        store.transition(name, row.status, row.status_at, row.exit_code)
-        if row.armed:
-            store.set_armed(name, True)
+        store.seed_job(
+            name,
+            status=row.status,
+            status_at=row.status_at,
+            last_end_at=row.status_at if row.status in TERMINAL else row.last_end_at,
+            exit_code=row.exit_code,
+            on_ice=row.on_ice,
+            on_hold=row.on_hold,
+            on_noexec=row.on_noexec,
+            armed=row.armed,
+        )
     for name, value in sorted(carried.globals_.items()):
         store.set_global(name, value)
     store.commit_input()

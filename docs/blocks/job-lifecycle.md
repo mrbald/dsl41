@@ -18,8 +18,9 @@ Its per-input [state_rev](../glossary.md#state_rev) is what a store's conditiona
 
 - Inputs: `Oracle.feed(event)`, `Oracle.batch(at)` for several events at one instant, and `Oracle.advance(now)` for a bare time observation. The alphabet is `EventKind` in `oracle_state.py`.
 - Outputs: emitted events, of which a STATUS STARTING is the shell's dispatch instruction; the trace of `TraceEntry` lines; `Oracle.next_timer_due()`.
-- State: one frozen `JobRuntime` row per job, written only by `RuntimeState` verbs such as `transition`, `start_run`, `set_flags` and `set_armed`.
-- Status sets: `TERMINAL`, `LIVE` and `INJECTABLE_STATUSES` in `oracle_state.py`.
+- State: one frozen `JobRuntime` row per job, written only by `RuntimeState` verbs such as `transition`, `start_run` and `move_flag`.
+- Transitions: each status, flag and capacity move names its declared transition; the tables are [job_status](../state-machines.md#job_status), [job_flags](../state-machines.md#job_flags) and [job_holding](../state-machines.md#job_holding).
+- Status sets: `TERMINAL`, `FAILED`, `LIVE`, `IDLE` and `INJECTABLE_STATUSES` in `oracle_state.py`.
 - Condition truth: `Oracle._cond_true` over the tree that `conditions.py` parses.
 
 ## States
@@ -55,6 +56,7 @@ stateDiagram-v2
 - The oracle classifies an exit code; an adapter never does ([SEM-09](../autosys-semantics.md#sem-09--max_exit_success-shifts-successfailure-boundary-v), [runner-design §3](../runner-design.md#3-architecture--functional-core-imperative-shell)).
 - A scheduled tick blocked at a releasable gate arms the job; an actual start consumes the arm ([SEM-32](../autosys-semantics.md#sem-32--start_times--start_mins-v), [DL-54](../decision-log.md)). An arm crosses a seal ([period-model §10.4](../period-model.md#104-armed-latches-cross-a-release)).
 - ON_ICE, ON_HOLD and ON_NOEXEC are ignored where the vendor says so, with one `EVENT_IGNORED` trace line ([DL-254](../decision-log.md)).
+- KILLJOB on a job that is not running or queued kills nothing and writes one `EVENT_IGNORED` trace line.
 - ON_NOEXEC on a FAILURE or TERMINATED job is a stored move to INACTIVE ([SEM-22](../autosys-semantics.md#sem-22--on_noexec-v), [DL-243](../decision-log.md)).
 - An operator never injects QUE_WAIT; the control server refuses it before the journal append ([DL-264](../decision-log.md)).
 - Rows change only through the owner's verbs ([DL-86](../decision-log.md)). One input moves each changed row's revision once ([DL-87](../decision-log.md)).

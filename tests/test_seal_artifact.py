@@ -1880,10 +1880,10 @@ def test_two_verdicts_for_one_job_refuse_before_projection() -> None:
 
 
 def test_pr50_a_start_in_period_two_stamps_the_row(tmp_path: Path) -> None:
-    """`open_period` is the ONE write to the period
-    counter -- owner-verb-gated, monotone by one, never inside an input --
-    and a start after it stamps the row with the new period, which is what
-    crosses the next seal."""
+    """`seed_period` is the ONE write to the period counter -- owner-verb
+    gated, once, never inside an input -- and a start after it stamps the
+    row with the seeded period, which is what crosses the next seal. A live
+    state never moves its period: the next one opens in a new state."""
     from dsl41.ir import lower_source
     from dsl41.oracle import Oracle
     from dsl41.oracle_state import Event
@@ -1893,25 +1893,21 @@ def test_pr50_a_start_in_period_two_stamps_the_row(tmp_path: Path) -> None:
     store.seed_period(2)  # assembly's explicit seed
     oracle.feed(Event(at=T, kind="STARTJOB", payload={"job": "j"}))
     assert store.job["j"].start_period == 2  # the stamp, PR-50's fact
-    # touched now: only the live rules remain
-    with pytest.raises(ValueError, match="exactly one"):
-        store.open_period(5)  # a skip
-    with pytest.raises(ValueError, match="exactly one"):
-        store.open_period(2)  # a repeat
+    with pytest.raises(ValueError, match="used state"):
+        store.seed_period(3)  # a live state keeps its period
     store.begin_input()
     try:
-        with pytest.raises(ValueError, match="not an input"):
-            store.open_period(3)
+        with pytest.raises(ValueError, match="inside an input"):
+            store.seed_period(3)
     finally:
         store.commit_input()
-    store.open_period(3)  # the one legal advance
-    assert store.period_id == 3
+    assert store.period_id == 2
 
 
-def test_a_fresh_state_seeds_any_period_and_a_used_one_advances_by_one() -> None:
+def test_a_fresh_state_seeds_any_period_once() -> None:
     """A resume assembles period N into a PRISTINE state
     -- a rule that only counted from 1 could never assemble one. The seed
-    is legal exactly once: with a row installed, only +1 remains."""
+    is legal exactly once."""
     from dsl41.ir import lower_source
     from dsl41.oracle import Oracle
 
@@ -1920,10 +1916,7 @@ def test_a_fresh_state_seeds_any_period_and_a_used_one_advances_by_one() -> None
     assert fresh.period_id == 3
     with pytest.raises(ValueError, match="used state"):
         fresh.seed_period(5)  # seeding is one-shot
-    with pytest.raises(ValueError, match="exactly one"):
-        fresh.open_period(3)
-    fresh.open_period(4)
-    assert fresh.period_id == 4
+    assert fresh.period_id == 3
     # and a state whose only mutation was a NON-JOB row still refuses a
     # seed: the latch is explicit, not an inference over job rows
     touched = Oracle(lower_source("insert_job: j\njob_type: c\ncommand: x\n")).store
