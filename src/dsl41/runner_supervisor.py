@@ -880,7 +880,7 @@ class Supervisor:
                         self._reap()
                         if self._shutdown_requested:
                             self._orderly_shutdown(PROCESS_SIGNALLED)
-                    elif tag == "conn":
+                    elif tag == "conn":  # pragma: no branch -- no other tag is registered
                         if mask & selectors.EVENT_WRITE:
                             self._writable(payload)
                         if mask & selectors.EVENT_READ and self._connected(payload):
