@@ -309,3 +309,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-295 | The engine tier is five state machines, the outbox refuses a second outcome, and a second seal request is refused while a boundary is in flight | [docs/concurrency-model.md](concurrency-model.md), [docs/control-protocol.md](control-protocol.md) |
 | DL-296 | Every state machine has an exhaustive event-by-state test |  |
 | DL-297 | The `engine:` request-id prefix is reserved, and the integration's contract corrections | [docs/control-protocol.md](control-protocol.md) |
+| DL-298 | Seven more modules join the 100% branch gate |  |

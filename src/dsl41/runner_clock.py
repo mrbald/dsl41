@@ -121,7 +121,7 @@ class VirtualClock:
         self._prune()
         while self._sleepers and self._sleepers[0][0] <= self._now:
             _, _, fut = heapq.heappop(self._sleepers)
-            if not fut.done():
+            if not fut.done():  # pragma: no branch -- _prune above left only live futures
                 fut.set_result(None)
 
     async def sleep_until(self, t: datetime) -> None:

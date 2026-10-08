@@ -188,7 +188,7 @@ def _err(cal: str, msg: str) -> CalendarRuleError:
 def _ord_in(cal: str, tok: str, text: str, lo: int, hi: int) -> int:
     try:
         n = int(text)
-    except ValueError:
+    except ValueError:  # pragma: no cover -- int() reads every digit the callers' \d patterns match
         raise _err(cal, f"token {tok!r}: ordinal {text!r} is not a number") from None
     if not lo <= n <= hi:
         raise _err(cal, f"token {tok!r}: ordinal {n} outside {lo}..{hi}")
@@ -825,7 +825,7 @@ class CompiledCalendar:
     def _replace(self, category: str, day: date) -> date:
         """One replacement code's target for one excluded date."""
         code = self.holiday if category == _HOLIDAY_CATEGORY else self.non_workday
-        if code is None or code not in _REPLACE:
+        if code is None or code not in _REPLACE:  # pragma: no cover -- both callers test it first
             raise _err(self.name, f"internal: {category} code {code!r} is not a replacement")
         if code == "n" and category == _HOLIDAY_CATEGORY:
             # [V] one-shot: 'Excludes the holiday and includes the next
@@ -953,7 +953,7 @@ def compile_calendar(
     switches (DL-252); None reads the registry defaults."""
     if cal.kind != "extended":
         raise CalendarRuleError(f"calendar {cal.name!r} is standard; use standard_days()")
-    if "condition" in cal.attrs:
+    if "condition" in cal.attrs:  # pragma: no cover -- lowering never puts it in attrs
         raise _err(cal.name, "condition in attrs (hand-built IR?); lowering owns the lane")
 
     unknown = set(cal.attrs) - CALENDAR_ATTRS
@@ -1221,7 +1221,7 @@ def semantic_key(
             return False
         if non_workday_action in _REPLACE:
             return bool(candidates)
-        return True  # an unparsed action spelling: assume reach
+        return True  # pragma: no cover -- a spelling compile_calendar refuses returned above
 
     adjust_raw = cal.attrs.get("adjust", "").strip()
     adjust: Any = 0
