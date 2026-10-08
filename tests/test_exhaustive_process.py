@@ -156,6 +156,7 @@ class _LeaseRig:
     def __init__(self, root: Path, clock: _Clock) -> None:
         self.clock = clock
         self.sup = runner_supervisor.Supervisor(str(root))
+        self.sup.state = "serving"  # requests are read and dispatched only while serving
         self.conns: dict[str, runner_supervisor._Conn] = {}
         self.peers: dict[str, socket.socket] = {}
         for slot in _SLOTS:
@@ -517,11 +518,15 @@ def test_every_process_event_at_every_reached_point_takes_a_declared_transition(
     deadman. `refused` is reached from a held lock and from a pid record
     that names a live process. A case passes when the run ends `closed`,
     having returned, refused (SystemExit) or raised the injected error, with
-    no TransitionError and no `internal: TransitionError` answer.
+    no TransitionError and no `internal: TransitionError` answer. An error
+    in a SHUTDOWN's wait is answered by the dispatch, and the end of that
+    loop pass runs the wait again (12), or the latched SIGTERM does (06).
 
-    Left out: SIGKILL, which runs no code; a request from a second
-    connection in the same loop pass as a stop (the pipelined SHUTDOWN is
-    the request that can follow one); and a SHUTDOWN before the socket
+    Left out: SIGKILL, which runs no code; a second error in the wait that
+    runs again (each case raises once; test_runner_supervisor.py raises
+    twice); a request from a second connection in the same loop pass as a
+    stop (none is dispatched once the process leaves `serving`, as the
+    pipelined SHUTDOWN shows); and a SHUTDOWN before the socket
     listens or after a refused start, which no client can deliver (the test
     asserts exactly which). A SIGTERM at those points is delivered, and the
     latch holds it for `serving`."""

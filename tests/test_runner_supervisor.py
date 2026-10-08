@@ -2588,6 +2588,7 @@ def test_dl210_probe_retries_refusals_before_pid_guard(queued_supervisor, monkey
 
 def test_dl210_a_later_ping_answer_still_refuses_ownership(queued_supervisor, monkeypatch):
     sup, _ = queued_supervisor
+    sup.state = "starting"  # the ownership guard runs at startup, before `serving`
     Path(sup.sock_path).touch()
     replies = iter([False, False, True])
     monkeypatch.setattr(sup, "_probe_answered", lambda _deadline: next(replies))
@@ -3197,6 +3198,41 @@ def test_a_ttl_that_is_not_positive_grants_and_renews_into_expired(queued_superv
     assert _exchange(sup, conn, peer, {"cmd": "LIST"})["lease"] is None
 
 
+def test_a_renew_whose_expiry_cannot_be_represented_changes_nothing(queued_supervisor) -> None:
+    """A RENEW whose ttl_s gives no representable expiry is refused through
+    the dispatch belt, as the same ttl_s on ACQUIRE is, and the lease is left
+    exactly as it was: before, the deadline moved first, so 1e20 or inf made
+    a lease that never expires and nan or -1e20 one that already had. An
+    ACQUIRE with such a ttl_s changes nothing either, not even the token
+    counter. A huge representable ttl_s, a negative one and a JSON string
+    still renew."""
+    sup, connect = queued_supervisor
+    conn, peer = connect()
+    granted = _exchange(sup, conn, peer, {"cmd": "ACQUIRE", "controller_id": "e", "ttl_s": 60})
+    creds = {"incarnation": sup.incarnation, "token": granted["token"]}
+    lease = sup.lease
+    for ttl_s in (1e20, -1e20, float("inf"), float("-inf"), float("nan")):
+        before = (lease.deadline, lease.expires_at, lease.token)
+        reply = _exchange(sup, conn, peer, {"cmd": "RENEW", "ttl_s": ttl_s, **creds})
+        assert reply["ok"] is False and reply["error"].startswith("internal: "), ttl_s
+        assert sup.lease is lease and (lease.deadline, lease.expires_at, lease.token) == before
+        assert _phase(sup) == "live"
+        acquire = {"cmd": "ACQUIRE", "controller_id": "e", "ttl_s": ttl_s, **creds}
+        next_token = sup._next_token
+        assert _exchange(sup, conn, peer, acquire)["error"].startswith("internal: ")
+        assert sup.lease is lease and sup._next_token == next_token  # no token used up
+    before_deadline = lease.deadline
+    huge = _exchange(sup, conn, peer, {"cmd": "RENEW", "ttl_s": 1e9, **creds})
+    assert huge["ok"] is True and lease.deadline > before_deadline + 1e8
+    assert huge["expires_at"] == lease.expires_at
+    assert _exchange(sup, conn, peer, {"cmd": "RENEW", "ttl_s": "60", **creds})["ok"] is True
+    assert _phase(sup) == "live"
+    assert _exchange(sup, conn, peer, {"cmd": "RENEW", "ttl_s": -5, **creds})["ok"] is True
+    assert _phase(sup) == "expired"  # a representable negative ttl_s: expired, as ss5 says
+    again = _exchange(sup, conn, peer, {"cmd": "ACQUIRE", "controller_id": "e", "ttl_s": -5})
+    assert again["ok"] is True and _phase(sup) == "expired"
+
+
 def test_a_second_shutdown_request_in_one_loop_pass_does_nothing_more(
     short_root: Path, monkeypatch
 ) -> None:
@@ -3245,6 +3281,218 @@ def test_an_error_during_shutdown_still_unlinks_what_was_published(
     sup._teardown()
     assert sup.state == "closed"
     assert not Path(sup.sock_path).exists() and not Path(sup.pid_path).exists()
+
+
+class _ErroredShutdown:
+    """An in-process `Supervisor.run()` whose shutdown wait raises at its
+    first `failures` reaps; the loop's own reap never raises. With `signal`,
+    a SIGTERM is latched just before each raise. When the loop starts
+    serving, a client sends in one write an ACQUIRE, a SHUTDOWN and then
+    `extra`; each line carries the lease's credentials. The signal handlers
+    and the subreaper are left out, and `_reap` is stubbed: an in-process
+    reap would wait on the test runner's children. `taken` lists the process
+    transitions in order. `seen_in_wait` is what the client had received at
+    the first reap of a wait that does not raise."""
+
+    def __init__(
+        self, root: Path, failures: int, extra: tuple[dict, ...] = (), signal: bool = False
+    ) -> None:
+        root.mkdir()
+        self.sup = sup = runner_supervisor.Supervisor(str(root))
+        self.failures = failures
+        self.taken: list[str] = []
+        self.client: socket.socket | None = None
+        self.received = b""
+        self.seen_in_wait: list[dict] | None = None
+        creds = {"v": 1, "incarnation": sup.incarnation, "token": 1}
+        lines = [{"cmd": "ACQUIRE", "controller_id": "c"}, {"cmd": "SHUTDOWN"}, *extra]
+        payload = b"".join(json.dumps({**creds, **line}).encode() + b"\n" for line in lines)
+        move = sup._move
+
+        def moved(t: state_machine.Transition[str], new: str) -> None:
+            self.taken.append(t.id)
+            move(t, new)  # type: ignore[arg-type]
+            if new == "serving":
+                self.client = socket.socket(socket.AF_UNIX)
+                self.client.connect(sup.sock_path)
+                self.client.sendall(payload)
+
+        def reap() -> None:
+            in_wait = (
+                sys._getframe(1).f_code is runner_supervisor.Supervisor._orderly_shutdown.__code__
+            )
+            if in_wait and self.failures > 0:
+                self.failures -= 1
+                if signal:
+                    sup._on_term_signal(runner_supervisor.signal.SIGTERM, None)
+                raise OSError(errno.EIO, "synthetic")
+            if in_wait and self.seen_in_wait is None:
+                self.seen_in_wait = self._parse(self._available())
+
+        sup._move = moved  # type: ignore[method-assign,assignment]
+        sup._reap = reap  # type: ignore[method-assign]
+        sup._install_signals = lambda: None  # type: ignore[method-assign]
+        sup._set_subreaper = lambda: None  # type: ignore[method-assign]
+
+    def _available(self) -> bytes:
+        """What the client can read now, without waiting."""
+        assert self.client is not None
+        self.client.setblocking(False)
+        with contextlib.suppress(BlockingIOError):
+            while chunk := self.client.recv(65536):
+                self.received += chunk
+        self.client.setblocking(True)
+        return self.received
+
+    @staticmethod
+    def _parse(data: bytes) -> list[dict]:
+        return [json.loads(line) for line in data.splitlines()]
+
+    def replies(self) -> list[dict]:
+        """Every line the client got. The supervisor is closed, so EOF is due."""
+        assert self.client is not None
+        with self.client:
+            self.client.settimeout(5.0)
+            while chunk := self.client.recv(65536):
+                self.received += chunk
+        return self._parse(self.received)
+
+
+_SYNTHETIC = "internal: OSError: [Errno 5] synthetic"
+_FAILED_LINE = (
+    "supervisor: the shutdown wait failed (OSError: [Errno 5] synthetic); running it once more"
+)
+
+
+def test_nothing_is_dispatched_after_an_error_ends_a_shutdown_wait(short_root: Path) -> None:
+    """An error in a SHUTDOWN's wait is answered by the dispatch belt, and the
+    process stays `shutting_down` for the rest of the loop pass. The requests
+    pipelined behind it are not dispatched then: no SPAWN, no PING, no
+    second SHUTDOWN. Before, each was answered, and a SPAWN with a valid spec
+    would have forked a wrapper during the shutdown. The ACQUIRE before the
+    SHUTDOWN is the non-triggering case: it is answered while serving."""
+    rig = _ErroredShutdown(
+        short_root / "a",
+        failures=1,
+        extra=({"cmd": "SPAWN", "spec": {}}, {"cmd": "PING"}, {"cmd": "SHUTDOWN"}),
+    )
+    assert rig.sup.run() == 0
+    replies = rig.replies()
+    assert len(replies) == 2 and replies[0]["ok"] is True
+    assert replies[1] == {"ok": False, "error": _SYNTHETIC}
+    assert rig.taken.count("supervisor_process.05") == 1
+    assert rig.sup.state == "closed"
+
+
+def test_an_error_in_a_shutdown_wait_runs_the_wait_once_more(
+    short_root: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """supervisor_process.12. With no signal latched, the end of the pass runs
+    the wait again, instead of tearing down with the wrappers still on their
+    lifelines (supervisor_process.11). The failed wait is logged with its
+    cause, and its `internal:` answer reaches the client before the second
+    wait, not after it. The process then stops in order and returns 0, as a
+    SHUTDOWN does. A wait with no error is the non-triggering case: 05, 07
+    and 10, no line, and no answer before the wait ends."""
+    plain = _ErroredShutdown(short_root / "plain", failures=0)
+    assert plain.sup.run() == 0
+    assert plain.taken[-3:] == [
+        "supervisor_process.05",
+        "supervisor_process.07",
+        "supervisor_process.10",
+    ]
+    assert plain.seen_in_wait == []
+    assert [r["ok"] for r in plain.replies()] == [True, True]
+    assert "running it once more" not in capfd.readouterr().err
+
+    rig = _ErroredShutdown(short_root / "once", failures=1)
+    assert rig.sup.run() == 0
+    assert rig.taken[-4:] == [
+        "supervisor_process.05",
+        "supervisor_process.12",
+        "supervisor_process.07",
+        "supervisor_process.10",
+    ]
+    assert rig.seen_in_wait is not None and len(rig.seen_in_wait) == 2
+    assert rig.seen_in_wait[1] == {"ok": False, "error": _SYNTHETIC}  # sent before the rerun
+    assert rig.replies()[1] == {"ok": False, "error": _SYNTHETIC}
+    assert capfd.readouterr().err.count(_FAILED_LINE) == 1
+    assert not Path(rig.sup.sock_path).exists() and not Path(rig.sup.pid_path).exists()
+
+
+def test_an_error_in_a_shutdown_wait_with_a_signal_latched_is_logged_too(
+    short_root: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """supervisor_process.06 from shutting_down. A SIGTERM latched in the pass
+    whose SHUTDOWN wait failed runs the wait again in place of row 12. The
+    failure is logged the same way and the answer is sent first."""
+    rig = _ErroredShutdown(short_root / "sig", failures=1, signal=True)
+    assert rig.sup.run() == 0
+    assert rig.taken[-4:] == [
+        "supervisor_process.05",
+        "supervisor_process.06",
+        "supervisor_process.07",
+        "supervisor_process.10",
+    ]
+    assert "supervisor_process.12" not in rig.taken
+    assert rig.seen_in_wait is not None and rig.seen_in_wait[1]["error"] == _SYNTHETIC
+    assert capfd.readouterr().err.count(_FAILED_LINE) == 1
+
+
+def test_a_second_error_in_a_shutdown_wait_ends_the_loop_with_the_error(
+    short_root: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """The wait runs once more, and only once. When that run fails too, the
+    error leaves `run()` through supervisor_process.11, so the process does
+    not exit 0 with its wrappers left to lifeline EOF: main exits 1 (the
+    process test below). Before, the first error was the last word and
+    `run()` returned 0."""
+    rig = _ErroredShutdown(short_root / "twice", failures=3)
+    with pytest.raises(OSError, match="synthetic"):
+        rig.sup.run()
+    assert rig.taken[-3:] == [
+        "supervisor_process.05",
+        "supervisor_process.12",
+        "supervisor_process.11",
+    ]
+    assert rig.failures == 1  # two waits, not three
+    assert rig.replies()[1] == {"ok": False, "error": _SYNTHETIC}
+    assert capfd.readouterr().err.count("running it once more") == 1
+    assert not Path(rig.sup.sock_path).exists() and not Path(rig.sup.pid_path).exists()
+
+
+def test_a_shutdown_wait_that_fails_twice_exits_1(short_root: Path) -> None:
+    """The process path behind supervisor_process.12 and .11. A spawn record
+    nested past the parser's depth limit makes the shutdown wait raise
+    RecursionError (a same-uid file, inside the trust boundary). The
+    SHUTDOWN is answered `internal:` before the wait runs once more, which
+    fails the same way, and the supervisor exits 1, which the service
+    restarts like any crash. The log names both errors. The wrapper loses
+    its lifeline and records a lost parent: the bounded promise of ss5, now
+    reported by the exit code."""
+    proc = start_supervisor(short_root)
+    cli = RawClient(short_root)
+    run_dir = short_root / "runs" / "j.1"
+    try:
+        tok = cli.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "A", "ttl_s": 60})["token"]
+        cli.send({"v": 1, "cmd": "SPAWN", "token": tok, "spec": _spec(run_dir, "sleep 60")})
+        wait_for(lambda: (run_dir / "spawn.json").exists())
+        (run_dir / "spawn.json").write_text("[" * 200_000 + "]" * 200_000)
+        reply = cli.send({"v": 1, "cmd": "SHUTDOWN", "token": tok})
+        assert reply["ok"] is False and reply["error"].startswith("internal: RecursionError")
+        assert proc.wait(timeout=30) == 1
+        log = (short_root / "supervisor.log").read_text()
+        assert log.count("supervisor: the shutdown wait failed (RecursionError") == 1
+        assert log.count("running it once more") == 1
+        assert "Traceback" in log and "RecursionError" in log.split("running it once more")[1]
+        wait_for(lambda: (run_dir / "status.json").exists())
+        status = json.loads((run_dir / "status.json").read_text())
+        assert status["outcome"] == "terminated" and status["cause"] == "parent lost"
+        assert not (short_root / "supervisor.sock").exists()
+        assert not (short_root / "supervisor.pid").exists()
+    finally:
+        cli.close()
+        teardown_supervisor(short_root, proc)
 
 
 def test_sigterm_during_a_shutdown_wait_is_answered_once(short_root: Path) -> None:

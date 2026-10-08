@@ -129,6 +129,81 @@ def test_wrapper_observe_exit_waitid_reports_exit_signal_running_and_reaped() ->
         running.wait()
 
 
+def _stopped(pid: int) -> bool:
+    """Whether `pid` is stopped by a signal: state T in /proc on Linux, in
+    `ps` on macOS."""
+    if sys.platform.startswith("linux"):
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            return f.read().rsplit(b")", 1)[1].split()[0] == b"T"
+    out = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "LC_ALL": "C"},
+        check=False,
+    )
+    return out.stdout.strip().startswith("T")
+
+
+@pytest.mark.skipif(not hasattr(os, "waitid"), reason="the waitid arm needs os.waitid")
+def test_wrapper_observe_exit_waitid_reads_a_stopped_command_as_still_running() -> None:
+    """A real command stopped by SIGSTOP is alive. macOS reports it through
+    `waitid(WEXITED)` with the stop signal as its status; the wrapper must not
+    record that as a signal death. After SIGCONT the command's own exit is the
+    one observed."""
+    child = _sh("kill -STOP $$; exit 5")
+    try:
+        wait_for(lambda: _stopped(child.pid))
+        assert runner_wrapper._observe_exit(child) is None
+        os.killpg(child.pid, signal.SIGCONT)
+        assert wait_for(lambda: runner_wrapper._observe_exit(child)) == {
+            "outcome": "exited",
+            "exit_code": 5,
+        }
+    finally:
+        if child.poll() is None:  # a failed check left it stopped or running
+            os.killpg(child.pid, signal.SIGKILL)
+            child.wait()
+
+
+class _Reports:
+    """The `os` module with `waitid` answering one fixed report, so every
+    host takes each `si_code` arm, whatever its own kernel reports."""
+
+    def __init__(self, si_code: int, si_status: int) -> None:
+        self.report = SimpleNamespace(si_pid=4242, si_code=si_code, si_status=si_status)
+
+    def waitid(self, *_args: object) -> SimpleNamespace:
+        return self.report
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(os, name)
+
+
+@pytest.mark.parametrize(
+    ("si_code", "si_status", "expected"),
+    [
+        (os.CLD_STOPPED, signal.SIGSTOP, None),
+        (os.CLD_STOPPED, signal.SIGTSTP, None),
+        (os.CLD_CONTINUED, signal.SIGCONT, None),
+        (os.CLD_TRAPPED, signal.SIGTRAP, None),
+        (os.CLD_EXITED, 5, {"outcome": "exited", "exit_code": 5}),
+        (os.CLD_KILLED, signal.SIGKILL, {"outcome": "signaled", "signal": signal.SIGKILL}),
+        (os.CLD_DUMPED, signal.SIGABRT, {"outcome": "signaled", "signal": signal.SIGABRT}),
+    ],
+    ids=["stopped", "tty-stopped", "continued", "trapped", "exited", "killed", "dumped"],
+)
+def test_wrapper_observe_exit_maps_each_waitid_report(
+    monkeypatch: pytest.MonkeyPatch, si_code: int, si_status: int, expected: object
+) -> None:
+    """A stop, a continue or a trace trap is a live command (None); an exit
+    is `exited`, a kill or a core dump is `signaled`. The real stopped
+    command above shows the first case where the host reports it."""
+    monkeypatch.setattr(runner_wrapper, "os", _Reports(si_code, si_status))
+    child = SimpleNamespace(pid=4242)
+    assert runner_wrapper._observe_exit(child) == expected  # type: ignore[arg-type]
+
+
 class _NoWaitid:
     """The `os` module as seen on a host without `os.waitid`."""
 
@@ -398,6 +473,41 @@ def test_wrapper_keeps_waiting_through_a_wakeup_that_is_neither_an_exit_nor_eof(
         _cleanup(proc, run_dir, go)
     status = read_json(run_dir / "status.json")
     assert status["outcome"] == "exited" and status["exit_code"] == 4
+    assert "cause" not in status
+
+
+def test_wrapper_records_the_exit_of_a_command_that_was_stopped_and_continued(
+    tmp_path: Path,
+) -> None:
+    """A command stopped by SIGSTOP is still running: the wrapper looks while
+    it is stopped, records nothing, and after SIGCONT records the command's
+    own exit. On macOS the look used to record `signaled 17` (SIGSTOP) and
+    lose the real exit. The test wakes the wrapper itself once the command
+    is stopped and waits for that look to finish, so the look is certain."""
+    run_dir = tmp_path / "j1.1"
+    run_dir.mkdir()
+    events = tmp_path / "events"
+    go = tmp_path / "go"
+    lifeline_r, lifeline_w = os.pipe()
+    command = f"while [ ! -e {go} ]; do sleep 0.05; done; kill -STOP $$; exit 5"
+    proc = _drive("count_observes", events, _spec(run_dir, command, lifeline_r), lifeline_r)
+    os.close(lifeline_r)
+    try:
+        wait_for(lambda: (run_dir / "spawn.json").exists())
+        pgid = read_json(run_dir / "spawn.json")["command_pgid"]
+        go.write_text("")
+        wait_for(lambda: _stopped(pgid))
+        before = _event_count(events)
+        os.kill(proc.pid, signal.SIGCHLD)
+        wait_for(lambda: _event_count(events) > before)  # looked while the command was stopped
+        assert not (run_dir / "status.json").exists() and proc.poll() is None
+        os.killpg(pgid, signal.SIGCONT)
+        assert proc.wait(timeout=30) == 0
+    finally:
+        os.close(lifeline_w)
+        _cleanup(proc, run_dir, go)
+    status = read_json(run_dir / "status.json")
+    assert status["outcome"] == "exited" and status["exit_code"] == 5
     assert "cause" not in status
 
 

@@ -302,7 +302,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-288 | The UC backend and Q12 are descoped until further notice | [README.md](../README.md), [docs/autosys-semantics.md](autosys-semantics.md), [docs/citation-index.md](citation-index.md), [docs/stonebranch-semantics.md](stonebranch-semantics.md) |
 | DL-289 | Runner state machines get transition tables, and a gate requires every transition to be taken by a test | [docs/citation-index.md](citation-index.md) |
 | DL-290 | The anchor head and the period row are state machines, and an undeclared move refuses the boundary operation before any write | [docs/concurrency-model.md](concurrency-model.md) |
-| DL-291 | The supervisor tier is three state machines, and lease renewal never stops while the client is open | [docs/state-machines.md](state-machines.md) |
+| DL-291 | The supervisor tier is three state machines, and lease renewal never stops while the client is open | [docs/state-machines.md](state-machines.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
 | DL-292 | A control input is dry-applied before it is admitted, a transition violation has one channel and one policy, and a replayed fault names its input | [docs/blocks/engine-loop.md](blocks/engine-loop.md), [docs/control-protocol.md](control-protocol.md), [docs/state-machines.md](state-machines.md) |
 | DL-293 | The oracle's job lifecycle, flags, holding and assembly are state machines, and every ignored event is a declared internal transition | [docs/concurrency-model.md](concurrency-model.md) |
 | DL-294 | The supervisor, the wrapper and process identity join the 100% branch gate |  |
@@ -311,3 +311,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-297 | The `engine:` request-id prefix is reserved, and the integration's contract corrections | [docs/control-protocol.md](control-protocol.md) |
 | DL-298 | Seven more modules join the 100% branch gate |  |
 | DL-299 | The engine-side supervisor adapters join the 100% branch gate, and two resource leaks are closed |  |
+| DL-300 | Four supervisor and wrapper fixes: a stopped command is not an exit, a lease with no representable expiry changes nothing, nothing is dispatched while shutting... | [docs/supervisor-protocol.md](supervisor-protocol.md) |

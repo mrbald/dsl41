@@ -188,8 +188,9 @@ def _test_pause(point: str) -> None:
 
 def _observe_exit(child: subprocess.Popen[bytes]) -> dict[str, Any] | None:
     """Observe the child's exit WITHOUT reaping (waitid WNOWAIT + WNOHANG);
-    None while it still runs. Falling back to waitpid (reap-on-observe) only
-    where waitid is missing -- the observe-to-record hole widens there.
+    None while it still runs, stopped or continued included. Falling back
+    to waitpid (reap-on-observe) only where waitid is missing -- the
+    observe-to-record hole widens there.
     Either way ``_reap`` stays safe afterwards: the waitid path leaves a
     reapable zombie for child.wait(); the waitpid path sets child.returncode
     so child.wait() returns immediately."""
@@ -199,6 +200,10 @@ def _observe_exit(child: subprocess.Popen[bytes]) -> dict[str, Any] | None:
         except ChildProcessError:
             return None  # already reaped: only possible after we reaped it
         if info is None or info.si_pid == 0:
+            return None
+        if info.si_code in (os.CLD_STOPPED, os.CLD_CONTINUED, os.CLD_TRAPPED):
+            # macOS reports a stopped child here despite WEXITED, with the
+            # stop signal in si_status: the command is alive, not signaled
             return None
         if info.si_code == os.CLD_EXITED:
             return {"outcome": "exited", "exit_code": info.si_status}

@@ -280,6 +280,27 @@ def test_sv_resuming_a_paused_reader_that_hit_eof_drops_it_without_rearming(
     assert json.loads(peer.recv(4096))["ok"] is True  # the frame was flushed first
 
 
+def test_sv_buffered_requests_wait_unless_the_process_is_serving(queued_supervisor) -> None:
+    """A connection whose earlier output pause cleared can hold complete
+    request lines in its buffer when the loop reads it next. Outside
+    `serving` none of them is dispatched, not even the first: an error that
+    ended a SHUTDOWN's wait leaves the process `shutting_down` for the rest
+    of the loop pass, and a request read then must not run. In `serving`
+    the same buffer is dispatched in order."""
+    sup, connect = queued_supervisor
+    conn, _peer = connect()
+    lines = b'{"v":1,"cmd":"PING"}\n{"v":1,"cmd":"LIST"}\n'
+    for state in ("starting", "shutting_down", "stopped"):
+        sup.state = state
+        conn.buf = lines
+        sup._readable(conn)
+        assert not conn.out and conn.buf == lines, state
+    sup.state = "serving"
+    sup._readable(conn)
+    assert [json.loads(frame)["ok"] for frame, _ in conn.out] == [True, True]
+    assert conn.buf == b""
+
+
 def test_sv_a_blank_line_is_ignored_and_a_request_is_answered(queued_supervisor) -> None:
     sup, connect = queued_supervisor
     conn, _peer = connect()
@@ -346,7 +367,7 @@ def test_sv_lease_verbs_refuse_bad_ids_and_stale_tokens_and_change_nothing(
     wrong = {"token": token, "incarnation": "another"}
     assert _exchange(sup, conn, peer, {"cmd": "RELEASE", **wrong})["error"] == "wrong_incarnation"
     assert _exchange(sup, conn, peer, {"cmd": "SHUTDOWN", **stale})["error"] == "stale_token"
-    assert sup.state == "starting"  # the refused SHUTDOWN stopped nothing
+    assert sup.state == "serving"  # the refused SHUTDOWN stopped nothing
     sig = {"cmd": "SIGNAL", "run_id": "r", "sig": "TERM"}
     assert _exchange(sup, conn, peer, {**sig, **stale})["error"] == "stale_token"
     assert _exchange(sup, conn, peer, {"cmd": "SPAWN", "spec": {}, **stale})["error"] == (

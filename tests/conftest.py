@@ -31,10 +31,13 @@ def short_root():
 
 @pytest.fixture
 def queued_supervisor(short_root: Path):
-    """In-process selector with real sockets and explicit descriptor cleanup."""
+    """In-process selector with real sockets and explicit descriptor cleanup.
+    The supervisor stands in `serving`, the only state whose requests are read
+    and dispatched; it binds nothing and publishes nothing."""
     from dsl41 import runner_supervisor
 
     sup = runner_supervisor.Supervisor(str(short_root))
+    sup.state = "serving"
     peers = []
 
     def connect():
