@@ -19716,3 +19716,57 @@ relitigate an entry; append a new one.
   findings (a socket leak, a reply accepted without a taken transition, two
   incomplete "left out" lists) are fixed and confirmed by the reviewer that
   raised them.
+- DL-297 The `engine:` request-id prefix is reserved, and the integration's
+  contract corrections
+  (2026-10-08; src/dsl41/runner_admission.py, runner_effects.py,
+  cli_estate.py;
+  docs/control-protocol.md (request_id, status line),
+  docs/concurrency-model.md §4 and §5, docs/period-model.md §11,
+  docs/deployment-runbook.md; tests/test_exhaustive_engine.py,
+  tests/test_engine_machines.py)
+  THE PREFIX. The engine names an input that carries no request id
+  `engine:<n>`, and a client could send that same id. A later engine-made
+  input then took the client's id and overwrote its decision, and the
+  client's retry was refused as a reused id (DL-296 pinned it). A client
+  request id that begins with `engine:` is now refused with
+  `invalid_argument`: in `parse_envelope`, for sendevent, host and seal, and
+  where a seal request is built, so the offline seal refuses it too. The
+  engine's own names are unchanged. On the socket the committed-seal retry
+  route runs before the check, which is harmless, because seal ids never
+  enter the decision index. Narrowing the v3 request_id domain needs no
+  version move: the envelope's shape is unchanged, the refusal is an
+  existing code (DL-151 and DL-292 did the same), the gateway spec already
+  requires a UUID v4, and the CLI mints one.
+  THE CORRECTIONS (from the integration review). concurrency-model §4 now
+  says exactly which violations raise or refuse by design: the anchor head
+  and period row refuse the boundary operation before any write, and at
+  resume that stops the resume, never as a replayed fault (DL-290); the
+  outbox refuses a second outcome live and, on replay, stops resume naming
+  the effect (DL-295); assembly misuse raises (DL-293). Every other
+  violation never raises, live or on replay. The violations outside the
+  `--on-transition-violation` option go to stderr under the shared prefix:
+  admission, subscriptions, the seal boundary and the outbox's record move;
+  host routing rides the oracle channel, so the option covers it. §5 states
+  the rule the code cites: an outcome is final. period-model §11 and the
+  runbook say a replay stop may name an effect instead of an input, with the
+  same exit and advice. `Outbox.record` now reports its violation through
+  the same channel as every other engine-tier move.
+  STATED LIMITS. No estate is live, so three cases are accepted: a retry of
+  an `engine:` id that an older build accepted is now refused as
+  `invalid_argument`, and a client that followed that advice could apply the
+  command twice; an older log's collision is not repaired; and offline, the
+  check runs before the committed-seal route, so an offline retry of a seal
+  an older build committed under an `engine:` id is refused, while the
+  socket would answer it. This build cannot create such a seal.
+  NOT RESERVED. Replay names an input `log:<seq>` only when a record has no
+  request id. This build writes one on every record, and the state-machine
+  version gate refuses a log old enough to lack it, so a client's `log:<n>`
+  meets the ordinary dedup and can never overwrite.
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass, the
+  Fable pass in place of Codex at the owner's instruction. Both found the
+  code correct and the new §4 text inexact (a wrong machine count, host
+  wrongly listed among the stderr reporters, and replay misdescribed for the
+  anchor head); both asked for the offline seal to apply the prefix rule.
+  The Opus reviewer also found an orphaned test reference, an unasserted
+  index, and two reporter lists missing the outbox's record move. All are
+  fixed and confirmed by the reviewer that raised them.

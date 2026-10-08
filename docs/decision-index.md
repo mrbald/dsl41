@@ -301,10 +301,11 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-287 | Preflight refuses FREE=Y and FREE=A on a depletable resource | [docs/autosys-semantics.md](autosys-semantics.md), [docs/blocks/capacity.md](blocks/capacity.md), [docs/citation-index.md](citation-index.md), [docs/live-instance-runbook.md](live-instance-runbook.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
 | DL-288 | The UC backend and Q12 are descoped until further notice | [README.md](../README.md), [docs/autosys-semantics.md](autosys-semantics.md), [docs/citation-index.md](citation-index.md), [docs/stonebranch-semantics.md](stonebranch-semantics.md) |
 | DL-289 | Runner state machines get transition tables, and a gate requires every transition to be taken by a test | [docs/citation-index.md](citation-index.md) |
-| DL-290 | The anchor head and the period row are state machines, and an undeclared move refuses the boundary operation before any write |  |
+| DL-290 | The anchor head and the period row are state machines, and an undeclared move refuses the boundary operation before any write | [docs/concurrency-model.md](concurrency-model.md) |
 | DL-291 | The supervisor tier is three state machines, and lease renewal never stops while the client is open | [docs/state-machines.md](state-machines.md) |
-| DL-292 | A control input is dry-applied before it is admitted, a transition violation has one channel and one policy, and a replayed fault names its input | [docs/blocks/engine-loop.md](blocks/engine-loop.md), [docs/state-machines.md](state-machines.md) |
-| DL-293 | The oracle's job lifecycle, flags, holding and assembly are state machines, and every ignored event is a declared internal transition |  |
+| DL-292 | A control input is dry-applied before it is admitted, a transition violation has one channel and one policy, and a replayed fault names its input | [docs/blocks/engine-loop.md](blocks/engine-loop.md), [docs/control-protocol.md](control-protocol.md), [docs/state-machines.md](state-machines.md) |
+| DL-293 | The oracle's job lifecycle, flags, holding and assembly are state machines, and every ignored event is a declared internal transition | [docs/concurrency-model.md](concurrency-model.md) |
 | DL-294 | The supervisor, the wrapper and process identity join the 100% branch gate |  |
-| DL-295 | The engine tier is five state machines, the outbox refuses a second outcome, and a second seal request is refused while a boundary is in flight |  |
+| DL-295 | The engine tier is five state machines, the outbox refuses a second outcome, and a second seal request is refused while a boundary is in flight | [docs/concurrency-model.md](concurrency-model.md), [docs/control-protocol.md](control-protocol.md) |
 | DL-296 | Every state machine has an exhaustive event-by-state test |  |
+| DL-297 | The `engine:` request-id prefix is reserved, and the integration's contract corrections | [docs/control-protocol.md](control-protocol.md) |

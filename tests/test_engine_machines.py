@@ -387,6 +387,42 @@ def test_a_strict_session_raises_on_a_second_outcome(
         outbox.resolve(EffectOutcome(effect_id=effect.effect_id, state="applied"))
 
 
+class _ViolatingMachine:
+    """Stands for the effect machine with its record move undeclared: the
+    real table cannot be driven into that violation, because `record`
+    takes the move from `absent` by construction."""
+
+    def take(self, t: Transition[Any], old: str, new: str) -> Violation:
+        return Violation("effect", t.id, old, new, "fake")
+
+
+def test_a_recorded_effect_that_breaks_the_table_is_reported_and_still_recorded(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Like every other engine-tier take, the record move's violation goes
+    to stderr under the shared prefix, and the move proceeds."""
+    monkeypatch.setattr("dsl41.runner_effects.EFFECT", _ViolatingMachine())
+    outbox = Outbox()
+    effect = _effect()
+    outbox.record(effect)
+    assert outbox.state_of(effect.effect_id) == "pending"
+    assert capsys.readouterr().err == (
+        f"{VIOLATION_LOG_PREFIX}: effect effect.01 absent->pending: fake\n"
+    )
+
+
+def test_a_recorded_effect_that_takes_its_declared_move_reports_nothing(
+    recording: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    outbox = Outbox()
+    effect = _effect()
+    outbox.record(effect)
+    outbox.record(effect)
+    assert outbox.state_of(effect.effect_id) == "pending"
+    assert capsys.readouterr().err == ""
+    assert not list(recording.glob("violations-*.jsonl"))
+
+
 def test_a_log_with_two_outcomes_for_one_effect_does_not_replay(
     recording: Path, tmp_path: Path
 ) -> None:

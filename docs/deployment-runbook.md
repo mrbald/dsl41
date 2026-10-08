@@ -565,7 +565,7 @@ endpoint; feed these into the site's monitoring.
 | leader | `$RUN_ROOT/leader.lock` holds the last leader's `pid`, `host`, `epoch` and `since`; compare `pid` with `systemctl show -p MainPID --value dsl41-engine.service` | the note stays after the engine exits, so it says who led, not who leads. Never probe the lock with `flock`: an engine that starts while a probe holds it refuses with exit 2. Never delete or replace the file: the engine re-checks it before every append and stops when it changed |
 | control socket | `dsl41 query status --brief -S "$S"` | exit 0: the leader answers. Exit 2: no engine, or a refusal |
 | failures and alarms | `dsl41 query subscribe -S "$S"` as the wake-up; then `dsl41 query trace --since N -S "$S"` with the last `last_seq` read. The trace is per period and its `seq` restarts at 1: set the cursor to 0 when the answer's `baseline_id` changes, or when `last_seq` is below the cursor, as the TUI does (DL-210) | the stream carries journal records: a run's end arrives as an `input` record of kind `STATUS` from the `adapter` source. The trace names what it did: a transition to `FAILURE` or `TERMINATED`, or a `MUST_START_ALARM` or `MUST_COMPLETE_ALARM` entry (SEM-34). Alert on any `TRANSITION_VIOLATION` entry: an applied input broke a declared state-machine transition, and its `cause` names the transition (concurrency-model §4) |
-| violations off the trace | `journalctl -u dsl41-engine.service` | alert on any line that begins `dsl41: transition violation`. It covers both kinds of violation the trace cannot carry: one in the engine's own machines (admission, the subscribe feed, the seal boundary), and one noted outside an input, which is dropped. The line names the machine or entity, the transition and the reason; the engine goes on (concurrency-model §4) |
+| violations off the trace | `journalctl -u dsl41-engine.service` | alert on any line that begins `dsl41: transition violation`. It covers both kinds of violation the trace cannot carry: one in the engine's own machines (admission, the subscribe feed, the seal boundary, the outbox's record move), and one noted outside an input, which is dropped. The line names the machine or entity, the transition and the reason; the engine goes on (concurrency-model §4) |
 | free space | `df -P "$RUN_ROOT" "$ESTATE_ANCHOR"`, and every file system a job's `std_out_file` or `std_err_file` writes to | see "when a write fails" below |
 | perimeter receipts | `$RUN_ROOT/perimeter.jsonl`, when the access map is armed | alert on `access_denied` and `policy_reload_failed` records. `stream_revoked` marks a stream that a reload closed (access-model §6, §7) |
 
@@ -1861,8 +1861,9 @@ log through this build. If a logged input raises on replay, resume
 refuses with exit 2 and names the input: `resume stopped: replay stopped
 at input N (KIND from SOURCE at AT, request_id ID)`. The same build
 raises at the same input on every resume, so a restart cannot clear it,
-and nothing skips the input (period-model §11). Which case it is decides
-the way out:
+and nothing skips the input (period-model §11). A replay stop may name an
+effect instead of an input (a doubled or unknown outcome): it exits 2 with
+the same advice. Which case it is decides the way out:
 
 - **The same build wrote the log.** The fault is in this release. Deploy
   a release that fixes it, then resume. The estate stays down until that

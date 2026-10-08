@@ -75,6 +75,7 @@ from typing import Final, Literal, get_args
 from pydantic import BaseModel, ConfigDict, Field
 
 from dsl41.oracle_state import LIVE, TERMINAL, Event, JobRuntime
+from dsl41.runner_admission import report_violation
 from dsl41.runner_clock import EngineError
 from dsl41.state_machine import StateMachine, Transition
 
@@ -299,7 +300,7 @@ class Outbox:
         self._order.append(effect.effect_id)
         self._effects[effect.effect_id] = effect
         # the id was unseen above, so the move is absent -> pending by construction
-        EFFECT.take(EFFECT_RECORD, "absent", self._state(effect.effect_id))
+        report_violation(EFFECT.take(EFFECT_RECORD, "absent", self._state(effect.effect_id)))
 
     def resolve(self, outcome: EffectOutcome) -> None:
         """Record what became of one attempt. STRICT on association: an

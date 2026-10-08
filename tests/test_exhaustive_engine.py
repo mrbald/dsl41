@@ -50,10 +50,12 @@ from dsl41.runner import SEAL_BOUNDARY, Engine, _PendingSeal
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import (
     ADMISSION,
+    ENGINE_REQUEST_ID_PREFIX,
     PROTOCOL_VERSION,
     ApplyResult,
     Attempt,
     Envelope,
+    EnvelopeError,
     TransitionStop,
     apply_attempt,
     fingerprint,
@@ -62,7 +64,8 @@ from dsl41.runner_admission import (
 from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.runner_effects import EFFECT, Effect, EffectOutcome, Outbox, effect_id_for
 from dsl41.runner_hosts import HOST, LOCAL_EXECUTOR_ID, HostCommand, seed_local_executor
-from dsl41.runner_journal import SUBSCRIPTION, Journal, read_decisions
+from dsl41.runner_control import command
+from dsl41.runner_journal import SUBSCRIPTION, Journal, read_decisions, read_journal
 from dsl41.runner_ledger import STATE_MACHINE_VERSION
 from dsl41.runner_startup import start_run
 from dsl41.seal import StagedNextPeriod
@@ -746,10 +749,9 @@ def test_every_feed_event_in_every_subscription_state_takes_a_declared_transitio
 
 # -------------------------------------------------------------- admission
 
-#: the request id every admission case addresses. It is the name the
-#: engine gives the input it admits at index 2, so the engine-made input
-#: below addresses it too
-_R = "engine:2"
+#: the request id every admission case addresses. A client id: the
+#: `engine:` prefix is the engine's own, and the envelope refuses it
+_R = "r-1"
 _G = "global:G"
 
 
@@ -775,7 +777,8 @@ def _admission_events() -> dict[str, _Command | None]:
     """Every input that can address `_R`: the command that built the state
     (or, for an unseen id, one that applies), another command, a stale
     epoch, a failed precondition, a command that faults when applied, a
-    host command, and (None) an input the engine makes and names itself."""
+    host command, and (None) an input the engine makes. That one takes a name
+    of its own, so it cannot address `_R`: it must leave the id where it was."""
     return {
         "the same command": None,
         "another command": (_set_global("2"), {_G: 0}, 0),
@@ -847,52 +850,20 @@ async def _admission_case(state: str, event: str) -> tuple[str, str]:
         await engine.shutdown()
 
 
-#: DEFECT, pinned: the engine names an input it makes `engine:<index>`, and
-#: an operator may send that id. Once an operator request under the name
-#: the next engine-made input will take is decided, that input notes its
-#: attempt over the operator's decision: admission.01 from a decided id.
-#: The move is wrong, not the table; the id scheme is the finding. The pin
-#: has three halves, and a fix on either side flips one of them: the wire
-#: accepts the id (`_wire_accepts_an_engine_name`), the live engine
-#: collides (these cells), and replay collides
-#: (`_replay_collides_on_an_engine_name`). Remove all three with the fix.
-_ENGINE_NAME_COLLISION = frozenset(
-    (state, "an engine-made input") for state in ("applied", "rejected", "admitted")
-)
-
-
-def _wire_accepts_an_engine_name() -> bool:
-    """Today's door: `parse_envelope` takes a client request id that is
-    one of the engine's own names."""
+def _wire_refuses_an_engine_name() -> bool:
+    """The door: `parse_envelope` refuses a client request id that is one
+    of the engine's own names, as an invalid argument."""
     request = {
         "v": PROTOCOL_VERSION,
         "baseline_id": "b",
-        "request_id": _R,
+        "request_id": "engine:2",
         "epoch": 1,
         "expect": {_G: 0},
     }
-    return parse_envelope(request, addressed=_G, baseline_id="b").request_id == _R
-
-
-def _replay_collides_on_an_engine_name() -> bool:
-    """Replay's half: `read_decisions` notes an operator attempt and an
-    engine-made attempt under one id, the second from `admitted`."""
-    records = [
-        {
-            "rec": "input",
-            "seq": index,
-            "at": T0.isoformat(),
-            "request_id": _R,
-            "kind": "SET_GLOBAL",
-            "payload": {"name": "G", "value": str(index)},
-            "fingerprint": f"fp{index}",
-        }
-        for index in (1, 2)
-    ]
     try:
-        read_decisions(records)
-    except TransitionError as exc:
-        return "admission.01" in str(exc)
+        parse_envelope(request, addressed=_G, baseline_id="b")
+    except EnvelopeError as exc:
+        return exc.code == "invalid_argument" and "engine:" in str(exc)
     return False
 
 
@@ -915,8 +886,8 @@ def test_every_input_in_every_request_id_state_takes_a_declared_transition(
     (`boundary._check_request_id`, which takes the reused-id row of the
     id's state); and replay's moves (`read_decisions` notes every attempt
     and records every decision, `replay_inputs` records a recovered one),
-    whose one collision is pinned beside the live one. The cases in
-    `_ENGINE_NAME_COLLISION` raise today: see there."""
+    whose one collision the reserved `engine:` prefix closes
+    (`test_a_client_request_id_in_the_engines_prefix_is_refused`)."""
     outcomes: dict[tuple[str, str], tuple[str, str]] = {}
     missing: set[tuple[str, str]] = set()
     for state in ("unseen", "applied", "rejected", "admitted"):
@@ -925,20 +896,188 @@ def test_every_input_in_every_request_id_state_takes_a_declared_transition(
                 outcomes[(state, event)] = asyncio.run(_admission_case(state, event))
             except TransitionError:
                 missing.add((state, event))
-    assert missing == _ENGINE_NAME_COLLISION
-    assert _wire_accepts_an_engine_name()
-    assert _replay_collides_on_an_engine_name()
-    # the id stays where it was: `state` reads a stored result first
-    assert _violations(strict) == {
-        ("admission", "admission.01", state, state) for state, _ in _ENGINE_NAME_COLLISION
-    }
+    assert missing == set()
+    assert _wire_refuses_an_engine_name()
+    assert _violations(strict) == set()
     _no_violation_line(capsys.readouterr().err)
+    for state in ("unseen", "applied", "rejected", "admitted"):
+        # an engine-made input has a name of its own and leaves the id alone
+        assert outcomes[(state, "an engine-made input")] == ("made", state)
     assert outcomes[("unseen", "the same command")] == ("applied", "applied")
     assert outcomes[("applied", "the same command")] == ("applied", "applied")
     assert outcomes[("rejected", "a failed precondition")][0] == "refused request_id_reused"
     assert outcomes[("unseen", "a faulting command")] == ("refused apply_faulted", "unseen")
     assert outcomes[("admitted", "the same command")][0].startswith("stopped:")
     assert {t.id for t in ADMISSION.transitions} <= _hits(strict)
+
+
+# ------------------------------------- the engine's reserved request-id prefix
+
+
+@pytest.mark.parametrize(
+    ("request_id", "refused"),
+    [
+        ("engine:1", True),
+        ("engine:", True),
+        ("engine:2026-07-01T08:00:00", True),  # the other name the engine makes
+        ("engine", False),  # no colon: not the prefix
+        ("Engine:1", False),  # ids are case-sensitive, as the engine's names are
+        ("xengine:1", False),  # the prefix must begin the id
+        (" engine:1", False),  # as must it begin the id after whitespace
+        ("r-engine:1", False),
+    ],
+)
+def test_a_client_request_id_in_the_engines_prefix_is_refused(
+    request_id: str, refused: bool
+) -> None:
+    """Triggering: an id that begins with `engine:`. Non-triggering: an id
+    that only contains it, differs in case, or lacks the colon. Each is a
+    legal client id, and none can equal a name the engine makes."""
+    request = {
+        "v": PROTOCOL_VERSION,
+        "baseline_id": "b",
+        "request_id": request_id,
+        "epoch": 1,
+        "expect": {_G: 0},
+    }
+    if refused:
+        with pytest.raises(EnvelopeError, match="reserves") as caught:
+            parse_envelope(request, addressed=_G, baseline_id="b")
+        assert caught.value.code == "invalid_argument"
+    else:
+        assert parse_envelope(request, addressed=_G, baseline_id="b").request_id == request_id
+    # a request that addresses no row (a boundary) meets the same door
+    boundary = {key: value for key, value in request.items() if key != "expect"}
+    if refused:
+        with pytest.raises(EnvelopeError, match="reserves"):
+            parse_envelope(boundary, addressed=None, baseline_id="b")
+    else:
+        assert parse_envelope(boundary, addressed=None, baseline_id="b").request_id == request_id
+
+
+def test_no_client_request_collides_with_an_engine_made_input_live_or_on_replay(
+    strict: Path, capsys: pytest.CaptureFixture[str], short_root: Path
+) -> None:
+    """The collision the prefix closes, end to end. An operator tries the
+    name the engine would give index 2, on `sendevent` and on `host`: both
+    are refused on the wire and nothing reaches the log. A legal request
+    takes index 1, the engine then makes input 2 and names it
+    `engine:2`, and the client's decision stands: its retry is answered
+    from it. Replay of the log notes every attempt without a violation."""
+    from test_runner_control import _control_call, _read_revision, _serve, _teardown
+
+    async def scenario() -> tuple[list[dict[str, Any]], bytes, list[dict[str, Any]]]:
+        engine, server, loop_task = await _serve(short_root / "run", _HOST_JIL)
+        try:
+            assert engine.journal is not None
+            baseline, epoch, revision = await _read_revision(server.path, _G)
+            legal = command(
+                "SET_GLOBAL",
+                {"name": "G", "value": "1"},
+                key=_G,
+                revision=revision,
+                baseline_id=baseline,
+                epoch=epoch,
+                request_id="r-1",
+            )
+            before = engine.journal.path.read_bytes()
+            refusals = [
+                await _control_call(server.path, {**legal, "request_id": "engine:2"}),
+                await _control_call(
+                    server.path,
+                    command(
+                        "drain",
+                        {"id": LOCAL_EXECUTOR_ID},
+                        key="host:local",
+                        revision=1,
+                        baseline_id=baseline,
+                        epoch=epoch,
+                        request_id="engine:2",
+                        cmd="host",
+                    ),
+                ),
+            ]
+            assert engine.journal.path.read_bytes() == before  # nothing was admitted
+            first = await _control_call(server.path, legal)
+            assert first["ok"] is True and first["decision"] == "applied"
+            engine.inject(
+                Event(
+                    at=engine.clock.now(), kind="SET_GLOBAL", payload={"name": "E", "value": "1"}
+                ),
+                source="scheduler",
+            )
+            for _ in range(200):
+                if engine.decisions.state("engine:2") == "applied":
+                    break
+                await asyncio.sleep(0.02)
+            assert engine.decisions.state(f"{ENGINE_REQUEST_ID_PREFIX}2") == "applied"
+            retry = await _control_call(server.path, legal)
+            assert retry["ok"] is True and retry["decision"] == "applied"
+            assert "refused" not in retry or retry["refused"] is False
+            return refusals, engine.journal.path.read_bytes(), read_journal(engine.journal.path)
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    refusals, _raw, records = asyncio.run(scenario())
+    for answer in refusals:
+        assert answer["ok"] is False and answer["refused"] is True
+        assert answer["code"] == "invalid_argument" and "engine:" in answer["error"]
+    # replay: every attempt noted under its own id, each decided once
+    seqs = {r["request_id"]: r["seq"] for r in records if r.get("rec") == "input"}
+    assert seqs == {"r-1": 1, "engine:2": 2}
+    index = read_decisions(records)
+    assert index.state("r-1") == "applied"
+    assert index.state("engine:2") == "applied"
+    assert _violations(strict) == set()
+    _no_violation_line(capsys.readouterr().err)
+
+
+def test_a_seal_request_cannot_take_an_engine_name(strict: Path, short_root: Path) -> None:
+    """`seal` is a client request id too: the boundary refuses the prefix
+    before it submits anything, and the engine stays open."""
+    from test_boundary import C1_JIL, C2_JIL, _catalog, _seal_request_wire, _stage
+
+    from dsl41.runner_clock import RealClock
+    from dsl41.runner_control import ControlClient, ControlServer
+
+    run_root = short_root / "run"
+    catalog, sources = _catalog(C1_JIL)
+    staged_manifest = stage_manifest(
+        catalog,
+        source_bundle_hash=write_bundle(run_root, sources),
+        profile=RuntimeProfile(),
+        state_machine_version=STATE_MACHINE_VERSION,
+    )
+    engine = start_run(
+        catalog,
+        run_root,
+        clock=RealClock(),
+        adapters={"CMD": FakeAdapter(default=None)},
+        hold_open=True,
+        staged=staged_manifest,
+    )
+
+    async def scenario() -> dict[str, Any]:
+        server = ControlServer(engine, run_root / "control.sock")
+        await server.start()
+        loop_task = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
+        client = ControlClient(run_root / "control.sock")
+        try:
+            staged = _stage(run_root, C2_JIL)
+            answer = await client.request(_seal_request_wire(engine, staged, request_id="engine:7"))
+            assert not loop_task.done()  # no boundary: the engine is still serving
+            return answer
+        finally:
+            loop_task.cancel()
+            await client.close()
+            await server.close()
+            await engine.shutdown()
+
+    answer = asyncio.run(scenario())
+    assert engine.journal is not None
+    engine.journal.close()
+    assert answer["ok"] is False and answer["refused"] is True
+    assert answer["code"] == "invalid_argument" and "engine:" in answer["error"]
 
 
 # ---------------------------------------------------------- seal_boundary

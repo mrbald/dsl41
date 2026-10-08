@@ -1956,6 +1956,24 @@ def test_pr30e_the_cli_retry_of_a_committed_boundary_closes_no_second_period(
     assert read_seal(run_root, 1).digest == digest
 
 
+def test_an_offline_seal_refuses_the_engines_reserved_request_id_prefix(tmp_path: Path) -> None:
+    """The offline path builds its `SealRequest` with no envelope, so it
+    refuses the prefix itself, with the socket's message (control-protocol
+    ss3). Nothing is sealed. Ids that only resemble the prefix are legal."""
+    c1, c2, _ = _estate(tmp_path / "estate")
+    run_root = tmp_path / "run"
+    _native_root(run_root, c1)
+
+    refused = _seal_next(run_root, c2, "--request-id", "engine:7")
+    assert refused.exit_code == 2, refused.output
+    assert "begins with 'engine:'" in refused.output and "reserves" in refused.output
+    assert sealed_periods(run_root) == []
+
+    accepted = _seal_next(run_root, c2, "--request-id", "xengine:7")
+    assert accepted.exit_code == 0, accepted.output
+    assert sealed_periods(run_root) == [1]
+
+
 def test_pr30e_a_live_retry_is_answered_by_the_engine_of_the_new_period(
     short_root: Path,  # noqa: F811
 ) -> None:

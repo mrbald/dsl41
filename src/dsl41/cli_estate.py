@@ -462,10 +462,18 @@ async def _offline_seal(
         load_bundle_catalog,
         preflight_errors,
     )
+    from dsl41.runner_admission import refuse_reserved_request_id
     from dsl41.runner_clock import EngineError, RealClock
     from dsl41.period import read_period_manifest
     from dsl41.runner_startup import resume_run, wire_from_profile
 
+    # this path builds its `SealRequest` without an envelope, so the
+    # reserved prefix is refused here, as `parse_envelope` does on the socket
+    if request_id is not None:
+        try:
+            refuse_reserved_request_id(request_id)
+        except EngineError as exc:
+            return refuse(exc)
     # ss1.3's resume rule (DL-224), before anything below stages C2 into the
     # root or wires a supervisor: this sealer resumes the root, and
     # `leader.lock` is already held
