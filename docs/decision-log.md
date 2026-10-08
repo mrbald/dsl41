@@ -19278,3 +19278,51 @@ relitigate an entry; append a new one.
   an unignored temp file. Round 3 found this entry's first draft citing
   question and finding labels that mean something else in this repository
   or live outside it. All are fixed, and the reviewer confirmed them.
+- DL-290 The anchor head and the period row are state machines, and an
+  undeclared move refuses the boundary operation before any write
+  (2026-10-08; src/dsl41/boundary.py, src/dsl41/machines.py,
+  docs/state-machines.md, tests/test_anchor_machines.py,
+  tests/test_boundary.py)
+  THE MACHINES. Two transition tables live beside `EstateAnchor` in
+  boundary.py, built on DL-289's core. `anchor_head` has the states absent
+  (before genesis), open, closed and claimed, and six transitions. Genesis
+  opens the head, a seal closes it, and a claim moves it to claimed.
+  Opening the claimed successor opens it again. The break-glass reclaim
+  returns it to closed. A claim whose file is gone, while the head already
+  names it, rewrites the claim and keeps the head claimed. `period_row` is
+  one period's registry row, with the states absent, provisional, durable
+  and attested (final), and five transitions: create, close, open from a
+  claim, finalize and attest. `row_tag` derives a row's state from its
+  flags. Each `EstateAnchor` method that moves the head or a row names its
+  transition and checks it after its guards and before its first write.
+  A repeat that writes nothing takes no transition.
+  THE RULE. When the check fails, the operation is refused with
+  `EngineError` before anything is written. The message names the machine,
+  the transition and the move. Under the test suite's strict variable the
+  check raises `TransitionError` first. A refusal at resume stops the
+  resume with that error, which is period-model §11's refuse-don't-degrade
+  result. It never becomes a replayed fault, because head moves are not
+  WAL inputs. `period_row.02` (close) also accepts an absent or a
+  provisional row. That is the code's existing tolerance, kept as it is; no
+  crash leaves either state, because genesis and resume finalize the row
+  before any engine runs (PR-02f).
+  TESTS. Two tests in test_boundary.py forged the head back while leaving
+  the successor's row in the registry, a state no crash leaves. They now
+  drop that row, and their assertions are unchanged. test_anchor_machines.py
+  covers registration, `row_tag`, a lineage walk with no violation, repeats
+  that take nothing, the refusal of a forged successor row, and the strict
+  twin. The gate covers both machines fully; no transition is marked.
+  NOT CHANGED. The anchor file format and STATE_MACHINE_VERSION.
+  OPEN. `anchor_head.06` declares a move that the refusals in `reclaim` and
+  in the resume step call unreachable; one rule should replace the two.
+  `open_claimed` does not check its `period_id` against the claim's
+  `next_period`. Both production callers pass the claim's own, so this is a
+  hardening item.
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass, the
+  Fable pass in place of Codex at the owner's instruction. Both walked a
+  crash at every step of genesis, seal, claim, open, physical roll and
+  resume, and each retry, and found no reachable state that is refused.
+  Neither found a code defect. They found an over-claiming docstring, two
+  stale test docstrings, a repeat test that could not fail, and wording on
+  the tolerance. All are fixed and confirmed by the reviewer that raised
+  them.
