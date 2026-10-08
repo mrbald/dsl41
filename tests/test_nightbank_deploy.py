@@ -475,7 +475,8 @@ def test_the_units_take_the_documented_separate_service_shape() -> None:
     assert "PartOf" not in supervisor["Unit"] and "BindsTo" not in supervisor["Unit"]
     assert engine["Service"]["ExecStart"] == ["/opt/dsl41/bin/dsl41-launch engine"]
     assert engine["Service"]["Restart"] == ["on-failure"]
-    assert engine["Service"]["RestartPreventExitStatus"][0].split() == ["2", "3"]
+    # 5: `--on-transition-violation stop` stays down for an operator
+    assert engine["Service"]["RestartPreventExitStatus"][0].split() == ["2", "3", "5"]
     # shape 2's KillMode=process is exactly what shape 1 does not need
     assert engine["Service"].get("KillMode", ["control-group"]) == ["control-group"]
 

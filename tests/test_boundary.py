@@ -2785,9 +2785,18 @@ def test_pr28b_an_exception_while_a_drained_attempt_applies_fail_stops(
         )
     elif fault == "apply":  # the oracle raises inside the batch
         injected = RuntimeError("injected oracle fault")
-        monkeypatch.setattr(
-            runner_mod, "apply_attempt", _raise_once(runner_mod.apply_attempt, injected)
-        )
+        real_apply = runner_mod.apply_attempt
+        live_once = _raise_once(real_apply, injected)
+
+        def apply_on_the_engine(oracle: Any, *args: Any, **kwargs: Any) -> Any:
+            # the request's dry apply runs on a fork and passes (concurrency-
+            # model ss4): a deterministic fault would be refused there, so the
+            # fault this case stands for is one only the real apply meets
+            if oracle is engine.oracle:
+                return live_once(oracle, *args, **kwargs)
+            return real_apply(oracle, *args, **kwargs)
+
+        monkeypatch.setattr(runner_mod, "apply_attempt", apply_on_the_engine)
     elif fault == "decision":  # the decision writer refuses
         injected = EngineError("injected decision write failure")
         monkeypatch.setattr(

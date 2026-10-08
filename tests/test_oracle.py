@@ -30,6 +30,7 @@ from datetime import date, datetime, timedelta
 
 import pytest
 from bisim_harness import EngineHarness
+from fork_harness import ForkCheckedOracle
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
@@ -46,23 +47,30 @@ T0 = datetime(2026, 7, 1, 8, 0)
 #: renewable request with no FREE frees its units on every completion
 _FREE_A = resolve_switches({"renewable-free": "A"})
 
-#: flipped by the autouse fixture below; oracle() consults it
+#: flipped by the autouse fixture below; oracle() consults them
 _ENGINE_PATH = False
+_FORK_PATH = False
 _HARNESSES: list[EngineHarness] = []
 
 
-@pytest.fixture(autouse=True, params=["direct", "engine"])
+@pytest.fixture(autouse=True, params=["direct", "engine", "fork"])
 def sem_path(request: pytest.FixtureRequest) -> Iterator[str]:
     """Bisimulation gate (runner-design ss13, DL-41 decision 9): every SEM
-    trace test in this module runs twice -- Oracle-direct and
-    Engine(VirtualClock, inert FakeAdapter) -- and must behave identically;
+    trace test in this module runs Oracle-direct and through
+    Engine(VirtualClock, inert FakeAdapter), and must behave identically;
     this is equivalence tier c between simulator and executor and phase
     11a's definition of done. oracle() below builds whichever path the
-    param selects."""
-    global _ENGINE_PATH
+    param selects.
+
+    The third run is the fork leak test (concurrency-model ss4): an
+    Oracle-direct run whose every input is applied first on `Oracle.fork()`.
+    The dry apply must leave the original byte-equal, and the fork must
+    reach the real apply's result (fork_harness.ForkCheckedOracle)."""
+    global _ENGINE_PATH, _FORK_PATH
     _ENGINE_PATH = request.param == "engine"
+    _FORK_PATH = request.param == "fork"
     yield request.param
-    _ENGINE_PATH = False
+    _ENGINE_PATH = _FORK_PATH = False
     _close_harnesses()
 
 
@@ -103,6 +111,10 @@ def oracle(
         harness = EngineHarness(catalog, semantics=semantics)
         _HARNESSES.append(harness)
         return harness
+    if _FORK_PATH:
+        return ForkCheckedOracle(
+            catalog, default_tz=default_tz, tz_aliases=tz_aliases, semantics=semantics
+        )
     return Oracle(catalog, default_tz=default_tz, tz_aliases=tz_aliases, semantics=semantics)
 
 
@@ -8305,6 +8317,10 @@ def _leap_257(o, monkeypatch: pytest.MonkeyPatch) -> int:
     release = datetime(2028, 3, 1, 8, 30)
     o.feed(Event(at=release, kind="STATUS", payload={"job": "hq257", "status": "SUCCESS"}))
     monkeypatch.setattr(CompiledCalendar, "days_between", expand)
+    if isinstance(o, ForkCheckedOracle):
+        # the fork path applies every input twice, once on the fork
+        assert len(calls) % 2 == 0
+        return len(calls) // 2
     return len(calls)
 
 

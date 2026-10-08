@@ -455,7 +455,7 @@ def test_the_process_diagram_names_what_the_units_launcher_and_cli_name() -> Non
     for wanted in (
         "Requires=dsl41-supervisor.service",
         "Restart=on-failure",
-        "RestartPreventExitStatus=2 3",
+        "RestartPreventExitStatus=2 3 5",
         "Restart=always",
         "ExecStart=/opt/dsl41/bin/dsl41-launch engine",
         "ExecStart=/opt/dsl41/bin/dsl41-launch supervisor",

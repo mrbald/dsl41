@@ -147,7 +147,7 @@ from dsl41.period import (
 from dsl41.runner_adapters import load_json, spool_names_run
 from dsl41.runner_admission import ApplyResult
 from dsl41.runner_clock import EngineError
-from dsl41.runner_journal import decision_effects, read_journal, replay_period
+from dsl41.runner_journal import ReplayFault, decision_effects, read_journal, replay_period
 from dsl41.runner_ledger import check_state_machine_version
 
 
@@ -1056,7 +1056,9 @@ def replay_trace(
     oracle = Oracle(catalog, carried=carried, **oracle_reading(profile))
     try:
         replay = replay_period(oracle, records)
-    except OracleError as exc:
+    except (OracleError, ReplayFault) as exc:
+        # a replayed input that raises arrives named, as a ReplayFault
+        # (period-model ss11); `runs` refuses it like any other replay fault
         raise RunHistoryError(f"{run_root}: replay failed ({exc})") from exc
     return SegmentReplay(trace=oracle.trace(), recovered=replay.recovered)
 

@@ -109,6 +109,7 @@ from pydantic import ValidationError
 from dsl41.runner_effects import Effect, EffectOutcome, Outbox, is_valid_run_id
 from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, HostCommand, seed_local_executor
 from dsl41.runner_ledger import STATE_MACHINE_VERSION, Proof
+from dsl41.state_machine import TransitionError
 
 if TYPE_CHECKING:  # annotation only: the WAL stays a leaf of the DL-74 DAG
     from dsl41.runner_preflight import PreflightItem
@@ -1313,6 +1314,31 @@ def read_outbox(records: list[dict[str, Any]], outbox: Outbox | None = None) -> 
     return outbox
 
 
+class ReplayFault(EngineError):
+    """A logged input raised when this build replayed it (period-model
+    ss11). Replay stops there, naming the input, and so does every resume
+    of the period: the same build raises at the same input every time. The
+    deployment runbook gives the two ways out: deploy a fix, or roll back to
+    the release that wrote the log. Nothing skips the input.
+
+    The cause's `code`, if it has one, rides on; the cause is chained."""
+
+    def __init__(self, attempt: Attempt, cause: Exception) -> None:
+        if attempt.kind is not None:
+            what = attempt.kind
+        elif attempt.host is not None:
+            what = f"host {attempt.host.verb}"
+        else:
+            what = "time observation"
+        super().__init__(
+            f"replay stopped at input {attempt.index} ({what} from"
+            f" {attempt.source or 'no source'} at {attempt.at.isoformat()},"
+            f" request_id {attempt.request_id}): {type(cause).__name__}: {cause}",
+            code=cause.code if isinstance(cause, EngineError) else None,
+        )
+        self.index = attempt.index
+
+
 @dataclass
 class Replay:
     """Where the log left the state machine (concurrency-model ss2/ss4)."""
@@ -1349,7 +1375,11 @@ def replay_inputs(
     still observed the clock, and the kill that observation let fire is a
     decision the estate already acted on -- skipping it wholesale would
     resurrect a killed job -- the case DL-44's amendment added the advance
-    record for, now decided by record rather than by absence."""
+    record for, now decided by record rather than by absence.
+
+    A violation of a declared transition never raises here: the oracle
+    traces it, as the live engine did. An input that raises stops the
+    replay with a `ReplayFault` that names it."""
     decisions = read_decisions(records)
     # I2: indices are monotone across the ESTATE, not across the segment, so
     # a segment that opens at 5311 replays from 5310 -- the number its own
@@ -1367,7 +1397,14 @@ def replay_inputs(
     )
     for attempt in read_attempts(records):
         durable = decisions.for_index(attempt.index)
-        applied = apply_attempt(oracle, attempt, decided=durable)
+        try:
+            applied = apply_attempt(oracle, attempt, decided=durable)
+        except TransitionError:
+            raise  # a strict test run fails where the move was made
+        except Exception as exc:
+            # never skipped: an oracle bug raises again on the input the
+            # recovery ladder would re-derive, so the error names the input
+            raise ReplayFault(attempt, exc) from exc
         if durable is None:
             decisions.record(applied.result)
             replay.recovered.append(applied.result)

@@ -1935,6 +1935,7 @@ release discipline this implies (PR-Q4, §16).
 | head `claimed`, first `segment` durable, crash before head moved to `open` | resume finds the segment, moves the head to `open`, continues |
 | new-format estate, crash in period 1 before any seal | replay from the genesis segment |
 | anchor directory deleted or replaced under a live incumbent | the incumbent stops on its next append/dispatch (`anchor.lock` re-check) |
+| a logged input raises when this build replays it | refuse, naming the input's index, kind, source, `at` and `request_id`. Every resume of the period refuses the same way until a build that replays the input runs: a fix, or the release that wrote the log. Nothing skips the input |
 | torn final line in the active segment | truncate to the last complete record |
 | torn or empty **first** line of a new segment | the segment never opened; the file is removed and re-opened from the boundary, which is byte-identical (PR-07). The repair needs an **earlier segment in this root** to re-open from: `select_seal` falls back to the previous segment and reads the `seal` record there. A root holding exactly that one segment — a rolled root, or a fully archived one — **refuses** instead, naming the missing segment record. That is a refusal and not damage, and lifting it means teaching seal selection to open from the anchor head, which is a unit of its own (DL-144) |
 | corrupt line inside a **closed** segment | that period is unauditable; later periods resume from a **verified** seal only, else refused (above) |

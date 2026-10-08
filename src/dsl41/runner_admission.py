@@ -61,7 +61,11 @@ the same way:
 - **Refused** -- steps 1-2. Bad framing, an absent or malformed `expect`, a
   `baseline_id` from another run, a reused `request_id`, a stale `epoch`.
   Nothing is appended, no index is consumed, no clock moves. The request
-  never entered the system, so the log says nothing about it.
+  never entered the system, so the log says nothing about it. The dry apply,
+  after step 3's clock check and before the frontier moves, refuses the
+  same way: a control input whose apply raises (`apply_faulted`) or whose
+  own half breaks a declared transition (`transition_violation`) on a fork
+  of the oracle, before it is logged.
 - **Rejected** -- step 6. The envelope was good and the precondition was
   not: the entity moved between the caller's read and this input. That IS
   an event in the estate's history -- it consumed an index and its time
@@ -100,6 +104,7 @@ from dsl41.oracle_state import LIVE, TERMINAL, Event, EventKind, RuntimeState
 from dsl41.runner_clock import EngineError
 from dsl41.runner_codes import Code, Rejection
 from dsl41.runner_hosts import HostCommand, apply_host_command, host_rejection_reason
+from dsl41.state_machine import Violation
 
 #: The wire version of the ss6 envelope. There is no earlier version to fall
 #: back to: ss0 refuses a caller that does not name a version, and accepting
@@ -118,6 +123,17 @@ PROTOCOL_VERSION = 3
 #: in the log has its source and nothing else, so replay must be able to
 #: reach the same verdict from the same field the live engine did.
 COMPLETION_SOURCES: frozenset[str] = frozenset({"adapter", "reconcile"})
+
+#: What the engine does when an apply breaks a declared transition
+#: (`dsl41 run --on-transition-violation`). A run option and not a semantic
+#: switch: it changes no derived state, so replay never reads it.
+#:
+#: - `refuse`: refuse a control input; take an engine-made move and record it.
+#: - `continue`: take every move and record it.
+#: - `stop`: as `refuse`, and stop the engine once a recorded move's
+#:   decision is durable, so the next resume replays that decision.
+ViolationPolicy = Literal["refuse", "continue", "stop"]
+VIOLATION_POLICIES: tuple[str, ...] = get_args(ViolationPolicy)
 
 #: ss6 shipped `epoch` in the v2 envelope though it was inert on one host,
 #: because adding it after the clients migrate is a second wire break. S6
@@ -509,6 +525,16 @@ class AdmissionRefused(EngineError):
         super().__init__(message, code=code)
 
 
+class TransitionStop(EngineError):
+    """`--on-transition-violation stop`: an applied input broke a declared
+    transition, and its decision is durable. Raised after step 7, never
+    inside it, so the log holds the decision and the next resume replays it
+    without meeting a raise."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="transition_violation")
+
+
 class RequestCollision(AdmissionRefused):
     """One `request_id`, two different commands. Loud rather than silent:
     answering the second from the first's decision would apply neither.
@@ -618,6 +644,12 @@ class Applied:
 
     result: ApplyResult
     emitted: list[Event] = field(default_factory=list)
+    #: (subject, violation) for every declared transition the apply broke;
+    #: each is a `TRANSITION_VIOLATION` trace line already
+    violations: list[tuple[str, Violation]] = field(default_factory=list)
+    #: the subset the attempt itself broke, after the time half's
+    #: engine-made moves: only these can refuse a control input
+    command_violations: list[tuple[str, Violation]] = field(default_factory=list)
 
 
 def apply_attempt(
@@ -686,6 +718,8 @@ def apply_attempt(
             revisions=batch.revisions,
         ),
         emitted=batch.emitted,
+        violations=batch.violations,
+        command_violations=batch.command_violations,
     )
 
 

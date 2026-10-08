@@ -176,6 +176,8 @@ The client action says what a client does next:
 | `period_sealing` | refused | the period is sealing and admits no external request | wait |
 | `engine_shutting_down` | refused | the engine shut down before the input was admitted | wait |
 | `decision_timeout` | unknown | no decision arrived within the window | re-read; retry a mutation only under the same request_id |
+| `apply_faulted` | refused | applying the command on a fork of the engine's state raised, so it was refused before it was logged (`docs/concurrency-model.md` §4) | operator |
+| `transition_violation` | refused | applying the command on a fork of the engine's state broke a declared state-machine transition, so it was refused before it was logged (`docs/concurrency-model.md` §4). An engine that runs with `--on-transition-violation continue` admits it instead | operator |
 | `precondition_failed` | rejected | the addressed entity is not at the revision `expect` names | re-read then decide |
 | `unknown_host` | rejected | no host with this id is in the routing table | fix the request |
 | `host_quarantined` | rejected | the host is quarantined, which the leader sets and clears | wait |

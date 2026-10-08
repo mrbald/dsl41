@@ -192,6 +192,8 @@ from dsl41.runner_admission import (
     Frontiers,
     RequestCollision,
     Applied,
+    TransitionStop,
+    ViolationPolicy,
     apply_attempt,
     fingerprint,
 )
@@ -226,6 +228,7 @@ from dsl41.seal import Execution, SealedHost, SealedState, implicit_routes
 from dsl41.runner_scheduler import Scheduler
 from dsl41.semantics import ADAPTER_SWITCHES, SCHEDULER_SWITCHES, SemanticSwitches
 from dsl41.semantics import DEFAULTS as DEFAULT_SWITCHES
+from dsl41.state_machine import TransitionError
 from dsl41.timezones import alias_table
 
 
@@ -302,6 +305,20 @@ class _Pending:
     source: EventSource | None = None
     envelope: Envelope | None = None
     future: asyncio.Future[ApplyResult] | None = None
+
+    @property
+    def control(self) -> bool:
+        """A CONTROL input, the kind the dry apply may refuse
+        (concurrency-model ss4): one that crossed the socket, or an event
+        raised with the `control` source, which is how an in-process script
+        sends an operator's command. A tick, a completion, a routing
+        observation and a time observation are the engine's own facts, and
+        nobody would hear of their refusal. An unattributed event (the
+        bisimulation harness) is not a control input either: it must behave
+        as the oracle does when fed directly."""
+        if self.envelope is not None:
+            return True
+        return self.ev is not None and self.ev.source == "control"
 
 
 class _Do(Enum):
@@ -496,6 +513,10 @@ class Engine:
         #: refused at ss4 steps 1-2 -- never admitted, so unlike `drops` these
         #: leave no trace in the log and this list is the only record of them
         self.refusals: list[tuple[str, str]] = []
+        #: the same refusals with the event (None for a verbless input) and the
+        #: refusal itself, for an in-process caller with no future to read --
+        #: `rehearse` prints each one and fails (concurrency-model ss4)
+        self.refused_inputs: list[tuple[Event | None, AdmissionRefused]] = []
         #: time-ordered input queue: (at, arrival seq, pending); provenance
         #: rides on Event.source (DL-68); see the module docstring for why
         #: FIFO alone is wrong here
@@ -559,6 +580,9 @@ class Engine:
         #: drain could not admit (`clock_regressed`). Refusing it would lose
         #: it while C1 reopens, so the seal fail-stops instead (DL-274).
         self._unadmitted: str | None = None
+        #: `--on-transition-violation` (concurrency-model ss4). An engine run
+        #: option, set before the loop runs; replay never reads it.
+        self.on_violation: ViolationPolicy = "refuse"
 
     def note_executor_contact(self) -> None:
         """Stamp positive contact with this engine's own execution host
@@ -743,7 +767,9 @@ class Engine:
         assert pending is not None
         try:
             committed = await self._run_boundary(pending.request)
-        except BoundaryFailStop:
+        except (BoundaryFailStop, TransitionStop):
+            # a stop after a durable decision is the operator's chosen halt,
+            # not a refusal: an abort would reopen C1 and carry on
             raise
         except Exception as exc:
             # not just EngineError: an OSError from a pre-PONR write, fsync
@@ -1186,8 +1212,8 @@ class Engine:
     def note_executor_unreachable(self) -> None:
         """The leader has lost contact with its own execution host (ss8).
 
-        Wired to the point where the supervisor client gives up rather than
-        to any single failure: one refused connection is a blip, and a
+        Wired to the fifth consecutive failed renewal of an outage (DL-291)
+        rather than to any single failure: one refused connection is a blip, and a
         quarantine per blip would hold work for no reason. What it buys
         locally is worth having on its own -- new work is HELD until the host
         answers again, instead of every spawn failing against a supervisor
@@ -1547,8 +1573,9 @@ class Engine:
         Reading it against ss4's numbered steps: framing and `baseline_id`
         are settled by construction here (1); the index answers an exact
         retry before anything is stamped or appended, so a retry costs no
-        index and moves no clock (2); the frontier hands out the next index
-        at a non-decreasing stamp (3); the attempt is one line, so its time
+        index and moves no clock (2); the frontier checks the stamp is
+        non-decreasing, `_dry_apply` may then refuse a control input, and only
+        then does the frontier hand out the next index (3); the attempt is one line, so its time
         observation cannot be torn from its verb (4); the batch applies the
         time half -- firing due timers, which is what puts a term_run_time
         kill AHEAD of the gate that reads the status it kills (5); the gate
@@ -1596,7 +1623,7 @@ class Engine:
             )
             return []
         try:
-            self.frontiers = self.frontiers.admit(pending.at)
+            admitted = self.frontiers.admit(pending.at)
         except EngineError as exc:
             if self.sealing and pending.future is not None:
                 # the seal refuses on this and C1 reopens, so the request it
@@ -1610,6 +1637,12 @@ class Engine:
                 # to the seal, and a retry chooses a new T
                 self._unadmitted = pending.ev.kind if pending.ev is not None else "host"
             raise
+        if pending.control:  # before the frontier moves: a refusal takes no index
+            refusal = self._dry_apply(pending, admitted.committed_index, fp)
+            if refusal is not None:
+                self._refuse(pending, refusal)
+                return []
+        self.frontiers = admitted
         index = self.frontiers.committed_index
         # the window opens with the frontier: memory has moved, and the
         # admission line may follow. `_write` flushes before it fsyncs, so
@@ -1647,7 +1680,53 @@ class Engine:
             self.drops.append((ev, applied.result.reason))
         self._answer(pending, applied.result)
         self._applying = None
+        self._stop_on_violation(applied, index)
         return applied.emitted
+
+    def _stop_on_violation(self, applied: Applied, index: int) -> None:
+        """`--on-transition-violation stop`, AFTER step 7: the decision is
+        durable, so the next resume replays it and never meets a raise."""
+        if not applied.violations or self.on_violation != "stop":
+            return
+        subject, first = applied.violations[0]
+        raise TransitionStop(
+            f"--on-transition-violation stop: input {index} broke"
+            f" {len(applied.violations)} declared transition(s), first"
+            f" {first.transition} on {subject}: {first.reason}. Its decision is"
+            " durable; resume replays it"
+        )
+
+    def _dry_apply(self, pending: _Pending, index: int, fp: str) -> AdmissionRefused | None:
+        """Apply a control input on a fork of the oracle, and say why it
+        must be refused, or None (concurrency-model ss4).
+
+        The fork reaches the result the real apply will: `apply_attempt` reads
+        nothing outside the oracle, and steps 5-7 do not yield to another
+        writer. A gate rejection is not a refusal; the real apply decides it
+        again and logs it. Only a violation the command itself recorded
+        refuses it: the batch's time half is the engine's own, and its
+        violations are taken with the real apply. A strict test run's
+        `TransitionError` propagates, so the test fails where the move was
+        made."""
+        attempt = self._attempt(pending, index, fp)
+        try:
+            dry = apply_attempt(self.oracle.fork(), attempt, grace_s=self.cmd_grace_s)
+        except TransitionError:
+            raise
+        except Exception as exc:  # noqa: BLE001 -- every fault refuses, none is logged
+            return AdmissionRefused(
+                f"refused before admission: applying the input raised {type(exc).__name__}: {exc}",
+                code="apply_faulted",
+            )
+        if dry.command_violations and self.on_violation != "continue":
+            subject, first = dry.command_violations[0]
+            return AdmissionRefused(
+                f"refused before admission: the input breaks"
+                f" {len(dry.command_violations)} declared transition(s), first"
+                f" {first.transition} on {subject}: {first.reason}",
+                code="transition_violation",
+            )
+        return None
 
     def _plan_effects(self, applied: Applied, index: int) -> list[Effect]:
         """ss4 step 7's other half: what the shell now intends to do about
@@ -1700,6 +1779,7 @@ class Engine:
         record -- so without this list an in-process caller that asked for no
         decision would see a command vanish silently."""
         self.refusals.append((pending.request_id or f"engine:{pending.at.isoformat()}", str(exc)))
+        self.refused_inputs.append((pending.ev, exc))
         if pending.future is not None and not pending.future.done():
             pending.future.set_exception(exc)
 

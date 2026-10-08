@@ -19397,3 +19397,85 @@ relitigate an entry; append a new one.
   found a loop that an unexpected error still ended, and an unguarded
   second teardown. Both found stale wording. All are fixed, over three
   rounds, and confirmed by the reviewer that raised them.
+- DL-292 A control input is dry-applied before it is admitted, a transition
+  violation has one channel and one policy, and a replayed fault names its
+  input
+  (2026-10-08; src/dsl41/oracle.py, oracle_state.py, runner.py,
+  runner_admission.py, runner_journal.py, runner_startup.py,
+  runner_history.py, runner_codes.py, rehearse_check.py, cli_run.py,
+  runner_hosts.py (comment);
+  docs/concurrency-model.md §4, docs/control-protocol.md code table,
+  docs/period-model.md §11, docs/deployment-runbook.md §0, §3, §5, §6a, §7,
+  §8; examples/nightbank/deploy/dsl41-engine.service,
+  examples/nightbank/RUNBOOK.md; README.md; tests/test_dry_apply.py,
+  tests/fork_harness.py, tests/test_oracle.py, tests/test_boundary.py,
+  tests/test_nightbank_deploy.py, tests/test_operator_recipes.py,
+  tests/test_run_reattach.py)
+  THE GAP. An admitted input whose apply raised was in the WAL, so every
+  resume replayed it and raised again; DL-274 left that case out of scope.
+  DL-289's transition checks add a second way for an apply to go wrong.
+  THE DRY APPLY. The engine applies each control input first to a fork of
+  the oracle, after the clock check and before the frontier moves
+  (concurrency-model §4, step 3). A control input is one with an envelope,
+  or an event whose source is `control`. If the command itself raises, or
+  records a transition violation, the input is refused with `apply_faulted`
+  or `transition_violation`, and nothing reaches the WAL or the indexes. An
+  exact retry is refused the same way. A gate rejection is still a decision
+  and is still logged. Violations from the engine-made part of the same
+  batch, such as a timer that fires first, never refuse the command; they
+  follow the engine-fact policy below. `Oracle.fork()` and
+  `RuntimeState.fork()` copy every mutable map and list and share the
+  frozen rows. A third parameter on the SEM corpus runs every input first on
+  a fork and checks that the original stays byte-equal and that both give
+  the same result.
+  ONE CHANNEL. `RuntimeState` collects the violations that a `take` returns
+  (`note_violation`, `drain_violations`). A batch drains them when it
+  commits and writes one `TRANSITION_VIOLATION` trace line each; replay
+  writes the same lines. A fork starts with an empty list. A violation noted
+  outside an `InputBatch` (by a writer that opens its own store transaction)
+  raises under the test suite's strict variable; in production it is
+  written once to stderr and dropped, with no trace line, so live and
+  replayed traces stay equal.
+  ONE POLICY. `dsl41 run --on-transition-violation refuse|continue|stop`,
+  default `refuse`, is an engine run option, not a runtime-profile semantics
+  switch, because it changes no derived state. `refuse` refuses a
+  violating control input as above. Engine-made facts are never refused:
+  their violations are traced and alerted, and the engine continues.
+  `continue` lets a violating control input through as well. `stop` halts
+  the engine after the commit and exits 5. The engine unit's
+  `RestartPreventExitStatus` is now `2 3 5`, so a stopped engine stays down
+  until an operator acts. The runbook's watch table alerts on a
+  `TRANSITION_VIOLATION` trace entry.
+  REPLAY. Nothing raises on replay for a violation. An input whose replay
+  raises stops resume with an error that names its index, kind, source,
+  time and request id, and tells the operator to deploy a build that fixes
+  the fault or roll back to the release that wrote the log. `dsl41 run`
+  exits 2 then; `dsl41 runs` and `dsl41 journal` refuse with the same
+  message. A refused resume now closes the WAL files it opened.
+  REHEARSE. Rehearse plays scenario events as control inputs, so it now
+  prints every refused input, in the main play and in each fail and flag
+  sweep case, and exits 1.
+  STATED LIMITS. A fault in an engine-made fact, or one a code change
+  introduced, still stops every resume until a fixed build ships or the
+  release rolls back; for the same build the estate stays down until then.
+  A lease contact between the dry and the real apply can change a host
+  gate's verdict; if the real apply of a control input then records a
+  violation the dry one did not, the input is not refused but traced and
+  alerted. An exception in the engine-made part of a batch refuses the
+  command as `apply_faulted`; the same exception surfaces on the engine's
+  next own input. An orphan violation reaches stderr only, so the trace
+  alert does not see it. A first-time calendar expansion on a control input
+  runs twice, a cost only.
+  NOT CHANGED. STATE_MACHINE_VERSION, the WAL format and the control wire.
+  The two codes are refusals, not stored decisions, so STORED_CODES is
+  unchanged.
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass, the
+  Fable pass in place of Codex at the owner's instruction, three rounds.
+  The Opus reviewer found a major finding: rehearse dropped a refused
+  scenario event and exited 0. It also found that engine-made moves in the
+  same batch could refuse a command, that a violation noted outside an
+  input leaked into later forks, a WAL file left open by a refused resume,
+  the §4 step order, and a missing reattach line on exit 5. The Fable pass
+  found that `dsl41 runs` printed a traceback on the new replay error, the
+  same channel leak, and silent refusals in rehearse's sweeps. All are fixed
+  and confirmed by the reviewer that raised them.

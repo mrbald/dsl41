@@ -81,7 +81,7 @@ systemd
 │           └── one wrapper per detached run, and the run's command, in this unit's cgroup;
 │               they write RUN_ROOT/runs/ and the job's output
 │
-└── dsl41-engine.service        User=dsl41  Restart=on-failure  RestartPreventExitStatus=2 3
+└── dsl41-engine.service        User=dsl41  Restart=on-failure  RestartPreventExitStatus=2 3 5
       Requires=dsl41-supervisor.service  After=dsl41-supervisor.service
       ExecStart=/opt/dsl41/bin/dsl41-launch engine
       └── dsl41 run ... --run-root RUN_ROOT --estate-anchor ESTATE_ANCHOR --detached   the engine
@@ -136,6 +136,10 @@ What has to happen?
 │     the period is sealed and the next one waits; nothing runs until it opens
 │     open it in place (start the engine unit) or in a fresh root (§7 row 2)
 │     an enabled engine unit opens it in place at the next boot
+│
+├── the engine unit failed with exit 5                               TRANSITION STOP
+│     --on-transition-violation stop halted it after a journaled decision (§3)
+│     read the TRANSITION_VIOLATION line with dsl41 journal, then start the unit
 │
 ├── new JIL, properties or run options, and the history continues   TRANSITION
 │   ├── in the same run root                                         IN-PLACE TRANSITION
@@ -378,7 +382,9 @@ dsl41 query status --job "$JOB" -S "$S"
 - **Recover from a refusal.** Exit 2 is a configuration refusal, and the
   unit does not retry it. The last lines of the engine unit's journal name
   the cause: a changed estate, a resume gate, an access map, a preflight
-  ERROR, or the launcher's own refusal. Fix it and start the unit.
+  ERROR, or the launcher's own refusal. Fix it and start the unit. A
+  `resume stopped` refusal names a logged input this build cannot replay;
+  §7 says what to deploy.
   A rolled root that refuses with `missing segment record` has
   [its own recipe](#recipe-recover-a-rolled-root-whose-opening-is-torn).
 - **Recover a lost answer: replay the request.** `sendevent` and `host`
@@ -552,13 +558,13 @@ endpoint; feed these into the site's monitoring.
 
 | Signal | Read it with | What it means |
 | --- | --- | --- |
-| engine unit | `systemctl show -p ActiveState -p ExecMainStatus -p NRestarts dsl41-engine.service` | `active` runs. `failed` with status 2 is a configuration refusal; the journal names it. `failed` with status 3 is a sealed period (next row); it lasts until the next start, and an enabled unit starts at boot. A rising `NRestarts` is crash restarts (exit 1); the journal says `engine failed:` and why |
+| engine unit | `systemctl show -p ActiveState -p ExecMainStatus -p NRestarts dsl41-engine.service` | `active` runs. `failed` with status 2 is a configuration refusal; the journal names it. `failed` with status 3 is a sealed period (next row); it lasts until the next start, and an enabled unit starts at boot. `failed` with status 5 is `--on-transition-violation stop` (§3); the journal says `engine stopped:` and names the transition. A rising `NRestarts` is crash restarts (exit 1); the journal says `engine failed:` and why |
 | sealed, not opened | the check below, on `ESTATE_ANCHOR/anchor.json` | `closed`: a period is sealed and the next is not open, so nothing runs. Alert when it stays `closed` past the window. `open` is normal. `claimed` is an opener at work, or one that crashed (§6a, Day 2) |
 | supervisor unit | `systemctl show -p ActiveState -p NRestarts dsl41-supervisor.service`; `dsl41 supervise list --run-root "$RUN_ROOT"` | the list answers `"ok": true` while the supervisor is up, and shows each run's `wrapper_alive`. A restart of this unit ended the commands it ran |
 | supervisor log | `$RUN_ROOT/supervisor.log`; `journalctl -u dsl41-supervisor.service` | the supervisor's own output, and the unit's starts and stops |
 | leader | `$RUN_ROOT/leader.lock` holds the last leader's `pid`, `host`, `epoch` and `since`; compare `pid` with `systemctl show -p MainPID --value dsl41-engine.service` | the note stays after the engine exits, so it says who led, not who leads. Never probe the lock with `flock`: an engine that starts while a probe holds it refuses with exit 2. Never delete or replace the file: the engine re-checks it before every append and stops when it changed |
 | control socket | `dsl41 query status --brief -S "$S"` | exit 0: the leader answers. Exit 2: no engine, or a refusal |
-| failures and alarms | `dsl41 query subscribe -S "$S"` as the wake-up; then `dsl41 query trace --since N -S "$S"` with the last `last_seq` read. The trace is per period and its `seq` restarts at 1: set the cursor to 0 when the answer's `baseline_id` changes, or when `last_seq` is below the cursor, as the TUI does (DL-210) | the stream carries journal records: a run's end arrives as an `input` record of kind `STATUS` from the `adapter` source. The trace names what it did: a transition to `FAILURE` or `TERMINATED`, or a `MUST_START_ALARM` or `MUST_COMPLETE_ALARM` entry (SEM-34) |
+| failures and alarms | `dsl41 query subscribe -S "$S"` as the wake-up; then `dsl41 query trace --since N -S "$S"` with the last `last_seq` read. The trace is per period and its `seq` restarts at 1: set the cursor to 0 when the answer's `baseline_id` changes, or when `last_seq` is below the cursor, as the TUI does (DL-210) | the stream carries journal records: a run's end arrives as an `input` record of kind `STATUS` from the `adapter` source. The trace names what it did: a transition to `FAILURE` or `TERMINATED`, or a `MUST_START_ALARM` or `MUST_COMPLETE_ALARM` entry (SEM-34). Alert on any `TRANSITION_VIOLATION` entry: an applied input broke a declared state-machine transition, and its `cause` names the transition (concurrency-model §4) |
 | free space | `df -P "$RUN_ROOT" "$ESTATE_ANCHOR"`, and every file system a job's `std_out_file` or `std_err_file` writes to | see "when a write fails" below |
 | perimeter receipts | `$RUN_ROOT/perimeter.jsonl`, when the access map is armed | alert on `access_denied` and `policy_reload_failed` records. `stream_revoked` marks a stream that a reload closed (access-model §6, §7) |
 
@@ -1177,22 +1183,39 @@ Decisions to make once, per site:
   refusal names the holder). Stop or kill the engine first. There is no
   TTL to wait out: the supervisor reads the closed connection as proof
   the holder is gone, so the lease is grantable at once.
+- **Transition violations.** `--on-transition-violation` says what the
+  engine does when an input breaks a declared state-machine transition
+  (concurrency-model §4). `refuse`, the default, refuses such a command
+  before it is journaled, with the code `transition_violation`. A command
+  whose apply raises is refused with `apply_faulted` under every value.
+  An input the engine made itself, a tick or a completion, is applied and
+  leaves a `TRANSITION_VIOLATION` trace line (§0's "What to watch").
+  `continue` also applies such a command, with its trace line. `stop`
+  refuses like `refuse`, and exits 5 once an input that broke a
+  transition has its decision journaled. The unit does not restart exit
+  5 (below). Read the `TRANSITION_VIOLATION` line with `dsl41 journal`,
+  then start the unit: resume replays that decision and the engine runs
+  on until the next violation. Keep the default unless
+  a refused command blocks work you need: `continue` is that escape until
+  a release fixes the table.
 - **Machine identity.** Pass `--as-machine` explicitly; the zero-config
   fallback (forward hostname) is for laptops. Jobs whose `machine:`
   resolves elsewhere are refused at preflight (`--machine-policy strict`,
   keep it).
 - **Init system.** The engine runs until SIGINT/SIGTERM and shuts down
   cleanly on both. Under systemd: `Type=simple`, `Restart=on-failure`,
-  `RestartPreventExitStatus=2 3` (exit 2 is a configuration refusal —
-  see below — that a retry loop cannot fix, and exit 3 is a sealed
-  engine), a sane `RestartSec`,
+  `RestartPreventExitStatus=2 3 5` (exit 2 is a configuration refusal —
+  see below — that a retry loop cannot fix, exit 3 is a sealed
+  engine, and exit 5 is a transition stop), a sane `RestartSec`,
   and an `ExecStart` wrapper that passes `--resume` iff
   `<root>/journal.jsonl` exists — a crash-restart must resume the same
   run root, while the first start of a new baseline must not. Never
   automate the *choice* of run root: new baselines are operator actions
   (§6). **3** is in the list above (DL-134): a sealed engine exits 3 and
   the next period is opened by an operator, not by a restart loop (§6a).
-  A unit that says `=2` alone restart-loops every boundary.
+  A unit that says `=2` alone restart-loops every boundary. **5** is
+  there so that `--on-transition-violation stop` keeps the engine down
+  until an operator has read the violation.
 
 A detached supervisor stays in the cgroup of the process that started it
 (DL-210). `setsid` does not move it out. Choose one of these
@@ -1256,8 +1279,9 @@ old owner is absent.
 Exit codes: 0 = clean stop, 1 = engine/estate failure, 2 = refused
 before start (used run root, a resume gate — catalog hash, clock domain
 or runtime profile — preflight ERROR, a root another engine already
-leads), 3 = sealed; period N+1 is ready to open (§6a). Treat 2 as "a human misconfigured something" — restarting
-harder will not help, hence `RestartPreventExitStatus=2 3` above. (A
+leads), 3 = sealed; period N+1 is ready to open (§6a), 5 = stopped by
+`--on-transition-violation stop` after a journaled decision. Treat 2 as "a human misconfigured something" — restarting
+harder will not help, hence `RestartPreventExitStatus=2 3 5` above. (A
 second engine on a live run root is refused by `leader.lock`, an
 `flock` the leader holds for its whole process life; the kernel
 releases it when that process dies, `kill -9` included. So even a
@@ -1420,7 +1444,8 @@ runtime-profile mismatch — no silent semantic drift — and the runtime
 profile is `--timezone`, `--timezone-map`, `--as-machine`,
 `--machine-policy`, `--detached` and `--deadman`. `--access-map` is not in
 the profile and is not gated: omit it and the run comes back with no
-perimeter (§4). Keep the whole line in the launcher (§3's worked
+perimeter (§4). `--on-transition-violation` is not in the profile either:
+omit it and the run comes back with the default, `refuse` (§3). Keep the whole line in the launcher (§3's worked
 example); the unit calls the launcher.
 A detached engine prints that line on its way out (DL-218):
 its own argv, shell-quoted, with `--resume` and `--detached` once each and
@@ -1539,7 +1564,7 @@ with.
 `seal` has two entry modes and **the lock decides which**, not a flag: an
 engine holding `leader.lock` is a live engine, so the CLI stages C2 and
 asks it over the control socket, and that engine then exits **code 3**
-("sealed; period N+1 is ready to open") — set `RestartPreventExitStatus=2 3`
+("sealed; period N+1 is ready to open") — set `RestartPreventExitStatus=2 3 5`
 under systemd, or an init system restart-loops a sealed engine. With no
 engine running, the same command takes the lock itself, replays and
 reconciles, and performs the boundary as an offline leader. C1 comes from
@@ -1724,7 +1749,7 @@ whether the root is live or offline.
 
 *The engine exited 3 and the init system restarted it.* It will loop.
 Exit 3 is "sealed; period N+1 is ready to open", and the opening is an
-operator action. Put `RestartPreventExitStatus=2 3` in the unit file.
+operator action. Put `RestartPreventExitStatus=2 3 5` in the unit file.
 
 *`audit` printed "the registry row could not be set".* The checkpoint IS
 written and durable, and the checkpoint is what `verify` and `run
@@ -1825,6 +1850,26 @@ segment pinned to another. Check it in both venvs, whatever the note says:
 /opt/dsl41/venv-<ver>/bin/python -c \
     'from dsl41.runner_ledger import STATE_MACHINE_VERSION as v; print(v)'
 ```
+
+**When resume stops on a replayed input.** Resume replays the period's
+log through this build. If a logged input raises on replay, resume
+refuses with exit 2 and names the input: `resume stopped: replay stopped
+at input N (KIND from SOURCE at AT, request_id ID)`. The same build
+raises at the same input on every resume, so a restart cannot clear it,
+and nothing skips the input (period-model §11). Which case it is decides
+the way out:
+
+- **The same build wrote the log.** The fault is in this release. Deploy
+  a release that fixes it, then resume. The estate stays down until that
+  release exists. This is a stated limit: no tool skips or rewrites a
+  logged input.
+- **An upgrade is replaying an older release's log.** The new release
+  cannot replay what the old one wrote. Flip the venv back to the release
+  that wrote the log, and resume with it.
+
+A command whose apply raises is refused before it is journaled
+(`apply_faulted`, concurrency-model §4), so this case needs an
+engine-made input, or a fault a code change introduced.
 
 **Pick one row (DL-266).** Read the release note: the annotated tag's
 message (README "Release"). Apply these questions in order, and stop at
@@ -2050,3 +2095,10 @@ An engine crash on the same host resumes inside the open period
 switch, an unplanned primary loss, a database failover under a live engine,
 a partition, and failback, waits for the relay that concurrency-model §7
 names and is not built (DL-189, DL-230).
+
+Never activate a standby box on a live estate. Activation is unsafe
+until each box has its own executor id in the ledger, every re-launch
+path holds an effect whose executor is not its own, and the dead
+executor is evicted before the resume dispatches. Until then, two boxes
+can launch the same run. The documented restore (§2b) is not affected:
+it starts from a quiescent backup on a stopped estate.

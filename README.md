@@ -740,11 +740,12 @@ CLI and scripts:
 
 ### Tests
 
-The suite has 85 test files (`pytest --collect-only -q` shows the current
+The suite has 87 test files (`pytest --collect-only -q` shows the current
 count) and a 31-file synthetic or doc-derived JIL corpus under
-`tests/corpus/`. Every oracle trace test runs twice, against the oracle
-directly and through the engine under a virtual clock, via
-`tests/bisim_harness.py`. The browser tests need
+`tests/corpus/`. Every oracle trace test runs three times: against the
+oracle directly, through the engine under a virtual clock via
+`tests/bisim_harness.py`, and against an oracle that applies each input
+to a fork first via `tests/fork_harness.py`. The browser tests need
 `DSL41_BROWSER_TESTS=1` and installed playwright browsers
 (`uv run playwright install chromium webkit firefox`); a plain `pytest -q`
 skips them, and CI's explore-page job runs them.
