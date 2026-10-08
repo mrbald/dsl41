@@ -307,3 +307,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-293 | The oracle's job lifecycle, flags, holding and assembly are state machines, and every ignored event is a declared internal transition |  |
 | DL-294 | The supervisor, the wrapper and process identity join the 100% branch gate |  |
 | DL-295 | The engine tier is five state machines, the outbox refuses a second outcome, and a second seal request is refused while a boundary is in flight |  |
+| DL-296 | Every state machine has an exhaustive event-by-state test |  |
