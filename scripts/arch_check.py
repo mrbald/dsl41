@@ -1054,6 +1054,7 @@ SPEC_EXCLUDED = (
     "glossary.md",
     "risk-map.md",
     "decision-index.md",
+    "state-machines.md",
     "architecture.md",
     "stonebranch-semantics.md",
     "uc-edge-schema.md",

@@ -50,6 +50,7 @@ uv run coverage run -m pytest -q
 uv run coverage combine
 uv run coverage report
 uv run python scripts/branch_coverage.py
+uv run python scripts/transition_coverage.py
 ```
 
 The mypy line names `tests/uc_oracle.py` beside `src`: it is a fully
@@ -66,6 +67,10 @@ ends with SIGKILL loses its data.
 The coverage report enforces the scoped branch-coverage requirement.
 The branch report prints branch-only numbers for every module of `src/dsl41`,
 most missed branches first, then the package total. It is a report, not a gate.
+The transition gate reads `.transition-hits.json`, which the test run writes at
+the repository root. It exits 1 when a declared transition without a mark has
+no recorded hit, when a violation was recorded, or when a marked transition was hit
+(the mark is stale). It must run after the pytest step of the same session.
 Keep this list aligned with `.github/workflows/ci.yml`. The one CI check not in
 it is `systemd-analyze verify` over `examples/nightbank/deploy/*.service`
 (DL-218); it needs Linux.

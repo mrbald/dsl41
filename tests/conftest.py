@@ -8,6 +8,9 @@ from pathlib import Path
 
 import pytest
 
+# records state-machine transition hits for scripts/transition_coverage.py
+pytest_plugins = ["transition_hits_plugin"]
+
 
 @pytest.fixture
 def short_root():

@@ -105,6 +105,7 @@ jobs:
       - run: uv run coverage combine
       - run: uv run coverage report
       - run: uv run python scripts/branch_coverage.py
+      - run: uv run python scripts/transition_coverage.py
       # DL-218: a static check of the example service units; no unit is
       # started. The launcher is installed at the path both units exec, so
       # verify's executable check resolves the real file rather than being

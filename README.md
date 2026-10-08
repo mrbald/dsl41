@@ -685,6 +685,11 @@ Period boundary:
   RuntimeProfile and its hash, the staged and committed manifests, the
   `segment` record every log opens with, and the archive receipt.
 - `src/dsl41/canon.py`: the canonical serialization behind every digest.
+- `src/dsl41/state_machine.py`: the shared state-machine core: `Transition`,
+  `StateMachine` with its `take` check, `well_formed`, and the hit recording
+  the test suite turns on. Standard library only, so the supervisor can load
+  it by path.
+- `src/dsl41/machines.py`: the registry of declared state machines.
 - `src/dsl41/seal.py`: the seal artifact a period ends by writing, and the
   two pure functions over it, `close_runtime` and `open_from_seal`. Every
   section is a frozen model; an unknown section is a refusal.
@@ -728,10 +733,14 @@ CLI and scripts:
   review (`--spec-status` prints the table).
 - `scripts/render_decision_index.py`: writes `docs/decision-index.md` from
   the decision log and the tracked docs that cite each entry (DL-276).
+- `scripts/render_state_machines.py`: writes `docs/state-machines.md`, a
+  diagram and a transition table per registered machine.
+- `scripts/transition_coverage.py`: the gate that fails when a declared,
+  unmarked transition has no recorded hit.
 
 ### Tests
 
-The suite has 79 test files (`pytest --collect-only -q` shows the current
+The suite has 85 test files (`pytest --collect-only -q` shows the current
 count) and a 31-file synthetic or doc-derived JIL corpus under
 `tests/corpus/`. Every oracle trace test runs twice, against the oracle
 directly and through the engine under a virtual clock, via
@@ -818,6 +827,15 @@ Compiler:
 - `tests/test_decision_index.py`: the committed decision index is the
   rendering, and the generator's parsing, title and citation rules
   (DL-276).
+- `tests/test_state_machine.py`: the core's take check, hit recording and
+  well-formedness rules, over small invented machines, and that every
+  registered machine is well formed.
+- `tests/test_transition_coverage.py`: the transition coverage gate, passing
+  and failing, with marks, a missing file and the per-source view.
+- `tests/test_state_machines_doc.py`: the committed state-machine doc is the
+  rendering, and the generator's diagram and table rules.
+- `tests/transition_hits_plugin.py`: the pytest plugin that turns hit
+  recording on and writes `.transition-hits.json`.
 - `tests/test_examples.py`: the three workflow examples' catalogs lower
   cleanly with their placeholders resolved (DL-237).
 
