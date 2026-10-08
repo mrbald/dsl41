@@ -141,6 +141,17 @@ VIOLATION_POLICIES: tuple[str, ...] = get_args(ViolationPolicy)
 #: allocates it for real.
 INERT_EPOCH = 0
 
+#: The request-id prefix the engine reserves for itself. An input the
+#: engine makes (a tick, a completion, an injection with no id) is named
+#: `engine:<index>` (`Engine._attempt`); a client id in that space could
+#: be decided at an index and then be taken again by a later engine-made
+#: input, which would overwrite the client's decision. `parse_envelope`
+#: refuses such an id, so no external request holds a name in this space
+#: (control-protocol ss3). A committed seal's retry is answered before the
+#: check on the control socket, which is harmless: a seal's id never enters
+#: the decision index.
+ENGINE_REQUEST_ID_PREFIX = "engine:"
+
 #: This build's event alphabet, for `Attempt.event`'s named refusal: an
 #: `input` record whose kind is outside it refuses by name -- the WAL row's
 #: strict-kind discipline applied at the event alphabet (protocol-evolution
@@ -255,6 +266,19 @@ def addressed_key(kind: str, payload: Mapping[str, Any]) -> str:
     return RuntimeState.job_key(job)
 
 
+def refuse_reserved_request_id(request_id: str) -> None:
+    """Raise `EnvelopeError` for a client request id in the engine's own
+    name space (`ENGINE_REQUEST_ID_PREFIX`). `parse_envelope` calls it for
+    every external mutation. `dsl41 seal` offline calls it too, because it
+    builds its `SealRequest` without an envelope."""
+    if request_id.startswith(ENGINE_REQUEST_ID_PREFIX):
+        raise EnvelopeError(
+            f"request_id {request_id!r} begins with {ENGINE_REQUEST_ID_PREFIX!r}, a prefix the"
+            " engine reserves for the inputs it names itself: choose another id",
+            code="invalid_argument",
+        )
+
+
 def parse_envelope(
     request: Mapping[str, Any], *, addressed: str | None, baseline_id: str
 ) -> Envelope:
@@ -289,6 +313,7 @@ def parse_envelope(
             " retried safely, because nothing could recognise the retry",
             code="invalid_argument",
         )
+    refuse_reserved_request_id(request_id)
     epoch = request.get("epoch")
     if not is_wire_int(epoch):
         # required, not defaulted, though it is inert on one host. ss6 ships
@@ -564,7 +589,7 @@ class RequestCollision(AdmissionRefused):
 def report_violation(violation: Violation | None) -> None:
     """Report a broken transition of an engine-tier machine whose moves are
     not oracle inputs (admission, the subscription feed, the seal
-    boundary). No `InputBatch` holds them, so no trace line can carry the
+    boundary, the outbox's record move). No `InputBatch` holds them, so no trace line can carry the
     violation, and the oracle trace must stay equal to its replay. It is
     one line on stderr under `VIOLATION_LOG_PREFIX`, which the runbook's
     journal alert matches, and the move proceeds. Best effort, like

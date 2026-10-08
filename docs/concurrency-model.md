@@ -306,9 +306,24 @@ admits it too, with its trace line. `stop` refuses like `refuse`, and
 stops the engine with `dsl41 run` exit 5 after step 7 commits an input
 that recorded a violation.
 The next resume replays that decision. The option changes no derived
-state and is not part of the runtime profile. A violation never raises,
-live or on replay. An input that raises on replay stops the replay with
-an error that names it (`docs/period-model.md` §11).
+state and is not part of the runtime profile. A violation of one of an
+input's moves never raises, live or on replay. Four machines refuse or
+raise by design instead. `anchor_head` and `period_row` refuse the
+boundary operation before anything is written (DL-290). At resume that
+stops the resume with an error that names the move. It is never a
+replayed fault, because head moves are not WAL inputs. `effect` refuses
+a second outcome for a resolved effect: live, and on replay, where it
+stops resume and names the effect (§5, DL-295). `runtime_assembly`
+raises `OracleError` on a misused verb (DL-293).
+The option does not cover three other machines and one move: a violation
+in admission, a subscription, the seal boundary or the outbox's record
+move is not an oracle input, so `stop` does not stop on it. It is one
+line on stderr under the shared violation prefix, and the move proceeds.
+The `host` machine is not among them: its violations ride the oracle
+channel inside an input's batch, so the option covers them.
+An input that raises on
+replay stops the replay with an error that names it
+(`docs/period-model.md` §11).
 
 **Worked example — one operator kill, three lines.** A job running at run 1,
 revision 1. An operator sends `KILLJOB` naming that revision. This is what
@@ -419,6 +434,14 @@ only pending effects. Its caller would be the relay, which is not built
 fingerprints and reject collisions. `effect_id` is the dedup identity;
 `(incarnation, token)` is a **fencing precondition**, not part of the
 dedup key.
+
+**An outcome is final.** Once an effect is `applied`, `indeterminate` or
+`retired`, a second outcome for it is refused, the same outcome again
+included, before anything is written (DL-295). A live writer resolves only
+pending effects, so live the refusal does not fire. On replay, a log that
+holds two outcomes for one effect stops resume, naming the effect
+(`docs/period-model.md` §11). An outcome for an effect the outbox never saw
+is refused the same way.
 
 **Supersession is by exact desired state.** The obvious guard — compare
 run generations — does not fire for the scenario that motivates it,

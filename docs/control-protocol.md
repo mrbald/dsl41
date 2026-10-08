@@ -2,7 +2,7 @@
 
 Status: frozen at **v3** (DL-118). Amended by DL-133, DL-135, DL-146,
 DL-147, DL-148, DL-150, DL-151, DL-158, DL-189, DL-216, DL-217, DL-256,
-DL-264, DL-267 and DL-272. This document is normative for the runner's
+DL-264, DL-267, DL-272, DL-292, DL-295 and DL-297. This document is normative for the runner's
 §10 control plane, as `docs/supervisor-protocol.md` is normative for the
 §6a lifecycle tier. A change to a frozen item requires a decision-log
 entry. Each amendment is cited where it applies.
@@ -161,7 +161,7 @@ The client action says what a client does next:
 | `internal_error` | unknown | a handler raised | re-read; retry a mutation only under the same request_id |
 | `lineage_lost` | refused | this engine can no longer prove it leads the estate's lineage (§4) | operator |
 | `unknown_cmd` | refused | `cmd` names no command | fix the request |
-| `invalid_argument` | refused, query or stream | a field is absent or has the wrong shape or type; `error` names the field | fix the request |
+| `invalid_argument` | refused, query or stream | a field is absent or has the wrong shape or type, or a `request_id` begins with the reserved prefix `engine:` (§3); `error` names the field | fix the request |
 | `plan_cycle` | query | the AND-success skeleton has a cycle, so `plan` is disabled | operator |
 | `unknown_job` | query, or refused on a mutation | the job is not in the catalog (for `status`: in neither the catalog nor the store) | fix the request |
 | `no_journal` | stream | the run has no journal to stream | operator |
@@ -282,7 +282,13 @@ naming any other key is **refused**: nothing is admitted, no index is
 consumed, and the log says nothing about it.
 
 `request_id` is required. Without one a timed-out command cannot be
-retried safely, because nothing could recognise the retry as one. An
+retried safely, because nothing could recognise the retry as one. An id
+that begins with `engine:` is refused as `invalid_argument`: the engine
+names the inputs it makes itself `engine:<index>`, so the prefix is
+reserved. The rule covers `sendevent`, `host` and `seal`, and
+`dsl41 seal` offline applies it too. On the socket, a committed seal's
+exact retry is answered before the check, which is harmless: a seal's id
+never enters the decision index. An
 exact retry (same id, same fingerprint) is answered from its original
 decision and takes no second index. With an access map configured
 (DL-147), the retry route runs **after** the perimeter admits the
