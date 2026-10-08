@@ -89,11 +89,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Literal, get_args
+from typing import Any, Final, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
@@ -104,7 +105,7 @@ from dsl41.oracle_state import LIVE, TERMINAL, Event, EventKind, RuntimeState
 from dsl41.runner_clock import EngineError
 from dsl41.runner_codes import Code, Rejection
 from dsl41.runner_hosts import HostCommand, apply_host_command, host_rejection_reason
-from dsl41.state_machine import Violation
+from dsl41.state_machine import VIOLATION_LOG_PREFIX, StateMachine, Transition, Violation
 
 #: The wire version of the ss6 envelope. There is no earlier version to fall
 #: back to: ss0 refuses a caller that does not name a version, and accepting
@@ -525,6 +526,17 @@ class AdmissionRefused(EngineError):
         super().__init__(message, code=code)
 
 
+class SealInFlight(AdmissionRefused):
+    """`seal_in_flight`: a boundary is queued or running, and one seal runs
+    at a time (period-model ss7), an exact retry of it included. It names
+    the boundary in flight, so a client can tell its own boundary, still
+    running, from another's (control-protocol ss3, `in_flight_request_id`)."""
+
+    def __init__(self, message: str, *, in_flight_request_id: str) -> None:
+        super().__init__(message, code="seal_in_flight")
+        self.in_flight_request_id = in_flight_request_id
+
+
 class TransitionStop(EngineError):
     """`--on-transition-violation stop`: an applied input broke a declared
     transition, and its decision is durable. Raised after step 7, never
@@ -549,21 +561,207 @@ class RequestCollision(AdmissionRefused):
         self.original = original
 
 
+def report_violation(violation: Violation | None) -> None:
+    """Report a broken transition of an engine-tier machine whose moves are
+    not oracle inputs (admission, the subscription feed, the seal
+    boundary). No `InputBatch` holds them, so no trace line can carry the
+    violation, and the oracle trace must stay equal to its replay. It is
+    one line on stderr under `VIOLATION_LOG_PREFIX`, which the runbook's
+    journal alert matches, and the move proceeds. Best effort, like
+    `runner_journal.best_effort_report` (not imported: runner_journal
+    imports this module): a write that fails is dropped. Under the test
+    suite's strict variable `take` has already raised."""
+    if violation is None:
+        return
+    try:
+        sys.stderr.write(
+            f"{VIOLATION_LOG_PREFIX}: {violation.machine} {violation.transition}"
+            f" {violation.old}->{violation.new}: {violation.reason}\n"
+        )
+    except Exception:  # noqa: BLE001, S110 -- a report that cannot be made is dropped
+        # never raise into the move: a broken or closed stderr must not stop
+        # the engine between an apply and its decision, or in a seal's exit
+        pass
+
+
+#: One request id's state in the admission order (concurrency-model ss4).
+#: `unseen` until its attempt is admitted; `admitted` while the attempt line
+#: is durable and the decision is not; then the decision.
+AdmissionState = Literal["unseen", "admitted", "applied", "rejected"]
+
+ADMISSION_ADMIT: Final = Transition[AdmissionState](
+    "admission.01",
+    frozenset({"unseen"}),
+    "input",
+    "admitted",
+    guard="the epoch is current; the stamp is not behind the frontier; a control"
+    " input's dry apply is clean",
+    effect="take the next index; append the attempt line; note the fingerprint",
+    cite="concurrency-model ss4 steps 2-4, DL-292",
+)
+ADMISSION_APPLIED: Final = Transition[AdmissionState](
+    "admission.02",
+    frozenset({"admitted"}),
+    "decide",
+    "applied",
+    guard="the gate passes, or a replayed durable decision says applied",
+    effect="the decision line, with the outbox entries it implies",
+    cite="concurrency-model ss4 steps 5-7, DL-118",
+)
+ADMISSION_REJECTED: Final = Transition[AdmissionState](
+    "admission.03",
+    frozenset({"admitted"}),
+    "decide",
+    "rejected",
+    guard="a precondition, the stale-completion gate or a host guard rejects, or a"
+    " replayed durable decision says rejected",
+    effect="the decision line, with its stored code",
+    cite="concurrency-model ss4, DL-235, DL-272",
+)
+ADMISSION_REFUSED: Final = Transition[AdmissionState](
+    "admission.04",
+    frozenset({"unseen"}),
+    "input",
+    "unseen",
+    guard="a stale epoch; a stamp behind the frontier while the seal answers;"
+    " the dry apply faults or breaks a declared transition",
+    effect="answer the refusal; no index is taken and nothing is logged",
+    cite="concurrency-model ss4 steps 2-3, DL-90, DL-274, DL-292",
+)
+ADMISSION_RETRY_APPLIED: Final = Transition[AdmissionState](
+    "admission.05",
+    frozenset({"applied"}),
+    "input",
+    "applied",
+    guard="the same fingerprint",
+    effect="answer the stored decision; no index, no clock",
+    cite="concurrency-model ss4 step 2, CM-05",
+)
+ADMISSION_RETRY_REJECTED: Final = Transition[AdmissionState](
+    "admission.06",
+    frozenset({"rejected"}),
+    "input",
+    "rejected",
+    guard="the same fingerprint",
+    effect="answer the stored decision and its code; no index, no clock",
+    cite="concurrency-model ss4 step 2, CM-05, DL-272",
+)
+ADMISSION_REUSED_APPLIED: Final = Transition[AdmissionState](
+    "admission.07",
+    frozenset({"applied"}),
+    "input",
+    "applied",
+    guard="another fingerprint",
+    effect="refuse request_id_reused, carrying the earlier decision",
+    cite="concurrency-model ss4 step 2, DL-217",
+)
+ADMISSION_REUSED_REJECTED: Final = Transition[AdmissionState](
+    "admission.08",
+    frozenset({"rejected"}),
+    "input",
+    "rejected",
+    guard="another fingerprint",
+    effect="refuse request_id_reused, carrying the earlier decision",
+    cite="concurrency-model ss4 step 2, DL-217",
+)
+ADMISSION_REUSED_ADMITTED: Final = Transition[AdmissionState](
+    "admission.09",
+    frozenset({"admitted"}),
+    "input",
+    "admitted",
+    guard="another fingerprint",
+    effect="refuse request_id_reused, with no decision to carry",
+    cite="concurrency-model ss4 step 2, DL-217",
+)
+ADMISSION_UNDECIDED: Final = Transition[AdmissionState](
+    "admission.10",
+    frozenset({"admitted"}),
+    "input",
+    "admitted",
+    guard="the same fingerprint",
+    effect="raise: a second writer is applying inputs, or steps 5-7 yielded",
+    cite="concurrency-model ss4 step 2",
+)
+
+#: One request id through the admission order (concurrency-model ss4),
+#: over `DecisionIndex` and the frontiers. It starts at dedup: the
+#: `period_sealing` refusal at the engine's queue (period-model ss6 step 2)
+#: and the envelope's own refusals come before it and move no id. A seal
+#: request is never admitted into it: its decision is the `seal` record.
+#: Readiness does ask `lookup` whether the seal's request_id is already
+#: spent on another command (`boundary._check_request_id`); on a collision
+#: that takes the reused-id row of the id's own machine, which is the rule
+#: it applies.
+ADMISSION: Final[StateMachine[AdmissionState]] = StateMachine(
+    name="admission",
+    states=frozenset(get_args(AdmissionState)),
+    initial="unseen",
+    finals=frozenset(),
+    transitions=(
+        ADMISSION_ADMIT,
+        ADMISSION_APPLIED,
+        ADMISSION_REJECTED,
+        ADMISSION_REFUSED,
+        ADMISSION_RETRY_APPLIED,
+        ADMISSION_RETRY_REJECTED,
+        ADMISSION_REUSED_APPLIED,
+        ADMISSION_REUSED_REJECTED,
+        ADMISSION_REUSED_ADMITTED,
+        ADMISSION_UNDECIDED,
+    ),
+)
+
+_RETRY: Final[dict[str, Transition[AdmissionState]]] = {
+    "applied": ADMISSION_RETRY_APPLIED,
+    "rejected": ADMISSION_RETRY_REJECTED,
+}
+_REUSED: Final[dict[str, Transition[AdmissionState]]] = {
+    "admitted": ADMISSION_REUSED_ADMITTED,
+    "applied": ADMISSION_REUSED_APPLIED,
+    "rejected": ADMISSION_REUSED_REJECTED,
+}
+
+
 class DecisionIndex:
     """`request_id` -> the decision that request already got, plus the
-    fingerprint it was admitted under (concurrency-model ss4 step 2)."""
+    fingerprint it was admitted under (concurrency-model ss4 step 2).
+
+    Each id moves through `ADMISSION`; `state` derives where it is, and
+    every move here names its transition."""
 
     def __init__(self) -> None:
         self._results: dict[str, ApplyResult] = {}
         self._by_index: dict[int, ApplyResult] = {}
         self._fingerprints: dict[str, str] = {}
 
+    def state(self, request_id: str | None) -> AdmissionState:
+        """Where `request_id` is in the admission order. An input with no id
+        has not been admitted, so it is `unseen`."""
+        if request_id is None:
+            return "unseen"
+        result = self._results.get(request_id)
+        if result is not None:
+            return result.decision
+        return "admitted" if request_id in self._fingerprints else "unseen"
+
     def note(self, attempt: Attempt) -> None:
+        old = self.state(attempt.request_id)
         self._fingerprints[attempt.request_id] = attempt.fingerprint
+        report_violation(ADMISSION.take(ADMISSION_ADMIT, old, self.state(attempt.request_id)))
 
     def record(self, result: ApplyResult) -> None:
+        old = self.state(result.request_id)
         self._results[result.request_id] = result
         self._by_index[result.index] = result
+        decided = ADMISSION_APPLIED if result.decision == "applied" else ADMISSION_REJECTED
+        report_violation(ADMISSION.take(decided, old, self.state(result.request_id)))
+
+    def refuse(self, request_id: str | None) -> None:
+        """Record a refusal after dedup (`admission.04`): the id stays where
+        it was, which is `unseen`, because dedup answered every id it had
+        seen."""
+        state = self.state(request_id)
+        report_violation(ADMISSION.take(ADMISSION_REFUSED, state, state))
 
     def for_index(self, index: int) -> ApplyResult | None:
         return self._by_index.get(index)
@@ -579,17 +777,21 @@ class DecisionIndex:
         if seen is None:
             return None
         result = self._results.get(request_id)
+        state = self.state(request_id)
         if seen != fingerprint:
+            report_violation(ADMISSION.take(_REUSED[state], state, state))
             raise RequestCollision(
                 f"request_id {request_id!r} was admitted for a different command"
                 " (fingerprint mismatch): reuse an id only for an exact retry",
                 original=result,
             )
         if result is None:
+            report_violation(ADMISSION.take(ADMISSION_UNDECIDED, state, state))
             raise EngineError(
                 f"request_id {request_id!r} is admitted but undecided: a second writer"
                 " is applying inputs, or steps 5-7 yielded"
             )
+        report_violation(ADMISSION.take(_RETRY[state], state, state))
         return result
 
 

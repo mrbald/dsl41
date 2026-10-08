@@ -19,7 +19,8 @@ Storage capabilities needed:
 ## Interface
 
 - `Effect`: `effect_id`, `kind`, `job`, `run_number`, `executor_id`, `index`, `at`, `run_id`, `generation`.
-- `EffectOutcome`: `state` is `applied`, `indeterminate` or `retired`; no outcome means pending.
+- `EffectOutcome`: `state` is `applied`, `indeterminate` or `retired`. An effect with no outcome is `pending`, the name `Outbox.state_of` gives it.
+- `EFFECT` is the effect's transition table ([state machines](../state-machines.md#effect)).
 - `effect_id_for(index, kind, job, run_number)` derives the id `e<index>:<KIND>:<job>.<run_number>`.
 - `Outbox`: `record`, `resolve`, `pending`, `pending_for`, `effects`, `state_of`, `result_for`.
 - `plan_effects(...)` is the planner at step 7, pure except the `run_id` mint. `superseded_reason(effect, row, live_run)` is asked at dispatch.
@@ -59,6 +60,7 @@ stateDiagram-v2
 - One planning call plans at most one KILL per run ([DL-232](../decision-log.md)).
 - The [ghost-run](../glossary.md#ghost-run) gate decides at planning, and a run counts as dispatched from its plan ([DL-234](../decision-log.md)).
 - The outcome states are four, and `indeterminate` is not `pending` ([concurrency-model §5](../concurrency-model.md#5-effects); [DL-111](../decision-log.md)).
+- An outcome is final. `Outbox.resolve` refuses a second one through the table's check, live and on replay ([concurrency-model §5](../concurrency-model.md#5-effects)).
 - `Outbox.result_for` gives the known result or `outcome_unavailable`. Nothing in the local engine asks for it; its caller would be the relay, which is not built ([DL-97](../decision-log.md); [DL-284](../decision-log.md)). Locally an indeterminate effect refuses the seal ([concurrency-model §5](../concurrency-model.md#5-effects) and the [CM-06 row](../concurrency-model.md#9-the-proving-ground)).
 - At resume a pending SPAWN with a spool trace is applied, and one with none is re-driven ([DL-102](../decision-log.md)). A recorded KILL is re-driven, and so is a live wrapper under a terminal row ([period-model §11](../period-model.md#11-resume-replay-and-recovery) step 7).
 
@@ -67,7 +69,7 @@ stateDiagram-v2
 - Crash between the decision and the attempt: the effect stays pending in the WAL. Resume re-drives or resolves it as the invariants above say ([concurrency-model §5](../concurrency-model.md#5-effects)).
 - Crash between a launch and its `effect_result`: the spool is the record, and resume resolves the SPAWN as applied ([DL-96](../decision-log.md)).
 - A spool file or a supervisor row naming another `run_id` than the effect bound: resume refuses before it changes anything (`_preflight_identities`; [DL-118](../decision-log.md)).
-- A log that records one effect id twice with different content, or an outcome for an unknown effect: `Outbox` raises `EngineError`.
+- A log that records one effect id twice with different content: `Outbox` raises `EngineError`, and resume stops. An outcome for an unknown effect, one naming another `run_id`, or a second outcome for one effect: replay stops with an `OutcomeReplayFault` naming the effect, and resume stops as for any replay fault ([period-model §11](../period-model.md#11-resume-replay-and-recovery)).
 - An engine that died during the kill ladder leaves a live wrapper under a terminal row. Resume kills it whatever the KILL effect says ([period-model §11](../period-model.md#11-resume-replay-and-recovery) step 7).
 - A leader that lost its lock launches nothing: `_dispatch` re-proves the fence first ([concurrency-model §1](../concurrency-model.md#1-storage--frozen)).
 - During a seal, an `outbox.record` that raises, or a failed `effect_result` append, [fail-stops](../glossary.md#fail-stop) the engine instead of refusing the seal. Resume rebuilds the outbox from the WAL's decision records ([period-model §7](../period-model.md#7-the-seal-operation); [DL-274](../decision-log.md)).

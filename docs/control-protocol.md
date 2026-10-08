@@ -538,6 +538,13 @@ attribution, and neither may be swapped under a retry. The lookup reaches
 exactly one seal back. An older seal's retry is refused as a stale
 baseline, which is a liveness loss and not a safety one.
 
+**One boundary at a time.** While a boundary is queued or running, every
+`seal` request is refused `seal_in_flight`, an exact retry of the one in
+flight included; a retry is never attached to it. The refusal adds
+`in_flight_request_id`, the `request_id` of the boundary in flight, so a
+client can tell its own boundary, still running, from another's. The field
+is additive: consumers ignore unknown fields (§2), and no version moves.
+
 **An uncommitted seal request is unseen.** A request that crashed before
 its record left nothing behind, so its retry is a fresh request that
 attempts the boundary again. Only a committed seal is ever deduplicated.

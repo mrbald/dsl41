@@ -19590,3 +19590,75 @@ relitigate an entry; append a new one.
   signal, and a race test that could leave a process behind. All are fixed
   except the stopped-child bug, which is recorded above, and the reviewer
   confirmed them.
+- DL-295 The engine tier is five state machines, the outbox refuses a second
+  outcome, and a second seal request is refused while a boundary is in
+  flight
+  (2026-10-08; src/dsl41/runner.py, runner_hosts.py, runner_admission.py,
+  runner_effects.py, runner_journal.py, runner_control.py, runner_adapters.py,
+  runner_tui.py, seal.py, state_machine.py, oracle_state.py (the orphan
+  line), machines.py, cli_common.py, cli_estate.py; docs/state-machines.md,
+  docs/control-protocol.md §3, docs/period-model.md §3.3 and §7,
+  docs/deployment-runbook.md (watch table, "A seal exited 4"),
+  docs/blocks/admission.md, effect-outbox.md, engine-loop.md; README.md;
+  tests/test_engine_machines.py, tests/test_boundary.py,
+  tests/test_control_branches.py, tests/test_dry_apply.py,
+  tests/test_runner_control.py, tests/test_runner_tui.py,
+  tests/test_seal_artifact.py)
+  THE MACHINES (DL-289). `host` has 12 transitions over active, passive,
+  quarantined and evicted. One table replaces the guard, the verb dispatcher
+  and two silent store no-ops; one selector, `host_move`, serves the gate
+  and the apply, with the same verdicts as before for every verb and state.
+  Its one mark is `host.12`, spec-only: the relay's re-registration after
+  self-fencing (concurrency-model §8). `admission` has 10 transitions, one
+  machine per request id, from dedup to an applied or rejected decision and
+  the answers to retries. `effect` has four: an effect is pending until it
+  resolves to applied, retired or indeterminate. `subscription` has four,
+  one machine per feed. `seal_boundary` has eight, one machine per seal
+  request; its phases live on `_PendingSeal`, and DL-274's exits are a
+  table. `Engine.sealing` is now derived from the barrier, and
+  `OpenedRuntime.dispatched`, which nothing read, is removed; resume
+  rebuilds the ghost-run gate from the rows (period-model §3.3, §7).
+  BEHAVIOR CHANGES. The outbox refuses a second outcome for a resolved
+  effect, the same outcome included, before anything is written. No live
+  writer resolves a resolved effect, so it fires only on a log this build
+  did not write: resume then stops through the same advice as a replayed
+  fault, naming the effect. An applied host decision with no transition in
+  the table raises; on replay it is a replayed fault naming the input.
+  Before, the store verb ran blindly (an unknown host raised OracleError).
+  Live it is unreachable behind the gate. No estate is live, so no shipped log is affected.
+  ENGINE-SIDE VIOLATIONS. A violation in admission, a subscription or the
+  seal boundary is not an oracle input, and the oracle trace must stay
+  replay-equal, so it is one stderr line and the move proceeds. The line,
+  and DL-292's orphan line, begin with `state_machine.VIOLATION_LOG_PREFIX`,
+  "dsl41: transition violation"; the runbook's watch table alerts on that
+  journal prefix. A failed stderr write never raises.
+  THE SECOND SEAL REQUEST. Before, a seal request sent while a boundary was
+  running was queued as a second boundary: after an abort it ran unasked,
+  and after a commit it was never answered. Now the engine holds the
+  request until its boundary exits and refuses any other request in the
+  meantime with `seal_in_flight`, naming the request id and phase, as
+  control-protocol §3 already defines it ("a refused retry says nothing
+  about its original"). The refusal carries the additive field
+  `in_flight_request_id`. `dsl41 seal` reads it: for its own id it exits 4,
+  outcome unknown, retry later under the same id, and the committed-seal
+  rule answers once the seal lands; for another id it exits 2, saying this
+  request did nothing, without claiming the period is still open
+  (period-model §7's exit-code sentence says so). A retry is never attached
+  to the in-flight boundary.
+  STATED LIMITS. For the three loop turns after a seal commits, an exact
+  retry is refused "in flight (sealed)" instead of answered `applied`; it
+  exits 4, and the next read finds the seal. `seal_boundary.05` (fence lost)
+  is exercised only from `committing`. An identical repeated effect is a
+  no-op while an identical repeated outcome is refused. A shutdown's
+  cancellation leaves a boundary with no named transition.
+  NOT CHANGED. STATE_MACHINE_VERSION; the wire, apart from the additive
+  field.
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass, the
+  Fable pass in place of Codex at the owner's instruction, three rounds and
+  one confirmation round the owner allowed. Both found the unguarded stderr
+  write and the bare error on a doubled outcome at resume. The Fable pass
+  found the second-seal gap's smallest fix. The Opus reviewer found
+  untested claims in the host and TUI tests and a stale docstring. On the
+  exact retry the two disagreed, then converged in an exchange: the server
+  keeps the contract's refusal, and the CLI maps it by id. All findings are
+  fixed and confirmed by the reviewer that raised them.

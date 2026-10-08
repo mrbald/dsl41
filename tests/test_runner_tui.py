@@ -30,6 +30,7 @@ import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -1052,6 +1053,65 @@ def test_dl210_u1_u4_trace_baseline_change_restarts_a_longer_trace_next_poll(
             assert app._rows == {"new_job"}
             assert sum("[new-" in line.text for line in console.lines) == 4
             assert sum("trace baseline changed" in line.text for line in console.lines) == 1
+
+    asyncio.run(scenario())
+
+
+def _line_style(line: Any) -> str:
+    """The styles of one console line, joined, for a style assertion."""
+    return " ".join(str(segment.style) for segment in line if segment.style is not None)
+
+
+def test_a_transition_violation_line_is_an_alert_and_a_host_subject_is_no_job(
+    short_root: Path,
+) -> None:
+    """concurrency-model ss4: a TRANSITION_VIOLATION entry names its subject in
+    `job`, and a host's subject is its `host:` key. The console shows every
+    such line as an alert, whatever the subject. A host subject makes no
+    jobs-table row and no alarm count; an ordinary transition stays dim."""
+
+    async def scenario() -> None:
+        async with _trace_poll_app(short_root) as (app, pilot, replies):
+            console = app.query_one("#console", RichLog)
+            violation = {
+                "at": "2026-07-01T08:00:01",
+                "transition": "TRANSITION_VIOLATION",
+                "cause": "host.07 quarantined->evicted: evicted is not one of the targets",
+            }
+            replies.trace.update(
+                last_seq=5,
+                entries=[
+                    *replies.entries("old", 2),
+                    {"seq": 3, "job": "host:local", **violation},
+                    {"seq": 4, "job": "trace_job", **violation},
+                    {
+                        "seq": 5,
+                        "at": "2026-07-01T08:00:02",
+                        "job": "trace_job",
+                        "transition": "INACTIVE->STARTING",
+                        "cause": "STARTJOB",
+                    },
+                ],
+            )
+            await pilot.press("r")
+            await _wait_for_ui(pilot, lambda: app._trace_seq == 5)
+            host = next(line for line in console.lines if "host:local" in line.text)
+            assert "TRANSITION_VIOLATION" in host.text and "host.07" in host.text
+            assert "red" in _line_style(host)
+            job = next(
+                line for line in console.lines if "trace_job TRANSITION_VIOLATION" in line.text
+            )
+            assert "red" in _line_style(job)
+            plain = next(line for line in console.lines if "INACTIVE->STARTING" in line.text)
+            assert "red" not in _line_style(plain)
+            # fails if a violation, or its `host:` subject, is tallied as an
+            # alarm (e.g. the marker joining the alarm set), or if a trace
+            # subject makes a jobs-table row
+            assert app._alarms == {"trace_job": 2}
+            assert "host:local" not in app._alarms
+            assert app._rows == {"trace_job"}
+            table = app.query_one("#jobs", DataTable)
+            assert [str(key.value) for key in table.rows] == ["trace_job"]
 
     asyncio.run(scenario())
 

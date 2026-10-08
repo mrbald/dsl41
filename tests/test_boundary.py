@@ -739,7 +739,7 @@ def test_pr28e_admission_closes_at_the_cut(tmp_path: Path) -> None:
     no-op ones included, since each takes a durable decision."""
     run_root = tmp_path / "run"
     engine = _genesis(run_root)
-    engine.sealing = True
+    engine.barrier.park()  # the freeze `Engine.sealing` reads
     from dsl41.runner_admission import AdmissionRefused, Envelope
 
     async def scenario() -> None:
@@ -1605,7 +1605,149 @@ def test_pr32_the_seal_names_the_executor_run_id_and_generation_of_every_live_ru
         manifest=_manifest(run_root, 2),  # type: ignore[arg-type]
     )
     assert [e.run_id for e in opened.executions] == [effect.run_id]
-    assert opened.dispatched == {"a": 1}  # ss3.3's ghost-run gate, rebuilt
+
+
+def test_a_second_seal_is_refused_for_the_whole_boundary_and_accepted_after_an_abort(
+    tmp_path: Path,
+) -> None:
+    """period-model ss7: one boundary at a time. While the first boundary
+    waits for quiescence, a second request -- a distinct one, or the same
+    request_id again -- is refused `seal_in_flight`, naming the boundary in
+    flight and its phase. Once the first aborts, a new request is a
+    boundary again."""
+    run_root = tmp_path / "run"
+    engine = _genesis(run_root)
+    engine.QUIESCE_WAIT_S = 0.05  # the wait is real; the bound is what refuses
+    _start_a(engine)  # a live run with no spool binding: the seal waits, then refuses
+    staged = _stage(run_root, C2_JIL)
+    first = _request(engine, staged)
+    second = _request(engine, staged, request_id="r-seal-2")
+    during: dict[str, Any] = {}
+
+    async def scenario() -> None:
+        running = engine.submit_seal(first)
+
+        async def inject() -> None:
+            while not engine.sealing:  # the first boundary has frozen admission
+                await asyncio.sleep(0)
+            during["second"] = engine.submit_seal(second)
+            during["retry"] = engine.submit_seal(first)
+
+        injector = asyncio.create_task(inject())
+        await engine.run_until_quiescent(T0)
+        await injector
+        assert running.done() and "an applied SPAWN with no spawn.json" in str(running.exception())
+        for future in during.values():
+            assert future.done()
+            refusal = future.exception()
+            assert isinstance(refusal, EngineError) and refusal.code == "seal_in_flight"
+            assert "request_id r-seal-1, frozen" in str(refusal)
+            assert getattr(refusal, "in_flight_request_id", None) == "r-seal-1"
+        assert engine._seal is None and engine.sealing is False  # the abort ran
+        again = engine.submit_seal(second)
+        assert not again.done()  # accepted: it is a boundary of its own
+        await engine.run_until_quiescent(T0)
+        refused = again.exception()
+        assert isinstance(refused, EngineError) and refused.code != "seal_in_flight"
+
+    asyncio.run(scenario())
+    _close(engine)
+
+
+def test_a_committed_seal_releases_the_one_boundary_slot(tmp_path: Path) -> None:
+    run_root = tmp_path / "run"
+    engine = _genesis(run_root)
+    asyncio.run(_seal(engine, _request(engine, _stage(run_root, C2_JIL))))
+    assert engine._seal is None
+
+    async def after() -> None:
+        assert not engine.submit_seal(_request(engine, _stage(run_root, C2_JIL))).done()
+
+    asyncio.run(after())
+    _close(engine)
+
+
+class _BrokenStderr:
+    """A stderr whose consumer has gone: every write is a broken pipe."""
+
+    def write(self, _text: str) -> int:
+        raise BrokenPipeError(32, "Broken pipe")
+
+    def flush(self) -> None:
+        raise BrokenPipeError(32, "Broken pipe")
+
+
+def test_a_violation_on_the_seal_abort_arm_with_a_broken_stderr_still_answers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The abort exit reports a broken declared transition on stderr, best
+    effort: with stderr gone, the report is dropped, the refusal still
+    answers the request, and C1 carries on."""
+    import sys
+
+    from dsl41 import runner
+    from dsl41.state_machine import HITS_ENV, STRICT_ENV, StateMachine
+
+    directory = tmp_path / "hits"
+    directory.mkdir()
+    monkeypatch.setenv(HITS_ENV, str(directory))  # the deliberate violation stays here
+    monkeypatch.delenv(STRICT_ENV, raising=False)
+    table = runner.SEAL_BOUNDARY
+    monkeypatch.setattr(
+        runner,
+        "SEAL_BOUNDARY",
+        StateMachine(
+            name=table.name,
+            states=table.states,
+            initial=table.initial,
+            finals=table.finals,
+            transitions=tuple(t for t in table.transitions if t.id != "seal_boundary.04"),
+        ),
+    )
+    run_root = tmp_path / "run"
+    engine = _genesis(run_root)
+    monkeypatch.setattr(sys, "stderr", _BrokenStderr())
+    stale = _request(engine, _stage(run_root, C2_JIL), epoch=engine.epoch + 1)
+    refusal = asyncio.run(_refusal(engine, stale))
+    assert refusal.code == "stale_epoch"
+    assert engine._seal is None and engine.sealing is False
+    assert "seal_boundary.04" in next(directory.glob("violations-*.jsonl")).read_text()
+    _close(engine)
+
+
+def test_pr18a_resume_rebuilds_the_ghost_run_gate_over_the_carried_rows(
+    tmp_path: Path,
+) -> None:
+    """ss3.3: the ghost-run gate is derived and not carried. A row that ran
+    in C1 keeps its run number across the seal, and C2's resume counts that
+    run as dispatched, so a `CHANGE_STATUS STARTING` at the same run number
+    plans no second SPAWN (PR-18a)."""
+    run_root = tmp_path / "run"
+    engine = _genesis(run_root)
+    _start_a(engine)
+    engine.inject(
+        Event(at=T0, kind="STATUS", payload={"job": "a", "status": "SUCCESS", "exit_code": 0})
+    )
+    asyncio.run(engine.run_until_quiescent(T0))
+    boundary = asyncio.run(_seal(engine, _request(engine, _stage(run_root, C2_JIL))))
+    _close(engine)
+
+    at = boundary.seal.closed_at
+    opened = _resume(run_root, C2_JIL, clock=VirtualClock(start=at))
+    assert opened._dispatched == {"a": 1}
+
+    async def under_c2() -> None:
+        opened.inject(
+            Event(
+                at=at, kind="STATUS", payload={"job": "a", "status": "STARTING"}, source="control"
+            )
+        )
+        await opened.run_until_quiescent(at)
+
+    asyncio.run(under_c2())
+    assert opened.oracle.store.runtime("a").status == "STARTING"
+    assert [e for e in opened.outbox.effects() if e.kind == "SPAWN"] == []
+    _close(opened)
 
 
 def test_the_carried_execution_sets_come_from_the_wal_alone(tmp_path: Path) -> None:
@@ -2595,11 +2737,21 @@ def test_every_quiescence_refusal_names_its_own_reason(tmp_path: Path) -> None:
     engine._reaping.clear()
 
     _start_a(engine)
-    from dsl41.runner_effects import EffectOutcome
+    from dsl41.runner_effects import EffectOutcome, effect_id_for
 
+    # the SPAWN already has its outcome, and an outcome is final: the
+    # indeterminate effect is a KILL of the same run, as resume leaves one
     effect = next(e for e in engine.outbox.effects() if e.kind == "SPAWN")
+    kill = effect.model_copy(
+        update={
+            "effect_id": effect_id_for(99, "KILL", effect.job, effect.run_number),
+            "kind": "KILL",
+            "index": 99,
+        }
+    )
+    engine.outbox.record(kill)
     engine.outbox.resolve(
-        EffectOutcome(effect_id=effect.effect_id, state="indeterminate", run_id=effect.run_id)
+        EffectOutcome(effect_id=kill.effect_id, state="indeterminate", run_id=kill.run_id)
     )
     assert "indeterminate effect(s)" in str(engine._not_quiescent(estate))
     _close(engine)

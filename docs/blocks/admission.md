@@ -53,6 +53,8 @@ stateDiagram-v2
     Rejected --> [*]: decision line written
 ```
 
+One request id's transition table is [admission](../state-machines.md#admission), over `DecisionIndex`. It starts at dedup: the `period_sealing` refusal and the envelope's refusals come first and move no id.
+
 ## Invariants
 
 - The steps and their order are [concurrency-model §4](../concurrency-model.md#4-admission-and-application)'s. This card does not restate them.
