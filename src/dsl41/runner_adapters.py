@@ -70,6 +70,7 @@ from dsl41.runner_clock import Clock, EngineError
 from dsl41.runner_journal import repair_tail
 from dsl41.runner_ledger import Proof
 from dsl41.semantics import FwExistence, fw_existence_immediate
+from dsl41.state_machine import StateMachine, Transition
 
 if TYPE_CHECKING:  # annotation only: the Journal object is the engine's, not an adapter's
     from dsl41.runner_journal import Journal
@@ -1225,6 +1226,80 @@ def _parse_list_reply(raw: dict[str, Any]) -> SupervisorListReply:
     return SupervisorRefusal(ok=False, error=error if isinstance(error, str) else "")
 
 
+#: The engine side's connection to the supervisor. It is derived from the
+#: client's transport fields and never stored: see `SupervisorClient.phase`.
+type ClientPhase = Literal["disconnected", "connected", "lost", "closed"]
+
+CLIENT_CONNECT: Transition[ClientPhase] = Transition(
+    "supervisor_client.01",
+    frozenset({"disconnected", "lost"}),
+    "connect",
+    "connected",
+    guard="the socket accepts",
+    effect=(
+        "a new connection epoch with its own reader and lost event, then PING, and a"
+        " reconnect re-ACQUIREs when a token is held"
+    ),
+    cite="supervisor-protocol ss5, DL-48, DL-79",
+)
+CLIENT_SUPERSEDE: Transition[ClientPhase] = Transition(
+    "supervisor_client.02",
+    frozenset({"connected"}),
+    "connect",
+    "connected",
+    guard="the socket accepts",
+    effect="close the previous writer and cancel its reader, then a new epoch",
+    cite="DL-48",
+)
+CLIENT_LOST: Transition[ClientPhase] = Transition(
+    "supervisor_client.03",
+    frozenset({"connected"}),
+    "EOF or a read error on this epoch's connection",
+    "lost",
+    effect="fail the pending request; the next request reconnects",
+    cite="supervisor-protocol ss5, runner-design ss7, DL-48",
+)
+CLIENT_POISONED: Transition[ClientPhase] = Transition(
+    "supervisor_client.04",
+    frozenset({"connected", "lost"}),
+    "a request cancelled mid-flight",
+    "lost",
+    effect=(
+        "fail the pending request and close the writer, since the stream has no"
+        " correlation ids and the reply in flight could reach the next request"
+    ),
+    cite="DL-48",
+)
+CLIENT_CLOSED: Transition[ClientPhase] = Transition(
+    "supervisor_client.05",
+    frozenset({"disconnected", "connected", "lost"}),
+    "close",
+    "closed",
+    effect="cancel the renewal, reader and LIST tasks, then close the writer",
+    cite="DL-48",
+)
+
+#: The lease token is extended state, not a state of this machine. A reply that
+#: sets or drops it can land just before its connection is lost, so the token
+#: is orthogonal to the connection. The renewal loop keeps it alive.
+SUPERVISOR_CLIENT: StateMachine[ClientPhase] = StateMachine(
+    name="supervisor_client",
+    states=frozenset({"disconnected", "connected", "lost", "closed"}),
+    initial="disconnected",
+    finals=frozenset({"closed"}),
+    transitions=(
+        CLIENT_CONNECT,
+        CLIENT_SUPERSEDE,
+        CLIENT_LOST,
+        CLIENT_POISONED,
+        CLIENT_CLOSED,
+    ),
+)
+
+#: consecutive failed renewals that report the host unreachable (ss8)
+_UNREACHABLE_AFTER = 5
+
+
 class SupervisorClient:
     """Engine-side client of the ss6a Tier-1 supervisor (this side may import
     dsl41 freely). Ensures a supervisor is running (spawning one DETACHED if
@@ -1248,6 +1323,8 @@ class SupervisorClient:
     #: engine defaults (spec ss2): 60s lease, renewed every 20s
     _TTL_S = 60.0
     _RENEW_EVERY_S = 20.0
+    #: the short backoff after a failed renewal
+    _RETRY_EVERY_S = 1.0
 
     def __init__(
         self,
@@ -1272,9 +1349,10 @@ class SupervisorClient:
         #: engine's state; what it stamps is deliberately UNPROJECTED, so a
         #: heartbeat costs no revision and no log record.
         self.on_contact = on_contact
-        #: called once when this client GIVES UP reaching the supervisor --
+        #: called once per outage, at the fifth consecutive failed renewal --
         #: ss8's unreachability, which the leader turns into a quarantine.
-        #: Deliberately not per-failure: see the renewal loop.
+        #: Deliberately not per-failure: see the renewal loop, which keeps
+        #: retrying and reports contact again when the supervisor answers.
         self.on_unreachable: Callable[[], None] | None = None
         self.sock_path = run_root / "supervisor.sock"
         # Per-INCARNATION since DL-79, and deliberately not stable: the old
@@ -1308,6 +1386,8 @@ class SupervisorClient:
         self._writer: asyncio.StreamWriter | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._renew_task: asyncio.Task[None] | None = None
+        #: the ttl_s the renewal loop renews with: `acquire`'s
+        self._renew_ttl_s = self._TTL_S
         self._lock = asyncio.Lock()
         self._reconnect_lock = asyncio.Lock()
         self._closed = False
@@ -1318,6 +1398,17 @@ class SupervisorClient:
         self._list_wakeup = asyncio.Event()
         self._list_idle = asyncio.Event()
         self._list_idle.set()
+
+    def phase(self) -> ClientPhase:
+        """The connection's phase (SUPERVISOR_CLIENT), read off the transport.
+
+        A writer whose `lost` event is set is lost: the reader saw EOF, or a
+        cancelled request poisoned it. A writer without one is connected."""
+        if self._closed:
+            return "closed"
+        if self.lost.is_set():
+            return "lost"
+        return "disconnected" if self._writer is None else "connected"
 
     # -- connection ---------------------------------------------------------
 
@@ -1360,6 +1451,7 @@ class SupervisorClient:
         if self._closed:
             writer.close()
             return False
+        before = self.phase()
         # supersede any previous connection's remains BEFORE swapping identity:
         # the epoch guard (each reader carries its own `lost` event) keeps a
         # stale reader from poisoning or delivering into its successor
@@ -1370,6 +1462,11 @@ class SupervisorClient:
         self._writer = writer
         self.lost = asyncio.Event()
         self._reader_task = asyncio.ensure_future(self._reader(reader, self.lost))
+        match before:
+            case "connected":
+                SUPERVISOR_CLIENT.take(CLIENT_SUPERSEDE, before, self.phase())
+            case _:
+                SUPERVISOR_CLIENT.take(CLIENT_CONNECT, before, self.phase())
         try:
             resp = await self._request({"cmd": "PING"}, _connect=False)
         except SupervisorUnavailable:
@@ -1438,6 +1535,7 @@ class SupervisorClient:
                     return False  # fenced out: another controller holds the lease
                 self.token = int(resp["token"])
                 self.incarnation = resp.get("incarnation")  # DL-80
+                self._keep_renewing()
             return True
 
     async def _request(self, obj: dict[str, Any], *, _connect: bool = True) -> dict[str, Any]:
@@ -1479,6 +1577,7 @@ class SupervisorClient:
                 raise
 
     def _poison(self) -> None:
+        before = self.phase()
         self.lost.set()
         if self._pending is not None and not self._pending.done():
             self._pending.set_exception(
@@ -1488,6 +1587,8 @@ class SupervisorClient:
         if self._writer is not None:
             self._writer.close()  # the reader sees EOF and exits via its epoch
             self._writer = None
+        if before != "closed":  # a closing client: `close` owns the teardown
+            SUPERVISOR_CLIENT.take(CLIENT_POISONED, before, self.phase())
 
     async def _reader(self, stream: asyncio.StreamReader, lost: asyncio.Event) -> None:
         """One reader per connection; `lost` is that connection's epoch. A
@@ -1526,10 +1627,13 @@ class SupervisorClient:
             return  # a superseded connection's reader: the successor is fine
         if lost.is_set():
             return  # already poisoned; _poison cleaned the pending future
+        before = self.phase()
         lost.set()
         if self._pending is not None and not self._pending.done():
             self._pending.set_exception(SupervisorUnavailable("connection lost"))
         self._pending = None
+        if before != "closed":  # a closing client cancels its reader: not a loss
+            SUPERVISOR_CLIENT.take(CLIENT_LOST, before, self.phase())
 
     def exit_future(self, run_id: str) -> asyncio.Future[dict[str, Any]]:
         fut = self._exit_futures.get(run_id)
@@ -1612,9 +1716,21 @@ class SupervisorClient:
         self.token = int(resp["token"])
         self.incarnation = resp.get("incarnation")  # DL-80
         self._note_contact(resp)
-        if self._renew_task is None:
-            self._renew_task = asyncio.ensure_future(self._renew_loop(ttl))
+        self._renew_ttl_s = ttl
+        self._keep_renewing()
         return self.token
+
+    def _keep_renewing(self) -> None:
+        """Start the renewal loop unless one is running or the client is
+        closed (supervisor-protocol ss5: the engine renews while it holds the
+        lease). A lease nobody renews lapses one TTL later, every mutating
+        verb then answers `stale_token`, and a supervisor with a deadman
+        exits. A loop started after `close` would never be cancelled."""
+        if self._closed:
+            return
+        if self._renew_task is not None and not self._renew_task.done():
+            return
+        self._renew_task = asyncio.ensure_future(self._renew_loop(self._renew_ttl_s))
 
     def _note_contact(self, resp: Mapping[str, Any]) -> None:
         """One confirmed lease exchange: ss8's "positive contact with this
@@ -1636,57 +1752,83 @@ class SupervisorClient:
         incumbency, not a label -- a lapsed lease is free, but one another
         engine now holds refuses us, which is the fencing working); a fresh
         token comes back; connection loss heals via _request's lazy reconnect.
-        Only several consecutive failures give up -- loudly, once."""
+
+        Five consecutive failures report the host unreachable, loudly and once
+        per outage (concurrency-model ss8). The loop does not end there. It
+        is the one thing that renews the lease, so it keeps retrying on the
+        short backoff, and its first success reports contact again, which is
+        what reinstates the host. A loop that returned at the fifth failure
+        left a later reconnect's lease unrenewed: it lapsed one TTL later.
+
+        The loop ends only when it is cancelled or the client is closed. An
+        unexpected error in one renewal is logged and counted as a failed
+        renewal, and an error in the unreachable report is logged; neither
+        ends the loop."""
         failures = 0
         try:
-            while True:
-                await asyncio.sleep(self._RENEW_EVERY_S if failures == 0 else 1.0)
+            while not self._closed:
+                await asyncio.sleep(self._RENEW_EVERY_S if failures == 0 else self._RETRY_EVERY_S)
                 try:
-                    resp = await self._request({"cmd": "RENEW", "ttl_s": ttl_s})
-                    if not resp.get("ok"):
-                        if resp.get("error") == "wrong_incarnation":
-                            # DL-80: the supervisor restarted under us. Our token
-                            # belongs to a world that no longer exists, and every
-                            # wrapper it held lost its lifeline: each kills its
-                            # group and records in its own time (DL-205). Drop the
-                            # pair so the re-ACQUIRE below takes the free path
-                            # instead of replaying a credential that can now
-                            # COLLIDE with the new incarnation's counter.
-                            self.token, self.incarnation = None, None
-                        # stale_token (fenced by a reconnect's own re-ACQUIRE,
-                        # or lapsed): same controller re-acquires, fresh token
-                        resp = await self._request(
-                            {
-                                "cmd": "ACQUIRE",
-                                "controller_id": self.controller_id,
-                                "ttl_s": ttl_s,
-                            }
-                        )
-                        if resp.get("ok"):
-                            self.token = int(resp["token"])
-                            self.incarnation = resp.get("incarnation")  # DL-80
+                    resp = await self._renew_once(ttl_s)
+                    if resp.get("ok"):
+                        if failures >= _UNREACHABLE_AFTER:
+                            print(
+                                f"dsl41: supervisor lease renewed after {failures} failed renewals",
+                                file=sys.stderr,
+                            )
+                        failures = 0
+                        self._note_contact(resp)  # ss8: the host answered
+                        continue
                 except SupervisorUnavailable:
-                    resp = {"ok": False}
-                if resp.get("ok"):
-                    failures = 0
-                    self._note_contact(resp)  # ss8: the host answered
-                    continue
+                    pass
+                except Exception as exc:  # noqa: BLE001 -- one bad renewal must not end renewal
+                    print(f"dsl41: supervisor lease renewal failed on {exc!r}", file=sys.stderr)
                 failures += 1
-                if failures >= 5:
+                if failures == _UNREACHABLE_AFTER:
                     # ss8: the leader has lost contact with this host. Signalled
                     # HERE and not on the first failure -- one refused
                     # connection is a blip, and a quarantine per blip would
                     # hold work for no reason
-                    if self.on_unreachable is not None:
-                        self.on_unreachable()
                     print(
-                        "dsl41: supervisor lease renewal failed 5 times; giving up"
+                        f"dsl41: supervisor lease renewal failed {_UNREACHABLE_AFTER} times;"
+                        " the host is reported unreachable and renewal keeps retrying"
                         " (job outcomes still resolve from the spool)",
                         file=sys.stderr,
                     )
-                    return
+                    try:
+                        if self.on_unreachable is not None:
+                            self.on_unreachable()
+                    except Exception as exc:  # noqa: BLE001 -- the report must not end renewal
+                        print(
+                            f"dsl41: reporting the supervisor unreachable failed on {exc!r}",
+                            file=sys.stderr,
+                        )
         except asyncio.CancelledError:
             pass
+
+    async def _renew_once(self, ttl_s: float) -> dict[str, Any]:
+        """One RENEW, and a re-ACQUIRE when it is refused. The reply that
+        decides the renewal is returned."""
+        resp = await self._request({"cmd": "RENEW", "ttl_s": ttl_s})
+        if resp.get("ok"):
+            return resp
+        if resp.get("error") == "wrong_incarnation":
+            # DL-80: the supervisor restarted under us. Our token belongs to a
+            # world that no longer exists, and every wrapper it held lost its
+            # lifeline: each kills its group and records in its own time
+            # (DL-205). Drop the pair so the re-ACQUIRE below takes the free
+            # path instead of replaying a credential that can now COLLIDE with
+            # the new incarnation's counter.
+            self.token, self.incarnation = None, None
+        # stale_token (fenced by a reconnect's own re-ACQUIRE, or lapsed): the
+        # same controller re-acquires, and a fresh token comes back
+        resp = await self._request(
+            {"cmd": "ACQUIRE", "controller_id": self.controller_id, "ttl_s": ttl_s}
+        )
+        if resp.get("ok"):
+            self.token = int(resp["token"])
+            self.incarnation = resp.get("incarnation")  # DL-80
+        return resp
 
     async def spawn(self, spec: dict[str, Any]) -> dict[str, Any]:
         resp = await self._request({"cmd": "SPAWN", "spec": spec})
@@ -1716,7 +1858,10 @@ class SupervisorClient:
                 await self._request({"cmd": "RELEASE"})
 
     async def close(self) -> None:
+        before = self.phase()
         self._closed = True  # no lazy reconnect may resurrect a closing client
+        if before != "closed":
+            SUPERVISOR_CLIENT.take(CLIENT_CLOSED, before, self.phase())
         for task in (self._renew_task, self._reader_task):
             if task is not None:
                 task.cancel()

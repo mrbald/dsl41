@@ -4,7 +4,7 @@ Status: the spool format and the wrapper input spec are frozen (DL-42
 item 3), and the supervisor socket protocol is frozen (DL-48); amended by
 DL-129, DL-150, DL-151 and DL-210, each cited where it applies. This
 document is the future extraction boundary. If the lifecycle tier (the
-four modules of §1) is extracted (DL-42 triggers), this document is its
+five modules of §1) is extracted (DL-42 triggers), this document is its
 public API. Each change to a frozen item requires a decision-log entry.
 
 The tier is deliberately dumb. It records process lifecycle facts durably
@@ -44,8 +44,14 @@ the orchestrator's UI (DL-42 item 6).
   stdlib-only itself, imported by the supervisor under its plain
   top-level name, and covered by the same import test. The wrapper does
   not import it.
+- **state-machine core** (`state_machine.py`): the declared transitions
+  of the supervisor's process and lease machines, and the one check that
+  takes them. It is the third sibling inside the boundary, on the same
+  terms: stdlib-only itself, imported by the supervisor under its plain
+  top-level name, and covered by the same import test. The wrapper does
+  not import it.
 
-Extraction takes all four files or none.
+Extraction takes all five files or none.
 
 ## 2. Wrapper input spec (frozen)
 
@@ -769,7 +775,7 @@ except by force.
 
 ## 6. License earmark
 
-The four modules of §1 and this document are
+The five modules of §1 and this document are
 earmarked Apache-2.0 on
 extraction (LICENSING.md item 6) (DL-150). Until the extraction, do not add
 per-file headers. Before CLA + relicense disclosure, do not accept

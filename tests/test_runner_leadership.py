@@ -23,14 +23,14 @@ interpreter:
 - **the eviction bound's inputs are produced, not configured** -- a
   deadman read back off a live supervisor, a `last_contact` stamped by a
   lease exchange that really landed, a quarantine reached only after the
-  renewal loop really gave up.
+  renewal loop really reported the host unreachable.
 
 Seconds, not minutes. Nothing here waits out a bound: what waiting out the
 real `T_kill` would prove is arithmetic, and the arithmetic is pinned under
 a controlled clock in test_hosts.py. The one deliberate slow spot is the
-quarantine: the loop gives up on the FIFTH consecutive failure, and only
+quarantine: the loop reports unreachable on the FIFTH consecutive failure, and only
 the first of those five waits `_RENEW_EVERY_S` (shortened here) -- the
-other four wait a hardcoded second each. That ~4.2 s is the property, not
+other four wait `_RETRY_EVERY_S`, one second each by default. That ~4.2 s is the property, not
 overhead, so it is paid and asserted rather than shortened away.
 
 **Every claim about a mechanism carries a positive control.** An empty
@@ -415,15 +415,15 @@ def test_cm09_five_failed_renewals_quarantine_the_host_and_new_work_is_held(
 
     Every other test of this path calls `note_executor_unreachable` or
     `quarantine_host` directly, which assumes the three things worth
-    checking: that a supervisor dying makes the renewal loop give up, that
-    giving up is what reaches the routing table, and that a SPAWN planned
+    checking: that a supervisor dying makes the renewal loop report the host
+    unreachable, that the report is what reaches the routing table, and that a SPAWN planned
     afterwards is HELD rather than failed against a socket that is not
     there. The bound the refusal then names is arithmetic over two produced
     numbers -- the deadman this supervisor said it runs, and the instant it
     last answered -- so the assertion is on the identity, not on a constant.
 
     Both halves of "five consecutive failures" are asserted, because the
-    count is a design decision and not an implementation detail: giving up
+    count is a design decision and not an implementation detail: reporting
     on the FIRST failure would also reach `quarantined`, faster, and would
     hold an estate's work over one refused connection."""
     monkeypatch.setattr(SupervisorClient, "_RENEW_EVERY_S", 0.2)
@@ -466,15 +466,17 @@ def test_cm09_five_failed_renewals_quarantine_the_host_and_new_work_is_held(
             os.kill(json.loads((run_root / "supervisor.pid").read_text())["pid"], signal.SIGKILL)
             deadline = killed_at + 30
             while engine.oracle.store.host(LOCAL_EXECUTOR_ID).state != "quarantined":
-                assert time.monotonic() < deadline, "the renewal loop never gave up"
+                assert time.monotonic() < deadline, (
+                    "the renewal loop never reported the host unreachable"
+                )
                 await asyncio.sleep(0.05)
             # Five CONSECUTIVE failures, not one: a quarantine per blip would
             # hold work for no reason, and that is the half a "did it end up
-            # quarantined" poll cannot see -- giving up on the first failure
+            # quarantined" poll cannot see -- reporting on the first failure
             # passes such a poll, and passes it FASTER. Four of the five waits
-            # are a hardcoded second, so the floor is a real 4 s.
-            gave_up_after = time.monotonic() - killed_at
-            assert gave_up_after >= 4.0, gave_up_after
+            # are a one-second `_RETRY_EVERY_S`, so the floor is a real 4 s.
+            reported_after = time.monotonic() - killed_at
+            assert reported_after >= 4.0, reported_after
 
             # new work, decided while the host is unreachable
             engine.inject(Event(at=engine.clock.now(), kind="STARTJOB", payload={"job": "held"}))
