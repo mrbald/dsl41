@@ -179,6 +179,9 @@ include = [
     "src/dsl41/runner_scheduler.py",
     "src/dsl41/runner_startup.py",
     "src/dsl41/seal.py",
+    # the shared state-machine core and its registry
+    "src/dsl41/state_machine.py",
+    "src/dsl41/machines.py",
 ]
 fail_under = 100
 show_missing = true

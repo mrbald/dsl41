@@ -19208,3 +19208,73 @@ relitigate an entry; append a new one.
   noted the wrong reason for "come back due". All are fixed here, and the
   reviewer confirmed them. Its note that the spec-review skill still names
   stonebranch-semantics.md is out of scope: that skill is instruction text.
+- DL-289 Runner state machines get transition tables, and a gate requires
+  every transition to be taken by a test
+  (2026-10-08; src/dsl41/state_machine.py, src/dsl41/machines.py,
+  scripts/transition_coverage.py, scripts/render_state_machines.py,
+  docs/state-machines.md, docs/citation-index.md, docs/agent-workflow.md,
+  tests/transition_hits_plugin.py, tests/conftest.py,
+  tests/test_state_machine.py, tests/test_transition_coverage.py,
+  tests/test_state_machines_doc.py, scripts/arch_check.py `SPEC_EXCLUDED`,
+  tests/test_arch_check.py, pyproject.toml, .github/workflows/ci.yml,
+  README.md source map, .gitignore)
+  THE RULING. The owner took up the transition list and the gate on its
+  coverage that DL-270 recorded as deferred. This entry reverses that
+  deferral. Each runner state
+  machine declares its transition table. Every state change names the
+  transition it takes. A gate fails when a declared transition is never
+  taken by a test. The tables use UML state-machine terms: state, initial
+  and final pseudostates, choice, trigger, guard, effect and internal
+  transition. The term is "transition table".
+  THE CORE. state_machine.py holds `Transition`, `StateMachine`, `Violation`
+  and `well_formed`. It imports only the standard library, because the
+  supervisor tier reaches it the way it reaches canon.py (DL-42); two tests
+  pin that. A transition's target is one state, or the set of states a
+  payload may choose (a choice). `StateMachine.take(t, old, new)` checks
+  that `t` belongs to the machine, that `old` is one of its sources, and
+  that `new` is its target or a member of its target set. It only checks
+  and records. It never changes what the caller does, and it never raises
+  in production. `well_formed` checks unique ids, declared states, finals
+  without exits, reachability from the initial state, and the id shape: a
+  machine name in lowercase, then a dot and two or three digits
+  (`host.03`). Reachability is checked only when a machine has an initial
+  state. That shape keeps transition ids out of the citation
+  scanner's way; citation-index.md has the row.
+  RECORDING. Two environment variables turn on the test tooling.
+  `DSL41_TRANSITION_HITS` names a directory: each process appends each new
+  (machine, id, old, new) to its own hits file and every violation to its
+  own violations file. Each write goes through at once, so a killed process
+  loses nothing, and a failed write never escapes `take`.
+  `DSL41_TRANSITION_STRICT` makes a violation raise `TransitionError`.
+  Production sets neither. The pytest plugin sets both at session start,
+  so subprocesses inherit them. At the end it merges the files into
+  `.transition-hits.json` and fails the session on any violation,
+  including one in a subprocess. A line in a violations file that does not
+  parse counts as a violation.
+  THE GATE. scripts/transition_coverage.py fails when an unmarked
+  transition has no hit, when a violation was recorded, or when a marked
+  transition was hit. `spec-only` marks a contract rule with no code yet;
+  `unreachable` marks a branch the code excludes from coverage. A hit on
+  either shows the mark is stale. The gate also lists, per transition, the
+  sources no test exercised; that list does not fail it. CI's coverage job
+  runs the gate after branch_coverage.py.
+  THE DOCS. scripts/render_state_machines.py generates
+  docs/state-machines.md from the registry in machines.py. Each machine
+  gets a Mermaid `stateDiagram-v2` with UML labels
+  (`id trigger [guard] / effect`) and its transition table. States get
+  generated Mermaid ids with their names as labels, so no ordinary state
+  name can break a diagram. A currency test pins the file, and arch_check treats it
+  as generated.
+  NOT YET. No machine is converted, and the registry is empty. What
+  production does on a violation comes with the fix for a replayed fault
+  (the dry apply of control inputs and an engine option). Each machine's
+  conversion gets its own entry.
+  REVIEW. Tooling class: one Opus reviewer, three rounds. Round 1 found two
+  medium findings: a failed hits write escaped `take`, and no test pinned
+  the standard-library rule. It found seven lower ones: the gate's
+  documentation, raw Mermaid ids, a vacuous registry test, a gate that
+  ignored violations and hit marks, a stale report, a torn violations line,
+  and Enum state names. Round 2 found a test bound to the real registry and
+  an unignored temp file. Round 3 found this entry's first draft citing
+  question and finding labels that mean something else in this repository
+  or live outside it. All are fixed, and the reviewer confirmed them.
