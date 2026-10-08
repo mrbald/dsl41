@@ -38,6 +38,7 @@ from dsl41.boundary import (
     EstateAnchor,
     Lineage,
     OpenHead,
+    PeriodRow,
     PeriodSealed,
     SealRequest,
     claim_id_for,
@@ -795,6 +796,12 @@ def test_pr28_readiness_refuses_while_c1_is_open_and_untouched(tmp_path: Path) -
 # ------------------------------------------------- ss11 the opening half
 
 
+def _without_row(stored: Anchor, period_id: int) -> dict[str, PeriodRow]:
+    """The registry as a crash before the successor's anchor write leaves it: the
+    successor's row is written in the same write as the head (PR-02c), so it is absent."""
+    return {key: row for key, row in stored.periods.items() if key != str(period_id)}
+
+
 def _closed_again(stored: Anchor) -> ClosedHead:
     """Put the head back where the crash-before-the-segment row leaves it."""
     row = stored.periods["1"]
@@ -887,7 +894,11 @@ def test_pr07_two_openings_of_one_seal_are_byte_identical(tmp_path: Path) -> Non
     anchor.acquire()
     stored = anchor.read()
     assert stored is not None
-    anchor.write(stored.model_copy(update={"head": _closed_again(stored)}))
+    anchor.write(
+        stored.model_copy(
+            update={"head": _closed_again(stored), "periods": _without_row(stored, 2)}
+        )
+    )
     anchor.release()
     second = _resume(run_root, C2_JIL, clock=VirtualClock(start=T0 + timedelta(hours=3)))
     _close(second)
@@ -946,7 +957,8 @@ def test_pr45_a_claim_with_a_durable_segment_moves_the_head_at_resume(tmp_path: 
                         prev_seal_digest=seal.digest, next_period=2, target_root=run_root
                     ),
                     target_root=str(run_root.resolve()),
-                )
+                ),
+                "periods": _without_row(stored, 2),
             }
         )
     )
