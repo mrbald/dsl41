@@ -10,14 +10,14 @@ It lives inside the oracle; the engine dispatches nothing for a box ([runner-des
 
 The code and its contract carry over unchanged if the storage under the runner changes.
 It needs none of the storage capabilities.
-Reason: a box's run state is two fields on its own `JobRuntime` row, `ran_members` and `window_skipped_members`, held in the same in-memory `RuntimeState` as every other row.
+Reason: a box's run state is three fields on its own `JobRuntime` row, `ran_members`, `window_skipped_members` and `iced_out_members`, held in the same in-memory `RuntimeState` as every other row.
 A live box has no effect and no execution entry ([period-model §3.5](../period-model.md#35-executions--a-discriminated-lifecycle-not-one-row)).
 
 ## Interface
 
-- Inputs: the same `Oracle.feed` inputs as any job, aimed at a box or a member: STARTJOB, FORCE_STARTJOB, KILLJOB, STATUS, ON_ICE, ON_NOEXEC, OFF_NOEXEC.
-- Box row: `JobRuntime.ran_members` holds the members started in this run; `JobRuntime.window_skipped_members` holds the members resolved in it. `RuntimeState.start_run`, `record_resolution` and `void_resolution` write them.
-- Oracle steps: `_reset_box_cycle`, `_on_box_started`, `_decide_windows_at_box_start`, `_on_member_transition`, `_resolves`, `_completion_door`, `_ice_resolves_member`, `_on_descendant_transition`, `_apply_box_overrides`, `_all_members_done`, `_fold_box_default`, `_idle_box_recompute`, `_inject_inactive`, `_noexec_box`.
+- Inputs: the same `Oracle.feed` inputs as any job, aimed at a box or a member: STARTJOB, FORCE_STARTJOB, KILLJOB, STATUS, ON_ICE, OFF_ICE, ON_NOEXEC, OFF_NOEXEC.
+- Box row: `JobRuntime.ran_members` holds the members started in this run; `JobRuntime.window_skipped_members` holds the members resolved in it; `JobRuntime.iced_out_members` holds the members taken off ice in it before they ran, which sit the run out. `RuntimeState.start_run`, `record_resolution`, `void_resolution` and `record_iced_out` write them. A box's own start resets all three; a member's start drops it from the second and third. The fold waits for a marked member while a forced start of it is queued or live; a forced attempt that leaves the queue unstarted keeps the mark.
+- Oracle steps: `_reset_box_cycle`, `_on_box_started`, `_decide_windows_at_box_start`, `_on_member_transition`, `_box_terminator_fires`, `_resolves`, `_completion_door`, `_ice_resolves_member`, `_off_ice_in_running_box`, `_on_descendant_transition`, `_apply_box_overrides`, `_all_members_done`, `_fold_box_default`, `_idle_box_recompute`, `_inject_inactive`, `_noexec_box`.
 - Outputs: box STATUS events and trace lines. Member starts and kills reach the engine as the members' own events.
 
 ## States
@@ -29,7 +29,7 @@ stateDiagram-v2
     STARTING --> RUNNING: then members attempted, run windows decided
     RUNNING --> SUCCESS: override met, or fold with no failed vote
     RUNNING --> FAILURE: override met, or fold with a failed vote
-    RUNNING --> TERMINATED: KILLJOB, box_terminator member failed
+    RUNNING --> TERMINATED: KILLJOB, box_terminator member failed or terminated
     RUNNING --> INACTIVE: CHANGE_STATUS INACTIVE cascades
     SUCCESS --> STARTING: next box start
     FAILURE --> STARTING: next box start
@@ -50,9 +50,10 @@ The diagram leaves out the idle re-derivation edges between INACTIVE, SUCCESS an
 - The default fold waits for every member; a member that never starts hangs the box ([SEM-11](../autosys-semantics.md#sem-11--box-runningcompletion-v), [DL-13](../decision-log.md)).
 - An operator's INACTIVE and a run_window skip resolve a member and run the full completion door ([DL-154](../decision-log.md), [DL-242](../decision-log.md)).
 - An ON_ICE on a member that has not run in a RUNNING box is a completion moment for that box and its RUNNING ancestors, as a resolved member is. A member that ran keeps its vote, a second ice or an ice on a resolved member does nothing, and an idle box re-derives nothing ([SEM-20](../autosys-semantics.md#sem-20--on_ice-v), [DL-285](../decision-log.md)).
+- An OFF_ICE on a member that was iced and has not run in a RUNNING box keeps it out of that run: the fold skips it, a plain start of it is refused, and FORCE_STARTJOB still starts it. The `off-ice-in-running-box` switch selects this (`next-run`, the default) or the member's return to the run (`same-run`) ([SEM-20](../autosys-semantics.md#sem-20--on_ice-v), [runner-design §8a](../runner-design.md#8a-semantic-switches)).
 - A box start decides each waiting run_window member at once ([SEM-33](../autosys-semantics.md#sem-33--run_window-is-a-gate-not-a-trigger-v), [DL-246](../decision-log.md)).
 - Override gating, with "inside" read transitively ([SEM-12](../autosys-semantics.md#sem-12--box_success--box_failure-override--with-evaluation-gating-v), [DL-12](../decision-log.md)).
-- TERMINATED is sticky ([SEM-13](../autosys-semantics.md#sem-13--box-terminated-is-sticky-v)). Terminators cascade both ways ([SEM-14](../autosys-semantics.md#sem-14--box_terminator--job_terminator-vc)).
+- TERMINATED is sticky ([SEM-13](../autosys-semantics.md#sem-13--box-terminated-is-sticky-v)). Terminators cascade both ways; a box_terminator member ending TERMINATED counts under the default `box-terminator-on-terminated=true` ([SEM-14](../autosys-semantics.md#sem-14--box_terminator--job_terminator-vc)).
 - An idle box re-derives with INACTIVE members ignored ([SEM-15](../autosys-semantics.md#sem-15--member-status-changes-can-ripple-upward-vc), [DL-242](../decision-log.md)).
 - CHANGE_STATUS INACTIVE on a box cascades as one batch ([SEM-18](../autosys-semantics.md#sem-18--change_status-inactive-on-a-box-cascades-v), [DL-242](../decision-log.md)).
 - ON_NOEXEC on a box: the dry run and the cascade ([SEM-22](../autosys-semantics.md#sem-22--on_noexec-v), [DL-254](../decision-log.md)).
@@ -78,6 +79,8 @@ The diagram leaves out the idle re-derivation edges between INACTIVE, SUCCESS an
 - `test_sem11_member_set_inactive_completes_a_running_box`
 - `test_sem11_waiting_member_still_hangs_the_box`
 - `test_sem20_ice_on_the_last_waiting_member_completes_a_running_box`
+- `test_sem20_off_ice_in_a_running_box_completes_the_box_without_the_member`
+- `test_sem14_a_terminated_box_terminator_member_terminates_its_box`
 - `test_sem12b_external_box_success_hung_running_then_fires_when_member_completes_after`
 - `test_sem12c_box_success_over_a_grandchild_fires_transitively`
 - `test_sem13_terminated_box_is_sticky_then_restarts_fresh`

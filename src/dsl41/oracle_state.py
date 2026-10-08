@@ -258,6 +258,17 @@ class JobRuntime(BaseModel):
     #: entries; reset beside `ran_members` on box start. The name predates
     #: DL-242 and stays: sealed periods and their attestations carry it.
     window_skipped_members: frozenset[str] = frozenset()
+    #: The members taken off ice during THIS box execution before they ran
+    #: in it, under `off-ice-in-running-box=next-run` (SEM-20). They sit
+    #: the run out: the SEM-11 fold skips them while they are not live or
+    #: queued, and a plain start of one is refused until the box's next
+    #: run. Unlike a resolution mark, the mark keeps a plain start out.
+    #: FORCE_STARTJOB starts the member anyway: the start voids the mark,
+    #: and a forced attempt that queues keeps the box waiting. An attempt
+    #: that leaves the queue unstarted keeps the mark: the force was a
+    #: one-shot override. Only a BOX row ever carries entries; reset
+    #: beside `ran_members` on box start.
+    iced_out_members: frozenset[str] = frozenset()
     #: DL-120: the capacity vector THIS run acquired, held while STARTING or
     #: RUNNING. After the run, the row keeps only a renewable's units its
     #: policy did not free (DL-256, `may_outlive_run`), until RELEASE_RESOURCE
@@ -701,9 +712,10 @@ BOX_FOLD_FAILURE: Final = Transition[JobStatus](
 BOX_TERMINATOR: Final = Transition[JobStatus](
     "job_status.30",
     _RUNNING,
-    "member ends FAILURE",
+    "member ends FAILURE or TERMINATED",
     "TERMINATED",
-    guard="the member has box_terminator",
+    guard="the member has box_terminator; a TERMINATED end only under"
+    " box-terminator-on-terminated=true",
     effect="kill the job_terminator members",
     cite="SEM-14",
 )
@@ -827,9 +839,9 @@ START_REFUSED: Final = _stays(
     "start refused",
     _ALL_ORDER,
     guard="already live or queued; a member whose box is not RUNNING, or that ran in this"
-    " box execution; a stale deferred start or scan",
+    " box execution, or was taken off ice in it; a stale deferred start or scan",
     effect="a START_REFUSED trace line",
-    cite="DL-64, DL-81, DL-246, DL-257",
+    cite="DL-64, DL-81, DL-246, DL-257, SEM-20",
 )
 ICE_IGNORED: Final = _stays(
     48,
@@ -942,7 +954,9 @@ ICE_OFF: Final = Transition[FlagState](
     frozenset({"ice_on", "ice_off"}),
     "OFF_ICE",
     "ice_off",
-    effect="no re-evaluation: conditions must reoccur",
+    effect="no re-evaluation: conditions must reoccur. From ice_on only, under"
+    " off-ice-in-running-box=next-run: a member of a RUNNING box that has not run there"
+    " sits that run out",
     cite="SEM-20",
 )
 FORCE_CLEARS_ICE: Final = Transition[FlagState](
@@ -1687,19 +1701,27 @@ class RuntimeState:
             start_period=self._period_id,
         )
         if box is not None:
-            # the member's own start voids its resolution mark (DL-242)
+            # the member's own start voids its resolution mark (DL-242) and
+            # its off-ice mark (SEM-20): a forced run votes in the fold
             box_rt = self.runtime(box)
             self._replace(
                 box,
                 ran_members=box_rt.ran_members | {job},
                 window_skipped_members=box_rt.window_skipped_members - {job},
+                iced_out_members=box_rt.iced_out_members - {job},
             )
         if is_box:
             # Reset BEFORE the caller's RUNNING transition: that transition's
             # own re-evaluation may already start members, and they must land
             # in the fresh per-run set (SEM-10 at-most-once bookkeeping).
-            # The resolution marks are per-execution too (DL-154, DL-242).
-            self._replace(job, ran_members=frozenset(), window_skipped_members=frozenset())
+            # The resolution and off-ice marks are per-execution too (DL-154,
+            # DL-242, SEM-20).
+            self._replace(
+                job,
+                ran_members=frozenset(),
+                window_skipped_members=frozenset(),
+                iced_out_members=frozenset(),
+            )
 
     def clear_exit_code(self, job: str) -> None:
         """SEM-10 (DL-242): a box-start reset drops the previous cycle's exit
@@ -1716,6 +1738,13 @@ class RuntimeState:
         self._replace(
             box, window_skipped_members=self.runtime(box).window_skipped_members | {member}
         )
+
+    def record_iced_out(self, box: str, member: str) -> None:
+        """Mark `member` out of this box execution: it was taken off ice
+        while `box` ran and before it ran there (SEM-20,
+        `off-ice-in-running-box=next-run`). `start_run` on the box resets
+        the marks; the member's own forced start voids its mark."""
+        self._replace(box, iced_out_members=self.runtime(box).iced_out_members | {member})
 
     def void_resolution(self, box: str, member: str) -> None:
         """Drop `member`'s resolution mark in `box`: a fresh attempt by the

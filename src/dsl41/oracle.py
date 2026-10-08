@@ -112,7 +112,11 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
   never starts on a plain STARTJOB; FORCE_STARTJOB on a non-live iced job
   now clears the flag first (SEM-23 below) -- DL-13's "FORCE included"
   reading no longer holds for that case. OFF_ICE does not re-evaluate
-  (conditions must REOCCUR).
+  (conditions must REOCCUR). Under the default
+  `off-ice-in-running-box=next-run`, a member taken off ice while its box
+  runs, before it ran there, sits that run out: a plain start of it is
+  refused and the box completes without it (Start Conditions, Job States,
+  AutoSys 24.2). `same-run` lets it start in that run.
 - ON_HOLD (SEM-21): the held job does not start; nothing else changes;
   OFF_HOLD immediately re-evaluates that job's start (missed runs collapse
   to at most one). ON_HOLD sent to a STARTING or RUNNING job is ignored
@@ -164,8 +168,10 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
   hung-RUNNING pattern; "inside" is TRANSITIVE, as in derive._is_inside, so
   every ancestor box evaluates its overrides on a descendant's transition,
   not just the direct parent), SEM-13 (TERMINATED boxes are sticky until the
-  next box start), SEM-14 (box_terminator member FAILURE -- not
-  TERMINATED -- kills the box; job_terminator members die with the box),
+  next box start), SEM-14 (a box_terminator member ending FAILURE or
+  TERMINATED kills the box, TERMINATED only under the default
+  `box-terminator-on-terminated=true`; job_terminator members die with
+  the box),
   SEM-15 (a terminal member transition, or an injected INACTIVE on a
   member, re-derives a non-running, non-TERMINATED box's status once every
   member that is not INACTIVE is terminal; INACTIVE members are ignored,
@@ -1313,8 +1319,17 @@ class Oracle:
                     self._ice_resolves_member(job, status)
                 self._wake_referencers(job, cause=f"{job!r} put ON_ICE")
         elif kind == "OFF_ICE":
+            iced = self._runtime(job).on_ice  # an OFF_ICE on a job not iced takes nothing off
             self.store.move_flag(job, ICE_OFF)
-            self._record(job, "OFF_ICE", "sendevent OFF_ICE")
+            box = self._off_ice_in_running_box(job) if iced else None
+            self._record(
+                job,
+                "OFF_ICE",
+                "sendevent OFF_ICE"
+                if box is None
+                else f"sendevent OFF_ICE; taken off ice in its running box {box!r}:"
+                " sits out this run (SEM-20)",
+            )
             # SEM-20: deliberately NO re-evaluation -- conditions must reoccur
             # PENDING: Q3d (DL-69) -- a pre-existing arm survives the ice
             # round-trip untouched (DL-54 pin, uncited), so a stale tick can
@@ -1687,6 +1702,13 @@ class Oracle:
                     return (
                         f"already ran in this {box!r} execution -- "
                         "rerun needs FORCE_STARTJOB (SEM-10)"
+                    )
+                if job in self._runtime(box).iced_out_members:
+                    # SEM-20: taken off ice while the box ran, so it waits
+                    # for the box's next run
+                    return (
+                        f"taken off ice during this {box!r} execution -- it waits for the"
+                        " box's next run; a start now needs FORCE_STARTJOB (SEM-20)"
                     )
             gate = job_ir.sem.condition
             if gate is not None and not self._cond_true(gate.cond, job):
@@ -2567,11 +2589,14 @@ class Oracle:
     def _on_member_transition(self, box: str, member: str, old: str, new: str) -> None:
         box_rt = self._runtime(box)
         box_ir = self.catalog.jobs[box]
-        if new == "FAILURE" and self.catalog.jobs[member].box.box_terminator:
+        if self._box_terminator_fires(member, new):
             if box_rt.status == "RUNNING":
-                # SEM-14: member failure terminates the containing box
+                # SEM-14: a member that fails, or is terminated, terminates
+                # the containing box
                 self._terminate(
-                    box, BOX_TERMINATOR, cause=f"box_terminator member {member!r} failed"
+                    box,
+                    BOX_TERMINATOR,
+                    cause=f"box_terminator member {member!r} ended {new} (SEM-14)",
                 )
                 return
         if box_rt.status == "TERMINATED":
@@ -2593,6 +2618,18 @@ class Oracle:
             # SEM-15 [C]: a member change on a non-running box re-derives the
             # box's status (TERMINATED already returned above, SEM-13 sticky)
             self._idle_box_recompute(box, box_ir, cause=f"member {member!r} changed")
+
+    def _box_terminator_fires(self, member: str, new: str) -> bool:
+        """SEM-14: whether `member` ending `new` triggers its box_terminator.
+        "Force the Job or the Box to Stop Running" (AutoSys 12.1, 24.2):
+        "if the job completes with a FAILURE or TERMINATED status, the box
+        terminates." TERMINATED counts under the default
+        `box-terminator-on-terminated=true`; `false` keeps FAILURE only."""
+        if not self.catalog.jobs[member].box.box_terminator:
+            return False
+        if new == "TERMINATED":
+            return self.semantics.box_terminator_on_terminated == "true"
+        return new == "FAILURE"
 
     def _completion_door(
         self, box: str, member: str, new: str, *, completion_moment: bool, overrides: bool = True
@@ -2650,11 +2687,37 @@ class Oracle:
             box_rt.status != "RUNNING"
             or job in box_rt.ran_members
             or job in box_rt.window_skipped_members
+            or job in box_rt.iced_out_members
         ):
             return
         self._completion_door(box, job, status, completion_moment=True)
         if self._runtime(box).status == "RUNNING":  # else its transition walked up
             self._on_descendant_transition(job, status, resolved=True)
+
+    def _off_ice_in_running_box(self, job: str) -> str | None:
+        """SEM-20 under `off-ice-in-running-box=next-run`: a member taken
+        off ice while its direct box is RUNNING, before it ran there, sits
+        that run out. "Start Conditions" (AutoSys 24.2, 12.0): "If a job is
+        contained in a running box when it is taken off ice, the scheduler
+        does not restart the job until the following run of the box, even
+        if its starting conditions recur during the existing run of the
+        box." The ice already took it out of the fold (DL-285); the mark
+        keeps it out, so the box completes without it, and refuses a plain
+        start of it in this run. A member that ran keeps its vote and needs
+        no mark. The caller runs this only for a job that was on ice.
+        `same-run` sets no mark: the member re-enters the fold and
+        may start in this run. Returns the box it marked, or None."""
+        if self.semantics.off_ice_in_running_box != "next-run":
+            return None
+        job_ir = self.catalog.jobs.get(job)
+        box = job_ir.box.box_name if job_ir is not None else None
+        if box is None:
+            return None
+        box_rt = self._runtime(box)
+        if box_rt.status != "RUNNING" or job in box_rt.ran_members:
+            return None
+        self.store.record_iced_out(box, job)
+        return box
 
     def _on_descendant_transition(self, member: str, new: str, *, resolved: bool) -> None:
         """SEM-12's "inside the box" is TRANSITIVE -- a grandchild is inside
@@ -2781,6 +2844,11 @@ class Oracle:
             rt = self._runtime(member)
             if rt.on_ice:
                 continue  # SEM-20: an iced member is out of the logic entirely
+            if member in box_rt.iced_out_members and rt.status not in LIVE | {"QUE_WAIT"}:
+                # SEM-20: taken off ice during this run, it sits the run
+                # out. A forced attempt that queued still keeps the box
+                # waiting, as for a resolved member below.
+                continue
             if member in resolved and rt.status not in LIVE | {"QUE_WAIT"}:
                 # an explicit INACTIVE verdict this execution: a run_window
                 # skip (DL-154) or an operator's (DL-242), which counts "as

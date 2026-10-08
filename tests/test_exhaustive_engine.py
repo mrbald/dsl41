@@ -157,7 +157,7 @@ _JOB_JIL = (
     "resources: (XD, QUANTITY=1)\n" + _SCHEDULED + "\n"
     "insert_job: fb\njob_type: b\n\n"
     "insert_job: fbm\njob_type: c\ncommand: m\nmachine: m1\nbox_name: fb\nauto_hold: 1\n"
-    + _SCHEDULED
+    "box_terminator: 1\n" + _SCHEDULED
 )
 _STATUSES = ("INACTIVE", "QUE_WAIT", "STARTING", "RUNNING", "SUCCESS", "FAILURE", "TERMINATED")
 #: every operator verb the oracle dispatches for a job, and an injected
@@ -214,10 +214,21 @@ def _feed_all(oracle: Oracle, steps: tuple[_Step, ...] | list[_Step]) -> None:
 
 
 def _row_state(oracle: Oracle, job: str) -> tuple[object, ...]:
-    """A job's status, its four flags and its `job_holding` state."""
+    """A job's status, its four flags and its `job_holding` state, and for
+    a box the members taken off ice in its run (SEM-20), which a plain
+    start of such a member meets."""
     row = oracle.store.job[job]
     holding = "none" if not row.reservations else "reserved" if row.status in LIVE else "held"
-    return (job, row.status, row.on_ice, row.on_hold, row.on_noexec, row.armed, holding)
+    return (
+        job,
+        row.status,
+        row.on_ice,
+        row.on_hold,
+        row.on_noexec,
+        row.armed,
+        holding,
+        tuple(sorted(row.iced_out_members)),
+    )
 
 
 def _job_builds() -> Iterator[tuple[list[_Step], tuple[str, ...]]]:
@@ -231,7 +242,10 @@ def _job_builds() -> Iterator[tuple[list[_Step], tuple[str, ...]]]:
     tick blocked by the condition), ON_NOEXEC, then each status, then ice
     or hold. The box `fb` has an auto_hold member `fbm` with the same
     schedule and condition: the member's flag, arm (only while the box
-    runs) or status, then the box's own flag, then each box status."""
+    runs) or status, then the box's own flag, then each box status. The
+    member carries box_terminator, so its FAILURE or TERMINATED in a
+    running box ends the box (SEM-14). Last, the member iced, the box
+    running, the member taken off ice: it sits the run out (SEM-20)."""
     for job in ("fj", "fa", "fd"):
         recipes = _status_recipes(job)
         for held in (False, True) if job == "fj" else (False,):
@@ -272,6 +286,8 @@ def _job_builds() -> Iterator[tuple[list[_Step], tuple[str, ...]]]:
                         steps.append((flag, "fb", {}))
                     steps += recipe
                     yield steps, ("fb", "fbm")
+    for recipe in fb["RUNNING"]:
+        yield [("ON_ICE", "fbm", {}), *recipe, ("OFF_ICE", "fbm", {})], ("fb", "fbm")
 
 
 def test_every_job_event_in_every_built_flag_and_holding_state_takes_a_declared_transition(
@@ -293,9 +309,13 @@ def test_every_job_event_in_every_built_flag_and_holding_state_takes_a_declared_
     below; and events addressed to another job that move the target: the
     condition predecessor's status or a SET_GLOBAL waking an armed target
     through the unscheduled start, a holder's end waking a queued one. A
-    review probe sent 7254 such events over these 403 states under the
-    strict variable and found no gap. The holding state `reserved` is only
-    ever a live run's."""
+    review probe sent 7254 such events over the 403 states the builder
+    reached then, under the strict variable, and found no gap. The holding
+    state `reserved` is only ever a live run's. The builder runs under the
+    default switches, `off-ice-in-running-box=next-run` and
+    `box-terminator-on-terminated=true`. Their other values add no state
+    or move: `same-run` sets no mark, and `false` takes job_status.30 on
+    FAILURE only, a move the default takes too."""
     catalog = lower_source(_JOB_JIL)
     reached: set[tuple[object, ...]] = set()
     missing: list[str] = []
@@ -322,7 +342,10 @@ def test_every_job_event_in_every_built_flag_and_holding_state_takes_a_declared_
     assert missing == []
     assert _violations(strict) == set()
     _no_violation_line(capsys.readouterr().err)
-    assert len(reached) == 403 and applied >= 10_000
+    assert len(reached) == 405 and applied >= 10_000
+    # not vacuous: two states hold a member taken off ice in its running box
+    # (the box started by a force, so the member is auto-held, or by a status)
+    assert sum(1 for state in reached if state[0][-1]) == 2
     # not vacuous: the events took every flag and holding move but the
     # queued-recheck disarm and the opening release (see above)
     taken = _hits(strict)

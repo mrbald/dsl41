@@ -1143,9 +1143,11 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
         _row(
             surface="job_attr",
             member="box_terminator",
+            revision=2,
             klass=SUPPORTED,
             cite="SEM-14",
-            effect="this member's failure terminates the whole box",
+            effect="this member ending FAILURE terminates the whole box, and so does ending"
+            " TERMINATED under box-terminator-on-terminated=true, the default",
             trigger=_job(BOX_BLOCK, box_name="BOX0", box_terminator="1"),
         ),
         _row(
@@ -2757,9 +2759,12 @@ SCENARIO_ROWS: tuple[Row, ...] = (
         _row(
             surface="event",
             member="OFF_ICE",
+            revision=2,
             klass=SUPPORTED,
-            cite="ir-design ss7",
-            effect="un-ices a job; conditions are deliberately NOT re-evaluated",
+            cite="ir-design ss7, SEM-20",
+            effect="un-ices a job; conditions are deliberately NOT re-evaluated. Under"
+            " off-ice-in-running-box=next-run, the default, a member of a RUNNING box that"
+            " has not run there sits that run out",
             trigger=_scn(BASE_JIL, "0 OFF_ICE job=J0"),
         ),
         _row(
@@ -3305,6 +3310,43 @@ PROFILE_ROWS: tuple[Row, ...] = (
             effect="start_times and start_mins convert at PEP 495 fold=0: a repeated wall"
             " time fires once, in the first pass, and every missing one fires past the gap",
             trigger='{"semantics": {"dst-start-times": "fold0"}}',
+        ),
+        _row(
+            surface="profile_alt",
+            member="semantics.off-ice-in-running-box=next-run",
+            klass=SUPPORTED,
+            cite="runner-design ss8a, SEM-20, SEM-11",
+            effect="the default and the vendor's: a member taken off ice while its box runs,"
+            " before it ran there, sits that run out; a plain start of it is refused, the"
+            " box completes without it, and FORCE_STARTJOB still starts it",
+            trigger='{"semantics": {"off-ice-in-running-box": "next-run"}}',
+        ),
+        _row(
+            surface="profile_alt",
+            member="semantics.off-ice-in-running-box=same-run",
+            klass=SUPPORTED,
+            cite="runner-design ss8a, SEM-20",
+            effect="a member taken off ice while its box runs re-enters that run: it may"
+            " start on its condition's next edge, and the box waits for it",
+            trigger='{"semantics": {"off-ice-in-running-box": "same-run"}}',
+        ),
+        _row(
+            surface="profile_alt",
+            member="semantics.box-terminator-on-terminated=true",
+            klass=SUPPORTED,
+            cite="runner-design ss8a, SEM-14",
+            effect="the default and the vendor's: a box_terminator member that ends FAILURE"
+            " or TERMINATED terminates its running box",
+            trigger='{"semantics": {"box-terminator-on-terminated": "true"}}',
+        ),
+        _row(
+            surface="profile_alt",
+            member="semantics.box-terminator-on-terminated=false",
+            klass=SUPPORTED,
+            cite="runner-design ss8a, SEM-14",
+            effect="only a box_terminator member that ends FAILURE terminates its running"
+            " box; one that ends TERMINATED leaves it running",
+            trigger='{"semantics": {"box-terminator-on-terminated": "false"}}',
         ),
     )
     + _PROFILE_FACETS

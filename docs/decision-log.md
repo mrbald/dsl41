@@ -19871,3 +19871,60 @@ relitigate an entry; append a new one.
   number used up before a bad expiry failed, the answer delayed behind the
   second wait, and wording in §5 that over-promised delivery. All are fixed
   and confirmed by the reviewer that raised them.
+- DL-301 A member taken off ice in a running box sits out that run, and
+  box_terminator fires on TERMINATED as well as FAILURE; both are switches
+  (2026-10-08; src/dsl41/oracle.py, oracle_state.py, semantics.py,
+  runner_ledger.py (STATE_MACHINE_VERSION), simulation_register_rows.py;
+  docs/autosys-semantics.md SEM-11, SEM-14, SEM-20, SEM-23 and §9 Q13, Q14;
+  docs/live-instance-runbook.md, docs/citation-index.md (`Q` row),
+  docs/runner-design.md §8a, docs/blocks/box-execution.md,
+  docs/state-machines.md, docs/simulation-coverage.md, README.md;
+  tests/test_oracle.py, tests/test_semantics.py,
+  tests/test_exhaustive_engine.py, tests/test_seal_artifact.py)
+  THE CHECK. The box-and-children rules were checked against the vendor
+  manuals for every operator event on a box and on a member. Force-starting
+  an inactive box does not force-start its members, in AutoSys and here:
+  the box starts, and its members run on their own conditions. Two rules
+  differed, and both could leave a box running for ever.
+  OFF_ICE IN A RUNNING BOX (SEM-20). [V] "Start Conditions" (AutoSys 24.2
+  and 12.0) and "Job States" (24.2): a job taken off ice while its box runs
+  does not start "until the following run of the box, even if its starting
+  conditions recur during the existing run". dsl41 started it in the same
+  run, and a member with no later condition edge left the box RUNNING. The
+  default is now `off-ice-in-running-box=next-run`: the member sits out the
+  run, a plain start is refused, and the box completes without it, unless
+  the box's own success or failure condition names it. FORCE_STARTJOB still
+  starts it; a force is a one-shot override, so an attempt that leaves the
+  queue unstarted leaves the member sitting out. The box's next start clears
+  the marks. `same-run` keeps the earlier behavior exactly. The marks live
+  in a new box-row field, `iced_out_members`, so STATE_MACHINE_VERSION moves
+  from 17 to 18; no estate is live, so nothing migrates. The 24.0 Web UI
+  help says the opposite; the reference pages set the default, and the
+  runbook has a probe, including a nested-box variant.
+  BOX_TERMINATOR ON TERMINATED (SEM-14). [V] "Force the Job or the Box to
+  Stop Running" (12.1 and 24.2) says a box_terminator member ending "FAILURE
+  or TERMINATED" terminates its box; the box_terminator page's example says
+  "fails or is terminated", while its value line says FAILURE only. dsl41
+  acted on FAILURE only, so a KILLJOB on such a member left the box running.
+  The default is now `box-terminator-on-terminated=true`; `false` keeps the
+  earlier behavior exactly.
+  OPEN AND DOCUMENTED. Q13 (CHANGE_STATUS RUNNING on a box) and Q14
+  (CHANGE_STATUS FAILURE or TERMINATED on a running box, and its
+  job_terminator members) rest on inferred vendor readings, so they are open
+  with no switch, each with a runbook probe. SEM-23 says dsl41 models the
+  `RESTRICT_FORCE_STARTJOB` configuration ([V] Events 24.2), so an estate
+  with that variable unset can diverge.
+  OPEN, NOT THIS ENTRY. A box whose members are all on ice when it starts
+  does not complete; that predates this entry and needs its own check.
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass, the
+  Fable pass in place of Codex at the owner's instruction, three rounds. The
+  Fable pass first verified every vendor quote and reproduced both hangs.
+  Both reviewers then found the same major finding: a forced member that
+  queued kept its mark, so the box completed and the forced run was lost.
+  Both later rejected an extension that dropped the mark when a forced
+  attempt left the queue unstarted, because it brought back the hang. They
+  also found untested guards, effect text that over-claimed, and missing
+  citations; the Opus reviewer's last note, that one case never asserted
+  the box completes, was applied after round three. All are fixed, and reverting each fix or flipping each default
+  fails a test, confirmed by the reviewer that raised it. The earlier
+  switch values pass every earlier test unchanged.
