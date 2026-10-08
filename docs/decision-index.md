@@ -303,3 +303,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-289 | Runner state machines get transition tables, and a gate requires every transition to be taken by a test | [docs/citation-index.md](citation-index.md) |
 | DL-290 | The anchor head and the period row are state machines, and an undeclared move refuses the boundary operation before any write |  |
 | DL-291 | The supervisor tier is three state machines, and lease renewal never stops while the client is open |  |
+| DL-292 | A control input is dry-applied before it is admitted, a transition violation has one channel and one policy, and a replayed fault names its input |  |

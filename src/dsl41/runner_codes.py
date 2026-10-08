@@ -49,6 +49,9 @@ Code = Literal[
     "period_sealing",
     "engine_shutting_down",
     "decision_timeout",
+    # the dry apply (concurrency-model ss4): refused before the log
+    "apply_faulted",
+    "transition_violation",
     # rejected decisions, stored in the WAL
     "precondition_failed",
     "unknown_host",

@@ -37,11 +37,12 @@ operation an operator actually performs before maintenance.
 
 **Every input to the ss8 bound is now produced, not assumed.** `deadman_s`
 is what the supervisor reports it runs and `last_contact` is stamped by the
-lease exchange (S5b); `quarantined` is set when the leader gives up reaching
-the host and cleared when it answers again (S5d), remembering the state it
-interrupted so a blip cannot undo a drain. What is still refused rather than
-automated is the return of an EVICTED host: it must re-register at its new
-generation and self-fence first, and self-fencing is the relay's act.
+lease exchange (S5b); `quarantined` is set when the leader's lease renewal
+fails five times in a row (DL-291) and cleared when it answers again (S5d),
+remembering the state it interrupted so a blip cannot undo a drain. What is
+still refused rather than automated is the return of an EVICTED host: it
+must re-register at its new generation and self-fence first, and
+self-fencing is the relay's act.
 """
 
 from __future__ import annotations

@@ -236,7 +236,10 @@ For every input, in log order:
    stale epoch — so an exact old-epoch retry recovers its original result,
    while an unseen old-epoch request is refused.
 3. Assign the leader timestamp, monotone across inputs already admitted
-   but not yet applied.
+   but not yet applied. After this step's clock check and before the
+   frontier moves, **dry-apply** a control input on a fork of the state,
+   and refuse it when that apply raises or the command breaks a declared
+   transition (below).
 4. Atomically append one ordered batch: `TimeAdvanced(at)` +
    `InputAttempt`, and publish that record to subscribers. The envelope
    is durable, which is not the same as a decision, so the socket
@@ -259,6 +262,52 @@ recovered application writes no effect record, so it launches nothing. A
 seal does not turn such an exception into a refusal (`period-model.md` §7,
 DL-274). In a seal, step 3's `clock_regressed` refuses a request but stops
 the engine for an engine-made input, which has no one to answer.
+
+**The dry apply.** A control input is one that crossed the socket, or
+an event raised with the `control` source by an in-process script.
+Scheduler ticks, adapter and reconciliation completions, the leader's
+routing observations and time observations are the engine's own facts.
+After step 3's clock check and before step 3 moves the frontier, the
+engine runs steps 5 and 6 for a control input on a fork of the oracle
+(`Oracle.fork`). The fork copies
+every map, the timer heap and the trace, and shares the frozen rows.
+Steps 5–7 read nothing outside the oracle and do not yield, so the fork
+reaches the result the real apply will, with one stated exception. The
+dry apply runs before step 4 and the real apply after it, and a lease
+contact in between may move a host's `last_contact`, which an eviction's
+gate reads. Only a gate verdict can differ, and the real apply's verdict
+is the one logged. If the real apply of a control input then records a
+violation the dry apply did not, the input is not refused: it is
+recorded like an engine-made violation below, with its trace line, and
+`stop` halts the engine. Two outcomes refuse the input.
+An apply that raises refuses it with `apply_faulted`. A violation of a
+declared state-machine transition that the command's own half records
+refuses it with `transition_violation`. A violation the batch's time
+half records belongs to an engine-made move, such as a timer due at the
+command's stamp: it does not refuse the command, and it is taken with
+the real apply like any engine-made violation. A refusal leaves nothing in the log and
+takes no index, so a faulting command never reaches replay. A gate
+rejection is not a refusal: the fork's verdict is discarded, and step 6
+decides again and logs the rejection.
+
+An engine-made input is not dry-applied, because nobody would hear of
+its refusal. Its move is taken. Only an input's batch (`InputBatch`)
+drains the violation channel. A violation noted outside one, by a move
+with no transaction open or by a writer that opens its own (the
+oracle's genesis seed, classification's seeding, the executor seed),
+never reaches a dry apply: the next batch drops it with a line on
+stderr and no trace line, so the live and the replayed traces stay
+equal. Every violation an applied input records
+becomes a `TRANSITION_VIOLATION` trace line when its batch commits, so
+replay writes the same line. The engine run option `--on-transition-violation` sets the
+cost. `refuse`, the default, refuses a control input as above. `continue`
+admits it too, with its trace line. `stop` refuses like `refuse`, and
+stops the engine with `dsl41 run` exit 5 after step 7 commits an input
+that recorded a violation.
+The next resume replays that decision. The option changes no derived
+state and is not part of the runtime profile. A violation never raises,
+live or on replay. An input that raises on replay stops the replay with
+an error that names it (`docs/period-model.md` §11).
 
 **Worked example — one operator kill, three lines.** A job running at run 1,
 revision 1. An operator sends `KILLJOB` naming that revision. This is what

@@ -269,6 +269,8 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
 
 from __future__ import annotations
 
+import copy
+
 from collections import deque
 from collections.abc import Callable, Mapping
 from datetime import date, datetime, time as dtime, timedelta, tzinfo
@@ -309,10 +311,12 @@ from dsl41.oracle_state import (
     JobRuntime,
     JobStatus,
     OracleError,
+    VIOLATION_MARKER,
     RuntimeState,
     TraceEntry,
 )
 from dsl41.semantics import DEFAULTS as DEFAULT_SWITCHES, SemanticSwitches, iced_atom_truth
+from dsl41.state_machine import Violation
 from dsl41.timezones import (
     MISSING_HOUR,
     REPEATED_HOUR,
@@ -362,6 +366,14 @@ class InputBatch:
 
     Hold one open only when a decision sits between the halves -- the
     engine's stale-completion gate does, and S3's preconditions will.
+
+    The commit also drains the store's violation channel. Each violation
+    the input's moves recorded becomes one `TRANSITION_VIOLATION` trace
+    line and lands on `violations`, where the engine reads it
+    (concurrency-model ss4). Recording it never raises: replay meets the
+    same line the live engine wrote. `command_violations` holds only those
+    the attempt half recorded: the time half's moves are the engine's own,
+    so only the attempt's own can refuse a command.
     """
 
     def __init__(self, oracle: Oracle, at: datetime) -> None:
@@ -373,6 +385,13 @@ class InputBatch:
         #: record of what the input moved, and the only place the changed set
         #: leaves the owner
         self.revisions: dict[str, int] = {}
+        #: (subject, violation) for every declared transition this input
+        #: broke; set at commit
+        self.violations: list[tuple[str, Violation]] = []
+        #: the subset the attempt half broke, after the time half
+        self.command_violations: list[tuple[str, Violation]] = []
+        #: what the time half broke, drained when it ends
+        self._time_violations: list[tuple[str, Violation]] = []
         self._emitted_start = 0
 
     def __enter__(self) -> InputBatch:
@@ -391,8 +410,9 @@ class InputBatch:
             oracle._lazy_clock_checks()
             oracle._drain()  # checks-then-drain adjacency
         except BaseException:
-            self._commit()
+            self._commit(time_half=True)
             raise
+        self._time_violations = oracle.store.drain_violations()
         return self
 
     def feed(self, ev: Event) -> None:
@@ -406,8 +426,27 @@ class InputBatch:
     def __exit__(self, *exc: object) -> None:
         self._commit()
 
-    def _commit(self) -> None:
+    def _commit(self, *, time_half: bool = False) -> None:
         oracle = self._oracle
+        # drained first: a commit that refuses the input's end state still
+        # reports what the input broke on the way there
+        drained = oracle.store.drain_violations()
+        if time_half:
+            self._time_violations, drained = self._time_violations + drained, []
+        self.command_violations = drained
+        self.violations = self._time_violations + drained
+        for subject, violation in self.violations:
+            oracle._trace.append(
+                TraceEntry(
+                    at=self._at,
+                    job=subject,
+                    transition=VIOLATION_MARKER,
+                    cause=(
+                        f"{violation.transition} {violation.old}->{violation.new}:"
+                        f" {violation.reason}"
+                    ),
+                )
+            )
         changed = oracle.store.commit_input()
         self.revisions = {key: oracle.store.revision(key) for key in changed}
         self.emitted = oracle._emitted[self._emitted_start :]
@@ -563,6 +602,29 @@ class Oracle:
         #: transition on, so the window decisions of a whole started subtree
         #: run after every attempt in it. None when no box start is open.
         self._window_starts: list[tuple[str, int, str]] | None = None
+
+    def fork(self) -> Oracle:
+        """An independent copy to dry-apply one input on (concurrency-model
+        ss4): the engine refuses a control input whose apply raises or breaks
+        a declared transition before the input is logged.
+
+        Not `deepcopy`, which would copy the catalog. The store forks itself;
+        every other mutable container is copied here, the memo caches
+        included, so nothing a dry apply does reaches this oracle. The
+        catalog, the switches, the capacity pool and the referencer index
+        are shared: they are fixed once the constructor returns. A new
+        attribute must be added here, and the fork test pins the attribute
+        set so it cannot be forgotten."""
+        twin = copy.copy(self)
+        twin.store = self.store.fork()
+        twin._trace = list(self._trace)
+        twin._emitted = list(self._emitted)
+        twin._queue = deque(self._queue)
+        twin._opening_release = list(self._opening_release)
+        twin._tz_cache = dict(self._tz_cache)
+        twin._calendars = dict(self._calendars)
+        twin._window_starts = None if self._window_starts is None else list(self._window_starts)
+        return twin
 
     # ------------------------------------------------------------------ plumbing
 

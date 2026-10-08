@@ -522,8 +522,8 @@ longer be answered after the boundary. Wait it out, or seal with
 
    The ENGINE then exits with code **3** — "sealed; period 2 is ready to
    open". That is not a failure. Under an init system it needs
-   `RestartPreventExitStatus=2 3`, or the unit restart-loops a sealed
-   engine.
+   `RestartPreventExitStatus=2 3 5`, or the unit restart-loops a sealed
+   engine (5 is `--on-transition-violation stop`).
 5. The impatient variant: add `--force-seal`. It commits inside the
    horizon and writes the gate's own numbers into the seal, so the record
    alone shows that somebody forced it:

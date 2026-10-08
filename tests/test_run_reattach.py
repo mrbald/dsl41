@@ -236,9 +236,10 @@ def test_an_argv_that_is_not_a_run_invocation_yields_none(argv: list[str]) -> No
 LINE = f"{PROG} run --resume a.jil --run-root /srv/R --detached"
 
 
-@pytest.mark.parametrize("code", [0, 1])
+@pytest.mark.parametrize("code", [0, 1, 5])
 def test_a_resumable_detached_exit_prints_its_own_line(code: int) -> None:
-    """A clean stop (0) and a crash (1) leave a period to resume."""
+    """A clean stop (0), a crash (1) and a transition stop (5) leave a
+    period to resume."""
     assert _reattach_note(LINE, Path("/srv/R"), detached=True, code=code) == (
         f"detached: reattach with `{LINE}`"
     )

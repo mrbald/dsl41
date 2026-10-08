@@ -93,6 +93,7 @@ from dsl41.period import (
 )
 from dsl41.runner_journal import (
     Journal,
+    ReplayFault,
     last_journal_at,
     baseline_id,
     read_journal,
@@ -667,6 +668,8 @@ async def resume_run(
     # of BOTH proofs is one readable block: a refused resume must hold
     # neither, or the next engine cannot lead a lineage this one could not.
     anchor: EstateAnchor | None = None
+    #: the WAL the ladder opened, closed again if it refuses
+    journals: list[Journal] = []
     try:
         sentinel = read_sentinel(run_root)
         # a root whose `journal.jsonl` is not a sentinel gets its refusal
@@ -687,6 +690,7 @@ async def resume_run(
             catalog,
             run_root,
             lock,
+            journals=journals,
             sentinel=sentinel,
             anchor=anchor,
             clock=clock,
@@ -700,7 +704,13 @@ async def resume_run(
             declared=declared,
         )
     except BaseException:
-        # a refused resume holds nothing: the next engine may lead
+        # a refused resume holds nothing: the next engine may lead. The WAL
+        # it opened is closed too; the locks are released below
+        for journal in journals:
+            # never mask the refusal with a second error: a WAL already
+            # closed, or a flush that fails on the way out
+            with contextlib.suppress(OSError, ValueError):
+                journal.detach()
         if anchor is not None:
             anchor.release()
         lock.release()
@@ -724,6 +734,7 @@ async def _resume_under_lock(
     supervisor: SupervisorClient | None,
     deadman_s: float | None,
     declared: RuntimeProfile | None = None,
+    journals: list[Journal],
 ) -> Engine:
     """The ss7 resume ladder proper, with leadership already held (S6a).
     Split from `resume_run` so the acquire/release pairing is one readable
@@ -782,6 +793,7 @@ async def _resume_under_lock(
             declared=declared,
         )
         journal = opened_period.journal
+        journals.append(journal)
         records = read_journal(journal.path)
     opening = records[0]
     # ss7 phase 3, at EVERY resume of a period that opened from a seal --
@@ -862,6 +874,7 @@ async def _resume_under_lock(
             baseline_id=baseline_id(records),
             lock=fence,
         )
+        journals.append(journal)
     # the term is allocated by being appended (ss1), before the first input
     # this incarnation admits, so every record after it names its author.
     # I2 makes the epoch estate-monotone, so a new period's first term is
@@ -903,9 +916,19 @@ async def _resume_under_lock(
     # afterwards: an `effect_result` here for an effect born in C1 is an
     # outcome the replay has to attach, and `Outbox.resolve` refuses an
     # outcome for an effect it never saw.
-    replay = replay_inputs(
-        engine.oracle, records, outbox=carried_outbox(opened, at=opening_at(opening))
-    )
+    try:
+        replay = replay_inputs(
+            engine.oracle, records, outbox=carried_outbox(opened, at=opening_at(opening))
+        )
+    except ReplayFault as exc:
+        # period-model ss11: refuse, don't degrade. The same build raises at
+        # the same input on every resume, so the estate stays down until a
+        # build that replays it runs here (deployment runbook ss7)
+        raise EngineError(
+            f"{run_root}: resume stopped: {exc}. Deploy a build that fixes the"
+            " fault, or roll back to the release that wrote this log",
+            code=exc.code,
+        ) from exc
     # the log's position comes back with its contents (concurrency-model
     # ss2): the next admission continues the index, and a retry of anything
     # this log already decided is still answered from that decision rather

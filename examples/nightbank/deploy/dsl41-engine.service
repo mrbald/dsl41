@@ -30,11 +30,12 @@ KillSignal=SIGTERM
 TimeoutStopSec=60
 # restart a crash (exit 1, a signal) on the same root. Never restart exit 2,
 # a configuration refusal -- a resume gate, a missing or invalid access
-# map, a preflight ERROR, the launcher's own refusal -- or exit 3, a sealed
-# period that an operator opens (deployment-runbook ss3, ss6a)
+# map, a preflight ERROR, the launcher's own refusal -- exit 3, a sealed
+# period that an operator opens, or exit 5, --on-transition-violation stop
+# (deployment-runbook ss3, ss6a)
 Restart=on-failure
 RestartSec=5
-RestartPreventExitStatus=2 3
+RestartPreventExitStatus=2 3 5
 LimitNOFILE=65536
 
 [Install]

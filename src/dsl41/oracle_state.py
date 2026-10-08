@@ -26,6 +26,11 @@ What is here:
 
 - **`OracleError`**, raised on both sides of the split, so it is defined on
   the side that has no dependencies.
+- **The violation channel.** `RuntimeState.note_violation` collects the
+  `Violation`s that `StateMachine.take` returns during an input, and the
+  input's commit drains them (`InputBatch`). A check never raises in
+  production; the engine decides what a violation costs (concurrency-model
+  ss4).
 
 `HostRuntime` is here and NOT in `oracle.py` for a reason the split makes
 enforceable (DL-93): a job's condition truth cannot depend on where its
@@ -43,7 +48,10 @@ not state) and every SEM rule that reads or writes these rows.
 
 from __future__ import annotations
 
+import copy
 import heapq
+import os
+import sys
 
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
@@ -51,6 +59,8 @@ from types import MappingProxyType
 from typing import Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from dsl41.state_machine import STRICT_ENV, TransitionError, Violation
 
 
 class OracleError(ValueError):
@@ -136,6 +146,12 @@ class TraceEntry(BaseModel):
     job: str
     transition: str  # "OLD->NEW" or an out-of-band marker like "ON_ICE"
     cause: str
+
+
+#: The trace marker of a move that broke its declared transition
+#: (concurrency-model ss4). The entry's `job` names the entity the move
+#: belongs to, and its `cause` names the transition and the reason.
+VIOLATION_MARKER = "TRANSITION_VIOLATION"
 
 
 #: DL-50's three release policies, named once: `CapacityReservation` stores
@@ -465,6 +481,43 @@ class RuntimeState:
         #: touch within the open input. Empty and inert outside one.
         self._snapshots: dict[str, object] = {}
         self._in_input = False
+        #: the violation channel: (subject, violation) pairs since the last
+        #: drain. `InputBatch` drains it; `begin_input` drops orphans.
+        self._violations: list[tuple[str, Violation]] = []
+
+    def fork(self) -> RuntimeState:
+        """An independent copy to dry-apply one input on (concurrency-model
+        ss4). Shallow: rows are frozen and a write replaces a row, so copying
+        each map and the heap list keeps every write on the copy. Heap events
+        are shared; no verb changes one in place. The violation channel starts
+        empty: an orphan must not refuse the input being dry-applied."""
+        twin = copy.copy(self)
+        twin._jobs = dict(self._jobs)
+        twin._globals = dict(self._globals)
+        twin._hosts = dict(self._hosts)
+        twin._timers = list(self._timers)
+        twin._consumed = dict(self._consumed)
+        twin._snapshots = dict(self._snapshots)
+        twin._violations = []
+        return twin
+
+    # ------------------------------------------------------- the violation channel
+
+    def note_violation(self, subject: str, violation: Violation | None) -> None:
+        """Collect what `StateMachine.take` returned, so a call site is one
+        line: `store.note_violation(job, MACHINE.take(t, old, new))`. None,
+        a move that matched its declaration, is not collected.
+
+        `subject` is the entity the move belongs to, as the trace names it:
+        a job name, or a namespaced key such as `host:local` for a row that
+        is not a job."""
+        if violation is not None:
+            self._violations.append((subject, violation))
+
+    def drain_violations(self) -> list[tuple[str, Violation]]:
+        """Hand over and forget every violation noted since the last drain."""
+        drained, self._violations = self._violations, []
+        return drained
 
     # ------------------------------------------------------------------- reads
 
@@ -605,8 +658,31 @@ class RuntimeState:
         the whole of the next input, not by its first transition."""
         if self._in_input:
             raise OracleError("input already open: inputs do not nest")
+        self._drop_orphan_violations()
         self._in_input = True
         self._snapshots = {}
+
+    def _drop_orphan_violations(self) -> None:
+        """Only an `InputBatch` drains the channel. A violation noted
+        outside one (with no transaction open, or in a writer that opens its
+        own: the Oracle's genesis seed, classify's seeding, the executor
+        seed) would blame this input with a trace line replay never writes.
+        Strict test runs raise, so the suite proves every `take` runs inside
+        an `InputBatch`; production writes it once to stderr and drops it."""
+        orphans = self.drain_violations()
+        if not orphans:
+            return
+        if os.environ.get(STRICT_ENV):
+            raise TransitionError(
+                f"{len(orphans)} transition violation(s) noted outside an InputBatch, first"
+                f" {orphans[0][1].transition} on {orphans[0][0]}"
+            )
+        for subject, violation in orphans:
+            sys.stderr.write(
+                f"dsl41: dropped a transition violation noted outside an InputBatch:"
+                f" {subject} {violation.transition} {violation.old}->{violation.new}:"
+                f" {violation.reason}\n"
+            )
 
     def commit_input(self) -> list[str]:
         """Close the transaction and increment each CHANGED entity exactly
