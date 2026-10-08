@@ -161,13 +161,26 @@ sigterm = true
 # a wake-up the wrapper would otherwise get only from its own `ps` probes (macOS)
 # is sent by the test, so the number does not depend on the host.
 #
+# Seven more modules are listed: the attestation and the physical roll
+# (attest, estate), the canonical form (canon), the calendar and condition
+# interpreters (autocal, conditions), the control-plane verbs (cli_control)
+# and the engine clocks (runner_clock). Other decision-shaped modules, such as
+# runner_preflight, runner_history and cli_estate, are not. A branch in a listed
+# module that only forged state reaches carries a pragma that names the invariant.
+#
 # Deliberately NOT listed: runner_adapters.py. Its numbers print in
 # `scripts/branch_coverage.py`; widening the gate to it is the owner's call.
-# The CLI, TUI, viz and compiler tiers are not state machines and get the
+# The rest of the CLI, TUI, viz and compiler tiers are not state machines and get the
 # suite's ordinary scrutiny, not this one.
 include = [
+    "src/dsl41/attest.py",
+    "src/dsl41/autocal.py",
     "src/dsl41/boundary.py",
+    "src/dsl41/canon.py",
     "src/dsl41/capacity.py",
+    "src/dsl41/cli_control.py",
+    "src/dsl41/conditions.py",
+    "src/dsl41/estate.py",
     "src/dsl41/oracle.py",
     "src/dsl41/oracle_state.py",
     "src/dsl41/period.py",
@@ -178,6 +191,7 @@ include = [
     # refusal, which on this module means an untested DENIAL path
     "src/dsl41/runner_access.py",
     "src/dsl41/runner_admission.py",
+    "src/dsl41/runner_clock.py",
     "src/dsl41/runner_control.py",
     "src/dsl41/runner_effects.py",
     "src/dsl41/runner_hosts.py",

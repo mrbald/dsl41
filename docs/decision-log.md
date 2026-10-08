@@ -19770,3 +19770,29 @@ relitigate an entry; append a new one.
   The Opus reviewer also found an orphaned test reference, an unasserted
   index, and two reporter lists missing the outbox's record move. All are
   fixed and confirmed by the reviewer that raised them.
+- DL-298 Seven more modules join the 100% branch gate
+  (2026-10-08; pyproject.toml `[tool.coverage.report]`; src/dsl41/autocal.py and
+  runner_clock.py (pragma comments); tests/test_canon_branches.py,
+  test_conditions_branches.py, test_runner_clock_branches.py,
+  test_estate_branches.py, test_attest_branches.py,
+  test_cli_control_branches.py, test_autocal_branches.py; README.md (test
+  count))
+  THE GATE. estate.py, conditions.py, cli_control.py, runner_clock.py,
+  attest.py, autocal.py and canon.py are now in the 100% branch gate
+  (DL-105). Their missed branches went from 53 to none, on macOS and on
+  Linux (Python 3.12 and 3.14). Each new test drives one missed branch and
+  asserts its effect.
+  PRAGMAS. Five branches carry a pragma, each with its reason in the same
+  comment: a virtual-clock future that is always live after the prune; an
+  integer parse every caller's pattern already guarantees; a replace-code
+  guard both callers test first; an autocal return that needs a non-workday
+  spelling compilation never accepts; and autocal's `condition` in an
+  extended calendar's attributes, which lowering never produces (DL-269's
+  rule: a branch only hand-built input reaches gets a pragma, not a test).
+  REVIEW. Tests class: one Opus reviewer, two rounds. It broke the covered
+  branches in a scratch copy and found two tests that stayed green: the
+  attestation arm of the version check, and the clock's re-slicing. It also
+  found an assertion that missed the error it named, a socket path too long
+  for macOS, a test of a branch only hand-built input reaches, and
+  over-claiming docstrings. All are fixed, and the reviewer re-ran its
+  mutants to confirm them.
