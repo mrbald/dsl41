@@ -310,3 +310,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-296 | Every state machine has an exhaustive event-by-state test |  |
 | DL-297 | The `engine:` request-id prefix is reserved, and the integration's contract corrections | [docs/control-protocol.md](control-protocol.md) |
 | DL-298 | Seven more modules join the 100% branch gate |  |
+| DL-299 | The engine-side supervisor adapters join the 100% branch gate, and two resource leaks are closed |  |

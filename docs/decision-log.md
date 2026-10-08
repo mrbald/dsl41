@@ -19796,3 +19796,30 @@ relitigate an entry; append a new one.
   for macOS, a test of a branch only hand-built input reaches, and
   over-claiming docstrings. All are fixed, and the reviewer re-ran its
   mutants to confirm them.
+- DL-299 The engine-side supervisor adapters join the 100% branch gate, and two
+  resource leaks are closed
+  (2026-10-08; pyproject.toml `[tool.coverage.report]`;
+  src/dsl41/runner_adapters.py; tests/test_adapters_branches.py; README.md
+  (test count))
+  THE GATE. runner_adapters.py is now in the 100% branch gate (DL-105). Its
+  missed branches went from 61 of 348 to none, on macOS and on Linux (Python
+  3.12 and 3.14). This closes DL-269's "STILL OUTSIDE" list. Arms that
+  differ by host or timing run through stand-ins; three lines that macOS
+  reached only by a host-specific path got deterministic tests after the
+  first Linux run.
+  TWO LEAKS. `SupervisedCommandAdapter.kill` registered an exit future and
+  forgot it only on success: a kill that met an unavailable supervisor, or
+  was cancelled, left the entry behind, once per such kill. The kill's body
+  now sits in one try/finally that forgets it on every path; the signal
+  order, waits and results are unchanged, and no caller reads the future
+  after a kill. `SupervisorConn.__init__` now closes its socket when the
+  timeout or the connect raises, and re-raises the same error. Neither
+  changes the supervisor protocol or anything the engine records.
+  REVIEW. One Opus reviewer, two rounds, with a mutant check over 41
+  covered branches: two mutants survived (the first-poll-only resume rule of
+  DL-258, and a report-hook guard) and one only hung; all three now fail
+  their tests, as do new mutants for both leak fixes. Because the slice
+  changed runner code, one Fable advisor pass, in place of Codex at the
+  owner's instruction, reviewed the two fixes: both correct and minimal,
+  with no caller-visible change. All findings are fixed and confirmed by the
+  reviewer that raised them.

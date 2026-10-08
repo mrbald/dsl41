@@ -168,8 +168,13 @@ sigterm = true
 # runner_preflight, runner_history and cli_estate, are not. A branch in a listed
 # module that only forged state reaches carries a pragma that names the invariant.
 #
-# Deliberately NOT listed: runner_adapters.py. Its numbers print in
-# `scripts/branch_coverage.py`; widening the gate to it is the owner's call.
+# The adapters are listed as well: both dispatch paths, the supervisor client,
+# the watch-log fold and the spool ladder. Arms that differ by host or by timing
+# are driven through stand-ins (a fake process, a patched `time`, a scripted
+# `_request`). Real sockets and the real wrapper appear in the adapters' tests
+# only where both hosts take the same path, and part of the module's arcs come
+# from the real-supervisor suites.
+#
 # The rest of the CLI, TUI, viz and compiler tiers are not state machines and get the
 # suite's ordinary scrutiny, not this one.
 include = [
@@ -190,6 +195,7 @@ include = [
     # authorization guard whose false arm nothing takes is an untested
     # refusal, which on this module means an untested DENIAL path
     "src/dsl41/runner_access.py",
+    "src/dsl41/runner_adapters.py",
     "src/dsl41/runner_admission.py",
     "src/dsl41/runner_clock.py",
     "src/dsl41/runner_control.py",
