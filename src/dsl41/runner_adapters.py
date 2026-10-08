@@ -1005,10 +1005,14 @@ class SupervisorConn:
 
     def __init__(self, sock_path: Path, *, timeout_s: float = 60.0) -> None:
         self.conn = socket.socket(socket.AF_UNIX)
-        # SHUTDOWN replies only AFTER waiting for wrappers (frozen ss5 order),
-        # which spans the spawn-record wait plus per-run grace windows
-        self.conn.settimeout(timeout_s)
-        self.conn.connect(str(sock_path))
+        try:
+            # SHUTDOWN replies only AFTER waiting for wrappers (frozen ss5 order),
+            # which spans the spawn-record wait plus per-run grace windows
+            self.conn.settimeout(timeout_s)
+            self.conn.connect(str(sock_path))
+        except BaseException:
+            self.conn.close()  # the caller never gets an object to close
+            raise
         self.buf = b""
         #: DL-80: the incarnation rides every mutating verb beside the token
         #: (supervisor-protocol ss5). It is part of the envelope, not of the
@@ -2150,17 +2154,20 @@ class SupervisedCommandAdapter:
         before its first step never enters the handler that calls this."""
         fut = self.client.exit_future(run_id)
         try:
-            await self._signal_when_addressable(run_id, "TERM", fut)
-        except SupervisorUnavailable:
-            return  # supervisor gone: the wrapper's own lifeline handles it
-        try:
-            await asyncio.wait_for(asyncio.shield(fut), timeout=self.grace_seconds)
-        except (TimeoutError, asyncio.TimeoutError):
-            with contextlib.suppress(SupervisorUnavailable):
-                await self._signal_when_addressable(run_id, "KILL", fut)
-            with contextlib.suppress(Exception):
+            try:
+                await self._signal_when_addressable(run_id, "TERM", fut)
+            except SupervisorUnavailable:
+                return  # supervisor gone: the wrapper's own lifeline handles it
+            try:
                 await asyncio.wait_for(asyncio.shield(fut), timeout=self.grace_seconds)
+            except (TimeoutError, asyncio.TimeoutError):
+                with contextlib.suppress(SupervisorUnavailable):
+                    await self._signal_when_addressable(run_id, "KILL", fut)
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(asyncio.shield(fut), timeout=self.grace_seconds)
         finally:
+            # every way out forgets the future registered above, the early
+            # return and a cancellation of the first signal included
             self.client.forget_exit(run_id)
 
 
