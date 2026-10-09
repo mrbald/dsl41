@@ -118,7 +118,14 @@ from dsl41.runner_clock import EngineError
 #: TERMINATED terminates its box (both by default, each behind a switch),
 #: so a replay with such an event can complete or terminate a box that v17
 #: left RUNNING.
-STATE_MACHINE_VERSION = 18
+#: 19 since DL-304 (SEM-11's box-start completion moment): a box whose
+#: start leaves no member in the run (every direct member on ice, or none)
+#: completes at its start under `box-start-all-members-out=complete`, the
+#: default; an iced member still running, or holding a running or queued
+#: job, keeps its box waiting; and a start nested inside two starts of
+#: the same job is refused. A replay with such an input can derive a box status
+#: or a start that v18 did not.
+STATE_MACHINE_VERSION = 19
 
 LOCK_NAME = "leader.lock"
 

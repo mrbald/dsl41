@@ -525,6 +525,15 @@ class InputBatch:
         self.emitted = oracle._emitted[self._emitted_start :]
 
 
+#: DL-304: how many starts of one job may be in progress on the call stack
+#: at once. A start's own cascade may start the job again once: a box
+#: start's window pass can skip-complete run one and its wakes start run
+#: two (DL-246). A start nested inside two starts of the same job is a
+#: re-trigger loop that closes in one instant (L010's pattern); it is
+#: refused with a START_REFUSED line. Starts that follow one another, such
+#: as a job that several predecessors start in turn, are never refused.
+MAX_NESTED_STARTS: Final = 2
+
 #: The closed set of deadline checks the oracle arms as TIMER payloads
 #: (`payload["check"]`); the fourth shape, the run-window defer, carries
 #: `deferred_cause` instead. PR-09 enumerates this set and proves each member
@@ -675,6 +684,11 @@ class Oracle:
         #: transition on, so the window decisions of a whole started subtree
         #: run after every attempt in it. None when no box start is open.
         self._window_starts: list[tuple[str, int, str]] | None = None
+        #: DL-304: per job, how many of its starts are in progress on the
+        #: call stack (`_start`, a run or an ON_NOEXEC bypass and the whole
+        #: cascade it drives). Empty between inputs, so a fork, a replay and
+        #: the live apply agree.
+        self._starts_in_progress: dict[str, int] = {}
 
     def fork(self) -> Oracle:
         """An independent copy to dry-apply one input on (concurrency-model
@@ -697,6 +711,7 @@ class Oracle:
         twin._tz_cache = dict(self._tz_cache)
         twin._calendars = dict(self._calendars)
         twin._window_starts = None if self._window_starts is None else list(self._window_starts)
+        twin._starts_in_progress = dict(self._starts_in_progress)
         return twin
 
     # ------------------------------------------------------------------ plumbing
@@ -894,10 +909,39 @@ class Oracle:
             return
         box = job_ir.box.box_name
         if box is not None:
+            leaving = old in LIVE | {"QUE_WAIT"} and new not in LIVE | {"QUE_WAIT"}
+            holders = self._holder_runs(job) if leaving else []
             self._on_member_transition(box, job, old, new)
             self._on_descendant_transition(job, new, resolved=self._resolves(box, job, old, new))
+            self._holders_may_leave_the_run(holders)
         if job_ir.job_type == "BOX" and new in TERMINAL:
             self._disarm_members(job)
+
+    def _holder_runs(self, job: str) -> list[tuple[str, str, int]]:
+        """Each box above `job` that has a parent, with that parent and its
+        run number, read before the transition's own box rules run."""
+        chain = self._ancestor_boxes(job)
+        return [
+            (holder, parent, self._runtime(parent).run_number)
+            for holder, parent in zip(chain, chain[1:], strict=False)
+        ]
+
+    def _holders_may_leave_the_run(self, holders: list[tuple[str, str, int]]) -> None:
+        """SEM-20 (DL-304): a job stopped being live or queued. An iced box
+        above it that held no other live or queued job is now out of its
+        parent's run (`_out_of_the_run`), which is the moment its ice takes
+        effect: DL-285's completion moment runs for it then, with all its
+        exclusions (a holder that is not iced is never out). A terminal end
+        reaches the parent through the iced box's own idle recompute too
+        (SEM-15), but a queued job cancelled to INACTIVE moves no status
+        above it, and neither does an end that the iced box's own unmet
+        override suppresses; without this the parent would wait for ever.
+        The moment belongs to the parent's run in progress when the job
+        stopped: if the transition's own cascade restarted the parent, the
+        new run gets no moment from it."""
+        for holder, parent, run in holders:
+            if self._runtime(parent).run_number == run:
+                self._ice_resolves_member(holder, self._runtime(holder).status)
 
     def _disarm_members(self, box: str) -> None:
         """A member's arm is scoped to the box run that armed it (DL-54
@@ -1983,6 +2027,30 @@ class Oracle:
         return any(self._runtime(box).on_noexec for box in self._ancestor_boxes(job_ir.name))
 
     def _start(self, job: str, cause: str, *, force: bool = False) -> None:
+        """Every start attempt that passed the gates, under DL-304's nesting
+        guard: a re-trigger loop that closes inside one instant -- a job
+        whose own completion satisfies its condition again, or a cycle of
+        such jobs -- would otherwise recurse without end."""
+        depth = self._starts_in_progress.get(job, 0)
+        if depth >= MAX_NESTED_STARTS:
+            self._ignore(
+                job,
+                START_REFUSED,
+                "START_REFUSED",
+                f"re-trigger loop inside one instant: started twice in one nested cascade;"
+                f" refused (L010; {cause})",
+            )
+            return
+        self._starts_in_progress[job] = depth + 1
+        try:
+            self._start_admitted(job, cause, force=force)
+        finally:
+            if depth:
+                self._starts_in_progress[job] = depth
+            else:
+                del self._starts_in_progress[job]
+
+    def _start_admitted(self, job: str, cause: str, *, force: bool) -> None:
         job_ir = self.catalog.jobs[job]
         if self._noexec_bypasses(job_ir):
             # SEM-22: lifecycle bypass -- straight to SUCCESS, downstream normal.
@@ -2126,6 +2194,7 @@ class Oracle:
         if outermost:
             assert starts is not None
             self._decide_windows_at_box_start(starts)
+            self._complete_starts_with_no_member_in_the_run(starts)
 
     # ---------------------------------------------------------- resources (DL-50)
 
@@ -2584,6 +2653,57 @@ class Oracle:
             if box_rt.status == "RUNNING" and box_rt.run_number == run:
                 self._run_window_permits(member_ir, cause)
 
+    def _complete_starts_with_no_member_in_the_run(
+        self, starts: list[tuple[str, int, str]]
+    ) -> None:
+        """SEM-11 under `box-start-all-members-out=complete`: a box start
+        whose pass leaves no direct member in the run -- every direct member
+        on ice, or no member at all -- is a completion moment. Basic Box Job
+        Concepts (AutoSys 12.0, 24.2): the box stays RUNNING "as long as
+        there are jobs in it with ACTIVATED or RUNNING status"; an iced job
+        is not executed "for the entire run of the box" (Events, JOB_ON_ICE).
+        No vendor sentence names the case, so the composition is [C] and
+        `wait` keeps the box RUNNING, as dsl41 did before at a box start.
+
+        It runs after the pass's window decisions, once per box run the pass
+        began, a subbox before its parent, while that run is still the box's
+        RUNNING run. The full door runs: overrides first, an external
+        reference included, then the default fold over an empty ran set.
+        A subbox that completes here does so by its own terminal transition,
+        which is a member transition of its parent. The trigger is explicit,
+        not `_all_members_done`: a box whose members were all window-skipped
+        at its start already ran its door through each skip."""
+        # PENDING: Q15 -- no vendor sentence names a box with no member in the run
+        if self.semantics.box_start_all_members_out != "complete":
+            return
+        for box, run, _cause in starts:
+            box_rt = self._runtime(box)
+            if box_rt.status != "RUNNING" or box_rt.run_number != run:
+                continue  # the run already ended, or a later run replaced it
+            if all(self._out_of_the_run(member) for member in self._members(box)):
+                self._completion_door(box, None, None, completion_moment=True)
+
+    def _out_of_the_run(self, job: str) -> bool:
+        """SEM-11, SEM-20: whether an iced member is out of its box's run. It
+        is when it is on ice, its own status is not live or QUE_WAIT, and no
+        job it contains, transitively, is live or QUE_WAIT. Basic Box Job
+        Concepts (AutoSys 12.0, 24.2) keeps a box RUNNING "as long as there
+        are jobs in it with ACTIVATED or RUNNING status", so an ice does not
+        take out a member that still runs or holds a running job. Three
+        readers share it, under both `box-start-all-members-out` values: the
+        box-start trigger, the fold's ice skip, and the ON_ICE completion
+        moment (DL-285). A member that is not out falls through to the
+        fold's "not yet run" rule, so the box waits; the member's own
+        terminal transition, or its subbox's idle recompute (SEM-15), runs
+        the door again once the job inside ends."""
+        rt = self._runtime(job)
+        if not rt.on_ice or rt.status in LIVE | {"QUE_WAIT"}:
+            return False
+        return not any(
+            self._runtime(inner).status in LIVE | {"QUE_WAIT"}
+            for inner in self._contained(job, skip_live=False)
+        )
+
     # ------------------------------------------------------------------ box rules
 
     def _on_member_transition(self, box: str, member: str, old: str, new: str) -> None:
@@ -2632,20 +2752,28 @@ class Oracle:
         return new == "FAILURE"
 
     def _completion_door(
-        self, box: str, member: str, new: str, *, completion_moment: bool, overrides: bool = True
+        self,
+        box: str,
+        member: str | None,
+        new: str | None,
+        *,
+        completion_moment: bool,
+        overrides: bool = True,
     ) -> None:
         """The completion door of a RUNNING box (SEM-11, SEM-12): the
         overrides first when `overrides`, then the default fold only if none
         fired and every member is done. A member transition, a window skip
-        on a member already INACTIVE (DL-154) and an ON_ICE on a member that
-        has not run (DL-285) all pass through it."""
+        on a member already INACTIVE (DL-154), an ON_ICE on a member that
+        has not run (DL-285) and a box start with no member in the run all
+        pass through it; the last has no member, so `member` and `new` are
+        None and the fold names the start."""
         box_ir = self.catalog.jobs[box]
         if overrides and self._apply_box_overrides(
             box, box_ir, member, new, completion_moment=completion_moment
         ):
             return
         if self._all_members_done(box):
-            self._fold_box_default(box, box_ir)
+            self._fold_box_default(box, box_ir, at_start=member is None)
 
     def _resolves(self, box: str, member: str, old: str, new: str) -> bool:
         """Whether an INACTIVE transition resolves `member` in a RUNNING run
@@ -2676,8 +2804,12 @@ class Oracle:
         ice that is not queued (a queued member's INACTIVE transition
         carries it, `_resolves`). A member that ran keeps its vote, and one
         already resolved or iced was already out of the fold: neither is a
-        completion moment. A box that is not RUNNING re-derives nothing
-        (SEM-15 reads a member's status, which the ice does not move)."""
+        completion moment. Nor is an ice on a member that is not out of the
+        run (`_out_of_the_run`, DL-304): a subbox that still holds a live or
+        queued job keeps the box waiting, and that job's end carries the
+        door through the subbox's idle recompute. A box that is not RUNNING
+        re-derives nothing (SEM-15 reads a member's status, which the ice
+        does not move)."""
         job_ir = self.catalog.jobs.get(job)
         box = job_ir.box.box_name if job_ir is not None else None
         if box is None:
@@ -2688,6 +2820,7 @@ class Oracle:
             or job in box_rt.ran_members
             or job in box_rt.window_skipped_members
             or job in box_rt.iced_out_members
+            or not self._out_of_the_run(job)
         ):
             return
         self._completion_door(box, job, status, completion_moment=True)
@@ -2792,7 +2925,13 @@ class Oracle:
             )
 
     def _apply_box_overrides(
-        self, box: str, box_ir: JobIR, member: str, new: str, *, completion_moment: bool = False
+        self,
+        box: str,
+        box_ir: JobIR,
+        member: str | None,
+        new: str | None,
+        *,
+        completion_moment: bool = False,
     ) -> bool:
         """Returns True if an override fired and set the box status.
 
@@ -2800,8 +2939,9 @@ class Oracle:
         operator's INACTIVE verdict RESOLVES the member without a terminal
         status, so the caller names the moment a completion moment for
         SEM-12's external/global-ref gate; the atoms still read the real
-        INACTIVE status."""
-        member_completed = completion_moment or new in TERMINAL
+        INACTIVE status. A box start with no member in the run passes no
+        member (`None`) and is always a completion moment."""
+        member_completed = completion_moment or (new is not None and new in TERMINAL)
         for attr, target in (
             (box_ir.sem.box_success, "SUCCESS"),
             (box_ir.sem.box_failure, "FAILURE"),
@@ -2809,7 +2949,7 @@ class Oracle:
             if attr is None:
                 continue
             cond = attr.cond
-            refs_member = member in _cond_job_names(cond)
+            refs_member = member is not None and member in _cond_job_names(cond)
             # internal ref: evaluate the moment the referenced job transitions;
             # external/global ref: evaluate only at member completion moments
             if not (refs_member or member_completed):
@@ -2842,8 +2982,11 @@ class Oracle:
         resolved = box_rt.window_skipped_members
         for member in self._members(box):
             rt = self._runtime(member)
-            if rt.on_ice:
-                continue  # SEM-20: an iced member is out of the logic entirely
+            if self._out_of_the_run(member):
+                # SEM-20: an iced member is out of the logic entirely, once
+                # nothing in it is live or queued; until then it is not yet
+                # run, below, and the box waits
+                continue
             if member in box_rt.iced_out_members and rt.status not in LIVE | {"QUE_WAIT"}:
                 # SEM-20: taken off ice during this run, it sits the run
                 # out. A forced attempt that queued still keeps the box
@@ -2863,16 +3006,22 @@ class Oracle:
                 return False  # still STARTING/RUNNING
         return True
 
-    def _fold_box_default(self, box: str, box_ir: JobIR) -> None:
+    def _fold_box_default(self, box: str, box_ir: JobIR, *, at_start: bool = False) -> None:
         # SEM-12 third bullet: an unmet specified override suppresses the
         # corresponding default; if neither can fire the box stays RUNNING.
+        # `at_start`: the box start left no member in the run, so the vote
+        # is over an empty ran set and "all members SUCCESS" would mislead.
         ran = self._runtime(box).ran_members
         members = [m for m in self._members(box) if m in ran]
         statuses = [self._runtime(m).status for m in members]
         any_failed = any(s in FAILED for s in statuses)
         if not any_failed and box_ir.sem.box_success is None:
             self._set_status(
-                box, BOX_FOLD_SUCCESS, cause="default box fold: all members SUCCESS (SEM-11)"
+                box,
+                BOX_FOLD_SUCCESS,
+                cause="default box fold at box start: no member in the run (SEM-11)"
+                if at_start
+                else "default box fold: all members SUCCESS (SEM-11)",
             )
             self._on_box_completed(box)
         elif any_failed and box_ir.sem.box_failure is None:

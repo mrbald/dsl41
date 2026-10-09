@@ -127,6 +127,12 @@ def _box_member(job: JobIR, _catalog: CatalogIR) -> bool:
     return job.box.box_name is not None
 
 
+def _is_box(job: JobIR, _catalog: CatalogIR) -> bool:
+    """A box job: what `box-start-all-members-out` reads when the box
+    starts with no member in the run (SEM-11)."""
+    return job.job_type == "BOX"
+
+
 def _has_box_terminator(job: JobIR, _catalog: CatalogIR) -> bool:
     """A member with `box_terminator`: what `box-terminator-on-terminated`
     reads when the member ends TERMINATED (SEM-14)."""
@@ -158,6 +164,7 @@ FwExistence = Literal["stable", "immediate"]
 WekrFirstWeek = Literal["first-full", "partial"]
 OffIceInRunningBox = Literal["next-run", "same-run"]
 BoxTerminatorOnTerminated = Literal["true", "false"]
+BoxStartAllMembersOut = Literal["complete", "wait"]
 # DstStartTimes is spelled in `timezones`, the phase-free module that reads it.
 
 
@@ -249,6 +256,16 @@ REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
                 " does (false)",
                 affects=_has_box_terminator,
             ),
+            Switch(
+                name="box-start-all-members-out",
+                values=get_args(BoxStartAllMembersOut),
+                default="complete",
+                autosys="unknown",
+                description="what a box does when its start leaves no member in the run,"
+                " every direct member on ice or no members: complete at once through the"
+                " completion door (complete), or stay RUNNING until an operator acts (wait)",
+                affects=_is_box,
+            ),
         )
     }
 )
@@ -294,6 +311,7 @@ class SemanticSwitches:
     dst_start_times: DstStartTimes
     off_ice_in_running_box: OffIceInRunningBox
     box_terminator_on_terminated: BoxTerminatorOnTerminated
+    box_start_all_members_out: BoxStartAllMembersOut
 
     def value(self, name: str) -> str:
         """The effective value of the switch called `name`."""

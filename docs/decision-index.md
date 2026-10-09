@@ -315,3 +315,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-301 | A member taken off ice in a running box sits out that run, and box_terminator fires on TERMINATED as well as FAILURE; both are switches |  |
 | DL-302 | Block cards link the generated state machines; a state diagram appears only where a declared machine backs it |  |
 | DL-303 | The service drill covers the upgrade rollbacks, stop and recover, configure, every monitoring command, and a SIGKILL of either unit |  |
+| DL-304 | A box whose start leaves no member in the run completes at its start; an iced member is out only when nothing inside it runs; a nested re-trigger loop is... | [docs/autosys-semantics.md](autosys-semantics.md), [docs/blocks/box-execution.md](blocks/box-execution.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md), [docs/state-machines.md](state-machines.md) |

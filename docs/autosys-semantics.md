@@ -33,6 +33,16 @@ AutoSys is **not** a DAG engine. It is an event-driven state machine engine:
   4. the job itself is not `ON_HOLD` / `ON_ICE`,
   5. (`run_window`, if present, additionally gates the actual start; see SEM-33).
 
+*Model note (DL-304):* the oracle runs one input's consequences inside that input, so a
+re-trigger loop that closes in one instant -- a job whose own completion satisfies its
+condition again, or a cycle of such jobs (L010's pattern) -- would recurse without end. A
+start of a job may nest inside its own start's cascade once (a run or an ON_NOEXEC bypass
+each): a box start's window pass can complete run one and its wakes start run two (DL-246).
+A start nested inside two starts of the same job is refused with one `START_REFUSED` line
+naming the loop, and nothing re-wakes the job until a status moves. Starts that follow one
+another, such as a job that several predecessors start in turn inside one input, are never
+refused.
+
 **IR consequence:** the faithful layer of the IR models jobs as state machines and conditions as
 predicates over a status store. The DAG is a *derived* artifact with per-edge confidence
 annotations, never the primary representation.
@@ -228,7 +238,13 @@ The first two resolve the member as INACTIVE.
   one that still waited. DL-235 still holds for a launched run: no kill.
 - An ON_ICE on a member that has not run in this box run (DL-285). SEM-20 **[V]** removes an
   iced job from all conditions and logic, and SEM-11 **[V]** lets a box complete once every
-  member ran or was bypassed, so the fold skips the iced member. The ice moves no status, so
+  member ran or was bypassed, so the fold skips the iced member once it is out of the run:
+  its own status is not live or QUE_WAIT, and no job it contains is (DL-304). Basic Box Job
+  Concepts keeps a box RUNNING "as long as there are jobs in it with ACTIVATED or RUNNING
+  status" **[V]**, so a member iced while it, or a job inside it, still runs or waits in the
+  queue keeps the box waiting, and an ice on it is no completion moment. When that job stops
+  being live or queued, the iced member is out, and its completion moment runs then; the
+  job's result casts no vote. The ice moves no status, so
   the check runs on the event itself; an ice on a queued member settles it INACTIVE (DL-50),
   and that transition carries the check. That the check runs at the ice, rather than at the
   next member transition, is **[C]**: it composes the two vendor rules, and no vendor text
@@ -241,6 +257,25 @@ A fourth way out is no completion moment of its own. A member taken off ice whil
 runs, before it ran in that run, stays out of the fold until the box's next run (SEM-20's box
 clause, under the default `off-ice-in-running-box=next-run`). The ice already took it out, so
 the OFF_ICE changes nothing the fold reads, and the box completes without it.
+
+Under the default `box-start-all-members-out=complete`, a box start whose pass leaves no
+direct member in the run is a completion moment (DL-304): every direct member is on ice and
+out of the run as defined above, or the box has no members. **[C]** No vendor sentence names the
+case. Basic Box Job Concepts (AutoSys 12.0 and 24.2) keeps a box RUNNING "as long as there
+are jobs in it with ACTIVATED or RUNNING status", and an iced job is not executed "for the
+entire run of the box" (Events, JOB_ON_ICE, 12.0 and 24.2), so neither sentence keeps such a
+box running. The door runs once, after the start's window decisions (DL-246), for each box
+run the start began, a subbox before its parent: overrides first, an external reference
+included, then the default fold. With no member that ran, the fold is SUCCESS, the vacuous
+vote SEM-15 gives an idle box whose members are all INACTIVE; the trace names the start
+("default box fold at box start: no member in the run"). A subbox that completes this way
+ends by its own terminal transition, which is a member transition of its parent. A start
+that leaves some member in the run, one that is not iced, is no completion moment: the
+box completes at a later member transition, as before. The moment resolves no member, so
+it is not a carve-out. Under the default `box-start-all-members-out=complete` the box
+completes at its start; `wait` keeps it RUNNING until an operator acts, as dsl41 did before
+at a box start (runner-design §8a). The out-of-the-run rule above applies under both values.
+Which one AutoSys does is open (Q15, section 9).
 
 The box row records the first two kinds in `window_skipped_members`; the member's own later
 start voids its mark. An iced member carries its own flag. A member taken off ice in the run
@@ -266,6 +301,10 @@ waiting reads INACTIVE without the mark.
 - If box_success is specified but not met, and box_failure is unspecified → default failure
   logic applies after all members complete (and vice versa). If neither fires, the box stays
   RUNNING indefinitely. **[V]**
+- Under the default `box-start-all-members-out=complete`, a box start that leaves no member in
+  the run is a completion moment (SEM-11, Q15, DL-304), so it evaluates an external-reference
+  override too: a met one fires at the start, an unmet one keeps the box RUNNING. That the
+  start counts is **[C]**, as DL-285's ice moment is.
 
 ### SEM-13 · Box TERMINATED is sticky **[V]**
 A box moved to TERMINATED (for example, KILLJOB) stays TERMINATED regardless of later member state
@@ -339,6 +378,9 @@ Broadcom's own guidance is boxes for *shared starting conditions*). ACTIVATED st
 box is RUNNING, member not yet started." The oracle does not model the ACTIVATED label. Its
 state effect is modeled (DL-242): a waiting member reads INACTIVE (SEM-10's reset), and an
 explicit INACTIVE verdict carries the box row's resolution mark (SEM-11).
+An iced subbox never starts, so its parent completes without it once nothing inside it is
+live or queued, and under the default `box-start-all-members-out=complete` a parent whose
+only members are iced completes at its start (SEM-11).
 *Model note:* lowering accepts at most 64 containment links as a compiler sanity limit; a deeper
 chain is a loud finding, not a silent truncation.
 
@@ -410,7 +452,9 @@ nothing else.
   Web UI reading, dsl41's earlier behavior, as `same-run` (runner-design §8a). The runbook's
   "SEM-20 box clause" protocol settles which reading a live instance follows.
 - An iced member that has not run is out of its RUNNING box's fold, so the ON_ICE itself runs
-  the box's completion check (DL-285, SEM-11's third carve-out).
+  the box's completion check (DL-285, SEM-11's third carve-out), and under the default
+  `box-start-all-members-out=complete` a box whose members are all on ice when it starts
+  completes at its start (SEM-11, Q15).
 - ON_ICE sent to a STARTING or RUNNING job, box or not, is ignored (DL-254). **[V]** Source:
   "sendevent Command -- Change the Executable Status of a Job" (AutoSys 24.2), JOB_ON_ICE:
   "The event has no effect on jobs with a status of STARTING or RUNNING." The oracle sets no
@@ -1301,7 +1345,9 @@ starts only the head of a chain, nested, held and ON_NOEXEC variants (SEM-10, DL
 `test_sem10_second_box_run_*`) · T11 default box fold (SEM-11), T11 operator INACTIVE on a
 member completes the box and a waiting member still hangs it (SEM-11, DL-242:
 `test_sem11_member_set_inactive_*`, `test_sem11_failed_member_set_inactive_*`,
-`test_sem11_waiting_member_*`) ·
+`test_sem11_waiting_member_*`), T11 a box start that leaves no member in the run
+completes the box, and `box-start-all-members-out=wait` keeps it RUNNING (SEM-11, Q15:
+`test_sem11_box_start_*`) ·
 T12a internal box_success early-exit, T12b external box_success hung-RUNNING,
 T12c box_success over a grandchild fires transitively (SEM-12) ·
 T13 sticky TERMINATED box (SEM-13) · T14 terminator cascade both directions (SEM-14) ·
@@ -1471,7 +1517,11 @@ holds the probe that would settle it.
   KB 92872 adds the evaluation-trigger nuance: a box_success over global-only terms is
   re-evaluated at member completion moments, not on SET_GLOBAL, consistent with SEM-12's
   gating. The box_success-referencing-an-iced-MEMBER case itself is uncited. The
-  shared-evaluator pin (atom true) stands. Q6 has no code switch.
+  shared-evaluator pin (atom true) stands. Q6 has no code switch. The pin decides what such
+  an override reads at two completion moments: an ice on a member that has not run (DL-285),
+  and a box start that leaves no member in the run (SEM-11, Q15). Under a flip, a box whose
+  box_success names a member that is iced at its start stays RUNNING, the literal "not
+  scheduled" reading.
 - Q7 (SEM-09): closed (DL-58). KB 408778 states the composition; the rule is in SEM-09 and
   `ir.exit_is_success` implements it, shared with the UC twin (M31). Pinned by
   `test_dl33_exit_is_success_*` and `test_sem09*`.
@@ -1598,6 +1648,17 @@ holds the probe that would settle it.
   downstream of the box read the written status. This cannot hang or wrongly complete a box,
   since the box is already terminal. No switch, no code marker. The runbook's Q14 protocol
   settles it.
+- Q15 (SEM-11, DL-304): open, pinned default. What a box does when its start leaves no member in the
+  run: every direct member is on ice, or the box has no members. No vendor sentence names the
+  case. Two sentences compose to completion: Basic Box Job Concepts (AutoSys 12.0 and 24.2)
+  keeps a box RUNNING "as long as there are jobs in it with ACTIVATED or RUNNING status", and
+  Events (12.0 and 24.2), JOB_ON_ICE: "If the job is in a box, the scheduler does not execute
+  the job for the entire run of the box." The default `box-start-all-members-out=complete`
+  completes the box at its start; `wait` keeps it RUNNING until an operator acts, as dsl41
+  did before at a box start (runner-design §8a). The rest of DL-304 -- an iced member that
+  is live, or holds a live or queued job, is not out of the run -- applies under both
+  values. `# PENDING: Q15` marks the read in the oracle. The
+  runbook's Q15 protocol settles it.
 
 ## Sources
 Primary: Broadcom TechDocs, AutoSys Workload Automation 12.0/12.0.01/12.1/12.1.01 (Basic Box

@@ -1809,4 +1809,4 @@ def test_l011_empty_box_message_names_the_container() -> None:
     text = "insert_job: hollow\njob_type: b\n"
     catalog = lower_source(text)
     (violation,) = rule_l011(catalog, derive_graph(catalog))
-    assert "empty box never completes" in violation.message
+    assert violation.message.endswith("in or out (dangling container)")

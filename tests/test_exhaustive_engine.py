@@ -67,6 +67,8 @@ from dsl41.runner_hosts import HOST, LOCAL_EXECUTOR_ID, HostCommand, seed_local_
 from dsl41.runner_control import command
 from dsl41.runner_journal import SUBSCRIPTION, Journal, read_decisions, read_journal
 from dsl41.runner_ledger import STATE_MACHINE_VERSION
+from dsl41.semantics import DEFAULTS, SemanticSwitches
+from dsl41.semantics import resolve as resolve_switches
 from dsl41.runner_startup import start_run
 from dsl41.seal import StagedNextPeriod
 from dsl41.state_machine import (
@@ -159,6 +161,9 @@ _JOB_JIL = (
     "insert_job: fbm\njob_type: c\ncommand: m\nmachine: m1\nbox_name: fb\nauto_hold: 1\n"
     "box_terminator: 1\n" + _SCHEDULED
 )
+#: `box-start-all-members-out=wait`: a box started with every member iced
+#: stays RUNNING, as a box start did before the switch
+_WAIT = resolve_switches({"box-start-all-members-out": "wait"})
 _STATUSES = ("INACTIVE", "QUE_WAIT", "STARTING", "RUNNING", "SUCCESS", "FAILURE", "TERMINATED")
 #: every operator verb the oracle dispatches for a job, and an injected
 #: status of each kind (a completion, or CHANGE_STATUS)
@@ -231,7 +236,7 @@ def _row_state(oracle: Oracle, job: str) -> tuple[object, ...]:
     )
 
 
-def _job_builds() -> Iterator[tuple[list[_Step], tuple[str, ...]]]:
+def _job_builds() -> Iterator[tuple[list[_Step], tuple[str, ...], SemanticSwitches]]:
     """The input sequences for the targets, and the jobs each one's events
     address.
 
@@ -245,7 +250,11 @@ def _job_builds() -> Iterator[tuple[list[_Step], tuple[str, ...]]]:
     runs) or status, then the box's own flag, then each box status. The
     member carries box_terminator, so its FAILURE or TERMINATED in a
     running box ends the box (SEM-14). Last, the member iced, the box
-    running, the member taken off ice: it sits the run out (SEM-20)."""
+    running, the member taken off ice: it sits the run out (SEM-20). A
+    box started with its only member iced completes at its start under the
+    default `box-start-all-members-out=complete` (SEM-11), so that build
+    also runs under `wait`, where the forced box stays RUNNING and the
+    OFF_ICE marks the member. Every other build runs under the defaults."""
     for job in ("fj", "fa", "fd"):
         recipes = _status_recipes(job)
         for held in (False, True) if job == "fj" else (False,):
@@ -267,7 +276,7 @@ def _job_builds() -> Iterator[tuple[list[_Step], tuple[str, ...]]]:
                                 steps += recipe
                                 if flag is not None:
                                     steps.append((flag, job, {}))
-                                yield steps, (job,)
+                                yield steps, (job,), DEFAULTS
     fb = _status_recipes("fb")
     members: tuple[tuple[_Step, ...], ...] = (
         (),
@@ -285,9 +294,11 @@ def _job_builds() -> Iterator[tuple[list[_Step], tuple[str, ...]]]:
                     if flag is not None:
                         steps.append((flag, "fb", {}))
                     steps += recipe
-                    yield steps, ("fb", "fbm")
-    for recipe in fb["RUNNING"]:
-        yield [("ON_ICE", "fbm", {}), *recipe, ("OFF_ICE", "fbm", {})], ("fb", "fbm")
+                    yield steps, ("fb", "fbm"), DEFAULTS
+    for switches in (DEFAULTS, _WAIT):
+        for recipe in fb["RUNNING"]:
+            steps = [("ON_ICE", "fbm", {}), *recipe, ("OFF_ICE", "fbm", {})]
+            yield steps, ("fb", "fbm"), switches
 
 
 def test_every_job_event_in_every_built_flag_and_holding_state_takes_a_declared_transition(
@@ -315,13 +326,16 @@ def test_every_job_event_in_every_built_flag_and_holding_state_takes_a_declared_
     default switches, `off-ice-in-running-box=next-run` and
     `box-terminator-on-terminated=true`. Their other values add no state
     or move: `same-run` sets no mark, and `false` takes job_status.30 on
-    FAILURE only, a move the default takes too."""
+    FAILURE only, a move the default takes too. One build also runs under
+    `box-start-all-members-out=wait` (see `_job_builds`); `complete` reaches
+    no state of its own, since a box that completes at its start reads as
+    one given SUCCESS."""
     catalog = lower_source(_JOB_JIL)
     reached: set[tuple[object, ...]] = set()
     missing: list[str] = []
     applied = 0
-    for steps, targets in _job_builds():
-        base = Oracle(catalog)
+    for steps, targets, switches in _job_builds():
+        base = Oracle(catalog, semantics=switches)
         _feed_all(base, steps)
         state = tuple(_row_state(base, job) for job in targets)
         if state in reached:

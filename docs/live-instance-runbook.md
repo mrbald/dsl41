@@ -238,8 +238,10 @@ sleep 60; autorep -J dsl41_q6_box%
 
 If the final box status is SUCCESS, ice satisfies box_success (dsl41's
 SEM-05/DL-13 pin — Q6 closes as pinned). dsl41 also completes the box at
-the ice itself when the iced member has not run in a RUNNING box (DL-285);
-that completion rests on this pin, so a flip moves it too. If the box stays RUNNING after
+the ice itself when the iced member has not run in a RUNNING box (DL-285),
+and at a box start that leaves no member in the run (SEM-11, Q15). Both
+completions rest on this pin when box_success names an iced member, so a
+flip moves them too. If the box stays RUNNING after
 `dsl41_q6_n` completes, box_success does NOT read the iced member as
 success (flip: the "not scheduled" clause wins). If the final box status
 is FAILURE, the flip is the same, in a harder form. Capture `autorep -J
@@ -513,6 +515,51 @@ If `_c` runs once `_s` starts, dsl41's direct-box reading holds. If `_c`
 never runs and `_s` ends SUCCESS without it, the vendor reads the rule
 through the subbox; the mark would then belong on every running box
 above the member. Cleanup: run `jil <<< "delete_box: dsl41_oin"`.
+
+### Q15 — a box whose start leaves no member in the run (~1 minute, runs no job)
+
+No vendor sentence names a box whose members are all on ice when it
+starts, or a box with no members. dsl41's default
+`box-start-all-members-out=complete` completes such a box at its start
+(dossier SEM-11, §9 Q15); `wait` keeps it RUNNING. Box `_q15` has two
+iced members; box `_q15_e` has none.
+
+```
+jil <<'EOF'
+insert_job: dsl41_q15
+job_type: b
+insert_job: dsl41_q15_a
+job_type: c
+box_name: dsl41_q15
+machine: <M>
+command: /bin/true
+insert_job: dsl41_q15_c
+job_type: c
+box_name: dsl41_q15
+machine: <M>
+command: /bin/true
+condition: s(dsl41_q15_a)
+insert_job: dsl41_q15_e
+job_type: b
+EOF
+sendevent -E JOB_ON_ICE -J dsl41_q15_a
+sendevent -E JOB_ON_ICE -J dsl41_q15_c
+sendevent -E STARTJOB -J dsl41_q15
+sendevent -E STARTJOB -J dsl41_q15_e
+sleep 30; autorep -J dsl41_q15% -d; autorep -J dsl41_q15_e -d
+```
+
+Readings, for each box on its own:
+
+- SUCCESS: the default `complete` holds. Q15 closes as pinned, and the
+  registry's `autosys` value becomes `complete`.
+- RUNNING after 30 seconds and still after five minutes: the vendor
+  keeps the box running. The default flips to `wait`, which moves the
+  state machine version; `complete` stays selectable.
+
+The two boxes may differ; record each. Capture the event_demon lines
+for both boxes. Cleanup: run `jil <<< "delete_box: dsl41_q15"` and
+`jil <<< "delete_box: dsl41_q15_e"`.
 
 ### Q3c — does a member's latched tick survive into the next box run
 
