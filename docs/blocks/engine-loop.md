@@ -28,24 +28,28 @@ Every durable write happens after the choice, in admission, dispatch or the seal
 
 ## States
 
+The work choice is a policy, not a declared machine; [the policies](policies.md#work-choice) say why.
+The seal's phases are [seal_boundary](../state-machines.md#seal_boundary), explained in [seal and lineage](seal-and-lineage.md).
+The flowchart shows one turn of the loop:
+
 ```mermaid
-stateDiagram-v2
-    [*] --> Settle
-    Settle --> Boundary: a seal request is waiting
-    Boundary --> Settle: seal refused, period stays open
-    Boundary --> [*]: seal committed
-    Boundary --> [*]: fail-stop, no abort and no answer
-    Settle --> Choose
-    Choose --> TakeInput: a queued input is takeable
-    Choose --> TakeTick: a calendar tick is takeable
-    Choose --> FireTimer: a timer is takeable
-    Choose --> Wait: real clock, work not yet due
-    Choose --> [*]: quiescent, return the emitted events
-    TakeInput --> Dispatch: admitted and decided
-    FireTimer --> Dispatch: admitted and decided
-    TakeTick --> Settle: STARTJOB inputs queued
-    Dispatch --> Settle
-    Wait --> Settle: instant reached or activity
+flowchart TD
+    turn(["loop turn"]) --> settle["Settle"]
+    settle --> sealq{"a seal request waiting?"}
+    sealq -->|"yes"| boundary["run the seal boundary"]
+    boundary -->|"refused: the period stays open"| settle
+    boundary -->|"committed, or a fail-stop"| ends(["the loop ends"])
+    sealq -->|"no"| choose{"choose"}
+    choose -->|"a queued input is takeable"| input["admit and decide the input"]
+    choose -->|"a calendar tick is takeable"| tick["queue its STARTJOB inputs"]
+    choose -->|"a timer is takeable"| timer["admit and decide the timer"]
+    choose -->|"real clock, work not yet due"| wait["wait for the instant or activity"]
+    choose -->|"quiescent"| quiet(["return the emitted events"])
+    input --> dispatch["dispatch"]
+    timer --> dispatch
+    dispatch --> settle
+    tick --> settle
+    wait --> settle
 ```
 
 ## Invariants

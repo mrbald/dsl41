@@ -19928,3 +19928,43 @@ relitigate an entry; append a new one.
   the box completes, was applied after round three. All are fixed, and reverting each fix or flipping each default
   fails a test, confirmed by the reviewer that raised it. The earlier
   switch values pass every earlier test unchanged.
+- DL-302 Block cards link the generated state machines; a state diagram
+  appears only where a declared machine backs it
+  (2026-10-09; docs/blocks/README.md, admission.md, box-execution.md,
+  capacity.md, effect-outbox.md, engine-loop.md, fw-observation.md,
+  job-lifecycle.md, scheduler.md, spawn-idempotency.md, supervisor.md,
+  wrapper.md, and the new host-routing.md, subscription.md,
+  seal-and-lineage.md, policies.md; tests/test_block_cards.py)
+  THE RULE. The state machines of DL-289 are declared in
+  src/dsl41/machines.py and generated into docs/state-machines.md, where
+  every transition is tested. A block card now links its machines' tables
+  and diagrams there by anchor and draws no state diagram of its own. A
+  hand-drawn diagram could drift from the code; the generated one cannot. A
+  card for a block with no declared machine may keep a flowchart with no
+  state notation, and either links its paragraph in policies.md or says on
+  the card why it has no machine.
+  THE CARDS. Six cards dropped their hand-drawn state diagrams for links:
+  job lifecycle, box execution, capacity, admission, effect outbox and
+  supervisor. Five redrew theirs as flowcharts: engine loop, FW
+  observation, scheduler, SPAWN idempotency and wrapper. Three cards are
+  new: host routing (`host`), the control subscription (`subscription`),
+  and seal and lineage (`anchor_head`, `period_row`, `seal_boundary`).
+  policies.md gives one paragraph each to scheduler frontier, work choice,
+  access, retention, wrapper outcome, SPAWN idempotency, leadership and
+  audit: what it decides, why it is not a state machine, and where its
+  rules live. Retention and audit name the verified attestation file and
+  the archive receipt as their authority, not the registry row. The
+  index's Machines table maps all 14 machines to their cards. Every card
+  is at most 120 lines.
+  THE CHECK. tests/test_block_cards.py fails when a card is missing from
+  the index, a card passes 120 lines, the Machines table differs from
+  `MACHINES` or lists a machine twice, an anchor is not a heading in
+  docs/state-machines.md, a machine's card does not link it or draws a
+  Mermaid block, or any page under docs/blocks/ contains `stateDiagram`.
+  REVIEW. One Opus reviewer, two rounds. It found two major errors: the
+  retention and audit paragraphs named the registry row as the stored
+  fact, where the code trusts the attestation file. It also found thirteen
+  minor errors: wrong routing and replay claims, partial copies of frozen
+  orders and wire shapes instead of links, and a test that accepted a
+  card listed outside the card list. All are fixed and confirmed by the
+  reviewer; its last two wording notes were applied after round two.

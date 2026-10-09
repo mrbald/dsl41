@@ -22,26 +22,10 @@ A live box has no effect and no execution entry ([period-model §3.5](../period-
 
 ## States
 
-```mermaid
-stateDiagram-v2
-    [*] --> INACTIVE
-    INACTIVE --> STARTING: start, contained jobs reset
-    STARTING --> RUNNING: then members attempted, run windows decided
-    RUNNING --> SUCCESS: override met, or fold with no failed vote
-    RUNNING --> FAILURE: override met, or fold with a failed vote
-    RUNNING --> TERMINATED: KILLJOB, box_terminator member failed or terminated
-    RUNNING --> INACTIVE: CHANGE_STATUS INACTIVE cascades
-    SUCCESS --> STARTING: next box start
-    FAILURE --> STARTING: next box start
-    TERMINATED --> STARTING: next box start
-    note right of RUNNING
-        Stays RUNNING while a member that is not iced or resolved has not run.
-        TERMINATED ignores member changes until the next start.
-    end note
-```
-
-The diagram leaves out the idle re-derivation edges between INACTIVE, SUCCESS and FAILURE.
-[SEM-15](../autosys-semantics.md#sem-15--member-status-changes-can-ripple-upward-vc) holds their table.
+A box has no machine of its own.
+Its moves are the [job_status](../state-machines.md#job_status) transitions whose trigger or guard concerns a box or its members.
+That anchor holds the generated diagram and transition table.
+The idle re-derivation rows follow the vendor table in [SEM-15](../autosys-semantics.md#sem-15--member-status-changes-can-ripple-upward-vc).
 
 ## Invariants
 

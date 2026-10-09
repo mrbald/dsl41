@@ -28,24 +28,19 @@ Its rules carry over to a store that returns a segment's records in order, becau
 
 ## States
 
-One job's schedule plan:
+The frontier is a calculation, not a declared machine; [the policies](policies.md#scheduler-frontier) say why.
+The flowchart shows how one job's ticks are computed:
 
 ```mermaid
-stateDiagram-v2
-    [*] --> Anchored: genesis, or resume at the frontier
-    Anchored --> Waiting: next tick at or after the anchor
-    Anchored --> Sweeping: resume
-    Sweeping --> Waiting: each derived tick skipped or dropped
-    Waiting --> Admitted: tick due, STARTJOB journaled as an input
-    Admitted --> Waiting: next tick computed
-    Waiting --> Dormant: calendar has no eligible day left
-    Waiting --> CutOff: a seal admits every tick up to its cutoff
-    CutOff --> [*]
-    note right of Sweeping
-        Skipped: already admitted or dropped in this segment,
-        or owned by the previous period's cutoff.
-        Dropped: missed while the engine was down, never fired late.
-    end note
+flowchart TD
+    anchor(["anchor at genesis, or at the frontier on resume"]) --> resumed{"a resume?"}
+    resumed -->|"yes"| sweep["sweep the ticks up to now: skip or drop each"]
+    resumed -->|"no"| next
+    sweep --> next["compute the next tick at or after the anchor"]
+    next -->|"no eligible day left"| dormant(["dormant"])
+    next -->|"the tick is due"| admit["journal its STARTJOB as an input"]
+    admit --> next
+    next -->|"a seal cuts off"| cutoff(["the seal admits every tick up to its cutoff"])
 ```
 
 ## Invariants
