@@ -1,52 +1,84 @@
 # Simulation coverage register
 
 This register lists every behaviour the simulation side of dsl41 can meet
-and says what it does with it. The compiler side fails closed: lowering
-refuses unknown attributes (DL-07), the UC backend refuses R-rows and
-records every A-row assumption, and `minify` refuses what it cannot
-classify. The simulation side runs on classified choices and on pinned
-defaults. Each default is a `provisional` row, and the `marker` column
-says whether the code carries a `PENDING` marker for it. This register
-lists them by classification, not by frequency. If a construct can occur,
-it is modelled, refused, or listed here as an explicit assumption.
+and says what the simulation does with it. The compiler side fails closed:
+lowering refuses unknown attributes that are not allow-listed (DL-07), the
+UC backend refuses R-rows and records every A-row assumption, and `minify`
+refuses what it cannot classify. The simulation side runs on classified
+choices and on pinned defaults. A pinned default that waits on an open
+question is a `provisional` row. Rows are chosen by classification, not by
+how often an estate meets the behaviour. If a construct can occur, it is
+modelled, refused, or listed here as an explicit assumption.
+
+The register covers estate-facing behaviour. It does not restate the runner
+protocol vocabularies, such as host states and verbs. The frozen runner
+contracts own those.
 
 Each row has one of four classes.
 
 - `supported`: the behaviour is modelled; the citation says how.
-- `provisional`: a pinned default under an open question. The label names
-  its open question; a row with no label says so and cites where the
-  default is pinned. The `marker` column says `yes` when the code carries
-  a `PENDING` marker for it, and the `protocol` column names the runbook
-  section that would settle it.
+- `provisional`: a pinned default under an open question. The `label`
+  column names the question. A row with no label says so in its effect and
+  cites where the default is pinned. The `marker` column says `yes` when
+  the code carries a `PENDING` marker for it. The `protocol` column names
+  the runbook section that would settle it.
 - `refused`: the behaviour is refused loudly; the citation is the refusing
   site.
 - `passthrough`: the input is carried verbatim; the effect column names what
   is not implemented.
 
+A row id is `surface:member`. A sub-behaviour of a member adds `#facet`. The
+`bound` column gives the limit of a bounded search, and the effect repeats
+it.
+
 Two readings are distinct. A static finding is exposure: the input may make
 the behaviour apply. A runtime finding is an application: it did apply.
-Rows here describe exposure. No collector records applications. The
-`detector` column says how far a row's scope is proven: `generic` means the
-test proves the scope fixtures with a static detector, `none` means scope
-fixtures only, and `unreachable` means no input reaches the member. No run
+Rows here describe exposure. No collector records applications, so no run
 output may claim a row was assessed.
+
+The `detector` column says how far a row's scope is proven. Every row has a
+trigger fixture, where the behaviour may apply, and a quiet fixture, where
+it does not.
+
+- `generic`: a reachable member row on a derived surface. The surface's one
+  detector in the test finds the member in the trigger fixture and not in the quiet
+  fixture.
+- `none`: a facet row or a row on `runtime` or `adapter_policy`. The test
+  checks only that the fixtures are well formed for their kind and reach
+  the engine. A refused row's fixture must be refused.
+- `unreachable`: no input reaches the member. The code can still emit it,
+  as a defensive gate behind an earlier refusal.
 
 Three limits hold for every row. A replay against recorded history proves
 agreement on that history only. A probe result binds to the scheduler and
 agent version, platform, configuration, and preconditions it ran under. A
-bounded search proves absence within its bound only; the `bound` column
-says how far.
+bounded search proves absence within its bound only.
 
 The rows are data in `src/dsl41/simulation_register_rows.py`. The table
-below is generated from them by `scripts/render_simulation_coverage.py`,
-and `tests/test_simulation_register.py` fails when the two differ. The same
-test derives the domain of every surface except `runtime` and
-`adapter_policy` from the code's own inventories (attributes, tokens, event
-kinds, statuses, profile fields, adapter and wrapper outcomes, event
-provenances, trace markers, preflight codes, calendar serializations,
-closed Literal alternatives, `PENDING` marker sites, and the rest), so a
-member of any derived surface without a row, or a row whose member is gone,
-fails the suite.
+below is generated from them by `scripts/render_simulation_coverage.py`.
+`tests/test_simulation_register.py` fails when the two differ. Do not edit
+the table by hand.
+
+The same test derives the domain of every surface except `runtime` and
+`adapter_policy` from the code's own inventories, such as attributes, statements,
+condition grammar rules and terminals, calendar keywords, families,
+operators, actions and forms, event kinds, statuses, timers, profile fields,
+adapter and wrapper outcomes, event provenances, trace markers, preflight
+codes, resource types, release policies, machine verdicts, and closed
+Literal alternatives. A member of a derived surface
+without a row fails the suite. So does a row whose member is gone.
+
+Facet rows and the `runtime` and `adapter_policy` rows have no derived
+domain. Review closes them. Two more checks narrow that space.
+
+A row for a regex-bodied member carries the exact pattern. An edit to the
+pattern fails the test until the row is revisited.
+
+Every simulation `PENDING` marker site in `src/dsl41` is claimed by exactly
+one row. The claiming row names the open question. The UC backend's `U`
+markers are not simulation defaults and are not in the register. The `Q8x`
+marker in the calendar module's docstring names the Q8 family and pins
+nothing.
 
 <!-- register:begin -->
 
