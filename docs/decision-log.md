@@ -20360,3 +20360,27 @@ relitigate an entry; append a new one.
   survive because no input can tell them apart from the code (a bare ice
   check on the changed member, and the batch's run read taken after its
   first box rule instead of before).
+- DL-310 A period's per-input cost no longer grows with the period, and a
+  trace call costs what it returns
+  (2026-10-09; src/dsl41/runner.py, runner_effects.py, runner_control.py,
+  oracle.py; tests/test_perf_equivalence.py)
+  THE COST. A measurement at the tested size (200 jobs, at most 20
+  running at once, about 1,000 launches a day) found two costs that grow
+  with a period's length. `Engine._plan_effects` rebuilt a
+  run_id map from the whole outbox on every input: by day 8 of one period
+  it was 80% of the engine's CPU, and by day 30 an input took 16 ms. The
+  control `trace` verb copied the whole oracle trace on every call, even
+  with `since`: 0.2 s a call at day 30, while the TUI polls every 2 s.
+  THE FIX. The outbox keeps the map of spawned runs as it records each
+  effect, and the planner reads it. It is a map of its own: the outbox's
+  existing run_id map also holds KILL bindings, and reading that one would
+  change an answer. `Oracle.trace_since` copies only the entries after
+  `since`. With 64k outbox entries an input's map read dropped from 21 ms
+  to a constant; with 64k trace entries an empty answer dropped from 69 ms
+  to under 0.01 ms. No answer, trace, journal record or state changes:
+  tests pin both against the old computation, at every `since` edge and
+  on every record shape. Forking the oracle for a control input's dry run
+  (DL-292) still copies the trace; operator commands are rare, so it stays.
+  REVIEW. One Opus reviewer, behavior-preserving class. It checked that
+  every outbox write goes through `record()`, ran 14 mutants that the
+  tests all caught, and found nothing material.
