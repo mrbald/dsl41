@@ -391,10 +391,13 @@ async def _interleaving(run_root: Path, schedule: FaultSchedule) -> ModelRun:
     at = run.clock.now()
     run.inject(Event(at=at, kind="STARTJOB", payload={"job": "solo"}))
     run.inject(Event(at=at, kind="STARTJOB", payload={"job": "bx"}))
-    for step in range(_STEPS):
-        await run.run_to(at + timedelta(seconds=10 * step))
-        await schedule.at(run, step)
-    await run.settle(at + timedelta(hours=1))
+    try:
+        for step in range(_STEPS):
+            await run.run_to(at + timedelta(seconds=10 * step))
+            await schedule.at(run, step)
+        await run.settle(at + timedelta(hours=1))
+    finally:
+        await run.close()  # the checks read the spawn log, which outlives the engine
     return run
 
 

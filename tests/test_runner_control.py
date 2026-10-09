@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import get_args
 
 import pytest
+from proc_pipes import close_pipes
 import typer
 from typer.testing import CliRunner
 
@@ -1446,6 +1447,7 @@ def test_cli_run_subprocess_sendevent_and_query_end_to_end(short_root: Path) -> 
         if proc.poll() is None:
             proc.kill()
             proc.wait()
+        close_pipes(proc)
 
 
 def _release_held_cli(sock_path: Path, *args: str) -> subprocess.CompletedProcess:
@@ -1541,6 +1543,7 @@ def test_cli_release_held_sweeps_every_held_job(short_root: Path) -> None:
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
+        close_pipes(proc)
 
 
 # --------------------------------------------------- 7. status query extensions (11d, DL-46)

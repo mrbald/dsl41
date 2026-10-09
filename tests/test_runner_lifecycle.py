@@ -36,6 +36,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+from proc_pipes import close_pipes
 
 if not sys.platform.startswith(("linux", "darwin")):  # pragma: no cover
     pytest.skip("lifecycle tier is POSIX-only", allow_module_level=True)
@@ -444,6 +445,7 @@ def test_wrapper_graceful_sigterm_reaches_command_on_parent_loss(tmp_path: Path)
     wait_for(lambda: (run_dir / "spawn.json").exists())
     os.kill(parent.pid, signal.SIGKILL)  # lifeline EOF fires even under -9
     parent.wait()
+    close_pipes(parent)
     status = wait_for(
         lambda: (run_dir / "status.json").exists() and read_json(run_dir / "status.json")
     )
@@ -507,6 +509,7 @@ def test_lifeline_write_end_leaks_nowhere(tmp_path: Path) -> None:
         wait_for(lambda d=d: (d / "spawn.json").exists())
     os.kill(parent.pid, signal.SIGKILL)
     parent.wait()
+    close_pipes(parent)
     for d in dirs:
         status = wait_for(lambda d=d: (d / "status.json").exists() and read_json(d / "status.json"))
         assert status["outcome"] == "terminated", (d.name, status)
@@ -870,6 +873,7 @@ def test_sigkill_engine_midrun_then_resume(tmp_path: Path) -> None:
         if driver.poll() is None:
             driver.kill()
             driver.wait()
+        close_pipes(driver)
 
     # tethered: both wrappers record parent-lost kills without any help
     for job in ("slow_one", "slow_two"):

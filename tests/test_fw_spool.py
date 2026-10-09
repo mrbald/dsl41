@@ -527,6 +527,8 @@ def test_resume_watch_falls_back_to_the_conventional_run_dir_when_none_is_named(
     last_at = T0 + timedelta(seconds=120)
 
     _resume_watch(engine, job_ir, 1, None, T0)  # run_dir=None: must fall back
+    assert engine.journal is not None
+    engine.journal.close()  # the assertions read the queue, not the log
 
     assert len(engine._queue) == 1
     _, _, pending = engine._queue[0]

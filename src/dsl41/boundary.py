@@ -53,6 +53,7 @@ these checks also serve audit and retention, where the code is unread.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -2798,7 +2799,8 @@ def open_next_period(
     # visible in both places for the life of both artifacts
     forced = pending_reclaim(stored, opening.period_id)
     path = open_wal(run_root, opening.segment_no)
-    if path.exists():
+    existing = path.exists()
+    if existing:
         _check_existing_segment(path, opening, link, forced)
         # a previous opener may have died between its write and its fsync:
         # readable is not durable, and the CAS below relies on this file
@@ -2821,16 +2823,23 @@ def open_next_period(
             opens_from_seal=link,
             reclaimed=None if forced is None else forced.model_dump(mode="json"),
         )
-        fsync_dir(path.parent)
-    crash_point("after_opening_segment")
-    if claim is not None:
-        anchor.open_claimed(claim_id=claim.claim_id, period_id=opening.period_id, root=run_root)
-    crash_point("after_open_cas")
-    return OpenedPeriod(
-        opened=open_from_seal(seal, expected_digest=seal.digest, manifest=committed.manifest),
-        journal=journal,
-        claim=claim,
-    )
+    try:
+        if not existing:
+            fsync_dir(path.parent)
+        crash_point("after_opening_segment")
+        if claim is not None:
+            anchor.open_claimed(claim_id=claim.claim_id, period_id=opening.period_id, root=run_root)
+        crash_point("after_open_cas")
+        opened = open_from_seal(seal, expected_digest=seal.digest, manifest=committed.manifest)
+    except BaseException:
+        # the opener failed past the point where the caller gets the journal:
+        # close the descriptor, and leave the term where it is (as `detach`
+        # says), so the caller's own cleanup decides about the lock. A failing
+        # flush must not replace the error that got us here
+        with contextlib.suppress(OSError, ValueError):
+            journal.detach()
+        raise
+    return OpenedPeriod(opened=opened, journal=journal, claim=claim)
 
 
 def pending_reclaim(anchor: Anchor, next_period: int) -> Reclaimed | None:
