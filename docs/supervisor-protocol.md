@@ -1,66 +1,65 @@
 # Supervisor protocol — the lifecycle tier's public contract
 
-Status: the spool format and the wrapper input spec are frozen (DL-42
-item 3), and the supervisor socket protocol is frozen (DL-48); amended by
-DL-129, DL-150, DL-151, DL-210, DL-291 and DL-300, each cited where it
-applies. This
-document is the future extraction boundary. If the lifecycle tier (the
-five modules of §1) is extracted (DL-42 triggers), this document is its
-public API. Each change to a frozen item requires a decision-log entry.
+Status: frozen. DL-42 item 3 freezes the spool format and the wrapper
+input spec, and DL-48 freezes the supervisor socket protocol. Entries
+that amend it include DL-80, DL-129, DL-150, DL-151, DL-210, DL-229,
+DL-291 and DL-300; each is cited where it applies. Each change to a frozen item needs a decision-log entry. This
+document is the extraction boundary of the lifecycle tier (the five
+modules of §1). If a DL-42 trigger fires and the tier is extracted, this
+document is its public API.
 
-The tier is deliberately dumb. It records process lifecycle facts durably
-and does nothing else. It has no conditions, no retries, no policy, and no
-scheduling timers. The time bounds it does keep are lifecycle bounds only
-(DL-150): the lease TTL, the SHUTDOWN waits, the two-second output drain at
-teardown, the startup PING probe, and the optional deadman (all §5). The
-supervisor loop also reaps on a one-second tick, so a coalesced SIGCHLD is
-not missed. None of them decides what runs. Scheduling semantics
-live in the orchestrator (dsl41's oracle). Dashboards of meaning live in
-the orchestrator's UI (DL-42 item 6).
+The tier is deliberately dumb. It records process lifecycle facts
+durably and does nothing else.
+It has no conditions, no retries, no policy and no scheduling timers. Its
+time bounds are lifecycle bounds only (DL-150): the lease TTL, the
+SHUTDOWN waits, the two-second output drain at teardown, the startup PING
+probe and the optional deadman (all §5). The supervisor loop also reaps on
+a one-second tick, so that a coalesced SIGCHLD is not missed. None of
+these bounds decides what runs. Scheduling semantics live in the
+orchestrator (dsl41's oracle). Dashboards of meaning live in the
+orchestrator's UI (DL-42 item 6).
 
 ## 1. Roles
 
 - **wrapper** (`runner_wrapper.py`): the per-run shim and the direct
   parent of the command. It is the one process that cannot miss the exit
-  status, and it writes the status durably. It is parent-agnostic: the
-  engine and the supervisor spawn it identically. It is stdlib-only, and an
-  import test enforces this
+  status, and it writes the status durably. The engine and the supervisor
+  spawn it the same way. It imports only the standard library and the
+  tier's own stdlib-only modules below, and an import test enforces this
   boundary.
-- **supervisor** (`runner_supervisor.py`): keeps parenthood
-  alive across engine restarts. It owns the wrapper lifelines. Thus an
-  engine restart REATTACHES and does not kill the jobs (E4 dissolved). It
-  speaks the §5 socket protocol (SPAWN/SIGNAL/LIST/SHUTDOWN/PING + lease
-  verbs). It is stdlib-only and runs by file path — the same enforced
-  boundary as the wrapper.
+- **supervisor** (`runner_supervisor.py`): keeps parenthood alive across
+  engine restarts. It owns the wrapper lifelines, so an engine restart
+  REATTACHES to the jobs and does not kill them (E4 dissolved). It speaks
+  the §5 socket protocol: SPAWN, SIGNAL, LIST, SHUTDOWN, PING and the lease
+  verbs. It imports only the standard library and the tier's own
+  stdlib-only modules below, and runs by file path, under the same
+  enforced boundary as the wrapper.
 - **process identity** (`runner_procid.py`, DL-72): the one copy of the
-  durability liturgy, the boot-session id, the (pid, start-time)
-  PID-reuse guard and the quiet group kill that the two above share. It
-  is a sibling *inside* the boundary: stdlib-only itself, imported by
-  both under its plain top-level name, and covered by the same import
-  test.
+  durability liturgy, the boot-session id, the (pid, start-time) PID-reuse
+  guard and the quiet group kill. The wrapper and the supervisor share it.
+  It is a sibling *inside* the boundary: it imports the standard library
+  only, both import it under its plain top-level name, and the same import
+  test covers it.
 - **canonical form** (`canon.py`, DL-129): the one implementation of the
-  §3.2 canonical form (`docs/period-model.md`) that the supervisor's three
-  §3 records are written in and read back through. It is the second
-  sibling inside the boundary (DL-150), on the same terms:
-  stdlib-only itself, imported by the supervisor under its plain
-  top-level name, and covered by the same import test. The wrapper does
-  not import it.
-- **state-machine core** (`state_machine.py`): the declared transitions
-  of the supervisor's process and lease machines, and the one check that
-  takes them. It is the third sibling inside the boundary, on the same
-  terms: stdlib-only itself, imported by the supervisor under its plain
-  top-level name, and covered by the same import test. The wrapper does
-  not import it.
+  §3.2 canonical form (`docs/period-model.md`). The supervisor writes its
+  three §3 records in this form and reads them back through it. It is the
+  second sibling inside the boundary (DL-150), on the same terms: standard
+  library only, imported by the supervisor under its plain top-level name,
+  and covered by the same import test. The wrapper does not import it.
+- **state-machine core** (`state_machine.py`, DL-291): the declared
+  transitions of the supervisor's process and lease machines, and the one
+  check that takes them. It is the third sibling inside the boundary, on
+  the same terms as `canon.py`. The wrapper does not import it.
 
 Extraction takes all five files or none.
 
 ## 2. Wrapper input spec (frozen)
 
 The input is a single JSON object on the wrapper's stdin. After the
-wrapper reads the object, it repoints stdin at /dev/null. The spawner
-runs the wrapper **by file path** (`sys.executable <path>/runner_wrapper.py`),
-never with `-m`. Thus the runtime imports of the wrapper stay
-stdlib-only.
+wrapper reads the object, it points stdin at /dev/null. The spawner runs
+the wrapper **by file path** (`sys.executable <path>/runner_wrapper.py`),
+never with `-m`, so the wrapper's runtime imports stay in the standard
+library.
 
 ```json
 {
@@ -78,94 +77,97 @@ stdlib-only.
 }
 ```
 
-`run_id` is checked
-against a **filename-safe grammar** at the wire —
-`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`, the
-canonical uuid4 string form the adapter mints (DL-129; period-model §11a).
-It names a
-directory entry now (§3), so anything else is refused before anything is
-created. `run_dir` must be `<run_root>/runs/<job>.<run_number>`: the
-supervisor owns that path, and one `run_id` maps to one `(job, run_number)`
-maps to one directory, in both directions. The two are compared as **resolved
-paths**, not as strings — the engine and the supervisor are told the run root
-separately, and `./r`, `/abs/r` and a symlinked `/tmp/r` are one directory.
+`run_id` must match a **filename-safe grammar** at the wire:
+`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`.
+This is the canonical uuid4 string form that the adapter mints (DL-129;
+period-model §11a). The `run_id` names a directory entry (§3), so any
+other value is refused before anything is created.
+
+`run_dir` must be `<run_root>/runs/<job>.<run_number>`. The supervisor
+owns that path. The mapping is one to one in both directions: one
+`run_id`, one `(job, run_number)`, one directory. The two paths are
+compared as **resolved paths**, not as strings. The engine and the
+supervisor are told the run root separately, and `./r`, `/abs/r` and a
+symlinked `/tmp/r` are one directory.
 
 - `lifeline_fd`: the read end of a pipe. Its **write end lives in exactly
-  one process — the spawner** (fd-hygiene invariant, leak-tested). EOF on
+  one process, the spawner** (fd-hygiene invariant, leak-tested). EOF on
   this fd means that the parent died, `kill -9` included.
-- `stdin_path: null` means /dev/null. Append on stdout/stderr is vendor
-  parity (AutoSys appends to std_out_file/std_err_file).
+- `stdin_path: null` means /dev/null. The wrapper opens stdout and stderr
+  for append, as AutoSys appends to std_out_file and std_err_file (vendor
+  parity).
 - `grace_seconds`: the SIGTERM→SIGKILL escalation window for the
-  parent-loss kill. The spawner reuses the same value for its own kills.
+  parent-loss kill. The spawner uses the same value for its own kills.
 
-The supervisor checks the whole object before it
-writes anything durable (§5) (DL-150). Every key above is required except
-`lifeline_fd`, which the supervisor fills. `version`, `run_number` and
-`lifeline_fd` are integers and never booleans. `run_id`, `job`,
-`command`, `run_dir`, `stdout_path` and `stderr_path` are strings.
-`stdin_path` is a string or null. `grace_seconds`
-is a **finite** number, zero or more: §5's SHUTDOWN escalates TERM→KILL
-after that many seconds, so an `Infinity` makes the whole orderly
-shutdown unbounded (DL-151). `job` names one directory component: it must not be
-empty, must not hold a path separator, and must not be `.` or `..`.
-**No string value may hold a NUL**, in `job`, in
-`command` or in any path (DL-151). An embedded null makes `os.path`, `os.open`
-and the spawn raise `ValueError` rather than `OSError`, so one that
-passed this gate would be no refusal but a wrapper killed after the fork
-with no `status.json`, the §3 absence that means the machine died.
-An **unknown key is refused** (`bad_spec`). The object is frozen, so a
-key this list does not name is a key whose type is not pinned either, and
-the receipt
-fingerprint (§3) stays injective only over pinned types. This is the one
-place in the protocol where an unknown field refuses rather than being
-ignored: §5's forward-compatibility rule covers the fields of a REQUEST,
+The supervisor checks the whole object before it writes anything durable
+(§5, DL-150). Every key above is required except `lifeline_fd`, which the
+supervisor fills. `version`, `run_number` and `lifeline_fd` are integers,
+never booleans. `run_id`, `job`, `command`, `run_dir`, `stdout_path` and
+`stderr_path` are strings. `stdin_path` is a string or null.
+`grace_seconds` is a **finite** number, zero or more. §5's SHUTDOWN
+escalates TERM→KILL after that many seconds, so an `Infinity` would make
+the whole orderly shutdown unbounded (DL-151). `job` names one directory
+component: it must not be empty, must not hold a path separator, and must
+not be `.` or `..`.
+
+**No string value may hold a NUL**: not `job`, not `command`, not any path
+(DL-151). An embedded NUL makes `os.path`, `os.open` and the spawn raise
+`ValueError`, not `OSError`. The check refuses it by name, as
+`bad_spec`, before anything durable is written. Unchecked, a NUL in
+`job` or `run_dir` would reach the supervisor's own path calls and
+answer `internal:`; a NUL in `command` or a stdio path would reach the
+wrapper, which records the spawn as `spawn_failed`.
+
+An **unknown key is refused** (`bad_spec`). The object is frozen, so a key
+that this list does not name has no pinned type, and the receipt
+fingerprint (§3) is injective only over pinned types. This is the one
+place in the protocol where an unknown field refuses instead of being
+ignored. §5's forward-compatibility rule covers the fields of a request,
 not the keys inside `spec`.
 
 ## 3. Spool format (frozen)
 
 `spawn.json`, `status.json`, `receipt.json` and `reply.json` live in
-`run_dir`. The one file below that does not is the
-`run_id` index entry, at `<run_root>/runs/.by_run_id/<run_id>` (DL-150). Every
-write uses the durability
-liturgy: same-directory temp file, fsync(file), rename, fsync(directory).
-`run_dir` must be on a **local** filesystem (rename-over-NFS has
-ambiguous crash semantics). Each file is a single JSON object, with
-sort_keys and one trailing newline. Consumers must ignore unknown fields
-(forward compatibility). `version` increases only on an incompatible
-change.
+`run_dir`. One spool file lives elsewhere: the `run_id` index entry, at
+`<run_root>/runs/.by_run_id/<run_id>` (DL-150). Every write uses the
+durability liturgy: a temp file in the same directory, fsync(file),
+rename, fsync(directory). `run_dir` must be on a **local** filesystem,
+because a rename over NFS has ambiguous crash semantics. Each file holds a
+single JSON object. The wrapper writes its two files, `spawn.json` and
+`status.json`, with sorted keys and one trailing newline. Consumers must
+ignore unknown fields (forward compatibility). `version` increases only
+on an incompatible change.
 
-A consumer of `spawn.json` or `status.json` must
-**refuse** a `version` it does not implement, and `true` and `1.0` are
-not the integer 1 (DL-151). Tolerant on fields, strict on versions — the
+A consumer of `spawn.json` or `status.json` must **refuse** a `version`
+that it does not implement. `true` and `1.0` are not the integer 1
+(DL-151). The rule is tolerant on fields and strict on versions: the
 `Wrapper-owned spool files` row of `docs/protocol-evolution.md`. The two
-consumers answer in their own vocabularies: engine-side the record reads
-as unread, which costs a `status.json` its outcome and makes the run
-`exit_status_unobservable` rather than letting a record whose meaning
-changed decide a verdict; supervisor-side it reads as PRESENT AND
-UNREADABLE, never as absence, because absence authorizes a spawn (§5).
-That absence is no index entry for the `run_id` AND no receipt at the
-computed path; §5's table names the rest (DL-151, DL-229).
-An **absent** `version` passes both readers because these two files are
-the wrapper-owned spool row of the evolution matrix. The Tier-0 wrapper
-writes them before any reader exists to require a version, and that row
-alone passes an absent one (`docs/protocol-evolution.md` §1, DL-227,
-DL-229).
+consumers state the refusal in their own terms. In the engine, the record
+reads as unread. An unread `status.json` loses its outcome and the run
+becomes `exit_status_unobservable`, so a record whose meaning changed
+cannot decide a verdict. In the supervisor, the record reads as PRESENT
+AND UNREADABLE, never as absent, because absence authorizes a spawn (§5).
+That absence means no index entry for the `run_id` AND no receipt at the
+computed path; §5's table lists the other cases (DL-151, DL-229).
 
-Three files join the
-spool, and the **supervisor** writes them, not the wrapper: `receipt.json`
-and `reply.json` in `run_dir`, and the `run_id` index entry
-`runs/.by_run_id/<run_id>` (DL-129; period-model §11a). Each is one object in
-the **§3.2 canonical form**
-(`docs/period-model.md`) — UTF-8, keys sorted at every depth, no whitespace,
-**no trailing newline** — written by the liturgy above, and each carries
-`artifact_format_version`. The wrapper's own two files keep the format of
-this section (`sort_keys`, one trailing newline) and are unchanged. A
-detached run's directory is created by the supervisor on receipt; the engine
-keeps that ownership only for tethered runs. `received_at` and `spawned_at` are
-aware-UTC ISO-8601 strings, like the
-wrapper's timestamps (DL-150). §3.2 governs the bytes of the object; it does not
-reshape these two strings. A reader of these records checks that the field
-is a string and does not parse its timestamp form.
+An **absent** `version` passes both readers. These two files form the
+wrapper-owned spool row of the evolution matrix, and that row alone passes
+an absent version: the Tier-0 wrapper writes them before any reader exists
+to require one (`docs/protocol-evolution.md` §1, DL-227, DL-229).
+
+The **supervisor**, not the wrapper, writes three spool files:
+`receipt.json` and `reply.json` in `run_dir`, and the `run_id` index entry
+`runs/.by_run_id/<run_id>` (DL-129; period-model §11a). Each is one object
+in the **§3.2 canonical form** (`docs/period-model.md`): UTF-8, keys
+sorted at every depth, no whitespace, **no trailing newline**. Each is
+written by the liturgy above, and each carries `artifact_format_version`.
+The supervisor creates a detached run's directory when it receives the
+SPAWN. The engine creates the directory only for tethered runs.
+
+`received_at` and `spawned_at` are aware-UTC ISO-8601 strings, like the
+wrapper's timestamps (DL-150). §3.2 governs the bytes of the object and
+does not reshape these two strings. A reader of these records checks that
+the field is a string and does not parse its timestamp form.
 
 ### receipt.json — written by the supervisor BEFORE it forks the wrapper
 
@@ -176,11 +178,11 @@ is a string and does not parse its timestamp form.
 ```
 
 `spec_fingerprint` is sha256 over the §3.2 canonical form of the §2 input
-spec with `lifeline_fd` removed (the supervisor fills that field, so a retry
-carrying one must not read as a different spec). §3.2's value grammar has no
-floats and `grace_seconds` is one, so a float is fingerprinted as the tagged
-string `"float:" + float.hex()` — exact, and nothing but this fingerprint
-reads it.
+spec with `lifeline_fd` removed. The supervisor fills that field, so a
+retry that carries one must not read as a different spec. §3.2's value
+grammar has no floats, and `grace_seconds` can be one. A float is
+therefore fingerprinted as the tagged string `"float:" + float.hex()`. The
+form is exact, and only this fingerprint reads it.
 
 ### reply.json — written by the supervisor after the fork
 
@@ -189,7 +191,8 @@ reads it.
  "wrapper_pid": 4242, "spawned_at": "2026-08-20T12:23:55.987654+00:00"}
 ```
 
-The answer as first given. A replayed SPAWN is answered from this file.
+It holds the SPAWN answer as first given. A replayed SPAWN is answered
+from this file.
 
 ### runs/.by_run_id/&lt;run_id&gt; — the run_id index
 
@@ -197,22 +200,25 @@ The answer as first given. A replayed SPAWN is answered from this file.
 {"artifact_format_version": 1, "run_id": "…", "job": "…", "run_number": 3}
 ```
 
-The first durable *record* a SPAWN writes — the run directory itself is
-made one step earlier (§5) — and the only route from a `run_id` back to
-its directory. **"No index entry" means "first application"** only when
-the computed path holds no receipt either: a receipt there naming the same
-`run_id` answers from the directory, and one naming a different `run_id` is
-a `collision` (§5; DL-151, DL-229). Once its receipt is gone too, deleting
+The index entry is the first durable *record* that a SPAWN writes; the run
+directory itself is made one step earlier (§5). It is the only route from
+a `run_id` back to its directory.
+
+**"No index entry" means "first application"** only when the computed
+path holds no receipt either. A receipt there that names the same `run_id`
+answers from the directory. A receipt that names a different `run_id` is a
+`collision` (§5; DL-151, DL-229). Once the receipt is gone too, deleting
 an entry can authorize a spawn. The supervisor can still answer
-`collision`, when another `run_id`'s index entry names the directory, or
-`indeterminate`, when a `spawn.json` or `status.json` remains (§5's table).
-So the entry may not be pruned while the SPAWN effect that names it can
+`collision` when another `run_id`'s index entry names the directory, or
+`indeterminate` when a `spawn.json` or `status.json` remains (§5's table).
+So an entry may not be pruned while the SPAWN effect that names it can
 still be replayed (period-model §11a, §12).
-The directory
-therefore grows one entry per run, and the retention floor is what bounds it.
-Reading it is a single lookup by name; the whole directory is scanned in one
-case only — an orphan run directory, to find whether another `run_id` already
-claims it — and that case exists only after a crash.
+
+The index directory therefore grows by one entry per run, and the
+retention floor bounds it. A read is a single lookup by name. The whole
+directory is scanned in one case only: an orphan run directory, to find
+whether another `run_id` already claims it. That case exists only after a
+crash.
 
 ### spawn.json — written by the wrapper immediately after spawning
 
@@ -230,18 +236,17 @@ claims it — and that case exists only after a crash.
 }
 ```
 
-- Start-time tokens are opaque strings: `ticks:<n>` on Linux (field 22 of
-  /proc/pid/stat, tick-exact equality) or `lstart:<ps -o lstart= output>`
-  on macOS (compare within ±2s, because ps rounds to whole seconds). **If
-  the live token of a pid does not match the recorded token, never signal
-  that pid** (PID-reuse guard, DL-41a item 5).
-- `command_pgid == command_pid`: the command is its own process-group
-  leader. The wrapper is deliberately NOT a member of this group. A group
-  kill must never kill the recorder before the recorder writes its record
-  (DL-41a item 2).
+- Start-time tokens are opaque strings. On Linux the token is `ticks:<n>`
+  (field 22 of /proc/pid/stat), compared for exact equality. On macOS it
+  is `lstart:<ps -o lstart= output>`, compared within ±2 s, because ps
+  rounds to whole seconds. **If the live token of a pid does not match the
+  recorded token, never signal that pid** (PID-reuse guard, DL-41a item 5).
+- `command_pgid == command_pid`: the command leads its own process group.
+  The wrapper is NOT a member of this group, so that a group kill can never
+  kill the recorder before the recorder writes its record (DL-41a item 2).
 - `boot_id` (kern.bootsessionuuid / /proc/sys/kernel/random/boot_id): a
-  mismatch with the current boot voids all liveness checks and proves
-  that nothing survived (DL-42 item 5).
+  mismatch with the current boot voids all liveness checks and proves that
+  nothing survived (DL-42 item 5).
 - Timestamps are aware-UTC ISO-8601.
 
 ### status.json — written by the wrapper before reaping
@@ -252,33 +257,34 @@ claims it — and that case exists only after a crash.
  "ended_at": "2026-07-11T12:23:56.357872+00:00"}
 ```
 
-The record-before-reap order holds on every path where `spawn.json`
-landed. One path is the exception: the `spawn.json` write itself failed.
-There the run has no `spawn.json`, so no process identity is recorded; a
-supervisor-spawned run does have its index entry and `receipt.json`
-(§5). The wrapper kills what it started,
-reaps it, then attempts this write as a best effort and exits 3. E7 covers
+The wrapper writes this record before it reaps, on every path where
+`spawn.json` landed. One path is the exception: the `spawn.json` write
+itself failed. That run has no `spawn.json`, so no process identity is
+recorded; a supervisor-spawned run does have its index entry and
+`receipt.json` (§5). The wrapper kills what it started, reaps it, then
+attempts the `status.json` write as a best effort and exits 3. E7 covers
 the file's absence on that path (DL-229).
 
-Outcomes (exactly one per run — the file appears at most once):
+Each run has at most one `status.json`, and it holds exactly one outcome:
 
 | outcome       | extra fields        | meaning                                    |
 |---------------|---------------------|--------------------------------------------|
 | `exited`      | `exit_code`         | the command exited on its own              |
 | `signaled`    | `signal`            | the command was killed by a signal that the wrapper did not send |
 | `terminated`  | `cause`, `observed` | the wrapper killed the group (`cause: "parent lost"`, or a spawn-record write failure). `observed` carries the forensic exit detail |
-| `spawn_failed`| `error`             | the wrapper could not open the command's stdin/stdout/stderr, or could not spawn /bin/sh (DL-150) |
+| `spawn_failed`| `error`             | the wrapper could not open the command's stdin, stdout or stderr, or could not spawn /bin/sh (DL-150) |
 
-The **absence** of status.json is the one state that the wrapper can
-never produce for a command that ran. It means one
-of four things: the recorder itself was killed (-9); the machine died;
-the wrapper refused the spec before it spawned anything (§4 step 6, exit
-1 or 2); or the record write itself failed (exit 3) (DL-150). The first two are
-the orchestrator's E7 unobservable case. The last two are the wrapper
-saying, on stderr and in its exit code, that no run started or no record
-survived. The orchestrator decides no outcome from the exit code — it may
-quote it in the cause and nothing more. It reports an absence as FAILURE
-`exit_status_unobservable` once no verified survivor remains, and never
+No outcome of a command that ran is written as an absent file. The
+**absence** of `status.json` means one of four things: the recorder itself
+was killed (-9); the machine died; the wrapper refused the spec before it
+spawned anything (§4 step 6, exit 1 or 2); or the record write itself
+failed (exit 3) (DL-150). The first two are the orchestrator's E7
+unobservable case. In the last two, the wrapper says on stderr and in its
+exit code that no run started or that no record survived.
+
+The orchestrator decides no outcome from the exit code; it may quote the
+code in the cause and nothing more. It reports an absence as FAILURE
+`exit_status_unobservable` once no verified survivor remains, and it never
 guesses. A command group verified alive at resume is killed and recorded
 TERMINATED instead; the survivor rule is DL-226's (DL-229).
 
@@ -296,500 +302,525 @@ Orchestrator mapping (dsl41's, recorded here as the reference consumer):
 
 The tag is base64url JSON `{"boot_id", "job", "run_id", "run_number"}` in
 the command's environment. Never use it for identity decisions. macOS
-KERN_PROCARGS2 omits env for restricted binaries (/bin/sh), and Linux
-/proc/pid/environ is ptrace-gated (DL-41a item 5, probed empirically).
+KERN_PROCARGS2 omits the environment for restricted binaries (/bin/sh),
+and Linux /proc/pid/environ is ptrace-gated (DL-41a item 5, probed
+empirically).
 
 ## 4. Wrapper behavior (frozen semantics)
 
-1. The wrapper has its own session (`setsid`). The command is in its own
-   pgid (`setpgid(0,0)` equivalent at spawn). The child restores the
-   default signal dispositions pre-exec. SIG_IGN inherits across exec.
-   Without the reset, the command ignores a graceful SIGTERM.
+1. The wrapper runs in its own session (`setsid`). The command runs in its
+   own process group (`setpgid(0,0)` equivalent at spawn). The child
+   restores the default signal dispositions before exec. SIG_IGN is
+   inherited across exec, so without the reset the command would ignore a
+   graceful SIGTERM.
 2. The wrapper ignores SIGTERM, SIGINT, SIGHUP, SIGQUIT, SIGUSR1 and
    SIGUSR2. SIGKILL, SIGABRT, any other signal whose default action
    terminates and that the wrapper does not ignore, or machine death
-   silences it, which E7 then reports (DL-229).
-3. The event loop is a SIGCHLD self-pipe + select over {self-pipe,
-   lifeline}. On every wakeup, the wrapper does the child-exit check
-   BEFORE the lifeline-EOF check. Thus a completion that races parent
-   death records as a completion.
-4. On exit, the wrapper observes via waitid(WNOWAIT), writes status.json,
-   and then reaps.
-5. On lifeline EOF, the wrapper does the exit check again. Then it sends
-   SIGTERM to the command pgid and waits the grace period. It sends SIGKILL
-   only to a command that is still alive at
-   the end of that wait; a command that ends on the SIGTERM is observed
-   and the wait stops there (DL-150). Then it writes `terminated / parent lost`
-   and exits.
-6. The wrapper exit code is a notification only (0 = a status record
-   exists, 2 = the spec refusal, 3 = a record write failed, for example
-   ENOSPC). The spec refusal comes before anything spawns. It refuses a
-   `version` that is absent or is not the integer 1 (`true` and `1.0` are
-   refused), a present `lifeline_fd` that is not an integer, and a present
-   `grace_seconds` that is not a finite number of zero or more; a boolean
-   is not a number (DL-229).
-   A spec that is not readable JSON exits 1 before
-   any record, and so does one that misses a key the wrapper reads with
-   no default: `run_id`, `job`, `run_number`, `command`, `run_dir`,
-   `lifeline_fd`, `stdout_path`, `stderr_path` (DL-150). The wrapper's own two
-   defaults are `stdin_path` (null, meaning /dev/null) and
-   `grace_seconds` (10.0); the supervisor refuses either omission first
-   (§2), so the defaults are reachable only by a direct spawner.
-   status.json is the sole data channel, and its absence reads
-   the same way whatever the exit code was.
+   silences it, and E7 then reports the run (DL-229).
+3. The event loop is a SIGCHLD self-pipe plus select over {self-pipe,
+   lifeline}. On every wakeup, the wrapper checks for child exit BEFORE it
+   checks for lifeline EOF. So a completion that races parent death
+   records as a completion.
+4. On exit, the wrapper observes the exit with waitid(WNOWAIT), writes
+   status.json, and then reaps. A stopped, continued or trapped report is
+   not an exit: the command is still running (DL-300).
+5. On lifeline EOF, the wrapper checks for exit again. Then it sends
+   SIGTERM to the command's process group and waits the grace period. It
+   sends SIGKILL only to a command that is still alive at the end of that
+   wait. A command that ends on the SIGTERM is observed, and the wait stops
+   there (DL-150). Then the wrapper writes `terminated / parent lost` and
+   exits.
+6. The wrapper exit code is a notification only: 0 = a status record
+   exists, 1 = an unreadable spec, a missing key or any other uncaught
+   error, 2 = the spec refusal, 3 = a record write failed (for example
+   ENOSPC). The spec refusal comes
+   before anything spawns. It refuses a `version` that is absent or is not
+   the integer 1 (`true` and `1.0` are refused), a present `lifeline_fd`
+   that is not an integer, and a present `grace_seconds` that is not a
+   finite number of zero or more. A boolean is not a number (DL-229).
+   A spec that is not readable JSON exits 1 before any record. So does a
+   spec that lacks a key the wrapper reads with no default: `run_id`,
+   `job`, `run_number`, `command`, `run_dir`, `lifeline_fd`,
+   `stdout_path`, `stderr_path` (DL-150). The wrapper has two defaults of
+   its own: `stdin_path` (null, meaning /dev/null) and `grace_seconds`
+   (10.0). The supervisor refuses either omission first (§2), so only a
+   direct spawner reaches these defaults. status.json is the sole data
+   channel, and its absence reads the same way whatever the exit code was.
 
 ## 5. Supervisor socket protocol (frozen — phase 11f, DL-48)
 
-One supervisor exists per run_root. The named socket is
-`<run_root>/supervisor.sock`, mode 0600, with a **same-uid peer-cred
-check on every accept** (Linux SO_PEERCRED, macOS LOCAL_PEERCRED / struct
-xucred). The check refuses a peer uid that differs
-from the supervisor's own (DL-150). Where the platform supplies no uid at all, the
-peer is admitted and the 0600 mode is the whole boundary. The access
-perimeter deliberately does not copy that fallback: it fails closed
-(`docs/access-model.md` §3). The supervisor also writes `<run_root>/supervisor.pid` (JSON:
-`pid`, `boot_id`, `incarnation`, `started_at`). It
-logs to its own stderr and opens no log file (DL-150). The spawner is what points
-that stderr at `<run_root>/supervisor.log`.
+One supervisor exists per run_root. Its socket is
+`<run_root>/supervisor.sock`, mode 0600, with a **same-uid peer-cred check
+on every accept** (Linux SO_PEERCRED, macOS LOCAL_PEERCRED / struct
+xucred). The check refuses a peer uid that differs from the supervisor's
+own (DL-150). Where the platform supplies no uid at all, the peer is
+admitted, and the 0600 mode is the whole boundary. The access perimeter
+deliberately does not copy that fallback: it fails closed (`docs/access-model.md` §3).
 
-Startup first takes `<run_root>/supervisor.lock`,
-an exclusive non-blocking flock held for the process lifetime (DL-210). The file is
-never unlinked. Under that lock it sweeps leftover `.s.*` socket files,
-probes the published endpoint with three PING attempts across one second,
-and checks the pid file before reclaiming anything. A PING answer or a live
-recorded process refuses startup with exit 1 and the message
-`another supervisor owns this root`. A zombie, exited and unreaped, is
-absent: it holds no descriptor, no lock and no socket. Runtime `OSError`
-failures also exit 1 so the service can retry. Configuration refusals remain exit 2.
-The pid file adds `start_time`, the opaque `runner_procid.proc_start_token`
-value; PID reuse is checked against it. A failed token lookup alone is not
-proof of absence. A live legacy pid without that token also refuses, so an
-older supervisor that holds no lock still owns its root. An unreadable pid
-record is ambiguous and refuses reclamation; resolve the owner before
-removing it manually. A missing pid record names no owner: after all three
-PING attempts fail, the published socket can be reclaimed.
-Do not launch old and new binaries concurrently on one root during upgrade:
-a lockless old starter that appears after the guards cannot be excluded by
-the new lock. The guards protect an already published legacy owner.
+The supervisor also writes `<run_root>/supervisor.pid` (JSON: `pid`,
+`start_time`, `boot_id`, `incarnation`, `started_at`). It logs to its own
+stderr and opens no log file (DL-150). The spawner points that stderr at
+`<run_root>/supervisor.log`.
 
-After both guards, the supervisor reclaims the stale published socket,
-binds and listens on `<run_root>/.s.<pid>`, chmods it to 0600, records that
-path's inode, durably writes the pid record including `start_time`, and then
-renames the socket to `supervisor.sock`. Teardown removes the
-published socket only while its path still names that inode, or its own
-private socket if publication failed. It removes the pid record only if its
-incarnation matches, including when publication failed after that write.
-The client never unlinks either path.
-One startup line goes to stderr:
+Startup first takes `<run_root>/supervisor.lock`, an exclusive
+non-blocking flock held for the process lifetime (DL-210). The file is
+never unlinked. Under that lock, the supervisor sweeps leftover `.s.*`
+socket files, probes the published endpoint with three PING attempts
+across one second, and checks the pid record before it reclaims anything.
+A held lock, a PING answer or a live recorded process refuses startup with
+exit 1 and the message `another supervisor owns this root`. A zombie
+(exited and unreaped) counts as absent: it holds no descriptor, no lock
+and no socket. Runtime `OSError` failures also exit 1, so that the service
+can retry. Configuration refusals exit 2.
+
+`start_time` in the pid record is the opaque
+`runner_procid.proc_start_token` value, and PID reuse is checked against
+it. A failed token lookup alone does not prove absence. A live legacy pid
+without that token also refuses startup, so an older supervisor that holds
+no lock still owns its root. An unreadable pid record is ambiguous and
+refuses reclamation; resolve the owner before you remove the record by
+hand. A missing pid record names no owner: once all three PING attempts
+fail, the published socket can be reclaimed.
+
+Do not launch old and new binaries at the same time on one root during an
+upgrade. The new lock cannot exclude a lockless old starter that appears
+after the guards. The guards protect only a legacy owner that has already
+published.
+
+After both guards, the supervisor reclaims the stale published socket. It
+binds and listens on `<run_root>/.s.<pid>`, chmods that socket to 0600,
+records its inode, durably writes the pid record including `start_time`,
+and then renames the socket to `supervisor.sock`. Teardown removes the
+published socket only while its path still names that inode. If
+publication failed, teardown removes its own private socket instead. It
+removes the pid record only if the record's incarnation matches, also
+when publication failed after that write. The client never unlinks either
+path. One startup line goes to stderr:
 `supervisor: started pid=<pid> incarnation=<hex> boot_id=<id>`.
 
 Linux hardening: the supervisor sets `PR_SET_CHILD_SUBREAPER` (prctl 36)
-at startup, best-effort. The supervisor never restarts itself. Survival
-across ITS death is the job of Tier 2.
+at startup, best-effort. The supervisor never restarts itself. Tier 2,
+the service manager, restarts it after it dies.
 
 **Framing.** The protocol is JSON lines over `SOCK_STREAM`. One request
-line → one response line, except async pushes (below). Every request
-carries `"v": 1`. Responses are `{"ok": true, …}` or
+line gets one response line; async pushes (below) are the exception. Every
+request carries `"v": 1`. Responses are `{"ok": true, …}` or
 `{"ok": false, "error": "<code>", …}`.
 
-Accepted sockets are non-blocking (DL-210). Replies and pushes
-are queued in order and flushed on write readiness. `REQUEST_LINE_LIMIT`
-is 1 MiB, including the newline. An oversized request gets one
-`request_too_large` refusal; its remaining bytes are discarded through the
-newline, and the next line is read normally. Invalid UTF-8 and excessively
-nested JSON answer `malformed_json`. So do a UTF-16 or UTF-32 line and a
-line that begins with a byte-order mark: a byte-order mark is not UTF-8
-JSON (DL-229). Both reads and writes on accepted
-sockets use the same error rule:
+Accepted sockets are non-blocking (DL-210). Replies and pushes are queued
+in order and flushed on write readiness. `REQUEST_LINE_LIMIT` is 1 MiB,
+including the newline. An oversized request gets one `request_too_large`
+refusal. Its remaining bytes are discarded through the newline, and the
+next line is read normally. Invalid UTF-8 and excessively nested JSON
+answer `malformed_json`. So do a UTF-16 or UTF-32 line and a line that
+begins with a byte-order mark, because a byte-order mark is not UTF-8 JSON
+(DL-229). Reads and writes on accepted sockets follow one error rule:
 
 - LATER: `BlockingIOError`, `InterruptedError`, and `OSError` with errno
-  `ENOBUFS` or `ENOMEM` keep the connection, change nothing, and retry on readiness.
-- GONE: a receive returning `b""` (EOF), or `OSError` with errno `EPIPE`,
-  `ECONNRESET`, `ECONNABORTED`, `ENOTCONN` or `EBADF`, drops the connection once.
-- UNKNOWN: any other `OSError` keeps the connection and logs one stderr line
-  with the errno.
+  `ENOBUFS` or `ENOMEM` keep the connection, change nothing, and retry on
+  readiness.
+- GONE: a receive that returns `b""` (EOF), or `OSError` with errno
+  `EPIPE`, `ECONNRESET`, `ECONNABORTED`, `ENOTCONN` or `EBADF`, drops the
+  connection once.
+- UNKNOWN: any other `OSError` keeps the connection and logs one stderr
+  line with the errno.
 
 A live client is never dropped for an error outside the GONE list. A send
-returning zero leaves the connection and pending output unchanged. EOF drops
-even a half-closed connection with queued replies.
+that returns zero leaves the connection and pending output unchanged. EOF
+drops even a half-closed connection with queued replies.
 
-`BACKLOG_BYTES` is 16 MiB per connection. At that queued-output bound, reads
-pause. Already buffered lines are dispatched first when output drains below
-the bound. Retained wire buffers are bounded per connection by
+`BACKLOG_BYTES` is 16 MiB per connection. At that bound on queued output,
+reads pause. When output drains below the bound, lines already buffered
+are dispatched first. Retained wire buffers are bounded per connection by
 `BACKLOG_BYTES + REQUEST_LINE_LIMIT + one frame`; one large reply may cross
-the output bound. Observers remain unlimited, so the connection count and
-aggregate memory are unbounded by design. The same-uid check is a trust
-boundary, not a memory bound. Accept failures `EMFILE` and `ENFILE` are logged
-at most once per minute. A reply at or above the shipped client's own line
-limit still poisons that client's connection.
+the output bound. Observers are unlimited, so the connection count and the
+total memory are unbounded by design. The same-uid check is a trust boundary, not a
+memory bound. Accept failures `EMFILE` and `ENFILE` are logged at most
+once per minute. A reply at or above the shipped client's own line limit
+still poisons that client's connection.
 
-A client that stops reading stops being read; later requests wait. A paused
-holder's unrenewed lease expires normally. A reading client can pause across
-one large reply and resumes as that reply drains. Shutdown drains pending
-output under one shared two-second deadline, then drops all connections.
-The test-only environment variables `DSL41_SUPERVISOR_TEST_BACKLOG_BYTES`
-and `DSL41_SUPERVISOR_TEST_REQUEST_LINE_LIMIT` override these bounds once at
+A client that stops reading stops being read, and its later requests
+wait. A paused holder's unrenewed lease expires normally. A reading client
+can pause across one large reply and resumes as that reply drains.
+Shutdown drains pending output under one shared two-second deadline, then
+drops all connections. The test-only environment variables
+`DSL41_SUPERVISOR_TEST_BACKLOG_BYTES` and
+`DSL41_SUPERVISOR_TEST_REQUEST_LINE_LIMIT` override these bounds once at
 startup. Leave them unset in production, like `DSL41_WRAPPER_TEST_PAUSE`.
 
 **Incarnation** (DL-80). The supervisor mints an `incarnation` id at every
 start and returns it from `PING`, `LIST` and `ACQUIRE`. Every verb that
-changes lease or run state must carry it — `SPAWN`, `SIGNAL`, `SHUTDOWN`,
-`RENEW` and `RELEASE` (DL-150 names the last two); a mismatch is
-`{"ok": false, "error":
-"wrong_incarnation", "incarnation": <current>}`. The reason it is not
-folded into the token: the fencing counter is in-memory, so a restarted
-supervisor mints token 1 again, and a controller still holding a token
-from the previous incarnation would match the new holder's token by
-coincidence. The two refusals must also stay distinct, because they demand
-opposite client behaviour — `wrong_incarnation` means the supervisor you
-knew is gone and every wrapper it held has lost its lifeline. Each such
-wrapper kills its group and records in its own time (DL-205, DL-229), so
-re-acquire **and** reconcile from the spool; `stale_token` means the
-supervisor is the one you knew, so no lifeline was cut and there is nothing to
-reconcile. Beyond that, `stale_token` says only
-that the token presented cannot mutate this incarnation (DL-150). The lease may
-have expired, may have been released, or may be held by someone else
-under another token — the refusal does not say which, and it asserts
-nothing about any run. A client may answer it with `ACQUIRE`, and the
-shipped engine does: the supervisor grants a free or expired lease, and
-refuses a live incumbent with `lease_held`. That refusal, not
-`stale_token`, is what says the lease is somebody else's. The incarnation is
-public (any reader gets it from `PING`); the token is the secret half.
+changes lease or run state must carry it: `SPAWN`, `SIGNAL`, `SHUTDOWN`,
+`RENEW` and `RELEASE` (DL-150 names the last two). A mismatch is
+`{"ok": false, "error": "wrong_incarnation", "incarnation": <current>}`.
 
-The supervisor ignores unknown fields (forward compatibility). An
-unknown verb → `unknown_verb`. A missing/wrong `v` →
-`unsupported_version`. A malformed line → `malformed_json` (the stream
-is not desynced). An oversized line answers
-`request_too_large`; the reader discards through its newline and resumes (DL-210).
+The incarnation is not folded into the token, because the fencing counter
+is in memory. A restarted supervisor mints token 1 again, and a controller
+that still holds a token from the previous incarnation would match the new
+holder's token by coincidence. The two refusals also stay distinct,
+because they ask for opposite client behaviour:
 
-`v` and `token` are **integers**, and neither JSON
-`true` nor `1.0` is one (DL-151). A comparison with `==` would equate all
-three in Python, and serve a request carrying `"v": true` as version 1 or
-pass a `"token": true` through the fence at token 1. The
-`incarnation` needs no such check: it is a hex string, which no boolean
-and no number can equal. This is a type check on the wire, not a
-tolerance — the token is the whole fence that keeps a superseded
-controller from mutating a live one's runs.
+- `wrong_incarnation` means that the supervisor you knew is gone and every
+  wrapper it held has lost its lifeline. Each such wrapper kills its group
+  and records in its own time (DL-205, DL-229). So re-acquire **and**
+  reconcile from the spool.
+- `stale_token` means that the supervisor is the one you knew, so no
+  lifeline was cut and there is nothing to reconcile. Beyond that, it says
+  only that the token presented cannot mutate this incarnation (DL-150).
+  The lease may have expired, may have been released, or may be held by
+  someone else under another token. The refusal does not say which, and it
+  asserts nothing about any run.
 
-A blank or whitespace-only line is ignored and gets
-no answer at all; every other line gets exactly one (DL-150). A handler that raises
-is answered `{"ok": false, "error": "internal: <type>: <message>"}` and the
+A client may answer `stale_token` with `ACQUIRE`, and the shipped engine
+does. The supervisor grants any lease that is not live (see the lease
+verbs below) and refuses a live incumbent with `lease_held`. That refusal,
+not `stale_token`, says that the lease is somebody else's. The incarnation
+is public (any reader gets it from `PING`); the token is the secret half.
+
+The supervisor ignores unknown fields (forward compatibility). An unknown
+verb answers `unknown_verb`. A missing or wrong `v` answers
+`unsupported_version`. A malformed line answers `malformed_json`, and the
+stream stays in sync. An oversized line answers `request_too_large`; the
+reader discards through its newline and resumes (DL-210).
+
+`v` and `token` are **integers**, and neither JSON `true` nor `1.0` is one
+(DL-151). In Python, `==` equates all three. A bare comparison would serve
+a request that carries `"v": true` as version 1, and would pass a
+`"token": true` through the fence at token 1. The `incarnation` needs no
+such check: it is a hex string, which no boolean and no number can equal.
+This is a type check on the wire, not a tolerance. The token is the whole
+fence that keeps a superseded controller from mutating a live one's runs.
+
+A blank or whitespace-only line is ignored and gets no answer at all.
+Every other line gets exactly one answer (DL-150). A handler that raises is
+answered `{"ok": false, "error": "internal: <type>: <message>"}`, and the
 supervisor keeps running. Its own death would EOF the lifeline of every
 wrapper on the host, so one request may never end it.
 
 **Read-only verbs** (any connection, no lease):
 
-- `LIST` → `{ok, version: 1, supervisor_pid, boot_id, incarnation, deadman_s,
-  lease: {holder,
-  expires_at} | null, runs: [{run_id, job, run_number, run_dir, wrapper_pid,
-  wrapper_alive, spawned_at, wrapper_rc}]}` — the response lists what THIS
-  supervisor still holds. A supervisor restart proves nothing about the
-  prior wrappers: each survives, takes lifeline EOF, kills its group and
-  records in its own time, and a restarted supervisor's LIST is empty while
-  that happens (DL-205, DL-229). The spool is the
-  cross-restart truth, and LIST shows this supervisor's in-memory state
-  only. `wrapper_rc` is
-  null while the wrapper is alive. Every live run, plus a bounded window of the most
-  recent completions: a completed entry may be evicted once its exit is
-  recorded and pushed, because LIST was never the idempotency store (DL-129;
-  period-model §11a). Older
-  completions are read from the spool by the client; LIST itself never
-  reads it. A SIGNAL for an evicted run answers
+- `LIST` → `{ok, version: 1, supervisor_pid, boot_id, incarnation,
+  deadman_s, lease: {holder, expires_at} | null, runs: [{run_id, job,
+  run_number, run_dir, wrapper_pid, wrapper_alive, spawned_at,
+  wrapper_rc}]}`. The response lists what THIS supervisor still holds in
+  memory. The spool is the cross-restart truth. A supervisor restart
+  proves nothing about the prior wrappers. Each survives, takes lifeline
+  EOF, kills its group and records in its own time, and a restarted
+  supervisor's LIST is empty while that happens (DL-205, DL-229).
+  `wrapper_rc` is null while the wrapper is alive.
+
+  LIST holds every live run and a bounded window of the most recent
+  completions. A completed entry may be evicted once its exit is recorded
+  and pushed, because LIST is not the idempotency store (DL-129;
+  period-model §11a). The client reads older completions from the spool;
+  LIST itself never reads the spool. A SIGNAL for an evicted run answers
   `unknown_run`, exactly as it does for any run of an incarnation that has
-  ended. The `lease` field reports an UNEXPIRED
-  lease, which is not the same as a live one (see the lease verbs below):
-  it can still name a holder whose connection is gone (DL-150). Nothing may read it
-  as proof that a controller is watching.
+  ended.
+
+  The `lease` field reports an UNEXPIRED lease, which is not the same as a
+  live one (see the lease verbs below). It can still name a holder whose
+  connection is gone (DL-150). Nothing may read it as proof that a
+  controller is watching.
 - `PING` → `{ok, version: 1, incarnation, deadman_s}`.
 
-`deadman_s` (S5b, DL-95) rides both read verbs: the interval this supervisor
-was started with, or `null`. It is read back rather than assumed because a
-reattaching engine meets a supervisor it did not start, and
-`docs/concurrency-model.md` §8's eviction bound has to describe the host
-rather than some engine's launch options. Additive; older clients ignore it
-like any unknown field.
+`deadman_s` (S5b, DL-95) is in both read verbs: the interval this
+supervisor was started with, or `null`. A client reads it back rather than
+assume it, because a reattaching engine meets a supervisor it did not
+start. `docs/concurrency-model.md` §8's eviction bound has to describe the
+host, not some engine's launch options. The field is additive: older
+clients ignore it like any unknown field.
 
 **Lease verbs** (single controller, observers are unlimited):
 
 - `ACQUIRE {controller_id, ttl_s, token?, incarnation?}` → `{ok, token,
-  expires_at, incarnation}`. `controller_id` must
-  be a non-empty string; anything else is
-  `{ok: false, error: "bad_controller_id"}`, checked before `ttl_s` and
-  before any lease state (DL-150). `ttl_s` is optional on `ACQUIRE` and on `RENEW`,
-  and defaults to 60 s. The supervisor puts no bound on it: a zero or
-  negative value makes a lease that is already expired. A value whose
-  expiry is not a representable time (`inf`, `nan`, `1e20`) is answered
-  `internal:` and changes no lease state (DL-300). `ACQUIRE` is the
-  one lease verb that does not
-  require the incarnation: a free lease is granted without one, and the
-  incarnation is read only to test incumbency against a live lease.
-  `token` is a monotonically increasing fencing integer. The counter is
-  in-memory only, so a restarted supervisor mints token 1 again; the
+  expires_at, incarnation}`. `controller_id` must be a non-empty string.
+  Anything else answers `{ok: false, error: "bad_controller_id"}`, checked
+  before `ttl_s` and before any lease state (DL-150). `ttl_s` is optional
+  on `ACQUIRE` and on `RENEW`, and defaults to 60 s. The supervisor puts no
+  bound on it: a zero or negative value makes a lease that is already
+  expired. A value whose expiry is not a representable time (`inf`, `nan`,
+  `1e20`) is answered `internal:` and changes no lease state (DL-300).
+  `ACQUIRE` is the one lease verb that does not require the incarnation. A
+  free lease is granted without one, and the incarnation is read only to
+  test incumbency against a live lease.
+
+  `token` is a monotonically increasing fencing integer. The counter is in
+  memory only, so a restarted supervisor mints token 1 again. The
   incarnation, not the counter, fences the previous incarnation's tokens
-  (DL-80). The predecessor's wrappers may still be killing their groups and
-  recording when it starts (DL-205, DL-229).
+  (DL-80). The predecessor's wrappers may still be killing their groups
+  and recording when the new supervisor starts (DL-205, DL-229).
 
   A lease is **live** when it is unexpired *and* its holder's connection
   is still open. A live lease yields only to a claimant that presents both
-  the **current token** and **this incarnation**; everyone else gets
+  the **current token** and **this incarnation**. Everyone else gets
   `{ok: false, error: "lease_held", holder, expires_at}`. The incumbent
-  re-keys this way (a fresh token, the old one dies), which is how a
-  reconnect after a poisoned connection fences anything the old
+  re-keys this way: it gets a fresh token, and the old one dies. This is
+  how a reconnect after a poisoned connection fences anything that the old
   connection had in flight.
 
-  A lease whose holder's connection is **gone** is freely grantable even
-  while unexpired. That is what lets a crashed engine's resume re-acquire
-  without waiting out the TTL. It is sound on a
-  local AF_UNIX socket because EOF there has exactly two causes, and both
-  end in the same place (DL-150). The kernel closes the fd when the holder process
-  is gone, `kill -9` included. The holder can also close it itself: the
-  shipped controller poisons a connection whose reply may be in flight and
-  reconnects on it. Either way the next `ACQUIRE` mints a fresh token, and
-  the old token — the one a poisoned connection may still be carrying — is
-  dead from that moment. So the branch keys on EOF and needs neither cause.
+  A lease whose holder's connection is **gone** is freely grantable, even
+  while unexpired. This lets a crashed engine's resume re-acquire without
+  waiting out the TTL. It is sound on a local AF_UNIX socket, because EOF
+  there has exactly two causes, and both end in the same place (DL-150).
+  The kernel closes the fd when the holder process is gone, `kill -9`
+  included. Or the holder closes it itself: the shipped controller poisons
+  a connection whose reply may be in flight, and reconnects. Either way,
+  the next `ACQUIRE` mints a fresh token. The old token, which a poisoned
+  connection may still carry, is dead from that moment. So the branch keys
+  on EOF and needs neither cause.
 
-  `controller_id` authorizes nothing (DL-79). It is a label for `LIST`
-  and for the `lease_held` refusal, and clients should make it unique per
-  incarnation so those two reads name a specific controller. A matching
-  label does not take a live lease (DL-79); that would be safe only while
-  one run_root has one engine and the orchestrator's own control-socket
-  bind enforces it on one machine.
+  `controller_id` authorizes nothing (DL-79). It is a label for `LIST` and
+  for the `lease_held` refusal. Clients should make it unique per
+  incarnation, so that those two reads name a specific controller. A
+  matching label does not take a live lease (DL-79). That would be safe
+  only while one run_root has one engine, which the orchestrator's own
+  control-socket bind enforces on one machine.
 
-  The token proves **incumbency, not authenticity** — it is a small
+  The token proves **incumbency, not authenticity**: it is a small
   monotone integer. Authentication is the same-uid peer-cred gate on
-  accept; a same-uid process is already inside the trust boundary.
+  accept, and a same-uid process is already inside the trust boundary.
 
   **Constraint on any future non-local transport:** EOF stops being proof
   of death. A relay must not close the supervisor-side connection while
   its controller lives, or the orphan branch must become TTL-gated.
 - `RENEW {incarnation, token, ttl_s}` → `{ok, expires_at}`.
-  `RELEASE {incarnation, token}` → `{ok}`. Both
-  change lease state, so both take the same two-step check as the
-  mutating verbs below: the incarnation first, then the token (DL-150).
+  `RELEASE {incarnation, token}` → `{ok}`. Both change lease state, so both
+  take the same two-step check as the mutating verbs below: the
+  incarnation first, then the token (DL-150).
 - Engine defaults: `ttl_s = 60`, with a renewal every 20 s. This is the
   client's policy (DL-150). The supervisor's own default for an absent
   `ttl_s` is the same 60 s.
 
-**Mutating verbs** (these require `incarnation` and `token`, and each
-signature line below names both (DL-80, DL-229); a foreign
-incarnation → `{ok: false, error: "wrong_incarnation", incarnation}`,
-checked first, and then a stale/expired token →
-`{ok: false, error: "stale_token"}`):
+**Mutating verbs** (DL-80, DL-229). These require `incarnation` and
+`token`, and each signature line below names both. A foreign incarnation
+answers `{ok: false, error: "wrong_incarnation", incarnation}`, checked
+first. Then a stale or expired token answers
+`{ok: false, error: "stale_token"}`.
 
-- `SPAWN {incarnation, token, spec}` — `spec` is the §2 frozen wrapper
-  input spec, and `lifeline_fd` is the supervisor's to own and fill. It is the one optional
-  key: a `spec` that carries one is
-  accepted, its value is replaced before the wrapper starts, and the
-  receipt fingerprint (§3) ignores the field either way, so a retry
-  carrying a stale fd does not read as a different spec (DL-150). The write end lives
-  in the supervisor ONLY. This is precisely the mechanism that detaches
-  job lifetime from the engine. `run_id` doubles as the idempotency key.
-  A replayed SPAWN with a known run_id spawns nothing and returns the
-  original result plus `"duplicate": true`.
-  → `{ok, run_id, wrapper_pid, spawned_at}`.
+- `SPAWN {incarnation, token, spec}` → `{ok, run_id, wrapper_pid,
+  spawned_at}`. `spec` is the §2 frozen wrapper input spec. `lifeline_fd`
+  is the supervisor's to own and fill, and it is the one optional key. A
+  `spec` that carries one is accepted, and its value is replaced before
+  the wrapper starts. The receipt fingerprint (§3) ignores the field
+  either way, so a retry that carries a stale fd does not read as a
+  different spec (DL-150). The write end lives in the supervisor ONLY.
+  This is the mechanism that detaches job lifetime from the engine.
+  `run_id` doubles as the idempotency key. A replayed SPAWN with a known
+  `run_id` spawns nothing and returns the original result plus
+  `"duplicate": true`.
 
   **The idempotency store is the run directory, not `self.runs`** (DL-129;
-  period-model §11a). LIST must stay bounded on a root that never rolls, so
-  completed entries leave memory, and an in-memory dedup turns a delayed
-  duplicate SPAWN into a second execution the moment they do. On receipt
-  the supervisor writes, in this order: `mkdir
-  runs/<job>.<run_number>` (the directory can exist already in one case
-  only, DL-150, the orphan the table's last row cleared for
-  reuse, because the replay resolution runs first; the `run_id` index entry (§3) —
-  **index before receipt**, because the first durable thing that names a run
-  must be the thing every later lookup goes through; `receipt.json`,
-  **before** the fork; the wrapper; `reply.json`; then the answer. A replay
-  resolves the directory **through the index**, never through the incoming
-  path, and answers from the directory, not from memory. The incoming path is
-  read in one case only — no index entry for
-  this `run_id` (DL-150). A receipt there for a DIFFERENT `run_id` is a `collision`.
-  A receipt there for THIS `run_id` means the index was lost under a live
-  tombstone: the directory answers, and it is never a first application,
-  because losing an index must not authorize a second process. The table's
-  last row is reached only when the path holds no receipt either:
+  period-model §11a). LIST must stay bounded on a root that never rolls,
+  so completed entries leave memory. An in-memory dedup would turn a
+  delayed duplicate SPAWN into a second execution as soon as they leave.
+  On receipt, after the §2 checks and the replay resolution, the
+  supervisor writes in this order:
+
+  1. `mkdir runs/<job>.<run_number>`. The directory can already exist in
+     one case only: the orphan that the table's last row cleared for
+     reuse, because the replay resolution runs first (DL-150).
+  2. The `run_id` index entry (§3). **Index before receipt**, because the
+     first durable thing that names a run must be the thing that every
+     later lookup goes through.
+  3. `receipt.json`, **before** the fork.
+  4. The wrapper.
+  5. `reply.json`.
+  6. The answer.
+
+  A replay resolves the directory **through the index**, never through the
+  incoming path, and answers from the directory, not from memory. The
+  incoming path is read in one case only: there is no index entry for
+  this `run_id` (DL-150). A receipt there for a DIFFERENT `run_id` is a
+  `collision`. A receipt there for THIS `run_id` means that the index was
+  lost under a live tombstone. The directory answers, and the SPAWN is
+  never a first application, because losing an index must not authorize a
+  second process. The table's last row is reached only when the path
+  holds no receipt either:
 
   | directory state | answer |
   | --- | --- |
-  | index, receipt with an equal `spec_fingerprint`, `reply.json` | duplicate:
-  the original result fields from `reply.json` |
-  | equal fingerprint, `spawn.json`, no `reply.json` | duplicate: `wrapper_pid`
-  and `spawned_at := started_at` from `spawn.json` — equivalent, and said
-  rather than promised |
+  | index, receipt with an equal `spec_fingerprint`, `reply.json` | duplicate: the original result fields from `reply.json` |
+  | equal fingerprint, `spawn.json`, no `reply.json` | duplicate: `wrapper_pid` and `spawned_at := started_at` from `spawn.json` — equivalent, and said rather than promised |
   | the incoming path holds a receipt (or an index) for a different `run_id` | `collision` |
   | the same `run_id` against a different `(job, run_number)` | `collision` |
   | `receipt.json` with a different fingerprint | `collision` |
   | equal fingerprint, no `spawn.json`, wrapper alive | `in_progress` — no second spawn |
-  | equal fingerprint, no `spawn.json`, nothing alive | `indeterminate` — the
-  crash landed between receipt and fork; nothing may re-spawn, and the engine's
-  E7 policy decides the run |
+  | equal fingerprint, no `spawn.json`, nothing alive | `indeterminate` — the crash landed between receipt and fork; nothing may re-spawn, and the engine's E7 policy decides the run |
   | index entry → a directory with no `receipt.json` | `indeterminate` |
-  | index entry → a directory that does not exist | impossible by write order;
-  `indeterminate` if ever seen |
-  | no index entry, no receipt, but a `spawn.json` or `status.json` |
-  `indeterminate` — a directory from before this protocol, engine-made and
-  receiptless; forking into it would overwrite the first run's records |
-  | no index entry, no receipt, nothing else | first application — an orphan
-  directory with neither is reused, because nothing durable names its run |
+  | index entry → a directory that does not exist | impossible by write order; `indeterminate` if ever seen |
+  | no index entry, no receipt, but a `spawn.json` or `status.json` | `indeterminate` — an engine-made, receiptless directory (a tethered run, or one from before this protocol); forking into it would overwrite the first run's records |
+  | no index entry, no receipt, nothing else | first application — an orphan directory with neither is reused, because nothing durable names its run |
 
   The duplicate envelope is frozen: `{ok, run_id, wrapper_pid, spawned_at,
-  "duplicate": true}`. Each new refusal is `{ok: false, error, detail}` with
-  `error` ∈ {`bad_run_id`, `bad_spec`, `collision`, `in_progress`,
-  `indeterminate`}; the `in_progress` refusal also carries `run_id`
-  (DL-150). `in_progress` is **retryable and not a completion**: the
-  wrapper is alive, so a client must wait for its outcome rather than record
-  a failure for a running process. `collision` and `indeterminate` are final,
-  and the engine's E7 policy owns what the run then becomes. A failed
-  `mkdir`, index write, receipt write or fork keeps the existing
-  `{ok: false, error: "spawn_failed: <reason>"}`, and this tier ANSWERS such a
-  failure rather than dying of it — its own death would EOF the lifeline of
-  every wrapper it holds. `reply.json` is the one
-  exception, because it is written AFTER the fork: the wrapper is already
-  running, so a failure there is logged and the SPAWN still answers
-  `{ok, …}` (DL-150). A replay then rebuilds that answer from `spawn.json`, which is
+  "duplicate": true}`. The spec and idempotency refusals are
+  `{ok: false, error, detail}`, with `error` ∈ {`bad_run_id`, `bad_spec`,
+  `collision`, `in_progress`, `indeterminate`}. The `in_progress` refusal
+  also carries `run_id` (DL-150). `in_progress` is **retryable and not a
+  completion**: the wrapper is alive, so a client must wait for its
+  outcome rather than record a failure for a running process. `collision`
+  and `indeterminate` are final, and the engine's E7 policy owns what the
+  run then becomes.
+
+  A failed `mkdir`, index write, receipt write or fork answers
+  `{ok: false, error: "spawn_failed: <reason>"}`. This tier ANSWERS such a
+  failure rather than dying of it, because its own death would EOF the
+  lifeline of every wrapper it holds. `reply.json` is the one exception,
+  because it is written AFTER the fork. The wrapper is already running, so
+  a failure there is logged, and the SPAWN still answers `{ok, …}`
+  (DL-150). A replay then rebuilds that answer from `spawn.json`, which is
   the table's second row. Losing the run over its copy of the receipt is
-  the one mistake this write order exists to avoid.
-  Idempotency therefore outlives LIST presence and a
-  supervisor **restart**: the entry is gone, and the directory answers.
+  the one mistake this write order exists to avoid. Idempotency therefore
+  outlives LIST presence and a supervisor **restart**: the memory entry is
+  gone, and the directory answers.
 
   **Absent means ENOENT and nothing else** (DL-150). A record that exists
-  and cannot be read (wrong permissions, a truncated write, bytes the §3.2
-  ingress refuses, a missing required field, an `artifact_format_version`
-  this binary does not implement, bytes that are not UTF-8 at all (UTF-16,
-  UTF-32, or a leading byte-order mark, which is not UTF-8 JSON; DL-229), and a
-  `spawn.json` or `status.json` whose own §3 `version` this binary does
-  not implement, the last two per DL-151) is never absence, because
-  absence authorizes a spawn. That absence is no index entry AND no receipt
-  at the computed path (DL-151, DL-229). An unreadable index entry or
-  `receipt.json` is `indeterminate`. An unreadable `reply.json` falls to the
-  next row of the table, and every next row is safer than the one above it,
-  so it can cost the answer detail but can never invent one. An index entry
-  that names a `run_id` other than its own filename is `indeterminate`. In
-  the orphan-directory scan, an index entry that cannot be read blocks
-  reuse — it might claim this directory — and the answer is `collision`; a
-  directory that cannot be listed is `indeterminate`. A
-  `.<name>.<pid>.tmp` file left behind by an interrupted write is not a
-  record and is skipped.
+  and cannot be read is never absent, because absence authorizes a spawn.
+  These records are unreadable:
+
+  - a record with wrong permissions, or a truncated write;
+  - bytes that the §3.2 ingress refuses;
+  - a record that misses a required field;
+  - an `artifact_format_version` that this binary does not implement;
+  - bytes that are not UTF-8 at all: UTF-16, UTF-32, or a leading
+    byte-order mark, which is not UTF-8 JSON (DL-151, DL-229);
+  - a `spawn.json` or `status.json` whose own §3 `version` this binary
+    does not implement (DL-151).
+
+  That absence means no index entry AND no receipt at the computed path
+  (DL-151, DL-229). An unreadable index entry or `receipt.json` is
+  `indeterminate`. An unreadable `reply.json` falls to the next row of the
+  table. Every next row is safer than the one above it, so an unreadable
+  reply can cost the answer detail but can never invent one. An index
+  entry that names a `run_id` other than its own filename is
+  `indeterminate`. In the orphan-directory scan, an index entry that
+  cannot be read blocks reuse, because it might claim this directory, and
+  the answer is `collision`. A directory that cannot be listed is
+  `indeterminate`. A `.<name>.<pid>.tmp` file left behind by an
+  interrupted write is not a record and is skipped.
 - `SIGNAL {incarnation, token, run_id, sig}` with `sig` ∈ {`TERM`,
-  `KILL`} — the supervisor compares the recorded command (pid, start-time) from
-  `spawn.json` with the live process (the PID-reuse guard, reimplemented
-  stdlib-side). Then it signals the command PGID, never the wrapper. Each
-  call sends exactly one signal: the TERM→grace→KILL escalation stays
-  engine-side (the oracle decides kills — the supervisor stays dumb). →
-  `{ok}`, or `{ok, "noop": true}` for an already-dead or unverifiable
-  group.
+  `KILL`}. The supervisor compares the command (pid, start-time) recorded
+  in `spawn.json` with the live process (the §3 PID-reuse guard). Then it
+  signals the command's process group, never the wrapper. Each call sends
+  exactly one signal. The TERM→grace→KILL escalation stays on the engine
+  side: the oracle decides kills, and the supervisor stays dumb. The
+  answer is `{ok}`, or `{ok, "noop": true}` for a group that is already
+  dead or cannot be verified.
 
   There is a third answer (DL-150, recording DL-83):
-  `{ok: false, error: "not_ready"}`. SPAWN answers as soon as the wrapper is
-  forked, and the wrapper writes `spawn.json` a few syscalls later. A SIGNAL
-  that lands in that window finds a live wrapper and no record. That is not
-  an already-dead group, and it must not read as `noop`, or a kill decided
-  milliseconds after a start is dropped. The wrapper is the discriminator:
-  alive with no record is `not_ready` and means retry; exited with no record
-  is `noop`, because nothing here can still be addressed. A `sig` outside
-  {`TERM`, `KILL`} is `{ok: false, error: "bad_signal"}`, checked before
-  `run_id`.
-- `SHUTDOWN {incarnation, token}` — orderly, the one exception to
-  no-escalation (the engine is possibly gone). The supervisor sends TERM to each live
-  command PGID, waits the per-run `grace_seconds`, and sends KILL to
-  survivors. **Lifelines stay open until wrappers exit**, so wrappers
-  observe the command deaths and record `signaled`/`exited` truthfully
-  (never "parent lost"). The supervisor waits for the wrappers, replies
-  `{ok}`, exits, and unlinks the socket + pidfile. Both removals require the
-  ownership checks above (DL-210). SIGTERM/SIGINT also
-  trigger this shutdown (Tier 2 / `supervise shutdown` fallback). Only
-  SIGKILL (unhandleable) leaves the wrappers to their own EOF.
+  `{ok: false, error: "not_ready"}`. SPAWN answers as soon as the wrapper
+  is forked, and the wrapper writes `spawn.json` a few syscalls later. A
+  SIGNAL that lands in that window finds a live wrapper and no record.
+  That is not an already-dead group, and it must not read as `noop`, or a
+  kill decided milliseconds after a start is dropped. The wrapper is the
+  discriminator. Alive with no record is `not_ready`, and means retry.
+  Exited with no record is `noop`, because nothing here can still be
+  addressed. A `sig` outside {`TERM`, `KILL`} answers
+  `{ok: false, error: "bad_signal"}`, checked before `run_id`.
+- `SHUTDOWN {incarnation, token}`: an orderly shutdown. It is the one
+  exception to no-escalation, because the engine may be gone. The
+  supervisor sends TERM to each live command's process group, waits the
+  per-run `grace_seconds`, and sends KILL to survivors. **Lifelines stay
+  open until the wrappers exit**, so the wrappers observe the command
+  deaths and record `signaled` or `exited` truthfully, never "parent
+  lost". The supervisor waits for the wrappers, replies `{ok}`, exits, and
+  unlinks the socket and the pid file. Both removals require the ownership
+  checks above (DL-210). SIGTERM and SIGINT start the same shutdown: Tier 2
+  sends SIGTERM, and an operator can send it as a fallback to `dsl41
+  supervise shutdown`. Only SIGKILL, which cannot be handled, leaves the
+  wrappers to their own EOF.
 
-  Two bounds hold that wait finite (DL-150). First a wait of
-  up to 5 s for a just-spawned wrapper's missing `spawn.json`: a command
-  with no record cannot be signalled, and it would otherwise die by
-  lifeline EOF alone and record "parent lost" (DL-48). Then, after the
-  TERM, a wait of the longest per-run `grace_seconds` plus 2 s. Past that
-  the supervisor sends one last KILL to every survivor's group, stops
-  waiting, and answers. A wrapper still alive at that point loses its
-  lifeline when the supervisor exits, and then runs §4 step 5 on its own:
-  it records the command's own ending if the command has ended, and
-  `terminated / parent lost` only if it has to kill it. The promise above
-  is bounded, not absolute.
+  Two bounds keep that wait finite (DL-150). First, the supervisor waits up
+  to 5 s for a just-spawned wrapper's missing `spawn.json`. A command with
+  no record cannot be signalled, and it would otherwise die by lifeline
+  EOF alone and record "parent lost" (DL-48). Second, after the TERM, it
+  waits the longest per-run `grace_seconds` plus 2 s. Past that, the
+  supervisor sends one last KILL to every survivor's group, stops waiting,
+  and answers. A wrapper still alive at that point loses its lifeline when
+  the supervisor exits, and then runs §4 step 5 on its own. It records the
+  command's own ending if the command has ended, and
+  `terminated / parent lost` only if it has to kill the command. The
+  promise above is bounded, not absolute.
 
   If an error ends that wait, the supervisor logs one line,
   `supervisor: the shutdown wait failed (<type>: <message>); running it
   once more`, and the SHUTDOWN is answered `internal:`. No request is
   dispatched after it. The supervisor writes its queued answers once,
-  without blocking, then runs the wait once more and exits; a client that
+  without blocking, then runs the wait once more and exits. A client that
   is not reading, or has a large backlog of pushes ahead of the answer,
-  may get it only in teardown's two-second flush, or not at all. If that
-  run fails, or the cleanup before it fails, it exits 1, and each wrapper
-  still alive runs §4 step 5 on its own (DL-300).
+  may get the answer only in teardown's two-second flush, or not at all.
+  If that second run fails, or the cleanup before it fails, the supervisor
+  exits 1, and each wrapper still alive runs §4 step 5 on its own
+  (DL-300).
 
-**Pushes.** When the supervisor reaps a wrapper, the connection that
-holds the current lease receives async lines
-`{"push": "exit", run_id, wrapper_rc, at}`. Pushes are NOTIFICATIONS
-only — droppable, never the data channel. A disconnected controller
-loses them. On reconnect, it recovers with LIST + status.json (the spool
-is the truth, the same philosophy as the wrapper exit code).
+**Pushes.** When the supervisor reaps a wrapper, the connection that holds
+the current lease receives an async line
+`{"push": "exit", run_id, wrapper_rc, at}`. Pushes are NOTIFICATIONS only:
+droppable, never the data channel. A disconnected controller loses them.
+On reconnect, it recovers with LIST and status.json. The spool is the
+truth, as with the wrapper exit code.
 
-An exit push suppressed because the lease is inactive,
-its holder connection is absent, or that connection is paused sets
-`pushes_dropped` on the lease (DL-210). The next reply to its holder carries
-`"pushes_dropped": true`; pushes never carry it. Re-granting the lease to
-the same `controller_id` preserves the notice, including on the ACQUIRE
-reply after reconnect. Queuing a reply does not clear the notice. Fully
-flushing it to the kernel clears the drops it reports; a later drop still
-requires a later reply.
+An exit push is suppressed when the lease is inactive, its holder
+connection is absent, or that connection is paused. A suppressed push sets
+`pushes_dropped` on the lease (DL-210). The next reply to its holder
+carries `"pushes_dropped": true`; pushes never carry it. Re-granting the
+lease to the same `controller_id` keeps the notice, including on the
+ACQUIRE reply after a reconnect. Queuing a reply does not clear the
+notice. Flushing that reply fully to the kernel clears the drops it
+reports; a later drop still needs a later reply.
 
-The client arms one shared LIST task on this reply field and on reconnect.
-It checks armed waits once per `_LIST_RECHECK_EVERY` interval, only after
-their SPAWN or duplicate reply. A successful listing that no longer shows
-a live run marks that wait for the existing spool-resolution ladder,
-including its settle window and surviving-command checks. LIST never
-resolves an exit future. An `ok: false` listing is unknown and marks nothing.
-The task remains available while idle. A malformed LIST fails the observing
-wait and replaces the failed task so later waits can recover. Close waits
-up to five seconds for an in-flight request to unwind, then cancels the task
-even if it is still waiting on that request. A dropped exit push can make
-`kill()` pay both existing grace waits, after TERM and after KILL, even if
-the command has already exited. The LIST net does not resolve that push future.
+The client arms one shared LIST task on this reply field and on
+reconnect. The task checks armed waits once per `_LIST_RECHECK_EVERY`
+interval, and only after their SPAWN or duplicate reply. A successful
+listing that does not show the run as live marks that wait for the
+spool-resolution ladder, including its settle window and its checks for
+surviving commands. LIST never resolves an exit future. An `ok: false`
+listing is unknown and marks nothing. The task stays available while
+idle. A malformed LIST fails the observing wait, and the failed task is
+replaced so that later waits can recover. Close waits up to five seconds
+for an in-flight request to unwind, then cancels the task, even if it is
+still waiting on that request. A dropped exit push can make `kill()` pay
+both grace waits, after TERM and after KILL, even if the command has
+already exited. The LIST net does not resolve that push future.
 
-The engine's OWN control socket (runner-design §10) deliberately keeps
-no lease: sendevent is multi-writer by AutoSys nature, and the
-single-writer engine loop serializes it. The lease guards the tier that
-spawns without semantics.
+The engine's OWN control socket (runner-design §10) deliberately keeps no lease.
+sendevent is multi-writer by AutoSys nature, and the single-writer engine
+loop serializes it. The lease guards the tier that spawns without
+semantics.
 
-**The deadman** (S5b, DL-95). Started with `--deadman-seconds N`, a
-supervisor that has had **no live leaseholder** for N seconds stops its loop
-and returns. N must be **finite and positive**, and
-the supervisor exits 2 otherwise (DL-151). `nan` fails every comparison, so a
-positivity test alone admitted it and the interval then fired on the first
-tick — a supervisor that exits at once and takes every wrapper with it.
-`inf` is the same flag spelled as no deadman at all, which §5 already has a
-way to say: omit it. Both halves of "live" from the lease definition
-above apply: unexpired *and* the holder's connection still open — an
-expired lease whose
-connection is open is a controller that stopped renewing, and an unexpired
-one whose connection died is a controller that is gone. The clock restarts
-whenever a live leaseholder appears, so a reconnecting engine reprieves it.
+**The deadman** (S5b, DL-95). A supervisor started with
+`--deadman-seconds N` stops its loop and returns once it has had **no live
+leaseholder** for N seconds. N must be **finite and positive**; otherwise
+the supervisor exits 2 (DL-151). A positivity test alone would admit
+`nan`, which fails every comparison, and the interval would then fire on
+the first tick: the supervisor would exit at once and take every wrapper
+with it. `inf` would mean no deadman at all, which
+omitting the flag already says. Both halves of "live" from the lease definition above apply:
+unexpired *and* the holder's connection still open. An expired lease
+whose connection is open is a controller that stopped renewing. An
+unexpired lease whose connection died is a controller that is gone. The
+clock restarts whenever a live leaseholder appears, so a reconnecting
+engine reprieves the supervisor.
 
-Its exit is the whole mechanism: the process dying EOFs every lifeline it
-owns, and each wrapper then runs §4 step 5 — TERM, grace, KILL, record
+Its exit is the whole mechanism. The process dying EOFs every lifeline it
+owns, and each wrapper then runs §4 step 5: TERM, grace, KILL, record
 `terminated / parent lost`. Step 5 checks the command first (DL-150), so
-a command that already ended records its own outcome instead.
-Teardown explicitly closes the lifelines of unreaped
-wrappers (DL-210). This gives an in-process supervisor the same EOF behavior as process exit.
-That is the existing kill path, not a new one,
-and the supervisor still decides nothing about what should run. Omitted, a
-supervisor tolerates an absent controller forever, which is what lets an
-engine crash and resume with its runs intact (DL-79).
+a command that already ended records its own outcome instead. Teardown
+closes the lifelines of unreaped wrappers explicitly (DL-210), which gives
+an in-process supervisor the same EOF behavior as a process exit. The
+deadman adds no kill path of its own, and the supervisor still decides
+nothing about what should run. Without the flag, a supervisor tolerates an
+absent controller forever, which lets an engine crash and resume with its
+runs intact (DL-79).
 
-It is here for one reason outside this tier: `docs/concurrency-model.md`
-§8's `evict` — the only state that lets another host run work bound to this
-one — must be provable, and nothing else bounds when a controller-less
-supervisor's wrappers die. A run root without a deadman is never reroutable
-except by force.
+The deadman exists for one reason outside this tier.
+`docs/concurrency-model.md` §8's `evict` is the only state that lets
+another host run work bound to this one, and it must be provable. Nothing
+else bounds when the wrappers of a supervisor without a controller die. A
+run root without a deadman is never reroutable except by force.
 
 ## 6. License earmark
 
-The five modules of §1 and this document are
-earmarked Apache-2.0 on
-extraction (LICENSING.md item 6) (DL-150). Until the extraction, do not add
-per-file headers. Before CLA + relicense disclosure, do not accept
-external contributions to earmarked files.
+The five modules of §1 and this document are earmarked Apache-2.0 on
+extraction (LICENSING.md item 6, DL-150). Until the extraction, do not add
+per-file headers. Until a CLA exists and contributors are told about the
+relicense, do not accept external contributions to earmarked files.
