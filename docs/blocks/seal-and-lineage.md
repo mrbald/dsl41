@@ -90,7 +90,7 @@ A repeat that writes nothing takes no transition.
 ## Open findings
 
 See the row "Seal and successor lineage" in [the risk map](../risk-map.md).
-Its own findings are [torn sole opening segment of a rolled root](../risk-map.md#torn-sole-opening-segment-of-a-rolled-root) and [owning modules outside the 100% gate](../risk-map.md#owning-modules-outside-the-100-gate).
+Its own finding is [torn sole opening segment of a rolled root](../risk-map.md#torn-sole-opening-segment-of-a-rolled-root).
 
 ## Gaps found
 

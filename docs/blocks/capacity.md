@@ -89,7 +89,6 @@ A threshold request is checked at admission and never reserved.
 
 See the row "Capacity waiter and reservation" in [the risk map](../risk-map.md).
 Its own finding is [held-unit circular wait](../risk-map.md#held-unit-circular-wait).
-Every machine shares the [no transition inventory](../risk-map.md#no-transition-inventory) finding.
 
 ## Gaps found
 

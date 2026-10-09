@@ -2171,5 +2171,14 @@ Never activate a standby box on a live estate. Activation is unsafe
 until each box has its own executor id in the ledger, every re-launch
 path holds an effect whose executor is not its own, and the dead
 executor is evicted before the resume dispatches. Until then, two boxes
-can launch the same run. The documented restore (§2b) is not affected:
-it starts from a quiescent backup on a stopped estate.
+can launch the same run. A standby will also need the active box's
+exact `--as-machine`, declared at genesis on both boxes. A run root's
+identity is its absolute path (DL-224), and the anchor names each root
+by it, so a standby must see every run root at the same path and have
+the anchor directory. A run root kept on the lost box's own disk takes
+its spool with it: a period that spans the failover then cannot be
+attested, physically rolled, or pruned past. Before a standby acts, it
+must wait out the eviction bound of concurrency-model §8: the deadman
+(DL-95) plus the kill allowance (DL-151) and the clock drift. So the
+active box runs with a deadman (DL-307). The documented restore (§2b)
+is not affected: it starts from a quiescent backup on a stopped estate.

@@ -81,8 +81,7 @@ flowchart TD
 
 See the row "SPAWN idempotency" in [the risk map](../risk-map.md).
 The map ranks it fourth among the [least-tested machines](../risk-map.md#least-tested-machines).
-Four of the risk map's five owning modules for this row are [outside the 100% gate](../risk-map.md#owning-modules-outside-the-100-gate): `runner_supervisor.py`, `runner_adapters.py`, `runner_procid.py` and `canon.py`. `runner_startup.py` is inside the gate.
-The common finding, [no transition inventory](../risk-map.md#no-transition-inventory), applies too.
+All five of the risk map's owning modules for this row are in the 100% gate ([DL-294, DL-298, DL-299](../risk-map.md#closed-by-dl-289dl-306)), and the row lists no open finding.
 
 ## Gaps found
 

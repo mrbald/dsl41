@@ -101,7 +101,7 @@ flowchart TD
 
 ## Open findings
 
-The [risk map](../risk-map.md) row "Engine work choice" lists none beyond the common one, [no transition inventory](../risk-map.md#no-transition-inventory).
+The [risk map](../risk-map.md) row "Engine work choice" lists no open finding.
 
 ## Gaps found
 

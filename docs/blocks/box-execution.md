@@ -83,7 +83,7 @@ The idle re-derivation rows follow the vendor table in [SEM-15](../autosys-seman
 ## Open findings
 
 See the row "Box execution" in [the risk map](../risk-map.md).
-Every machine shares the [no transition inventory](../risk-map.md#no-transition-inventory) finding.
+Its own findings are [open vendor readings](../risk-map.md#open-vendor-readings-for-a-box-and-its-members), [a completed box can flip, and the ancestor walk has no run binding](../risk-map.md#a-completed-box-can-flip-and-the-ancestor-walk-has-no-run-binding) and [instant cascades recurse](../risk-map.md#instant-cascades-recurse).
 
 ## Gaps found
 

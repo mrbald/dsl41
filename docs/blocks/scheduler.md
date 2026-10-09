@@ -97,8 +97,7 @@ The calendar rules are pinned by the `test_sem36_*` to `test_sem39_*` families. 
 ## Open findings
 
 See the row "Scheduler and timer frontier" in [the risk map](../risk-map.md).
-Its own finding is [owning modules outside the 100% gate](../risk-map.md#owning-modules-outside-the-100-gate), for `runner_clock.py` and `autocal.py`.
-Every machine shares the [no transition inventory](../risk-map.md#no-transition-inventory) finding.
+The row lists no open finding. `runner_clock.py` and `autocal.py` are in the 100% gate ([DL-298](../risk-map.md#closed-by-dl-289dl-306)).
 
 ## Gaps found
 

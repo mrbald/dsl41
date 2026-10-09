@@ -95,7 +95,7 @@ One effect's states are [effect](../state-machines.md#effect); the anchor holds 
 
 ## Open findings
 
-The [risk map](../risk-map.md) row "Effect outbox" lists [outbox outcome overwrite](../risk-map.md#outbox-outcome-overwrite), beside the common one, [no transition inventory](../risk-map.md#no-transition-inventory).
+The [risk map](../risk-map.md) row "Effect outbox" lists no open finding. The outbox refuses a second outcome for a resolved effect ([DL-295](../decision-log.md), [closed](../risk-map.md#closed-by-dl-289dl-306)).
 
 ## Gaps found
 
