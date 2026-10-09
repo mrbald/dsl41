@@ -2623,7 +2623,7 @@ def test_pr53_the_receipt_is_a_closed_artifact_like_every_other(tmp_path: Path) 
     # only ever reached with the key ABSENT -- DL-157's rule, PR-08d's cite
     absent_version = json.loads(raw)
     del absent_version["artifact_format_version"]
-    with pytest.raises(EngineError, match="artifact_format_version None") as excinfo:
+    with pytest.raises(EngineError, match="artifact_format_version is missing") as excinfo:
         ArchiveReceipt.from_bytes(canonical_bytes(absent_version), where="x")
     assert "(PR-08d)" in str(excinfo.value)
 

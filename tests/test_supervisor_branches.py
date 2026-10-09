@@ -20,6 +20,7 @@ import signal
 import socket
 import struct
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -845,3 +846,122 @@ def test_sv_record_readers_refuse_what_is_not_their_record(short_root: Path) -> 
         },
     )
     assert rs._load_tombstone(str(path), "index") is not rs._INVALID
+
+
+# ------------------------------------------- the wrapper spec write and grace_seconds
+
+
+def test_sv_wrapper_spec_over_a_pipe_buffer_arrives_whole_after_short_writes(
+    short_root: Path, queued_supervisor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A spec past the pipe buffer is written in pieces. The kernel may cut a
+    write short: every byte still arrives."""
+    sup, _ = queued_supervisor
+    sink = short_root / "spec.bin"
+    real_spawn = os.posix_spawn
+    real_write = os.write
+    writes: list[int] = []
+
+    def spawn(_path: str, _argv: list[str], env: dict, **kwargs: Any) -> int:
+        code = f"import sys; open({str(sink)!r}, 'wb').write(sys.stdin.buffer.read())"
+        return real_spawn(sys.executable, [sys.executable, "-c", code], env, **kwargs)
+
+    def short_write(fd: int, data: Any) -> int:
+        if len(data) <= 4096:
+            return real_write(fd, data)
+        count = real_write(fd, bytes(data[:4096]))
+        writes.append(count)
+        return count
+
+    monkeypatch.setattr(os, "posix_spawn", spawn)
+    monkeypatch.setattr(os, "write", short_write)
+    spec = _spec(sup, _run_id(), command="true # " + "x" * 200_000)
+    pid, lifeline_w = sup._spawn_wrapper(spec)
+    monkeypatch.undo()
+    os.close(lifeline_w)
+    os.waitpid(pid, 0)
+    got = json.loads(sink.read_bytes())
+    assert got == {**spec, "lifeline_fd": got["lifeline_fd"]}
+    assert len(writes) > 40  # a 200 KB spec went out in 4 KiB pieces
+
+
+def test_sv_wrapper_spec_write_failure_closes_the_lifeline(
+    queued_supervisor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A spec write that fails after the fork raises OSError and leaves no
+    descriptor of the lifeline or the stdin pipe open in the supervisor."""
+    sup, _ = queued_supervisor
+    real_pipe = os.pipe
+    real_spawn = os.posix_spawn
+    fds: list[int] = []
+    pids: list[int] = []
+
+    def spawn(*args: Any, **kwargs: Any) -> int:
+        pids.append(real_spawn(*args, **kwargs))
+        return pids[-1]
+
+    def pipe() -> tuple[int, int]:
+        pair = real_pipe()
+        fds.extend(pair)
+        return pair
+
+    def fail(_fd: int, _data: Any) -> int:
+        raise OSError(errno.EIO, "synthetic")
+
+    monkeypatch.setattr(os, "pipe", pipe)
+    monkeypatch.setattr(os, "posix_spawn", spawn)
+    monkeypatch.setattr(os, "write", fail)
+    with pytest.raises(OSError) as raised:
+        sup._spawn_wrapper(_spec(sup, _run_id()))
+    monkeypatch.undo()
+    assert raised.value.errno == errno.EIO  # the write's error, not a second close's EBADF
+    assert len(fds) == 4
+    for fd in fds:
+        with pytest.raises(OSError) as info:
+            os.fstat(fd)
+        assert info.value.errno == errno.EBADF, fd
+    assert len(pids) == 1
+    os.waitpid(pids[0], 0)  # the wrapper saw EOF on a cut-short spec and ended
+
+
+def test_sv_wrapper_spawn_failure_closes_every_pipe_end_and_keeps_its_errno(
+    queued_supervisor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A posix_spawn that fails leaves no pipe end open in the supervisor, the
+    caller sees the spawn's own errno, and the spawn answer is `spawn_failed`."""
+    sup, _ = queued_supervisor
+    real_pipe = os.pipe
+    fds: list[int] = []
+
+    def pipe() -> tuple[int, int]:
+        pair = real_pipe()
+        fds.extend(pair)
+        return pair
+
+    def no_spawn(*_args: Any, **_kwargs: Any) -> int:
+        raise OSError(errno.ENOMEM, "synthetic")
+
+    monkeypatch.setattr(os, "pipe", pipe)
+    monkeypatch.setattr(os, "posix_spawn", no_spawn)
+    with pytest.raises(OSError) as raised:
+        sup._spawn_wrapper(_spec(sup, _run_id()))
+    assert raised.value.errno == errno.ENOMEM  # not a second close's EBADF
+    reply = sup.spawn_run(_spec(sup, _run_id(), job="k"))
+    monkeypatch.undo()
+    assert reply == {"ok": False, "error": "spawn_failed: [Errno 12] synthetic"}
+    assert len(fds) == 8
+    for fd in fds:
+        with pytest.raises(OSError) as info:
+            os.fstat(fd)
+        assert info.value.errno == errno.EBADF, fd
+    assert sup.runs == {}
+
+
+def test_sv_grace_seconds_past_float_range_is_bad_spec(queued_supervisor) -> None:
+    """An integer too large for a float is a bad spec, as the wrapper's own
+    check says, and not an `internal:` OverflowError from the dispatcher."""
+    sup, _ = queued_supervisor
+    for grace in (10**400, -(10**400)):
+        reply = sup.spawn_run(_spec(sup, _run_id(), grace_seconds=grace))
+        assert reply["ok"] is False and reply["error"] == "bad_spec", grace
+    assert sup.runs == {}

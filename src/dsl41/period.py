@@ -766,7 +766,7 @@ def parse_sealed_preamble(data: bytes | str, *, where: str) -> tuple[dict[str, A
         require_artifact_version(payload)
     except CanonError:
         raise EngineError(
-            f"{where}: artifact_format_version {payload.get('artifact_format_version')!r}:"
+            f"{where}: artifact_format_version is missing;"
             f" this binary implements {ARTIFACT_FORMAT_VERSION} (PR-08d)"
         ) from None
     return payload, stamped

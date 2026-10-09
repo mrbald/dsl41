@@ -10,8 +10,11 @@ when a row is missing, stale, or disagrees with the doc.
 The register states EXPOSURE, not application: a row says what the
 simulation does with a behaviour it can meet, never that a particular run
 met it. Collectors that record applications arrive in later slices, which
-is why `render_markdown` prints `detector: none` for every row that has
-scope fixtures and no collector yet.
+is why `render_markdown` prints `none` in the detector column for a
+reachable row that is not a plain member of a derived surface: it has scope
+fixtures and no collector yet. A plain member of a derived surface prints
+`generic`, and a member no input can reach prints `unreachable`
+(`detector_of`).
 
 Rows are data, so they carry no code: a row's `trigger`/`quiet` fixtures are
 strings the test interprets against the surface's fixture kind. Keeping the

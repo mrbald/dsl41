@@ -20469,3 +20469,42 @@ relitigate an entry; append a new one.
   had called it unreachable; the Fable pass then reproduced it, reversed
   its ruling, and ruled the run-scoped check into this entry. Each fix has
   a test that fails without it.
+- DL-314 Small runner fixes from the spec reviews: the wrapper spec is
+  written whole, an oversized grace is bad_spec, and the perimeter
+  journal's name is made durable
+  (2026-10-09; src/dsl41/runner_supervisor.py, runner_access.py, period.py,
+  runner_control.py, simulation_register.py; docs/access-model.md §6 and
+  header, docs/supervisor-protocol.md §2; tests/test_supervisor_branches.py,
+  tests/test_access.py, tests/test_estate.py, tests/test_retention.py)
+  THE SPEC WRITE. `_spawn_wrapper` wrote the wrapper spec with one
+  `os.write` and ignored the count. A spec larger than a pipe buffer could
+  arrive cut short; the run then never started and was reported
+  unobservable. It now uses `runner_procid.write_all` (DL-137, DL-178), and
+  every failure path closes all four pipe ends and keeps the real errno.
+  THE GRACE. A `grace_seconds` integer too large for a float answered
+  `internal:`; it now answers `bad_spec`, as the wrapper already did.
+  supervisor-protocol §2 says a finite number "representable as a double",
+  which states what both already enforce.
+  THE JOURNAL NAME. DL-311 recorded a residual: after an unsynced create of
+  perimeter.jsonl, a later synced append did not fsync the run root. The
+  writer now keeps a "name not yet durable" mark. It is set when the
+  writer creates the file, before any write can fail, and when it opens an
+  existing file, because an earlier process may have created it unsynced.
+  The first synced append fsyncs the run root and clears the mark; a
+  failed directory fsync leaves it set, so the next synced append tries
+  again. The arming receipt is the writer's first synced append, so the
+  name is durable before the engine serves. New refusal: on a restart over
+  an existing journal, arming fails ("cannot sync the arming receipt") if
+  that run-root fsync fails; before, it armed. access-model §6 states the
+  rule and no longer names a residual.
+  SMALLER. A seal preamble with no artifact_format_version now says the
+  field is missing. Three comments that stated false facts are corrected:
+  the leader lock, not the socket bind, keeps two engines apart
+  (concurrency-model §1, DL-100); an unreadable perimeter journal is
+  refused; and what the register's detector column prints.
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass, the
+  Fable pass in place of Codex at the owner's instruction, two rounds.
+  They found the spawn-failure path untested, a duplicate write helper, a
+  comment still false, an untested failing first write, and entry text
+  that over-claimed. All are fixed and confirmed, and each fix has a test
+  that fails without it.
