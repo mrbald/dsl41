@@ -740,7 +740,7 @@ CLI and scripts:
 
 ### Tests
 
-The suite has 104 test files (`pytest --collect-only -q` shows the current
+The suite has 105 test files (`pytest --collect-only -q` shows the current
 count) and a 31-file synthetic or doc-derived JIL corpus under
 `tests/corpus/`. Every oracle trace test runs three times: against the
 oracle directly, through the engine under a virtual clock via

@@ -765,6 +765,12 @@ class Oracle:
     def trace(self) -> list[TraceEntry]:
         return [entry.model_copy() for entry in self._trace]  # no aliasing out
 
+    def trace_since(self, since: int) -> tuple[int, list[TraceEntry]]:
+        """The trace length and a copy of the entries after the first `since`.
+        Only the slice is copied, so a poll that is up to date costs nothing
+        in the trace's length."""
+        return len(self._trace), [e.model_copy() for e in self._trace[max(since, 0) :]]
+
     def batch(self, at: datetime) -> InputBatch:
         """Open one admitted input at `at` (concurrency-model ss4). Use this
         only when a decision sits BETWEEN the two halves of the batch -- the

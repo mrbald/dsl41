@@ -1918,11 +1918,7 @@ class Engine:
             dispatched=self._dispatched,
             live={job: run.run_number for job, run in self._live.items()},
             dispatchable=self._dispatchable(),
-            run_ids={
-                (e.job, e.run_number): e.run_id
-                for e in self.outbox.effects()
-                if e.kind == "SPAWN" and e.run_id is not None
-            },
+            run_ids=self.outbox.spawn_run_ids(),
             mint_run_id=lambda: str(uuid.uuid4()),
         )
 

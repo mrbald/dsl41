@@ -70,6 +70,7 @@ import re
 
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from datetime import datetime
+from types import MappingProxyType
 from typing import Final, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -245,6 +246,9 @@ class Outbox:
         #: the ss11a one-to-one ownership maps, both directions
         self._run_ids: dict[tuple[str, int], str] = {}
         self._runs_by_id: dict[str, tuple[str, int]] = {}
+        #: the run ids that SPAWN effects bound: what a KILL is planned from.
+        #: Kept as effects are recorded so planning never walks the outbox.
+        self._spawn_run_ids: dict[tuple[str, int], str] = {}
 
     def record(self, effect: Effect) -> None:
         """Note an intended effect. Idempotent on `effect_id`, because replay
@@ -297,6 +301,8 @@ class Outbox:
                 )
             self._run_ids[run] = effect.run_id
             self._runs_by_id[effect.run_id] = run
+            if effect.kind == "SPAWN":
+                self._spawn_run_ids[run] = effect.run_id
         self._order.append(effect.effect_id)
         self._effects[effect.effect_id] = effect
         # the id was unseen above, so the move is absent -> pending by construction
@@ -369,6 +375,12 @@ class Outbox:
         """Every unattempted effect, in admission order (ss5's per-run
         ordering, which a global order satisfies for free)."""
         return [self._effects[eid] for eid in self._order if eid not in self._outcomes]
+
+    def spawn_run_ids(self) -> Mapping[tuple[str, int], str]:
+        """The `(job, run_number) -> run_id` bindings the recorded SPAWN
+        effects made, as a read-only view of the live map. The planner reads
+        it for a KILL's id; it never changes while a plan is built."""
+        return MappingProxyType(self._spawn_run_ids)
 
     def effects(self) -> Iterator[Effect]:
         return (self._effects[eid] for eid in self._order)

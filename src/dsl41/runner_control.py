@@ -1072,10 +1072,10 @@ class ControlServer:
         since = request.get("since", 0)
         if not is_wire_int(since):
             return _failure("invalid_argument", "since must be an integer trace seq")
-        entries = self.engine.oracle.trace()
+        last_seq, entries = self.engine.oracle.trace_since(since)
         return {
             "ok": True,
-            "last_seq": len(entries),
+            "last_seq": last_seq,
             "entries": [
                 {
                     "seq": seq,
@@ -1084,8 +1084,7 @@ class ControlServer:
                     "transition": entry.transition,
                     "cause": entry.cause,
                 }
-                for seq, entry in enumerate(entries, start=1)
-                if seq > since
+                for seq, entry in enumerate(entries, start=max(since, 0) + 1)
             ],
         }
 
