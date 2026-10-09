@@ -26,17 +26,16 @@ Here, prod grade means
 durable, resumable, auditable, and loud about everything that the runner
 does not do. Prod grade does not mean highly available.
 
-Lifecycle stance (DL-41a): the default is **tethered**: engine death
+Lifecycle stance (DL-41a): the default is **tethered**. Engine death
 terminates all jobs, and the record is durable even under `kill -9` (§6a).
-This behavior is a documented semantic choice, not an accident. For
-long-running estates, operators correctly expect that an engine restart
-(upgrade) does not kill active work. Thus the **detached** supervisor tier
-(§6a Tier 1) is part of the prod-grade story, not an optional extra.
-Without this tier, the engine is prod-grade for restartable workloads only.
+This is a documented semantic choice. For long-running estates, operators
+expect an engine restart (an upgrade) not to kill active work. So the
+**detached** supervisor tier (§6a Tier 1) is part of prod grade. Without
+it, the engine is prod grade for restartable workloads only.
 
 ## 2. Position in the pipeline
 
-The runner consumes IR-F (`CatalogIR`) through the existing loaders
+The runner consumes IR-F (`CatalogIR`) through the compiler's loaders
 (JIL → ast_jil → lowering, or the DSL surface). IR-G stays derived, and the
 runner does not consume it: `plan` walks the AND-success skeleton over IR-F
 (§8) and the UI lays out boxes from the catalog's own `box_name`. The
@@ -61,7 +60,7 @@ control surface.
                 └───────────────────────────┘
 ```
 
-The cut line comes directly from the oracle's existing event contract:
+The cut line follows the oracle's event contract:
 
 - **Oracle → shell**: the oracle emits every internal transition as a
   STATUS event (`_set_status` → `_emit`). An emitted
@@ -79,7 +78,7 @@ The cut line comes directly from the oracle's existing event contract:
   alarms (SEM-34), box folds, ON_ICE/ON_HOLD/ON_NOEXEC (SEM-20/21/22),
   SEM-32 arm-and-wait (Q3; DL-54, DL-58).
 
-The runner makes only two core changes, and both are additions to the oracle:
+For the real-time shell, the runner adds two methods to the oracle:
 
 - `next_timer_due() -> datetime | None` — a read-only look at the timer
   heap, so that a real-time shell knows when to wake. In the oracle, timers fire
@@ -91,6 +90,11 @@ The runner makes only two core changes, and both are additions to the oracle:
 
 Both are deterministic and pure-core-compatible. Bisimulation (§13) pins
 that `feed`-only and `advance`+`feed` schedules produce identical traces.
+
+The engine uses more of the oracle than these two methods. `fork` and
+`batch` (`InputBatch`) serve the admission order and the host table serves
+routing (`docs/concurrency-model.md` §4 and §8). `trace_since` serves the
+control `trace` verb (DL-310). The recursion-limit fit is §4's (DL-306).
 
 ## 4. Engine loop — single writer
 
@@ -139,7 +143,7 @@ advancing the run number, and vendor parity launches nothing.
 **Stale-completion gate.** Completions carry `(job, run_number)`. Every
 completion enters the common admission order first, so it is durable before
 it is judged (§7). The gate then rejects one whose run_number does not match
-the current one, or whose row is no longer STARTING or RUNNING: a terminal
+the current one, or whose row is not STARTING or RUNNING: a terminal
 status, a status an operator injected, such as INACTIVE, or QUE_WAIT after
 a restart queued behind a reservation (DL-235). An INACTIVE cascaded from the
 job's box (SEM-18) counts as injected (DL-242). The rejection is that
@@ -169,8 +173,8 @@ local, `start_times` and `start_mins` follow the `dst-start-times` switch
 missing hour then ticks in the first minute of 03:00, with its minute as
 seconds (2:05 ticks at 3:00:05); that is the one tick that is not on a
 whole minute. The runner injects `STARTJOB` at the
-tick and then computes the next occurrence. The scheduler fires **unconditionally** at the tick. SEM-32
-arm-and-wait on a false condition (Q3, DL-58) and
+tick and then computes the next occurrence. The scheduler fires
+**unconditionally** at the tick. SEM-32 arm-and-wait on a false condition (Q3, DL-58) and
 run_window closer-edge handling (SEM-33) stay oracle-side, exactly as in
 simulation.
 
@@ -267,7 +271,7 @@ files reuse the event-script shapes that the oracle trace tests already
 use.
 
 Execution identity: jobs run as the invoking user. `owner` set to a
-different user is a preflight ERROR (no setuid in MVP). `machine` must be
+different user is a preflight ERROR (the runner does not setuid). `machine` must be
 local (§8).
 
 ## 6a. Process lifecycle tiers (DL-41a)
@@ -289,23 +293,24 @@ transient scopes (cgroup kill) are the only true containment (see below).
 supervisor → wrappers. The supervisor exists for exactly one reason: jobs
 that must SURVIVE engine restarts (upgrades, crash isolation). The
 supervisor is deliberately dumb (postmaster / s6-supervise philosophy):
-SPAWN, SIGNAL, LIST, SHUTDOWN, fork wrappers, reap, forward completions.
-It has no scheduling timers, no conditions, and no configuration reload.
+it forks wrappers, reaps them, and answers SPAWN, SIGNAL, LIST and
+SHUTDOWN, plus PING and the lease verbs ACQUIRE, RENEW and RELEASE
+(`docs/supervisor-protocol.md` §5). It has no scheduling timers, no conditions, and no configuration reload.
 Its only time bounds are lifecycle bounds, which the
 [supervisor-protocol preamble](supervisor-protocol.md) lists (DL-150). Its own-bug
 crash surface is near zero. Wrappers hold ITS lifeline (below). Thus even
 `kill -9` of the supervisor keeps
 "supervisor death ⇒ all jobs terminate and are recorded". On restart, the
-engine reattaches and LISTs. The E4 "orphan adoption" question dissolves:
-jobs never orphan because their parent never died. Linux hardening:
+engine reattaches and LISTs. No job is orphaned, because its parent did not
+die, so nothing is adopted (E4). Linux hardening:
 `PR_SET_CHILD_SUBREAPER`, so that a killed wrapper's command reparents to
 the supervisor for reaping/killing.
 
-From day one, the supervisor speaks a **versioned line protocol over a
-named unix socket** (0600 + same-uid peer-cred check), not an inherited
-socketpair. The reason: the protocol plus the spool format
-(spawn.json/status.json) is the tier's public contract and future
-extraction boundary (DL-42). The supervisor also writes `receipt.json`,
+The supervisor speaks a **versioned line protocol over a named unix
+socket** (0600 + same-uid peer-cred check), not an inherited socketpair.
+The reason: the protocol plus the spool format
+(spawn.json/status.json) is the tier's public contract and the boundary
+along which it can be extracted (DL-42). The supervisor also writes `receipt.json`,
 `reply.json` and the `runs/.by_run_id/<run_id>` index, and those three
 plus the run directory itself are what make SPAWN idempotent across its
 own restart (DL-129). Clients split into **unlimited read-only
@@ -329,8 +334,8 @@ tier is a dumb stdlib-only shim (`runner_wrapper.py`, no
 third-party imports). Both spawners run it BY FILE PATH, never as
 `python -m`: `-m` would import the `dsl41` package first and drag
 third-party imports into the recorder. The shim is parent-agnostic: it
-does not know or care whether the engine or the supervisor spawned it.
-This property lets Tier 1 attach later without a change to the shim.
+does not know whether the engine or the supervisor spawned it. So both
+tiers run the same shim.
 Duties:
 
 1. `setsid()` — its own session. The command child then does
@@ -353,8 +358,7 @@ Duties:
 3. Spawn the command with the `DSL41_RUN` env tag (base64url JSON:
    run_id, job, run_number, boot_id). The tag is **forensics, not
    correctness**: macOS `KERN_PROCARGS2` omits env for restricted
-   (platform/code-signed) targets like `/bin/sh` (shown empirically and
-   in XNU source), and Linux `/proc/pid/environ` is ptrace-gated. The
+   (platform/code-signed) targets like `/bin/sh` (XNU source), and Linux `/proc/pid/environ` is ptrace-gated. The
    identity check uses the **(pid, start-time)** tuple from spawn.json
    instead (`ps -o lstart=` / `/proc/<pid>/stat` starttime, ±2s tolerance
    on macOS's 1-second resolution). Never signal a pid that fails this
@@ -391,7 +395,7 @@ kill parent, assert both EOF).
 escapees (`sh -c 'daemon & '`). Vendor agents share this limitation. The
 documented Linux hardening is a per-run transient systemd scope (cgroup
 kill), which also survives runner restarts better than any fd- or
-pid-based mechanism. A `--scope` option is future work, not MVP.
+pid-based mechanism. A `--scope` option is not built.
 
 The crash matrix that remains after Tier 0: `kill -9` of a *wrapper*
 alone (the command survives, no status.json will ever appear) and `-9` of
@@ -496,12 +500,11 @@ Record kinds:
 - `preflight` — the §8 WARN items that the run started under (DL-45:
   "prints, journals, and runs" made literal). This record is not an
   input, and replay ignores it.
-- Retired kinds are refused by name, citing DL-138: `header` (DL-130
-  stopped writing it: a once-per-log header cannot describe a log made of
-  segments), and `result`
-  and standalone `effect` (the decision and its intents as separate records,
-  each its own fsync, with the window between them the atomicity violation
-  §4 step 7 forbids; DL-118 merged them into `decision`). A
+- Retired kinds are refused by name, citing DL-138: `header` (a
+  once-per-log header cannot describe a log made of segments, DL-130), and
+  `result` and standalone `effect` (the decision and its intents as
+  separate records, each its own fsync, with the window between them the
+  atomicity violation §4 step 7 forbids; `decision` holds both, DL-118). A
   `catalog_hash_version` of 1 is refused the same way. An **unknown** `rec`
   is refused too, naming the kind, as its own error: the version gate sits
   on the opening `segment`, so an unrecognised kind inside a version-matched
@@ -517,11 +520,21 @@ requested and therefore had to name a revision. Replay reads `expect` back,
 because an attempt admitted without a result is re-decided through the same
 gate, and the revision it named is half of what that gate reads.
 
-Resume's side effects are bounded: a kill the engine decided and recorded,
-then died before delivering, is re-driven (DL-96); a supervised SPAWN with a
-bound `run_id` and no spool is replayed (DL-129); and a live wrapper under a
-terminal row is killed (DL-133). Nothing else. Without the first, the sweep
-would walk past a detached run whose parent is the supervisor, because its
+Resume's side effects are bounded to this list:
+
+- a kill the engine decided and recorded, then died before delivering, is
+  re-driven (DL-96);
+- the ladder below kills a verified command group that outlived its
+  wrapper's record: the wrapper dead, or alive and silent past the settle
+  window plus the grace (DL-226);
+- a pending SPAWN is re-driven (DL-102), and a supervised SPAWN with a
+  bound `run_id` and no spool is replayed (DL-129);
+- an FW watch is resumed from its log, or, with no trace and no pending
+  SPAWN, dispatched again, because a watch is an idempotent read (DL-44
+  item 7, DL-129);
+- a live wrapper under a terminal row is killed (DL-133).
+
+Nothing else. Without the first, the sweep would walk past a detached run whose parent is the supervisor, because its
 row is already TERMINAL and reads as "completion already replayed".
 
 `dsl41 runs` is not a new record kind: its rows are a projection folded from
@@ -531,14 +544,16 @@ the spool, offline, with nothing appended to the journal (DL-113). The
 **verdict** is read for the same reason §4's gate writes it (DL-151): a
 completion that gate REJECTED never reached the oracle, so the fold skips it
 too; read without the verdict, a late `exit 0` would decide the row over the
-real FAILURE. **The fold decides the crash window itself** (DL-156): an attempt whose `decision` record was never written is re-decided
-through the §4 gate on replay, and the full-fidelity fold takes those
-recovered verdicts (`Replay.recovered`, returned by `replay_trace`) instead
-of throwing them away. A recovered rejection is skipped exactly as a durable
-one, and a recovered application still decides the row. This exercises no
-new authority: the same gate, the same records, deterministic, version-gated
-(`check_replay_version`), and a resume derives the identical verdict from
-the same log. A fold reading records alone cannot run the gate and REFUSES
+real FAILURE.
+
+**The fold decides the crash window itself** (DL-156). An attempt whose
+`decision` record was never written is re-decided through the §4 gate on
+replay. The full-fidelity fold uses those recovered verdicts
+(`Replay.recovered`, returned by `replay_trace`). A recovered rejection is
+skipped exactly as a durable one, and a recovered application decides the
+row. This adds no new authority: it is the same gate over the same records,
+deterministic and version-gated (`check_replay_version`), and a resume
+derives the same verdict from the same log. A fold reading records alone cannot run the gate and REFUSES
 to decide instead: the row's status stands on what the records do decide,
 an earlier durable verdict or the pre-completion RUNNING, and it carries
 `undecided`, so the operator is told the newest completion did not decide
@@ -592,8 +607,9 @@ it. The run root outlives the estate files it was launched from. A
 nor read, and a root that has one where the period manifest is absent is
 refused naming the layout (`docs/protocol-evolution.md`). The catalog hash
 covers `SourceSpan.file`, so byte-exact replay against relocated copies
-still needs the recorded original paths; relocation-independent hashing is
-a deliberate defer (it orphans every existing journal's resume gate).
+still needs the recorded original paths. Relocation-independent hashing
+is deliberately not built: it would fail every existing journal's resume
+gate.
 
 **Permissions** (DL-66): run roots are `0700` (created and re-tightened
 at resume); the journal, wrapper spool files, and job stdout/stderr are
@@ -733,13 +749,18 @@ still holding.
 **A start with no trace anywhere splits in two.** The spool is one kind of
 evidence; the outbox (S5c) is a second, and it lives in the log. A start
 whose SPAWN is still PENDING is an intent the previous leader recorded and
-did not deliver; it is re-driven, at the run_number the oracle already
-decided, which is §7's "re-drive pending" and needs no new mechanism:
-leaving the effect pending is enough, because dispatch drains the outbox
-through the same gates a fresh effect passes (so a drained host still holds
-it). A start with no pending intent, an effect already resolved whose spool
-has since gone, is FAILED, unless a supervised adapter holds a bound
-`run_id`, in which case the SPAWN is replayed (PR-36a, the rung above).
+did not deliver. It is re-driven at the run_number the oracle already
+decided. This is concurrency-model §7's "re-drive pending", and it needs no
+new mechanism: leaving the effect pending is enough, because dispatch
+drains the outbox through the same gates a fresh effect passes (so a
+drained or quarantined host still holds it, and a held start stays held;
+DL-102, `docs/concurrency-model.md` §8). This applies to FW starts too. A
+start with no pending intent is an effect already resolved whose spool
+has since gone. It is FAILED with cause `dispatch lost to engine crash
+(never spawned)`, with two exceptions. An FW watch is dispatched again,
+because a watch is an idempotent read (DL-44 item 7). A supervised adapter
+that holds a bound `run_id` has its SPAWN replayed (PR-36a, the rung
+above). These are the rules of `docs/concurrency-model.md` §5 and §7.
 
 **The barrier ends in a dispatch,** because §7 says so and because without
 it the outbox is drained only on the way out of the next admitted input: a
@@ -822,7 +843,7 @@ ERROR:
 - `resources:` that requires a resource with no `insert_resource` in the
   set, or with no parseable `amount` — an unsized semaphore cannot be
   honored (DL-50: fail-closed, stricter than L016's warn). A
-  `--resource-capacity` override is a documented future escape hatch.
+  `--resource-capacity` override is not built.
   Unknown `res_type` (not R/D/T). FREE=Y or FREE=A on a `res_type: D`
   resource: release semantics undocumented (DL-287, Q12); FREE=N accepted.
   The same resource named twice in one `resources:` list — the demand is
@@ -862,51 +883,8 @@ WARN:
   unmodeled by scope decision).
 - `job_load` on a **pool** machine — the machine-load throttle is
   unmodeled for pools (DL-50, PENDING Qr3). Resource semaphores on such a
-  job still apply. (Plain `job_load`/`priority`/`resources:` are now
-  HONORED (DL-50), not warned. An unsized/unknown-res_type/malformed
-  resource is an ERROR below, not a WARN.) The oracle applies the vendor's
-  load rules (DL-247). Only a job with a positive `priority` checks its
-  `job_load`: "The scheduler ignores any load unit values defined for the
-  job or machine when the job has a priority value of zero", and 0 is the
-  default. That job's load still counts against the machine: "even when
-  jobs have a priority of 0, AutoSys Workload Automation tracks job loads
-  on each machine". A FORCE_STARTJOB "runs even if its load exceeds the
-  machine's max_load value"; its units are held the same way. A job
-  waiting for load "automatically blocks all the lower priority jobs that
-  specify the same machine attribute value", on a fresh start and on
-  readmission; a positive priority is blocked even without a `job_load`.
-  Named resources gate every start, forced or not, with one vendor
-  exception: a FORCE_STARTJOB of a FAILURE or TERMINATED job that still
-  holds resource units starts on them and does not re-evaluate its other
-  resources (DL-256). Pools stay outside both load rules. This WARN still
-  fires for a pool job at priority 0.
-  The oracle applies the vendor's named-resource rule too (DL-255): "A job
-  in the RESWAIT state for one resource name automatically blocks all the
-  lower priority jobs that specify the same resource name. It does not
-  automatically block higher or equal priority jobs that specify the same
-  resource name or a job that specifies a different resource name." The
-  blocked job has a positive priority and may be forced; a forced start on
-  held units is not checked at all (DL-256). The blocker has a
-  positive priority, names a resource the blocked job names, is short on
-  any resource it names (Broadcom KB 240816, AutoSys 12.0: a job waiting
-  for its second resource blocks jobs that need only its first), and has
-  passed its load check: its load fits and no higher-priority load waiter blocks it, since
-  jobs still in QUE_WAIT for load "do not automatically block lower
-  priority jobs that specify the same resource attribute". A blocker that
-  holds units from an earlier run counts them as its own, as its admission
-  does (DL-256). A queued job holds no load: jobs "that enter the RESWAIT
-  state after the load balancing attributes are successfully evaluated do
-  not consume any load units". A start or enqueue that takes machine load
-  can send a resource waiter back to its load check, so it owes an
-  admit-only queue scan. The input pays that scan after every referencer
-  it woke.
-- Held resource units (DL-256). A renewable resource's units that a run's
-  FREE policy does not release stay held by the job after the run: FREE=N
-  always, and FREE=Y, or an omitted FREE under `renewable-free=Y`, after
-  FAILURE or TERMINATED. They count against the resource until the
-  operator sends `RELEASE_RESOURCE` for the job, or the job's next run
-  takes them over. That run re-uses them for the same resources and is
-  never charged twice. A depletable's units are spent as before.
+  job still apply. Pools stay outside both load rules below, so this WARN
+  fires for a pool job at priority 0 too.
 - Cycle in the AND-success skeleton (graphlib `CycleError`): cycles are
   *legal* AutoSys (edge-triggered re-runs, DL-13, L010's territory). Thus
   this rule warns and disables `plan`, and it does not refuse.
@@ -915,6 +893,55 @@ graphlib's role is deliberately bounded to that skeleton check plus `plan`
 (wave-by-wave `get_ready()` batches for acyclic estates). General
 eligibility is predicate evaluation over the status store. That is the
 oracle's edge-triggered referencer machinery, not a topological order.
+
+**Load and resource rules the oracle applies.** These are not preflight
+items. Plain `job_load`, `priority` and `resources:` are honored (DL-50)
+and draw no WARN. An unsized, unknown-res_type or malformed resource is an
+ERROR (above).
+
+The oracle applies the vendor's load rules (DL-247). Only a job with a
+positive `priority` checks its `job_load`: "The scheduler ignores any load
+unit values defined for the job or machine when the job has a priority
+value of zero", and 0 is the default. That job's load still counts against
+the machine: "even when jobs have a priority of 0, AutoSys Workload
+Automation tracks job loads on each machine". A FORCE_STARTJOB "runs even
+if its load exceeds the machine's max_load value"; its units are held the
+same way. A job waiting for load "automatically blocks all the lower
+priority jobs that specify the same machine attribute value", on a fresh
+start and on readmission; a positive priority is blocked even without a
+`job_load`. Named resources gate every start, forced or not, with one
+vendor exception: a FORCE_STARTJOB of a FAILURE or TERMINATED job that
+still holds resource units starts on them and does not re-evaluate its
+other resources (DL-256).
+
+The oracle applies the vendor's named-resource rule too (DL-255): "A job
+in the RESWAIT state for one resource name automatically blocks all the
+lower priority jobs that specify the same resource name. It does not
+automatically block higher or equal priority jobs that specify the same
+resource name or a job that specifies a different resource name." The
+blocked job has a positive priority and may be forced; a forced start on
+held units is not checked at all (DL-256). The blocker has a positive
+priority, names a resource the blocked job names, is short on any resource
+it names (Broadcom KB 240816, AutoSys 12.0: a job waiting for its second
+resource blocks jobs that need only its first), and has passed its load
+check. That is, its load fits and no higher-priority load waiter blocks
+it, since jobs still in QUE_WAIT for load "do not automatically block
+lower priority jobs that specify the same resource attribute". A blocker
+that holds units from an earlier run counts them as its own, as its
+admission does (DL-256). A queued job holds no load: jobs "that enter the
+RESWAIT state after the load balancing attributes are successfully
+evaluated do not consume any load units". A start or enqueue that takes
+machine load can send a resource waiter back to its load check, so it
+owes an admit-only queue scan. The input pays that scan after every
+referencer it woke.
+
+Held resource units (DL-256). A renewable resource's units that a run's
+FREE policy does not release stay held by the job after the run: FREE=N
+always, and FREE=Y, or an omitted FREE under `renewable-free=Y`, after
+FAILURE or TERMINATED. They count against the resource until the operator
+sends `RELEASE_RESOURCE` for the job, or the job's next run takes them
+over. That run re-uses them for the same resources and is never charged
+twice. A depletable resource's units are spent.
 
 ## 8a. Semantic switches
 
@@ -981,15 +1008,15 @@ its default; only a short allow-list of static callers may.
 | Switch | Values | Default | Documented AutoSys | Why this default |
 | --- | --- | --- | --- | --- |
 | `ice-lookback` | `true`, `ordinary` | `true` | `true` | A condition atom with a lookback qualifier whose predecessor is on ice. `true`: the atom is true, lookback ignored. `ordinary`: the qualifier is dropped and the ordinary on-ice table applies (s, d, n true; f, t, exitcode false). The "condition Attribute" page (AutoSys 24.2) says "If the predecessor job being evaluated for the look-back condition is currently in an ON_ICE status, it always evaluates to true. That is, any look-back evaluation is ignored." `ordinary` extends the Start Conditions on-ice table (SEM-20), which does not separate lookback atoms, to the lookback atom. Q10 stays open. |
-| `renewable-free` | `Y`, `A` | `Y` | `Y` | A renewable resource request (`res_type: R` or none) that states no FREE. `Y`: the units are freed only when the run ends SUCCESS; after FAILURE or TERMINATED the job holds them until `RELEASE_RESOURCE` or its next run. `A`: the units are freed on every completion, dsl41's reading before DL-256. The "resources Attribute" page (AutoSys 24.2) gives FREE's default: "Default: Y", where "Y -- Frees the units only if the job completes successfully". An explicit FREE is not affected. Qr1 is decided. |
-| `queued-recheck` | `0`, `1`, `2` | `0` | `1` | A job that can queue (it names a resource, or a positive priority makes it check machine load) and leaves QUE_WAIT. The values are the vendor's EvaluateQueuedJobStarts (Administrating > Configure a Scheduler, AutoSys 24.2). `0`: it starts without a recheck. `1`: its `condition`, `run_window` and `exclude_calendar` are checked again, but not `run_calendar`, `days_of_week`, `start_times` or `start_mins`. `2`: `run_calendar` or `days_of_week` is checked for the day too. A job that fails goes INACTIVE without starting, its arm is cleared, and its next start time starts it; a member of a running box that fails its condition waits and keeps the box running, the vendor's ACTIVATED. A `run_window` failure takes DL-246's disposition at that instant (the skip, or one deferral to the opening), and a day failure of a job with no start times of its own is deferred to its next eligible window opening, so no job waits for a tick that never comes. The vendor's default is `1`. The owner kept `0`, dsl41's existing behavior: a queued job met its conditions when it started. Qr6 is decided (DL-50, DL-257). The day and window checks use the oracle's zone, which DL-253 aligns with the scheduler's base zone. |
+| `renewable-free` | `Y`, `A` | `Y` | `Y` | A renewable resource request (`res_type: R` or none) that states no FREE. `Y`: the units are freed only when the run ends SUCCESS; after FAILURE or TERMINATED the job holds them until `RELEASE_RESOURCE` or its next run. `A`: the units are freed on every completion. The "resources Attribute" page (AutoSys 24.2) gives FREE's default: "Default: Y", where "Y -- Frees the units only if the job completes successfully". An explicit FREE is not affected. Qr1 is decided. |
+| `queued-recheck` | `0`, `1`, `2` | `0` | `1` | A job that can queue (it names a resource, or a positive priority makes it check machine load) and leaves QUE_WAIT. The values are the vendor's EvaluateQueuedJobStarts (Administrating > Configure a Scheduler, AutoSys 24.2). `0`: it starts without a recheck. `1`: its `condition`, `run_window` and `exclude_calendar` are checked again, but not `run_calendar`, `days_of_week`, `start_times` or `start_mins`. `2`: `run_calendar` or `days_of_week` is checked for the day too. A job that fails goes INACTIVE without starting, its arm is cleared, and its next start time starts it; a member of a running box that fails its condition waits and keeps the box running, the vendor's ACTIVATED. A `run_window` failure takes DL-246's disposition at that instant (the skip, or one deferral to the opening), and a day failure of a job with no start times of its own is deferred to its next eligible window opening, so no job waits for a tick that never comes. The vendor's default is `1`. dsl41 keeps `0`: a queued job met its conditions when it started. Qr6 is decided (DL-50, DL-257). The day and window checks use the oracle's zone, which DL-253 aligns with the scheduler's base zone. |
 | `fw-existence` | `stable`, `immediate` | `stable` | `immediate` | What an FW job with no `watch_file_min_size` does once the watched file exists. `stable`: wait for the size to stay steady across two polls, like a job with a minimum size — dsl41's own choice, because a file still being written is not complete. `immediate`: complete at once, `watch_interval` ignored — the vendor reading. The "watch_interval Attribute" page (AutoSys 24.2) says "If you are monitoring for the existence of a file (not the size) and the file already exists when the job runs, the job completes immediately. The watch_interval attribute is ignored." The "watch_file_min_size Attribute" page says "If you do not specify the watch_file_min_size attribute in your job definition, the job completes if the file exists (the default)." A job with a minimum size is unaffected by this switch either way (§6, E6). |
 | `wekr-first-week` | `first-full`, `partial` | `first-full` | unknown | Where week 1 of a WEKR token's year starts (SEM-37). A WEKR token selects a week of the year whose weeks start on the anchor day. `first-full`: week 1 starts on the first anchor day on or after January 1, and the days before it are in no week, as in the C library's `%U`/`%W` numbering. `partial`: week 1 runs from January 1 to the day before that anchor day. The vendor text does not say; its example, "consider full weeks as those that start on a Monday", supports `first-full`. Both readings agree when January 1 falls on the anchor day, and both count `Mnn` back from the week that holds December 31. The switch reaches every job whose `run_calendar` or `exclude_calendar` has a WEKR token. Q11 is closed (DL-259). |
-| `dst-start-times` | `vendor`, `fold0` | `vendor` | `vendor` | `start_times` and `start_mins` on a one-hour DST change at 02:00 local, the shape DL-249 detects. `vendor`: a start time in the repeated 01:00-01:59 runs once, in the second (standard time) pass. `start_mins` run in both passes. A start time in the missing 02:00-02:59 runs in the first minute of 03:00, its minute read as seconds (2:05 at 3:00:05), and only the first such start time runs. `start_mins` ticks in the missing hour do not exist. `fold0`: dsl41's earlier PEP 495 fold=0 reading. A repeated time runs once, in the first pass, and each missing time runs past the gap (2:05 at 3:05). "Standard Time Changes" and "Daylight Time Changes" (AutoSys 12.1 and 24.2) document the vendor rules. Other change shapes use fold=0 under both values; that is unverified. The scheduler and the oracle read the same value: the runtime profile reads it back from the scheduler, so a disagreeing scheduler is refused before anything durable is written, and the engine refuses one as a backstop. |
-| `off-ice-in-running-box` | `next-run`, `same-run` | `next-run` | `next-run` | A job inside a box, taken off ice while its box runs and before it ran in that run. `next-run`: it sits the run out. A plain start of it is refused, the box completes without it, FORCE_STARTJOB still starts it, and the box waits while that forced start is queued; the box's next run clears the mark. "Start Conditions" (AutoSys 24.2 and 12.0) says "If a job is contained in a running box when it is taken off ice, the scheduler does not restart the job until the following run of the box, even if its starting conditions recur during the existing run of the box." `same-run`: it re-enters the run and may start on its condition's next edge, and the box waits for it; dsl41's earlier behavior and the reading of the AutoSys 24.0 Web UI help. SEM-20. |
-| `box-terminator-on-terminated` | `true`, `false` | `true` | `true` | A box member with `box_terminator`, a subbox included, that ends TERMINATED: killed, given the status, killed while queued, or ended by `term_run_time`. `true`: it terminates its running box, as a FAILURE does. "Force the Job or the Box to Stop Running" (AutoSys 12.1 and 24.2) says "if the job completes with a FAILURE or TERMINATED status, the box terminates." `false`: only a FAILURE does, dsl41's earlier behavior and the value line of the 24.2 `box_terminator` reference page. SEM-14. |
-| `box-start-all-members-out` | `complete`, `wait` | `complete` | unknown | A box whose start leaves no member in the run: every direct member on ice, or no members. `complete`: the start is a completion moment, so the box completes at once through the completion door, overrides first, then the default fold, which is SUCCESS over no member that ran. `wait`: the box stays RUNNING until an operator acts, as dsl41 did before at a box start; the rest of DL-304 (an iced member that is live, or holds a live or queued job, is not out of the run) applies under both values. No vendor sentence names the case. "Basic Box Job Concepts" (AutoSys 12.0 and 24.2) keeps a box RUNNING "as long as there are jobs in it with ACTIVATED or RUNNING status", and "Events" (12.0 and 24.2) says of JOB_ON_ICE: "If the job is in a box, the scheduler does not execute the job for the entire run of the box." The runbook's Q15 protocol settles which value AutoSys follows. SEM-11, DL-304. |
-| `idle-box-iced-member` | `ignore`, `vote` | `ignore` | unknown | A box that is not running and re-derives its status when a member changes (SEM-15). `ignore`: an iced member that is out of the run, on ice with nothing inside it live or queued, is dropped from the re-derivation, as an INACTIVE member is, so a completed box does not flip when a job inside an iced subbox, or an iced member given a status, ends later. Nor is such a member's own change a verdict: if no other member votes, the box keeps its status, so a box that never ran stays INACTIVE; when the member that changed is in the run, DL-242's vacuous SUCCESS stands. An iced member that is live, or holds a live or queued job, is not dropped: its own status votes, and a live one blocks the re-derivation. `vote`: the iced member's status counts, as dsl41 did before. A member that is not iced votes under both values. "Basic Box Job Concepts" (AutoSys 12.0 and 24.2) ignores only INACTIVE members and does not name ON_ICE; "Job States" (12.0 and 24.2) says an ON_ICE job "is removed from the job stream but is still defined", and SEM-11's fold already skips such a member (DL-304). The runbook's Q16 protocol settles which value AutoSys follows. SEM-15, SEM-20. |
+| `dst-start-times` | `vendor`, `fold0` | `vendor` | `vendor` | `start_times` and `start_mins` on a one-hour DST change at 02:00 local, the shape DL-249 detects. `vendor`: a start time in the repeated 01:00-01:59 runs once, in the second (standard time) pass. `start_mins` run in both passes. A start time in the missing 02:00-02:59 runs in the first minute of 03:00, its minute read as seconds (2:05 at 3:00:05), and only the first such start time runs. `start_mins` ticks in the missing hour do not exist. `fold0`: the PEP 495 fold=0 reading. A repeated time runs once, in the first pass, and each missing time runs past the gap (2:05 at 3:05). "Standard Time Changes" and "Daylight Time Changes" (AutoSys 12.1 and 24.2) document the vendor rules. Other change shapes use fold=0 under both values; that is unverified. The scheduler and the oracle read the same value: the runtime profile reads it back from the scheduler, so a disagreeing scheduler is refused before anything durable is written, and the engine refuses one as a backstop. |
+| `off-ice-in-running-box` | `next-run`, `same-run` | `next-run` | `next-run` | A job inside a box, taken off ice while its box runs and before it ran in that run. `next-run`: it sits the run out. A plain start of it is refused, the box completes without it, FORCE_STARTJOB still starts it, and the box waits while that forced start is queued; the box's next run clears the mark. "Start Conditions" (AutoSys 24.2 and 12.0) says "If a job is contained in a running box when it is taken off ice, the scheduler does not restart the job until the following run of the box, even if its starting conditions recur during the existing run of the box." `same-run`: it re-enters the run and may start on its condition's next edge, and the box waits for it; the reading of the AutoSys 24.0 Web UI help. SEM-20. |
+| `box-terminator-on-terminated` | `true`, `false` | `true` | `true` | A box member with `box_terminator`, a subbox included, that ends TERMINATED: killed, given the status, killed while queued, or ended by `term_run_time`. `true`: it terminates its running box, as a FAILURE does. "Force the Job or the Box to Stop Running" (AutoSys 12.1 and 24.2) says "if the job completes with a FAILURE or TERMINATED status, the box terminates." `false`: only a FAILURE does, the reading of the value line of the 24.2 `box_terminator` reference page. SEM-14. |
+| `box-start-all-members-out` | `complete`, `wait` | `complete` | unknown | A box whose start leaves no member in the run: every direct member on ice, or no members. `complete`: the start is a completion moment, so the box completes at once through the completion door, overrides first, then the default fold, which is SUCCESS over no member that ran. `wait`: the box stays RUNNING until an operator acts; the rest of DL-304 (an iced member that is live, or holds a live or queued job, is not out of the run) applies under both values. No vendor sentence names the case. "Basic Box Job Concepts" (AutoSys 12.0 and 24.2) keeps a box RUNNING "as long as there are jobs in it with ACTIVATED or RUNNING status", and "Events" (12.0 and 24.2) says of JOB_ON_ICE: "If the job is in a box, the scheduler does not execute the job for the entire run of the box." The runbook's Q15 protocol settles which value AutoSys follows. SEM-11, DL-304. |
+| `idle-box-iced-member` | `ignore`, `vote` | `ignore` | unknown | A box that is not running and re-derives its status when a member changes (SEM-15). `ignore`: an iced member that is out of the run, on ice with nothing inside it live or queued, is dropped from the re-derivation, as an INACTIVE member is, so a completed box does not flip when a job inside an iced subbox, or an iced member given a status, ends later. Nor is such a member's own change a verdict: if no other member votes, the box keeps its status, so a box that never ran stays INACTIVE; when the member that changed is in the run, DL-242's vacuous SUCCESS stands. An iced member that is live, or holds a live or queued job, is not dropped: its own status votes, and a live one blocks the re-derivation. `vote`: the iced member's status counts. A member that is not iced votes under both values. "Basic Box Job Concepts" (AutoSys 12.0 and 24.2) ignores only INACTIVE members and does not name ON_ICE; "Job States" (12.0 and 24.2) says an ON_ICE job "is removed from the job stream but is still defined", and SEM-11's fold already skips such a member (DL-304). The runbook's Q16 protocol settles which value AutoSys follows. SEM-15, SEM-20. |
 
 ## 9. Time domains (E2)
 
@@ -1056,7 +1083,7 @@ frozen inventory; what follows is what each is for.
   for a live FW run, a `watching {file, interval, min_size}`
   object (DL-68), and a `spec_drift` flag — a lazy fingerprint re-check of the
   loaded input files; there is no reload, the flag tells the operator
-  the running catalog no longer matches the disk (DL-65). The CLI adds
+  the running catalog does not match the disk (DL-65). The CLI adds
   scriptable predicates `is-success`/`is-failed` (print status, exit
   0/1) over the status verb.
 - **subscribe** — stream journal records from a seq (the UI feed).
@@ -1130,25 +1157,25 @@ DL-56; the SEM-36..39 extended-calendar freeze is interpreted, DL-57; open
 composition corners run on pinned defaults, DL-59; only doc-defective
 tokens stay materialize-on-a-live-instance).
 Also retry semantics (Q4, DL-53: kept deliberately unmodeled by scope
-decision). Also non-child orphan adoption (dissolved by design: the
-supervisor makes survival a *reattachment*, never an adoption, E4).
+decision). Also non-child orphan adoption (not needed: the supervisor makes
+survival a *reattachment*, never an adoption, E4).
 Also alarm delivery beyond the replayed trace and the UI (no mail/pager
 integrations; an alarm is never a WAL record of its own, §4).
 Also cgroup/scope containment (documented Linux hardening path, §6a).
 Resource/load management is single-node (DL-50): the oracle honors it as
 capacity buckets, and preflight refuses the unmodelable. Out of scope:
 DEPLETABLE replenishment (mid-run `update_resource` = SEM-16), and
-cross-node resource coordination (subsumed today by the foreign-machine
-refusal — a distributed concern, DL-49 future track).
+cross-node resource coordination (covered by the foreign-machine refusal;
+a distributed concern, DL-49).
 
 ## 13. Testing — bisimulation is the acceptance gate
 
 1. **Bisimulation**: every SEM trace test is parametrized over
    Oracle-direct and Engine(VirtualClock, FakeAdapter). Traces must be
    identical. This is equivalence tier c between simulator and executor,
-   and it reuses the entire existing fixture corpus. It is the engine's
+   and it reuses the oracle's whole fixture corpus. It is the engine's
    definition of done.
-2. **Hypothesis**: random event scripts (existing strategies) run through
+2. **Hypothesis**: random event scripts (the oracle's strategies) run through
    both paths with the same property. The suite also compares feed-only
    and advance+feed timer schedules.
 3. **Journal**: replay reproduces the trace (property test). Crash-recovery
@@ -1173,10 +1200,8 @@ refusal — a distributed concern, DL-49 future track).
 ## 14. Module layout and phasing
 
 The house layout is flat, with no `runner` subpackage: nineteen
-`runner*.py` sibling modules. The first seven were split along the seams
-their test files use (DL-74, DL-78); the later ones were added under the
-same rule, each documented by the entry that built it. Nothing is
-re-exported: every import site names the module that owns the symbol, so
+`runner*.py` sibling modules. Each module owns one seam (DL-74, DL-78);
+the entry that built a module documents it. Nothing is re-exported: every import site names the module that owns the symbol, so
 the split cannot decay into a second name for one file.
 
 - `runner.py`: the §4 engine loop.
@@ -1219,12 +1244,12 @@ the split cannot decay into a second name for one file.
   (`docs/access-model.md`).
 
 Runner CLI verbs live in `cli_run.py` (`run`, `rehearse`, `journal`,
-`runs`) and `cli_control.py` (`sendevent`, `host`, `ui`, `serve`, `query`,
-`supervise`), the five-module CLI split of DL-137, assembled by `cli.py`.
+`runs`) and `cli_control.py` (`sendevent`, `release-held`, `host`, `ui`, `serve`,
+`query`, `supervise`), the five-module CLI split of DL-137, assembled by `cli.py`.
 The period verbs are `cli_estate.py`'s.
 
-The runner's six phases, 11a to 11f (DL-41; 11f by DL-41a), are all built,
-and module docstrings cite them by label: 11a, the engine loop and the
+Module docstrings cite the runner's six build phases by label, 11a to 11f
+(DL-41; 11f by DL-41a). All six are built: 11a, the engine loop and the
 bisimulation suite; 11b, the wrapper, adapters, WAL and resume; 11c, the
 scheduler, preflight and control socket with the headless verbs
 (`rehearse` and a minimal `query` client ship with them, DL-45); 11d, the
@@ -1238,8 +1263,8 @@ code. None is guess-resolved.
 
 - **E4** — jobs that survive engine restarts: closed (DL-41a, DL-48). Never
   non-child adoption. The supervisor keeps parenthood alive, so survival is
-  reattachment (`run --detached`). The default tethered path is unchanged:
-  engine death terminates jobs, and resume uses §7's reconciliation ladder.
+  reattachment (`run --detached`). On the default tethered path, engine
+  death terminates jobs, and resume uses §7's reconciliation ladder.
 - **E5** — profile sourcing failure semantics [?]. Default: the job fails
   with sh's exit code (§6).
 - **E6** — FW steady-size semantics: decided (DL-258), via the
@@ -1276,10 +1301,12 @@ code. None is guess-resolved.
   says the default `2,9` "usually" returns TERMINATED (DL-226). The
   operator-kill case is therefore documented. `# PENDING: E8` stays for
   what is not: the mechanism "usually" leaves open, recorded intent
-  versus wait status, which the trap-TERM live test discriminates
-  (KILLJOB against a command that traps SIGTERM and exits 0,
-  `docs/live-instance-runbook.md`), and the signal deaths no operator
-  sent (segfault, OOM kill). If a live instance marks those FAILURE
+  versus wait status, which the trap live test discriminates
+  (KILLJOB against a command that traps INT and TERM and exits 0,
+  `docs/live-instance-runbook.md`). The test reads the mechanism only
+  when the agent's first kill signal is INT or TERM; the System Agent's
+  `oscomponent.killsignals` default is 9 (DL-226). Also open are the
+  signal deaths no operator sent (segfault, OOM kill). If a live instance marks those FAILURE
   (128+signum through the SEM-09 boundary), t()/f() routing flips
   (DL-44). KB 230562 (DL-58) shows a spawn-path signal-9 abort as
   agent-level FAILED: spawn-time, no PID ever existed, not the mid-run
@@ -1304,8 +1331,8 @@ code. None is guess-resolved.
   (TechDocs 12.0.01, timezone attribute page). The oracle exposes the same
   rule as a `default_tz` constructor knob; with none set, the engine clock
   plays the scheduler's zone. The DST half is decided (DL-260): the
-  vendor's rules are the default, and dsl41's earlier PEP 495 fold=0
-  reading stays selectable as `dst-start-times=fold0` (§8a). TechDocs 12.1
+  vendor's rules are the default, and the PEP 495 fold=0 reading is
+  selectable as `dst-start-times=fold0` (§8a). TechDocs 12.1
   and 24.2 document the rules. "Standard Time Changes": jobs whose
   start_time is "between 1:00 and 1:59" run "during the second (standard
   time) hour", and "Jobs for which the start_mins attribute is set run in
@@ -1321,7 +1348,7 @@ code. None is guess-resolved.
   times (E11) keep fold=0 too. One half stays open [?], behind its
   `# PENDING: E10` marker in `runner_scheduler.py`: absent
   `days_of_week` = every day.
-- **E11** — opened by DL-56, closed by DL-58: `run_calendar` with neither
+- **E11** — closed (DL-56, DL-58): `run_calendar` with neither
   `start_times` nor `start_mins` is a valid vendor shape. The job fires at
   the calendar row's own time-of-day (`mm/dd/yyyy HH:MM`), and at 00:00
   when neither the row nor the job supplies a time. Job-level
@@ -1336,8 +1363,7 @@ code. None is guess-resolved.
   >366 days out (KB 442457). That is a vendor operational artifact
   (resolution: regenerate the calendar) deliberately NOT replicated: the
   generator computes occurrences directly.
-- **E12** to **E15** — opened by the HA plan and withdrawn with it
-  (DL-189). Not open.
+- **E12** to **E15** — withdrawn with the HA plan (DL-189). Not open.
 - **E16** — seal cadence. Every boundary is an operator act (automatic
   sealing on a timer is a period-model §12 non-goal) and costs a restart,
   so whether the boundary is per estate, per booking centre or per
