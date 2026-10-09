@@ -80,8 +80,7 @@ flowchart TD
 ## Open findings
 
 See the row "SPAWN idempotency" in [the risk map](../risk-map.md).
-The map ranks it fourth among the [least-tested machines](../risk-map.md#least-tested-machines).
-All five of the risk map's owning modules for this row are in the 100% gate ([DL-294, DL-298, DL-299](../risk-map.md#closed-by-dl-289dl-306)), and the row lists no open finding.
+All five of the risk map's owning modules for this row are in the 100% gate ([DL-294, DL-298, DL-299](../risk-map.md#closed-by-dl-289dl-306)), and the row lists one open finding, the boot_id check, which matters only with more than one host.
 
 ## Gaps found
 
