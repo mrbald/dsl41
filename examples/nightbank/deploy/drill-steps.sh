@@ -16,9 +16,12 @@
 # same-root restart, a detached job that survives an engine stop, a changed
 # estate refused without a restart loop, a sealed engine that stays
 # stopped until an operator opens the next period, the managed quiescence
-# and restore of deployment-runbook ss2b, the upgrade rows of ss7, and
-# ss0's retirement. The install, the first start and the retirement run
-# ss0's recipe blocks as the runbook prints them (run_recipe).
+# and restore of deployment-runbook ss2b, the signals of "What to watch"
+# (with a violation injected into the engine unit), the configure recipe,
+# the stop-and-recover recipe, a SIGKILL of the engine and of the
+# supervisor, every upgrade row of ss7 with its rollback, and ss0's
+# retirement. The install, the first start and the retirement run ss0's
+# recipe blocks as the runbook prints them (run_recipe).
 # The two access-map refusals prove the same systemd claim as the changed
 # estate, and are pinned in tests/test_nightbank_deploy.py instead.
 set -euo pipefail
@@ -26,8 +29,10 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/drill-lib.sh"
 
 STEPS=(install first-start restart detached refusal sealed quiesce restore reboot
-    upgrade-resume-safe upgrade-fresh-root upgrade-coordinated upgrade-old-release
-    upgrade-state-machine retire)
+    watch configure kill-engine kill-supervisor stop-recover
+    upgrade-resume-safe upgrade-fresh-root upgrade-fresh-root-rollback
+    upgrade-coordinated upgrade-coordinated-rollback
+    upgrade-old-release upgrade-state-machine upgrade-state-machine-rollback retire)
 # runs after the steps whatever they did; not part of --list
 FINALLY=diagnostics
 
@@ -40,13 +45,19 @@ BUILD_B=/opt/dsl41/venv-build-b
 # implements state-machine version 1
 OLD_VERSION=1.7.0
 OLD_VENV=/opt/dsl41/venv-$OLD_VERSION
-# the roots the upgrade rows move the launcher to
+# the roots the upgrade rows move the launcher to: row 2's roll, and the
+# fresh root of its rollback
 ROLLED_ROOT=/srv/dsl41/runs/nightbank-01b
+ROLLBACK_ROOT=/srv/dsl41/runs/nightbank-01c
 OLD_ROOT=/srv/dsl41/runs/nightbank-old
 NEW_ROOT=/srv/dsl41/runs/nightbank-02
 BACKUP=/srv/dsl41/backup
 # a short box member: an 8-second fakework, unconditioned
 SHORT_JOB=AMER_INV_MACROS_C
+# a job whose first run fails (the night's fail_once incident), and a job
+# nothing depends on, for an operator's probes
+FAIL_JOB=AMER_MKT_FX_C
+PROBE_JOB=OPS_SPOOL_C
 
 step_install() { # install dsl41, the nightbank estate, the launcher, the map and the units
     sudo apt-get update -q
@@ -183,11 +194,17 @@ step_sealed() { # a sealed engine stays stopped until the next period is opened
         --next-detached --next-as-machine localhost --next-machine-policy strict \
         --next-timezone UTC --force-seal --claimed-actor drill@nightbank
     assert_stays_stopped 3 "sealed period 1" "$mark"
+    # "What to watch", the sealed-not-opened row: closed until the opener runs
+    [ "$(run_recipe --as-dsl41 watch-sealed ESTATE_ANCHOR="$ANCHOR")" = closed ] ||
+        fail "the sealed check did not read closed"
+    ok "the sealed check reads closed"
     mark=$(date +%s)
     start_engine
     launch_line_since "$mark" | grep -q -- ' --resume$' || fail "the opener was not a resume"
     sudo test -e "$ROOT/wal/000002.jsonl" || fail "period 2 did not open in $ROOT"
-    ok "period 2 opened in place"
+    [ "$(run_recipe --as-dsl41 watch-sealed ESTATE_ANCHOR="$ANCHOR")" = open ] ||
+        fail "the sealed check did not read open"
+    ok "period 2 opened in place; the sealed check reads open"
 }
 
 step_quiesce() { # managed quiescence: both units stopped and staying stopped (runbook ss2b)
@@ -243,6 +260,396 @@ step_reboot() { # a host reboot: the enabled units resume the same root at boot
     ok "the boot resumed period 3 in $ROOT"
 }
 
+# deployment-runbook ss0's "What to watch": each signal read with the command
+# the table prints, against the running estate. Two cases are not reached in
+# a live unit, and the runbook does not say they are drilled: exit 5 (the
+# engine stops on a violation) and a subscribe line over the budget. A
+# violation is injected into the engine unit (inject_faults), the way the
+# unit tests inject one; the drill proves the line reaches the journal with
+# the prefix the alert matches, not that a real engine violates.
+watch_cleanup() {
+    sudo pkill -f '[d]sl41 query subscribe' 2>/dev/null || true
+    remove_faults 2>/dev/null || true
+}
+step_watch() { # "What to watch": every signal, and a violation in the journal
+    local out cursor baseline sub rc err mark before run lines leader
+    trap watch_cleanup EXIT
+    # the engine unit
+    out=$(systemctl show -p ActiveState -p ExecMainStatus -p NRestarts "$ENGINE")
+    grep -qx 'ActiveState=active' <<<"$out" || fail "engine unit: $out"
+    grep -qx 'ExecMainStatus=0' <<<"$out" || fail "engine unit: $out"
+    grep -qE '^NRestarts=[0-9]+$' <<<"$out" || fail "engine unit: $out"
+    ok "the engine unit row reads active, status 0, a restart count"
+    # sealed, not opened: open is normal (closed is drilled in the sealed step)
+    [ "$(run_recipe --as-dsl41 watch-sealed ESTATE_ANCHOR="$ANCHOR")" = open ] ||
+        fail "the sealed check did not read open"
+    # the supervisor unit and its list, with one finished run in it
+    out=$(systemctl show -p ActiveState -p NRestarts "$SUPERVISOR")
+    grep -qx 'ActiveState=active' <<<"$out" || fail "supervisor unit: $out"
+    grep -qE '^NRestarts=[0-9]+$' <<<"$out" || fail "supervisor unit: $out"
+    run=$(job_field "$SHORT_JOB" run_number)
+    force_start "$SHORT_JOB"
+    wait_for 60 "$SHORT_JOB ended in SUCCESS" ran_to_success "$SHORT_JOB" $((run + 1))
+    wait_for 30 "supervise list shows $SHORT_JOB with wrapper_alive false" \
+        list_shows_finished_run "$SHORT_JOB"
+    # the supervisor log (the unit's journal is read in kill-supervisor, where a start is new)
+    sudo test -s "$ROOT/supervisor.log" || fail "$ROOT/supervisor.log is empty or missing"
+    ok "the supervisor log has content"
+    # the leader note names the engine now running
+    out=$(sudo cat "$ROOT/leader.lock")
+    jq -e --argjson pid "$(prop "$ENGINE" MainPID)" \
+        '.pid == $pid and (.host | type == "string") and (.epoch | type == "number")
+         and (.since | type == "string")' <<<"$out" >/dev/null ||
+        fail "leader.lock does not name the running engine: $out"
+    ok "leader.lock names the engine's pid, host, epoch and since"
+    # the control socket answers
+    cli query status --brief -S "$SOCK" >/dev/null || fail "the control socket did not answer"
+    # the perimeter's arming receipt
+    perimeter_has policy_loaded || fail "no policy_loaded receipt in perimeter.jsonl"
+    ok "the perimeter journal holds the map's policy_loaded receipt"
+    # free space: both paths report
+    lines=$(sudo df -P "$ROOT" "$ANCHOR" | wc -l)
+    [ "$lines" = 3 ] || fail "df -P printed $lines lines for the run root and the anchor"
+    # failures and alarms: the stream wakes the reader, the trace is the record
+    out=$(cli query trace --since 0 -S "$SOCK")
+    cursor=$(jq -r .last_seq <<<"$out")
+    baseline=$(jq -r .baseline_id <<<"$out")
+    rm -f "$SCRATCH/subscribe.out" "$SCRATCH/subscribe.err"
+    as_dsl41 timeout 180 "$DSL41" query subscribe -S "$SOCK" \
+        >"$SCRATCH/subscribe.out" 2>"$SCRATCH/subscribe.err" &
+    sub=$!
+    wait_for 30 "the subscriber is acknowledged" grep -q '"subscribed": true' "$SCRATCH/subscribe.out"
+    request FORCE_STARTJOB "$FAIL_JOB"
+    wait_for 60 "$FAIL_JOB ended in FAILURE" job_is "$FAIL_JOB" FAILURE
+    wait_for 30 "the stream carries the run's end as an adapter STATUS input" \
+        stream_shows_failure "$SCRATCH/subscribe.out" "$FAIL_JOB"
+    out=$(cli query trace --since "$cursor" -S "$SOCK")
+    [ "$(jq -r .baseline_id <<<"$out")" = "$baseline" ] || fail "the baseline_id moved"
+    jq -e --arg job "$FAIL_JOB" \
+        '[.entries[] | select(.job == $job and .transition == "RUNNING->FAILURE")] | length == 1' \
+        <<<"$out" >/dev/null || fail "the trace since $cursor has no RUNNING->FAILURE for $FAIL_JOB"
+    ok "the trace since the cursor names the transition to FAILURE"
+    # a subscriber the engine closes exits 2 and names the cursor to resume at
+    leader=$(prop "$ENGINE" MainPID)
+    sudo systemctl stop "$ENGINE"
+    rc=0
+    wait "$sub" || rc=$?
+    [ "$rc" = 2 ] || fail "subscribe exited $rc after the engine stopped, not 2"
+    grep -q 'resubscribe with --since [0-9]' "$SCRATCH/subscribe.err" ||
+        fail "subscribe did not name a --since: $(cat "$SCRATCH/subscribe.err")"
+    ok "subscribe exits 2 and names the --since to resume with"
+    # the leader note says who led; the control socket says no engine answers
+    [ "$(sudo jq -r .pid "$ROOT/leader.lock")" = "$leader" ] ||
+        fail "leader.lock does not keep the stopped engine's pid $leader"
+    [ "$(prop "$ENGINE" MainPID)" = 0 ] || fail "$ENGINE still has a main process"
+    rc=0
+    cli query status --brief -S "$SOCK" >/dev/null 2>&1 || rc=$?
+    [ "$rc" = 2 ] || fail "status --brief exited $rc with no engine, not 2"
+    rc=0
+    err=$(cli query subscribe -S "$SOCK" 2>&1) || rc=$?
+    [ "$rc" = 2 ] || fail "subscribe exited $rc with no engine, not 2"
+    ! grep -q -- '--since' <<<"$err" || fail "a subscribe refused before its ack named a --since"
+    ok "with no engine: status --brief and subscribe exit 2, and subscribe names no --since"
+    start_engine
+    # violations off the trace: a journal line that begins with the prefix
+    inject_faults effect.01
+    mark=$(date +%s)
+    before=$(journal_count "$mark" 'dsl41: transition violation')
+    run=$(job_field "$SHORT_JOB" run_number)
+    force_start "$SHORT_JOB"
+    wait_for 30 "the journal gains a transition violation line" violation_lines_exceed "$mark" "$before"
+    engine_log_since "$mark" | grep -qE \
+        '^dsl41: transition violation: effect effect\.01 absent->pending: injected by the service drill$' ||
+        fail "no violation line begins the message as the runbook says"
+    wait_for 60 "$SHORT_JOB ended in SUCCESS: the engine goes on" \
+        ran_to_success "$SHORT_JOB" $((run + 1))
+    remove_faults
+    manual restart
+    wait_up
+    ok "a transition violation shows in the journal under the alert prefix, and the engine goes on"
+}
+
+# deployment-runbook ss0's "Recipe: configure an estate": the account that
+# runs both units and owns the root, the socket group, the tiers a binding
+# gives, the perimeter's receipts, a reload that names another group, and a
+# changed execution profile refused on resume. The service account must be in
+# the socket group (the engine hands it the run root), and the group needs
+# execute on the run roots' directory.
+SOCKET_GROUP=nightbank-socket
+configure_restore() {
+    local user
+    [ ! -e "$SCRATCH/map.orig" ] || sudo cp "$SCRATCH/map.orig" "$MAP"
+    [ ! -e "$SCRATCH/launch.orig" ] || sudo cp "$SCRATCH/launch.orig" "$LAUNCH"
+    sudo chgrp dsl41 "$(dirname "$ROOT")" "$ROOT" 2>/dev/null || true
+    sudo chmod 0700 "$(dirname "$ROOT")" 2>/dev/null || true
+    sudo gpasswd -d dsl41 "$SOCKET_GROUP" >/dev/null 2>&1 || true
+    for user in dopsu dreadu dnobindu dstranger; do
+        sudo userdel "$user" 2>/dev/null || true
+    done
+    sudo groupdel "$SOCKET_GROUP" 2>/dev/null || true
+    sudo groupdel nightbank-ops 2>/dev/null || true
+    sudo groupdel nightbank-observers 2>/dev/null || true
+}
+# CMD (a dsl41 command line) as USER exits CODE; the output is in $out
+exits_as() { # exits_as USER CODE ARGS...
+    local user=$1 code=$2 rc=0
+    shift 2
+    out=$(as_user "$user" "$@" 2>&1) || rc=$?
+    [ "$rc" = "$code" ] || fail "$user: dsl41 $* exited $rc, not $code: $out"
+}
+step_configure() { # configure recipe: identity, socket group, tiers, receipts, profile gate
+    local unit path denied before
+    out=
+    trap configure_restore EXIT
+    # identities: one service account runs both units and owns what it writes
+    for unit in "$ENGINE" "$SUPERVISOR"; do
+        [ "$(prop "$unit" User)" = dsl41 ] || fail "$unit does not run as dsl41"
+        [ "$(ps -o user= -p "$(prop "$unit" MainPID)")" = dsl41 ] || fail "$unit's process is not dsl41's"
+    done
+    for path in "$ROOT" "$ANCHOR" "$MAP"; do
+        [ "$(sudo stat -c %U "$path")" = dsl41 ] || fail "$path is not owned by dsl41"
+    done
+    [ "$(sudo stat -c %a "$ROOT")" = 700 ] || fail "$ROOT is not 0700"
+    [ "$(sudo stat -c %a "$MAP")" = 600 ] || fail "$MAP is not 0600"
+    sudo groupadd "$SOCKET_GROUP"
+    sudo groupadd nightbank-ops
+    sudo groupadd nightbank-observers
+    sudo useradd -M -s /usr/sbin/nologin -G "$SOCKET_GROUP,nightbank-ops" dopsu
+    sudo useradd -M -s /usr/sbin/nologin -G "$SOCKET_GROUP,nightbank-observers" dreadu
+    sudo useradd -M -s /usr/sbin/nologin -G "$SOCKET_GROUP" dnobindu
+    sudo useradd -M -s /usr/sbin/nologin dstranger
+    sudo cp -p "$MAP" "$SCRATCH/map.orig"
+    sudo cp -p "$LAUNCH" "$SCRATCH/launch.orig"
+    # with no socket_group, only the service account reaches the socket
+    exits_as dopsu 2 query status --brief -S "$SOCK"
+    grep -q 'Permission denied' <<<"$out" || fail "an ops member without the group: $out"
+    ok "no socket_group: a person with an ops binding cannot reach the socket"
+    # socket exposure: name the group in the map and restart. The service
+    # account is not yet a member, so the engine cannot hand the root over
+    sudo systemctl stop "$ENGINE"
+    sudo sed -i "s/^# socket_group = .*/socket_group = \"$SOCKET_GROUP\"/" "$MAP"
+    expect_refusal "cannot open the run root to group '$SOCKET_GROUP'"
+    sudo usermod -aG "$SOCKET_GROUP" dsl41
+    start_engine
+    [ "$(sudo stat -c '%a %G' "$ROOT")" = "710 $SOCKET_GROUP" ] || fail "run root: $(sudo stat -c '%a %G' "$ROOT")"
+    [ "$(sudo stat -c '%a %G' "$SOCK")" = "660 $SOCKET_GROUP" ] || fail "socket: $(sudo stat -c '%a %G' "$SOCK")"
+    ok "the engine opened the run root to 0710 and the socket to 0660 for $SOCKET_GROUP"
+    # the run roots' directory is 0700 for the account: no member reaches the socket yet
+    exits_as dopsu 2 query status --brief -S "$SOCK"
+    grep -q 'Permission denied' <<<"$out" || fail "before the directory grant: $out"
+    sudo chgrp "$SOCKET_GROUP" "$(dirname "$ROOT")"
+    sudo chmod 0710 "$(dirname "$ROOT")"
+    # the bindings decide each member's tier
+    exits_as dopsu 0 query status --brief -S "$SOCK"
+    exits_as dopsu 0 sendevent ON_HOLD -J "$PROBE_JOB" -S "$SOCK"
+    exits_as dopsu 0 sendevent OFF_HOLD -J "$PROBE_JOB" -S "$SOCK"
+    stamp_request
+    exits_as dreadu 0 query status --brief -S "$SOCK"
+    exits_as dreadu 2 sendevent ON_HOLD -J "$PROBE_JOB" -S "$SOCK"
+    grep -q 'access_denied' <<<"$out" || fail "the read tier's send: $out"
+    exits_as dnobindu 2 query status --brief -S "$SOCK"
+    grep -q 'access_denied' <<<"$out" || fail "a member with no binding: $out"
+    exits_as dstranger 2 query status --brief -S "$SOCK"
+    grep -q 'Permission denied' <<<"$out" || fail "a login outside the group: $out"
+    [ "$(job_field "$PROBE_JOB" on_hold)" = false ] || fail "a refused ON_HOLD was applied"
+    ok "ops sends, read only reads, an unbound member is denied, a stranger cannot connect"
+    # the receipts: denials are access_denied records naming the principal
+    denied=$(sudo jq -r -s '[.[] | select(.rec == "access_denied") | .principal] | unique | join(",")' \
+        "$ROOT/perimeter.jsonl")
+    [ "$denied" = dnobindu,dreadu ] || fail "access_denied receipts name: $denied"
+    # each start's policy_loaded record names the map's digest
+    [ "$(sudo jq -r -s '[.[] | select(.rec == "policy_loaded")] | last | .digest' "$ROOT/perimeter.jsonl")" = \
+        "sha256:$(sudo sha256sum "$MAP" | cut -d' ' -f1)" ] || fail "policy_loaded names another digest"
+    ok "perimeter.jsonl has access_denied receipts, and policy_loaded names the map's digest"
+    # a reload that names another group is refused whole
+    sudo sed -i "s/^socket_group = .*/socket_group = \"nightbank-ops\"/" "$MAP"
+    before=$(perimeter_count policy_reload_failed 'socket_group is fixed at arming')
+    sudo systemctl kill -s HUP --kill-whom=main "$ENGINE"
+    wait_for 30 "the reload that names another group is refused (policy_reload_failed)" \
+        perimeter_count_exceeds policy_reload_failed 'socket_group is fixed at arming' "$before"
+    is_state "$ENGINE" active || fail "the refused reload stopped the engine"
+    exits_as dopsu 0 query status --brief -S "$SOCK"
+    # execution profile: a changed option is a refusal on resume, exit 2
+    sudo systemctl stop "$ENGINE"
+    sudo cp "$SCRATCH/map.orig" "$MAP"
+    sudo sed -i 's|^        --timezone UTC|        --timezone America/New_York|' "$LAUNCH"
+    sudo grep -q 'America/New_York' "$LAUNCH" || fail "the launcher edit did not apply"
+    expect_refusal "runtime-profile mismatch"
+    # put it all back
+    sudo cp "$SCRATCH/launch.orig" "$LAUNCH"
+    configure_restore
+    start_engine
+    [ "$(sudo stat -c '%a' "$SOCK")" = 600 ] || fail "the socket is not owner-only again"
+    ok "the example's map and launcher are back; the socket is owner-only"
+}
+
+# deployment-runbook ss0's "Recipe: stop, restart, seal and recover", the
+# parts no other step runs: an engine stop reads as no answer, a crash loop
+# that the start limit ends and reset-failed clears, a lost answer replayed
+# with the printed arguments, and a rerun as a different act. The refusal,
+# the seal, the reboot and the estate stop are the refusal, sealed, reboot
+# and quiesce steps'; the supervisor unit's restart is kill-supervisor's.
+step_stop_recover() { # stop and recover: a crash loop, a replayed request, a new rerun
+    local mark run first rc applied
+    # engine stop and start
+    sudo systemctl stop "$ENGINE"
+    is_state "$ENGINE" inactive || fail "$ENGINE: $(prop "$ENGINE" ActiveState)"
+    rc=0
+    cli query status --brief -S "$SOCK" >/dev/null 2>&1 || rc=$?
+    [ "$rc" = 2 ] || fail "status --brief exited $rc with the engine stopped, not 2"
+    cli supervise list --run-root "$ROOT" | jq -e '.ok == true' >/dev/null ||
+        fail "the supervisor did not outlive the engine stop"
+    mark=$(date +%s)
+    start_engine
+    launch_line_since "$mark" | grep -q -- ' --resume$' || fail "the start was not a resume"
+    ok "an engine stop is exit 2 on the socket; the start resumes the same root"
+    # recover from a crash: the unit restarts the engine until the start limit
+    mark=$(date +%s)
+    kill_engine_until_failed
+    ((KILLS >= 5 && KILLS <= 6)) || fail "the unit gave up after $KILLS kills, not 5 or 6"
+    journal_has "$ENGINE" "$mark" 'repeated too quickly' || fail "the journal does not name the start limit"
+    [ "$(prop "$ENGINE" ExecMainStatus)" = 9 ] || fail "exit $(prop "$ENGINE" ExecMainStatus), not a SIGKILL"
+    ok "after $KILLS kills the unit stays failed (StartLimitBurst=5)"
+    # fix the cause, reset-failed, start
+    mark=$(date +%s)
+    start_engine
+    launch_line_since "$mark" | grep -q -- ' --resume$' || fail "the recovery was not a resume"
+    ok "reset-failed and a start recover the engine on the same root"
+    # a lost answer: the same arguments, with the printed pins, answer from the first decision
+    run=$(job_field "$FAIL_JOB" run_number)
+    send_keeping_retry FORCE_STARTJOB "$FAIL_JOB"
+    first=$ANSWER
+    wait_for 60 "$FAIL_JOB ended in SUCCESS on its rerun" ran_to_success "$FAIL_JOB" $((run + 1))
+    applied=$(cli query trace --since 0 -S "$SOCK" | jq -r .applied_index)
+    # shellcheck disable=SC2086  # RETRY_LINE is the printed arguments, split on purpose
+    ANSWER=$(cli sendevent FORCE_STARTJOB -J "$FAIL_JOB" -S "$SOCK" $RETRY_LINE 2>/dev/null) ||
+        fail "the replayed request was refused: $ANSWER"
+    [ "$(jq -S -c '{request_id, decision, index}' <<<"$ANSWER")" = \
+        "$(jq -S -c '{request_id, decision, index}' <<<"$first")" ] ||
+        fail "the replay was not answered from the first decision: $ANSWER"
+    [ "$(cli query trace --since 0 -S "$SOCK" | jq -r .applied_index)" = "$applied" ] ||
+        fail "the replay applied something"
+    [ "$(job_field "$FAIL_JOB" run_number)" = $((run + 1)) ] || fail "the replay started another run"
+    ok "the replayed request got the first answer and applied nothing twice"
+    # a new request id is a different act: the next run number
+    request FORCE_STARTJOB "$FAIL_JOB"
+    wait_for 60 "$FAIL_JOB ran again" ran_to_success "$FAIL_JOB" $((run + 2))
+    ok "a fresh request id started run $((run + 2))"
+}
+
+# deployment-runbook ss0 and ss3: a SIGKILL of the engine's main process.
+# systemd restarts the unit, the launcher resumes the root, and a detached
+# command keeps running under the supervisor through it.
+step_kill_engine() { # SIGKILL of the engine: systemd restarts it and the run resumes
+    local pids pid main restarts mark run
+    force_start "$LONG_JOB"
+    wait_for 60 "$LONG_JOB is RUNNING" job_is "$LONG_JOB" RUNNING
+    run=$(job_field "$LONG_JOB" run_number)
+    pids=$(pgrep -f "fakework $LONG_JOB") || fail "no $LONG_JOB process"
+    main=$(prop "$ENGINE" MainPID)
+    restarts=$(prop "$ENGINE" NRestarts)
+    mark=$(date +%s)
+    sudo kill -KILL "$main"
+    wait_for 60 "systemd restarted the engine" unit_replaced "$ENGINE" "$main"
+    wait_up
+    [ "$(prop "$ENGINE" NRestarts)" = $((restarts + 1)) ] || fail "NRestarts did not rise by one"
+    journal_has "$ENGINE" "$mark" 'status=9/KILL' || fail "the journal does not say status=9/KILL"
+    launch_line_since "$mark" | grep -q -- ' --resume$' || fail "the restart was not a resume"
+    for pid in $pids; do
+        sudo kill -0 "$pid" || fail "$pid died with the engine"
+    done
+    job_is "$LONG_JOB" RUNNING || fail "after the restart: $(job_status "$LONG_JOB")"
+    [ "$(job_field "$LONG_JOB" run_number)" = "$run" ] || fail "the restart started another run"
+    wait_for 180 "$LONG_JOB ended in SUCCESS" job_is "$LONG_JOB" SUCCESS
+    [ "$(cli query status --job APAC_EOD_B -S "$SOCK" | jq -r '.jobs.APAC_EOD_B.on_hold')" = true ] ||
+        fail "the hold did not survive the kill"
+    ok "after a SIGKILL the unit resumed the root; $LONG_JOB kept running to SUCCESS"
+}
+
+# deployment-runbook ss0 and ss3: a SIGKILL of the supervisor's main
+# process. Part 1 runs the shipped units: systemd restarts the supervisor and
+# Requires= carries the restart to the engine, which resumes and takes a lease
+# that renews. Part 2 is a drill-only edit of the installed units, not a
+# supported configuration (the runbook requires Requires=): Wants= for
+# Requires= in the engine unit, and RestartSec=40 in the supervisor unit.
+# It keeps the engine up through the outage to drive the engine's own
+# client: it reports the host unreachable after five failed renewals and
+# renews again when the supervisor returns (the renewal loop never ends
+# while the client is open). The shipped units never reach that path.
+kill_supervisor_cleanup() {
+    restore_units 2>/dev/null || true
+}
+step_kill_supervisor() { # SIGKILL of the supervisor: restart, resume and lease renewal
+    local sup eng_inv eng_pid holder was mark run restarts cursor
+    trap kill_supervisor_cleanup EXIT
+    # part 1: the shipped units
+    force_start "$LONG_JOB"
+    wait_for 60 "$LONG_JOB is RUNNING" job_is "$LONG_JOB" RUNNING
+    run=$(job_field "$LONG_JOB" run_number)
+    sup=$(prop "$SUPERVISOR" MainPID)
+    eng_inv=$(prop "$ENGINE" InvocationID)
+    restarts=$(prop "$ENGINE" NRestarts)
+    mark=$(date +%s)
+    sudo kill -KILL "$sup"
+    wait_for 60 "systemd restarted the supervisor" unit_replaced "$SUPERVISOR" "$sup"
+    journal_has "$SUPERVISOR" "$mark" 'status=9/KILL' || fail "the journal does not say status=9/KILL"
+    wait_for 30 "the supervisor unit's journal records the new start" \
+        journal_has "$SUPERVISOR" "$mark" 'Started dsl41-supervisor'
+    wait_for 90 "the engine unit began a new invocation" engine_reinvoked "$eng_inv"
+    # a stop job from Requires=, not the unit's own on-failure restart
+    journal_has "$ENGINE" "$mark" 'Stopping dsl41-engine' || fail "no stop of the engine unit in its journal"
+    [ "$(prop "$ENGINE" NRestarts)" -le "$restarts" ] || fail "the engine unit restarted itself"
+    wait_up
+    launch_line_since "$mark" | grep -q -- ' --resume$' || fail "the engine did not resume"
+    wait_for 60 "the engine holds the lease" lease_is_held
+    was=$(lease_field expires_at)
+    wait_for 60 "the lease renews" lease_renewed_past "$was"
+    wait_for 60 "$LONG_JOB's command is recorded as ended" job_not_running "$LONG_JOB"
+    [ "$(job_field "$LONG_JOB" run_number)" = "$run" ] || fail "the restart brought the command back"
+    run=$(job_field "$SHORT_JOB" run_number)
+    force_start "$SHORT_JOB"
+    wait_for 60 "$SHORT_JOB ran on the new supervisor" ran_to_success "$SHORT_JOB" $((run + 1))
+    ok "the supervisor restarted and ended its command; the engine resumed and its lease renews"
+    # part 2: the engine outlives the supervisor's outage
+    sudo sed -i 's/^Requires=dsl41-supervisor.service/Wants=dsl41-supervisor.service/' \
+        "/etc/systemd/system/$ENGINE"
+    sudo install -d "/etc/systemd/system/$SUPERVISOR.d"
+    printf '[Service]\nRestartSec=40\n' | sudo tee "/etc/systemd/system/$SUPERVISOR.d/drill.conf" >/dev/null
+    sudo systemctl daemon-reload
+    inject_faults host.07
+    wait_for 60 "the engine holds the lease" lease_is_held
+    sup=$(prop "$SUPERVISOR" MainPID)
+    eng_pid=$(prop "$ENGINE" MainPID)
+    eng_inv=$(prop "$ENGINE" InvocationID)
+    holder=$(lease_field holder)
+    cursor=$(cli query trace --since 0 -S "$SOCK" | jq -r .last_seq)
+    mark=$(date +%s)
+    sudo kill -KILL "$sup"
+    wait_for 60 "the engine reports the host unreachable" \
+        journal_has "$ENGINE" "$mark" 'supervisor lease renewal failed 5 times'
+    wait_for 90 "systemd restarted the supervisor after RestartSec" unit_replaced "$SUPERVISOR" "$sup"
+    wait_for 60 "the engine renewed its lease after the outage" \
+        journal_has "$ENGINE" "$mark" 'supervisor lease renewed after'
+    [ "$(prop "$ENGINE" MainPID)" = "$eng_pid" ] && [ "$(prop "$ENGINE" InvocationID)" = "$eng_inv" ] ||
+        fail "the engine was restarted"
+    [ "$(lease_field holder)" = "$holder" ] || fail "the lease changed hands"
+    was=$(lease_field expires_at)
+    wait_for 60 "the lease keeps renewing" lease_renewed_past "$was"
+    ok "the engine outlived the outage: five failed renewals, then the lease renewed"
+    # the reinstatement ran through an undeclared move: a trace line, and the engine went on
+    cli query trace --since "$cursor" -S "$SOCK" | jq -e \
+        '[.entries[] | select(.transition == "TRANSITION_VIOLATION" and .job == "host:local"
+            and (.cause | startswith("host.07 ")))] | length >= 1' >/dev/null ||
+        fail "no TRANSITION_VIOLATION trace entry for host.07 on host:local since $cursor"
+    ok "an injected violation shows as a TRANSITION_VIOLATION trace entry for host:local"
+    run=$(job_field "$SHORT_JOB" run_number)
+    force_start "$SHORT_JOB"
+    wait_for 60 "$SHORT_JOB ran after the outage" ran_to_success "$SHORT_JOB" $((run + 1))
+    restore_units
+    manual restart
+    wait_up
+}
+
 # ss7 row 1, a patch marked resume-safe: stop the engine unit, flip, start
 # it again; the supervisor unit and its detached job are kept. Rollback is
 # the same with the old venv.
@@ -281,30 +688,30 @@ step_upgrade_resume_safe() { # resume-safe row: engine restarted on the flipped 
 # in a fresh run root (a physical roll) on the new venv; the lineage and
 # its anchor are kept. The launcher's one-shot open trigger makes the
 # engine unit run the opener, so the new root's supervisor and jobs live in
-# the units' cgroups.
-step_upgrade_fresh_root() { # silent-note row: the next period opens in a fresh root on the flipped venv
-    local mark line
-    echo "two installs of one build: this exercises the row, it qualifies no version pair"
+# the units' cgroups. The rollback is the same procedure with the old venv
+# and another fresh root.
+roll_into_fresh_root() { # roll_into_fresh_root NEW_ROOT BUILD PERIOD
+    local new=$1 build=$2 period=$3 mark line
     wait_for 60 "nothing is live under the supervisor" nothing_live "$ROOT"
     take_hold
     quiesce_shape1
-    flip "$BUILD_B"
-    point_launcher "$ROLLED_ROOT" "$ANCHOR"
-    as_dsl41 touch "$ROLLED_ROOT.open-from"
+    flip "$build"
+    point_launcher "$new" "$ANCHOR"
+    as_dsl41 touch "$new.open-from"
     line=$(sudo -u dsl41 "$LAUNCH" --print)
     [[ $line == *" --open-from $ANCHOR" ]] || fail "the trigger did not make an opener: $line"
-    ROOT=$ROLLED_ROOT
+    ROOT=$new
     SOCK=$ROOT/control.sock
     mark=$(date +%s)
     start_engine
     is_state "$ENGINE" active || fail "$ENGINE: $(prop "$ENGINE" ActiveState)"
     launch_line_since "$mark" | grep -qF -- " --open-from $ANCHOR" || fail "the unit did not open $ROOT"
-    engine_log_since "$mark" | grep -qF "opened period 4 in $ROOT" || fail "no roll into $ROOT"
+    engine_log_since "$mark" | grep -qF "opened period $period in $ROOT" || fail "no roll into $ROOT"
     ! sudo test -e "$ROOT.open-from" || fail "the open trigger is still there"
-    sudo test -e "$ROOT/wal/000004.jsonl" || fail "period 4 did not open in $ROOT"
-    on_build "$ENGINE" "$BUILD_B"
-    on_build "$SUPERVISOR" "$BUILD_B"
-    ok "the engine unit opened period 4 in $ROOT; both units run from $BUILD_B"
+    sudo test -e "$ROOT/wal/00000$period.jsonl" || fail "period $period did not open in $ROOT"
+    on_build "$ENGINE" "$build"
+    on_build "$SUPERVISOR" "$build"
+    ok "the engine unit opened period $period in $ROOT; both units run from $build"
     # one shot: the next start resumes the opened root
     mark=$(date +%s)
     manual restart
@@ -314,35 +721,59 @@ step_upgrade_fresh_root() { # silent-note row: the next period opens in a fresh 
     release_hold
 }
 
-# ss7 row 3, resume-safe with a wrapper or supervisor protocol change:
-# drain, stop both units, flip, start both; the engine resumes the same
-# root and the supervisor is replaced by the new venv's.
-step_upgrade_coordinated() { # coordinated row: both units replaced, the engine resumes the same root
-    local mark sup_pid held
+step_upgrade_fresh_root() { # silent-note row: the next period opens in a fresh root on the flipped venv
+    echo "two installs of one build: this exercises the row, it qualifies no version pair"
+    roll_into_fresh_root "$ROLLED_ROOT" "$BUILD_B" 4
+}
+
+step_upgrade_fresh_root_rollback() { # silent-note row's rollback: the old venv, another fresh root
     echo "two installs of one build: this exercises the row, it qualifies no version pair"
     ROOT=$ROLLED_ROOT
     SOCK=$ROOT/control.sock
+    roll_into_fresh_root "$ROLLBACK_ROOT" "$BUILD_A" 5
+}
+
+# ss7 row 3, resume-safe with a wrapper or supervisor protocol change:
+# drain, stop both units, flip, start both; the engine resumes the same
+# root and the supervisor is replaced by the new venv's. The rollback is the
+# same with the old venv.
+flip_both_units() { # flip_both_units BUILD
+    local mark sup_pid held
     wait_for 60 "nothing is live under the supervisor" nothing_live "$ROOT"
     sup_pid=$(prop "$SUPERVISOR" MainPID)
     sudo systemctl stop "$ENGINE" "$SUPERVISOR"
-    flip "$BUILD_A"
+    flip "$1"
     mark=$(date +%s)
     start_engine
     is_state "$SUPERVISOR" active || fail "Requires= did not start $SUPERVISOR"
     launch_line_since "$mark" | grep -q -- ' --resume$' || fail "the engine did not resume $ROOT"
     [ "$(prop "$SUPERVISOR" MainPID)" != "$sup_pid" ] || fail "the supervisor was not replaced"
-    on_build "$ENGINE" "$BUILD_A"
-    on_build "$SUPERVISOR" "$BUILD_A"
+    on_build "$ENGINE" "$1"
+    on_build "$SUPERVISOR" "$1"
     held=$(cli query status --job APAC_EOD_B -S "$SOCK" | jq -r '.jobs.APAC_EOD_B.on_hold')
-    [ "$held" = true ] || fail "the hold did not survive the upgrade"
-    ok "both units run from $BUILD_A; the engine resumed $ROOT with its holds"
+    [ "$held" = true ] || fail "the hold did not survive the flip"
+    ok "both units run from $1; the engine resumed $ROOT with its holds"
+}
+
+step_upgrade_coordinated() { # coordinated row: both units replaced, the engine resumes the same root
+    echo "two installs of one build: this exercises the row, it qualifies no version pair"
+    ROOT=$ROLLBACK_ROOT
+    SOCK=$ROOT/control.sock
+    flip_both_units "$BUILD_B"
+}
+
+step_upgrade_coordinated_rollback() { # coordinated row's rollback: flip back, replace again
+    echo "two installs of one build: this exercises the row, it qualifies no version pair"
+    ROOT=$ROLLBACK_ROOT
+    SOCK=$ROOT/control.sock
+    flip_both_units "$BUILD_A"
 }
 
 # The old estate for ss7's state-machine row: v1.7.0 from PyPI, as runbook
 # ss1 installs a release that has no assets, on a new estate of its own.
 step_upgrade_old_release() { # an estate on the old release, v1.7.0 from PyPI
     local mark line version
-    ROOT=$ROLLED_ROOT
+    ROOT=$ROLLBACK_ROOT
     SOCK=$ROOT/control.sock
     wait_for 60 "nothing is live under the supervisor" nothing_live "$ROOT"
     sudo systemctl stop "$ENGINE" "$SUPERVISOR"
@@ -371,7 +802,7 @@ step_upgrade_old_release() { # an estate on the old release, v1.7.0 from PyPI
 # start a new estate on the new build, and keep the old venv to audit the
 # retained old estate.
 step_upgrade_state_machine() { # state-machine row: v1.7.0 to this build, a new estate
-    local mark line version refused
+    local mark line version refused rc
     ROOT=$OLD_ROOT
     ANCHOR=$OLD_ROOT.anchor
     SOCK=$ROOT/control.sock
@@ -395,12 +826,62 @@ step_upgrade_state_machine() { # state-machine row: v1.7.0 to this build, a new 
     # refuses it and names the version
     as_dsl41 "$OLD_VENV/bin/dsl41" audit --estate-anchor "$OLD_ROOT.anchor"
     ok "the kept v$OLD_VERSION venv audits the retained estate"
-    if refused=$(cli audit --estate-anchor "$OLD_ROOT.anchor" 2>&1); then
-        fail "this build audited a state-machine version 1 period: $refused"
-    fi
+    rc=0
+    refused=$(cli audit --estate-anchor "$OLD_ROOT.anchor" 2>&1) || rc=$?
     echo "$refused"
-    grep -qi 'state.machine' <<<"$refused" || fail "the refusal does not name the version"
-    ok "this build refuses the old estate and names the version"
+    [ "$rc" = 2 ] || fail "this build's audit of a state-machine version 1 period exited $rc, not 2: $refused"
+    # The refusal is the seal artifact's "not in ss3.2 canonical form (corrupt
+    # bytes, or a seal written by a build with a different record shape)".
+    # It names neither the version nor the shape: this build reads the seal
+    # before the period's state-machine version. The check that the old venv
+    # is the one to use is the audit just above, which passes on the same
+    # anchor.
+    grep -qF 'not in ss3.2 canonical form' <<<"$refused" ||
+        fail "the refusal is not the seal artifact's canonical-form message: $refused"
+    ok "this build refuses the old estate (exit 2); the kept v$OLD_VERSION venv audits it"
+}
+
+# ss7 row 4's rollback: stop both units, flip back to the old venv, point the
+# launcher at the old estate, start; the engine opens the old estate's next
+# period on the old build, with the old estate's holds. The drill then goes
+# forward again, to the new estate the retirement works on.
+step_upgrade_state_machine_rollback() { # state-machine row's rollback: the old venv on the old estate
+    local mark line held
+    ROOT=$NEW_ROOT
+    wait_for 60 "nothing is live under the supervisor" nothing_live "$ROOT"
+    sudo systemctl stop "$ENGINE" "$SUPERVISOR"
+    flip "$OLD_VENV"
+    point_launcher "$OLD_ROOT" "$OLD_ROOT.anchor"
+    ROOT=$OLD_ROOT
+    ANCHOR=$OLD_ROOT.anchor
+    SOCK=$ROOT/control.sock
+    mark=$(date +%s)
+    start_engine
+    is_state "$SUPERVISOR" active || fail "Requires= did not start $SUPERVISOR"
+    line=$(launch_line_since "$mark")
+    echo "$line"
+    [[ $line == *" --run-root $ROOT "* && $line == *" --resume" ]] ||
+        fail "the rollback was not a resume of $ROOT"
+    on_build "$ENGINE" "$OLD_VENV"
+    on_build "$SUPERVISOR" "$OLD_VENV"
+    sudo test -e "$ROOT/wal/000002.jsonl" || fail "the old estate's period 2 did not open in $ROOT"
+    held=$(cli query status --job APAC_EOD_B -S "$SOCK" | jq -r '.jobs.APAC_EOD_B.on_hold')
+    [ "$held" = true ] || fail "the old estate's hold did not survive"
+    ok "the old estate answers on v$OLD_VERSION with period 2 open and its holds"
+    # forward again: the new estate resumes where the upgrade left it
+    sudo systemctl stop "$ENGINE" "$SUPERVISOR"
+    flip "$BUILD_A"
+    point_launcher "$NEW_ROOT" "$NEW_ROOT.anchor"
+    ROOT=$NEW_ROOT
+    ANCHOR=$NEW_ROOT.anchor
+    SOCK=$ROOT/control.sock
+    mark=$(date +%s)
+    start_engine
+    line=$(launch_line_since "$mark")
+    [[ $line == *" --run-root $ROOT "* && $line == *" --resume" ]] ||
+        fail "the return was not a resume of $ROOT"
+    on_build "$ENGINE" "$BUILD_A"
+    ok "the new estate resumed on $BUILD_A"
 }
 
 # deployment-runbook ss0's retirement, on the estate row 4 started: take

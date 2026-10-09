@@ -45,9 +45,9 @@ and the retirement's audit and list as written, against a synthetic
 estate, with the engine unit's `ExecStart=` in place of `systemctl
 start`. It runs the sealed check and the torn-opening recipe where `jq`
 is installed. The service
-drill (§3's worked example) runs the service and retirement recipes as
-written; CI checks their content but does not run them. The variables
-block is compared with the launcher.
+drill (§3's worked example) runs the service, hold, sealed-check and
+retirement recipes as written; CI checks their content but does not run
+them. The variables block is compared with the launcher.
 
 ### Task index
 
@@ -250,12 +250,18 @@ dsl41 query status --brief -S "$S"
 2. **Socket exposure.** With no `socket_group`, only the service account
    reaches the socket. To let people in, name a group in the map
    (`socket_group`; the example ships it commented out), create it, and
-   add every person who may reach the socket. The engine then opens the
-   run root to `0710` and the socket to `0660` for that group
-   (access-model §8); the bindings still decide each member's tier.
-   Restart the engine unit after a `socket_group` change: a reload that
-   names another group is refused (access-model §7). The web UI listens
-   on loopback; front it with TLS and authentication (§4).
+   add every person who may reach the socket. Add the service account
+   too: the engine hands the run root to the group, and refuses to start
+   with exit 2 (`cannot open the run root to group`) when the account is
+   not a member. The engine then opens the run root to `0710` and the
+   socket to `0660` for that group (access-model §8). The run roots'
+   directory, `/srv/dsl41/runs` in the example, is `0700` for the
+   account, so give the group execute on it too (`chgrp GROUP
+   /srv/dsl41/runs; chmod 0710 /srv/dsl41/runs`); until then a member
+   gets `Permission denied` on the socket. The bindings still decide each
+   member's tier. Restart the engine unit after a `socket_group` change:
+   a reload that names another group is refused (access-model §7). The
+   web UI listens on loopback; front it with TLS and authentication (§4).
 3. **Execution profile.** The launcher's run options are the runtime
    profile: `--detached`, `--as-machine`, `--machine-policy strict` and
    `--timezone`, plus `--timezone-map` and `--deadman` when used (§3, §5).
@@ -400,6 +406,19 @@ dsl41 query status --job "$JOB" -S "$S"
 - **The supervisor unit restarted.** Its running commands ended with it,
   and a restart does not bring them back. The engine reconciles what the
   spool says (§3).
+
+The service drill runs the configure recipe's socket exposure, access
+check and refused profile change (`configure`), an engine stop, a crash
+loop that the start limit ends, a replayed request and a new rerun
+(`stop-recover`), a SIGKILL of the engine (`kill-engine`) and a SIGKILL
+of the supervisor (`kill-supervisor`). The refusal, seal, reboot and
+estate-stop bullets are the `refusal`, `sealed`, `reboot` and `quiesce`
+steps'. After a SIGKILL of the supervisor the drill sees `Requires=`
+restart the engine unit with it, which resumes, takes a lease and renews
+it. It also drives the engine's own client through a supervisor outage
+that the engine outlives. That part edits the installed units for the
+drill only (`Wants=` for `Requires=` in the engine unit, `RestartSec=40`
+in the supervisor unit); it is not a supported configuration.
 
 ### Recipe: recover a rolled root whose opening is torn
 
@@ -568,6 +587,22 @@ endpoint; feed these into the site's monitoring.
 | violations off the trace | `journalctl -u dsl41-engine.service` | alert on any line that begins `dsl41: transition violation`. It covers both kinds of violation the trace cannot carry: one in the engine's own machines (admission, the subscribe feed, the seal boundary, the outbox's record move), and one noted outside an input, which is dropped. The line names the machine or entity, the transition and the reason; the engine goes on (concurrency-model §4) |
 | free space | `df -P "$RUN_ROOT" "$ESTATE_ANCHOR"`, and every file system a job's `std_out_file` or `std_err_file` writes to | see "when a write fails" below |
 | perimeter receipts | `$RUN_ROOT/perimeter.jsonl`, when the access map is armed | alert on `access_denied` and `policy_reload_failed` records. `stream_revoked` marks a stream that a reload closed (access-model §6, §7) |
+
+The service drill (`watch`) runs the command of every row above and
+checks the output against the row. `configure` reads the perimeter's
+receipts, `sealed` the `closed` state, and `kill-supervisor` the
+supervisor unit's journal. It does not reach these meanings: exit 5; a
+rising `NRestarts` from exit 1 with the `engine failed:` line (the drill's
+crash is a signal, status 9); the `claimed` state; the
+`MUST_START_ALARM` and `MUST_COMPLETE_ALARM` entries; a `TERMINATED` run
+read from the trace; `stream_revoked`; the trace cursor reset when
+`baseline_id` changes; the free space of a job's output file systems; and
+a subscribe line over the budget. A real
+engine does not break a declared transition, so the drill injects a
+violation into the engine unit the way the unit tests do: the journal
+line begins with the prefix, and a host's reinstatement shows as a
+`TRANSITION_VIOLATION` trace entry (`kill-supervisor`). That shows the
+alert pattern matches; it does not show that an engine violates.
 
 The sealed-not-opened check prints the lineage head's state. It needs
 `jq` on the host (`apt-get install jq`); no dsl41 command prints the
@@ -1331,7 +1366,9 @@ that survives an engine stop, a changed estate refused without a restart
 loop, and a sealed engine that stays stopped until the next period is
 opened. It also covers §2b's shape-1 quiescence and a restore at the
 recorded paths, a host reboot that the enabled units resume from (§0),
-and §7's upgrade rows (DL-266). It installs and first
+the signals of "What to watch", §0's configure and stop-and-recover
+recipes, a SIGKILL of the engine and of the supervisor, and §7's four
+upgrade rows with their rollbacks (DL-266). It installs and first
 starts the units with §0's service recipe, and ends with §0's retirement
 procedure, both read from this file (DL-268). The access-map refusals,
 their messages and what they leave
@@ -1343,10 +1380,15 @@ a podman container with systemd as PID 1 on Ubuntu 24.04, as an
 unprivileged user with passwordless sudo, as the runner runs them
 (DL-271). It runs the host's architecture, so on Apple silicon it is arm64, not the runner's
 x86_64.
-The drill passed every step on GitHub's Ubuntu 24.04 runner at c1e6b0c
-(2026-10-04, DL-271), the `quiesce`, `restore`, `reboot`, upgrade and
-`retire` steps and the recipe-driven `install` and `first-start`
-included. Its first pass there was at d886679 (DL-223). No other
+The drill passed every step it had then on GitHub's Ubuntu 24.04 runner at
+c1e6b0c (2026-10-04, DL-271), the `quiesce`, `restore`, `reboot`, upgrade
+and `retire` steps and the recipe-driven `install` and `first-start`
+included. Its first pass there was at d886679 (DL-223). The steps added
+since (`watch`, `configure`, `kill-engine`, `kill-supervisor`,
+`stop-recover` and the three rollback steps) and the steps changed since
+(`sealed`, `upgrade-fresh-root`, `upgrade-coordinated`,
+`upgrade-old-release`, `upgrade-state-machine`) have run only in
+`drill-local.sh`, on arm64 (2026-10-09, Ubuntu 24.04, systemd 255). No other
 distribution or systemd version has been observed. It is not
 part of the default gate: dispatch it again after a change to the units,
 the launcher or the drill.
@@ -1633,7 +1675,12 @@ needs no predecessor. `verify` validates a checkpoint alone — its digest,
 its binding to the seal it names, and the chain it claims — which is what
 a rolled root can do and a full audit is not. Auditing a period whose STATE-MACHINE VERSION differs from this
 binary's needs the dsl41 version that produced it (§7's venv-per-version
-pattern); the refusal names the version. A period run by an older
+pattern). The refusal names the version only when the seal reads. A
+v1.7.0 seal does not read under this build, and the refusal says `the
+bytes are not in ss3.2 canonical form (corrupt bytes, or a seal written
+by a build with a different record shape -- DL-154)`, which names neither the
+version nor the shape. To tell, audit the same root with the kept old
+venv: if that passes, the old venv is the one to use. A period run by an older
 release of the same state-machine version audits under the current
 binary.
 
@@ -1963,8 +2010,9 @@ the unit. On either path, release the reboot hold once the engine answers.
 A supervisor serves one run root, so the new root gets its own, from the
 new venv. The holds cross the roll; release them with `OFF_HOLD` once the
 engine answers. The rollback is the same procedure with the old venv and
-another fresh root. The service drill runs this row
-(`upgrade-fresh-root`) with two installs of one build.
+another fresh root. The service drill runs this row and its rollback
+(`upgrade-fresh-root`, `upgrade-fresh-root-rollback`) with two installs
+of one build.
 
 **Row 3, resume-safe, with a wrapper spec or supervisor protocol
 change.** The engine and the supervisor are deployed together, never one
@@ -1981,9 +2029,10 @@ systemctl start dsl41-engine.service     # Requires= starts the supervisor first
 ```
 
 Release the holds with `OFF_HOLD` once the engine answers. The rollback is
-the same with the old venv. The service drill runs these commands
-(`upgrade-coordinated`) with two installs of one build, and checks that
-both units run from the new venv and that the engine resumed.
+the same with the old venv. The service drill runs these commands and the
+rollback (`upgrade-coordinated`, `upgrade-coordinated-rollback`) with two
+installs of one build, and checks that both units run from the flipped
+venv and that the engine resumed.
 
 **Row 4, a state-machine version change.** The new build cannot open the
 old estate's periods, and only the old venv can audit them (§6a). Drain
@@ -2018,7 +2067,9 @@ across reboots: once the old estate answers, release the hold with
 `hold-release` (§2b), or the next boot leaves it stopped. The service
 drill runs
 this row from v1.7.0, installed from PyPI, to the build under test
-(`upgrade-old-release`, `upgrade-state-machine`).
+(`upgrade-old-release`, `upgrade-state-machine`), and then the rollback
+to the old estate and back to the new one
+(`upgrade-state-machine-rollback`).
 
 ## 8. Operator scenarios
 
