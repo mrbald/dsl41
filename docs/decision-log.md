@@ -19968,3 +19968,54 @@ relitigate an entry; append a new one.
   orders and wire shapes instead of links, and a test that accepted a
   card listed outside the card list. All are fixed and confirmed by the
   reviewer; its last two wording notes were applied after round two.
+- DL-303 The service drill covers the upgrade rollbacks, stop and recover,
+  configure, every monitoring command, and a SIGKILL of either unit
+  (2026-10-09; examples/nightbank/deploy/drill-steps.sh, drill-lib.sh;
+  .github/workflows/service-drill.yml; docs/deployment-runbook.md;
+  tests/test_operator_recipes.py)
+  THE STEPS. Each new step asserts an exit status, a journal line or a run
+  state, not only that a command ran.
+  The rollbacks of upgrade rows 2, 3 and 4 now run; before, only row 1's
+  did (DL-266, DL-270). Row 3 goes forward to a second build and back.
+  stop-recover stops the engine and checks that the supervisor still
+  answers. It kills the engine until systemd gives up, then runs
+  reset-failed and resumes. It also replays a sendevent with its printed
+  pins and gets the first answer back.
+  configure checks the socket exposure, the access tiers and their
+  `access_denied` receipts, the `policy_loaded` digest, a refused reload
+  and a refused profile change, and restores all of it on every exit.
+  watch runs the command of every row in "What to watch". It also checks
+  that an injected effect violation writes a journal line starting
+  `dsl41: transition violation` and that the run still ends SUCCESS
+  (DL-292, DL-295). The runbook lists the meanings it does not reach.
+  kill-engine sends SIGKILL to the engine unit's main process. systemd
+  restarts it, the launcher resumes, and the detached command survives.
+  kill-supervisor sends SIGKILL to the supervisor. With the shipped units,
+  `Requires=` restarts the engine with it, so the engine never sees an
+  outage. A drill-only edit of the installed units (`Wants=` and
+  `RestartSec=40`) keeps the engine up, so the drill sees five failed
+  renewals and then a renewed lease (DL-291). That edit is not a supported
+  configuration.
+  WHAT THE DRILL FOUND. First, the existing upgrade-state-machine step
+  already failed before this change. Auditing a v1.7.0 estate with this
+  build refuses with the seal's canonical-form message (DL-154), which
+  names neither the version nor the record shape. The step and §6a now
+  quote that message and give the check: the kept old venv's audit passes
+  on the same root. A refusal that names the version first stays open.
+  Second, the configure recipe missed two requirements. The service
+  account must be in the socket group, or the engine exits 2. The run
+  roots' directory needs group execute, or members get "Permission
+  denied". The recipe now says both.
+  WHERE IT RUNS. The local podman drill passed all 23 steps (Ubuntu 24.04,
+  systemd 255, arm64). The GitHub service drill runs only on dispatch and
+  has not run the new or changed steps; the runbook and the workflow name
+  them as run locally only.
+  REVIEW. One Opus reviewer, two rounds. It found one major: the runbook
+  said two "What to watch" meanings were not drilled, but at least seven
+  more were not. It also found weak assertions (a deleted lock file
+  passed, an earlier reload failure passed, a restart was credited to the
+  wrong cause), an inexact quote, the drill-only unit edit described like a
+  supported shape, and over-claimed "drilled" text. All are fixed and
+  confirmed by the reviewer. The runbook is not a frozen contract, and the
+  two new recipe sentences were proven by the drill and checked against
+  src/dsl41/runner_access.py, so no second-vendor pass ran.

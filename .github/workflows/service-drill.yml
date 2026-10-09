@@ -7,17 +7,24 @@
 # systemd claim and are pinned instead in tests/test_nightbank_deploy.py --
 # a sealed engine that stays stopped until an operator opens the next
 # period, the managed quiescence and restore of deployment-runbook ss2b,
-# a host reboot that the enabled units resume from, and the four upgrade rows of ss7 (DL-266). Rows 1 to 3 run with two
-# installs of one build: their mechanics, not a qualified version pair.
-# Row 4 runs from v1.7.0 on PyPI to the build under test. The install,
-# the first start and a final retirement run ss0's recipe blocks as the
-# runbook prints them (DL-268).
+# a host reboot that the enabled units resume from, the signals of "What to
+# watch" (with a violation injected into the engine unit), the configure
+# and stop-and-recover recipes of ss0, a SIGKILL of the engine and of the
+# supervisor, and the four upgrade rows of ss7 with their rollbacks
+# (DL-266). Rows 1 to 3 run with two installs of one build: their
+# mechanics, not a qualified version pair. Row 4 runs from v1.7.0 on PyPI
+# to the build under test. The install, the first start and a final
+# retirement run ss0's recipe blocks as the runbook prints them (DL-268).
 #
 # Manual only (workflow_dispatch). It is not part of the default gate. It
-# passed every step on GitHub's Ubuntu 24.04 runner at c1e6b0c on
-# 2026-10-04 (DL-271), every step above included; its first pass there was
-# on 2026-09-29 (DL-223). Dispatch it again after a change to the units, the
-# launcher or the drill. Each step
+# passed every step it had then on GitHub's Ubuntu 24.04 runner at c1e6b0c
+# on 2026-10-04 (DL-271); its first pass there was on 2026-09-29 (DL-223).
+# The watch, configure, kill-engine, kill-supervisor, stop-recover and
+# rollback steps were added after that, and the sealed, upgrade-fresh-root,
+# upgrade-coordinated, upgrade-old-release and upgrade-state-machine steps
+# changed; they have run only in drill-local.sh.
+# Dispatch it again after a change to the units, the launcher or the
+# drill. Each step
 # runs one step of drill-steps.sh; drill-local.sh runs the same steps in a
 # local podman container (DL-266). A test holds this list to the script's.
 
@@ -69,20 +76,44 @@ jobs:
       - name: a host reboot starts the enabled units, which resume the same root
         run: bash examples/nightbank/deploy/drill-steps.sh reboot
 
+      - name: the signals of What to watch read true, and an injected violation shows in the journal
+        run: bash examples/nightbank/deploy/drill-steps.sh watch
+
+      - name: the configure recipe sets the socket group, the tiers and the receipts, and a changed profile is refused
+        run: bash examples/nightbank/deploy/drill-steps.sh configure
+
+      - name: a SIGKILL of the engine is restarted by the unit and the run resumes
+        run: bash examples/nightbank/deploy/drill-steps.sh kill-engine
+
+      - name: a SIGKILL of the supervisor is restarted, the engine resumes, and the lease renews
+        run: bash examples/nightbank/deploy/drill-steps.sh kill-supervisor
+
+      - name: stop and recover from a crash loop, replay a request, rerun a job
+        run: bash examples/nightbank/deploy/drill-steps.sh stop-recover
+
       - name: upgrade by the resume-safe row resumes the engine and keeps the supervisor
         run: bash examples/nightbank/deploy/drill-steps.sh upgrade-resume-safe
 
       - name: upgrade by the silent-note row opens the next period in a fresh root
         run: bash examples/nightbank/deploy/drill-steps.sh upgrade-fresh-root
 
+      - name: the silent-note row's rollback opens another fresh root on the old venv
+        run: bash examples/nightbank/deploy/drill-steps.sh upgrade-fresh-root-rollback
+
       - name: upgrade by the coordinated row replaces both units and resumes the same root
         run: bash examples/nightbank/deploy/drill-steps.sh upgrade-coordinated
+
+      - name: the coordinated row's rollback replaces both units again
+        run: bash examples/nightbank/deploy/drill-steps.sh upgrade-coordinated-rollback
 
       - name: an estate on the old release, v1.7.0 from PyPI
         run: bash examples/nightbank/deploy/drill-steps.sh upgrade-old-release
 
       - name: upgrade by the state-machine row starts a new estate on this build
         run: bash examples/nightbank/deploy/drill-steps.sh upgrade-state-machine
+
+      - name: the state-machine row's rollback resumes the old estate on the old venv
+        run: bash examples/nightbank/deploy/drill-steps.sh upgrade-state-machine-rollback
 
       - name: a retired estate stays stopped after a reload, and its history audits
         run: bash examples/nightbank/deploy/drill-steps.sh retire

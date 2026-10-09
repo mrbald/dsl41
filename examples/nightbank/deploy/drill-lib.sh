@@ -309,9 +309,10 @@ quiesce_shape1() {
 # An operator's request, with its time kept: a seal refuses inside
 # the closing period's retry horizon (60 s after the last request) unless
 # it is forced (period-model ss9), and an upgrade waits the horizon out.
+stamp_request() { date +%s | sudo tee "$SCRATCH/last-request" >/dev/null; }
 request() { # request VERB JOB
     cli sendevent "$1" -J "$2" -S "$SOCK"
-    date +%s | sudo tee "$SCRATCH/last-request" >/dev/null
+    stamp_request
 }
 force_start() { request FORCE_STARTJOB "$1"; }
 # RUNBOOK exercise 15 step 1: hold what the calendar would start
@@ -347,3 +348,189 @@ anchors_in() { # anchors_in DIR
 nothing_live() { # nothing_live ROOT
     cli supervise list --run-root "$1" | jq -e '[.runs[] | select(.wrapper_alive)] | length == 0' >/dev/null
 }
+
+# `sendevent`, with the retry line it prints before its first write kept
+# (control-protocol: --request-id, --expect, --epoch and --baseline). Sets
+# RETRY_LINE to those arguments and ANSWER to the engine's JSON. The time of
+# the request is kept like request().
+send_keeping_retry() { # send_keeping_retry VERB JOB
+    local err
+    err=$(mktemp "$SCRATCH/send.XXXXXX")
+    ANSWER=$(cli sendevent "$1" -J "$2" -S "$SOCK" 2>"$err") || {
+        cat "$err" >&2
+        fail "sendevent $1 -J $2 failed"
+    }
+    stamp_request
+    RETRY_LINE=$(sed -n 's/^sending: //p' "$err")
+    rm -f "$err"
+    [ -n "$RETRY_LINE" ] || fail "sendevent printed no retry line"
+}
+
+job_field() { # job_field JOB FIELD -- one field of the job's status row
+    cli query status --job "$1" -S "$SOCK" | jq -r --arg job "$1" --arg f "$2" '.jobs[$job][$f]'
+}
+
+# the engine's state, taken from its supervisor connection: the lease
+# holder and its expiry, from the supervisor's LIST
+lease_field() { # lease_field holder|expires_at
+    cli supervise list --run-root "$ROOT" | jq -r --arg f "$1" '.lease[$f] // empty'
+}
+lease_is_held() { [ -n "$(lease_field holder)" ]; }
+# the lease's expiry moved past WAS: one renewal (ISO times compare as text)
+lease_renewed_past() { # lease_renewed_past WAS
+    local now
+    now=$(lease_field expires_at)
+    [[ -n $now && $now > $1 ]]
+}
+
+# The engine unit's journal lines since EPOCH that match the fixed string
+journal_count() { # journal_count EPOCH FRAGMENT
+    engine_log_since "$1" | { grep -cF -- "$2" || true; }
+}
+journal_has() { # journal_has UNIT EPOCH FRAGMENT
+    sudo journalctl -u "$1" --since "@$2" -o cat --no-pager | grep -qF -- "$3"
+}
+
+# A fault injected into the engine unit, the way tests/test_engine_machines.py
+# injects one: a sitecustomize in a directory the unit's PYTHONPATH names
+# replaces one machine's transition with a violating one. effect.01 is the
+# outbox's record move (an engine-tier machine: the violation is one journal
+# line); host.07 is a host's reinstatement (an oracle-tier machine: the
+# violation is a trace line). No source file changes, and remove_faults
+# takes the drop-in and the directory away. Restarts the engine, which
+# resumes the same root.
+FAULT_DIR=/opt/dsl41/drill-inject
+FAULT_DROPIN=/etc/systemd/system/$ENGINE.d/drill-fault.conf
+inject_faults() { # inject_faults effect.01 host.07 ...
+    local names
+    names=$(IFS=,; echo "$*")
+    sudo install -d "$FAULT_DIR" "$(dirname "$FAULT_DROPIN")"
+    sudo tee "$FAULT_DIR/sitecustomize.py" >/dev/null <<'PY'
+import os
+
+from dsl41 import runner_effects, runner_hosts
+from dsl41.state_machine import StateMachine, Violation
+
+faults = set(os.environ["DRILL_FAULTS"].split(","))
+effect_real = runner_effects.EFFECT
+
+
+class BrokenEffect:
+    def __getattr__(self, name):
+        return getattr(effect_real, name)
+
+    def take(self, transition, old, new):
+        if transition.id in faults:
+            return Violation("effect", transition.id, old, new, "injected by the service drill")
+        return effect_real.take(transition, old, new)
+
+
+runner_effects.EFFECT = BrokenEffect()
+host = runner_hosts.HOST
+runner_hosts.HOST = StateMachine(
+    name=host.name,
+    states=host.states,
+    initial=host.initial,
+    finals=host.finals,
+    transitions=tuple(t for t in host.transitions if t.id not in faults),
+)
+PY
+    printf '[Service]\nEnvironment=PYTHONPATH=%s\nEnvironment=DRILL_FAULTS=%s\n' \
+        "$FAULT_DIR" "$names" | sudo tee "$FAULT_DROPIN" >/dev/null
+    sudo systemctl daemon-reload
+    manual restart
+    wait_up
+}
+remove_faults() {
+    sudo rm -rf "$FAULT_DIR" "$(dirname "$FAULT_DROPIN")"
+    sudo systemctl daemon-reload
+}
+
+# a client command run as another login, with the venv the launcher uses
+as_user() { # as_user USER ARGS... -- dsl41 ARGS as USER
+    local user=$1
+    shift
+    (cd / && sudo -u "$user" -H "$VENV/bin/dsl41" "$@")
+}
+
+# JOB's run number RUN or a later one ended in SUCCESS
+ran_to_success() { # ran_to_success JOB RUN
+    [ "$(job_field "$1" run_number)" -ge "$2" ] && job_is "$1" SUCCESS
+}
+
+# a unit's main process is not PID: systemd started a new one, and it is active
+unit_replaced() { # unit_replaced UNIT PID
+    local now
+    now=$(prop "$1" MainPID)
+    [ "$now" != 0 ] && [ "$now" != "$2" ] && is_state "$1" active
+}
+# the engine unit began a new invocation since INVOCATION and is active
+engine_reinvoked() { # engine_reinvoked INVOCATION
+    [ "$(prop "$ENGINE" InvocationID)" != "$1" ] && is_state "$ENGINE" active
+}
+# the engine unit has a new main process since PID, or gave up
+engine_moved_on() { # engine_moved_on PID
+    local now
+    is_state "$ENGINE" failed && return 0
+    now=$(prop "$ENGINE" MainPID)
+    [ "$now" != 0 ] && [ "$now" != "$1" ]
+}
+
+# Kill the engine's main process again and again until the unit's start
+# limit stops it (StartLimitBurst=5 in five minutes). Sets KILLS. At most ten
+# kills; a unit that never gives up is a failure.
+kill_engine_until_failed() {
+    local pid
+    KILLS=0
+    sudo systemctl reset-failed "$ENGINE"
+    while ((KILLS < 10)) && ! is_state "$ENGINE" failed; do
+        pid=$(prop "$ENGINE" MainPID)
+        if [ "$pid" != 0 ]; then
+            sudo kill -KILL "$pid"
+            KILLS=$((KILLS + 1))
+        fi
+        wait_for 30 "the unit restarted the engine, or gave up" engine_moved_on "$pid"
+    done
+    is_state "$ENGINE" failed || fail "$ENGINE was still restarted after $KILLS kills"
+}
+
+# the subscribe stream in FILE carries the adapter's STATUS input for JOB, with
+# a nonzero exit code: the run's end, as the runbook's alarm row describes it
+stream_shows_failure() { # stream_shows_failure FILE JOB
+    jq -e -n --arg job "$2" '[inputs | select(.rec == "input" and .kind == "STATUS"
+        and .source == "adapter" and .payload.job == $job and ((.payload.exit_code // 0) != 0))]
+        | length >= 1' "$1" >/dev/null 2>&1
+}
+
+# put the units back the way the install left them: the engine's
+# Requires= and no drop-ins, then reload. The caller restarts what it needs.
+restore_units() {
+    sudo sed -i 's/^Wants=dsl41-supervisor.service/Requires=dsl41-supervisor.service/' \
+        "/etc/systemd/system/$ENGINE"
+    sudo rm -rf "$FAULT_DIR" "/etc/systemd/system/$ENGINE.d" "/etc/systemd/system/$SUPERVISOR.d"
+    sudo systemctl daemon-reload
+}
+
+# supervise list shows a run of JOB, and no run of it has a live wrapper
+list_shows_finished_run() { # list_shows_finished_run JOB
+    cli supervise list --run-root "$ROOT" | jq -e --arg job "$1" \
+        '.ok == true and ([.runs[] | select(.job == $job)] | length >= 1)
+         and ([.runs[] | select(.job == $job)] | all(.wrapper_alive == false))' >/dev/null
+}
+# more transition violation lines since EPOCH than BEFORE
+violation_lines_exceed() { # violation_lines_exceed EPOCH BEFORE
+    [ "$(journal_count "$1" 'dsl41: transition violation')" -gt "$2" ]
+}
+# the run root's perimeter journal holds a record of this kind
+perimeter_has() { # perimeter_has REC
+    sudo jq -e -s --arg rec "$1" 'any(.[]; .rec == $rec)' "$ROOT/perimeter.jsonl" >/dev/null
+}
+# records of kind REC in the perimeter journal whose text holds FRAGMENT
+perimeter_count() { # perimeter_count REC FRAGMENT
+    sudo jq -s --arg rec "$1" --arg frag "$2" \
+        '[.[] | select(.rec == $rec and (tojson | contains($frag)))] | length' "$ROOT/perimeter.jsonl"
+}
+perimeter_count_exceeds() { # perimeter_count_exceeds REC FRAGMENT BEFORE
+    [ "$(perimeter_count "$1" "$2")" -gt "$3" ]
+}
+job_not_running() { [ "$(job_status "$1")" != RUNNING ]; }

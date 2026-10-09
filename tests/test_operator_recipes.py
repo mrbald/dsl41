@@ -224,6 +224,7 @@ RUN_BY_DRILL = {
     "service-install",
     "service-start",
     "wait-answers",
+    "watch-sealed",
     "hold-down",
     "hold-release",
     "retire-remove",
