@@ -322,3 +322,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-308 | The service drill passes on GitHub with the steps DL-303 added, and the risk map is measured on main | [docs/deployment-runbook.md](deployment-runbook.md), [docs/risk-map.md](risk-map.md) |
 | DL-309 | A completed box keeps its status through an iced member, and the walk from a job up to its boxes is bound to their runs (state machine 20) | [docs/risk-map.md](risk-map.md) |
 | DL-310 | A period's per-input cost no longer grows with the period, and a trace call costs what it returns |  |
+| DL-311 | access-model: `release-held` and `supervise start` get their tiers, and the perimeter journal's directory fsync is stated as the code does it | [docs/access-model.md](access-model.md) |

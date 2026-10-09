@@ -20384,3 +20384,25 @@ relitigate an entry; append a new one.
   REVIEW. One Opus reviewer, behavior-preserving class. It checked that
   every outbox write goes through `record()`, ran 14 mutants that the
   tests all caught, and found nothing material.
+- DL-311 access-model: `release-held` and `supervise start` get
+  their tiers, and the perimeter journal's directory fsync is stated as
+  the code does it
+  (2026-10-09; docs/access-model.md §6 and §10)
+  THE TIERS. The CLI tier list in §10 named no tier for two verbs.
+  `release-held` sends one `sendevent OFF_HOLD` per held job (DL-180), so
+  it is ops, by composition. `supervise start` creates the run root at
+  0700 when it is missing, leaves an existing one alone, and writes the
+  supervisor log there through the filesystem (src/dsl41/cli_control.py),
+  so it is adm. Both rows describe the verbs; the only enforcement stays
+  filesystem access (§2).
+  THE FSYNC. §6 and DL-151 said the write that creates perimeter.jsonl
+  fsyncs the run root. The code does that for a synced append only
+  (src/dsl41/runner_access.py). An unsynced create does not, because its
+  own bytes are not durable either. The arming receipt is always synced,
+  so the journal is created by a synced write unless the file is removed
+  while the engine runs; §6 names that residual. This narrows DL-151's
+  wording to the code; it does not reverse it.
+  REVIEW. Found by the spec review of access-model.md, with one Opus
+  reviewer and one Fable advisor pass. The Fable pass ruled that both
+  changes need this entry, since §6 and §10 are frozen (DL-231, DL-225).
+  The pass's other edits are wording; the pull request lists them.
