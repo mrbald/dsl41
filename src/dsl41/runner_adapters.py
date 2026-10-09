@@ -39,6 +39,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 
@@ -1484,7 +1485,7 @@ class SupervisorClient:
         argv = supervisor_argv(self.run_root, self.deadman_s)
         logf = supervisor_log_path(self.run_root).open("ab")
         try:
-            return subprocess.Popen(
+            child = subprocess.Popen(
                 argv,
                 stdin=subprocess.DEVNULL,
                 stdout=logf,
@@ -1494,6 +1495,13 @@ class SupervisorClient:
             )
         finally:
             logf.close()  # the child dup'd it; our copy is done
+        # The supervisor outlives this call and often this engine, so nobody
+        # else waits for it. A daemon thread reaps it whenever it ends and
+        # keeps its handle alive until then, so the handle is never dropped
+        # while the child runs (that drop is a ResourceWarning, and a zombie
+        # until some later spawn collects it).
+        threading.Thread(target=child.wait, name="supervisor-reaper", daemon=True).start()
+        return child
 
     # -- request / response / push demux ------------------------------------
 

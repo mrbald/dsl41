@@ -127,8 +127,12 @@ class RawClient:
 
     def __init__(self, run_root: Path) -> None:
         self.sock = socket.socket(socket.AF_UNIX)
-        self.sock.settimeout(10.0)
-        self.sock.connect(str(run_root / "supervisor.sock"))
+        try:
+            self.sock.settimeout(10.0)
+            self.sock.connect(str(run_root / "supervisor.sock"))
+        except BaseException:
+            self.sock.close()  # a refused connect leaves no object to close
+            raise
         self.buf = b""
         #: DL-80: a real client pairs the incarnation with its token on every
         #: request (SupervisorClient does it in _request), so the raw client
@@ -1685,6 +1689,8 @@ def test_sigkill_engine_detached_survives_and_reattaches(short_root: Path) -> No
         if driver.poll() is None:
             driver.kill()
             driver.wait()
+        if driver.stdout is not None:
+            driver.stdout.close()
         _kill_group(run_root)
 
 
@@ -1846,6 +1852,8 @@ def _kill_decided_before_the_crash(short_root: Path, *, with_effect: bool) -> bo
         if driver.poll() is None:
             driver.kill()
             driver.wait()
+        if driver.stdout is not None:
+            driver.stdout.close()
         _kill_group(run_root)
 
 
@@ -1911,6 +1919,8 @@ def test_detach_stop_sigint_then_resume_reattaches(short_root: Path) -> None:
         if driver.poll() is None:
             driver.kill()
             driver.wait()
+        if driver.stdout is not None:
+            driver.stdout.close()
         _kill_group(run_root)
 
 
@@ -3348,6 +3358,11 @@ class _ErroredShutdown:
     def _parse(data: bytes) -> list[dict]:
         return [json.loads(line) for line in data.splitlines()]
 
+    def close(self) -> None:
+        """For a test that does not read the replies."""
+        if self.client is not None:
+            self.client.close()
+
     def replies(self) -> list[dict]:
         """Every line the client got. The supervisor is closed, so EOF is due."""
         assert self.client is not None
@@ -3437,6 +3452,7 @@ def test_an_error_in_a_shutdown_wait_with_a_signal_latched_is_logged_too(
     assert "supervisor_process.12" not in rig.taken
     assert rig.seen_in_wait is not None and rig.seen_in_wait[1]["error"] == _SYNTHETIC
     assert capfd.readouterr().err.count(_FAILED_LINE) == 1
+    rig.close()
 
 
 def test_a_second_error_in_a_shutdown_wait_ends_the_loop_with_the_error(

@@ -123,6 +123,12 @@ testpaths = ["tests"]
 # a wedged test dumps every thread's stack instead of hanging silently (the
 # whole suite runs in ~30s; the v0.2.0 release hang burned a 6h CI slot mute)
 faulthandler_timeout = 120
+# a leaked file, socket, transport or child process fails the test that
+# loses it, instead of printing a warning nobody reads
+filterwarnings = [
+    "error::ResourceWarning",
+    "error::pytest.PytestUnraisableExceptionWarning",
+]
 
 [tool.coverage.run]
 # BRANCH coverage, not line: the concurrency tier is mostly decisions, and a

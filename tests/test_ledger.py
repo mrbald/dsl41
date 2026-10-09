@@ -43,6 +43,7 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+from proc_pipes import close_pipes
 from supervisor_list_doubles import stub_listing, stub_row
 
 from dsl41.ir import lower_source
@@ -226,6 +227,7 @@ def test_a_dead_holder_leaves_nothing_to_clean_up(tmp_path: Path) -> None:
         if child.poll() is None:  # pragma: no cover -- only on an assert above
             child.kill()
             child.wait(timeout=10)
+        close_pipes(child)
 
 
 # ------------------------------------------------------------- 2. the epoch
@@ -323,6 +325,7 @@ def test_a_replaced_lock_file_stops_the_engine_that_can_no_longer_prove_it_leads
             usurper.release()
 
     asyncio.run(scenario())
+    _close(engine)
 
 
 def test_a_deleted_lock_file_stops_it_too(tmp_path: Path) -> None:
@@ -339,6 +342,7 @@ def test_a_deleted_lock_file_stops_it_too(tmp_path: Path) -> None:
             await engine.run_until_quiescent(T0 + timedelta(minutes=1))
 
     asyncio.run(scenario())
+    _close(engine)
 
 
 def test_the_fence_stops_the_spawn_and_not_only_the_record(tmp_path: Path) -> None:
@@ -356,6 +360,7 @@ def test_the_fence_stops_the_spawn_and_not_only_the_record(tmp_path: Path) -> No
             await engine.run_until_quiescent(T0 + timedelta(minutes=1))
 
     asyncio.run(scenario())
+    _close(engine)
     assert engine.oracle.store.job["j"].run_number == 0
     assert list((run_root / "runs").iterdir()) == []
     assert engine.outbox.pending() == []

@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from proc_pipes import close_pipes
 from pydantic import ValidationError
 from supervisor_list_doubles import stub_listing, stub_refusal, stub_row
 
@@ -3323,6 +3324,7 @@ def test_pr30b_a_live_seal_exits_the_engine_with_code_three(short_root: Path) ->
         if proc.poll() is None:  # pragma: no cover - only on a failed assertion
             proc.kill()
             proc.wait()
+        close_pipes(proc)
     assert read_seal(run_root, 1).digest == answer["digest"]
     # and the estate is left ready to open, not half-closed
     anchor = EstateAnchor(default_anchor_dir(run_root))

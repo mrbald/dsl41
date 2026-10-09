@@ -2278,6 +2278,7 @@ def test_a_failing_journal_close_still_gives_the_leader_lock_back(
         raise EngineError("pin: the control socket could not be bound")
 
     def _bad_close(self: Any) -> None:
+        self._f.close()  # the failure is the fsync; the descriptor still goes
         raise OSError("pin: fsync failed on the way out")
 
     monkeypatch.setattr(runner_control.ControlServer, "start", _no_socket)

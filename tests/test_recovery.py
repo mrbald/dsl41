@@ -464,12 +464,19 @@ _HEADER = {"ok": True, "baseline_id": "base-1", "epoch": 7, "applied_index": 3}
 
 
 async def _fake_engine(
-    path: Path, on_mutation: Callable[[asyncio.StreamWriter], Awaitable[None]]
+    path: Path,
+    on_mutation: Callable[[asyncio.StreamWriter], Awaitable[None]],
+    served: list[None] | None = None,
 ) -> asyncio.AbstractServer:
     """A socket that answers reads like an engine and hands every mutation
-    to `on_mutation` -- which misbehaves."""
+    to `on_mutation` -- which misbehaves. Each connection it takes up adds
+    an entry to `served`: a test whose client never reads an answer waits on
+    it, because `Server.wait_closed` does not wait for a connection that is
+    accepted but not yet attached, and the loop would end with it open."""
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        if served is not None:
+            served.append(None)
         try:
             while line := await reader.readline():
                 request = json.loads(line)
@@ -855,7 +862,8 @@ def test_any_exception_from_a_sync_write_is_delivered_but_an_interrupt_propagate
     path = short_root / "fake.sock"
 
     async def scenario() -> None:
-        server = await _fake_engine(path, _hang_up)
+        served: list[None] = []
+        server = await _fake_engine(path, _hang_up, served)
         try:
             for raised, wrapped in (
                 (RuntimeError("handler raised"), True),
@@ -879,6 +887,9 @@ def test_any_exception_from_a_sync_write_is_delivered_but_an_interrupt_propagate
                     assert "handler raised" in str(got)
                 else:
                     assert isinstance(got, KeyboardInterrupt)
+            # neither client sent a byte or read one, so nothing above waited
+            # for the server to take the connection up
+            await _poll(lambda: len(served) == 2)
         finally:
             server.close()
             await server.wait_closed()

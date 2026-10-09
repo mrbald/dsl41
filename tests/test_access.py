@@ -29,6 +29,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+from proc_pipes import close_pipes
 
 from dsl41.ir import lower_source
 from dsl41.runner import Engine
@@ -1033,6 +1034,7 @@ def test_access_sighup_reloads_the_live_engine(short_root: Path) -> None:
     finally:
         proc.terminate()
         proc.wait(timeout=30)
+        close_pipes(proc)
 
 
 def test_access_run_installs_signal_handlers_before_the_socket_binds(

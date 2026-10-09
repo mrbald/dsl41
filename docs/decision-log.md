@@ -20101,3 +20101,45 @@ relitigate an entry; append a new one.
   reviewers also found a hook without a run check, untested shapes, and
   over-claiming text. All are fixed and confirmed by the reviewer that
   raised them; reverting each fix in a scratch copy fails a test.
+- DL-305 A leaked file, socket, transport or child process fails the
+  test suite; two production leaks closed
+  (2026-10-09; pyproject.toml `[tool.pytest.ini_options]`;
+  src/dsl41/runner_adapters.py, src/dsl41/boundary.py; tests/proc_pipes.py
+  and eleven test files)
+  THE GATE. The suite printed 183 ResourceWarnings, which plain
+  `pytest -q` hides: 105 unclosed journal files, 51 sockets, 11 child
+  processes still running, and 16 text pipes. Each is fixed where it
+  starts. No assertion changed. pytest's `filterwarnings` now turns a
+  ResourceWarning and an unraisable exception into an error, so a new leak
+  fails the test that loses it.
+  AN INTERMITTENT ONE. A `_SelectorTransport.__del__` warning from
+  tests/test_recovery.py appeared about once in twelve runs under parallel
+  load. A test's two clients connected and never sent, and the fake
+  engine's `Server.wait_closed` returned while an accepted connection had
+  no transport yet. The test now waits until both are served. 125 strict
+  runs, five at a time, then passed with no failure.
+  THE SUPERVISOR'S HANDLE. When the engine spawns a detached supervisor
+  (DL-210), it dropped the `Popen` handle while the child ran: a warning,
+  and a zombie until the next spawn. A daemon thread now waits on the
+  child. The engine reaps no child globally, and asyncio's watchers wait
+  per pid, so the thread cannot take another child's status. DL-210's
+  early-exit check by `poll` still works. A double fork was rejected: it
+  loses that check.
+  THE OPENER'S JOURNAL. In `open_next_period`, a failure after the
+  journal opened (the directory fsync, a crash point, the anchor CAS, or
+  the seal read) left the journal file open. It is now detached and the
+  error re-raised. Detach closes the file and keeps the lock, so each
+  caller's own cleanup is unchanged. A failing flush during that cleanup
+  is suppressed, as at runner_startup.py's cleanup, so the original error
+  keeps its type.
+  OPEN. `start_run` does not close the journal when a step after
+  `Journal.create` raises. It is recorded, not fixed: every caller exits on
+  that error, the file holds no lock, and its bytes were flushed. A later
+  fix must detach under the same suppress.
+  REVIEW. Semantic class, for the two production fixes: one Opus reviewer
+  and one Fable advisor pass, the Fable pass in place of Codex at the
+  owner's instruction, two rounds. The Opus reviewer reproduced the
+  intermittent warning that the first build had not seen, which the new
+  filter would have turned into a flaky CI failure. Both reviewers found
+  the opener's try too narrow. All are fixed and confirmed by the reviewer
+  that raised them, and removing either production fix fails a test.

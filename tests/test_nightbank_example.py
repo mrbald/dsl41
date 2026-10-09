@@ -227,7 +227,7 @@ def small_catalog(props_file: Path):
     return load_estate("small", props_file)
 
 
-async def _night(catalog, run_root: Path, schedule):
+async def _night(catalog, run_root: Path, schedule, *, close: bool = True):
     """One night, driven through NIGHT_STEPS boundaries with the schedule's
     faults fired at each.
 
@@ -261,10 +261,16 @@ async def _night(catalog, run_root: Path, schedule):
             payload={"job": "SOD_APPROVE_C"},
         )
     )
-    for step in range(NIGHT_STEPS):
-        await run.run_to(NIGHT_START + timedelta(minutes=15 * step))
-        await schedule.at(run, step)
-    await run.settle(NIGHT_START + timedelta(hours=3))
+    try:
+        for step in range(NIGHT_STEPS):
+            await run.run_to(NIGHT_START + timedelta(minutes=15 * step))
+            await schedule.at(run, step)
+        await run.settle(NIGHT_START + timedelta(hours=3))
+    except BaseException:
+        await run.close()
+        raise
+    if close:
+        await run.close()  # the checks read the spawn log, which outlives the engine
     return run
 
 
@@ -309,12 +315,23 @@ def test_the_night_completes_end_to_end_in_the_harness(small_catalog, tmp_path: 
     quiet = FaultSchedule(seed=-1, plan={})
 
     async def scenario():
-        return await _night(small_catalog, tmp_path / "run", quiet)
+        return await _night(small_catalog, tmp_path / "run", quiet, close=False)
 
     run = asyncio.run(scenario())
-    run.check()
-    assert quiet.fired == []
-    store = run.live.oracle.store.job
-    for job in ("APAC_EOD_B", "EMEA_EOD_B", "AMER_EOD_B", "GLOBAL_RISK_B", "SOD_FLIP_C", "SOD_B"):
-        assert store[job].status == "SUCCESS", f"{job} is {store[job].status}"
-    assert len(run.log.execs()) > 50  # a whole night, not a corner of one
+    try:
+        run.check()
+        assert quiet.fired == []
+        store = run.live.oracle.store.job
+        for job in (
+            "APAC_EOD_B",
+            "EMEA_EOD_B",
+            "AMER_EOD_B",
+            "GLOBAL_RISK_B",
+            "SOD_FLIP_C",
+            "SOD_B",
+        ):
+            assert store[job].status == "SUCCESS", f"{job} is {store[job].status}"
+        assert len(run.log.execs()) > 50  # a whole night, not a corner of one
+    finally:
+        assert run.live.journal is not None
+        run.live.journal.close()  # the loop is gone; the journal needs no loop to close
