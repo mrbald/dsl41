@@ -502,7 +502,7 @@ def test_an_attestation_with_no_artifact_format_version_refuses() -> None:
 
     payload = json.loads(_golden().to_bytes())
     del payload["artifact_format_version"]
-    with pytest.raises(EngineError, match="artifact_format_version None") as excinfo:
+    with pytest.raises(EngineError, match="artifact_format_version is missing") as excinfo:
         Attestation.from_bytes(canon_bytes(payload), where="x")
     assert "(PR-08d)" in str(excinfo.value)
 

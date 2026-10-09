@@ -315,8 +315,12 @@ class ControlServer:
                 self._handle, path=str(self.path), limit=LINE_LIMIT
             )
         except OSError as exc:
-            # two engines racing past the probe: the loser's bind fails --
-            # same refusal class as the live-socket case
+            # asyncio removes a socket already at the path before it binds, so
+            # a socket another engine bound after the probe is replaced, not
+            # refused. This branch fires for a non-socket at the path or a
+            # permission error. A second engine never gets this far: it fails
+            # the leader lock on the run root first (concurrency-model §1,
+            # DL-100)
             raise EngineError(f"cannot bind control socket {self.path}: {exc}") from exc
         finally:
             os.umask(old_umask)

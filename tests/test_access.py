@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import grp
 import hashlib
 import json
@@ -27,6 +28,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 from proc_pipes import close_pipes
@@ -1577,3 +1579,107 @@ def test_access_the_created_journal_is_durable_by_name(
     second = PerimeterJournal(tmp_path / "other" / "perimeter.jsonl")
     (tmp_path / "other").mkdir()
     assert second.write("policy_loaded", sync=True, generation=1) is False
+
+
+def test_access_a_synced_append_after_an_unsynced_create_makes_the_name_durable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ss6: an unsynced create does not fsync the run root, so the name is
+    still pending. The first synced append after it fsyncs the run root, once;
+    a journal whose name is already durable does not pay it again. A writer
+    that opens an existing file starts with the name pending."""
+    import dsl41.runner_access as ra
+    from dsl41.runner_access import PerimeterJournal
+
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    synced: list[str] = []
+    real_fsync_dir = ra.fsync_dir
+
+    def record(path: object) -> None:
+        synced.append(str(path))
+        real_fsync_dir(path)
+
+    monkeypatch.setattr(ra, "fsync_dir", record)
+    journal = PerimeterJournal(run_root / "perimeter.jsonl")
+    assert journal.write("access_denied", sync=False, principal="x") is True
+    assert journal.write("access_denied", sync=False, principal="x") is True
+    assert synced == []  # an unsynced create leaves the name pending
+    assert journal.write("policy_loaded", sync=True, generation=1) is True
+    assert synced == [str(run_root)]
+    assert journal.write("access_denied", sync=True, principal="x") is True
+    assert synced == [str(run_root)]  # durable now: no second fsync
+
+    # a writer that opens an existing file cannot know how it was created:
+    # its first synced append fsyncs the run root, once
+    reopened = PerimeterJournal(run_root / "perimeter.jsonl")
+    assert reopened.write("access_denied", sync=False, principal="x") is True
+    assert synced == [str(run_root)]
+    assert reopened.write("policy_loaded", sync=True, generation=2) is True
+    assert synced == [str(run_root)] * 2
+    assert reopened.write("access_denied", sync=True, principal="x") is True
+    assert synced == [str(run_root)] * 2
+
+
+def test_access_a_failed_directory_fsync_is_retried_by_the_next_synced_append(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A synced create whose directory fsync failed answered False; the name
+    stays pending, so the next synced append tries the fsync again."""
+    import dsl41.runner_access as ra
+    from dsl41.runner_access import PerimeterJournal
+
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    synced: list[str] = []
+    real_fsync_dir = ra.fsync_dir
+    fail = [True]
+
+    def flaky(path: object) -> None:
+        if fail[0]:
+            raise OSError("no fsync on this directory")
+        synced.append(str(path))
+        real_fsync_dir(path)
+
+    monkeypatch.setattr(ra, "fsync_dir", flaky)
+    journal = PerimeterJournal(run_root / "perimeter.jsonl")
+    assert journal.write("policy_loaded", sync=True, generation=1) is False
+    fail[0] = False
+    assert journal.write("access_denied", sync=True, principal="x") is True
+    assert synced == [str(run_root)]
+
+
+def test_access_a_create_whose_first_write_fails_still_owes_the_name_fsync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The name is marked pending when the file is created, before any write
+    can fail. Otherwise a create whose record write fails (no space) leaves the
+    file behind, the next synced append finds it existing, and nothing fsyncs
+    the run root behind a synced receipt."""
+    import dsl41.runner_access as ra
+    from dsl41.runner_access import PerimeterJournal
+
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    synced: list[str] = []
+    real_fsync_dir = ra.fsync_dir
+    real_write = os.write
+    failures = [1]
+
+    def record(path: object) -> None:
+        synced.append(str(path))
+        real_fsync_dir(path)
+
+    def write_once_fails(fd: int, data: Any) -> int:
+        if failures:
+            failures.pop()
+            raise OSError(errno.ENOSPC, "synthetic")
+        return real_write(fd, data)
+
+    monkeypatch.setattr(ra, "fsync_dir", record)
+    journal = PerimeterJournal(run_root / "perimeter.jsonl")
+    monkeypatch.setattr(os, "write", write_once_fails)
+    assert journal.write("policy_loaded", sync=True, generation=1) is False
+    assert (run_root / "perimeter.jsonl").exists()  # the create landed
+    assert journal.write("policy_loaded", sync=True, generation=1) is True
+    assert synced == [str(run_root)]

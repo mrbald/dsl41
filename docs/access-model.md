@@ -1,8 +1,8 @@
 # Access model — three tiers at the perimeter
 
 Status: **frozen (DL-231; design DL-146, amended by DL-147, DL-148, DL-149,
-DL-150, DL-151, DL-152, DL-158, DL-256, DL-272, DL-275 and
-DL-311).** This
+DL-150, DL-151, DL-152, DL-158, DL-256, DL-272, DL-275, DL-311
+and DL-314).** This
 document is the design of record for `runner_access.py`, the control-plane
 gate and the served web TUI. A change to a frozen item requires a
 decision-log entry, as in `docs/control-protocol.md`. The authentication
@@ -332,8 +332,8 @@ has two cases:
   succeeds. A restart can reissue it only if no later complete record
   carries a higher seq.
 - The line landed complete, and only the I/O after it failed: the fsync,
-  the parent-directory fsync that a synced CREATE owes its own name
-  (DL-151), or the close. The record exists and carries its seq. The void
+  the parent-directory fsync that a pending name owes (DL-151,
+  DL-314), or the close. The record exists and carries its seq. The void
   rule above exists for exactly this case, and it depends on this
   allocation order.
 
@@ -368,14 +368,17 @@ loader read.
 - The writer trusts the path it owns. It opens `perimeter.jsonl` without
   the map loader's symlink and FIFO checks. A synced append that CREATES
   the file fsyncs the run root, so the name is durable before the receipt
-  it gates is answered (DL-151, DL-311). An unsynced create
-  does not fsync it, because its own bytes are not durable either. A
-  later synced append to that file does not fsync the run root, so if
-  the file was first created by an unsynced write, a crash can lose its
-  name with the synced receipts in it; this needs the file removed while
-  the engine runs. Each recovery, heal and append resolves the name
-  again. The run root has been owner-only since before arming (§8),
-  so anything planted at that name is the owner's own act. The one-file
+  it gates is answered (DL-151). An unsynced create does not fsync it,
+  because its own bytes are not durable either. It leaves the name
+  pending, and the first synced append after it fsyncs the run root
+  (DL-314). A directory fsync that fails leaves the name pending
+  too, so the next synced append tries again. A writer that opens an
+  existing file also starts with the name pending, because an earlier
+  process may have created it unsynced. Its first synced append is the
+  arming receipt, so the name is durable before the engine serves, and
+  arming is refused if that fsync fails. Each recovery, heal and append
+  resolves the name again. The run root has been owner-only since before
+  arming (§8), so anything planted at that name is the owner's own act. The one-file
   lifetime holds only while the owner keeps the name bound to the same
   regular file.
 - The journal is outside the period-model §12 lineage floor. No replay

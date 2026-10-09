@@ -104,11 +104,11 @@ The supervisor checks the whole object before it writes anything durable
 supervisor fills. `version`, `run_number` and `lifeline_fd` are integers,
 never booleans. `run_id`, `job`, `command`, `run_dir`, `stdout_path` and
 `stderr_path` are strings. `stdin_path` is a string or null.
-`grace_seconds` is a **finite** number, zero or more. §5's SHUTDOWN
-escalates TERM→KILL after that many seconds, so an `Infinity` would make
-the whole orderly shutdown unbounded (DL-151). `job` names one directory
-component: it must not be empty, must not hold a path separator, and must
-not be `.` or `..`.
+`grace_seconds` is a **finite** number, representable as a double, zero
+or more. §5's SHUTDOWN escalates TERM→KILL after that many seconds, so an
+`Infinity` would make the whole orderly shutdown unbounded (DL-151).
+`job` names one directory component: it must not be empty, must not hold
+a path separator, and must not be `.` or `..`.
 
 **No string value may hold a NUL**: not `job`, not `command`, not any path
 (DL-151). An embedded NUL makes `os.path`, `os.open` and the spawn raise

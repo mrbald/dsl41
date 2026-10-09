@@ -138,6 +138,7 @@ if TYPE_CHECKING:
         spool_version_supported,
         utc_now_iso,
         verify_alive,
+        write_all,
     )
     from dsl41.state_machine import StateMachine, Transition
 else:
@@ -163,6 +164,7 @@ else:
         spool_version_supported,
         utc_now_iso,
         verify_alive,
+        write_all,
     )
     from state_machine import StateMachine, Transition  # noqa: E402
 
@@ -1750,23 +1752,36 @@ class Supervisor:
         posix_spawn -- not subprocess.Popen -- so the global waitpid(-1) reaper
         never fights Popen's own bookkeeping."""
         lifeline_r, lifeline_w = os.pipe()
-        os.set_inheritable(lifeline_r, True)  # the wrapper inherits it as lifeline_fd
-        stdin_r, stdin_w = os.pipe()
-        wrapper_spec = {**spec, "lifeline_fd": lifeline_r}
+        stdin_r = stdin_w = -1
         try:
-            pid = os.posix_spawn(
-                sys.executable,
-                [sys.executable, _WRAPPER_PATH],
-                dict(os.environ),
-                file_actions=[(os.POSIX_SPAWN_DUP2, stdin_r, 0)],
-            )
-        finally:
-            os.close(lifeline_r)  # our copy; the wrapper holds its own now
-            os.close(stdin_r)
-        try:
-            os.write(stdin_w, json.dumps(wrapper_spec).encode("utf-8"))
-        finally:
-            os.close(stdin_w)  # EOF: the wrapper repoints stdin at /dev/null after
+            os.set_inheritable(lifeline_r, True)  # the wrapper inherits it as lifeline_fd
+            stdin_r, stdin_w = os.pipe()
+            wrapper_spec = {**spec, "lifeline_fd": lifeline_r}
+            try:
+                pid = os.posix_spawn(
+                    sys.executable,
+                    [sys.executable, _WRAPPER_PATH],
+                    dict(os.environ),
+                    file_actions=[(os.POSIX_SPAWN_DUP2, stdin_r, 0)],
+                )
+            finally:
+                os.close(lifeline_r)  # our copy; the wrapper holds its own now
+                lifeline_r = -1
+                os.close(stdin_r)
+                stdin_r = -1
+            try:
+                write_all(stdin_w, json.dumps(wrapper_spec).encode("utf-8"))
+            finally:
+                os.close(stdin_w)  # EOF: the wrapper repoints stdin at /dev/null after
+                stdin_w = -1
+        except BaseException:
+            # no caller owns the lifeline yet, so every way out closes all four
+            # ends. A wrapper forked before the failure sees EOF on its
+            # lifeline and on a spec that stops short, and ends itself.
+            for fd in (lifeline_r, lifeline_w, stdin_r, stdin_w):
+                if fd >= 0:
+                    os.close(fd)
+            raise
         return pid, lifeline_w
 
     def _h_signal(self, _conn: _Conn, req: dict[str, Any]) -> dict[str, Any]:
@@ -2029,6 +2044,18 @@ class Supervisor:
             self._lock_fd = None
 
 
+def _is_grace_seconds(value: object) -> bool:
+    """A finite number of zero or more. An integer past float range (10**400)
+    is refused as a bad value, as the wrapper's own check does, not raised."""
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return False
+    try:
+        grace_s = float(value)
+    except OverflowError:
+        return False
+    return math.isfinite(grace_s) and grace_s >= 0.0
+
+
 #: the frozen ss2 wrapper-input schema, as (key, predicate) -- the whole of
 #: it, because a fingerprint over a spec with an unpinned key type is not
 #: collision-free, and an unvalidated field that only explodes after the
@@ -2047,12 +2074,7 @@ _SPEC_SCHEMA: dict[str, Any] = {
     "stdout_path": lambda v: isinstance(v, str),
     "stderr_path": lambda v: isinstance(v, str),
     "stdin_path": lambda v: v is None or isinstance(v, str),
-    "grace_seconds": lambda v: (
-        isinstance(v, (int, float))
-        and not isinstance(v, bool)
-        and math.isfinite(v)
-        and float(v) >= 0.0
-    ),
+    "grace_seconds": lambda v: _is_grace_seconds(v),
     "lifeline_fd": is_wire_int,
 }
 

@@ -342,14 +342,21 @@ class PerimeterJournal:
         #: a write that failed MID-LINE left a torn fragment; the next
         #: write starts with a newline so it never glues to the wreck
         self._dirty = False
+        #: no directory fsync by this writer has made the name durable yet.
+        #: Set at open when the file already exists (an earlier process may
+        #: have created it unsynced and died), by an unsynced create, and by a
+        #: synced one whose directory fsync failed; cleared by the next
+        #: successful directory fsync
+        self._name_pending = path.exists()
 
     @staticmethod
     def _recover_seq(path: Path) -> int:
         """The last complete record's access_seq, so a resumed engine
         continues the series instead of reissuing 1 (a repeated audit key
-        is a duplicate record by identity). A torn tail is skipped; an
-        unreadable file starts at 0 -- the next write will fail loudly
-        enough on a filesystem that lost the journal."""
+        is a duplicate record by identity). A torn tail is skipped. A missing
+        file starts at 0. A file that exists and cannot be read raises
+        `AccessError`: the series is not restarted from a journal that was
+        not read."""
         try:
             raw = path.read_bytes()
         except FileNotFoundError:
@@ -395,6 +402,8 @@ class PerimeterJournal:
         line = json.dumps(record, sort_keys=True) + "\n"
         try:
             fd, created = self._open_append()
+            if created:
+                self._name_pending = True  # set before any write can fail
             try:
                 payload = line.encode("utf-8")
                 if self._dirty:
@@ -411,12 +420,15 @@ class PerimeterJournal:
                     os.fsync(fd)
             finally:
                 os.close(fd)
-            if created and sync:
+            if sync and self._name_pending:
                 # a create is a directory-entry write, and without this the
                 # NAME can vanish on power loss after arm() accepted the
                 # receipt as synced -- access_seq would then restart and forge
-                # duplicate audit keys (DL-137's one spelling; DL-151)
+                # duplicate audit keys (DL-137's one spelling; DL-151). An
+                # unsynced create leaves the name pending, so the first synced
+                # append after it pays the fsync
                 fsync_dir(self.path.parent)
+                self._name_pending = False
         except OSError:
             return False  # ss6: a storage failure still denies; the decision stands
         return True
