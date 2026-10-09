@@ -839,9 +839,10 @@ START_REFUSED: Final = _stays(
     "start refused",
     _ALL_ORDER,
     guard="already live or queued; a member whose box is not RUNNING, or that ran in this"
-    " box execution, or was taken off ice in it; a stale deferred start or scan",
+    " box execution, or was taken off ice in it; a stale deferred start or scan; a start"
+    " nested inside two starts of the same job (a re-trigger loop)",
     effect="a START_REFUSED trace line",
-    cite="DL-64, DL-81, DL-246, DL-257, SEM-20",
+    cite="DL-64, DL-81, DL-246, DL-257, SEM-20, DL-304",
 )
 ICE_IGNORED: Final = _stays(
     48,

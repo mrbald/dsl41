@@ -1112,14 +1112,16 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             surface="job_attr",
             member="box_success",
             facet="iced-member",
+            revision=2,
             klass=PROVISIONAL,
-            cite="SEM-12, SEM-20, DL-285",
+            cite="SEM-12, SEM-20, DL-285, SEM-11",
             label="Q6",
             protocol="Q6",
             effect="an iced member is read as satisfied inside box_success, the same way"
             " it is read inside an ordinary condition; an ice on a member that has not"
             " run in its RUNNING box is itself a completion moment, so such a box_success"
-            " fires on the ice (DL-285)",
+            " fires on the ice (DL-285), and so does a box start that leaves no member in"
+            " the run (SEM-11)",
             trigger=_job(
                 BOX_BLOCK,
                 box_name="BOX0",
@@ -2745,15 +2747,16 @@ SCENARIO_ROWS: tuple[Row, ...] = (
         _row(
             surface="event",
             member="ON_ICE",
-            revision=3,
+            revision=4,
             klass=SUPPORTED,
-            cite="ir-design ss7, DL-254, DL-285",
+            cite="ir-design ss7, DL-254, DL-285, SEM-11",
             effect="ices a job: an ordinary downstream atom follows the vendor ON_ICE table"
             " (s/d/n true, f/t/exitcode false), a lookback-qualified atom reads satisfied"
             " regardless, and it never runs on a plain start (DL-243); ignored on a"
             " STARTING or RUNNING job (DL-254); on a member that has not run in its"
-            " RUNNING box, a completion moment for that box and its RUNNING ancestors"
-            " (DL-285)",
+            " RUNNING box and holds no live or queued job, a completion moment for that box"
+            " and its RUNNING ancestors (DL-285, DL-304); a box started with every direct member iced completes at its start"
+            " under box-start-all-members-out=complete, the default (SEM-11)",
             trigger=_scn(BASE_JIL, "0 ON_ICE job=J0"),
         ),
         _row(
@@ -3329,6 +3332,24 @@ PROFILE_ROWS: tuple[Row, ...] = (
             effect="a member taken off ice while its box runs re-enters that run: it may"
             " start on its condition's next edge, and the box waits for it",
             trigger='{"semantics": {"off-ice-in-running-box": "same-run"}}',
+        ),
+        _row(
+            surface="profile_alt",
+            member="semantics.box-start-all-members-out=complete",
+            klass=SUPPORTED,
+            cite="runner-design ss8a, SEM-11",
+            effect="the default: a box whose start leaves no member in the run, every direct"
+            " member on ice or no members, completes at its start through the completion door",
+            trigger='{"semantics": {"box-start-all-members-out": "complete"}}',
+        ),
+        _row(
+            surface="profile_alt",
+            member="semantics.box-start-all-members-out=wait",
+            klass=SUPPORTED,
+            cite="runner-design ss8a, SEM-11",
+            effect="a box whose start leaves no member in the run stays RUNNING until an"
+            " operator acts",
+            trigger='{"semantics": {"box-start-all-members-out": "wait"}}',
         ),
         _row(
             surface="profile_alt",
@@ -4316,6 +4337,20 @@ RUNTIME_ROWS: tuple[Row, ...] = (
     ),
     _row(
         surface="runtime",
+        member="box-start-all-members-out",
+        klass=PROVISIONAL,
+        cite="SEM-11, oracle.Oracle._complete_starts_with_no_member_in_the_run",
+        label="Q15",
+        sites=("oracle.Oracle._complete_starts_with_no_member_in_the_run#1",),
+        protocol="Q15",
+        effect="a box whose start leaves no member in the run, every direct member on ice or"
+        " no members, completes at its start; no vendor sentence names the case, and"
+        " box-start-all-members-out=wait keeps it RUNNING",
+        trigger=_job(BOX_BLOCK, box_name="BOX0", status="ON_ICE"),
+        quiet=_job(BOX_BLOCK, box_name="BOX0"),
+    ),
+    _row(
+        surface="runtime",
         member="missed-tick-skip",
         klass=PROVISIONAL,
         cite="runner_startup, runner_scheduler.Scheduler.pop_due",
@@ -4430,6 +4465,19 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         " equal to the anchor's day passes even when its start times have passed",
         trigger=_job(HOLCAL_BLOCK, date_conditions="1", run_calendar=f'"{HOLCAL_NAME}"'),
         quiet=_job(date_conditions="1", days_of_week="all"),
+    ),
+    _row(
+        surface="runtime",
+        member="start-loop-cap",
+        klass=SUPPORTED,
+        cite="oracle.Oracle._start, DL-304",
+        effect="at most 2 nested starts of one job: a re-trigger loop that closes inside one"
+        " input, a job whose own completion satisfies its condition again or a cycle of such"
+        " jobs, starts each job twice; a start nested inside two starts of the same job is"
+        " refused with a START_REFUSED line instead of recursing without end. Starts that"
+        " follow one another are never refused",
+        trigger=_job(condition="s(J0)", status="ON_NOEXEC"),
+        quiet=BASE_JIL,
     ),
     _row(
         surface="runtime",

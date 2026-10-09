@@ -72,7 +72,10 @@ T0 = datetime(2026, 7, 1, 8, 0)
 ORDINARY = {"ice-lookback": "ordinary"}
 RECHECK = {"queued-recheck": "1"}
 #: the head of the refusal's sorted list of known switch names
-_KNOWN = "known switches: box-terminator-on-terminated, dst-start-times, fw-existence, ice-lookback"
+_KNOWN = (
+    "known switches: box-start-all-members-out, box-terminator-on-terminated, dst-start-times,"
+    " fw-existence"
+)
 
 #: `qc` queues behind `hq` on LOCK while its condition s(up) holds; `up`
 #: then fails, and `hq` ends: the shape where `queued-recheck` 0 and 1
@@ -1248,6 +1251,25 @@ def test_box_terminator_on_terminated_affects_exactly_the_box_terminator_members
     assert {name for name, job in catalog.jobs.items() if affects(job, catalog)} == {"bt"}
 
 
+def test_the_box_start_switch_defaults_to_complete_and_the_vendor_reading_is_unknown() -> None:
+    """SEM-11, Q15: no vendor sentence names a box whose start leaves no
+    member in the run, so `autosys` is unknown until the runbook's Q15
+    probe; `complete` is the default and `wait` keeps dsl41's earlier
+    behavior."""
+    switch = semantics.REGISTRY["box-start-all-members-out"]
+    assert switch.values == ("complete", "wait")
+    assert switch.default == "complete"
+    assert switch.autosys == "unknown"
+
+
+def test_box_start_all_members_out_affects_exactly_the_boxes() -> None:
+    """SEM-11: a flip changes whether a box completes at its start, so it
+    reaches every box, a subbox included, and no other job."""
+    affects = semantics.REGISTRY["box-start-all-members-out"].affects
+    catalog = lower_source(_BOX_SWITCH_JIL)
+    assert {name for name, job in catalog.jobs.items() if affects(job, catalog)} == {"b", "sb"}
+
+
 @pytest.mark.parametrize(
     ("switch", "value"),
     [("off-ice-in-running-box", "same-run"), ("box-terminator-on-terminated", "false")],
@@ -1275,6 +1297,37 @@ def test_a_box_switch_flip_reaches_a_running_box_through_its_member(
     )
     assert node in result.by_job["bt"].changed
     assert result.by_job["b"].verdict == "R"
+    assert node not in result.by_job["lone"].changed
+
+
+def test_a_box_start_switch_flip_refuses_a_running_box_and_its_member() -> None:
+    """ss10.2, SEM-11: a flip of `box-start-all-members-out` changes every
+    box, so a running box is refused, and a member carried with it inherits
+    the change through the classifier's box edge and is refused too; a job
+    outside every box is not changed."""
+    catalog = lower_source(_BOX_SWITCH_JIL)
+    closing = Baseline(catalog=catalog, profile=RuntimeProfile())
+    opening = Baseline(
+        catalog=catalog,
+        profile=RuntimeProfile(semantics={"box-start-all-members-out": "wait"}),
+    )
+    node = SWITCH + "box-start-all-members-out"
+    result = classify(
+        closing=closing,
+        opening=opening,
+        carried=CarriedState(
+            jobs={
+                "b": CarriedJob(row=JobRuntime(status="RUNNING", status_at=T0)),
+                "m": CarriedJob(row=JobRuntime(status="RUNNING", status_at=T0)),
+            },
+            now=T0,
+        ),
+    )
+    assert node in result.by_job["b"].changed
+    assert node in result.by_job["sb"].changed
+    assert result.by_job["b"].verdict == "R"
+    assert node in result.by_job["m"].changed
+    assert result.by_job["m"].verdict == "R"
     assert node not in result.by_job["lone"].changed
 
 

@@ -20019,3 +20019,85 @@ relitigate an entry; append a new one.
   confirmed by the reviewer. The runbook is not a frozen contract, and the
   two new recipe sentences were proven by the drill and checked against
   src/dsl41/runner_access.py, so no second-vendor pass ran.
+- DL-304 A box whose start leaves no member in the run completes at its
+  start; an iced member is out only when nothing inside it runs; a nested
+  re-trigger loop is refused (state machine 19)
+  (2026-10-09; src/dsl41/oracle.py, oracle_state.py, semantics.py, lint.py,
+  runner_ledger.py (STATE_MACHINE_VERSION), simulation_register_rows.py;
+  docs/autosys-semantics.md §0, SEM-11, SEM-12, SEM-17, SEM-20 and §9 Q6,
+  Q15; docs/live-instance-runbook.md, docs/citation-index.md (`Q` row),
+  docs/runner-design.md §8a, docs/blocks/box-execution.md,
+  docs/state-machines.md, docs/simulation-coverage.md, README.md;
+  tests/test_oracle.py, tests/test_semantics.py,
+  tests/test_exhaustive_engine.py, tests/test_derive.py,
+  tests/fork_harness.py)
+  THE DEFECT. A box whose members were all on ice when it started, or a box
+  with no members, stayed RUNNING for ever. A box start ran no completion
+  check: the check ran only after a member changed status, a window skip,
+  or an ice (DL-285). The same held for an outer box whose only member was
+  such a subbox, and for an all-iced box with a `box_success` override.
+  THE RULE. Under the new switch `box-start-all-members-out=complete`, the
+  default, a box start whose pass leaves no direct member in the run runs
+  the completion check once, after the start's window decisions (DL-246).
+  "No member in the run" means every direct member is out on ice, or there
+  are no members. Overrides run first, then the default fold, which gives
+  SUCCESS when no member ran. A box with some members in the run still
+  completes through them: completing it at the start could fire a stale
+  external override while members run. `wait` keeps such a box RUNNING at
+  its start, as before.
+  [C] No vendor page names this case. Two [V] sentences compose to it:
+  "Basic Box Job Concepts" (12.0, 12.1.01, 24.2): "Maintains the box in the
+  RUNNING state as long as there are jobs in it with ACTIVATED or RUNNING
+  status", and JOB_ON_ICE in "Events" (12.0, 24.2): "If the job is in a
+  box, the scheduler does not execute the job for the entire run of the
+  box". So the switch's AutoSys value is unknown, Q15 is open, and the
+  runbook has a probe. An override naming an iced member follows Q6's pin.
+  OUT OF THE RUN. An iced member is out of its box's run only when neither
+  it nor any job inside it, at any depth, is live or queued. Before, an
+  iced member counted as out even when it was given a RUNNING status, or
+  when it was a subbox holding a force-started job. Its box then completed
+  while that job ran, and the box's consumers launched. One helper now
+  decides "out" for the start check, the default fold and DL-285's ice
+  moment, under both switch values; this narrows DL-285. When a job inside
+  an iced box stops being live or queued, each iced box above it is checked
+  again, for the parent's run in progress only.
+  NESTED RE-TRIGGER LOOPS. A box that completes at its start can satisfy
+  its own start condition again (`s(B)` or `d(B)`, or a cycle of such
+  boxes) inside one instant. The oracle evaluates that synchronously, so
+  it raised RecursionError. For an engine-made input, which is journaled
+  before it is applied and has no dry run, that is a ReplayFault on every
+  resume. A start of a job that already has two starts in progress on the
+  call stack is now refused with a START_REFUSED line that names the loop
+  (L010). Starts that follow one another are never refused, and DL-246's
+  nested run two still runs. This also closes DL-254's recorded recursion
+  of an ON_NOEXEC box whose condition reads `n()` of itself.
+  VERSION. STATE_MACHINE_VERSION moves from 18 to 19: a replay with such a
+  start, an iced member holding a live job, or a nested loop derives a
+  different state than version 18. No row field is added, so seals keep
+  their bytes. No estate is live, so nothing migrates. L011's message no
+  longer claims an empty box never completes.
+  OPEN, NOT THIS ENTRY. First, SEM-15's idle recompute reads an iced
+  member's status. So a completed box can flip from SUCCESS to FAILURE when
+  a job inside an iced subbox, or an iced member given a status, fails
+  later. By then the box's success consumers have launched, and its failure
+  consumers launch too. Versions 18 and 19 behave the same here. A
+  candidate fix makes the recompute skip iced members; the vendor reading
+  needs a ruling or a probe first. Second, the walk from a job's
+  transition up to an ancestor box has no run binding either, so a
+  restarted box run can complete through a job of the earlier run. Third,
+  a long chain of instant starts in one input still exceeds Python's
+  recursion limit. Measured with the default limit of 1000, it fails at
+  about 45 empty boxes in a ring under `complete`, 91 empty boxes in a
+  chain, and 142 ON_NOEXEC jobs in a chain (166 before this entry). From
+  an engine-made input that is the same replay fault.
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass, the
+  Fable pass in place of Codex at the owner's instruction, three rounds. A
+  Fable ruling set the rule, the narrower trigger and the switch before
+  the build. Round 1: the Opus reviewer found the early completion through
+  a live iced member (major) and the RecursionError, and the advisor
+  ruled both fixed here. Round 2: the Opus reviewer found that the first
+  loop guard, two starts per input, refused ordinary fan-in, where three
+  predecessors start one job in turn; it became the nesting guard. Both
+  reviewers also found a hook without a run check, untested shapes, and
+  over-claiming text. All are fixed and confirmed by the reviewer that
+  raised them; reverting each fix in a scratch copy fails a test.

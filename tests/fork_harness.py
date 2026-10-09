@@ -40,6 +40,7 @@ ORACLE_COPIED = frozenset(
         "_tz_cache",
         "_calendars",
         "_window_starts",
+        "_starts_in_progress",
     }
 )
 #: Oracle attributes fixed once the constructor returns, so the fork shares them.
@@ -101,6 +102,7 @@ def state_bytes(oracle: Oracle) -> bytes:
         "window_starts": (
             None if oracle._window_starts is None else [list(w) for w in oracle._window_starts]
         ),
+        "starts_in_progress": dict(sorted(oracle._starts_in_progress.items())),
     }
     return canonical_bytes(doc)
 

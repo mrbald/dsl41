@@ -834,7 +834,7 @@ def rule_l011(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
         if job.job_type == "BOX":
             message = (
                 f"box {job.name!r} has no members, no schedule, and no dependencies in"
-                f" or out (an empty box never completes; dangling container)"
+                f" or out (dangling container)"
             )
         else:
             message = (
