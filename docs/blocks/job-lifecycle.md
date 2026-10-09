@@ -82,8 +82,7 @@ Each anchor holds the generated diagram and transition table.
 ## Open findings
 
 See the row "Job lifecycle and flags" in [the risk map](../risk-map.md).
-Its own finding is [owning modules outside the 100% gate](../risk-map.md#owning-modules-outside-the-100-gate), for `conditions.py`.
-Every machine shares the [no transition inventory](../risk-map.md#no-transition-inventory) finding.
+The row lists no open finding. `conditions.py` is in the 100% gate ([DL-298](../risk-map.md#closed-by-dl-289dl-306)).
 
 ## Gaps found
 

@@ -98,7 +98,7 @@ The machine starts at deduplication. The `period_sealing` refusal and the envelo
 
 ## Open findings
 
-The [risk map](../risk-map.md) row "Admission and idempotency" lists [a replayed oracle fault](../risk-map.md#a-replayed-oracle-fault-stops-every-resume), beside the common one, [no transition inventory](../risk-map.md#no-transition-inventory).
+The [risk map](../risk-map.md) row "Admission and idempotency" lists [a replayed oracle fault](../risk-map.md#a-replayed-oracle-fault-stops-every-resume) and [instant cascades recurse](../risk-map.md#instant-cascades-recurse).
 
 ## Gaps found
 

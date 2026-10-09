@@ -20199,3 +20199,83 @@ relitigate an entry; append a new one.
   equivalence check outside the fit, and later an over-claiming frame
   count. All are fixed and confirmed by the reviewer that raised them;
   its last wording note was applied after round three.
+- DL-307 The architecture review of 2026-10-07 is closed: what was acted on,
+  declined and left open, and the standby requirements
+  (2026-10-09; docs/risk-map.md, docs/deployment-runbook.md (failover), the
+  "Open findings" paragraphs of docs/blocks/, scripts/arch_baseline.json)
+  THE REVIEW. Two independent reviews of the runner at 49a3a5b ranked 22
+  findings and added notes on durable state, a standby box and several
+  hosts. This entry gives each one an outcome.
+  ACTED. The seal flag that copied the barrier's parked state, the effect
+  outbox's unnamed pending state and its outcome overwrite, the unread
+  dispatched field of an opened runtime, the seal boundary's phase spread
+  over five flags, and host routing held in three places (DL-295). The four
+  assembly flags of RuntimeState, one checked entry for every job status
+  write, and the failed-status pair named once (DL-293). The supervisor's
+  flag set and its client's connection fields (DL-291). The engine's
+  `_dispatched` set stays; its comment now says why it agrees with the
+  outbox on resume. Also acted: a replayed historic log names its input and
+  raises nothing for a violation (DL-292); hosts belong to the engine tier
+  (DL-295); transition coverage is a pytest plugin (DL-289).
+  DECLINED. Readers that address ledger files by path get no interface until
+  a second ledger exists; new readers use `read_journal`. Startup keeps
+  using Engine private attributes and methods; the coupling is load-bearing.
+  The run_id grammar keeps its two copies, because a test already pins them
+  equal (DL-129). No digest of the oracle's tables sits beside
+  STATE_MACHINE_VERSION; the rendered-table test pins the tables (DL-289).
+  No stored decision lets a resume skip a faulting input; the dry apply
+  prevents the fault instead (DL-292). Seven standby and multi-host notes
+  need no change now: the epoch allocation (the `Proof` protocol is the
+  seam), retention deleting files, the two-step commit windows, the file
+  code inside `Journal`, the lease freed on EOF of a local socket
+  (supervisor-protocol states why), routing as a preflight refusal, and the
+  refusal of network file systems.
+  OPEN. Trace entries carry their transition as an "OLD->NEW" string that
+  three readers parse back; a transition id field would replace it. Spool
+  reads are spread over five modules with no single reader. A one-line
+  forwarder, `_carried_rows`, remains in runner_startup.py. The oracle's
+  trace and the engine's drop, dedupe and refusal counters grow without a
+  bound; a capacity measurement, not yet run, must state a limit. The anchor
+  class is built at twelve sites. A host's `boot_id` check reads another
+  host's live run as dead. Watch progress in `watch.jsonl` is lost on a
+  failover.
+  STANDBY REQUIREMENTS. The owner rules that a standby box, activated on an
+  outage against a database ledger shared by both boxes, is recorded now and
+  built later. It must meet six requirements. First, each box has its own
+  executor id in the ledger; `--as-machine` stays the placement identity,
+  shared by both boxes and declared at genesis on both. Today `executor_id`
+  defaults to a constant that replay and audit ignore. Second, every
+  re-launch path holds an effect whose executor is not its own. Third, the
+  dead executor is evicted before the resume dispatches, and only after the
+  eviction bound of concurrency-model §8: the deadman (DL-95) plus the kill
+  allowance (DL-151) and the clock drift. So the active box runs with a
+  deadman. Fourth, the spool lives in the run root. A run root kept on the
+  lost box's own disk takes it along, so a period that spans the failover
+  cannot be attested, physically rolled, or pruned past; the design must
+  replicate the spool or accept that. Fifth, a run root's identity is its
+  absolute path (DL-224), and the anchor names each root by it, so the
+  standby sees every run root at the same path and has the anchor directory,
+  or identity becomes logical. Sixth, the `Proof` protocol in
+  runner_ledger.py is the seam for a database fence. The first is a journal
+  format decision (protocol-evolution §2). The runbook's failover paragraph
+  says activation is unsafe until the first three are built, and now also
+  names the shared `--as-machine`, the paths, the spool and the deadman.
+  THE RISK MAP. Its findings are brought up to DL-307. Closed: the
+  transition inventory, the outbox overwrite, the modules outside the 100%
+  gate, and most of the replayed fault. Narrowed: the untested operator
+  procedures. New open findings: the instant-cascade recursion, the open
+  vendor readings, the box flip and the missing run binding, the journal
+  left open by `start_run`, the open items of DL-290 and DL-293, and this
+  entry's unbounded counters and `boot_id` check. Its measured table, its
+  ranking of the least-tested machines and its pragma count stay as measured
+  at c30ad12, and so do the block cards' rank sentences. They are refreshed
+  on main after this branch merges, because the refresh rule stamps only a
+  main commit, and a rebase merge renames branch commits. The architecture
+  review stamp waits for the same commit.
+  THE BASELINE. scripts/arch_baseline.json is re-armed from this tree, as
+  DL-283 did after the previous review.
+  REVIEW. One Opus reviewer. It found an operator-procedures finding called
+  closed that stays open, numbers left from the old measurement without
+  saying so, open items of DL-290 and DL-293 missing from the risk map, a
+  deployment detail that does not belong here, and standby notes without an
+  outcome. All are fixed and confirmed by the reviewer.
