@@ -20435,3 +20435,37 @@ relitigate an entry; append a new one.
   filesystem case above is a stated limit. The pass's other edits are
   wording or corrections already ruled by other entries; the pull request
   lists them.
+- DL-313 At resume a held file-watcher start stays held, and a pending
+  start counts only for its own run
+  (2026-10-09; src/dsl41/runner_startup.py; tests/test_hosts.py)
+  THE DEFECT. `_resume_untraced_starts` re-dispatched an untraced FW start
+  before it checked for a pending SPAWN. So after a restart, an FW start
+  held because its host was drained or quarantined ran anyway. The
+  contract says otherwise: a held start stays held while its host is not
+  active, and FW re-dispatch applies only when nothing is pending
+  (concurrency-model §5, §7 and §8; DL-96, DL-102, DL-232; runner-design
+  §7). The pending check now comes first for every job type; a pending
+  SPAWN is left to the barrier's closing dispatch and its routing gate.
+  THE RUN. The pending check counted a SPAWN of any run. Through DL-156's
+  undecided attempt, a row can stand at run N with only a stale SPAWN of
+  run N-1 pending: replay re-decides the attempt but does not plan it
+  again. Before this entry, that left a command run RUNNING with nothing
+  behind it; with the new order it would also have done so to a watch. The
+  check now counts only a SPAWN of the row's own run. A watch of run N is
+  then re-dispatched, and a command start with no intent for its run fails
+  with the "dispatch lost" cause, as runner-design §7 and concurrency-model
+  §7 already state. STATE_MACHINE_VERSION does not move: replay derives the
+  same state, and the change is in what resume launches afterwards.
+  OPEN. When a start's decision never reached the journal, there is no
+  SPAWN at all, and resume re-dispatches the watch directly, even on a
+  held host. The watch polls inside the engine and contacts no executor,
+  so nothing runs twice, and jobs downstream of it still pass the hold.
+  Closing it needs a design choice: write the missing SPAWN at resume
+  (touching DL-156 and DL-118), or fail such a start. It waits for the
+  owner.
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass, the
+  Fable pass in place of Codex at the owner's instruction, three rounds.
+  The Opus reviewer reproduced the stale-SPAWN case after the Fable pass
+  had called it unreachable; the Fable pass then reproduced it, reversed
+  its ruling, and ruled the run-scoped check into this entry. Each fix has
+  a test that fails without it.
