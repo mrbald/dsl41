@@ -25,11 +25,13 @@ learns to check which one is meant.
   outbox is an intent the previous leader never delivered and is re-driven;
   one with no pending intent is FAILURE "dispatch lost to engine crash" --
   provably-never-ran is still never re-executed silently. FW watchers are
-  the exception to both: polling is an idempotent read, so incomplete FW
-  runs are re-dispatched. Reconciliation completions go through the ss4
-  stale gate like any adapter completion: if replay already reached a
-  terminal state (say a term_run_time TERMINATED), the late real record is
-  dropped AND journaled -- never a silent overwrite.
+  the exception to the second: polling is an idempotent read, so an
+  incomplete FW run with no pending intent is re-dispatched. A pending one
+  is re-driven like any other start, so a held watch stays held.
+  Reconciliation completions go through the ss4 stale gate like any
+  adapter completion: if replay already reached a terminal state (say a
+  term_run_time TERMINATED), the late real record is dropped AND journaled
+  -- never a silent overwrite.
 
 The whole sequence IS concurrency-model ss7's takeover barrier -- ACQUIRE,
 reconcile every execution host, retire superseded and re-drive pending,
@@ -1421,7 +1423,24 @@ def _resume_untraced_starts(
         job_ir = engine.oracle.catalog.jobs.get(job)
         if job_ir is None or job_ir.job_type == "BOX":
             continue  # boxes fold from members; pseudo-entries have no dispatch
+        if any(e.run_number == rt.run_number for e in engine.outbox.pending_for(job, "SPAWN")):
+            # RE-DRIVEN. The log holds this run's intent to spawn, never
+            # resolved, and nothing anywhere ran: the previous leader died in
+            # the window between recording what it meant to do and doing it.
+            # Left pending, which is all re-driving takes -- `_dispatch`
+            # drains the outbox the moment the loop runs, through the same
+            # gates a fresh effect passes, so a drained or quarantined host
+            # still HOLDS it (ss8) and this sweep does not need to know that.
+            # An FW start too: its watch waits for the same SPAWN, so a
+            # held watch stays held across the restart (DL-96, DL-102).
+            # Only THIS run's SPAWN counts. A recovered attempt (DL-156) can
+            # move the row to run N with no SPAWN N planned, while a SPAWN of
+            # an earlier run is still pending; dispatch retires that one, so
+            # it says nothing about run N, which falls through below.
+            continue
         if job_ir.job_type == "FW":
+            # No pending intent for this run: the watch is an idempotent re-read, so it is
+            # re-dispatched rather than failed (DL-44 item 7, DL-102).
             adapter = engine.adapters.get("FW")
             if adapter is None:
                 # _require_adapters runs at both genesis and resume, before
@@ -1435,15 +1454,6 @@ def _resume_untraced_starts(
                 )
             bound = _spawn_effect_for(engine, job, rt.run_number)
             engine._launch(job_ir, rt.run_number, adapter, run_id=bound.run_id if bound else None)
-            continue
-        if engine.outbox.pending_for(job, "SPAWN"):
-            # RE-DRIVEN. The log holds an intent to spawn that was never
-            # resolved, and nothing anywhere ran: the previous leader died in
-            # the window between recording what it meant to do and doing it.
-            # Left pending, which is all re-driving takes -- `_dispatch`
-            # drains the outbox the moment the loop runs, through the same
-            # gates a fresh effect passes, so a drained or quarantined host
-            # still HOLDS it (ss8) and this sweep does not need to know that.
             continue
         bound = _spawn_effect_for(engine, job, rt.run_number)
         adapter = engine.adapters.get(job_ir.job_type)

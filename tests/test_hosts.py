@@ -50,6 +50,7 @@ from dsl41.runner_startup import resume_run, start_run
 from dsl41.runner_adapters import FakeAdapter, SupervisorClient
 from dsl41.runner_admission import PROTOCOL_VERSION, Envelope
 from dsl41.runner_clock import RealClock, VirtualClock
+from dsl41.runner_effects import EffectOutcome
 from dsl41.runner_control import ControlServer, outcome_of, read_for, revision_in
 from dsl41.period import CMD_GRACE_S
 from dsl41.runner_hosts import (
@@ -793,6 +794,283 @@ def test_a_held_job_survives_the_restart_the_drain_did(short_root: Path) -> None
             await resumed.shutdown()
             assert resumed.journal is not None
             resumed.journal.close()
+
+    asyncio.run(scenario())
+
+
+_WATCH_JIL = "insert_job: w\njob_type: f\nwatch_file: /tmp/dsl41-never-appears\n"
+
+
+class _CountingWatch(FakeAdapter):
+    """An inert watch that records each adapter run, with the identity it
+    was given. A launch cancelled before its first step records nothing
+    here; `_count_launches` sees those."""
+
+    def __init__(self) -> None:
+        super().__init__(default=None)
+        self.calls: list[tuple[str, int, str | None]] = []
+
+    async def run(self, job_ir, run_number, ctx):  # type: ignore[no-untyped-def]
+        self.calls.append((job_ir.name, run_number, ctx.run_id))
+        return await super().run(job_ir, run_number, ctx)
+
+
+def _count_launches(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, int]]:
+    """Every `Engine._launch` from now on, whether or not its task ever
+    runs. The old resume launched a watch in the sweep and again from its
+    SPAWN, and the second launch cancelled the first before it took a step,
+    so only this count shows the double launch."""
+    launches: list[tuple[str, int]] = []
+    real = Engine._launch
+
+    def counted(self, job_ir, run_number, adapter, *, run_id=None):  # type: ignore[no-untyped-def]
+        launches.append((job_ir.name, run_number))
+        real(self, job_ir, run_number, adapter, run_id=run_id)
+
+    monkeypatch.setattr(Engine, "_launch", counted)
+    return launches
+
+
+async def _start_a_watch(run_root: Path, *, hold: str | None, takeover: bool) -> str | None:
+    """Start `w` once, optionally on a held host, and stop the engine.
+
+    `takeover` models a leader that dies after the decision and before its
+    dispatch pass (DL-102's window): the SPAWN stays pending on an active
+    host too. Returns the `run_id` the SPAWN bound (DL-118)."""
+    engine = start_run(
+        lower_source(_WATCH_JIL),
+        run_root,
+        clock=VirtualClock(start=T0),
+        adapters={"FW": FakeAdapter(default=None)},
+    )
+    drained = None
+    if hold == "drain":
+        drained = engine.submit_host(_cmd("drain"), _expect("d1", SEEDED, epoch=engine.epoch))
+    elif hold == "quarantine":
+        engine.note_executor_unreachable()
+    if takeover:
+        engine._dispatch = lambda: None  # type: ignore[method-assign]
+    engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "w"}))
+    await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+    if drained is not None:
+        assert (await drained).decision == "applied"
+    assert engine.oracle.store.job["w"].status == "RUNNING"
+    pending = hold is not None or takeover
+    assert engine.held_jobs() == (frozenset({"w"}) if pending else frozenset())
+    [spawn] = [e for e in engine.outbox.effects() if e.kind == "SPAWN"]
+    await engine.shutdown()
+    assert engine.journal is not None
+    engine.journal.close()
+    return spawn.run_id
+
+
+async def _resume_watch_root(run_root: Path, jil: str, adapter: FakeAdapter) -> Engine:
+    job_type = "FW" if "job_type: f" in jil else "CMD"
+    return await resume_run(
+        lower_source(jil),
+        run_root,
+        clock=VirtualClock(start=T0 + timedelta(minutes=4)),
+        adapters={job_type: adapter},
+        settle_seconds=0.0,
+        grace_seconds=0.0,
+    )
+
+
+async def _close_engine(engine: Engine) -> None:
+    await engine.shutdown()
+    assert engine.journal is not None
+    engine.journal.close()
+
+
+@pytest.mark.parametrize("hold", ["drain", "quarantine"])
+def test_a_held_watch_stays_held_across_a_restart(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch, hold: str
+) -> None:
+    """An FW start whose SPAWN is held (DL-96) is still a pending intent at
+    resume, and the barrier re-drives a pending intent by leaving it to
+    dispatch, whose routing gate holds it (concurrency-model ss7, ss8). The
+    FW re-dispatch is only for a start with nothing pending (DL-102). So
+    the restart launches no watch, and the host's return launches it once,
+    under the identity its SPAWN bound.
+
+    A takeover in DL-102's window writes the same log here: the dispatch
+    pass of a held SPAWN records nothing, so one restart covers both."""
+
+    async def scenario() -> None:
+        run_root = short_root / "run"
+        bound = await _start_a_watch(run_root, hold=hold, takeover=False)
+        launches = _count_launches(monkeypatch)
+        watch = _CountingWatch()
+        resumed = await _resume_watch_root(run_root, _WATCH_JIL, watch)
+        try:
+            await resumed.run_until_quiescent(T0 + timedelta(minutes=5))
+            assert resumed.oracle.store.job["w"].status == "RUNNING"
+            assert resumed.held_jobs() == frozenset({"w"})
+            assert resumed.live_jobs() == frozenset()
+            assert launches == []
+
+            if hold == "drain":
+                back = resumed.submit_host(
+                    _cmd("activate"), _expect("a1", SEEDED + 1, epoch=resumed.epoch)
+                )
+            else:
+                resumed.note_executor_reachable()
+            await resumed.run_until_quiescent(T0 + timedelta(minutes=6))
+            if hold == "drain":
+                assert (await back).decision == "applied"
+            assert resumed.held_jobs() == frozenset()
+            assert resumed.live_jobs() == frozenset({"w"})
+            assert resumed.oracle.store.job["w"].run_number == 1
+            assert launches == [("w", 1)]
+            assert watch.calls == [("w", 1, bound)]
+        finally:
+            await _close_engine(resumed)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("takeover", [False, True], ids=["resume", "takeover"])
+def test_a_watch_on_an_active_host_is_launched_once_at_resume(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch, takeover: bool
+) -> None:
+    """The two untraced cases on a host that routes work. With no pending
+    intent (the SPAWN was applied and nothing on disk shows it), the watch
+    is re-dispatched, because polling is an idempotent re-read (DL-44 item
+    7). With a pending SPAWN (a takeover in DL-102's window), dispatch
+    applies it, and the sweep does not launch the watch first. Either way
+    the restart launches the watch once, under the identity its SPAWN
+    bound (DL-118)."""
+
+    async def scenario() -> None:
+        run_root = short_root / "run"
+        bound = await _start_a_watch(run_root, hold=None, takeover=takeover)
+        launches = _count_launches(monkeypatch)
+        watch = _CountingWatch()
+        resumed = await _resume_watch_root(run_root, _WATCH_JIL, watch)
+        try:
+            await resumed.run_until_quiescent(T0 + timedelta(minutes=5))
+            assert resumed.oracle.store.job["w"].status == "RUNNING"
+            assert resumed.held_jobs() == frozenset()
+            assert resumed.live_jobs() == frozenset({"w"})
+            assert launches == [("w", 1)]
+            assert watch.calls == [("w", 1, bound)]
+        finally:
+            await _close_engine(resumed)
+
+    asyncio.run(scenario())
+
+
+async def _crash_with_a_stale_spawn(run_root: Path, jil: str, job_type: str) -> str:
+    """Leave a held SPAWN of run 1 pending and the row at run 2 with no
+    SPAWN of its own, the way DL-156's window leaves it.
+
+    The host is drained, so SPAWN(1) is held. One input ends run 1, and the
+    job's own condition (`t(x)`) starts run 2 in the same feed. The leader
+    dies after that input's attempt record and before its decision record.
+    Replay re-decides the attempt and never re-plans, so no SPAWN(2) exists.
+    Returns SPAWN(1)'s effect id."""
+    engine = start_run(
+        lower_source(jil),
+        run_root,
+        clock=VirtualClock(start=T0),
+        adapters={job_type: FakeAdapter(default=None)},
+    )
+    drained = engine.submit_host(_cmd("drain"), _expect("d1", SEEDED, epoch=engine.epoch))
+    engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "x"}))
+    await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+    assert (await drained).decision == "applied"
+    [spawn] = engine.outbox.pending()
+    assert (spawn.kind, spawn.run_number) == ("SPAWN", 1)
+
+    def die(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("the leader died before the decision record")
+
+    assert engine.journal is not None
+    engine.journal.decision = die  # type: ignore[method-assign]
+    engine.inject(
+        Event(
+            at=T0 + timedelta(minutes=2),
+            kind="STATUS",
+            payload={"job": "x", "status": "TERMINATED"},
+        )
+    )
+    with pytest.raises(RuntimeError, match="before the decision record"):
+        await engine.run_until_quiescent(T0 + timedelta(minutes=3))
+    await _close_engine(engine)
+    return spawn.effect_id
+
+
+def test_an_untraced_watch_is_not_orphaned_by_an_earlier_runs_pending_spawn(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the run's own SPAWN keeps the sweep from acting on it. SPAWN(1)
+    says nothing about run 2: dispatch retires it ("at run 2, not the 1").
+    Had it counted, the sweep would skip run 2, dispatch would retire the
+    only intent, and the row would stay RUNNING with nothing live, held or
+    journaled. Run 2 has no intent of its own, so it takes the FW
+    re-dispatch (DL-102, DL-44 item 7), once.
+
+    That launch happens while the host is drained. Whether a start with no
+    intent should wait for the host is an open question; this test pins
+    only that the run is not lost."""
+
+    async def scenario() -> None:
+        run_root = short_root / "run"
+        jil = _WATCH_JIL.replace("insert_job: w", "insert_job: x") + "condition: t(x)\n"
+        stale = await _crash_with_a_stale_spawn(run_root, jil, "FW")
+        launches = _count_launches(monkeypatch)
+        watch = _CountingWatch()
+        resumed = await _resume_watch_root(run_root, jil, watch)
+        try:
+            await resumed.run_until_quiescent(T0 + timedelta(minutes=5))
+            row = resumed.oracle.store.job["x"]
+            assert (row.status, row.run_number) == ("RUNNING", 2)
+            outcome = resumed.outbox.result_for(stale)
+            assert isinstance(outcome, EffectOutcome) and outcome.state == "retired"
+            assert resumed.held_jobs() == frozenset()
+            assert resumed.live_jobs() == frozenset({"x"})
+            assert launches == [("x", 2)]
+            assert watch.calls == [("x", 2, None)]
+        finally:
+            await _close_engine(resumed)
+
+    asyncio.run(scenario())
+
+
+def test_an_untraced_start_is_failed_when_only_an_earlier_runs_spawn_is_pending(
+    short_root: Path,
+) -> None:
+    """The CMD twin. Run 2 has no pending intent and no bound identity to
+    replay, so it fails as a dispatch lost to the crash (runner-design ss7,
+    concurrency-model ss7), rather than sitting RUNNING with nothing live."""
+
+    async def scenario() -> None:
+        run_root = short_root / "run"
+        jil = "insert_job: x\njob_type: c\ncommand: x\ncondition: t(x)\n"
+        stale = await _crash_with_a_stale_spawn(run_root, jil, "CMD")
+        resumed = await _resume_watch_root(run_root, jil, FakeAdapter(default=None))
+        try:
+            await resumed.run_until_quiescent(T0 + timedelta(minutes=5))
+            row = resumed.oracle.store.job["x"]
+            assert (row.status, row.run_number) == ("FAILURE", 2)
+            outcome = resumed.outbox.result_for(stale)
+            assert isinstance(outcome, EffectOutcome) and outcome.state == "retired"
+            assert resumed.live_jobs() == frozenset()
+        finally:
+            await _close_engine(resumed)
+        reconciled = [
+            r["payload"]
+            for r in read_journal(run_root / "journal.jsonl")
+            if r.get("rec") == "input" and r.get("source") == "reconcile"
+        ]
+        assert reconciled == [
+            {
+                "job": "x",
+                "run_number": 2,
+                "status": "FAILURE",
+                "cause": "dispatch lost to engine crash (never spawned)",
+            }
+        ]
 
     asyncio.run(scenario())
 
