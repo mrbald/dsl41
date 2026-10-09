@@ -24,24 +24,24 @@ It does need the run directory on a local filesystem ([supervisor-protocol §3](
 
 ## States
 
+The wrapper is a straight-line procedure, not a declared machine; [the policies](policies.md#wrapper-outcome) say why.
+The flowchart shows its steps:
+
 ```mermaid
-stateDiagram-v2
-    [*] --> ReadSpec
-    ReadSpec --> Refused: bad version or field type, unreadable JSON, missing key
-    Refused --> [*]: exit 2 or 1, no record
-    ReadSpec --> Spawning: own session, operator signals ignored
-    Spawning --> SpawnFailed: stdio open or /bin/sh spawn fails
-    SpawnFailed --> [*]: status spawn_failed
-    Spawning --> Recording: command runs in its own process group
-    Recording --> KillAndExit: spawn.json write fails
-    KillAndExit --> [*]: best-effort status, exit 3
-    Recording --> Waiting: spawn.json durable
-    Waiting --> Exited: wakeup, exit observed first
-    Waiting --> ParentLost: lifeline EOF, no exit observed
-    ParentLost --> GroupDead: SIGTERM, then SIGKILL if alive after the grace
-    Exited --> StatusWritten: write the observed outcome, then reap
-    GroupDead --> StatusWritten: write terminated, parent lost
-    StatusWritten --> [*]: exit 0
+flowchart TD
+    read["read the spec on stdin"] --> valid{"the spec is valid?"}
+    valid -->|"no: bad version or field type, unreadable JSON, missing key"| refused(["exit 2 or 1, no record"])
+    valid -->|"yes"| session["own session, operator signals ignored"]
+    session --> spawn{"spawn the command in its own process group"}
+    spawn -->|"stdio open or the /bin/sh spawn fails"| spawnfail(["status spawn_failed"])
+    spawn -->|"spawned"| record{"write spawn.json"}
+    record -->|"the write fails"| killed(["kill the group, best-effort status, exit 3"])
+    record -->|"durable"| wait{"wait; on each wakeup the exit check runs first"}
+    wait -->|"exit observed"| exited["write the observed outcome, then reap"]
+    wait -->|"lifeline EOF, no exit observed"| lost["SIGTERM the group, SIGKILL after the grace"]
+    lost --> term["write terminated, parent lost"]
+    exited --> ok(["exit 0"])
+    term --> ok
 ```
 
 ## Invariants

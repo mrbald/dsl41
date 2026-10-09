@@ -31,22 +31,7 @@ Storage capabilities needed:
 
 ## States
 
-One effect:
-
-```mermaid
-stateDiagram-v2
-    [*] --> Pending: planned in the decision line
-    Pending --> Pending: SPAWN held, host routes no new work
-    Pending --> Retired: superseded at dispatch
-    Pending --> Applied: SPAWN launched or KILL delivered
-    Pending --> Applied: resume finds the run reached the host
-    Pending --> Applied: resume re-drives it to a live wrapper, or the spool shows it landed
-    Pending --> Retired: resume finds the run exited first
-    Pending --> Indeterminate: resume KILL, no status and no live wrapper
-    Applied --> [*]
-    Retired --> [*]
-    Indeterminate --> [*]
-```
+One effect's states are [effect](../state-machines.md#effect); the anchor holds the generated diagram and transition table.
 
 ## Invariants
 

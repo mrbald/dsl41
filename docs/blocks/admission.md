@@ -36,24 +36,8 @@ Monotone epoch allocation is not listed. Step 2 compares the envelope's epoch wi
 
 ## States
 
-One input's path:
-
-```mermaid
-stateDiagram-v2
-    [*] --> Arrived
-    Arrived --> Refused: bad framing, collision or stale epoch
-    Arrived --> Answered: exact retry of a decided id
-    Arrived --> Admitted: index taken, attempt line written
-    Admitted --> Admitted: crash, replay re-runs the gate
-    Admitted --> Applied: gate passes
-    Admitted --> Rejected: precondition or stale completion
-    Refused --> [*]: nothing in the log
-    Answered --> [*]: earlier decision returned
-    Applied --> [*]: decision line written
-    Rejected --> [*]: decision line written
-```
-
-One request id's transition table is [admission](../state-machines.md#admission), over `DecisionIndex`. It starts at dedup: the `period_sealing` refusal and the envelope's refusals come first and move no id.
+One request id's states are [admission](../state-machines.md#admission), over `DecisionIndex`; the anchor holds the generated diagram and transition table.
+The machine starts at deduplication. The `period_sealing` refusal and the envelope's refusals come first and move no id.
 
 ## Invariants
 

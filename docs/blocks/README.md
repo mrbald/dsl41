@@ -22,9 +22,14 @@ Every card has these sections, in this order:
    "none".
 3. **Interface.** What the block takes and gives, as module functions,
    records, verbs or files.
-4. **States.** A Mermaid state diagram that illustrates the block. It is a
-   picture, not an inventory: it carries no row ids and makes no coverage
-   claim.
+4. **States.** A block whose states are a declared machine links that
+   machine in [the state machines](../state-machines.md), by anchor. The
+   anchor holds the generated diagram and transition table, so the card
+   draws no diagram and copies no transition. A block with no declared
+   machine either links its paragraph in [the policies](policies.md) or
+   says on its own card why it has none. It may keep a Mermaid flowchart
+   of its steps, data or ordering, with no state notation. A state diagram
+   appears only where a declared, tested machine backs it.
 5. **Invariants.** Each one links its decision-log entry or contract
    section.
 6. **Failure and recovery.** What can go wrong and what brings the block
@@ -38,6 +43,11 @@ Every card has these sections, in this order:
 A card that finds a gap, or a contradiction between the code and a
 contract, lists it under **Gaps found** at the end. A card never settles
 one.
+
+A card is at most 120 lines. [The policies](policies.md) page is not a
+block card: it gives one paragraph to each policy. `tests/test_block_cards.py`
+checks the length, the index below, the machine links and that no card
+draws a state diagram.
 
 ## Cards
 
@@ -73,3 +83,37 @@ Engine:
   to a durable decision.
 - [Effect outbox](effect-outbox.md): SPAWN and KILL intent recorded before
   the attempt, then dispatched or reconciled.
+- [Host routing](host-routing.md): the routing table's four states, drain,
+  quarantine and eviction.
+- [Control subscription](subscription.md): one `subscribe` feed, from its
+  backfill to its end.
+- [Seal and lineage](seal-and-lineage.md): the anchor head, the period
+  registry row and the engine's seal phases.
+
+Rules without a machine:
+
+- [Policies](policies.md): the scheduler frontier, the work choice,
+  access, audit, retention, the wrapper outcome, SPAWN idempotency and
+  leadership, and why each is not a state machine.
+
+## Machines
+
+Each machine in [the state machines](../state-machines.md) and the card
+that explains it.
+
+| Machine | Card |
+| --- | --- |
+| [job_status](../state-machines.md#job_status) | [Job lifecycle](job-lifecycle.md); its box rows in [Box execution](box-execution.md); QUE_WAIT in [Capacity](capacity.md) |
+| [job_flags](../state-machines.md#job_flags) | [Job lifecycle](job-lifecycle.md) |
+| [job_holding](../state-machines.md#job_holding) | [Capacity](capacity.md); [Job lifecycle](job-lifecycle.md) |
+| [runtime_assembly](../state-machines.md#runtime_assembly) | [Job lifecycle](job-lifecycle.md) |
+| [anchor_head](../state-machines.md#anchor_head) | [Seal and lineage](seal-and-lineage.md) |
+| [period_row](../state-machines.md#period_row) | [Seal and lineage](seal-and-lineage.md) |
+| [supervisor_process](../state-machines.md#supervisor_process) | [Supervisor](supervisor.md) |
+| [supervisor_lease](../state-machines.md#supervisor_lease) | [Supervisor](supervisor.md) |
+| [supervisor_client](../state-machines.md#supervisor_client) | [Supervisor](supervisor.md) |
+| [host](../state-machines.md#host) | [Host routing](host-routing.md) |
+| [admission](../state-machines.md#admission) | [Admission](admission.md) |
+| [effect](../state-machines.md#effect) | [Effect outbox](effect-outbox.md) |
+| [subscription](../state-machines.md#subscription) | [Control subscription](subscription.md) |
+| [seal_boundary](../state-machines.md#seal_boundary) | [Seal and lineage](seal-and-lineage.md) |

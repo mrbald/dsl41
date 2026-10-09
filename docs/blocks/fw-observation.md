@@ -27,22 +27,25 @@ The completion reaches the ledger as an ordinary STATUS input through the engine
 
 ## States
 
+No machine is declared for the watch.
+Its progress is a fold of `watch.jsonl`, and its parking is the seal's frozen phase in [seal_boundary](../state-machines.md#seal_boundary), not a step of the watch.
+The flowchart shows one watch:
+
 ```mermaid
-stateDiagram-v2
-    [*] --> Dispatched
-    Dispatched --> Started: fence check, append the start line
-    Dispatched --> Resumed: the log already holds a start line
-    Resumed --> Done: the log ends on a completing poll
-    Resumed --> Sleeping: progress rebuilt from the log
-    Started --> Sleeping
-    Sleeping --> Parked: the seal barrier is set
-    Parked --> Polling: the barrier is released
-    Parked --> [*]: the seal commits, the successor resumes the watch
-    Sleeping --> Polling: next_poll_at reached
-    Polling --> Appended: stat the file, fence check, append a poll line
-    Appended --> Done: steady size, or a qualifying first poll under immediate
-    Appended --> Sleeping: not complete
-    Done --> [*]: return exit 0
+flowchart TD
+    dispatched(["dispatched"]) --> logged{"the log holds a start line?"}
+    logged -->|"no"| start["fence check, append the start line"]
+    logged -->|"yes"| folded{"the log ends on a completing poll?"}
+    folded -->|"yes"| done(["return exit 0"])
+    folded -->|"no: progress rebuilt from the log"| sleep
+    start --> sleep["sleep until next_poll_at"]
+    sleep -->|"the seal barrier is set"| park["parked at a poll boundary"]
+    park -->|"the barrier is released"| poll
+    park -->|"the seal commits"| successor(["the successor resumes the watch"])
+    sleep -->|"next_poll_at reached"| poll["stat the file, fence check, append a poll line"]
+    poll --> complete{"steady size, or a qualifying first poll under immediate?"}
+    complete -->|"yes"| done
+    complete -->|"no"| sleep
 ```
 
 ## Invariants

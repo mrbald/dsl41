@@ -19,35 +19,20 @@ Its per-input [state_rev](../glossary.md#state_rev) is what a store's conditiona
 - Inputs: `Oracle.feed(event)`, `Oracle.batch(at)` for several events at one instant, and `Oracle.advance(now)` for a bare time observation. The alphabet is `EventKind` in `oracle_state.py`.
 - Outputs: emitted events, of which a STATUS STARTING is the shell's dispatch instruction; the trace of `TraceEntry` lines; `Oracle.next_timer_due()`.
 - State: one frozen `JobRuntime` row per job, written only by `RuntimeState` verbs such as `transition`, `start_run` and `move_flag`.
-- Transitions: each status, flag and capacity move names its declared transition; the tables are [job_status](../state-machines.md#job_status), [job_flags](../state-machines.md#job_flags) and [job_holding](../state-machines.md#job_holding).
+- Transitions: each status, flag and capacity move names its declared transition (see States).
 - Status sets: `TERMINAL`, `FAILED`, `LIVE`, `IDLE` and `INJECTABLE_STATUSES` in `oracle_state.py`.
 - Condition truth: `Oracle._cond_true` over the tree that `conditions.py` parses.
 
 ## States
 
-```mermaid
-stateDiagram-v2
-    [*] --> INACTIVE
-    INACTIVE --> STARTING: start gates hold, capacity admits
-    INACTIVE --> QUE_WAIT: capacity short
-    INACTIVE --> SUCCESS: ON_NOEXEC bypass
-    QUE_WAIT --> STARTING: admitted from the queue
-    QUE_WAIT --> INACTIVE: ON_ICE, ON_NOEXEC, failed recheck
-    QUE_WAIT --> TERMINATED: KILLJOB
-    STARTING --> RUNNING
-    RUNNING --> SUCCESS: exit inside the success boundary
-    RUNNING --> FAILURE: other exit, spawn failure
-    RUNNING --> TERMINATED: KILLJOB, term_run_time, terminator
-    SUCCESS --> STARTING: next start
-    FAILURE --> STARTING: next start
-    TERMINATED --> STARTING: next start
-    FAILURE --> INACTIVE: ON_NOEXEC
-    TERMINATED --> INACTIVE: ON_NOEXEC
-    note right of INACTIVE
-        ON_ICE, ON_HOLD, ON_NOEXEC and the arm are flags beside the status.
-        An injected STATUS may set any status except QUE_WAIT.
-    end note
-```
+One job row carries three orthogonal regions, each a declared machine:
+
+- [job_status](../state-machines.md#job_status): the status and its moves.
+- [job_flags](../state-machines.md#job_flags): ON_ICE, ON_HOLD and ON_NOEXEC, and the schedule arm.
+- [job_holding](../state-machines.md#job_holding): the units a job reserves or keeps; the [capacity](capacity.md) card explains it.
+
+[runtime_assembly](../state-machines.md#runtime_assembly) is the state owner's own life: carried rows or a genesis seed, then one input at a time.
+Each anchor holds the generated diagram and transition table.
 
 ## Invariants
 

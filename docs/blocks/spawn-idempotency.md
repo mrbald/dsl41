@@ -24,23 +24,19 @@ It carries over to any store that keeps that capability.
 
 ## States
 
-The picture shows one run directory filling in write order.
-A replay reads whatever state a crash left; the answers are in the frozen tables linked below.
+SPAWN idempotency is a decision table, not a declared machine; [the policies](policies.md#spawn-idempotency) say why.
+The flowchart shows the write order that fills one run directory.
+A replay reads the files a crash left. The answers are in the frozen tables linked below.
 
 ```mermaid
-stateDiagram-v2
-    [*] --> Nothing
-    Nothing --> DirMade: mkdir runs/job.n
-    DirMade --> Indexed: write the run_id index entry
-    Indexed --> Received: write receipt.json
-    Received --> Forked: fork the wrapper
-    Received --> ForkFailed: fork fails
-    ForkFailed --> [*]: answer spawn_failed
-    Forked --> Recorded: the wrapper writes spawn.json
-    Forked --> Replied: write reply.json
-    Recorded --> Replied: write reply.json
-    Replied --> Answered: answer the engine
-    Answered --> [*]
+flowchart TD
+    mkdir["mkdir runs/job.n"] --> index["write the run_id index entry"]
+    index --> receipt["write receipt.json"]
+    receipt --> fork{"fork the wrapper"}
+    fork -->|"fails"| failed(["answer spawn_failed"])
+    fork -->|"forked"| reply["write reply.json"]
+    fork -.->|"the wrapper, before or after the reply"| spawnjson["spawn.json"]
+    reply --> answer(["answer the engine"])
 ```
 
 ## Invariants

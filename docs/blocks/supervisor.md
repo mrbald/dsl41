@@ -22,28 +22,13 @@ One limit is about transport, not storage: a lease freed on EOF needs a local so
 
 ## States
 
-```mermaid
-stateDiagram-v2
-    [*] --> Starting
-    Starting --> Refused: lock held, PING answered, or live pid record
-    Refused --> [*]: exit 1, the caller may retry
-    Starting --> Serving: handlers installed, then pid record and socket published
-    state Serving {
-        [*] --> Unleased
-        Unleased --> Leased: ACQUIRE
-        Leased --> Leased: RENEW, or ACQUIRE with the current token
-        Leased --> Orphaned: holder connection closed
-        Leased --> Expired: TTL passes with no RENEW
-        Orphaned --> Leased: ACQUIRE by any controller
-        Expired --> Leased: ACQUIRE
-        Leased --> Unleased: RELEASE
-    }
-    Serving --> ShuttingDown: SHUTDOWN, SIGTERM or SIGINT
-    ShuttingDown --> Exited: wrappers reaped, or the wait bound reached
-    Serving --> Exited: deadman fires
-    Serving --> Exited: SIGKILL
-    Exited --> [*]: every lifeline it held reaches EOF
-```
+Three declared machines hold this block's states:
+
+- [supervisor_process](../state-machines.md#supervisor_process): the process from start to teardown.
+- [supervisor_lease](../state-machines.md#supervisor_lease): the one controller lease inside a serving process.
+- [supervisor_client](../state-machines.md#supervisor_client): the engine side's connection to the socket.
+
+Each anchor holds the generated diagram and transition table.
 
 ## Invariants
 

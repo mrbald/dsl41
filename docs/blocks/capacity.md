@@ -26,24 +26,13 @@ Reservations and waiter ranks ride on the job rows in the in-memory `RuntimeStat
 
 ## States
 
-One job's units on one bucket:
+Two declared machines hold this block's states:
 
-```mermaid
-stateDiagram-v2
-    [*] --> Free
-    Free --> Reserved: start admitted, vector frozen on the row
-    Free --> Waiting: a bucket is short, or a higher priority blocks
-    Waiting --> Reserved: readmitted in queue order
-    Waiting --> Free: KILLJOB, ON_ICE, ON_NOEXEC, failed recheck
-    Reserved --> Free: run ends and its policy frees the units
-    Reserved --> Held: renewable run ends, policy keeps the units
-    Reserved --> Spent: depletable default policy, units move to consumed
-    Held --> Free: RELEASE_RESOURCE, or holder removed at an opening
-    Held --> Reserved: the job's next start takes them over
-    note right of Free
-        A threshold request is checked at admission and never reserved.
-    end note
-```
+- [job_holding](../state-machines.md#job_holding): one job's units, reserved, held or none, and what a run's end does to them.
+- [job_status](../state-machines.md#job_status): the QUE_WAIT rows, where a waiter enters and leaves the queue.
+
+Each anchor holds the generated diagram and transition table.
+A threshold request is checked at admission and never reserved.
 
 ## Invariants
 
