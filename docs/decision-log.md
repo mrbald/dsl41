@@ -20406,3 +20406,32 @@ relitigate an entry; append a new one.
   reviewer and one Fable advisor pass. The Fable pass ruled that both
   changes need this entry, since §6 and §10 are frozen (DL-231, DL-225).
   The pass's other edits are wording; the pull request lists them.
+- DL-312 period-model: the anchor's local-filesystem check and the seal's
+  quiesce wait, stated as the code does them
+  (2026-10-09; docs/period-model.md §1.3, §3.5 and §8)
+  THE FILESYSTEM CHECK. PR-04 keeps the anchor on local storage (DL-116,
+  DL-133). The check refuses an anchor on any of the network filesystem
+  types the code lists (src/dsl41/boundary.py, NETWORK_FILESYSTEMS): NFS and
+  also SMB, CIFS, Ceph, GlusterFS, Lustre, AFS and others. When the platform
+  cannot say the filesystem type, the check refuses nothing: refusing every
+  unknown type would make the anchor unusable where the type cannot be read.
+  That is a stated limit on PR-04's guarantee. A doubled run would need the
+  operator to put the anchor on network storage against the rule, and the
+  type to be unreadable, unlisted, or masked by another mount line at the
+  same mount point.
+  THE QUIESCE WAIT. §7 already names "the drain's own timeout" (DL-274), and
+  control-protocol lists `seal_not_settling` and `seal_not_quiescent`. The
+  bound is a fixed 30 seconds per wait (`QUIESCE_WAIT_S`), not taken from
+  the runtime profile. Each of the seal's waits has its own bound. When one
+  passes, the seal refuses before any sidecar byte, the period reopens, and
+  the operator retries. So a KILL ladder longer than 30 seconds (a
+  `cmd_grace_us` above about 30 s) makes a seal refuse while it runs,
+  instead of being waited out. Deriving the bound from `cmd_grace_us` stays
+  open; the constant is what ships.
+  REVIEW. Found by the spec review of period-model.md, with one Opus
+  reviewer and one Fable advisor pass. The Fable pass ruled that both need
+  this entry and are not code defects: while the anchor is on local storage,
+  neither can cause a wrong launch, a lost or doubled run, or a hang; the
+  filesystem case above is a stated limit. The pass's other edits are
+  wording or corrections already ruled by other entries; the pull request
+  lists them.
