@@ -305,6 +305,15 @@ waiting reads INACTIVE without the mark.
   the run is a completion moment (SEM-11, Q15, DL-304), so it evaluates an external-reference
   override too: a met one fires at the start, an unmet one keeps the box RUNNING. That the
   start counts is **[C]**, as DL-285's ice moment is.
+- The walk from a job's change up to the boxes above it is bound to each box's run. **[C]**
+  The run numbers are read before the moment's first box rule. If the moment's own cascade
+  completes a box above and starts it again, the walk skips that box: "Jobs in a box run only
+  once for each box execution" (Basic Box Job Concepts, AutoSys 12.0 and 24.2), so the job's
+  change belongs to the earlier run and is no moment of the later one. The walk goes on to the
+  boxes above whose run did not move; they still evaluate their overrides. The same binding
+  holds for the walk after an ice (DL-285) or a window skip (DL-154), and an ice's walk does not
+  run at all when its own box was started again. An INACTIVE cascade (SEM-18) is one moment:
+  each row's runs are read after every row is written and before any row's box rules run.
 
 ### SEM-13 · Box TERMINATED is sticky **[V]**
 A box moved to TERMINATED (for example, KILLJOB) stays TERMINATED regardless of later member state
@@ -363,6 +372,32 @@ triggers the re-evaluation, and so does an injected INACTIVE on a member. A box-
 a SEM-18 cascade and a window skip are internal transitions and do not trigger it. The box is
 read again after the injected transition: a box that the transition's own wakes started is
 not re-derived.
+
+A member that is not iced votes. **[V]** Basic Box Job Concepts (AutoSys 12.0 and 24.2): "If a
+box that is not running contains a job that changes status because of a FORCE_STARTJOB or
+CHANGE_STATUS event, the new job status could change the status of its containing box. A
+status change for the box could then trigger the start of downstream jobs that depend on the
+box." So a completed box flips when such a member fails later, and its failure consumers start
+beside the success consumers that already ran.
+
+Under the default `idle-box-iced-member=ignore`, an iced member that is out of the run is
+ignored in the re-evaluation, as an INACTIVE member is. **[C]** "Out of the run" is SEM-11's
+test: on ice, and neither it nor any job inside it is live or queued (DL-304). The page's table
+does not name ON_ICE, and no vendor sentence says whether an iced member votes here. Job
+States (AutoSys 12.0 and 24.2) says an ON_ICE job "is removed from the job stream but is still
+defined", SEM-20 removes it from all conditions and logic, and SEM-11's fold already skips it.
+So a completed box does not flip when a job inside an iced subbox, or an iced member given a
+status by CHANGE_STATUS, ends later. Nor is such a member's own change a verdict: when the
+member that changed is out of the run and no other member votes, the box keeps its status, so
+a box that never ran stays INACTIVE. When the member that changed is in the run, DL-242's
+vacuous SUCCESS stands even if every other member is iced: an operator's INACTIVE on the last
+member in the run "returns a SUCCESS status as it ignores all the jobs that are in INACTIVE
+status" **[V]**, and an iced member is ignored the same way. An iced member that is live, or
+holds a live or queued job, is not out of the run, so it is not dropped: its own status votes
+as any member's does. A live status blocks the re-evaluation, and an INACTIVE one is ignored.
+A forced start clears the ice (SEM-23), and so does OFF_ICE, so such a member votes. `vote`
+reads an iced member's status, as dsl41 did before (runner-design §8a). Which one AutoSys does
+is open (Q16, section 9).
 
 ### SEM-16 · Jobs added to a RUNNING box **[V]**
 When a job is inserted/moved into a running box: an ALERT event occurs, and the job's run
@@ -454,7 +489,9 @@ nothing else.
 - An iced member that has not run is out of its RUNNING box's fold, so the ON_ICE itself runs
   the box's completion check (DL-285, SEM-11's third carve-out), and under the default
   `box-start-all-members-out=complete` a box whose members are all on ice when it starts
-  completes at its start (SEM-11, Q15).
+  completes at its start (SEM-11, Q15). A box that is not running ignores an iced member that
+  is out of the run when it re-derives its status, under the default
+  `idle-box-iced-member=ignore` (SEM-15, Q16).
 - ON_ICE sent to a STARTING or RUNNING job, box or not, is ignored (DL-254). **[V]** Source:
   "sendevent Command -- Change the Executable Status of a Job" (AutoSys 24.2), JOB_ON_ICE:
   "The event has no effect on jobs with a status of STARTING or RUNNING." The oracle sets no
@@ -1349,7 +1386,14 @@ member completes the box and a waiting member still hangs it (SEM-11, DL-242:
 completes the box, and `box-start-all-members-out=wait` keeps it RUNNING (SEM-11, Q15:
 `test_sem11_box_start_*`) ·
 T12a internal box_success early-exit, T12b external box_success hung-RUNNING,
-T12c box_success over a grandchild fires transitively (SEM-12) ·
+T12c box_success over a grandchild fires transitively (SEM-12), and the walk up skips a box
+that the same moment completed and started again
+(SEM-12: `test_sem12_a_box_started_again_in_the_cascade_ignores_the_earlier_run_s_job`,
+`test_sem12_the_walk_skips_a_restarted_box_and_reaches_the_one_above_it`,
+`test_sem12_the_walk_goes_on_past_a_restarted_box_to_an_unmoved_one`,
+`test_sem12_an_ice_whose_box_starts_again_does_not_walk_into_the_new_run`,
+`test_sem12_an_inactive_cascade_is_bound_to_the_runs_before_its_rows_move`,
+`test_sem33_a_window_skip_s_walk_skips_the_box_run_the_skip_restarted`) ·
 T13 sticky TERMINATED box (SEM-13) · T14 terminator cascade both directions (SEM-14) ·
 a box_terminator member ending TERMINATED, killed, injected or dequeued, ends its box under
 `box-terminator-on-terminated=true` and leaves it RUNNING under `false` (SEM-14:
@@ -1361,7 +1405,21 @@ a box_terminator member ending TERMINATED, killed, injected or dequeued, ends it
 `test_sem14_a_box_terminator_member_ended_by_term_run_time_reads_the_switch`,
 `test_sem14_a_box_terminator_subbox_that_ends_terminated_reads_the_switch`) ·
 T15 idle box ignores INACTIVE members, the single-member table (SEM-15, DL-242:
-`test_sem15_*`) · T18 box INACTIVE cascades to every contained job (SEM-18, DL-242:
+`test_sem15_*`), and an iced member out of the run under `idle-box-iced-member=ignore`,
+while a member that is not iced, taken off ice, forced, or iced but live still decides
+(SEM-15, Q16:
+`test_sem15_a_job_failing_inside_an_iced_subbox_leaves_a_completed_box_alone`,
+`test_sem15_a_box_completed_at_its_start_stays_completed_through_an_iced_subbox`,
+`test_sem15_an_iced_member_given_failure_leaves_a_completed_box_alone`,
+`test_sem15_a_forced_member_that_is_not_iced_still_flips_a_completed_box`,
+`test_sem15_a_member_taken_off_ice_and_forced_flips_a_completed_box`,
+`test_sem15_a_forced_start_clears_the_ice_and_its_run_flips_a_completed_box`,
+`test_sem15_an_iced_member_given_running_blocks_the_recompute_until_it_ends`,
+`test_sem15_an_iced_member_given_failure_moves_no_box_that_never_ran`,
+`test_sem15_a_job_failing_in_an_iced_subbox_moves_no_box_that_never_ran`,
+`test_sem15_an_inactive_verdict_beside_an_iced_member_keeps_the_vacuous_success`,
+`test_sem15_a_failed_member_set_inactive_beside_an_iced_success_gives_success`,
+`test_sem15_an_iced_subbox_holding_a_live_job_keeps_its_vote`) · T18 box INACTIVE cascades to every contained job (SEM-18, DL-242:
 `test_sem18_*`) ·
 T20a ice downstream fires, T20b off-ice does not immediately run (SEM-20) ·
 a member taken off ice in its running box sits the run out under
@@ -1659,6 +1717,16 @@ holds the probe that would settle it.
   is live, or holds a live or queued job, is not out of the run -- applies under both
   values. `# PENDING: Q15` marks the read in the oracle. The
   runbook's Q15 protocol settles it.
+- Q16 (SEM-15, SEM-20): open, pinned default. Whether an iced member votes when a box that is
+  not running re-derives its status. Basic Box Job Concepts (AutoSys 12.0 and 24.2) lets a
+  member's FORCE_STARTJOB or CHANGE_STATUS change a box that is not running, and ignores only
+  INACTIVE members; its table does not name ON_ICE. Job States (12.0 and 24.2) says an ON_ICE
+  job "is removed from the job stream but is still defined", and that "You cannot manually
+  change the status of a job from ON_ICE to INACTIVE"; no vendor sentence says that
+  CHANGE_STATUS to another status clears the ice. No text names a job inside an iced subbox.
+  The default `idle-box-iced-member=ignore` drops an iced member that is out of the run, as
+  SEM-11's fold does; `vote` reads its status, as dsl41 did before (runner-design §8a).
+  `# PENDING: Q16` marks the read in the oracle. The runbook's Q16 protocol settles it.
 
 ## Sources
 Primary: Broadcom TechDocs, AutoSys Workload Automation 12.0/12.0.01/12.1/12.1.01 (Basic Box

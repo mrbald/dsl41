@@ -39,8 +39,9 @@ The idle re-derivation rows follow the vendor table in [SEM-15](../autosys-seman
 - An OFF_ICE on a member that was iced and has not run in a RUNNING box keeps it out of that run: the fold skips it, a plain start of it is refused, and FORCE_STARTJOB still starts it. The `off-ice-in-running-box` switch selects this (`next-run`, the default) or the member's return to the run (`same-run`) ([SEM-20](../autosys-semantics.md#sem-20--on_ice-v), [runner-design §8a](../runner-design.md#8a-semantic-switches)).
 - A box start decides each waiting run_window member at once ([SEM-33](../autosys-semantics.md#sem-33--run_window-is-a-gate-not-a-trigger-v), [DL-246](../decision-log.md)).
 - Override gating, with "inside" read transitively ([SEM-12](../autosys-semantics.md#sem-12--box_success--box_failure-override--with-evaluation-gating-v), [DL-12](../decision-log.md)).
+- The walk from a job's change up to the boxes above it skips a box that the same moment completed and started again, and goes on to the boxes above that one ([SEM-12](../autosys-semantics.md#sem-12--box_success--box_failure-override--with-evaluation-gating-v)).
 - TERMINATED is sticky ([SEM-13](../autosys-semantics.md#sem-13--box-terminated-is-sticky-v)). Terminators cascade both ways; a box_terminator member ending TERMINATED counts under the default `box-terminator-on-terminated=true` ([SEM-14](../autosys-semantics.md#sem-14--box_terminator--job_terminator-vc)).
-- An idle box re-derives with INACTIVE members ignored ([SEM-15](../autosys-semantics.md#sem-15--member-status-changes-can-ripple-upward-vc), [DL-242](../decision-log.md)).
+- An idle box re-derives with INACTIVE members ignored, and under the default `idle-box-iced-member=ignore` also iced members out of the run, so a completed box does not flip through an iced member ([SEM-15](../autosys-semantics.md#sem-15--member-status-changes-can-ripple-upward-vc), Q16, [DL-242](../decision-log.md)).
 - CHANGE_STATUS INACTIVE on a box cascades as one batch ([SEM-18](../autosys-semantics.md#sem-18--change_status-inactive-on-a-box-cascades-v), [DL-242](../decision-log.md)).
 - ON_NOEXEC on a box: the dry run and the cascade ([SEM-22](../autosys-semantics.md#sem-22--on_noexec-v), [DL-254](../decision-log.md)).
 - Unconsumed member arms die with the box run ([DL-54](../decision-log.md)).
@@ -83,7 +84,7 @@ The idle re-derivation rows follow the vendor table in [SEM-15](../autosys-seman
 ## Open findings
 
 See the row "Box execution" in [the risk map](../risk-map.md).
-Its own findings are [open vendor readings](../risk-map.md#open-vendor-readings-for-a-box-and-its-members), [a completed box can flip, and the ancestor walk has no run binding](../risk-map.md#a-completed-box-can-flip-and-the-ancestor-walk-has-no-run-binding) and [instant cascades recurse](../risk-map.md#instant-cascades-recurse).
+Its own findings are [open vendor readings](../risk-map.md#open-vendor-readings-for-a-box-and-its-members), [a completed box and an iced member](../risk-map.md#a-completed-box-and-an-iced-member) and [instant cascades recurse](../risk-map.md#instant-cascades-recurse).
 
 ## Gaps found
 

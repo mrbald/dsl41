@@ -329,7 +329,12 @@ def test_every_job_event_in_every_built_flag_and_holding_state_takes_a_declared_
     FAILURE only, a move the default takes too. One build also runs under
     `box-start-all-members-out=wait` (see `_job_builds`); `complete` reaches
     no state of its own, since a box that completes at its start reads as
-    one given SUCCESS."""
+    one given SUCCESS. `idle-box-iced-member` adds no state or move: it
+    decides whether an idle box re-derives through an iced member. Under
+    `ignore`, the default these builds run, the moves that follow,
+    job_status.31 to .34, are taken through a member that is not iced, or
+    the end of an iced member whose live status had blocked the re-derive.
+    Under `vote` an iced member's own end can take them too, by design."""
     catalog = lower_source(_JOB_JIL)
     reached: set[tuple[object, ...]] = set()
     missing: list[str] = []

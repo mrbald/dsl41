@@ -987,7 +987,7 @@ Training estate:
   expander pairs).
 
 Open questions run on documented defaults marked `# PENDING: <label>` in
-the code. The AutoSys questions Q3c, Q3d, Q6, Q8b-Q8d, Q13, Q14 and Q15 need
+the code. The AutoSys questions Q3c, Q3d, Q6, Q8b-Q8d, Q13, Q14, Q15 and Q16 need
 a live AutoSys instance; Q6, Q13 and Q14 have no code switch. The resource-manager questions
 Qr2-Qr4 are stated in DL-50; DL-247 narrows Qr2. Qr6 is decided: dsl41
 keeps its default, and the `queued-recheck` switch selects the vendor's

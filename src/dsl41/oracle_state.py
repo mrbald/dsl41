@@ -748,7 +748,9 @@ IDLE_BOX_OVERRIDE: Final[Mapping[JobStatus, Transition[JobStatus]]] = MappingPro
             _IDLE_BOX - {"SUCCESS"},
             "member ends, or a member set INACTIVE",
             "SUCCESS",
-            guard="every member that is not INACTIVE is terminal; box_success holds",
+            guard="under idle-box-iced-member=ignore, every member that is neither"
+            " INACTIVE nor out on ice is terminal, and one votes or the changed member"
+            " is not out on ice; under vote, every member not INACTIVE is terminal; box_success holds",
             cite="SEM-15",
         ),
         "FAILURE": Transition[JobStatus](
@@ -756,7 +758,9 @@ IDLE_BOX_OVERRIDE: Final[Mapping[JobStatus, Transition[JobStatus]]] = MappingPro
             _IDLE_BOX - {"FAILURE"},
             "member ends, or a member set INACTIVE",
             "FAILURE",
-            guard="every member that is not INACTIVE is terminal; box_failure holds",
+            guard="under idle-box-iced-member=ignore, every member that is neither"
+            " INACTIVE nor out on ice is terminal, and one votes or the changed member"
+            " is not out on ice; under vote, every member not INACTIVE is terminal; box_failure holds",
             cite="SEM-15",
         ),
     }
@@ -768,7 +772,9 @@ IDLE_BOX_DERIVE: Final[Mapping[JobStatus, Transition[JobStatus]]] = MappingProxy
             _IDLE_BOX - {"SUCCESS"},
             "member ends, or a member set INACTIVE",
             "SUCCESS",
-            guard="every member that is not INACTIVE is terminal; no override holds;"
+            guard="under idle-box-iced-member=ignore, every member that is neither"
+            " INACTIVE nor out on ice is terminal, and one votes or the changed member"
+            " is not out on ice; under vote, every member not INACTIVE is terminal; no override holds;"
             " no member failed; no box_success",
             cite="SEM-15, DL-242",
         ),
@@ -777,7 +783,9 @@ IDLE_BOX_DERIVE: Final[Mapping[JobStatus, Transition[JobStatus]]] = MappingProxy
             _IDLE_BOX - {"FAILURE"},
             "member ends, or a member set INACTIVE",
             "FAILURE",
-            guard="every member that is not INACTIVE is terminal; no override holds;"
+            guard="under idle-box-iced-member=ignore, every member that is neither"
+            " INACTIVE nor out on ice is terminal, and one votes or the changed member"
+            " is not out on ice; under vote, every member not INACTIVE is terminal; no override holds;"
             " a member failed; no box_failure",
             cite="SEM-15, DL-242",
         ),

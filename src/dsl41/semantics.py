@@ -129,7 +129,9 @@ def _box_member(job: JobIR, _catalog: CatalogIR) -> bool:
 
 def _is_box(job: JobIR, _catalog: CatalogIR) -> bool:
     """A box job: what `box-start-all-members-out` reads when the box
-    starts with no member in the run (SEM-11)."""
+    starts with no member in the run (SEM-11), and what
+    `idle-box-iced-member` reads when an idle box re-derives its status
+    (SEM-15)."""
     return job.job_type == "BOX"
 
 
@@ -165,6 +167,7 @@ WekrFirstWeek = Literal["first-full", "partial"]
 OffIceInRunningBox = Literal["next-run", "same-run"]
 BoxTerminatorOnTerminated = Literal["true", "false"]
 BoxStartAllMembersOut = Literal["complete", "wait"]
+IdleBoxIcedMember = Literal["ignore", "vote"]
 # DstStartTimes is spelled in `timezones`, the phase-free module that reads it.
 
 
@@ -266,6 +269,16 @@ REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
                 " completion door (complete), or stay RUNNING until an operator acts (wait)",
                 affects=_is_box,
             ),
+            Switch(
+                name="idle-box-iced-member",
+                values=get_args(IdleBoxIcedMember),
+                default="ignore",
+                autosys="unknown",
+                description="what an iced member that is out of the run counts for when a box"
+                " that is not running re-derives its status: nothing, as an INACTIVE member"
+                " (ignore), or its own status (vote)",
+                affects=_is_box,
+            ),
         )
     }
 )
@@ -312,6 +325,7 @@ class SemanticSwitches:
     off_ice_in_running_box: OffIceInRunningBox
     box_terminator_on_terminated: BoxTerminatorOnTerminated
     box_start_all_members_out: BoxStartAllMembersOut
+    idle_box_iced_member: IdleBoxIcedMember
 
     def value(self, name: str) -> str:
         """The effective value of the switch called `name`."""

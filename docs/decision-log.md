@@ -20300,3 +20300,63 @@ relitigate an entry; append a new one.
   line, a ranking rule that would rank tied machines, a card that missed
   its row's open finding, and loose wording in the runbook's drill
   paragraph. All are fixed and confirmed by the reviewer.
+- DL-309 A completed box keeps its status through an iced member, and the
+  walk from a job up to its boxes is bound to their runs (state machine 20)
+  (2026-10-09; src/dsl41/oracle.py, oracle_state.py, semantics.py,
+  runner_ledger.py (STATE_MACHINE_VERSION), simulation_register_rows.py;
+  docs/autosys-semantics.md SEM-12, SEM-15, SEM-20, §8 and §9 Q16;
+  docs/live-instance-runbook.md, docs/citation-index.md (`Q` row),
+  docs/runner-design.md §8a, docs/risk-map.md, docs/blocks/box-execution.md,
+  docs/state-machines.md, docs/simulation-coverage.md, README.md;
+  tests/test_oracle.py, tests/test_semantics.py,
+  tests/test_exhaustive_engine.py)
+  THE ICED VOTE. SEM-15's recompute of an idle box read an iced member's
+  status; it ignored only INACTIVE. So a box that had completed SUCCESS
+  flipped to FAILURE when an iced member was given FAILURE, or when a job
+  failed inside an iced subbox. Its success consumers had already run,
+  and its failure consumers then launched too. Under the new switch
+  `idle-box-iced-member=ignore`, the default, the recompute drops a member
+  that is out of the run (DL-304's rule: on ice, and neither it nor any job
+  inside it is live or queued), as it drops INACTIVE. A member that is live
+  or holds a live or queued job is not dropped: its own status votes, and a
+  live one blocks the recompute. When nothing is left to vote and the
+  member whose change ran the recompute is itself out of the run, the box
+  keeps its status: an iced member's own change is no verdict. DL-242's
+  vacuous SUCCESS stays for a change by a member in the run. `vote` keeps
+  the earlier reading exactly.
+  [V] "Basic Box Job Concepts" (12.0, 24.2): a FORCE_STARTJOB or
+  CHANGE_STATUS on a job in a box that is not running "could change the
+  status of its containing box", which "could then trigger the start of
+  downstream jobs". That flip through a member that is not iced is vendor
+  behavior and does not change. [V] "Job States" (12.0, 24.2): an iced job
+  is "removed from the job stream but is still defined", and "You cannot
+  manually change the status of a job from ON_ICE to INACTIVE". No page
+  says whether an iced member votes in the recompute, so the switch's
+  AutoSys value is unknown, Q16 is open, and the runbook has a probe.
+  THE RUN BINDING. The walk from a job's change up to its ancestor boxes
+  did not check which box run the job belonged to. A box restarted in the
+  same moment could then complete its new run through a job of the old
+  one, and launch its consumers early. The walk now reads every ancestor's
+  run number before the moment's first box rule, and skips an ancestor
+  whose run moved; the boxes above it still get the change. It does so at
+  all four entry points: a single transition, the window skip of a member
+  already INACTIVE, an ON_ICE, and the INACTIVE batch (the SEM-10 reset and
+  the SEM-18 cascade), where each row's runs are read after the batch wrote
+  its rows and before any box rule ran. No switch: a member runs once per
+  box run ([V], SEM-10), so no reading lets one run's job complete another.
+  VERSION. STATE_MACHINE_VERSION moves from 19 to 20: a replay with such a
+  moment derives a different state. Seals keep their bytes. No estate is
+  live, so nothing migrates.
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass, the
+  Fable pass in place of Codex at the owner's instruction, three rounds. A
+  Fable ruling set both rules before the build. Round 1: the Opus
+  reviewer found the INACTIVE batch as a fourth entry point, and that the
+  default could move a box that never ran to SUCCESS on an iced member's
+  failure. The Fable pass had read that as the ruling's intent; the advisor
+  sided with the Opus reviewer and narrowed its ruling to the rule above.
+  Both reviewers also found an untested walk site and wording that
+  over-claimed. All are fixed and confirmed by the reviewer that raised
+  them. Reverting each fix in a scratch copy fails a test; two mutants
+  survive because no input can tell them apart from the code (a bare ice
+  check on the changed member, and the batch's run read taken after its
+  first box rule instead of before).
