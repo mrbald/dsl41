@@ -20143,3 +20143,59 @@ relitigate an entry; append a new one.
   filter would have turned into a flaky CI failure. Both reviewers found
   the opener's try too narrow. All are fixed and confirmed by the reviewer
   that raised them, and removing either production fix fails a test.
+- DL-306 The engine and every replay fit Python's recursion limit to the
+  estate, so a long instant cascade no longer crash-loops replay
+  (2026-10-09; src/dsl41/oracle.py, oracle_state.py, runner.py,
+  runner_journal.py, equiv.py; docs/deployment-runbook.md §7,
+  docs/runner-design.md §4; tests/conftest.py,
+  tests/test_cascade_depth.py)
+  THE DEFECT. The oracle evaluates a cascade of instant starts and
+  completions by nested calls. With Python's default recursion limit of
+  1000, it raised RecursionError at about 45 empty boxes in a ring under
+  `box-start-all-members-out=complete`, 91 in a chain, and 142 ON_NOEXEC
+  jobs in a chain (DL-304). A control input fails its dry apply and is
+  refused cleanly (DL-292). An engine-made input, such as a process exit or
+  a tick, is journaled before it is applied and has no dry run. So the
+  engine died, and every resume replayed the same input and stopped with
+  ReplayFault. A rollback could not escape, because the state-machine
+  version refuses it.
+  THE FIX. `oracle.fit_recursion_limit(n)` raises the limit to
+  1000 + 32 x n for an estate of n jobs, and never lowers it. Measured on
+  Python 3.12 and 3.14, the deepest shape needs 11 frames per nested start.
+  DL-304 allows two nested starts per job, and a run begun before the
+  cascade can add one completion of about 6 frames. Those parts sum to at
+  most 28 of the 32 frames budgeted per job; the worst single shape
+  measured needs 22. The base of 1000 covers the frames below the
+  oracle and box nesting, which lowering caps at 64. `Engine.__init__`,
+  `runner_journal.replay_inputs` and `equiv`'s third tier call it, so every
+  run, rehearse, seal, journal, runs, audit, verify, reclaim, prune and
+  equivalence check is covered. 200 jobs give 7,400; 300 give 10,600.
+  The raise is process-wide, so it also lifts the condition parser's depth
+  refusal (DL-20) in that process; a run root still refuses such a catalog
+  when it is serialized.
+  THE PROOF. Three 300-job cascades started by engine-made inputs, a box
+  chain, a box ring and an ON_NOEXEC chain, run and replay in subprocesses
+  with no RecursionError on macOS and on Linux with Python 3.12 and 3.14.
+  A 10,000-job ring runs on macOS at a limit of 2,000,000, so the C stack
+  is not the next limit: Python-to-Python calls take none since 3.12, and
+  the oracle runs only on the main thread. A test measures the frames each
+  extra job adds and fails if they pass the budget.
+  THE MESSAGE. If the limit is still passed, the outermost start raises
+  `CascadeDepthError`, an OracleError and a RecursionError, naming the job
+  whose start began the cascade. Before, `rehearse` died with a bare
+  traceback and the engine printed only "maximum recursion depth
+  exceeded". The runbook (§7) says the journal is not corrupt in that
+  case. Traces and state do not change, and STATE_MACHINE_VERSION does not
+  move.
+  OPEN. Dispatching a cascade without recursion would remove the limit
+  altogether; it is a larger change to the oracle and is not done. An
+  engine-made input still has no dry run, so any other exception while
+  applying one stops the engine the same way.
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass, the
+  Fable pass in place of Codex at the owner's instruction, three rounds.
+  The Fable pass checked that only a start nests starts, so the job count
+  bounds the depth. The Opus reviewer found no test tying the frame budget
+  to measured growth, an untested outermost-start check, and the
+  equivalence check outside the fit, and later an over-claiming frame
+  count. All are fixed and confirmed by the reviewer that raised them;
+  its last wording note was applied after round three.

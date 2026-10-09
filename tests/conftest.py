@@ -6,6 +6,7 @@ import os
 import selectors
 import shutil
 import socket
+import sys
 import tempfile
 from pathlib import Path
 
@@ -13,6 +14,17 @@ import pytest
 
 # records state-machine transition hits for scripts/transition_coverage.py
 pytest_plugins = ["transition_hits_plugin"]
+
+
+@pytest.fixture(autouse=True)
+def _restore_recursion_limit():
+    """The engine and the replay raise the interpreter's recursion limit to
+    fit their catalog (`oracle.fit_recursion_limit`), for the whole process.
+    Each test gets back the limit it started with, so a test that relies on
+    the default limit does not depend on which tests ran before it."""
+    limit = sys.getrecursionlimit()
+    yield
+    sys.setrecursionlimit(limit)
 
 
 @pytest.fixture

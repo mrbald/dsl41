@@ -77,6 +77,26 @@ class OracleError(ValueError):
     pass
 
 
+class CascadeDepthError(OracleError, RecursionError):
+    """An instant cascade nested past the interpreter's recursion limit.
+
+    The oracle evaluates a cascade of instant starts recursively, one start
+    inside the next. `fit_recursion_limit` sizes the limit for the catalog,
+    so this means the fit fell short. The message names the RecursionError
+    and the cascade's first start, so an operator can tell it from a
+    corrupt log: the same input raises it again on every replay. The first
+    start is the outermost `_start`; for a cascade entered through a
+    QUE_WAIT readmission (DL-50) that is the first job it started, not the
+    readmitted job."""
+
+    def __init__(self, job: str, cause: str, limit: int) -> None:
+        super().__init__(
+            f"RecursionError: an instant cascade passed the recursion limit of {limit};"
+            f" its first start was {job} ({cause})"
+        )
+        self.job = job
+
+
 JobStatus = Literal[
     "INACTIVE",
     "QUE_WAIT",
