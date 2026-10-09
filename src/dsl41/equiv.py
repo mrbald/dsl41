@@ -110,7 +110,7 @@ from dsl41.ir import (
     SlaSpec,
     Time,
 )
-from dsl41.oracle import Oracle
+from dsl41.oracle import Oracle, fit_recursion_limit
 from dsl41.oracle_state import TERMINAL, Event, TraceEntry
 from dsl41.semantics import DEFAULTS, iced_atom_truth
 
@@ -931,6 +931,8 @@ def equivalent_tier_c(
     mapped_names = [_fold(_apply_rename(name, rename), case_fold) for name in a.jobs]
     if len(set(mapped_names)) != len(mapped_names):
         raise RenameError("job name collision after rename/fold (tier c)")
+    # a script can start a cascade of instant starts as deep as a live one
+    fit_recursion_limit(max(len(a.jobs), len(b.jobs)))
     for index, script in enumerate(scripts):
         # the default switches: equiv is a static tool with no runtime
         # profile, and compares both catalogs under one reading

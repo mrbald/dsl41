@@ -276,6 +276,7 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
 from __future__ import annotations
 
 import copy
+import sys
 
 from collections import deque
 from collections.abc import Callable, Mapping
@@ -372,6 +373,7 @@ from dsl41.oracle_state import (
     TAKE_OVER_HELD,
     TERMINAL,
     CarriedRows,
+    CascadeDepthError,
     Event,
     EventKind,
     JobRuntime,
@@ -533,6 +535,46 @@ class InputBatch:
 #: refused with a START_REFUSED line. Starts that follow one another, such
 #: as a job that several predecessors start in turn, are never refused.
 MAX_NESTED_STARTS: Final = 2
+
+#: Python frames one nested start takes, at most. The worst measured is 11:
+#: an empty box, or one its `box_success` override completes, on CPython
+#: 3.12 and 3.14. An ON_NOEXEC bypass takes 7. The rest is margin.
+FRAMES_PER_NESTED_START: Final = 16
+
+#: The frames left for everything outside a cascade: the caller's stack
+#: (about 20 frames under the engine and the replay) and any other
+#: recursion in the process. Python's default limit.
+RECURSION_LIMIT_BASE: Final = 1000
+
+
+def fit_recursion_limit(job_count: int) -> int:
+    """Raise the interpreter's recursion limit so that the deepest instant
+    cascade over `job_count` jobs fits, and return the limit in force. Never
+    lowers it.
+
+    The oracle evaluates a cascade of instant starts recursively, one start
+    inside the next. A job has at most `MAX_NESTED_STARTS` starts on the
+    call stack at once. Per job, the measured parts sum to at most 28 of the
+    32 frames the budget allows: two nested starts of 11, plus one
+    completion of a run begun before the cascade, about 6. The worst single
+    shape measured needs 22. The engine,
+    the replay and equiv's tier (c) call this once the catalog is loaded:
+    an engine-made input that raises is in the WAL already, so every resume
+    would raise at it again.
+
+    The raise is process-wide. It also lifts every other recursion budget
+    that rests on the limit, such as the condition parser's depth refusal
+    (DL-20): a condition too deep to lower at the default limit may lower
+    after an engine or a replay ran in the same process.
+
+    Since Python 3.12 the limit counts Python frames only. A call from
+    Python to Python takes no C stack, and C recursion has its own guard, so
+    a high limit does not risk the C stack."""
+    needed = RECURSION_LIMIT_BASE + FRAMES_PER_NESTED_START * MAX_NESTED_STARTS * job_count
+    if needed > sys.getrecursionlimit():
+        sys.setrecursionlimit(needed)
+    return sys.getrecursionlimit()
+
 
 #: The closed set of deadline checks the oracle arms as TIMER payloads
 #: (`payload["check"]`); the fourth shape, the run-window defer, carries
@@ -2041,9 +2083,15 @@ class Oracle:
                 f" refused (L010; {cause})",
             )
             return
+        outermost = not self._starts_in_progress
         self._starts_in_progress[job] = depth + 1
         try:
             self._start_admitted(job, cause, force=force)
+        except RecursionError as exc:
+            if not outermost:
+                raise
+            # the stack has unwound to the cascade's first start: name it
+            raise CascadeDepthError(job, cause, sys.getrecursionlimit()) from exc
         finally:
             if depth:
                 self._starts_in_progress[job] = depth

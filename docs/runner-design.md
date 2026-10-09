@@ -104,7 +104,9 @@ steps:
 2. The clock waits (§9). A real clock sleeps until `next_wake` and wakes
    early when the queue gains an event. A virtual clock jumps.
 3. **Journal first** (§7): WAL-append and fsync the injected event, *then*
-   run `feed()` / `advance()`.
+   run `feed()` / `advance()`. The oracle evaluates a cascade of instant
+   starts recursively, so the engine and the replay fit the interpreter's
+   recursion limit to the estate's job count.
 4. Act on emitted events per the dispatch table. Journal the dispatch
    records.
 

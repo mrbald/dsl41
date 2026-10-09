@@ -1929,6 +1929,15 @@ A command whose apply raises is refused before it is journaled
 (`apply_faulted`, concurrency-model §4), so this case needs an
 engine-made input, or a fault a code change introduced.
 
+One such fault has its own message: `RecursionError: an instant cascade
+passed the recursion limit of N; its first start was JOB (CAUSE)`. It
+appears after `engine failed:`, and after `CascadeDepthError:` when
+resume stops. It means a chain of instant starts in one input nested
+deeper than the engine's recursion limit. The log is not corrupt. JOB is
+the job whose start began the cascade. The engine fits the limit to the
+estate's job count, so this should not happen; if it does, report it
+with the message.
+
 **Pick one row (DL-266).** Read the release note: the annotated tag's
 message (README "Release"). Apply these questions in order, and stop at
 the first that picks a row:

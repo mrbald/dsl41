@@ -151,7 +151,7 @@ from pathlib import Path
 from typing import Final, Literal, get_args
 
 from dsl41.ir import CatalogIR, JobIR
-from dsl41.oracle import Oracle
+from dsl41.oracle import Oracle, fit_recursion_limit
 from dsl41.oracle_state import CarriedRows, Event, EventSource
 from dsl41.boundary import (
     BoundaryFailStop,
@@ -590,6 +590,9 @@ class Engine:
                 semantics=switches,
             )
         self.oracle = Oracle(catalog, carried=carried, **reading)
+        # an engine-made input is in the WAL before it is applied, so a
+        # cascade too deep for the stack would stop every resume
+        fit_recursion_limit(len(catalog.jobs))
         #: concurrency-model ss2/ss8: the execution host this engine dispatches
         #: to. One engine per run root owns one local executor; machine names
         #: resolve to a relay through the routing table (ss5) and there is no
