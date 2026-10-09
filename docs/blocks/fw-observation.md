@@ -90,7 +90,6 @@ flowchart TD
 ## Open findings
 
 See the row "FW observation" in [the risk map](../risk-map.md).
-The map ranks it fifth among the [least-tested machines](../risk-map.md#least-tested-machines), with `runner_adapters.py` as its weakest module.
 All four owning modules are in the 100% gate ([DL-299](../risk-map.md#closed-by-dl-289dl-306)), and the row lists no open finding.
 
 ## Gaps found

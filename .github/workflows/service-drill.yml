@@ -17,12 +17,9 @@
 # retirement run ss0's recipe blocks as the runbook prints them (DL-268).
 #
 # Manual only (workflow_dispatch). It is not part of the default gate. It
-# passed every step it had then on GitHub's Ubuntu 24.04 runner at c1e6b0c
-# on 2026-10-04 (DL-271); its first pass there was on 2026-09-29 (DL-223).
-# The watch, configure, kill-engine, kill-supervisor, stop-recover and
-# rollback steps were added after that, and the sealed, upgrade-fresh-root,
-# upgrade-coordinated, upgrade-old-release and upgrade-state-machine steps
-# changed; they have run only in drill-local.sh.
+# passed every step on GitHub's Ubuntu 24.04 runner at b6b8a55 on
+# 2026-10-09 (DL-308), the steps DL-303 added or changed included. Earlier
+# passes there: c1e6b0c on 2026-10-04 (DL-271) and 2026-09-29 (DL-223).
 # Dispatch it again after a change to the units, the launcher or the
 # drill. Each step
 # runs one step of drill-steps.sh; drill-local.sh runs the same steps in a

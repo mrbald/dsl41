@@ -85,7 +85,6 @@ flowchart TD
 ## Open findings
 
 See the row "Wrapper and command" in [the risk map](../risk-map.md).
-The map ranks it first among the [least-tested machines](../risk-map.md#least-tested-machines), with `runner_wrapper.py` as its weakest module.
 All three owning modules are in the 100% gate ([DL-294, DL-299](../risk-map.md#closed-by-dl-289dl-306)), and the row lists no open finding.
 The wrapper runs as a subprocess, and a process a test ends with SIGKILL loses its coverage data, so its numbers are floors.
 

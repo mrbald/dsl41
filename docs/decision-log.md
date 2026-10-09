@@ -20279,3 +20279,24 @@ relitigate an entry; append a new one.
   saying so, open items of DL-290 and DL-293 missing from the risk map, a
   deployment detail that does not belong here, and standby notes without an
   outcome. All are fixed and confirmed by the reviewer.
+- DL-308 The service drill passes on GitHub with the steps DL-303 added,
+  and the risk map is measured on main
+  (2026-10-09; .github/workflows/service-drill.yml (header comment),
+  docs/deployment-runbook.md, docs/risk-map.md, docs/blocks/fw-observation.md,
+  docs/blocks/spawn-idempotency.md, docs/blocks/supervisor.md,
+  docs/blocks/wrapper.md)
+  THE DRILL. Dispatched on main at b6b8a55, the service drill passed every
+  step on GitHub's Ubuntu 24.04 x86_64 runner, the steps DL-303 added or
+  changed included. Those steps had run only in the local podman drill on
+  arm64. The risk map no longer lists that as open.
+  THE RISK MAP. Its table is measured on src at main b6b8a55, the commit
+  DL-307 deferred it to, as its Refresh section says. Every owning module
+  with branches is at 100% branch coverage; runner_codes.py has none. So no
+  machine ranks, and the ranking rule now says that only a machine with a
+  module below 100% ranks. The 30 modules in the gate carry 33 pragma
+  comments. Four block cards drop the rank they quoted, and the SPAWN
+  idempotency card names its one open finding.
+  REVIEW. One Opus reviewer. It found a review label left in the stamp
+  line, a ranking rule that would rank tied machines, a card that missed
+  its row's open finding, and loose wording in the runbook's drill
+  paragraph. All are fixed and confirmed by the reviewer.
