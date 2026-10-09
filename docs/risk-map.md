@@ -11,7 +11,7 @@ The last column lists the open findings of each machine.
 | Machine | Owning modules | Contract | Branch coverage per module | Open findings |
 | --- | --- | --- | --- | --- |
 | Job lifecycle and flags | `oracle_state.py`, `oracle.py`, `conditions.py` | [autosys-semantics §0](autosys-semantics.md#0-execution-model-the-frame-everything-else-hangs-on); [runner-design §3](runner-design.md#3-architecture--functional-core-imperative-shell) | `oracle_state.py` 112/112 (100.00%); `oracle.py` 638/638 (100.00%); `conditions.py` 46/46 (100.00%) | [RELEASE_RESOURCE no-op trace lines](#release_resource-no-op-trace-lines); [unbounded trace and counters](#unbounded-trace-and-counters) |
-| Box execution | `oracle.py`, `oracle_state.py` | [autosys-semantics §2](autosys-semantics.md#2-boxes); [period-model §3.5](period-model.md#35-executions--a-discriminated-lifecycle-not-one-row) | `oracle.py` 638/638 (100.00%); `oracle_state.py` 112/112 (100.00%) | [open vendor readings](#open-vendor-readings-for-a-box-and-its-members); [a completed box can flip, and the ancestor walk has no run binding](#a-completed-box-can-flip-and-the-ancestor-walk-has-no-run-binding); [instant cascades recurse](#instant-cascades-recurse) |
+| Box execution | `oracle.py`, `oracle_state.py` | [autosys-semantics §2](autosys-semantics.md#2-boxes); [period-model §3.5](period-model.md#35-executions--a-discriminated-lifecycle-not-one-row) | `oracle.py` 638/638 (100.00%); `oracle_state.py` 112/112 (100.00%) | [open vendor readings](#open-vendor-readings-for-a-box-and-its-members); [a completed box and an iced member](#a-completed-box-and-an-iced-member); [instant cascades recurse](#instant-cascades-recurse) |
 | Capacity waiter and reservation | `capacity.py`, `oracle.py`, `oracle_state.py` | [period-model §5](period-model.md#5-capacity-decomposed); DL-50, DL-255, DL-256 | `capacity.py` 84/84 (100.00%); `oracle.py` 638/638 (100.00%); `oracle_state.py` 112/112 (100.00%) | [held-unit circular wait](#held-unit-circular-wait) |
 | Scheduler and timer frontier | `runner_scheduler.py`, `runner.py`, `runner_clock.py`, `runner_startup.py`, `runner_journal.py`, `autocal.py` | [runner-design §5](runner-design.md#5-scheduler--the-calendar-the-oracle-deliberately-lacks); [period-model §6](period-model.md#6-the-cutoff-barrier) | `runner_scheduler.py` 66/66 (100.00%); `runner.py` 216/216 (100.00%); `runner_clock.py` 16/16 (100.00%); `runner_startup.py` 188/188 (100.00%); `runner_journal.py` 152/152 (100.00%); `autocal.py` 216/216 (100.00%) | none |
 | Engine work choice | `runner.py` | [runner-design §4](runner-design.md#4-engine-loop--single-writer) | `runner.py` 216/216 (100.00%) | [unbounded trace and counters](#unbounded-trace-and-counters) |
@@ -130,12 +130,16 @@ These rest on readings of the vendor manuals or on no vendor statement. Each but
 - SEM-23 (DL-301): the oracle models the `RESTRICT_FORCE_STARTJOB` configuration. An estate with that variable unset can diverge.
 - SEM-20 (DL-301): the default `off-ice-in-running-box=next-run` follows the reference pages. The 24.0 Web UI help says the opposite.
 
-### A completed box can flip, and the ancestor walk has no run binding
+### A completed box and an iced member
 
-Both are open in DL-304. The flip behaves the same before and after it.
+DL-309 closes the first two items DL-304 left open.
+SEM-15's idle recompute drops an iced member that is out of the run, under the default `idle-box-iced-member=ignore`, so a completed box no longer flips through it.
+The walk from a job's change up to its ancestors skips an ancestor that the same moment completed and started again (SEM-12).
+One vendor reading stays open:
 
-- SEM-15's idle recompute reads an iced member's status. A completed box can change from SUCCESS to FAILURE when a job inside an iced subbox, or an iced member given a status, fails later. By then the box's success consumers have launched, and its failure consumers launch too. A candidate fix makes the recompute skip iced members. The vendor reading needs a ruling or a probe first.
-- The walk from a job's transition up to an ancestor box has no run binding. A restarted box run can complete through a job of the earlier run.
+- Q16: whether an iced member votes when a box that is not running re-derives its status. No vendor sentence names the case. The runbook has a probe. `vote` keeps the earlier reading.
+
+A member that is not iced still flips a completed box, and its failure consumers start. That is SEM-15's documented vendor behavior, not a finding.
 
 ### A journal stays open when genesis fails late
 

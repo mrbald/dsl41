@@ -320,3 +320,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-306 | The engine and every replay fit Python's recursion limit to the estate, so a long instant cascade no longer crash-loops replay | [docs/risk-map.md](risk-map.md) |
 | DL-307 | The architecture review of 2026-10-07 is closed: what was acted on, declined and left open, and the standby requirements | [docs/deployment-runbook.md](deployment-runbook.md), [docs/risk-map.md](risk-map.md) |
 | DL-308 | The service drill passes on GitHub with the steps DL-303 added, and the risk map is measured on main | [docs/deployment-runbook.md](deployment-runbook.md), [docs/risk-map.md](risk-map.md) |
+| DL-309 | A completed box keeps its status through an iced member, and the walk from a job up to its boxes is bound to their runs (state machine 20) | [docs/risk-map.md](risk-map.md) |

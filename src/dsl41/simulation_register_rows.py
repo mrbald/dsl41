@@ -3353,6 +3353,25 @@ PROFILE_ROWS: tuple[Row, ...] = (
         ),
         _row(
             surface="profile_alt",
+            member="semantics.idle-box-iced-member=ignore",
+            klass=SUPPORTED,
+            cite="runner-design ss8a, SEM-15",
+            effect="the default: a box that is not running re-derives its status without an"
+            " iced member that is out of the run, so a completed box does not flip when a job"
+            " inside an iced subbox, or an iced member given a status, ends later",
+            trigger='{"semantics": {"idle-box-iced-member": "ignore"}}',
+        ),
+        _row(
+            surface="profile_alt",
+            member="semantics.idle-box-iced-member=vote",
+            klass=SUPPORTED,
+            cite="runner-design ss8a, SEM-15",
+            effect="a box that is not running re-derives its status from an iced member's own"
+            " status too, so a completed box can flip through it",
+            trigger='{"semantics": {"idle-box-iced-member": "vote"}}',
+        ),
+        _row(
+            surface="profile_alt",
             member="semantics.box-terminator-on-terminated=true",
             klass=SUPPORTED,
             cite="runner-design ss8a, SEM-14",
@@ -4346,6 +4365,20 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         effect="a box whose start leaves no member in the run, every direct member on ice or"
         " no members, completes at its start; no vendor sentence names the case, and"
         " box-start-all-members-out=wait keeps it RUNNING",
+        trigger=_job(BOX_BLOCK, box_name="BOX0", status="ON_ICE"),
+        quiet=_job(BOX_BLOCK, box_name="BOX0"),
+    ),
+    _row(
+        surface="runtime",
+        member="idle-box-iced-member",
+        klass=PROVISIONAL,
+        cite="SEM-15, oracle.Oracle._idle_box_recompute",
+        label="Q16",
+        sites=("oracle.Oracle._idle_box_recompute#1",),
+        protocol="Q16",
+        effect="a box that is not running re-derives its status without an iced member that"
+        " is out of the run, as it does without an INACTIVE one; no vendor sentence names an"
+        " iced member there, and idle-box-iced-member=vote reads its status",
         trigger=_job(BOX_BLOCK, box_name="BOX0", status="ON_ICE"),
         quiet=_job(BOX_BLOCK, box_name="BOX0"),
     ),

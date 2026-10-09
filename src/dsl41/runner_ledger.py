@@ -125,7 +125,14 @@ from dsl41.runner_clock import EngineError
 #: job, keeps its box waiting; and a start nested inside two starts of
 #: the same job is refused. A replay with such an input can derive a box status
 #: or a start that v18 did not.
-STATE_MACHINE_VERSION = 19
+#: 20 since DL-309 (SEM-15 and SEM-12's run binding): under
+#: `idle-box-iced-member=ignore`, the default, an idle box's recompute drops
+#: an iced member that is out of the run, so a completed box no longer
+#: flips through it; and the walk from a job's transition up to its
+#: ancestors skips an ancestor that the same cascade completed and started
+#: again. A replay with such an input can derive a box status that v19 did
+#: not.
+STATE_MACHINE_VERSION = 20
 
 LOCK_NAME = "leader.lock"
 

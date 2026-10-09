@@ -1262,10 +1262,23 @@ def test_the_box_start_switch_defaults_to_complete_and_the_vendor_reading_is_unk
     assert switch.autosys == "unknown"
 
 
-def test_box_start_all_members_out_affects_exactly_the_boxes() -> None:
-    """SEM-11: a flip changes whether a box completes at its start, so it
-    reaches every box, a subbox included, and no other job."""
-    affects = semantics.REGISTRY["box-start-all-members-out"].affects
+def test_the_idle_box_switch_defaults_to_ignore_and_the_vendor_reading_is_unknown() -> None:
+    """SEM-15, Q16: no vendor sentence says whether an iced member votes
+    when a box that is not running re-derives its status, so `autosys` is
+    unknown until the runbook's Q16 probe; `ignore` is the default and
+    `vote` keeps dsl41's earlier behavior."""
+    switch = semantics.REGISTRY["idle-box-iced-member"]
+    assert switch.values == ("ignore", "vote")
+    assert switch.default == "ignore"
+    assert switch.autosys == "unknown"
+
+
+@pytest.mark.parametrize("switch", ["box-start-all-members-out", "idle-box-iced-member"])
+def test_a_box_wide_switch_affects_exactly_the_boxes(switch: str) -> None:
+    """SEM-11, SEM-15: a flip changes whether a box completes at its start,
+    or how a box that is not running re-derives its status, so it reaches
+    every box, a subbox included, and no other job."""
+    affects = semantics.REGISTRY[switch].affects
     catalog = lower_source(_BOX_SWITCH_JIL)
     assert {name for name, job in catalog.jobs.items() if affects(job, catalog)} == {"b", "sb"}
 
@@ -1300,18 +1313,21 @@ def test_a_box_switch_flip_reaches_a_running_box_through_its_member(
     assert node not in result.by_job["lone"].changed
 
 
-def test_a_box_start_switch_flip_refuses_a_running_box_and_its_member() -> None:
-    """ss10.2, SEM-11: a flip of `box-start-all-members-out` changes every
-    box, so a running box is refused, and a member carried with it inherits
-    the change through the classifier's box edge and is refused too; a job
-    outside every box is not changed."""
+@pytest.mark.parametrize(
+    ("switch", "value"), [("box-start-all-members-out", "wait"), ("idle-box-iced-member", "vote")]
+)
+def test_a_box_wide_switch_flip_refuses_a_running_box_and_its_member(
+    switch: str, value: str
+) -> None:
+    """ss10.2, SEM-11, SEM-15: a flip of `box-start-all-members-out` or
+    `idle-box-iced-member` changes every box, so a running box is refused,
+    and a member carried with it inherits the change through the
+    classifier's box edge and is refused too; a job outside every box is
+    not changed."""
     catalog = lower_source(_BOX_SWITCH_JIL)
     closing = Baseline(catalog=catalog, profile=RuntimeProfile())
-    opening = Baseline(
-        catalog=catalog,
-        profile=RuntimeProfile(semantics={"box-start-all-members-out": "wait"}),
-    )
-    node = SWITCH + "box-start-all-members-out"
+    opening = Baseline(catalog=catalog, profile=RuntimeProfile(semantics={switch: value}))
+    node = SWITCH + switch
     result = classify(
         closing=closing,
         opening=opening,

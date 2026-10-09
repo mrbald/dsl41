@@ -175,10 +175,11 @@ Interpreter decisions (each with a trace test; PENDING items keep switches):
   SEM-15 (a terminal member transition, or an injected INACTIVE on a
   member, re-derives a non-running, non-TERMINATED box's status once every
   member that is not INACTIVE is terminal; INACTIVE members are ignored,
-  DL-242), SEM-17 (nesting: a member box starting is a member start; folds
-  recurse; the ACTIVATED label is unmodeled -- a waiting member reads
-  INACTIVE), SEM-18 (an injected INACTIVE on a box cascades to every job it
-  contains, DL-242).
+  DL-242, and so, under the default `idle-box-iced-member=ignore`, is an
+  iced member out of the run), SEM-17 (nesting: a member box starting is
+  a member start; folds recurse; the ACTIVATED label is unmodeled -- a
+  waiting member reads INACTIVE), SEM-18 (an injected INACTIVE on a box
+  cascades to every job it contains, DL-242).
 - FORCE_STARTJOB (SEM-23, DL-243): overrides false conditions, ON_HOLD, and
   the box-RUNNING gate ("regardless of conditions"). A non-live job that is
   ON_ICE or ON_HOLD is a non-executable state the force clears first
@@ -942,33 +943,41 @@ class Oracle:
         released = self._settle_row(job, old, new)
         self._notify_wakes(job, new, wake_queue=released or self._lifts_a_block(old, new))
 
-    def _notify_boxes(self, job: str, old: str, new: str) -> None:
+    def _notify_boxes(
+        self, job: str, old: str, new: str, *, runs: Mapping[str, int] | None = None
+    ) -> None:
         """The box rules a transition drives: the parent's member rules, the
         ancestors' transitive overrides, and the Q3c disarm of a box that
-        reached a terminal status."""
+        reached a terminal status. `runs` is the ancestors' run numbers for
+        the moment (`_ancestor_runs`); a single transition reads them here,
+        and a batch passes the ones it read before its first box rule."""
         job_ir = self.catalog.jobs.get(job)
         if job_ir is None:
             return
         box = job_ir.box.box_name
         if box is not None:
-            leaving = old in LIVE | {"QUE_WAIT"} and new not in LIVE | {"QUE_WAIT"}
-            holders = self._holder_runs(job) if leaving else []
+            if runs is None:
+                runs = self._ancestor_runs(job)
             self._on_member_transition(box, job, old, new)
-            self._on_descendant_transition(job, new, resolved=self._resolves(box, job, old, new))
-            self._holders_may_leave_the_run(holders)
+            self._on_descendant_transition(
+                job, new, resolved=self._resolves(box, job, old, new), runs=runs
+            )
+            if old in LIVE | {"QUE_WAIT"} and new not in LIVE | {"QUE_WAIT"}:
+                self._holders_may_leave_the_run(job, runs)
         if job_ir.job_type == "BOX" and new in TERMINAL:
             self._disarm_members(job)
 
-    def _holder_runs(self, job: str) -> list[tuple[str, str, int]]:
-        """Each box above `job` that has a parent, with that parent and its
-        run number, read before the transition's own box rules run."""
-        chain = self._ancestor_boxes(job)
-        return [
-            (holder, parent, self._runtime(parent).run_number)
-            for holder, parent in zip(chain, chain[1:], strict=False)
-        ]
+    def _ancestor_runs(self, job: str) -> dict[str, int]:
+        """Each box above `job` with its run number, read before a moment's
+        first box rule runs. A rule of that moment that completes a box can
+        start it again in the same cascade; the walk up (SEM-12) and the
+        holders' check (SEM-20) then leave the new run alone: "Jobs in a box
+        run only once for each box execution" (Basic Box Job Concepts,
+        AutoSys 12.0 and 24.2), so an end in the earlier run is no moment of
+        the later one."""
+        return {box: self._runtime(box).run_number for box in self._ancestor_boxes(job)}
 
-    def _holders_may_leave_the_run(self, holders: list[tuple[str, str, int]]) -> None:
+    def _holders_may_leave_the_run(self, job: str, runs: Mapping[str, int]) -> None:
         """SEM-20 (DL-304): a job stopped being live or queued. An iced box
         above it that held no other live or queued job is now out of its
         parent's run (`_out_of_the_run`), which is the moment its ice takes
@@ -979,11 +988,12 @@ class Oracle:
         above it, and neither does an end that the iced box's own unmet
         override suppresses; without this the parent would wait for ever.
         The moment belongs to the parent's run in progress when the job
-        stopped: if the transition's own cascade restarted the parent, the
-        new run gets no moment from it."""
-        for holder, parent, run in holders:
-            if self._runtime(parent).run_number == run:
-                self._ice_resolves_member(holder, self._runtime(holder).status)
+        stopped (`runs`): if the transition's own cascade restarted the
+        parent, the new run gets no moment from it."""
+        chain = self._ancestor_boxes(job)
+        for holder, parent in zip(chain, chain[1:], strict=False):
+            if self._runtime(parent).run_number == runs[parent]:
+                self._ice_resolves_member(holder, self._runtime(holder).status, runs)
 
     def _disarm_members(self, box: str) -> None:
         """A member's arm is scoped to the box run that armed it (DL-54
@@ -1107,6 +1117,11 @@ class Oracle:
         `between` runs after phase 1: the cascade's Q3c disarm, or the box's
         own STARTING transition for the reset.
 
+        The batch is one moment, so each row's ancestor run numbers are read
+        once, after phase 1 and before `between` (`_ancestor_runs`): a later
+        row's walk up and holder check are bound to those runs, not to a run
+        an earlier row's cascade started (SEM-12, SEM-20).
+
         `exit_code` is written on the first row only (an injected STATUS
         may carry one); `clear_exit_code` clears it on every row."""
         written: list[tuple[str, str, int, bool]] = []
@@ -1123,6 +1138,7 @@ class Oracle:
             if self._box_stopped(job, old, "INACTIVE"):
                 self._scan_owed = True
             written.append((job, old, self._runtime(job).run_number, wake))
+        runs = {job: self._ancestor_runs(job) for job, _old, _run, _wake in written}
         between()
         owed = False
         for job, before, run_number, wake in written:
@@ -1134,7 +1150,7 @@ class Oracle:
                 continue
             # `before` is the pre-batch status even when a wake restarted the
             # box around this row; no rule reads it here, so that is harmless
-            self._notify_boxes(job, before, "INACTIVE")
+            self._notify_boxes(job, before, "INACTIVE", runs=runs[job])
             self._notify_wakes(job, "INACTIVE", wake_queue=wake)
         if owed:
             self._wake_waiters()
@@ -1334,7 +1350,7 @@ class Oracle:
             and now.run_number == parent.run_number
         ):
             self._idle_box_recompute(
-                box, self.catalog.jobs[box], cause=f"member {job!r} set INACTIVE"
+                box, self.catalog.jobs[box], cause=f"member {job!r} set INACTIVE", trigger=job
             )
 
     def _oob_ignored(self, kind: EventKind, job: str) -> str | None:
@@ -1402,7 +1418,7 @@ class Oracle:
                 # them before its wakes; then downstream conditions treat
                 # this job as satisfied
                 if not iced:
-                    self._ice_resolves_member(job, status)
+                    self._ice_resolves_member(job, status, self._ancestor_runs(job))
                 self._wake_referencers(job, cause=f"{job!r} put ON_ICE")
         elif kind == "OFF_ICE":
             iced = self._runtime(job).on_ice  # an OFF_ICE on a job not iced takes nothing off
@@ -2027,11 +2043,13 @@ class Oracle:
         # already INACTIVE: no transition to ride -- run the same door here,
         # then the ancestors' transitive overrides, as a resolved INACTIVE
         # transition would (SEM-12, DL-242)
+        runs = self._ancestor_runs(job_ir.name)
         self._completion_door(box, job_ir.name, "INACTIVE", completion_moment=True)
         self._on_descendant_transition(
             job_ir.name,
             "INACTIVE",
             resolved=self._resolves(box, job_ir.name, "INACTIVE", "INACTIVE"),
+            runs=runs,
         )
 
     def _ancestor_boxes(self, job: str) -> list[str]:
@@ -2785,7 +2803,9 @@ class Oracle:
         elif box_rt.status not in LIVE and new in TERMINAL:
             # SEM-15 [C]: a member change on a non-running box re-derives the
             # box's status (TERMINATED already returned above, SEM-13 sticky)
-            self._idle_box_recompute(box, box_ir, cause=f"member {member!r} changed")
+            self._idle_box_recompute(
+                box, box_ir, cause=f"member {member!r} changed", trigger=member
+            )
 
     def _box_terminator_fires(self, member: str, new: str) -> bool:
         """SEM-14: whether `member` ending `new` triggers its box_terminator.
@@ -2843,7 +2863,7 @@ class Oracle:
             )
         )
 
-    def _ice_resolves_member(self, job: str, status: str) -> None:
+    def _ice_resolves_member(self, job: str, status: str, runs: Mapping[str, int]) -> None:
         """SEM-20 (DL-285): the vendor removes an iced job from all
         conditions and logic, and `_all_members_done` skips it, so an ON_ICE
         on a member of a RUNNING box is a completion moment for that box and
@@ -2857,7 +2877,8 @@ class Oracle:
         queued job keeps the box waiting, and that job's end carries the
         door through the subbox's idle recompute. A box that is not RUNNING
         re-derives nothing (SEM-15 reads a member's status, which the ice
-        does not move)."""
+        does not move). `runs` holds each ancestor's run number from before
+        the moment's first box rule (`_ancestor_runs`)."""
         job_ir = self.catalog.jobs.get(job)
         box = job_ir.box.box_name if job_ir is not None else None
         if box is None:
@@ -2872,8 +2893,11 @@ class Oracle:
         ):
             return
         self._completion_door(box, job, status, completion_moment=True)
-        if self._runtime(box).status == "RUNNING":  # else its transition walked up
-            self._on_descendant_transition(job, status, resolved=True)
+        box_rt = self._runtime(box)
+        if box_rt.status == "RUNNING" and box_rt.run_number == runs[box]:
+            # else the box's own transition walked up, and a run it started
+            # again in the same cascade gets no moment from this one
+            self._on_descendant_transition(job, status, resolved=True, runs=runs)
 
     def _off_ice_in_running_box(self, job: str) -> str | None:
         """SEM-20 under `off-ice-in-running-box=next-run`: a member taken
@@ -2900,7 +2924,9 @@ class Oracle:
         self.store.record_iced_out(box, job)
         return box
 
-    def _on_descendant_transition(self, member: str, new: str, *, resolved: bool) -> None:
+    def _on_descendant_transition(
+        self, member: str, new: str, *, resolved: bool, runs: Mapping[str, int]
+    ) -> None:
         """SEM-12's "inside the box" is TRANSITIVE -- a grandchild is inside
         every box above it, which is what derive._is_inside implements for
         the static edge classification. So each ancestor ABOVE the direct
@@ -2915,7 +2941,15 @@ class Oracle:
 
         `resolved`: the member was resolved in its parent's RUNNING run
         (`_resolves`, or an ice), which is a completion moment for every
-        ancestor, as it is for the parent."""
+        ancestor, as it is for the parent.
+
+        `runs` holds each ancestor's run number from before the moment's
+        first box rule (`_ancestor_runs`). An ancestor whose run moved since
+        was completed and started again by this moment's own cascade; the
+        walk skips it, since the member's change belongs to the earlier run
+        ("Jobs in a box run only once for each box execution"). It does not
+        stop there: a higher ancestor whose run did not move still owns the
+        moment, and stopping would leave its override hung."""
         chain = self._ancestor_boxes(member)
         for box in chain[1:]:  # [0] is the direct parent
             box_ir = self.catalog.jobs.get(box)
@@ -2925,20 +2959,38 @@ class Oracle:
                 # parent, `chain[0]`, is indexed without a guard in `_on_member_transition`
                 # for the same reason.
                 return
-            if self._runtime(box).status != "RUNNING":
-                continue  # not evaluating: SEM-13 sticky, or already folded
+            box_rt = self._runtime(box)
+            if box_rt.status != "RUNNING" or box_rt.run_number != runs[box]:
+                continue  # not evaluating: SEM-13 sticky, already folded, or a later run
             if (new in TERMINAL | {"RUNNING"} or resolved) and self._apply_box_overrides(
                 box, box_ir, member, new, completion_moment=resolved
             ):
                 return
 
-    def _idle_box_recompute(self, box: str, box_ir: JobIR, cause: str) -> None:
+    def _idle_box_recompute(self, box: str, box_ir: JobIR, cause: str, *, trigger: str) -> None:
         """Derived-status recompute for a non-running box (SEM-15): pure
         function of current member statuses -- ran_members does not apply
         outside a live run. "Any jobs in the box with a status of INACTIVE
         are ignored when the status of the box is being re-evaluated"
         (DL-242), so it fires when every other member is terminal. With
-        every member INACTIVE the default verdict is SUCCESS."""
+        every member INACTIVE the default verdict is SUCCESS.
+
+        Under `idle-box-iced-member=ignore`, the default, a member that is
+        out of the run on ice (`_out_of_the_run`) is dropped the same way:
+        SEM-20 removes an iced job from all logic, and DL-304's fold already
+        gives it no vote. So a box that completed does not flip when a job
+        inside an iced subbox, or an iced member given a status, ends later.
+        Nor is the change of `trigger`, the member whose change runs the
+        recompute, a verdict when it is out of the run: if no member is left
+        to vote, the box keeps its status. DL-242's vacuous SUCCESS ("returns
+        a SUCCESS status as it ignores all the jobs that are in INACTIVE
+        status") stays for a trigger in the run, such as an operator's
+        INACTIVE, even when every other member is iced. An iced member that
+        is live, or holds a live or queued job, is not dropped: its own
+        status counts as any member's does, so a live status blocks the
+        recompute and an INACTIVE one is ignored. `vote` reads the iced
+        member's status, as dsl41 did before. No vendor sentence names an
+        iced member here (Q16)."""
         members = self._members(box)
         if not members:  # pragma: no cover -- see below
             # Unreachable: both callers reach here from a transition of a member
@@ -2946,7 +2998,16 @@ class Oracle:
             # holds at least that member. It would take a catalog edited between the
             # transition and this call to empty it.
             return
-        statuses = [s for s in (self._runtime(m).status for m in members) if s != "INACTIVE"]
+        # PENDING: Q16 -- whether an iced member votes in an idle box's recompute
+        ignore_iced = self.semantics.idle_box_iced_member == "ignore"
+        statuses = [
+            status
+            for member in members
+            if (status := self._runtime(member).status) != "INACTIVE"
+            and not (ignore_iced and self._out_of_the_run(member))
+        ]
+        if ignore_iced and not statuses and self._out_of_the_run(trigger):
+            return  # an iced member's own change is no verdict, and nothing else votes
         if not all(s in TERMINAL for s in statuses):
             return
         verdicts: tuple[tuple[CondAttr | None, JobStatus], ...] = (

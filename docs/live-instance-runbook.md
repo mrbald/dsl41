@@ -561,6 +561,80 @@ The two boxes may differ; record each. Capture the event_demon lines
 for both boxes. Cleanup: run `jil <<< "delete_box: dsl41_q15"` and
 `jil <<< "delete_box: dsl41_q15_e"`.
 
+### Q16 — an iced member when a completed box re-derives its status (~2 minutes, runs three short jobs)
+
+Basic Box Job Concepts lets a member's FORCE_STARTJOB or CHANGE_STATUS
+change the status of a box that is not running, and ignores only INACTIVE
+members. No vendor sentence names an iced member there. dsl41's default
+`idle-box-iced-member=ignore` drops an iced member that is out of the run,
+so a completed box does not flip through it (dossier SEM-15, §9 Q16);
+`vote` reads its status. Box `_q16` has an iced direct member `_m`. Box
+`_q16s` has an iced subbox `_q16s_s` that holds `_q16s_n`, which fails.
+
+```
+jil <<'EOF'
+insert_job: dsl41_q16
+job_type: b
+insert_job: dsl41_q16_a
+job_type: c
+box_name: dsl41_q16
+machine: <M>
+command: /bin/true
+insert_job: dsl41_q16_m
+job_type: c
+box_name: dsl41_q16
+machine: <M>
+command: /bin/true
+insert_job: dsl41_q16s
+job_type: b
+insert_job: dsl41_q16s_a
+job_type: c
+box_name: dsl41_q16s
+machine: <M>
+command: /bin/true
+insert_job: dsl41_q16s_s
+job_type: b
+box_name: dsl41_q16s
+insert_job: dsl41_q16s_n
+job_type: c
+box_name: dsl41_q16s_s
+machine: <M>
+command: /bin/false
+EOF
+sendevent -E JOB_ON_ICE -J dsl41_q16_m
+sendevent -E JOB_ON_ICE -J dsl41_q16s_s
+sendevent -E STARTJOB -J dsl41_q16
+sendevent -E STARTJOB -J dsl41_q16s
+sleep 30; autorep -J dsl41_q16% -d     # both boxes SUCCESS, _m and _q16s_s ON_ICE
+sendevent -E CHANGE_STATUS -s FAILURE -J dsl41_q16_m
+sendevent -E FORCE_STARTJOB -J dsl41_q16s_n
+sleep 30; autorep -J dsl41_q16% -d
+```
+
+First read `_q16s_s` after `_q16s_n` fails. dsl41 re-derives an iced
+subbox like any idle box, so it shows FAILURE there. If AutoSys leaves
+`_q16s_s` unchanged, `_q16s` decides nothing yet: record that divergence,
+then send `sendevent -E CHANGE_STATUS -s FAILURE -J dsl41_q16s_s`, wait
+30 seconds and run `autorep -J dsl41_q16% -d` again, so that the iced
+subbox carries a FAILURE status, as `_m` does.
+
+Readings, for each box on its own, once its iced member shows FAILURE:
+
+- The box stays SUCCESS: the default `ignore` holds. Q16 closes as pinned,
+  and the registry's `autosys` value becomes `ignore`.
+- The box changes to FAILURE: the vendor reads the iced member's status.
+  The default flips to `vote`, which moves the state machine version;
+  `ignore` stays selectable.
+
+For `_q16` also record what the CHANGE_STATUS did to `_m`: whether the
+event was refused, whether `_m` shows FAILURE, and whether it still shows
+ON_ICE. If `_m` shows FAILURE and is no longer on ice, CHANGE_STATUS clears
+the ice; then `vote` is the vendor's reading for this shape, and dsl41
+must clear the ice too. If `_m` does not show FAILURE, `_q16` decides
+nothing; record the refusal. The two boxes may differ; record each. Capture the
+event_demon lines for both boxes. Cleanup: run
+`jil <<< "delete_box: dsl41_q16"` and `jil <<< "delete_box: dsl41_q16s"`.
+
 ### Q3c — does a member's latched tick survive into the next box run
 
 This protocol is timing-sensitive. Pick a `HH:MM` value ~3 minutes in

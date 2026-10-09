@@ -2981,7 +2981,8 @@ def test_sem20_a_holder_leaving_the_run_gives_no_moment_to_a_restarted_parent() 
     end completes run one through the override, and the relay `rl` starts
     the box again inside that cascade, so the parent is in a later run when
     the holder check comes; that run gets no completion moment from `m`
-    and keeps waiting for `a`."""
+    and keeps waiting for `a`. The walk up from `m` skips run two as well
+    (SEM-12's run binding), so no third run starts."""
     o = oracle(
         "insert_job: bx20p\njob_type: b\ncondition: s(bx20p_rl)\n"
         "box_success: s(bx20p_rl) | s(bx20p_m)\n\n"
@@ -2997,7 +2998,7 @@ def test_sem20_a_holder_leaving_the_run_gives_no_moment_to_a_restarted_parent() 
     o.feed(ev("STATUS", 2, job="bx20p_a", status="SUCCESS"))
     assert o.store.job["bx20p"].status == "RUNNING"
     o.feed(ev("STATUS", 3, job="bx20p_m", status="SUCCESS"))
-    assert o.store.job["bx20p"].run_number == 3
+    assert o.store.job["bx20p"].run_number == 2
     assert _status(o, "bx20p", "bx20p_a") == ["RUNNING", "RUNNING"]
 
 
@@ -7376,6 +7377,482 @@ def test_sem12_a_resolved_member_reaches_every_ancestor_override(nested: bool) -
     assert o.store.job["out12r"].status == "SUCCESS"
     [fold] = [t for t in o.trace() if t.job == "out12r" and t.transition == "RUNNING->SUCCESS"]
     assert fold.cause == "box_success override met (SEM-12)"
+
+
+# ------------------------------- SEM-15: an iced member in an idle box's recompute (Q16)
+
+#: `idle-box-iced-member=vote`: the recompute reads an iced member's status,
+#: as dsl41 did before the switch
+_VOTE = resolve_switches({"idle-box-iced-member": "vote"})
+
+
+def _flip_box(box: str, *, subbox: bool) -> str:
+    """Box `box` with a plain member `a` and a job `m`, inside an iced
+    subbox `s` when `subbox`, else a direct member; `d` waits on s(box), `e`
+    on f(box)."""
+    parent = f"{box}_s" if subbox else box
+    return (
+        f"insert_job: {box}\njob_type: b\n\n"
+        f"insert_job: {box}_a\njob_type: c\ncommand: a\nmachine: m1\nbox_name: {box}\n\n"
+        + (f"insert_job: {box}_s\njob_type: b\nbox_name: {box}\n\n" if subbox else "")
+        + f"insert_job: {box}_m\njob_type: c\ncommand: m\nmachine: m1\nbox_name: {parent}\n\n"
+        f"insert_job: {box}_d\njob_type: c\ncommand: d\nmachine: m1\ncondition: s({box})\n\n"
+        f"insert_job: {box}_e\njob_type: c\ncommand: e\nmachine: m1\ncondition: f({box})\n"
+    )
+
+
+def _assert_the_iced_vote(
+    o: Oracle | EngineHarness, box: str, semantics: SemanticSwitches | None
+) -> None:
+    """Under the default `ignore` the completed box keeps SUCCESS and its
+    failure consumer never starts; under `vote` it flips to FAILURE through
+    the iced member and the failure consumer starts beside the success
+    consumer that already ran."""
+    if semantics is None:
+        assert _status(o, box, f"{box}_d", f"{box}_e") == ["SUCCESS", "RUNNING", "INACTIVE"]
+        assert transitions(o, f"{box}_e") == []
+    else:
+        assert _status(o, box, f"{box}_d", f"{box}_e") == ["FAILURE", "RUNNING", "RUNNING"]
+        [flip] = [t for t in o.trace() if t.job == box and t.transition == "SUCCESS->FAILURE"]
+        assert flip.cause.startswith("idle-box recompute (SEM-15)")
+
+
+@pytest.mark.parametrize("semantics", [None, _VOTE], ids=["ignore", "vote"])
+def test_sem15_a_job_failing_inside_an_iced_subbox_leaves_a_completed_box_alone(
+    semantics: SemanticSwitches | None,
+) -> None:
+    """SEM-15, SEM-20, Q16: the box completes by its fold with the subbox
+    iced and out of the run (DL-304). A job forced inside the iced subbox
+    then fails, and the subbox re-derives FAILURE. Under `ignore` the
+    parent's recompute drops the iced subbox, as its fold did, so the box
+    stays SUCCESS; under `vote` it flips."""
+    o = oracle(_flip_box("bx15f", subbox=True), semantics=semantics)
+    o.feed(ev("ON_ICE", 0, job="bx15f_s"))
+    o.feed(ev("STARTJOB", 1, job="bx15f"))
+    o.feed(ev("STATUS", 2, job="bx15f_a", status="SUCCESS"))
+    assert _status(o, "bx15f", "bx15f_d") == ["SUCCESS", "RUNNING"]
+    o.feed(ev("FORCE_STARTJOB", 3, job="bx15f_m"))
+    o.feed(ev("STATUS", 4, job="bx15f_m", status="FAILURE"))
+    assert o.store.job["bx15f_s"].status == "FAILURE"
+    _assert_the_iced_vote(o, "bx15f", semantics)
+
+
+@pytest.mark.parametrize("semantics", [None, _VOTE], ids=["ignore", "vote"])
+def test_sem15_a_box_completed_at_its_start_stays_completed_through_an_iced_subbox(
+    semantics: SemanticSwitches | None,
+) -> None:
+    """SEM-15, SEM-11, Q16: with every member iced the box completes at its
+    start (Q15's default); a job forced inside the iced subbox that fails
+    later does not flip it under `ignore`, and does under `vote`."""
+    o = oracle(_flip_box("bx15g", subbox=True), semantics=semantics)
+    o.feed(ev("ON_ICE", 0, job="bx15g_s"))
+    o.feed(ev("ON_ICE", 0, job="bx15g_a"))
+    o.feed(ev("STARTJOB", 1, job="bx15g"))
+    assert _status(o, "bx15g", "bx15g_d") == ["SUCCESS", "RUNNING"]
+    o.feed(ev("FORCE_STARTJOB", 3, job="bx15g_m"))
+    o.feed(ev("STATUS", 4, job="bx15g_m", status="FAILURE"))
+    _assert_the_iced_vote(o, "bx15g", semantics)
+
+
+@pytest.mark.parametrize("semantics", [None, _VOTE], ids=["ignore", "vote"])
+def test_sem15_an_iced_member_given_failure_leaves_a_completed_box_alone(
+    semantics: SemanticSwitches | None,
+) -> None:
+    """SEM-15, SEM-20, Q16: an iced direct member given FAILURE by
+    CHANGE_STATUS keeps its ice and is still out of the run, so under
+    `ignore` the completed box stays SUCCESS; under `vote` it flips."""
+    o = oracle(_flip_box("bx15h", subbox=False), semantics=semantics)
+    o.feed(ev("ON_ICE", 0, job="bx15h_m"))
+    o.feed(ev("STARTJOB", 1, job="bx15h"))
+    o.feed(ev("STATUS", 2, job="bx15h_a", status="SUCCESS"))
+    assert _status(o, "bx15h", "bx15h_d") == ["SUCCESS", "RUNNING"]
+    o.feed(ev("STATUS", 4, job="bx15h_m", status="FAILURE"))
+    assert o.store.job["bx15h_m"].on_ice
+    assert o.store.job["bx15h_m"].status == "FAILURE"
+    _assert_the_iced_vote(o, "bx15h", semantics)
+
+
+def _completed_with_m_iced(o: Oracle | EngineHarness, box: str) -> None:
+    o.feed(ev("ON_ICE", 0, job=f"{box}_m"))
+    o.feed(ev("STARTJOB", 1, job=box))
+    o.feed(ev("STATUS", 2, job=f"{box}_a", status="SUCCESS"))
+    assert _status(o, box, f"{box}_d") == ["SUCCESS", "RUNNING"]
+
+
+def _failed_through_a_vote(o: Oracle | EngineHarness, box: str) -> None:
+    assert _status(o, box, f"{box}_e") == ["FAILURE", "RUNNING"]
+
+
+@pytest.mark.parametrize("semantics", [None, _VOTE], ids=["ignore", "vote"])
+def test_sem15_a_forced_member_that_is_not_iced_still_flips_a_completed_box(
+    semantics: SemanticSwitches | None,
+) -> None:
+    """SEM-15 [V] under both values: Basic Box Job Concepts says a member
+    whose status a FORCE_STARTJOB changes "could change the status of its
+    containing box", and that the box's change "could then trigger the
+    start of downstream jobs". A member that is not iced votes."""
+    o = oracle(_flip_box("bx15k", subbox=False), semantics=semantics)
+    _completed_with_m_iced(o, "bx15k")
+    o.feed(ev("FORCE_STARTJOB", 3, job="bx15k_a"))
+    o.feed(ev("STATUS", 4, job="bx15k_a", status="FAILURE"))
+    _failed_through_a_vote(o, "bx15k")
+
+
+@pytest.mark.parametrize("semantics", [None, _VOTE], ids=["ignore", "vote"])
+def test_sem15_a_member_taken_off_ice_and_forced_flips_a_completed_box(
+    semantics: SemanticSwitches | None,
+) -> None:
+    """SEM-15, SEM-20 under both values: after OFF_ICE the member is no
+    longer iced, so its forced run votes in the recompute."""
+    o = oracle(_flip_box("bx15o", subbox=False), semantics=semantics)
+    _completed_with_m_iced(o, "bx15o")
+    o.feed(ev("OFF_ICE", 3, job="bx15o_m"))
+    o.feed(ev("FORCE_STARTJOB", 3, job="bx15o_m"))
+    o.feed(ev("STATUS", 4, job="bx15o_m", status="FAILURE"))
+    _failed_through_a_vote(o, "bx15o")
+
+
+@pytest.mark.parametrize("semantics", [None, _VOTE], ids=["ignore", "vote"])
+def test_sem15_a_forced_start_clears_the_ice_and_its_run_flips_a_completed_box(
+    semantics: SemanticSwitches | None,
+) -> None:
+    """SEM-15, SEM-23 under both values: FORCE_STARTJOB returns an iced
+    job to an executable state (Start Jobs: it "runs, and does not
+    revert"), so its run votes in the recompute."""
+    o = oracle(_flip_box("bx15c", subbox=False), semantics=semantics)
+    _completed_with_m_iced(o, "bx15c")
+    o.feed(ev("FORCE_STARTJOB", 3, job="bx15c_m"))
+    assert not o.store.job["bx15c_m"].on_ice
+    o.feed(ev("STATUS", 4, job="bx15c_m", status="FAILURE"))
+    _failed_through_a_vote(o, "bx15c")
+
+
+@pytest.mark.parametrize("semantics", [None, _VOTE], ids=["ignore", "vote"])
+def test_sem15_an_iced_member_given_running_blocks_the_recompute_until_it_ends(
+    semantics: SemanticSwitches | None,
+) -> None:
+    """SEM-15, SEM-20, DL-304 under both values: an iced member given
+    RUNNING by CHANGE_STATUS is not out of the run, so it is not dropped:
+    another member's failure re-derives nothing while it runs. When it
+    ends the recompute runs, and the other member's failure flips the box.
+    Dropping every iced member, live or not, would flip the box at once."""
+    o = oracle(_flip_box("bx15r", subbox=False), semantics=semantics)
+    _completed_with_m_iced(o, "bx15r")
+    o.feed(ev("STATUS", 3, job="bx15r_m", status="RUNNING"))
+    assert o.store.job["bx15r_m"].on_ice
+    o.feed(ev("STATUS", 4, job="bx15r_a", status="FAILURE"))
+    assert _status(o, "bx15r", "bx15r_e") == ["SUCCESS", "INACTIVE"]
+    o.feed(ev("STATUS", 5, job="bx15r_m", status="SUCCESS"))
+    _failed_through_a_vote(o, "bx15r")
+
+
+@pytest.mark.parametrize("semantics", [None, _VOTE], ids=["ignore", "vote"])
+def test_sem15_an_iced_member_given_failure_moves_no_box_that_never_ran(
+    semantics: SemanticSwitches | None,
+) -> None:
+    """SEM-15, Q16: the box never ran and its other member is INACTIVE.
+    Under `ignore` the iced member's own change is no verdict and no member
+    is left to vote, so the box stays INACTIVE and neither consumer starts;
+    DL-242's vacuous SUCCESS would have started the success consumer. Under
+    `vote` the box derives FAILURE and its failure consumer starts."""
+    o = oracle(_flip_box("bx15v", subbox=False), semantics=semantics)
+    o.feed(ev("ON_ICE", 0, job="bx15v_m"))
+    o.feed(ev("STATUS", 1, job="bx15v_m", status="FAILURE"))
+    if semantics is None:
+        assert _status(o, "bx15v", "bx15v_d", "bx15v_e") == ["INACTIVE"] * 3
+        assert transitions(o, "bx15v") == []
+    else:
+        assert _status(o, "bx15v", "bx15v_d", "bx15v_e") == ["FAILURE", "INACTIVE", "RUNNING"]
+
+
+@pytest.mark.parametrize("semantics", [None, _VOTE], ids=["ignore", "vote"])
+def test_sem15_a_job_failing_in_an_iced_subbox_moves_no_box_that_never_ran(
+    semantics: SemanticSwitches | None,
+) -> None:
+    """SEM-15, SEM-17, Q16: a job forced inside an iced subbox of a box that
+    never ran fails. The subbox re-derives FAILURE under both values. Under
+    `ignore` that change is an iced member's and nothing else votes, so the
+    box stays INACTIVE; under `vote` it derives FAILURE."""
+    o = oracle(_flip_box("bx15w", subbox=True), semantics=semantics)
+    o.feed(ev("ON_ICE", 0, job="bx15w_s"))
+    o.feed(ev("FORCE_STARTJOB", 1, job="bx15w_m"))
+    o.feed(ev("STATUS", 2, job="bx15w_m", status="FAILURE"))
+    assert o.store.job["bx15w_s"].status == "FAILURE"
+    expected = ["INACTIVE", "INACTIVE"] if semantics is None else ["FAILURE", "RUNNING"]
+    assert _status(o, "bx15w", "bx15w_e") == expected
+    assert _status(o, "bx15w_d") == ["INACTIVE"]
+
+
+@pytest.mark.parametrize("semantics", [None, _VOTE], ids=["ignore", "vote"])
+def test_sem15_an_inactive_verdict_beside_an_iced_member_keeps_the_vacuous_success(
+    semantics: SemanticSwitches | None,
+) -> None:
+    """SEM-15 [V] (DL-242): an operator's INACTIVE on a member that is in
+    the run re-evaluates the box, which "returns a SUCCESS status as it
+    ignores all the jobs that are in INACTIVE status". Under `ignore` the
+    iced member, given FAILURE earlier, is ignored as an INACTIVE one is,
+    so the verdict is SUCCESS; under `vote` its FAILURE keeps the box
+    FAILURE."""
+    o = oracle(_flip_box("bx15i", subbox=False), semantics=semantics)
+    o.feed(ev("ON_ICE", 0, job="bx15i_m"))
+    o.feed(ev("STATUS", 1, job="bx15i_m", status="FAILURE"))
+    o.feed(ev("STATUS", 2, job="bx15i_a", status="INACTIVE"))
+    expected = "SUCCESS" if semantics is None else "FAILURE"
+    assert o.store.job["bx15i"].status == expected
+
+
+@pytest.mark.parametrize("semantics", [None, _VOTE], ids=["ignore", "vote"])
+def test_sem15_a_failed_member_set_inactive_beside_an_iced_success_gives_success(
+    semantics: SemanticSwitches | None,
+) -> None:
+    """SEM-15 [V], the table's FAILURE + INACTIVE row (DL-242): the box
+    failed through a; m succeeded and is then iced. Setting a INACTIVE
+    re-derives SUCCESS under both values: under `ignore` as the vacuous
+    verdict, under `vote` from m's SUCCESS."""
+    o = oracle(_flip_box("bx15j", subbox=False), semantics=semantics)
+    o.feed(ev("STARTJOB", 0, job="bx15j"))
+    o.feed(ev("STATUS", 1, job="bx15j_a", status="FAILURE"))
+    o.feed(ev("STATUS", 1, job="bx15j_m", status="SUCCESS"))
+    assert o.store.job["bx15j"].status == "FAILURE"
+    o.feed(ev("ON_ICE", 2, job="bx15j_m"))
+    o.feed(ev("STATUS", 3, job="bx15j_a", status="INACTIVE"))
+    assert o.store.job["bx15j"].status == "SUCCESS"
+
+
+@pytest.mark.parametrize("semantics", [None, _VOTE], ids=["ignore", "vote"])
+def test_sem15_an_iced_subbox_holding_a_live_job_keeps_its_vote(
+    semantics: SemanticSwitches | None,
+) -> None:
+    """SEM-15, SEM-20, DL-304 under both values: an iced subbox is out of
+    the run only when no job inside it is live or queued. Here it reads
+    FAILURE while a job inside it runs, so it is not dropped, and when the
+    box's other member ends SUCCESS the box derives FAILURE. Reading only
+    the subbox's own ice and status would drop it and give SUCCESS."""
+    o = oracle(
+        _flip_box("bx15t", subbox=True)
+        + "\ninsert_job: bx15t_n\njob_type: c\ncommand: n\nmachine: m1\nbox_name: bx15t_s\n",
+        semantics=semantics,
+    )
+    o.feed(ev("ON_ICE", 0, job="bx15t_s"))
+    o.feed(ev("FORCE_STARTJOB", 1, job="bx15t_n"))
+    o.feed(ev("STATUS", 2, job="bx15t_n", status="FAILURE"))
+    o.feed(ev("FORCE_STARTJOB", 3, job="bx15t_m"))
+    assert _status(o, "bx15t_s", "bx15t_m") == ["FAILURE", "RUNNING"]
+    o.feed(ev("FORCE_STARTJOB", 4, job="bx15t_a"))
+    o.feed(ev("STATUS", 5, job="bx15t_a", status="SUCCESS"))
+    assert _status(o, "bx15t", "bx15t_e") == ["FAILURE", "RUNNING"]
+
+
+# --------------------------------------------- SEM-12: the walk up is bound to the box run
+
+
+def _restarting_box(extra: str = "", box_name: str | None = None) -> str:
+    """Box `B` with a member `a` and an iced subbox `S` holding `m`, which
+    is forced before B starts. B's box_success names m, and an ON_NOEXEC
+    `R` gated on s(B) starts B again the moment B completes."""
+    inside = f"box_name: {box_name}\n" if box_name else ""
+    return (
+        f"insert_job: B12w\njob_type: b\n{inside}condition: s(R12w)\n"
+        "box_success: s(R12w) | s(m12w)\n\n"
+        "insert_job: a12w\njob_type: c\ncommand: a\nmachine: m1\nbox_name: B12w\n\n"
+        "insert_job: S12w\njob_type: b\nbox_name: B12w\n\n"
+        "insert_job: m12w\njob_type: c\ncommand: m\nmachine: m1\nbox_name: S12w\n\n"
+        "insert_job: R12w\njob_type: c\ncommand: r\nmachine: m1\ncondition: s(B12w)\n\n" + extra
+    )
+
+
+def _start_the_restarting_box(o: Oracle | EngineHarness) -> None:
+    o.feed(ev("ON_NOEXEC", 0, job="R12w"))
+    o.feed(ev("FORCE_STARTJOB", 0, job="m12w"))
+    o.feed(ev("ON_ICE", 0, job="S12w"))
+    o.feed(ev("FORCE_STARTJOB", 1, job="B12w"))
+
+
+def test_sem12_a_box_started_again_in_the_cascade_ignores_the_earlier_run_s_job() -> None:
+    """SEM-12, SEM-10: "Jobs in a box run only once for each box execution"
+    (Basic Box Job Concepts). m ends in B's first run; the iced subbox's
+    recompute completes B through its override, and R's bypass starts B's
+    second run inside the same cascade. The walk from m's end then reaches
+    B again, now in its second run: it skips it, so run two stays RUNNING
+    with a running, and completes only at a's end in run two. Without the
+    run binding m's end completed run two too, and R started run three."""
+    o = oracle(_restarting_box())
+    _start_the_restarting_box(o)
+    o.feed(ev("STATUS", 2, job="a12w", status="SUCCESS"))
+    o.feed(ev("STATUS", 3, job="m12w", status="SUCCESS"))
+    assert o.store.job["B12w"].run_number == 2
+    assert _status(o, "B12w", "a12w") == ["RUNNING", "RUNNING"]
+    assert transitions(o, "B12w").count("RUNNING->SUCCESS") == 1
+    o.feed(ev("OFF_NOEXEC", 4, job="R12w"))
+    o.feed(ev("STATUS", 5, job="a12w", status="SUCCESS"))
+    assert o.store.job["B12w"].run_number == 2
+    assert _status(o, "B12w", "R12w") == ["SUCCESS", "RUNNING"]
+    [done] = [
+        t
+        for t in o.trace()
+        if t.job == "B12w"
+        and t.transition == "RUNNING->SUCCESS"
+        and t.at == T0 + timedelta(minutes=5)
+    ]
+    assert done.cause == "box_success override met (SEM-12)"
+
+
+def test_sem12_the_walk_skips_a_restarted_box_and_reaches_the_one_above_it() -> None:
+    """SEM-12, SEM-17: B sits in C and was running before C started, so
+    its restart in the cascade is B's first start in C's run. C's run did
+    not move, so m's end is still C's moment: C's box_success names m, and
+    it fires (R is SUCCESS and m is not running), beside its running member
+    w. Without the run binding m's end completed B's second run instead,
+    and the walk ended there with C RUNNING."""
+    o = oracle(
+        "insert_job: C12w\njob_type: b\nbox_success: n(m12w) & s(R12w)\n\n"
+        "insert_job: w12w\njob_type: c\ncommand: w\nmachine: m1\nbox_name: C12w\n\n"
+        + _restarting_box(box_name="C12w")
+    )
+    _start_the_restarting_box(o)
+    o.feed(ev("STARTJOB", 1.5, job="C12w"))
+    assert _status(o, "C12w", "w12w", "B12w", "m12w") == ["RUNNING"] * 4
+    o.feed(ev("STATUS", 2, job="a12w", status="SUCCESS"))
+    assert o.store.job["C12w"].status == "RUNNING"
+    o.feed(ev("STATUS", 3, job="m12w", status="SUCCESS"))
+    assert o.store.job["B12w"].run_number == 2
+    assert _status(o, "C12w", "w12w", "B12w", "a12w") == [
+        "SUCCESS",
+        "RUNNING",
+        "RUNNING",
+        "RUNNING",
+    ]
+    [done] = [t for t in o.trace() if t.job == "C12w" and t.transition == "RUNNING->SUCCESS"]
+    assert done.cause == "box_success override met (SEM-12)"
+
+
+def test_sem12_the_walk_goes_on_past_a_restarted_box_to_an_unmoved_one() -> None:
+    """SEM-12, SEM-17: the walk skips an ancestor whose run moved; it does
+    not stop there. m sits in S, in B, in D, in C. The subbox S's end
+    completes B, and R's bypass starts B again inside D's run. S's own
+    walk then completes D, whose box_success reads R, and D's end makes Q
+    SUCCESS, which C's box_success reads. C was last evaluated at D's end,
+    before Q, so only m's walk, past the restarted B and the completed D,
+    fires C's override. A walk that stopped at B would leave C RUNNING
+    beside its running member w."""
+    o = oracle(
+        "insert_job: C12k\njob_type: b\nbox_success: s(Q12k)\n\n"
+        "insert_job: w12k\njob_type: c\ncommand: w\nmachine: m1\nbox_name: C12k\n\n"
+        "insert_job: D12k\njob_type: b\nbox_name: C12k\nbox_success: s(R12w)\n\n"
+        "insert_job: v12k\njob_type: c\ncommand: v\nmachine: m1\nbox_name: D12k\n\n"
+        "insert_job: Q12k\njob_type: c\ncommand: q\nmachine: m1\ncondition: s(D12k)\n\n"
+        + _restarting_box(box_name="D12k")
+    )
+    o.feed(ev("ON_NOEXEC", 0, job="Q12k"))
+    _start_the_restarting_box(o)
+    o.feed(ev("STARTJOB", 1.5, job="C12k"))
+    assert _status(o, "C12k", "D12k", "B12w", "m12w") == ["RUNNING"] * 4
+    o.feed(ev("STATUS", 2, job="a12w", status="SUCCESS"))
+    o.feed(ev("STATUS", 3, job="m12w", status="SUCCESS"))
+    assert o.store.job["B12w"].run_number == 2
+    assert _status(o, "C12k", "w12k", "D12k", "B12w", "Q12k") == [
+        "SUCCESS",
+        "RUNNING",
+        "SUCCESS",
+        "RUNNING",
+        "SUCCESS",
+    ]
+
+
+def test_sem12_an_ice_whose_box_starts_again_does_not_walk_into_the_new_run() -> None:
+    """SEM-12, SEM-20 (DL-285): an ice that completes its box P is a
+    completion moment for P's run, and P's own transition carries it up to
+    G. R's bypass then starts P again in the same cascade, so the ice's
+    walk up does not run: G's box_success reads R, an external job, and
+    R's SUCCESS came after the moment. G waits for its next member
+    completion, w's end, and fires there."""
+    o = oracle(
+        "insert_job: G12i\njob_type: b\nbox_success: s(R12i)\n\n"
+        "insert_job: w12i\njob_type: c\ncommand: w\nmachine: m1\nbox_name: G12i\n\n"
+        "insert_job: P12i\njob_type: b\nbox_name: G12i\ncondition: s(R12i)\n\n"
+        "insert_job: x12i\njob_type: c\ncommand: x\nmachine: m1\nbox_name: P12i\n"
+        "condition: s(nv12i)\n\n"
+        "insert_job: y12i\njob_type: c\ncommand: y\nmachine: m1\nbox_name: P12i\n"
+        "condition: s(nv12i)\n\n"
+        "insert_job: nv12i\njob_type: c\ncommand: n\nmachine: m1\n\n"
+        "insert_job: R12i\njob_type: c\ncommand: r\nmachine: m1\ncondition: s(P12i)\n"
+    )
+    o.feed(ev("ON_NOEXEC", 0, job="R12i"))
+    o.feed(ev("FORCE_STARTJOB", 0, job="P12i"))
+    o.feed(ev("STARTJOB", 1, job="G12i"))
+    o.feed(ev("FORCE_STARTJOB", 2, job="y12i"))
+    o.feed(ev("STATUS", 3, job="y12i", status="SUCCESS"))
+    assert _status(o, "G12i", "P12i", "x12i") == ["RUNNING", "RUNNING", "INACTIVE"]
+    o.feed(ev("ON_ICE", 4, job="x12i"))
+    assert o.store.job["P12i"].run_number == 2
+    assert _status(o, "G12i", "P12i", "R12i") == ["RUNNING", "RUNNING", "SUCCESS"]
+    o.feed(ev("STATUS", 5, job="w12i", status="SUCCESS"))
+    assert o.store.job["G12i"].status == "SUCCESS"
+
+
+def test_sem12_an_inactive_cascade_is_bound_to_the_runs_before_its_rows_move() -> None:
+    """SEM-12, SEM-18, SEM-20 (DL-304): an operator's INACTIVE on the iced
+    subbox X cascades to y, the job running inside it, as one batch. Row X
+    resolves X in P; P's override over the external k fires, and R's
+    bypass starts P's second run with w running. Row y's end is part of
+    the same moment, so its holder check is bound to P's first run and
+    gives the second run no completion moment: P stays RUNNING beside w
+    and completes at w's end."""
+    o = oracle(
+        "insert_job: P12b\njob_type: b\ncondition: s(R12b)\nbox_success: s(k12b)\n\n"
+        "insert_job: w12b\njob_type: c\ncommand: w\nmachine: m1\nbox_name: P12b\n\n"
+        "insert_job: X12b\njob_type: b\nbox_name: P12b\n\n"
+        "insert_job: y12b\njob_type: c\ncommand: y\nmachine: m1\nbox_name: X12b\n\n"
+        "insert_job: k12b\njob_type: c\ncommand: k\nmachine: m1\n\n"
+        "insert_job: R12b\njob_type: c\ncommand: r\nmachine: m1\ncondition: s(P12b)\n"
+    )
+    o.feed(ev("ON_NOEXEC", 0, job="R12b"))
+    o.feed(ev("FORCE_STARTJOB", 0, job="y12b"))
+    o.feed(ev("ON_ICE", 0, job="X12b"))
+    o.feed(ev("FORCE_STARTJOB", 1, job="P12b"))
+    o.feed(ev("STATUS", 2, job="w12b", status="SUCCESS"))
+    o.feed(ev("STATUS", 2.5, job="k12b", status="SUCCESS"))
+    assert o.store.job["P12b"].status == "RUNNING"
+    o.feed(ev("STATUS", 3, job="X12b", status="INACTIVE"))
+    assert o.store.job["P12b"].run_number == 2
+    assert _status(o, "P12b", "w12b", "y12b") == ["RUNNING", "RUNNING", "INACTIVE"]
+    o.feed(ev("OFF_NOEXEC", 4, job="R12b"))
+    o.feed(ev("STATUS", 5, job="w12b", status="SUCCESS"))
+    assert o.store.job["P12b"].run_number == 2
+    assert _status(o, "P12b", "R12b") == ["SUCCESS", "RUNNING"]
+
+
+def test_sem33_a_window_skip_s_walk_skips_the_box_run_the_skip_restarted() -> None:
+    """SEM-12, SEM-33 (DL-154, DL-246): m's window skip in B's first run
+    completes B, B's success completes G's first run, and R's bypass starts
+    G's second run, whose B run re-skips m. x's bypass then makes G's
+    override `s(x)` true. The first skip's walk up is bound to the runs read
+    before its door, so it skips G's second run: G stays RUNNING with q
+    running. Reading the runs after the door completed G's second run
+    through the first run's moment, and R started a third."""
+    o = oracle(
+        "insert_job: G12s\njob_type: b\ncondition: s(R12s)\nbox_success: s(B12s) | s(x12s)\n\n"
+        "insert_job: B12s\njob_type: b\nbox_name: G12s\nbox_success: n(q12s)\n\n"
+        "insert_job: q12s\njob_type: c\ncommand: q\nmachine: m1\nbox_name: B12s\n"
+        "condition: s(R12s)\n\n"
+        "insert_job: m12s\njob_type: c\ncommand: m\nmachine: m1\nbox_name: B12s\n"
+        'date_conditions: 1\ndays_of_week: all\nstart_times: "02:00"\n'
+        'run_window: "02:00-04:00"\n\n'
+        "insert_job: R12s\njob_type: c\ncommand: r\nmachine: m1\ncondition: s(G12s)\n\n"
+        "insert_job: x12s\njob_type: c\ncommand: x\nmachine: m1\ncondition: s(R12s)\n"
+    )
+    at = datetime(2026, 7, 1, 4, 5)
+    o.feed(ev_at(at, "ON_NOEXEC", job="R12s"))
+    o.feed(ev_at(at, "ON_NOEXEC", job="x12s"))
+    o.feed(ev_at(at, "FORCE_STARTJOB", job="G12s"))
+    assert _status(o, "G12s", "B12s", "q12s", "x12s") == [
+        "RUNNING",
+        "RUNNING",
+        "RUNNING",
+        "SUCCESS",
+    ]
+    assert o.store.job["G12s"].run_number == 2
+    assert transitions(o, "m12s") == ["RUN_WINDOW_SKIP", "RUN_WINDOW_SKIP"]
 
 
 def test_trace_returns_copies_not_aliases() -> None:
