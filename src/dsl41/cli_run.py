@@ -54,7 +54,12 @@ if TYPE_CHECKING:
     from dsl41.period import Manifest, RuntimeProfile, StagedManifest
     from dsl41.runner import Engine
     from dsl41.runner_history import RunRow
-    from dsl41.runner_admission import AdmissionRefused, ViolationPolicy
+    from dsl41.runner_admission import (
+        AdmissionRefused,
+        ApplyResult,
+        DecisionIndex,
+        ViolationPolicy,
+    )
     from dsl41.runner_preflight import PreflightItem
     from dsl41.runner_startup import Wiring
     from dsl41.seal import CarriedRows
@@ -73,12 +78,19 @@ if TYPE_CHECKING:
 # finding deviations after a clean play. run's 5 is
 # `--on-transition-violation stop` (concurrency-model ss4): an applied input
 # broke a declared transition and its decision is durable. 4 is taken by the
-# control verbs' unknown outcome, so 5 collides with no verb's code.
+# control verbs' unknown outcome, so 5 collides with no verb's code. run's 6
+# is a time-half stop (concurrency-model ss4): an engine-made input's time
+# half raised, and the engine stopped before it was logged.
 
 #: `run`'s exit code for `--on-transition-violation stop`. The engine units
 #: list it in `RestartPreventExitStatus`, so a stopped engine stays down
 #: until an operator acts (deployment-runbook ss3).
 EXIT_TRANSITION_STOP = 5
+#: `run`'s exit code for a time-half stop (`TimeHalfStop`). Listed in the
+#: units' `RestartPreventExitStatus` too: every restart would meet the same
+#: timers and stop the same way, so the engine stays down until a build
+#: that fixes the fault is deployed (deployment-runbook ss3).
+EXIT_TIME_HALF_STOP = 6
 
 
 def _preflight_or_exit(
@@ -435,12 +447,13 @@ def _reattach_note(
     """The line a detached run prints on its way out, or None (DL-218).
 
     Only a detached run that can be resumed gets one: a clean stop (0), a
-    crash (1) or a transition stop (5, whose decision resume replays). A
+    crash (1), a transition stop (5, whose decision resume replays) or a
+    time-half stop (6, whose log is clean; it resumes on a fixed build). A
     sealed exit (3) does not -- its period is closed, and
     `say_next` has already named the opener of the next one. `reattach` is
     this process's own line; an embedding caller that has none gets the
     schematic."""
-    if not detached or code not in (0, 1, EXIT_TRANSITION_STOP):
+    if not detached or code not in (0, 1, EXIT_TRANSITION_STOP, EXIT_TIME_HALF_STOP):
         return None
     line = reattach or f"dsl41 run --resume --detached --run-root {run_root} <files>"
     return f"detached: reattach with `{line}`"
@@ -643,7 +656,7 @@ async def _serve_run(
     from dsl41.runner_startup import start_run, wire_from_profile
     from dsl41.runner_control import ControlServer
     from dsl41.runner_startup import resume_run as _resume_run
-    from dsl41.runner_admission import TransitionStop
+    from dsl41.runner_admission import TimeHalfStop, TransitionStop
     from dsl41.runner_clock import EngineError, RealClock
 
     from dsl41.runner_ledger import acquire_run_root
@@ -957,6 +970,11 @@ async def _serve_run(
             # unit down until someone reads the trace (concurrency-model ss4)
             typer.echo(f"engine stopped: {loop_task.exception()}", err=True)
             code = EXIT_TRANSITION_STOP
+        elif loop_task in done and isinstance(loop_task.exception(), TimeHalfStop):
+            # not a crash: a restart meets the same timers, so its own code
+            # keeps the unit down until a fixed build runs (concurrency-model ss4)
+            typer.echo(f"engine stopped: {loop_task.exception()}", err=True)
+            code = EXIT_TIME_HALF_STOP
         elif loop_task in done:  # hold_open never quiesces: this is a crash
             typer.echo(f"engine failed: {loop_task.exception()}", err=True)
             code = 1
@@ -1193,8 +1211,10 @@ def _emit_cadence_check(
         typer.echo("sweeps skipped: the happy path tripped the zero-delay guard", err=True)
     elif sweeps:
         progress = lambda line: typer.echo(line, err=True)  # noqa: E731
-        # every sweep plays to its end; their refusals are reported together
+        # every sweep plays to its end; their refusals and quarantines are
+        # reported together
         refused: list[tuple[str, Event | None, AdmissionRefused]] = []
+        quarantined: list[tuple[str, ApplyResult]] = []
         if SweepKind.fail in sweeps:
             try:
                 cases, sweep_findings = run_fail_sweep(
@@ -1212,6 +1232,7 @@ def _emit_cadence_check(
                 )
             except SweepRefused as exc:
                 refused.extend(exc.refusals)
+                quarantined.extend(exc.quarantines)
             else:
                 check.sweeps.append(SweepKind.fail.value)
                 check.fail_sweep = cases
@@ -1236,14 +1257,17 @@ def _emit_cadence_check(
                 )
             except SweepRefused as exc:
                 refused.extend(exc.refusals)
+                quarantined.extend(exc.quarantines)
             else:
                 check.sweeps.append(SweepKind.flags.value)
                 check.flag_sweep = fcases
                 check.flag_uncovered = uncovered
                 check.findings.extend(flag_findings)
-        if refused:
+        if refused or quarantined:
             for case, ev, refusal in refused:
                 typer.echo(_refusal_line(ev, refusal, case), err=True)
+            for case, decided in quarantined:
+                typer.echo(_quarantine_line(decided, case), err=True)
             raise typer.Exit(1)
     trace = engine.oracle.trace()
     if fmt is RehearseFormat.json:
@@ -1258,6 +1282,14 @@ def _emit_cadence_check(
             typer.echo(line)
     if check.findings:
         raise typer.Exit(3)
+
+
+def _quarantine_line(decided: "ApplyResult", case: str = "") -> str:
+    """One quarantined engine-made input, as rehearse reports it: its
+    index, the sweep case it was met in (none for the main play), and the
+    reason, which names the input and the fault (concurrency-model ss4)."""
+    where = f" in sweep {case}" if case else ""
+    return f"rehearse failed: quarantined input {decided.index}{where}: {decided.reason}"
 
 
 def _refusal_line(refused: "Event | None", refusal: "AdmissionRefused", case: str = "") -> str:
@@ -1529,12 +1561,15 @@ def rehearse(
     finally:
         if engine.journal is not None:
             engine.journal.close()
-    if engine.refused_inputs:
-        # a scripted event the dry apply refused never reached the trace:
+    if engine.refused_inputs or engine.quarantined:
+        # a scripted event the dry apply refused never reached the trace,
+        # and a quarantined engine-made input applied its time half only:
         # no silent loss, so each one is named and the play fails
         # (concurrency-model ss4)
         for refused, refusal in engine.refused_inputs:
             typer.echo(_refusal_line(refused, refusal), err=True)
+        for result, _fault in engine.quarantined:
+            typer.echo(_quarantine_line(result), err=True)
         raise typer.Exit(1)
     if not check_cadence:
         _emit_rehearsal(engine.oracle.trace(), catalog.jobs, fmt=output)
@@ -2030,11 +2065,42 @@ def _run_period(
     # The base zone comes from it too (DL-253).
     oracle = Oracle(catalog, carried=carried, **oracle_reading(profile))
     try:
-        replay_period(oracle, records)
+        replay = replay_period(oracle, records)
     except (OracleError, EngineError) as exc:
         raise typer.Exit(refuse(exc, prefix=f"{named}replay failed")) from exc
     for entry in oracle.trace():
         typer.echo(_trace_line(entry))
+    for line in _rejection_lines(records, replay.decisions):
+        typer.echo(line)
+
+
+def _rejection_lines(records: list[dict[str, Any]], decisions: "DecisionIndex") -> list[str]:
+    """The narration beside a period's trace: one line per engine-made
+    input the period rejected -- a stale completion, a refused routing
+    observation, a quarantined input -- and one per quarantine
+    (`engine_apply_faulted`, concurrency-model ss4) whatever its source,
+    since replay quarantines an undecided control input too. The trace
+    shows what an input did, so an input rejected without a move would
+    otherwise leave no line. Read from the decisions replay holds, the
+    recovered ones included, so the journal says what a resume would
+    write. Unprefixed, like the trace lines it sits beside. Narration only:
+    nothing replayed reads it."""
+    from dsl41.runner_admission import describe_input
+    from dsl41.runner_journal import read_attempts
+
+    lines = []
+    for attempt in read_attempts(records):
+        decided = decisions.for_index(attempt.index)
+        engine_made = attempt.request_id.startswith("engine:") and attempt.source != "control"
+        if decided is None or decided.decision != "rejected":
+            continue
+        if not engine_made and decided.code != "engine_apply_faulted":
+            continue
+        lines.append(
+            f"{attempt.at.isoformat()} rejected input {attempt.index}"
+            f" ({describe_input(attempt)}): {decided.code}: {decided.reason}"
+        )
+    return lines
 
 
 def _period_catalog(

@@ -9967,8 +9967,10 @@ def _leap_257(o, monkeypatch: pytest.MonkeyPatch) -> int:
     release = datetime(2028, 3, 1, 8, 30)
     o.feed(Event(at=release, kind="STATUS", payload={"job": "hq257", "status": "SUCCESS"}))
     monkeypatch.setattr(CompiledCalendar, "days_between", expand)
-    if isinstance(o, ForkCheckedOracle):
-        # the fork path applies every input twice, once on the fork
+    if isinstance(o, (ForkCheckedOracle, EngineHarness)):
+        # the fork path applies every input twice, once on the fork, and so
+        # does the engine path: it dry-applies every input (concurrency-model
+        # ss4), and a fork expands a calendar for itself
         assert len(calls) % 2 == 0
         return len(calls) // 2
     return len(calls)

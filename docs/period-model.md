@@ -800,7 +800,11 @@ reader treats a stored code as opaque: it never requires one and never
 checks it against the registry. A replay derives nothing from it, so it
 changes no state and needs no `state_machine_version` bump. An exact retry
 and `original_decision` answer the stored code. Unlike the wire break above,
-this field is additive.
+this field is additive. One stored code is not a gate's verdict:
+`engine_apply_faulted` quarantines an input whose apply raised while its
+time half applied alone (`concurrency-model.md` §4). Like every rejection,
+it replays as its time half alone on any build of the same
+`state_machine_version`.
 
 There is deliberately **no transition record**. A period opens because a
 `segment` says so, and closes because a `seal` says so. The seal's
@@ -1836,6 +1840,17 @@ tick or the cutoff's own time observation. That
 stop is the operator's chosen halt. An abort would reopen C1 and carry on.
 The engine exits 5 (`concurrency-model.md` §4).
 
+**A time-half stop** (`concurrency-model.md` §4) raises before its input
+is admitted, so nothing is logged for it. On an engine-made input the seal
+drains, such as a cutoff tick, an adapter completion or a routing
+observation, it leaves that input unadmitted. So the seal stops the engine
+without an abort, as for `clock_regressed` (DL-274): neither request is
+answered, the engine exits 6, and resume observes the input again. The
+cutoff's own time observation belongs to the seal. A time-half stop on it
+is one of the other exceptions below: the seal aborts and refuses, C1
+reopens, and the engine's next engine-made input meets the same timers and
+stops the engine with exit 6.
+
 Every other exception still aborts and refuses. Among them are the drain's
 own timeout, and a failure in settling with no unfinished append.
 
@@ -2397,7 +2412,7 @@ this implies is keeping old versions installable (PR-Q4, §16).
 | head `claimed`, first `segment` durable, crash before head moved to `open` | resume finds the segment, moves the head to `open`, continues |
 | crash in period 1 before any seal | replay from the genesis segment |
 | anchor directory deleted or replaced under a live incumbent | the incumbent stops on its next append/dispatch (`anchor.lock` re-check) |
-| a logged input raises when this build replays it | refuse, naming the input's index, kind, source, `at` and `request_id` (DL-292). A logged effect outcome the outbox refuses (such as a second outcome for one effect, or one for an effect it never saw) stops resume the same way, naming the effect instead of an input (DL-295). Every resume of the period refuses the same way until a build that replays the input runs: a fix, or the release that wrote the log. Nothing skips the input |
+| a logged input raises when this build replays it | refuse, naming the input's index, kind, source, `at` and `request_id` (DL-292). A logged effect outcome the outbox refuses (such as a second outcome for one effect, or one for an effect it never saw) stops resume the same way, naming the effect instead of an input (DL-295). Every resume of the period refuses the same way until a build that replays the input runs: a fix, or the release that wrote the log. An input admitted with no decision is the one exception: when its apply raises and its time half applies alone, replay quarantines it under `engine_apply_faulted`, and resume writes that decision (`concurrency-model.md` §4) |
 | torn final line in the active segment | truncate to the last complete record |
 | torn or empty **first** line of a new segment | the segment never opened; the file is removed and re-opened from the boundary, which is byte-identical (PR-07). The repair needs an **earlier segment in this root** to re-open from: `select_seal` falls back to the previous segment and reads the `seal` record there. A root holding exactly that one segment — a rolled root, or a fully archived one — **refuses** instead, naming the missing segment record. That is a refusal and not damage. Lifting it means teaching seal selection to open from the anchor head, which is a unit of its own (DL-144) |
 | corrupt line inside a **closed** segment | that period is unauditable; later periods resume from a **verified** seal only, else refused (above) |

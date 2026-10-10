@@ -80,6 +80,10 @@ Code = Literal[
     "seal_timeout",
     # stored on a rejected decision only; never answered on the wire
     "stale_completion",
+    # stored on a rejected decision: the input's apply raised and its time
+    # half did not, so the input is quarantined (concurrency-model ss4). An
+    # exact retry of a control input that replay quarantined answers it
+    "engine_apply_faulted",
     # an engine refusal that carries no code of its own
     "engine_error",
 ]
@@ -87,7 +91,8 @@ Code = Literal[
 #: every code, for the table test and the decision writer
 CODES: frozenset[str] = frozenset(get_args(Code))
 
-#: the codes a rejected `decision` record may store: the gates' verdicts.
+#: the codes a rejected `decision` record may store: the gates' verdicts,
+#: and the quarantine of an input whose apply raised.
 #: APPEND-ONLY -- each one may sit in a retained WAL for the life of the
 #: root, and the writer refuses a rejection whose code is not here
 STORED_CODES: frozenset[str] = frozenset(
@@ -103,6 +108,7 @@ STORED_CODES: frozenset[str] = frozenset(
         "host_never_contacted",
         "eviction_bound_pending",
         "stale_completion",
+        "engine_apply_faulted",
     }
 )
 

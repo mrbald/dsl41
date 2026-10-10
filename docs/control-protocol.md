@@ -207,6 +207,7 @@ The client action says what a client does next:
 | `seal_refused` | refused | one of the boundary's own pre-commit refusals: the candidate, its validation, the snapshot or the install. A check on the same path that names no code answers `engine_error` | operator |
 | `seal_timeout` | unknown | no boundary outcome arrived within the window | re-read; retry a mutation only under the same request_id |
 | `stale_completion` | rejected, stored only | the stale-completion gate rejected an engine-made completion; it is stored, and no client request is answered with it | none |
+| `engine_apply_faulted` | rejected | applying an input on a fork of the engine's state raised, and its time half applied alone, so the input was logged with this rejection and only its time half applied: it is quarantined (`docs/concurrency-model.md` §4). The live engine stores it for an engine-made input. Replay stores it for any input admitted with no decision whose apply raises the same way, a control input included. Like every stored code, an exact retry of that control input is answered with it | operator |
 | `engine_error` | refused | an engine refusal whose raise site names no code | operator |
 
 ## 3. Mutating verbs: sendevent, host, seal

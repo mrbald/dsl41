@@ -20728,3 +20728,74 @@ relitigate an entry; append a new one.
   REVIEW. The runbook's spec review (DL-225) carried these: one Opus reviewer, two rounds. It
   found nothing lost from the old text. Its findings were about wording, the reaping consequence
   and `--semantics` for rehearse; all are fixed and confirmed.
+- DL-320 An engine-made input whose apply raises is quarantined, or stops the engine before it is
+  logged
+  (2026-10-10; docs/concurrency-model.md §4; docs/period-model.md §§2.3, 7, 11;
+  docs/control-protocol.md code table; docs/deployment-runbook.md §§0, 3, 7)
+  THE PROBLEM. An engine-made input (a tick, a completion, a routing or time observation, the
+  opening release, the seal cutoff) was appended to the WAL before it was applied, with no dry
+  run. A raise in its apply left memory half-applied and killed the engine. Every resume then
+  replayed the same input and stopped (`ReplayFault`) until a build that fixed the fault shipped.
+  DL-292 STATED LIMITS recorded this; DL-306 removed one trigger, not the class.
+  THE GOAL. A defect in applying one engine-made input costs at most that input's own effects. It
+  is loud, never blocks resume, and never blocks a rollback to a build with the same
+  `STATE_MACHINE_VERSION`.
+  THE FORK. `Oracle.fork` starts the fork's trace and emitted log empty. Both are append-only, and
+  an apply reads them only by slicing from a length it saved itself. A fork now costs about
+  0.005 ms on day 1 and day 30 of a 200-job period (it was 0.55 ms on day 30). The control dry
+  run of DL-292 gets the same saving.
+  LIVE. Every input is dry-applied on a fork before the frontier moves and before the append. A
+  control input keeps DL-292: a fault refuses it with `apply_faulted`, and nothing is logged. For
+  an engine-made input, a fault runs the time half alone on a second fresh fork. Where the first
+  apply raised does not tell the halves apart, because the batch commits both on the way out.
+  - The time half passes: the input is appended with a durable rejected decision under the new
+    stored code `engine_apply_faulted`. Only its time half applies, and the engine runs on.
+  - The time half raises: the engine stops before the append with `TimeHalfStop`, and
+    `dsl41 run` exits 6. The log stays clean. The engine unit does not restart on 6.
+  - An input with no verb (time observation, opening release, seal cutoff) is all time half. A
+    fault in it always stops.
+  - Inside a seal, a stop on an input the seal drains stops the seal without an abort, as DL-274
+    does; resume re-derives the tick or re-injects the completion. A stop on the cutoff's own
+    observation aborts the seal.
+  REPLAY. `replay_inputs` classifies an undecided attempt that raises the same way, on fresh
+  forks: a passing time half gives the rejected verdict, which resume step 6a writes; a raising
+  one is a `ReplayFault`. This covers a real apply that raised after a passing dry apply, and a
+  root that an older build left poisoned. It covers control inputs too: an exact retry of such a
+  control request is answered with the stored code, like every stored code. Offline readers
+  (`journal`, `runs`, audit) get the verdict through `replay_inputs`, as DL-156 does for gate
+  verdicts.
+  LOUD. A stderr line `dsl41: input quarantined: input N: <reason>` when the decision is durable,
+  live or at step 6a. The reason names the input kind, job, run, source and the exception.
+  `dsl41 journal` narrates every rejected engine-made decision and every `engine_apply_faulted`
+  decision after each period's trace. `rehearse` fails on a quarantine in its main play or a
+  sweep. The runbook's watch table alerts on the line and on exit 6. There is no oracle trace
+  marker: the trace equals across live and replay without one.
+  WHAT THIS REVERSES. DL-292's "engine-made facts are never refused" stands: a quarantine is a
+  rejection, not a refusal. Its STATED LIMITS sentence on engine-made faults is narrowed to
+  time-half faults. The old sentences in concurrency-model §4 ("An engine-made input is not
+  dry-applied", the fork copying the trace, an undecided attempt "replayed as an application"),
+  period-model §11 ("Nothing skips the input"), the `ReplayFault` docstring's "Nothing skips
+  the input" and the runbook §7 recovery text are rewritten.
+  VERSIONS. `STATE_MACHINE_VERSION`, the protocol versions, the artifact format and the WAL format
+  do not move. Readers treat a stored code as opaque, so a same-version older build replays an
+  `engine_apply_faulted` decision by its time half; a test pins this. Every decided input
+  derives the same state on every build of this version. The one difference is an undecided
+  attempt at a crash: a build where its apply raises rejects it, and one where it does not
+  applies it. That is the crash window DL-156 leaves to the engine's own gate, and the first
+  resume's durable decision settles it for every later build. `STORED_CODES` gains one entry;
+  the code table one row. Exit code 6
+  is engine prose (period-model §7, concurrency-model §4), not a protocol row.
+  COST. The dry apply costs about 0.13 ms per input: 0.26 s of CPU a day at the tested size
+  (DL-317), flat across the period.
+  OPEN. A time-half fault still stops the estate, operators included (a control input under it
+  stays refused), until a fixed build runs; per-timer quarantine is not built. A raise in effect
+  planning or the outbox record after the apply still poisons the log; both are invariant checks.
+  A quarantined completion leaves its run live; a tethered seal waits until an operator settles
+  it, a detached seal carries the run as bound, and
+  the resume ladder may re-inject it and quarantine it again, once per resume. The TUI and
+  `dsl41 runs` show no quarantine. The service drill exercises neither exit 6 nor the line.
+  REVIEW. Semantic class: one Opus reviewer and one Fable pass, which also ruled the design.
+  It found a stop on an input a seal drains that dropped the input and kept the engine up;
+  rehearse sweeps that passed a quarantined case; stops that named the wrong half's fault; a
+  kept fault that pinned a fork in memory; and sentences that still stated the old rule. All
+  are fixed and confirmed by the reviewer that raised them.

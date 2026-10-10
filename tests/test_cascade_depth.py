@@ -19,6 +19,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from types import FrameType
+from typing import Any
 
 import pytest
 from typer.testing import CliRunner
@@ -262,30 +263,52 @@ def test_sem10_equiv_tier_c_fits_the_limit_to_the_larger_catalog() -> None:
 def test_sem10_a_log_written_past_the_limit_names_the_cascade_and_replays_once_fitted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An engine whose limit fell short dies on the engine-made tick with the
-    named error, after the tick is in the WAL. A replay that does not fit the
-    limit stops at that input with the same name. A replay that fits it
-    replays the log, so a build with the fit recovers such an estate."""
+    """An engine whose limit fell short meets the named error on the
+    engine-made tick's dry apply. The tick's time half applies alone, so the
+    tick is quarantined: logged with its rejection, and rehearse names it
+    and fails (concurrency-model ss4). A log an older build wrote holds the
+    tick with no decision. A replay that does not fit the limit quarantines
+    it the same way; a replay that fits it applies it, so a build with the
+    fit recovers such an estate."""
     jil, _ = _box_chain(200)
     (tmp_path / "estate.jil").write_text(jil)
-    root = tmp_path / "run"
     monkeypatch.setattr(runner, "fit_recursion_limit", lambda _jobs: sys.getrecursionlimit())
     sys.setrecursionlimit(1000)
     invoke = CliRunner().invoke
     rehearse = ["rehearse", str(tmp_path / "estate.jil"), "--start", START, "--hours", "1"]
+
+    def unfitted_journal(root: Path) -> Any:
+        with monkeypatch.context() as unfitted:
+            unfitted.setattr(
+                runner_journal, "fit_recursion_limit", lambda _jobs: sys.getrecursionlimit()
+            )
+            return invoke(app, ["journal", str(root)])
+
+    quarantined = "rejected input 1 (STARTJOB for job q0 from scheduler): engine_apply_faulted:"
+    root = tmp_path / "run"
     played = invoke(app, [*rehearse, "--run-root", str(root)])
     assert played.exit_code == 1, played.output
-    assert "rehearse failed: RecursionError: an instant cascade passed" in played.output
+    assert "quarantined input 1: quarantined: applying STARTJOB for job q0" in played.output
+    assert "RecursionError: an instant cascade passed" in played.output
     assert "its first start was q0 (STARTJOB" in played.output
-    with monkeypatch.context() as unfitted:
-        unfitted.setattr(
-            runner_journal, "fit_recursion_limit", lambda _jobs: sys.getrecursionlimit()
-        )
-        stopped = invoke(app, ["journal", str(root)])
-    assert stopped.exit_code == 2, stopped.output
-    assert "replay stopped at input 1 (STARTJOB from scheduler" in stopped.output
-    assert "CascadeDepthError: RecursionError:" in stopped.output
-    assert "its first start was q0" in stopped.output
-    replayed = invoke(app, ["journal", str(root)])
+    narrated = unfitted_journal(root)
+    assert narrated.exit_code == 0, narrated.output
+    assert quarantined in narrated.output
+    assert "q199 RUNNING->SUCCESS" not in narrated.output
+    # the older build: no dry apply for an engine-made input, so the tick
+    # reached the WAL before its apply raised
+    old = tmp_path / "old"
+    with monkeypatch.context() as older:
+        older.setattr(runner.Engine, "_dry_apply_engine_made", lambda _self, _attempt: None)
+        died = invoke(app, [*rehearse, "--run-root", str(old)])
+    assert died.exit_code == 1, died.output
+    assert "rehearse failed: RecursionError: an instant cascade passed" in died.output
+    assert "its first start was q0 (STARTJOB" in died.output
+    recovered = unfitted_journal(old)
+    assert recovered.exit_code == 0, recovered.output
+    assert quarantined in recovered.output
+    assert "CascadeDepthError: RecursionError:" in recovered.output
+    replayed = invoke(app, ["journal", str(old)])
     assert replayed.exit_code == 0, replayed.output
     assert "q199 RUNNING->SUCCESS" in replayed.output
+    assert "rejected input" not in replayed.output

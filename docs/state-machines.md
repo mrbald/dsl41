@@ -569,10 +569,10 @@ stateDiagram-v2
     state "rejected" as s2
     state "unseen" as s3
     [*] --> s3
-    s3 --> s0 : admission.01 input [the epoch is current, the stamp is not behind the frontier, a control input's dry apply is clean] / take the next index, append the attempt line, note the fingerprint
+    s3 --> s0 : admission.01 input [the epoch is current, the stamp is not behind the frontier, a control input's dry apply is clean, an engine-made input's time half applies] / take the next index, append the attempt line, note the fingerprint
     s0 --> s1 : admission.02 decide [the gate passes, or a replayed durable decision says applied] / the decision line, with the outbox entries it implies
-    s0 --> s2 : admission.03 decide [a precondition, the stale-completion gate or a host guard rejects, or a replayed durable decision says rejected] / the decision line, with its stored code
-    s3 --> s3 : admission.04 input [a stale epoch, a stamp behind the frontier while the seal answers, the dry apply faults or breaks a declared transition] / answer the refusal, no index is taken and nothing is logged
+    s0 --> s2 : admission.03 decide [a precondition, the stale-completion gate or a host guard rejects, the input is quarantined, or a replayed durable decision says rejected] / the decision line, with its stored code
+    s3 --> s3 : admission.04 input [a stale epoch, a stamp behind the frontier while the seal answers, a control input's dry apply faults or breaks a declared transition] / answer the refusal, no index is taken and nothing is logged
     s1 --> s1 : admission.05 input [the same fingerprint] / answer the stored decision, no index, no clock
     s2 --> s2 : admission.06 input [the same fingerprint] / answer the stored decision and its code, no index, no clock
     s1 --> s1 : admission.07 input [another fingerprint] / refuse request_id_reused, carrying the earlier decision
@@ -583,10 +583,10 @@ stateDiagram-v2
 
 | Id | Source | Trigger | Guard | Effect | Target | Cite | Mark |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| admission.01 | unseen | input | the epoch is current, the stamp is not behind the frontier, a control input's dry apply is clean | take the next index, append the attempt line, note the fingerprint | admitted | concurrency-model ss4 steps 2-4, DL-292 |  |
+| admission.01 | unseen | input | the epoch is current, the stamp is not behind the frontier, a control input's dry apply is clean, an engine-made input's time half applies | take the next index, append the attempt line, note the fingerprint | admitted | concurrency-model ss4 steps 2-4, DL-292 |  |
 | admission.02 | admitted | decide | the gate passes, or a replayed durable decision says applied | the decision line, with the outbox entries it implies | applied | concurrency-model ss4 steps 5-7, DL-118 |  |
-| admission.03 | admitted | decide | a precondition, the stale-completion gate or a host guard rejects, or a replayed durable decision says rejected | the decision line, with its stored code | rejected | concurrency-model ss4, DL-235, DL-272 |  |
-| admission.04 | unseen | input | a stale epoch, a stamp behind the frontier while the seal answers, the dry apply faults or breaks a declared transition | answer the refusal, no index is taken and nothing is logged | unseen | concurrency-model ss4 steps 2-3, DL-90, DL-274, DL-292 |  |
+| admission.03 | admitted | decide | a precondition, the stale-completion gate or a host guard rejects, the input is quarantined, or a replayed durable decision says rejected | the decision line, with its stored code | rejected | concurrency-model ss4, DL-235, DL-272 |  |
+| admission.04 | unseen | input | a stale epoch, a stamp behind the frontier while the seal answers, a control input's dry apply faults or breaks a declared transition | answer the refusal, no index is taken and nothing is logged | unseen | concurrency-model ss4 steps 2-3, DL-90, DL-274, DL-292 |  |
 | admission.05 | applied | input | the same fingerprint | answer the stored decision, no index, no clock | applied | concurrency-model ss4 step 2, CM-05 |  |
 | admission.06 | rejected | input | the same fingerprint | answer the stored decision and its code, no index, no clock | rejected | concurrency-model ss4 step 2, CM-05, DL-272 |  |
 | admission.07 | applied | input | another fingerprint | refuse request_id_reused, carrying the earlier decision | applied | concurrency-model ss4 step 2, DL-217 |  |
