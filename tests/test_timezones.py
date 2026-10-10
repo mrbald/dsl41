@@ -7,7 +7,7 @@ a Scheduler stayed there: those pin the caller, not the ladder.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -17,12 +17,18 @@ from dsl41.timezones import (
     alias_table,
     dst_change,
     dst_change_near,
+    dst_windows,
+    must_instant,
     parse_timezone_map,
     resolve_timezone,
     start_mins_instants,
     start_time_instants,
     to_local,
     to_utc,
+    wall_window_contains,
+    wall_window_intervals,
+    window_span,
+    window_spans_near,
 )
 
 
@@ -308,4 +314,65 @@ def test_sem32_dst_start_mins_instants_follow_the_switch() -> None:
     assert start_mins_instants(date(2026, 3, 8), spring, _NY_ZONE, dst="fold0") == [
         datetime(2026, 3, 8, 7, 20),
         datetime(2026, 3, 8, 7, 20),
+    ]
+
+
+def test_dst_windows_lists_each_artifact_hour_once_with_its_shape() -> None:
+    windows = dst_windows(_NY_ZONE, date(2026, 6, 1))
+    assert [(w.kind, w.label, w.documented, w.day) for w in windows] == [
+        ("overlap", "01:00-01:59", True, date(2026, 11, 1)),
+        ("gap", "02:00-02:59", True, date(2026, 3, 8)),
+    ]
+    assert dst_windows(ZoneInfo("Asia/Tokyo"), date(2026, 6, 1)) == ()
+
+
+def test_dst_windows_marks_a_shape_dst_change_does_not_name() -> None:
+    windows = dst_windows(ZoneInfo("Europe/London"), date(2026, 6, 1))
+    assert {(w.kind, w.documented) for w in windows} == {("gap", False), ("overlap", True)}
+
+
+def test_wall_window_contains_is_inclusive_and_crosses_midnight() -> None:
+    assert wall_window_contains(time(9, 0), time(9, 0), time(17, 0))
+    assert wall_window_contains(time(17, 0), time(9, 0), time(17, 0))
+    assert not wall_window_contains(time(17, 1), time(9, 0), time(17, 0))
+    assert wall_window_contains(time(23, 30), time(23, 0), time(1, 0))
+    assert wall_window_contains(time(0, 30), time(23, 0), time(1, 0))
+    assert not wall_window_contains(time(12, 0), time(23, 0), time(1, 0))
+
+
+def test_window_span_and_spans_near_agree_on_the_spring_window() -> None:
+    lo, hi = time(2, 15), time(2, 45)
+    opens, closes = window_span(date(2026, 3, 8), lo, hi, _NY_ZONE)
+    assert (to_local(opens, _NY_ZONE), to_local(closes, _NY_ZONE)) == (
+        datetime(2026, 3, 8, 3, 0),
+        datetime(2026, 3, 8, 3, 45),
+    )
+    spans = window_spans_near(date(2026, 3, 8), lo, hi, _NY_ZONE)
+    assert spans is not None and spans[2] == (opens, closes)
+    assert window_spans_near(date(2026, 6, 1), lo, hi, _NY_ZONE) is None
+
+
+def test_must_instant_moves_a_missing_hour_must_time_and_pairs_the_start() -> None:
+    day = date(2026, 3, 8)
+    assert must_instant(day, (2, 5), (2, 10), _NY_ZONE) == datetime(2026, 3, 8, 7, 0, 10)
+    assert must_instant(day, (2, 30), (3, 0), _NY_ZONE) == datetime(2026, 3, 8, 7, 0, 59)
+
+
+def test_wall_window_intervals_lists_each_opening_with_its_wall_ends() -> None:
+    london = ZoneInfo("Europe/London")
+    usual = wall_window_intervals(
+        date(2026, 3, 22), date(2026, 3, 24), time(0, 30), time(1, 30), london
+    )
+    assert [(o.day, o.strftime("%H:%M"), c.strftime("%H:%M")) for o, c in usual] == [
+        (22, "00:30", "01:30"),
+        (23, "00:30", "01:30"),
+        (24, "00:30", "01:30"),
+    ]
+    spring = wall_window_intervals(
+        date(2026, 3, 28), date(2026, 3, 30), time(0, 30), time(1, 30), london
+    )
+    assert [(o.day, c.strftime("%H:%M")) for o, c in spring] == [
+        (28, "01:30"),
+        (29, "00:59"),
+        (30, "01:30"),
     ]
