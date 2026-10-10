@@ -86,7 +86,9 @@ from dsl41.runner_admission import (
     Frontiers,
     apply_attempt,
     fingerprint,
+    quarantine_verdict,
     report_violation,
+    trial_apply,
 )
 from dsl41.period import (
     Manifest,
@@ -1408,7 +1410,12 @@ class ReplayFault(EngineError):
     ss11). Replay stops there, naming the input, and so does every resume
     of the period: the same build raises at the same input every time. The
     deployment runbook gives the two ways out: deploy a fix, or roll back to
-    the release that wrote the log. Nothing skips the input.
+    the release that wrote the log.
+
+    It stops on an input with a durable decision, and on an undecided one
+    whose time half raises on its own. An undecided attempt whose time half
+    applies alone is quarantined instead (`quarantine_verdict`), and resume
+    writes that decision.
 
     The cause's `code`, if it has one, rides on; the cause is chained.
     `index` is the input's, or None when the fault is in a record that is
@@ -1499,9 +1506,13 @@ def replay_inputs(
     this build reproduces the log's history rather than the one its current
     gate would write. An attempt with no result is applied, because
     admission is the commit point; it goes through the gate on the way,
-    since a decision is exactly what it is missing. Replay writes nothing:
-    it reports each such attempt in `recovered_attempts`, and a resuming
-    engine writes the missing decision (DL-315).
+    since a decision is exactly what it is missing. It is applied on a fork
+    first, as the live engine applies an engine-made input. If that raises
+    and its time half applies alone, the verdict is the quarantine the live
+    engine would have logged: rejected, `engine_apply_faulted`
+    (concurrency-model ss4). Replay writes nothing: it reports each such
+    attempt in `recovered_attempts`, and a resuming engine writes the
+    missing decision (DL-315).
 
     The time half of every batch applies either way. A rejected completion
     still observed the clock, and the kill that observation let fire is a
@@ -1510,8 +1521,8 @@ def replay_inputs(
     record for, now decided by record rather than by absence.
 
     A violation of a declared transition never raises here: the oracle
-    traces it, as the live engine did. An input that raises stops the
-    replay with a `ReplayFault` that names it."""
+    traces it, as the live engine did. Any other input that raises stops
+    the replay with a `ReplayFault` that names it."""
     # the live engine fitted the limit to this catalog; a replay in another
     # process must fit it too, or it raises where the engine did not
     fit_recursion_limit(len(oracle.catalog.jobs))
@@ -1533,8 +1544,25 @@ def replay_inputs(
     for attempt in read_attempts(records):
         durable = decisions.for_index(attempt.index)
         runs_before = _run_numbers(oracle) if durable is None else {}
+        forced = None
+        if durable is None:
+            # the crash window: on a fork first, so a fault leaves this
+            # oracle as the input found it, and is classified (ss4)
+            dry = trial_apply(oracle, attempt)
+            if isinstance(dry, Exception):
+                verdict = quarantine_verdict(oracle, attempt, dry)
+                if isinstance(verdict, Exception):
+                    # the time half's own fault, which may not be the
+                    # first one: the whole apply's rides on as a note
+                    fault = ReplayFault(attempt, verdict)
+                    if (type(verdict), str(verdict)) != (type(dry), str(dry)):
+                        fault.add_note(
+                            f"applying the whole input raised {type(dry).__name__}: {dry}"
+                        )
+                    raise fault from verdict
+                forced = verdict
         try:
-            applied = apply_attempt(oracle, attempt, decided=durable)
+            applied = apply_attempt(oracle, attempt, decided=durable, forced=forced)
         except TransitionError:
             raise  # a strict test run fails where the move was made
         except Exception as exc:

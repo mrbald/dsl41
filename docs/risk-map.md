@@ -105,12 +105,13 @@ An attempt admitted with no decision is applied through the gate at resume (DL-1
 `replay_inputs` in `src/dsl41/runner_journal.py` runs `apply_attempt` on it again.
 If the oracle raised on that attempt because of the attempt itself, it raises again, and the engine fails at every resume.
 DL-292 closes this for control inputs, and the [closed section](#closed-by-dl-289dl-306) lists the other closed causes.
+An engine-made input, such as an adapter completion or a scheduled start, is dry-applied too. If its apply raises and its time half applies alone, it is logged with a rejected decision under `engine_apply_faulted` and the engine runs on; replay classifies an undecided attempt the same way (concurrency-model §4).
 Two cases stay open:
 
-- An engine-made input, such as a timer, an adapter completion or a scheduled start, is written to the log before it is applied and has no dry run (DL-292, DL-304). An exception while it is applied stops every resume.
-- A fault that a code change introduces stops every resume of a log the earlier build wrote (DL-292).
+- A fault in the time half of an engine-made input, the timers due at its stamp, stops the engine with exit 6 before the input is logged. Every later input meets the same timers.
+- A fault that a code change introduces stops every resume of a log the earlier build wrote, at an input with a durable decision (DL-292).
 
-In both, the estate stays down until a fixed build ships, or the release rolls back to the one that wrote the log. The resume error names the input and says so (DL-292).
+In both, the estate stays down until a fixed build ships, or the release rolls back to one without the fault. The error names the input and says so (DL-292).
 
 ### Instant cascades recurse
 

@@ -82,7 +82,7 @@ systemd
 │           └── one wrapper per detached run, and the run's command, in this unit's cgroup;
 │               they write RUN_ROOT/runs/ and the job's output
 │
-└── dsl41-engine.service        User=dsl41  Restart=on-failure  RestartPreventExitStatus=2 3 5
+└── dsl41-engine.service        User=dsl41  Restart=on-failure  RestartPreventExitStatus=2 3 5 6
       Requires=dsl41-supervisor.service  After=dsl41-supervisor.service
       ExecStart=/opt/dsl41/bin/dsl41-launch engine
       └── dsl41 run ... --run-root RUN_ROOT --estate-anchor ESTATE_ANCHOR --detached   the engine
@@ -141,6 +141,10 @@ What has to happen?
 ├── the engine unit failed with exit 5                               TRANSITION STOP
 │     --on-transition-violation stop halted it after a journaled decision (§3)
 │     read the TRANSITION_VIOLATION line with dsl41 journal, then start the unit
+│
+├── the engine unit failed with exit 6                               TIME-HALF STOP
+│     the timers due at an engine-made input raised; nothing was journaled (§3)
+│     deploy a release that fixes the fault, then start the unit (§7)
 │
 ├── new JIL, properties or run options, and the history continues   TRANSITION
 │   ├── in the same run root                                         IN-PLACE TRANSITION
@@ -406,6 +410,13 @@ dsl41 query status --job "$JOB" -S "$S"
   ERROR, or the launcher's own refusal. Fix it and start the unit. A
   `resume stopped` refusal names a logged input this build cannot replay;
   §7 says what to deploy.
+- **Recover from a time-half stop.** Exit 6: the timers due at an
+  engine-made input raised, and the engine stopped before journaling it.
+  The unit does not retry it, because every restart would stop the same
+  way. The journal line `engine stopped: engine stopped before admitting
+  input N` names the input and the fault. Deploy a release that fixes it
+  (§7), then start the unit. The journal is clean, so the release resumes
+  it.
   A refusal that names a watch's `watch.jsonl` reporting `run_id None`
   against a durable effect is an identity split on a root an earlier
   build resumed: that build launched a watch with no identity for a start
@@ -600,13 +611,14 @@ endpoint; feed these into the site's monitoring.
 
 | Signal | Read it with | What it means |
 | --- | --- | --- |
-| engine unit | `systemctl show -p ActiveState -p ExecMainStatus -p NRestarts dsl41-engine.service` | `active` runs. `failed` with status 2 is a configuration refusal; the journal names it. `failed` with status 3 is a sealed period (next row); it lasts until the next start, and an enabled unit starts at boot. `failed` with status 5 is `--on-transition-violation stop` (§3); the journal says `engine stopped:` and names the transition. A rising `NRestarts` is crash restarts (exit 1); the journal says `engine failed:` and why |
+| engine unit | `systemctl show -p ActiveState -p ExecMainStatus -p NRestarts dsl41-engine.service` | `active` runs. `failed` with status 2 is a configuration refusal; the journal names it. `failed` with status 3 is a sealed period (next row); it lasts until the next start, and an enabled unit starts at boot. `failed` with status 5 is `--on-transition-violation stop` (§3); the journal says `engine stopped:` and names the transition. `failed` with status 6 is a time-half stop (§3); the journal says `engine stopped:` and names the input and the fault. A rising `NRestarts` is crash restarts (exit 1); the journal says `engine failed:` and why |
 | sealed, not opened | the check below, on `ESTATE_ANCHOR/anchor.json` | `closed`: a period is sealed and the next is not open, so nothing runs. Alert when it stays `closed` past the window. `open` is normal. `claimed` is an opener at work, or one that crashed (§6a, Day 2) |
 | supervisor unit | `systemctl show -p ActiveState -p NRestarts dsl41-supervisor.service`; `dsl41 supervise list --run-root "$RUN_ROOT"` | the list answers `"ok": true` while the supervisor is up, and shows each run's `wrapper_alive`. A restart of this unit ended the commands it ran |
 | supervisor log | `$RUN_ROOT/supervisor.log`; `journalctl -u dsl41-supervisor.service` | the supervisor's own output, and the unit's starts and stops |
 | leader | `$RUN_ROOT/leader.lock` holds the last leader's `pid`, `host`, `epoch` and `since`; compare `pid` with `systemctl show -p MainPID --value dsl41-engine.service` | the note stays after the engine exits, so it says who led, not who leads. Never probe the lock with `flock`: an engine that starts while a probe holds it refuses with exit 2. Never delete or replace the file: the engine re-checks it before every append and stops when it changed |
 | control socket | `dsl41 query status --brief -S "$S"` | exit 0: the leader answers. Exit 2: no engine, or a refusal |
 | failures and alarms | `dsl41 query subscribe -S "$S"` as the wake-up; then `dsl41 query trace --since N -S "$S"` with the last `last_seq` read. The trace is per period and its `seq` restarts at 1: set the cursor to 0 when the answer's `baseline_id` changes, or when `last_seq` is below the cursor, as the TUI does (DL-210) | the stream carries journal records: a run's end arrives as an `input` record of kind `STATUS` from the `adapter` source. The trace names what it did: a transition to `FAILURE` or `TERMINATED`, or a `MUST_START_ALARM` or `MUST_COMPLETE_ALARM` entry (SEM-34). Alert on any `TRANSITION_VIOLATION` entry: an applied input broke a declared state-machine transition, and its `cause` names the transition (concurrency-model §4) |
+| quarantined inputs | `journalctl -u dsl41-engine.service`; `dsl41 query subscribe -S "$S"`; `dsl41 journal "$RUN_ROOT"` | alert on any journal line that begins `dsl41: input quarantined`, and on a `decision` record with `"code": "engine_apply_faulted"` on the stream. Applying an engine-made input raised, so the engine logged it rejected and applied only its time half. The line names the input's kind, job, run and the fault. The input's own effect is lost: a quarantined completion leaves its run RUNNING, and a quarantined tick is a missed start. `dsl41 journal` prints a `rejected input` line for it. Report the fault, then settle the row with `sendevent` (concurrency-model §4) |
 | violations off the trace | `journalctl -u dsl41-engine.service` | alert on any line that begins `dsl41: transition violation`. It covers both kinds of violation the trace cannot carry: one in the engine's own machines (admission, the subscribe feed, the seal boundary, the outbox's record move), and one noted outside an input, which is dropped. The line names the machine or entity, the transition and the reason; the engine goes on (concurrency-model §4) |
 | free space | `df -P "$RUN_ROOT" "$ESTATE_ANCHOR"`, and every file system a job's `std_out_file` or `std_err_file` writes to | see "when a write fails" below |
 | perimeter receipts | `$RUN_ROOT/perimeter.jsonl`, when the access map is armed | alert on `access_denied` and `policy_reload_failed` records. `stream_revoked` marks a stream that a reload closed (access-model §6, §7) |
@@ -614,7 +626,8 @@ endpoint; feed these into the site's monitoring.
 The service drill (`watch`) runs the command of every row above and
 checks the output against the row. `configure` reads the perimeter's
 receipts, `sealed` the `closed` state, and `kill-supervisor` the
-supervisor unit's journal. It does not reach these meanings: exit 5; a
+supervisor unit's journal. It does not reach these meanings: exit 5;
+exit 6; a quarantined input; a
 rising `NRestarts` from exit 1 with the `engine failed:` line (the drill's
 crash is a signal, status 9); the `claimed` state; the
 `MUST_START_ALARM` and `MUST_COMPLETE_ALARM` entries; a `TERMINATED` run
@@ -1448,20 +1461,31 @@ Decisions to make once, per site:
   on until the next violation. Keep the default unless
   a refused command blocks work you need: `continue` is that escape until
   a release fixes the table.
+- **Faults in engine-made inputs.** The engine applies each input it made
+  itself on a copy of its state first (concurrency-model §4). If a tick, a
+  completion or a routing observation raises there and the timers due at
+  its stamp apply on their own, the input is quarantined: it is journaled
+  with a rejected decision under `engine_apply_faulted`, only its timers
+  apply, a `dsl41: input quarantined` line names it, and the engine runs on
+  (§0's "What to watch"). If the timers raise too, or the input is a time
+  observation, which is all timers, the engine stops before journaling the
+  input and exits 6.
 - **Machine identity.** Pass `--as-machine` explicitly; the zero-config
   fallback (forward hostname) is for laptops. Jobs whose `machine:`
   resolves elsewhere are refused at preflight (`--machine-policy strict`,
   keep it).
 - **Init system.** The engine runs until SIGINT or SIGTERM and stops
   cleanly on both. Under systemd, use `Type=simple`,
-  `Restart=on-failure`, `RestartPreventExitStatus=2 3 5`, a sane
+  `Restart=on-failure`, `RestartPreventExitStatus=2 3 5 6`, a sane
   `RestartSec`, and an `ExecStart` wrapper that passes `--resume` if and
   only if `<root>/journal.jsonl` exists. Exit 2 is a configuration
   refusal (below) that a retry cannot fix. Exit 3 is a sealed engine: the
   next period is opened by an operator, not by a restart loop (§6a;
   DL-134). A unit that lists 2 alone restart-loops at every boundary.
   Exit 5 is a transition stop, listed so that `--on-transition-violation
-  stop` keeps the engine down until an operator has read the violation. A
+  stop` keeps the engine down until an operator has read the violation.
+  Exit 6 is a time-half stop: the timers due at an engine-made input
+  raised, so every restart would stop the same way. A
   crash restart must resume the same run root, and the first start of a
   new baseline must not. Never automate the choice of run root: a new
   baseline is an operator action (§6).
@@ -1559,9 +1583,15 @@ Exit codes:
 - 3: sealed; period N+1 is ready to open (§6a).
 - 5: stopped by `--on-transition-violation stop` after a journaled
   decision.
+- 6: stopped before journaling an engine-made input whose time half
+  raised: a timer due at its stamp, the release of a removed job's units,
+  or a clock check. The journal stays clean. Every later input would meet
+  the same timers, so the engine stays down until a release that fixes
+  the fault is deployed (§7). A control command under the same fault is
+  refused with `apply_faulted`.
 
 Exit 2 means a person misconfigured something, and a restart will not
-help; hence `RestartPreventExitStatus=2 3 5` above. A second engine on a
+help; hence `RestartPreventExitStatus=2 3 5 6` above. A second engine on a
 live run root is refused by `leader.lock`, an `flock` the leader holds for
 its whole process life. The kernel releases it when that process dies,
 `kill -9` included. So a misconfigured restart loop cannot start a second
@@ -1856,7 +1886,7 @@ with.
 engine that holds `leader.lock` is a live engine. The CLI stages C2 and
 asks that engine over the control socket, and the engine then exits with
 code 3 ("sealed; period N+1 is ready to open"). Set
-`RestartPreventExitStatus=2 3 5` under systemd, or the init system
+`RestartPreventExitStatus=2 3 5 6` under systemd, or the init system
 restart-loops a sealed engine. With no engine running, the same command
 takes the lock itself, replays and reconciles, and performs the boundary
 as an offline leader. In both modes C1 comes from the run root's own
@@ -2052,7 +2082,7 @@ in flight exits 2: this request did nothing.
 
 *The engine exited 3 and the init system restarted it.* It will loop.
 Exit 3 is "sealed; period N+1 is ready to open", and the opening is an
-operator action. Put `RestartPreventExitStatus=2 3 5` in the unit file.
+operator action. Put `RestartPreventExitStatus=2 3 5 6` in the unit file.
 
 *`audit` printed "the registry row could not be set".* The checkpoint is
 written and durable, and the checkpoint is what `verify` and
@@ -2161,22 +2191,30 @@ segment pinned to another. Check it in both venvs, whatever the note says:
 log through this build. If a logged input raises on replay, resume
 refuses with exit 2 and names the input: `resume stopped: replay stopped
 at input N (KIND from SOURCE at AT, request_id ID)`. The same build
-raises at the same input on every resume, so a restart cannot clear it,
-and nothing skips the input (period-model §11). A replay stop may name an
-effect instead of an input (a doubled or unknown outcome): it exits 2 with
-the same advice. Which case it is decides the way out:
+raises at the same input on every resume, so a restart cannot clear it
+(period-model §11). A replay stop may name an effect instead of an input
+(a doubled or unknown outcome): it exits 2 with the same advice. Which
+case it is decides the way out:
 
 - **The same build wrote the log.** The fault is in this release. Deploy
   a release that fixes it, then resume. The estate stays down until that
-  release exists. This is a stated limit: no tool skips or rewrites a
-  logged input.
+  release exists. No tool skips or rewrites a logged input.
 - **An upgrade is replaying an older release's log.** The new release
   cannot replay what the old one wrote. Flip the venv back to the release
   that wrote the log, and resume with it.
 
-A command whose apply raises is refused before it is journaled
-(`apply_faulted`, concurrency-model §4), so this case needs an
-engine-made input, or a fault a code change introduced.
+Most faults never reach this point. A command whose apply raises is
+refused before it is journaled (`apply_faulted`), and an engine-made input
+whose apply raises is quarantined or stops the engine with exit 6 before
+it is journaled (concurrency-model §4). An input journaled with no
+decision, the crash window, is quarantined by replay the same way when
+its apply raises and its timers apply on their own; resume journals that
+decision, prints the `dsl41: input quarantined` line and runs on. So this
+case needs a journaled decision and a fault a code change introduced, or
+an input journaled with no decision whose timers raise. A quarantine
+journaled by one
+release replays on any release with the same state-machine version, so
+it does not block a rollback to a release without the fault.
 
 One such fault has its own message: `RecursionError: an instant cascade
 passed the recursion limit of N; its first start was JOB (CAUSE)`. It

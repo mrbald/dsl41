@@ -331,3 +331,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-317 | The tested size: a 200-job estate on a virtual and a real clock, what it costs, and the limits that follow | [docs/deployment-runbook.md](deployment-runbook.md) |
 | DL-318 | A DST and midnight drill runs the real runner on a fast fake clock, and L023 names every opening of a window with its day and pass | [docs/ir-design.md](ir-design.md) |
 | DL-319 | The runbook requires an init that reaps orphaned processes, and lint and rehearse take the launcher's zone | [docs/deployment-runbook.md](deployment-runbook.md) |
+| DL-320 | An engine-made input whose apply raises is quarantined, or stops the engine before it is logged |  |

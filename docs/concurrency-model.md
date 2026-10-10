@@ -238,9 +238,11 @@ For every input, in log order:
    and an unseen old-epoch request is refused.
 3. Assign the leader timestamp, monotone across inputs already admitted
    but not yet applied. After this step's clock check and before the
-   frontier moves, **dry-apply** a control input on a fork of the state.
-   Refuse it when that apply raises or the command breaks a declared
-   transition (below, DL-292).
+   frontier moves, **dry-apply** every input on a fork of the state.
+   Refuse a control input when that apply raises or the command breaks a
+   declared transition (below, DL-292). Quarantine an engine-made input
+   whose apply raises when its time half applies alone, and stop the
+   engine when it does not (below).
 4. Atomically append one ordered batch: `TimeAdvanced(at)` +
    `InputAttempt`, and publish that record to subscribers. The envelope
    is durable, but that is not a decision, so the socket does not answer
@@ -258,8 +260,9 @@ For every input, in log order:
 Steps 5–7 must not yield to another state-changing input. An exception
 between step 3 assigning the index and step 7 completing stops the
 engine. So does a failed WAL append. Replay rebuilds the attempt and, when
-its decision is missing, applies it through the gate (DL-156). Replay
-itself writes nothing. Before the ghost-run gate is seeded and before the
+its decision is missing, applies it through the gate (DL-156), or
+quarantines it when that apply raises and its time half applies alone
+(below). Replay itself writes nothing. Before the ghost-run gate is seeded and before the
 resume ladder reads the outbox, the resuming engine performs step 7 for
 that attempt: it writes the missing `decision` record, with the effects
 the verdict implies, and a SPAWN mints its `run_id` in that record
@@ -272,16 +275,20 @@ does not run for it. A
 seal does not turn such an exception into a refusal (`period-model.md`
 §7, DL-274). In a seal, step 3's `clock_regressed` refuses a request. For
 an engine-made input it stops the engine, because nobody would hear the
-refusal.
+refusal. A time-half stop on an engine-made input the seal drains stops
+the engine the same way; on the cutoff's own time observation the seal
+aborts.
 
 **The dry apply** (DL-292). A control input is one that crossed the
 socket, or an event that an in-process script raised with the `control`
 source. Scheduler ticks, adapter and reconciliation completions, the
 leader's routing observations and time observations are the engine's own
 facts. After step 3's clock check and before step 3 moves the frontier,
-the engine runs steps 5 and 6 for a control input on a fork of the oracle
-(`Oracle.fork`). The fork copies every map, the timer heap and the trace,
-and shares the frozen rows.
+the engine runs steps 5 and 6 for every input on a fork of the oracle
+(`Oracle.fork`). The fork copies every map and the timer heap, and shares
+the frozen rows. Its trace and its emitted log start empty: both are
+append-only, and an apply reads them only from a length it saved, so a
+fork costs the same on every day of a period.
 
 Steps 5–7 read nothing outside the oracle and do not yield. So the fork
 reaches the result the real apply will, with one stated exception. The
@@ -291,9 +298,11 @@ reads. Only a gate verdict can differ, and the real apply's verdict is the
 one logged. If the real apply of a control input then records a violation
 that the dry apply did not, the input is not refused. It is recorded like
 an engine-made violation (below), with its trace line, and `stop` halts
-the engine.
+the engine. A real apply that raises after a passing dry apply stops the
+engine with the input logged and undecided, and replay classifies it
+(below).
 
-Two outcomes refuse the input:
+Two outcomes refuse a control input:
 
 - An apply that raises refuses it with `apply_faulted`.
 - A violation of a declared state-machine transition that the command's
@@ -307,9 +316,31 @@ command never reaches replay. A gate rejection is not a refusal. The
 fork's verdict is discarded, and step 6 decides again and logs the
 rejection.
 
-An engine-made input is not dry-applied, because nobody would hear of its
-refusal. Its move is taken. Only an input's batch (`InputBatch`) drains
-the violation channel. Some violations are noted outside a batch: by a
+An engine-made input is never refused, because nobody would hear of its
+refusal. If its dry apply raises, the engine runs the batch's time half
+alone on a second fresh fork, with the attempt rejected. Where the first
+apply raised does not tell the halves apart: the batch commits both
+halves on the way out, and a commit-time check can trip on either.
+
+- If the time half applies alone, the input is quarantined. It is logged
+  with a rejected decision under the stored code `engine_apply_faulted`,
+  and only its time half applies. The `reason` names the input's kind,
+  job, run and the exception. A line under `dsl41: input quarantined`
+  goes to stderr once the decision is durable, and `dsl41 journal` prints
+  the rejection beside the trace. The fault costs that input's own effect:
+  a quarantined completion leaves its run live, and a quarantined tick is
+  a missed start. A rejection is a decision, not a refusal, so the input
+  and its verdict are in the log.
+- If the time half raises too, the engine stops before the frontier moves
+  and before the append (`TimeHalfStop`), with `dsl41 run` exit 6. The
+  log stays clean, and nothing is dispatched. The same timers fire first
+  in every later batch, so the engine stays down until a build that fixes
+  the fault runs. A time observation has no attempt half, so a fault in
+  its dry apply always stops. A control input under the same fault is
+  refused with `apply_faulted`.
+
+Otherwise an engine-made input's move is taken, with its violations.
+Only an input's batch (`InputBatch`) drains the violation channel. Some violations are noted outside a batch: by a
 move with no transaction open, or by a writer that opens its own (the
 oracle's genesis seed, classification's seeding, the executor seed). Such
 a violation never reaches a dry apply. The next batch drops it, with a
@@ -343,9 +374,9 @@ in admission, a subscription, the seal boundary or the outbox's record
 move is not an oracle input, so `stop` does not stop on it. It is one
 line on stderr under the shared violation prefix, and the move proceeds.
 The `host` machine is not among them. Its violations ride the oracle
-channel inside an input's batch, so the option covers them. An input that
-raises on replay stops the replay with an error that names it
-(`docs/period-model.md` §11).
+channel inside an input's batch, so the option covers them. A logged
+input that raises on replay stops the replay with an error that names it,
+unless replay quarantines it as below (`docs/period-model.md` §11).
 
 **Worked example — one operator kill, three lines.** A job is running at
 run 1, revision 1. An operator sends `KILLJOB` naming that revision. The
@@ -411,8 +442,12 @@ the other half of the input alphabet (DL-44).
 **Replay is two-pass.** `ApplyResult` is appended *after*
 `InputAttempt`, so replay cannot skip an attempt by its kind. It builds
 the decision index first, then applies. An attempt durably admitted with
-**no result** (a crash between steps 4 and 7) is replayed as an
-application, because admission is the commit point.
+**no result** (a crash between steps 4 and 7) is replayed through the
+gate, because admission is the commit point. It is applied on a fork
+first. If that raises, replay classifies it as the live engine classifies
+an engine-made input: when its time half applies alone, the verdict is a
+rejection under `engine_apply_faulted`, which resume writes; otherwise
+replay stops and names the input.
 
 ## 5. Effects
 

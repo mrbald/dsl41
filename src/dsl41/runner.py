@@ -193,12 +193,17 @@ from dsl41.runner_admission import (
     RequestCollision,
     SealInFlight,
     Applied,
+    TimeHalfStop,
     TransitionStop,
     ViolationPolicy,
     apply_attempt,
     fingerprint,
+    quarantine_verdict,
+    report_quarantine,
     report_violation,
+    trial_apply,
 )
+from dsl41.runner_codes import Rejection
 from dsl41.runner_clock import Clock, EngineError, ZeroDelayCycleError
 from dsl41.runner_effects import (
     Effect,
@@ -231,7 +236,7 @@ from dsl41.seal import Execution, SealedHost, SealedState, implicit_routes
 from dsl41.runner_scheduler import Scheduler
 from dsl41.semantics import ADAPTER_SWITCHES, SCHEDULER_SWITCHES, SemanticSwitches
 from dsl41.semantics import DEFAULTS as DEFAULT_SWITCHES
-from dsl41.state_machine import StateMachine, Transition, TransitionError
+from dsl41.state_machine import StateMachine, Transition
 from dsl41.timezones import alias_table
 
 
@@ -433,12 +438,28 @@ class _Pending:
         raised with the `control` source, which is how an in-process script
         sends an operator's command. A tick, a completion, a routing
         observation and a time observation are the engine's own facts, and
-        nobody would hear of their refusal. An unattributed event (the
+        nobody would hear of their refusal: a fault in one quarantines it
+        or stops the engine instead. An unattributed event (the
         bisimulation harness) is not a control input either: it must behave
         as the oracle does when fed directly."""
         if self.envelope is not None:
             return True
         return self.ev is not None and self.ev.source == "control"
+
+
+def _without_frames(exc: Exception) -> Exception:
+    """`exc` and the exceptions chained to it, stripped of their
+    tracebacks, so keeping it pins no frame."""
+    seen: set[int] = set()
+    links: list[BaseException | None] = [exc]
+    while links:
+        link = links.pop()
+        if link is None or id(link) in seen:
+            continue
+        seen.add(id(link))
+        link.__traceback__ = None
+        links += [link.__cause__, link.__context__]
+    return exc
 
 
 class _Do(Enum):
@@ -640,6 +661,11 @@ class Engine:
         #: refusal itself, for an in-process caller with no future to read --
         #: `rehearse` prints each one and fails (concurrency-model ss4)
         self.refused_inputs: list[tuple[Event | None, AdmissionRefused]] = []
+        #: engine-made inputs this engine quarantined live, each with the
+        #: fault its dry apply met: logged with a rejected
+        #: `engine_apply_faulted` decision, their time half applied
+        #: (concurrency-model ss4). `rehearse` prints each one and fails
+        self.quarantined: list[tuple[ApplyResult, Exception]] = []
         #: time-ordered input queue: (at, arrival seq, pending); provenance
         #: rides on Event.source (DL-68); see the module docstring for why
         #: FIFO alone is wrong here
@@ -1735,8 +1761,10 @@ class Engine:
         are settled by construction here (1); the index answers an exact
         retry before anything is stamped or appended, so a retry costs no
         index and moves no clock (2); the frontier checks the stamp is
-        non-decreasing, `_dry_apply` may then refuse a control input, and only
-        then does the frontier hand out the next index (3); the attempt is one line, so its time
+        non-decreasing, `_dry_apply` may then refuse a control input, and
+        `_dry_apply_engine_made` may quarantine an engine-made one or stop the
+        engine, and only then does the frontier hand out the next index (3);
+        the attempt is one line, so its time
         observation cannot be torn from its verb (4); the batch applies the
         time half -- firing due timers, which is what puts a term_run_time
         kill AHEAD of the gate that reads the status it kills (5); the gate
@@ -1800,24 +1828,38 @@ class Engine:
                 # to the seal, and a retry chooses a new T
                 self._unadmitted = pending.ev.kind if pending.ev is not None else "host"
             raise
-        if pending.control:  # before the frontier moves: a refusal takes no index
-            refusal = self._dry_apply(pending, admitted.committed_index, fp)
+        # before the frontier moves: a refusal or a stop takes no index
+        attempt = self._attempt(pending, admitted.committed_index, fp)
+        quarantine: tuple[Rejection, Exception] | None = None
+        if pending.control:
+            refusal = self._dry_apply(attempt)
             if refusal is not None:
                 self.decisions.refuse(pending.request_id)
                 self._refuse(pending, refusal)
                 return []
+        else:
+            try:
+                quarantine = self._dry_apply_engine_made(attempt)
+            except TimeHalfStop:
+                # the input is out of the queue and has no index: inside a
+                # seal it is unadmitted, and the seal stops the engine
+                # rather than lose it while C1 reopens (DL-274). The
+                # cutoff's own time observation is neither: the seal aborts
+                if self.sealing and (pending.ev is not None or pending.host is not None):
+                    self._unadmitted = pending.ev.kind if pending.ev is not None else "host"
+                raise
+        forced = None if quarantine is None else quarantine[0]
         self.frontiers = admitted
         index = self.frontiers.committed_index
         # the window opens with the frontier: memory has moved, and the
         # admission line may follow. `_write` flushes before it fsyncs, so
         # an exception out of `admit` does not prove the line absent either
         self._applying = index
-        attempt = self._attempt(pending, index, fp)
         if self.journal is not None:
             self.journal.admit(attempt)  # WAL-append + fsync BEFORE apply (ss7)
         self.decisions.note(attempt)
         await self.clock.wait_until(pending.at)
-        applied = apply_attempt(self.oracle, attempt, grace_s=self.cmd_grace_s)
+        applied = apply_attempt(self.oracle, attempt, forced=forced, grace_s=self.cmd_grace_s)
         self.decisions.record(applied.result)
         self.frontiers = self.frontiers.record(attempt.index)
         # step 7 commits the decision and the outbox entries it implies as ONE
@@ -1847,6 +1889,9 @@ class Engine:
         if applied.result.decision == "rejected" and ev is not None:
             assert applied.result.reason is not None
             self.drops.append((ev, applied.result.reason))
+        if quarantine is not None:  # loud once the quarantine is durable
+            self.quarantined.append((applied.result, quarantine[1]))
+            report_quarantine(applied.result)
         self._answer(pending, applied.result)
         self._applying = None
         self._stop_on_violation(applied, index)
@@ -1865,26 +1910,22 @@ class Engine:
             " durable; resume replays it"
         )
 
-    def _dry_apply(self, pending: _Pending, index: int, fp: str) -> AdmissionRefused | None:
+    def _dry_apply(self, attempt: Attempt) -> AdmissionRefused | None:
         """Apply a control input on a fork of the oracle, and say why it
         must be refused, or None (concurrency-model ss4).
 
         The fork reaches the result the real apply will: `apply_attempt` reads
         nothing outside the oracle, and steps 5-7 do not yield to another
         writer. A gate rejection is not a refusal; the real apply decides it
-        again and logs it. Only a violation the command itself recorded
-        refuses it: the batch's time half is the engine's own, and its
-        violations are taken with the real apply. A strict test run's
-        `TransitionError` propagates, so the test fails where the move was
-        made."""
-        attempt = self._attempt(pending, index, fp)
-        try:
-            dry = apply_attempt(self.oracle.fork(), attempt, grace_s=self.cmd_grace_s)
-        except TransitionError:
-            raise
-        except Exception as exc:  # noqa: BLE001 -- every fault refuses, none is logged
+        again and logs it. Every fault refuses, in either half, and none is
+        logged. Only a violation the command itself recorded refuses it: the
+        batch's time half is the engine's own, and its violations are taken
+        with the real apply. A strict test run's `TransitionError`
+        propagates, so the test fails where the move was made."""
+        dry = trial_apply(self.oracle, attempt, grace_s=self.cmd_grace_s)
+        if isinstance(dry, Exception):
             return AdmissionRefused(
-                f"refused before admission: applying the input raised {type(exc).__name__}: {exc}",
+                f"refused before admission: applying the input raised {type(dry).__name__}: {dry}",
                 code="apply_faulted",
             )
         if dry.command_violations and self.on_violation != "continue":
@@ -1896,6 +1937,29 @@ class Engine:
                 code="transition_violation",
             )
         return None
+
+    def _dry_apply_engine_made(self, attempt: Attempt) -> tuple[Rejection, Exception] | None:
+        """Apply an engine-made input on a fork of the oracle, and return
+        the rejection that quarantines it with the fault it met, or None to
+        apply it as the gate decides (concurrency-model ss4).
+
+        Nobody would hear of a refusal, so a fault does not refuse. If the
+        time half applies alone on a second fork, the input is logged with
+        a rejected `engine_apply_faulted` decision and its time half
+        applies: the fault costs that input's own effect. If the time half
+        raises too, the engine stops here, before the frontier moves and
+        before the append, with `TimeHalfStop`, naming what the time half
+        raised alone.
+
+        The fault is kept without its traceback: the traceback's frames
+        hold the fork, a full copy of the oracle's maps."""
+        dry = trial_apply(self.oracle, attempt, grace_s=self.cmd_grace_s)
+        if not isinstance(dry, Exception):
+            return None
+        verdict = quarantine_verdict(self.oracle, attempt, dry, grace_s=self.cmd_grace_s)
+        if isinstance(verdict, Exception):
+            raise TimeHalfStop(attempt, verdict, dry) from verdict
+        return verdict, _without_frames(dry)
 
     def _plan_effects(self, applied: Applied, index: int) -> list[Effect]:
         """ss4 step 7's other half: what the shell now intends to do about
@@ -1979,6 +2043,8 @@ class Engine:
         self.journal.decision(recovered.result, effects)
         for effect in effects:
             self.outbox.record(effect)
+        if recovered.result.code == "engine_apply_faulted":
+            report_quarantine(recovered.result)  # replay quarantined it (ss4)
 
     def _dispatchable(self) -> frozenset[str]:
         """Jobs this engine has a dispatch row for: a catalog entry whose

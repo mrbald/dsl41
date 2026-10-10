@@ -56,7 +56,7 @@ from dsl41.ir import CatalogIR, JobIR
 from dsl41.oracle_state import Event
 from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
-from dsl41.runner_admission import AdmissionRefused
+from dsl41.runner_admission import AdmissionRefused, ApplyResult
 from dsl41.runner_clock import EngineError, VirtualClock, ZeroDelayCycleError
 from dsl41.runner_scheduler import Scheduler
 from dsl41.semantics import DEFAULTS, SemanticSwitches, iced_atom_truth
@@ -396,6 +396,7 @@ def run_fail_sweep(
     cases: list[SweepCase] = []
     findings: list[CheckFinding] = []
     refused: list[SweepRefusal] = []
+    quarantined: list[SweepQuarantine] = []
     for producer in producers:
         job = catalog.jobs[producer]
         if job.job_type == "BOX":
@@ -434,6 +435,7 @@ def run_fail_sweep(
             reading=reading,
         )
         refused.extend((case_id, ev, refusal) for ev, refusal in result.refused)
+        quarantined.extend((case_id, decided) for decided in result.quarantined)
         suppressed = {
             name: baseline_runs.get(name, 0) - runs
             for name, runs in sorted(result.runs.items())
@@ -450,8 +452,8 @@ def run_fail_sweep(
         if result.cycle is not None:
             findings.append(_cycle_finding(result.cycle, case=case_id))
         findings.extend(_multi_fire_findings(bounds, result.runs, case=case_id))
-    if refused:
-        raise SweepRefused(refused)
+    if refused or quarantined:
+        raise SweepRefused(refused, quarantined)
     return cases, findings
 
 
@@ -698,6 +700,7 @@ def run_flag_sweep(
     out: list[FlagCase] = []
     findings: list[CheckFinding] = []
     refused: list[SweepRefusal] = []
+    quarantined: list[SweepQuarantine] = []
     for assignment, reset in cases_spec:
         label = ",".join(f"{g}={v!r}" for g, v in sorted(assignment.items()))
         case_id = f"flags:{label}" + ("+reset" if reset else "")
@@ -735,6 +738,7 @@ def run_flag_sweep(
             reading=reading,
         )
         refused.extend((case_id, ev, refusal) for ev, refusal in result.refused)
+        quarantined.extend((case_id, decided) for decided in result.quarantined)
         if result.cycle is not None:
             findings.append(_cycle_finding(result.cycle, case=case_id))
         case_findings = _multi_fire_findings(bounds, result.runs, case=case_id)
@@ -759,8 +763,8 @@ def run_flag_sweep(
                 cycle=result.cycle is not None,
             )
         )
-    if refused:
-        raise SweepRefused(refused)
+    if refused or quarantined:
+        raise SweepRefused(refused, quarantined)
     return out, findings, uncovered
 
 
@@ -1164,21 +1168,32 @@ class PlayResult:
     #: scripted inputs the dry apply refused (concurrency-model ss4): each one
     #: never ran, so the counts above would under-report without it
     refused: list[tuple[Event | None, AdmissionRefused]] = field(default_factory=list)
+    #: engine-made inputs the play quarantined (concurrency-model ss4): only
+    #: their time half applied, so the counts under-report them the same way
+    quarantined: list[ApplyResult] = field(default_factory=list)
 
 
 #: one refusal a sweep play met: the case id, the input, the refusal
 SweepRefusal = tuple[str, Event | None, AdmissionRefused]
+#: one quarantine a sweep play met: the case id and the rejected decision
+SweepQuarantine = tuple[str, ApplyResult]
 
 
 class SweepRefused(EngineError):
-    """A sweep's plays refused scripted inputs. Raised once the sweep has
-    played every case, carrying every refusal with its case, because a
-    refused input never ran: its case's counts would report a suppressed
-    run that is only a lost input (no silent loss)."""
+    """A sweep's plays refused scripted inputs or quarantined engine-made
+    ones. Raised once the sweep has played every case, carrying each with
+    its case, because neither input ran: its case's counts would report a
+    suppressed run that is only a lost input (no silent loss)."""
 
-    def __init__(self, refusals: list[SweepRefusal]) -> None:
-        super().__init__(f"{len(refusals)} scripted input(s) refused in sweep plays")
+    def __init__(
+        self, refusals: list[SweepRefusal], quarantines: list[SweepQuarantine] | None = None
+    ) -> None:
         self.refusals = refusals
+        self.quarantines = quarantines or []
+        super().__init__(
+            f"{len(refusals)} scripted input(s) refused and {len(self.quarantines)}"
+            " input(s) quarantined in sweep plays"
+        )
 
 
 def play_once(
@@ -1223,4 +1238,9 @@ def play_once(
     runs = {
         name: engine.oracle.store.runtime(name).run_number - before[name] for name in catalog.jobs
     }
-    return PlayResult(runs=runs, cycle=cycle, refused=list(engine.refused_inputs))
+    return PlayResult(
+        runs=runs,
+        cycle=cycle,
+        refused=list(engine.refused_inputs),
+        quarantined=[decided for decided, _fault in engine.quarantined],
+    )

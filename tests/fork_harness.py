@@ -1,6 +1,6 @@
 """The fork leak test over the SEM corpus (concurrency-model ss4).
 
-The engine dry-applies a control input on `Oracle.fork()` before it logs
+The engine dry-applies every input on `Oracle.fork()` before it logs
 the input. Two things must hold for that to be sound, and this harness
 checks both on every feed of every SEM trace test in test_oracle.py (the
 `fork` param of its autouse fixture):
@@ -8,7 +8,9 @@ checks both on every feed of every SEM trace test in test_oracle.py (the
 - the dry apply leaves the original's canonical state and trace
   byte-equal to what they were, and
 - the fork's result equals the real apply's: the same state, the same
-  trace, the same emitted events, or the same exception.
+  trace and emitted events as the original appended, or the same
+  exception. A fork's trace and emitted log start empty, so they are
+  compared with the original's tail.
 
 `state_bytes` serializes every attribute the fork must copy. `COPIED`
 and `SHARED` name every attribute an `Oracle` and a `RuntimeState` hold,
@@ -29,8 +31,6 @@ from dsl41.oracle_state import Event
 ORACLE_COPIED = frozenset(
     {
         "store",
-        "_trace",
-        "_emitted",
         "_queue",
         "_now",
         "_opening_release",
@@ -43,6 +43,9 @@ ORACLE_COPIED = frozenset(
         "_starts_in_progress",
     }
 )
+#: Oracle attributes the fork starts empty: the append-only history, which
+#: an apply reads only by slicing from a length it saved itself.
+ORACLE_FRESH = frozenset({"_trace", "_emitted"})
 #: Oracle attributes fixed once the constructor returns, so the fork shares them.
 ORACLE_SHARED = frozenset(
     {"catalog", "semantics", "_referencers", "_pool", "_tz_aliases", "_default_tz"}
@@ -75,9 +78,17 @@ def _event(ev: Event) -> object:
     return ev.model_dump(mode="json")
 
 
-def state_bytes(oracle: Oracle) -> bytes:
-    """The canonical bytes of everything a dry apply could change."""
+def history(oracle: Oracle) -> tuple[int, int]:
+    """The lengths of the trace and the emitted log: where a fork taken now
+    starts them."""
+    return len(oracle._trace), len(oracle._emitted)
+
+
+def state_bytes(oracle: Oracle, since: tuple[int, int] = (0, 0)) -> bytes:
+    """The canonical bytes of everything a dry apply could change, with the
+    trace and the emitted log from `since` (a `history` reading) on."""
     store = oracle.store
+    traced, emitted = since
     doc = {
         "jobs": {name: row.model_dump(mode="json") for name, row in store.job.items()},
         "globals": {name: row.model_dump(mode="json") for name, row in store.globals_.items()},
@@ -91,8 +102,8 @@ def state_bytes(oracle: Oracle) -> bytes:
         "enqueue_counter": store.enqueue_counter,
         "snapshots": sorted(store._snapshots),
         "violations": [[subject, repr(v)] for subject, v in store._violations],
-        "trace": [entry.model_dump(mode="json") for entry in oracle._trace],
-        "emitted": [_event(ev) for ev in oracle._emitted],
+        "trace": [entry.model_dump(mode="json") for entry in oracle._trace[traced:]],
+        "emitted": [_event(ev) for ev in oracle._emitted[emitted:]],
         "queue": [_event(ev) for ev in oracle._queue],
         "now": _when(oracle._now),
         "opening_release": list(oracle._opening_release),
@@ -118,6 +129,7 @@ class ForkCheckedOracle(Oracle):
 
     def _checked(self, step: Callable[[Oracle], list[Event]]) -> list[Event]:
         before = state_bytes(self)
+        since = history(self)
         fork = self.fork()
         dry: list[Event] = []
         dry_fault: Exception | None = None
@@ -131,9 +143,9 @@ class ForkCheckedOracle(Oracle):
         except Exception as exc:
             assert dry_fault is not None, f"only the real apply raised: {exc!r}"
             assert (type(exc), str(exc)) == (type(dry_fault), str(dry_fault))
-            assert state_bytes(fork) == state_bytes(self), "the fork's result differs"
+            assert state_bytes(fork) == state_bytes(self, since), "the fork's result differs"
             raise
         assert dry_fault is None, f"only the dry apply raised: {dry_fault!r}"
-        assert state_bytes(fork) == state_bytes(self), "the fork's result differs"
+        assert state_bytes(fork) == state_bytes(self, since), "the fork's result differs"
         assert [_event(ev) for ev in dry] == [_event(ev) for ev in real]
         return real

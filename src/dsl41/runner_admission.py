@@ -71,6 +71,14 @@ the same way:
   an event in the estate's history -- it consumed an index and its time
   half fired timers -- so it is recorded as a decision.
 
+An engine-made input has nobody to hear a refusal, so its dry apply ends
+another way. If the apply raises and the time half alone applies, the
+input is quarantined: it is logged with a rejected decision under
+`engine_apply_faulted`, and only its time half applies. If the time half
+raises too, the engine stops before the input is logged
+(`TimeHalfStop`). Replay classifies an undecided attempt that raises the
+same way (`quarantine_verdict`).
+
 S5a adds a second shape of verbless attempt beside the time observation: a
 routing-table command (`docs/concurrency-model.md` ss8). It is admitted by
 this same order and gated in this same place, and it is applied to the ss3
@@ -105,7 +113,13 @@ from dsl41.oracle_state import LIVE, TERMINAL, Event, EventKind, RuntimeState
 from dsl41.runner_clock import EngineError
 from dsl41.runner_codes import Code, Rejection
 from dsl41.runner_hosts import HostCommand, apply_host_command, host_rejection_reason
-from dsl41.state_machine import VIOLATION_LOG_PREFIX, StateMachine, Transition, Violation
+from dsl41.state_machine import (
+    VIOLATION_LOG_PREFIX,
+    StateMachine,
+    Transition,
+    TransitionError,
+    Violation,
+)
 
 #: The wire version of the ss6 envelope. There is no earlier version to fall
 #: back to: ss0 refuses a caller that does not name a version, and accepting
@@ -562,6 +576,33 @@ class SealInFlight(AdmissionRefused):
         self.in_flight_request_id = in_flight_request_id
 
 
+class TimeHalfStop(EngineError):
+    """An engine-made input whose time half raises on a fork: the timers
+    due at its stamp, the opening release, or the lazy clock checks
+    (concurrency-model ss4). Raised before the frontier moves and before
+    the append, so the log stays clean and nothing is dispatched. The same
+    timers fire first in every later batch, so the engine stops rather
+    than meet the fault again on its next input; `dsl41 run` exits 6, and
+    the engine unit does not restart it. Resume replays a clean log and
+    stops the same way until a build that fixes the fault runs.
+
+    `cause` is what the time half raised alone; `full`, when it differs,
+    is what the whole apply raised first, named as context."""
+
+    def __init__(self, attempt: Attempt, cause: Exception, full: Exception | None = None) -> None:
+        context = (
+            ""
+            if full is None or _same_fault(full, cause)
+            else f" (applying the whole input raised {type(full).__name__}: {full})"
+        )
+        super().__init__(
+            f"engine stopped before admitting input {attempt.index}"
+            f" ({describe_input(attempt)} at {attempt.at.isoformat()}): its time half"
+            f" raised {type(cause).__name__}: {cause}{context}. Nothing was logged;"
+            " deploy a build that fixes the fault, then resume"
+        )
+
+
 class TransitionStop(EngineError):
     """`--on-transition-violation stop`: an applied input broke a declared
     transition, and its decision is durable. Raised after step 7, never
@@ -609,6 +650,22 @@ def report_violation(violation: Violation | None) -> None:
         pass
 
 
+#: The stderr prefix of a quarantined input (concurrency-model ss4). The
+#: runbook's watch table alerts on it, beside the decision's stored code.
+QUARANTINE_LOG_PREFIX: Final = "dsl41: input quarantined"
+
+
+def report_quarantine(result: ApplyResult) -> None:
+    """One line on stderr for an input quarantined under
+    `engine_apply_faulted`: by the live engine once its decision is durable,
+    or by resume when it writes the decision replay recovered. Best effort,
+    like `report_violation`: a write that fails is dropped."""
+    try:
+        sys.stderr.write(f"{QUARANTINE_LOG_PREFIX}: input {result.index}: {result.reason}\n")
+    except Exception:  # noqa: BLE001, S110 -- a report that cannot be made is dropped
+        pass
+
+
 #: One request id's state in the admission order (concurrency-model ss4).
 #: `unseen` until its attempt is admitted; `admitted` while the attempt line
 #: is durable and the decision is not; then the decision.
@@ -620,7 +677,7 @@ ADMISSION_ADMIT: Final = Transition[AdmissionState](
     "input",
     "admitted",
     guard="the epoch is current; the stamp is not behind the frontier; a control"
-    " input's dry apply is clean",
+    " input's dry apply is clean; an engine-made input's time half applies",
     effect="take the next index; append the attempt line; note the fingerprint",
     cite="concurrency-model ss4 steps 2-4, DL-292",
 )
@@ -638,8 +695,8 @@ ADMISSION_REJECTED: Final = Transition[AdmissionState](
     frozenset({"admitted"}),
     "decide",
     "rejected",
-    guard="a precondition, the stale-completion gate or a host guard rejects, or a"
-    " replayed durable decision says rejected",
+    guard="a precondition, the stale-completion gate or a host guard rejects, the"
+    " input is quarantined, or a replayed durable decision says rejected",
     effect="the decision line, with its stored code",
     cite="concurrency-model ss4, DL-235, DL-272",
 )
@@ -649,7 +706,7 @@ ADMISSION_REFUSED: Final = Transition[AdmissionState](
     "input",
     "unseen",
     guard="a stale epoch; a stamp behind the frontier while the seal answers;"
-    " the dry apply faults or breaks a declared transition",
+    " a control input's dry apply faults or breaks a declared transition",
     effect="answer the refusal; no index is taken and nothing is logged",
     cite="concurrency-model ss4 steps 2-3, DL-90, DL-274, DL-292",
 )
@@ -884,6 +941,7 @@ def apply_attempt(
     attempt: Attempt,
     *,
     decided: ApplyResult | None = None,
+    forced: Rejection | None = None,
     grace_s: float = CMD_GRACE_S,
 ) -> Applied:
     """Steps 5-7 for one admitted attempt, live or replayed.
@@ -893,6 +951,10 @@ def apply_attempt(
     record of anything. `decided` is a DURABLE decision from the log, and
     it wins -- a gate that has changed since must reproduce what the log
     says happened, not what it would decide now.
+
+    `forced` is a quarantine (`quarantine_verdict`): the attempt is
+    rejected without the gate, and only the time half applies. Unlike
+    `decided`, it carries no revisions; the result takes the batch's.
 
     `grace_s` is the command grace this period runs, and it reaches only
     ss8's eviction bound (`runner_hosts.kill_allowance`). It is a WIRING
@@ -912,6 +974,8 @@ def apply_attempt(
     with oracle.batch(attempt.at) as batch:  # step 5: the time half, timers first
         if decided is not None:
             decision = decided.decision
+        elif forced is not None:
+            rejection, decision = forced, "rejected"
         else:
             rejection = _gate(oracle, attempt, ev, grace_s=grace_s)  # step 6
             decision = "rejected" if rejection is not None else "applied"
@@ -948,6 +1012,75 @@ def apply_attempt(
         violations=batch.violations,
         command_violations=batch.command_violations,
     )
+
+
+def trial_apply(
+    oracle: Oracle,
+    attempt: Attempt,
+    *,
+    forced: Rejection | None = None,
+    grace_s: float = CMD_GRACE_S,
+) -> Applied | Exception:
+    """`apply_attempt` on a fresh fork of `oracle`, which it leaves alone:
+    the result, or the exception the apply raised instead. A strict test
+    run's `TransitionError` propagates, so the test fails where the move
+    was made."""
+    try:
+        return apply_attempt(oracle.fork(), attempt, forced=forced, grace_s=grace_s)
+    except TransitionError:
+        raise
+    except Exception as exc:  # noqa: BLE001 -- the caller classifies every fault
+        return exc
+
+
+def quarantine_verdict(
+    oracle: Oracle, attempt: Attempt, cause: Exception, *, grace_s: float = CMD_GRACE_S
+) -> Rejection | Exception:
+    """What to do with an attempt whose apply raised `cause` on a fork
+    (concurrency-model ss4): the rejection that quarantines it, or the
+    exception its time half raises on its own.
+
+    The time half runs alone on a second fresh fork, under the rejection
+    itself. Where the first apply raised does not tell the halves apart:
+    the batch commits both halves on the way out, and a commit-time check
+    can trip on what either moved. So the stop names what the time half
+    raised alone, which may differ from `cause`. An attempt with no verb is
+    all time half, so it is never quarantined and `cause` is its fault.
+    The live engine stops before the append on an exception
+    (`TimeHalfStop`); replay stops with a `ReplayFault`."""
+    if attempt.kind is None and attempt.host is None:
+        return cause
+    rejection = Rejection(
+        "engine_apply_faulted",
+        f"quarantined: applying {describe_input(attempt)} at {attempt.at.isoformat()}"
+        f" raised {type(cause).__name__}: {cause}. Its time half applied and the"
+        " input did not",
+    )
+    alone = trial_apply(oracle, attempt, forced=rejection, grace_s=grace_s)
+    return alone if isinstance(alone, Exception) else rejection
+
+
+def _same_fault(one: Exception, other: Exception) -> bool:
+    """Two faults that read the same: a stop names the first only once."""
+    return (type(one), str(one)) == (type(other), str(other))
+
+
+def describe_input(attempt: Attempt) -> str:
+    """An input as an operator reads it: its kind, the job and run it
+    names, and its source when it has one."""
+    if attempt.kind is not None:
+        what = attempt.kind
+        job = attempt.payload.get("job")
+        if job is not None:
+            what += f" for job {job}"
+        run = attempt.payload.get("run_number")
+        if run is not None:
+            what += f" run {run}"
+    elif attempt.host is not None:
+        what = f"host {attempt.host.verb} of {attempt.host.host_id}"
+    else:
+        what = "time observation"
+    return what if attempt.source is None else f"{what} from {attempt.source}"
 
 
 def _gate(

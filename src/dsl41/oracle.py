@@ -559,8 +559,9 @@ def fit_recursion_limit(job_count: int) -> int:
     completion of a run begun before the cascade, about 6. The worst single
     shape measured needs 22. The engine,
     the replay and equiv's tier (c) call this once the catalog is loaded:
-    an engine-made input that raises is in the WAL already, so every resume
-    would raise at it again.
+    an input that raises is quarantined or stops the engine, and a replay
+    that raised where the engine did not would turn a logged input into a
+    resume stop.
 
     The raise is process-wide. It also lifts every other recursion budget
     that rests on the limit, such as the condition parser's depth refusal
@@ -735,19 +736,24 @@ class Oracle:
     def fork(self) -> Oracle:
         """An independent copy to dry-apply one input on (concurrency-model
         ss4): the engine refuses a control input whose apply raises or breaks
-        a declared transition before the input is logged.
+        a declared transition before the input is logged, and quarantines or
+        stops on an engine-made one.
 
         Not `deepcopy`, which would copy the catalog. The store forks itself;
         every other mutable container is copied here, the memo caches
         included, so nothing a dry apply does reaches this oracle. The
         catalog, the switches, the capacity pool and the referencer index
-        are shared: they are fixed once the constructor returns. A new
-        attribute must be added here, and the fork test pins the attribute
-        set so it cannot be forgotten."""
+        are shared: they are fixed once the constructor returns. The trace
+        and the emitted log start empty, so a fork costs nothing in the
+        period's length: both are append-only, and an apply reads them only
+        by slicing from a length it saved itself. A fork's trace therefore
+        holds only what was applied on the fork. A new attribute must be
+        added here, and the fork test pins the attribute set so it cannot
+        be forgotten."""
         twin = copy.copy(self)
         twin.store = self.store.fork()
-        twin._trace = list(self._trace)
-        twin._emitted = list(self._emitted)
+        twin._trace = []
+        twin._emitted = []
         twin._queue = deque(self._queue)
         twin._opening_release = list(self._opening_release)
         twin._tz_cache = dict(self._tz_cache)

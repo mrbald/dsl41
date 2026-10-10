@@ -7,8 +7,10 @@ that records a violation refuses it with `transition_violation`, unless
 the engine runs `--on-transition-violation continue`. A refusal leaves
 nothing in the WAL. An engine-made input is never refused: its move is
 taken and the violation becomes a trace line, and under `stop` the
-engine halts once the decision is durable. A logged input that raises on
-replay stops replay with an error that names it.
+engine halts once the decision is durable. An engine-made input whose
+apply raises is quarantined or stops the engine (test_engine_quarantine.py).
+A logged input with a durable decision that raises on replay stops replay
+with an error that names it.
 
 Every violation here is a fake one, noted on the store's channel by a
 patched `transition`, so a test chooses which move breaks; the job's real
@@ -27,7 +29,14 @@ from typing import Any
 
 import pytest
 
-from fork_harness import ORACLE_COPIED, ORACLE_SHARED, STORE_COPIED, state_bytes
+from fork_harness import (
+    ORACLE_COPIED,
+    ORACLE_FRESH,
+    ORACLE_SHARED,
+    STORE_COPIED,
+    history,
+    state_bytes,
+)
 from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import VIOLATION_MARKER, Event, JobStatus, RuntimeState
@@ -133,14 +142,21 @@ def _attempt(index: int, *, kind: str | None, **fields: Any) -> Attempt:
 
 def test_the_fork_copies_every_mutable_attribute_and_shares_only_fixed_ones() -> None:
     """The attribute sets are pinned: a new field on either class fails here
-    until `fork` and `fork_harness.state_bytes` both name it."""
+    until `fork` and `fork_harness.state_bytes` both name it. The history
+    starts empty on the fork, so a fork costs nothing in the period's
+    length."""
     oracle = Oracle(lower_source(_JIL))
-    assert set(vars(oracle)) == ORACLE_COPIED | ORACLE_SHARED
+    assert set(vars(oracle)) == ORACLE_COPIED | ORACLE_FRESH | ORACLE_SHARED
     assert set(vars(oracle.store)) == STORE_COPIED
+    oracle.feed(_start())
+    assert oracle._trace and oracle._emitted  # history to leave behind
     oracle._window_starts = [("b", 1, "cause")]  # set only inside a box start
     twin = oracle.fork()
     for name in ORACLE_SHARED:
         assert getattr(twin, name) is getattr(oracle, name), name
+    for name in ORACLE_FRESH:
+        assert getattr(twin, name) == [], name
+        assert getattr(twin, name) is not getattr(oracle, name), name
     for name in ORACLE_COPIED:
         value = getattr(oracle, name)
         assert getattr(twin, name) == value or name == "store", name
@@ -168,6 +184,7 @@ def test_a_dry_host_command_on_a_fork_leaves_the_routing_table_alone() -> None:
         expect={"host:local": oracle.store.revision("host:local")},
     )
     before = state_bytes(oracle)
+    since = history(oracle)
     twin = oracle.fork()
     dry = apply_attempt(twin, attempt)
     assert dry.result.decision == "applied"
@@ -175,7 +192,7 @@ def test_a_dry_host_command_on_a_fork_leaves_the_routing_table_alone() -> None:
     assert state_bytes(oracle) == before
     real = apply_attempt(oracle, attempt)
     assert real.result == dry.result
-    assert state_bytes(oracle) == state_bytes(twin)
+    assert state_bytes(oracle, since) == state_bytes(twin)
 
 
 def test_a_dry_apply_that_raises_leaves_the_original_untouched(
