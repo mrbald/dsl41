@@ -20636,3 +20636,71 @@ relitigate an entry; append a new one.
   the drain. All are fixed and confirmed. Figures first measured before DL-310 were measured again
   on a build that includes it. One nit stays: a supervisor that crashes and leaves its socket
   behind makes `stop.sh` wait the whole drain before it gives up.
+- DL-318 A DST and midnight drill runs the real runner on a fast fake clock, and L023 names every
+  opening of a window with its day and pass
+  (2026-10-10; examples/dst-drill/, examples/README.md, .github/workflows/dst-drill.yml,
+  .dockerignore; src/dsl41/lint.py; docs/ir-design.md §9; tests/test_dst_drill.py,
+  tests/test_lint.py)
+  THE DRILL. examples/dst-drill/ runs `dsl41 run` with its engine, wrappers and real commands
+  under libfaketime, at 60 times real speed, in a Linux container started with an init process.
+  Six scenarios: the spring and fall changes of Europe/London and America/New_York; a local
+  midnight with a live seal, `dsl41 audit` of the sealed period, and `dsl41 run --resume` into
+  the next period; and a clean stop before London's fall change with a resume after it. The
+  rehearsal runs the same zone arithmetic on a virtual clock; the runner reads only UTC, so the
+  container needs no TZ. What the drill adds is timing and processes on one timeline: the engine
+  waking for each tick in real sleep slices, real wrapper launches, a real kill by
+  `term_run_time`, and a stop, a resume and a live seal. Monotonic time is faked too, because
+  asyncio needs both clocks to agree. The driver itself reads the real clock and starts every
+  dsl41 process at the fake time that continues one timeline.
+  THE VERDICT. Each run is compared with `dsl41 rehearse` over the same window and zone. The engine
+  stamps a scheduled start at its computed tick, and a must alarm or a `term_run_time` kill at its
+  computed deadline, not at its clock reading. So these match the rehearsal to the second, and that
+  checks the DST computation, not the timing. The timing has its own checks. Each scheduled start's
+  `dispatch` record, stamped with the engine's clock reading after the wrapper process starts, comes
+  0 to 0.75 s real after the tick (45 s at x60), and the median launch 0 to 0.1 s (6 s). Most
+  launches measured 2 to 4 fake s; the largest of about 250, three containers at once, 28 s. A slow
+  clock or an overshooting sleep moves every launch and so the median. Each kill's KILL effect is
+  applied, and the wrapper's status.json shows the command signaled within 0.1 s real of the
+  deadline (6 s at x60; measured 0.7 to 1.5 s). A separate bound, because a kill starts no process:
+  a kill a grace period or a drain late must fail. A start the engine made from another job's status
+  may lag by 0.25 s real (15 s; measured at most 4 s). End statuses are equal. Scheduler ticks are
+  compared from the two journals, not from the trace: a tick that finds the job's start already
+  deferred to its run_window prints no trace line. A tick inside a downtime must be a `drop` record
+  (E9, DL-45). For each L023 finding, the drill checks that the real run does what the message
+  states on the scenario's change day, and each check is tested to fail on a run that does
+  otherwise. A tick in a gap that does not run, or moves, leaves no start between the job's last
+  ordinary tick before the change and its first one after it. A moved or repeated tick is a count of
+  one start at its instant.
+  REJECTED. Running the test suite under libfaketime to save time: the gain is small, and at high
+  speed tests with real-time windows fail without a product cause. Speeds above x60: start-up
+  skew and launch latency grow with the speed.
+  L023. This closes DL-316's OPEN paragraph. The cause: the rule compared the change day's window
+  intervals with the usual ones as naive datetimes, and datetime equality ignores `fold`. An
+  interval that opens in the second pass of a repeated hour, at the usual wall times, matched a
+  usual interval and was not printed. The comparison now includes `fold`. An opening on the same
+  local date as an earlier one says "opens a second time". A day's openings form one clause,
+  joined by ", then". Each end of an opening now carries its day against the change day ("next
+  day", "previous day") and, in a repeated hour, its pass, in both the vendor-endpoint and the
+  wall-time branches. An opening that spans the whole change day says "does not close that day"
+  (London spring "01:20-01:10": the gap swallows the 01:10 close, so the window stays open from
+  01:20 the day before to 01:10 the day after; DL-316 printed it as a normal day). The message
+  prints every opening that differs from the usual day; a usual first opening is implied by
+  "opens a second time". America/Santiago "23:30-00:30" now reads "the window opens at 23:30, in
+  the first pass (UTC-03:00) and closes at 23:59, in the first pass (UTC-03:00), then opens a
+  second time at 23:30, in the second pass (UTC-04:00) and closes at 00:30 next day". Across
+  7,560 windows in ten zones at 15-minute ends near the change hours, against DL-316: no finding
+  is lost; 13 windows that linted clean now warn, all wholly inside a repeated hour (for example
+  Santiago "23:00-23:15"), because the runner opens them twice; 435 messages gain an opening;
+  1,564 change only by the day and pass of each end, or by joining a day's clauses.
+  LIMITS. A start_mins finding states the scheduler's ticks before a run_window defers or skips
+  them, so the drill checks it only for jobs without a run_window. A moved tick that lands on an
+  ordinary tick merges into it, so the run cannot show which of the two ran. Kernel times stay
+  real under libfaketime, and it does not scale timed thread waits, `setitimer` or `alarm`;
+  src/dsl41 uses none of them. One restart and one seal are tried. The drill runs only when
+  dispatched.
+  REVIEW. One Opus reviewer, tooling and lint-message class, three rounds. It found
+  scheduled-start checks that compared the engine's stamped tick with itself, so a late launch
+  passed; L023 cross-checks that could not fail; a kill check with the launch bound; a window that
+  does not close on a change day left unflagged by DL-316; and a workflow that GitHub would reject
+  on its first dispatch. All are fixed and confirmed. A paired passing and failing run tests each
+  claim kind.

@@ -1011,7 +1011,9 @@ def test_l023_run_window_in_the_missing_hour_prints_the_computed_window() -> Non
 
 def test_l023_run_window_closing_in_the_repeated_hour_closes_in_the_first_pass() -> None:
     (v,) = _l023('run_window: "11:30-01:30"', NY)
-    assert "closes at 01:30, once, in the first pass (UTC-04:00)" in v.message
+    assert (
+        "the window opens at 11:30 previous day and closes at 01:30, in the first pass (UTC-04:00)"
+    ) in v.message
 
 
 def test_l023_run_window_outside_the_change_hours_is_quiet() -> None:
@@ -1034,7 +1036,95 @@ def test_l023_run_window_that_reopens_in_a_repeated_hour_of_another_shape() -> N
     """Berlin repeats 02:00-02:59, an unverified shape: the wall
     comparison opens the window a second time."""
     (v,) = _l023('run_window: "23:00-02:30"', "Europe/Berlin")
-    assert "the window opens a second time at 02:00 and closes at 02:30" in v.message
+    assert (
+        "the window opens a second time at 02:00, in the second pass (UTC+01:00) and closes at"
+        " 02:30, in the second pass (UTC+01:00)"
+    ) in v.message
+
+
+SECOND = "in the second pass"
+
+
+@pytest.mark.parametrize(
+    ("zone", "window", "text"),
+    [
+        (
+            "America/Santiago",
+            "23:30-00:30",
+            "repeats 23:00-23:59 (unverified shape) the window opens at 23:30, in the first pass"
+            " (UTC-03:00) and closes at 23:59, in the first pass (UTC-03:00), then opens a"
+            f" second time at 23:30, {SECOND} (UTC-04:00) and closes at 00:30 next day",
+        ),
+        (
+            "Australia/Lord_Howe",
+            "01:45-02:15",
+            "repeats 01:30-01:59 (unverified shape) the window opens at 01:45, in the first pass"
+            " (UTC+11:00) and closes at 01:59, in the first pass (UTC+11:00), then opens a"
+            f" second time at 01:45, {SECOND} (UTC+10:30) and closes at 02:15",
+        ),
+    ],
+)
+def test_l023_run_window_whose_unusual_opening_comes_first_names_both_openings(
+    zone: str, window: str, text: str
+) -> None:
+    """The second opening falls in the second pass of the repeated hour, at
+    the usual wall times; it is still a second opening that day."""
+    (v,) = _l023(f'run_window: "{window}"', zone)
+    assert text in v.message
+
+
+def test_l023_run_window_that_opens_twice_at_its_written_time_says_second_time() -> None:
+    """Lord Howe repeats 01:30-01:59: the window opens at 01:50 in each pass."""
+    (v,) = _l023('run_window: "01:50-01:40"', "Australia/Lord_Howe")
+    assert (
+        "the window opens at 01:50, in the first pass (UTC+11:00) and closes at 01:40, in the"
+        f" second pass (UTC+10:30), then opens a second time at 01:50, {SECOND} (UTC+10:30)"
+        " and closes at 01:40 next day"
+    ) in v.message
+
+
+@pytest.mark.parametrize(
+    ("zone", "window", "text"),
+    [
+        (
+            "America/Santiago",
+            "23:00-23:15",
+            "repeats 23:00-23:59 (unverified shape) the window opens a second time at 23:00,"
+            f" {SECOND} (UTC-04:00) and closes at 23:15, {SECOND} (UTC-04:00).",
+        ),
+        (
+            "Europe/Berlin",
+            "02:00-02:30",
+            "repeats 02:00-02:59 (unverified shape) the window opens a second time at 02:00,"
+            f" {SECOND} (UTC+01:00) and closes at 02:30, {SECOND} (UTC+01:00).",
+        ),
+    ],
+)
+def test_l023_run_window_wholly_inside_a_repeated_hour_reports_its_second_opening(
+    zone: str, window: str, text: str
+) -> None:
+    """The window opens in both passes. The first opening is the usual one,
+    so only the second is printed."""
+    found = [v for v in _l023(f'run_window: "{window}"', zone) if "repeats" in v.message]
+    assert len(found) == 1 and text in found[0].message
+
+
+def test_l023_run_window_that_does_not_close_on_the_change_day_says_so() -> None:
+    """London's spring gap swallows the 01:10 close: the window opened the
+    day before stays open until 01:10 the day after."""
+    (v,) = _l023('run_window: "01:20-01:10"', "Europe/London")
+    assert (
+        "skips 01:00-01:59 (unverified shape) the window does not close that day: it opens at"
+        " 01:20 previous day and closes at 01:10 next day;"
+    ) in v.message
+
+
+def test_l023_run_window_ends_carry_their_day() -> None:
+    """An overnight window's opening the evening before says so."""
+    (v,) = _l023('run_window: "23:00-01:30"', "Europe/London")
+    assert "skips 01:00-01:59 (unverified shape) the window opens at 23:00 previous day and" in (
+        v.message
+    )
 
 
 @pytest.mark.parametrize("zone", ["Europe/London", "Europe/Berlin", "Australia/Lord_Howe"])

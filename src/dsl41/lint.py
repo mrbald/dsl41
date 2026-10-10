@@ -1460,10 +1460,32 @@ def _must_outcome(
     return _wall_outcome(naive, must_instant(day, times[index], must, tz), tz, "is due at")
 
 
+def _window_end(moment: datetime, day: date, tz: tzinfo) -> str:
+    """One end of a window as the runner opens or closes it: the local clock,
+    its day against the change day `day`, and the pass in a repeated hour."""
+    where = (
+        "" if moment.date() == day else (" next day" if moment.date() > day else " previous day")
+    )
+    first = moment.replace(tzinfo=tz, fold=0).utcoffset()
+    second = moment.replace(tzinfo=tz, fold=1).utcoffset()
+    if first is not None and second is not None and first > second:
+        kind, offset = ("second", second) if moment.fold else ("first", first)
+        return f"{_clock(moment)}{where}, in the {kind} pass ({_utc_label(offset)})"
+    return f"{_clock(moment)}{where}"
+
+
+def _window_text(verb: str, opens: datetime, closes: datetime, day: date, tz: tzinfo) -> str:
+    """One opening of a window, in local wall times. An opening that spans
+    the whole change day says so: the window does not close that day."""
+    text = f"{verb} {_window_end(opens, day, tz)} and closes at {_window_end(closes, day, tz)}"
+    return f"does not close that day: it {text}" if opens.date() < day < closes.date() else text
+
+
 def _window_outcomes(day: date, lo: time, hi: time, tz: tzinfo) -> list[str]:
     """How run_window `lo`-`hi` differs from its written endpoints around the
     change on `day`: the vendor's endpoint rules where `dst_change` names the
-    shape (DL-249), the wall-time comparison elsewhere."""
+    shape (DL-249), the wall-time comparison elsewhere. Each differing opening
+    is printed with its day and, in a repeated hour, its pass."""
     spans = window_spans_near(day, lo, hi, tz)
     texts: list[str] = []
     if spans is not None:
@@ -1473,24 +1495,34 @@ def _window_outcomes(day: date, lo: time, hi: time, tz: tzinfo) -> list[str]:
             opened = _wall_outcome(naive_open, opens, tz, "opens at")
             closed = _wall_outcome(naive_close, closes, tz, "closes at")
             if opened.kind != "same" or closed.kind != "same":
-                texts.append(f"{opened.text} and {closed.text}")
+                local_open, local_close = to_local(opens, tz), to_local(closes, tz)
+                texts.append(_window_text("opens at", local_open, local_close, day, tz))
         return texts
     week = timedelta(days=7)
     one = timedelta(days=1)
     here = wall_window_intervals(day - one, day + one, lo, hi, tz)
+
+    def wall(moment: datetime) -> tuple[datetime, int]:
+        # datetime equality ignores fold, so the second pass of a repeated
+        # hour would match the usual wall time and its opening go unprinted
+        return moment, moment.fold
+
     usual = {
-        (start + week, end + week)
+        (wall(start + week), wall(end + week))
         for start, end in wall_window_intervals(day - 8 * one, day - 6 * one, lo, hi, tz)
     }
     # only the opening and closing wall times and the number of openings count:
     # a day a DST change makes longer or shorter leaves an overnight window alone
     for number, (start, end) in enumerate(here):
-        if (start, end) in usual:
+        if (wall(start), wall(end)) in usual:
             continue
-        again = any(earlier_end >= start for _, earlier_end in here[:number])
+        again = any(
+            earlier_end >= start or earlier_start.date() == start.date()
+            for earlier_start, earlier_end in here[:number]
+        )
         verb = "opens a second time at" if again else "opens at"
-        texts.append(f"{verb} {_clock(start)} and closes at {_clock(end)}")
-    if not texts and usual - set(here):
+        texts.append(_window_text(verb, start, end, day, tz))
+    if not texts and usual - {(wall(start), wall(end)) for start, end in here}:
         texts.append("never opens")
     return texts
 
@@ -1565,10 +1597,11 @@ def _schedule_findings(
         if schedule.run_window is not None:
             lo, hi = schedule.run_window
             shown = f"{lo.hour:02d}:{lo.minute:02d}-{hi.hour:02d}:{hi.minute:02d}"
-            for text in _window_outcomes(
+            texts = _window_outcomes(
                 window.day, time(lo.hour, lo.minute), time(hi.hour, hi.minute), tz
-            ):
-                note("run_window", shown, window, text, "the window")
+            )
+            if texts:
+                note("run_window", shown, window, ", then ".join(texts), "the window")
     return found
 
 
