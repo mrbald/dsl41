@@ -326,3 +326,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-312 | period-model: the anchor's local-filesystem check and the seal's quiesce wait, stated as the code does them | [docs/period-model.md](period-model.md) |
 | DL-313 | At resume a held file-watcher start stays held, and a pending start counts only for its own run |  |
 | DL-314 | Small runner fixes from the spec reviews: the wrapper spec is written whole, an oversized grace is bad_spec, and the perimeter journal's name is made durable | [docs/access-model.md](access-model.md) |
+| DL-315 | At resume a recovered start is committed, and a start whose SPAWN was retired stays as the live engine left it | [docs/concurrency-model.md](concurrency-model.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md) |

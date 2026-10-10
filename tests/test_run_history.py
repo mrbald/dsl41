@@ -1269,6 +1269,39 @@ def test_a_recovered_application_still_decides_the_row(tmp_path: Path) -> None:
     assert records_only.undecided is True
 
 
+def test_a_resume_commits_a_lost_verdict_so_the_records_decide_the_row(tmp_path: Path) -> None:
+    """A resume writes the decision the crash lost (DL-315). The
+    late control `exit 0` lost its application; after one resume the log
+    holds that decision, so records alone decide the row as the gate did,
+    and no run is marked undecided. A commit kept in memory only would
+    leave the records-only row at its pre-completion FAILURE, flagged."""
+    run_root = tmp_path / "run"
+    asyncio.run(_run_then_late_completion(run_root, "control"))
+    _lose_the_decision_for(run_root, "control")
+    [lost] = fold_run_rows(read_journal(wal_path(run_root, 1)))
+    assert (lost.status, lost.undecided) == ("FAILURE", True)
+
+    async def resume() -> None:
+        jil = parse(
+            "insert_job: j1\njob_type: c\ncommand: exit 1\nmachine: m1\n", file="estate.jil"
+        )
+        engine = await resume_run(
+            lower_catalog([jil], permit_unknown=False),
+            run_root,
+            clock=RealClock(),
+            adapters={"CMD": LocalCommandAdapter(grace_seconds=2.0)},
+            settle_seconds=0.0,
+        )
+        await engine.shutdown()
+        assert engine.journal is not None
+        engine.journal.close()
+
+    asyncio.run(resume())
+    [records_only] = fold_run_rows(read_journal(wal_path(run_root, 1)))
+    assert (records_only.status, records_only.exit_code) == ("SUCCESS", 0)
+    assert records_only.undecided is False
+
+
 def test_a_decided_completion_never_marks_its_row_undecided(tmp_path: Path) -> None:
     """The default: every completion in an intact log has its durable
     verdict and nothing sets the flag, full and records-only fidelity

@@ -2921,8 +2921,9 @@ def test_pr28b_an_exception_while_a_drained_attempt_applies_fail_stops(
     an abort would reopen C1 over that state. So no abort runs, the seal
     is not answered, no `seal` record exists, and resume rebuilds from the
     WAL in a period that is still open. A start whose decision was never
-    durable is re-decided through the gate (DL-156) and launches nothing:
-    the outbox is rebuilt from decision records only."""
+    durable is re-decided through the gate (DL-156), and resume writes the
+    missing decision with the SPAWN it implies (DL-315): the start
+    is dispatched once, as a durable decision's would be."""
     import dsl41.runner as runner_mod
     from dsl41.runner_admission import Envelope
 
@@ -2995,14 +2996,13 @@ def test_pr28b_an_exception_while_a_drained_attempt_applies_fail_stops(
     assert opened.estate is not None and opened.estate.manifest.period_id == 1
     assert opened.oracle.store.runtime("a").run_number == 1
     spawns = [e for e in opened.outbox.effects() if e.kind == "SPAWN" and e.job == "a"]
-    if fault in _UNDECIDED:
-        # the recovered verdict has no effect record: nothing launches, and
-        # the row stands for the resume ladder and the operator
-        assert spawns == []
-        assert "a" not in opened.live_jobs()
-    else:
-        assert len(spawns) == 1  # rebuilt from the durable decision, dispatched once
-        assert "a" in opened.live_jobs()
+    # committed at resume for an undecided attempt, rebuilt from the durable
+    # decision otherwise; dispatched once either way
+    assert len(spawns) == 1
+    assert spawns[0].index == index and spawns[0].run_id is not None
+    assert "a" in opened.live_jobs()
+    resumed = read_journal(opened.journal.path)
+    assert len([r for r in resumed if r["rec"] == "decision" and r["index"] == index]) == 1
     _close(opened)
 
 

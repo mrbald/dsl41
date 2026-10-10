@@ -36,9 +36,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import uuid
 
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -63,7 +65,7 @@ from dsl41.runner_hosts import (
     seed_local_executor,
     skew_allowance,
 )
-from dsl41.runner_journal import read_journal
+from dsl41.runner_journal import Replay, read_journal
 from test_preconditions import _serve_engine
 
 T0 = datetime(2026, 7, 1, 8, 0)
@@ -961,14 +963,13 @@ def test_a_watch_on_an_active_host_is_launched_once_at_resume(
 
 
 async def _crash_with_a_stale_spawn(run_root: Path, jil: str, job_type: str) -> str:
-    """Leave a held SPAWN of run 1 pending and the row at run 2 with no
-    SPAWN of its own, the way DL-156's window leaves it.
+    """Leave a held SPAWN of run 1 pending and an attempt that moves the
+    row to run 2 with no decision, the way DL-156's window leaves it.
 
     The host is drained, so SPAWN(1) is held. One input ends run 1, and the
     job's own condition (`t(x)`) starts run 2 in the same feed. The leader
-    dies after that input's attempt record and before its decision record.
-    Replay re-decides the attempt and never re-plans, so no SPAWN(2) exists.
-    Returns SPAWN(1)'s effect id."""
+    dies after that input's attempt record and before its decision record,
+    so the log holds no SPAWN(2). Returns SPAWN(1)'s effect id."""
     engine = start_run(
         lower_source(jil),
         run_root,
@@ -1000,76 +1001,625 @@ async def _crash_with_a_stale_spawn(run_root: Path, jil: str, job_type: str) -> 
     return spawn.effect_id
 
 
-def test_an_untraced_watch_is_not_orphaned_by_an_earlier_runs_pending_spawn(
-    short_root: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("job_type", ["FW", "CMD"])
+def test_a_recovered_restart_waits_for_the_host_under_its_own_spawn(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch, job_type: str
 ) -> None:
-    """Only the run's own SPAWN keeps the sweep from acting on it. SPAWN(1)
-    says nothing about run 2: dispatch retires it ("at run 2, not the 1").
-    Had it counted, the sweep would skip run 2, dispatch would retire the
-    only intent, and the row would stay RUNNING with nothing live, held or
-    journaled. Run 2 has no intent of its own, so it takes the FW
-    re-dispatch (DL-102, DL-44 item 7), once.
-
-    That launch happens while the host is drained. Whether a start with no
-    intent should wait for the host is an open question; this test pins
-    only that the run is not lost."""
+    """Resume writes the decision the crash lost, with the SPAWN of run 2
+    its plan implies and a fresh run_id (DL-315). SPAWN(1) says
+    nothing about run 2: dispatch retires it ("at run 2, not the 1"). Run 2
+    is then a pending intent like any other, so the drained host holds it,
+    and its return launches run 2 once under that id. Neither a watch
+    launched on the drained host nor a command failed as a lost dispatch."""
 
     async def scenario() -> None:
         run_root = short_root / "run"
-        jil = _WATCH_JIL.replace("insert_job: w", "insert_job: x") + "condition: t(x)\n"
-        stale = await _crash_with_a_stale_spawn(run_root, jil, "FW")
+        if job_type == "FW":
+            jil = _WATCH_JIL.replace("insert_job: w", "insert_job: x") + "condition: t(x)\n"
+        else:
+            jil = "insert_job: x\njob_type: c\ncommand: x\ncondition: t(x)\n"
+        stale = await _crash_with_a_stale_spawn(run_root, jil, job_type)
         launches = _count_launches(monkeypatch)
-        watch = _CountingWatch()
-        resumed = await _resume_watch_root(run_root, jil, watch)
+        adapter = _CountingWatch()
+        resumed = await _resume_watch_root(run_root, jil, adapter)
         try:
             await resumed.run_until_quiescent(T0 + timedelta(minutes=5))
             row = resumed.oracle.store.job["x"]
             assert (row.status, row.run_number) == ("RUNNING", 2)
             outcome = resumed.outbox.result_for(stale)
             assert isinstance(outcome, EffectOutcome) and outcome.state == "retired"
+            [spawn] = [e for e in resumed.outbox.pending() if e.kind == "SPAWN"]
+            assert (spawn.job, spawn.run_number) == ("x", 2)
+            assert spawn.run_id is not None
+            assert resumed.held_jobs() == frozenset({"x"})
+            assert resumed.live_jobs() == frozenset()
+            assert launches == []
+
+            back = resumed.submit_host(
+                _cmd("activate"), _expect("a1", SEEDED + 1, epoch=resumed.epoch)
+            )
+            await resumed.run_until_quiescent(T0 + timedelta(minutes=6))
+            assert (await back).decision == "applied"
             assert resumed.held_jobs() == frozenset()
             assert resumed.live_jobs() == frozenset({"x"})
             assert launches == [("x", 2)]
-            assert watch.calls == [("x", 2, None)]
+            assert adapter.calls == [("x", 2, spawn.run_id)]
+        finally:
+            await _close_engine(resumed)
+        assert _reconciled(run_root) == []
+
+    asyncio.run(scenario())
+
+
+def _reconciled(run_root: Path) -> list[dict[str, object]]:
+    """The completions resume's ladder injected, by payload."""
+    return [
+        r["payload"]
+        for r in read_journal(run_root / "journal.jsonl")
+        if r.get("rec") == "input" and r.get("source") == "reconcile"
+    ]
+
+
+def _genesis_engine(run_root: Path, jil: str, job_type: str, adapter: object = None) -> Engine:
+    return start_run(
+        lower_source(jil),
+        run_root,
+        clock=VirtualClock(start=T0),
+        adapters={job_type: adapter or FakeAdapter(default=None)},  # type: ignore[dict-item]
+    )
+
+
+async def _hold_host(engine: Engine, hold: str) -> None:
+    """Drain the engine's executor, or observe it unreachable, durably."""
+    if hold == "drain":
+        drained = engine.submit_host(_cmd("drain"), _expect("d1", SEEDED, epoch=engine.epoch))
+        await engine.run_until_quiescent(T0)
+        assert (await drained).decision == "applied"
+    else:
+        engine.note_executor_unreachable()
+        await engine.run_until_quiescent(T0)
+
+
+async def _release_host(engine: Engine, hold: str, minutes: float) -> None:
+    if hold == "drain":
+        back = engine.submit_host(_cmd("activate"), _expect("a1", SEEDED + 1, epoch=engine.epoch))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=minutes))
+        assert (await back).decision == "applied"
+    else:
+        engine.note_executor_reachable()
+        await engine.run_until_quiescent(T0 + timedelta(minutes=minutes))
+
+
+async def _die_before_the_decision(engine: Engine, ev: Event) -> int:
+    """Admit `ev` and kill the engine after its attempt record and before
+    its decision record (DL-156's window). Returns the attempt's index."""
+
+    def die(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("the leader died before the decision record")
+
+    assert engine.journal is not None
+    path = engine.journal.path
+    engine.journal.decision = die  # type: ignore[method-assign]
+    engine.inject(ev)
+    with pytest.raises(RuntimeError, match="before the decision record"):
+        await engine.run_until_quiescent(ev.at + timedelta(minutes=1))
+    await _close_engine(engine)
+    records = read_journal(path)
+    index = int(records[-1]["seq"])
+    assert records[-1]["rec"] == "input"
+    assert not [r for r in records if r["rec"] == "decision" and r["index"] == index]
+    return index
+
+
+def _decisions_at(run_root: Path, index: int) -> list[dict[str, object]]:
+    return [
+        r
+        for r in read_journal(run_root / "journal.jsonl")
+        if r["rec"] == "decision" and r["index"] == index
+    ]
+
+
+def _committed_spawn(run_root: Path, index: int, job: str, run_number: int) -> str:
+    """The one decision resume wrote for the attempt at `index`, holding one
+    SPAWN of `job.run_number`. Returns the run_id that SPAWN minted."""
+    [decision] = _decisions_at(run_root, index)
+    [effect] = decision["effects"]  # type: ignore[misc]
+    assert (effect["kind"], effect["job"], effect["run_number"]) == ("SPAWN", job, run_number)
+    assert uuid.UUID(effect["run_id"]).version == 4
+    return str(effect["run_id"])
+
+
+@pytest.mark.parametrize("hold", ["drain", "quarantine"])
+@pytest.mark.parametrize("job_type", ["FW", "CMD"])
+def test_an_undecided_start_on_a_held_host_is_committed_and_stays_held(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch, hold: str, job_type: str
+) -> None:
+    """A start admitted on a held host whose decision never landed. Resume
+    re-decides it through the gate (DL-156) and writes the decision, with
+    the SPAWN its plan implies and a run_id minted in that record
+    (DL-315). The SPAWN is pending, so the routing gate holds it:
+    nothing launches at the restart, and a command is not failed. The
+    host's return launches the run once, under the minted id."""
+
+    async def scenario() -> None:
+        run_root = short_root / "run"
+        jil, job = (_WATCH_JIL, "w") if job_type == "FW" else (_SOLO_JIL, "j")
+        engine = _genesis_engine(run_root, jil, job_type)
+        await _hold_host(engine, hold)
+        index = await _die_before_the_decision(
+            engine, Event(at=T0 + timedelta(minutes=1), kind="FORCE_STARTJOB", payload={"job": job})
+        )
+        launches = _count_launches(monkeypatch)
+        adapter = _CountingWatch()
+        resumed = await _resume_watch_root(run_root, jil, adapter)
+        try:
+            await resumed.run_until_quiescent(T0 + timedelta(minutes=5))
+            row = resumed.oracle.store.job[job]
+            assert (row.status, row.run_number) == ("RUNNING", 1)
+            assert resumed.held_jobs() == frozenset({job})
+            assert resumed.live_jobs() == frozenset()
+            assert launches == []
+            run_id = _committed_spawn(run_root, index, job, 1)
+
+            await _release_host(resumed, hold, 6)
+            assert resumed.held_jobs() == frozenset()
+            assert resumed.live_jobs() == frozenset({job})
+            assert launches == [(job, 1)]
+            assert adapter.calls == [(job, 1, run_id)]
+        finally:
+            await _close_engine(resumed)
+        assert _reconciled(run_root) == []
+
+    asyncio.run(scenario())
+
+
+def test_a_committed_start_is_committed_once(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The commit is durable: a second restart finds the attempt decided,
+    recovers nothing, writes no second decision, and holds the same SPAWN
+    under the same run_id (DL-315)."""
+    import dsl41.runner_startup as startup
+
+    replays: list[Replay] = []
+    real = startup.replay_inputs
+
+    def recording(*args: Any, **kwargs: Any) -> Replay:
+        replay = real(*args, **kwargs)
+        replays.append(replay)
+        return replay
+
+    monkeypatch.setattr(startup, "replay_inputs", recording)
+
+    async def scenario() -> None:
+        run_root = short_root / "run"
+        engine = _genesis_engine(run_root, _WATCH_JIL, "FW")
+        await _hold_host(engine, "drain")
+        index = await _die_before_the_decision(
+            engine, Event(at=T0 + timedelta(minutes=1), kind="FORCE_STARTJOB", payload={"job": "w"})
+        )
+        first = await _resume_watch_root(run_root, _WATCH_JIL, _CountingWatch())
+        [spawn] = first.outbox.pending()
+        await _close_engine(first)
+        run_id = _committed_spawn(run_root, index, "w", 1)
+        assert spawn.run_id == run_id
+
+        second = await _resume_watch_root(run_root, _WATCH_JIL, _CountingWatch())
+        try:
+            assert [e for e in second.outbox.effects() if e.kind == "SPAWN"] == [spawn]
+            assert second.held_jobs() == frozenset({"w"})
+        finally:
+            await _close_engine(second)
+        assert _committed_spawn(run_root, index, "w", 1) == run_id
+        assert [len(r.recovered) for r in replays] == [1, 0]
+
+    asyncio.run(scenario())
+
+
+def test_a_refused_mixed_history_resume_writes_no_decision(short_root: Path) -> None:
+    """A run root an earlier build resumed: a watch start lost its decision,
+    and that build launched the watch with no identity, so `watch.jsonl`
+    starts with `run_id: null`. This build's resume plans the missing
+    decision, mints the run's id, and refuses the root by name as a
+    WAL/spool identity split (DL-118). It checks the planned SPAWN before it
+    writes the decision, so the refused resume appends no decision and no
+    SPAWN: its `leader` record, which any refused resume appends, is the
+    only new record, and the build that wrote the log can still open it
+    (DL-315)."""
+    from dsl41.period import active_wal
+    from dsl41.runner_adapters import ARTIFACT_FORMAT_VERSION, append_watch_line
+    from dsl41.runner_clock import EngineError
+
+    async def scenario() -> None:
+        run_root = short_root / "run"
+        engine = _genesis_engine(run_root, _WATCH_JIL, "FW")
+        await _die_before_the_decision(
+            engine, Event(at=T0 + timedelta(minutes=1), kind="FORCE_STARTJOB", payload={"job": "w"})
+        )
+        run_dir = run_root / "runs" / "w.1"
+        run_dir.mkdir(parents=True)
+        append_watch_line(
+            run_dir / "watch.jsonl",
+            {
+                "artifact_format_version": ARTIFACT_FORMAT_VERSION,
+                "at": T0 + timedelta(minutes=2),
+                "kind": "start",
+                "run_id": None,
+            },
+        )
+        wal = active_wal(run_root)
+        before = wal.read_bytes()
+        with pytest.raises(EngineError, match="watch.jsonl reports run_id None"):
+            await _resume_watch_root(run_root, _WATCH_JIL, _CountingWatch())
+        after = wal.read_bytes()
+        assert after.startswith(before)
+        appended = [json.loads(line) for line in after[len(before) :].splitlines()]
+        assert [r["rec"] for r in appended] == ["leader"]
+
+    asyncio.run(scenario())
+
+
+def test_a_recovered_start_followed_by_decided_ones_plans_its_own_run(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A log an earlier build resumed without writing the lost decision:
+    the undecided start of run 1 is followed by a decided start of run 2,
+    whose SPAWN bound its own id. This build plans the lost decision against
+    the rows as of that attempt, so it writes SPAWN(1), which dispatch
+    retires, and leaves SPAWN(2) and its id alone. Planned against the rows
+    the whole replay ends on, it would plan a second SPAWN(2) and refuse the
+    resume as one run with two identities (DL-315)."""
+
+    async def scenario() -> None:
+        run_root = short_root / "run"
+        engine = _genesis_engine(run_root, _SOLO_JIL, "CMD")
+        index = await _die_before_the_decision(
+            engine, Event(at=T0 + timedelta(minutes=1), kind="FORCE_STARTJOB", payload={"job": "j"})
+        )
+        with monkeypatch.context() as earlier_build:
+            earlier_build.setattr(Engine, "commit_recovered", lambda *_args: None)
+            old = await _resume_watch_root(run_root, _SOLO_JIL, FakeAdapter(default=None))
+            try:
+                old.inject(_ev("KILLJOB", 5, job="j"))
+                old.inject(_ev("FORCE_STARTJOB", 5.5, job="j"))
+                await old.run_until_quiescent(T0 + timedelta(minutes=6))
+                assert old.oracle.store.job["j"].run_number == 2
+                [second] = [e for e in old.outbox.effects() if e.kind == "SPAWN"]
+                assert second.run_number == 2
+            finally:
+                await _close_engine(old)
+        assert _decisions_at(run_root, index) == []
+
+        resumed = await resume_run(
+            lower_source(_SOLO_JIL),
+            run_root,
+            clock=VirtualClock(start=T0 + timedelta(minutes=7)),
+            adapters={"CMD": FakeAdapter(default=None)},
+            settle_seconds=0.0,
+            grace_seconds=0.0,
+        )
+        try:
+            spawns = [e for e in resumed.outbox.effects() if e.kind == "SPAWN"]
+            assert [(e.run_number, e.index) for e in spawns] == [(2, second.index), (1, index)]
+            assert spawns[0] == second
+            outcome = resumed.outbox.result_for(spawns[1].effect_id)
+            assert isinstance(outcome, EffectOutcome) and outcome.state == "retired"
+            assert resumed.oracle.store.job["j"].run_number == 2
+        finally:
+            await _close_engine(resumed)
+        _committed_spawn(run_root, index, "j", 1)
+
+    asyncio.run(scenario())
+
+
+def test_a_recovered_starting_overwrite_plans_no_spawn(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ghost-run gate at the commit compares the rows as of the attempt.
+    Run 1 was killed while its SPAWN was held, so dispatch retired the
+    SPAWN. A `CHANGE_STATUS STARTING` at the same run number then lost its
+    decision. Resume writes that decision with no effect: the run number did
+    not move, and a retired effect stays retired (DL-232). Nothing
+    launches, nothing is refused, and the row stays at run 1."""
+
+    async def scenario() -> None:
+        run_root = short_root / "run"
+        engine = _genesis_engine(run_root, _SOLO_JIL, "CMD")
+        await _hold_host(engine, "drain")
+        engine.inject(_ev("STARTJOB", 0.5, job="j"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+        engine.inject(_ev("KILLJOB", 2, job="j"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=3))
+        [spawn] = [e for e in engine.outbox.effects() if e.kind == "SPAWN"]
+        assert engine.outbox.state_of(spawn.effect_id) == "retired"
+        await _release_host(engine, "drain", 4)
+        index = await _die_before_the_decision(engine, _ev("STATUS", 5, job="j", status="STARTING"))
+        launches = _count_launches(monkeypatch)
+        resumed = await _resume_watch_root(run_root, _SOLO_JIL, _CountingWatch())
+        try:
+            await resumed.run_until_quiescent(T0 + timedelta(minutes=7))
+            row = resumed.oracle.store.job["j"]
+            assert (row.status, row.run_number) == ("STARTING", 1)
+            assert [e for e in resumed.outbox.effects() if e.kind == "SPAWN"] == [spawn]
+            assert resumed.outbox.state_of(spawn.effect_id) == "retired"
+            assert resumed.live_jobs() == frozenset()
+            assert resumed.held_jobs() == frozenset()
+            assert launches == []
+        finally:
+            await _close_engine(resumed)
+        [decision] = _decisions_at(run_root, index)
+        assert (decision["decision"], decision["effects"]) == ("applied", [])
+        assert _reconciled(run_root) == []
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("arm", ["FW", "supervised", "tethered"])
+def test_a_start_whose_spawn_was_retired_is_left_as_it_is_at_a_restart(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch, arm: str
+) -> None:
+    """Run 1 was killed while its SPAWN was held, so dispatch retired it,
+    and an operator then set the row RUNNING at the same run number. The
+    live engine launches nothing for that run, and neither does a restart
+    (DL-315): a watch is not relaunched, a supervised start is not
+    replayed under the retired id, and a tethered start is not failed as a
+    lost dispatch. The row stays RUNNING at run 1 with nothing live and
+    nothing held, for the operator to end or restart."""
+    from test_supervisor_idempotency import _probe_adapter
+
+    async def scenario() -> None:
+        run_root = short_root / "run"
+        if arm == "FW":
+            jil, job, job_type = _WATCH_JIL, "w", "FW"
+            genesis, resume = FakeAdapter(default=None), _CountingWatch()
+        else:
+            jil, job, job_type = _SOLO_JIL, "j", "CMD"
+            if arm == "supervised":
+                genesis, resume = _probe_adapter(hang=True), _probe_adapter()
+            else:
+                genesis, resume = FakeAdapter(default=None), _CountingWatch()
+        engine = _genesis_engine(run_root, jil, job_type, genesis)
+        await _hold_host(engine, "drain")
+        engine.inject(_ev("STARTJOB", 0.5, job=job))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+        engine.inject(_ev("KILLJOB", 2, job=job))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=3))
+        [spawn] = [e for e in engine.outbox.effects() if e.kind == "SPAWN"]
+        assert engine.outbox.state_of(spawn.effect_id) == "retired"
+        await _release_host(engine, "drain", 4)
+        engine.inject(_ev("STATUS", 5, job=job, status="RUNNING"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=6))
+        assert engine.live_jobs() == frozenset()
+        await _close_engine(engine)
+
+        launches = _count_launches(monkeypatch)
+        resumed = await resume_run(
+            lower_source(jil),
+            run_root,
+            clock=VirtualClock(start=T0 + timedelta(minutes=7)),
+            adapters={job_type: resume},
+            settle_seconds=0.0,
+            grace_seconds=0.0,
+        )
+        try:
+            await resumed.run_until_quiescent(T0 + timedelta(minutes=8))
+            row = resumed.oracle.store.job[job]
+            assert (row.status, row.run_number) == ("RUNNING", 1)
+            assert resumed.live_jobs() == frozenset()
+            assert resumed.held_jobs() == frozenset()
+            assert launches == []
+            assert resume.calls == []
+        finally:
+            await _close_engine(resumed)
+        assert _reconciled(run_root) == []
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("job_type", ["FW", "CMD"])
+def test_a_start_no_decision_planned_is_left_as_it_is_at_a_restart(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch, job_type: str
+) -> None:
+    """An operator set a job that never ran RUNNING. No decision planned a
+    SPAWN for it, so the live engine launches nothing, and neither does a
+    restart (DL-315): a watch is not launched with no identity,
+    and a command is not failed as a lost dispatch."""
+
+    async def scenario() -> None:
+        run_root = short_root / "run"
+        jil, job = (_WATCH_JIL, "w") if job_type == "FW" else (_SOLO_JIL, "j")
+        engine = _genesis_engine(run_root, jil, job_type)
+        engine.inject(_ev("STATUS", 0, job=job, status="RUNNING"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+        assert list(engine.outbox.effects()) == []
+        await _close_engine(engine)
+
+        launches = _count_launches(monkeypatch)
+        resumed = await _resume_watch_root(run_root, jil, _CountingWatch())
+        try:
+            await resumed.run_until_quiescent(T0 + timedelta(minutes=5))
+            row = resumed.oracle.store.job[job]
+            assert (row.status, row.run_number) == ("RUNNING", 0)
+            assert resumed.live_jobs() == frozenset()
+            assert launches == []
+        finally:
+            await _close_engine(resumed)
+        assert _reconciled(run_root) == []
+
+    asyncio.run(scenario())
+
+
+def test_a_watch_relaunched_under_a_retired_spawn_is_not_relaunched_again(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run root an earlier build left: the watch's SPAWN was retired, and
+    that build's restart launched the watch under the retired id anyway, so
+    a run directory holds an incomplete watch log. A restart now leaves it:
+    a watch is relaunched only under a SPAWN that was applied
+    (DL-315). The completion half still reads the log."""
+    from dsl41.runner_adapters import ARTIFACT_FORMAT_VERSION, append_watch_line
+
+    async def scenario() -> None:
+        run_root = short_root / "run"
+        engine = _genesis_engine(run_root, _WATCH_JIL, "FW")
+        await _hold_host(engine, "drain")
+        engine.inject(_ev("STARTJOB", 0.5, job="w"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+        engine.inject(_ev("KILLJOB", 2, job="w"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=3))
+        [spawn] = [e for e in engine.outbox.effects() if e.kind == "SPAWN"]
+        assert engine.outbox.state_of(spawn.effect_id) == "retired"
+        await _release_host(engine, "drain", 4)
+        engine.inject(_ev("STATUS", 5, job="w", status="RUNNING"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=6))
+        await _close_engine(engine)
+        run_dir = run_root / "runs" / "w.1"
+        run_dir.mkdir(parents=True)
+        append_watch_line(
+            run_dir / "watch.jsonl",
+            {
+                "artifact_format_version": ARTIFACT_FORMAT_VERSION,
+                "at": T0 + timedelta(minutes=6),
+                "kind": "start",
+                "run_id": spawn.run_id,
+            },
+        )
+
+        launches = _count_launches(monkeypatch)
+        watch = _CountingWatch()
+        resumed = await _resume_watch_root(run_root, _WATCH_JIL, watch)
+        try:
+            await resumed.run_until_quiescent(T0 + timedelta(minutes=8))
+            row = resumed.oracle.store.job["w"]
+            assert (row.status, row.run_number) == ("RUNNING", 1)
+            assert resumed.live_jobs() == frozenset()
+            assert launches == []
+            assert watch.calls == []
+        finally:
+            await _close_engine(resumed)
+        assert _reconciled(run_root) == []
+
+    asyncio.run(scenario())
+
+
+def test_a_watch_no_decision_planned_is_not_relaunched_from_its_directory(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An operator set a watch that never ran RUNNING, so no decision
+    planned a SPAWN for its run, and a run directory holds an incomplete
+    watch log with no identity. A restart reads the log but launches
+    nothing: a watch is relaunched only under a SPAWN that was applied,
+    never with no identity (DL-315)."""
+    from dsl41.runner_adapters import ARTIFACT_FORMAT_VERSION, append_watch_line
+
+    async def scenario() -> None:
+        run_root = short_root / "run"
+        engine = _genesis_engine(run_root, _WATCH_JIL, "FW")
+        engine.inject(_ev("STATUS", 0, job="w", status="RUNNING"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+        assert list(engine.outbox.effects()) == []
+        await _close_engine(engine)
+        run_dir = run_root / "runs" / "w.0"
+        run_dir.mkdir(parents=True)
+        append_watch_line(
+            run_dir / "watch.jsonl",
+            {
+                "artifact_format_version": ARTIFACT_FORMAT_VERSION,
+                "at": T0 + timedelta(minutes=1),
+                "kind": "start",
+                "run_id": None,
+            },
+        )
+
+        launches = _count_launches(monkeypatch)
+        watch = _CountingWatch()
+        resumed = await _resume_watch_root(run_root, _WATCH_JIL, watch)
+        try:
+            await resumed.run_until_quiescent(T0 + timedelta(minutes=5))
+            row = resumed.oracle.store.job["w"]
+            assert (row.status, row.run_number) == ("RUNNING", 0)
+            assert resumed.live_jobs() == frozenset()
+            assert launches == []
+            assert watch.calls == []
+        finally:
+            await _close_engine(resumed)
+        assert _reconciled(run_root) == []
+
+    asyncio.run(scenario())
+
+
+def test_an_applied_watch_with_no_trace_is_relaunched_on_a_drained_host(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A watch launched on an active host, then the host drained, then the
+    engine died before the watch wrote anything. Its SPAWN was applied, so
+    the restart re-dispatches the watch under the bound id (DL-44 item 7,
+    DL-102): the routing gate passed at the live dispatch, and a drain stops
+    new work, not running work (ss8)."""
+
+    async def scenario() -> None:
+        run_root = short_root / "run"
+        engine = _genesis_engine(run_root, _WATCH_JIL, "FW")
+        engine.inject(_ev("STARTJOB", 0, job="w"))
+        await engine.run_until_quiescent(T0)
+        assert engine.live_jobs() == frozenset({"w"})
+        [spawn] = [e for e in engine.outbox.effects() if e.kind == "SPAWN"]
+        assert engine.outbox.state_of(spawn.effect_id) == "applied"
+        drained = engine.submit_host(_cmd("drain"), _expect("d1", SEEDED, epoch=engine.epoch))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+        assert (await drained).decision == "applied"
+        await _close_engine(engine)
+        assert not (run_root / "runs" / "w.1").exists()
+
+        launches = _count_launches(monkeypatch)
+        watch = _CountingWatch()
+        resumed = await _resume_watch_root(run_root, _WATCH_JIL, watch)
+        try:
+            await resumed.run_until_quiescent(T0 + timedelta(minutes=5))
+            assert resumed.held_jobs() == frozenset()
+            assert resumed.live_jobs() == frozenset({"w"})
+            assert launches == [("w", 1)]
+            assert watch.calls == [("w", 1, spawn.run_id)]
         finally:
             await _close_engine(resumed)
 
     asyncio.run(scenario())
 
 
-def test_an_untraced_start_is_failed_when_only_an_earlier_runs_spawn_is_pending(
+def test_a_tethered_start_whose_spawn_is_indeterminate_fails_unobservable(
     short_root: Path,
 ) -> None:
-    """The CMD twin. Run 2 has no pending intent and no bound identity to
-    replay, so it fails as a dispatch lost to the crash (runner-design ss7,
-    concurrency-model ss7), rather than sitting RUNNING with nothing live."""
+    """No path resolves a SPAWN `indeterminate` today; a foreign outcome
+    can. The restart treats it as tried with no trace, and a tethered start
+    fails with E7's cause, not "never spawned": the run may have happened
+    (DL-315)."""
 
     async def scenario() -> None:
         run_root = short_root / "run"
-        jil = "insert_job: x\njob_type: c\ncommand: x\ncondition: t(x)\n"
-        stale = await _crash_with_a_stale_spawn(run_root, jil, "CMD")
-        resumed = await _resume_watch_root(run_root, jil, FakeAdapter(default=None))
+        engine = _genesis_engine(run_root, _SOLO_JIL, "CMD")
+        await _hold_host(engine, "drain")
+        engine.inject(_ev("STARTJOB", 0.5, job="j"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+        [spawn] = engine.outbox.pending()
+        engine._resolve_effect(
+            EffectOutcome(
+                effect_id=spawn.effect_id,
+                state="indeterminate",
+                run_id=spawn.run_id,
+                detail="a foreign outcome",
+            )
+        )
+        await _close_engine(engine)
+
+        resumed = await _resume_watch_root(run_root, _SOLO_JIL, FakeAdapter(default=None))
         try:
             await resumed.run_until_quiescent(T0 + timedelta(minutes=5))
-            row = resumed.oracle.store.job["x"]
-            assert (row.status, row.run_number) == ("FAILURE", 2)
-            outcome = resumed.outbox.result_for(stale)
-            assert isinstance(outcome, EffectOutcome) and outcome.state == "retired"
-            assert resumed.live_jobs() == frozenset()
+            row = resumed.oracle.store.job["j"]
+            assert (row.status, row.run_number) == ("FAILURE", 1)
         finally:
             await _close_engine(resumed)
-        reconciled = [
-            r["payload"]
-            for r in read_journal(run_root / "journal.jsonl")
-            if r.get("rec") == "input" and r.get("source") == "reconcile"
-        ]
-        assert reconciled == [
-            {
-                "job": "x",
-                "run_number": 2,
-                "status": "FAILURE",
-                "cause": "dispatch lost to engine crash (never spawned)",
-            }
+        assert _reconciled(run_root) == [
+            {"job": "j", "run_number": 1, "status": "FAILURE", "cause": "exit_status_unobservable"}
         ]
 
     asyncio.run(scenario())

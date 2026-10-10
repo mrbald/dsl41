@@ -1815,10 +1815,11 @@ an `ENOSPC` on the sidecar.
   For these two, no abort runs. The seal request is not answered, and
   neither is an attempt whose answer was still owed. Recovery repairs the
   WAL tail and rebuilds from the WAL, and the period stays open. An attempt
-  whose decision is missing is applied through the gate (DL-156). That
-  recovered application writes no effect record, so a start recovered this
-  way launches nothing. Its row stands for the resume ladder, its
-  untraced-start sweep and the operator to settle (runner-design §7).
+  whose decision is missing is applied through the gate (DL-156). Resume
+  then writes the missing decision, with the effects the verdict implies,
+  before it seeds the ghost-run gate (§11 step 6a, DL-315). A
+  start recovered this way is a pending SPAWN: dispatch applies it, or a
+  drained or quarantined host holds it.
 - A `clock_regressed` before the index on an engine-made input, such as an
   adapter completion, a tick or a routing observation. That input has no
   one to answer, and a refusal would lose it while C1 reopens. So the seal
@@ -2222,6 +2223,35 @@ crashed before its first seal would have no path back.
    lineage, `Oracle(catalog)` genesis from segment 1.
 6. Replay the segments after the seal in order, each in its own period
    context.
+
+   **6a. Commit the recovered verdict.** For each attempt that replay
+   found with no `decision` and applied through the gate (DL-156), write
+   the missing `decision` record, with the effects that `plan_effects`
+   plans for it and a SPAWN's `run_id` minted in that record
+   (DL-315). The plan
+   reads each job's run number just before the attempt as dispatched, and
+   just after it as current, and holds no live run. The decision lands in
+   the active segment, after this incarnation's `leader` record; readers
+   pair a decision with its attempt by `index`, never by position. The
+   verdict is not recorded in the decision index a second time, and
+   `--on-transition-violation stop` does not run for it. A second resume
+   finds the attempt decided and commits nothing.
+
+   Every recovered attempt is planned, and the identity preflight of the
+   reconciliation ladder runs against the WAL's SPAWNs and the planned
+   ones, before any of these decisions is written. A resume refused there
+   writes no decision and mints no id; the only record it has appended is
+   its `leader` record, as any refused resume does.
+
+   A run root that an earlier build resumed may hold a watch it relaunched
+   with no identity: a `watch.jsonl` start line with `run_id: null` for a
+   start whose decision was missing. At this build's first resume of such
+   a root, while that run directory is present, the plan mints an id for
+   the run and resume refuses the root by name as a WAL/spool identity
+   split (DL-118). The refusal fires whether the watch completed or not.
+   It writes no decision, so the build that wrote the log can still open
+   it. Such roots are reset, not migrated, under the pre-production
+   reset clause (`protocol-evolution.md` §5, DL-138).
 7. Run the reconciliation ladder (`runner-design.md` §7). It includes the
    re-drive of a live wrapper under a terminal row, whatever its KILL
    effect's recorded state (PR-33).
@@ -2914,7 +2944,7 @@ and is active whole.
 | PR-30e | a committed seal's exact retry arriving under the new baseline is answered before the baseline gate — **after a physical roll, a B restart, A's removal, and lawful pruning of A's WAL**, from the imported sidecar's `boundary_request`; the same retry two periods later is refused as stale |
 | PR-30g | power loss **after** the committed seal: `periods/N+1/` and its `manifest.json` survive — on **both** the fresh-install path (four fsyncs) and the same-stage reuse path (its in-place liturgy); with any one fsync removed the test fails |
 | PR-28e | a `rejected` and an applied-no-op control attempt arriving after §6 step 2 are refused at admission; one admitted just before the cut has its `decision` durable before the sidecar is written; the active seal request is **not** waited on and the seal commits |
-| PR-28b | after **every** non-commit exit **before the seal append** — phase-2 refusal, and fault injection at each manifest/sidecar write, rename, fsync and pre-commit fence check — `abort_boundary` has run: a control command is admitted, a scheduled tick fires, an FW poll appends; a fence loss inside the interval fail-stops instead; so do an exception while an attempt admitted during the seal is not fully applied, a failed WAL append, and a `clock_regressed` on an engine-made input, which leave no `seal` record; a request that hits `clock_regressed` is answered refused; resume rebuilds from the WAL with the period open, and a start whose decision was missing launches nothing (DL-274) |
+| PR-28b | after **every** non-commit exit **before the seal append** — phase-2 refusal, and fault injection at each manifest/sidecar write, rename, fsync and pre-commit fence check — `abort_boundary` has run: a control command is admitted, a scheduled tick fires, an FW poll appends; a fence loss inside the interval fail-stops instead; so do an exception while an attempt admitted during the seal is not fully applied, a failed WAL append, and a `clock_regressed` on an engine-made input, which leave no `seal` record; a request that hits `clock_regressed` is answered refused; resume rebuilds from the WAL with the period open, and a start whose decision was missing gets that decision with its SPAWN and is dispatched once (DL-274, DL-315) |
 | PR-28d | fault injection **on the seal append itself** — write error mid-line, `fsync` error after a complete line, power loss after flush before fsync: the engine fail-stops with an unknown outcome, never reopens admission; recovery then finds a complete line → `fsync`s the WAL and only then promotes it, **with power loss injected before and after that confirming `fsync`, and with the confirming `fsync` itself raising** — before it the seal may vanish and no successor exists; after it the seal is durable; when it raises, no anchor transition, no successor segment, admission stays closed, and a repeated recovery stays fail-stopped — a torn or absent line → truncated and C1 reopened, a line with records after it → refused |
 | PR-28c | one operator hold, one **pre-armed** job and one held, **initially unarmed** job, a tick at T for the latter, then both a refused and a committed boundary: the pre-armed row is exactly as the operator left it; the initially unarmed row is `armed: true` with exactly the one legitimate C1 revision increment the tick caused — in **both** outcomes, so an abort that restored a pre-freeze snapshot fails; after the commit the operator's `OFF_HOLD` in C2 produces exactly one start |
 | PR-30f | crash before and after the engine's committed-manifest write, before the rename: the retry re-validates, overwrites with its own, and the installed `periods/N+1/` holds both files |
