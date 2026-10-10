@@ -59,6 +59,7 @@ them. The variables block is compared with the launcher.
 | add, change or remove a job | [the job recipe](#recipe-add-change-or-remove-a-job) |
 | stop, restart, seal or recover | [the stop recipe](#recipe-stop-restart-seal-and-recover) |
 | watch an estate | [what to watch](#what-to-watch) |
+| know the tested size and its limits | [capacity and limits](#capacity-and-limits) |
 | back up and restore | §2b |
 | upgrade dsl41 | §7 |
 | keep or prune history | §2a |
@@ -672,6 +673,184 @@ an I/O error:
   still denies. A `privileged_admitted` receipt is best effort, and the
   admission stands. A map whose `policy_loaded` receipt cannot be written
   does not arm (access-model §6).
+
+### Capacity and limits
+
+This section states the size dsl41 was measured at (DL-317), and what that size
+costs. All of it was measured on one macOS host (Apple M3 Pro, Python
+3.14); Linux is not measured. The compressed figures come from build
+55541f3, measured on 2026-10-10, which includes DL-310. The real-clock
+figures come from build b6b8a55, measured on 2026-10-09 and 2026-10-10.
+`examples/soak/` holds the estate and the scripts, and its README says how
+to repeat each measurement.
+
+**The tested size.** 200 jobs on one machine whose `max_load` admits 20
+runs at once. In a day the estate starts about 980 jobs: 900 command runs
+and 78 box runs. 30 runs fail. At the 02:00 batch, 19 runs wait in
+`QUE_WAIT`, and never more than 20 run at once. The commands are cheap
+(`sleep`, `true`, `false`) and print nothing.
+
+**Two kinds of run.** The compressed run plays the estate under a virtual
+clock with a fake adapter: no processes, no supervisor and no spool. Its
+CPU figures are the cost of the engine's decisions, not a real day's CPU.
+The real-clock soak runs the estate with `dsl41 run --detached` and real
+commands. Its CPU and disk figures are the real ones.
+
+**Sealed every day.** The compressed run plays seven days and seals at each
+midnight. Each day then costs the same:
+
+| Per day | Measured |
+| --- | --- |
+| decision CPU, virtual clock | 0.46 s |
+| engine resident set | 70 MiB |
+| the day's WAL segment | 1.2 MB |
+| oracle trace | 3,500 entries |
+| decisions and outbox entries | 2,000 and 900 |
+| open the next period, in process | 0.25 s |
+| seal, in process | 0.25 s |
+| audit, as a command | 1.0 s |
+| one `trace` call past the end, one `status` call, in process | under 0.1 ms, 1.8 ms |
+
+"In process" excludes process start. The `dsl41` command itself takes about
+0.2 s to start on this host, so an opening through `dsl41 run --resume`
+costs that much more. The audit was timed as a command and includes it.
+
+A seal resets the trace, the decision index, the outbox and the engine's
+three lists. A live seal stops the engine with exit 3, and the next period
+starts in a new process. Of the three lists, `drops` stayed empty: it holds
+rejected engine inputs, such as a stale completion. `deduped` and
+`refusals` count operator traffic, not launches. A retried request adds
+one to `deduped`, and a refused request adds one to `refusals`. A restart
+empties both, because the WAL does not hold them.
+
+**One long period.** The same estate, with no seal for 30 days. The WAL row
+is the open period's segment, which is the whole `wal/` here because there
+is only one period:
+
+| End of day | 1 | 7 | 30 |
+| --- | --- | --- | --- |
+| oracle trace, entries | 3,402 | 24,432 | 105,047 |
+| decisions | 1,978 | 13,882 | 59,514 |
+| outbox | 900 | 6,318 | 27,087 |
+| open period's WAL segment | 1.2 MB | 8.6 MB | 37 MB |
+| engine resident set | 69 MiB | 132 MiB | 556 MiB (peak 610) |
+| decision CPU in that day, virtual clock | 0.45 s | 0.6 s | 1.4 s |
+| one `trace` call past the end, in process | under 0.1 ms | under 0.1 ms | under 0.1 ms |
+| one `trace` call from the start, in process | 6.4 ms | 68 ms | 0.31 s |
+| replay on a restart, in process | 0.34 s | 2.0 s | 8.6 s |
+| resident set during the replay | 82 MiB | 197 MiB | 655 MiB |
+| seal, in process | 0.25 s | 0.33 s | 0.74 s |
+| audit, as a command | 0.72 s | 2.4 s | 9.4 s |
+
+The running peak includes the harness's own `trace` call from the start of
+the period, once a day, which builds the whole trace as one answer. A TUI's
+first connect does the same.
+
+**The real clock.** Both real-clock runs used build b6b8a55, before
+DL-310. At a day's age DL-310 saves about 0.15 s a day of planning and at
+most about 2 s a day of the sampler's own `trace` calls, so the real-clock
+CPU below is up to about 7% high for today's build. The other real-clock
+figures do not depend on it. The first soak ran for 30 minutes from 14:21
+UTC, a quiet part of the estate's day, and started 11 runs:
+
+| 30 minutes, real clock | Measured |
+| --- | --- |
+| engine CPU, including its start | 0.31 s at start, 0.61 s at the end |
+| engine resident set | 48 to 61 MiB |
+| engine open files | 16 rows of `lsof -p`, which counts the working directory and mapped files besides descriptors |
+| supervisor resident set | 21 to 31 MiB |
+| one `status` call at the socket, from `sample.py` | 1.1 to 1.8 ms |
+| live seal, then audit, as commands | 0.48 s, 0.44 s |
+| run directory per command run | 5 spool files (20 KiB on disk) and 2 log files |
+
+**A day on the real clock.** The 24-hour soak ran on the same host from
+2026-10-09 15:01 UTC to 2026-10-10 16:30 UTC and started 717 command runs.
+The host slept twice, for about 1.5 h and 9 h, so the engine was awake for
+14.9 h. Each rate per day below is awake time scaled to 24 h.
+
+| 24 hours, real clock | Measured | From |
+| --- | --- | --- |
+| engine CPU | 33 s a day (20.7 s in 14.9 h awake) | samples |
+| supervisor CPU | 5.4 s a day | samples |
+| engine resident set | 61 MiB at start, 57 MiB at the end, never above 61 MiB | samples |
+| supervisor resident set | 31 MiB at start, 10 MiB at the end, never above 31 MiB | samples |
+| engine open files | 16 `lsof` rows from start to end | samples |
+| one `status` call at the socket | 2.4 ms median, 7.6 ms at the 99th percentile | samples |
+| WAL of the one period | 0.98 MB for 717 runs | `engine/wal/` |
+| run directory per command run | 7 files, 20 KiB on disk, 1.1 KB of content | `engine/runs/`, `engine/logs/` |
+| live seal, engine exit, audit, as commands | 0.56 s, 1.6 s, 0.90 s | `stop.jsonl` |
+
+The engine CPU includes the sampler's two control calls a minute. macOS
+takes resident pages back while the host sleeps: just after the 9-hour
+sleep the engine read 11 MiB and the supervisor 7 MiB, so the low values
+are not use. The samples counted `lsof` rows, which include the working
+directory and mapped files; `sample.py` now counts descriptors only. A
+constant count still shows that no descriptor leaked.
+
+**A host suspend.** The host slept from 00:29 to 09:30 UTC, and the engine
+process slept with it. No restart happened, so nothing was resumed. At the
+wake the engine fired every tick that fell in the sleep: about 185 ticks of
+some 66 jobs, each stamped at its own due time, and all applied. None was dropped.
+That is the rule for a live engine that stalls (E9, runner-design §15); a
+restart drops missed ticks instead. Each of those jobs started once,
+however many of its ticks fell in the sleep. About 115 runs started in the
+first 10 minutes. 59 runs waited in `QUE_WAIT` at the wake, and 4 after 13
+minutes. One `trace` call that began at the wake took 14 s; the next took
+11 ms. The engine went on scheduling until the stop. The two short wakes
+before it, at 17:48 and 18:32 UTC, also started runs. To drop the missed
+ticks instead of running them late, stop the engine before a planned pause
+of the host and resume it after.
+
+**Disk.** Each command run leaves a spool directory under `runs/` with four
+files, an entry in `runs/.by_run_id`, and its two log files. The 24-hour
+run's 717 runs used 14 MiB on disk, 20 KiB a run. At 900 runs a day that is
+about 6,300 files and 18 MiB a day. The logs grow by whatever the commands
+print; the soak's commands print nothing. The WAL adds about 1.2 MB a day.
+Nothing removes any of it until an attested period is pruned (§2a:
+`dsl41 estate prune --tombstones`).
+
+**The limits that follow.**
+
+- Within a period, the trace, the decision index and the outbox grow by
+  about 3,500, 2,000 and 900 entries a day, and nothing bounds them. A seal
+  is the only reset. The seal cadence stays the estate's choice
+  (E16, runner-design §15); the tables give its cost at this size.
+- Planning an input's effects no longer reads the whole outbox (DL-310).
+  The decision CPU of a day still grows with the age of the period, from
+  0.45 s on day 1 to 0.6 s on day 7 and 1.4 s on day 30: about 0.7 ms per
+  input on day 30, under the virtual clock. The largest remaining term is
+  the dispatch step's scan of every effect the period recorded.
+- A 30-day period at this size needs about 0.65 GiB for a restart (the
+  replay peak, 655 MiB) and up to 0.6 GiB while it runs. That was measured on
+  macOS with the fake adapter. Linux, a real-clock 30-day period, a longer
+  period and a busier estate are not measured.
+- A restart costs one replay of the open period, and only the open period:
+  0.34 s after a day, 2 s after a week, 9 s after 30 days, plus the
+  process start. The replay needs more memory than the running engine.
+- A `trace` call copies only the entries after its `since` (DL-310), so
+  the TUI's poll every 2 s costs what it returns: under 0.1 ms on day 30.
+  A call from the start of the period, as a TUI's first connect makes,
+  still builds the whole trace: 68 ms on day 7 and 0.31 s on day 30.
+- Disk grows with every run until a prune. At this size the run directory
+  takes about fifteen times the WAL's space.
+
+**What to watch for capacity.** `examples/soak/sample.py` reads the first
+three once a minute, and times the `status` call at the socket:
+
+- The engine's resident set: `ps -o rss= -p "$(systemctl show -p MainPID
+  --value dsl41-engine.service)"`. It should stay near its first day's size
+  under a daily seal.
+- The open period's WAL segment, the highest-numbered file:
+  `ls "$RUN_ROOT"/wal/*.jsonl | tail -1 | xargs du -k`. Its size predicts
+  the replay time. The whole `wal/` keeps every period's segment until a
+  prune, so it is a retention figure (§2a), not a replay figure.
+- The trace length: `last_seq` in the answer to `dsl41 query trace --since
+  N -S "$S"`. It starts at 1 in each period.
+- The run directory: `du -sk "$RUN_ROOT"/runs "$RUN_ROOT"/logs` and
+  `find "$RUN_ROOT"/runs | wc -l`. Prune attested periods by §2a.
+- The time of one `dsl41 query status --brief -S "$S"`. On the tested host
+  it takes about 0.2 s, almost all of it the command's start; the engine's
+  part is about 2 ms in process. A time well above 0.2 s means the engine is busy.
 
 ### Retiring an estate
 

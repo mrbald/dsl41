@@ -20605,3 +20605,34 @@ relitigate an entry; append a new one.
   effect text that stated the runner wrongly in three shapes, which led to messages computed by
   the runner's own functions; false warnings on overnight windows; and wording. All are fixed and
   confirmed except the OPEN gap above, found in round three.
+- DL-317 The tested size: a 200-job estate on a virtual and a real clock, what it costs, and the
+  limits that follow
+  (2026-10-10; examples/soak/, examples/README.md; docs/deployment-runbook.md "Capacity and
+  limits"; tests/test_soak_example.py)
+  THE SIZE. The tested size is one box with 200 jobs and at most 20 runs at once. examples/soak/
+  holds a generated estate of that size (seed 41, `max_load` 20, about 980 starts a day) and the
+  scripts that measure it. `compressed.py` plays the estate on a virtual clock with a fake
+  adapter: seven days sealed at each midnight, and one 30-day period. `soak.sh` runs `dsl41 run
+  --detached` with real commands and a sampler that reads the engine once a minute. `stop.sh`
+  seals, audits, waits for the commands to end and stops the supervisor.
+  THE RESULT. The deployment runbook's new section "Capacity and limits" gives the figures and the
+  build each came from. Sealed daily, every day costs the same: about 70 MiB resident and a 1.2 MB
+  WAL segment. Unsealed, the trace, the decisions and the outbox grow without bound: on day 30 the
+  engine holds up to 0.6 GiB, a restart's replay peaks at 655 MiB and takes 8.6 s, and the audit
+  takes 9.4 s. A day's decision CPU still grows with the period's age, from 0.45 s on day 1 to
+  1.4 s on day 30, because dispatch scans every effect the period recorded. The seal cadence stays
+  the estate's choice (E16); the runbook states its cost. On the real clock, a day used 33 s of engine
+  CPU, the resident set stayed between 57 and 61 MiB, and each run left 20 KiB on disk.
+  A HOST SUSPEND. The soak host slept for about 9 h, and the engine process slept with it. At the
+  wake the live engine fired every missed tick at its due time, each job once, as E9 states for a
+  live engine that stalls; a restart drops missed ticks. The runbook records this. An operator who
+  wants the missed ticks dropped stops the engine before a planned pause and resumes it after.
+  LIMITS. One macOS host; Linux is not measured. The real-clock runs used a build before DL-310,
+  which makes their CPU up to about 7% high at a day's age. The soak's commands print nothing, so
+  log growth is not measured. A 30-day period on the real clock is not measured.
+  REVIEW. One Opus reviewer, tooling and docs class, two rounds. It found WAL sizes summed across
+  periods, virtual-clock CPU presented as a real day's, missing replay memory and run-directory
+  growth, a sampler that counted mapped files as descriptors, and a stop script that could skip
+  the drain. All are fixed and confirmed. Figures first measured before DL-310 were measured again
+  on a build that includes it. One nit stays: a supervisor that crashes and leaves its socket
+  behind makes `stop.sh` wait the whole drain before it gives up.
