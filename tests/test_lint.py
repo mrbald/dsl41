@@ -14,8 +14,10 @@ so every "whole corpus" lint pass here uses the same set test_ir.py lowers.
 from __future__ import annotations
 
 from collections import Counter
+from datetime import date
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 from pydantic import ValidationError
@@ -52,6 +54,7 @@ from dsl41.lint import (
     rule_l017,
     rule_l018,
     rule_l019,
+    rule_l023,
 )
 
 CORPUS_DIR = Path(__file__).parent / "corpus"
@@ -849,3 +852,325 @@ def test_l002_lists_every_attribute_carrying_the_unresolved_var() -> None:
     assert "std_err_file" in violation.message
     assert "command" in violation.message
     assert violation.detail == "Region"
+
+
+# ------------------------------------------------------ 13. L023, DST hours (SEM-32)
+
+#: A reference date for every L023 test, so no result reads today's date.
+L023_TODAY = date(2026, 6, 1)
+NY = "America/New_York"
+
+
+def _sched(name: str, attrs: str, zone: str | None = None) -> str:
+    tz = f"timezone: {zone}\n" if zone else ""
+    return (
+        f"insert_job: {name}\njob_type: c\ncommand: x\nmachine: m1\n"
+        f"date_conditions: 1\n{attrs}\n{tz}\n"
+    )
+
+
+def _l023(attrs: str, zone: str | None = None, base_tz: str | None = None) -> list[Violation]:
+    return rule_l023(lower_source(_sched("j", attrs, zone)), base_tz=base_tz, today=L023_TODAY)
+
+
+def _by_detail(found: list[Violation]) -> dict[str, str]:
+    return {v.detail or "": v.message for v in found}
+
+
+def test_l023_london_start_time_in_the_shared_hour_is_one_finding_with_both_days() -> None:
+    """London springs forward over 01:00-01:59 and falls back over the same
+    wall hour. The spring shape is not the documented one; the runner moves
+    the time past the gap at fold=0. The autumn time runs once, in the
+    second pass."""
+    (v,) = _l023('start_times: "01:30"', "Europe/London")
+    assert (v.code, v.severity, v.jobs) == ("L023", "warn", ["j"])
+    assert "Europe/London" in v.message
+    assert "skips 01:00-01:59 (unverified shape) it runs at 02:30" in v.message
+    assert "repeats 01:00-01:59 it runs at 01:30, once, in the second pass (UTC+00:00)" in v.message
+    assert "\n" not in v.message
+
+
+def test_l023_london_times_outside_the_change_hour_are_quiet() -> None:
+    assert _l023('start_times: "00:59, 02:00, 10:00"', "Europe/London") == []
+
+
+def test_l023_new_york_gap_prints_what_start_time_instants_computes() -> None:
+    from dsl41.timezones import dst_windows, start_time_instants, to_local
+
+    tz = ZoneInfo(NY)
+    gap = next(w for w in dst_windows(tz, L023_TODAY) if w.kind == "gap")
+    (index, instant), *_ = start_time_instants(gap.day, [(2, 5)], tz, dst="vendor")
+    expected = to_local(instant, tz).strftime("%H:%M:%S")
+    (v,) = _l023('start_times: "02:05"', NY)
+    assert f"skips 02:00-02:59 it runs at {expected}" in v.message
+    assert expected == "03:00:05"
+
+
+def test_l023_a_second_start_time_in_the_missing_hour_does_not_run() -> None:
+    found = _by_detail(_l023('start_times: "02:05, 02:25"', NY))
+    assert "it runs at 03:00:05" in found["start_times 02:05"]
+    assert "it does not run" in found["start_times 02:25"]
+
+
+def test_l023_start_times_that_land_on_one_tick_merge() -> None:
+    found = _by_detail(_l023('start_times: "02:00, 03:00"', NY))
+    assert (
+        "runs at 03:00, the same tick as the 03:00 start time (one run; unverified)"
+        in found["start_times 02:00"]
+    )
+    assert (
+        "the same tick as the 02:00 start time (one run; unverified)" in found["start_times 03:00"]
+    )
+
+
+def test_l023_new_york_overlap_start_time_runs_once_in_the_second_pass() -> None:
+    (v,) = _l023('start_times: "01:05"', NY)
+    assert "repeats 01:00-01:59 it runs at 01:05, once, in the second pass (UTC-05:00)" in v.message
+    assert "skips" not in v.message
+
+
+def test_l023_new_york_times_outside_the_change_hours_are_quiet() -> None:
+    assert _l023('start_times: "00:59, 03:00, 12:00"', NY) == []
+
+
+def test_l023_sydney_gap_is_documented_and_its_overlap_is_not() -> None:
+    """Sydney skips 02:00-02:59 in October (the documented shape) and repeats
+    the same hour in April, which is unverified."""
+    (v,) = _l023('start_times: "02:30"', "Australia/Sydney")
+    assert "skips 02:00-02:59 it runs at 03:00:30" in v.message
+    assert "repeats 02:00-02:59 (unverified shape) it runs at 02:30, once, in the" in (v.message)
+
+
+def test_l023_santiago_changes_at_midnight() -> None:
+    found = _by_detail(_l023('start_times: "00:30, 23:30"', "America/Santiago"))
+    assert "skips 00:00-00:59 (unverified shape) it runs at 01:30" in found["start_times 00:30"]
+    assert (
+        "repeats 23:00-23:59 (unverified shape) it runs at 23:30, once"
+        in found["start_times 23:30"]
+    )
+
+
+def test_l023_absolute_must_times_follow_the_computed_deadline() -> None:
+    found = _by_detail(
+        _l023('start_times: "02:05"\nmust_start_times: "02:10"\nmust_complete_times: "02:30"', NY)
+    )
+    assert "it is due at 03:00:10" in found["must_start_times 02:10"]
+    assert "it is due at 03:00:30" in found["must_complete_times 02:30"]
+
+
+def test_l023_a_must_time_outside_the_hour_moves_when_its_start_runs_after_it() -> None:
+    found = _by_detail(_l023('start_times: "02:30"\nmust_start_times: "03:00"', NY))
+    assert "it runs at 03:00:30" in found["start_times 02:30"]
+    assert "it is due at 03:00:59" in found["must_start_times 03:00"]
+
+
+def test_l023_a_must_time_of_a_start_that_does_not_run_is_never_armed() -> None:
+    found = _by_detail(_l023('start_times: "02:05, 02:25"\nmust_start_times: "02:10, 02:50"', NY))
+    assert (
+        "it is never armed: its start time does not run that day" in found["must_start_times 02:50"]
+    )
+
+
+def test_l023_a_must_time_of_a_merged_start_is_never_armed() -> None:
+    found = _by_detail(_l023('start_times: "02:00, 03:00"\nmust_start_times: "02:30, 03:10"', NY))
+    assert (
+        "its start shares the tick of the 02:00 start (unverified)"
+        in found["must_start_times 03:10"]
+    )
+
+
+def test_l023_a_must_time_in_the_repeated_hour_takes_the_pass_the_runner_computes() -> None:
+    first = _by_detail(_l023('start_times: "00:30"\nmust_complete_times: "01:15"', NY))
+    assert (
+        "it is due at 01:15, once, in the first pass (UTC-04:00)"
+        in first["must_complete_times 01:15"]
+    )
+    second = _by_detail(_l023('start_times: "01:05"\nmust_complete_times: "01:15"', NY))
+    assert (
+        "it is due at 01:15, once, in the second pass (UTC-05:00)"
+        in second["must_complete_times 01:15"]
+    )
+
+
+def test_l023_a_must_time_past_midnight_lands_on_the_change_day() -> None:
+    found = _by_detail(_l023('start_times: "23:00"\nmust_complete_times: "26:10"', NY))
+    assert "it is due at 03:00:10" in found["must_complete_times 26:10"]
+
+
+def test_l023_relative_must_times_and_unmoved_absolute_ones_are_quiet() -> None:
+    assert _l023('start_times: "10:00"\nmust_start_times: +5\nmust_complete_times: +90', NY) == []
+    assert _l023('start_times: "10:00"\nmust_start_times: "10:30"', NY) == []
+
+
+def test_l023_run_window_in_the_missing_hour_prints_the_computed_window() -> None:
+    (v,) = _l023('run_window: "02:15-02:45"', NY)
+    assert "the window opens at 03:00 and closes at 03:45" in v.message
+    (v,) = _l023('run_window: "02:30-02:30"', NY)
+    assert "the window opens at 03:00 and closes at 03:00" in v.message
+
+
+def test_l023_run_window_closing_in_the_repeated_hour_closes_in_the_first_pass() -> None:
+    (v,) = _l023('run_window: "11:30-01:30"', NY)
+    assert "closes at 01:30, once, in the first pass (UTC-04:00)" in v.message
+
+
+def test_l023_run_window_outside_the_change_hours_is_quiet() -> None:
+    assert _l023('run_window: "09:00-17:00"', NY) == []
+    assert _l023('run_window: "09:00-17:00"', "Europe/London") == []
+
+
+def test_l023_run_window_on_an_undocumented_shape_is_read_by_wall_time() -> None:
+    """London's spring gap is not the documented shape, so the oracle compares
+    wall times: the window closes when the wall clock jumps past its end."""
+    (v,) = _l023('run_window: "00:30-01:30"', "Europe/London")
+    assert "(unverified shape) the window opens at 00:30 and closes at 00:59" in v.message
+    (v,) = _l023('run_window: "01:30-05:00"', "Europe/London")
+    assert "the window opens at 02:00 and closes at 05:00" in v.message
+    (v,) = _l023('run_window: "01:15-01:45"', "Europe/London")
+    assert "the window never opens" in v.message
+
+
+def test_l023_run_window_that_reopens_in_a_repeated_hour_of_another_shape() -> None:
+    """Berlin repeats 02:00-02:59, an unverified shape: the wall
+    comparison opens the window a second time."""
+    (v,) = _l023('run_window: "23:00-02:30"', "Europe/Berlin")
+    assert "the window opens a second time at 02:00 and closes at 02:30" in v.message
+
+
+@pytest.mark.parametrize("zone", ["Europe/London", "Europe/Berlin", "Australia/Lord_Howe"])
+@pytest.mark.parametrize("window", ["22:00-06:00", "00:30-03:00", "23:00-06:00"])
+def test_l023_an_overnight_window_that_only_spans_a_change_is_quiet(zone: str, window: str) -> None:
+    """Both ends stay at their written wall times and the window opens once
+    each day, so a longer or shorter day is not a finding."""
+    assert _l023(f'run_window: "{window}"', zone) == []
+
+
+def test_l023_start_mins_is_one_info_finding_per_job() -> None:
+    (v,) = _l023("start_mins: 0,30", NY)
+    assert (v.severity, v.detail, v.jobs) == ("info", "start_mins", ["j"])
+    assert "repeats 01:00-01:59, ticks run twice: 01:00, 01:30" in v.message
+    assert "skips 02:00-02:59, ticks do not run: 02:00, 02:30" in v.message
+
+
+def test_l023_start_mins_does_not_move_the_exit_code_even_strict() -> None:
+    catalog = lower_source(_sched("ny", "start_mins: 0,30", NY))
+    report = lint_catalog(catalog, today=L023_TODAY)
+    assert report.by_code("L023")
+    assert report.exit_code(strict=True) == 0
+
+
+def test_l023_start_mins_on_half_hour_changes() -> None:
+    """Lord Howe skips 02:00-02:29 and repeats 01:30-01:59, neither the
+    documented shape: ticks convert at fold=0."""
+    (v,) = _l023("start_mins: 10,40", "Australia/Lord_Howe")
+    assert "ticks move: 02:10 runs at 02:40" in v.message
+    assert "ticks run once, in the first pass: 01:40" in v.message
+
+
+def test_l023_start_mins_that_miss_a_short_window_still_report_the_other() -> None:
+    (v,) = _l023("start_mins: 35", "Australia/Lord_Howe")
+    assert "skips" not in v.message
+    assert "repeats 01:30-01:59 (unverified shape), ticks run once" in v.message
+
+
+@pytest.mark.parametrize("zone", ["UTC", "Asia/Tokyo", "GMT+5"])
+def test_l023_zones_without_dst_are_quiet(zone: str) -> None:
+    attrs = (
+        'start_times: "01:30, 02:30"\nrun_window: "01:15-02:45"\nmust_start_times: "01:35, 02:40"'
+    )
+    assert _l023(attrs, zone) == []
+    assert _l023("start_mins: 0,30", zone) == []
+
+
+def test_l023_a_job_without_a_schedule_is_quiet() -> None:
+    catalog = lower_source("insert_job: j\njob_type: c\ncommand: x\nmachine: m1\n")
+    assert rule_l023(catalog, today=L023_TODAY) == []
+
+
+def test_l023_the_base_zone_applies_to_a_job_with_no_timezone_of_its_own() -> None:
+    assert _l023('start_times: "02:05"') == []  # base UTC by default
+    (v,) = _l023('start_times: "02:05"', base_tz=NY)
+    assert NY in v.message
+    assert "use UTC as the base zone (--timezone)" in v.message
+    assert "around the clock across regions" in v.message
+
+
+def test_l023_a_job_timezone_overrides_the_base_zone_both_ways() -> None:
+    assert _l023('start_times: "02:05"', "Asia/Tokyo", base_tz=NY) == []
+    (v,) = _l023('start_times: "02:05"', NY, base_tz="Asia/Tokyo")
+    assert NY in v.message
+
+
+def test_l023_advice_for_a_zoned_job_names_its_own_timezone() -> None:
+    (v,) = _l023('start_times: "02:05"', NY, base_tz="UTC")
+    assert "set this job's timezone to UTC if it need not follow local time" in v.message
+    assert "base zone" not in v.message
+
+
+def test_l023_an_unresolvable_zone_is_skipped() -> None:
+    assert _l023('start_times: "02:05"', "Nowhere/Land") == []
+    assert _l023('start_times: "02:05"', base_tz="Nowhere/Land") == []
+
+
+def test_l023_a_map_alias_resolves_like_run() -> None:
+    catalog = lower_source(_sched("mapped", 'start_times: "02:05"', "NYSITE"))
+    assert rule_l023(catalog, today=L023_TODAY) == []
+    found = rule_l023(catalog, tz_aliases={"nysite": NY}, today=L023_TODAY)
+    assert len(found) == 1
+
+
+def test_l023_output_is_the_same_on_any_date_of_the_same_reference_years() -> None:
+    attrs = 'start_times: "01:05, 02:05"\nrun_window: "01:15-02:45"'
+    catalog = lower_source(_sched("ny", attrs, NY))
+    first = rule_l023(catalog, today=date(2026, 1, 1))
+    assert first
+    assert first == rule_l023(catalog, today=date(2026, 12, 31))
+
+
+def test_l023_runs_inside_lint_catalog_with_the_base_zone() -> None:
+    catalog = lower_source(_sched("bare", 'start_times: "01:30"'))
+    assert not lint_catalog(catalog, today=L023_TODAY).by_code("L023")
+    report = lint_catalog(catalog, base_tz=NY, today=L023_TODAY)
+    assert [v.jobs for v in report.by_code("L023")] == [["bare"]]
+
+
+@pytest.fixture
+def _l023_date(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("dsl41.lint._reference_today", lambda: L023_TODAY)
+
+
+def test_l023_cli_timezone_sets_the_base_zone(tmp_path: Path, _l023_date: None) -> None:
+    jil = tmp_path / "dst.jil"
+    jil.write_text(_sched("bare", 'start_times: "02:05"'), encoding="utf-8")
+    plain = runner.invoke(app, ["lint", str(jil), "--strict"])
+    assert "L023" not in plain.stdout
+    zoned = runner.invoke(app, ["lint", str(jil), "--strict", "--timezone", NY])
+    assert "L023 warn" in zoned.stdout
+    assert zoned.exit_code == 1
+    suppressed = runner.invoke(
+        app, ["lint", str(jil), "--strict", "--timezone", NY, "--suppress", "L023"]
+    )
+    assert "L023" not in suppressed.stdout
+
+
+def test_l023_cli_timezone_map_resolves_a_site_alias(tmp_path: Path, _l023_date: None) -> None:
+    jil = tmp_path / "dst.jil"
+    jil.write_text(_sched("mapped", 'start_times: "02:05"', "NYSITE"), encoding="utf-8")
+    table = tmp_path / "tz.txt"
+    table.write_text("NYSITE America/New_York\n", encoding="utf-8")
+    assert "L023" not in runner.invoke(app, ["lint", str(jil)]).stdout
+    mapped = runner.invoke(app, ["lint", str(jil), "--timezone-map", str(table)])
+    assert "L023 warn" in mapped.stdout
+
+
+def test_l023_cli_refuses_an_unresolvable_base_zone(tmp_path: Path) -> None:
+    jil = tmp_path / "dst.jil"
+    jil.write_text(_sched("bare", 'start_times: "02:05"'), encoding="utf-8")
+    result = runner.invoke(app, ["lint", str(jil), "--timezone", "Nowhere/Land"])
+    assert result.exit_code == 2
+
+
+def test_l023_cli_timezone_map_help_says_what_it_is_for() -> None:
+    result = runner.invoke(app, ["lint", "--help"])
+    assert "Used only by L023" in result.stdout.replace("\n", " ")
+    assert "without a warning" in " ".join(result.stdout.split()).replace("│", "")

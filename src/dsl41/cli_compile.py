@@ -19,7 +19,10 @@ from dsl41.cli_common import (
     CATALOG_FILES,
     PERMIT_UNKNOWN,
     PROPERTIES,
+    TIMEZONE_OPT,
+    check_base_tz,
     load_catalog_or_exit_2,
+    load_tz_aliases,
     parse_files_or_exit_2,
     refuse,
 )
@@ -60,10 +63,20 @@ def lint(
         help="Rule codes to leave out of the report and the exit code, for"
         " example L005. Repeatable; comma-separated lists accepted.",
     ),  # DL-23
+    timezone: str = TIMEZONE_OPT,
+    timezone_map: Path = typer.Option(
+        None,
+        "--timezone-map",
+        help="Used only by L023. File that maps AutoSys timezone names to zones: the"
+        " output of 'autotimezone -l', or plain 'name zone' lines. Without it, an unknown"
+        " city name is read as the one matching zoneinfo city, without a warning.",
+    ),  # SEM-35/DL-62
 ) -> None:
     """Check JIL files and report linter findings.
 
     All FILES form one catalog. Each finding names its rule, file and line.
+    --timezone and --timezone-map read as in 'dsl41 run'; only L023 (a time
+    in a DST gap or overlap hour) uses them.
 
     Exit codes: 0 clean; 1 findings at error severity, or at warning
     severity with --strict; 2 the input could not be read, parsed or
@@ -82,8 +95,10 @@ def lint(
                 f" (known: {', '.join(sorted(RULE_CODES))})"
             )
         )
+    tz_aliases = load_tz_aliases(timezone_map)
+    check_base_tz(timezone, tz_aliases)
     catalog = load_catalog_or_exit_2(files, permit_unknown, properties)
-    report = lint_catalog(catalog).suppress(codes)
+    report = lint_catalog(catalog, base_tz=timezone, tz_aliases=tz_aliases).suppress(codes)
     for violation in report.violations:
         typer.echo(violation.render())
     raise typer.Exit(report.exit_code(strict=strict))

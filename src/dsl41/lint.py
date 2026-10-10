@@ -9,7 +9,8 @@ engine and join in phase 8 (equiv).
 Rules are pure functions CatalogIR -> list[Violation] (graph rules receive
 the pre-derived DerivedGraph too); lint_catalog derives the graph once and
 runs the registry in code order and jobs in catalog (source) order, so
-output is deterministic for identical input.
+output is deterministic for identical input. L023 also takes a base zone and
+a reference date, so its output is deterministic for a given reference date.
 
 Decisions pinned here (each with a test):
 - L001 cross-instance reading (SEM-06 vs SEM-07): a local job ref must exist
@@ -85,13 +86,21 @@ Phase-5 graph-rule readings (each with a test):
   ancestor box, the SEM-11 default fold). The miss is at least one
   cycle; indefinite only when the producer has no schedule of its own.
   Alarms cannot exempt: observability, not control flow (DL-32).
+- L023 schedule time changed by a DST gap or overlap (SEM-32, DL-249,
+  DL-253, DL-260): an IR-F rule. It finds the days the zone's clock skips or
+  repeats minutes, runs each configured time through the runner's own time
+  functions (timezones.py) and reports a time whose result is not one
+  instant at its written wall time. It restates no runner rule, so the
+  message prints what the runner computes, and says so where the docs mark
+  the change shape unverified. It never changes what the runner does.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterable
-from typing import Literal
+from collections.abc import Callable, Iterable, Mapping
+from datetime import date, datetime, time, timedelta, tzinfo
+from typing import Literal, NamedTuple
 
 from pydantic import BaseModel
 
@@ -109,8 +118,27 @@ from dsl41.conditions import (
     lookback_pitfalls,
 )
 from dsl41.derive import DerivedGraph, derive_graph, local_job, local_producer, start_gates
-from dsl41.ir import TIME_CLUSTER, CatalogIR, ExecSpec, FwSpec, unquote_jil_value
+from dsl41.ir import (
+    TIME_CLUSTER,
+    CatalogIR,
+    ExecSpec,
+    FwSpec,
+    ScheduleBlock,
+    unquote_jil_value,
+)
 from dsl41.semantics import DEFAULTS, iced_atom_truth
+from dsl41.timezones import (
+    DstWindow,
+    dst_windows,
+    must_instant,
+    resolve_timezone,
+    start_mins_instants,
+    start_time_instants,
+    to_local,
+    to_utc,
+    wall_window_intervals,
+    window_spans_near,
+)
 
 Severity = Literal["error", "warn", "info"]
 
@@ -1334,6 +1362,299 @@ def rule_l022(catalog: CatalogIR, graph: DerivedGraph) -> list[Violation]:
     return out
 
 
+# ------------------------------------------------------------------ L023: DST hours
+
+
+def _reference_today() -> date:
+    """The reference date L023 reads when the caller gives none."""
+    return date.today()
+
+
+class _Outcome(NamedTuple):
+    """What the runner does with one configured time on a DST change day,
+    against the plain reading (one instant at the written wall time)."""
+
+    kind: Literal["same", "shifted", "first", "second", "none", "twice"]
+    text: str
+
+
+def _clock(moment: datetime) -> str:
+    return f"{moment:%H:%M:%S}" if moment.second else f"{moment:%H:%M}"
+
+
+def _utc_label(offset: timedelta) -> str:
+    minutes = int(offset.total_seconds() // 60)
+    sign = "-" if minutes < 0 else "+"
+    return f"UTC{sign}{abs(minutes) // 60:02d}:{abs(minutes) % 60:02d}"
+
+
+def _wall_outcome(naive: datetime, instant: datetime, tz: tzinfo, verb: str) -> _Outcome:
+    """One engine instant the runner computed for the wall time `naive`:
+    unchanged, moved to another local time, or one pass of a repeated hour."""
+    local = to_local(instant, tz)
+    if local != naive:
+        later = local.date() > naive.date()
+        where = "" if local.date() == naive.date() else (" next day" if later else " previous day")
+        return _Outcome("shifted", f"{verb} {_clock(local)}{where}")
+    first = naive.replace(tzinfo=tz, fold=0).utcoffset()
+    second = naive.replace(tzinfo=tz, fold=1).utcoffset()
+    if first is not None and second is not None and first > second:
+        if instant == to_utc(naive, tz):
+            kind: Literal["first", "second"] = "first"
+            offset = first
+        else:
+            kind = "second"
+            offset = second
+        return _Outcome(
+            kind, f"{verb} {_clock(naive)}, once, in the {kind} pass ({_utc_label(offset)})"
+        )
+    return _Outcome("same", f"{verb} {_clock(naive)}")
+
+
+def _start_time_outcomes(
+    day: date, times: list[tuple[int, int]], tz: tzinfo
+) -> dict[int, _Outcome]:
+    """The default (`vendor`) result for each start_times entry on `day`,
+    from `start_time_instants`; an entry that shares its instant with
+    another is merged into one tick."""
+    got = dict(start_time_instants(day, times, tz, dst="vendor"))
+    out: dict[int, _Outcome] = {}
+    for index, (hour, minute) in enumerate(times):
+        naive = datetime.combine(day, time(hour, minute))
+        if index not in got:
+            out[index] = _Outcome("none", "does not run")
+            continue
+        outcome = _wall_outcome(naive, got[index], tz, "runs at")
+        twins = [j for j in got if j != index and got[j] == got[index] and times[j] != times[index]]
+        if twins:
+            other = "%02d:%02d" % times[min(twins, key=lambda j: times[j])]
+            outcome = _Outcome(
+                "shifted",
+                f"{outcome.text}, the same tick as the {other} start time (one run; unverified)",
+            )
+        out[index] = outcome
+    return out
+
+
+def _must_outcome(
+    day: date,
+    times: list[tuple[int, int]],
+    index: int,
+    must: tuple[int, int],
+    tz: tzinfo,
+) -> _Outcome:
+    """The deadline of one absolute must time whose start is start_times
+    entry `index` on `day` (DL-253), or why none is armed there."""
+    starts = _start_time_outcomes(day, times, tz)
+    if starts[index].kind == "none":
+        return _Outcome("none", "is never armed: its start time does not run that day")
+    got = dict(start_time_instants(day, times, tz, dst="vendor"))
+    ahead = [j for j in got if got[j] == got[index] and times[j] < times[index]]
+    if ahead:
+        other = "%02d:%02d" % times[min(ahead, key=lambda j: times[j])]
+        return _Outcome(
+            "none", f"is never armed: its start shares the tick of the {other} start (unverified)"
+        )
+    days, hour = divmod(must[0], 24)
+    naive = datetime.combine(day + timedelta(days=days), time(hour, must[1]))
+    return _wall_outcome(naive, must_instant(day, times[index], must, tz), tz, "is due at")
+
+
+def _window_outcomes(day: date, lo: time, hi: time, tz: tzinfo) -> list[str]:
+    """How run_window `lo`-`hi` differs from its written endpoints around the
+    change on `day`: the vendor's endpoint rules where `dst_change` names the
+    shape (DL-249), the wall-time comparison elsewhere."""
+    spans = window_spans_near(day, lo, hi, tz)
+    texts: list[str] = []
+    if spans is not None:
+        for opening, (opens, closes) in zip((day - timedelta(days=1), day), spans[1:3]):
+            naive_open = datetime.combine(opening, lo)
+            naive_close = datetime.combine(opening if lo <= hi else opening + timedelta(days=1), hi)
+            opened = _wall_outcome(naive_open, opens, tz, "opens at")
+            closed = _wall_outcome(naive_close, closes, tz, "closes at")
+            if opened.kind != "same" or closed.kind != "same":
+                texts.append(f"{opened.text} and {closed.text}")
+        return texts
+    week = timedelta(days=7)
+    one = timedelta(days=1)
+    here = wall_window_intervals(day - one, day + one, lo, hi, tz)
+    usual = {
+        (start + week, end + week)
+        for start, end in wall_window_intervals(day - 8 * one, day - 6 * one, lo, hi, tz)
+    }
+    # only the opening and closing wall times and the number of openings count:
+    # a day a DST change makes longer or shorter leaves an overnight window alone
+    for number, (start, end) in enumerate(here):
+        if (start, end) in usual:
+            continue
+        again = any(earlier_end >= start for _, earlier_end in here[:number])
+        verb = "opens a second time at" if again else "opens at"
+        texts.append(f"{verb} {_clock(start)} and closes at {_clock(end)}")
+    if not texts and usual - set(here):
+        texts.append("never opens")
+    return texts
+
+
+def _start_mins_clause(day: date, minutes: list[int], tz: tzinfo) -> str:
+    """The start_mins ticks of every hour on `day` that the runner does not
+    run once at their written time, grouped by what happens to them."""
+    groups: dict[str, list[str]] = {}
+    for hour in range(24):
+        for minute in minutes:
+            naive = datetime.combine(day, time(hour, minute))
+            got = start_mins_instants(day, [(hour, minute)], tz, dst="vendor")
+            if not got:
+                kind, text = "do not run", f"{naive:%H:%M}"
+            elif len(got) > 1:
+                kind, text = "run twice", f"{naive:%H:%M}"
+            else:
+                outcome = _wall_outcome(naive, got[0], tz, "runs at")
+                if outcome.kind == "same":
+                    continue
+                if outcome.kind == "shifted":
+                    kind, text = "move", f"{naive:%H:%M} {outcome.text}"
+                else:
+                    kind, text = f"run once, in the {outcome.kind} pass", f"{naive:%H:%M}"
+            groups.setdefault(kind, []).append(text)
+    return "; ".join(f"{kind}: {', '.join(ticks)}" for kind, ticks in groups.items())
+
+
+def _day_note(window: DstWindow) -> str:
+    skipped = window.kind == "gap"
+    note = f"on a day the clock {'skips' if skipped else 'repeats'} {window.label}"
+    return note if window.documented else f"{note} (unverified shape)"
+
+
+def _l023_advice(own_zone: bool) -> str:
+    if own_zone:
+        return (
+            "Move the time out of the affected hour, or set this job's timezone to UTC if it"
+            " need not follow local time."
+        )
+    return (
+        "Move the time out of the affected hour, or use UTC as the base zone (--timezone)"
+        " for an estate that runs around the clock across regions."
+    )
+
+
+def _schedule_findings(
+    schedule: ScheduleBlock, windows: tuple[DstWindow, ...], tz: tzinfo
+) -> dict[tuple[str, str], list[str]]:
+    """(attribute, written time) -> one clause per change day that moves it,
+    for start_times, absolute must times and run_window."""
+    found: dict[tuple[str, str], list[str]] = {}
+
+    def note(attr: str, shown: str, window: DstWindow, text: str, subject: str = "it") -> None:
+        found.setdefault((attr, shown), []).append(f"{_day_note(window)} {subject} {text}")
+
+    starts = [(t.hour, t.minute) for t in schedule.start_times or []]
+    for window in windows:
+        for index, outcome in _start_time_outcomes(window.day, starts, tz).items():
+            if outcome.kind != "same":
+                note("start_times", "%02d:%02d" % starts[index], window, outcome.text)
+        for attr, sla in (
+            ("must_start_times", schedule.must_start),
+            ("must_complete_times", schedule.must_complete),
+        ):
+            for index, must in enumerate((sla.times or [])[: len(starts)] if sla else []):
+                lead = timedelta(days=must.hour // 24)
+                for start_day in sorted({window.day, window.day - lead}):
+                    result = _must_outcome(start_day, starts, index, (must.hour, must.minute), tz)
+                    if result.kind != "same":
+                        note(attr, "%02d:%02d" % (must.hour, must.minute), window, result.text)
+        if schedule.run_window is not None:
+            lo, hi = schedule.run_window
+            shown = f"{lo.hour:02d}:{lo.minute:02d}-{hi.hour:02d}:{hi.minute:02d}"
+            for text in _window_outcomes(
+                window.day, time(lo.hour, lo.minute), time(hi.hour, hi.minute), tz
+            ):
+                note("run_window", shown, window, text, "the window")
+    return found
+
+
+def rule_l023(
+    catalog: CatalogIR,
+    base_tz: str | None = None,
+    tz_aliases: Mapping[str, str] | None = None,
+    today: date | None = None,
+) -> list[Violation]:
+    """A schedule time that a DST change moves, drops, merges or runs twice
+    (SEM-32, DL-249, DL-253, DL-260). The runtime is settled; the rule tells
+    the author what the runner does.
+
+    The job's own `timezone` decides the zone, else `base_tz` (UTC when
+    None), resolved as `dsl41 run --timezone` does; a name that does not
+    resolve is skipped, other paths report it. On each day the zone's clock
+    skips or repeats minutes, in the reference year (`today`, default the
+    current date) and the next, each configured time goes through the
+    runner's own functions: `start_time_instants` and `start_mins_instants`
+    for start and tick times, `must_instant` for absolute must times, and
+    `window_spans_near` and `wall_window_contains` for run_window. A time is
+    flagged when the result is not one instant at its written wall time;
+    the message prints the computed result. Output is deterministic for a
+    given reference date. Each flagged time is a warn; a `start_mins` job
+    is one info, because it crosses every hour."""
+    reference = today if today is not None else _reference_today()
+    base = base_tz if base_tz is not None else "UTC"
+    zones: dict[str, tuple[tzinfo, tuple[DstWindow, ...]] | None] = {}
+
+    def zone_of(name: str) -> tuple[tzinfo, tuple[DstWindow, ...]] | None:
+        if name not in zones:
+            resolved = resolve_timezone(name, tz_aliases)
+            zones[name] = (
+                None if resolved is None else (resolved.tz, dst_windows(resolved.tz, reference))
+            )
+        return zones[name]
+
+    out: list[Violation] = []
+    for job in catalog.jobs.values():
+        schedule = job.schedule
+        if schedule is None:
+            continue
+        zone_name = schedule.timezone if schedule.timezone is not None else base
+        resolved_zone = zone_of(zone_name)
+        if resolved_zone is None or not resolved_zone[1]:
+            continue
+        tz, windows = resolved_zone
+        advice = _l023_advice(schedule.timezone is not None)
+        for (attr, shown), clauses in _schedule_findings(schedule, windows, tz).items():
+            out.append(
+                Violation(
+                    code="L023",
+                    severity="warn",
+                    message=(
+                        f"{attr} {shown} of {job.name!r} is changed by DST in {zone_name}."
+                        f" Under the runner's rules, {'; '.join(dict.fromkeys(clauses))}."
+                        f" {advice}"
+                    ),
+                    jobs=[job.name],
+                    span=job.span,
+                    detail=f"{attr} {shown}",
+                )
+            )
+        if schedule.start_mins:
+            ticks = [
+                f"{_day_note(window)}, ticks {clause}"
+                for window in windows
+                if (clause := _start_mins_clause(window.day, schedule.start_mins, tz))
+            ]
+            out.append(
+                Violation(
+                    code="L023",
+                    severity="info",
+                    message=(
+                        f"start_mins of {job.name!r} repeats every hour, so a DST change in"
+                        f" {zone_name} reaches it. Under the runner's rules,"
+                        f" {'; '.join(ticks) or 'no tick is moved'}. {advice}"
+                    ),
+                    jobs=[job.name],
+                    span=job.span,
+                    detail="start_mins",
+                )
+            )
+    return out
+
+
 # -------------------------------------------------------------------------- registry
 
 RuleFn = Callable[[CatalogIR], list[Violation]]
@@ -1354,6 +1675,7 @@ RULES: tuple[tuple[str, RuleFn], ...] = (
     ("L018", rule_l018),
     ("L019", rule_l019),
     ("L020", rule_l020),
+    ("L023", rule_l023),
 )
 
 GRAPH_RULES: tuple[tuple[str, GraphRuleFn], ...] = (
@@ -1376,16 +1698,31 @@ RULE_CODES: frozenset[str] = frozenset(code for code, _ in RULES) | frozenset(
 )
 
 
-def lint_catalog(catalog: CatalogIR, graph: DerivedGraph | None = None) -> LintReport:
-    """Run every registered rule; deterministic for identical input. The
+def lint_catalog(
+    catalog: CatalogIR,
+    graph: DerivedGraph | None = None,
+    *,
+    base_tz: str | None = None,
+    tz_aliases: Mapping[str, str] | None = None,
+    today: date | None = None,
+) -> LintReport:
+    """Run every registered rule; deterministic for identical input and
+    reference date. The
     derived graph is computed once (or passed in by a caller that already
     has it); report order is IR-F rules first, then graph rules, each block
-    in code order."""
+    in code order. `base_tz`, `tz_aliases` and `today` reach L023 only: the
+    zone of a schedule that sets no `timezone` (UTC when None), the
+    `--timezone-map` table, and the reference date for DST changes."""
     if graph is None:
         graph = derive_graph(catalog)
     violations: list[Violation] = []
-    for _code, rule in RULES:
-        violations.extend(rule(catalog))
+    for code, rule in RULES:
+        if code == "L023":
+            violations.extend(
+                rule_l023(catalog, base_tz=base_tz, tz_aliases=tz_aliases, today=today)
+            )
+        else:
+            violations.extend(rule(catalog))
     for _code, graph_rule in GRAPH_RULES:
         violations.extend(graph_rule(catalog, graph))
     return LintReport(violations=violations)

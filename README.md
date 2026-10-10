@@ -123,11 +123,16 @@ compiler core never models templating.
 ```sh
 dsl41 lint jobs.jil globals.jil            # errors fail (exit 1)
 dsl41 lint --strict jobs.jil globals.jil   # warnings fail too
+dsl41 lint --timezone America/New_York jobs.jil   # base zone for L023
 ```
 
-The rules are L001-L022: IR-F rules, truth-table rules, graph rules over the
+The rules are L001-L023: IR-F rules, truth-table rules, graph rules over the
 derived graph, and dangling-name rules. `--strict` is the migration gate. Do
 not ship a catalog that lints dirty.
+
+L023 warns when a DST change moves, drops or doubles a schedule time of the
+job's zone, and prints what the runner does. A job's own `timezone` decides the zone, else `--timezone` (UTC by
+default, as in `dsl41 run`); `--timezone-map` supplies a site alias table.
 
 ### Visualize the dependency graph
 
@@ -542,7 +547,7 @@ Front end and IR:
 - `src/dsl41/ir.py`: the IR-F Pydantic entity models and AST-to-IR-F
   lowering. Unknown attributes are refused unless `permit_unknown` is set.
   Calendar and cycle repeat-key lanes keep real autocal exports loadable.
-- `src/dsl41/lint.py`: the Violation model and rules L001-L022.
+- `src/dsl41/lint.py`: the Violation model and rules L001-L023.
 - `src/dsl41/derive.py`: IR-F to IR-G. Seven analysis passes produce the
   edges, mutex pairs, box tree, same-cycle detection, and the M01-M36
   mapping-row classification.

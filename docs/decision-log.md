@@ -20578,3 +20578,30 @@ relitigate an entry; append a new one.
   stated too narrowly; a stale cross-reference in runner-design §7; and two untested branches. All
   are fixed and confirmed, and each fix has a test that fails without it. The reviewer that raised
   the refusal finding agrees to the LIMIT above.
+- DL-316 Lint L023: a schedule time that a DST change moves, drops, repeats or merges
+  (2026-10-10; src/dsl41/lint.py, timezones.py, oracle.py, cli_compile.py; docs/ir-design.md §9,
+  README.md, docs/citation-index.md; tests/test_lint.py, tests/test_timezones.py)
+  THE RULE. L023 checks each wall-clock schedule time of a job: start_times, start_mins,
+  must_start_times, must_complete_times and the ends of run_window. The zone is the job's own
+  `timezone`, or else the base zone `dsl41 lint --timezone` names: UTC by default, resolved as
+  `dsl41 run` resolves it, with `--timezone-map` as there. On each DST change day of the
+  reference year and the next, the rule asks the runner's own time functions what happens to the
+  time. It reports a time whose result is not one instant at its written wall time: moved,
+  dropped, run twice, merged into another start's tick, never armed, or a window whose opening,
+  closing or number of openings differs. The message prints that computed result, so it cannot
+  drift from the runner. A shape the docs leave unverified (SEM-32 verifies only a one-hour
+  change at 02:00 local) says "unverified". Severity is warn; start_mins, which crosses every
+  change hour, is info, once per job. The advice names UTC: the job's own timezone, or the base
+  zone, for an estate that runs around the clock across regions. A window's length is never
+  compared: an overnight window keeps its written ends while the night is an hour longer or
+  shorter.
+  THE MOVE. To share one set of rules, `must_instant`, `window_span`, `window_spans_near` and
+  `wall_window_contains` moved from oracle.py to timezones.py as pure functions, and the oracle
+  keeps thin wrappers. No behaviour changes; review compared each body line by line.
+  OPEN. When a window opens twice in a repeated hour and the unusual opening comes first
+  (America/Santiago "23:30-00:30", Australia/Lord_Howe "01:45-02:15"), the message leaves out the
+  second opening. The finding still fires. Left for a follow-up.
+  REVIEW. One Opus reviewer, since a lint rule changes no run behaviour, three rounds. It found
+  effect text that stated the runner wrongly in three shapes, which led to messages computed by
+  the runner's own functions; false warnings on overnight windows; and wording. All are fixed and
+  confirmed except the OPEN gap above, found in round three.
