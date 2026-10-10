@@ -20704,3 +20704,27 @@ relitigate an entry; append a new one.
   does not close on a change day left unflagged by DL-316; and a workflow that GitHub would reject
   on its first dispatch. All are fixed and confirmed. A paired passing and failing run tests each
   claim kind.
+- DL-319 The runbook requires an init that reaps orphaned processes, and lint and rehearse take
+  the launcher's zone
+  (2026-10-10; docs/deployment-runbook.md §0, §3, §6, §7)
+  THE REQUIREMENT. The engine and the supervisor run under an init that reaps orphaned processes:
+  systemd as PID 1, or `docker run --init` in a container. When a supervisor or a tethered engine
+  is gone, its wrappers and their commands pass to PID 1. A process that exits and is not reaped
+  stays a zombie. The liveness check that resume and a live engine that lost its supervisor use
+  (`verify_alive`, runner_procid.py) counts a zombie as alive. A command that has already exited
+  is then signaled and recorded `TERMINATED` ("wrapper lost; killed at resume") instead of
+  `FAILURE` with an unobservable exit status. `t()` and `f()` conditions read the two differently,
+  so a downstream job can start, or stay put, when it should not. The supervisor's own owner check
+  already counts a zombie as absent. With a reaping init no zombie stays, so the two checks agree.
+  LINT AND REHEARSE ZONE. `dsl41 lint` and `dsl41 rehearse` take the launcher's `--timezone`, and
+  its `--timezone-map` when it has one; rehearse also takes its `--semantics`. Without
+  `--timezone` both work in UTC: L023 checks DST effects there (DL-316), and rehearse plays the
+  schedules there. Lint takes no `--semantics`.
+  UTC ADVICE. An estate that runs around the clock across regions is best run with UTC as its base
+  zone. Schedules that take the base zone then have no DST change. A job that names its own zone
+  still follows that zone's changes (the L023 row of docs/ir-design.md §9).
+  NOT BUILT. Making `verify_alive` count a zombie as dead would end the disagreement in code. It
+  is a runner change with its own review, and the requirement above covers a production host.
+  REVIEW. The runbook's spec review (DL-225) carried these: one Opus reviewer, two rounds. It
+  found nothing lost from the old text. Its findings were about wording, the reaping consequence
+  and `--semantics` for rehearse; all are fixed and confirmed.
