@@ -223,6 +223,7 @@ from dsl41.period import (
 )
 from dsl41.runner_journal import (
     Journal,
+    RecoveredAttempt,
     read_journal,
 )
 from dsl41.runner_ledger import Fence
@@ -1837,9 +1838,9 @@ class Engine:
                 # re-run this rule: it rebuilds `_dispatched` from every
                 # row's run number (runner_startup, period-model ss3.3). The
                 # two agree on a dispatchable row: it reaches run N through
-                # a decision that planned run N's SPAWN, or through an
-                # attempt whose decision never landed, whose start resume
-                # handles itself (`_resume_untraced_starts`)
+                # a decision that planned run N's SPAWN, and resume writes
+                # that decision for an attempt whose decision never landed
+                # before it seeds the map (`commit_recovered`, DL-315)
                 self._dispatched[effect.job] = max(
                     self._dispatched.get(effect.job, 0), effect.run_number
                 )
@@ -1908,19 +1909,76 @@ class Engine:
         KILL looks its run's id up in the outbox, where the SPAWN that
         started it recorded it; a run the outbox holds no binding for has
         none to find."""
-        row = self.oracle.store.host(self.executor_id)
-        return plan_effects(
+        return self._plan(
             applied.emitted,
-            index=index,
-            executor_id=self.executor_id,
-            generation=row.generation if row is not None else 0,
+            index,
             runs={job: rt.run_number for job, rt in self.oracle.store.job.items()},
             dispatched=self._dispatched,
             live={job: run.run_number for job, run in self._live.items()},
+        )
+
+    def _plan(
+        self,
+        emitted: list[Event],
+        index: int,
+        *,
+        runs: Mapping[str, int],
+        dispatched: Mapping[str, int],
+        live: Mapping[str, int],
+    ) -> list[Effect]:
+        """`plan_effects` with this engine's executor, generation, dispatch
+        rows, run-id bindings and mint."""
+        row = self.oracle.store.host(self.executor_id)
+        return plan_effects(
+            emitted,
+            index=index,
+            executor_id=self.executor_id,
+            generation=row.generation if row is not None else 0,
+            runs=runs,
+            dispatched=dispatched,
+            live=live,
             dispatchable=self._dispatchable(),
             run_ids=self.outbox.spawn_run_ids(),
             mint_run_id=lambda: str(uuid.uuid4()),
         )
+
+    def plan_recovered(self, recovered: RecoveredAttempt) -> list[Effect]:
+        """The effects an attempt replay recovered (DL-156) implies, as its
+        step 7 would have planned them (DL-315). Nothing is written
+        or recorded here; `commit_recovered` writes them.
+
+        The plan reads the rows as of the attempt: `dispatched` is every
+        run number before it and `runs` every run number after it. The
+        seeded `_dispatched` would plan no SPAWN for a recovered start, and
+        an empty map would plan one for a STARTING overwrite whose run
+        already has one. `live` is empty: nothing runs in this engine yet,
+        so the plan holds SPAWNs only, and a SPAWN mints its `run_id` here."""
+        return self._plan(
+            recovered.emitted,
+            recovered.result.index,
+            runs=recovered.runs_after,
+            dispatched=recovered.runs_before,
+            live={},
+        )
+
+    def commit_recovered(self, recovered: RecoveredAttempt, effects: list[Effect]) -> None:
+        """Write the step-7 batch an attempt never got: its decision and the
+        effects `plan_recovered` planned for it, as one record
+        (DL-315).
+
+        Resume calls this for each verdict replay recovered, after the
+        identity preflight and before `_dispatched` is seeded. Nothing of
+        the attempt escaped the engine that admitted it: dispatch follows
+        the decision record, so a missing record means no SPAWN of that
+        attempt was ever recorded or applied. This record is therefore the
+        attempt's decision transaction, and its SPAWN's `run_id` the run's
+        one identity. The decision index already holds the verdict, and no
+        `--on-transition-violation stop` runs: the oracle traced every
+        violation at replay, and a stop here would stop every resume."""
+        assert self.journal is not None  # resume always holds its root's journal
+        self.journal.decision(recovered.result, effects)
+        for effect in effects:
+            self.outbox.record(effect)
 
     def _dispatchable(self) -> frozenset[str]:
         """Jobs this engine has a dispatch row for: a catalog entry whose

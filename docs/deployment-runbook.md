@@ -391,6 +391,14 @@ dsl41 query status --job "$JOB" -S "$S"
   ERROR, or the launcher's own refusal. Fix it and start the unit. A
   `resume stopped` refusal names a logged input this build cannot replay;
   §7 says what to deploy.
+  A refusal that names a watch's `watch.jsonl` reporting `run_id None`
+  against a durable effect is an identity split on a root an earlier
+  build resumed: that build launched a watch with no identity for a start
+  whose decision was missing. It fires at this build's first resume while
+  that run directory is present, whether the watch completed or not. The
+  refused resume writes no decision, so the earlier build can still open
+  the root. There is no migration: reset the root (period-model §11,
+  step 6a; DL-315).
   A rolled root that refuses with `missing segment record` has
   [its own recipe](#recipe-recover-a-rolled-root-whose-opening-is-torn).
 - **Recover a lost answer: replay the request.** `sendevent` and `host`
@@ -603,6 +611,16 @@ violation into the engine unit the way the unit tests do: the journal
 line begins with the prefix, and a host's reinstatement shows as a
 `TRANSITION_VIOLATION` trace entry (`kill-supervisor`). That shows the
 alert pattern matches; it does not show that an engine violates.
+
+**A row left live with nothing behind it.** After a restart, a job can
+stand RUNNING or STARTING with no live run and nothing held: `dsl41 query
+status` shows the row with `"held": false`, and no process or watch runs
+for it. That is the state the engine was in before the restart, when the
+run's start was retired and an operator then set the row live, for
+example KILLJOB on a held start followed by `CHANGE_STATUS RUNNING`. A
+restart launches nothing for such a run and does not fail it, a tethered
+command included (runner-design §7, DL-315). End it with KILLJOB
+or `CHANGE_STATUS`, or start a new run with FORCE_STARTJOB.
 
 The sealed-not-opened check prints the lineage head's state. It needs
 `jq` on the host (`apt-get install jq`); no dsl41 command prints the

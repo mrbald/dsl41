@@ -230,10 +230,12 @@ def test_pr35_decision_and_effects_commit_together(tmp_path: Path) -> None:
     at all.
 
     The two named boundaries carry the contrast. Before the decision write
-    the log holds the input alone, which replay applies (admission is the
-    commit point) and which leaves nothing pending. After it the log holds
-    the decision AND both SPAWNs it planned, and the successor takes them
-    over. Neither state is the torn one.
+    the log holds the input alone. Replay applies it (admission is the
+    commit point), and the successor writes the missing decision with the
+    same two SPAWNs under ids it mints itself (DL-315). After it
+    the log holds the decision AND both SPAWNs it planned, and the successor
+    takes them over. Neither state is the torn one, and either way the
+    successor's log decides every input it holds.
 
     The invariant is read in BOTH dialects so that it is about atomicity
     rather than about the record shape: restore the pre-DL-118 writer (a
@@ -279,7 +281,18 @@ def test_pr35_decision_and_effects_commit_together(tmp_path: Path) -> None:
 
         left[append] = records
         inherited[append] = _resumed_outbox_ids(run_root)
-        assert set(inherited[append]) == {e["effect_id"] for e in _effects_of(records)}
+        # the successor's log: the crash's records, then its own. It decides
+        # every attempt, a missing decision with the plan the live engine
+        # would have written, and it inherits exactly the intents it holds
+        successor = _records(active_wal(run_root))
+        assert successor[: len(records)] == records
+        attempts = {r["seq"] for r in successor if r.get("rec") in ("input", "host")}
+        assert attempts <= _decided(successor)
+        resumed = _intents_by_index(successor)
+        for index in attempts:
+            assert _sans_run_id(resumed.get(index, [])) == _sans_run_id(planned.get(index, []))
+            assert all(e["run_id"] for e in resumed.get(index, []) if e["kind"] == "SPAWN")
+        assert set(inherited[append]) == {e["effect_id"] for e in _effects_of(successor)}
 
     # appends are 1-based and counted from the first one after genesis, one
     # record each
@@ -290,7 +303,6 @@ def test_pr35_decision_and_effects_commit_together(tmp_path: Path) -> None:
     before = left[decision_append]
     assert [r["rec"] for r in before][-1] == "input"  # admitted, undecided
     assert _effects_of(before) == []
-    assert inherited[decision_append] == []
 
     after = left[decision_append + 1]
     assert [r["rec"] for r in after][-1] == "decision"
@@ -300,6 +312,8 @@ def test_pr35_decision_and_effects_commit_together(tmp_path: Path) -> None:
         ("SPAWN", "b", 1),
     ]
     assert inherited[decision_append + 1] == [e["effect_id"] for e in intents]
+    # the successor of the crash before the decision commits the same plan
+    assert inherited[decision_append] == [e["effect_id"] for e in intents]
 
 
 def test_pr35_a_torn_decision_line_is_cut_before_the_successor_appends(tmp_path: Path) -> None:
@@ -311,8 +325,9 @@ def test_pr35_a_torn_decision_line_is_cut_before_the_successor_appends(tmp_path:
     and the run root stops reading at all (Journal._repair_tail).
 
     The torn log and the log cut before the decision write are the same
-    state to a successor: input replayed as an application, nothing
-    inherited."""
+    state to a successor: the input is replayed as an application, and the
+    successor writes its decision after its own `leader` record, with the
+    two SPAWNs the lost line held (DL-315)."""
     genesis = _run_dying_at(tmp_path / "intact", None)
     intact = active_wal(tmp_path / "intact").read_bytes().split(b"\n")
     kinds = [json.loads(line)["rec"] for line in intact if line]
@@ -327,11 +342,14 @@ def test_pr35_a_torn_decision_line_is_cut_before_the_successor_appends(tmp_path:
     path.write_bytes(clean + lines[at][: len(lines[at]) // 2])
     assert [r["rec"] for r in read_journal(path)] == kinds[:at]
 
-    assert _resumed_outbox_ids(torn_root) == []
+    lost = json.loads(lines[at])
+    assert _resumed_outbox_ids(torn_root) == [e["effect_id"] for e in lost["effects"]]
     after = read_journal(path)  # the successor appended and left a readable log
     assert [r["rec"] for r in after[:at]] == kinds[:at]
     assert path.read_bytes().startswith(clean)
-    assert "leader" in [r["rec"] for r in after[at:]]
+    # the barrier's dispatch follows the commit and applies both SPAWNs
+    assert [r["rec"] for r in after[at:]] == ["leader", "decision", *["effect_result"] * 2]
+    assert after[at + 1]["index"] == lost["index"]
 
 
 # --------------------------------------------------- 2. admission order (PR-14)

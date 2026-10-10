@@ -258,8 +258,17 @@ For every input, in log order:
 Steps 5–7 must not yield to another state-changing input. An exception
 between step 3 assigning the index and step 7 completing stops the
 engine. So does a failed WAL append. Replay rebuilds the attempt and, when
-its decision is missing, applies it through the gate (DL-156). That
-recovered application writes no effect record, so it launches nothing. A
+its decision is missing, applies it through the gate (DL-156). Replay
+itself writes nothing. Before the ghost-run gate is seeded and before the
+resume ladder reads the outbox, the resuming engine performs step 7 for
+that attempt: it writes the missing `decision` record, with the effects
+the verdict implies, and a SPAWN mints its `run_id` in that record
+(DL-315). It plans against each job's run number just before the attempt
+and just after it.
+A recovered start is then a pending SPAWN, which dispatch applies or a
+drained or quarantined host holds. The commit does not record the verdict
+in the decision index a second time, and `--on-transition-violation stop`
+does not run for it. A
 seal does not turn such an exception into a refusal (`period-model.md`
 §7, DL-274). In a seal, step 3's `clock_regressed` refuses a request. For
 an engine-made input it stops the engine, because nobody would hear the
@@ -580,12 +589,21 @@ intent that the previous leader recorded and never delivered is
 re-driven at the run_number the oracle decided. A pending SPAWN that
 *does* have a spool trace is reconciled as applied: the engine died
 between launching and recording, and the spool is the record. A start
-with no pending intent and no spool trace fails, as
-`docs/runner-design.md` §7 says, with two exceptions. An FW run is
-re-dispatched, because its watch is an idempotent re-read
-(DL-44 item 7). A supervised run whose durable SPAWN bound a
-`run_id` has its SPAWN replayed, and the supervisor's directory says
-whether the run already exists (DL-129, period-model §11a).
+with no spool trace is decided by the state of its own SPAWN
+(DL-315). If that SPAWN was retired, or no decision planned one,
+the live engine launched nothing for the run, and the row is left as it
+is: no launch and no FAILURE, for an FW, a supervised and a tethered
+command start alike. A tethered command start whose SPAWN was retired
+therefore stays live at its run number after a restart, RUNNING or
+STARTING as it was left. If the SPAWN was applied and left
+no trace, the start fails, as `docs/runner-design.md` §7 says, with two
+exceptions. An FW run is re-dispatched under its bound `run_id`, because
+its watch is an idempotent re-read (DL-44 item 7). A supervised run whose
+durable SPAWN bound a `run_id` has its SPAWN replayed, and the
+supervisor's directory says whether the run already exists (DL-129,
+period-model §11a). An `indeterminate` SPAWN takes the same path as an
+applied one, and a tethered start fails with the cause
+`exit_status_unobservable`.
 
 A recorded KILL is also re-driven at resume. `docs/runner-design.md` §7
 lists the side effects resume may have, and a recorded kill is one of
@@ -795,16 +813,20 @@ engine that killed processes on losing proof would be taking the relay's
 act (§7, DL-97) without knowing whether the new leader has already
 adopted them.
 
-**"Re-drive pending" splits the untraced start** (DL-102).
+**"Re-drive pending" decides the untraced start by its own SPAWN** (DL-102).
 `docs/runner-design.md` §7 fails a start with no spool trace rather than
 re-running it. The log also holds the outbox's intents, a second kind of
 evidence beside the spool, so the rule splits. A start whose SPAWN is still *pending* is an
 intent that the previous leader recorded and never delivered. Nothing
 anywhere ran, so the barrier re-drives it at the run_number the oracle
-already decided. A start with no pending intent fails: its effect was
-already resolved, and its spool has since gone. The exceptions are an FW
-run, which is re-dispatched, and a supervised run with a bound `run_id`,
-whose SPAWN is replayed (DL-44 item 7, DL-129; §5).
+already decided. A start whose own SPAWN was retired, or that no decision
+gave a SPAWN, is left as it is: the live engine launched nothing for it
+and never would (DL-315). A start whose SPAWN was applied fails:
+the spool it left has since gone. The exceptions are an FW run, which is
+re-dispatched, and a supervised run with a bound `run_id`, whose SPAWN is
+replayed (DL-44 item 7, DL-129; §5). Resume has committed every attempt
+whose decision was missing before this sweep runs (§4), so no start
+reaches it without a decision.
 
 **Re-driving needs no mechanism.** Leaving the effect pending is all of
 it. Dispatch drains the outbox through the same gates a fresh effect

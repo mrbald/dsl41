@@ -3440,7 +3440,11 @@ ADAPTER_ROWS: tuple[Row, ...] = (
         klass=PROVISIONAL,
         cite="runner_adapters.resolve_spool, runner-design ss15",
         label="E7",
-        sites=("runner_adapters.resolve_spool#1", "runner_startup.<module>#1"),
+        sites=(
+            "runner_adapters.resolve_spool#1",
+            "runner_startup.<module>#1",
+            "runner_startup._resume_untraced_starts#1",
+        ),
         effect="a resumed run with no status record fails rather than guessing an exit code",
         trigger=f"Failed={_UNOBSERVABLE}",
     ),

@@ -522,19 +522,26 @@ gate, and the revision it named is half of what that gate reads.
 
 Resume's side effects are bounded to this list:
 
+- an attempt admitted with no `decision` record gets that record, with the
+  effects its recovered verdict implies and a SPAWN's `run_id` minted in
+  it, before the ladder runs (DL-156, DL-315). A start recovered
+  this way is then a pending SPAWN like any other;
 - a kill the engine decided and recorded, then died before delivering, is
   re-driven (DL-96);
 - the ladder below kills a verified command group that outlived its
   wrapper's record: the wrapper dead, or alive and silent past the settle
   window plus the grace (DL-226);
-- a pending SPAWN is re-driven (DL-102), and a supervised SPAWN with a
-  bound `run_id` and no spool is replayed (DL-129);
-- an FW watch is resumed from its log, or, with no trace and no pending
-  SPAWN, dispatched again, because a watch is an idempotent read (DL-44
-  item 7, DL-129);
+- a pending SPAWN is re-driven (DL-102), and a supervised SPAWN that was
+  applied (or is indeterminate), with a bound `run_id` and no spool, is
+  replayed (DL-129, DL-315);
+- an FW watch is resumed from its log, or, with no trace and an applied
+  SPAWN, dispatched again under that SPAWN's `run_id`, because a watch is
+  an idempotent read (DL-44 item 7, DL-129). A watch whose SPAWN was
+  retired, or that no decision gave a SPAWN, is not launched
+  (DL-315);
 - a live wrapper under a terminal row is killed (DL-133).
 
-Nothing else. Without the first, the sweep would walk past a detached run whose parent is the supervisor, because its
+Nothing else. Without the re-driven kill, the sweep would walk past a detached run whose parent is the supervisor, because its
 row is already TERMINAL and reads as "completion already replayed".
 
 `dsl41 runs` is not a new record kind: its rows are a projection folded from
@@ -746,7 +753,7 @@ spawned" from absence, where absence only meant "the run directory is
 gone", would let the barrier start a second process for a run the host is
 still holding.
 
-**A start with no trace anywhere splits in two.** The spool is one kind of
+**A start with no trace anywhere is decided by its own SPAWN.** The spool is one kind of
 evidence; the outbox (S5c) is a second, and it lives in the log. A start
 whose SPAWN is still PENDING is an intent the previous leader recorded and
 did not deliver. It is re-driven at the run_number the oracle already
@@ -754,13 +761,23 @@ decided. This is concurrency-model §7's "re-drive pending", and it needs no
 new mechanism: leaving the effect pending is enough, because dispatch
 drains the outbox through the same gates a fresh effect passes (so a
 drained or quarantined host still holds it, and a held start stays held;
-DL-102, `docs/concurrency-model.md` §8). This applies to FW starts too. A
-start with no pending intent is an effect already resolved whose spool
-has since gone. It is FAILED with cause `dispatch lost to engine crash
-(never spawned)`, with two exceptions. An FW watch is dispatched again,
-because a watch is an idempotent read (DL-44 item 7). A supervised adapter
-that holds a bound `run_id` has its SPAWN replayed (PR-36a, the rung
-above). These are the rules of `docs/concurrency-model.md` §5 and §7.
+DL-102, `docs/concurrency-model.md` §8). This applies to FW starts too.
+Resume has already written the decision of every attempt whose decision
+was missing (DL-315), so a recovered start reaches this sweep as
+a pending SPAWN. A start whose own SPAWN was RETIRED, or that no decision
+gave a SPAWN, is one the live engine launched nothing for. It is left as
+it is: no launch and no FAILURE, for an FW, a supervised and a tethered
+command start alike. A tethered command start whose SPAWN was retired
+therefore stays live at its run number after a restart, RUNNING or
+STARTING as it was left, with nothing running and nothing held; the operator ends it or restarts it. A start whose
+SPAWN was APPLIED and left no trace is FAILED with cause `dispatch lost to
+engine crash (never spawned)`, with two exceptions. An FW watch is
+dispatched again under its bound `run_id`, because a watch is an
+idempotent read (DL-44 item 7). A supervised adapter that holds a bound
+`run_id` has its SPAWN replayed (PR-36a, the rung above). An
+INDETERMINATE SPAWN takes the applied path, and a tethered start then
+fails with cause `exit_status_unobservable`, because the run may have
+happened. These are the rules of `docs/concurrency-model.md` §5 and §7.
 
 **The barrier ends in a dispatch,** because §7 says so and because without
 it the outbox is drained only on the way out of the next admitted input: a

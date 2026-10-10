@@ -1449,6 +1449,21 @@ class OutcomeReplayFault(ReplayFault):
         self.index = None
 
 
+@dataclass(frozen=True)
+class RecoveredAttempt:
+    """One attempt admitted with no durable decision, as replay decided it
+    through the gate (DL-156), with what a resuming engine needs to commit
+    that verdict (DL-315): the events the batch emitted, and every
+    job's run number just before and just after the attempt. The commit
+    plans against these rows, never against the rows the whole replay ends
+    on: the ghost-run gate compares a run with the run before the attempt."""
+
+    result: ApplyResult
+    emitted: list[Event]
+    runs_before: dict[str, int]
+    runs_after: dict[str, int]
+
+
 @dataclass
 class Replay:
     """Where the log left the state machine (concurrency-model ss2/ss4)."""
@@ -1457,12 +1472,17 @@ class Replay:
     decisions: DecisionIndex = field(default_factory=DecisionIndex)
     #: attempts admitted with no durable result -- the crash window, decided
     #: here by re-running the gate rather than guessed at
-    recovered: list[ApplyResult] = field(default_factory=list)
+    recovered_attempts: list[RecoveredAttempt] = field(default_factory=list)
     #: the effects this log intended and what became of them (ss5). Read from
     #: the records rather than re-planned: an effect the previous engine
     #: decided is a fact, and re-deriving it would let a changed planner
     #: silently disagree with the log about what was meant to happen.
     outbox: Outbox = field(default_factory=Outbox)
+
+    @property
+    def recovered(self) -> list[ApplyResult]:
+        """The recovered verdicts alone, in admission order."""
+        return [attempt.result for attempt in self.recovered_attempts]
 
 
 def replay_inputs(
@@ -1479,7 +1499,9 @@ def replay_inputs(
     this build reproduces the log's history rather than the one its current
     gate would write. An attempt with no result is applied, because
     admission is the commit point; it goes through the gate on the way,
-    since a decision is exactly what it is missing.
+    since a decision is exactly what it is missing. Replay writes nothing:
+    it reports each such attempt in `recovered_attempts`, and a resuming
+    engine writes the missing decision (DL-315).
 
     The time half of every batch applies either way. A rejected completion
     still observed the clock, and the kill that observation let fire is a
@@ -1510,6 +1532,7 @@ def replay_inputs(
     )
     for attempt in read_attempts(records):
         durable = decisions.for_index(attempt.index)
+        runs_before = _run_numbers(oracle) if durable is None else {}
         try:
             applied = apply_attempt(oracle, attempt, decided=durable)
         except TransitionError:
@@ -1520,9 +1543,21 @@ def replay_inputs(
             raise ReplayFault(attempt, exc) from exc
         if durable is None:
             decisions.record(applied.result)
-            replay.recovered.append(applied.result)
+            replay.recovered_attempts.append(
+                RecoveredAttempt(
+                    result=applied.result,
+                    emitted=applied.emitted,
+                    runs_before=runs_before,
+                    runs_after=_run_numbers(oracle),
+                )
+            )
         replay.frontiers = replay.frontiers.admit(attempt.at).record(attempt.index)
     return replay
+
+
+def _run_numbers(oracle: Oracle) -> dict[str, int]:
+    """Every job's run number as the oracle holds it now."""
+    return {job: rt.run_number for job, rt in oracle.store.job.items()}
 
 
 def replay_period(

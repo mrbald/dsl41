@@ -20,14 +20,18 @@ learns to check which one is meant.
   max(ended_at, last journal at) with the true ended_at in the payload;
   verified command group orphaned by a dead wrapper -> kill it, TERMINATED
   "wrapper lost; killed at resume" (a kill that happened); nothing ->
-  FAILURE exit_status_unobservable (PENDING: E7). A start with no trace
-  anywhere splits in two (DL-102): one whose SPAWN is still PENDING in the
-  outbox is an intent the previous leader never delivered and is re-driven;
-  one with no pending intent is FAILURE "dispatch lost to engine crash" --
-  provably-never-ran is still never re-executed silently. FW watchers are
-  the exception to the second: polling is an idempotent read, so an
-  incomplete FW run with no pending intent is re-dispatched. A pending one
-  is re-driven like any other start, so a held watch stays held.
+  FAILURE exit_status_unobservable (PENDING: E7). Before any of that, an
+  attempt the previous engine admitted and never decided gets its decision
+  record, with the effects it implies (DL-315). A start with no
+  trace anywhere is then decided by its own SPAWN (DL-102): a PENDING one
+  is an intent the previous leader never delivered and is re-driven; a
+  RETIRED one, or none, means the live engine launched nothing for the run,
+  and the row is left as it is; an APPLIED one that left no trace is FAILURE
+  "dispatch lost to engine crash" -- provably-never-ran is still never
+  re-executed silently. FW watchers are the exception to the last: polling
+  is an idempotent read, so an applied watch with no trace is re-dispatched,
+  and a supervised start with a bound id is replayed. A pending one is
+  re-driven like any other start, so a held watch stays held.
   Reconciliation completions go through the ss4 stale gate like any
   adapter completion: if replay already reached a terminal state (say a
   term_run_time TERMINATED), the late real record is dropped AND journaled
@@ -45,7 +49,7 @@ from __future__ import annotations
 import contextlib
 import os
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -95,6 +99,7 @@ from dsl41.period import (
 )
 from dsl41.runner_journal import (
     Journal,
+    RecoveredAttempt,
     ReplayFault,
     last_journal_at,
     baseline_id,
@@ -942,6 +947,9 @@ async def _resume_under_lock(
     # orphaned for the rest of its life -- its job is already TERMINAL, so
     # reconciliation skips it, and nothing else would ever look again.
     engine.outbox = replay.outbox
+    evidence = await _commit_recovered_after_identity_check(
+        engine, replay.recovered_attempts, records, supervisor
+    )
     # seed the ghost-run gate: replayed starts are reconciliation's business,
     # never a fresh dispatch
     for job, rt in engine.oracle.store.job.items():
@@ -1021,6 +1029,7 @@ async def _resume_under_lock(
         settle_seconds=settle_seconds,
         grace_seconds=grace_seconds,
         supervisor=supervisor,
+        evidence=evidence,
     )
     return engine
 
@@ -1144,27 +1153,43 @@ def _carried_rows(opened: OpenedRuntime) -> CarriedRows:
     return opened.carried_rows
 
 
-async def _reconcile(
+async def _commit_recovered_after_identity_check(
     engine: Engine,
+    recovered: list[RecoveredAttempt],
     records: list[dict[str, Any]],
-    last_at: datetime,
-    *,
-    settle_seconds: float,
-    grace_seconds: float,
-    supervisor: SupervisorClient | None = None,
-) -> None:
-    """The ss6a/ss7 reconciliation ladder (module docstring). Tethered
-    semantics did the killing already (wrappers EOF'd when the engine
-    died), so this is mostly READING; signals are for the residual crash
-    matrix only, and only ever at a (pid, start-time)-verified target.
+    supervisor: SupervisorClient | None,
+) -> tuple[dict[tuple[str, int], Path | None], dict[tuple[str, int], SupervisorRunRow]]:
+    """ss4 step 7 for each attempt the previous engine admitted and never
+    decided (DL-315): plan, check, then write.
 
-    Detached resume (spec ss3): with a `supervisor`, an in-flight run the
-    supervisor still LISTs as wrapper_alive is REATTACHED -- the adapter task
-    just awaits its exit push, no reconciliation injection (the run never
-    stopped, E4 dissolved). Runs listed dead or unlisted fall through to the
-    spool ladder unchanged (the supervisor died, or the run predates it)."""
+    Every recovered attempt is planned first; with no live run a plan holds
+    SPAWNs only, so no plan reads another's. Then what the spool and the
+    host hold is read and checked against the WAL's SPAWNs and the planned
+    ones (DL-118). Only then are the decisions written, so a refused resume
+    has written no decision and minted no id, and the build that wrote the
+    log can still open it. The decisions land before anything after this
+    reads the outbox: a recovered start is then a pending SPAWN like any
+    other, which the barrier's dispatch applies or a held host holds.
+    Returns the evidence read, for the reconciliation ladder."""
+    planned = [(attempt, engine.plan_recovered(attempt)) for attempt in recovered]
+    candidates, supervised_live = await _resume_evidence(engine, records, supervisor)
+    _preflight_identities(
+        engine,
+        candidates,
+        supervised_live,
+        planned=[effect for _, effects in planned for effect in effects],
+    )
+    for attempt, effects in planned:
+        engine.commit_recovered(attempt, effects)
+    return candidates, supervised_live
+
+
+async def _resume_evidence(
+    engine: Engine, records: list[dict[str, Any]], supervisor: SupervisorClient | None
+) -> tuple[dict[tuple[str, int], Path | None], dict[tuple[str, int], SupervisorRunRow]]:
+    """The runs the ss7 sweep reconciles, with what the supervisor LISTs.
+    Read only: nothing here appends or launches."""
     assert engine.run_root is not None
-    boot_now = _procid.current_boot_id()
     #: DL-137/DL-220 -- values are `SupervisorRunRow`, validated once at the
     #: `SupervisorClient.list_runs` boundary; every reader below reads it by
     #: attribute, so this dict-of-rows is the one decode the whole resume
@@ -1201,7 +1226,40 @@ async def _reconcile(
     # still running -- the double run the whole model exists to prevent.
     for key in supervised_live:
         candidates.setdefault(key, None)
+    return candidates, supervised_live
 
+
+async def _reconcile(
+    engine: Engine,
+    records: list[dict[str, Any]],
+    last_at: datetime,
+    *,
+    settle_seconds: float,
+    grace_seconds: float,
+    supervisor: SupervisorClient | None = None,
+    evidence: tuple[dict[tuple[str, int], Path | None], dict[tuple[str, int], SupervisorRunRow]]
+    | None = None,
+) -> None:
+    """The ss6a/ss7 reconciliation ladder (module docstring). Tethered
+    semantics did the killing already (wrappers EOF'd when the engine
+    died), so this is mostly READING; signals are for the residual crash
+    matrix only, and only ever at a (pid, start-time)-verified target.
+
+    `evidence` is `_resume_evidence`'s reading when the caller has taken it
+    already: resume reads it, and checks it against the WAL and the planned
+    SPAWNs, before it writes the recovered decisions. The preflight below re-checks it
+    against the outbox as it now stands.
+
+    Detached resume (spec ss3): with a `supervisor`, an in-flight run the
+    supervisor still LISTs as wrapper_alive is REATTACHED -- the adapter task
+    just awaits its exit push, no reconciliation injection (the run never
+    stopped, E4 dissolved). Runs listed dead or unlisted fall through to the
+    spool ladder unchanged (the supervisor died, or the run predates it)."""
+    assert engine.run_root is not None
+    boot_now = _procid.current_boot_id()
+    if evidence is None:
+        evidence = await _resume_evidence(engine, records, supervisor)
+    candidates, supervised_live = evidence
     _preflight_identities(engine, candidates, supervised_live)
     _reconcile_applied_spawns(engine, candidates)
 
@@ -1376,12 +1434,18 @@ def _resume_watch(
         return
     if not relaunch:
         return
+    if bound is None or engine.outbox.state_of(bound.effect_id) == "retired":
+        # the live engine planned no launch for this run, or retired the one
+        # it planned: the sweep's rule for an untraced start holds for a
+        # traced one too, and a watch is relaunched only under the identity
+        # of a SPAWN that was applied (DL-315)
+        return
     # idempotent read: the adapter reconstructs progress from the log and
     # appends no second `start` line. The bound id rides along for the one
     # case with no log to reconstruct from -- a run directory made and then
     # crashed on, before the `start` line -- where a watch dispatched with no
     # identity would write `run_id: null` and split from the WAL (DL-118).
-    engine._launch(job_ir, run_number, adapter, run_id=bound.run_id if bound else None)
+    engine._launch(job_ir, run_number, adapter, run_id=bound.run_id)
 
 
 def _inject_completion(
@@ -1414,16 +1478,22 @@ def _resume_untraced_starts(
     and nothing the host admits to running (S6c).
 
     ss7's barrier says "retire superseded, re-drive pending", and this is
-    where those four words become two cases. It is a separate question from
-    the ladder above, which asks how runs that DID leave a trace ended; this
-    one asks what to do about a decision that left none."""
+    where those words meet a row. It is a separate question from the ladder
+    above, which asks how runs that DID leave a trace ended; this one asks
+    what to do about a decision that left none. The answer is the state of
+    the row's own SPAWN (DL-315). Resume has already committed
+    every attempt whose decision never landed, so a dispatchable row at run
+    N reached it through a decision, and that decision's plan is the
+    record of what the live engine meant to do for run N."""
     for job, rt in engine.oracle.store.job.items():
         if rt.status not in LIVE or (job, rt.run_number) in candidates:
             continue
         job_ir = engine.oracle.catalog.jobs.get(job)
         if job_ir is None or job_ir.job_type == "BOX":
             continue  # boxes fold from members; pseudo-entries have no dispatch
-        if any(e.run_number == rt.run_number for e in engine.outbox.pending_for(job, "SPAWN")):
+        bound = _spawn_effect_for(engine, job, rt.run_number)
+        state = engine.outbox.state_of(bound.effect_id) if bound is not None else None
+        if state == "pending":
             # RE-DRIVEN. The log holds this run's intent to spawn, never
             # resolved, and nothing anywhere ran: the previous leader died in
             # the window between recording what it meant to do and doing it.
@@ -1433,14 +1503,31 @@ def _resume_untraced_starts(
             # still HOLDS it (ss8) and this sweep does not need to know that.
             # An FW start too: its watch waits for the same SPAWN, so a
             # held watch stays held across the restart (DL-96, DL-102).
-            # Only THIS run's SPAWN counts. A recovered attempt (DL-156) can
-            # move the row to run N with no SPAWN N planned, while a SPAWN of
-            # an earlier run is still pending; dispatch retires that one, so
-            # it says nothing about run N, which falls through below.
+            # Only THIS run's SPAWN counts: a pending SPAWN of an earlier
+            # run says nothing about run N, and dispatch retires it.
             continue
+        if bound is None or state == "retired":
+            # LEFT AS THE LIVE ENGINE LEFT IT. Run N's SPAWN was retired at
+            # dispatch -- a retired effect stays retired (DL-232) -- or the
+            # decision that put the row at run N planned none: a STARTING
+            # overwrite at the same run number, or a row carried across a
+            # boundary whose SPAWN the previous period retired. Either way
+            # the live engine launched nothing for this run and never would,
+            # so neither does resume. The row stays live at run N with
+            # nothing running and nothing held, exactly as before the restart,
+            # for the operator to end or restart. A tethered command is not
+            # failed either: nothing was lost (DL-315).
+            continue
+        # TRIED, AND NO TRACE. The SPAWN resolved `applied`: dispatch reached
+        # the adapter, and the crash took whatever it left before anything
+        # durable named the run. `indeterminate` takes the same ladder; no
+        # path resolves a SPAWN so today, and the ladder lets the host decide
+        # where it can, which is what the state means (concurrency-model ss5)
         if job_ir.job_type == "FW":
-            # No pending intent for this run: the watch is an idempotent re-read, so it is
-            # re-dispatched rather than failed (DL-44 item 7, DL-102).
+            # the watch is an idempotent re-read, so it is re-dispatched
+            # rather than failed (DL-44 item 7, DL-102), under its bound id.
+            # The routing gate passed at the live dispatch, and a running
+            # watch continues on a host that routes nothing new (ss8)
             adapter = engine.adapters.get("FW")
             if adapter is None:
                 # _require_adapters runs at both genesis and resume, before
@@ -1452,16 +1539,10 @@ def _resume_untraced_starts(
                     "_require_adapters already refuses a resume with an FW job and no"
                     " FW adapter wired, so adapter cannot be None here"
                 )
-            bound = _spawn_effect_for(engine, job, rt.run_number)
-            engine._launch(job_ir, rt.run_number, adapter, run_id=bound.run_id if bound else None)
+            engine._launch(job_ir, rt.run_number, adapter, run_id=bound.run_id)
             continue
-        bound = _spawn_effect_for(engine, job, rt.run_number)
         adapter = engine.adapters.get(job_ir.job_type)
-        if (
-            isinstance(adapter, SupervisedCommandAdapter)
-            and bound is not None
-            and bound.run_id is not None
-        ):
+        if isinstance(adapter, SupervisedCommandAdapter) and bound.run_id is not None:
             # PR-36a again, with even less on disk: the intent is durable and
             # bound but nothing anywhere names a wrapper. Replaying through
             # the idempotent SPAWN is strictly safer than the FAILURE verdict
@@ -1469,17 +1550,22 @@ def _resume_untraced_starts(
             # whether the run already exists.
             engine._launch(job_ir, rt.run_number, adapter, run_id=bound.run_id)
             continue
-        # FAILED. No pending intent, so the log never said a spawn was meant
-        # to happen -- an effect already resolved whose spool has since gone
-        # -- and either no supervisor path or no bound identity to replay
-        # against. That is the case runner-design ss7 was reasoning
-        # about when it chose to fail a start rather than silently re-run
-        # it, and for these chains it still does.
+        # FAILED. A tethered wrapper died with the engine and left no trace,
+        # or a supervised run has no bound identity to replay against. That
+        # is the case runner-design ss7 was reasoning about when it chose to
+        # fail a start rather than silently re-run it, and for these chains
+        # it still does. An indeterminate SPAWN may have run, so its cause
+        # is E7's, not "never spawned"
+        cause = (
+            "exit_status_unobservable"  # PENDING: E7
+            if state == "indeterminate"
+            else "dispatch lost to engine crash (never spawned)"
+        )
         _inject_completion(
             engine,
             job,
             rt.run_number,
-            {"status": "FAILURE", "cause": "dispatch lost to engine crash (never spawned)"},
+            {"status": "FAILURE", "cause": cause},
             at=last_at,
             last_at=last_at,
         )
@@ -1526,6 +1612,8 @@ def _preflight_identities(
     engine: Engine,
     candidates: dict[tuple[str, int], Path | None],
     supervised_live: dict[tuple[str, int], SupervisorRunRow],
+    *,
+    planned: Sequence[Effect] = (),
 ) -> None:
     """Check EVERY candidate's observed identities against the WAL before
     the barrier mutates anything (DL-118). One sweep, up front, because the
@@ -1533,10 +1621,25 @@ def _preflight_identities(
     reconciliation that durably recorded `applied` before a later branch
     refused the same run left the refusal half-taken, and a dead LIST row
     with no local directory reached `resolve_spool` through a branch no
-    guard covered. A refusal here has appended nothing and launched
-    nothing -- the run root is exactly as the crash left it."""
+    guard covered.
+
+    `planned` holds the SPAWNs of the recovered decisions resume is about
+    to write (DL-315); a run's id is bound by its durable SPAWN or
+    by one of these. Resume runs it first, before it writes the recovered
+    decisions, so a refusal there has written no decision and launched
+    nothing -- the run root holds only this incarnation's `leader` record
+    beyond what the crash left. The barrier runs it again over the same
+    evidence once the recovered decisions are written, and it passes unless
+    the spool changed in between."""
     for (job, run_number), run_dir in sorted(candidates.items()):
-        effect = _spawn_effect_for(engine, job, run_number)
+        effect = _spawn_effect_for(engine, job, run_number) or next(
+            (
+                e
+                for e in planned
+                if e.kind == "SPAWN" and (e.job, e.run_number) == (job, run_number)
+            ),
+            None,
+        )
         if effect is None or effect.run_id is None:
             continue
         directory = run_dir

@@ -407,9 +407,13 @@ def plan_effects(
     A pure function of what the oracle emitted plus what the shell is
     holding -- except the one deliberate impurity: a SPAWN's `run_id` comes
     from `mint_run_id`, because identity is CREATED here, in the decision
-    transaction (PR-36a), and nowhere later. Replay is not exposed to the
-    mint: it never re-plans, it reads the outbox back from the records
-    (`Replay`), so the id a resumed engine acts on is the id the log holds.
+    transaction (PR-36a), and nowhere later. Replay never re-plans a
+    decided attempt: it reads the outbox back from the records (`Replay`),
+    so the id a resumed engine acts on is the id the log holds. The one
+    plan made at resume is for an attempt whose decision was never written
+    (`Engine.plan_recovered`, DL-315): nothing of it was recorded
+    or dispatched, so the decision record resume writes for it is that
+    attempt's decision transaction, and its mint is the only one.
     A KILL carries the run's id from `run_ids` -- the (job, run_number) ->
     run_id bindings this run root already made -- or None for a run this
     root holds no binding for. `generation` is the executor

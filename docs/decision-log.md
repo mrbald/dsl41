@@ -20508,3 +20508,73 @@ relitigate an entry; append a new one.
   comment still false, an untested failing first write, and entry text
   that over-claimed. All are fixed and confirmed, and each fix has a test
   that fails without it.
+- DL-315 At resume a recovered start is committed, and a start whose SPAWN was retired stays as
+  the live engine left it
+  (2026-10-10; src/dsl41/runner_journal.py, runner.py, runner_startup.py, runner_effects.py,
+  simulation_register_rows.py; docs/concurrency-model.md §4, §5, §7, docs/period-model.md §7 and
+  §11, docs/runner-design.md §7, docs/deployment-runbook.md §0; tests/test_hosts.py,
+  tests/test_boundary.py, tests/test_decision_record.py, tests/test_run_history.py)
+  THE DEFECT. An attempt whose decision never reached the journal was re-decided at replay
+  (DL-156) but never planned, so a recovered start had no SPAWN. Resume then guessed: an FW watch
+  was launched at once, even on a drained or quarantined host, with no run_id; a command start
+  failed with "dispatch lost". DL-313 left this open. Separately, the untraced-start sweep could
+  not see a retired SPAWN: it relaunched a watch, replayed a supervised start under the retired id
+  (the supervisor then ran a process the live engine never would have), or failed a tethered start
+  with a false "never spawned" cause. `_resume_watch` could also launch a watch with no identity.
+  THE RULE. Resume plans the missing decision of every recovered verdict with `plan_effects`,
+  reading each job's run number just before the attempt as dispatched and just after it as
+  current, with no live run; a SPAWN mints its run_id in that plan. It then reads the spool and
+  the supervisor's LIST and checks their identities against the WAL's SPAWNs and the planned ones.
+  Only then does it write each planned decision, before the ghost-run gate is seeded. Nothing of
+  the attempt was recorded or dispatched before the crash, so this record is the attempt's
+  decision transaction (DL-118, period-model §2.3). It does not record the verdict in the decision
+  index again and does not run the violation stop. A recovered start is then a pending SPAWN:
+  dispatch applies it or the routing gate holds it. A resume refused by the identity check writes
+  no decision and mints no id; its `leader` record is the only record it appends, as for any
+  refused resume. The untraced-start sweep decides by the row's own SPAWN: pending is left to the
+  barrier; retired, or none, is left as it is; applied or indeterminate takes the trace-lost
+  ladder (FW re-dispatch under the bound id, supervised replay, tethered FAILURE, with
+  `exit_status_unobservable` for indeterminate). `_resume_watch` relaunches only under a SPAWN
+  that is not retired. This closes DL-313's OPEN paragraph.
+  THE AMENDED TEXT. concurrency-model §4 "That recovered application writes no effect record, so
+  it launches nothing" (replaced); concurrency-model §5 "A start with no pending intent and no
+  spool trace fails" and §7 "A start with no pending intent fails" (split by SPAWN state);
+  concurrency-model §7's heading "'Re-drive pending' splits the untraced start" (now "decides the
+  untraced start by its own SPAWN"); period-model §7 "That recovered application writes no effect
+  record, so a start recovered this way launches nothing. Its row stands for the resume ladder,
+  its untraced-start sweep and the operator to settle" (replaced) and the PR-28b row "launches
+  nothing"; period-model §11 new step 6a; runner-design §7's bounded list of resume side effects
+  (a new first item; the supervised replay and the FW item narrowed to an applied SPAWN; "Without
+  the first" now names the re-driven kill) and its heading "A start with no trace anywhere splits
+  in two" (now "is decided by its own SPAWN"). Code comments: runner_startup.py's module
+  docstring, runner.py's `_dispatched` comment, `plan_effects`' docstring ("Replay is not exposed
+  to the mint") and `_preflight_identities`' docstring.
+  OWNER-VISIBLE BEHAVIOUR. A tethered command start whose SPAWN was retired (for example killed
+  while held, then set RUNNING) stays live at its run number after a restart, RUNNING or STARTING
+  as it was left, with nothing running or held and no FAILURE; before, the restart failed it. A
+  run root an earlier build resumed, holding a `watch.jsonl` start line with `run_id: null` for a
+  start whose decision was missing, refuses this build's first resume by name as an identity split
+  while that run directory is present, whether the watch completed or not. The refused resume
+  writes no decision, so the earlier build can still open it; such roots are reset under the
+  pre-production reset clause (protocol-evolution §5, DL-138). The deployment runbook states both.
+  LIMIT. If spool or LIST evidence changes between the identity check and the ladder's reads,
+  under this engine's lock, the later re-check refuses after the decisions are written. That needs
+  a foreign writer in the run root during resume.
+  VERSIONS. STATE_MACHINE_VERSION, the protocol versions and artifact_format_version do not move:
+  replay derives the same state, and the `decision` record's shape is unchanged.
+  TESTS. tests/test_hosts.py: the held undecided start (FW and CMD, drain and quarantine), the
+  recovered run-2 restart, a recovered start followed by decided ones, the STARTING overwrite
+  gate, the retired SPAWN (FW, supervised, tethered), no SPAWN at all, a no-SPAWN watch directory,
+  a watch relaunched under a retired id, the applied watch on a drained host, the single commit
+  across two restarts, the indeterminate SPAWN, and a refused mixed-history resume that writes no
+  decision (only its `leader` record); tests/test_run_history.py: the records-only fold after the
+  commit; tests/test_boundary.py and tests/test_decision_record.py restated. Each new test fails
+  without its fix.
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass, the Fable pass in place of
+  Codex at the owner's instruction, two rounds. A Fable advisor ruled on the design first. It
+  found that the change reverses two frozen sentences, which DL-118 and DL-156 do not cover, and
+  named the planning condition above. The reviewers found that a refused resume wrote the decision
+  before the identity check, which would have blocked a rollback; that the refusal's scope was
+  stated too narrowly; a stale cross-reference in runner-design §7; and two untested branches. All
+  are fixed and confirmed, and each fix has a test that fails without it. The reviewer that raised
+  the refusal finding agrees to the LIMIT above.
