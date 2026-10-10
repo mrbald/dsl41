@@ -1,5 +1,5 @@
 # Allowlist: the build context is the repository root, so nothing enters it
-# unless named here (examples/workflows/Dockerfile).
+# unless named here (examples/workflows/Dockerfile, examples/dst-drill/Dockerfile).
 *
 !pyproject.toml
 !uv.lock
@@ -15,5 +15,6 @@
 !examples/fulfilment/
 !examples/energy/
 !examples/media/
+!examples/dst-drill/
 **/__pycache__
 **/*.pyc

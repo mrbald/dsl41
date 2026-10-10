@@ -1,0 +1,122 @@
+/* The DST drill's estate: invented names, one machine. Times sit in and
+   around the gap and overlap hours of Europe/London and America/New_York,
+   and around midnight. */
+
+insert_machine: dd_host
+type: a
+node_name: localhost
+max_load: 20
+
+insert_job: DD_AT_2359
+job_type: c
+date_conditions: 1
+days_of_week: all
+start_times: "23:59"
+command: sh -c 'echo DD_AT_2359 $(date -u +%FT%TZ)'
+machine: dd_host
+
+insert_job: DD_AT_0001
+job_type: c
+date_conditions: 1
+days_of_week: all
+start_times: "00:01"
+command: sh -c 'echo DD_AT_0001 $(date -u +%FT%TZ)'
+machine: dd_host
+
+insert_job: DD_AT_0030
+job_type: c
+date_conditions: 1
+days_of_week: all
+start_times: "00:30"
+command: sh -c 'echo DD_AT_0030 $(date -u +%FT%TZ)'
+machine: dd_host
+
+insert_job: DD_AT_0100
+job_type: c
+date_conditions: 1
+days_of_week: all
+start_times: "01:00"
+command: sh -c 'echo DD_AT_0100 $(date -u +%FT%TZ)'
+machine: dd_host
+
+insert_job: DD_AT_0130
+job_type: c
+date_conditions: 1
+days_of_week: all
+start_times: "01:30"
+command: sh -c 'echo DD_AT_0130 $(date -u +%FT%TZ)'
+machine: dd_host
+
+insert_job: DD_AT_0200
+job_type: c
+date_conditions: 1
+days_of_week: all
+start_times: "02:00"
+command: sh -c 'echo DD_AT_0200 $(date -u +%FT%TZ)'
+machine: dd_host
+
+insert_job: DD_AT_0230
+job_type: c
+date_conditions: 1
+days_of_week: all
+start_times: "02:30"
+command: sh -c 'echo DD_AT_0230 $(date -u +%FT%TZ)'
+machine: dd_host
+
+insert_job: DD_AT_0300
+job_type: c
+date_conditions: 1
+days_of_week: all
+start_times: "03:00"
+command: sh -c 'echo DD_AT_0300 $(date -u +%FT%TZ)'
+machine: dd_host
+
+insert_job: DD_KILL
+job_type: c
+date_conditions: 1
+days_of_week: all
+start_times: "00:58"
+term_run_time: 5
+command: sleep 600
+machine: dd_host
+
+insert_job: DD_MUST
+job_type: c
+date_conditions: 1
+days_of_week: all
+start_times: "01:15"
+must_complete_times: "01:20"
+command: sleep 600
+machine: dd_host
+
+insert_job: DD_AFTER
+job_type: c
+condition: s(DD_AT_0100)
+command: sh -c 'echo DD_AFTER $(date -u +%FT%TZ)'
+machine: dd_host
+
+insert_job: DD_WINDOW
+job_type: c
+date_conditions: 1
+days_of_week: all
+start_mins: "0,15,30,45"
+run_window: "01:15-01:45"
+command: sh -c 'echo DD_WINDOW $(date -u +%FT%TZ)'
+machine: dd_host
+
+insert_job: DD_WINDOW_LATE
+job_type: c
+date_conditions: 1
+days_of_week: all
+start_mins: "0,15,30,45"
+run_window: "02:15-02:45"
+command: sh -c 'echo DD_WINDOW_LATE $(date -u +%FT%TZ)'
+machine: dd_host
+
+insert_job: DD_EVERY
+job_type: c
+date_conditions: 1
+days_of_week: all
+start_mins: "15,45"
+command: sh -c 'echo DD_EVERY $(date -u +%FT%TZ)'
+machine: dd_host
