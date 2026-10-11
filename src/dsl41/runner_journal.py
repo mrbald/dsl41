@@ -84,11 +84,11 @@ from dsl41.runner_admission import (
     Attempt,
     DecisionIndex,
     Frontiers,
+    TimeHalfFault,
     apply_attempt,
+    classify_fault,
     fingerprint,
-    quarantine_verdict,
     report_violation,
-    trial_apply,
 )
 from dsl41.period import (
     Manifest,
@@ -1414,7 +1414,7 @@ class ReplayFault(EngineError):
 
     It stops on an input with a durable decision, and on an undecided one
     whose time half raises on its own. An undecided attempt whose time half
-    applies alone is quarantined instead (`quarantine_verdict`), and resume
+    applies alone is quarantined instead (`classify_fault`), and resume
     writes that decision.
 
     The cause's `code`, if it has one, rides on; the cause is chained.
@@ -1546,21 +1546,18 @@ def replay_inputs(
         runs_before = _run_numbers(oracle) if durable is None else {}
         forced = None
         if durable is None:
-            # the crash window: on a fork first, so a fault leaves this
+            # the crash window: on forks first, so a fault leaves this
             # oracle as the input found it, and is classified (ss4)
-            dry = trial_apply(oracle, attempt)
-            if isinstance(dry, Exception):
-                verdict = quarantine_verdict(oracle, attempt, dry)
-                if isinstance(verdict, Exception):
-                    # the time half's own fault, which may not be the
-                    # first one: the whole apply's rides on as a note
-                    fault = ReplayFault(attempt, verdict)
-                    if (type(verdict), str(verdict)) != (type(dry), str(dry)):
-                        fault.add_note(
-                            f"applying the whole input raised {type(dry).__name__}: {dry}"
-                        )
-                    raise fault from verdict
-                forced = verdict
+            try:
+                quarantine = classify_fault(oracle, attempt)
+            except TimeHalfFault as fault:
+                # the time half's own fault, which may not be the first
+                # one: the whole apply's rides on as a note
+                stop = ReplayFault(attempt, fault.cause)
+                if fault.note is not None:
+                    stop.add_note(fault.note)
+                raise stop from fault.cause
+            forced = None if quarantine is None else quarantine[0]
         try:
             applied = apply_attempt(oracle, attempt, decided=durable, forced=forced)
         except TransitionError:

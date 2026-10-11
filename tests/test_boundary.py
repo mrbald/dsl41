@@ -3037,7 +3037,7 @@ def test_pr28b_a_clock_regression_in_the_drain_still_refuses(tmp_path: Path) -> 
     refusal, answered = asyncio.run(scenario())
     assert refusal.code == "clock_regressed"
     assert isinstance(answered, AdmissionRefused) and answered.code == "clock_regressed"
-    assert [rid for rid, _ in engine.refusals] == ["r-behind"]
+    assert [refused for _, refused in engine.refused_inputs] == [answered]  # r-behind's
     assert engine.sealing is False and engine.barrier.parked is False
     engine.inject(Event(at=later, kind="SET_GLOBAL", payload={"name": "G", "value": "2"}))
     asyncio.run(engine.run_until_quiescent(later))
@@ -3077,7 +3077,7 @@ def test_pr28b_a_clock_regression_on_an_engine_made_input_in_the_drain_fail_stop
 
     asyncio.run(scenario())
     assert engine.sealing is True and engine.barrier.parked is True  # no abort ran
-    assert engine.refusals == []  # not refused, so not lost behind a reopened C1
+    assert engine.refused_inputs == []  # not refused, so not lost behind a reopened C1
     assert engine.journal is not None
     records = read_journal(engine.journal.path)
     _close(engine)

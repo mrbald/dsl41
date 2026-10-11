@@ -34,6 +34,7 @@ from dsl41.rehearse_check import (
     CadenceCheckError,
     CadencePolicy,
     JobPolicy,
+    LostInput,
     case_fail_entry,
     check_adapter,
     genesis_truth,
@@ -43,6 +44,7 @@ from dsl41.rehearse_check import (
     failure_exit,
     flag_cases,
     load_policy,
+    lost_lines,
     play_once,
     render_text,
     run_fail_sweep,
@@ -1841,3 +1843,21 @@ def test_cli_sweep_fail_and_flags_together_populate_both_blocks(tmp_path: Path) 
     assert len(cc["fail_sweep"]) == 2
     assert cc["flag_sweep"] == []
     assert cc["flag_uncovered"] == []
+
+
+def test_lost_lines_print_every_refusal_before_every_quarantine() -> None:
+    """Sweeps collect lost inputs case by case, each case's refusals before
+    its quarantines. Rehearse prints every refusal across the cases first,
+    then every quarantine, each in the order met (concurrency-model ss4)."""
+    lost = [
+        LostInput("refused", "SET_GLOBAL {} @ t1", "apply_faulted: one", "fail:a"),
+        LostInput("quarantined", "input 3", "quarantined: two", "fail:a"),
+        LostInput("refused", "a verbless input", "apply_faulted: three", "flags:b"),
+        LostInput("quarantined", "input 5", "quarantined: four", "flags:b"),
+    ]
+    assert lost_lines(lost) == [
+        "rehearse failed: refused SET_GLOBAL {} @ t1 in sweep fail:a: apply_faulted: one",
+        "rehearse failed: refused a verbless input in sweep flags:b: apply_faulted: three",
+        "rehearse failed: quarantined input 3 in sweep fail:a: quarantined: two",
+        "rehearse failed: quarantined input 5 in sweep flags:b: quarantined: four",
+    ]

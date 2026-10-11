@@ -61,10 +61,10 @@ uv run dsl41 rehearse examples/soak/estate/soak.jil --run-root /tmp/soak-rehears
 
 Each day's line has the wall and CPU time of playing the day, the launches,
 failures and queue waits, the most runs live at once, the length of the
-oracle trace and of the engine's `drops`, `deduped` and `refusals` lists,
-the decision index and the outbox, the open segment's and the whole WAL's
-bytes, the resident set, and the time one `trace` and one `status` control
-call take in process. The CPU is the engine's decision cost under a virtual
+oracle trace and of the engine's `drops`, `deduped` and `refused_inputs`
+lists (the line's `refusals`), the decision index and the outbox, the open
+segment's and the whole WAL's bytes, the resident set, and the time one
+`trace` and one `status` control call take in process. The CPU is the engine's decision cost under a virtual
 clock with a fake adapter: no processes, no supervisor and no spool. It is
 not a real day's CPU. The `seal`, `replay` and `audit` lines carry their
 times; seal and replay are timed in process, audit as a command.

@@ -744,11 +744,12 @@ costs that much more. The audit was timed as a command and includes it.
 
 A seal resets the trace, the decision index, the outbox and the engine's
 three lists. A live seal stops the engine with exit 3, and the next period
-starts in a new process. Of the three lists, `drops` stayed empty: it holds
-rejected engine inputs, such as a stale completion. `deduped` and
-`refusals` count operator traffic, not launches. A retried request adds
-one to `deduped`, and a refused request adds one to `refusals`. A restart
-empties both, because the WAL does not hold them.
+starts in a new process. The soak line counts the three lists under the
+keys `drops`, `deduped` and `refusals`. `drops` stayed empty: it counts rejected engine inputs, such as a stale
+completion or a quarantined input. `deduped` and `refusals` count operator
+traffic, not launches. A retried request adds one to `deduped`, and a
+refused request adds one to `refusals` (the engine's `refused_inputs`). A
+restart empties both, because the WAL does not hold them.
 
 **One long period.** The same estate, with no seal for 30 days. The WAL row
 is the open period's segment, which is the whole `wal/` here because there

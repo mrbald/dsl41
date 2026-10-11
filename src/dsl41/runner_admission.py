@@ -77,7 +77,7 @@ input is quarantined: it is logged with a rejected decision under
 `engine_apply_faulted`, and only its time half applies. If the time half
 raises too, the engine stops before the input is logged
 (`TimeHalfStop`). Replay classifies an undecided attempt that raises the
-same way (`quarantine_verdict`).
+same way: both ask `classify_fault`.
 
 S5a adds a second shape of verbless attempt beside the time observation: a
 routing-table command (`docs/concurrency-model.md` ss8). It is admitted by
@@ -445,6 +445,27 @@ class Attempt(BaseModel):
             raise ValueError("an attempt carries an oracle verb or a host command, never both")
         return self
 
+    @property
+    def verbless(self) -> bool:
+        """A standalone time observation: no oracle verb and no host
+        command. The opening release and the seal's cutoff are such
+        observations. It is all time half, so a fault in it is never
+        quarantined (concurrency-model ss4)."""
+        return self.kind is None and self.host is None
+
+    @property
+    def engine_made(self) -> bool:
+        """An input the engine made itself, which nobody would hear refused
+        (concurrency-model ss4): a tick, a completion, a routing or time
+        observation. Every other input is a control input: one that crossed
+        the socket, which always carries `expect` (ss0), or an event an
+        in-process script raised with the `control` source, which is how it
+        sends an operator's command. An unattributed event (the bisimulation
+        harness) is engine-made: it must behave as the oracle does when fed
+        directly. Read from the logged attempt alone, so the live engine and
+        the journal narration ask the same question of the same record."""
+        return self.expect is None and self.source != "control"
+
     def event(self) -> Event | None:
         if self.kind is None:
             return None
@@ -590,11 +611,8 @@ class TimeHalfStop(EngineError):
     is what the whole apply raised first, named as context."""
 
     def __init__(self, attempt: Attempt, cause: Exception, full: Exception | None = None) -> None:
-        context = (
-            ""
-            if full is None or _same_fault(full, cause)
-            else f" (applying the whole input raised {type(full).__name__}: {full})"
-        )
+        note = _whole_input_note(cause, full)
+        context = "" if note is None else f" ({note})"
         super().__init__(
             f"engine stopped before admitting input {attempt.index}"
             f" ({describe_input(attempt)} at {attempt.at.isoformat()}): its time half"
@@ -1048,7 +1066,7 @@ def quarantine_verdict(
     all time half, so it is never quarantined and `cause` is its fault.
     The live engine stops before the append on an exception
     (`TimeHalfStop`); replay stops with a `ReplayFault`."""
-    if attempt.kind is None and attempt.host is None:
+    if attempt.verbless:
         return cause
     rejection = Rejection(
         "engine_apply_faulted",
@@ -1060,9 +1078,55 @@ def quarantine_verdict(
     return alone if isinstance(alone, Exception) else rejection
 
 
-def _same_fault(one: Exception, other: Exception) -> bool:
-    """Two faults that read the same: a stop names the first only once."""
-    return (type(one), str(one)) == (type(other), str(other))
+class TimeHalfFault(Exception):
+    """`classify_fault`'s stop: the time half raised `cause` on its own,
+    after the whole apply raised `full`. Its two callers turn it into their
+    own stop, `TimeHalfStop` live and `ReplayFault` on replay, so it never
+    leaves them."""
+
+    def __init__(self, cause: Exception, full: Exception) -> None:
+        super().__init__(f"{type(cause).__name__}: {cause}")
+        self.cause = cause
+        self.full = full
+
+    @property
+    def note(self) -> str | None:
+        """The whole apply's fault, as the stop's context, or None when
+        it reads as the time half's own."""
+        return _whole_input_note(self.cause, self.full)
+
+
+def classify_fault(
+    oracle: Oracle, attempt: Attempt, *, grace_s: float = CMD_GRACE_S
+) -> tuple[Rejection, Exception] | None:
+    """DL-320's rule for one attempt, applied on fresh forks of `oracle`,
+    which it leaves alone (concurrency-model ss4).
+
+    - The whole apply passes: None, and the attempt applies as the gate
+      decides.
+    - It raises and the time half applies alone: the rejection that
+      quarantines the attempt, with the fault the whole apply met.
+    - The time half raises too: `TimeHalfFault`.
+
+    The live engine asks this for an engine-made input only, because a
+    fault refuses a control input there. Replay asks it for every
+    undecided attempt, because nobody is left to hear a refusal."""
+    full = trial_apply(oracle, attempt, grace_s=grace_s)
+    if not isinstance(full, Exception):
+        return None
+    verdict = quarantine_verdict(oracle, attempt, full, grace_s=grace_s)
+    if isinstance(verdict, Exception):
+        raise TimeHalfFault(verdict, full)
+    return verdict, full
+
+
+def _whole_input_note(cause: Exception, full: Exception | None) -> str | None:
+    """What the whole input's apply raised, as a time-half stop's
+    context. None when there is none, or when it reads as the time half's
+    own fault `cause`: a stop names one fault once."""
+    if full is None or (type(full), str(full)) == (type(cause), str(cause)):
+        return None
+    return f"applying the whole input raised {type(full).__name__}: {full}"
 
 
 def describe_input(attempt: Attempt) -> str:

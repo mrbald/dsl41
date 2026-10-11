@@ -20883,3 +20883,39 @@ relitigate an entry; append a new one.
   live, and that a test left a killed member unreaped. The Opus reviewer found two sentences
   that read the dead-leader case as `TERMINATED` or as resume only, and both found citations
   that named the wrong sections. All are fixed and confirmed by the reviewer that raised them.
+- DL-323 The architecture review of 2026-10-11 is closed: the quarantine rule has one copy, and
+  the engine keeps one list per kind of lost input
+  (2026-10-11; docs/deployment-runbook.md; docs/risk-map.md; examples/soak/README.md;
+  scripts/arch_baseline.json)
+  THE REVIEW. One reviewer read c326b56, the drift since the stamp of 2026-10-09 (22 commits),
+  and ranked twelve findings. None is a defect. This entry gives each an outcome.
+  ACTED, with no visible change: no WAL byte, stored decision, code, journal line, stderr line,
+  exit code, rehearse line or soak line moves.
+  - One classifier. `classify_fault` (runner_admission.py) holds DL-320's rule: the whole input
+    passes, or it is quarantined, or its time half raises too (`TimeHalfFault`). The live engine
+    turns the last into `TimeHalfStop` and replay into `ReplayFault`. Live asks it for an
+    engine-made input only; replay asks it for every undecided attempt. One helper words the
+    stop's context.
+  - One spelling. `Attempt.engine_made` (no `expect`, source not `control`, the concurrency-model
+    §4 definition) and `Attempt.verbless` replace four predicates. The journal narration asks the
+    same question as the live engine. The old journal test read the `engine:` request-id prefix;
+    the two differ only for inputs an in-process script builds by hand, or a hand-built log,
+    which no operator, socket, CLI or deployed engine can make. One helper writes a stop's
+    unadmitted label.
+  - One list in rehearse. A `LostInput` record (kind, what, why, case) is built once per play
+    and printed by one renderer, refusals before quarantines as before. `PlayResult` and the
+    sweep exception carry one list.
+  - The engine's lists. `Engine.refusals` duplicated `refused_inputs` and is gone. A quarantined
+    input sits on `quarantined` only, no longer also on `drops`. The soak line counts it where
+    `drops` did, so its number does not move. The quarantined fault and `_without_frames` stay
+    as DL-320 chose them.
+  OPEN, neither acted nor declined: a third run-id map in the outbox (DL-310); two one-line
+  forwarders in oracle.py; L023 called by code name around the rule registry; a test-only
+  fallback in resume's evidence and its type written three times; the supervisor's owner check
+  looking at a process twice where `verify_alive` looks once (DL-322; its order is safe); the
+  `grace_seconds` check in two processes; the two stop exceptions mapped to exit codes by
+  parallel branches; one guard sentence repeated in four transitions.
+  BASELINE. The architecture baseline is re-armed at this commit.
+  REVIEW. One Opus reviewer (a refactor that keeps behaviour), two rounds. It found the soak
+  counter moving on a quarantine, the one-list rule and the line order unpinned by any test, and
+  a docstring and a runbook sentence naming the old attributes. All are fixed and confirmed.
