@@ -310,6 +310,33 @@ def test_the_supervisor_dispatch_belt_lets_a_statechart_error_through(
         sup._readable(conn)
 
 
+def test_a_statechart_error_in_a_shutdown_wait_is_not_logged_as_a_retry(
+    queued_supervisor: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The wait reads the lease (`_reap`, `_push_exit`), so the chart can stop the
+    supervisor inside a SHUTDOWN. That is a stop, not a failed wait to run again,
+    so the "running it once more" line is not written. An OSError there is the
+    non-triggering case: it is logged as a retry."""
+    from dsl41 import runner_supervisor
+
+    sup, connect = queued_supervisor
+    conn, _peer = connect()
+    granted = sup._h_acquire(conn, {"controller_id": "c"})
+    creds = {"incarnation": sup.incarnation, "token": granted["token"]}
+    errors = iter([runner_supervisor.StatechartError("stop"), OSError(5, "synthetic")])
+
+    def wait(_trigger: Any) -> None:
+        raise next(errors)
+
+    sup._orderly_shutdown = wait
+    with pytest.raises(runner_supervisor.StatechartError):
+        sup._h_shutdown(conn, creds)
+    assert "running it once more" not in capsys.readouterr().err
+    with pytest.raises(OSError):
+        sup._h_shutdown(conn, creds)
+    assert "running it once more" in capsys.readouterr().err
+
+
 def test_the_supervisor_still_answers_any_other_handler_error(queued_supervisor: Any) -> None:
     sup, connect = queued_supervisor
     conn, peer = connect()

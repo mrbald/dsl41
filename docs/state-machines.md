@@ -446,46 +446,81 @@ stateDiagram-v2
 
 ## supervisor_lease
 
+Clock: monotonic. Time events: expire.
+
 ```mermaid
 stateDiagram-v2
-    state "expired" as s0
-    state "free" as s1
-    state "live" as s2
-    state "orphaned" as s3
-    state c0 <<choice>>
-    state c1 <<choice>>
-    state c2 <<choice>>
-    state c3 <<choice>>
-    [*] --> s1
-    s0 --> c0 : supervisor_lease.01 ACQUIRE [controller_id is a non-empty string] / mint a token, keep the dropped-push notice for the same controller_id, a ttl_s that is not positive grants a lease that is already expired
-    s1 --> c0 : supervisor_lease.01 ACQUIRE [controller_id is a non-empty string] / mint a token, keep the dropped-push notice for the same controller_id, a ttl_s that is not positive grants a lease that is already expired
-    s3 --> c0 : supervisor_lease.01 ACQUIRE [controller_id is a non-empty string] / mint a token, keep the dropped-push notice for the same controller_id, a ttl_s that is not positive grants a lease that is already expired
-    c0 --> s0
-    c0 --> s2
-    s2 --> c1 : supervisor_lease.02 ACQUIRE [the incumbent, with this incarnation and the current token] / re-key with a fresh token, and the old one dies
-    c1 --> s0
-    c1 --> s2
-    s2 --> c2 : supervisor_lease.03 RENEW [this incarnation, then the current token] / move the deadline to now + ttl_s
-    c2 --> s0
-    c2 --> s2
-    s3 --> c3 : supervisor_lease.04 RENEW [this incarnation, then the current token] / move the deadline to now + ttl_s, pushes still drop until an ACQUIRE
-    c3 --> s0
-    c3 --> s3
-    s2 --> s1 : supervisor_lease.05 RELEASE [this incarnation, then the current token] / drop the record
-    s3 --> s1 : supervisor_lease.05 RELEASE [this incarnation, then the current token] / drop the record
-    s2 --> s3 : supervisor_lease.06 the holder's connection closes / forget the connection, so pushes drop and any controller may ACQUIRE
-    s0 --> s0 : supervisor_lease.07 the holder's connection closes / forget the connection
+    state "lease" as s3
+    state s3 {
+        [*] --> s6
+        state "unheld" as s6
+        state s6 {
+            [*] --> s1
+            state "free" as s1
+            state "expired" as s0
+        }
+        state "held" as s2
+        state s2 {
+            [*] --> s4
+            state "live" as s4
+            state "orphaned" as s5
+        }
+    }
+    s6 --> s4 : supervisor_lease.01 ACQUIRE [grantable] / grant
+    s5 --> s4 : supervisor_lease.02 ACQUIRE [grantable] / grant
+    s2 --> s1 : supervisor_lease.11 RELEASE [credentials] / release
+    s4 --> s5 : supervisor_lease.14 disconnect [holder] / forget
+    s2 --> s0 : supervisor_lease.17 expire
 ```
 
-| Id | Source | Trigger | Guard | Effect | Target | Cite | Mark |
+| Id | Source | Event | Guard | Action | Target | Kind | Cite |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| supervisor_lease.01 | expired, free, orphaned | ACQUIRE | controller_id is a non-empty string | mint a token, keep the dropped-push notice for the same controller_id, a ttl_s that is not positive grants a lease that is already expired | expired, live | supervisor-protocol ss5 lease verbs, DL-79, DL-150 |  |
-| supervisor_lease.02 | live | ACQUIRE | the incumbent, with this incarnation and the current token | re-key with a fresh token, and the old one dies | expired, live | supervisor-protocol ss5 lease verbs, DL-79, DL-80 |  |
-| supervisor_lease.03 | live | RENEW | this incarnation, then the current token | move the deadline to now + ttl_s | expired, live | supervisor-protocol ss5 lease verbs, DL-150 |  |
-| supervisor_lease.04 | orphaned | RENEW | this incarnation, then the current token | move the deadline to now + ttl_s, pushes still drop until an ACQUIRE | expired, orphaned | supervisor-protocol ss5 lease verbs, DL-150 |  |
-| supervisor_lease.05 | live, orphaned | RELEASE | this incarnation, then the current token | drop the record | free | supervisor-protocol ss5 lease verbs, DL-150 |  |
-| supervisor_lease.06 | live | the holder's connection closes |  | forget the connection, so pushes drop and any controller may ACQUIRE | orphaned | supervisor-protocol ss5 lease verbs, DL-150 |  |
-| supervisor_lease.07 | expired | the holder's connection closes |  | forget the connection | expired | supervisor-protocol ss5 lease verbs |  |
+| supervisor_lease.01 | unheld | ACQUIRE | grantable | grant | live | external | supervisor-protocol ss5 lease verbs, DL-79, DL-150 |
+| supervisor_lease.02 | orphaned | ACQUIRE | grantable | grant | live | external | supervisor-protocol ss5 lease verbs, DL-79, DL-150 |
+| supervisor_lease.03 | live | ACQUIRE | incumbent | grant |  | internal | supervisor-protocol ss5 lease verbs, DL-79, DL-80 |
+| supervisor_lease.04 | live | ACQUIRE | challenger |  |  | refusal lease_held | supervisor-protocol ss5 lease verbs, DL-79 |
+| supervisor_lease.05 | lease | ACQUIRE | unnamed |  |  | refusal bad_controller_id | supervisor-protocol ss5 lease verbs, DL-150 |
+| supervisor_lease.06 | lease | ACQUIRE | untimed |  |  | refusal internal | supervisor-protocol ss5 lease verbs, DL-300 |
+| supervisor_lease.07 | held | RENEW | renewable | extend |  | internal | supervisor-protocol ss5 lease verbs, DL-150 |
+| supervisor_lease.08 | held | RENEW | renewal_untimed |  |  | refusal internal | supervisor-protocol ss5 lease verbs, DL-300 |
+| supervisor_lease.09 | lease | RENEW | foreign |  |  | refusal wrong_incarnation | supervisor-protocol ss5 incarnation, DL-80, DL-150 |
+| supervisor_lease.10 | lease | RENEW | this_incarnation |  |  | refusal stale_token | supervisor-protocol ss5 incarnation, DL-150 |
+| supervisor_lease.11 | held | RELEASE | credentials | release | free | external | supervisor-protocol ss5 lease verbs, DL-150 |
+| supervisor_lease.12 | lease | RELEASE | foreign |  |  | refusal wrong_incarnation | supervisor-protocol ss5 incarnation, DL-80, DL-150 |
+| supervisor_lease.13 | lease | RELEASE | this_incarnation |  |  | refusal stale_token | supervisor-protocol ss5 incarnation, DL-150 |
+| supervisor_lease.14 | live | disconnect | holder | forget | orphaned | external | supervisor-protocol ss5 lease verbs, DL-150 |
+| supervisor_lease.15 | expired | disconnect | holder | forget |  | internal | supervisor-protocol ss5 lease verbs |
+| supervisor_lease.16 | lease | disconnect |  |  |  | ignored | supervisor-protocol ss5 lease verbs |
+| supervisor_lease.17 | held | expire |  |  | expired | external | supervisor-protocol ss5 lease verbs |
+| supervisor_lease.18 | lease | expire |  |  |  | ignored | supervisor-protocol ss5 lease verbs |
+
+| State | In | Entry | Exit | Defers | Waits |
+| --- | --- | --- | --- | --- | --- |
+| lease |  |  |  |  |  |
+| unheld | lease/phase |  |  |  |  |
+| free | unheld/phase |  |  |  |  |
+| expired | unheld/phase |  |  |  |  |
+| held | lease/phase |  |  |  | expire |
+| live | held/phase |  |  |  |  |
+| orphaned | held/phase |  |  |  |  |
+
+| Name | Kind | Prose |
+| --- | --- | --- |
+| grantable | guard | controller_id is a non-empty string, and ttl_s gives a representable expiry. A zero or negative ttl_s gives one too: the lease it grants is due at once, and the next sample expires it (ss5). |
+| incumbent | guard | Grantable, with this incarnation and the current token: the incumbent re-keys, and its old token dies (DL-79, DL-80). controller_id is a label, not a credential. The token proves incumbency, not authenticity. Authentication is the same-uid peer-cred gate on accept (ss1). |
+| challenger | guard | controller_id is a non-empty string and ttl_s is a number, without this incarnation and the current token: a live lease yields only to its incumbent (DL-79). The expiry is not computed. |
+| unnamed | guard | controller_id is not a non-empty string, checked before ttl_s and before any lease state (DL-150). |
+| untimed | guard | controller_id is a non-empty string, and ttl_s gives no representable expiry (not a number, inf, nan, 1e20). Nothing changes, not even the token counter (DL-300). |
+| renewable | guard | This incarnation and the current token, and ttl_s gives a representable expiry (DL-150, DL-300). |
+| renewal_untimed | guard | This incarnation and the current token, and ttl_s gives no representable expiry. Nothing changes (DL-300). |
+| foreign | guard | The request names no incarnation, or another one: the supervisor it knew is gone, so it must re-acquire and reconcile (DL-80). |
+| this_incarnation | guard | The request names this incarnation (DL-80). |
+| credentials | guard | This incarnation, then the current token, an integer on the wire (DL-151). ss5 checks nothing else: any connection may present them. |
+| holder | guard | The dropped connection is the one that holds the lease. |
+| grant | action | Mint the next token and write a new record, held on the claimant's connection, with the request's deadline. A re-grant to the same controller_id keeps the dropped-push notice (DL-210). Answer the token, the expiry and the incarnation (DL-80). |
+| extend | action | Move the deadline and expires_at to the request's. The connection is not adopted, so an orphaned lease stays orphaned and its pushes keep dropping until an ACQUIRE. Answer the expiry. |
+| release | action | Drop the record, and answer ok. |
+| forget | action | Forget the holder's connection: pushes drop until the holder re-ACQUIREs, and any controller may ACQUIRE an orphaned lease. That lets a crashed engine's resume re-acquire without waiting out the TTL. It is sound because the kernel closes this AF_UNIX fd only when the holder process is gone, kill -9 included, or when the holder closes it itself. A non-local transport would break that (ss5). |
 
 ## supervisor_client
 

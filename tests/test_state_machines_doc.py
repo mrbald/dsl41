@@ -342,3 +342,27 @@ def test_a_statechart_gets_a_summary_line_and_its_own_section() -> None:
     text = rsm.render([CHART, MACHINE])
     assert "\n## door\n\nClock: logical." in text and "\n## demo\n" in text
     assert rsm.chart_table(bare)[-1] == "| bare |  |  |  |  |  |"
+
+
+def _ready(_ctx: object) -> bool:
+    """The door is ready;
+    a second line."""
+    return True
+
+
+def test_a_statechart_lists_its_guards_and_actions_with_their_docstrings() -> None:
+    documented = Statechart(
+        "lock",
+        State("lock"),
+        (Row("lock.01", "lock", "go", kind="internal", guard="ready", action="note"),),
+        guards={"ready": _ready},
+        actions={"note": lambda _ctx: None},
+        clock="logical",
+    )
+    assert rsm.chart_table(documented)[-4:] == [
+        "| Name | Kind | Prose |",
+        "| --- | --- | --- |",
+        "| ready | guard | The door is ready, a second line. |",
+        "| note | action |  |",
+    ]
+    assert rsm.chart_table(CHART)[-1] == "| alarm | opened/r2 |  |  |  | t (stays: waits) |"

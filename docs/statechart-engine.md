@@ -219,7 +219,7 @@ Completeness is syntactic. For every state and every event in the machine's alph
 configuration resolves to one of:
 
 - a row;
-- an internal `ignored` row, which writes a trace line;
+- an internal `ignored` row, which writes a trace line where the tier keeps one;
 - a deferral;
 - a declared refusal.
 

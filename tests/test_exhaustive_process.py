@@ -13,7 +13,9 @@ None of these machines writes a trace line. A violation shows as a
 that starts with `VIOLATION_LOG_PREFIX`; each test checks all three. Each
 test records into its own directory and asserts which declared (transition,
 source) pairs its builder took; each pair it does not take is named, with the
-reason. The fixture then hands the hits, never the violations, to the
+reason. `supervisor_lease` is a statechart: its executor raises on an event no
+row takes, so its test checks the row each event took and the chart's
+coverage items instead. The fixture then hands the hits, never the violations, to the
 session's directory, so the coverage gate counts them.
 """
 
@@ -33,7 +35,7 @@ from typing import Any
 
 import pytest
 
-from dsl41 import runner_supervisor
+from dsl41 import runner_supervisor, state_machine
 from dsl41.boundary import (
     ANCHOR_HEAD,
     CLAIMS_DIR,
@@ -124,12 +126,21 @@ class _Clock:
 
 
 #: the lease's events. A request is (verb, connection, credentials, ttl_s).
-type _LeaseEvent = tuple[str, str, str, float | None]
+type _LeaseEvent = tuple[str, str, str, float | str | None]
 
 _SLOTS = ("a", "b")
 _CREDENTIALS = ("current", "none", "stale", "foreign")
 #: the lease verbs' own refusals (supervisor-protocol ss5). Each changes nothing.
 _LEASE_REFUSALS = {"bad_controller_id", "lease_held", "wrong_incarnation", "stale_token"}
+#: a ttl_s with no representable expiry: not a number, and not finite
+_UNTIMED = ("x", float("inf"))
+#: the rows an answered verb may take, and those a dropped connection may take
+_LEASE_ROWS = {
+    "ACQUIRE": {"01", "02", "03"},
+    "RENEW": {"07"},
+    "RELEASE": {"11"},
+    "EOF": {"14", "15"},
+}
 
 
 def _lease_events() -> list[_LeaseEvent]:
@@ -139,8 +150,8 @@ def _lease_events() -> list[_LeaseEvent]:
     ]
     for slot in _SLOTS:
         for creds in _CREDENTIALS:
-            events += [("ACQUIRE", slot, creds, ttl) for ttl in (60.0, 0.0)]
-            events += [("RENEW", slot, creds, ttl) for ttl in (60.0, -1.0)]
+            events += [("ACQUIRE", slot, creds, ttl) for ttl in (60.0, 0.0, *_UNTIMED)]
+            events += [("RENEW", slot, creds, ttl) for ttl in (60.0, -1.0, *_UNTIMED)]
             events.append(("RELEASE", slot, creds, None))
         events.append(("EOF", slot, "", None))
     return events
@@ -151,12 +162,21 @@ class _LeaseRig:
     them. A request goes in through the peer socket and `_readable`, the
     loop's own entry; its reply is taken off the connection's queue. EOF is
     the peer closing, read the same way, and a fresh connection takes the
-    slot."""
+    slot. Every outcome of the supervisor's lease executor is kept."""
 
     def __init__(self, root: Path, clock: _Clock) -> None:
         self.clock = clock
         self.sup = runner_supervisor.Supervisor(str(root))
         self.sup.state = "serving"  # requests are read and dispatched only while serving
+        self.outcomes: list[Any] = []
+        dispatch = self.sup._leases.dispatch
+
+        def spy(key: Any, event: Any) -> Any:
+            outcomes = dispatch(key, event)
+            self.outcomes += outcomes
+            return outcomes
+
+        self.sup._leases.dispatch = spy
         self.conns: dict[str, runner_supervisor._Conn] = {}
         self.peers: dict[str, socket.socket] = {}
         for slot in _SLOTS:
@@ -173,8 +193,8 @@ class _LeaseRig:
 
     def key(self) -> tuple[str, str | None]:
         """The lease's phase and which slot's connection holds it."""
+        phase = self.sup._lease_phase()
         lease = self.sup.lease
-        phase = runner_supervisor.lease_phase(lease, self.clock.now)
         holder = None
         for slot, conn in self.conns.items():
             if lease is not None and lease.conn is conn:
@@ -226,6 +246,37 @@ class _LeaseRig:
         self.sup._sel.close()
 
 
+def _lease_problem(
+    event: _LeaseEvent, holder: str | None, reply: dict[str, Any] | None, outcomes: list[Any]
+) -> str:
+    """What is wrong with the rows one event took, or an empty string.
+
+    The sampled expiry is left out: it is the clock's, not the event's."""
+    verb = event[0]
+    taken = [o for o in outcomes if o.event.name != runner_supervisor.EXPIRE]
+    alphabet = set(state_machine.alphabet(runner_supervisor.SUPERVISOR_LEASE))
+    if any(o.event.name not in alphabet for o in outcomes):
+        return f"posted outside the alphabet: {[o.event.name for o in outcomes]}"
+    if verb == "ELAPSE":
+        return "" if not taken else f"took {[o.rows for o in taken]}"
+    if len(taken) != 1:
+        return f"{len(taken)} outcomes"
+    (outcome,) = taken
+    rows = {row.removeprefix("supervisor_lease.") for row in outcome.rows}
+    if verb == "EOF":
+        expected = _LEASE_ROWS["EOF"] if holder == event[1] else {"16"}
+        return "" if len(rows) == 1 and rows <= expected else f"took {outcome.rows}"
+    assert reply is not None
+    if reply.get("ok") is True:
+        ok = len(rows) == 1 and rows <= _LEASE_ROWS[verb] and not outcome.refusals
+        return "" if ok else f"answered ok, took {outcome.rows}"
+    error = str(reply.get("error"))
+    code = "internal" if error.startswith("internal: ") and event[3] in _UNTIMED else error
+    if code not in {*_LEASE_REFUSALS, "internal"}:
+        return error
+    return "" if outcome.refusals == (code,) else f"refused {error}, took {outcome.rows}"
+
+
 def test_every_lease_verb_in_every_reached_lease_state_takes_a_declared_transition(
     short_root: Path,
     strict: Path,
@@ -236,28 +287,26 @@ def test_every_lease_verb_in_every_reached_lease_state_takes_a_declared_transiti
     every event to every state it reaches, keyed on (phase, which connection
     holds the lease). The events: ACQUIRE, RENEW and RELEASE from either of
     two connections, with the current credentials, none, a stale token or a
-    foreign incarnation, ACQUIRE and RENEW with a positive ttl_s and one that
-    is not; an ACQUIRE with an empty controller_id; EOF on either connection; and
-    time passing beyond any deadline. The walk reaches all seven
-    (phase, holder) states: free; live, held by either connection; orphaned;
-    expired, with either holder's connection open or with none. A request is
-    answered ok after a declared transition, or refused with one of the
-    lease's own codes, the record unchanged and no transition taken; an
-    `internal:` answer would be the dispatch belt catching a TransitionError.
-    Each event must take exactly the transition its verb names: an ok ACQUIRE
-    01 or 02, RENEW 03 or 04, RELEASE 05; EOF on the holder's connection 06
-    or 07; anything else none.
+    foreign incarnation, ACQUIRE and RENEW with a positive ttl_s, one that is
+    not, one that is not a number and one that is not finite; an ACQUIRE with
+    an empty controller_id; EOF on either connection; and time passing beyond
+    any deadline. The walk reaches all seven (phase, holder) states: free;
+    live, held by either connection; orphaned; expired, with either holder's
+    connection open or with none.
 
-    Left out: a ttl_s that is not finite, overflows a timestamp, or is not a
-    number. The first two answer `internal:` from `_grant` or `_extend`, and
-    RENEW moves the deadline before it fails (reported, not changed here); a
-    non-numeric one answers `internal:` from `float()` with the record
-    unchanged. The clock is the test's, so expiry is a step, not a wait."""
+    The executor raises on an event no row takes, so each event is checked for
+    the row it took. An ok answer took the one row its verb names: ACQUIRE 01,
+    02 or 03, RENEW 07, RELEASE 11. A refusal took the refusal row of its code,
+    and left the record unchanged; an `internal:` answer is the `internal`
+    refusal of a ttl_s with no representable expiry, and any other would be the
+    dispatch belt catching an error. EOF on the holder's connection took 14 or
+    15, and any other EOF the ignored row 16. Every event name posted is in the
+    chart's alphabet. The walk hits every row but 18, and both outcomes of every
+    guard.
+    The clock is the test's, so expiry is a step, not a wait."""
     clock = _Clock()
     monkeypatch.setattr(runner_supervisor, "time", clock)
     monkeypatch.setattr(runner_supervisor, "current_boot_id", lambda: "boot")
-    taken = _spy_on_take(monkeypatch, runner_supervisor.SUPERVISOR_LEASE)
-    takes = {"ACQUIRE": {"01", "02"}, "RENEW": {"03", "04"}, "RELEASE": {"05"}, "EOF": {"06", "07"}}
     events = _lease_events()
     problems: list[str] = []
 
@@ -279,29 +328,19 @@ def test_every_lease_verb_in_every_reached_lease_state_takes_a_declared_transiti
             rig = build(path)
             state, before = rig.key(), rig.snapshot()
             applied += 1
-            taken.clear()
+            rig.outcomes.clear()
             try:
                 reply = rig.apply(event)
-            except Exception as exc:  # the supervisor's TransitionError is another module's
+            except Exception as exc:  # the supervisor's StatechartError is another module's
                 problems.append(f"{event} in {state}: {type(exc).__name__}: {exc}")
                 continue
             else:
-                if reply is not None and reply.get("ok") is not True:
-                    error = str(reply.get("error"))
-                    if error not in _LEASE_REFUSALS:
-                        problems.append(f"{event} in {state}: {error}")
-                    elif rig.snapshot() != before:
+                problem = _lease_problem(event, state[1], reply, rig.outcomes)
+                if problem:
+                    problems.append(f"{event} in {state}: {problem}")
+                elif reply is not None and reply.get("ok") is not True:
+                    if rig.snapshot() != before:
                         problems.append(f"{event} in {state}: refused, and the record moved")
-                moves = reply is not None and reply.get("ok") is True
-                moves = moves or (event[0] == "EOF" and state[1] == event[1])
-                expected = {f"supervisor_lease.{n}" for n in takes.get(event[0], set())}
-                lease_takes = [i for i in taken if i.startswith("supervisor_lease.")]
-                if not (
-                    len(lease_takes) == 1 and lease_takes[0] in expected
-                    if moves
-                    else not lease_takes
-                ):
-                    problems.append(f"{event} in {state}: took {lease_takes}")
                 after = rig.key()
             finally:
                 rig.close()
@@ -319,7 +358,18 @@ def test_every_lease_verb_in_every_reached_lease_state_takes_a_declared_transiti
         ("expired", None),
     }
     assert applied == len(reached) * len(events)
-    assert _missed_sources(strict, runner_supervisor.SUPERVISOR_LEASE) == set()
+    hits = {
+        (r["kind"], r["id"], r["detail"])
+        for r in _records(strict, "hits")
+        if r["machine"] == "supervisor_lease"
+    }
+    required, forbidden = state_machine.coverage_items(runner_supervisor.SUPERVISOR_LEASE)
+    # row 18 declares an expiry outside `held`, which the supervisor never posts:
+    # it samples a deadline only while the lease is held. The completeness test
+    # covers the row.
+    missed = [item for item in required if item not in hits]
+    assert missed == [("row", "supervisor_lease.18", "")]
+    assert forbidden == []
     _assert_no_violation(strict, capfd.readouterr().err)
 
 
