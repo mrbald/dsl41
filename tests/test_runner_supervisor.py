@@ -2791,6 +2791,50 @@ def test_supervisor_signal_handlers_are_installed_before_the_socket_is_published
     assert at_bind[signal.SIGHUP] == signal.SIG_IGN
 
 
+def _current_wakeup_fd() -> int:
+    fd = signal.set_wakeup_fd(-1)
+    signal.set_wakeup_fd(fd)
+    return fd
+
+
+def test_supervisor_makes_its_self_pipe_the_wakeup_fd_and_teardown_gives_the_old_one_back(
+    short_root,
+):
+    """The handlers write their byte between bytecodes, so a signal that lands
+    just before the select syscall would wait for the one-second tick. The
+    supervisor makes its self-pipe the interpreter's wakeup fd, which is
+    written at delivery. Teardown puts back the wakeup fd it found, before the
+    pipe closes."""
+    found_r, found_w = os.pipe()
+    os.set_blocking(found_w, False)
+    previous = signal.set_wakeup_fd(found_w)
+    sup = runner_supervisor.Supervisor(str(short_root))
+    try:
+        sup._install_signals()
+        assert _current_wakeup_fd() == sup._chld_w
+        sup._teardown()
+        assert _current_wakeup_fd() == found_w
+    finally:
+        signal.set_wakeup_fd(previous)
+        os.close(found_r)
+        os.close(found_w)
+
+
+def test_supervisor_teardown_leaves_the_wakeup_fd_alone_when_it_installed_none(short_root):
+    found_r, found_w = os.pipe()
+    os.set_blocking(found_w, False)
+    previous = signal.set_wakeup_fd(found_w)
+    sup = runner_supervisor.Supervisor(str(short_root))
+    try:
+        sup._bind()
+        sup._teardown()
+        assert _current_wakeup_fd() == found_w
+    finally:
+        signal.set_wakeup_fd(previous)
+        os.close(found_r)
+        os.close(found_w)
+
+
 @pytest.mark.parametrize(
     ("chunks", "answered"),
     [

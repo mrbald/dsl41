@@ -13,8 +13,10 @@ durably and does nothing else.
 It has no conditions, no retries, no policy and no scheduling timers. Its
 time bounds are lifecycle bounds only (DL-150): the lease TTL, the
 SHUTDOWN waits, the two-second output drain at teardown, the startup PING
-probe and the optional deadman (all §5). The supervisor loop also reaps on
-a one-second tick, so that a coalesced SIGCHLD is not missed. None of
+probe and the optional deadman (all §5). A handled signal (SIGCHLD,
+SIGTERM, SIGINT) wakes the supervisor loop at delivery through its
+self-pipe, which is also the interpreter's wakeup fd. The loop also reaps
+on a one-second tick, so that a coalesced SIGCHLD is not missed. None of
 these bounds decides what runs. Scheduling semantics live in the
 orchestrator (dsl41's oracle). Dashboards of meaning live in the
 orchestrator's UI (DL-42 item 6).
@@ -318,9 +320,11 @@ empirically).
    terminates and that the wrapper does not ignore, or machine death
    silences it, and E7 then reports the run (DL-229).
 3. The event loop is a SIGCHLD self-pipe plus select over {self-pipe,
-   lifeline}. On every wakeup, the wrapper checks for child exit BEFORE it
-   checks for lifeline EOF. So a completion that races parent death
-   records as a completion.
+   lifeline}. The self-pipe is also the interpreter's wakeup fd, so the
+   signal writes to it at delivery. A command that exits just before the
+   select starts still wakes the wrapper. On every wakeup, the wrapper
+   checks for child exit BEFORE it checks for lifeline EOF. So a
+   completion that races parent death records as a completion.
 4. On exit, the wrapper observes the exit with waitid(WNOWAIT), writes
    status.json, and then reaps. A stopped, continued or trapped report is
    not an exit: the command is still running (DL-300).

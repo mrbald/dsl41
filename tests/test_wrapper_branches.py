@@ -3,9 +3,10 @@ reach (DL-42, DL-229, DL-265).
 
 Normative spec: `docs/supervisor-protocol.md` ss3-ss4 (the wrapper's duties,
 its spec refusal and its records). Pure helpers run in this process. The
-kill escalation runs real process groups. Two paths of `main()` only exist as
-races (a failing SIGCHLD wake-up write; a command that exits as the lifeline
-closes), so a driver (tests/wrapper_branch_driver.py) makes each certain and
+kill escalation runs real process groups. Three paths of `main()` only exist
+as races (a failing SIGCHLD wake-up write; a command that exits as the
+lifeline closes; an exit whose Python handler has not run when the select
+starts), so a driver (tests/wrapper_branch_driver.py) makes each certain and
 the test reads the record the wrapper wrote. Each refusal has a twin that
 does not trigger it.
 """
@@ -537,3 +538,36 @@ def test_wrapper_completion_beats_parent_loss_when_the_exit_lands_with_the_eof(
     assert status["outcome"] == "exited" and status["exit_code"] == 4
     assert "cause" not in status and "observed" not in status
     assert events.read_bytes().count(b"\n") == 2  # two looks, no kill-wait loop
+
+
+def test_wrapper_wakes_for_an_exit_whose_python_handler_has_not_run(tmp_path: Path) -> None:
+    """The SIGCHLD lands after the Python handler's last chance and before
+    the select syscall starts, so the handler writes nothing in time. The
+    wrapper still wakes, because the interpreter writes the signal number into
+    the self-pipe at delivery (its wakeup fd). The driver holds that window
+    open: the signal reaches a helper thread, and the main thread is already
+    in select. The lifeline stays open throughout, so nothing else can wake it."""
+    run_dir = tmp_path / "j1.1"
+    run_dir.mkdir()
+    events = tmp_path / "events"
+    lifeline_r, lifeline_w = os.pipe()
+    proc = _drive(
+        "exit_lands_in_select", events, _spec(run_dir, "exec sleep 600", lifeline_r), lifeline_r
+    )
+    os.close(lifeline_r)
+    try:
+        wait_for(lambda: _event_count(events) > 0)  # in select, nothing to read
+        os.killpg(read_json(run_dir / "spawn.json")["command_pgid"], signal.SIGTERM)
+        assert proc.wait(timeout=30) == 0
+    finally:
+        spawn = run_dir / "spawn.json"
+        if proc.poll() is None and spawn.exists():  # the wrapper still holds the group
+            with contextlib.suppress(Exception):
+                os.killpg(read_json(spawn)["command_pgid"], signal.SIGKILL)
+        os.close(lifeline_w)  # a wrapper that slept through the exit wakes now
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+    status = read_json(run_dir / "status.json")
+    assert status == {**status, "outcome": "signaled", "signal": signal.SIGTERM}
+    assert "cause" not in status

@@ -37,7 +37,9 @@ Duties, in order (ss6a Tier 0):
    tolerance on macOS's 1-second ``ps -o lstart=`` resolution, tick-exact
    on Linux.
 4. Portable event loop: SIGCHLD self-pipe + select over {self-pipe,
-   lifeline}. On EVERY wakeup check child-exit BEFORE lifeline EOF -- a job
+   lifeline}. The pipe is also the interpreter's wakeup fd, so a SIGCHLD
+   delivered just before the select still wakes it.
+   On EVERY wakeup check child-exit BEFORE lifeline EOF -- a job
    completing at the instant its parent dies must be recorded as a
    completion, not as "parent lost".
 5. On child exit: observe with waitid(WNOWAIT) (observe-before-reap narrows
@@ -342,6 +344,14 @@ def main() -> int:
             pass
 
     signal.signal(signal.SIGCHLD, _on_chld)
+    # The handler above runs between bytecodes, not at delivery. A SIGCHLD that
+    # lands after the last check and before the select() syscall starts would
+    # leave the pipe empty and the select asleep while the lifeline stays open.
+    # The wakeup fd makes the C-level handler write the signal number into the
+    # same pipe at delivery, which closes that window. It fires only for a
+    # signal with a Python handler, so `_on_chld` stays; the select loops drain
+    # whatever bytes arrive and never read them.
+    signal.set_wakeup_fd(self_pipe_w, warn_on_full_buffer=False)
 
     env = dict(os.environ)
     env["DSL41_RUN"] = base64.urlsafe_b64encode(

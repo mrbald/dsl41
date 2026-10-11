@@ -20799,3 +20799,47 @@ relitigate an entry; append a new one.
   rehearse sweeps that passed a quarantined case; stops that named the wrong half's fault; a
   kept fault that pinned a fork in memory; and sentences that still stated the old rule. All
   are fixed and confirmed by the reviewer that raised them.
+- DL-321 The wrapper and the supervisor wake at a signal's delivery, so a command's exit is never
+  missed
+  (2026-10-11; docs/supervisor-protocol.md header and §4 item 3; docs/runner-design.md §6a Tier 0)
+  THE PROBLEM. The wrapper's SIGCHLD handler is Python code. CPython's C handler only sets a flag,
+  and the Python handler runs at the next check between bytecodes. A SIGCHLD that landed after
+  the last check and before the `select()` syscall started did not interrupt the syscall, and the
+  self-pipe stayed empty. The wrapper's select has no timeout, and the engine holds the lifeline
+  open while it waits for the wrapper. So the job stayed RUNNING and the engine waited forever.
+  A fast command widens the window. A spawn harness on Linux measured 10 hangs in 128,000
+  starts on CPython 3.12 and 3.13, on this build and the one before it. The
+  supervisor has the same handler pattern, but its select waits at most one second, so there the
+  race cost a delay, not a hang.
+  THE FIX. Both processes make their self-pipe the interpreter's wakeup fd
+  (`signal.set_wakeup_fd`, buffer warnings off). The C handler writes the signal number into the
+  pipe at delivery, which closes the window. It is portable POSIX: no pidfd, no polling. The
+  Python handlers stay, because the wakeup fd fires only for a signal that has one. The loops
+  drain and discard every byte, so a signal number needs no other handling.
+  - Wrapper: no other change. Its `main` runs only as its own process.
+  - Supervisor: SIGCHLD, SIGTERM and SIGINT now wake the loop at once instead of on the next
+    tick. The one-second tick and its reap stay, for a coalesced SIGCHLD. The process runs no
+    asyncio loop, so nothing else owns its wakeup fd. `_teardown` gives back the wakeup fd it
+    found before it closes the pipe, so an in-process run (the tests) leaves no write aimed at a
+    reused descriptor.
+  The other selects in the runner modules are bounded and cannot hang. The engine uses asyncio's
+  own signal handling, which sets its own wakeup fd.
+  VERSIONS. No outcome, record field, exit code, protocol version, `STATE_MACHINE_VERSION` or WAL
+  format moves. The frozen supervisor protocol changes in wording only: its header and §4 item 3
+  now say how the loops wake.
+  TESTS. A driver blocks SIGCHLD on the wrapper's main thread and leaves it open on a parked
+  helper thread. The kernel delivers it there, so the Python handler cannot run while the main
+  thread waits in select. The test fails on the old wrapper and passes with the fix. A test that
+  unblocks the signal with `signal.pthread_sigmask` in the gap would not work: that call runs
+  pending Python handlers itself. Two supervisor tests pin the install and the restore; a timing
+  test of the supervisor's delay would be a flaky assertion. A spawn harness on Linux ran 64,000
+  starts on CPython 3.12 and 32,000 on 3.13 with no hang.
+  OPEN. Run in one pytest process on Linux, the supervisor tests before the lifecycle tests fail
+  three lifecycle tests, on the previous build too. The suite's order passes. A likely cause, not
+  checked: an in-process supervisor makes the test process a subreaper.
+  REVIEW. Semantic class: one Opus reviewer and one Fable pass. Neither found a blocker or a
+  major. Fixed: a failing window test could leave its command running; a supervisor test name
+  claimed a signal it never sent; the protocol header said any signal wakes the loop, where only
+  a handled one does (SIGHUP is ignored). Left as stated: a second install without a teardown
+  would restore the closed pipe, and teardown must now run on the main thread; no caller does
+  either.

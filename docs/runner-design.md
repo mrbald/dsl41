@@ -364,7 +364,11 @@ Duties:
    on macOS's 1-second resolution). Never signal a pid that fails this
    check — the PID-reuse guard.
 4. Portable event loop: SIGCHLD self-pipe + `waitpid(WNOHANG)`, with
-   `select` over {self-pipe, lifeline}. On every wakeup, **do the
+   `select` over {self-pipe, lifeline}. The self-pipe is also the
+   interpreter's wakeup fd (`signal.set_wakeup_fd`), written at signal
+   delivery. A Python handler runs only between bytecodes, so without it
+   an exit just before the `select` call could leave the wrapper asleep
+   while the lifeline is open. On every wakeup, **do the
    child-exit check before the lifeline-EOF check**. A job that completes
    at the instant the parent dies must be recorded as completed, not as
    "parent lost".

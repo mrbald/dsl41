@@ -698,6 +698,9 @@ class Supervisor:
         self._chld_r, self._chld_w = os.pipe()
         os.set_blocking(self._chld_r, False)
         os.set_blocking(self._chld_w, False)
+        #: the wakeup fd `_install_signals` replaced (-1: none), or None while
+        #: this supervisor has not installed its own
+        self._prior_wakeup_fd: int | None = None
         #: SIGTERM or SIGINT arrived. The handler sets only this; the loop takes
         #: the transition. A handler that wrote `state` could interrupt another
         #: write of it, and a signal during startup must wait for `serving`.
@@ -868,6 +871,13 @@ class Supervisor:
         signal.signal(signal.SIGTERM, self._on_term_signal)
         signal.signal(signal.SIGINT, self._on_term_signal)
         signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        # The handlers above run between bytecodes, not at delivery. A signal
+        # that lands just before the select() syscall would wait for the
+        # one-second tick. The wakeup fd makes the C-level handler write the
+        # signal number into the same pipe at delivery, so the select wakes at
+        # once. This process runs no asyncio loop, so nothing else owns the
+        # wakeup fd; `_teardown` gives back the one it found.
+        self._prior_wakeup_fd = signal.set_wakeup_fd(self._chld_w, warn_on_full_buffer=False)
 
     def _on_chld_signal(self, _signum: int, _frame: object) -> None:
         try:
@@ -2034,6 +2044,11 @@ class Supervisor:
             if run.wrapper_rc is None:
                 with contextlib.suppress(OSError):
                     os.close(run.lifeline_w)
+        if self._prior_wakeup_fd is not None:
+            # before the pipe closes: a wakeup fd left on a closed descriptor
+            # would write signal numbers into whatever reuses the number
+            signal.set_wakeup_fd(self._prior_wakeup_fd)
+            self._prior_wakeup_fd = None
         for fd in (self._chld_r, self._chld_w):
             with contextlib.suppress(OSError):
                 os.close(fd)

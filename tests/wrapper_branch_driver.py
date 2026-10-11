@@ -14,6 +14,12 @@ event, so a test can wait on the event instead of sleeping:
 - completion_beats_parent_loss: the first exit probe blocks until the command
   has exited and reports "still running", so the lifeline EOF is read with the
   exit already there. One line per probe.
+- exit_lands_in_select: SIGCHLD is blocked on the main thread and open on a
+  parked helper thread, so the kernel delivers it there. The C-level handler
+  runs at delivery, but the Python handler waits for the main thread, which
+  sits in select. That is the window between the handler's last chance and the
+  select syscall, held open. One line before each untimed select that starts
+  with nothing to read.
 
 Not a test file: no test_ prefix, imported by nothing.
 """
@@ -21,7 +27,11 @@ Not a test file: no test_ prefix, imported by nothing.
 from __future__ import annotations
 
 import os
+import select
+import signal
 import sys
+import threading
+from types import SimpleNamespace
 from typing import Any
 
 from dsl41 import runner_wrapper
@@ -91,10 +101,34 @@ def count_observes(event_path: str) -> None:
     runner_wrapper._observe_exit = observe
 
 
+def exit_lands_in_select(event_path: str) -> None:
+    parked = threading.Event()
+
+    def park() -> None:
+        parked.set()
+        threading.Event().wait()
+
+    threading.Thread(target=park, daemon=True).start()  # inherits an open mask
+    parked.wait()
+    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGCHLD})
+    real_select = select.select
+
+    def select_(rlist: Any, wlist: Any, xlist: Any, *timeout: float) -> Any:
+        if not timeout:
+            ready = real_select(rlist, wlist, xlist, 0)
+            if ready[0]:
+                return ready
+            _note(event_path)
+        return real_select(rlist, wlist, xlist, *timeout)
+
+    runner_wrapper.select = SimpleNamespace(select=select_)  # type: ignore[assignment]
+
+
 MODES = {
     "count_observes": count_observes,
     "full_self_pipe": full_self_pipe,
     "completion_beats_parent_loss": completion_beats_parent_loss,
+    "exit_lands_in_select": exit_lands_in_select,
 }
 
 
