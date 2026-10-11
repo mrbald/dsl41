@@ -12,9 +12,16 @@ with no hit, then the marked transitions (listed, never counted), then a
 per-source view: for each hit transition, the source states no test took it
 from. That last view is a report only.
 
-Exit 0 when every unmarked transition was hit, 1 on any miss, on any recorded
-violation, or when a marked transition (`spec-only` or `unreachable`) was hit
-(the mark is stale or wrong), and 2 when the hits file is missing.
+A statechart (docs/statechart-engine.md §13) is gated on every class of its
+coverage items at once: rows, choice branches, both outcomes of each guard,
+and a defer and a release for each deferred event. All are held at 100%. A
+guard outcome declared unreachable is listed as forbidden and fails the gate
+when hit.
+
+Exit 0 when every unmarked transition and every statechart item was hit, 1 on
+any miss, on any recorded violation, or when a marked transition (`spec-only`
+or `unreachable`) or a forbidden item was hit (the mark is stale or wrong), and
+2 when the hits file is missing.
 """
 
 from __future__ import annotations
@@ -26,18 +33,53 @@ from pathlib import Path
 from typing import Any
 
 from dsl41.machines import MACHINES
-from dsl41.state_machine import StateMachine, Transition, state_name
+from dsl41.state_machine import (
+    StateMachine,
+    Statechart,
+    Transition,
+    coverage_items,
+    is_statechart,
+    state_name,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 HITS_FILE = ROOT / ".transition-hits.json"
 
 
 def hit_sources(hits: Iterable[dict[str, str]]) -> dict[tuple[str, str], set[str]]:
-    """(machine, transition id) to the old states a test took it from."""
+    """(machine, transition id) to the old states a test took it from.
+
+    A statechart's hits carry a `kind` and no `old`; they are read by
+    `chart_items` instead."""
     seen: dict[tuple[str, str], set[str]] = {}
     for hit in hits:
-        seen.setdefault((hit["machine"], hit["id"]), set()).add(hit["old"])
+        if "kind" not in hit:
+            seen.setdefault((hit["machine"], hit["id"]), set()).add(hit["old"])
     return seen
+
+
+def chart_items(hits: Iterable[dict[str, str]]) -> set[tuple[str, str, str, str]]:
+    """Every (machine, kind, id, detail) a statechart recorded."""
+    return {
+        (hit["machine"], hit["kind"], hit["id"], hit.get("detail", ""))
+        for hit in hits
+        if "kind" in hit
+    }
+
+
+def chart_report(
+    chart: Statechart, items: set[tuple[str, str, str, str]]
+) -> tuple[str, list[str], list[str]]:
+    """The summary line, the misses and the forbidden hits of one statechart."""
+    required, forbidden = coverage_items(chart)
+
+    def line(item: tuple[str, str, str]) -> str:
+        return " ".join(part for part in (chart.name, *item) if part)
+
+    hit = [item for item in required if (chart.name, *item) in items]
+    misses = [line(item) for item in required if (chart.name, *item) not in items]
+    wrong = [line(item) for item in forbidden if (chart.name, *item) in items]
+    return f"{chart.name}: {len(hit)}/{len(required)}", misses, wrong
 
 
 def describe(machine: StateMachine[Any], t: Transition[Any]) -> str:
@@ -48,18 +90,26 @@ def describe(machine: StateMachine[Any], t: Transition[Any]) -> str:
 
 
 def report(
-    machines: Iterable[StateMachine[Any]],
+    machines: Iterable[StateMachine[Any] | Statechart],
     hits: Iterable[dict[str, str]],
     violations: Iterable[dict[str, str]] = (),
 ) -> tuple[list[str], int]:
     """The report lines and the exit status for these machines, hits and violations."""
+    hits = list(hits)
     seen = hit_sources(hits)
+    items = chart_items(hits)
     summary: list[str] = []
     misses: list[str] = []
     marked: list[str] = []
     partial: list[str] = []
     wrong_marks: list[str] = []
     for machine in machines:
+        if is_statechart(machine):
+            line, chart_misses, chart_wrong = chart_report(machine, items)
+            summary.append(line)
+            misses += chart_misses
+            wrong_marks += chart_wrong
+            continue
         unmarked = [t for t in machine.transitions if t.mark is None]
         hit = [t for t in unmarked if (machine.name, t.id) in seen]
         summary.append(f"{machine.name}: {len(hit)}/{len(unmarked)}")
@@ -92,7 +142,9 @@ def report(
     return lines, 1 if misses or wrong_marks or broken else 0
 
 
-def main(hits_file: Path = HITS_FILE, machines: Iterable[StateMachine[Any]] | None = None) -> int:
+def main(
+    hits_file: Path = HITS_FILE, machines: Iterable[StateMachine[Any] | Statechart] | None = None
+) -> int:
     if not hits_file.is_file():
         print(f"{hits_file.name}: missing; run the test suite first", file=sys.stderr)
         return 2

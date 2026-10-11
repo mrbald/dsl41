@@ -13,10 +13,10 @@ from dsl41.runner_effects import EFFECT
 from dsl41.runner_hosts import HOST
 from dsl41.runner_journal import SUBSCRIPTION
 from dsl41.runner_supervisor import SUPERVISOR_LEASE, SUPERVISOR_PROCESS
-from dsl41.state_machine import StateMachine
+from dsl41.state_machine import StateMachine, Statechart
 
-# Later slices add each machine here.
-MACHINES: tuple[StateMachine[Any], ...] = (
+# Later slices add each machine here; a converted machine is a `Statechart`.
+MACHINES: tuple[StateMachine[Any] | Statechart, ...] = (
     JOB_STATUS,
     JOB_FLAGS,
     JOB_HOLDING,

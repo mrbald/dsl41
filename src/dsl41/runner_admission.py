@@ -115,6 +115,7 @@ from dsl41.runner_codes import Code, Rejection
 from dsl41.runner_hosts import HostCommand, apply_host_command, host_rejection_reason
 from dsl41.state_machine import (
     VIOLATION_LOG_PREFIX,
+    StatechartError,
     StateMachine,
     Transition,
     TransitionError,
@@ -1042,10 +1043,12 @@ def trial_apply(
     """`apply_attempt` on a fresh fork of `oracle`, which it leaves alone:
     the result, or the exception the apply raised instead. A strict test
     run's `TransitionError` propagates, so the test fails where the move
-    was made."""
+    was made. A `StatechartError` propagates too: it is an assertion
+    failure, never a fault to classify, and the tier stops before any
+    durable write (docs/statechart-engine.md §5)."""
     try:
         return apply_attempt(oracle.fork(), attempt, forced=forced, grace_s=grace_s)
-    except TransitionError:
+    except (TransitionError, StatechartError):
         raise
     except Exception as exc:  # noqa: BLE001 -- the caller classifies every fault
         return exc

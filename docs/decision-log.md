@@ -20985,3 +20985,97 @@ relitigate an entry; append a new one.
   an ancestor's row that could override a deferral from a sibling region; both are fixed here and
   go to the owner with the entry, as the round limit says. Everything else is confirmed by the
   reviewer that raised it.
+- DL-325 The statechart executor, its gate and its generated completeness test; a statechart
+  error stops the tier with exit 7
+  (2026-10-11; src/dsl41/state_machine.py; scripts/transition_coverage.py,
+  scripts/render_state_machines.py; tests/statechart_completeness.py; docs/statechart-engine.md
+  §§3, 5, 10, 15; docs/concurrency-model.md §4; docs/deployment-runbook.md; the example unit
+  files)
+  THE EXECUTOR. state_machine.py gains the executor of DL-324's contract beside the table of
+  DL-289, which stays for the fourteen machines not yet converted. A declaration is frozen
+  dataclasses: states (simple, composite with regions, initial, final), choice pseudostates with
+  ordered branches and a last else, rows of kind external, internal, ignored or refusal, time
+  events with an optional generation, deferral sets with a bound and an overflow policy, wait and
+  stays marks, and justified exclusions. Guards and actions are named callables in a registry
+  the chart carries. A guard takes a context and answers a bool. An action takes a context and
+  returns what it raises (events to instances of the same executor, a continuation, intents, a
+  re-arm) or nothing. `Executor` has one worklist per tier object and instances by key; `post`
+  and `run` give one outcome per microstep. `well_formed` dispatches to the chart's checks;
+  `chart_warnings` names what cannot be refused statically. No production machine converts in
+  this entry. The module imports nothing from its package, so the supervisor tier loads it by
+  path, as it loads canon.py.
+  CHOICES THE CONTRACT LEFT OPEN. A row has one source state. A choice sits in the innermost
+  region that holds its source and every branch target, so its exit set is fixed before actions
+  run; a branch targets a state, never another choice. A completion item is queued only for a
+  state that declares completion rows: a simple state on entry, a composite when every region
+  rests in a final state. A continuation is a named action of the same declaration, run with
+  the requesting item's event after that microstep's reported items. One deferred queue per
+  instance; release goes in instance creation order, one item per macrostep, and a pure
+  selection peek decides whether the head is deferred again. Generations live in the executor
+  per instance and a re-arm bumps them. Under `drop`, the first deferring state's `overflowed`
+  row runs with the dropped event. A completion item carries its state's entry serial and its
+  payload is the state name; it is discarded when the state is no longer active or is active
+  again by a later entry. `forget` removes an instance that rests in a final configuration with
+  nothing deferred or pooled. The initial pseudo-event's name is reserved. An exception out of
+  an action ends the run and empties the worklist; the tier discards the executor. An event
+  outside the chart's alphabet that reaches the executor is a tier bug and stops it: the gate
+  before it refuses unknown kinds, and a converted machine's test asserts that every name any
+  poster can send is in the alphabet: the gate's verbs, the engine-made inputs, the tier's time
+  events, and the names its actions raise.
+  THE CONTRACT, CLARIFIED. Three sentences of docs/statechart-engine.md §3 were read two ways and
+  are now pinned: conflicts are resolved from the deepest candidate outward, and a candidate
+  beaten by a deeper one is dropped before pairs of equal depth are judged; an `ignored` row is
+  a candidate only when no other region produced one that is not ignored, and otherwise yields
+  and writes no trace line; a refusal row beside another region's candidate raises
+  `AmbiguousTransition`, and `well_formed` warns where a refusal row and another region's row
+  share an event; a candidate whose source is exited by another surviving candidate in the same
+  microstep is dropped, internal rows included. §4 says that a completion is discarded for a
+  later entry of its state. §15 now says the module's path and that the only I/O is the
+  test-time hit recording of DL-289.
+  A STATECHART ERROR STOPS THE TIER. The owner's rule, now §5 and §10 of the contract: the
+  executor's three errors subclass `StatechartError`, which is an assertion failure, not a fault
+  to contain. DL-320's classification never catches it: `trial_apply` and replay re-raise it as
+  they re-raise `TransitionError`, nothing is appended, and the tier stops before any durable
+  write. The error is structured: machine, instance, active configuration, the item and a
+  summary of its payload, its ancestry, the candidates found, the deferred queue, and a ring of
+  the executor's last microsteps (64 by default); on replay it names the WAL input. Every verb
+  that runs, replays or reads an estate (`run`, `rehearse`, `journal`, `runs`, `seal`, `audit`,
+  `verify`, `estate`) and the supervisor print it on stderr under the prefix `dsl41: statechart
+  error` and exit 7, the engine's resume included, with its lock released; the
+  example units list 7 in `RestartPreventExitStatus`; the runbook's diagram, decision tree,
+  watch table and exit list carry it. concurrency-model §4 says that the error is neither kind
+  of fault and that a control input under it is not refused. A handler's own fault keeps
+  DL-320's recovery: a statechart error is the skeleton disagreeing with its declaration, and
+  nothing after it can be trusted.
+  COVERAGE AND COMPLETENESS. Hits are recorded for rows, choice branches, guard outcomes (true
+  and false, unless the declaration marks false unreachable), deferrals and releases, in the
+  hits files of DL-289; the gate holds every class at 100% for an executor machine and is
+  unchanged for a table machine. `statechart_completeness` enumerates witness configurations by
+  event and payload partition and asserts the executor's outcome against the declaration's own
+  resolution; a hand-written table for a synthetic machine pins the resolver, so the test is not
+  circular. The renderer draws regions, choices and deferrals.
+  The checks, the gate and the renderer recognise a chart by a marker, not by class identity,
+  so the supervisor's by-path copy of the module is one of them.
+  TESTS. A conformance suite on synthetic machines, one or more tests per contract section,
+  named after the section. A mutant test runs the suite under eight broken executors (deferral
+  loses, first row wins, no completion, no conflicts, no yield, an old completion kept, a
+  continuation run first, an exited source run) and under a stale-generation mutant; each
+  kills at least one test. A hypothesis property drains any sequence of root items
+  with a bounded stack. Suite: 8663 passed; state_machine.py at 100% lines and branches.
+  OPEN. The seal's `_boundary_exits` still catches every exception before the point of no
+  return and may abort the seal and carry on, so a statechart error raised during a seal's
+  drain would be swallowed; the seal_boundary slice adds the row, and period-model §7's
+  exit-6 sentences name 7 then. Four other broad excepts (lease renewal, the control query
+  belt, two in the journal and access paths) are on no converted machine's path yet.
+  state_machine.py is 1420 lines, over the size advisory. `STATE_MACHINE_VERSION` does not move:
+  no derivation changed.
+  REVIEW. Semantic class: one Opus reviewer, three rounds, and one Fable pass, two rounds. Both
+  found that a
+  statechart error met on replay reached no handler, so resume died with exit 1 and a
+  traceback and the readers crashed. The Opus reviewer found the supervisor's by-path chart
+  failing a class check, a composite's completion firing after the composite was left and
+  entered again, a continuation running before the items reported after it, and an internal
+  row running on a state another region had exited. The Fable pass found no way to remove an
+  instance and a reserved name the initial entry needed; the Opus reviewer's last round found
+  the exit-7 wrapper unpinned on five verbs. All are fixed and confirmed by the reviewer that
+  raised them.

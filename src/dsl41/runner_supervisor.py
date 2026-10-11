@@ -140,7 +140,12 @@ if TYPE_CHECKING:
         verify_alive,
         write_all,
     )
-    from dsl41.state_machine import StateMachine, Transition
+    from dsl41.state_machine import (
+        EXIT_STATECHART_ERROR,
+        StatechartError,
+        StateMachine,
+        Transition,
+    )
 else:
     from canon import (  # noqa: E402
         ARTIFACT_FORMAT_VERSION,
@@ -166,7 +171,12 @@ else:
         verify_alive,
         write_all,
     )
-    from state_machine import StateMachine, Transition  # noqa: E402
+    from state_machine import (  # noqa: E402
+        EXIT_STATECHART_ERROR,
+        StatechartError,
+        StateMachine,
+        Transition,
+    )
 
 if _PROCID_DIR_ADDED:
     sys.path.remove(_PROCID_DIR)
@@ -1015,6 +1025,8 @@ class Supervisor:
             self._read_conn(conn)
         except OSError as exc:
             self._client_error(conn, exc)
+        except StatechartError:
+            raise  # an assertion failure stops the supervisor (statechart-engine ss5)
         except Exception as exc:  # noqa: BLE001 -- isolate this connection
             print(f"supervisor: client read: {type(exc).__name__}: {exc}", file=sys.stderr)
 
@@ -1183,6 +1195,10 @@ class Supervisor:
             return {"ok": False, "error": "unknown_verb"}
         try:
             answer = handler(conn, req)
+        except StatechartError:
+            # not one request's problem: a declared machine is wrong, and the
+            # supervisor stops on it, as every tier does (statechart-engine ss5)
+            raise
         except Exception as exc:  # noqa: BLE001 -- the belt under every verb
             # a handler that raises would end this process, and its death
             # EOFs the lifeline of every wrapper on the host. Whatever went
@@ -2277,6 +2293,8 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         print(f"supervisor: {exc}", file=sys.stderr)
         return 1
+    except StatechartError as exc:
+        return _statechart_stop(exc)
     try:
         return supervisor.run()
     except OSError as exc:
@@ -2285,6 +2303,15 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit as exc:  # lock contention or the legacy live-owner gate
         print(str(exc), file=sys.stderr)
         return exc.code if isinstance(exc.code, int) else 1
+    except StatechartError as exc:
+        return _statechart_stop(exc)
+
+
+def _statechart_stop(exc: StatechartError) -> int:
+    """Every line of the report under one prefix, and the code the unit does not
+    restart. The exit ends every command this supervisor ran, by lifeline EOF."""
+    print(exc.report(), file=sys.stderr, flush=True)
+    return EXIT_STATECHART_ERROR
 
 
 if __name__ == "__main__":

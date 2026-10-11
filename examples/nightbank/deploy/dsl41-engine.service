@@ -32,11 +32,12 @@ TimeoutStopSec=60
 # a configuration refusal -- a resume gate, a missing or invalid access
 # map, a preflight ERROR, the launcher's own refusal -- exit 3, a sealed
 # period that an operator opens, exit 5, --on-transition-violation stop,
-# or exit 6, a time-half stop that every restart would meet again
+# exit 6, a time-half stop that every restart would meet again, or exit 7,
+# a statechart error, a bug the same release would meet again
 # (deployment-runbook ss3, ss6a)
 Restart=on-failure
 RestartSec=5
-RestartPreventExitStatus=2 3 5 6
+RestartPreventExitStatus=2 3 5 6 7
 LimitNOFILE=65536
 
 [Install]

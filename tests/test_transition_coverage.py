@@ -10,7 +10,7 @@ from types import ModuleType
 
 import pytest
 
-from dsl41.state_machine import StateMachine, Transition
+from dsl41.state_machine import Region, Row, State, Statechart, StateMachine, Transition
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "transition_coverage.py"
 
@@ -172,3 +172,66 @@ def test_a_hit_on_a_spec_only_transition_fails_and_is_listed() -> None:
     assert status == 1
     heading = "Marked but hit (the mark is stale or wrong):"
     assert lines[lines.index(heading) + 1] == "demo demo.03 {a} --later--> b [spec-only]"
+
+
+# ---- statecharts (docs/statechart-engine.md §13)
+
+CHART = Statechart(
+    "lamp",
+    State(
+        "lamp",
+        regions=(Region("main", "off", (State("off"), State("on", defer=frozenset({"x"})))),),
+    ),
+    (
+        Row("lamp.01", "off", "switch", "on", guard="power", false_unreachable="mains"),
+        Row("lamp.02", "on", "switch", "off", guard="cool"),
+        Row("lamp.03", "lamp", "x", kind="ignored"),
+    ),
+    clock="logical",
+    defer_bound=1,
+    overflow="stop",
+)
+ALL_CHART = [
+    {"machine": "lamp", "kind": kind, "id": ident, "detail": detail}
+    for kind, ident, detail in [
+        ("row", "lamp.01", ""),
+        ("row", "lamp.02", ""),
+        ("row", "lamp.03", ""),
+        ("guard", "lamp.01", "true"),
+        ("guard", "lamp.02", "true"),
+        ("guard", "lamp.02", "false"),
+        ("defer", "on", "x"),
+        ("release", "on", "x"),
+    ]
+]
+
+
+def test_a_statechart_with_every_item_hit_passes() -> None:
+    lines, status = tc.report([CHART, MACHINE], [*ALL_CHART, *ALL_UNMARKED])
+    assert status == 0
+    assert lines[:2] == ["lamp: 8/8", "demo: 2/2"]
+
+
+def test_a_statechart_miss_in_any_class_fails_and_is_listed() -> None:
+    for missing in ALL_CHART:
+        lines, status = tc.report([CHART], [h for h in ALL_CHART if h != missing])
+        assert status == 1
+        assert lines[0] == "lamp: 7/8"
+        wanted = " ".join(
+            p for p in ("lamp", missing["kind"], missing["id"], missing["detail"]) if p
+        )
+        assert lines[lines.index("Transitions with no hit:") + 1] == wanted
+
+
+def test_a_forbidden_guard_outcome_that_was_hit_fails() -> None:
+    hit = {"machine": "lamp", "kind": "guard", "id": "lamp.01", "detail": "false"}
+    lines, status = tc.report([CHART], [*ALL_CHART, hit])
+    assert status == 1
+    heading = "Marked but hit (the mark is stale or wrong):"
+    assert lines[lines.index(heading) + 1] == "lamp guard lamp.01 false"
+
+
+def test_statechart_hits_do_not_count_for_a_table_machine() -> None:
+    renamed = [{**h, "machine": "demo"} for h in ALL_CHART]
+    lines, status = tc.report([MACHINE], [*renamed, *ALL_UNMARKED])
+    assert status == 0 and lines[0] == "demo: 2/2"

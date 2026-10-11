@@ -518,6 +518,13 @@ def test_the_core_loads_by_path_without_the_package() -> None:
         "m = sm.StateMachine('m', frozenset({'a', 'b'}), 'a', frozenset(), (t,))\n"
         "assert m.take(t, 'a', 'b') is None and sm.well_formed(m) == []\n"
         "assert m.take(t, 'b', 'b') is not None\n"
+        "root = sm.State('c', regions=(sm.Region('r', 'a', (sm.State('a'), sm.State('b'))),))\n"
+        "rows = (sm.Row('c.01', 'a', 'go', 'b'), sm.Row('c.02', 'c', 'go', kind='ignored'))\n"
+        "chart = sm.Statechart('c', root, rows, clock='monotonic')\n"
+        "assert sm.well_formed(chart) == []\n"
+        "ex = sm.Executor()\n"
+        "ex.restore('k', chart, {'c', 'a'})\n"
+        "assert [o.rows for o in ex.dispatch('k', sm.Event('go'))] == [('c.01',)]\n"
         "assert not any(name.split('.')[0] == 'dsl41' for name in sys.modules)\n"
     )
     env = {k: v for k, v in os.environ.items() if k not in (HITS_ENV, STRICT_ENV)}

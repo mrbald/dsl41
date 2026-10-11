@@ -28,10 +28,12 @@ TimeoutStartSec=30
 # final cgroup kill can silence a wrapper before it records its command.
 TimeoutStopSec=60
 # a clean exit (`dsl41 supervise shutdown`, a deadman) restarts on purpose;
-# exit 2 is a configuration refusal and a retry cannot fix it
+# exit 2 is a configuration refusal and a retry cannot fix it; exit 7 is a
+# statechart error, a bug the same release would meet again
+# (deployment-runbook ss3)
 Restart=always
 RestartSec=2
-RestartPreventExitStatus=2
+RestartPreventExitStatus=2 7
 LimitNOFILE=65536
 # stopping this unit ends its jobs: the commands take SIGTERM, the wrappers
 # ignore it and record what their commands did
