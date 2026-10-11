@@ -8,7 +8,7 @@ tests/test_runner_supervisor.py), its only non-stdlib imports being three siblin
 stdlib-only modules under the same by-path rule (DL-72): runner_procid, which
 the wrapper shares; canon, which is the one implementation of the ss3.2
 canonical form the ss11a tombstone files are written in; and state_machine, the
-shared core that checks the process transitions and runs the lease statechart below. The engine runs it BY
+shared core whose executor runs the process and lease statecharts below. The engine runs it BY
 FILE PATH (``sys.executable <this file> --run-root <root>``), never ``-m``:
 ``-m`` would import the dsl41 package __init__ and drag third-party imports
 into the supervisor's runtime.
@@ -88,7 +88,7 @@ import time
 import uuid
 from collections import deque
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 # DL-72: the durability liturgy and the (pid, start-time) PID-reuse guard live
 # in the sibling stdlib-only runner_procid -- one copy, shared with the wrapper
@@ -145,15 +145,15 @@ if TYPE_CHECKING:
         Context,
         Effects,
         Event,
+        Exclusion,
         Executor,
+        Outcome,
         Region,
         Row,
         State,
         Statechart,
         StatechartError,
-        StateMachine,
         TimeEvent,
-        Transition,
     )
 else:
     from canon import (  # noqa: E402
@@ -185,15 +185,15 @@ else:
         Context,
         Effects,
         Event,
+        Exclusion,
         Executor,
+        Outcome,
         Region,
         Row,
         State,
         Statechart,
         StatechartError,
-        StateMachine,
         TimeEvent,
-        Transition,
     )
 
 if _PROCID_DIR_ADDED:
@@ -378,168 +378,19 @@ class _Conn:
 
 # --------------------------------------------------------- state machines
 #
-# Two machines live in this process, declared with the shared core
-# (state_machine.py, reached by path like canon). The process machine is a
-# transition table: the code that moves its state names the transition it takes
-# and calls `take`, which checks and records and never changes what happens.
-# The lease is a statechart that an executor runs (below).
+# Two machines live in this process, both statecharts (docs/statechart-engine.md)
+# declared with the shared core (state_machine.py, reached by path like canon)
+# and run by the one executor each Supervisor owns: `supervisor_lease`, one
+# instance for the lease, and `supervisor_process`, one instance for the
+# process's own lifecycle. The fence of the mutating verbs is the lease chart's
+# guards, registered in both charts, so the rule has one copy.
 
-#: The process lifecycle. `Supervisor.state` stores it.
+#: The process lifecycle: the leaf states of SUPERVISOR_PROCESS.
 type ProcessState = Literal[
     "starting", "bound", "serving", "shutting_down", "stopped", "refused", "closed"
 ]
 
 _SP5 = "supervisor-protocol ss5"
-
-PROCESS_LOCK_HELD: Transition[ProcessState] = Transition(
-    "supervisor_process.01",
-    frozenset({"starting"}),
-    "start",
-    "refused",
-    guard="supervisor.lock is held",
-    effect="exit 1, another supervisor owns this root",
-    cite=f"{_SP5}, DL-210",
-)
-PROCESS_OWNER_LIVE: Transition[ProcessState] = Transition(
-    "supervisor_process.02",
-    frozenset({"starting"}),
-    "start",
-    "refused",
-    guard="the published socket answers PING, or the pid record does not prove its owner absent",
-    effect="exit 1, another supervisor owns this root",
-    cite=f"{_SP5}, DL-210",
-)
-PROCESS_BOUND: Transition[ProcessState] = Transition(
-    "supervisor_process.03",
-    frozenset({"starting"}),
-    "start",
-    "bound",
-    guard="lock taken and no other owner",
-    effect="sweep private sockets, reclaim the published path, bind the private socket",
-    cite=f"{_SP5}, DL-210",
-)
-PROCESS_PUBLISHED: Transition[ProcessState] = Transition(
-    "supervisor_process.04",
-    frozenset({"bound"}),
-    "publish",
-    "serving",
-    effect="listen, chmod 0600, write supervisor.pid, rename the socket to supervisor.sock",
-    cite=f"{_SP5}, DL-210, DL-275",
-)
-# Only an error in a SHUTDOWN's wait leaves `shutting_down` at rest: the
-# dispatch answers the error, and the process stays there for the rest of the
-# loop pass. Nothing more is dispatched then. A signal latched before the pass
-# ends runs the wait again through row 06; without one, row 12 does.
-PROCESS_SHUTDOWN: Transition[ProcessState] = Transition(
-    "supervisor_process.05",
-    frozenset({"serving"}),
-    "SHUTDOWN",
-    "shutting_down",
-    guard="this incarnation, then the current token",
-    cite=f"{_SP5} SHUTDOWN, DL-80",
-)
-PROCESS_SIGNALLED: Transition[ProcessState] = Transition(
-    "supervisor_process.06",
-    frozenset({"serving", "shutting_down"}),
-    "SIGTERM or SIGINT",
-    "shutting_down",
-    guard=(
-        "from shutting_down only after an error ended the wait of a SHUTDOWN in this loop"
-        " pass and the dispatch answered it"
-    ),
-    effect=(
-        "the handler only latches the signal and the loop takes this, so one during startup"
-        " waits, and from shutting_down the errored SHUTDOWN's answer is sent and the wait"
-        " runs again, sending TERM to each live command group again"
-    ),
-    cite=f"{_SP5} SHUTDOWN, DL-275",
-)
-PROCESS_DRAINED: Transition[ProcessState] = Transition(
-    "supervisor_process.07",
-    frozenset({"shutting_down"}),
-    "every wrapper reaped, or the wait bound passed",
-    "stopped",
-    effect="TERM each command group, KILL it after its grace, KILL every survivor at the bound",
-    cite=f"{_SP5} SHUTDOWN, DL-48, DL-150",
-)
-PROCESS_DEADMAN: Transition[ProcessState] = Transition(
-    "supervisor_process.08",
-    frozenset({"serving"}),
-    "tick",
-    "stopped",
-    guard="a deadman is set and no live leaseholder for that many seconds",
-    effect="log the reason",
-    cite=f"{_SP5} The deadman, DL-95",
-)
-PROCESS_REPEAT: Transition[ProcessState] = Transition(
-    "supervisor_process.09",
-    frozenset({"stopped"}),
-    "SIGTERM or SIGINT",
-    "stopped",
-    guard="latched during a shutdown that already ran in this loop pass",
-    effect="none",
-    cite=f"{_SP5} SHUTDOWN",
-)
-PROCESS_TEARDOWN: Transition[ProcessState] = Transition(
-    "supervisor_process.10",
-    frozenset({"stopped", "refused"}),
-    "teardown",
-    "closed",
-    effect=(
-        "flush replies for up to 2 s, drop every connection, unlink what this incarnation"
-        " published, close the open lifelines and the lock"
-    ),
-    cite=f"{_SP5}, DL-210",
-)
-PROCESS_ABORTED: Transition[ProcessState] = Transition(
-    "supervisor_process.11",
-    frozenset({"starting", "bound", "serving", "shutting_down"}),
-    "teardown",
-    "closed",
-    guard="an error ended startup or the loop",
-    effect="the same cleanup as supervisor_process.10; main exits 1",
-    cite=f"{_SP5}, DL-210",
-)
-PROCESS_RETRIED: Transition[ProcessState] = Transition(
-    "supervisor_process.12",
-    frozenset({"shutting_down"}),
-    "the loop pass ends",
-    "shutting_down",
-    guard="an error ended a SHUTDOWN's wait in this pass, the dispatch answered it, and no"
-    " signal is latched",
-    effect=(
-        "send the errored SHUTDOWN's answer, then run the wait once more, which sends TERM to"
-        " each live command group again; an error in it ends the loop through"
-        " supervisor_process.11"
-    ),
-    cite=f"{_SP5} SHUTDOWN",
-)
-
-#: SIGKILL ends the process in any state and runs no code, so no row is taken
-#: for it: each wrapper takes lifeline EOF and records in its own time (ss5,
-#: DL-205).
-SUPERVISOR_PROCESS: StateMachine[ProcessState] = StateMachine(
-    name="supervisor_process",
-    states=frozenset(
-        {"starting", "bound", "serving", "shutting_down", "stopped", "refused", "closed"}
-    ),
-    initial="starting",
-    finals=frozenset({"closed"}),
-    transitions=(
-        PROCESS_LOCK_HELD,
-        PROCESS_OWNER_LIVE,
-        PROCESS_BOUND,
-        PROCESS_PUBLISHED,
-        PROCESS_SHUTDOWN,
-        PROCESS_SIGNALLED,
-        PROCESS_DRAINED,
-        PROCESS_DEADMAN,
-        PROCESS_REPEAT,
-        PROCESS_TEARDOWN,
-        PROCESS_ABORTED,
-        PROCESS_RETRIED,
-    ),
-)
 
 # ---------------------------------------------------------- the lease statechart
 #
@@ -572,7 +423,23 @@ DISCONNECT = "disconnect"
 _PHASES = frozenset({"free", "expired", "live", "orphaned"})
 
 
-class _LeaseRequest:
+class _Request:
+    """A verb's request as a chart sees it: the payload of SPAWN, SIGNAL and
+    SHUTDOWN in SUPERVISOR_PROCESS, and the base of a lease verb's. The fence
+    guards read `incarnation` and `token` off it."""
+
+    __slots__ = ("req",)
+
+    def __init__(self, req: dict[str, Any]) -> None:
+        self.req = req
+
+    def __repr__(self) -> str:
+        """The request without its token, for a statechart error's report."""
+        shown = {key: value for key, value in self.req.items() if key != "token"}
+        return f"{type(self).__name__}({shown!r})"
+
+
+class _LeaseRequest(_Request):
     """A lease verb as the chart sees it: the request, its connection, and the
     instants the supervisor sampled for it, `now` on the monotonic clock and
     `wall` on the wall clock.
@@ -582,20 +449,15 @@ class _LeaseRequest:
     refusal the supervisor raises it, so the dispatch belt answers it as before
     and nothing is written (DL-300)."""
 
-    __slots__ = ("req", "conn", "now", "wall", "_ttl", "_expiry")
+    __slots__ = ("conn", "now", "wall", "_ttl", "_expiry")
 
     def __init__(self, req: dict[str, Any], conn: _Conn, now: float, wall: float) -> None:
-        self.req = req
+        super().__init__(req)
         self.conn = conn
         self.now = now
         self.wall = wall
         self._ttl: float | Exception | None = None
         self._expiry: tuple[float, str] | Exception | None = None
-
-    def __repr__(self) -> str:
-        """The request without its token, for a statechart error's report."""
-        shown = {key: value for key, value in self.req.items() if key != "token"}
-        return f"_LeaseRequest({shown!r})"
 
     def ttl(self) -> float | Exception:
         """ttl_s as a number, 60 when it is absent, or the error converting it raised."""
@@ -653,15 +515,32 @@ def _foreign(ctx: Context) -> bool:
     return not _this_incarnation(ctx)
 
 
+def _held(ctx: Context) -> bool:
+    """`held` is active in the lease chart: the lease is live or orphaned, not
+    expired and not free. Both charts read the lease instance's configuration in
+    the supervisor's executor, a pure read. No clock is read: the supervisor
+    posts a due `expire` before the verb."""
+    return "held" in ctx.data._machines.active(_LEASE)
+
+
 def _credentials(ctx: Context) -> bool:
-    """This incarnation, then the current token, an integer on the wire (DL-151).
-    ss5 checks nothing else: any connection may present them."""
+    """This incarnation, then the current token of an unexpired lease, an integer
+    on the wire (DL-151). ss5 checks nothing else: any connection may present
+    them. The one fence of RENEW, RELEASE, SPAWN, SIGNAL and SHUTDOWN."""
     lease = ctx.data.lease
     return (
         _this_incarnation(ctx)
+        and _held(ctx)
         and lease is not None
         and _is_wire_int_equal(ctx.event.payload.req.get("token"), lease.token)
     )
+
+
+def _stale(ctx: Context) -> bool:
+    """This incarnation without credentials: the token is not the current one, or
+    the lease is not held. The request is refused stale_token (ss5). With `foreign`
+    and `credentials` this partitions every request."""
+    return _this_incarnation(ctx) and not _credentials(ctx)
 
 
 def _grantable(ctx: Context) -> bool:
@@ -961,6 +840,451 @@ SUPERVISOR_LEASE = Statechart(
 )
 
 
+# -------------------------------------------------------- the process statechart
+#
+# `supervisor_process` is the supervisor's own lifecycle, one instance for the
+# process's lifetime in the executor that runs the lease. The supervisor runs
+# its procedures (the startup probes and the bind, the orderly shutdown with its
+# bounds, the teardown) and posts a fact at each point where the next step
+# depends on what happened. The row it takes decides the move, and an action
+# reports an intent the supervisor carries out: exit 1, or run the wait.
+# Actions never raise and do no I/O.
+#
+# The supervisor posts:
+#   - `start`, once, from `_bind`: the lock held, an owner live, or the root free
+#     and the private socket bound;
+#   - `publish`, once, after the socket is renamed into place (DL-275);
+#   - SPAWN, SIGNAL and SHUTDOWN under their own names, from the dispatch belt,
+#     which runs only while `serving`: the fence, with a due `expire` posted to
+#     the lease first;
+#   - `term`, when the loop consumes a latched SIGTERM or SIGINT;
+#   - `drained`, when the shutdown's wait ends: every wrapper reaped, or the
+#     bound passed;
+#   - `pass_ended`, at the end of a loop pass that an errored SHUTDOWN wait
+#     left in `shutting_down`, with no signal latched;
+#   - `deadman`, the time event it produces by sampling the deadman's deadline
+#     at the end of each loop pass while `serving`, posted only when due;
+#   - `teardown`, once, from `_teardown`, unless the process is closed.
+#
+# Ties. Nothing is concurrent: the loop is single-threaded, every wait blocks
+# it, and a signal handler only latches. Within a pass, the latch is read
+# before the end-of-pass `pass_ended` and before the deadman is sampled.
+#
+# Unreachable cells. A mutating verb is posted only while `serving`, and every
+# lifecycle fact only from the states named above. The fence rows sit on
+# `serving` with the verbs' own rows, so a verb resolves only there; the other
+# facts resolve only where they are posted. Each event has an ignored row on
+# the root, guarded by `closed`, which makes the declaration complete (ss10):
+# in `closed` the event is ignored, and anywhere else the guard is false. Every
+# other cell is an exclusion of the declaration, and an out-of-order post
+# raises `UnhandledEvent`, which stops the supervisor with exit 7.
+
+#: The process's instance key in the supervisor's executor.
+_PROCESS = "process"
+START = "start"
+PUBLISH = "publish"
+TERM = "term"
+DRAINED = "drained"
+PASS_ENDED = "pass_ended"
+DEADMAN = "deadman"
+TEARDOWN = "teardown"
+#: `start`'s facts, from `_bind`
+LOCK_HELD = "lock_held"
+OWNER_LIVE = "owner_live"
+FREE = "free"
+#: `drained`'s facts: every wrapper reaped, or the last-resort bound passed
+REAPED = "reaped"
+PAST_BOUND = "past_bound"
+#: the intents of the process chart's actions
+REFUSE = "refuse"
+DRAIN = "drain"
+#: The process's phases: the leaf states of SUPERVISOR_PROCESS.
+_PROCESS_PHASES = frozenset(
+    {"starting", "bound", "serving", "shutting_down", "stopped", "refused", "closed"}
+)
+_MUTATING = ("SPAWN", "SIGNAL", "SHUTDOWN")
+
+
+# -- the guards. Each docstring is its rows' prose.
+
+
+def _lock_held(ctx: Context) -> bool:
+    """supervisor.lock is held: another supervisor owns this root (DL-210)."""
+    return bool(ctx.event.payload == LOCK_HELD)
+
+
+def _owner_live(ctx: Context) -> bool:
+    """The lock is taken, but the published socket answers PING within one of
+    three attempts across a second, or the pid record does not prove its owner
+    absent (DL-210)."""
+    return bool(ctx.event.payload == OWNER_LIVE)
+
+
+def _free(ctx: Context) -> bool:
+    """The lock is taken and no other owner is proven present: private sockets
+    are swept, the published path is reclaimed, and the private socket is bound
+    (DL-210)."""
+    return bool(ctx.event.payload == FREE)
+
+
+def _closed(ctx: Context) -> bool:
+    """The process is closed. Nothing posts to it then: `_teardown` returns at
+    once and a dropped connection posts nothing. In any other state a fact
+    posted out of order finds no row and raises `UnhandledEvent`."""
+    return "closed" in ctx.active
+
+
+# -- the actions
+
+
+def _refuse(_ctx: Context) -> Effects:
+    """Exit 1: another supervisor owns this root. Teardown then releases only
+    what this process took."""
+    return Effects(intents=(REFUSE,))
+
+
+def _drain(_ctx: Context) -> Effects:
+    """Run the shutdown's wait: up to 5 s for missing spawn records, TERM each
+    live command group, KILL each after its grace, and KILL every survivor once
+    the longest grace plus 2 s has passed. Lifelines stay open until each
+    wrapper exits (DL-48, DL-150)."""
+    return Effects(intents=(DRAIN,))
+
+
+_ONLY = "the supervisor posts {event} only {where}"
+_VERBS = (
+    "a mutating verb is dispatched only while serving: no request is read before"
+    " publish, the shutdown runs inside its own dispatch, and teardown drops every"
+    " connection after the move to closed"
+)
+_PROCESS_UNREACHABLE: dict[str, tuple[tuple[str, ...], str]] = {
+    START: (("bound", "up", "ended"), _ONLY.format(event=START, where="from starting")),
+    PUBLISH: (("starting", "up", "ended"), _ONLY.format(event=PUBLISH, where="from bound")),
+    TERM: (
+        ("starting", "bound", "refused"),
+        _ONLY.format(
+            event=TERM, where="from the serving loop, in serving, shutting_down or stopped"
+        ),
+    ),
+    DRAINED: (
+        ("starting", "bound", "serving", "ended"),
+        _ONLY.format(event=DRAINED, where="when a wait ends, in shutting_down"),
+    ),
+    PASS_ENDED: (
+        ("starting", "bound", "serving", "ended"),
+        _ONLY.format(event=PASS_ENDED, where="in shutting_down"),
+    ),
+    DEADMAN: (
+        ("starting", "bound", "shutting_down", "ended"),
+        _ONLY.format(event=DEADMAN, where="in serving"),
+    ),
+    **{verb: (("starting", "bound", "shutting_down", "ended"), _VERBS) for verb in _MUTATING},
+}
+
+#: The supervisor's own lifecycle (ss5, DL-210). Rows 01 to 12 keep the ids and
+#: the meanings of the transition table they replace (DL-289); 13 to 20 are the
+#: fence, which was `_check_token`; 21 to 30 are the events ignored once closed. A fence
+#: refusal is answered with its code, and with the incarnation for
+#: wrong_incarnation, as the lease verbs' are. SIGKILL ends the process in any
+#: state and runs no code, so no row is taken for it: each wrapper takes
+#: lifeline EOF and records in its own time (ss5, DL-205).
+SUPERVISOR_PROCESS = Statechart(
+    name="supervisor_process",
+    root=State(
+        "process",
+        regions=(
+            Region(
+                "phase",
+                "open",
+                (
+                    State(
+                        "open",
+                        regions=(
+                            Region(
+                                "phase",
+                                "starting",
+                                (
+                                    State("starting"),
+                                    State("bound"),
+                                    State(
+                                        "up",
+                                        regions=(
+                                            Region(
+                                                "phase",
+                                                "serving",
+                                                (State("serving"), State("shutting_down")),
+                                            ),
+                                        ),
+                                    ),
+                                ),
+                            ),
+                        ),
+                    ),
+                    State(
+                        "ended",
+                        regions=(Region("phase", "stopped", (State("stopped"), State("refused"))),),
+                    ),
+                    State("closed", final=True),
+                ),
+            ),
+        ),
+    ),
+    rows=(
+        Row(
+            "supervisor_process.01",
+            "starting",
+            START,
+            "refused",
+            guard="lock_held",
+            action="refuse",
+            cite=f"{_SP5}, DL-210",
+        ),
+        Row(
+            "supervisor_process.02",
+            "starting",
+            START,
+            "refused",
+            guard="owner_live",
+            action="refuse",
+            cite=f"{_SP5}, DL-210",
+        ),
+        Row(
+            "supervisor_process.03",
+            "starting",
+            START,
+            "bound",
+            guard="free",
+            cite=f"{_SP5}, DL-210",
+        ),
+        Row(
+            "supervisor_process.04",
+            "bound",
+            PUBLISH,
+            "serving",
+            cite=f"{_SP5}, DL-210, DL-275",
+        ),
+        Row(
+            "supervisor_process.05",
+            "serving",
+            "SHUTDOWN",
+            "shutting_down",
+            guard="credentials",
+            cite=f"{_SP5} SHUTDOWN, DL-80",
+        ),
+        Row(
+            "supervisor_process.06",
+            "up",
+            TERM,
+            "shutting_down",
+            action="drain",
+            cite=f"{_SP5} SHUTDOWN, DL-275, DL-300",
+        ),
+        Row(
+            "supervisor_process.07",
+            "shutting_down",
+            DRAINED,
+            "stopped",
+            cite=f"{_SP5} SHUTDOWN, DL-48, DL-150",
+        ),
+        Row(
+            "supervisor_process.08",
+            "serving",
+            DEADMAN,
+            "stopped",
+            cite=f"{_SP5} The deadman, DL-95",
+        ),
+        Row(
+            "supervisor_process.09",
+            "stopped",
+            TERM,
+            kind="internal",
+            cite=f"{_SP5} SHUTDOWN",
+        ),
+        Row("supervisor_process.10", "ended", TEARDOWN, "closed", cite=f"{_SP5}, DL-210"),
+        Row("supervisor_process.11", "open", TEARDOWN, "closed", cite=f"{_SP5}, DL-210"),
+        Row(
+            "supervisor_process.12",
+            "shutting_down",
+            PASS_ENDED,
+            "shutting_down",
+            action="drain",
+            cite=f"{_SP5} SHUTDOWN, DL-300",
+        ),
+        Row(
+            "supervisor_process.13",
+            "serving",
+            "SPAWN",
+            guard="credentials",
+            kind="internal",
+            cite=f"{_SP5} mutating verbs, DL-80",
+        ),
+        Row(
+            "supervisor_process.14",
+            "serving",
+            "SIGNAL",
+            guard="credentials",
+            kind="internal",
+            cite=f"{_SP5} mutating verbs, DL-80",
+        ),
+        Row(
+            "supervisor_process.15",
+            "serving",
+            "SPAWN",
+            guard="foreign",
+            kind="refusal",
+            code="wrong_incarnation",
+            cite=f"{_SP5} mutating verbs, DL-80, DL-229",
+        ),
+        Row(
+            "supervisor_process.16",
+            "serving",
+            "SPAWN",
+            guard="stale",
+            kind="refusal",
+            code="stale_token",
+            cite=f"{_SP5} mutating verbs, DL-80, DL-229",
+        ),
+        Row(
+            "supervisor_process.17",
+            "serving",
+            "SIGNAL",
+            guard="foreign",
+            kind="refusal",
+            code="wrong_incarnation",
+            cite=f"{_SP5} mutating verbs, DL-80, DL-229",
+        ),
+        Row(
+            "supervisor_process.18",
+            "serving",
+            "SIGNAL",
+            guard="stale",
+            kind="refusal",
+            code="stale_token",
+            cite=f"{_SP5} mutating verbs, DL-80, DL-229",
+        ),
+        Row(
+            "supervisor_process.19",
+            "serving",
+            "SHUTDOWN",
+            guard="foreign",
+            kind="refusal",
+            code="wrong_incarnation",
+            cite=f"{_SP5} mutating verbs, DL-80, DL-229",
+        ),
+        Row(
+            "supervisor_process.20",
+            "serving",
+            "SHUTDOWN",
+            guard="stale",
+            kind="refusal",
+            code="stale_token",
+            cite=f"{_SP5} mutating verbs, DL-80, DL-229",
+        ),
+        Row(
+            "supervisor_process.21",
+            "process",
+            START,
+            guard="closed",
+            kind="ignored",
+            cite="statechart-engine ss10",
+        ),
+        Row(
+            "supervisor_process.22",
+            "process",
+            PUBLISH,
+            guard="closed",
+            kind="ignored",
+            cite="statechart-engine ss10",
+        ),
+        Row(
+            "supervisor_process.23",
+            "process",
+            TERM,
+            guard="closed",
+            kind="ignored",
+            cite="statechart-engine ss10",
+        ),
+        Row(
+            "supervisor_process.24",
+            "process",
+            DRAINED,
+            guard="closed",
+            kind="ignored",
+            cite="statechart-engine ss10",
+        ),
+        Row(
+            "supervisor_process.25",
+            "process",
+            PASS_ENDED,
+            guard="closed",
+            kind="ignored",
+            cite="statechart-engine ss10",
+        ),
+        Row(
+            "supervisor_process.26",
+            "process",
+            DEADMAN,
+            guard="closed",
+            kind="ignored",
+            cite="statechart-engine ss10",
+        ),
+        Row(
+            "supervisor_process.27",
+            "process",
+            TEARDOWN,
+            guard="closed",
+            kind="ignored",
+            cite="statechart-engine ss10",
+            false_unreachable=(
+                "rows .10 and .11 take a teardown in every state but closed, so the"
+                " walk reaches the root only from closed"
+            ),
+        ),
+        Row(
+            "supervisor_process.28",
+            "process",
+            "SPAWN",
+            guard="closed",
+            kind="ignored",
+            cite="statechart-engine ss10",
+        ),
+        Row(
+            "supervisor_process.29",
+            "process",
+            "SIGNAL",
+            guard="closed",
+            kind="ignored",
+            cite="statechart-engine ss10",
+        ),
+        Row(
+            "supervisor_process.30",
+            "process",
+            "SHUTDOWN",
+            guard="closed",
+            kind="ignored",
+            cite="statechart-engine ss10",
+        ),
+    ),
+    guards={
+        "lock_held": _lock_held,
+        "owner_live": _owner_live,
+        "free": _free,
+        "credentials": _credentials,
+        "foreign": _foreign,
+        "stale": _stale,
+        "closed": _closed,
+    },
+    actions={"refuse": _refuse, "drain": _drain},
+    time_events=(TimeEvent(DEADMAN),),
+    clock="monotonic",
+    exclusions=tuple(
+        Exclusion(state, event, reason)
+        for event, (states, reason) in _PROCESS_UNREACHABLE.items()
+        for state in states
+    ),
+)
+
+
 class Supervisor:
     """One supervisor per run_root; owns the socket, the wrapper lifelines, and
     the single-controller lease. Single-threaded selectors loop (SIGCHLD
@@ -982,10 +1306,6 @@ class Supervisor:
         self._unleased_since: float | None = None
         self.sock_path = os.path.join(run_root, "supervisor.sock")
         self.pid_path = os.path.join(run_root, "supervisor.pid")
-        #: the process lifecycle (SUPERVISOR_PROCESS). Teardown reads what to
-        #: unlink off it: `bound` owns the private socket path, and every state
-        #: from `serving` on owns the published one.
-        self.state: ProcessState = "starting"
         self._lock_fd: int | None = None
         self._private_path = os.path.join(run_root, f".s.{os.getpid()}")
         self._socket_inode: int | None = None
@@ -1008,11 +1328,13 @@ class Supervisor:
         self._completed: deque[str] = deque()
         self.lease: _Lease | None = None
         self._next_token = 1  # monotonic fencing counter (in-memory; ss5)
-        #: runs SUPERVISOR_LEASE: its state is the lease's phase, and
-        #: `self.lease` is the record its actions write
-        self._leases = Executor()
-        self._leases.start(_LEASE, SUPERVISOR_LEASE, self)
-        self._leases.run()
+        #: the supervisor's executor (statechart-engine ss11). It runs
+        #: SUPERVISOR_LEASE, whose state is the lease's phase and whose actions
+        #: write `self.lease`, and SUPERVISOR_PROCESS, whose state is `state`.
+        self._machines = Executor()
+        self._machines.start(_LEASE, SUPERVISOR_LEASE, self)
+        self._machines.start(_PROCESS, SUPERVISOR_PROCESS, self)
+        self._machines.run()
         self._conns: dict[int, _Conn] = {}
         self._sel = selectors.DefaultSelector()
         self._listen: socket.socket | None = None
@@ -1032,10 +1354,24 @@ class Supervisor:
         )
         self._accept_log_at = float("-inf")
 
-    def _move(self, t: Transition[ProcessState], new: ProcessState) -> None:
-        """Take a declared process transition: check it, record it, store it."""
-        SUPERVISOR_PROCESS.take(t, self.state, new)
-        self.state = new
+    @property
+    def state(self) -> ProcessState:
+        """The process lifecycle: the active leaf of SUPERVISOR_PROCESS. Teardown
+        reads what to unlink off it: `bound` owns the private socket path, and
+        every state from `serving` on owns the published one."""
+        (phase,) = self._machines.active(_PROCESS) & _PROCESS_PHASES
+        return cast(ProcessState, phase)
+
+    def _process(self, name: str, payload: Any = None) -> Outcome:
+        """Post one event to SUPERVISOR_PROCESS and give the outcome of its row.
+        No action of the chart raises an event, so there is one."""
+        (outcome,) = self._machines.dispatch(_PROCESS, Event(name, payload))
+        return outcome
+
+    def _start(self, fact: str, cause: BaseException | None = None) -> None:
+        """Post the startup fact. A refusal row's intent exits 1."""
+        if REFUSE in self._process(START, fact).intents:
+            raise SystemExit("another supervisor owns this root") from cause
 
     @property
     def _running(self) -> bool:
@@ -1134,21 +1470,18 @@ class Supervisor:
             for attempt in range(3):
                 deadline = started + (attempt + 1) / 3
                 if self._probe_answered(deadline):
-                    self._move(PROCESS_OWNER_LIVE, "refused")
-                    raise SystemExit("another supervisor owns this root")
+                    self._start(OWNER_LIVE)  # supervisor_process.02 exits 1
                 delay = deadline - time.monotonic()
                 if delay > 0:
                     time.sleep(delay)
         if not self._pid_owner_absent():
-            self._move(PROCESS_OWNER_LIVE, "refused")
-            raise SystemExit("another supervisor owns this root")
+            self._start(OWNER_LIVE)  # supervisor_process.02 exits 1
 
     def _bind(self) -> None:
         try:
             self._lock_fd = flock_exclusive(os.path.join(self.run_root, "supervisor.lock"))
         except LockHeld as exc:
-            self._move(PROCESS_LOCK_HELD, "refused")
-            raise SystemExit("another supervisor owns this root") from exc
+            self._start(LOCK_HELD, exc)  # supervisor_process.01 exits 1
         # Sweep private sockets only, under the exclusion lock. Ordinary
         # files or symlinks with this prefix are not ours to remove.
         with os.scandir(self.run_root) as entries:
@@ -1164,7 +1497,7 @@ class Supervisor:
         try:
             self._listen = socket.socket(socket.AF_UNIX)
             self._listen.bind(self._private_path)
-            self._move(PROCESS_BOUND, "bound")
+            self._start(FREE)
             self._listen.listen(64)
         finally:
             os.umask(old_umask)
@@ -1181,7 +1514,7 @@ class Supervisor:
             },
         )
         os.rename(self._private_path, self.sock_path)
-        self._move(PROCESS_PUBLISHED, "serving")
+        self._process(PUBLISH)
         self._listen.setblocking(False)
 
     def _install_signals(self) -> None:
@@ -1241,7 +1574,7 @@ class Supervisor:
                         self._drain_chld()
                         self._reap()
                         if self._shutdown_requested:
-                            self._orderly_shutdown(PROCESS_SIGNALLED)
+                            self._orderly_shutdown(TERM)
                     elif tag == "conn":  # pragma: no branch -- no other tag is registered
                         if mask & selectors.EVENT_WRITE:
                             self._writable(payload)
@@ -1251,14 +1584,14 @@ class Supervisor:
                 # load; the select timeout gives an unconditional reap tick
                 self._reap()
                 if self._shutdown_requested:
-                    self._orderly_shutdown(PROCESS_SIGNALLED)
+                    self._orderly_shutdown(TERM)
                 elif self.state == "shutting_down":
                     # an error ended a SHUTDOWN's wait and the dispatch answered
                     # it: run the wait once more rather than leave the wrappers
                     # to lifeline EOF; a second error ends the loop and main exits 1
-                    self._orderly_shutdown(PROCESS_RETRIED)
+                    self._orderly_shutdown(PASS_ENDED)
                 elif self.state == "serving" and self._deadman_expired():
-                    self._move(PROCESS_DEADMAN, "stopped")
+                    self._process(DEADMAN)
         finally:
             self._teardown()
         return 0
@@ -1277,7 +1610,9 @@ class Supervisor:
         return self._lease_phase() == "live"
 
     def _deadman_expired(self) -> bool:
-        """Has this supervisor been unwatched for T_deadman (ss8)?
+        """Has this supervisor been unwatched for T_deadman (ss8)? The sampler of
+        SUPERVISOR_PROCESS's time event `deadman`: the loop posts it when this
+        is true, once per pass while serving, and logs the reason here first.
 
         The clock RESTARTS whenever a live leaseholder appears, so a
         reconnecting engine reprieves it. That is the point: the deadman
@@ -1401,7 +1736,7 @@ class Supervisor:
             # teardown drops every connection after the loop ended, perhaps on
             # an error; nothing reads the lease after it, so it is left alone
             self._expire_due(time.monotonic())
-            self._leases.dispatch(_LEASE, Event(DISCONNECT, conn))
+            self._machines.dispatch(_LEASE, Event(DISCONNECT, conn))
         conn.sock.close()
         conn.buf = b""
         conn.out.clear()
@@ -1563,20 +1898,20 @@ class Supervisor:
         if (
             self.lease is not None
             and not now < self.lease.deadline
-            and "held" in self._leases.active(_LEASE)
+            and "held" in self._machines.active(_LEASE)
         ):
-            self._leases.dispatch(_LEASE, Event(EXPIRE))
+            self._machines.dispatch(_LEASE, Event(EXPIRE))
 
     def _lease_phase(self) -> str:
         """The lease's phase now: free, live, orphaned or expired. A due expiry
         is taken first."""
         self._expire_due(time.monotonic())
-        (phase,) = self._leases.active(_LEASE) & _PHASES
+        (phase,) = self._machines.active(_LEASE) & _PHASES
         return phase
 
     def _lease_active(self) -> bool:
-        """Unexpired: live or orphaned. LIST reports such a lease, and only
-        such a lease passes the token check."""
+        """Unexpired: live or orphaned, which is `held` in SUPERVISOR_LEASE.
+        LIST reports such a lease, and an exit push goes only to its holder."""
         return self._lease_phase() in ("live", "orphaned")
 
     def _refusal(self, code: str) -> dict[str, Any]:
@@ -1591,23 +1926,21 @@ class Supervisor:
             answer.update(holder=self.lease.holder, expires_at=self.lease.expires_at)
         return answer
 
-    def _check_token(self, req: dict[str, Any]) -> dict[str, Any] | None:
-        """SPAWN, SIGNAL and SHUTDOWN: the request must name THIS incarnation
-        (DL-80) and its token must match an unexpired lease. Incarnation is
-        checked first and answers separately: a token from a dead supervisor is
-        not a lost election, it is a vanished world -- that controller's wrappers
-        lost their lifeline and kill their groups and record in their own time
-        (DL-205), so it must re-acquire AND reconcile from the spool, which is the
-        opposite of what stale_token asks for. RENEW and RELEASE take the same
-        two checks as rows of SUPERVISOR_LEASE."""
-        if req.get("incarnation") != self.incarnation:
-            return self._refusal("wrong_incarnation")
-        if (
-            not self._lease_active()
-            or self.lease is None
-            or not _is_wire_int_equal(req.get("token"), self.lease.token)
-        ):
-            return self._refusal("stale_token")
+    def _fence(self, verb: str, req: dict[str, Any]) -> dict[str, Any] | None:
+        """SPAWN, SIGNAL and SHUTDOWN: post the verb to SUPERVISOR_PROCESS at one
+        sampled instant, after a due expiry of the lease, and give its refusal's
+        answer, or None when the verb's work runs. The guards are the lease
+        chart's, so RENEW, RELEASE and these three meet one fence: this
+        incarnation first, then the token of an unexpired lease. A token from a
+        dead supervisor is not a lost election but a vanished world: that
+        controller's wrappers lost their lifeline and record in their own time
+        (DL-205), so it must re-acquire AND reconcile from the spool, which is
+        the opposite of what stale_token asks for."""
+        self._expire_due(time.monotonic())
+        outcome = self._process(verb, _Request(req))
+        if outcome.refusals:
+            (code,) = outcome.refusals
+            return self._refusal(code)
         return None
 
     def _h_acquire(self, conn: _Conn, req: dict[str, Any]) -> dict[str, Any]:
@@ -1627,7 +1960,7 @@ class Supervisor:
         now = time.monotonic()
         self._expire_due(now)
         request = _LeaseRequest(req, conn, now, time.time())
-        outcome = self._leases.dispatch(_LEASE, Event(verb, request))[0]
+        outcome = self._machines.dispatch(_LEASE, Event(verb, request))[0]
         if outcome.intents:
             answer: dict[str, Any] = outcome.intents[0]
             return answer
@@ -1639,7 +1972,7 @@ class Supervisor:
     # -- spawn / signal -----------------------------------------------------
 
     def _h_spawn(self, _conn: _Conn, req: dict[str, Any]) -> dict[str, Any]:
-        if (err := self._check_token(req)) is not None:
+        if (err := self._fence("SPAWN", req)) is not None:
             return err
         spec = req.get("spec")
         if not isinstance(spec, dict):
@@ -2039,7 +2372,7 @@ class Supervisor:
         return pid, lifeline_w
 
     def _h_signal(self, _conn: _Conn, req: dict[str, Any]) -> dict[str, Any]:
-        if (err := self._check_token(req)) is not None:
+        if (err := self._fence("SIGNAL", req)) is not None:
             return err
         run_id = req.get("run_id")
         sig_name = req.get("sig")
@@ -2106,12 +2439,15 @@ class Supervisor:
     # -- shutdown -----------------------------------------------------------
 
     def _h_shutdown(self, conn: _Conn, req: dict[str, Any]) -> dict[str, Any]:
-        if (err := self._check_token(req)) is not None:
+        if (err := self._fence("SHUTDOWN", req)) is not None:
             return err
+        # supervisor_process.05 moved to shutting_down. A signal latched before
+        # now is this shutdown's; one latched during the wait finds it stopped.
+        self._shutdown_requested = False
         # ss5 order: wait for wrappers FIRST, reply {ok}, exit, unlink -- the
         # earlier reply-then-teardown also double-sent {ok} (review fix, DL-48)
         try:
-            self._orderly_shutdown(PROCESS_SHUTDOWN)
+            self._shutdown_wait()
         except StatechartError:
             raise  # the supervisor stops on it; the wait does not run again
         except Exception as exc:
@@ -2126,27 +2462,27 @@ class Supervisor:
             raise
         return {"ok": True}
 
-    def _orderly_shutdown(self, trigger: Transition[ProcessState]) -> None:
+    def _orderly_shutdown(self, trigger: str) -> None:
+        """The loop's shutdown: `trigger` is TERM, a latched signal the loop
+        consumes, or PASS_ENDED, the end of a loop pass in which an error ended
+        a SHUTDOWN's wait. The row it takes says whether the wait runs: a
+        signal latched while a shutdown ran is consumed after the stop, finds
+        the process stopped, and does nothing more (supervisor_process.09). No
+        request is dispatched once the process is shutting down."""
+        self._shutdown_requested = False
+        if self.state == "shutting_down":
+            # the wait runs again after an error: the errored SHUTDOWN's
+            # answer goes out now, not after this second wait
+            for conn in list(self._conns.values()):
+                self._writable(conn, resume=False)
+        if DRAIN in self._process(trigger).intents:
+            self._shutdown_wait()
+
+    def _shutdown_wait(self) -> None:
         """The one place the supervisor escalates TERM->KILL (the engine may be
         gone). Lifelines stay OPEN until each wrapper exits, so wrappers observe
-        the command deaths and record signaled/exited -- never parent-lost.
-
-        `trigger` is the transition that asked for it: SHUTDOWN, a signal, or
-        the end of a loop pass in which an error ended this wait. A signal
-        latched while a shutdown ran is consumed after the stop, finds the
-        process stopped, and does nothing more. No request is dispatched once
-        the process is shutting down."""
-        self._shutdown_requested = False
-        match self.state:
-            case "stopped":
-                self._move(PROCESS_REPEAT, "stopped")
-                return
-            case "shutting_down":
-                # the wait runs again after an error: the errored SHUTDOWN's
-                # answer goes out now, not after this second wait
-                for conn in list(self._conns.values()):
-                    self._writable(conn, resume=False)
-        self._move(trigger, "shutting_down")
+        the command deaths and record signaled/exited -- never parent-lost. It
+        ends by posting `drained`: every wrapper reaped, or the bound passed."""
         live = [r for r in self.runs.values() if r.wrapper_rc is None]
         # a JUST-spawned wrapper may not have written spawn.json yet, and
         # _signal_command is a silent no-op without it -- the wrapper would
@@ -2172,6 +2508,7 @@ class Supervisor:
             self._reap()
             remaining = [r for r in self.runs.values() if r.wrapper_rc is None]
             if not remaining:
+                ended = REAPED
                 break
             now = time.monotonic()
             for run in remaining:
@@ -2182,9 +2519,10 @@ class Supervisor:
                 for run in remaining:
                     self._signal_command(run, signal.SIGKILL)
                 self._reap()
+                ended = PAST_BOUND
                 break
             time.sleep(0.02)
-        self._move(PROCESS_DRAINED, "stopped")
+        self._process(DRAINED, ended)
 
     # -- reaping ------------------------------------------------------------
 
@@ -2255,11 +2593,7 @@ class Supervisor:
         # Closed first, so no request is dispatched while replies flush, even
         # if reads are ready. One deadline for all clients, including a
         # SHUTDOWN reply.
-        match entered:
-            case "stopped" | "refused":
-                self._move(PROCESS_TEARDOWN, "closed")
-            case _:
-                self._move(PROCESS_ABORTED, "closed")
+        self._process(TEARDOWN)  # supervisor_process.10 or 11
         deadline = time.monotonic() + 2.0
         while any(conn.out for conn in self._conns.values()):
             remaining = deadline - time.monotonic()

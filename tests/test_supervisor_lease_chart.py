@@ -54,8 +54,10 @@ def _witness(phase: str) -> sc.Builder:
             deadline = NOW if phase == "expired" else NOW + 60
             conn = None if phase == "orphaned" else HOLDER
             lease = runner_supervisor._Lease("h", TOKEN, deadline, "then", conn)
-        data = SimpleNamespace(lease=lease, incarnation=INCARNATION, _next_token=TOKEN + 1)
         executor = runner_supervisor.Executor()
+        data = SimpleNamespace(
+            lease=lease, incarnation=INCARNATION, _next_token=TOKEN + 1, _machines=executor
+        )
         executor.restore("lease", CHART, {"lease", parent, phase}, data)
         return executor, "lease"
 
@@ -164,18 +166,20 @@ def test_the_completeness_table_is_section_5() -> None:
 def test_every_event_the_supervisor_posts_is_in_the_alphabet(queued_supervisor: Any) -> None:
     """The posters: the dispatch belt for every verb it admits, the dropped
     connection, and the sampled expiry. No action raises an event: every
-    dispatch is one microstep at depth 0."""
+    dispatch is one microstep at depth 0. The executor also runs the process
+    chart, whose posts (the mutating verbs) are not the lease's."""
     sup, connect = queued_supervisor
     posted: list[str] = []
-    dispatch: Callable[..., Any] = sup._leases.dispatch
+    dispatch: Callable[..., Any] = sup._machines.dispatch
 
     def spy(key: Any, event: Any) -> Any:
         outcomes = dispatch(key, event)
         assert [o.depth for o in outcomes] == [0], outcomes
-        posted.append(event.name)
+        if key == "lease":
+            posted.append(event.name)
         return outcomes
 
-    sup._leases.dispatch = spy
+    sup._machines.dispatch = spy
     conn, peer = connect()
     stale = {"incarnation": sup.incarnation, "token": 99}
     for verb in ("PING", "LIST", "ACQUIRE", "RENEW", "RELEASE", "SPAWN", "SIGNAL", "SHUTDOWN"):
@@ -208,9 +212,10 @@ def test_an_expired_lease_posts_one_expiry_and_keeps_the_report_history(
     clock.now = NOW + 10
     for _ in range(100):
         assert sup._lease_phase() == "expired"
-    expiries = [line for line in sup._leases._recent if " expire " in line]
+    expiries = [line for line in sup._machines._recent if " expire " in line]
     assert len(expiries) == 1 and "supervisor_lease.17" in expiries[0]
-    assert len(sup._leases._recent) == 3  # the start, the ACQUIRE, the expiry
+    leases = [line for line in sup._machines._recent if line.startswith("'lease' ")]
+    assert len(leases) == 3  # the start, the ACQUIRE, the expiry
     sup._drop_conn(conn)
     peer.close()
 
@@ -226,18 +231,24 @@ def test_a_lease_request_reports_without_its_token() -> None:
 def test_teardown_leaves_the_lease_alone(short_root: Any) -> None:
     """Teardown drops every connection after the loop ended, perhaps on an
     error. It posts nothing to the lease, so a fault there cannot replace the
-    error that ended the loop (an OSError keeps exit 1) or cut teardown short."""
+    error that ended the loop (an OSError keeps exit 1) or cut teardown short.
+    Its own `teardown` post goes to the process chart."""
     sup = runner_supervisor.Supervisor(str(short_root))
-    sup.state = "serving"
+    sup._process(runner_supervisor.START, runner_supervisor.FREE)
+    sup._process(runner_supervisor.PUBLISH)
     server, peer = socket.socketpair()
     conn = runner_supervisor._Conn(server)
     sup._conns[server.fileno()] = conn
     sup._sel.register(server, selectors.EVENT_READ, ("conn", conn))
 
-    def refuse(*_args: Any) -> Any:
-        raise runner_supervisor.StatechartError("no lease post during teardown")
+    dispatch: Callable[..., Any] = sup._machines.dispatch
 
-    sup._leases.dispatch = refuse
+    def refuse(key: Any, event: Any) -> Any:
+        if key == "lease":
+            raise runner_supervisor.StatechartError("no lease post during teardown")
+        return dispatch(key, event)
+
+    sup._machines.dispatch = refuse
     sup._teardown()
     peer.close()
     assert sup.state == "closed" and sup._conns == {} and server.fileno() == -1

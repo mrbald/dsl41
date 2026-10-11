@@ -2596,9 +2596,9 @@ def test_dl210_probe_retries_refusals_before_pid_guard(queued_supervisor, monkey
     assert Path(sup.sock_path).exists()  # the gate itself never reclaims
 
 
-def test_dl210_a_later_ping_answer_still_refuses_ownership(queued_supervisor, monkeypatch):
+def test_dl210_a_later_ping_answer_still_refuses_ownership(queued_supervisor, monkeypatch, stand):
     sup, _ = queued_supervisor
-    sup.state = "starting"  # the ownership guard runs at startup, before `serving`
+    stand(sup, "starting")  # the ownership guard runs at startup, before `serving`
     Path(sup.sock_path).touch()
     replies = iter([False, False, True])
     monkeypatch.setattr(sup, "_probe_answered", lambda _deadline: next(replies))
@@ -2941,13 +2941,13 @@ def test_dl210_main_configuration_and_usage_refuse_with_two(short_root, capsys, 
     assert "supervisor:" in capsys.readouterr().err
 
 
-def test_dl210_lock_close_error_does_not_mask_clean_exit(short_root, monkeypatch):
+def test_dl210_lock_close_error_does_not_mask_clean_exit(short_root, monkeypatch, stand):
     sup = runner_supervisor.Supervisor(str(short_root))
     bind = sup._bind
 
     def bind_then_stop() -> None:
         bind()
-        sup.state = "stopped"  # skip the loop: the clean exit is what is under test
+        stand(sup, "stopped")  # skip the loop: the clean exit is what is under test
 
     monkeypatch.setattr(sup, "_bind", bind_then_stop)
     close = runner_supervisor.os.close
@@ -3327,11 +3327,11 @@ def test_a_second_shutdown_request_in_one_loop_pass_does_nothing_more(
     sup._bind()
     try:
         sup._shutdown_requested = True
-        sup._orderly_shutdown(runner_supervisor.PROCESS_SIGNALLED)
+        sup._orderly_shutdown(runner_supervisor.TERM)
         assert sup.state == "stopped" and reaps and set(reaps) == {"shutting_down"}
         ran = len(reaps)
         sup._shutdown_requested = True  # a signal during the shutdown
-        sup._orderly_shutdown(runner_supervisor.PROCESS_SIGNALLED)
+        sup._orderly_shutdown(runner_supervisor.TERM)
         assert sup.state == "stopped" and not sup._shutdown_requested
         assert len(reaps) == ran  # no second wait
     finally:
@@ -3355,7 +3355,7 @@ def test_an_error_during_shutdown_still_unlinks_what_was_published(
     sup._bind()
     assert sup.state == "serving"
     with pytest.raises(OSError, match="synthetic reap failure"):
-        sup._orderly_shutdown(runner_supervisor.PROCESS_SHUTDOWN)
+        sup._orderly_shutdown(runner_supervisor.TERM)
     assert sup.state == "shutting_down"
     sup._teardown()
     assert sup.state == "closed"
@@ -3371,7 +3371,9 @@ class _ErroredShutdown:
     and the subreaper are left out, and `_reap` is stubbed: an in-process
     reap would wait on the test runner's children. `taken` lists the process
     transitions in order. `seen_in_wait` is what the client had received at
-    the first reap of a wait that does not raise."""
+    the first reap of a wait that does not raise. The transitions are read
+    off the process chart's outcomes in the supervisor's executor: every row
+    it takes but a fence refusal."""
 
     def __init__(
         self, root: Path, failures: int, extra: tuple[dict, ...] = (), signal: bool = False
@@ -3386,19 +3388,21 @@ class _ErroredShutdown:
         creds = {"v": 1, "incarnation": sup.incarnation, "token": 1}
         lines = [{"cmd": "ACQUIRE", "controller_id": "c"}, {"cmd": "SHUTDOWN"}, *extra]
         payload = b"".join(json.dumps({**creds, **line}).encode() + b"\n" for line in lines)
-        move = sup._move
+        dispatch = sup._machines.dispatch
 
-        def moved(t: state_machine.Transition[str], new: str) -> None:
-            self.taken.append(t.id)
-            move(t, new)  # type: ignore[arg-type]
-            if new == "serving":
-                self.client = socket.socket(socket.AF_UNIX)
-                self.client.connect(sup.sock_path)
-                self.client.sendall(payload)
+        def moved(key: object, event: state_machine.Event) -> list[state_machine.Outcome]:
+            outcomes = dispatch(key, event)
+            if key == "process":
+                self.taken += [row for o in outcomes if not o.refusals for row in o.rows]
+                if event.name == runner_supervisor.PUBLISH:
+                    self.client = socket.socket(socket.AF_UNIX)
+                    self.client.connect(sup.sock_path)
+                    self.client.sendall(payload)
+            return outcomes
 
         def reap() -> None:
             in_wait = (
-                sys._getframe(1).f_code is runner_supervisor.Supervisor._orderly_shutdown.__code__
+                sys._getframe(1).f_code is runner_supervisor.Supervisor._shutdown_wait.__code__
             )
             if in_wait and self.failures > 0:
                 self.failures -= 1
@@ -3408,7 +3412,7 @@ class _ErroredShutdown:
             if in_wait and self.seen_in_wait is None:
                 self.seen_in_wait = self._parse(self._available())
 
-        sup._move = moved  # type: ignore[method-assign,assignment]
+        sup._machines.dispatch = moved  # type: ignore[method-assign,assignment]
         sup._reap = reap  # type: ignore[method-assign]
         sup._install_signals = lambda: None  # type: ignore[method-assign]
         sup._set_subreaper = lambda: None  # type: ignore[method-assign]

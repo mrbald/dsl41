@@ -281,7 +281,7 @@ def test_sv_resuming_a_paused_reader_that_hit_eof_drops_it_without_rearming(
     assert json.loads(peer.recv(4096))["ok"] is True  # the frame was flushed first
 
 
-def test_sv_buffered_requests_wait_unless_the_process_is_serving(queued_supervisor) -> None:
+def test_sv_buffered_requests_wait_unless_the_process_is_serving(queued_supervisor, stand) -> None:
     """A connection whose earlier output pause cleared can hold complete
     request lines in its buffer when the loop reads it next. Outside
     `serving` none of them is dispatched, not even the first: an error that
@@ -292,11 +292,11 @@ def test_sv_buffered_requests_wait_unless_the_process_is_serving(queued_supervis
     conn, _peer = connect()
     lines = b'{"v":1,"cmd":"PING"}\n{"v":1,"cmd":"LIST"}\n'
     for state in ("starting", "shutting_down", "stopped"):
-        sup.state = state
+        stand(sup, state)
         conn.buf = lines
         sup._readable(conn)
         assert not conn.out and conn.buf == lines, state
-    sup.state = "serving"
+    stand(sup, "serving")
     sup._readable(conn)
     assert [json.loads(frame)["ok"] for frame, _ in conn.out] == [True, True]
     assert conn.buf == b""
@@ -763,7 +763,7 @@ def test_sv_shutdown_schedule_for_a_wrapper_that_never_records(
     sup._bind()
     try:
         run = _fake_run(sup, "rid", short_root / "runs" / "j.1", lifeline_w=lifeline_w)
-        sup._orderly_shutdown(rs.PROCESS_SHUTDOWN)
+        sup._orderly_shutdown(rs.TERM)
         assert sup.state == "stopped" and run.killed
         # TERM after the 5 s record wait, KILL at TERM + grace (1 s), KILL again
         # past TERM + grace + 2 s

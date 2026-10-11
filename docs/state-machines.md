@@ -399,50 +399,105 @@ stateDiagram-v2
 
 ## supervisor_process
 
+Clock: monotonic. Time events: deadman.
+
 ```mermaid
 stateDiagram-v2
-    state "bound" as s0
-    state "closed" as s1
-    state "refused" as s2
-    state "serving" as s3
-    state "shutting_down" as s4
-    state "starting" as s5
-    state "stopped" as s6
-    [*] --> s5
-    s5 --> s2 : supervisor_process.01 start [supervisor.lock is held] / exit 1, another supervisor owns this root
-    s5 --> s2 : supervisor_process.02 start [the published socket answers PING, or the pid record does not prove its owner absent] / exit 1, another supervisor owns this root
-    s5 --> s0 : supervisor_process.03 start [lock taken and no other owner] / sweep private sockets, reclaim the published path, bind the private socket
-    s0 --> s3 : supervisor_process.04 publish / listen, chmod 0600, write supervisor.pid, rename the socket to supervisor.sock
-    s3 --> s4 : supervisor_process.05 SHUTDOWN [this incarnation, then the current token]
-    s3 --> s4 : supervisor_process.06 SIGTERM or SIGINT [from shutting_down only after an error ended the wait of a SHUTDOWN in this loop pass and the dispatch answered it] / the handler only latches the signal and the loop takes this, so one during startup waits, and from shutting_down the errored SHUTDOWN's answer is sent and the wait runs again, sending TERM to each live command group again
-    s4 --> s4 : supervisor_process.06 SIGTERM or SIGINT [from shutting_down only after an error ended the wait of a SHUTDOWN in this loop pass and the dispatch answered it] / the handler only latches the signal and the loop takes this, so one during startup waits, and from shutting_down the errored SHUTDOWN's answer is sent and the wait runs again, sending TERM to each live command group again
-    s4 --> s6 : supervisor_process.07 every wrapper reaped, or the wait bound passed / TERM each command group, KILL it after its grace, KILL every survivor at the bound
-    s3 --> s6 : supervisor_process.08 tick [a deadman is set and no live leaseholder for that many seconds] / log the reason
-    s6 --> s6 : supervisor_process.09 SIGTERM or SIGINT [latched during a shutdown that already ran in this loop pass] / none
-    s2 --> s1 : supervisor_process.10 teardown / flush replies for up to 2 s, drop every connection, unlink what this incarnation published, close the open lifelines and the lock
-    s6 --> s1 : supervisor_process.10 teardown / flush replies for up to 2 s, drop every connection, unlink what this incarnation published, close the open lifelines and the lock
-    s0 --> s1 : supervisor_process.11 teardown [an error ended startup or the loop] / the same cleanup as supervisor_process.10, main exits 1
-    s3 --> s1 : supervisor_process.11 teardown [an error ended startup or the loop] / the same cleanup as supervisor_process.10, main exits 1
-    s4 --> s1 : supervisor_process.11 teardown [an error ended startup or the loop] / the same cleanup as supervisor_process.10, main exits 1
-    s5 --> s1 : supervisor_process.11 teardown [an error ended startup or the loop] / the same cleanup as supervisor_process.10, main exits 1
-    s4 --> s4 : supervisor_process.12 the loop pass ends [an error ended a SHUTDOWN's wait in this pass, the dispatch answered it, and no signal is latched] / send the errored SHUTDOWN's answer, then run the wait once more, which sends TERM to each live command group again, an error in it ends the loop through supervisor_process.11
-    s1 --> [*]
+    state "process" as s4
+    state s4 {
+        [*] --> s3
+        state "open" as s3
+        state s3 {
+            [*] --> s8
+            state "starting" as s8
+            state "bound" as s0
+            state "up" as s10
+            state s10 {
+                [*] --> s6
+                state "serving" as s6
+                state "shutting_down" as s7
+            }
+        }
+        state "ended" as s2
+        state s2 {
+            [*] --> s9
+            state "stopped" as s9
+            state "refused" as s5
+        }
+        state "closed" as s1
+        s1 --> [*]
+    }
+    s8 --> s5 : supervisor_process.01 start [lock_held] / refuse
+    s8 --> s5 : supervisor_process.02 start [owner_live] / refuse
+    s8 --> s0 : supervisor_process.03 start [free]
+    s0 --> s6 : supervisor_process.04 publish
+    s6 --> s7 : supervisor_process.05 SHUTDOWN [credentials]
+    s10 --> s7 : supervisor_process.06 term / drain
+    s7 --> s9 : supervisor_process.07 drained
+    s6 --> s9 : supervisor_process.08 deadman
+    s2 --> s1 : supervisor_process.10 teardown
+    s3 --> s1 : supervisor_process.11 teardown
+    s7 --> s7 : supervisor_process.12 pass_ended / drain
 ```
 
-| Id | Source | Trigger | Guard | Effect | Target | Cite | Mark |
+| Id | Source | Event | Guard | Action | Target | Kind | Cite |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| supervisor_process.01 | starting | start | supervisor.lock is held | exit 1, another supervisor owns this root | refused | supervisor-protocol ss5, DL-210 |  |
-| supervisor_process.02 | starting | start | the published socket answers PING, or the pid record does not prove its owner absent | exit 1, another supervisor owns this root | refused | supervisor-protocol ss5, DL-210 |  |
-| supervisor_process.03 | starting | start | lock taken and no other owner | sweep private sockets, reclaim the published path, bind the private socket | bound | supervisor-protocol ss5, DL-210 |  |
-| supervisor_process.04 | bound | publish |  | listen, chmod 0600, write supervisor.pid, rename the socket to supervisor.sock | serving | supervisor-protocol ss5, DL-210, DL-275 |  |
-| supervisor_process.05 | serving | SHUTDOWN | this incarnation, then the current token |  | shutting_down | supervisor-protocol ss5 SHUTDOWN, DL-80 |  |
-| supervisor_process.06 | serving, shutting_down | SIGTERM or SIGINT | from shutting_down only after an error ended the wait of a SHUTDOWN in this loop pass and the dispatch answered it | the handler only latches the signal and the loop takes this, so one during startup waits, and from shutting_down the errored SHUTDOWN's answer is sent and the wait runs again, sending TERM to each live command group again | shutting_down | supervisor-protocol ss5 SHUTDOWN, DL-275 |  |
-| supervisor_process.07 | shutting_down | every wrapper reaped, or the wait bound passed |  | TERM each command group, KILL it after its grace, KILL every survivor at the bound | stopped | supervisor-protocol ss5 SHUTDOWN, DL-48, DL-150 |  |
-| supervisor_process.08 | serving | tick | a deadman is set and no live leaseholder for that many seconds | log the reason | stopped | supervisor-protocol ss5 The deadman, DL-95 |  |
-| supervisor_process.09 | stopped | SIGTERM or SIGINT | latched during a shutdown that already ran in this loop pass | none | stopped | supervisor-protocol ss5 SHUTDOWN |  |
-| supervisor_process.10 | refused, stopped | teardown |  | flush replies for up to 2 s, drop every connection, unlink what this incarnation published, close the open lifelines and the lock | closed | supervisor-protocol ss5, DL-210 |  |
-| supervisor_process.11 | bound, serving, shutting_down, starting | teardown | an error ended startup or the loop | the same cleanup as supervisor_process.10, main exits 1 | closed | supervisor-protocol ss5, DL-210 |  |
-| supervisor_process.12 | shutting_down | the loop pass ends | an error ended a SHUTDOWN's wait in this pass, the dispatch answered it, and no signal is latched | send the errored SHUTDOWN's answer, then run the wait once more, which sends TERM to each live command group again, an error in it ends the loop through supervisor_process.11 | shutting_down | supervisor-protocol ss5 SHUTDOWN |  |
+| supervisor_process.01 | starting | start | lock_held | refuse | refused | external | supervisor-protocol ss5, DL-210 |
+| supervisor_process.02 | starting | start | owner_live | refuse | refused | external | supervisor-protocol ss5, DL-210 |
+| supervisor_process.03 | starting | start | free |  | bound | external | supervisor-protocol ss5, DL-210 |
+| supervisor_process.04 | bound | publish |  |  | serving | external | supervisor-protocol ss5, DL-210, DL-275 |
+| supervisor_process.05 | serving | SHUTDOWN | credentials |  | shutting_down | external | supervisor-protocol ss5 SHUTDOWN, DL-80 |
+| supervisor_process.06 | up | term |  | drain | shutting_down | external | supervisor-protocol ss5 SHUTDOWN, DL-275, DL-300 |
+| supervisor_process.07 | shutting_down | drained |  |  | stopped | external | supervisor-protocol ss5 SHUTDOWN, DL-48, DL-150 |
+| supervisor_process.08 | serving | deadman |  |  | stopped | external | supervisor-protocol ss5 The deadman, DL-95 |
+| supervisor_process.09 | stopped | term |  |  |  | internal | supervisor-protocol ss5 SHUTDOWN |
+| supervisor_process.10 | ended | teardown |  |  | closed | external | supervisor-protocol ss5, DL-210 |
+| supervisor_process.11 | open | teardown |  |  | closed | external | supervisor-protocol ss5, DL-210 |
+| supervisor_process.12 | shutting_down | pass_ended |  | drain | shutting_down | external | supervisor-protocol ss5 SHUTDOWN, DL-300 |
+| supervisor_process.13 | serving | SPAWN | credentials |  |  | internal | supervisor-protocol ss5 mutating verbs, DL-80 |
+| supervisor_process.14 | serving | SIGNAL | credentials |  |  | internal | supervisor-protocol ss5 mutating verbs, DL-80 |
+| supervisor_process.15 | serving | SPAWN | foreign |  |  | refusal wrong_incarnation | supervisor-protocol ss5 mutating verbs, DL-80, DL-229 |
+| supervisor_process.16 | serving | SPAWN | stale |  |  | refusal stale_token | supervisor-protocol ss5 mutating verbs, DL-80, DL-229 |
+| supervisor_process.17 | serving | SIGNAL | foreign |  |  | refusal wrong_incarnation | supervisor-protocol ss5 mutating verbs, DL-80, DL-229 |
+| supervisor_process.18 | serving | SIGNAL | stale |  |  | refusal stale_token | supervisor-protocol ss5 mutating verbs, DL-80, DL-229 |
+| supervisor_process.19 | serving | SHUTDOWN | foreign |  |  | refusal wrong_incarnation | supervisor-protocol ss5 mutating verbs, DL-80, DL-229 |
+| supervisor_process.20 | serving | SHUTDOWN | stale |  |  | refusal stale_token | supervisor-protocol ss5 mutating verbs, DL-80, DL-229 |
+| supervisor_process.21 | process | start | closed |  |  | ignored | statechart-engine ss10 |
+| supervisor_process.22 | process | publish | closed |  |  | ignored | statechart-engine ss10 |
+| supervisor_process.23 | process | term | closed |  |  | ignored | statechart-engine ss10 |
+| supervisor_process.24 | process | drained | closed |  |  | ignored | statechart-engine ss10 |
+| supervisor_process.25 | process | pass_ended | closed |  |  | ignored | statechart-engine ss10 |
+| supervisor_process.26 | process | deadman | closed |  |  | ignored | statechart-engine ss10 |
+| supervisor_process.27 | process | teardown | closed |  |  | ignored | statechart-engine ss10 |
+| supervisor_process.28 | process | SPAWN | closed |  |  | ignored | statechart-engine ss10 |
+| supervisor_process.29 | process | SIGNAL | closed |  |  | ignored | statechart-engine ss10 |
+| supervisor_process.30 | process | SHUTDOWN | closed |  |  | ignored | statechart-engine ss10 |
+
+| State | In | Entry | Exit | Defers | Waits |
+| --- | --- | --- | --- | --- | --- |
+| process |  |  |  |  |  |
+| open | process/phase |  |  |  |  |
+| starting | open/phase |  |  |  |  |
+| bound | open/phase |  |  |  |  |
+| up | open/phase |  |  |  |  |
+| serving | up/phase |  |  |  |  |
+| shutting_down | up/phase |  |  |  |  |
+| ended | process/phase |  |  |  |  |
+| stopped | ended/phase |  |  |  |  |
+| refused | ended/phase |  |  |  |  |
+| closed (final) | process/phase |  |  |  |  |
+
+| Name | Kind | Prose |
+| --- | --- | --- |
+| lock_held | guard | supervisor.lock is held: another supervisor owns this root (DL-210). |
+| owner_live | guard | The lock is taken, but the published socket answers PING within one of three attempts across a second, or the pid record does not prove its owner absent (DL-210). |
+| free | guard | The lock is taken and no other owner is proven present: private sockets are swept, the published path is reclaimed, and the private socket is bound (DL-210). |
+| credentials | guard | This incarnation, then the current token of an unexpired lease, an integer on the wire (DL-151). ss5 checks nothing else: any connection may present them. The one fence of RENEW, RELEASE, SPAWN, SIGNAL and SHUTDOWN. |
+| foreign | guard | The request names no incarnation, or another one: the supervisor it knew is gone, so it must re-acquire and reconcile (DL-80). |
+| stale | guard | This incarnation without credentials: the token is not the current one, or the lease is not held. The request is refused stale_token (ss5). With `foreign` and `credentials` this partitions every request. |
+| closed | guard | The process is closed. Nothing posts to it then: `_teardown` returns at once and a dropped connection posts nothing. In any other state a fact posted out of order finds no row and raises `UnhandledEvent`. |
+| refuse | action | Exit 1: another supervisor owns this root. Teardown then releases only what this process took. |
+| drain | action | Run the shutdown's wait: up to 5 s for missing spawn records, TERM each live command group, KILL each after its grace, and KILL every survivor once the longest grace plus 2 s has passed. Lifelines stay open until each wrapper exits (DL-48, DL-150). |
 
 ## supervisor_lease
 
@@ -515,7 +570,7 @@ stateDiagram-v2
 | renewal_untimed | guard | This incarnation and the current token, and ttl_s gives no representable expiry. Nothing changes (DL-300). |
 | foreign | guard | The request names no incarnation, or another one: the supervisor it knew is gone, so it must re-acquire and reconcile (DL-80). |
 | this_incarnation | guard | The request names this incarnation (DL-80). |
-| credentials | guard | This incarnation, then the current token, an integer on the wire (DL-151). ss5 checks nothing else: any connection may present them. |
+| credentials | guard | This incarnation, then the current token of an unexpired lease, an integer on the wire (DL-151). ss5 checks nothing else: any connection may present them. The one fence of RENEW, RELEASE, SPAWN, SIGNAL and SHUTDOWN. |
 | holder | guard | The dropped connection is the one that holds the lease. |
 | grant | action | Mint the next token and write a new record, held on the claimant's connection, with the request's deadline. A re-grant to the same controller_id keeps the dropped-push notice (DL-210). Answer the token, the expiry and the incarnation (DL-80). |
 | extend | action | Move the deadline and expires_at to the request's. The connection is not adopted, so an orphaned lease stays orphaned and its pushes keep dropping until an ACQUIRE. Answer the expiry. |
