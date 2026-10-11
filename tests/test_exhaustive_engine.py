@@ -28,7 +28,6 @@ from typing import Any
 
 import pytest
 
-from dsl41 import runner
 from dsl41.ast_jil import parse, render_preserve
 from dsl41.boundary import SealRequest, default_anchor_dir, stage_next_period
 from dsl41.ir import lower_catalog, lower_source
@@ -75,6 +74,7 @@ from dsl41.state_machine import (
     HITS_ENV,
     STRICT_ENV,
     VIOLATION_LOG_PREFIX,
+    StatechartError,
     TransitionError,
 )
 
@@ -1311,14 +1311,18 @@ async def _seal_cell(
     """Run one cell. Answers the moves taken, the phase the boundary ended
     in, the notes on the exception that ended the loop, and the engine."""
     taken: list[str] = []
-    real_move = runner._seal_move
-
-    def spy(pending: _PendingSeal, t: Any, new: Any) -> None:
-        taken.append(t.id)
-        real_move(pending, t, new)
-
-    mp.setattr(runner, "_seal_move", spy)
+    phases: list[str] = []
     engine, request = _sealable(run_root)
+    dispatch = engine._machines.dispatch
+
+    def spy(key: Any, event: Any) -> Any:
+        # the executor's outcome: the rows each post took, and the phase it left
+        outcomes = dispatch(key, event)
+        taken.extend(row for outcome in outcomes for row in outcome.rows)
+        phases.append(engine._seal_phase(key))
+        return outcomes
+
+    mp.setattr(engine._machines, "dispatch", spy)
     if cell == "frozen: an input unadmitted":
         # the frontier at T0, so an input stamped before it cannot be admitted
         engine.inject(_set_global("0"), source="scheduler")
@@ -1338,14 +1342,14 @@ async def _seal_cell(
         async def settle() -> None:
             # the loop's first await, before it takes the queued boundary
             await real_settle()
-            if engine._seal is not None and engine._seal.phase == "requested":
+            if engine._seal is not None and engine._seal_phase(engine._seal) == "requested":
                 parked.set()
                 await asyncio.Event().wait()  # a shutdown arrives while it waits
 
         mp.setattr(engine, "_settle", settle)
     future = _seal_future(engine, request)
     pending = engine._seal
-    assert isinstance(pending, _PendingSeal) and pending.phase == "requested"
+    assert isinstance(pending, _PendingSeal) and engine._seal_phase(pending) == "requested"
     if cell == "requested: refused":
         _submit_second(engine, request, second)  # while the first is still queued
     loop = asyncio.create_task(engine.run_until_quiescent(T0 + timedelta(minutes=1)))
@@ -1356,7 +1360,7 @@ async def _seal_cell(
         await asyncio.wait({waiter, loop}, timeout=30, return_when=asyncio.FIRST_COMPLETED)
         waiter.cancel()
         assert parked.is_set(), "the loop never reached the cell's pause point"
-        assert pending.phase == cell.split(":")[0]
+        assert engine._seal_phase(pending) == cell.split(":")[0]
         loop.cancel()
     notes = ""
     try:
@@ -1367,11 +1371,16 @@ async def _seal_cell(
         pass
     except Exception as exc:  # noqa: BLE001 -- each exit is checked by its moves
         notes = " ".join(getattr(exc, "__notes__", []))
-    if pending.phase in ("aborted", "sealed"):
+    phase = phases[-1] if phases else engine._seal_phase(pending)
+    if phase in ("aborted", "sealed"):
         assert future.done()
+        with pytest.raises(StatechartError, match="no instance"):
+            engine._machines.active(pending)  # forgotten once it rests there
+    else:
+        assert engine._seal_phase(pending) == phase  # a stop or a shutdown keeps it
     if future.done() and not future.cancelled():
         future.exception()  # read, so a refusal is not logged as never retrieved
-    return tuple(taken), pending.phase, notes, engine
+    return tuple(taken), phase, notes, engine
 
 
 def test_every_exit_in_every_seal_phase_takes_a_declared_transition(
@@ -1415,4 +1424,4 @@ def test_every_exit_in_every_seal_phase_takes_a_declared_transition(
     assert second_in == {"requested", "frozen", "committing"}
     assert _violations(strict) == set()
     _no_violation_line(capsys.readouterr().err)
-    assert {t.id for t in SEAL_BOUNDARY.transitions} <= _hits(strict)
+    assert {row.id for row in SEAL_BOUNDARY.rows if row.kind != "ignored"} <= _hits(strict)

@@ -29,6 +29,7 @@ from dsl41.cli_common import (
     refuse,
     resume_target_period,
     say_next,
+    statechart_report,
     walk_estate_or_exit_2,
 )
 from dsl41.period import ARCHIVE_CLASS
@@ -642,15 +643,16 @@ async def _drive_boundary(
     alone would wait forever for an engine that is correctly still
     serving C1.
 
-    The three exits are ss7's: 0 committed, 2 refused with C1 still open,
+    The four exits are ss7's: 0 committed, 2 refused with C1 still open,
     4 an unknown outcome whose only safe retry is the printed
-    `request_id`."""
+    `request_id`, and 7 a statechart error (DL-327)."""
     import asyncio
     import contextlib
 
     from datetime import datetime
 
     from dsl41.boundary import BoundaryFailStop, PeriodSealed
+    from dsl41.state_machine import StatechartError
 
     # `ensure_future` over the engine's own future: it hands the same
     # object back and gives this function the `done`/`exception`/`result`
@@ -690,8 +692,13 @@ async def _drive_boundary(
     elif isinstance(outcome, BoundaryFailStop):
         typer.echo(str(outcome), err=True)
         code = 4
+    elif isinstance(outcome, StatechartError):
+        # an assertion failure, not a refusal: the boundary neither aborted
+        # nor moved, and the sealer stops with its report and exit 7
+        # (statechart-engine ss5, DL-327)
+        code = statechart_report(outcome)
     elif outcome is not None:
-        # ss7 publishes 0/2/4 for this verb and nothing else (DL-145): the
+        # ss7 publishes 0/2/4/7 for this verb and nothing else (DL-145): the
         # boundary did NOT commit and C1 is still open, whatever kind of
         # exception said so. The exit-1 fork this replaced left the
         # published table for anything that was not an `EngineError` and

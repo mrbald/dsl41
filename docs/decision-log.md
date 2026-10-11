@@ -21143,3 +21143,79 @@ relitigate an entry; append a new one.
   The Fable pass ruled the chart's shape right against the pilot's list and found the dead
   generation. The fence-rule copy stays open above; the exit-7 change is stated, not changed;
   the rest is fixed and confirmed by the reviewer that raised it.
+- DL-327 The seal boundary runs on the statechart executor; a statechart error in a seal stops
+  the engine with exit 7
+  (2026-10-11; src/dsl41/runner_seal.py (new), src/dsl41/runner.py, src/dsl41/cli_estate.py;
+  docs/period-model.md §7; docs/concurrency-model.md §4; docs/statechart-engine.md §16;
+  docs/deployment-runbook.md; docs/blocks/seal-and-lineage.md; docs/state-machines.md
+  (generated))
+  THE CHART. `seal_boundary` is a `Statechart` on the logical clock, in runner_seal.py beside the
+  engine. Its tree is `boundary` with `in_flight` (`requested`, `frozen` and `committing`) and
+  the finals `sealed`, `aborted` and `stopped`. No state waits (§9): the seal's posts are facts.
+  Twelve rows: `parked` moves `requested` to `frozen` once the barrier parks (§6 step 2);
+  `quiesced` moves `frozen` to `committing` after the retry-horizon gate; `committed` moves
+  `committing` to `sealed` and answers; `exception` leaves `in_flight` by one of five rows whose
+  guards partition every exception in today's order of precedence: past the point of no return
+  (`BoundaryFailStop`) and the stop run option (`TransitionStop`) by type, then a lost fence,
+  then DL-274's three doubts (an attempt admitted and not fully applied, an engine-made input
+  the drain could not admit, an unfinished WAL append), else the abort. The guards are
+  conjunctions, so the partition is total and exclusive, not ordered. Four ignored rows on the
+  root, guarded by a final state being active, make the declaration complete over the finals;
+  in flight an event out of order finds no row and raises. The facts an exception row reads
+  are computed into its payload before the post, and the fence is read only for an exception
+  of neither stop type, as before. An action never raises and does no I/O: it reports one exit
+  intent (sealed, abort, or stop with DL-274's note), and the engine carries it out.
+  THE TIER. The engine owns one `Executor` (statechart-engine §11); the seal chart is its first
+  machine, one instance per seal request keyed by the request, started when the request is
+  submitted and forgotten once it rests in `sealed` or `aborted`; `stopped` ends the engine. The
+  chart is never replayed: the seal's durability is the `seal` record. The deleted code: the
+  seal's `StateMachine` table, its phase string, `_seal_move` and the violation channel for this
+  machine; the exception ladder of `_boundary_exits` is the chart's guards.
+  THE SEAL DEFERS NOTHING. period-model §6 step 7 stands: an input stamped after T refuses the
+  boundary with `seal_input_after_cutoff`, and C1 reopens and admits it. A deferred input would
+  be lost at the exit-3 restart if held in memory, or land as a post-T record in the sealed
+  period's WAL if held as statechart-engine §12 holds one. Inputs are not events of this machine.
+  statechart-engine §16 now says so in place of "until then today's refusal stands".
+  WHAT CHANGES. No reply, code, record, exit code 3, 4, 5 or 6, or ordering of period-model §6
+  and §7 moves. One thing does. A `StatechartError` raised anywhere inside a seal before the
+  seal append never enters the seal chart: `_boundary_exits` re-raises it before any
+  classification, posts nothing and answers nothing, and the engine exits 7 by DL-325's path;
+  the boundary neither aborts nor moves, and resume reads where the period stands. Until now the
+  abort arm caught it, failed the request with it and carried on. period-model §7 excludes it
+  from "every other exception still aborts and refuses", and the offline sealer exits 7 on it
+  where it refused with 2. The seal boundary leaves the violation-channel list of
+  concurrency-model §4 and the runbook: a gap in this chart is a statechart error, not a stderr
+  line. And the oracle's batch cleanup no longer replaces a statechart error in flight with an
+  oracle error: it re-raises it, so DL-320's dry apply never classifies it; this was a fifth
+  masking route beside the four DL-325 names.
+  CHECKS. `well_formed` and `chart_warnings` pass. The generated completeness test enumerates
+  the abstraction: four exception types (the two stop types, a refusal, an OS error) by the
+  fence (intact, lost) by every subset of the three doubts, with witnesses for every state,
+  against a table written from period-model §6-§7 without the rows. The alphabet test spies on
+  the engine's posts over a committed and a refused seal, and the chart's actions raise nothing.
+  The exhaustive walk of every exit in every phase reads the executor where it spied on the old
+  move, with its fourteen cells unchanged. New tests: a statechart error in the drain and one
+  while committing stop the engine with nothing aborted, the barrier still parked, no `seal`
+  record and the request unanswered; `dsl41 run` exits 7 with the report on both and on a gap in
+  the chart; the offline sealer exits 7 on a gap. Of the tests that pinned the old mechanics,
+  the one that broke stderr under the seal's violation line is replaced by a guard-gap test on
+  the same arm; the exhaustive walk and the engine's machine list are re-pointed. The gate
+  holds rows and guard outcomes at 100%.
+  STATED LIMITS. A statechart error after the `seal` append inside `commit_boundary` is wrapped
+  as an unknown outcome (exit 4), not 7: past the point of no return the outcome is unknown
+  whatever raised, and no converted machine runs there today. A statechart error at the last
+  post, after `commit_boundary` returned, exits 7 with the seal record durable: the engine stops
+  at once, and resume reads the lineage; a test pins it. A live `dsl41 seal` whose engine stops
+  with 7 reads the dropped connection as unknown (exit 4), by the command's own rule. The
+  control belt's catch-all would answer `internal_error` to a statechart error raised while a
+  request starts its instance; no such error can arise here (an identity key, no entry action),
+  and the subscription slice, which lives on the belt, fixes the belt.
+  REVIEW. Semantic class: one Opus reviewer and one Codex pass, two rounds. Both found the
+  sealed instance forgotten before the answer turns, so a second request in that window met an
+  internal error instead of `seal_in_flight`. The Codex pass found the oracle's batch cleanup
+  replacing a statechart error with an oracle error, and the claim that the period is still
+  open after exit 7, false for an error at the last post. The Opus reviewer found the report
+  hiding the error behind the fault's repr, stale exit prose, and a wait mark §9 does not allow.
+  All are fixed and confirmed by the reviewer that raised them, but one: the Opus reviewer's
+  tier-side unpack failure on a finished boundary is ruled unreachable once the forget moved,
+  and it agreed.

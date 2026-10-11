@@ -18,7 +18,7 @@ It needs atomic multi-record commit too: the `seal` record is one line, and the 
 ## Interface
 
 - Wire: the `seal` verb ([control-protocol §3, `seal`](../control-protocol.md#seal-dl-133-period-model-22)). `Engine.submit_seal` holds one request, and a second is refused with `seal_in_flight`.
-- Engine: `Engine._seal_boundary` runs one seal inside the loop. `_PendingSeal.phase` is its phase, and `_seal_move` names each move. `Engine.sealing` reads `SealBarrier.parked`.
+- Engine: `Engine._seal_boundary` runs one seal inside the loop. The engine's `Executor` runs `SEAL_BOUNDARY` for it, one instance per request: the engine posts what happened, and the row it takes reports what the engine does next. `Engine.sealing` reads `SealBarrier.parked`.
 - Operation: `commit_boundary` in `boundary.py` performs the seal's writes in [period-model §7](../period-model.md#7-the-seal-operation)'s order. `Engine.abort_boundary` releases the freeze, and the period stays open. It touches no row.
 - Anchor: `EstateAnchor` with `create_open`, `close_period`, `claim_successor`, `open_claimed`, `finalize`, `attest` and `reclaim`. `row_tag` derives a registry row's state from its flags.
 - Resume: `act_on_head` repairs the one crash window each head state can leave, before anything is replayed ([period-model §11](../period-model.md#11-resume-replay-and-recovery)).
@@ -27,11 +27,11 @@ It needs atomic multi-record commit too: the `seal` record is one line, and the 
 
 ## States
 
-Three declared machines hold this block's states:
+Two declared machines and one statechart hold this block's states:
 
 - [anchor_head](../state-machines.md#anchor_head): the lineage head, from genesis through each seal, claim and opening.
 - [period_row](../state-machines.md#period_row): one period's registry row, provisional at genesis or durable for a successor, then attested.
-- [seal_boundary](../state-machines.md#seal_boundary): one seal request's phases in the engine and its three exits.
+- [seal_boundary](../state-machines.md#seal_boundary): one seal request's phases in the engine and its three exits, run by the statechart executor ([DL-327](../decision-log.md)).
 
 Each anchor holds the generated diagram and transition table.
 A repeat that writes nothing takes no transition.
@@ -47,7 +47,7 @@ A repeat that writes nothing takes no transition.
 - The seal proves the supervisor before it commits (PR-27 in [period-model §13.5](../period-model.md#135-the-boundary)).
 - A physical roll needs the closing period attested first ([period-model §1.3](../period-model.md#13-the-successor-fence); [DL-134](../decision-log.md)).
 - One seal request is in flight at a time ([DL-295](../decision-log.md)).
-- A violation in the seal boundary's table is one stderr line, and the move proceeds ([DL-295](../decision-log.md)).
+- A gap in the seal chart is a statechart error: the boundary neither aborts nor moves, and the engine exits 7 ([DL-327](../decision-log.md)).
 
 ## Failure and recovery
 
@@ -57,6 +57,7 @@ A repeat that writes nothing takes no transition.
 - A crash between the `seal` record and the anchor CAS: resume performs the CAS (PR-45 in [period-model §13.8](../period-model.md#138-recovery-and-stream)).
 - A crashed claimant: the same claim resumes, and a different claim against the same seal is refused, naming the holder. `reclaim` is the attributed break-glass ([period-model §1.3](../period-model.md#13-the-successor-fence)).
 - `--on-transition-violation stop` in the drain stops the engine after the decision is durable ([DL-292](../decision-log.md)).
+- A statechart error anywhere in the seal stops the engine with exit 7. Nothing aborts, the request is not answered, and resume reads where the period stands ([period-model §7](../period-model.md#7-the-seal-operation)).
 
 ## Owning modules
 
@@ -64,7 +65,8 @@ A repeat that writes nothing takes no transition.
 - `src/dsl41/seal.py`: the seal artifact, CLOSE and OPEN.
 - `src/dsl41/period.py`: period identity and the estate layout.
 - `src/dsl41/estate.py`: the physical roll.
-- `src/dsl41/runner.py`: `SEAL_BOUNDARY`, `_PendingSeal`, `Engine.submit_seal`, `Engine._seal_boundary`.
+- `src/dsl41/runner.py`: `_PendingSeal`, `Engine.submit_seal`, `Engine._seal_boundary`.
+- `src/dsl41/runner_seal.py`: `SEAL_BOUNDARY`, its guards and actions.
 
 ## Tests
 
@@ -85,6 +87,8 @@ A repeat that writes nothing takes no transition.
 - `test_pr25_c1_owns_every_tick_at_or_before_t`
 - `test_a_second_seal_is_refused_for_the_whole_boundary_and_accepted_after_an_abort`
 - `test_every_exit_in_every_seal_phase_takes_a_declared_transition`
+- `test_the_completeness_table_is_section_7`
+- `test_a_statechart_error_in_the_drain_stops_the_engine_with_nothing_aborted`
 - `test_the_offline_seal_commits_and_the_period_reopens`
 
 ## Open findings

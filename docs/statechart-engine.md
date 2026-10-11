@@ -331,9 +331,8 @@ Subscription's declared contract is the one its own document states
 ([docs/blocks/subscription.md](blocks/subscription.md)): a bounded buffer in both phases, not a
 deferral.
 
-`seal_boundary` comes third. Whether deferral applies in `frozen`, and how that squares with
-period-model §6's rule for an input after the cutoff, is ruled by that slice's entry; until
-then today's refusal stands.
+`seal_boundary` comes third. `seal_boundary` defers nothing: an input after the cutoff refuses
+the boundary (`period-model.md` §6, DL-327).
 
 Acceptance per machine:
 

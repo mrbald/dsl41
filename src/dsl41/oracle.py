@@ -385,7 +385,7 @@ from dsl41.oracle_state import (
     TraceEntry,
 )
 from dsl41.semantics import DEFAULTS as DEFAULT_SWITCHES, SemanticSwitches, iced_atom_truth
-from dsl41.state_machine import Transition, Violation
+from dsl41.state_machine import StatechartError, Transition, Violation
 from dsl41.timezones import (
     must_instant,
     resolve_timezone,
@@ -419,6 +419,17 @@ _IGNORED_ROWS: Final[Mapping[str, Mapping[JobStatus, Transition[JobStatus]]]] = 
 #: SEM-34: how long after a start time's instant an event still names its
 #: slot -- the minute the wall-time match used to cover (DL-260)
 _SLOT_MINUTE = timedelta(minutes=1)
+
+
+def _note_cleanup(exc: StatechartError, cleanup: Exception) -> None:
+    """A batch's cleanup raised `cleanup` while a `StatechartError` was
+    leaving it. The statechart error is an assertion failure, not a fault to
+    classify (docs/statechart-engine.md section 5), and the cleanup can trip
+    on the state it left half-moved, such as a terminal row still holding
+    capacity. The statechart error leaves unchanged, with the cleanup's
+    finding as a note. Any other exception in flight is replaced by the
+    cleanup's, as before."""
+    exc.add_note(f"the batch's cleanup then raised {type(cleanup).__name__}: {cleanup}")
 
 
 class InputBatch:
@@ -484,8 +495,13 @@ class InputBatch:
             oracle._now = self._at
             oracle._lazy_clock_checks()
             oracle._drain()  # checks-then-drain adjacency
-        except BaseException:
-            self._commit(time_half=True)
+        except BaseException as exc:
+            try:
+                self._commit(time_half=True)
+            except Exception as cleanup:
+                if not isinstance(exc, StatechartError):
+                    raise
+                _note_cleanup(exc, cleanup)
             raise
         self._time_violations = oracle.store.drain_violations()
         return self
@@ -498,8 +514,13 @@ class InputBatch:
         self._oracle._queue.append(ev)
         self._oracle._drain()
 
-    def __exit__(self, *exc: object) -> None:
-        self._commit()
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        try:
+            self._commit()
+        except Exception as cleanup:
+            if not isinstance(exc, StatechartError):
+                raise
+            _note_cleanup(exc, cleanup)
 
     def _commit(self, *, time_half: bool = False) -> None:
         oracle = self._oracle
