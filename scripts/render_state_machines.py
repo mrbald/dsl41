@@ -190,7 +190,8 @@ def chart_table(chart: Statechart) -> list[str]:
     for row in chart.rows:
         kind = f"{row.kind} {row.code}" if row.code else row.kind
         event = row.event or "(completion)"
-        cells = [row.id, row.source, event, row.guard, row.action, row.target, kind, row.cite]
+        action = row.action or row.note
+        cells = [row.id, row.source, event, row.guard, action, row.target, kind, row.cite]
         lines.append("| " + " | ".join(_cell(c) for c in cells) + " |")
     if chart.choices:
         lines += [

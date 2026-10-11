@@ -154,7 +154,7 @@ from dsl41.seal import (
     close_runtime,
     open_from_seal,
 )
-from dsl41.state_machine import StateMachine, Transition
+from dsl41.state_machine import StatechartError, StateMachine, Transition
 
 #: ss1.1's anchor directory, which is NOT inside any archivable root.
 ANCHOR_NAME: Final[str] = "anchor.json"
@@ -2616,6 +2616,11 @@ def commit_boundary(
             seal_digest=sidecar.digest,
         )
         crash_point("after_close_cas")
+    except StatechartError:
+        # the `seal` record's fan-out runs the subscription chart: a gap in
+        # it is an assertion failure, which stops the engine with exit 7 and
+        # the record durable; resume reads the lineage (statechart-engine ss5)
+        raise
     except Exception as exc:
         raise BoundaryFailStop(
             f"the `seal` append did not complete cleanly ({exc}): the outcome is UNKNOWN"

@@ -30,10 +30,9 @@ from dsl41.boundary import BoundaryFailStop
 from dsl41.runner_admission import TransitionStop
 from dsl41.state_machine import Context, Effects, Exclusion, Region, Row, State, Statechart
 
-#: The barrier parked: admission is frozen and FW polls are parked (ss6 step 2).
+#: The barrier parked (row .01's note).
 PARKED: Final = "parked"
-#: The cutoff is chosen, drained and quiescent, and the supervisor proof holds
-#: (ss6 steps 3-7, ss8).
+#: The boundary may commit (row .02's note).
 QUIESCED: Final = "quiesced"
 #: `commit_boundary` returned: the `seal` record is durable (ss6 step 8).
 COMMITTED: Final = "committed"
@@ -243,6 +242,7 @@ SEAL_BOUNDARY: Final = Statechart(
             PARKED,
             "frozen",
             cite="period-model ss6 step 2, ss8, PR-28c",
+            note="The barrier parked: admission is frozen and FW polls are parked (ss6 step 2).",
         ),
         Row(
             "seal_boundary.02",
@@ -250,6 +250,10 @@ SEAL_BOUNDARY: Final = Statechart(
             QUIESCED,
             "committing",
             cite="period-model ss6 steps 3-8, PR-27",
+            note=(
+                "The cutoff is chosen, drained and quiescent, and the supervisor proof"
+                " holds (ss6 steps 3-7, ss8). `commit_boundary` runs next (step 8)."
+            ),
         ),
         Row(
             "seal_boundary.03",

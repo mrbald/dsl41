@@ -74,9 +74,12 @@ from dsl41.state_machine import (
     HITS_ENV,
     STRICT_ENV,
     VIOLATION_LOG_PREFIX,
+    Executor,
+    Outcome,
     StatechartError,
     TransitionError,
 )
+from dsl41.state_machine import Event as ChartEvent
 
 T0 = datetime(2026, 7, 1, 8, 0)
 DAY = timedelta(days=1)
@@ -725,23 +728,40 @@ def test_every_outbox_call_in_every_effect_state_takes_a_declared_transition(
 # ----------------------------------------------------------- subscription
 
 
-def _feeds(path: Path) -> Iterator[tuple[Journal, Any]]:
+def _spied(outcomes: list[Outcome]) -> Executor:
+    """A stand-in for the engine's executor that keeps every outcome."""
+    machines = Executor()
+    dispatch = machines.dispatch
+
+    def spy(key: Any, event: ChartEvent) -> list[Outcome]:
+        taken = dispatch(key, event)
+        outcomes.extend(taken)
+        return taken
+
+    machines.dispatch = spy  # type: ignore[method-assign]
+    return machines
+
+
+def _feeds(path: Path) -> Iterator[tuple[Journal, Any, list[Outcome]]]:
     """Each feed state the journal and the handler reach, by their own
     calls: a new feed in backfill, live after the backfill, each with room
     or with a backlog its budget cannot grow, removed by an overflow from
-    either, and closed from either."""
+    either, and closed from either. Each comes with the executor's outcomes
+    so far."""
     for live in (False, True):
         for tight in (False, True):
+            outcomes: list[Outcome] = []
             journal = Journal(path / f"j-{live}-{tight}.jsonl", fsync_each=False)
-            feed = journal.subscribe(budget=1 if tight else 1 << 30)
+            feed = journal.subscribe(_spied(outcomes), budget=1 if tight else 1 << 30)
             journal.preflight([])  # an empty backlog takes one record
             if live:
                 feed.go_live()
-            yield journal, feed
+            yield journal, feed, outcomes
     for live in (False, True):
         for end in ("overflow", "unsubscribe"):
+            outcomes = []
             journal = Journal(path / f"e-{live}-{end}.jsonl", fsync_each=False)
-            feed = journal.subscribe(budget=1)
+            feed = journal.subscribe(_spied(outcomes), budget=1)
             journal.preflight([])
             if live:
                 feed.go_live()
@@ -749,17 +769,30 @@ def _feeds(path: Path) -> Iterator[tuple[Journal, Any]]:
                 journal.preflight([])
             else:
                 journal.unsubscribe(feed)
-            yield journal, feed
+            yield journal, feed, outcomes
+
+
+def _feed_row(state: str, event: str, tight: bool) -> tuple[str, ...]:
+    """The rows one event takes, from control-protocol ss5 and the block doc:
+    a record that fits is queued, one that does not removes the feed, the
+    backfill sent moves it live, and its end closes it. A removed or closed
+    feed has left the fan-out, so nothing posts to it."""
+    if state in ("removed", "closed"):
+        return ()
+    if event == "append":
+        return ("subscription.03",) if tight else ("subscription.05",)
+    return ("subscription.04",) if event == "unsubscribe" else ("subscription.02",)
 
 
 def test_every_feed_event_in_every_subscription_state_takes_a_declared_transition(
     strict: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`subscription`: `absent` (a new feed is `subscribe`, `subscription.01`)
-    and every state a feed reaches through the journal and the handler
-    (`_feeds`), and in each the events the journal applies to any feed: an
-    append, and the stream's end (`unsubscribe`). In `backfill` also the
-    backfill sent (`go_live`).
+    """`subscription`: every state a feed reaches through the journal and the
+    handler (`_feeds`), and in each the events the journal applies to any
+    feed: an append, and the stream's end (`unsubscribe`). In `backfill`
+    also the backfill sent (`go_live`). Each post is one microstep of the
+    executor that fires the declared row; a removed or closed feed gets no
+    post at all, so the root's ignore rows are never taken.
 
     Left out: `go_live` in `live`, `removed` and `closed`. The handler
     (`ControlServer._subscribe`) calls it once, after the ack and the
@@ -768,25 +801,33 @@ def test_every_feed_event_in_every_subscription_state_takes_a_declared_transitio
     await, before `go_live`; and only the handler's `finally` ends the
     stream. So `go_live` meets only `backfill`."""
     states: set[str] = set()
-    for journal, feed in _feeds(tmp_path):
+    for journal, feed, _ in _feeds(tmp_path):
         journal.close()
         states.add(feed.state)
     assert states == {"backfill", "live", "removed", "closed"}
+    taken: set[str] = set()
     for event in ("append", "unsubscribe", "go_live"):
         (tmp_path / event).mkdir()
-        for journal, feed in _feeds(tmp_path / event):
+        for journal, feed, outcomes in _feeds(tmp_path / event):
+            state, tight, before = feed.state, feed.budget == 1, len(outcomes)
             try:
                 if event == "append":
                     journal.preflight([])
                 elif event == "unsubscribe":
                     journal.unsubscribe(feed)
-                elif feed.state == "backfill":
+                elif state == "backfill":
                     feed.go_live()
+                else:
+                    continue
             finally:
                 journal.close()
-    assert _violations(strict) == set()
+            cell = outcomes[before:]
+            assert [o.kind for o in cell] == (["fired"] if cell else []), (state, event)
+            rows = tuple(row for outcome in cell for row in outcome.rows)
+            assert rows == _feed_row(state, event, tight), (state, event, tight)
+            taken |= set(rows)
     _no_violation_line(capsys.readouterr().err)
-    assert {t.id for t in SUBSCRIPTION.transitions} <= _hits(strict)
+    assert taken == {row.id for row in SUBSCRIPTION.rows if row.kind != "ignored"}
 
 
 # -------------------------------------------------------------- admission

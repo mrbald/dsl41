@@ -21,8 +21,8 @@ Before every response it re-proves the lineage fence, as every revision-bearing 
 - Wire: the `subscribe` verb with an optional cursor, on a connection of its own. The request and ack shapes are [control-protocol §5](../control-protocol.md#5-streaming-verb-subscribe)'s.
 - Refusals: `no_journal` comes before the ack. `backfill_refused` and a displaced leader's refusal come on the stream after it. A cursor below what the root retains gets a gap marker line first.
 - Server: `ControlServer._subscribe` in `runner_control.py` sends the ack, the backfill and the live records, and drops a seq'd record the backfill already sent.
-- Journal: `Journal.subscribe(on_overflow, budget=...)` returns a `Subscription`. `Journal.unsubscribe` leaves the fan-out. Each append offers the record to every feed (`Journal._publish`).
-- `Subscription`: `offer`, `get`, `go_live`, `close`, `tell_owner`, `backlog_bytes` and `state`. `removed` is derived from `overflow`, and the other states are stored.
+- Journal: `Journal.subscribe(machines, on_overflow, budget=...)` returns a `Subscription`; `machines` is the engine's executor. `Journal.unsubscribe` leaves the fan-out. Each append offers the record to every feed (`Journal._publish`).
+- `Subscription`: `offer`, `get`, `go_live`, `close`, `tell_owner`, `backlog_bytes` and `state`. It is the record and the key of one instance of the feed's chart. `offer`, `go_live` and `close` post its events, and `state` is the instance's active leaf.
 - Backfill: `read_backfill(path, since=...)` returns a `Backfill`, with `gap_from` and the retained records after the cursor.
 - Budget: `SUBSCRIBER_BACKLOG_BYTES`, sized in [control-protocol §5](../control-protocol.md#5-streaming-verb-subscribe).
 - Clients: `ControlClient.subscribe` and the CLI's `subscribe_lines`. A stream line past the budget raises `StreamLineTooLong`.
@@ -30,7 +30,9 @@ Before every response it re-proves the lineage fence, as every revision-bearing 
 ## States
 
 One feed's states are [subscription](../state-machines.md#subscription). The anchor holds the generated diagram and transition table.
-An unsubscribe of a removed feed finds nothing to leave and takes no transition.
+The instance starts in `backfill` when the feed joins the fan-out; before that there is no instance, and no state.
+It ends in `removed` or `closed`, and the journal forgets it at once.
+An unsubscribe of a removed feed finds nothing to leave and posts nothing.
 
 ## Invariants
 
@@ -40,9 +42,9 @@ An unsubscribe of a removed feed finds nothing to leave and takes no transition.
 - The backfill spans segments and is bounded by the segment holding the cursor ([DL-135](../decision-log.md)).
 - The stream carries `decision` records, keyed by `index` and not `seq` ([DL-89](../decision-log.md); [DL-118](../decision-log.md)).
 - A feed's backlog is bounded by the budget or one record, whichever is larger, and an overflow removes the feed ([DL-267](../decision-log.md)).
-- Nothing a removal does reaches the append, the engine loop or another feed ([DL-267](../decision-log.md)).
+- Nothing a removal does reaches the append, the engine loop or another feed ([DL-267](../decision-log.md)); a statechart error is the one exception (exit 7).
 - A `seal` record reaches the feeds only after its fsync, so no subscriber hears of a boundary that recovery may discard ([DL-133](../decision-log.md)).
-- A violation of the feed's table is one stderr line, and the move proceeds ([DL-295](../decision-log.md)).
+- A gap in the feed's chart is a statechart error, and the engine exits 7 ([statechart-engine §5](../statechart-engine.md#5-the-step-and-the-worklist)).
 
 ## Failure and recovery
 
@@ -55,7 +57,7 @@ An unsubscribe of a removed feed finds nothing to leave and takes no transition.
 
 ## Owning modules
 
-- `src/dsl41/runner_journal.py`: `Subscription`, `SUBSCRIPTION`, the fan-out, `Backfill` and `read_backfill`.
+- `src/dsl41/runner_journal.py`: `Subscription`, the `SUBSCRIPTION` chart, the fan-out, `Backfill` and `read_backfill`.
 - `src/dsl41/runner_control.py`: the `subscribe` handler, the budget, the connection ends and the client.
 - `src/dsl41/cli_control.py`: `dsl41 query subscribe` and its resume advice.
 
@@ -79,6 +81,13 @@ An unsubscribe of a removed feed finds nothing to leave and takes no transition.
 - `test_a_feed_moves_backfill_live_closed`
 - `test_an_overflowed_feed_is_removed_and_its_unsubscribe_takes_nothing`
 - `test_every_feed_event_in_every_subscription_state_takes_a_declared_transition`
+- `test_the_completeness_table_is_section_5`
+- `test_every_event_the_posters_send_is_in_the_alphabet`
+- `test_a_statechart_error_in_a_control_handler_stops_the_run_with_exit_7`
+- `test_the_old_belt_would_have_answered_internal_error`
+- `test_a_statechart_error_from_an_owner_reaches_the_append`
+- `test_a_statechart_error_at_the_seal_record_s_fan_out_is_not_an_unknown_outcome`
+- `test_a_statechart_error_while_the_server_closes_still_exits_7`
 
 ## Open findings
 

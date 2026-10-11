@@ -21298,3 +21298,81 @@ relitigate an entry; append a new one.
   rows. All are fixed and confirmed by the reviewer that raised them, but three nits ruled no fix
   with its agreement: a walk cell that no longer reaches a row production still takes, row prose
   that needs an executor change, and a wait mark on the steady state.
+- DL-329 The subscribe feed runs on the statechart executor; a statechart error in a control handler
+  stops the engine with exit 7
+  (2026-10-12; src/dsl41/runner_journal.py, src/dsl41/runner_control.py, src/dsl41/cli_run.py,
+  src/dsl41/boundary.py, src/dsl41/runner.py, src/dsl41/state_machine.py, src/dsl41/runner_seal.py,
+  src/dsl41/runner_supervisor.py, scripts/render_state_machines.py; docs/blocks/subscription.md;
+  docs/control-protocol.md §2 and §5; docs/period-model.md §7; docs/concurrency-model.md §4;
+  docs/deployment-runbook.md; docs/statechart-engine.md §5, §14 and §16; docs/state-machines.md
+  (generated))
+  THE CHART. `subscription` is a `Statechart` on the logical clock. Its tree is `feed` with `open`
+  (`backfill`, `live`) and the finals `removed` and `closed`. The instance starts in `backfill` when
+  the feed joins the fan-out: there is no instance before that, so the old `absent` state and its
+  row are gone, and the remaining rows keep their ids. `backfill_sent` moves `backfill` to `live`;
+  `append` in `open` is an internal row when the record fits, which enqueues it and counts its
+  bytes, and a move to `removed` when it does not, which drops the backlog and reports one intent,
+  to leave the fan-out; `stream_ends` moves `open` to `closed`. Three ignored rows on the root,
+  guarded by a final state being active, make the declaration complete over the finals; the one
+  exclusion is a second `backfill_sent` in `live`, a statechart error. The guards read the backlog,
+  the budget and the record's size, so DL-267's bound and its one-record rule are the chart's: an
+  empty backlog accepts a record of any size. No deferral: the bounded buffer in both phases is the
+  contract, as statechart-engine §16 says. Actions never raise and do no I/O.
+  THE TIER. The instances live in the engine's one executor (DL-327), which the control server
+  reaches through its engine and hands to the journal at subscribe; the journal creates none. The
+  `Subscription` object is the instance's key and its record, and its `state` is the active leaf.
+  The journal's publish is unchanged in order: every feed is offered the record, the overflowed ones
+  leave the list, then their owners are told. A feed that rests in a final state is forgotten right
+  after the microstep that put it there, and a removed feed's handler posts nothing at stream end,
+  as it found nothing to leave before. The deleted code: the table, its phase type, the stored
+  phase, the four `take` sites and the budget check inside `offer`.
+  THE BELT. DL-325 left the control query belt open: its catch-all answered `internal_error` to any
+  exception, a `StatechartError` included, and a handler's error under `subscribe` went to asyncio's
+  log. Now a statechart error in any control handler is never answered: the belt re-raises it before
+  its catch-all, the connection hangs up, the server keeps the first error, cancels the engine loop
+  at once through a callback the run gave it, so no step of the loop runs after the error, and sets
+  an event; `dsl41 run` waits on that event beside the loop, prints the same report and exits 7 with
+  the engine shut down, and a loop that failed in the same instant is reported under it. One met
+  while the server closes, a feed's last post at shutdown, prints the report and exits 7 where the
+  run would have exited 0 or 1; a halt the engine had already chosen, 3, 5 or 6, keeps its code, and
+  the report says so. control-protocol §2 and §5 say that a statechart error is not a query bug and
+  gets no answer, as concurrency-model §4 already said.
+  THE SEAL APPEND. The `seal` record's fan-out runs this chart after the record's fsync, past the
+  point of no return, so DL-327's limit, that a statechart error there is wrapped as an unknown
+  outcome with exit 4 because no converted machine ran there, no longer holds. `commit_boundary`
+  re-raises a `StatechartError` before its wrap, the seal's exception rows never see it, and the
+  engine exits 7 with the record durable and the head still open; the live `dsl41 seal` client,
+  whose connection drops, still answers 4, and the next resume opens the next period as PR-45 says,
+  where a new paragraph of period-model §7 says so and a test runs the resume.
+  CHECKS. `well_formed` and `chart_warnings` pass. The generated completeness test enumerates the
+  witnesses, `backfill` and `live` with an empty and a held backlog, `removed` and `closed`, by the
+  record's size against the budget (small, exact, one over, oversized), thirty-four cells, against a
+  table written from control-protocol §5 without the rows. The alphabet test runs a real server
+  through a backfill, a live record, an overflow and a shutdown. The exhaustive feed walk reads the
+  executor's outcomes with its enumeration unchanged and asserts that the tier never posts to a
+  final instance. New tests: a statechart error under a query handler and under the subscribe
+  handler, raised by the handler and by a gapped chart, ends `dsl41 run` with exit 7 and the report,
+  no line after the ack and EOF on the stream; a mutant with the old belt answers `internal_error`;
+  one met while the server closes exits 7; one at the seal record's fan-out is not an unknown
+  outcome, and the next resume opens the next period; a handler's error stops the loop before its
+  next step; one beside a loop crash reports both and tears down; a sealed exit 3 is kept; the
+  report keeps the ring of the machine that raised; a dispatch visits no quiet instance. The gate
+  holds rows and guard outcomes at 100%.
+  THE EXECUTOR, REFINED. Three things this slice found in the executor. A dispatch scanned every
+  instance for deferred work, so a fan-out to thousands of feeds was quadratic; the executor keeps
+  the set of instances with something deferred and scans nothing when it is empty. The history ring
+  was one per executor, so a seal's error report lost the seal's steps behind the feeds' appends;
+  the ring is per machine, and the report shows the ring of the machine that raised
+  (statechart-engine §5). A row with no guard and no action had no prose in the rendered document
+  (DL-328); a row may carry a note, which the renderer shows, and the seal's, the supervisor's and
+  the feed's such rows now do.
+  OPEN. runner_journal.py is over the size advisory; the guards read the feed's record, which lives
+  with the fan-out. Three `except Exception` on the path keep no re-raise because no statechart
+  error can arise inside them: the report's print, the hang-up's wait and the revoke path's close.
+  REVIEW. Semantic class: one Opus reviewer and one Codex pass, two rounds each. Both found the run
+  awaiting a loop that had failed in the same instant as a handler's error, which skipped the
+  teardown, and two absolute sentences the accepted behaviour contradicted. The Opus reviewer found
+  the loop running three more steps before the cancel landed, with a launch possible in that window,
+  the halt codes overridden at close, a report crowded out by the feeds' steps, and the client's
+  unknown answer unstated. The Codex pass found the quadratic fan-out scan. All are fixed and
+  confirmed by the reviewer that raised them.

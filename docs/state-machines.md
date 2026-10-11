@@ -445,14 +445,14 @@ stateDiagram-v2
 | supervisor_process.01 | starting | start | lock_held | refuse | refused | external | supervisor-protocol ss5, DL-210 |
 | supervisor_process.02 | starting | start | owner_live | refuse | refused | external | supervisor-protocol ss5, DL-210 |
 | supervisor_process.03 | starting | start | free |  | bound | external | supervisor-protocol ss5, DL-210 |
-| supervisor_process.04 | bound | publish |  |  | serving | external | supervisor-protocol ss5, DL-210, DL-275 |
+| supervisor_process.04 | bound | publish |  | The private socket listens with mode 0600, supervisor.pid is written, and the socket is renamed to supervisor.sock. | serving | external | supervisor-protocol ss5, DL-210, DL-275 |
 | supervisor_process.05 | serving | SHUTDOWN | credentials |  | shutting_down | external | supervisor-protocol ss5 SHUTDOWN, DL-80 |
 | supervisor_process.06 | up | term |  | drain | shutting_down | external | supervisor-protocol ss5 SHUTDOWN, DL-275, DL-300 |
-| supervisor_process.07 | shutting_down | drained |  |  | stopped | external | supervisor-protocol ss5 SHUTDOWN, DL-48, DL-150 |
-| supervisor_process.08 | serving | deadman |  |  | stopped | external | supervisor-protocol ss5 The deadman, DL-95 |
-| supervisor_process.09 | stopped | term |  |  |  | internal | supervisor-protocol ss5 SHUTDOWN |
-| supervisor_process.10 | ended | teardown |  |  | closed | external | supervisor-protocol ss5, DL-210 |
-| supervisor_process.11 | open | teardown |  |  | closed | external | supervisor-protocol ss5, DL-210 |
+| supervisor_process.07 | shutting_down | drained |  | The shutdown's wait ended: every wrapper reaped, or the last-resort bound passed and every survivor's group was killed. | stopped | external | supervisor-protocol ss5 SHUTDOWN, DL-48, DL-150 |
+| supervisor_process.08 | serving | deadman |  | A deadman is set and no live leaseholder for that many seconds, the supervisor logs the reason first. | stopped | external | supervisor-protocol ss5 The deadman, DL-95 |
+| supervisor_process.09 | stopped | term |  | A signal latched during a shutdown that already ran in this loop pass. Nothing runs. |  | internal | supervisor-protocol ss5 SHUTDOWN |
+| supervisor_process.10 | ended | teardown |  | Flush replies for up to 2 s, drop every connection, unlink what this incarnation published, close the open lifelines and the lock. | closed | external | supervisor-protocol ss5, DL-210 |
+| supervisor_process.11 | open | teardown |  | An error ended startup or the loop: the cleanup of .10, and main exits 1. | closed | external | supervisor-protocol ss5, DL-210 |
 | supervisor_process.12 | shutting_down | pass_ended |  | drain | shutting_down | external | supervisor-protocol ss5 SHUTDOWN, DL-300 |
 | supervisor_process.13 | serving | SPAWN | credentials |  |  | internal | supervisor-protocol ss5 mutating verbs, DL-80 |
 | supervisor_process.14 | serving | SIGNAL | credentials |  |  | internal | supervisor-protocol ss5 mutating verbs, DL-80 |
@@ -712,30 +712,55 @@ stateDiagram-v2
 
 ## subscription
 
+Clock: logical.
+
 ```mermaid
 stateDiagram-v2
-    state "absent" as s0
-    state "backfill" as s1
-    state "closed" as s2
-    state "live" as s3
-    state "removed" as s4
-    [*] --> s0
-    s0 --> s1 : subscription.01 subscribe [the lineage is held and the run has a journal] / join the fan-out, the ack names the cursor
-    s1 --> s3 : subscription.02 backfill sent [no refusal on the stream, with no `since` there is nothing to send] / send the queued live records past the seam
-    s1 --> s4 : subscription.03 append [the record does not fit the backlog budget] / drop the backlog, leave the fan-out, tell the owner, which ends the stream
-    s3 --> s4 : subscription.03 append [the record does not fit the backlog budget] / drop the backlog, leave the fan-out, tell the owner, which ends the stream
-    s1 --> s2 : subscription.04 stream ends [the client is gone, a refusal went on the stream, the lineage was lost, or the handler was cancelled] / leave the fan-out
-    s3 --> s2 : subscription.04 stream ends [the client is gone, a refusal went on the stream, the lineage was lost, or the handler was cancelled] / leave the fan-out
-    s2 --> [*]
-    s4 --> [*]
+    state "feed" as s2
+    state s2 {
+        [*] --> s4
+        state "open" as s4
+        state s4 {
+            [*] --> s0
+            state "backfill" as s0
+            state "live" as s3
+        }
+        state "removed" as s5
+        state "closed" as s1
+        s5 --> [*]
+        s1 --> [*]
+    }
+    s0 --> s3 : subscription.02 backfill_sent
+    s4 --> s5 : subscription.03 append [overflows] / drop_backlog
+    s4 --> s1 : subscription.04 stream_ends
 ```
 
-| Id | Source | Trigger | Guard | Effect | Target | Cite | Mark |
+| Id | Source | Event | Guard | Action | Target | Kind | Cite |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| subscription.01 | absent | subscribe | the lineage is held and the run has a journal | join the fan-out, the ack names the cursor | backfill | control-protocol ss5, DL-45, DL-267 |  |
-| subscription.02 | backfill | backfill sent | no refusal on the stream, with no `since` there is nothing to send | send the queued live records past the seam | live | control-protocol ss5, DL-45, DL-135 |  |
-| subscription.03 | backfill, live | append | the record does not fit the backlog budget | drop the backlog, leave the fan-out, tell the owner, which ends the stream | removed | control-protocol ss5, DL-267 |  |
-| subscription.04 | backfill, live | stream ends | the client is gone, a refusal went on the stream, the lineage was lost, or the handler was cancelled | leave the fan-out | closed | control-protocol ss5, PR-03, period-model ss11 |  |
+| subscription.02 | backfill | backfill_sent |  | The handler posts it once the backfill went out without a refusal, with no `since` there is nothing to send. The handler then sends the queued live records past the seam. | live | external | control-protocol ss5, DL-45, DL-135 |
+| subscription.03 | open | append | overflows | drop_backlog | removed | external | control-protocol ss5, DL-267 |
+| subscription.04 | open | stream_ends |  | The client is gone, a refusal went on the stream, the lineage was lost, or the handler was cancelled. The journal has already taken the feed out of its fan-out. | closed | external | control-protocol ss5, PR-03, period-model ss11 |
+| subscription.05 | open | append | fits | enqueue |  | internal | control-protocol ss5, DL-267 |
+| subscription.06 | feed | append | over |  |  | ignored | statechart-engine ss10 |
+| subscription.07 | feed | backfill_sent | over |  |  | ignored | statechart-engine ss10 |
+| subscription.08 | feed | stream_ends | over |  |  | ignored | statechart-engine ss10 |
+
+| State | In | Entry | Exit | Defers | Waits |
+| --- | --- | --- | --- | --- | --- |
+| feed |  |  |  |  |  |
+| open | feed/phase |  |  |  |  |
+| backfill | open/phase |  |  |  |  |
+| live | open/phase |  |  |  |  |
+| removed (final) | feed/phase |  |  |  |  |
+| closed (final) | feed/phase |  |  |  |  |
+
+| Name | Kind | Prose |
+| --- | --- | --- |
+| fits | guard | The record fits: the backlog is empty, or the backlog plus the record stays within the budget. An empty backlog takes one record of any size, so one record larger than the budget delays the feed and does not remove it (DL-267). |
+| overflows | guard | The record does not fit: the backlog holds a record, and the backlog plus this one would pass the budget (DL-267). |
+| over | guard | The feed rests in `removed` or `closed`. Nothing posts to it then: the journal forgets the instance in the call that made it final. In `live`, a second `backfill_sent` finds no row and raises `UnhandledEvent`. |
+| enqueue | action | Queue the record and count its bytes against the budget. Memory only: the queue has no count limit, so this never blocks. |
+| drop_backlog | action | Record why, and drop the backlog. The journal then takes the feed out of its fan-out and, once every other feed has the record, tells the owner, which ends the stream (DL-267). |
 
 ## seal_boundary
 
@@ -772,8 +797,8 @@ stateDiagram-v2
 
 | Id | Source | Event | Guard | Action | Target | Kind | Cite |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| seal_boundary.01 | requested | parked |  |  | frozen | external | period-model ss6 step 2, ss8, PR-28c |
-| seal_boundary.02 | frozen | quiesced |  |  | committing | external | period-model ss6 steps 3-8, PR-27 |
+| seal_boundary.01 | requested | parked |  | The barrier parked: admission is frozen and FW polls are parked (ss6 step 2). | frozen | external | period-model ss6 step 2, ss8, PR-28c |
+| seal_boundary.02 | frozen | quiesced |  | The cutoff is chosen, drained and quiescent, and the supervisor proof holds (ss6 steps 3-7, ss8). `commit_boundary` runs next (step 8). | committing | external | period-model ss6 steps 3-8, PR-27 |
 | seal_boundary.03 | committing | committed |  | answer | sealed | external | period-model ss7 |
 | seal_boundary.04 | in_flight | exception | reversible | abort | aborted | external | period-model ss7, PR-28b |
 | seal_boundary.05 | in_flight | exception | fence_lost | stop | stopped | external | period-model ss7, DL-101, PR-28b |

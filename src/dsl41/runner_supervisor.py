@@ -1062,6 +1062,10 @@ SUPERVISOR_PROCESS = Statechart(
             PUBLISH,
             "serving",
             cite=f"{_SP5}, DL-210, DL-275",
+            note=(
+                "The private socket listens with mode 0600, supervisor.pid is written,"
+                " and the socket is renamed to supervisor.sock."
+            ),
         ),
         Row(
             "supervisor_process.05",
@@ -1085,6 +1089,10 @@ SUPERVISOR_PROCESS = Statechart(
             DRAINED,
             "stopped",
             cite=f"{_SP5} SHUTDOWN, DL-48, DL-150",
+            note=(
+                "The shutdown's wait ended: every wrapper reaped, or the last-resort"
+                " bound passed and every survivor's group was killed."
+            ),
         ),
         Row(
             "supervisor_process.08",
@@ -1092,6 +1100,10 @@ SUPERVISOR_PROCESS = Statechart(
             DEADMAN,
             "stopped",
             cite=f"{_SP5} The deadman, DL-95",
+            note=(
+                "A deadman is set and no live leaseholder for that many seconds;"
+                " the supervisor logs the reason first."
+            ),
         ),
         Row(
             "supervisor_process.09",
@@ -1099,9 +1111,27 @@ SUPERVISOR_PROCESS = Statechart(
             TERM,
             kind="internal",
             cite=f"{_SP5} SHUTDOWN",
+            note="A signal latched during a shutdown that already ran in this loop pass. Nothing runs.",
         ),
-        Row("supervisor_process.10", "ended", TEARDOWN, "closed", cite=f"{_SP5}, DL-210"),
-        Row("supervisor_process.11", "open", TEARDOWN, "closed", cite=f"{_SP5}, DL-210"),
+        Row(
+            "supervisor_process.10",
+            "ended",
+            TEARDOWN,
+            "closed",
+            cite=f"{_SP5}, DL-210",
+            note=(
+                "Flush replies for up to 2 s, drop every connection, unlink what this"
+                " incarnation published, close the open lifelines and the lock."
+            ),
+        ),
+        Row(
+            "supervisor_process.11",
+            "open",
+            TEARDOWN,
+            "closed",
+            cite=f"{_SP5}, DL-210",
+            note="An error ended startup or the loop: the cleanup of .10, and main exits 1.",
+        ),
         Row(
             "supervisor_process.12",
             "shutting_down",
