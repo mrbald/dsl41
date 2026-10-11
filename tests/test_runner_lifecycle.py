@@ -671,6 +671,135 @@ def test_live_wrapper_gets_a_settle_window(tmp_path: Path) -> None:
     os.close(lifeline_w)
 
 
+def _zombie_spawn_record(run_dir: Path, command: subprocess.Popen, command_token: str) -> None:
+    """A spawn.json whose wrapper is gone and whose command is `command`, a
+    child of this process. This process does not reap it, so once it exits
+    it stays a zombie: the shape of a run whose wrapper died under an init
+    that does not reap (DL-319)."""
+    wrapper = subprocess.Popen(["/bin/sh", "-c", "exit 0"])
+    wrapper_token = runner_procid.proc_start_token(wrapper.pid)
+    wrapper.wait()  # reaped: the wrapper is gone
+    (run_dir / "spawn.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "run_id": "test-run",
+                "job": "j1",
+                "run_number": 1,
+                "wrapper_pid": wrapper.pid,
+                "wrapper_start_time": wrapper_token,
+                "command_pid": command.pid,
+                "command_pgid": command.pid,
+                "command_start_time": command_token,
+                "boot_id": runner_procid.current_boot_id(),
+                "started_at": "2026-07-11T00:00:00+00:00",
+            }
+        )
+    )
+
+
+def test_resume_reads_an_exited_unreaped_command_as_unobservable(tmp_path: Path) -> None:
+    """A command that exited while its wrapper was gone, and that nothing
+    reaped, is a zombie. Its start token still matches. Resume must read it
+    as an exit with no record (E7), not as a survivor it killed: TERMINATED
+    would claim a kill that never happened."""
+    run_dir = tmp_path / "j1.1"
+    run_dir.mkdir()
+    command = subprocess.Popen(
+        ["/bin/sh", "-c", "read line"], stdin=subprocess.PIPE, process_group=0
+    )
+    try:
+        token = runner_procid.proc_start_token(command.pid)
+        assert token is not None
+        _zombie_spawn_record(run_dir, command, token)
+        assert command.stdin is not None
+        command.stdin.close()  # the command exits on its own
+        wait_for(lambda: runner_procid.proc_is_zombie(command.pid))
+        result, ended_at = _resolve(run_dir, grace_seconds=0.5)
+        assert result == Failed("exit_status_unobservable")
+        assert ended_at is None
+    finally:
+        if command.stdin is not None and not command.stdin.closed:
+            command.stdin.close()
+        command.wait(timeout=10)
+
+
+def test_resume_never_signals_the_live_member_of_an_exited_unreaped_leader(
+    tmp_path: Path,
+) -> None:
+    """DL-226: a group whose leader is already dead is not signalled, and its
+    run is E7's. A zombie leader is dead, so a member still running in its
+    group is left alone, as it is once the leader is reaped. The member is
+    checked with the same guard, so a member that died of a signal (a zombie
+    for a moment) fails the check."""
+    run_dir = tmp_path / "j1.1"
+    run_dir.mkdir()
+    member_pid_file = run_dir / "member.pid"
+    leader = subprocess.Popen(
+        [
+            "/bin/sh",
+            "-c",
+            f"sleep 300 & echo $! > {member_pid_file}.tmp;"
+            f" mv {member_pid_file}.tmp {member_pid_file}; read line",
+        ],
+        stdin=subprocess.PIPE,
+        process_group=0,
+    )
+    member_pid = member_token = None
+    try:
+        token = runner_procid.proc_start_token(leader.pid)
+        assert token is not None
+        member_pid = int(wait_for(lambda: member_pid_file.exists() and member_pid_file.read_text()))
+        member_token = runner_procid.proc_start_token(member_pid)
+        assert member_token is not None
+        assert os.getpgid(member_pid) == leader.pid  # a member of the leader's group
+        _zombie_spawn_record(run_dir, leader, token)
+        assert leader.stdin is not None
+        leader.stdin.close()  # the leader exits on its own; the member runs on
+        wait_for(lambda: runner_procid.proc_is_zombie(leader.pid))
+        result, ended_at = _resolve(run_dir, grace_seconds=0.5)
+        assert result == Failed("exit_status_unobservable")
+        assert ended_at is None
+        assert runner_procid.verify_alive(member_pid, member_token)  # never signalled
+    finally:
+        if member_pid is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(member_pid, signal.SIGKILL)
+            # the orphaned member is this process's child only when this
+            # process is a subreaper (Linux, after an in-process supervisor);
+            # reap it then, and either way wait until it is gone
+            with contextlib.suppress(ChildProcessError):
+                os.waitpid(member_pid, 0)
+            if member_token is not None:
+                wait_for(lambda: not runner_procid.verify_alive(member_pid, member_token))
+        if leader.stdin is not None and not leader.stdin.closed:
+            leader.stdin.close()
+        leader.wait(timeout=10)
+
+
+def test_a_silent_wrapper_whose_command_exited_resolves_unobservable(tmp_path: Path) -> None:
+    """The wrapper is alive but frozen after it observed the exit and before
+    it recorded it, so its command is a zombie it has not reaped yet. Past
+    the settle window plus the grace, resume finds no record and an exited
+    command: E7, not a kill. The real wrapper, frozen at
+    post_wait_pre_status."""
+    run_dir = tmp_path / "j1.1"
+    run_dir.mkdir()
+    proc, lifeline_w = spawn_wrapper(run_dir, "exit 5", pause="post_wait_pre_status")
+    try:
+        wait_for(lambda: proc_state(proc.pid) == "T")
+        command_pid = read_json(run_dir / "spawn.json")["command_pid"]
+        assert runner_procid.proc_is_zombie(command_pid)
+        result, ended_at = _resolve(run_dir, settle_seconds=0.2, grace_seconds=0.2)
+        assert result == Failed("exit_status_unobservable")
+        assert ended_at is None
+    finally:
+        os.kill(proc.pid, signal.SIGCONT)
+        os.close(lifeline_w)
+        assert proc.wait(timeout=10) == 0
+    assert read_json(run_dir / "status.json")["exit_code"] == 5  # the late record
+
+
 def test_spoofed_spawn_json_never_signals_innocents(tmp_path: Path) -> None:
     """DL-42 item 8 'pid reuse (spoofed spawn.json)': a live innocent pid
     with a non-matching start-time token must never be signaled; the run

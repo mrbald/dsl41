@@ -333,3 +333,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-319 | The runbook requires an init that reaps orphaned processes, and lint and rehearse take the launcher's zone | [docs/deployment-runbook.md](deployment-runbook.md) |
 | DL-320 | An engine-made input whose apply raises is quarantined, or stops the engine before it is logged |  |
 | DL-321 | The wrapper and the supervisor wake at a signal's delivery, so a command's exit is never missed |  |
+| DL-322 | The liveness check counts an exited, unreaped process as dead | [docs/deployment-runbook.md](deployment-runbook.md), [docs/runner-design.md](runner-design.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |

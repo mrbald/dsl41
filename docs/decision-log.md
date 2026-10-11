@@ -20843,3 +20843,43 @@ relitigate an entry; append a new one.
   a handled one does (SIGHUP is ignored). Left as stated: a second install without a teardown
   would restore the closed pipe, and teardown must now run on the main thread; no caller does
   either.
+- DL-322 The liveness check counts an exited, unreaped process as dead
+  (2026-10-11; docs/runner-design.md §§6a, 7; docs/supervisor-protocol.md §3;
+  docs/deployment-runbook.md §3)
+  THE PROBLEM. `verify_alive` (runner_procid.py) checked that a pid exists and that its start
+  token matches. A zombie passes both until its parent reaps it. Where no init reaped, an exited
+  command read as live: resume signaled it and recorded `TERMINATED` ("wrapper lost; killed at
+  resume") instead of `FAILURE` with an unobservable exit status, and `t()` and `f()` read the
+  two differently. DL-319 required a reaping init and left this change NOT BUILT; this entry
+  builds it. The supervisor's owner check already counted a zombie as absent (DL-210).
+  THE RULE. A process is alive when it exists, its start token matches and it is not a zombie.
+  - One look. The token and the state come from one read: one /proc/<pid>/stat on Linux, one
+    `ps -o stat=,lstart=` on macOS. With two reads, a pid reaped between them passed as live.
+  - Linux. The state field is the thread-group leader's. A live process whose main thread has
+    exited while other threads run also shows `Z`. So a zombie is state `Z` with at most one
+    task left (field 20, the thread count). macOS does not show `Z` for that case.
+  - The supervisor's owner check uses the same test, so the two checks agree on every host.
+  CALLERS. For a zombie:
+  - Resume, wrapper check: dead at once, no settle wait. Then one more `status.json` read, so a
+    wrapper that recorded and exited after the first read is not resolved as unobservable.
+  - Resume, command check: `FAILURE` `exit_status_unobservable` (E7), not `TERMINATED`.
+  - The tethered kill: no signal; it waits for the wrapper, which records the real exit, as
+    for a kill that arrives after the reap.
+  - The supervisor's SIGNAL: `{ok, noop}`, which the protocol already defines as already dead.
+  ZOMBIE LEADER, LIVE MEMBERS. The group is not signalled, and the members keep running. DL-226
+  sets the rule: a group whose leader is already dead is not signalled. A zombie leader is
+  dead, though its token still matches. The wrapper never signals the group of a leader that
+  exited by itself, and under a reaping init the members already survive the reaped leader. So
+  hosts with and without a reaping init now behave the same. The reaping-init requirement
+  (DL-319) stays.
+  VERSIONS. No outcome, record field, protocol version, `STATE_MACHINE_VERSION` or WAL format
+  moves. The frozen supervisor protocol changes in wording only: its start-token guard (§3) now
+  names the zombie.
+  OPEN. The tests' own `pid_alive` helper still counts a zombie as alive. Run in one process on
+  Linux with the supervisor tests first, two lifecycle tests still fail through it (DL-321 OPEN).
+  REVIEW. Semantic class: one Opus reviewer and one Fable pass, which also ruled the zombie
+  leader; three rounds. Both found that a live process with an exited main thread read as dead on
+  Linux (a blocker for the Opus reviewer), that a reap between two reads passed a gone pid as
+  live, and that a test left a killed member unreaped. The Opus reviewer found two sentences
+  that read the dead-leader case as `TERMINATED` or as resume only, and both found citations
+  that named the wrong sections. All are fixed and confirmed by the reviewer that raised them.

@@ -1426,6 +1426,45 @@ def test_resolve_spool_reads_a_status_written_as_the_wrapper_died(
     assert sent == []
 
 
+def test_resolve_spool_reads_a_status_written_before_the_first_wrapper_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wrapper records and dies between the ladder's first read and its
+    first liveness check, so that check already finds it dead (a zombie
+    counts as dead). The ladder reads once more before it turns to the
+    command: the record is there, and nothing is signalled."""
+    run_dir = tmp_path / "j.1"
+    spawn = _spawn_doc()
+    _spool(run_dir, "spawn.json", spawn)
+    sent = _record_signals(monkeypatch, on={})
+    probes: list[int] = []
+
+    def verify(pid: int, token: str) -> bool:
+        probes.append(pid)
+        _spool(
+            run_dir,
+            "status.json",
+            {**_IDENT, "run_id": "rid", "outcome": "exited", "exit_code": 4},
+        )
+        return False  # recorded and died before the first check
+
+    monkeypatch.setattr(_procid, "verify_alive", verify)
+    result = asyncio.run(
+        resolve_spool(
+            "j",
+            1,
+            run_dir,
+            "boot-A",
+            settle_seconds=5.0,
+            grace_seconds=5.0,
+            expected_run_id="rid",
+        )
+    )
+    assert result == (4, None)
+    assert probes == [spawn["wrapper_pid"]]  # the command was never checked
+    assert sent == []
+
+
 def test_resolve_spool_kills_a_surviving_group_when_the_wrapper_never_records(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

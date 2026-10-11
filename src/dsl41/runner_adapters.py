@@ -2303,6 +2303,10 @@ async def resolve_spool(
                     status = _load_status()  # one last read after death
                     break
                 await asyncio.sleep(0.1)
+        else:
+            # one last read after death here too: a wrapper that recorded and
+            # exited after the first read is dead now, a zombie included
+            status = _load_status()
         if status is None:
             command_pid = spawn.get("command_pid")
             command_pgid = spawn.get("command_pgid")

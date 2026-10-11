@@ -686,6 +686,47 @@ def test_sv_signal_command_reads_only_a_record_that_names_the_run(
     assert sup._signal_command(run, signal.SIGTERM) == "noop"  # no start token
 
 
+def test_sv_signal_command_finds_an_exited_unreaped_leader_already_dead(
+    queued_supervisor, short_root: Path
+) -> None:
+    """SIGNAL answers `noop` for a group that is already dead (supervisor
+    protocol, SIGNAL). A leader that has exited and is not yet reaped is a
+    zombie with a matching start token; it is dead. Its live twin is
+    signalled."""
+    sup, _ = queued_supervisor
+    run_dir = short_root / "runs" / "j.1"
+    run_dir.mkdir(parents=True)
+    run = _fake_run(sup, "rid", run_dir)
+    leader = subprocess.Popen(
+        ["/bin/sh", "-c", "read line"], stdin=subprocess.PIPE, process_group=0
+    )
+    try:
+        token = rs.proc_start_token(leader.pid)
+        (run_dir / "spawn.json").write_text(
+            json.dumps(
+                {
+                    "run_id": "rid",
+                    "job": "j",
+                    "run_number": 1,
+                    "command_pid": leader.pid,
+                    "command_pgid": leader.pid,
+                    "command_start_time": token,
+                }
+            )
+        )
+        assert sup._signal_command(run, signal.SIGTERM) == "sent"  # alive: signalled
+        deadline = time.monotonic() + 10.0
+        while not rs.proc_is_zombie(leader.pid):
+            assert time.monotonic() < deadline, "the signalled leader never exited"
+            time.sleep(0.02)
+        assert rs.proc_start_token(leader.pid) == token  # the token alone says ours
+        assert sup._signal_command(run, signal.SIGTERM) == "noop"  # exited, unreaped
+    finally:
+        if leader.stdin is not None:
+            leader.stdin.close()
+        leader.wait(timeout=10)
+
+
 # ------------------------------------------------------ shutdown
 
 
