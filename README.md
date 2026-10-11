@@ -639,6 +639,9 @@ Runner:
 - `src/dsl41/runner_effects.py`: the effect outbox: what the shell intends
   to do to an execution host, recorded before the attempt, in the states
   pending, applied, and indeterminate.
+- `src/dsl41/runner_seal.py`: the seal boundary as a statechart: its
+  declaration, the facts its exception rows read, and the exit each row
+  reports for the engine to carry out.
 - `src/dsl41/runner_hosts.py`: the execution-host routing table: the
   HostCommand vocabulary, eviction's preconditions as a pure function of
   the row, and the genesis seed.

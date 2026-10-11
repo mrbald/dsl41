@@ -684,39 +684,72 @@ stateDiagram-v2
 
 ## seal_boundary
 
+Clock: logical.
+
 ```mermaid
 stateDiagram-v2
-    state "aborted" as s0
-    state "committing" as s1
-    state "frozen" as s2
-    state "requested" as s3
-    state "sealed" as s4
-    state "stopped" as s5
-    [*] --> s3
-    s3 --> s2 : seal_boundary.01 loop turn [the engine leads a lineage, the epoch is current, readiness passes] / freeze admission, park FW polls
-    s2 --> s1 : seal_boundary.02 quiesced [drained, cut off at T, quiescent, and the supervisor proof holds] / commit_boundary (step 8)
-    s1 --> s4 : seal_boundary.03 commit returns / answer the request, raise PeriodSealed
-    s1 --> s0 : seal_boundary.04 exception [before the seal append, the fence is intact, no attempt applying, no input unadmitted, no append unfinished] / abort_boundary, fail the request, C1 carries on
-    s2 --> s0 : seal_boundary.04 exception [before the seal append, the fence is intact, no attempt applying, no input unadmitted, no append unfinished] / abort_boundary, fail the request, C1 carries on
-    s3 --> s0 : seal_boundary.04 exception [before the seal append, the fence is intact, no attempt applying, no input unadmitted, no append unfinished] / abort_boundary, fail the request, C1 carries on
-    s1 --> s5 : seal_boundary.05 exception [the fence is lost] / raise without an abort
-    s2 --> s5 : seal_boundary.05 exception [the fence is lost] / raise without an abort
-    s3 --> s5 : seal_boundary.05 exception [the fence is lost] / raise without an abort
-    s2 --> s5 : seal_boundary.06 exception [an attempt is admitted and not fully applied, an engine-made input is unadmitted, or a WAL append is unfinished] / note why, raise without an abort
-    s1 --> s5 : seal_boundary.07 BoundaryFailStop [past the point of no return] / raise without an abort
-    s2 --> s5 : seal_boundary.08 TransitionStop [the run option on-transition-violation is stop, a drained input's decision is durable] / raise without an abort
-    s0 --> [*]
-    s4 --> [*]
-    s5 --> [*]
+    state "boundary" as s1
+    state s1 {
+        [*] --> s4
+        state "in_flight" as s4
+        state s4 {
+            [*] --> s5
+            state "requested" as s5
+            state "frozen" as s3
+            state "committing" as s2
+        }
+        state "sealed" as s6
+        state "aborted" as s0
+        state "stopped" as s7
+        s6 --> [*]
+        s0 --> [*]
+        s7 --> [*]
+    }
+    s5 --> s3 : seal_boundary.01 parked
+    s3 --> s2 : seal_boundary.02 quiesced
+    s2 --> s6 : seal_boundary.03 committed / answer
+    s4 --> s0 : seal_boundary.04 exception [reversible] / abort
+    s4 --> s7 : seal_boundary.05 exception [fence_lost] / stop
+    s4 --> s7 : seal_boundary.06 exception [in_doubt] / stop_in_doubt
+    s4 --> s7 : seal_boundary.07 exception [past_ponr] / stop
+    s4 --> s7 : seal_boundary.08 exception [transition_stop] / stop
 ```
 
-| Id | Source | Trigger | Guard | Effect | Target | Cite | Mark |
+| Id | Source | Event | Guard | Action | Target | Kind | Cite |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| seal_boundary.01 | requested | loop turn | the engine leads a lineage, the epoch is current, readiness passes | freeze admission, park FW polls | frozen | period-model ss6 step 2, ss8, PR-28c |  |
-| seal_boundary.02 | frozen | quiesced | drained, cut off at T, quiescent, and the supervisor proof holds | commit_boundary (step 8) | committing | period-model ss6 steps 3-8, PR-27 |  |
-| seal_boundary.03 | committing | commit returns |  | answer the request, raise PeriodSealed | sealed | period-model ss7 |  |
-| seal_boundary.04 | committing, frozen, requested | exception | before the seal append, the fence is intact, no attempt applying, no input unadmitted, no append unfinished | abort_boundary, fail the request, C1 carries on | aborted | period-model ss7, PR-28b |  |
-| seal_boundary.05 | committing, frozen, requested | exception | the fence is lost | raise without an abort | stopped | period-model ss7, DL-101, PR-28b |  |
-| seal_boundary.06 | frozen | exception | an attempt is admitted and not fully applied, an engine-made input is unadmitted, or a WAL append is unfinished | note why, raise without an abort | stopped | DL-274 |  |
-| seal_boundary.07 | committing | BoundaryFailStop | past the point of no return | raise without an abort | stopped | period-model ss7 |  |
-| seal_boundary.08 | frozen | TransitionStop | the run option on-transition-violation is stop, a drained input's decision is durable | raise without an abort | stopped | concurrency-model ss4, DL-292 |  |
+| seal_boundary.01 | requested | parked |  |  | frozen | external | period-model ss6 step 2, ss8, PR-28c |
+| seal_boundary.02 | frozen | quiesced |  |  | committing | external | period-model ss6 steps 3-8, PR-27 |
+| seal_boundary.03 | committing | committed |  | answer | sealed | external | period-model ss7 |
+| seal_boundary.04 | in_flight | exception | reversible | abort | aborted | external | period-model ss7, PR-28b |
+| seal_boundary.05 | in_flight | exception | fence_lost | stop | stopped | external | period-model ss7, DL-101, PR-28b |
+| seal_boundary.06 | in_flight | exception | in_doubt | stop_in_doubt | stopped | external | DL-274 |
+| seal_boundary.07 | in_flight | exception | past_ponr | stop | stopped | external | period-model ss7 |
+| seal_boundary.08 | in_flight | exception | transition_stop | stop | stopped | external | concurrency-model ss4, DL-292 |
+| seal_boundary.09 | boundary | parked | over |  |  | ignored | statechart-engine ss10 |
+| seal_boundary.10 | boundary | quiesced | over |  |  | ignored | statechart-engine ss10 |
+| seal_boundary.11 | boundary | committed | over |  |  | ignored | statechart-engine ss10 |
+| seal_boundary.12 | boundary | exception | over |  |  | ignored | statechart-engine ss10 |
+
+| State | In | Entry | Exit | Defers | Waits |
+| --- | --- | --- | --- | --- | --- |
+| boundary |  |  |  |  |  |
+| in_flight | boundary/phase |  |  |  |  |
+| requested | in_flight/phase |  |  |  |  |
+| frozen | in_flight/phase |  |  |  |  |
+| committing | in_flight/phase |  |  |  |  |
+| sealed (final) | boundary/phase |  |  |  |  |
+| aborted (final) | boundary/phase |  |  |  |  |
+| stopped (final) | boundary/phase |  |  |  |  |
+
+| Name | Kind | Prose |
+| --- | --- | --- |
+| past_ponr | guard | The exception is `BoundaryFailStop`: the `seal` append may have begun, so the outcome is unknown and recovery decides (PR-28d). The engine exits 4. Checked first. |
+| transition_stop | guard | The exception is `TransitionStop`: under `--on-transition-violation stop`, an input committed inside the interval recorded a violation, and its decision is durable. That stop is the operator's chosen halt. The engine exits 5 (DL-292, DL-295). |
+| fence_lost | guard | Neither stop type, and the fence is lost: a leader that cannot prove it leads does not reopen admission (DL-101, PR-28b). Checked before DL-274's flags. |
+| in_doubt | guard | Neither stop type, the fence intact, and memory or the WAL in doubt: an attempt admitted during the seal is not fully applied, an engine-made input the drain could not admit would be lost, or a WAL append is unfinished (DL-274). |
+| reversible | guard | Neither stop type, the fence intact, and nothing in doubt: every other exception before the `seal` append. A refusal before the freeze, a phase-2 refusal, the drain's timeout, a late input (`seal_input_after_cutoff`) and a failed sidecar write are among them (PR-28b). |
+| over | guard | The boundary rests in a final state. Nothing posts to it then: an aborted boundary is forgotten at once, a sealed one once the answer has had its turns, and a stop ends the engine. In flight, an event out of order finds no row and raises `UnhandledEvent`. |
+| answer | action | Answer the request with the committed boundary, then raise `PeriodSealed`: the engine exits 3 (PR-30b). |
+| abort | action | Run `abort_boundary` and fail the request with the exception. The abort clears the sealing flag, reopens control admission, restarts scheduler admission and unparks FW polls. It touches no row, and C1 carries on (PR-28b). |
+| stop | action | Re-raise without an abort. The request is not answered. |
+| stop_in_doubt | action | Note which fact stopped the seal, then re-raise without an abort. Neither the request nor an attempt whose answer was owed is answered. Resume repairs the WAL tail and rebuilds from the WAL (DL-274). |

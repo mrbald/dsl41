@@ -374,10 +374,10 @@ replay. Four machines refuse or raise by design instead (DL-297):
   replay, where it stops resume and names the effect (§5, DL-295).
 - `runtime_assembly` raises `OracleError` on a misused verb (DL-293).
 
-The option does not cover three other machines and one move. A violation
-in admission, a subscription, the seal boundary or the outbox's record
-move is not an oracle input, so `stop` does not stop on it. It is one
-line on stderr under the shared violation prefix, and the move proceeds.
+The option does not cover two other machines and one move. A violation
+in admission, a subscription or the outbox's record move is not an
+oracle input, so `stop` does not stop on it. It is one line on stderr
+under the shared violation prefix, and the move proceeds.
 The `host` machine is not among them. Its violations ride the oracle
 channel inside an input's batch, so the option covers them. A logged
 input that raises on replay stops the replay with an error that names it,

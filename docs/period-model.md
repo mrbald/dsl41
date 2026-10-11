@@ -1657,7 +1657,11 @@ to retry it exactly. The lock decides the mode, not a flag:
   still commit;
 - 4 when the answer was `unknown`, or when a `seal_in_flight` refusal names
   this request's own `request_id` (its boundary is still running). It prints
-  the `request_id`, exactly as `sendevent` does.
+  the `request_id`, exactly as `sendevent` does;
+- 7 when a statechart error stopped the offline sealer
+  (`statechart-engine.md` §5). The sealer stops at once and does not abort.
+  Whether the `seal` record was written is what the next verb reads from the
+  lineage.
 
 The live *engine* exits 3 ("sealed; period N+1 is ready to open"), distinct
 from its 0/1/2, so an init system does not restart a sealed engine in a loop
@@ -1853,6 +1857,9 @@ stops the engine with exit 6.
 
 Every other exception still aborts and refuses. Among them are the drain's
 own timeout, and a failure in settling with no unfinished append.
+A statechart error (`statechart-engine.md` §5) is not among them. The seal
+neither aborts nor moves, the request is not answered, and the engine exits
+7 (`concurrency-model.md` §4).
 
 **The `seal` append is the point of no return. A failure there is an
 unknown outcome, not an abort.** The writer flushes the whole line before

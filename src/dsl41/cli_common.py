@@ -369,7 +369,7 @@ def command_outcome(
     from one of the two).
 
     `rejected_as_unknown` is for a surface whose PUBLISHED table has no 3.
-    `dsl41 seal` is the one: period-model ss7 states 0/2/4 for it, and 3 is
+    `dsl41 seal` is the one: period-model ss7 states 0/2/4/7 for it, and 3 is
     taken in that same feature area -- a live ENGINE exits 3 when its
     period sealed, and init units read that number
     (deployment-runbook ss6a). It is a DEFENCE, and the live seal's ladder

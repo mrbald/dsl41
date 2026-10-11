@@ -1,5 +1,6 @@
-"""The engine tier's state machines (DL-289): host routing, admission, the
-effect outbox, the subscription feed and the seal boundary.
+"""The engine tier's table machines (DL-289): host routing, admission, the
+effect outbox and the subscription feed. The seal boundary is a statechart
+now (DL-327), tested in test_seal_boundary_chart.py.
 
 Each machine is registered and well formed, and each new rule has a test
 that triggers it and one that does not: the routing table's transitions and
@@ -25,7 +26,7 @@ from dsl41.machines import MACHINES
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import VIOLATION_MARKER, Event
 from dsl41.period import estate_wal
-from dsl41.runner import SEAL_BOUNDARY, Engine
+from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import (
     ADMISSION,
@@ -72,7 +73,7 @@ from dsl41.state_machine import (
 
 T0 = datetime(2026, 7, 1, 8, 0)
 _JIL = "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\n"
-ENGINE_MACHINES = (HOST, ADMISSION, EFFECT, SUBSCRIPTION, SEAL_BOUNDARY)
+ENGINE_MACHINES = (HOST, ADMISSION, EFFECT, SUBSCRIPTION)
 
 
 @pytest.fixture

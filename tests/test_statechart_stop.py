@@ -14,8 +14,8 @@ import pytest
 
 from dsl41 import runner_admission, runner_journal
 from dsl41.ir import lower_source
-from dsl41.oracle import Oracle
-from dsl41.oracle_state import Event, JobStatus, RuntimeState
+from dsl41.oracle import InputBatch, Oracle
+from dsl41.oracle_state import Event, JobStatus, OracleError, RuntimeState
 from dsl41.period import estate_wal
 from dsl41.runner import Engine, _Pending
 from dsl41.runner_adapters import FakeAdapter
@@ -72,6 +72,115 @@ def test_any_other_fault_is_still_returned_for_classification(
     monkeypatch.setattr(runner_admission, "apply_attempt", apply)
     attempt = Attempt(index=1, at=T0, request_id="engine:1", fingerprint="fp")
     assert isinstance(trial_apply(_Forkable(), attempt), RuntimeError)  # type: ignore[arg-type]
+
+
+_HOLDER = (
+    "insert_resource: R\nres_type: R\namount: 1\n\n"
+    "insert_job: h\njob_type: c\ncommand: x\nmachine: m1\nresources: (R, QUANTITY=1, FREE=A)\n"
+)
+
+
+def _holder_oracle() -> Oracle:
+    """A job running on a unit of R: its success releases the unit."""
+    oracle = Oracle(lower_source(_HOLDER))
+    oracle.feed(Event(at=T0, kind="STARTJOB", payload={"job": "h"}))
+    return oracle
+
+
+def _fail_to_release(monkeypatch: pytest.MonkeyPatch, error: Exception) -> None:
+    """The release raises `error` after the row has landed its terminal status:
+    the batch's cleanup then finds a terminal row that still holds capacity."""
+
+    def release(*args: Any, **kwargs: Any) -> Any:
+        raise error
+
+    monkeypatch.setattr(RuntimeState, "release_reservations", release)
+
+
+def _success() -> Attempt:
+    return Attempt(
+        index=2,
+        at=T0,
+        request_id="engine:2",
+        fingerprint="fp",
+        kind="STATUS",
+        payload={"job": "h", "status": "SUCCESS"},
+    )
+
+
+def test_a_statechart_error_in_a_release_is_not_replaced_by_the_batch_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The batch's cleanup refuses a terminal row that still holds capacity,
+    which would replace the statechart error in flight with an `OracleError`
+    and let the dry apply journal an `engine_apply_faulted` quarantine. The
+    error leaves unchanged, with the cleanup's finding as a note."""
+    oracle = _holder_oracle()
+    error = _error()
+    _fail_to_release(monkeypatch, error)
+    with pytest.raises(UnhandledEvent) as raised:
+        trial_apply(oracle, _success())
+    assert raised.value is error
+    assert any("the batch's cleanup then raised OracleError" in n for n in error.__notes__)
+    with pytest.raises(UnhandledEvent) as classified:
+        classify_fault(oracle, _success())
+    assert classified.value is error  # nothing is returned as a rejection to journal
+
+
+def test_any_other_fault_in_a_release_is_still_replaced_by_the_cleanup_s(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same route with an ordinary fault: today's behaviour, unchanged."""
+    oracle = _holder_oracle()
+    _fail_to_release(monkeypatch, RuntimeError("an ordinary fault"))
+    fault = trial_apply(oracle, _success())
+    assert isinstance(fault, OracleError) and "holds" in str(fault)
+    assert isinstance(fault.__context__, RuntimeError)
+
+
+def _fail_to_commit(monkeypatch: pytest.MonkeyPatch) -> None:
+    def commit(self: Any, *, time_half: bool = False) -> None:
+        raise OracleError("the cleanup's own finding")
+
+    monkeypatch.setattr(InputBatch, "_commit", commit)
+
+
+@pytest.mark.parametrize("fault", [_error(), RuntimeError("an ordinary fault")])
+def test_the_batch_cleanup_on_entry_keeps_only_a_statechart_error(
+    monkeypatch: pytest.MonkeyPatch, fault: Exception
+) -> None:
+    """The time half's cleanup on the way out of `__enter__`: a statechart error
+    in flight survives it, with a note, and any other exception is replaced."""
+    oracle = Oracle(lower_source(_HOLDER))
+
+    def break_clock(*args: Any, **kwargs: Any) -> None:
+        raise fault
+
+    monkeypatch.setattr(Oracle, "_lazy_clock_checks", break_clock)
+    _fail_to_commit(monkeypatch)
+    with pytest.raises(Exception) as raised:
+        oracle.batch(T0).__enter__()
+    if isinstance(fault, StatechartError):
+        assert raised.value is fault
+        assert any("the cleanup's own finding" in n for n in fault.__notes__)
+    else:
+        assert isinstance(raised.value, OracleError) and raised.value is not fault
+
+
+@pytest.mark.parametrize("fault", [_error(), RuntimeError("an ordinary fault")])
+def test_the_batch_cleanup_on_exit_keeps_only_a_statechart_error(
+    monkeypatch: pytest.MonkeyPatch, fault: Exception
+) -> None:
+    """The same for `__exit__`, where the attempt half raised."""
+    oracle = Oracle(lower_source(_HOLDER))
+    _fail_to_commit(monkeypatch)
+    with pytest.raises(Exception) as raised, oracle.batch(T0):
+        raise fault
+    if isinstance(fault, StatechartError):
+        assert raised.value is fault
+        assert any("the cleanup's own finding" in n for n in fault.__notes__)
+    else:
+        assert isinstance(raised.value, OracleError) and raised.value is not fault
 
 
 def _raise_on_running(monkeypatch: pytest.MonkeyPatch) -> None:

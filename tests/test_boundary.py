@@ -1668,51 +1668,49 @@ def test_a_committed_seal_releases_the_one_boundary_slot(tmp_path: Path) -> None
     _close(engine)
 
 
-class _BrokenStderr:
-    """A stderr whose consumer has gone: every write is a broken pipe."""
-
-    def write(self, _text: str) -> int:
-        raise BrokenPipeError(32, "Broken pipe")
-
-    def flush(self) -> None:
-        raise BrokenPipeError(32, "Broken pipe")
-
-
-def test_a_violation_on_the_seal_abort_arm_with_a_broken_stderr_still_answers(
+def test_a_guard_gap_in_the_seal_chart_stops_the_engine_and_the_boundary_does_not_move(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The abort exit reports a broken declared transition on stderr, best
-    effort: with stderr gone, the report is dropped, the refusal still
-    answers the request, and C1 carries on."""
-    import sys
+    """The seal chart's own selection error is a statechart error like any
+    other (DL-327). A copy of the chart with no row for a reversible
+    exception leaves a refusal in `frozen` unhandled: the engine stops with
+    `UnhandledEvent`, nothing aborts, the barrier stays parked, the boundary
+    stays `frozen`, the request is not answered, and no `seal` record is
+    written. Where the table took a declared transition and reported a
+    missing one on stderr, the chart is the skeleton."""
+    from dataclasses import replace
 
     from dsl41 import runner
-    from dsl41.state_machine import HITS_ENV, STRICT_ENV, StateMachine
+    from dsl41.state_machine import HITS_ENV, STRICT_ENV, UnhandledEvent
 
     directory = tmp_path / "hits"
     directory.mkdir()
-    monkeypatch.setenv(HITS_ENV, str(directory))  # the deliberate violation stays here
+    monkeypatch.setenv(HITS_ENV, str(directory))  # the gap's hits stay here
     monkeypatch.delenv(STRICT_ENV, raising=False)
-    table = runner.SEAL_BOUNDARY
-    monkeypatch.setattr(
-        runner,
-        "SEAL_BOUNDARY",
-        StateMachine(
-            name=table.name,
-            states=table.states,
-            initial=table.initial,
-            finals=table.finals,
-            transitions=tuple(t for t in table.transitions if t.id != "seal_boundary.04"),
-        ),
-    )
+    chart = runner.SEAL_BOUNDARY
+    rows = tuple(row for row in chart.rows if row.id != "seal_boundary.04")
+    monkeypatch.setattr(runner, "SEAL_BOUNDARY", replace(chart, rows=rows))
     run_root = tmp_path / "run"
     engine = _genesis(run_root)
-    monkeypatch.setattr(sys, "stderr", _BrokenStderr())
-    stale = _request(engine, _stage(run_root, C2_JIL), epoch=engine.epoch + 1)
-    refusal = asyncio.run(_refusal(engine, stale))
-    assert refusal.code == "stale_epoch"
-    assert engine._seal is None and engine.sealing is False
-    assert "seal_boundary.04" in next(directory.glob("violations-*.jsonl")).read_text()
+
+    async def not_quiescent(_estate: Any) -> None:
+        raise EngineError("not quiescent", code="seal_not_quiescent")
+
+    aborts: list[bool] = []
+    monkeypatch.setattr(engine, "_await_quiescence", not_quiescent)
+    monkeypatch.setattr(engine, "abort_boundary", lambda: aborts.append(True))
+
+    async def scenario() -> tuple[Any, Any]:
+        future = engine.submit_seal(_request(engine, _stage(run_root, C2_JIL)))
+        pending = engine._seal
+        with pytest.raises(UnhandledEvent, match="no row and no deferral for exception"):
+            await engine.run_until_quiescent(T0)
+        return future, pending
+
+    future, pending = asyncio.run(scenario())
+    assert not future.done() and aborts == []
+    assert engine.sealing and engine._seal_phase(pending) == "frozen"
+    assert all(record["rec"] != "seal" for record in read_journal(wal_path(run_root, 1)))
     _close(engine)
 
 
