@@ -1490,22 +1490,22 @@ Decisions to make once, per site:
   new baseline must not. Never automate the choice of run root: a new
   baseline is an operator action (§6).
 - **Reaping.** Run the engine and the supervisor under an init that reaps
-  orphaned processes. systemd as PID 1 does. In a container, use
+  orphaned processes (DL-319). systemd as PID 1 does. In a container, use
   `docker run --init` or an equivalent. A live supervisor reaps its
   wrappers, and on Linux also the commands of wrappers that died. A live
   tethered engine reaps its own wrappers. Once the supervisor or a
   tethered engine is gone, its wrappers and their commands pass to PID 1,
   or to the nearest subreaper. A process that has exited and is not
-  reaped stays a zombie. When dsl41 finds a run with no status record, its
-  liveness check counts a zombie as alive. That check runs at resume, and
-  in a live engine that has lost its supervisor. For a command that has
-  already exited, dsl41 then signals the command's process group and
-  records the run as `TERMINATED` ("wrapper lost; killed at resume"). It
-  would otherwise record `FAILURE` with an exit status it could not
-  observe. A `t()` condition tests the first and an `f()` condition the
-  second, so a downstream job can start, or stay put, when it should not.
-  Each such run also waits out the settle and grace windows, up to 25 s
-  with the defaults (DL-319).
+  reaped stays a zombie and keeps its slot in the process table. When
+  dsl41 finds a run with no status record, its liveness check counts a
+  zombie as dead, as it counts a reaped process (DL-322). That check runs
+  at resume, and in a live engine that has lost its supervisor. A command
+  that has already exited is recorded `FAILURE` with an exit status dsl41
+  could not observe, with or without a reaping init. dsl41 does not
+  signal its process group, so a member still running there is left
+  alone. The same check decides a kill, through the engine or through the
+  supervisor: the group of a command that has already exited, a zombie
+  included, gets no signal.
 
 A detached supervisor stays in the cgroup of the process that started it
 (DL-210). `setsid` does not move it out. Choose one of these

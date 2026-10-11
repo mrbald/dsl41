@@ -362,7 +362,8 @@ Duties:
    identity check uses the **(pid, start-time)** tuple from spawn.json
    instead (`ps -o lstart=` / `/proc/<pid>/stat` starttime, ±2s tolerance
    on macOS's 1-second resolution). Never signal a pid that fails this
-   check — the PID-reuse guard.
+   check — the PID-reuse guard. A zombie (exited, not yet reaped) fails it
+   too: its token still matches, but it is dead (DL-322).
 4. Portable event loop: SIGCHLD self-pipe + `waitpid(WNOHANG)`, with
    `select` over {self-pipe, lifeline}. The self-pipe is also the
    interpreter's wakeup fd (`signal.set_wakeup_fd`), written at signal
@@ -703,7 +704,8 @@ unchanged.
    directly. Otherwise, per incomplete run, in order:
    - Wrapper alive per the (pid, start-time) check → the wrapper is
      mid-grace. Allow a short settle window for its `status.json` to
-     land.
+     land. A wrapper found dead, a zombie included, gets one more read of
+     `status.json`, since it may have written it just before it died.
    - `status.json` present → inject the real completion (raw exit_code
      through SEM-09 as usual, recorded signal/parent-lost → TERMINATED).
      Inject it at `max(ended_at, last journal at)`, with the true
@@ -712,9 +714,13 @@ unchanged.
      alive and silent past the settle window plus the grace → verify the
      group leader's (pid, start-time), SIGTERM the pgid, then SIGKILL the
      pgid once the leader has died or the grace has passed (DL-226; the
-     vendor's default cancel signals the process group too). A group
-     whose leader is already dead is not signalled: E7. Inject `STATUS TERMINATED` cause `wrapper lost; killed at resume` (a
-     kill that actually happened; TERMINATED is truthful).
+     vendor's default cancel signals the process group too). Inject
+     `STATUS TERMINATED` cause `wrapper lost; killed at resume` (a kill
+     that actually happened; TERMINATED is truthful). A group whose leader
+     is already dead is not signalled, and its run takes the E7 bullet
+     below: `FAILURE`, never TERMINATED. A zombie leader (exited, not yet
+     reaped) is dead, so a member still running in its group is not
+     signalled either (DL-322).
    - A SUPERVISED run whose durable effect bound a `run_id` and whose spool
      holds neither `spawn.json` nor `status.json` → the SPAWN is
      **replayed** (DL-129): period-model §11a made it idempotent, so the

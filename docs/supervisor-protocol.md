@@ -243,6 +243,8 @@ crash.
   is `lstart:<ps -o lstart= output>`, compared within ±2 s, because ps
   rounds to whole seconds. **If the live token of a pid does not match the
   recorded token, never signal that pid** (PID-reuse guard, DL-41a item 5).
+  A zombie (exited, not yet reaped) is not alive for this guard, although
+  its token still matches: it is already dead (DL-322).
 - `command_pgid == command_pid`: the command leads its own process group.
   The wrapper is NOT a member of this group, so that a group kill can never
   kill the recorder before the recorder writes its record (DL-41a item 2).

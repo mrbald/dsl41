@@ -12,6 +12,9 @@ from __future__ import annotations
 
 import io
 import os
+import subprocess
+import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -29,10 +32,11 @@ def _platform(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
     monkeypatch.setattr(procid, "sys", SimpleNamespace(platform=name))
 
 
-def _stat_line(pid: int, comm: str, state: str, start: str) -> bytes:
-    """A /proc/<pid>/stat line. Field 3 is the state, field 22 the start
-    ticks; fields 4..21 are filler."""
-    filler = " ".join("0" for _ in range(4, 22))
+def _stat_line(pid: int, comm: str, state: str, start: str, threads: str = "1") -> bytes:
+    """A /proc/<pid>/stat line. Field 3 is the state, field 20 the thread
+    count, field 22 the start ticks; the other fields from 4 to 21 are
+    filler."""
+    filler = " ".join(threads if n == 20 else "0" for n in range(4, 22))
     return f"{pid} ({comm}) {state} {filler} {start} 0 0\n".encode("ascii")
 
 
@@ -47,6 +51,15 @@ def _fake_open(content: bytes | str | None) -> Any:
         return io.StringIO(content)
 
     return opener
+
+
+def _wait_for(predicate: Any, timeout_s: float = 10.0) -> None:
+    """Poll until `predicate()` is truthy. Loud on timeout."""
+    deadline = time.monotonic() + timeout_s
+    while not predicate():
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"timed out after {timeout_s}s waiting for {predicate}")
+        time.sleep(0.02)
 
 
 def _fake_run(returncode: int, stdout: str) -> Any:
@@ -282,11 +295,166 @@ def test_procid_verify_alive_handles_gone_foreign_and_reused_pids(
     assert procid.verify_alive(5, "ticks:1") is False
 
     monkeypatch.setattr(procid.os, "kill", foreign)
-    monkeypatch.setattr(procid, "proc_start_token", lambda pid: "ticks:1")
+    monkeypatch.setattr(procid, "_proc_look", lambda pid: ("ticks:1", False))
     assert procid.verify_alive(5, "ticks:1") is True
     assert procid.verify_alive(5, "ticks:2") is False
-    monkeypatch.setattr(procid, "proc_start_token", lambda pid: None)
+    monkeypatch.setattr(procid, "_proc_look", lambda pid: None)
     assert procid.verify_alive(5, "ticks:1") is False
+
+
+def test_procid_verify_alive_linux_counts_a_zombie_as_dead(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A zombie keeps its /proc entry and its start ticks until it is
+    reaped, so the token alone reads it as ours. State `Z` with one task
+    left makes it dead. `Z` with two tasks is a live process whose main
+    thread exited: alive. Any other state with the right token is alive, and
+    the wrong token is not ours whatever the state."""
+    _platform(monkeypatch, "linux")
+    monkeypatch.setattr(procid.os, "kill", lambda pid, sig: None)
+
+    def stat(state: str, threads: str = "1") -> None:
+        line = _stat_line(7, "sh", state, "4242", threads)
+        monkeypatch.setattr(procid, "open", _fake_open(line), raising=False)
+
+    stat("Z")
+    assert procid.verify_alive(7, "ticks:4242") is False
+    assert procid.proc_is_zombie(7) is True
+    stat("Z", threads="2")
+    assert procid.verify_alive(7, "ticks:4242") is True
+    assert procid.proc_is_zombie(7) is False
+    stat("S")
+    assert procid.verify_alive(7, "ticks:4242") is True
+    assert procid.verify_alive(7, "ticks:4243") is False
+    monkeypatch.setattr(procid, "open", _fake_open(None), raising=False)
+    assert procid.verify_alive(7, "ticks:4242") is False  # gone after kill(0)
+
+
+def test_procid_linux_zombie_without_a_thread_count_reads_by_its_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stat line cut short before field 20 has no count to read; its state
+    decides, as it did before the count was read."""
+    _platform(monkeypatch, "linux")
+    monkeypatch.setattr(procid, "open", _fake_open(b"9 (x) Z 1 1"), raising=False)
+    assert procid.proc_is_zombie(9) is True
+
+
+def test_procid_verify_alive_macos_counts_a_zombie_as_dead(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The macOS arm: one `ps -o stat=,lstart=` gives the state and the
+    token. A stat starting with Z is dead; any other stat with a token in
+    the tolerance is alive; a token outside it is not ours; no row is
+    gone."""
+    _platform(monkeypatch, "darwin")
+    monkeypatch.setattr(procid.os, "kill", lambda pid, sig: None)
+    lstart = "Mon Jan  1 00:00:00 2001"
+    monkeypatch.setattr(procid.subprocess, "run", _fake_run(0, f"Z    {lstart}    \n"))
+    assert procid.verify_alive(7, f"lstart:{lstart}") is False
+    monkeypatch.setattr(procid.subprocess, "run", _fake_run(0, f"S+   {lstart}    \n"))
+    assert procid.verify_alive(7, f"lstart:{lstart}") is True
+    assert procid.verify_alive(7, "lstart:Mon Jan  1 00:00:05 2001") is False
+    monkeypatch.setattr(procid.subprocess, "run", _fake_run(1, ""))
+    assert procid.verify_alive(7, f"lstart:{lstart}") is False
+    monkeypatch.setattr(procid.subprocess, "run", _fake_run(0, "Z\n"))
+    assert procid.verify_alive(7, f"lstart:{lstart}") is False
+
+
+def test_procid_verify_alive_a_reap_after_the_first_look_cannot_read_a_zombie_alive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first look finds a zombie with the right token; the pid is reaped
+    before any later look. With the token and the state read in two looks,
+    the second found nothing, answered "not a zombie", and the gone pid read
+    alive. One look decides both. Linux (/proc) and macOS (`ps`) arms."""
+    _platform(monkeypatch, "linux")
+    monkeypatch.setattr(procid.os, "kill", lambda pid, sig: None)
+    looks: list[str] = []
+
+    def stat_then_reaped(path: str, mode: str = "r", encoding: str | None = None) -> Any:
+        looks.append(path)
+        if len(looks) > 1:
+            raise FileNotFoundError(path)  # reaped after the first look
+        return io.BytesIO(_stat_line(7, "sh", "Z", "4242"))
+
+    monkeypatch.setattr(procid, "open", stat_then_reaped, raising=False)
+    assert procid.verify_alive(7, "ticks:4242") is False
+
+    _platform(monkeypatch, "darwin")
+    lstart = "Mon Jan  1 00:00:00 2001"
+    calls: list[str] = []
+
+    def ps_then_reaped(argv: list[str], **kwargs: Any) -> Any:
+        column = argv[argv.index("-o") + 1]
+        calls.append(column)
+        if len(calls) > 1:
+            return SimpleNamespace(returncode=1, stdout="")  # reaped
+        rows = {"lstart=": lstart, "stat=": "Z", "stat=,lstart=": f"Z    {lstart}"}
+        return SimpleNamespace(returncode=0, stdout=rows[column] + "\n")
+
+    monkeypatch.setattr(procid.subprocess, "run", ps_then_reaped)
+    assert procid.verify_alive(7, f"lstart:{lstart}") is False
+    assert calls == ["stat=,lstart="]  # one fork per check, as before this change
+
+
+def test_procid_verify_alive_a_real_zombie_is_dead_and_a_live_child_is_alive() -> None:
+    """A real child on the host: alive with its own token, not ours with
+    another, and dead once it has exited, although this process has not
+    reaped it and its start token still matches."""
+    child = subprocess.Popen(["/bin/sh", "-c", "read line"], stdin=subprocess.PIPE)
+    try:
+        token = procid.proc_start_token(child.pid)
+        assert token is not None
+        other = "ticks:1" if token.startswith("ticks:") else "lstart:Mon Jan  1 00:00:00 2001"
+        assert procid.verify_alive(child.pid, token) is True
+        assert procid.verify_alive(child.pid, other) is False
+        assert child.stdin is not None
+        child.stdin.close()  # `read` sees EOF and the shell exits on its own
+        _wait_for(lambda: procid.proc_is_zombie(child.pid))
+        assert procid.proc_start_token(child.pid) == token  # the token alone says ours
+        assert procid.verify_alive(child.pid, token) is False
+    finally:
+        if child.stdin is not None and not child.stdin.closed:
+            child.stdin.close()
+        child.wait(timeout=10)
+
+
+#: Starts a worker that waits for stdin EOF and then ends the process, and
+#: ends the MAIN thread with pthread_exit. The process lives on in the worker.
+_MAIN_THREAD_EXITS = """
+import ctypes, os, sys, threading
+def worker():
+    sys.stdin.buffer.read()
+    os._exit(0)
+threading.Thread(target=worker).start()
+ctypes.CDLL(None).pthread_exit(None)
+"""
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc thread states")
+def test_procid_verify_alive_linux_a_live_process_whose_main_thread_exited_is_alive() -> None:
+    """Linux shows the thread-group leader's state for the process, so a
+    process whose main thread called pthread_exit reads `Z` while its other
+    threads run. It is alive: two tasks are left. Once the last thread ends
+    the process, it is a real zombie, one task, and dead."""
+    child = subprocess.Popen([sys.executable, "-c", _MAIN_THREAD_EXITS], stdin=subprocess.PIPE)
+    try:
+        token = procid.proc_start_token(child.pid)
+        assert token is not None
+        _wait_for(lambda: (procid._linux_stat_fields(child.pid) or ["?"])[0] == "Z")
+        with open(f"/proc/{child.pid}/status", encoding="ascii") as f:
+            assert "Threads:\t2\n" in f.read()  # the worker still runs
+        assert procid.proc_is_zombie(child.pid) is False
+        assert procid.verify_alive(child.pid, token) is True
+        assert child.stdin is not None
+        child.stdin.close()  # the worker sees EOF and ends the process
+        _wait_for(lambda: procid.proc_is_zombie(child.pid))
+        assert procid.verify_alive(child.pid, token) is False
+    finally:
+        if child.stdin is not None and not child.stdin.closed:
+            child.stdin.close()
+        child.wait(timeout=10)
 
 
 def test_procid_killpg_quiet_swallows_only_a_gone_group(

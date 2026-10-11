@@ -288,26 +288,52 @@ def current_boot_id() -> str:
     return "unknown"
 
 
-def proc_start_token(pid: int) -> str | None:
-    """Opaque start-time token for the (pid, start-time) PID-reuse guard, or
-    None when the pid is gone. Linux: tick-exact starttime, field 22 of
-    /proc/<pid>/stat (split after the LAST ')' -- comm may contain spaces and
-    parens). macOS: ``ps -o lstart=`` under LC_ALL=C, 1-second resolution."""
-    if sys.platform.startswith("linux"):
-        try:
-            with open(f"/proc/{pid}/stat", "rb") as f:
-                raw = f.read().decode("ascii", "replace")
-        except OSError:
-            return None
-        fields = raw.rsplit(")", 1)[1].split()
-        return f"ticks:{fields[19]}"  # fields[0] is field 3 overall
-    out = subprocess.run(
-        ["ps", "-o", "lstart=", "-p", str(pid)],
+def _linux_stat_fields(pid: int) -> list[str] | None:
+    """The fields of /proc/<pid>/stat after the comm, in one read, or None
+    when the pid is gone. Split after the LAST ')': comm may contain spaces
+    and parens. fields[0] is field 3 overall (the state), so field N is
+    fields[N - 3]."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            raw = f.read().decode("ascii", "replace")
+    except OSError:
+        return None
+    return raw.rsplit(")", 1)[1].split()
+
+
+def _linux_zombie(fields: list[str]) -> bool:
+    """State `Z` with at most one task left. The state is the thread-group
+    leader's, so a live process whose main thread has exited (pthread_exit
+    while other threads run) also shows `Z`; it still counts its threads in
+    field 20, the counter /proc/<pid>/status prints as `Threads:`. A stat
+    line without that field is read by its state alone."""
+    if not fields or fields[0] != "Z":
+        return False
+    try:
+        return int(fields[17]) <= 1
+    except (IndexError, ValueError):
+        return True
+
+
+def _ps(pid: int, columns: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["ps", "-o", columns, "-p", str(pid)],
         capture_output=True,
         text=True,
         env={**os.environ, "LC_ALL": "C"},
         check=False,
     )
+
+
+def proc_start_token(pid: int) -> str | None:
+    """Opaque start-time token for the (pid, start-time) PID-reuse guard, or
+    None when the pid is gone. Linux: tick-exact starttime, field 22 of
+    /proc/<pid>/stat. macOS: ``ps -o lstart=`` under LC_ALL=C, 1-second
+    resolution."""
+    if sys.platform.startswith("linux"):
+        fields = _linux_stat_fields(pid)
+        return None if fields is None else f"ticks:{fields[19]}"
+    out = _ps(pid, "lstart=")
     lstart = out.stdout.strip()
     if out.returncode != 0 or not lstart:
         return None
@@ -318,25 +344,33 @@ def proc_is_zombie(pid: int) -> bool:
     """Whether `pid` is a zombie: exited, unreaped, holding no descriptors
     and no locks. A zombie still has a /proc entry and a `ps` row, so the
     start-token guard would read it as the recorded live owner; the
-    supervisor's reclaim treats it as absent (DL-210). Linux: the state
-    field is the first field after the last ')' in /proc/<pid>/stat. macOS:
-    `ps -o stat=` starts with Z."""
+    supervisor's reclaim treats it as absent (DL-210). Linux: state `Z` with
+    one task left (`_linux_zombie`). macOS: `ps -o stat=` starts with Z; a
+    live process whose main thread exited does not show Z there."""
     if sys.platform.startswith("linux"):
-        try:
-            with open(f"/proc/{pid}/stat", "rb") as f:
-                raw = f.read().decode("ascii", "replace")
-        except OSError:
-            return False
-        fields = raw.rsplit(")", 1)[1].split()
-        return bool(fields) and fields[0] == "Z"
-    out = subprocess.run(
-        ["ps", "-o", "stat=", "-p", str(pid)],
-        capture_output=True,
-        text=True,
-        env={**os.environ, "LC_ALL": "C"},
-        check=False,
-    )
+        fields = _linux_stat_fields(pid)
+        return fields is not None and _linux_zombie(fields)
+    out = _ps(pid, "stat=")
     return out.returncode == 0 and out.stdout.strip().startswith("Z")
+
+
+def _proc_look(pid: int) -> tuple[str, bool] | None:
+    """(start token, zombie) from ONE look at the process, or None when it
+    is gone. One read, so a reap cannot fall between the token and the state:
+    with two, a pid reaped after its token was read had no state left to
+    read and passed for a live process. Linux: one /proc/<pid>/stat read.
+    macOS: one ``ps -o stat=,lstart=`` (stat has no spaces; lstart is the
+    rest of the line)."""
+    if sys.platform.startswith("linux"):
+        fields = _linux_stat_fields(pid)
+        if fields is None:
+            return None
+        return f"ticks:{fields[19]}", _linux_zombie(fields)
+    out = _ps(pid, "stat=,lstart=")
+    parts = out.stdout.strip().split(None, 1)
+    if out.returncode != 0 or len(parts) != 2:
+        return None
+    return f"lstart:{parts[1]}", parts[0].startswith("Z")
 
 
 _LSTART_FORMAT = "%a %b %d %H:%M:%S %Y"
@@ -381,15 +415,25 @@ def start_tokens_match(a: str, b: str, *, tolerance_s: float = 2.0) -> bool:
 
 def verify_alive(pid: int, recorded_token: str) -> bool:
     """The PID-reuse guard: a pid is only 'ours' if it exists AND its start
-    time matches the recorded token. Never signal a pid that fails this."""
+    time matches the recorded token. Never signal a pid that fails this.
+
+    A zombie is not alive. It has exited, and its token still matches until
+    its parent reaps it, so without this check an exited command read as a
+    live one wherever no init reaped it. The supervisor's owner check uses
+    the same zombie test (DL-210). The token and the state come from one
+    look (`_proc_look`), so a reap between two reads cannot pass a gone pid
+    as alive."""
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         pass  # exists under another uid; the token check decides
-    token = proc_start_token(pid)
-    return token is not None and start_tokens_match(token, recorded_token)
+    look = _proc_look(pid)
+    if look is None:
+        return False
+    token, zombie = look
+    return start_tokens_match(token, recorded_token) and not zombie
 
 
 # --------------------------------------------------------------- process group
