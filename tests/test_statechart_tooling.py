@@ -631,6 +631,69 @@ def test_the_ring_buffer_keeps_the_declared_number_of_microsteps() -> None:
     assert len(steps) == 2 and "recent microsteps: 2, oldest first" in str(raised.value)
 
 
+def test_the_report_keeps_the_ring_of_the_machine_that_raised() -> None:
+    """Each machine keeps its own ring: many steps of another machine on the
+    same executor do not evict the steps that led up to the error."""
+    executor = _pick(history=4)
+    other = Statechart(
+        "other",
+        State("other", regions=(Region("main", "s", (State("s"),)),)),
+        (Row("other.01", "s", "tick", kind="internal"),),
+        clock="logical",
+    )
+    executor.restore("o", other, {"other", "s"})
+    executor.dispatch("p", Event("tick"))
+    for n in range(10):
+        executor.dispatch("o", Event("tick", n))
+    with pytest.raises(AmbiguousTransition) as raised:
+        executor.dispatch("p", Event("go"))
+    lines = str(raised.value).splitlines()
+    assert lines[lines.index("recent microsteps: 1, oldest first") + 1 :] == [
+        "microstep: 'p' tick fired rows pick.03 depth 0",
+    ]
+
+
+class _CountingInstances(dict[Any, Any]):
+    """An executor's instance table that counts every instance it hands out."""
+
+    visits = 0
+
+    def __getitem__(self, key: Any) -> Any:
+        self.visits += 1
+        return super().__getitem__(key)
+
+    def items(self) -> Any:
+        for pair in super().items():
+            self.visits += 1
+            yield pair
+
+    def values(self) -> Any:
+        for value in super().values():
+            self.visits += 1
+            yield value
+
+    def __iter__(self) -> Any:
+        for key in super().__iter__():
+            self.visits += 1
+            yield key
+
+
+def _visits_of_one_dispatch(quiet: int) -> int:
+    executor = _pick()
+    chart = executor._instances["p"].chart
+    for n in range(quiet):
+        executor.restore(n, chart, {"pick", "s"})
+    executor._instances = counting = _CountingInstances(executor._instances)
+    executor.dispatch("p", Event("tick"))
+    return counting.visits
+
+
+def test_a_dispatch_visits_no_quiet_instance() -> None:
+    """The deferred release scans only the instances with a deferred event, so a
+    dispatch costs the same beside five or five thousand quiet instances."""
+    assert _visits_of_one_dispatch(5) == _visits_of_one_dispatch(5000) < 10
+
+
 def test_an_error_outside_a_run_is_its_message_alone() -> None:
     with pytest.raises(StatechartError) as raised:
         Executor().post("nobody", Event("go"))

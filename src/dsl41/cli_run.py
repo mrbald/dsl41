@@ -42,7 +42,7 @@ from dsl41.cli_common import (
 from dsl41.ir import CatalogIR
 from dsl41.period import root_is_unused
 
-from dsl41.state_machine import EXIT_STATECHART_ERROR, StatechartError
+from dsl41.state_machine import EXIT_STATECHART_ERROR, STATECHART_LOG_PREFIX, StatechartError
 
 if TYPE_CHECKING:
     import asyncio
@@ -946,77 +946,116 @@ async def _serve_run(
             return refuse(exc)
         typer.echo(f"engine up; control socket: {server.path}")
         loop_task = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
+        # a control handler's StatechartError stops the run as one from the
+        # loop does (statechart-engine ss5): the handler cancels the loop at
+        # once, so it takes no further step, and the run wakes on `failed`
+        server.on_statechart_error = loop_task.cancel
         stop_task = asyncio.ensure_future(stop.wait())
+        failed_task = asyncio.ensure_future(server.failed.wait())
         ui_task: asyncio.Task[Any] | None = None
         tui = None
         if ui:
             tui, ui_task = _attach_tui(server.path, owns_run=True)
-        waiters = {loop_task, stop_task} | ({ui_task} if ui_task is not None else set())
+        waiters = {loop_task, stop_task, failed_task}
+        waiters |= {ui_task} if ui_task is not None else set()
         done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
         stop_task.cancel()
-        tui_failure = _tui_failure(tui, ui_task, done)
-        if tui is not None and ui_task is not None and ui_task not in done:
-            tui.exit()  # engine crash or signal: detach the viewer first
-            with contextlib.suppress(Exception):
-                await ui_task
-        # detach-stop (spec ss3 case b): teardown must NOT kill jobs -- the flag
-        # makes the SupervisedCommandAdapter abandon its await instead of signaling.
-        # Set before any adapter-task cancel; in-run oracle kills already happened
-        # while the loop ran (stopping was False then).
-        if detached:
-            engine.detach.stopping = True
+        failed_task.cancel()
         code = 0
-        sealed = loop_task in done and isinstance(loop_task.exception(), PeriodSealed)
-        if sealed:
-            # ss7: a committed boundary is a SUCCESSFUL terminal outcome, and
-            # its code is its own -- distinct from 0/1/2, so an init system does
-            # not restart-loop a sealed engine, and distinct from the crash
-            # branch below, which `hold_open` makes the only other way this loop
-            # can return. Detached work is NOT signalled: `detach.stopping` is
-            # already set above, so the supervised adapter abandons its await
-            # instead of killing a run the next period will reattach (PR-30b).
-            typer.echo(str(loop_task.exception()))
-            say_next(run_root, anchor_dir)
-            code = 3
-            loop_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, PeriodSealed):
-                await loop_task
-        elif loop_task in done and isinstance(loop_task.exception(), TransitionStop):
-            # the operator's chosen halt, not a crash: its own code keeps the
-            # unit down until someone reads the trace (concurrency-model ss4)
-            typer.echo(f"engine stopped: {loop_task.exception()}", err=True)
-            code = EXIT_TRANSITION_STOP
-        elif loop_task in done and isinstance(loop_task.exception(), TimeHalfStop):
-            # not a crash: a restart meets the same timers, so its own code
-            # keeps the unit down until a fixed build runs (concurrency-model ss4)
-            typer.echo(f"engine stopped: {loop_task.exception()}", err=True)
-            code = EXIT_TIME_HALF_STOP
-        elif loop_task in done and isinstance(loop_task.exception(), StatechartError):
-            # an assertion failure, not a crash: every line of its report goes
-            # out under one prefix, and its own code keeps the unit down until
-            # a fixed build runs (docs/statechart-engine.md ss5)
-            failure = loop_task.exception()
-            assert isinstance(failure, StatechartError)  # narrowed above
-            code = statechart_report(failure)
-        elif loop_task in done:  # hold_open never quiesces: this is a crash
-            typer.echo(f"engine failed: {loop_task.exception()}", err=True)
-            code = 1
-        else:
-            # operator stop: a signal, or quitting the attached TUI (ss11 --ui
-            # tethers the run to this terminal; viewers that must not stop the
-            # run attach with `dsl41 ui` instead)
-            if tui_failure is not None:
-                typer.echo(f"TUI failed: {tui_failure}", err=True)
-                code = 1
+        sealed = False
+        try:
+            tui_failure = _tui_failure(tui, ui_task, done)
+            if tui is not None and ui_task is not None and ui_task not in done:
+                tui.exit()  # engine crash or signal: detach the viewer first
+                with contextlib.suppress(Exception):
+                    await ui_task
+            # detach-stop (spec ss3 case b): teardown must NOT kill jobs -- the
+            # flag makes the SupervisedCommandAdapter abandon its await instead
+            # of signaling. Set before any adapter-task cancel; in-run oracle
+            # kills already happened while the loop ran (stopping was False then).
             if detached:
-                typer.echo("stopping: jobs continue under the supervisor (detached, ss6a)")
+                engine.detach.stopping = True
+            # how the loop ended, if it did on its own; a loop the server
+            # cancelled ended for the server's error, read below
+            ended = loop_task in done and not loop_task.cancelled()
+            outcome = loop_task.exception() if ended else None
+            sealed = isinstance(outcome, PeriodSealed)
+            if sealed:
+                # ss7: a committed boundary is a SUCCESSFUL terminal outcome,
+                # and its code is its own -- distinct from 0/1/2, so an init
+                # system does not restart-loop a sealed engine, and distinct
+                # from the crash branch below, which `hold_open` makes the only
+                # other way this loop can return. Detached work is NOT
+                # signalled: `detach.stopping` is already set above, so the
+                # supervised adapter abandons its await instead of killing a
+                # run the next period will reattach (PR-30b). `say_next` runs
+                # after the teardown, below any report the server adds.
+                typer.echo(str(outcome))
+                code = 3
+            elif isinstance(outcome, TransitionStop):
+                # the operator's chosen halt, not a crash: its own code keeps
+                # the unit down until someone reads the trace (concurrency-model ss4)
+                typer.echo(f"engine stopped: {outcome}", err=True)
+                code = EXIT_TRANSITION_STOP
+            elif isinstance(outcome, TimeHalfStop):
+                # not a crash: a restart meets the same timers, so its own code
+                # keeps the unit down until a fixed build runs (concurrency-model ss4)
+                typer.echo(f"engine stopped: {outcome}", err=True)
+                code = EXIT_TIME_HALF_STOP
+            elif isinstance(outcome, StatechartError):
+                # an assertion failure, not a crash: every line of its report
+                # goes out under one prefix, and its own code keeps the unit
+                # down until a fixed build runs (docs/statechart-engine.md ss5)
+                code = statechart_report(outcome)
+            elif server.statechart_error is not None:
+                # the same report and exit for one a control handler met; the
+                # handler sent no reply, hung up and cancelled the loop
+                code = statechart_report(server.statechart_error)
+                # never a raw await: a loop that crashed in the same instant
+                # must not skip the teardown or the report's precedence
+                loop_task.cancel()
+                await asyncio.wait({loop_task})
+                if not loop_task.cancelled() and loop_task.exception() is not None:
+                    typer.echo(f"engine failed: {loop_task.exception()}", err=True)
+            elif ended:  # hold_open never quiesces: this is a crash
+                typer.echo(f"engine failed: {outcome}", err=True)
+                code = 1
             else:
-                typer.echo("stopping: cancelling live jobs (wrappers record the kills, ss6a)")
-            loop_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await loop_task
-        await server.close()
-        await engine.shutdown()
+                # operator stop: a signal, or quitting the attached TUI (ss11
+                # --ui tethers the run to this terminal; viewers that must not
+                # stop the run attach with `dsl41 ui` instead)
+                if tui_failure is not None:
+                    typer.echo(f"TUI failed: {tui_failure}", err=True)
+                    code = 1
+                if detached:
+                    typer.echo("stopping: jobs continue under the supervisor (detached, ss6a)")
+                else:
+                    typer.echo("stopping: cancelling live jobs (wrappers record the kills, ss6a)")
+            if not loop_task.done():
+                loop_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await loop_task
+        finally:
+            # whatever the branch above met, the server and the engine are
+            # torn down
+            try:
+                await server.close()
+            finally:
+                await engine.shutdown()
+        if server.statechart_error is not None and code != EXIT_STATECHART_ERROR:
+            # recorded while a loop outcome took precedence, or met while the
+            # server closed (a feed's last post, at shutdown). A crash or a
+            # clean stop becomes 7; a halt the engine chose keeps its code
+            statechart_report(server.statechart_error)
+            if code in (0, 1):
+                code = EXIT_STATECHART_ERROR
+            else:
+                typer.echo(
+                    f"{STATECHART_LOG_PREFIX}: the engine had already stopped with exit {code}",
+                    err=True,
+                )
+        if sealed:
+            say_next(run_root, anchor_dir)
         # a client exists exactly when the profile said detached; the lease
         # itself is given back in the one teardown below
         note = _reattach_note(reattach, run_root, detached=client is not None, code=code)

@@ -72,7 +72,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Literal, get_args
+from typing import TYPE_CHECKING, Any, Final
 
 from dsl41.canon import is_wire_int
 from dsl41.ir import CatalogIR
@@ -89,7 +89,6 @@ from dsl41.runner_admission import (
     classify_fault,
     describe_input,
     fingerprint,
-    report_violation,
 )
 from dsl41.period import (
     Manifest,
@@ -113,65 +112,225 @@ from pydantic import ValidationError
 from dsl41.runner_effects import Effect, EffectOutcome, Outbox, is_valid_run_id
 from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, HostCommand, seed_local_executor
 from dsl41.runner_ledger import STATE_MACHINE_VERSION, Proof
-from dsl41.state_machine import StatechartError, StateMachine, Transition, TransitionError
+from dsl41.state_machine import (
+    Context,
+    Effects,
+    Exclusion,
+    Executor,
+    Outcome,
+    Region,
+    Row,
+    State,
+    Statechart,
+    StatechartError,
+    TransitionError,
+)
+from dsl41.state_machine import Event as ChartEvent
 
 if TYPE_CHECKING:  # annotation only: the WAL stays a leaf of the DL-74 DAG
     from dsl41.runner_preflight import PreflightItem
 
 
-#: One feed's state (control-protocol ss5). `backfill` from the subscribe
-#: until the backfill is sent, while live records already queue; `live`
-#: after; `removed` when the journal dropped it on overflow; `closed` when
-#: its stream ended for any other reason.
-SubscriptionState = Literal["absent", "backfill", "live", "removed", "closed"]
+# ---- one `subscribe` feed as a statechart (control-protocol ss5, DL-267)
+#
+# `SUBSCRIPTION` is the declaration (docs/statechart-engine.md). The engine
+# owns the one `Executor`; the control server hands it to `Journal.subscribe`,
+# and the instance starts there, in `backfill`, as the feed joins the fan-out.
+# Its key and its data are the `Subscription`, which keeps the tier's record:
+# the queue, the backlog bytes, the budget and the overflow reason.
+#
+# The posters are the journal's fan-out (`append`, from `_publish`) and the
+# subscribe handler (`backfill_sent` after a backfill without refusal, and
+# `stream_ends` from its `finally`, through `Journal.unsubscribe`). Rows
+# `subscription.02` and `.04` have no guard and no action; their notes say
+# when the handler posts. The buffer is bounded in both phases: `append`
+# reads the same rows in `backfill` and `live`, and nothing is deferred.
+#
+# `removed` and `closed` are final, and the tier forgets the instance in the
+# same call that made it final, so nothing posts to it there. The root's
+# ignore rows exist because the completeness check is syntactic
+# (statechart-engine ss10). A gap in the chart is a `StatechartError`, which
+# stops the engine with exit 7 (statechart-engine ss5).
 
-SUB_SUBSCRIBE: Final = Transition[SubscriptionState](
-    "subscription.01",
-    frozenset({"absent"}),
-    "subscribe",
-    "backfill",
-    guard="the lineage is held and the run has a journal",
-    effect="join the fan-out; the ack names the cursor",
-    cite="control-protocol ss5, DL-45, DL-267",
-)
-SUB_LIVE: Final = Transition[SubscriptionState](
-    "subscription.02",
-    frozenset({"backfill"}),
-    "backfill sent",
-    "live",
-    guard="no refusal on the stream; with no `since` there is nothing to send",
-    effect="send the queued live records past the seam",
-    cite="control-protocol ss5, DL-45, DL-135",
-)
-SUB_OVERFLOW: Final = Transition[SubscriptionState](
-    "subscription.03",
-    frozenset({"backfill", "live"}),
-    "append",
-    "removed",
-    guard="the record does not fit the backlog budget",
-    effect="drop the backlog; leave the fan-out; tell the owner, which ends the stream",
-    cite="control-protocol ss5, DL-267",
-)
-SUB_CLOSE: Final = Transition[SubscriptionState](
-    "subscription.04",
-    frozenset({"backfill", "live"}),
-    "stream ends",
-    "closed",
-    guard="the client is gone, a refusal went on the stream, the lineage was lost,"
-    " or the handler was cancelled",
-    effect="leave the fan-out",
-    cite="control-protocol ss5, PR-03, period-model ss11",
-)
+#: A record was appended and fanned out. Its payload is an `Offer`.
+APPEND: Final = "append"
+#: The handler sent the backfill without a refusal and now reads the live queue.
+BACKFILL_SENT: Final = "backfill_sent"
+#: The feed's stream ended while the feed was in the fan-out.
+STREAM_ENDS: Final = "stream_ends"
+#: The intent of an overflow: the journal takes the feed out of its fan-out,
+#: and tells the owner once every other feed has the record (DL-267).
+LEAVE_FAN_OUT: Final = "leave the fan-out, then tell the owner"
 
-#: One `subscribe` feed (control-protocol ss5). A removed feed's handler
-#: still unsubscribes when its stream ends; that finds nothing to leave and
-#: takes no transition.
-SUBSCRIPTION: Final[StateMachine[SubscriptionState]] = StateMachine(
+#: Where a feed can be: the leaf states of `SUBSCRIPTION`.
+FEED_STATES: Final = frozenset({"backfill", "live", "removed", "closed"})
+_FEED_FINALS: Final = frozenset({"removed", "closed"})
+
+
+@dataclass(frozen=True)
+class Offer:
+    """One appended record for a feed, and the size of its stream line in bytes."""
+
+    record: dict[str, Any]
+    size: int
+
+
+# -- the guards. Each docstring is its rows' prose.
+
+
+def _fits(ctx: Context) -> bool:
+    """The record fits: the backlog is empty, or the backlog plus the record
+    stays within the budget. An empty backlog takes one record of any size, so
+    one record larger than the budget delays the feed and does not remove it
+    (DL-267)."""
+    feed: Subscription = ctx.data
+    offer: Offer = ctx.event.payload
+    return not feed.backlog_bytes or feed.backlog_bytes + offer.size <= feed.budget
+
+
+def _overflows(ctx: Context) -> bool:
+    """The record does not fit: the backlog holds a record, and the backlog
+    plus this one would pass the budget (DL-267)."""
+    return not _fits(ctx)
+
+
+def _over(ctx: Context) -> bool:
+    """The feed rests in `removed` or `closed`. Nothing posts to it then: the
+    journal forgets the instance in the call that made it final. In `live`, a
+    second `backfill_sent` finds no row and raises `UnhandledEvent`."""
+    return bool(ctx.active & _FEED_FINALS)
+
+
+# -- the actions
+
+
+def _enqueue(ctx: Context) -> None:
+    """Queue the record and count its bytes against the budget. Memory only:
+    the queue has no count limit, so this never blocks."""
+    feed: Subscription = ctx.data
+    offer: Offer = ctx.event.payload
+    feed._queue.put_nowait((offer.record, offer.size))
+    feed.backlog_bytes += offer.size
+
+
+def _drop_backlog(ctx: Context) -> Effects:
+    """Record why, and drop the backlog. The journal then takes the feed out
+    of its fan-out and, once every other feed has the record, tells the owner,
+    which ends the stream (DL-267)."""
+    feed: Subscription = ctx.data
+    offer: Offer = ctx.event.payload
+    feed.overflow = (
+        f"subscriber backlog of {feed.backlog_bytes} bytes cannot take a"
+        f" {offer.size}-byte record within the {feed.budget}-byte budget"
+    )
+    while not feed._queue.empty():
+        feed._queue.get_nowait()
+    feed.backlog_bytes = 0
+    return Effects(intents=(LEAVE_FAN_OUT,))
+
+
+#: One `subscribe` feed (control-protocol ss5), one instance per subscription.
+SUBSCRIPTION: Final = Statechart(
     name="subscription",
-    states=frozenset(get_args(SubscriptionState)),
-    initial="absent",
-    finals=frozenset({"removed", "closed"}),
-    transitions=(SUB_SUBSCRIBE, SUB_LIVE, SUB_OVERFLOW, SUB_CLOSE),
+    root=State(
+        "feed",
+        regions=(
+            Region(
+                "phase",
+                "open",
+                (
+                    State(
+                        "open",
+                        regions=(Region("phase", "backfill", (State("backfill"), State("live"))),),
+                    ),
+                    State("removed", final=True),
+                    State("closed", final=True),
+                ),
+            ),
+        ),
+    ),
+    rows=(
+        Row(
+            "subscription.02",
+            "backfill",
+            BACKFILL_SENT,
+            "live",
+            cite="control-protocol ss5, DL-45, DL-135",
+            note=(
+                "The handler posts it once the backfill went out without a refusal;"
+                " with no `since` there is nothing to send. The handler then sends"
+                " the queued live records past the seam."
+            ),
+        ),
+        Row(
+            "subscription.03",
+            "open",
+            APPEND,
+            "removed",
+            guard="overflows",
+            action="drop_backlog",
+            cite="control-protocol ss5, DL-267",
+        ),
+        Row(
+            "subscription.04",
+            "open",
+            STREAM_ENDS,
+            "closed",
+            cite="control-protocol ss5, PR-03, period-model ss11",
+            note=(
+                "The client is gone, a refusal went on the stream, the lineage was"
+                " lost, or the handler was cancelled. The journal has already taken"
+                " the feed out of its fan-out."
+            ),
+        ),
+        Row(
+            "subscription.05",
+            "open",
+            APPEND,
+            guard="fits",
+            action="enqueue",
+            kind="internal",
+            cite="control-protocol ss5, DL-267",
+        ),
+        Row(
+            "subscription.06",
+            "feed",
+            APPEND,
+            guard="over",
+            kind="ignored",
+            cite="statechart-engine ss10",
+            false_unreachable="rows .03 and .05 partition every append in `open`",
+        ),
+        Row(
+            "subscription.07",
+            "feed",
+            BACKFILL_SENT,
+            guard="over",
+            kind="ignored",
+            cite="statechart-engine ss10",
+        ),
+        Row(
+            "subscription.08",
+            "feed",
+            STREAM_ENDS,
+            guard="over",
+            kind="ignored",
+            cite="statechart-engine ss10",
+            false_unreachable="row .04 takes every stream end in `open`",
+        ),
+    ),
+    guards={"fits": _fits, "overflows": _overflows, "over": _over},
+    actions={"enqueue": _enqueue, "drop_backlog": _drop_backlog},
+    clock="logical",
+    exclusions=(
+        Exclusion(
+            "live",
+            BACKFILL_SENT,
+            "the handler posts backfill_sent once, after the ack and the backfill, with no"
+            " await between its last send and the post; one out of order raises"
+            " UnhandledEvent, which the chart's own test pins",
+        ),
+    ),
 )
 
 
@@ -180,70 +339,78 @@ class Subscription:
     began, in append order, under a byte budget (control-protocol ss5,
     DL-267). The budget is the owner's; the journal only enforces it.
 
-    A record enters an empty backlog. Otherwise it enters only if the
-    backlog plus the record stays within the budget, so the backlog never
-    holds more than the budget or one record, whichever is larger. A
+    It is the tier's record of one `SUBSCRIPTION` instance, and the
+    instance's key. `offer`, `go_live` and `close` post the chart's events,
+    and the rows decide: a record enters an empty backlog, otherwise only
+    if the backlog plus the record stays within the budget, so the backlog
+    never holds more than the budget or one record, whichever is larger. A
     refused record removes the feed: the journal drops the backlog and
     then tells the owner why. The append it came from has already
-    succeeded, and nothing here raises into it.
+    succeeded, and nothing here raises into it but a `StatechartError`.
 
-    Its state is `SUBSCRIPTION`'s. `removed` is derived from `overflow`; the other
-    states are stored."""
+    `state` is the instance's active leaf. Once the instance is final the
+    tier forgets it, and `state` keeps the final state it rested in."""
 
-    def __init__(self, budget: int, on_overflow: Callable[[str], None] | None) -> None:
+    def __init__(
+        self, machines: Executor, budget: int, on_overflow: Callable[[str], None] | None
+    ) -> None:
         self.budget = budget
         self.backlog_bytes = 0
         #: why the journal removed this feed, or None while it is live
         self.overflow: str | None = None
         self._on_overflow = on_overflow
         self._queue: asyncio.Queue[tuple[dict[str, Any], int]] = asyncio.Queue()
-        self._phase: Literal["backfill", "live", "closed"] = "backfill"
-        report_violation(SUBSCRIPTION.take(SUB_SUBSCRIBE, "absent", self.state))
+        #: the engine's executor, which holds this feed's instance
+        self._machines = machines
+        #: the final state the instance rested in, once it is forgotten
+        self._rested: str | None = None
+        machines.start(self, SUBSCRIPTION, self)
+        machines.run()
 
     @property
-    def state(self) -> SubscriptionState:
-        return "removed" if self.overflow is not None else self._phase
+    def state(self) -> str:
+        if self._rested is not None:
+            return self._rested
+        (leaf,) = self._machines.active(self) & FEED_STATES
+        return leaf
+
+    def _post(self, name: str, payload: object = None) -> Outcome:
+        """Post one event and answer its microstep. An instance that the row
+        made final is forgotten at once."""
+        (outcome,) = self._machines.dispatch(self, ChartEvent(name, payload))
+        active = self._machines.active(self)
+        if active & _FEED_FINALS:
+            (self._rested,) = active & _FEED_FINALS
+            self._machines.forget(self)
+        return outcome
 
     def go_live(self) -> None:
         """The backfill is sent: the handler now reads the live queue."""
-        old = self.state
-        self._phase = "live"
-        report_violation(SUBSCRIPTION.take(SUB_LIVE, old, self.state))
+        self._post(BACKFILL_SENT)
 
     def close(self) -> None:
         """The stream ended and the feed left the fan-out."""
-        old = self.state
-        self._phase = "closed"
-        report_violation(SUBSCRIPTION.take(SUB_CLOSE, old, self.state))
+        self._post(STREAM_ENDS)
 
     def offer(self, record: dict[str, Any], size: int) -> bool:
-        """Queue one record of `size` encoded bytes, or answer False when
-        it does not fit. Never blocks and never raises QueueFull: the queue
-        has no count limit, and the budget is checked here."""
-        if self.backlog_bytes and self.backlog_bytes + size > self.budget:
-            old = self.state
-            self.overflow = (
-                f"subscriber backlog of {self.backlog_bytes} bytes cannot take a"
-                f" {size}-byte record within the {self.budget}-byte budget"
-            )
-            report_violation(SUBSCRIPTION.take(SUB_OVERFLOW, old, self.state))
-            while not self._queue.empty():
-                self._queue.get_nowait()
-            self.backlog_bytes = 0
-            return False
-        self._queue.put_nowait((record, size))
-        self.backlog_bytes += size
-        return True
+        """Offer one record of `size` encoded bytes: True when the feed took
+        it, False when the record removed the feed. Never blocks and never
+        raises QueueFull: the queue has no count limit, and the rows check
+        the budget."""
+        return LEAVE_FAN_OUT not in self._post(APPEND, Offer(record, size)).intents
 
     def tell_owner(self) -> None:
         """Hand an overflowed feed's reason to its owner. Best effort: the
         append behind it is durable and the other feeds have their record,
         so an owner that raises, or a stderr that cannot take the report,
-        changes nothing."""
+        changes nothing. A `StatechartError` is not contained: it stops the
+        engine (statechart-engine ss5)."""
         if self._on_overflow is None or self.overflow is None:
             return
         try:
             self._on_overflow(self.overflow)
+        except StatechartError:
+            raise
         except Exception as exc:  # noqa: BLE001 -- see the docstring
             best_effort_report(f"dsl41: subscriber overflow handler failed: {exc!r}")
 
@@ -650,20 +817,26 @@ class Journal:
         )
 
     def subscribe(
-        self, on_overflow: Callable[[str], None] | None = None, *, budget: int = sys.maxsize
+        self,
+        machines: Executor,
+        on_overflow: Callable[[str], None] | None = None,
+        *,
+        budget: int = sys.maxsize,
     ) -> Subscription:
         """A live feed of every record appended from now on, held to
-        `budget` bytes; the control server passes ss5's. `on_overflow` is
-        called once, synchronously inside the append that overflowed the
-        feed, after the feed is removed and every other feed has the
-        record (control-protocol ss5, DL-267)."""
-        feed = Subscription(budget, on_overflow)
+        `budget` bytes; the control server passes ss5's. `machines` is the
+        engine's executor, which runs the feed's `SUBSCRIPTION` instance; the
+        journal creates none. `on_overflow` is called once, synchronously
+        inside the append that overflowed the feed, after the feed is
+        removed and every other feed has the record (control-protocol ss5,
+        DL-267)."""
+        feed = Subscription(machines, budget, on_overflow)
         self._subscribers.append(feed)
         return feed
 
     def unsubscribe(self, feed: Subscription) -> None:
         """The feed's stream ended. A feed the journal already removed on
-        overflow is not in the fan-out, and stays `removed`."""
+        overflow is not in the fan-out, posts nothing, and stays `removed`."""
         if feed in self._subscribers:
             self._subscribers.remove(feed)
             feed.close()
@@ -671,7 +844,9 @@ class Journal:
     def _publish(self, record: dict[str, Any], size: int) -> None:
         """Fan one durable record out to the live feeds. A feed it does
         not fit is removed, never grown and never left open with a hole in
-        it (control-protocol ss5, DL-267)."""
+        it (control-protocol ss5, DL-267): the overflow row reports it, and
+        this carries the removal out once every feed has been offered the
+        record."""
         overflowed = [feed for feed in self._subscribers if not feed.offer(record, size)]
         for feed in overflowed:
             self._subscribers.remove(feed)

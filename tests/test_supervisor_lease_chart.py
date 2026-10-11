@@ -212,9 +212,10 @@ def test_an_expired_lease_posts_one_expiry_and_keeps_the_report_history(
     clock.now = NOW + 10
     for _ in range(100):
         assert sup._lease_phase() == "expired"
-    expiries = [line for line in sup._machines._recent if " expire " in line]
+    recent = sup._machines._recent[runner_supervisor.SUPERVISOR_LEASE.name]
+    expiries = [line for line in recent if " expire " in line]
     assert len(expiries) == 1 and "supervisor_lease.17" in expiries[0]
-    leases = [line for line in sup._machines._recent if line.startswith("'lease' ")]
+    leases = [line for line in recent if line.startswith("'lease' ")]
     assert len(leases) == 3  # the start, the ACQUIRE, the expiry
     sup._drop_conn(conn)
     peer.close()

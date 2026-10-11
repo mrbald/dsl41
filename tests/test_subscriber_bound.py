@@ -51,6 +51,7 @@ from dsl41.runner_control import (
     subscribe_lines,
 )
 from dsl41.runner_journal import Journal, read_journal
+from dsl41.state_machine import Executor
 
 TEXT = "insert_job: sb_job\njob_type: c\ncommand: x\nmachine: m1\n"
 #: one SET_GLOBAL value: real mutations that fill socket buffers quickly,
@@ -101,7 +102,7 @@ def test_dl267_a_feed_is_removed_at_the_fixed_bound_and_never_grows_past_it(
     the feed, and the backlog never passed the budget on the way."""
     journal = Journal(tmp_path / "j.jsonl", fsync_each=False)
     reasons: list[str] = []
-    feed = journal.subscribe(reasons.append, budget=SUBSCRIBER_BACKLOG_BYTES)
+    feed = journal.subscribe(Executor(), reasons.append, budget=SUBSCRIBER_BACKLOG_BYTES)
     written = 0
     while feed.overflow is None:
         journal._write(_filler(256 * 1024))
@@ -119,7 +120,7 @@ def test_dl267_records_within_the_budget_are_all_delivered_in_order(tmp_path: Pa
     """The non-triggering twin: a reader that keeps up is never removed."""
     journal = Journal(tmp_path / "j.jsonl", fsync_each=False)
     reasons: list[str] = []
-    feed = journal.subscribe(reasons.append, budget=4096)
+    feed = journal.subscribe(Executor(), reasons.append, budget=4096)
     for n in range(200):
         journal._write(_filler(1000) | {"n": n})
         assert feed.get_nowait()["n"] == n
@@ -133,7 +134,7 @@ def test_dl267_one_record_larger_than_the_budget_delays_and_does_not_remove(
     """A record always enters an empty backlog, so a healthy subscriber is
     never removed for the size of one record."""
     journal = Journal(tmp_path / "j.jsonl", fsync_each=False)
-    feed = journal.subscribe(budget=100)
+    feed = journal.subscribe(Executor(), budget=100)
     journal._write(_filler(1000))
     assert feed.overflow is None and feed.backlog_bytes > feed.budget
     assert feed.get_nowait()["rec"] == "preflight"
@@ -150,7 +151,7 @@ def test_dl267_a_burst_past_the_budget_removes_even_a_waiting_feed(tmp_path: Pat
 
     async def scenario() -> None:
         journal = Journal(tmp_path / "j.jsonl", fsync_each=False)
-        waiting = journal.subscribe(budget=4096)
+        waiting = journal.subscribe(Executor(), budget=4096)
         peaks: list[int] = []
         offer = waiting.offer
 
@@ -190,9 +191,10 @@ def test_dl267_a_broken_stderr_and_a_raising_owner_never_fail_the_append(
     def broken(_why: str) -> None:
         raise RuntimeError("owner bug")
 
-    feed = journal.subscribe(broken, budget=10)
-    ownerless = journal.subscribe(budget=10)
-    healthy = journal.subscribe()  # listed after the overflowed ones
+    machines = Executor()  # the engine's, which a bare journal has not
+    feed = journal.subscribe(machines, broken, budget=10)
+    ownerless = journal.subscribe(machines, budget=10)
+    healthy = journal.subscribe(machines)  # listed after the overflowed ones
     journal._write(_filler(10))
     monkeypatch.setattr(sys, "stderr", _BrokenStderr())
     journal._write(_filler(10))  # overflows `feed` and `ownerless`; returns normally
@@ -223,8 +225,8 @@ def test_dl267_an_overflow_at_the_seal_record_leaves_the_boundary_committed(
         reasons.append(why)
         raise RuntimeError("owner bug")
 
-    stalled = journal.subscribe(stalled_owner, budget=SUBSCRIBER_BACKLOG_BYTES)
-    healthy = journal.subscribe()
+    stalled = journal.subscribe(engine.machines, stalled_owner, budget=SUBSCRIBER_BACKLOG_BYTES)
+    healthy = journal.subscribe(engine.machines)
 
     def before_the_seal(stage: str) -> None:
         if stage == "after_sidecar":
@@ -577,7 +579,7 @@ def test_dl267_a_broken_stderr_does_not_keep_an_overflowed_stream_open(
             stalled, _, handler = await _subscribe_and_track(server)
             [writer] = writers
             [stalled_feed] = journal._subscribers
-            healthy = journal.subscribe()  # after the stalled one
+            healthy = journal.subscribe(server.engine.machines)  # after the stalled one
             written = 0
             while not _backpressured(writer):
                 journal._write(_filler(2000))
@@ -607,6 +609,7 @@ class _FakeEngine:
     def __init__(self, journal: Journal) -> None:
         self.journal = journal
         self.estate = None
+        self.machines = Executor()  # the engine's executor, which runs the feeds
 
         class _Frontiers:
             committed_index = 0

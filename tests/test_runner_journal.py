@@ -46,6 +46,7 @@ from dsl41.runner_journal import (
     read_journal,
     replay_inputs,
 )
+from dsl41.state_machine import Executor
 
 T0 = datetime(2026, 7, 1, 8, 0)
 
@@ -944,7 +945,7 @@ def test_seal_writes_and_notifies_with_no_lock_held(tmp_path: Path) -> None:
     to check, and `seal` must still write the record and fan it out."""
     journal = Journal(tmp_path / "j.jsonl", fsync_each=False)
     assert journal._lock is None
-    queue = journal.subscribe()
+    queue = journal.subscribe(Executor())
     journal.seal({"rec": "seal", "period_id": 1})
     journal.close()
     assert queue.get_nowait() == {"rec": "seal", "period_id": 1}
@@ -957,7 +958,7 @@ def test_unsubscribing_something_that_never_subscribed_is_a_no_op(tmp_path: Path
     drops while its handler is being cancelled -- must not take the WAL down
     with it. The fan-out never blocks on a subscriber and never dies of one."""
     journal = Journal(tmp_path / "j.jsonl", fsync_each=False)
-    queue = journal.subscribe()
+    queue = journal.subscribe(Executor())
     journal.unsubscribe(queue)
     journal.unsubscribe(queue)  # already gone
     journal.unsubscribe(asyncio.Queue())  # never here

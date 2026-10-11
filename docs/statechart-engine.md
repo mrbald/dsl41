@@ -143,14 +143,15 @@ The executor's errors, among them `AmbiguousTransition` (§3), `ReentrantDispatc
 `UnhandledEvent` (§10), subclass one base, `StatechartError`. Each is an assertion failure, not
 a fault to contain. DL-320's classification never catches it: `trial_apply` and
 `classify_fault` re-raise it as they re-raise `TransitionError`, and nothing is appended. No tier
-may swallow it. The tier stops before any durable write.
+may swallow it. The tier stops before any further durable write of its own; a record already
+durable, a seal record among them, stays.
 
 The error is structured. It carries the machine, the instance key, the active configuration, the
 item and a summary of its payload, the item's ancestry, the candidates found, the deferred queue,
-and the executor's last microsteps. The executor keeps those in a ring buffer of a declared size;
-the default is 64. `str()` of the error renders all of it, one fact per line. The engine and the
-supervisor print it on stderr, each line under the prefix `dsl41: statechart error`, and exit 7.
-The units list 7 in `RestartPreventExitStatus`.
+and a ring of the last microsteps of the machine that raised. The executor keeps one ring per
+machine, of a declared size; the default is 64. `str()` of the error renders all of it, one fact
+per line. The engine and the supervisor print it on stderr, each line under the prefix
+`dsl41: statechart error`, and exit 7. The units list 7 in `RestartPreventExitStatus`.
 
 ## 6. Deferred events
 
@@ -307,7 +308,8 @@ Rows get stable anchors. The semantics dossier and the runner contracts cite anc
 transition mechanics. They keep their own text for vendor requirements and cross-machine
 invariants.
 
-Guard and action docstrings are the row's prose.
+Guard and action docstrings are the row's prose. A row with no guard or action carries its
+prose in its `note`, which the generated table shows in the action column.
 
 ## 15. The executor
 
@@ -329,7 +331,8 @@ Pilot: `supervisor_lease` (token guards, monotonic clock, time events) and `subs
 
 Subscription's declared contract is the one its own document states
 ([docs/blocks/subscription.md](blocks/subscription.md)): a bounded buffer in both phases, not a
-deferral.
+deferral. It runs on the engine's executor, one instance per feed from its join to its end, and
+a statechart error that a control handler meets stops the engine as one from the loop does.
 
 `seal_boundary` comes third. `seal_boundary` defers nothing: an input after the cutoff refuses
 the boundary (`period-model.md` §6, DL-327).

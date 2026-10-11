@@ -95,7 +95,7 @@ import time
 import uuid
 
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Iterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any, Final, Literal, cast, get_args
 
@@ -133,6 +133,7 @@ from dsl41.runner_hosts import HOST_VERBS, HostCommand, HostVerb
 from dsl41.seal import StagedNextPeriod
 from dsl41.runner_journal import best_effort_report, read_backfill
 from dsl41.runner_preflight import and_success_skeleton
+from dsl41.state_machine import StatechartError
 
 #: sendevent verbs whose payload is a single catalog job (1:1 onto EventKind)
 JOB_EVENT_VERBS: frozenset[EventKind] = frozenset(
@@ -288,6 +289,15 @@ class ControlServer:
         self._closing = False
         #: each subscription's backlog budget (ss5); tests lower it
         self.subscriber_budget = SUBSCRIBER_BACKLOG_BYTES
+        #: the first `StatechartError` a connection handler met, and the
+        #: event `_serve_run` waits on beside the engine loop. It stops the
+        #: engine with exit 7, as one from the loop does (statechart-engine
+        #: ss5): an assertion failure, never answered and never contained
+        self.statechart_error: StatechartError | None = None
+        self.failed = asyncio.Event()
+        #: what `_stop_on` calls first, before the event: `_serve_run` sets it
+        #: to the loop task's cancel, so the engine takes no further step
+        self.on_statechart_error: Callable[[], object] | None = None
         #: the armed perimeter, or None = the 0600 owner-only model,
         #: byte-compatible (docs/access-model.md ss4: configured vs absent
         #: is explicit)
@@ -465,6 +475,8 @@ class ControlServer:
                     break  # a subscription owns its connection until hangup
                 try:
                     response = await self._respond(request)
+                except StatechartError:
+                    raise  # an assertion failure is not a query bug: below
                 except Exception as exc:  # noqa: BLE001 -- a query bug must
                     # answer ok:false, never kill the connection unreplied
                     # (the client would only see a timeout; DL-45)
@@ -475,11 +487,23 @@ class ControlServer:
         except asyncio.CancelledError:
             at_once = not self._closing  # an overflow or a revocation
             raise
+        except StatechartError as exc:
+            # statechart-engine ss5, concurrency-model ss4: no reply, the
+            # connection hangs up, and the engine stops with exit 7
+            self._stop_on(exc)
         finally:
             # still in _conn_tasks: a shutdown waits for this hangup too
             await self._hang_up(writer, at_once=at_once)
             if task is not None:  # pragma: no branch -- the same task as above
                 self._conn_tasks.discard(task)
+
+    def _stop_on(self, error: StatechartError) -> None:
+        """Hand a handler's `StatechartError` to the run, which stops the
+        engine and reports the first one (statechart-engine ss5)."""
+        self.statechart_error = self.statechart_error or error
+        if self.on_statechart_error is not None:
+            self.on_statechart_error()
+        self.failed.set()
 
     async def _hang_up(self, writer: asyncio.StreamWriter, *, at_once: bool) -> None:
         """End one connection without waiting on a peer that stopped
@@ -1290,7 +1314,7 @@ class ControlServer:
                 handler.cancel()
             best_effort_report(f"dsl41: closing a subscribe stream: {why}")
 
-        feed = journal.subscribe(overflowed, budget=self.subscriber_budget)
+        feed = journal.subscribe(self.engine.machines, overflowed, budget=self.subscriber_budget)
         try:
             # sample the seam BEFORE the ack yields: a record written during
             # the send takes the next index and would be skipped as "covered"

@@ -609,8 +609,10 @@ class Engine:
         #: while it is set, and `_seal_boundary` clears it when it exits
         self._seal: _PendingSeal | None = None
         #: this engine's statechart executor (statechart-engine ss11): one
-        #: worklist for every instance. Its one machine so far is
-        #: `SEAL_BOUNDARY`, one instance per seal request (DL-327)
+        #: worklist for every instance. Its machines are `SEAL_BOUNDARY`, one
+        #: instance per seal request (DL-327), and `SUBSCRIPTION`, one
+        #: instance per subscribe feed, which the control server starts
+        #: through `machines`
         self._machines = Executor()
         #: the index of an admitted attempt that is not yet fully applied:
         #: its admission line, decision, outbox entries and answer. Set when
@@ -626,6 +628,12 @@ class Engine:
         #: `--on-transition-violation` (concurrency-model ss4). An engine run
         #: option, set before the loop runs; replay never reads it.
         self.on_violation: ViolationPolicy = "refuse"
+
+    @property
+    def machines(self) -> Executor:
+        """This engine's one statechart executor, for the control server's
+        subscribe feeds (statechart-engine ss11)."""
+        return self._machines
 
     @property
     def sealing(self) -> bool:

@@ -52,7 +52,6 @@ from dsl41.runner_hosts import (
 )
 from dsl41.runner_codes import Rejection
 from dsl41.runner_journal import (
-    SUBSCRIPTION,
     Journal,
     ReplayFault,
     read_journal,
@@ -64,16 +63,20 @@ from dsl41.state_machine import (
     HITS_ENV,
     STRICT_ENV,
     VIOLATION_LOG_PREFIX,
+    Executor,
+    Outcome,
+    StatechartError,
     StateMachine,
     Transition,
     TransitionError,
     Violation,
     well_formed,
 )
+from dsl41.state_machine import Event as ChartEvent
 
 T0 = datetime(2026, 7, 1, 8, 0)
 _JIL = "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\n"
-ENGINE_MACHINES = (HOST, ADMISSION, EFFECT, SUBSCRIPTION)
+ENGINE_MACHINES = (HOST, ADMISSION, EFFECT)
 
 
 @pytest.fixture
@@ -603,7 +606,7 @@ def test_an_engine_violation_line_carries_the_journal_alert_prefix(
 def test_a_feed_moves_backfill_live_closed(tmp_path: Path) -> None:
     journal = Journal(tmp_path / "j.jsonl", fsync_each=False)
     try:
-        feed = journal.subscribe()
+        feed = journal.subscribe(Executor())
         assert feed.state == "backfill"
         feed.go_live()
         assert feed.state == "live"
@@ -619,13 +622,24 @@ def test_an_overflowed_feed_is_removed_and_its_unsubscribe_takes_nothing(tmp_pat
     journal = Journal(tmp_path / "j.jsonl", fsync_each=False)
     try:
         reasons: list[str] = []
-        feed = journal.subscribe(reasons.append, budget=1)
+        machines = Executor()
+        feed = journal.subscribe(machines, reasons.append, budget=1)
         record = {"rec": "preflight", "items": [{"message": "x" * 100}]}
         journal._write(record)  # an empty backlog takes one record
         assert feed.state == "backfill"
         journal._write(record)  # the second does not fit: the journal drops the feed
         assert feed.state == "removed" and feed.overflow is not None
+        with pytest.raises(StatechartError, match="no instance"):
+            machines.active(feed)  # forgotten once it rests in `removed`
+        posts: list[str] = []
+        dispatch = machines.dispatch
+
+        def spy(key: Any, event: ChartEvent) -> list[Outcome]:
+            posts.append(event.name)
+            return dispatch(key, event)
+
+        machines.dispatch = spy  # type: ignore[method-assign]
         journal.unsubscribe(feed)
-        assert feed.state == "removed"
+        assert feed.state == "removed" and posts == []  # nothing posted
     finally:
         journal.close()

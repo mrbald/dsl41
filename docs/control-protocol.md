@@ -102,7 +102,9 @@ CLI's job.
   with no answer, and the caller reads it as a transport error. A handler
   that raises answers `{"ok": false, "code": "internal_error", "error":
   "internal error: …"}` rather than leaving the request unanswered. A
-  client must never see a bare timeout for a query bug.
+  client must never see a bare timeout for a query bug. A statechart error
+  is not a query bug: it gets no answer, the connection hangs up, and the
+  engine stops with exit 7 (`concurrency-model.md` §4).
 - Consumers must ignore unknown fields (forward compatibility).
 
 **Socket lifecycle.** On start the server probes an existing socket file
@@ -853,7 +855,8 @@ refused record removes the subscription:
   and reports the reason on its stderr, best effort;
 - the journal append has already succeeded. Nothing from the removal, an
   owner that raises or a stderr that cannot be written included, reaches
-  the append, the engine loop or any other subscription;
+  the append, the engine loop or any other subscription. A statechart
+  error is the one exception: it stops the engine with exit 7;
 - the stream ends with EOF, perhaps after a torn last line. It never
   continues past a missing record. It carries no terminal line: EOF and
   the §6 cursor are the signal, and the peer that stopped reading could

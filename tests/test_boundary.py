@@ -4529,7 +4529,7 @@ def test_a_seal_whose_fsync_fails_reaches_no_subscriber(tmp_path: Path, monkeypa
     run_root = tmp_path / "run"
     engine = _genesis(run_root)
     assert engine.journal is not None
-    queue = engine.journal.subscribe()
+    queue = engine.journal.subscribe(engine.machines)
     journal_fd = engine.journal._f.fileno()
     real_fsync = os_mod.fsync
 

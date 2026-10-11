@@ -262,19 +262,20 @@ STATECHART_LOG_PREFIX = "dsl41: statechart error"
 #: The exit code of a tier stopped by a `StatechartError`: `dsl41 run`'s and the
 #: supervisor's. The units list it in `RestartPreventExitStatus`.
 EXIT_STATECHART_ERROR = 7
-#: How many recent microsteps an executor keeps for its errors' reports.
+#: How many recent microsteps an executor keeps per machine for its errors' reports.
 HISTORY = 64
 
 
 class StatechartError(Exception):
     """An assertion failure of a statechart: a bug, never a fault to contain.
 
-    Every tier lets it through to a stop, before any durable write: DL-320's
-    classification re-raises it, and the engine and the supervisor exit with
-    `EXIT_STATECHART_ERROR`. An executor fills `facts` when the error leaves a
-    run: the machine, the instance, its configuration, the item, its ancestry,
-    the candidates, the deferred queue and the last microsteps. `str()`
-    renders the message and then one fact per line.
+    Every tier lets it through to a stop, before any further durable write of
+    its own: DL-320's classification re-raises it, and the engine and the
+    supervisor exit with `EXIT_STATECHART_ERROR`. An executor fills `facts`
+    when the error leaves a run: the machine, the instance, its configuration,
+    the item, its ancestry, the candidates, the deferred queue and its
+    machine's last microsteps. `str()` renders the message and then one fact
+    per line.
     """
 
     def __init__(self, message: str, candidates: Iterable[str] = ()) -> None:
@@ -394,7 +395,9 @@ class Row:
     an external row and empty otherwise. `guard` and `action` name registry
     entries. A row on `COMPLETION` is a completion transition.
     `false_unreachable` is the reason no test can make the guard false: the
-    coverage gate then forbids that outcome instead of requiring it.
+    coverage gate then forbids that outcome instead of requiring it. `note` is
+    the prose of a row with no guard or action, which has no docstring to
+    carry it; the generated table shows it in the action column (§14).
     """
 
     id: str
@@ -407,6 +410,7 @@ class Row:
     code: str = ""
     cite: str = ""
     false_unreachable: str = ""
+    note: str = ""
 
 
 @dataclass(frozen=True)
@@ -845,6 +849,9 @@ class _Instance:
     #: since `restore` has no entry yet and reads as serial 0
     entered: dict[str, int] = field(default_factory=dict)
     entries: int = 0
+    #: the executor's serial of this instance's addition: the release scan
+    #: visits deferring instances in this order (§6)
+    added: int = 0
 
 
 @dataclass(frozen=True)
@@ -970,8 +977,14 @@ class Executor:
         self._running = False
         #: the item in hand, for an error's report
         self._current: _Item | None = None
-        #: the last `history` microsteps, one line each, for an error's report
-        self._recent: deque[str] = deque(maxlen=history)
+        #: each machine's last `history` microsteps, one line each, for an
+        #: error's report: another machine's steps never evict them
+        self._history = history
+        self._recent: dict[str, deque[str]] = {}
+        #: the instances with a non-empty deferred queue, the only ones the
+        #: release scan visits; and the serial the next added instance takes
+        self._deferring: set[Hashable] = set()
+        self._added = 0
 
     # -- the tier's calls
 
@@ -1031,7 +1044,9 @@ class Executor:
                     self._current = self._worklist.popleft()
                     outcome = self._step(self._current)
                     outcomes.append(outcome)
-                    self._recent.append(_summary(outcome))
+                    name = self._instances[outcome.key].chart.name
+                    ring = self._recent.setdefault(name, deque(maxlen=self._history))
+                    ring.append(_summary(outcome))
                 self._current = None
                 item = self._release() or (self._pool.popleft() if self._pool else None)
                 if item is None:
@@ -1074,6 +1089,8 @@ class Executor:
         self._idle()
         if key in self._instances:
             raise StatechartError(f"instance {key!r} already exists")
+        self._added += 1
+        instance.added = self._added
         self._instances[key] = instance
 
     def _instance(self, key: Hashable) -> _Instance:
@@ -1100,8 +1117,9 @@ class Executor:
             ("deferred", queue or "empty"),
         ]
         facts.append(("candidates", ", ".join(error.candidates) or "none"))
-        facts.append(("recent microsteps", f"{len(self._recent)}, oldest first"))
-        facts += [("microstep", line) for line in self._recent]
+        recent = self._recent.get(inst.chart.name, ())
+        facts.append(("recent microsteps", f"{len(recent)}, oldest first"))
+        facts += [("microstep", line) for line in recent]
         return facts
 
     @staticmethod
@@ -1148,6 +1166,7 @@ class Executor:
         chart = inst.chart
         if len(inst.deferred) < chart.defer_bound:
             inst.deferred.append(_Deferred(item.event, tuple(deferring)))
+            self._deferring.add(item.key)
             for state in deferring:
                 _hit(chart, "defer", state, item.event.name)
             return _outcome(item, "deferred")
@@ -1167,9 +1186,8 @@ class Executor:
         A head deferred again holds its place, and its queue waits for a later
         macrostep.
         """
-        for key, inst in self._instances.items():
-            if not inst.deferred:
-                continue
+        for key in sorted(self._deferring, key=lambda k: self._instances[k].added):
+            inst = self._instances[key]
             head = inst.deferred[0]
             item = self._current = _Item(key, "event", head.event, released=True)
             if not self._stale(inst, head.event):
@@ -1178,6 +1196,8 @@ class Executor:
                 if not firing and deferring:
                     continue
             inst.deferred.popleft()
+            if not inst.deferred:
+                self._deferring.discard(key)
             for state in head.states:
                 _hit(inst.chart, "release", state, head.event.name)
             return item

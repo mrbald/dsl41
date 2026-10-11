@@ -1882,6 +1882,11 @@ outcome unknown (exit 4, `request_id` printed). Recovery decides:
 - a seal line with records after it, or interior corruption → refuse
   (PR-28d).
 
+A statechart error in the `seal` record's fan-out to subscribers runs after
+its `fsync`. The engine does not report it as an unknown outcome: it stops
+with exit 7 (`statechart-engine.md` §5). The live `dsl41 seal` client, whose
+connection drops, still answers 4. The next resume decides as above.
+
 **Phase 3 — `open_from_seal(sidecar, expected_digest, manifest) ->
 OpenedRuntime`**, at resume and at the tail of phase 2.
 
