@@ -21079,3 +21079,67 @@ relitigate an entry; append a new one.
   instance and a reserved name the initial entry needed; the Opus reviewer's last round found
   the exit-7 wrapper unpinned on five verbs. All are fixed and confirmed by the reviewer that
   raised them.
+- DL-326 The supervisor's lease is the first machine the statechart executor runs
+  (2026-10-11; src/dsl41/runner_supervisor.py; docs/state-machines.md (generated);
+  docs/supervisor-protocol.md §1; docs/statechart-engine.md §10)
+  THE CHART. `supervisor_lease` is a `Statechart` on the monotonic clock. Its tree is `lease`
+  with `unheld` (`free`, `expired`) and `held` (`live`, `orphaned`), a wait state that leaves on
+  the time event `expire`. Eighteen rows: ACQUIRE grants from `unheld` or `orphaned`, re-keys
+  the incumbent, refuses a challenger with `lease_held`, and refuses an unnamed or an untimed
+  request; RENEW extends a credentialed holder and refuses a foreign incarnation or a stale
+  token; RELEASE frees a credentialed holder; `disconnect` orphans the holder's live lease and
+  forgets an expired one; `expire` moves `held` to `expired`. Every refusal is a row on the root,
+  reached only when every inner row is false, so the protocol's check order (controller_id,
+  then ttl_s, then the lease's state, then expiry) is the walk of statechart-engine §3; inner
+  guards carry the earlier checks as conjunctions. Guards and actions are named callables in
+  the module, and their docstrings are the rows' prose in the generated document. An action
+  never raises: a request's ttl_s and expiry are computed into its payload first, and a bad
+  one takes a refusal row whose code makes the supervisor answer `internal` as before.
+  THE TIER. One `Executor` per supervisor, one instance. A lease verb samples each clock once,
+  posts a due `expire`, then the verb; the old code read the monotonic clock up to four times
+  per verb, so a request landing within microseconds of its deadline could read two instants.
+  Expiry is a time event the tier produces by sampling its deadline, at the points it sampled
+  before, and only while `held` is active, so an expired lease is not sampled into the
+  executor's history again; it carries no generation, because a sampled deadline cannot fire
+  stale. The deadline instant is due. At the same instant, expiry wins: RENEW and RELEASE get
+  `stale_token`, and ACQUIRE grants, as before. Every dropped connection posts `disconnect`,
+  and the `holder` guard decides; teardown posts nothing once the supervisor is closed. The
+  deleted code: `lease_phase`, the lease branch of the verb handlers and their `take` sites.
+  WHAT CHANGES. No reply, code, record field or ordering of supervisor-protocol §5 moves; a
+  reviewer's differential run of the old supervisor against the new one, 7,000 input
+  sequences with deadline ties and hostile payloads, found no mismatch; it is not a repo test.
+  Two things do change. A
+  guard gap or overlap in this chart now stops the supervisor with exit 7 on a client's input,
+  where `take` logged a violation (DL-325's rule: the chart is the skeleton); the completeness
+  test and the exhaustive process walk are the defence. And the one-clock-read narrowing above,
+  which §5 does not pin.
+  CHECKS. `well_formed` and `chart_warnings` pass. The generated completeness test enumerates
+  the abstraction: partitions for the controller_id (named or not), ttl_s (representable,
+  unparsed, unrepresentable), the credentials (this incarnation or not, token equal or
+  not) and the holder, with witnesses for every state; it asserts the declared outcome per
+  cell. The alphabet test covers every poster: the belt's three verbs, `disconnect`, `expire`
+  and the chart's own actions, which raise nothing. The gate holds rows, guard outcomes and
+  the wait state's exit at 100%. The exhaustive process walk reads the executor's outcomes
+  where it spied on `take`. The supervisor's tests passed on Linux before the review's fixes;
+  the fixes changed tests, and the run was not repeated.
+  THE PILOT'S LIST. What the executor and the contract made awkward, with the ruling on each:
+  an action cannot raise once exits ran (the contract; compute into the payload first); a
+  refusal row cannot build its reply (the contract; the tier builds it from the code); ordered
+  checks become conjunctions on inner guards (the contract; a choice pseudostate would have
+  been wrong here, since a branch cannot refuse and exits precede it); a generation on a
+  sampled deadline is dead weight (dropped); "an ignored row writes a trace line" has no home
+  in a tier without a trace (statechart-engine §10 now says "where the tier keeps one"); the
+  completeness tool did not recognise the by-path copy's error (fixed, as the marker check of
+  DL-325); witnesses need a stand-in for the supervisor (inherent); rows are verbose (the
+  module grew by about 200 lines; the table carried prose where the chart carries code).
+  OPEN. SPAWN, SIGNAL and SHUTDOWN still check the token in `_check_token`, so the fence rule
+  has two copies until `supervisor_process` converts. An action that raised inside the belt
+  would end with a traceback rather than the exit-7 report; it cannot happen with this chart,
+  and it is a stated limit until the supervisor's other machines convert.
+  REVIEW. Semantic class: one Opus reviewer and one Fable pass, two rounds. Neither found a
+  protocol-visible change. The Opus reviewer found a partition the completeness test lacked
+  (an unnamed request with a bad ttl_s), teardown posting to the chart after close, the
+  sampler posting `expire` on every sample of an expired lease, and prose that overclaimed.
+  The Fable pass ruled the chart's shape right against the pilot's list and found the dead
+  generation. The fence-rule copy stays open above; the exit-7 change is stated, not changed;
+  the rest is fixed and confirmed by the reviewer that raised it.

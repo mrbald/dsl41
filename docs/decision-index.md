@@ -311,7 +311,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-297 | The `engine:` request-id prefix is reserved, and the integration's contract corrections | [docs/concurrency-model.md](concurrency-model.md), [docs/control-protocol.md](control-protocol.md), [docs/risk-map.md](risk-map.md) |
 | DL-298 | Seven more modules join the 100% branch gate | [docs/blocks/job-lifecycle.md](blocks/job-lifecycle.md), [docs/blocks/scheduler.md](blocks/scheduler.md), [docs/blocks/spawn-idempotency.md](blocks/spawn-idempotency.md), [docs/risk-map.md](risk-map.md) |
 | DL-299 | The engine-side supervisor adapters join the 100% branch gate, and two resource leaks are closed | [docs/blocks/fw-observation.md](blocks/fw-observation.md), [docs/blocks/spawn-idempotency.md](blocks/spawn-idempotency.md), [docs/blocks/supervisor.md](blocks/supervisor.md), [docs/blocks/wrapper.md](blocks/wrapper.md), [docs/risk-map.md](risk-map.md) |
-| DL-300 | Four supervisor and wrapper fixes: a stopped command is not an exit, a lease with no representable expiry changes nothing, nothing is dispatched while shutting... | [docs/supervisor-protocol.md](supervisor-protocol.md) |
+| DL-300 | Four supervisor and wrapper fixes: a stopped command is not an exit, a lease with no representable expiry changes nothing, nothing is dispatched while shutting... | [docs/state-machines.md](state-machines.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
 | DL-301 | A member taken off ice in a running box sits out that run, and box_terminator fires on TERMINATED as well as FAILURE; both are switches | [docs/risk-map.md](risk-map.md) |
 | DL-302 | Block cards link the generated state machines; a state diagram appears only where a declared machine backs it | [docs/risk-map.md](risk-map.md) |
 | DL-303 | The service drill covers the upgrade rollbacks, stop and recover, configure, every monitoring command, and a SIGKILL of either unit | [docs/deployment-runbook.md](deployment-runbook.md), [docs/risk-map.md](risk-map.md) |
@@ -337,3 +337,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-323 | The architecture review of 2026-10-11 is closed: the quarantine rule has one copy, and the engine keeps one list per kind of lost input |  |
 | DL-324 | Runner state machines become declared, executable statecharts under one engine contract | [docs/statechart-engine.md](statechart-engine.md) |
 | DL-325 | The statechart executor, its gate and its generated completeness test; a statechart error stops the tier with exit 7 |  |
+| DL-326 | The supervisor's lease is the first machine the statechart executor runs | [docs/supervisor-protocol.md](supervisor-protocol.md) |

@@ -21,6 +21,7 @@ edge; the row table lists every row, then come a branch table and a state table.
 
 from __future__ import annotations
 
+import inspect
 import pathlib
 import sys
 from collections.abc import Iterable
@@ -219,6 +220,18 @@ def chart_table(chart: Statechart) -> list[str]:
             waits += f" (stays: {state.stays})"
         cells = [name, where, state.entry, state.exit, ", ".join(sorted(state.defer)), waits]
         lines.append("| " + " | ".join(_cell(c) for c in cells) + " |")
+    return lines + _prose_table(chart)
+
+
+def _prose_table(chart: Statechart) -> list[str]:
+    """The guards and actions with their docstrings, which are the rows' prose (§14)."""
+    named = [("guard", name, fn) for name, fn in chart.guards.items()]
+    named += [("action", name, fn) for name, fn in chart.actions.items()]
+    if not named:
+        return []
+    lines = ["", "| Name | Kind | Prose |", "| --- | --- | --- |"]
+    for kind, name, fn in named:
+        lines.append(f"| {_cell(name)} | {kind} | {_cell(inspect.getdoc(fn) or '')} |")
     return lines
 
 

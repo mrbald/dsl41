@@ -463,6 +463,29 @@ def test_the_completeness_test_fails_on_an_ambiguous_cell() -> None:
         sc.completeness_table(both, _door(both))
 
 
+def test_the_completeness_test_reports_a_by_path_executors_error_as_a_cell() -> None:
+    """The supervisor loads state_machine.py by path, so its executor raises
+    another module object's StatechartError; the tool still reads it as the
+    cell's value instead of letting it escape."""
+    from dsl41 import runner_supervisor
+
+    gappy = replace(DOOR, rows=DOOR.rows[:-1])
+    by_path = sys.modules[runner_supervisor.Executor.__module__]
+
+    def build() -> tuple[Any, str]:
+        executor = runner_supervisor.Executor()
+        executor.restore("w", gappy, {"door", "opened"})
+        return executor, "w"
+
+    assert by_path is not sm and by_path.UnhandledEvent is not sm.UnhandledEvent
+    assert sc.is_statechart_error(by_path.UnhandledEvent("x"))
+    assert not sc.is_statechart_error(ValueError("x"))
+    with pytest.raises(
+        AssertionError, match=r"executor .UnhandledEvent: .*declaration .falls through \(open"
+    ):
+        sc.completeness_table(gappy, sc.Abstraction(witnesses={"opened": build}))
+
+
 @pytest.mark.parametrize("mutant", ["stale_kept", "deferral_lost"])
 def test_the_completeness_test_fails_on_a_mutant_executor(
     mutant: str, monkeypatch: pytest.MonkeyPatch

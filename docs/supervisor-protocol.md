@@ -3,7 +3,7 @@
 Status: frozen. DL-42 item 3 freezes the spool format and the wrapper
 input spec, and DL-48 freezes the supervisor socket protocol. Entries
 that amend it include DL-80, DL-129, DL-150, DL-151, DL-210, DL-229,
-DL-291 and DL-300; each is cited where it applies. Each change to a frozen item needs a decision-log entry. This
+DL-291, DL-300 and DL-326; each is cited where it applies. Each change to a frozen item needs a decision-log entry. This
 document is the extraction boundary of the lifecycle tier (the five
 modules of §1). If a DL-42 trigger fires and the tier is extracted, this
 document is its public API.
@@ -49,9 +49,11 @@ orchestrator's UI (DL-42 item 6).
   library only, imported by the supervisor under its plain top-level name,
   and covered by the same import test. The wrapper does not import it.
 - **state-machine core** (`state_machine.py`, DL-291): the declared
-  transitions of the supervisor's process and lease machines, and the one
-  check that takes them. It is the third sibling inside the boundary, on
-  the same terms as `canon.py`. The wrapper does not import it.
+  transitions of the supervisor's process machine and the one check that
+  takes them, and the executor that runs its lease statechart
+  ([statechart-engine §15](statechart-engine.md#15-the-executor)). It is
+  the third sibling inside the boundary, on the same terms as `canon.py`.
+  The wrapper does not import it.
 
 Extraction takes all five files or none.
 

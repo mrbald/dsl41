@@ -8,7 +8,7 @@ tests/test_runner_supervisor.py), its only non-stdlib imports being three siblin
 stdlib-only modules under the same by-path rule (DL-72): runner_procid, which
 the wrapper shares; canon, which is the one implementation of the ss3.2
 canonical form the ss11a tombstone files are written in; and state_machine, the
-shared core that checks the process and lease transitions below. The engine runs it BY
+shared core that checks the process transitions and runs the lease statechart below. The engine runs it BY
 FILE PATH (``sys.executable <this file> --run-root <root>``), never ``-m``:
 ``-m`` would import the dsl41 package __init__ and drag third-party imports
 into the supervisor's runtime.
@@ -88,7 +88,7 @@ import time
 import uuid
 from collections import deque
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal
 
 # DL-72: the durability liturgy and the (pid, start-time) PID-reuse guard live
 # in the sibling stdlib-only runner_procid -- one copy, shared with the wrapper
@@ -142,8 +142,17 @@ if TYPE_CHECKING:
     )
     from dsl41.state_machine import (
         EXIT_STATECHART_ERROR,
+        Context,
+        Effects,
+        Event,
+        Executor,
+        Region,
+        Row,
+        State,
+        Statechart,
         StatechartError,
         StateMachine,
+        TimeEvent,
         Transition,
     )
 else:
@@ -173,8 +182,17 @@ else:
     )
     from state_machine import (  # noqa: E402
         EXIT_STATECHART_ERROR,
+        Context,
+        Effects,
+        Event,
+        Executor,
+        Region,
+        Row,
+        State,
+        Statechart,
         StatechartError,
         StateMachine,
+        TimeEvent,
         Transition,
     )
 
@@ -361,9 +379,10 @@ class _Conn:
 # --------------------------------------------------------- state machines
 #
 # Two machines live in this process, declared with the shared core
-# (state_machine.py, reached by path like canon). Each declaration is the
-# transition table; the code that moves a state names the transition it takes
+# (state_machine.py, reached by path like canon). The process machine is a
+# transition table: the code that moves its state names the transition it takes
 # and calls `take`, which checks and records and never changes what happens.
+# The lease is a statechart that an executor runs (below).
 
 #: The process lifecycle. `Supervisor.state` stores it.
 type ProcessState = Literal[
@@ -522,137 +541,424 @@ SUPERVISOR_PROCESS: StateMachine[ProcessState] = StateMachine(
     ),
 )
 
-#: The lease's phase (ss5 lease verbs). It is derived, never stored: see
-#: `lease_phase`.
-type LeasePhase = Literal["free", "live", "orphaned", "expired"]
+# ---------------------------------------------------------- the lease statechart
+#
+# `supervisor_lease` is a statechart (docs/statechart-engine.md), run by the
+# executor each Supervisor owns. Its rows pick every move of the lease, and the
+# guards and actions below are the only code that reads a lease verb's request
+# or writes the record's holder, token, deadline, expiry or connection. The
+# dropped-push notice on the record (`pushes_dropped`, `drops`) is written by
+# `_push_exit` and `_writable` as well. The supervisor posts three kinds of
+# event: a lease verb under its own name, `disconnect` for every connection it
+# drops while it is not closed, and `expire`, the time event it produces by
+# sampling the record's monotonic deadline at each point where it reads the
+# lease, once per deadline.
+#
+# Ties. The supervisor samples the deadline before it posts anything else at
+# that instant, and the deadline instant itself is due. So an expiry and a
+# RENEW or RELEASE at the same instant resolve as the expiry first: the verb
+# meets an expired lease and is refused stale_token, and an ACQUIRE meets a
+# lease it may grant.
+
+#: The lease's instance key in the supervisor's executor: one lease per process.
+_LEASE = "lease"
+#: The time event of a lease whose deadline has passed. It has no generation: the
+#: supervisor samples the current deadline synchronously and posts the event only
+#: while the lease is held, so an expiry can never be stale.
+EXPIRE = "expire"
+#: The event of a connection the supervisor drops, whoever held it.
+DISCONNECT = "disconnect"
+#: The lease's phases: the leaf states of SUPERVISOR_LEASE.
+_PHASES = frozenset({"free", "expired", "live", "orphaned"})
 
 
-def lease_phase(lease: _Lease | None, now: float) -> LeasePhase:
-    """The phase of the lease record at monotonic time `now` (ss5).
+class _LeaseRequest:
+    """A lease verb as the chart sees it: the request, its connection, and the
+    instants the supervisor sampled for it, `now` on the monotonic clock and
+    `wall` on the wall clock.
 
-    free: no record. expired: `now` is not before the deadline, which is also
-    how a NaN deadline reads. orphaned: unexpired, and the holder's connection
-    is gone. live: unexpired, with the holder's connection open.
+    `ttl_s` and the expiry it gives are computed on first use. An error in that
+    computation is kept, not raised: the guards read it, and for an `internal`
+    refusal the supervisor raises it, so the dispatch belt answers it as before
+    and nothing is written (DL-300)."""
 
-    Expiry has no row in SUPERVISOR_LEASE, and the generated table shows no
-    edge into `expired` from live or orphaned. In UML terms it is a time
-    event, after(ttl_s) from the last grant or renewal, and no code takes it:
-    nothing writes the record when the deadline passes. This function reads
-    it off the clock instead. The verbs list `expired` among their sources,
-    and a ttl_s that is not positive targets it directly."""
-    if lease is None:
-        return "free"
-    if not now < lease.deadline:
-        return "expired"
-    return "orphaned" if lease.conn is None else "live"
+    __slots__ = ("req", "conn", "now", "wall", "_ttl", "_expiry")
+
+    def __init__(self, req: dict[str, Any], conn: _Conn, now: float, wall: float) -> None:
+        self.req = req
+        self.conn = conn
+        self.now = now
+        self.wall = wall
+        self._ttl: float | Exception | None = None
+        self._expiry: tuple[float, str] | Exception | None = None
+
+    def __repr__(self) -> str:
+        """The request without its token, for a statechart error's report."""
+        shown = {key: value for key, value in self.req.items() if key != "token"}
+        return f"_LeaseRequest({shown!r})"
+
+    def ttl(self) -> float | Exception:
+        """ttl_s as a number, 60 when it is absent, or the error converting it raised."""
+        if self._ttl is None:
+            try:
+                self._ttl = float(self.req.get("ttl_s", 60))
+            except Exception as exc:  # noqa: BLE001 -- kept for the belt to answer
+                self._ttl = exc
+        return self._ttl
+
+    def expiry(self) -> tuple[float, str] | Exception:
+        """The monotonic deadline and the `expires_at` that ttl_s gives, or the
+        error computing them raised. A zero or negative ttl_s gives a deadline
+        that is already due (ss5)."""
+        if self._expiry is None:
+            ttl_s = self.ttl()
+            if isinstance(ttl_s, Exception):
+                self._expiry = ttl_s
+            else:
+                try:
+                    expires_at = datetime.fromtimestamp(self.wall + ttl_s, UTC).isoformat()
+                    self._expiry = (self.now + ttl_s, expires_at)
+                except Exception as exc:  # noqa: BLE001 -- kept for the belt to answer
+                    self._expiry = exc
+        return self._expiry
+
+    def error(self) -> Exception:
+        """The error that computing the expiry raised. Only an `internal` refusal
+        asks, and its guard saw the error."""
+        expiry = self.expiry()
+        assert isinstance(expiry, Exception)
+        return expiry
+
+
+# -- the guards. Each docstring is its rows' prose.
+
+
+def _named(ctx: Context) -> bool:
+    controller_id = ctx.event.payload.req.get("controller_id")
+    return isinstance(controller_id, str) and controller_id != ""
+
+
+def _timed(ctx: Context) -> bool:
+    return not isinstance(ctx.event.payload.expiry(), Exception)
+
+
+def _this_incarnation(ctx: Context) -> bool:
+    """The request names this incarnation (DL-80)."""
+    return bool(ctx.event.payload.req.get("incarnation") == ctx.data.incarnation)
+
+
+def _foreign(ctx: Context) -> bool:
+    """The request names no incarnation, or another one: the supervisor it knew is
+    gone, so it must re-acquire and reconcile (DL-80)."""
+    return not _this_incarnation(ctx)
+
+
+def _credentials(ctx: Context) -> bool:
+    """This incarnation, then the current token, an integer on the wire (DL-151).
+    ss5 checks nothing else: any connection may present them."""
+    lease = ctx.data.lease
+    return (
+        _this_incarnation(ctx)
+        and lease is not None
+        and _is_wire_int_equal(ctx.event.payload.req.get("token"), lease.token)
+    )
+
+
+def _grantable(ctx: Context) -> bool:
+    """controller_id is a non-empty string, and ttl_s gives a representable expiry.
+    A zero or negative ttl_s gives one too: the lease it grants is due at once,
+    and the next sample expires it (ss5)."""
+    return _named(ctx) and _timed(ctx)
+
+
+def _incumbent(ctx: Context) -> bool:
+    """Grantable, with this incarnation and the current token: the incumbent
+    re-keys, and its old token dies (DL-79, DL-80). controller_id is a label, not
+    a credential. The token proves incumbency, not authenticity. Authentication
+    is the same-uid peer-cred gate on accept (ss1)."""
+    return _grantable(ctx) and _credentials(ctx)
+
+
+def _challenger(ctx: Context) -> bool:
+    """controller_id is a non-empty string and ttl_s is a number, without this
+    incarnation and the current token: a live lease yields only to its incumbent
+    (DL-79). The expiry is not computed."""
+    return (
+        _named(ctx)
+        and not isinstance(ctx.event.payload.ttl(), Exception)
+        and not (_credentials(ctx))
+    )
+
+
+def _unnamed(ctx: Context) -> bool:
+    """controller_id is not a non-empty string, checked before ttl_s and before any
+    lease state (DL-150)."""
+    return not _named(ctx)
+
+
+def _untimed(ctx: Context) -> bool:
+    """controller_id is a non-empty string, and ttl_s gives no representable expiry
+    (not a number, inf, nan, 1e20). Nothing changes, not even the token counter
+    (DL-300)."""
+    return _named(ctx) and not _timed(ctx)
+
+
+def _renewable(ctx: Context) -> bool:
+    """This incarnation and the current token, and ttl_s gives a representable
+    expiry (DL-150, DL-300)."""
+    return _credentials(ctx) and _timed(ctx)
+
+
+def _renewal_untimed(ctx: Context) -> bool:
+    """This incarnation and the current token, and ttl_s gives no representable
+    expiry. Nothing changes (DL-300)."""
+    return _credentials(ctx) and not _timed(ctx)
+
+
+def _holder(ctx: Context) -> bool:
+    """The dropped connection is the one that holds the lease."""
+    lease = ctx.data.lease
+    return lease is not None and lease.conn is ctx.event.payload
+
+
+# -- the actions
+
+
+def _grant(ctx: Context) -> Effects:
+    """Mint the next token and write a new record, held on the claimant's
+    connection, with the request's deadline. A re-grant to the same
+    controller_id keeps the dropped-push notice (DL-210). Answer the token, the
+    expiry and the incarnation (DL-80)."""
+    sup: Supervisor = ctx.data
+    request: _LeaseRequest = ctx.event.payload
+    expiry = request.expiry()
+    assert not isinstance(expiry, Exception)  # the row's guard held
+    deadline, expires_at = expiry
+    token = sup._next_token
+    sup._next_token += 1  # monotonic: never regresses while any run is alive
+    previous = sup.lease
+    holder = request.req["controller_id"]
+    sup.lease = _Lease(holder, token, deadline, expires_at, request.conn)
+    if previous is not None and previous.holder == holder:
+        sup.lease.pushes_dropped = previous.pushes_dropped
+        sup.lease.drops = previous.drops
+    answer = {"ok": True, "token": token, "expires_at": expires_at, "incarnation": sup.incarnation}
+    return Effects(intents=(answer,))
+
+
+def _extend(ctx: Context) -> Effects:
+    """Move the deadline and expires_at to the request's. The connection is not
+    adopted, so an orphaned lease stays orphaned and its pushes keep dropping
+    until an ACQUIRE. Answer the expiry."""
+    sup: Supervisor = ctx.data
+    expiry = ctx.event.payload.expiry()
+    assert sup.lease is not None and not isinstance(expiry, Exception)  # the guard held
+    sup.lease.deadline, sup.lease.expires_at = expiry
+    return Effects(intents=({"ok": True, "expires_at": sup.lease.expires_at},))
+
+
+def _release(ctx: Context) -> Effects:
+    """Drop the record, and answer ok."""
+    ctx.data.lease = None
+    return Effects(intents=({"ok": True},))
+
+
+def _forget(ctx: Context) -> None:
+    """Forget the holder's connection: pushes drop until the holder re-ACQUIREs,
+    and any controller may ACQUIRE an orphaned lease. That lets a crashed
+    engine's resume re-acquire without waiting out the TTL. It is sound because
+    the kernel closes this AF_UNIX fd only when the holder process is gone, kill
+    -9 included, or when the holder closes it itself. A non-local transport would
+    break that (ss5)."""
+    ctx.data.lease.conn = None
 
 
 _LEASE_CITE = f"{_SP5} lease verbs"
 
-LEASE_GRANT: Transition[LeasePhase] = Transition(
-    "supervisor_lease.01",
-    frozenset({"free", "expired", "orphaned"}),
-    "ACQUIRE",
-    frozenset({"live", "expired"}),
-    guard="controller_id is a non-empty string",
-    effect=(
-        "mint a token, keep the dropped-push notice for the same controller_id;"
-        " a ttl_s that is not positive grants a lease that is already expired"
-    ),
-    cite=f"{_LEASE_CITE}, DL-79, DL-150",
-)
-LEASE_REKEY: Transition[LeasePhase] = Transition(
-    "supervisor_lease.02",
-    frozenset({"live"}),
-    "ACQUIRE",
-    frozenset({"live", "expired"}),
-    guard="the incumbent, with this incarnation and the current token",
-    effect="re-key with a fresh token, and the old one dies",
-    cite=f"{_LEASE_CITE}, DL-79, DL-80",
-)
-LEASE_RENEW: Transition[LeasePhase] = Transition(
-    "supervisor_lease.03",
-    frozenset({"live"}),
-    "RENEW",
-    frozenset({"live", "expired"}),
-    guard="this incarnation, then the current token",
-    effect="move the deadline to now + ttl_s",
-    cite=f"{_LEASE_CITE}, DL-150",
-)
-LEASE_RENEW_ORPHANED: Transition[LeasePhase] = Transition(
-    "supervisor_lease.04",
-    frozenset({"orphaned"}),
-    "RENEW",
-    frozenset({"orphaned", "expired"}),
-    guard="this incarnation, then the current token",
-    effect="move the deadline to now + ttl_s; pushes still drop until an ACQUIRE",
-    cite=f"{_LEASE_CITE}, DL-150",
-)
-LEASE_RELEASE: Transition[LeasePhase] = Transition(
-    "supervisor_lease.05",
-    frozenset({"live", "orphaned"}),
-    "RELEASE",
-    "free",
-    guard="this incarnation, then the current token",
-    effect="drop the record",
-    cite=f"{_LEASE_CITE}, DL-150",
-)
-LEASE_HOLDER_GONE: Transition[LeasePhase] = Transition(
-    "supervisor_lease.06",
-    frozenset({"live"}),
-    "the holder's connection closes",
-    "orphaned",
-    effect="forget the connection, so pushes drop and any controller may ACQUIRE",
-    cite=f"{_LEASE_CITE}, DL-150",
-)
-LEASE_GONE_EXPIRED: Transition[LeasePhase] = Transition(
-    "supervisor_lease.07",
-    frozenset({"expired"}),
-    "the holder's connection closes",
-    "expired",
-    effect="forget the connection",
-    cite=f"{_LEASE_CITE}",
-)
-
-#: A refusal changes nothing and takes no transition: bad_controller_id,
-#: lease_held, wrong_incarnation, stale_token. SPAWN, SIGNAL and SHUTDOWN read
-#: the lease and never write it.
-SUPERVISOR_LEASE: StateMachine[LeasePhase] = StateMachine(
+#: A lease verb is answered by the one row it takes: an external or internal
+#: row's action answers, and a refusal row's code is the answer, with the
+#: incarnation for wrong_incarnation and the holder for lease_held. An
+#: `internal` refusal is the dispatch belt's `internal:` answer. SPAWN, SIGNAL
+#: and SHUTDOWN read the lease and never write it.
+SUPERVISOR_LEASE = Statechart(
     name="supervisor_lease",
-    states=frozenset({"free", "live", "orphaned", "expired"}),
-    initial="free",
-    finals=frozenset(),
-    transitions=(
-        LEASE_GRANT,
-        LEASE_REKEY,
-        LEASE_RENEW,
-        LEASE_RENEW_ORPHANED,
-        LEASE_RELEASE,
-        LEASE_HOLDER_GONE,
-        LEASE_GONE_EXPIRED,
+    root=State(
+        "lease",
+        regions=(
+            Region(
+                "phase",
+                "unheld",
+                (
+                    State(
+                        "unheld",
+                        regions=(Region("phase", "free", (State("free"), State("expired"))),),
+                    ),
+                    State(
+                        "held",
+                        regions=(Region("phase", "live", (State("live"), State("orphaned"))),),
+                        wait=frozenset({EXPIRE}),
+                    ),
+                ),
+            ),
+        ),
     ),
+    rows=(
+        Row(
+            "supervisor_lease.01",
+            "unheld",
+            "ACQUIRE",
+            "live",
+            guard="grantable",
+            action="grant",
+            cite=f"{_LEASE_CITE}, DL-79, DL-150",
+        ),
+        Row(
+            "supervisor_lease.02",
+            "orphaned",
+            "ACQUIRE",
+            "live",
+            guard="grantable",
+            action="grant",
+            cite=f"{_LEASE_CITE}, DL-79, DL-150",
+        ),
+        Row(
+            "supervisor_lease.03",
+            "live",
+            "ACQUIRE",
+            guard="incumbent",
+            action="grant",
+            kind="internal",
+            cite=f"{_LEASE_CITE}, DL-79, DL-80",
+        ),
+        Row(
+            "supervisor_lease.04",
+            "live",
+            "ACQUIRE",
+            guard="challenger",
+            kind="refusal",
+            code="lease_held",
+            cite=f"{_LEASE_CITE}, DL-79",
+        ),
+        Row(
+            "supervisor_lease.05",
+            "lease",
+            "ACQUIRE",
+            guard="unnamed",
+            kind="refusal",
+            code="bad_controller_id",
+            cite=f"{_LEASE_CITE}, DL-150",
+        ),
+        Row(
+            "supervisor_lease.06",
+            "lease",
+            "ACQUIRE",
+            guard="untimed",
+            kind="refusal",
+            code="internal",
+            cite=f"{_LEASE_CITE}, DL-300",
+        ),
+        Row(
+            "supervisor_lease.07",
+            "held",
+            "RENEW",
+            guard="renewable",
+            action="extend",
+            kind="internal",
+            cite=f"{_LEASE_CITE}, DL-150",
+        ),
+        Row(
+            "supervisor_lease.08",
+            "held",
+            "RENEW",
+            guard="renewal_untimed",
+            kind="refusal",
+            code="internal",
+            cite=f"{_LEASE_CITE}, DL-300",
+        ),
+        Row(
+            "supervisor_lease.09",
+            "lease",
+            "RENEW",
+            guard="foreign",
+            kind="refusal",
+            code="wrong_incarnation",
+            cite=f"{_SP5} incarnation, DL-80, DL-150",
+        ),
+        Row(
+            "supervisor_lease.10",
+            "lease",
+            "RENEW",
+            guard="this_incarnation",
+            kind="refusal",
+            code="stale_token",
+            cite=f"{_SP5} incarnation, DL-150",
+        ),
+        Row(
+            "supervisor_lease.11",
+            "held",
+            "RELEASE",
+            "free",
+            guard="credentials",
+            action="release",
+            cite=f"{_LEASE_CITE}, DL-150",
+        ),
+        Row(
+            "supervisor_lease.12",
+            "lease",
+            "RELEASE",
+            guard="foreign",
+            kind="refusal",
+            code="wrong_incarnation",
+            cite=f"{_SP5} incarnation, DL-80, DL-150",
+        ),
+        Row(
+            "supervisor_lease.13",
+            "lease",
+            "RELEASE",
+            guard="this_incarnation",
+            kind="refusal",
+            code="stale_token",
+            cite=f"{_SP5} incarnation, DL-150",
+        ),
+        Row(
+            "supervisor_lease.14",
+            "live",
+            DISCONNECT,
+            "orphaned",
+            guard="holder",
+            action="forget",
+            cite=f"{_LEASE_CITE}, DL-150",
+        ),
+        Row(
+            "supervisor_lease.15",
+            "expired",
+            DISCONNECT,
+            guard="holder",
+            action="forget",
+            kind="internal",
+            cite=_LEASE_CITE,
+        ),
+        Row("supervisor_lease.16", "lease", DISCONNECT, kind="ignored", cite=_LEASE_CITE),
+        Row("supervisor_lease.17", "held", EXPIRE, "expired", cite=_LEASE_CITE),
+        Row("supervisor_lease.18", "lease", EXPIRE, kind="ignored", cite=_LEASE_CITE),
+    ),
+    guards={
+        "grantable": _grantable,
+        "incumbent": _incumbent,
+        "challenger": _challenger,
+        "unnamed": _unnamed,
+        "untimed": _untimed,
+        "renewable": _renewable,
+        "renewal_untimed": _renewal_untimed,
+        "foreign": _foreign,
+        "this_incarnation": _this_incarnation,
+        "credentials": _credentials,
+        "holder": _holder,
+    },
+    actions={"grant": _grant, "extend": _extend, "release": _release, "forget": _forget},
+    time_events=(TimeEvent(EXPIRE),),
+    clock="monotonic",
 )
-
-
-class _Acquire(NamedTuple):
-    """An ACQUIRE that passed its own checks: controller_id, then ttl_s (ss5)."""
-
-    controller_id: str
-    ttl_s: float
-    req: dict[str, Any]
-
-
-class _Renew(NamedTuple):
-    req: dict[str, Any]
-
-
-class _Release(NamedTuple):
-    req: dict[str, Any]
-
-
-#: the lease's own messages, dispatched to one handler per phase
-type _LeaseMessage = _Acquire | _Renew | _Release
-type _LeaseAnswer = tuple[dict[str, Any], Transition[LeasePhase] | None]
 
 
 class Supervisor:
@@ -702,6 +1008,11 @@ class Supervisor:
         self._completed: deque[str] = deque()
         self.lease: _Lease | None = None
         self._next_token = 1  # monotonic fencing counter (in-memory; ss5)
+        #: runs SUPERVISOR_LEASE: its state is the lease's phase, and
+        #: `self.lease` is the record its actions write
+        self._leases = Executor()
+        self._leases.start(_LEASE, SUPERVISOR_LEASE, self)
+        self._leases.run()
         self._conns: dict[int, _Conn] = {}
         self._sel = selectors.DefaultSelector()
         self._listen: socket.socket | None = None
@@ -963,7 +1274,7 @@ class Supervisor:
         process is, kill -9 included. An expired lease whose connection is
         open means a controller that stopped renewing, which is a controller
         that has stopped watching."""
-        return lease_phase(self.lease, time.monotonic()) == "live"
+        return self._lease_phase() == "live"
 
     def _deadman_expired(self) -> bool:
         """Has this supervisor been unwatched for T_deadman (ss8)?
@@ -1086,16 +1397,11 @@ class Supervisor:
         with contextlib.suppress(KeyError, OSError, ValueError):
             self._sel.unregister(conn.sock)
         self._conns.pop(conn.sock.fileno(), None)
-        if self.lease is not None and self.lease.conn is conn:
-            now = time.monotonic()
-            before = lease_phase(self.lease, now)
-            self.lease.conn = None  # pushes drop until the holder re-ACQUIREs
-            match before:
-                case "live":
-                    taken = LEASE_HOLDER_GONE
-                case _:  # expired: the record stays expired
-                    taken = LEASE_GONE_EXPIRED
-            SUPERVISOR_LEASE.take(taken, before, lease_phase(self.lease, now))
+        if self.state != "closed":
+            # teardown drops every connection after the loop ended, perhaps on
+            # an error; nothing reads the lease after it, so it is left alone
+            self._expire_due(time.monotonic())
+            self._leases.dispatch(_LEASE, Event(DISCONNECT, conn))
         conn.sock.close()
         conn.buf = b""
         conn.out.clear()
@@ -1249,164 +1555,86 @@ class Supervisor:
 
     # -- lease --------------------------------------------------------------
 
+    def _expire_due(self, now: float) -> None:
+        """Produce the lease's time event (SUPERVISOR_LEASE): post `expire` when
+        the record's deadline is not after `now` and the lease is still held, so
+        once per deadline. The deadline instant itself is due, and so is a NaN
+        deadline."""
+        if (
+            self.lease is not None
+            and not now < self.lease.deadline
+            and "held" in self._leases.active(_LEASE)
+        ):
+            self._leases.dispatch(_LEASE, Event(EXPIRE))
+
+    def _lease_phase(self) -> str:
+        """The lease's phase now: free, live, orphaned or expired. A due expiry
+        is taken first."""
+        self._expire_due(time.monotonic())
+        (phase,) = self._leases.active(_LEASE) & _PHASES
+        return phase
+
     def _lease_active(self) -> bool:
         """Unexpired: live or orphaned. LIST reports such a lease, and only
         such a lease passes the token check."""
-        return lease_phase(self.lease, time.monotonic()) in ("live", "orphaned")
+        return self._lease_phase() in ("live", "orphaned")
+
+    def _refusal(self, code: str) -> dict[str, Any]:
+        """The answer of a lease refusal (ss5): its code, with the current
+        incarnation for wrong_incarnation, and the holder and its expiry for
+        lease_held."""
+        answer: dict[str, Any] = {"ok": False, "error": code}
+        if code == "wrong_incarnation":
+            answer["incarnation"] = self.incarnation
+        elif code == "lease_held":
+            assert self.lease is not None  # only a live lease is held
+            answer.update(holder=self.lease.holder, expires_at=self.lease.expires_at)
+        return answer
 
     def _check_token(self, req: dict[str, Any]) -> dict[str, Any] | None:
-        """Every mutating verb: the request must name THIS incarnation (DL-80)
-        and its token must match a live lease. Incarnation is checked first and
-        answers separately: a token from a dead supervisor is not a lost
-        election, it is a vanished world -- that controller's wrappers lost
-        their lifeline and kill their groups and record in their own time
-        (DL-205), so it must re-acquire AND reconcile from the spool, which
-        is the opposite of what stale_token asks for."""
+        """SPAWN, SIGNAL and SHUTDOWN: the request must name THIS incarnation
+        (DL-80) and its token must match an unexpired lease. Incarnation is
+        checked first and answers separately: a token from a dead supervisor is
+        not a lost election, it is a vanished world -- that controller's wrappers
+        lost their lifeline and kill their groups and record in their own time
+        (DL-205), so it must re-acquire AND reconcile from the spool, which is the
+        opposite of what stale_token asks for. RENEW and RELEASE take the same
+        two checks as rows of SUPERVISOR_LEASE."""
         if req.get("incarnation") != self.incarnation:
-            return {"ok": False, "error": "wrong_incarnation", "incarnation": self.incarnation}
+            return self._refusal("wrong_incarnation")
         if (
             not self._lease_active()
             or self.lease is None
             or not _is_wire_int_equal(req.get("token"), self.lease.token)
         ):
-            return {"ok": False, "error": "stale_token"}
+            return self._refusal("stale_token")
         return None
 
     def _h_acquire(self, conn: _Conn, req: dict[str, Any]) -> dict[str, Any]:
-        controller_id = req.get("controller_id")
-        if not isinstance(controller_id, str) or not controller_id:
-            return {"ok": False, "error": "bad_controller_id"}
-        return self._lease_verb(conn, _Acquire(controller_id, float(req.get("ttl_s", 60)), req))
+        return self._lease_verb(conn, "ACQUIRE", req)
 
     def _h_renew(self, conn: _Conn, req: dict[str, Any]) -> dict[str, Any]:
-        return self._lease_verb(conn, _Renew(req))
+        return self._lease_verb(conn, "RENEW", req)
 
     def _h_release(self, conn: _Conn, req: dict[str, Any]) -> dict[str, Any]:
-        return self._lease_verb(conn, _Release(req))
+        return self._lease_verb(conn, "RELEASE", req)
 
-    def _lease_verb(self, conn: _Conn, msg: _LeaseMessage) -> dict[str, Any]:
-        """Dispatch a lease verb to the handler of the lease's current phase,
-        and take the transition that handler names (SUPERVISOR_LEASE)."""
-        before = lease_phase(self.lease, time.monotonic())
-        match before:
-            case "live":
-                reply, taken = self._lease_live(conn, msg)
-            case "orphaned":
-                reply, taken = self._lease_orphaned(conn, msg)
-            case _:
-                reply, taken = self._lease_unheld(conn, msg)
-        if taken is not None:
-            SUPERVISOR_LEASE.take(taken, before, lease_phase(self.lease, time.monotonic()))
-        return reply
-
-    def _lease_live(self, conn: _Conn, msg: _LeaseMessage) -> _LeaseAnswer:
-        """A LIVE lease -- unexpired AND its holder's connection still open --
-        yields only to the holder itself, and the holder proves incumbency by
-        presenting its CURRENT token (DL-79). controller_id is a label, not a
-        credential: any client may send any string, and until DL-79 a matching
-        one took the lease away from a live holder. That was safe only because
-        one run_root had one engine, which the engine's own control-socket bind
-        enforced ON THIS MACHINE; the moment a second host can serve the same
-        logical run, the label stops discriminating and the partitioned OLD
-        leader fences out the new one.
-
-        The token proves incumbency, not authenticity -- it is a small monotone
-        integer. Authentication is the same-uid peer-cred gate on accept (ss1);
-        a same-uid process is already inside the trust boundary and can signal
-        the engine directly."""
-        assert self.lease is not None  # the phase is live
-        match msg:
-            case _Acquire(req=req) if req.get("incarnation") == self.incarnation and (
-                _is_wire_int_equal(req.get("token"), self.lease.token)
-            ):
-                return self._grant(conn, msg), LEASE_REKEY
-            case _Acquire():
-                refusal = {
-                    "ok": False,
-                    "error": "lease_held",
-                    "holder": self.lease.holder,
-                    "expires_at": self.lease.expires_at,
-                }
-                return refusal, None
-            case _Renew(req=req):
-                return self._extend(req, LEASE_RENEW)
-            case _:
-                return self._drop_lease(msg.req)
-
-    def _lease_orphaned(self, conn: _Conn, msg: _LeaseMessage) -> _LeaseAnswer:
-        """An ORPHANED lease -- unexpired, its holder's connection gone -- is
-        freely grantable, and that is what lets a crashed engine's resume
-        re-acquire without waiting out the TTL. It is sound here because the
-        kernel closes this AF_UNIX fd only when the holder process is gone
-        (kill -9 included), so EOF is proof of death. A NON-LOCAL transport
-        breaks that inference: a relay must not close the supervisor-side
-        connection while its controller lives, or this branch must become
-        TTL-gated. Recorded, not yet needed.
-
-        RENEW and RELEASE still pass with this incarnation and the current
-        token, from any connection (ss5 checks nothing else)."""
-        match msg:
-            case _Acquire():
-                return self._grant(conn, msg), LEASE_GRANT
-            case _Renew(req=req):
-                return self._extend(req, LEASE_RENEW_ORPHANED)
-            case _:
-                return self._drop_lease(msg.req)
-
-    def _lease_unheld(self, conn: _Conn, msg: _LeaseMessage) -> _LeaseAnswer:
-        """No record, or an expired one: ACQUIRE grants; RENEW and RELEASE
-        have nothing to act on and are refused."""
-        match msg:
-            case _Acquire():
-                return self._grant(conn, msg), LEASE_GRANT
-            case _:
-                refusal = self._check_token(msg.req)
-                # an unheld lease never passes the token check: time does not
-                # run backwards, so an expired lease cannot turn active
-                assert refusal is not None
-                return refusal, None
-
-    def _grant(self, conn: _Conn, msg: _Acquire) -> dict[str, Any]:
-        """Mint a token and make `conn` the holder's connection. The expiry is
-        computed first: a ttl_s it cannot represent raises before anything,
-        the token counter included, changes."""
-        expires_at = datetime.fromtimestamp(time.time() + msg.ttl_s, UTC).isoformat()
-        token = self._next_token
-        self._next_token += 1  # monotonic: never regresses while any run is alive
-        previous = self.lease
-        self.lease = _Lease(
-            msg.controller_id, token, time.monotonic() + msg.ttl_s, expires_at, conn
-        )
-        if previous is not None and previous.holder == msg.controller_id:
-            self.lease.pushes_dropped = previous.pushes_dropped
-            self.lease.drops = previous.drops
-        return {
-            "ok": True,
-            "token": token,
-            "expires_at": expires_at,
-            "incarnation": self.incarnation,  # DL-80: pair it with the token
-        }
-
-    def _extend(self, req: dict[str, Any], taken: Transition[LeasePhase]) -> _LeaseAnswer:
-        """RENEW: the token check first, then ttl_s. Everything is computed
-        before the record changes, as in `_grant`: a ttl_s whose expiry cannot
-        be represented (inf, nan, 1e20) raises here, the dispatch belt answers
-        it, and the lease stays as it was."""
-        if (err := self._check_token(req)) is not None:
-            return err, None
-        assert self.lease is not None  # the token check passed
-        ttl_s = float(req.get("ttl_s", 60))
-        expires_at = datetime.fromtimestamp(time.time() + ttl_s, UTC).isoformat()
-        self.lease.deadline = time.monotonic() + ttl_s
-        self.lease.expires_at = expires_at
-        return {"ok": True, "expires_at": expires_at}, taken
-
-    def _drop_lease(self, req: dict[str, Any]) -> _LeaseAnswer:
-        """RELEASE: the token check, then the record goes."""
-        if (err := self._check_token(req)) is not None:
-            return err, None
-        self.lease = None
-        return {"ok": True}, LEASE_RELEASE
+    def _lease_verb(self, conn: _Conn, verb: str, req: dict[str, Any]) -> dict[str, Any]:
+        """Post a lease verb to SUPERVISOR_LEASE at one sampled instant, and give
+        the answer of the row it took: the action's answer, or the refusal's. An
+        `internal` refusal raises the error computing the expiry, so the dispatch
+        belt answers it and nothing has changed (DL-300)."""
+        now = time.monotonic()
+        self._expire_due(now)
+        request = _LeaseRequest(req, conn, now, time.time())
+        outcome = self._leases.dispatch(_LEASE, Event(verb, request))[0]
+        if outcome.intents:
+            answer: dict[str, Any] = outcome.intents[0]
+            return answer
+        (code,) = outcome.refusals
+        if code == "internal":
+            raise request.error()
+        return self._refusal(code)
 
     # -- spawn / signal -----------------------------------------------------
 
@@ -1884,6 +2112,8 @@ class Supervisor:
         # earlier reply-then-teardown also double-sent {ok} (review fix, DL-48)
         try:
             self._orderly_shutdown(PROCESS_SHUTDOWN)
+        except StatechartError:
+            raise  # the supervisor stops on it; the wait does not run again
         except Exception as exc:
             # the dispatch answers it `internal:` and the wait runs again at
             # the end of this loop pass (row 06 or 12); the log keeps the cause

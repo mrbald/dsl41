@@ -28,7 +28,6 @@ from dsl41.state_machine import (
     Row,
     State,
     Statechart,
-    StatechartError,
     alphabet,
 )
 
@@ -171,6 +170,19 @@ def resolution(chart: Statechart, active: frozenset[str], ctx: Context) -> str:
     return "deferred" if deferrals else "unhandled"
 
 
+def is_statechart_error(error: BaseException) -> bool:
+    """True for a `StatechartError` of the package's module or of its by-path twin.
+
+    The supervisor loads state_machine.py by path, so its executor raises another
+    module object's class. Like `is_statechart`, this reads the class, not the
+    identity: a class named StatechartError in either module's ancestry."""
+    return any(
+        cls.__name__ == "StatechartError"
+        and cls.__module__ in ("dsl41.state_machine", "state_machine")
+        for cls in type(error).__mro__
+    )
+
+
 def _excluded(chart: Statechart, active: frozenset[str], event: str, partition: str) -> bool:
     return any(
         x.state in active and x.event == event and x.partition in ("", partition)
@@ -236,8 +248,10 @@ def _cell(
         expected = resolution(chart, active, Context(key, posted, active, executor.data(key)))
     try:
         actual = observed(chart, executor.dispatch(key, posted)[0])
-    except StatechartError as error:
-        actual = f"{type(error).__name__}: {error.message}"
+    except Exception as error:  # noqa: BLE001 -- only a statechart error is a cell value
+        if not is_statechart_error(error):
+            raise
+        actual = f"{type(error).__name__}: {error.args[0]}"
     if expected == "unhandled":
         expected = f"falls through ({event} in {sorted(active)})"
     return actual, expected

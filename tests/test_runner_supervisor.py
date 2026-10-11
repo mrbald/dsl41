@@ -3180,18 +3180,44 @@ def test_dl210_a_killed_unreaped_supervisor_is_absent_not_an_owner(short_root: P
 # ------------------------------------------- the process and lease machines
 
 
-def test_lease_phase_reads_the_record_and_the_monotonic_clock() -> None:
-    """ss5's lease modes, derived. The deadline instant itself is expired, as
-    `_lease_active` always read it, and so is a NaN deadline."""
-    phase = runner_supervisor.lease_phase
-    lease = runner_supervisor._Lease
-    holder = object()  # stands for the holder's open connection
-    assert phase(None, 0.0) == "free"
-    assert phase(lease("h", 1, 10.0, "", holder), 9.0) == "live"
-    assert phase(lease("h", 1, 10.0, "", None), 9.0) == "orphaned"
-    assert phase(lease("h", 1, 10.0, "", holder), 10.0) == "expired"
-    assert phase(lease("h", 1, 10.0, "", None), 11.0) == "expired"
-    assert phase(lease("h", 1, float("nan"), "", holder), 0.0) == "expired"
+class _SteppedClock:
+    """The supervisor's `time` module with a monotonic clock the test moves."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    @staticmethod
+    def time() -> float:
+        return time.time()
+
+
+def test_the_lease_phase_is_the_chart_after_the_sampled_expiry(
+    queued_supervisor, monkeypatch
+) -> None:
+    """ss5's lease phases are SUPERVISOR_LEASE's states, read after the
+    supervisor posts the expiry its monotonic deadline says is due. The
+    deadline instant itself is expired, as `_lease_active` always read it, and
+    so is a NaN deadline."""
+    clock = _SteppedClock()
+    monkeypatch.setattr(runner_supervisor, "time", clock)
+    sup, connect = queued_supervisor
+    conn, peer = connect()
+    assert sup._lease_phase() == "free"
+    _exchange(sup, conn, peer, {"cmd": "ACQUIRE", "controller_id": "h", "ttl_s": 10})
+    clock.now = 1009.0
+    assert sup._lease_phase() == "live"
+    sup._drop_conn(conn)
+    assert sup._lease_phase() == "orphaned"
+    clock.now = 1010.0
+    assert sup._lease_phase() == "expired"
+    conn, peer = connect()
+    _exchange(sup, conn, peer, {"cmd": "ACQUIRE", "controller_id": "h", "ttl_s": 10})
+    assert sup._lease_phase() == "live"
+    sup.lease.deadline = float("nan")
+    assert sup._lease_phase() == "expired"
 
 
 def _exchange(sup, conn, peer, request: dict) -> dict:
@@ -3200,13 +3226,13 @@ def _exchange(sup, conn, peer, request: dict) -> dict:
 
 
 def _phase(sup) -> str:
-    return runner_supervisor.lease_phase(sup.lease, time.monotonic())
+    return sup._lease_phase()
 
 
 def test_an_orphaned_lease_renews_from_a_new_connection_and_stays_orphaned(
     queued_supervisor,
 ) -> None:
-    """supervisor_lease.04 and .05 from orphaned. RENEW and RELEASE check the
+    """supervisor_lease.07 and .11 from orphaned. RENEW and RELEASE check the
     incarnation and then the token, nothing else (ss5), so a new connection
     that holds both renews an orphaned lease. RENEW does not adopt that
     connection: the lease stays orphaned and pushes keep dropping until an
@@ -3231,9 +3257,8 @@ def test_an_orphaned_lease_renews_from_a_new_connection_and_stays_orphaned(
 
 def test_a_ttl_that_is_not_positive_grants_and_renews_into_expired(queued_supervisor) -> None:
     """ss5 puts no bound on ttl_s: zero or negative makes a lease that is
-    already expired. That is why the grant, re-key and renew transitions of
-    supervisor_lease target a choice of live or expired. A positive ttl_s is
-    the non-triggering case."""
+    already expired: its deadline is due at once, and the next sample takes
+    supervisor_lease's expiry. A positive ttl_s is the non-triggering case."""
     sup, connect = queued_supervisor
     conn, peer = connect()
     first = _exchange(sup, conn, peer, {"cmd": "ACQUIRE", "controller_id": "e", "ttl_s": 60})
