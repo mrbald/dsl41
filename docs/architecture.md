@@ -365,6 +365,7 @@ The README's "Operator recovery" section runs the same `query status` and
 - The frozen runner contracts: [control-protocol](control-protocol.md),
   [supervisor-protocol](supervisor-protocol.md),
   [concurrency-model](concurrency-model.md), [period-model](period-model.md),
-  [protocol-evolution](protocol-evolution.md), [access-model](access-model.md).
+  [protocol-evolution](protocol-evolution.md), [access-model](access-model.md),
+  [statechart-engine](statechart-engine.md).
 - The operator path: [deployment-runbook §0](deployment-runbook.md#0-the-operator-path).
 - The decisions behind all of it: [decision index](decision-index.md).

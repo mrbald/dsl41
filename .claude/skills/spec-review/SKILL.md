@@ -73,7 +73,7 @@ When the specification and the code disagree, the decision log decides.
   the code. List the finding in the PR body with file and line, as a fact.
 - A frozen contract (`period-model.md`, `concurrency-model.md`,
   `control-protocol.md`, `supervisor-protocol.md`, `protocol-evolution.md`,
-  `access-model.md`, and the U3a record schema in `uc-edge-schema.md`)
+  `access-model.md`, `statechart-engine.md`, and the U3a record schema in `uc-edge-schema.md`)
   changes meaning only
   through a new decision-log entry. So does any rule an entry doc-froze,
   such as SEM-36 to SEM-39.
