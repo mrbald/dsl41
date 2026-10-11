@@ -20919,3 +20919,69 @@ relitigate an entry; append a new one.
   REVIEW. One Opus reviewer (a refactor that keeps behaviour), two rounds. It found the soak
   counter moving on a quarantine, the one-list rule and the line order unpinned by any test, and
   a docstring and a runbook sentence naming the old attributes. All are fixed and confirmed.
+- DL-324 Runner state machines become declared, executable statecharts under one engine
+  contract
+  (2026-10-11; docs/statechart-engine.md (new, frozen); CLAUDE.md "Read for the task";
+  README.md and docs/architecture.md §7 contract lists)
+  THE RULING. DL-289 made each runner state machine declare its transition table. The code that
+  moves a state names the row it takes, and `take` checks the shape and records a hit. Guards and
+  effects are prose. So the table describes the code. Full transition coverage proves that no
+  undeclared move happened and that every row was taken once. It does not prove that a guard held.
+  The owner rules that the declaration is the only spec. Rows pick the transition. The guard and
+  the action are named callables beside the row. No other code decides a move. Coverage over the
+  declaration (rows, choice branches, guard outcomes, deferral paths), plus a generated
+  completeness test over every configuration and event, then means "the machine works as
+  specified". docs/statechart-engine.md fixes the executor every declared machine runs under: UML
+  2.5 with every open choice pinned, and three rules of the owner's.
+  - No nested calls. An action reports the events it raises and the continuation it requests. The
+    executor's loop takes them from one worklist, depth-first, with the target's completion
+    queued behind the items the step reported. The stack stays one deep.
+  - Deferred events. A wait state declares the events it defers. The innermost state with a row
+    or a deferral decides. A deferred event waits in a bounded queue and is released, in order,
+    once the machine reaches a state that does not defer it. A wait state needs no rows for the
+    events it defers.
+  - Re-entrance is a hard error. A dispatch while a macrostep is in flight raises, in production
+    too, and tests assert it. Two enabled rows for one event in one state raise. An event that no
+    row, deferral or ignore handles raises. These three reverse DL-289's rule that nothing raises
+    in production, for a converted machine. DL-292's violation channel stays for the machines not
+    yet converted; the entry that converts the last one retires it.
+  WHAT ELSE IT PINS. The firing set is computed before any action runs, with conflicts across
+  regions resolved by depth. An internal transition runs no exit or entry. A choice is resolved
+  inside its step; completion events precede pool events. Each machine declares its clock, and the
+  executor reads none. A time event the tier re-arms carries a generation. A wait state declares
+  its way out. A former call-then-continue site becomes a transient state whose completion is the
+  continuation. A re-trigger bound is a row guarded on ancestry depth. The completeness test is
+  generated from the declaration over a declared finite abstraction and checks the executor against
+  the declaration cell by cell; the SEM trace tests and the bisimulation stay the evidence of
+  behaviour. Cross-machine invariants and vendor requirements stay in the normative documents.
+  WHAT IT LEAVES TO THE SLICES. How a deferred queue is represented inside the oracle, its dry
+  apply and a fault at release (which narrow concurrency-model §4, DL-292 and DL-320); whether the
+  seal's `frozen` state defers, against period-model §6; the oracle's cascade phases and DL-304's
+  start bound; tie rules between time events and other items. Each is ruled by the entry that
+  converts that machine. No oracle machine defers until then.
+  THE EXECUTOR. Built here, in state_machine.py: standard library only, imported by path by the
+  supervisor tier, deterministic, no clock, no I/O. A prior-art check of python-statemachine,
+  transitions, sismic, miros and pysm found no deferral with override anywhere and no
+  standard-library fit. Their vocabulary and semantic tests are references only.
+  THE ORDER. Pilot: supervisor_lease and subscription, whose contract is a bounded buffer in both
+  phases, not a deferral. Then seal_boundary, then the remaining machines in the order the document
+  lists. The oracle last: one composite `job` machine with named regions, built beside the old
+  oracle and compared with it on the corpus and generated estates before the old one is deleted. A
+  divergence is a bug or a fidelity question. Each slice is a semantic-class change with its own
+  entry. Versions are reviewed on every slice that changes a derivation.
+  NAMES. "Deferred event" is the UML term. A transient state is left by a completion transition. A
+  wait state awaits a reply or a time event. SEM-33's run_window deferral is a "window-postponed
+  start" in new prose; its identifiers, cause strings and trace line stay.
+  NOT BUILT. No machine is converted and no version moves. The executor lands with the pilot.
+  REVIEW. The ruling: Fable, with two Codex rounds (xhigh, then high) as the cross-model pass;
+  twelve amendments accepted, none contested. The document: one Opus reviewer, three rounds, and
+  one Fable advisor pass of its own, two rounds; it found two regions' rows of equal depth
+  undecided, a completion whose state was left unplaced, release and overflow underspecified, and
+  the executor and the engine tier sharing one name; all fixed and confirmed. Round one found the
+  seal's deferral contradicting period-model §6, the oracle's timers and start bound over-specified
+  before their slices, an undefined step, an ignore row that would override a deferral, and the
+  reversal of DL-289 unstated; the document was narrowed to the executor. Round two found
+  completeness unpinned across regions. Round three, the last, found the per-item unit unnamed and
+  an ancestor's row that could override a deferral from a sibling region; both are fixed here and
+  go to the owner with the entry, as the round limit says. Everything else is confirmed by the
+  reviewer that raised it.

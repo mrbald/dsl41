@@ -41,7 +41,8 @@ Its frozen contracts are
 [docs/concurrency-model.md](docs/concurrency-model.md),
 [docs/period-model.md](docs/period-model.md),
 [docs/protocol-evolution.md](docs/protocol-evolution.md),
-and [docs/access-model.md](docs/access-model.md).
+[docs/access-model.md](docs/access-model.md),
+and [docs/statechart-engine.md](docs/statechart-engine.md).
 A proposed HTTP and WebSocket gateway is specified in
 [docs/gateway.md](docs/gateway.md); nothing of it is built.
 
