@@ -297,7 +297,7 @@ _ENVELOPE = Envelope(request_id="r", expect={"job:j": 0})
 def test_only_a_socket_request_or_a_control_event_is_a_control_input(
     pending: _Pending, control: bool
 ) -> None:
-    assert pending.control is control
+    assert _engine()._attempt(pending, 1, "fp").engine_made is not control
 
 
 # ------------------------------------------------------------- refusals
@@ -341,7 +341,7 @@ def test_a_control_input_whose_apply_fails_is_refused_before_the_wal(
         with pytest.raises(AdmissionRefused) as refused:
             await future
         assert (engine.frontiers, state_bytes(engine.oracle)) == before
-        assert [rid for rid, _ in engine.refusals] == ["r1"]
+        assert [kept for _, kept in engine.refused_inputs] == [refused.value]  # r1's
         await _close(engine)
         return refused.value
 
@@ -358,7 +358,7 @@ def test_a_clean_control_input_is_admitted_after_its_dry_apply(tmp_path: Path) -
         future = _submit_start(engine)
         await engine.run_until_quiescent(T0 + timedelta(seconds=1))
         result = await future
-        assert engine.refusals == []
+        assert engine.refused_inputs == []
         assert engine.oracle.store.job["j"].status == "SUCCESS"
         await _close(engine)
         return result
@@ -403,7 +403,7 @@ def test_continue_admits_a_violating_control_input_with_its_trace_line(
         return engine
 
     engine = asyncio.run(scenario())
-    assert engine.refusals == []
+    assert engine.refused_inputs == []
     assert engine.oracle.store.job["j"].run_number == 1  # the command applied
     assert _markers(engine.oracle) == [("j", "job_status.99 STARTING->RUNNING: a fake violation")]
 
@@ -419,7 +419,7 @@ def test_a_strict_check_raises_through_the_dry_apply(monkeypatch: pytest.MonkeyP
         try:
             with pytest.raises(TransitionError):
                 await engine.run_until_quiescent(T0)
-            assert engine.refusals == []
+            assert engine.refused_inputs == []
         finally:
             await engine.shutdown()
 
@@ -443,7 +443,7 @@ def test_an_engine_made_violation_is_taken_and_traced(monkeypatch: pytest.Monkey
 
     engine = asyncio.run(scenario())
     assert engine.oracle.store.job["j"].status == "SUCCESS"
-    assert engine.refusals == []
+    assert engine.refused_inputs == []
     assert [job for job, _ in _markers(engine.oracle)] == ["j"]
 
 
@@ -794,7 +794,7 @@ def test_a_violation_in_the_time_half_does_not_refuse_the_command(
         return engine, stopped
 
     engine, stopped = asyncio.run(scenario())
-    assert engine.refusals == []
+    assert engine.refused_inputs == []
     assert engine.oracle.store.global_value("G") == "1"
     assert engine.oracle.store.job["t"].status == "TERMINATED"
     assert [job for job, _ in _markers(engine.oracle)] == ["t"]
@@ -1003,6 +1003,7 @@ def test_a_sweep_raises_every_refusal_after_playing_every_case(
             parked=frozenset(),
             no_success_exit=frozenset(),
         )
-    cases = [case for case, _, _ in refused.value.refusals]
-    assert cases and all(case.startswith("flags:FLAG='go'") for case in cases)
-    assert {r.code for _, _, r in refused.value.refusals} == {"apply_faulted"}
+    lost = refused.value.lost
+    assert lost and all(item.case.startswith("flags:FLAG='go'") for item in lost)
+    assert {item.kind for item in lost} == {"refused"}
+    assert all(item.why.startswith("apply_faulted: ") for item in lost)

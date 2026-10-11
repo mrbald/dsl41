@@ -279,7 +279,7 @@ def test_cm06_a_command_composed_against_a_stale_revision_is_rejected() -> None:
     engine = asyncio.run(scenario())
     # a rejection is a DECISION: it took an index, unlike a refusal
     assert engine.frontiers.applied_index == 2
-    assert engine.refusals == []
+    assert engine.refused_inputs == []
 
 
 def test_a_stale_precondition_still_observed_the_clock() -> None:
@@ -648,7 +648,7 @@ def test_the_engines_own_inputs_carry_no_precondition() -> None:
 
     engine = asyncio.run(scenario())
     assert engine.oracle.store.job["x"].status == "TERMINATED"  # the timer applied
-    assert engine.refusals == []
+    assert engine.refused_inputs == []
 
 
 # ------------------------------------------- 3. refused vs rejected (the ledger)
@@ -782,7 +782,7 @@ def test_an_exact_retry_at_a_stale_epoch_recovers_its_original_decision() -> Non
         return engine
 
     engine = asyncio.run(scenario())
-    assert engine.refusals == []  # answered, not refused
+    assert engine.refused_inputs == []  # answered, not refused
     assert engine.frontiers.committed_index == 1
 
 

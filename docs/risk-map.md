@@ -162,7 +162,7 @@ Two items stay open (DL-290):
 
 ### Unbounded trace and counters
 
-The oracle's trace, and the engine's `drops`, `deduped` and `refusals` lists, grow for the life of the process with no bound (DL-307).
+The oracle's trace, and the engine's `drops`, `deduped` and `refused_inputs` lists, grow for the life of the process with no bound (DL-307).
 A capacity measurement, not yet run, must state a limit.
 
 ### A host's boot_id check reads a foreign live run as dead

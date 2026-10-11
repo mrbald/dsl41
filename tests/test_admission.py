@@ -233,7 +233,7 @@ def test_one_request_id_for_two_different_commands_is_refused_not_applied() -> N
         return engine
 
     engine = asyncio.run(scenario())
-    assert [reason for _, reason in engine.refusals] == [
+    assert [str(refusal) for _, refusal in engine.refused_inputs] == [
         "request_id 'same' was admitted for a different command (fingerprint mismatch):"
         " reuse an id only for an exact retry"
     ]

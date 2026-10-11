@@ -21,7 +21,7 @@ outcome comes from its command: `sleep N` takes N seconds, `false` exits 1.
 Each day also carries a little operator traffic, through the engine's
 control path: a forced start, its exact retry (answered from the first
 decision), a hold and its release, and a request id reused for another
-command (refused). Without it the engine's `deduped` and `refusals` lists
+command (refused). Without it the engine's `deduped` and `refused_inputs` lists
 stay empty.
 
 `scenario` writes the same outcomes as a `dsl41 rehearse --scenario` file
@@ -145,9 +145,12 @@ def day_counts(engine: Engine, since: int) -> dict[str, int]:
 def lists(engine: Engine) -> dict[str, int]:
     return {
         "trace": len(engine.oracle._trace),
-        "drops": len(engine.drops),
+        # a quarantine was on `drops` until DL-323 gave it its own list; the
+        # soak runs no supervisor, so no host input, the one quarantine that
+        # never reached `drops`, can occur here
+        "drops": len(engine.drops) + len(engine.quarantined),
         "deduped": len(engine.deduped),
-        "refusals": len(engine.refusals),
+        "refusals": len(engine.refused_inputs),
         "decisions": len(engine.decisions._by_index),
         "outbox": len(engine.outbox._effects),
     }

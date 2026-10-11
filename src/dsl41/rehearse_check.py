@@ -34,7 +34,7 @@ import asyncio
 import json
 
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -56,7 +56,6 @@ from dsl41.ir import CatalogIR, JobIR
 from dsl41.oracle_state import Event
 from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
-from dsl41.runner_admission import AdmissionRefused, ApplyResult
 from dsl41.runner_clock import EngineError, VirtualClock, ZeroDelayCycleError
 from dsl41.runner_scheduler import Scheduler
 from dsl41.semantics import DEFAULTS, SemanticSwitches, iced_atom_truth
@@ -395,8 +394,7 @@ def run_fail_sweep(
     events = list(events)  # one materialization, replayed per case
     cases: list[SweepCase] = []
     findings: list[CheckFinding] = []
-    refused: list[SweepRefusal] = []
-    quarantined: list[SweepQuarantine] = []
+    lost: list[LostInput] = []
     for producer in producers:
         job = catalog.jobs[producer]
         if job.job_type == "BOX":
@@ -434,8 +432,7 @@ def run_fail_sweep(
             events=list(events),
             reading=reading,
         )
-        refused.extend((case_id, ev, refusal) for ev, refusal in result.refused)
-        quarantined.extend((case_id, decided) for decided in result.quarantined)
+        lost.extend(replace(item, case=case_id) for item in result.lost)
         suppressed = {
             name: baseline_runs.get(name, 0) - runs
             for name, runs in sorted(result.runs.items())
@@ -452,8 +449,8 @@ def run_fail_sweep(
         if result.cycle is not None:
             findings.append(_cycle_finding(result.cycle, case=case_id))
         findings.extend(_multi_fire_findings(bounds, result.runs, case=case_id))
-    if refused or quarantined:
-        raise SweepRefused(refused, quarantined)
+    if lost:
+        raise SweepRefused(lost)
     return cases, findings
 
 
@@ -699,8 +696,7 @@ def run_flag_sweep(
     mid = start + (horizon - start) / 2
     out: list[FlagCase] = []
     findings: list[CheckFinding] = []
-    refused: list[SweepRefusal] = []
-    quarantined: list[SweepQuarantine] = []
+    lost: list[LostInput] = []
     for assignment, reset in cases_spec:
         label = ",".join(f"{g}={v!r}" for g, v in sorted(assignment.items()))
         case_id = f"flags:{label}" + ("+reset" if reset else "")
@@ -737,8 +733,7 @@ def run_flag_sweep(
             events=[*events, *case_events],
             reading=reading,
         )
-        refused.extend((case_id, ev, refusal) for ev, refusal in result.refused)
-        quarantined.extend((case_id, decided) for decided in result.quarantined)
+        lost.extend(replace(item, case=case_id) for item in result.lost)
         if result.cycle is not None:
             findings.append(_cycle_finding(result.cycle, case=case_id))
         case_findings = _multi_fire_findings(bounds, result.runs, case=case_id)
@@ -763,8 +758,8 @@ def run_flag_sweep(
                 cycle=result.cycle is not None,
             )
         )
-    if refused or quarantined:
-        raise SweepRefused(refused, quarantined)
+    if lost:
+        raise SweepRefused(lost)
     return out, findings, uncovered
 
 
@@ -1165,18 +1160,55 @@ class PlayResult:
 
     runs: dict[str, int]
     cycle: ZeroDelayCycleError | None
-    #: scripted inputs the dry apply refused (concurrency-model ss4): each one
-    #: never ran, so the counts above would under-report without it
-    refused: list[tuple[Event | None, AdmissionRefused]] = field(default_factory=list)
-    #: engine-made inputs the play quarantined (concurrency-model ss4): only
-    #: their time half applied, so the counts under-report them the same way
-    quarantined: list[ApplyResult] = field(default_factory=list)
+    #: inputs the play did not run as asked (`lost_inputs`): the counts
+    #: above under-report each one
+    lost: list[LostInput] = field(default_factory=list)
 
 
-#: one refusal a sweep play met: the case id, the input, the refusal
-SweepRefusal = tuple[str, Event | None, AdmissionRefused]
-#: one quarantine a sweep play met: the case id and the rejected decision
-SweepQuarantine = tuple[str, ApplyResult]
+@dataclass(frozen=True)
+class LostInput:
+    """An input a play did not run as asked (concurrency-model ss4): a
+    scripted input the dry apply refused, which never ran, or an engine-made
+    one the play quarantined, whose time half alone applied. The play's
+    counts under-report either one, so rehearse names it and fails (no
+    silent loss). `what` names the input and `why` the refusal's code and
+    message or the quarantine's reason. `case` is the sweep case it was met
+    in, empty for the main play."""
+
+    kind: Literal["refused", "quarantined"]
+    what: str
+    why: str
+    case: str = ""
+
+    def line(self) -> str:
+        """The input as rehearse reports it on stderr."""
+        where = f" in sweep {self.case}" if self.case else ""
+        return f"rehearse failed: {self.kind} {self.what}{where}: {self.why}"
+
+
+def lost_inputs(engine: Engine) -> list[LostInput]:
+    """Every input `engine` refused or quarantined, refusals first."""
+    lost = [
+        LostInput(
+            "refused",
+            "a verbless input"
+            if ev is None
+            else f"{ev.kind} {json.dumps(ev.payload, sort_keys=True)} @ {ev.at.isoformat()}",
+            f"{refusal.code}: {refusal}",
+        )
+        for ev, refusal in engine.refused_inputs
+    ]
+    lost += [
+        LostInput("quarantined", f"input {decided.index}", f"{decided.reason}")
+        for decided, _fault in engine.quarantined
+    ]
+    return lost
+
+
+def lost_lines(lost: Iterable[LostInput]) -> list[str]:
+    """The stderr lines for `lost`: every refusal, then every quarantine,
+    each in the order it was met."""
+    return [item.line() for item in sorted(lost, key=lambda item: item.kind == "quarantined")]
 
 
 class SweepRefused(EngineError):
@@ -1185,13 +1217,11 @@ class SweepRefused(EngineError):
     its case, because neither input ran: its case's counts would report a
     suppressed run that is only a lost input (no silent loss)."""
 
-    def __init__(
-        self, refusals: list[SweepRefusal], quarantines: list[SweepQuarantine] | None = None
-    ) -> None:
-        self.refusals = refusals
-        self.quarantines = quarantines or []
+    def __init__(self, lost: list[LostInput]) -> None:
+        self.lost = lost
+        refused = sum(1 for item in lost if item.kind == "refused")
         super().__init__(
-            f"{len(refusals)} scripted input(s) refused and {len(self.quarantines)}"
+            f"{refused} scripted input(s) refused and {len(lost) - refused}"
             " input(s) quarantined in sweep plays"
         )
 
@@ -1238,9 +1268,4 @@ def play_once(
     runs = {
         name: engine.oracle.store.runtime(name).run_number - before[name] for name in catalog.jobs
     }
-    return PlayResult(
-        runs=runs,
-        cycle=cycle,
-        refused=list(engine.refused_inputs),
-        quarantined=[decided for decided, _fault in engine.quarantined],
-    )
+    return PlayResult(runs=runs, cycle=cycle, lost=lost_inputs(engine))

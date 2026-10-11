@@ -242,6 +242,7 @@ def test_an_engine_made_input_whose_apply_raises_is_quarantined_and_the_engine_r
     assert decided["reason"].startswith(f"quarantined: applying {what} at ")
     assert "raised RuntimeError: an injected fault on" in decided["reason"]
     assert [result.index for result, _ in engine.quarantined] == [attempt["seq"]]
+    assert engine.drops == []  # a quarantined input is on one list: `quarantined`
     assert isinstance(engine.quarantined[0][1], RuntimeError)
     assert engine.quarantined[0][1].__traceback__ is None  # it pins no fork's frames
     assert err.count(f"{QUARANTINE_LOG_PREFIX}: input {attempt['seq']}: quarantined:") == 1
@@ -847,6 +848,36 @@ def test_a_time_half_fault_on_a_drained_input_stops_the_seal_without_an_abort(
     assert isinstance(raised, TimeHalfStop)
     assert "rather than lose an unadmitted STATUS input" in "\n".join(raised.__notes__)
     assert not [r for r in records if r["rec"] in ("seal", "input", "advance")]
+
+
+def test_a_time_half_fault_on_a_drained_routing_observation_names_it_unadmitted(
+    tmp_path: Path,
+) -> None:
+    """The leader's own routing observation, queued before the seal, is
+    drained by it like a completion. A time-half stop on it stops the seal
+    without an abort, and the note names it as a host input (DL-274)."""
+    from test_boundary import C2_JIL, _genesis, _request, _stage
+
+    run_root = tmp_path / "run"
+    engine = _genesis(run_root)
+    staged = _stage(run_root, C2_JIL)
+
+    async def scenario() -> TimeHalfStop:
+        with pytest.MonkeyPatch.context() as mp:
+            _fault_on_the_engines_oracle(mp)
+            engine.inject_host(HostCommand(verb="quarantine", host_id="local"))
+            sealed = engine.submit_seal(_request(engine, staged))
+            with pytest.raises(TimeHalfStop) as out:
+                await engine.run_until_quiescent(T0)
+            assert not sealed.done() and engine.sealing  # no abort ran
+        await _close(engine)
+        return out.value
+
+    raised = asyncio.run(scenario())
+    assert "rather than lose an unadmitted host input" in "\n".join(raised.__notes__)
+    assert engine.journal is not None
+    records = read_journal(engine.journal.path)
+    assert not [r for r in records if r["rec"] in ("seal", "host", "advance")]
 
 
 def _fork_only_commit_fault(mp: pytest.MonkeyPatch) -> None:

@@ -334,3 +334,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-320 | An engine-made input whose apply raises is quarantined, or stops the engine before it is logged |  |
 | DL-321 | The wrapper and the supervisor wake at a signal's delivery, so a command's exit is never missed |  |
 | DL-322 | The liveness check counts an exited, unreaped process as dead | [docs/deployment-runbook.md](deployment-runbook.md), [docs/runner-design.md](runner-design.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
+| DL-323 | The architecture review of 2026-10-11 is closed: the quarantine rule has one copy, and the engine keeps one list per kind of lost input |  |

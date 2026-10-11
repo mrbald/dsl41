@@ -54,12 +54,7 @@ if TYPE_CHECKING:
     from dsl41.period import Manifest, RuntimeProfile, StagedManifest
     from dsl41.runner import Engine
     from dsl41.runner_history import RunRow
-    from dsl41.runner_admission import (
-        AdmissionRefused,
-        ApplyResult,
-        DecisionIndex,
-        ViolationPolicy,
-    )
+    from dsl41.runner_admission import DecisionIndex, ViolationPolicy
     from dsl41.runner_preflight import PreflightItem
     from dsl41.runner_startup import Wiring
     from dsl41.seal import CarriedRows
@@ -1173,10 +1168,12 @@ def _emit_cadence_check(
     from dsl41.derive import derive_graph
     from dsl41.rehearse_check import (
         Interpretation,
+        LostInput,
         SweepRefused,
         compare,
         expected_bounds,
         fail_sweep_producers,
+        lost_lines,
         render_text,
         run_fail_sweep,
         run_flag_sweep,
@@ -1211,10 +1208,9 @@ def _emit_cadence_check(
         typer.echo("sweeps skipped: the happy path tripped the zero-delay guard", err=True)
     elif sweeps:
         progress = lambda line: typer.echo(line, err=True)  # noqa: E731
-        # every sweep plays to its end; their refusals and quarantines are
-        # reported together
-        refused: list[tuple[str, Event | None, AdmissionRefused]] = []
-        quarantined: list[tuple[str, ApplyResult]] = []
+        # every sweep plays to its end; the inputs they lost are reported
+        # together
+        lost: list[LostInput] = []
         if SweepKind.fail in sweeps:
             try:
                 cases, sweep_findings = run_fail_sweep(
@@ -1231,8 +1227,7 @@ def _emit_cadence_check(
                     progress=progress,
                 )
             except SweepRefused as exc:
-                refused.extend(exc.refusals)
-                quarantined.extend(exc.quarantines)
+                lost.extend(exc.lost)
             else:
                 check.sweeps.append(SweepKind.fail.value)
                 check.fail_sweep = cases
@@ -1256,18 +1251,15 @@ def _emit_cadence_check(
                     progress=progress,
                 )
             except SweepRefused as exc:
-                refused.extend(exc.refusals)
-                quarantined.extend(exc.quarantines)
+                lost.extend(exc.lost)
             else:
                 check.sweeps.append(SweepKind.flags.value)
                 check.flag_sweep = fcases
                 check.flag_uncovered = uncovered
                 check.findings.extend(flag_findings)
-        if refused or quarantined:
-            for case, ev, refusal in refused:
-                typer.echo(_refusal_line(ev, refusal, case), err=True)
-            for case, decided in quarantined:
-                typer.echo(_quarantine_line(decided, case), err=True)
+        if lost:
+            for line in lost_lines(lost):
+                typer.echo(line, err=True)
             raise typer.Exit(1)
     trace = engine.oracle.trace()
     if fmt is RehearseFormat.json:
@@ -1282,29 +1274,6 @@ def _emit_cadence_check(
             typer.echo(line)
     if check.findings:
         raise typer.Exit(3)
-
-
-def _quarantine_line(decided: "ApplyResult", case: str = "") -> str:
-    """One quarantined engine-made input, as rehearse reports it: its
-    index, the sweep case it was met in (none for the main play), and the
-    reason, which names the input and the fault (concurrency-model ss4)."""
-    where = f" in sweep {case}" if case else ""
-    return f"rehearse failed: quarantined input {decided.index}{where}: {decided.reason}"
-
-
-def _refusal_line(refused: "Event | None", refusal: "AdmissionRefused", case: str = "") -> str:
-    """One refused scripted input, as rehearse reports it: the input, the
-    sweep case it was met in (none for the main play), the code and why."""
-    import json as json_mod
-
-    what = (
-        "a verbless input"
-        if refused is None
-        else f"{refused.kind} {json_mod.dumps(refused.payload, sort_keys=True)}"
-        f" @ {refused.at.isoformat()}"
-    )
-    where = f" in sweep {case}" if case else ""
-    return f"rehearse failed: refused {what}{where}: {refusal.code}: {refusal}"
 
 
 def _scenario_completion(raw: object, where: str) -> tuple[float, int]:
@@ -1561,15 +1530,16 @@ def rehearse(
     finally:
         if engine.journal is not None:
             engine.journal.close()
-    if engine.refused_inputs or engine.quarantined:
+    from dsl41.rehearse_check import lost_inputs, lost_lines
+
+    lost = lost_inputs(engine)
+    if lost:
         # a scripted event the dry apply refused never reached the trace,
         # and a quarantined engine-made input applied its time half only:
         # no silent loss, so each one is named and the play fails
         # (concurrency-model ss4)
-        for refused, refusal in engine.refused_inputs:
-            typer.echo(_refusal_line(refused, refusal), err=True)
-        for result, _fault in engine.quarantined:
-            typer.echo(_quarantine_line(result), err=True)
+        for line in lost_lines(lost):
+            typer.echo(line, err=True)
         raise typer.Exit(1)
     if not check_cadence:
         _emit_rehearsal(engine.oracle.trace(), catalog.jobs, fmt=output)
@@ -2091,10 +2061,9 @@ def _rejection_lines(records: list[dict[str, Any]], decisions: "DecisionIndex") 
     lines = []
     for attempt in read_attempts(records):
         decided = decisions.for_index(attempt.index)
-        engine_made = attempt.request_id.startswith("engine:") and attempt.source != "control"
         if decided is None or decided.decision != "rejected":
             continue
-        if not engine_made and decided.code != "engine_apply_faulted":
+        if not attempt.engine_made and decided.code != "engine_apply_faulted":
             continue
         lines.append(
             f"{attempt.at.isoformat()} rejected input {attempt.index}"

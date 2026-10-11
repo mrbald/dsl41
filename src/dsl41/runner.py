@@ -98,7 +98,7 @@ door and stays as it was: the scheduler, the adapters, reconciliation and
 every test script are inside the trust boundary, and ss0's rule is about
 what crosses it. A refusal (steps 1-2) and a rejection (step 6) are
 different facts here too -- the first never entered the log and is recorded
-only on `refusals`, the second is a decision with an index.
+only on `refused_inputs`, the second is a decision with an index.
 
 Phase 11b (ss6-ss7; DL-41a/DL-42 pin the lifecycle semantics):
 
@@ -183,6 +183,7 @@ from dsl41.runner_adapters import (
     status_payload,
 )
 from dsl41.runner_admission import (
+    ENGINE_REQUEST_ID_PREFIX,
     INERT_EPOCH,
     AdmissionRefused,
     ApplyResult,
@@ -193,12 +194,13 @@ from dsl41.runner_admission import (
     RequestCollision,
     SealInFlight,
     Applied,
+    TimeHalfFault,
     TimeHalfStop,
     TransitionStop,
     ViolationPolicy,
     apply_attempt,
+    classify_fault,
     fingerprint,
-    quarantine_verdict,
     report_quarantine,
     report_violation,
     trial_apply,
@@ -431,21 +433,6 @@ class _Pending:
     envelope: Envelope | None = None
     future: asyncio.Future[ApplyResult] | None = None
 
-    @property
-    def control(self) -> bool:
-        """A CONTROL input, the kind the dry apply may refuse
-        (concurrency-model ss4): one that crossed the socket, or an event
-        raised with the `control` source, which is how an in-process script
-        sends an operator's command. A tick, a completion, a routing
-        observation and a time observation are the engine's own facts, and
-        nobody would hear of their refusal: a fault in one quarantines it
-        or stops the engine instead. An unattributed event (the
-        bisimulation harness) is not a control input either: it must behave
-        as the oracle does when fed directly."""
-        if self.envelope is not None:
-            return True
-        return self.ev is not None and self.ev.source == "control"
-
 
 def _without_frames(exc: Exception) -> Exception:
     """`exc` and the exceptions chained to it, stripped of their
@@ -635,7 +622,9 @@ class Engine:
         #: flipped by the CLI before a detach-stop cancels adapter tasks (ss3
         #: case b): the SupervisedCommandAdapter then abandons instead of killing
         self.detach = DetachSignal()
-        self.drops: list[tuple[Event, str]] = []  # gate rejections; also WAL drop records
+        #: events not applied: step 6's gate rejections and resume's missed
+        #: ticks (WAL `drop` records). A quarantine is on `quarantined` only
+        self.drops: list[tuple[Event, str]] = []
         #: concurrency-model ss2: the log's position. `frontiers` is where
         #: admission and application have reached; `decisions` answers a
         #: retry from what it already decided (ss4 step 2). Both are restored
@@ -654,12 +643,9 @@ class Engine:
         self.decisions = DecisionIndex()
         #: retries answered from the index rather than re-applied (CM-05)
         self.deduped: list[tuple[str, ApplyResult]] = []
-        #: refused at ss4 steps 1-2 -- never admitted, so unlike `drops` these
-        #: leave no trace in the log and this list is the only record of them
-        self.refusals: list[tuple[str, str]] = []
-        #: the same refusals with the event (None for a verbless input) and the
-        #: refusal itself, for an in-process caller with no future to read --
-        #: `rehearse` prints each one and fails (concurrency-model ss4)
+        #: refused before admission (concurrency-model ss4), so this list is
+        #: their only record: each event (None for a verbless input) and its
+        #: refusal, for an in-process caller with no future to read
         self.refused_inputs: list[tuple[Event | None, AdmissionRefused]] = []
         #: engine-made inputs this engine quarantined live, each with the
         #: fault its dry apply met: logged with a rejected
@@ -1820,18 +1806,15 @@ class Engine:
                 # popped is answered rather than dropped (DL-274)
                 self.decisions.refuse(pending.request_id)
                 self._refuse(pending, AdmissionRefused(str(exc), code=exc.code or "engine_error"))
-            elif self.sealing and (pending.ev is not None or pending.host is not None):
+            else:
                 # an engine-made input -- a completion, a tick, a routing
-                # observation -- has no one to answer: a refusal would lose
-                # it while C1 reopens, so the seal stops instead (DL-274).
-                # The cutoff's own time observation is neither: it belongs
-                # to the seal, and a retry chooses a new T
-                self._unadmitted = pending.ev.kind if pending.ev is not None else "host"
+                # observation -- has no one to answer
+                self._mark_unadmitted(pending)
             raise
         # before the frontier moves: a refusal or a stop takes no index
         attempt = self._attempt(pending, admitted.committed_index, fp)
         quarantine: tuple[Rejection, Exception] | None = None
-        if pending.control:
+        if not attempt.engine_made:
             refusal = self._dry_apply(attempt)
             if refusal is not None:
                 self.decisions.refuse(pending.request_id)
@@ -1841,12 +1824,8 @@ class Engine:
             try:
                 quarantine = self._dry_apply_engine_made(attempt)
             except TimeHalfStop:
-                # the input is out of the queue and has no index: inside a
-                # seal it is unadmitted, and the seal stops the engine
-                # rather than lose it while C1 reopens (DL-274). The
-                # cutoff's own time observation is neither: the seal aborts
-                if self.sealing and (pending.ev is not None or pending.host is not None):
-                    self._unadmitted = pending.ev.kind if pending.ev is not None else "host"
+                # the input is out of the queue and has no index
+                self._mark_unadmitted(pending)
                 raise
         forced = None if quarantine is None else quarantine[0]
         self.frontiers = admitted
@@ -1886,16 +1865,29 @@ class Engine:
                 self._dispatched[effect.job] = max(
                     self._dispatched.get(effect.job, 0), effect.run_number
                 )
-        if applied.result.decision == "rejected" and ev is not None:
-            assert applied.result.reason is not None
-            self.drops.append((ev, applied.result.reason))
         if quarantine is not None:  # loud once the quarantine is durable
             self.quarantined.append((applied.result, quarantine[1]))
             report_quarantine(applied.result)
+        elif applied.result.decision == "rejected" and ev is not None:
+            assert applied.result.reason is not None
+            self.drops.append((ev, applied.result.reason))
         self._answer(pending, applied.result)
         self._applying = None
         self._stop_on_violation(applied, index)
         return applied.emitted
+
+    def _mark_unadmitted(self, pending: _Pending) -> None:
+        """Inside a seal, name an input that left the queue and took no
+        index, so the seal stops the engine rather than lose it while C1
+        reopens (DL-274). The cutoff's own time observation is not such an
+        input: it belongs to the seal, which aborts, and a retry chooses a
+        new T."""
+        if not self.sealing:
+            return
+        if pending.ev is not None:
+            self._unadmitted = pending.ev.kind
+        elif pending.host is not None:
+            self._unadmitted = "host"
 
     def _stop_on_violation(self, applied: Applied, index: int) -> None:
         """`--on-transition-violation stop`, AFTER step 7: the decision is
@@ -1953,13 +1945,14 @@ class Engine:
 
         The fault is kept without its traceback: the traceback's frames
         hold the fork, a full copy of the oracle's maps."""
-        dry = trial_apply(self.oracle, attempt, grace_s=self.cmd_grace_s)
-        if not isinstance(dry, Exception):
+        try:
+            quarantine = classify_fault(self.oracle, attempt, grace_s=self.cmd_grace_s)
+        except TimeHalfFault as stop:
+            raise TimeHalfStop(attempt, stop.cause, stop.full) from stop.cause
+        if quarantine is None:
             return None
-        verdict = quarantine_verdict(self.oracle, attempt, dry, grace_s=self.cmd_grace_s)
-        if isinstance(verdict, Exception):
-            raise TimeHalfStop(attempt, verdict, dry) from verdict
-        return verdict, _without_frames(dry)
+        rejection, fault = quarantine
+        return rejection, _without_frames(fault)
 
     def _plan_effects(self, applied: Applied, index: int) -> list[Effect]:
         """ss4 step 7's other half: what the shell now intends to do about
@@ -2062,11 +2055,10 @@ class Engine:
             pending.future.set_result(result)
 
     def _refuse(self, pending: _Pending, exc: AdmissionRefused) -> None:
-        """Steps 1-2's other outcome. Recorded on `refusals` as well as
-        answered, because a refusal leaves NOTHING in the log -- no index, no
-        record -- so without this list an in-process caller that asked for no
-        decision would see a command vanish silently."""
-        self.refusals.append((pending.request_id or f"engine:{pending.at.isoformat()}", str(exc)))
+        """Steps 1-2's other outcome. Recorded on `refused_inputs` as well
+        as answered, because a refusal leaves NOTHING in the log -- no index,
+        no record -- so without this list an in-process caller that asked for
+        no decision would see a command vanish silently."""
         self.refused_inputs.append((pending.ev, exc))
         if pending.future is not None and not pending.future.done():
             pending.future.set_exception(exc)
@@ -2077,7 +2069,7 @@ class Engine:
         return Attempt(
             index=index,
             at=pending.at,
-            request_id=pending.request_id or f"engine:{index}",
+            request_id=pending.request_id or f"{ENGINE_REQUEST_ID_PREFIX}{index}",
             fingerprint=fp,
             kind=ev.kind if ev is not None else None,
             payload=dict(ev.payload) if ev is not None else {},
