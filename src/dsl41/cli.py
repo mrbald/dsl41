@@ -42,6 +42,7 @@ from __future__ import annotations
 import typer
 
 from dsl41 import cli_compile, cli_control, cli_estate, cli_run
+from dsl41.cli_common import stops_on_statechart_error as stops
 
 app = typer.Typer(
     no_args_is_help=True,
@@ -67,7 +68,8 @@ def _root() -> None:
 
 
 # Panels and order are what `dsl41 --help` shows. Group by workflow, most
-# common first.
+# common first. `stops` wraps each verb that runs, replays or reads back an
+# estate: a StatechartError there prints its report and exits 7.
 app.command(rich_help_panel="Compile JIL")(cli_compile.lint)
 app.command(rich_help_panel="Compile JIL")(cli_compile.report)
 app.command(rich_help_panel="Compile JIL")(cli_compile.viz)
@@ -77,10 +79,10 @@ app.command(rich_help_panel="Compile JIL")(cli_compile.decompile)
 app.command(rich_help_panel="Compile JIL")(cli_compile.folds)
 app.command(rich_help_panel="Compile JIL")(cli_compile.minify)
 app.command(rich_help_panel="Compile JIL")(cli_compile.resolve)
-app.command(rich_help_panel="Run an estate")(cli_run.run)
-app.command(rich_help_panel="Run an estate")(cli_run.rehearse)
-app.command(rich_help_panel="Run an estate")(cli_run.journal)
-app.command(rich_help_panel="Run an estate")(cli_run.runs)
+app.command(rich_help_panel="Run an estate")(stops(cli_run.run))
+app.command(rich_help_panel="Run an estate")(stops(cli_run.rehearse))
+app.command(rich_help_panel="Run an estate")(stops(cli_run.journal))
+app.command(rich_help_panel="Run an estate")(stops(cli_run.runs))
 app.command(rich_help_panel="Control a running engine")(cli_control.query)
 app.command(rich_help_panel="Control a running engine")(cli_control.sendevent)
 app.command(rich_help_panel="Control a running engine")(cli_control.release_held)
@@ -88,9 +90,9 @@ app.command(rich_help_panel="Control a running engine")(cli_control.host)
 app.command(rich_help_panel="Control a running engine")(cli_control.ui)
 app.command(rich_help_panel="Control a running engine")(cli_control.serve)
 app.command(rich_help_panel="Control a running engine")(cli_control.supervise)
-app.command(rich_help_panel="Periods and retention")(cli_estate.seal)
-app.command(rich_help_panel="Periods and retention")(cli_estate.audit)
-app.command(rich_help_panel="Periods and retention")(cli_estate.verify)
+app.command(rich_help_panel="Periods and retention")(stops(cli_estate.seal))
+app.command(rich_help_panel="Periods and retention")(stops(cli_estate.audit))
+app.command(rich_help_panel="Periods and retention")(stops(cli_estate.verify))
 
 estate_app = typer.Typer(
     no_args_is_help=True,
@@ -98,5 +100,5 @@ estate_app = typer.Typer(
     context_settings={"help_option_names": ["-h", "--help"]},
 )
 app.add_typer(estate_app, name="estate", rich_help_panel="Periods and retention")
-estate_app.command("reclaim")(cli_estate.estate_reclaim)
-estate_app.command("prune")(cli_estate.estate_prune)
+estate_app.command("reclaim")(stops(cli_estate.estate_reclaim))
+estate_app.command("prune")(stops(cli_estate.estate_prune))

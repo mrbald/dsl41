@@ -339,6 +339,11 @@ halves on the way out, and a commit-time check can trip on either.
   its dry apply always stops. A control input under the same fault is
   refused with `apply_faulted`.
 
+A `StatechartError` (statechart-engine.md §5) is neither kind of fault.
+No dry apply classifies it: the engine stops before the frontier moves and
+before the append, with `dsl41 run` exit 7 beside exit 6, and a control
+input under it is not refused.
+
 Otherwise an engine-made input's move is taken, with its violations.
 Only an input's batch (`InputBatch`) drains the violation channel. Some violations are noted outside a batch: by a
 move with no transaction open, or by a writer that opens its own (the

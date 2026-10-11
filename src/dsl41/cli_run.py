@@ -36,10 +36,13 @@ from dsl41.cli_common import (
     refuse,
     resume_target_period,
     say_next,
+    statechart_report,
     walk_estate_or_exit_2,
 )
 from dsl41.ir import CatalogIR
 from dsl41.period import root_is_unused
+
+from dsl41.state_machine import EXIT_STATECHART_ERROR, StatechartError
 
 if TYPE_CHECKING:
     import asyncio
@@ -75,7 +78,12 @@ if TYPE_CHECKING:
 # broke a declared transition and its decision is durable. 4 is taken by the
 # control verbs' unknown outcome, so 5 collides with no verb's code. run's 6
 # is a time-half stop (concurrency-model ss4): an engine-made input's time
-# half raised, and the engine stopped before it was logged.
+# half raised, and the engine stopped before it was logged. run's and
+# rehearse's 7 is a statechart error (docs/statechart-engine.md ss5): a declared machine hit an
+# assertion failure, and the engine stopped before any durable write of it.
+# EXIT_STATECHART_ERROR lives in state_machine.py, shared with the supervisor;
+# the units list it in `RestartPreventExitStatus`, because a restart would run
+# the same build into the same bug (deployment-runbook ss3).
 
 #: `run`'s exit code for `--on-transition-violation stop`. The engine units
 #: list it in `RestartPreventExitStatus`, so a stopped engine stays down
@@ -442,13 +450,20 @@ def _reattach_note(
     """The line a detached run prints on its way out, or None (DL-218).
 
     Only a detached run that can be resumed gets one: a clean stop (0), a
-    crash (1), a transition stop (5, whose decision resume replays) or a
-    time-half stop (6, whose log is clean; it resumes on a fixed build). A
+    crash (1), a transition stop (5, whose decision resume replays), a
+    time-half stop (6, whose log is clean; it resumes on a fixed build) or a
+    statechart error (7, which resumes on a fixed build too). A
     sealed exit (3) does not -- its period is closed, and
     `say_next` has already named the opener of the next one. `reattach` is
     this process's own line; an embedding caller that has none gets the
     schematic."""
-    if not detached or code not in (0, 1, EXIT_TRANSITION_STOP, EXIT_TIME_HALF_STOP):
+    if not detached or code not in (
+        0,
+        1,
+        EXIT_TRANSITION_STOP,
+        EXIT_TIME_HALF_STOP,
+        EXIT_STATECHART_ERROR,
+    ):
         return None
     line = reattach or f"dsl41 run --resume --detached --run-root {run_root} <files>"
     return f"detached: reattach with `{line}`"
@@ -821,38 +836,44 @@ async def _serve_run(
             error = _resume_profile_error(run_root, profile, running_deadman)
             if error is not None:
                 return refuse(error)
-            engine = await _resume_run(
-                catalog,
-                run_root,
-                clock=clock,
-                adapters=adapters,
-                scheduler=scheduler,
-                hold_open=True,
-                supervisor=client,
-                deadman_s=running_deadman,
-                lock=lock,
-                anchor_dir=anchor_dir,
-                # the launch options no wired object can report -- the
-                # machine identity and its policy. Without them the core
-                # gate inherits them from the pin and can never disagree
-                # with it, which is how a boundary that staged a new
-                # identity opened under the old one (DL-151)
-                declared=profile,
-            )
-        else:
-            engine = start_run(
-                catalog,
-                run_root,
-                clock=clock,
-                adapters=adapters,
-                scheduler=scheduler,
-                hold_open=True,
-                deadman_s=running_deadman,
-                lock=lock,
-                staged=staged,
-                anchor_dir=anchor_dir,
-                launched=profile,
-            )
+        try:
+            if resume:
+                engine = await _resume_run(
+                    catalog,
+                    run_root,
+                    clock=clock,
+                    adapters=adapters,
+                    scheduler=scheduler,
+                    hold_open=True,
+                    supervisor=client,
+                    deadman_s=running_deadman,
+                    lock=lock,
+                    anchor_dir=anchor_dir,
+                    # the launch options no wired object can report -- the
+                    # machine identity and its policy. Without them the core
+                    # gate inherits them from the pin and can never disagree
+                    # with it, which is how a boundary that staged a new
+                    # identity opened under the old one (DL-151)
+                    declared=profile,
+                )
+            else:
+                engine = start_run(
+                    catalog,
+                    run_root,
+                    clock=clock,
+                    adapters=adapters,
+                    scheduler=scheduler,
+                    hold_open=True,
+                    deadman_s=running_deadman,
+                    lock=lock,
+                    staged=staged,
+                    anchor_dir=anchor_dir,
+                    launched=profile,
+                )
+        except StatechartError as exc:
+            # a replayed input that meets one: the report names the WAL input,
+            # and exit 7 keeps the unit down (docs/statechart-engine.md ss5)
+            return statechart_report(exc)
         # before the loop runs: neither opener admits an input itself
         engine.on_violation = on_violation
         if client is not None:
@@ -970,6 +991,13 @@ async def _serve_run(
             # keeps the unit down until a fixed build runs (concurrency-model ss4)
             typer.echo(f"engine stopped: {loop_task.exception()}", err=True)
             code = EXIT_TIME_HALF_STOP
+        elif loop_task in done and isinstance(loop_task.exception(), StatechartError):
+            # an assertion failure, not a crash: every line of its report goes
+            # out under one prefix, and its own code keeps the unit down until
+            # a fixed build runs (docs/statechart-engine.md ss5)
+            failure = loop_task.exception()
+            assert isinstance(failure, StatechartError)  # narrowed above
+            code = statechart_report(failure)
         elif loop_task in done:  # hold_open never quiesces: this is a crash
             typer.echo(f"engine failed: {loop_task.exception()}", err=True)
             code = 1

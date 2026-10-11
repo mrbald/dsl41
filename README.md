@@ -693,8 +693,10 @@ Period boundary:
 - `src/dsl41/canon.py`: the canonical serialization behind every digest.
 - `src/dsl41/state_machine.py`: the shared state-machine core: `Transition`,
   `StateMachine` with its `take` check, `well_formed`, and the hit recording
-  the test suite turns on. Standard library only, so the supervisor can load
-  it by path.
+  the test suite turns on; and the statechart executor of
+  `docs/statechart-engine.md`: `Statechart` declarations, the `Executor`,
+  its errors under `StatechartError`, and `chart_problems`. Standard library
+  only, so the supervisor can load it by path.
 - `src/dsl41/machines.py`: the registry of declared state machines.
 - `src/dsl41/seal.py`: the seal artifact a period ends by writing, and the
   two pure functions over it, `close_runtime` and `open_from_seal`. Every
@@ -740,9 +742,11 @@ CLI and scripts:
 - `scripts/render_decision_index.py`: writes `docs/decision-index.md` from
   the decision log and the tracked docs that cite each entry (DL-276).
 - `scripts/render_state_machines.py`: writes `docs/state-machines.md`, a
-  diagram and a transition table per registered machine.
+  diagram and a transition table per registered machine, and regions,
+  choices and deferrals for a statechart.
 - `scripts/transition_coverage.py`: the gate that fails when a declared,
-  unmarked transition has no recorded hit.
+  unmarked transition has no recorded hit, or a statechart's row, branch,
+  guard outcome, deferral or release has none.
 
 ### Tests
 
@@ -843,6 +847,16 @@ Compiler:
   rendering, and the generator's diagram and table rules.
 - `tests/transition_hits_plugin.py`: the pytest plugin that turns hit
   recording on and writes `.transition-hits.json`.
+- `tests/test_statechart.py`: the executor's conformance to
+  `docs/statechart-engine.md`, one test per rule, named by section, with a
+  mutant check that breaks one rule at a time.
+- `tests/test_statechart_tooling.py`: the statechart well-formedness rules,
+  coverage hits, the completeness generator against a hand-written table,
+  and the structured error report.
+- `tests/test_statechart_stop.py`: a `StatechartError` stops every tier
+  before any durable write, and the engine and the supervisor exit 7.
+- `tests/statechart_completeness.py`: the generated completeness test that a
+  converted machine's test module calls (§13).
 - `tests/test_examples.py`: the three workflow examples' catalogs lower
   cleanly with their placeholders resolved (DL-237).
 

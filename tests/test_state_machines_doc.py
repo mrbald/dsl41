@@ -7,7 +7,18 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-from dsl41.state_machine import StateMachine, Transition
+from dsl41.state_machine import (
+    COMPLETION,
+    Branch,
+    Choice,
+    Region,
+    Row,
+    State,
+    Statechart,
+    StateMachine,
+    TimeEvent,
+    Transition,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "render_state_machines.py"
@@ -238,3 +249,96 @@ def test_an_enum_state_renders_by_its_value() -> None:
     lines = rsm.diagram(machine)
     assert "    s0 --> s1 : e.01 go" in lines and '    state "a" as s0' in lines
     assert rsm.table(machine)[2] == "| e.01 | a | go |  |  | b |  |  |"
+
+
+# ---- statecharts
+
+CHART = Statechart(
+    "door",
+    State(
+        "door",
+        regions=(
+            Region(
+                "main",
+                "closed",
+                (
+                    State("closed", entry="light"),
+                    State(
+                        "opened",
+                        regions=(
+                            Region("r1", "wide", (State("wide"), State("shut", final=True))),
+                            Region(
+                                "r2",
+                                "alarm",
+                                (State("alarm", wait=frozenset({"t"}), stays="waits"),),
+                            ),
+                        ),
+                        defer=frozenset({"lock", "bell"}),
+                    ),
+                ),
+            ),
+        ),
+    ),
+    (
+        Row("door.01", "closed", "open", "which", guard="badge", action="log", cite="DL-1"),
+        Row("door.02", "opened", "close", "closed"),
+        Row("door.03", "door", "lock", kind="ignored"),
+        Row("door.04", "door", "bell", kind="refusal", code="quiet"),
+        Row("door.05", "wide", COMPLETION, "shut"),
+    ),
+    choices=(
+        Choice(
+            "which",
+            (Branch("door.11", "opened", guard="ok", action="ring"), Branch("door.12", "closed")),
+        ),
+    ),
+    time_events=(TimeEvent("t", generation=True), TimeEvent("u")),
+    clock="logical",
+    defer_bound=3,
+    overflow="drop",
+)
+
+
+def test_a_statechart_renders_regions_choices_and_deferrals() -> None:
+    lines = rsm.chart_diagram(CHART)
+    # sorted names: alarm closed door opened shut wide -> s0..s5
+    assert lines[:4] == [
+        "```mermaid",
+        "stateDiagram-v2",
+        '    state "door" as s2',
+        "    state s2 {",
+    ]
+    assert "        [*] --> s1" in lines
+    assert "        state s3 {" in lines
+    assert "            --" in lines
+    assert "            s4 --> [*]" in lines
+    assert "    state c0 <<choice>>" in lines
+    assert "    s1 --> c0 : door.01 open [badge] / log" in lines
+    assert "    c0 --> s3 : door.11 [ok] / ring" in lines
+    assert "    c0 --> s1 : door.12 [else]" in lines
+    assert "    s5 --> s4 : door.05" in lines
+    assert "    note right of s3 : defer bell, lock" in lines
+    assert not any("door.03" in line or "door.04" in line for line in lines)
+
+
+def test_a_statechart_table_lists_rows_branches_and_states() -> None:
+    rows = rsm.chart_table(CHART)
+    assert rows[2] == "| door.01 | closed | open | badge | log | which | external | DL-1 |"
+    assert "| door.04 | door | bell |  |  |  | refusal quiet |  |" in rows
+    assert "| door.05 | wide | (completion) |  |  | shut | external |  |" in rows
+    assert "| door.12 | which | else |  | closed |" in rows
+    assert "| opened | door/main |  |  | bell, lock |  |" in rows
+    assert "| shut (final) | opened/r1 |  |  |  |  |" in rows
+    assert "| alarm | opened/r2 |  |  |  | t (stays: waits) |" in rows
+    assert "| closed | door/main | light |  |  |  |" in rows
+
+
+def test_a_statechart_gets_a_summary_line_and_its_own_section() -> None:
+    assert rsm.chart_summary(CHART) == (
+        "Clock: logical. Deferred queue: 3, overflow drop. Time events: t (generation), u."
+    )
+    bare = Statechart("bare", State("bare"), (), clock="")
+    assert rsm.chart_summary(bare) == "Clock: undeclared."
+    text = rsm.render([CHART, MACHINE])
+    assert "\n## door\n\nClock: logical." in text and "\n## demo\n" in text
+    assert rsm.chart_table(bare)[-1] == "| bare |  |  |  |  |  |"

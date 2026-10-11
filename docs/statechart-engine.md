@@ -66,19 +66,25 @@ A row never targets a state in a sibling region; `well_formed` refuses it. A row
 state shared by several regions (their common ancestor) is one candidate, however many walks reach
 it. When two candidates' exit sets intersect, the one with the deeper source wins. When neither is
 deeper, the executor raises `AmbiguousTransition`: a machine that needs both declares one row on
-the shared ancestor instead. `well_formed` warns where two regions declare rows for one event of
-which one leaves the shared ancestor. A row of a state that several regions share (their common
-ancestor) is not a candidate when any region below it ended its walk in a deferral of the event:
-the inner deferral wins over the outer row, as within one region. A sibling region's own row still
-consumes the event.
+the shared ancestor instead. Conflicts are resolved from the deepest candidate outward: a
+candidate beaten by a deeper one is dropped before pairs of equal depth are judged. A candidate
+whose source state another surviving candidate exits is dropped, internal rows included;
+`well_formed` warns where that can happen. `well_formed` warns where two regions declare rows for
+one event of which one leaves the shared ancestor. A row of a state that several regions share
+(their common ancestor) is not a candidate when any region below it ended its walk in a deferral
+of the event: the inner deferral wins over the outer row, as within one region. A sibling
+region's own row still consumes the event.
 
 The firing set is final before any action runs. It executes in region declaration order.
 
 The outcome for the whole instance is decided from all its regions together. If any region
 produced a candidate, including an internal `ignored` row, the event is consumed and the firing
-set runs. Otherwise, if any region's walk ended in a deferral, the event is deferred. Otherwise
-the event is unhandled (§10). A region whose walk found neither a row nor a deferral takes no
-part; it needs no rows for another region's events.
+set runs. An `ignored` row is a candidate only when no other region produced a candidate that is
+not `ignored`; otherwise it yields and writes no trace line. A refusal row beside another region's
+candidate raises `AmbiguousTransition`; `well_formed` warns where a refusal row and another
+region's row share an event. Otherwise, if any region's walk ended in a deferral, the event is
+deferred. Otherwise the event is unhandled (§10). A region whose walk found neither a row nor a
+deferral takes no part; it needs no rows for another region's events.
 
 ## 4. Execution of one row
 
@@ -97,8 +103,9 @@ An external transition runs:
 Entering a region's final state completes the region. A composite whose regions are all final
 raises its completion event. That completion is a chained item of the microstep that entered the
 last final state, queued as §5 step 3 says. A completion item whose source state is no longer
-active when it pops is discarded without error: a completion belongs to its state. A chained event
-is an ordinary item and resolves by §3 and §10 like any event.
+active, or active again by a later entry, when it pops is discarded without error: a completion
+belongs to its state. A chained event is an ordinary item and resolves by §3 and §10 like any
+event.
 
 Completion events and chained items precede every pool event.
 
@@ -131,6 +138,19 @@ A macrostep is iterative on one executor worklist and never recursive.
    - the engine's go through the WAL decision.
 
    The executor itself does no I/O.
+
+The executor's errors, among them `AmbiguousTransition` (§3), `ReentrantDispatch` (step 4) and
+`UnhandledEvent` (§10), subclass one base, `StatechartError`. Each is an assertion failure, not
+a fault to contain. DL-320's classification never catches it: `trial_apply` and
+`classify_fault` re-raise it as they re-raise `TransitionError`, and nothing is appended. No tier
+may swallow it. The tier stops before any durable write.
+
+The error is structured. It carries the machine, the instance key, the active configuration, the
+item and a summary of its payload, the item's ancestry, the candidates found, the deferred queue,
+and the executor's last microsteps. The executor keeps those in a ring buffer of a declared size;
+the default is 64. `str()` of the error renders all of it, one fact per line. The engine and the
+supervisor print it on stderr, each line under the prefix `dsl41: statechart error`, and exit 7.
+The units list 7 in `RestartPreventExitStatus`.
 
 ## 6. Deferred events
 
@@ -207,7 +227,8 @@ Absence is a well-formedness error.
 
 Completeness is judged per instance, over all its regions together (§3). At run time, an event that
 no region consumes and no active state defers raises `UnhandledEvent`, in production too: the
-guards of a state's rows for one event partition the cases by contract. This reverses DL-293's
+guards of a state's rows for one event partition the cases by contract. Like every
+`StatechartError`, it stops the tier (§5). This reverses DL-293's
 rule of one ignore row per state it occurs in: an ignored event is declared once, on a
 superstate.
 
@@ -291,8 +312,11 @@ Guard and action docstrings are the row's prose.
 ## 15. The executor
 
 The executor is built here, not adopted. It is standard library only and one module.
-`state_machine.py` grows into it. The supervisor tier imports it by path. It is deterministic,
-has no clock and does no I/O.
+`state_machine.py` grows into it: `src/dsl41/state_machine.py` holds the table core and the
+executor. The module imports nothing from its package, so the supervisor tier loads it by path,
+with its own directory on `sys.path`, as it loads `canon.py`. It is deterministic and has no
+clock. It does no I/O in production; under the test variables it records hits as `take` does
+(DL-289).
 
 The prior-art check covered python-statemachine, transitions, sismic, miros and pysm. In those
 libraries it found no deferral with override and no standard-library fit. Vocabulary and semantic

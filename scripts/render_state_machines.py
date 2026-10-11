@@ -12,6 +12,11 @@ name can be a Mermaid keyword or contain characters Mermaid rejects. A set targe
 states a payload may choose) is drawn as an edge into one choice node per transition
 (`c0`, ...), with one edge from it to each member. Its table cell lists the members in
 sorted order.
+
+A statechart (docs/statechart-engine.md) renders its composite states as nested
+blocks, its regions split by `--`, its choices as choice nodes with one edge per
+branch, and its deferrals as notes. Internal, ignored and refusal rows have no
+edge; the row table lists every row, then come a branch table and a state table.
 """
 
 from __future__ import annotations
@@ -22,7 +27,16 @@ from collections.abc import Iterable
 from typing import Any
 
 from dsl41.machines import MACHINES
-from dsl41.state_machine import StateMachine, Transition, state_name
+from dsl41.state_machine import (
+    COMPLETION,
+    Row,
+    State,
+    StateMachine,
+    Statechart,
+    Transition,
+    is_statechart,
+    state_name,
+)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 DOC = ROOT / "docs" / "state-machines.md"
@@ -107,7 +121,121 @@ def table(machine: StateMachine[Any]) -> list[str]:
     return lines
 
 
-def render(machines: Iterable[StateMachine[Any]]) -> str:
+def _chart_states(state: State, parent: str = "", region: str = "") -> list[tuple[State, str]]:
+    """Every state with the `parent/region` it lives in, in declaration order."""
+    found = [(state, f"{parent}/{region}" if parent else "")]
+    for each in state.regions:
+        for sub in each.states:
+            found += _chart_states(sub, state.name, each.name)
+    return found
+
+
+def _row_label(row: Row) -> str:
+    label = row.id if row.event == COMPLETION else f"{row.id} {row.event}"
+    if row.guard:
+        label += f" [{row.guard}]"
+    if row.action:
+        label += f" / {row.action}"
+    return _text(label)
+
+
+def _block(state: State, ids: dict[str, str], indent: str) -> list[str]:
+    """A state's declaration; a composite opens a block with one part per region."""
+    lines = [f'{indent}state "{state.name.replace(chr(34), chr(39))}" as {ids[state.name]}']
+    if not state.regions:
+        return lines
+    lines.append(f"{indent}state {ids[state.name]} {{")
+    for index, region in enumerate(state.regions):
+        if index:
+            lines.append(f"{indent}    --")
+        lines.append(f"{indent}    [*] --> {ids[region.initial]}")
+        for sub in region.states:
+            lines += _block(sub, ids, indent + "    ")
+        lines += [f"{indent}    {ids[s.name]} --> [*]" for s in region.states if s.final]
+    lines.append(f"{indent}}}")
+    return lines
+
+
+def chart_diagram(chart: Statechart) -> list[str]:
+    states = [state for state, _ in _chart_states(chart.root)]
+    ids = {name: f"s{index}" for index, name in enumerate(sorted(s.name for s in states))}
+    choices = {choice.name: f"c{index}" for index, choice in enumerate(chart.choices)}
+    lines = ["```mermaid", "stateDiagram-v2", *_block(chart.root, ids, "    ")]
+    lines += [f"    state {choices[c.name]} <<choice>>" for c in chart.choices]
+    for row in chart.rows:
+        if row.kind == "external":
+            target = choices.get(row.target) or ids[row.target]
+            lines.append(f"    {ids[row.source]} --> {target} : {_row_label(row)}")
+    for choice in chart.choices:
+        for branch in choice.branches:
+            label = f"{branch.id} [{branch.guard or 'else'}]"
+            if branch.action:
+                label += f" / {branch.action}"
+            lines.append(f"    {choices[choice.name]} --> {ids[branch.target]} : {_text(label)}")
+    for state in states:
+        if state.defer:
+            deferred = ", ".join(sorted(state.defer))
+            lines.append(f"    note right of {ids[state.name]} : defer {deferred}")
+    lines.append("```")
+    return lines
+
+
+def chart_table(chart: Statechart) -> list[str]:
+    """The rows, the branches and the states, each in its own table."""
+    lines = [
+        "| Id | Source | Event | Guard | Action | Target | Kind | Cite |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for row in chart.rows:
+        kind = f"{row.kind} {row.code}" if row.code else row.kind
+        event = row.event or "(completion)"
+        cells = [row.id, row.source, event, row.guard, row.action, row.target, kind, row.cite]
+        lines.append("| " + " | ".join(_cell(c) for c in cells) + " |")
+    if chart.choices:
+        lines += [
+            "",
+            "| Id | Choice | Guard | Action | Target |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+        for choice in chart.choices:
+            for branch in choice.branches:
+                cells = [
+                    branch.id,
+                    choice.name,
+                    branch.guard or "else",
+                    branch.action,
+                    branch.target,
+                ]
+                lines.append("| " + " | ".join(_cell(c) for c in cells) + " |")
+    lines += [
+        "",
+        "| State | In | Entry | Exit | Defers | Waits |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for state, where in _chart_states(chart.root):
+        name = f"{state.name} (final)" if state.final else state.name
+        waits = ", ".join(sorted(state.wait))
+        if state.stays:
+            waits += f" (stays: {state.stays})"
+        cells = [name, where, state.entry, state.exit, ", ".join(sorted(state.defer)), waits]
+        lines.append("| " + " | ".join(_cell(c) for c in cells) + " |")
+    return lines
+
+
+def chart_summary(chart: Statechart) -> str:
+    """The chart's clock, deferred queue and time events, in one line."""
+    parts = [f"Clock: {chart.clock or 'undeclared'}."]
+    if chart.overflow:
+        parts.append(f"Deferred queue: {chart.defer_bound}, overflow {chart.overflow}.")
+    if chart.time_events:
+        names = ", ".join(
+            f"{t.name} (generation)" if t.generation else t.name for t in chart.time_events
+        )
+        parts.append(f"Time events: {names}.")
+    return " ".join(parts)
+
+
+def render(machines: Iterable[StateMachine[Any] | Statechart]) -> str:
     """The whole file."""
     lines = [
         "# State machines",
@@ -118,12 +246,16 @@ def render(machines: Iterable[StateMachine[Any]]) -> str:
     if not declared:
         lines += ["", "No state machines are declared yet."]
     for machine in declared:
-        lines += ["", f"## {machine.name}", "", *diagram(machine), "", *table(machine)]
+        if is_statechart(machine):
+            lines += ["", f"## {machine.name}", "", chart_summary(machine), ""]
+            lines += [*chart_diagram(machine), "", *chart_table(machine)]
+        else:
+            lines += ["", f"## {machine.name}", "", *diagram(machine), "", *table(machine)]
     return "\n".join(lines) + "\n"
 
 
 def is_current(
-    root: pathlib.Path = ROOT, machines: Iterable[StateMachine[Any]] | None = None
+    root: pathlib.Path = ROOT, machines: Iterable[StateMachine[Any] | Statechart] | None = None
 ) -> bool:
     """True when the committed file at `root` equals the rendering."""
     doc = root / "docs" / "state-machines.md"

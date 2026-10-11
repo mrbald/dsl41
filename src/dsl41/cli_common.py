@@ -14,10 +14,11 @@ DL-78; scripts/arch_check.py gate 2).
 
 from __future__ import annotations
 
+import functools
 import hashlib
 from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import typer
 
@@ -26,6 +27,7 @@ from dsl41.ir import CatalogIR, LoweringError, lower_catalog
 from dsl41.timezones import parse_timezone_map, resolve_timezone
 from dsl41.placeholders import PlaceholderError, load_properties, substitute
 from dsl41.semantics import help_text, parse_assignments
+from dsl41.state_machine import EXIT_STATECHART_ERROR, StatechartError
 
 if TYPE_CHECKING:
     from dsl41.boundary import EstateWalk, Lineage
@@ -533,3 +535,31 @@ def say_next(run_root: Path, estate_anchor: "Path | None") -> None:
         f" or roll: `dsl41 audit --run-root {run_root}{anchor}` then"
         " `dsl41 run --open-from <anchor-dir> --run-root <new-root> <new estate files>`"
     )
+
+
+def statechart_report(exc: StatechartError) -> int:
+    """Print a `StatechartError`'s report on stderr, every line under its prefix, and
+    return its exit code, 7 (docs/statechart-engine.md ss5)."""
+    typer.echo(exc.report(), err=True)
+    return EXIT_STATECHART_ERROR
+
+
+def statechart_exit(exc: StatechartError) -> NoReturn:
+    """`statechart_report`, then exit 7."""
+    raise typer.Exit(statechart_report(exc)) from exc
+
+
+def stops_on_statechart_error[**P, R](verb: Callable[P, R]) -> Callable[P, R]:
+    """Wrap a verb so that a `StatechartError` from anything it runs or replays
+    stops it with the report and exit 7, never a traceback and exit 1. A replay
+    names the WAL input in the report. cli.py wraps every verb that runs,
+    replays or reads back an estate."""
+
+    @functools.wraps(verb)
+    def guarded(*args: P.args, **kwargs: P.kwargs) -> R:
+        try:
+            return verb(*args, **kwargs)
+        except StatechartError as exc:
+            statechart_exit(exc)
+
+    return guarded

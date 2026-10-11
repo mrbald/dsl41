@@ -87,6 +87,7 @@ from dsl41.runner_admission import (
     TimeHalfFault,
     apply_attempt,
     classify_fault,
+    describe_input,
     fingerprint,
     report_violation,
 )
@@ -112,7 +113,7 @@ from pydantic import ValidationError
 from dsl41.runner_effects import Effect, EffectOutcome, Outbox, is_valid_run_id
 from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, HostCommand, seed_local_executor
 from dsl41.runner_ledger import STATE_MACHINE_VERSION, Proof
-from dsl41.state_machine import StateMachine, Transition, TransitionError
+from dsl41.state_machine import StatechartError, StateMachine, Transition, TransitionError
 
 if TYPE_CHECKING:  # annotation only: the WAL stays a leaf of the DL-74 DAG
     from dsl41.runner_preflight import PreflightItem
@@ -1550,6 +1551,8 @@ def replay_inputs(
             # oracle as the input found it, and is classified (ss4)
             try:
                 quarantine = classify_fault(oracle, attempt)
+            except StatechartError as exc:
+                raise _at_input(exc, attempt)
             except TimeHalfFault as fault:
                 # the time half's own fault, which may not be the first
                 # one: the whole apply's rides on as a note
@@ -1562,6 +1565,9 @@ def replay_inputs(
             applied = apply_attempt(oracle, attempt, decided=durable, forced=forced)
         except TransitionError:
             raise  # a strict test run fails where the move was made
+        except StatechartError as exc:
+            # an assertion failure stops replay as itself, naming the input
+            raise _at_input(exc, attempt)
         except Exception as exc:
             # never skipped: an oracle bug raises again on the input the
             # recovery ladder would re-derive, so the error names the input
@@ -1578,6 +1584,13 @@ def replay_inputs(
             )
         replay.frontiers = replay.frontiers.admit(attempt.at).record(attempt.index)
     return replay
+
+
+def _at_input(exc: StatechartError, attempt: Attempt) -> StatechartError:
+    """A statechart error met in replay, with the WAL input it met added to its
+    report, as a `ReplayFault` names the input (period-model ss11)."""
+    exc.facts.append(("WAL input", f"{attempt.index}: {describe_input(attempt)}"))
+    return exc
 
 
 def _run_numbers(oracle: Oracle) -> dict[str, int]:

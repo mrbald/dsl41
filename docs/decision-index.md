@@ -336,3 +336,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-322 | The liveness check counts an exited, unreaped process as dead | [docs/deployment-runbook.md](deployment-runbook.md), [docs/runner-design.md](runner-design.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
 | DL-323 | The architecture review of 2026-10-11 is closed: the quarantine rule has one copy, and the engine keeps one list per kind of lost input |  |
 | DL-324 | Runner state machines become declared, executable statecharts under one engine contract | [docs/statechart-engine.md](statechart-engine.md) |
+| DL-325 | The statechart executor, its gate and its generated completeness test; a statechart error stops the tier with exit 7 |  |
