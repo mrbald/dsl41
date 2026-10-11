@@ -176,7 +176,7 @@ Stale-identity events are refused by a guard row. They are never deferred.
 ## 7. Clocks and time events
 
 Each machine declares its clock. The clock is logical for the engine tier and the oracle, and
-monotonic for the supervisor's lease.
+monotonic for the supervisor's lease and process.
 
 A time event is a declared trigger. How the owning tier produces it is the tier's: an armed
 timer, or a deadline it samples on its clock. The executor reads no clock.
@@ -345,7 +345,8 @@ Acceptance per machine:
 - for oracle-tier machines also: fork isolation, replay, seal and reopen, and per-input
   revision equality against the old implementation.
 
-After the pilot and `seal_boundary` come, in this order: `supervisor_process`,
+After the pilot, `seal_boundary` (DL-327) and `supervisor_process` (DL-328), the rest come in
+this order:
 `supervisor_client`, `effect`, `host`, `admission`, `anchor_head`, `period_row`,
 `runtime_assembly`.
 

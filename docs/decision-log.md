@@ -21219,3 +21219,82 @@ relitigate an entry; append a new one.
   All are fixed and confirmed by the reviewer that raised them, but one: the Opus reviewer's
   tier-side unpack failure on a finished boundary is ruled unreachable once the forget moved,
   and it agreed.
+- DL-328 The supervisor's lifecycle runs on the statechart executor; the fence rule has one copy
+  (2026-10-11; src/dsl41/runner_supervisor.py; docs/supervisor-protocol.md §1;
+  docs/statechart-engine.md §16; docs/state-machines.md (generated))
+  THE CHART. `supervisor_process` is a `Statechart` on the monotonic clock with one time event,
+  `deadman`. Its tree is `process` with `open` (`starting`, `bound`, and `up` holding `serving` and
+  `shutting_down`), `ended` (`stopped`, `refused`) and the final `closed`; the three grouping states
+  are new, and the seven states keep their names and meanings. Thirty rows; the first twelve keep
+  the old ids and meanings: `start` leaves `starting` for `refused` when the lock is held or the
+  owner answers, else for `bound`; `publish` moves `bound` to `serving`; SHUTDOWN moves `serving` to
+  `shutting_down` when the fence passes, the fence and the move one row; `term` moves `up` to
+  `shutting_down` and drains; `drained`, reaped or past the bound, moves `shutting_down` to
+  `stopped`; `deadman` moves `serving` to `stopped`; `term` in `stopped` stays; `teardown` moves
+  `ended` and `open` to `closed`; `pass_ended` re-runs the drain in `shutting_down`. SPAWN and
+  SIGNAL are internal rows of `serving` when the fence passes, and six refusal rows beside them
+  answer the mutating verbs in supervisor-protocol §5's order: a foreign incarnation
+  `wrong_incarnation`, this incarnation without credentials `stale_token`; the three guards
+  partition every request. Ten ignored rows on the root, guarded by `closed`, make the declaration
+  complete over the final state, since the syntactic check wants a row for every event in every
+  state; elsewhere outside `serving` the guard is false and a verb is a statechart error.
+  Thirty-three exclusions say where a fact or a verb cannot arrive: each lifecycle fact outside the
+  states that post it, and a mutating verb in every state but `serving`, because dispatch runs only
+  while serving, the shutdown is synchronous and teardown drops the connections; a post out of order
+  is a statechart error. Guards and actions are named callables whose docstrings are the rows'
+  prose. An action never raises and does no I/O: it returns the intent the tier carries out, a
+  refusal that ends the process with exit 1 or the drain.
+  ONE COPY OF THE FENCE. `_check_token` is deleted. The guards `foreign` and `credentials` are the
+  lease chart's own callables, registered in both charts, and `stale` is their complement, so the
+  rule of §5 has one home. `credentials` reads the lease chart's configuration, `held` active and
+  the token equal as a wire integer (DL-151), and never the clock: before posting a mutating verb
+  the tier samples the clock once and posts a due `expire` to the lease chart, as DL-326 does for
+  the lease verbs. At the deadline instant the answer is what `_lease_active` gave, since `held` is
+  `live` or `orphaned`; a test pins the instant and the microsecond before it. One mechanical
+  difference: a foreign request now samples the clock and may post a due expiry before its refusal;
+  every later reader samples first, so no reply, push or LIST line differs.
+  THE TIER. The supervisor's one executor runs both charts, the lease and the process, one instance
+  each. `state` is the active leaf. The startup fact is posted after the private bind, where the old
+  row was taken, so a failed bind still aborts from `starting`; `publish` after the rename. The
+  deadman is sampled each loop pass while `serving`. The orderly shutdown posts `term` or
+  `pass_ended` and runs the wait when the row says so; the wait ends with `drained`. Teardown posts
+  `teardown` first. The blocking waits, their bounds and polling intervals are unchanged. The
+  deleted code: the table and its phase type, `_move`, `_check_token`, the `state` attribute, the
+  `match` blocks of the shutdown and teardown, and the `take` channel for this machine.
+  WHAT CHANGES. No reply, code, record, timing, ordering or exit code of supervisor-protocol §5
+  moves. A gap in this chart stops the supervisor with exit 7 where `take` logged a violation
+  (DL-325's rule); the completeness test, the alphabet test and the exhaustive process walk are the
+  defence. A statechart error raised while teardown runs now reaches exit 7 with the report, which
+  is new: no earlier entry stated a limit there. DL-326's two open items are the fence copy, closed
+  above, and an action raising inside the belt, which stands. Teardown stops at the post, the socket
+  and pid files stay, and the next start reclaims them by its probes as after a kill.
+  CHECKS. `well_formed` and `chart_warnings` pass. The generated completeness test enumerates ten
+  witnesses, the six states and `serving` under each lease state, by the partitions of the startup
+  fact, the drain fact and each verb's credentials (current, stale, foreign, absent), ninety-six
+  cells, against a table written from §5; a fact posted out of order stops the supervisor in six
+  cases; every event the supervisor posts is in the alphabet of its chart, and the actions raise
+  nothing; each mutating verb answers as before under one fence. The exhaustive process walk reads
+  the executor's outcomes where it hooked the old move, with its enumeration and its seventeen
+  state-and-row pairs unchanged. Tests that wrote the state, hooked the move or named the table's
+  rows now post facts or hook the executor; the row ids they assert are unchanged. The gate holds
+  rows, guard outcomes and the time event at 100%. The supervisor's tests ran on Linux.
+  THE PILOT'S LIST, CONTINUED. Syntactic completeness (§10) wants a row per event per state, so the
+  final state carries ignored rows, as the seal does. Only guard and action docstrings are prose, so
+  the effect text of rows with neither lives in module comments. A row has one source, so three
+  grouping states keep the old multi-source rows single. An action's context is built after the
+  exits, so a row from a grouping state cannot tell which child it left; the flush of an errored
+  SHUTDOWN answer stays tier code keyed on the state before the post. A shared guard reads the
+  lease's configuration through the supervisor's executor from either chart. No executor call
+  re-seats an instance, so tests stand a witness up through a fresh executor.
+  OPEN. A row without a guard or an action has no prose in the rendered document; a note on the row
+  is a candidate for the executor's next revision. runner_supervisor.py is over the size advisory; a
+  sibling module would change the extraction set §1 lists, and the fence guards are shared, so it
+  stays whole for now. The executor's history in an error report now holds both machines.
+  REVIEW. Semantic class: one Opus reviewer, three rounds, and one Codex pass, two rounds. Both
+  found the fence test returning before SHUTDOWN's deadline check. The Opus reviewer found the
+  refusal rows on the root, where a verb outside `serving` would have met them instead of the
+  exclusion's error, and the walk no longer asserting which state a grouped row fired from; its last
+  rounds found this entry misquoting DL-326's open items and the verb exclusions overlapping the new
+  rows. All are fixed and confirmed by the reviewer that raised them, but three nits ruled no fix
+  with its agreement: a walk cell that no longer reaches a row production still takes, row prose
+  that needs an executor change, and a wait mark on the steady state.

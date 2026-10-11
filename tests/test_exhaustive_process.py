@@ -13,9 +13,10 @@ None of these machines writes a trace line. A violation shows as a
 that starts with `VIOLATION_LOG_PREFIX`; each test checks all three. Each
 test records into its own directory and asserts which declared (transition,
 source) pairs its builder took; each pair it does not take is named, with the
-reason. `supervisor_lease` is a statechart: its executor raises on an event no
-row takes, so its test checks the row each event took and the chart's
-coverage items instead. The fixture then hands the hits, never the violations, to the
+reason. `supervisor_lease` and `supervisor_process` are statecharts: their
+executor raises on an event no row takes, so their tests check the rows each
+event took, or that the run raised nothing, and the chart's coverage items
+instead. The fixture then hands the hits, never the violations, to the
 session's directory, so the coverage gate counts them.
 """
 
@@ -167,16 +168,18 @@ class _LeaseRig:
     def __init__(self, root: Path, clock: _Clock) -> None:
         self.clock = clock
         self.sup = runner_supervisor.Supervisor(str(root))
-        self.sup.state = "serving"  # requests are read and dispatched only while serving
+        # requests are read and dispatched only while serving
+        self.sup._process(runner_supervisor.START, runner_supervisor.FREE)
+        self.sup._process(runner_supervisor.PUBLISH)
         self.outcomes: list[Any] = []
-        dispatch = self.sup._leases.dispatch
+        dispatch = self.sup._machines.dispatch
 
         def spy(key: Any, event: Any) -> Any:
             outcomes = dispatch(key, event)
             self.outcomes += outcomes
             return outcomes
 
-        self.sup._leases.dispatch = spy
+        self.sup._machines.dispatch = spy
         self.conns: dict[str, runner_supervisor._Conn] = {}
         self.peers: dict[str, socket.socket] = {}
         for slot in _SLOTS:
@@ -408,6 +411,28 @@ _STIMULI = (
 _STOPPERS = ("signal", "shutdown", "pipelined_shutdowns", "deadman")
 
 
+#: the seventeen (source, row) pairs of the table the chart replaced, which the
+#: walk took each of. A row of a grouping state (06, 10, 11) is judged by the
+#: leaf state it left, so each old source stays a pair.
+_PROCESS_PAIRS = frozenset(
+    {
+        *(("starting", f"supervisor_process.{n}") for n in ("01", "02", "03")),
+        ("bound", "supervisor_process.04"),
+        ("serving", "supervisor_process.05"),
+        ("serving", "supervisor_process.06"),
+        ("shutting_down", "supervisor_process.06"),
+        ("shutting_down", "supervisor_process.07"),
+        ("serving", "supervisor_process.08"),
+        ("stopped", "supervisor_process.09"),
+        ("stopped", "supervisor_process.10"),
+        ("refused", "supervisor_process.10"),
+        *((state, "supervisor_process.11") for state in ("starting", "bound", "serving")),
+        ("shutting_down", "supervisor_process.11"),
+        ("shutting_down", "supervisor_process.12"),
+    }
+)
+
+
 class _ProcessRig:
     """One in-process `Supervisor.run()` with events delivered at one point.
 
@@ -424,15 +449,24 @@ class _ProcessRig:
         #: the stimulus reached the supervisor: a request needs a listening socket
         self.delivered = False
         self.client: socket.socket | None = None
-        move = self.sup._move
+        #: (the leaf state before a post, the process row it took), as the table
+        #: recorded (row, source)
+        self.taken: set[tuple[str, str]] = set()
+        dispatch = self.sup._machines.dispatch
 
-        def moved(t: Any, new: Any) -> None:
-            move(t, new)
-            self._at(new, "enter")
-            if new == "serving":
-                self._deliver(self.stopper)
+        def moved(key: Any, event: Any) -> Any:
+            before = self.sup.state
+            outcomes = dispatch(key, event)
+            if key == "process":
+                self.taken |= {(before, row) for o in outcomes for row in o.rows}
+            # a row that is not a fence refusal is a move, as `_move` was
+            if key == "process" and not any(o.refusals for o in outcomes):
+                self._at(self.sup.state, "enter")
+                if event.name == runner_supervisor.PUBLISH:
+                    self._deliver(self.stopper)
+            return outcomes
 
-        self.sup._move = moved  # type: ignore[method-assign]
+        self.sup._machines.dispatch = moved  # type: ignore[method-assign]
         self.sup._reap = lambda: self._at(self.sup.state, "reap")  # type: ignore[method-assign]
         self.sup._install_signals = lambda: None  # type: ignore[method-assign]
         self.sup._set_subreaper = lambda: None  # type: ignore[method-assign]
@@ -568,7 +602,9 @@ def test_every_process_event_at_every_reached_point_takes_a_declared_transition(
     deadman. `refused` is reached from a held lock and from a pid record
     that names a live process. A case passes when the run ends `closed`,
     having returned, refused (SystemExit) or raised the injected error, with
-    no TransitionError and no `internal: TransitionError` answer. An error
+    no StatechartError and no `internal: TransitionError` answer. Each point
+    is reached right after the process chart takes a row that is not a fence
+    refusal, as it was after each `_move` of the table. An error
     in a SHUTDOWN's wait is answered by the dispatch, and the end of that
     loop pass runs the wait again (12), or the latched SIGTERM does (06).
 
@@ -583,6 +619,7 @@ def test_every_process_event_at_every_reached_point_takes_a_declared_transition(
     monkeypatch.setattr(runner_supervisor, "current_boot_id", lambda: "boot")
     problems: list[str] = []
     delivered: set[tuple[tuple[str, str], str]] = set()
+    taken: set[tuple[str, str]] = set()
     cases = [
         (point, stimulus, stopper, refusal)
         for point in _POINTS
@@ -610,6 +647,7 @@ def test_every_process_event_at_every_reached_point_takes_a_declared_transition(
                 runner_supervisor.os.close(lock)
         if rig.delivered:
             delivered.add((point, stimulus))
+        taken |= rig.taken
         if ended != "raised" and rig.sup.state != "closed":
             problems.append(f"{case}: ended {ended} in {rig.sup.state}")
         problems += [
@@ -625,7 +663,30 @@ def test_every_process_event_at_every_reached_point_takes_a_declared_transition(
         for request in ("shutdown", "stale_shutdown")
     }
     assert delivered == {(p, s) for p in _POINTS for s in _STIMULI} - unsent
-    assert _missed_sources(strict, runner_supervisor.SUPERVISOR_PROCESS) == set()
+    assert _PROCESS_PAIRS <= taken, sorted(_PROCESS_PAIRS - taken)
+    hits = {
+        (r["kind"], r["id"], r["detail"])
+        for r in _records(strict, "hits")
+        if r["machine"] == "supervisor_process"
+    }
+    required, forbidden = state_machine.coverage_items(runner_supervisor.SUPERVISOR_PROCESS)
+    missed = [item for item in required if item not in hits]
+    # The walk's requests are SHUTDOWNs that name this incarnation, and nothing
+    # posts once closed. So SPAWN and SIGNAL (13, 14 and their refusals 15 to
+    # 18), the true outcome of a foreign SHUTDOWN's refusal (19) and the events
+    # ignored once closed (21 to 30) are left to test_supervisor_process_chart.py.
+    # Its row 27 has no false outcome to reach. A SHUTDOWN in `serving` weighs
+    # all of 05, 19 and 20, so the false outcome of 19 is reached here.
+    fence = {f"supervisor_process.{n}" for n in range(13, 20)}
+    closed = {f"supervisor_process.{n}" for n in range(21, 31)}
+    left = {("row", row, "") for row in fence | closed}
+    left |= {("guard", row, outcome) for row in fence | closed for outcome in ("true", "false")}
+    left -= {
+        ("guard", "supervisor_process.19", "false"),
+        ("guard", "supervisor_process.27", "false"),
+    }
+    assert set(missed) == left
+    assert [item for item in forbidden if item in hits] == []
     _assert_no_violation(strict, capfd.readouterr().err)
 
 

@@ -48,9 +48,8 @@ orchestrator's UI (DL-42 item 6).
   second sibling inside the boundary (DL-150), on the same terms: standard
   library only, imported by the supervisor under its plain top-level name,
   and covered by the same import test. The wrapper does not import it.
-- **state-machine core** (`state_machine.py`, DL-291): the declared
-  transitions of the supervisor's process machine and the one check that
-  takes them, and the executor that runs its lease statechart
+- **state-machine core** (`state_machine.py`, DL-291): the executor that
+  runs the supervisor's two statecharts, its process and its lease
   ([statechart-engine §15](statechart-engine.md#15-the-executor)). It is
   the third sibling inside the boundary, on the same terms as `canon.py`.
   The wrapper does not import it.
