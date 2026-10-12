@@ -33,6 +33,7 @@ from dsl41.boundary import SealRequest, default_anchor_dir, stage_next_period
 from dsl41.ir import lower_catalog, lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import (
+    HOST,
     JOB_FLAGS,
     JOB_HOLDING,
     LIVE,
@@ -62,7 +63,7 @@ from dsl41.runner_admission import (
 )
 from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.runner_effects import Effect, EffectOutcome, Outbox, effect_id_for
-from dsl41.runner_hosts import HOST, LOCAL_EXECUTOR_ID, HostCommand, seed_local_executor
+from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, HostCommand, seed_local_executor
 from dsl41.runner_control import command
 from dsl41.runner_journal import SUBSCRIPTION, Journal, read_decisions, read_journal
 from dsl41.runner_ledger import STATE_MACHINE_VERSION
@@ -132,11 +133,14 @@ def _violations(directory: Path) -> set[tuple[str, str, str, str]]:
 
 
 def _hits(directory: Path) -> set[str]:
-    """The transition ids taken and recorded into `directory`."""
+    """The transition ids taken and recorded into `directory`: a table's hits,
+    and a statechart's row hits (its guard and branch records carry ids too,
+    and are not rows taken)."""
     return {
         record["id"]
         for path in directory.glob("hits-*.jsonl")
         for record in map(json.loads, path.read_text().splitlines())
+        if record.get("kind", "row") == "row"
     }
 
 
@@ -564,16 +568,19 @@ def test_every_host_command_in_every_built_routing_state_takes_a_declared_transi
     passive (also after a quarantine and reinstate), quarantined from
     either, evicted by force from each of the three, and evicted past the
     ss8 bound; each with and without a deadman. Every host command
-    (`_host_events`) in each. A command takes a declared transition, or the
-    gate rejects it (a decision that moves nothing), or the apply half
-    refuses a durable decision the table has no transition for (its own
-    EngineError, naming it; a replay check that the stored revisions match
-    is an EngineError too, raised after the move).
+    (`_host_events`) in each. A command takes a declared row of the chart,
+    or the gate rejects it (a decision that moves nothing), or the apply
+    half meets a durable decision the chart refuses, or a host with no
+    instance: a `StatechartError` (statechart-engine ss5). A replay check
+    that the stored revisions match is an EngineError, raised after the
+    move.
 
     Left out: a carried row with no `last_contact` (only the
     `host_never_contacted` rejection reads it, and a rejection takes no
     transition), a stale `expect` (the precondition rejects before the
-    host gate), and the relay's re-registration (host.12, spec-only)."""
+    host gate), and the relay's re-registration, which no code posts:
+    host.12 (spec-only) and host.22, the ignored `register` outside
+    `evicted`, which only the chart's completeness test posts."""
     catalog = lower_source(_HOST_JIL)
     reached: set[tuple[object, ...]] = set()
     missing: list[str] = []
@@ -606,8 +613,12 @@ def test_every_host_command_in_every_built_routing_state_takes_a_declared_transi
                 twin = base.fork()
                 try:
                     applied = apply_attempt(twin, attempt, decided=decided, grace_s=10.0)
+                except StatechartError as exc:
+                    assert decided is not None, name  # never a live gated command
+                    assert "the chart refuses it" in str(exc) or "no instance" in str(exc)
+                    continue
                 except EngineError as exc:
-                    assert "no transition for it" in str(exc) or "replay diverged" in str(exc)
+                    assert "replay diverged" in str(exc)
                     continue
                 except TransitionError as exc:
                     missing.append(f"{name} on {state}: {exc}")
@@ -619,7 +630,9 @@ def test_every_host_command_in_every_built_routing_state_takes_a_declared_transi
     assert _violations(strict) == set()
     assert {state[0] for state in reached} == {"active", "passive", "quarantined", "evicted"}
     assert len(reached) == 11
-    assert {t.id for t in HOST.transitions} - _hits(strict) == {"host.12"}
+    # by design: host.12 is spec-only, and host.22 is declaration-only, which the
+    # chart's completeness test alone posts
+    assert {row.id for row in HOST.rows} - _hits(strict) == {"host.12", "host.22"}
 
 
 # ----------------------------------------------------------------- effect

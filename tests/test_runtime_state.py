@@ -57,6 +57,7 @@ from dsl41.oracle_state import (
     RuntimeState,
     may_outlive_run,
 )
+from dsl41.runner_hosts import HostCommand, apply_host_command
 
 T0 = datetime(2026, 7, 1, 8, 0)
 
@@ -816,25 +817,23 @@ def test_quarantine_and_reinstate_are_each_idempotent() -> None:
     that gives up five times over (S5d) -- a second quarantine that moved a
     revision would make a host's `expect` unholdable exactly while an
     operator is trying to use it. Reinstating a host that was never
-    quarantined is the same no-op from the other side."""
+    quarantined is the same no-op from the other side. Both are internal
+    rows of the host chart (host.06, host.08), so the apply writes nothing
+    (DL-333)."""
     store = RuntimeState()
     store.begin_input()
     store.register_host("h", deadman_s=None, at=None)
     store.commit_input()
 
-    store.begin_input()
-    store.quarantine_host("h")
-    assert store.commit_input() == ["host:h"]
+    def apply(verb: str) -> list[str]:
+        store.begin_input()
+        cmd = HostCommand(verb=verb, host_id="h")  # type: ignore[arg-type]
+        apply_host_command(store, cmd, actor=None)
+        return store.commit_input()
+
+    assert apply("quarantine") == ["host:h"]
     after_first = store.revision("host:h")
-
-    store.begin_input()
-    store.quarantine_host("h")  # still unreachable: one fact, not two
-    assert store.commit_input() == []
+    assert apply("quarantine") == []  # still unreachable: one fact, not two
     assert store.revision("host:h") == after_first
-
-    store.begin_input()
-    store.reinstate_host("h")
-    assert store.commit_input() == ["host:h"]
-    store.begin_input()
-    store.reinstate_host("h")  # already back: nothing to put back
-    assert store.commit_input() == []
+    assert apply("reinstate") == ["host:h"]
+    assert apply("reinstate") == []  # already back: nothing to put back

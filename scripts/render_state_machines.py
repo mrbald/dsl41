@@ -189,6 +189,8 @@ def chart_table(chart: Statechart) -> list[str]:
     ]
     for row in chart.rows:
         kind = f"{row.kind} {row.code}" if row.code else row.kind
+        if row.mark:
+            kind += f" ({row.mark})"
         event = row.event or "(completion)"
         action = row.action or row.note
         cells = [row.id, row.source, event, row.guard, action, row.target, kind, row.cite]

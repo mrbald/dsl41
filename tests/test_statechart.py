@@ -1614,3 +1614,43 @@ def test_a_stale_generation_mutant_fails_the_suite(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(Executor, "_stale", staticmethod(lambda inst, event: False))
     with pytest.raises(AssertionError):
         test_s7_a_stale_generation_is_discarded_before_selection()
+
+
+# ---- a tier's own error about an instance (§5)
+
+
+def _refusing() -> Statechart:
+    """One state that refuses `go`."""
+    root = composite("m", region("r", "a", leaf("a")))
+    return chart("m", root, [Row("m.01", "a", "go", kind="refusal", code="no")])
+
+
+def test_explain_gives_a_tier_s_error_the_facts_of_a_run_error() -> None:
+    """The tier raises about an outcome after the run: the report names the
+    machine, the instance, its states, the item, the candidates and the
+    recent microsteps, as an error out of a run does."""
+    executor = Executor()
+    executor.restore("k", _refusing(), {"m", "a"})
+    (outcome,) = executor.dispatch("k", Event("go"))
+    error = executor.explain(StatechartError("refused", outcome.rows), "k", Event("go"))
+    assert error.facts[:8] == [
+        ("machine", "m"),
+        ("instance", "'k'"),
+        ("active", "a, m"),
+        ("item", "the event go"),
+        ("payload", "None"),
+        ("ancestry", "none: a root item"),
+        ("deferred", "empty"),
+        ("candidates", "m.01"),
+    ]
+    assert str(error).splitlines()[-1] == "microstep: 'k' go fired rows m.01 depth 0"
+
+
+def test_explain_keeps_an_error_s_own_facts_and_refuses_an_unknown_instance() -> None:
+    executor = Executor()
+    executor.restore("k", _refusing(), {"m", "a"})
+    error = StatechartError("refused")
+    error.facts = [("WAL input", "1: go")]
+    assert executor.explain(error, "k", Event("go")).facts == [("WAL input", "1: go")]
+    with pytest.raises(StatechartError, match="no instance 'x'"):
+        executor.explain(StatechartError("refused"), "x", Event("go"))

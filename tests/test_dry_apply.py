@@ -34,6 +34,7 @@ from fork_harness import (
     ORACLE_FRESH,
     ORACLE_SHARED,
     STORE_COPIED,
+    STORE_REBUILT,
     history,
     state_bytes,
 )
@@ -52,7 +53,7 @@ from dsl41.runner_admission import (
     apply_attempt,
 )
 from dsl41.runner_clock import EngineError, VirtualClock
-from dsl41.runner_hosts import HostCommand
+from dsl41.runner_hosts import HostCommand, seed_local_executor
 from dsl41.runner_journal import ReplayFault, read_journal, replay_inputs
 from dsl41.runner_startup import resume_run, start_run
 from dsl41.state_machine import Transition, TransitionError, Violation
@@ -147,7 +148,7 @@ def test_the_fork_copies_every_mutable_attribute_and_shares_only_fixed_ones() ->
     length."""
     oracle = Oracle(lower_source(_JIL))
     assert set(vars(oracle)) == ORACLE_COPIED | ORACLE_FRESH | ORACLE_SHARED
-    assert set(vars(oracle.store)) == STORE_COPIED
+    assert set(vars(oracle.store)) == STORE_COPIED | STORE_REBUILT
     oracle.feed(_start())
     assert oracle._trace and oracle._emitted  # history to leave behind
     oracle._window_starts = [("b", 1, "cause")]  # set only inside a box start
@@ -167,6 +168,12 @@ def test_the_fork_copies_every_mutable_attribute_and_shares_only_fixed_ones() ->
         assert getattr(twin.store, name) == value, name
         if not isinstance(value, (bool, int, str)):
             assert getattr(twin.store, name) is not value, name
+    for name in STORE_REBUILT:  # the twin's own executor
+        assert getattr(twin.store, name) is not getattr(oracle.store, name), name
+    seed_local_executor(oracle.store, "local", at=T0)
+    assert oracle.fork().store.machines.active("host:local") == frozenset(
+        {"host", "routed", "active"}
+    )
     oracle._window_starts = None
     assert oracle.fork()._window_starts is None
 
@@ -190,6 +197,50 @@ def test_a_dry_host_command_on_a_fork_leaves_the_routing_table_alone() -> None:
     assert dry.result.decision == "applied"
     assert twin.store.hosts["local"].state == "passive"
     assert state_bytes(oracle) == before
+    real = apply_attempt(oracle, attempt)
+    assert real.result == dry.result
+    assert state_bytes(oracle, since) == state_bytes(twin)
+
+
+#: (the commands that build the row's state, the dry-applied command)
+_HOST_DRY = [
+    (build, verb, force)
+    for build in ((), ("drain",), ("quarantine",), ("drain", "quarantine"))
+    for verb in ("activate", "drain", "quarantine", "reinstate", "evict")
+    for force in ((False, True) if verb == "evict" else (False,))
+]
+
+
+@pytest.mark.parametrize(("build", "verb", "force"), _HOST_DRY)
+def test_a_dry_host_command_leaves_the_rows_revisions_and_instance_alone(
+    build: tuple[str, ...], verb: str, force: bool
+) -> None:
+    """The routing table's half of the leak test, for every host verb in
+    each routed and quarantined state: the dry apply moves the fork's row
+    and the fork's instance, and the original's rows, revisions, trace and
+    executor configuration stay byte-equal. The real apply then reaches the
+    fork's result."""
+    oracle = Oracle(lower_source(_JIL))
+    seed_local_executor(oracle.store, "local", at=T0, deadman_s=60.0)
+    for index, step in enumerate(build, start=1):
+        cmd = HostCommand(verb=step, host_id="local")  # type: ignore[arg-type]
+        assert apply_attempt(oracle, _attempt(index, kind=None, host=cmd)).result.decision == (
+            "applied"
+        )
+    attempt = _attempt(
+        len(build) + 1,
+        kind=None,
+        host=HostCommand(verb=verb, host_id="local", force=force),  # type: ignore[arg-type]
+        claimed_actor="alice@ops",
+        at=T0 + timedelta(hours=1),  # past the bound, so a gated eviction applies
+    )
+    before = state_bytes(oracle)
+    since = history(oracle)
+    revisions = {"host:local": oracle.store.revision("host:local")}
+    twin = oracle.fork()
+    dry = apply_attempt(twin, attempt)
+    assert state_bytes(oracle) == before
+    assert {"host:local": oracle.store.revision("host:local")} == revisions
     real = apply_attempt(oracle, attempt)
     assert real.result == dry.result
     assert state_bytes(oracle, since) == state_bytes(twin)

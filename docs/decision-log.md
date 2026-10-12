@@ -21558,3 +21558,83 @@ relitigate an entry; append a new one.
   that checked the plan against the helpers that built it, a dead identity check and a pinned call
   count. The Codex pass found no material defect and noted the chart index's retention. All are
   fixed and confirmed by the reviewer that raised them, the last applied as it proposed.
+
+- DL-333 The host routing row runs on the statechart executor: the state owner has its own executor,
+  rebuilt from its rows
+  (2026-10-12; src/dsl41/oracle_state.py, src/dsl41/runner_hosts.py, src/dsl41/state_machine.py,
+  src/dsl41/machines.py, scripts/transition_coverage.py, scripts/render_state_machines.py;
+  docs/blocks/host-routing.md; docs/concurrency-model.md §4 and §8; docs/deployment-runbook.md;
+  docs/risk-map.md; docs/statechart-engine.md §11, §13 and §16; docs/state-machines.md
+  (generated))
+  THE STORE'S EXECUTOR. The host row is the first machine whose state lives in the oracle's state
+  owner. `RuntimeState` owns an executor (statechart-engine §11: one per tier object), and the
+  host instance lives there; its configuration is the host's routing state, and the row's `state`
+  field is that configuration's projection into the ledger, published with its revision, carried
+  in the seal and replayed as before. The rows are enough to rebuild the executor, and every place
+  that rebuilds the rows rebuilds it: a fork gives its twin a new executor restored from the twin's
+  rows, the carried rows restore theirs at reopen, and a new row's registration starts its
+  instance; re-registration of a known row starts nothing. A write that would leave the row and
+  the configuration apart is a bug and raises; the test builders that seed rows directly call one
+  named rebuild. The engine's executor stays the engine
+  tier's: §11 now says that the engine-tier machines share the wiring's executor and that the
+  state owner has its own, forked with it.
+  THE CHART. The chart is declared beside the row, in oracle_state.py, since runner_hosts.py
+  imports the store and not the other way. A composite `routed` holds `active` and `passive`;
+  `quarantined` and `evicted` stand beside it. Rows .01 to .12 keep their ids: quarantine leaves
+  `routed` as one row; a reinstatement resolves by a choice on the state quarantine interrupted;
+  a forced eviction leaves any state but `evicted` from the root; the five self-moves are
+  internal rows that move no revision; and the relay's re-registration from `evicted` keeps its
+  spec-only mark and is never hit. The cells concurrency-model §8 has no move for are refusal
+  rows carrying the gate's own codes: an operator verb on a quarantined host, an eviction without
+  force outside quarantine, any verb on an evicted host. One ignored row absorbs a registration
+  outside `evicted`, which keeps the state, because completeness is syntactic (§10). No actions:
+  the apply reads the leaf after the microstep and writes the row through the store's verbs, as
+  before, with the generation bump and the attribution on eviction.
+  THE GATE. The gate stays outside the chart and keeps one copy of each rule. A rejection is a
+  decision at a log index that replay never re-decides (DL-94), and two of the eviction
+  preconditions read the last contact, which resume re-seeds fresher, so they cannot be guards
+  evaluated at apply. The gate reads the chart's state-dependent half on a scratch executor
+  restored from the rows, and keeps the fact-dependent half, the deadman, the bound and the
+  attribution of a force, as its own; the check order and every rejection sentence are unchanged.
+  The chart is dispatched only for an applied decision: live after the gate, in the dry apply on
+  the fork and in replay. A refusal outcome at the real apply means the log says applied where
+  the table has no move; DL-295 made that a replay fault that stopped resume with exit 2; it is
+  now a statechart error that names the WAL input, and the run exits 7.
+  THE EXECUTOR. A row may carry a mark, spec-only or unreachable. The coverage gate forbids a
+  marked row's hits and its guard outcomes instead of requiring them, the transition report lists
+  the marked rows, and the rendered document shows the mark; §13 says so in one sentence. The
+  executor can also explain an error the tier raises about an instance: a refusal the chart
+  returns for a decided command carries the configuration, the row, the item and the machine's
+  recent microsteps, as a run error does (§5). Nothing in selection or execution moved.
+  CHECKS. `well_formed` and `chart_warnings` pass. The generated completeness test holds five
+  witnesses, the quarantined one from each routed state, against a table written from
+  concurrency-model §8: thirty-four cells, the re-registration from `evicted` excluded. The
+  alphabet test drives the operator's verbs, the leader's quarantine and reinstatement through
+  the renewal callbacks, and replay. Per-input revision equality: over the exhaustive walk's
+  1,120 inputs the decision, the code, the revisions and the row are byte-identical to a table
+  recorded from the previous implementation, kept in the tests; about 1,470 more inputs across
+  the host tests compared equal. The fork-leak test now covers the instance's configuration: a
+  dry apply of each host verb leaves the rows, the revisions, the trace and the configuration
+  alone. New tests: a gap met by the leader's quarantine stops the loop and logs nothing; one met
+  by an operator's drain in the dry apply stops the loop unrefused; replay names the host input a
+  gap meets; `dsl41 run` exits 7 when resume replays a host decision the chart refuses; a carried
+  drain is the configuration the next period opens in. The host walk's unhit set is the marked
+  row and the ignored registration, which only the completeness test posts. A hit recorded by the
+  gate's scratch read means the row was selected for a rejected command, not that a move was
+  applied. STATE_MACHINE_VERSION is unchanged: no stored shape and no
+  derivation moved. The host leaves the violation channel: no `transition violation` line can
+  name it, and the run option's scope says so.
+  OPEN. oracle_state.py is over the size advisory. Every gate check and every fork builds a new
+  executor restored from the rows: one instance today, DL-325's cheap-fork question for the job
+  machines.
+  REVIEW. Semantic class: one Opus reviewer, three rounds, and one Codex pass, two rounds. Both
+  found the store rebuilding its executor silently when a direct write disagreed with the
+  configuration, which hid the divergence this entry makes a fault; it is now a raise, and the test
+  builders call one named rebuild. Codex found the apply's refusal raising without the structured
+  facts §5 requires, and a reinstatement test that never drove the apply; Opus found the quarantine
+  verb's lost idempotence, an unknown refusal code falling into the eviction sentence, the §13
+  sentence narrower than the code, and, on the rework, an explain helper raising a bare key error,
+  the witness builder's convention unpinned and two builders forcing an eviction with no actor.
+  Codex compared 3,840 cells and regenerated the recorded table from the previous implementation
+  with no difference; Opus compared the walk's cells and texts with no difference but the error
+  class the entry states. All are fixed and confirmed by the reviewer that raised them.

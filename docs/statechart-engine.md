@@ -243,10 +243,12 @@ A declaration is a type. Instances are per job, per lease, per subscription, and
 variant of the job machine (§16).
 
 One executor per tier object (an `Oracle`, a `Supervisor`, an `Engine`) owns one worklist for all
-its instances. A process with an `Engine` has one executor: the wiring builds it before the
-engine and hands it to the supervisor client first, then to the engine (DL-330). A fork has its own
-executor. `ReentrantDispatch` is per executor; a call from one tier into another tier's executor
-is not re-entrance.
+its instances. A process with an `Engine` has one executor for the engine tier's machines: the
+wiring builds it before the engine and hands it to the supervisor client first, then to the engine
+(DL-330). The oracle's state owner (`RuntimeState`) has its own executor, for the machines whose
+state it owns (DL-333). A fork has its own executor; a fork of the owner rebuilds it from the
+fork's rows. `ReentrantDispatch` is per executor; a call from one tier into another tier's
+executor is not re-entrance.
 
 The oracle becomes one composite `job` machine per job, with named regions for its status, its
 flags and its holding. Its regions, its box variant and its write path through `RuntimeState`
@@ -285,7 +287,9 @@ Hits are counted for:
 - guard outcomes where false is reachable;
 - defer and release paths.
 
-All of them are held at 100% in the gate.
+All of them are held at 100% in the gate. A row may carry a mark, `spec-only` (a contract rule
+with no code yet) or `unreachable`. The gate lists a marked row and never counts it, and a hit on
+it or on its guard's outcomes fails the gate, as for a marked table transition (DL-296, DL-333).
 
 The completeness test is generated per machine from the declaration plus a declared finite
 abstraction. The abstraction has three parts:
@@ -348,6 +352,13 @@ its outcome; the outbox refuses a second outcome before any post, and a statecha
 record or an outcome stops the engine as one from the loop does, and in replay names the WAL
 record.
 
+`host` (DL-333) is the first oracle-tier machine. It runs on the state owner's executor, one
+instance per host row; the row's state is the instance's configuration, written from its leaf. The
+gate reads the chart on a scratch executor rebuilt from the rows and keeps only the checks that
+read the input's own facts. The chart is dispatched on the store's executor only for an applied
+decision; the gate's scratch read is separate and moves nothing. A durable `applied` the chart
+refuses is a statechart error that names the WAL input.
+
 Acceptance per machine:
 
 - the old decision code is deleted;
@@ -360,8 +371,8 @@ Acceptance per machine:
   revision equality against the old implementation.
 
 After the pilot, `seal_boundary` (DL-327), `supervisor_process` (DL-328), `supervisor_client`
-(DL-330) and `effect` (DL-331), the rest come in this order:
-`host`, `admission`, `anchor_head`, `period_row`, `runtime_assembly`.
+(DL-330), `effect` (DL-331) and `host` (DL-333), the rest come in this order:
+`admission`, `anchor_head`, `period_row`, `runtime_assembly`.
 
 The oracle comes last. A second oracle is built beside the old one under a new old-vs-new
 harness. The same inputs go to both. The harness compares the trace, the emitted events, the

@@ -628,47 +628,77 @@ stateDiagram-v2
 
 ## host
 
+Clock: logical.
+
 ```mermaid
 stateDiagram-v2
-    state "active" as s0
-    state "evicted" as s1
-    state "passive" as s2
-    state "quarantined" as s3
-    state c6 <<choice>>
-    [*] --> s0
-    s0 --> s0 : host.01 activate / none: the row does not move and no revision moves
-    s0 --> s2 : host.02 drain / new effects are held, running work continues
-    s2 --> s0 : host.03 activate / held starts dispatch again
-    s2 --> s2 : host.04 drain / none: the row does not move and no revision moves
-    s0 --> s3 : host.05 quarantine [the leader's renewal failed five times in a row] / remember the state it interrupts
-    s2 --> s3 : host.05 quarantine [the leader's renewal failed five times in a row] / remember the state it interrupts
-    s3 --> s3 : host.06 quarantine / none: repeated unreachability is one fact
-    s3 --> c6 : host.07 reinstate [the host answered again] / put back the state quarantine interrupted, and forget it
-    c6 --> s0
-    c6 --> s2
-    s0 --> s0 : host.08 reinstate / none: nothing to put back
-    s2 --> s2 : host.09 reinstate / none: nothing to put back
-    s3 --> s1 : host.10 evict [the host runs a deadman, was in contact, and has been silent past deadman + kill + skew] / generation += 1, forced_by = none, forget the interrupted state
-    s0 --> s1 : host.11 evict (force) [claimed_actor names who asks] / generation += 1, forced_by = the actor, forget the interrupted state
-    s2 --> s1 : host.11 evict (force) [claimed_actor names who asks] / generation += 1, forced_by = the actor, forget the interrupted state
-    s3 --> s1 : host.11 evict (force) [claimed_actor names who asks] / generation += 1, forced_by = the actor, forget the interrupted state
-    s1 --> s0 : host.12 register [the relay presents the current generation and has self-fenced] / the relay's held jobs run as new runs with new effect ids
+    state "host" as s2
+    state s2 {
+        [*] --> s5
+        state "routed" as s5
+        state s5 {
+            [*] --> s0
+            state "active" as s0
+            state "passive" as s3
+        }
+        state "quarantined" as s4
+        state "evicted" as s1
+    }
+    state c0 <<choice>>
+    s0 --> s3 : host.02 drain
+    s3 --> s0 : host.03 activate
+    s5 --> s4 : host.05 quarantine
+    s4 --> c0 : host.07 reinstate
+    s4 --> s1 : host.10 evict
+    s2 --> s1 : host.11 force_evict [not_evicted]
+    s1 --> s0 : host.12 register
+    c0 --> s3 : host.23 [remembered_passive]
+    c0 --> s0 : host.24 [else]
 ```
 
-| Id | Source | Trigger | Guard | Effect | Target | Cite | Mark |
+| Id | Source | Event | Guard | Action | Target | Kind | Cite |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| host.01 | active | activate |  | none: the row does not move and no revision moves | active | concurrency-model ss8 |  |
-| host.02 | active | drain |  | new effects are held, running work continues | passive | concurrency-model ss8, CM-13 |  |
-| host.03 | passive | activate |  | held starts dispatch again | active | concurrency-model ss8 |  |
-| host.04 | passive | drain |  | none: the row does not move and no revision moves | passive | concurrency-model ss8 |  |
-| host.05 | active, passive | quarantine | the leader's renewal failed five times in a row | remember the state it interrupts | quarantined | concurrency-model ss7, ss8, DL-97, DL-291 |  |
-| host.06 | quarantined | quarantine |  | none: repeated unreachability is one fact | quarantined | DL-97 |  |
-| host.07 | quarantined | reinstate | the host answered again | put back the state quarantine interrupted, and forget it | active, passive | concurrency-model ss8, DL-97 |  |
-| host.08 | active | reinstate |  | none: nothing to put back | active | concurrency-model ss8, DL-111 |  |
-| host.09 | passive | reinstate |  | none: nothing to put back | passive | concurrency-model ss8, DL-111 |  |
-| host.10 | quarantined | evict | the host runs a deadman, was in contact, and has been silent past deadman + kill + skew | generation += 1, forced_by = none, forget the interrupted state | evicted | concurrency-model ss8 preconditions 1-3, DL-151 |  |
-| host.11 | active, passive, quarantined | evict (force) | claimed_actor names who asks | generation += 1, forced_by = the actor, forget the interrupted state | evicted | concurrency-model ss8, DL-111, DL-151 |  |
-| host.12 | evicted | register | the relay presents the current generation and has self-fenced | the relay's held jobs run as new runs with new effect ids | active | concurrency-model ss8 (eviction is fenced on return), period-model ss3.3 | spec-only |
+| host.01 | active | activate |  | none: the row does not move and no revision moves |  | internal | concurrency-model ss8 |
+| host.02 | active | drain |  | new effects are held, running work continues | passive | external | concurrency-model ss8, CM-13 |
+| host.03 | passive | activate |  | held starts dispatch again | active | external | concurrency-model ss8 |
+| host.04 | passive | drain |  | none: the row does not move and no revision moves |  | internal | concurrency-model ss8 |
+| host.05 | routed | quarantine |  | The leader's renewal failed five times in a row. The row remembers the state it interrupts. | quarantined | external | concurrency-model ss7, ss8, DL-97, DL-291 |
+| host.06 | quarantined | quarantine |  | none: repeated unreachability is one fact |  | internal | DL-97 |
+| host.07 | quarantined | reinstate |  | The host answered again: put back the state quarantine interrupted, and forget it. | remembered | external | concurrency-model ss8, DL-97 |
+| host.08 | active | reinstate |  | none: nothing to put back |  | internal | concurrency-model ss8, DL-111 |
+| host.09 | passive | reinstate |  | none: nothing to put back |  | internal | concurrency-model ss8, DL-111 |
+| host.10 | quarantined | evict |  | The gate has proved the bound: a deadman, a contact, and silence past deadman + kill + skew. generation += 1, forced_by = none, forget the interrupted state. | evicted | external | concurrency-model ss8 preconditions 1-3, DL-151 |
+| host.11 | host | force_evict | not_evicted | The gate has the attribution: claimed_actor names who asks. generation += 1, forced_by = the actor, forget the interrupted state. | evicted | external | concurrency-model ss8, DL-111, DL-151 |
+| host.12 | evicted | register |  | The relay presents the current generation and has self-fenced. Its held jobs run as new runs with new effect ids. No code posts it. | active | external (spec-only) | concurrency-model ss8 (eviction is fenced on return), period-model ss3.3 |
+| host.13 | quarantined | activate |  |  |  | refusal host_quarantined | concurrency-model ss8, concurrency-model ss7 |
+| host.14 | quarantined | drain |  |  |  | refusal host_quarantined | concurrency-model ss8, concurrency-model ss7 |
+| host.15 | routed | evict |  |  |  | refusal host_not_quarantined | concurrency-model ss8 precondition 1, DL-94 |
+| host.16 | evicted | activate |  |  |  | refusal host_evicted | concurrency-model ss8 |
+| host.17 | evicted | drain |  |  |  | refusal host_evicted | concurrency-model ss8 |
+| host.18 | evicted | quarantine |  |  |  | refusal host_evicted | concurrency-model ss8, CM-12 |
+| host.19 | evicted | reinstate |  |  |  | refusal host_evicted | concurrency-model ss8, CM-12 |
+| host.20 | evicted | evict |  |  |  | refusal host_already_evicted | concurrency-model ss8 |
+| host.21 | evicted | force_evict |  |  |  | refusal host_already_evicted | concurrency-model ss8 |
+| host.22 | host | register |  | Re-registration refreshes identity and keeps the state. No tier path posts it: `register_host` on an existing row starts nothing. |  | ignored | concurrency-model ss8, DL-94 |
+
+| Id | Choice | Guard | Action | Target |
+| --- | --- | --- | --- | --- |
+| host.23 | remembered | remembered_passive |  | passive |
+| host.24 | remembered | else |  | active |
+
+| State | In | Entry | Exit | Defers | Waits |
+| --- | --- | --- | --- | --- | --- |
+| host |  |  |  |  |  |
+| routed | host/routing |  |  |  |  |
+| active | routed/routing |  |  |  |  |
+| passive | routed/routing |  |  |  |  |
+| quarantined | host/routing |  |  |  |  |
+| evicted | host/routing |  |  |  |  |
+
+| Name | Kind | Prose |
+| --- | --- | --- |
+| not_evicted | guard | The host is not evicted. `evicted` refuses a forced eviction with its own row, so the walk reaches the root only from a routed or a quarantined host (ss8: force skips the proof, not the state). |
+| remembered_passive | guard | Quarantine interrupted `passive`: the row remembers it, and a drained host that answers again stays drained (DL-97). |
 
 ## admission
 
