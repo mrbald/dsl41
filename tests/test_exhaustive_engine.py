@@ -61,7 +61,7 @@ from dsl41.runner_admission import (
     parse_envelope,
 )
 from dsl41.runner_clock import EngineError, VirtualClock
-from dsl41.runner_effects import EFFECT, Effect, EffectOutcome, Outbox, effect_id_for
+from dsl41.runner_effects import Effect, EffectOutcome, Outbox, effect_id_for
 from dsl41.runner_hosts import HOST, LOCAL_EXECUTOR_ID, HostCommand, seed_local_executor
 from dsl41.runner_control import command
 from dsl41.runner_journal import SUBSCRIPTION, Journal, read_decisions, read_journal
@@ -684,45 +684,97 @@ def _resolve_to(effect_id: str, outcome: str) -> Callable[[Outbox], None]:
     return resolve
 
 
+def _run_spied(outcomes: list[Outcome]) -> Executor:
+    """An outbox's executor that keeps every outcome: a record's start and an
+    outcome's post both end in `run`."""
+    machines = Executor()
+    run = machines.run
+
+    def spy() -> list[Outcome]:
+        taken = run()
+        outcomes.extend(taken)
+        return taken
+
+    machines.run = spy  # type: ignore[method-assign]
+    return machines
+
+
+#: the row each outcome of a pending effect takes
+_OUTCOME_ROWS = {"applied": "effect.02", "retired": "effect.03", "indeterminate": "effect.04"}
+
+
+def _effect_cell(state: str, name: str) -> str:
+    """What one call does to an effect in `state`, from concurrency-model ss5
+    and DL-118: the effect starts `pending` when it is first recorded; an
+    exact record again changes nothing; other content under its id, or a
+    KILL of its bound run naming another process, is refused; an outcome
+    must belong to a recorded effect and its run, and an outcome is final."""
+    if name == "record":
+        return "started" if state == "absent" else "no-op"
+    if state == "absent":
+        return "started" if name.startswith("record") else "refused"
+    if name.startswith("record") or name == "outcome naming a stranger":
+        return "refused"
+    return _OUTCOME_ROWS[name.split()[1]] if state == "pending" else "refused"
+
+
 def test_every_outbox_call_in_every_effect_state_takes_a_declared_transition(
     strict: Path,
 ) -> None:
     """`effect`: all five states, built on an `Outbox` by its own verbs, as
     the engine and `read_outbox` build it (`_EFFECT_BUILDS`), and every
-    call it accepts for that effect (`_effect_events`). A call takes a
-    declared transition, is a no-op (the same record again), or is refused
-    by the outbox's own EngineError before the table is asked. A second
-    outcome is refused by the table itself, by design (DL-295): under the
-    strict variable that refusal is the `TransitionError`, and it is the
-    only one expected. Left out: nothing."""
+    call it accepts for that effect (`_effect_events`). Each call starts the
+    effect's instance, posts one outcome that fires its row, is a no-op (the
+    same record again), or is refused by the outbox's own EngineError before
+    anything is posted. A second outcome is that refusal, by design
+    (DL-295): the instance of a resolved effect is gone, so no chart is
+    asked. Left out: nothing."""
     events = _effect_events()
-    refused: set[tuple[str, str]] = set()
+    cells: dict[tuple[str, str], str] = {}
     for state, build in _EFFECT_BUILDS.items():
         for name, call in events.items():
-            box = Outbox()
+            outcomes: list[Outcome] = []
+            box = Outbox(_run_spied(outcomes))
             for step in build:
                 if step == "record":
                     box.record(_spawn())
                 else:
                     box.resolve(EffectOutcome(effect_id=_spawn().effect_id, state=step))  # type: ignore[arg-type]
             assert (box.state_of(_spawn().effect_id) or "absent") == state
+            before = len(outcomes)
             try:
                 call(box)
-            except EngineError:
+            except EngineError as error:
+                assert outcomes[before:] == []  # refused before any post
+                assert not box.machines._pool  # and nothing left in the pool
                 assert (box.state_of(_spawn().effect_id) or "absent") == state
-            except TransitionError:
-                refused.add((state, name))
-                assert box.state_of(_spawn().effect_id) == state
-    second = {
-        (s, f"outcome {o}") for s in EFFECT.finals for o in ("applied", "retired", "indeterminate")
-    }
-    assert refused == second
-    outcomes = [t for t in EFFECT.transitions if t.trigger == "resolve"]
-    assert len(outcomes) == 3
-    assert _violations(strict) == {
-        ("effect", t.id, state, str(t.target)) for state in EFFECT.finals for t in outcomes
-    }
-    assert {t.id for t in EFFECT.transitions} <= _hits(strict)
+                if (
+                    state in _OUTCOME_ROWS
+                    and name.startswith("outcome ")
+                    and "stranger" not in name
+                ):
+                    assert "an outcome is final" in str(error)
+                cells[(state, name)] = "refused"
+                continue
+            cell = outcomes[before:]
+            if not cell:
+                cells[(state, name)] = "no-op"
+            else:
+                (outcome,) = cell
+                cells[(state, name)] = (
+                    outcome.kind if outcome.kind == "started" else outcome.rows[0]
+                )
+            if box.state_of(_spawn().effect_id) in _OUTCOME_ROWS:
+                with pytest.raises(StatechartError, match="no instance"):
+                    box.machines.active(box.key(_spawn().effect_id))  # forgotten once final
+    assert cells == {cell: _effect_cell(*cell) for cell in cells}
+    assert len(cells) == len(_EFFECT_BUILDS) * len(events)
+    second = {(s, f"outcome {o}") for s in _OUTCOME_ROWS for o in _OUTCOME_ROWS}
+    assert {cell for cell, value in cells.items() if value == "refused"} >= second
+    assert {value for value in cells.values() if value.startswith("effect.")} == set(
+        _OUTCOME_ROWS.values()
+    )
+    assert _violations(strict) == set()
 
 
 # ----------------------------------------------------------- subscription
@@ -1357,10 +1409,12 @@ async def _seal_cell(
     dispatch = engine._machines.dispatch
 
     def spy(key: Any, event: Any) -> Any:
-        # the executor's outcome: the rows each post took, and the phase it left
+        # the executor's outcome: the rows each post took, and the phase it left.
+        # The seal's posts only: the outbox's effects run on the same executor
         outcomes = dispatch(key, event)
-        taken.extend(row for outcome in outcomes for row in outcome.rows)
-        phases.append(engine._seal_phase(key))
+        if isinstance(key, _PendingSeal):
+            taken.extend(row for outcome in outcomes for row in outcome.rows)
+            phases.append(engine._seal_phase(key))
         return outcomes
 
     mp.setattr(engine._machines, "dispatch", spy)

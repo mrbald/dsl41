@@ -21451,3 +21451,75 @@ relitigate an entry; append a new one.
   a discarded post that skipped the lease's return and spun an adapter's wait, the pending order in
   §16 and the §11 wording, and, in its second round, a lease return whose raise skipped the run's
   judgement and its hints. All are fixed and confirmed by the reviewer that raised them.
+
+- DL-331 The effect runs on the statechart executor: one instance per open effect, forgotten at its
+  outcome
+  (2026-10-12; src/dsl41/runner_effects.py, src/dsl41/runner.py, src/dsl41/runner_journal.py,
+  src/dsl41/runner_startup.py, src/dsl41/boundary.py, src/dsl41/runner_admission.py;
+  docs/blocks/effect-outbox.md; docs/concurrency-model.md §4; docs/deployment-runbook.md;
+  docs/statechart-engine.md §16; docs/state-machines.md (generated))
+  THE CHART. `effect` is a `Statechart` on the logical clock: one region with `pending` and the
+  finals `applied`, `retired` and `indeterminate`. An instance exists from the effect's record to
+  its outcome: `record` starts it in `pending` after the outbox's own checks, so the old `absent`
+  state and its row are gone, as the feed's were (DL-329), and rows .02 to .04 keep their ids. One
+  event, `resolve`, carries the outcome; its state is the payload partition, and the three rows in
+  `pending` are guarded by it. Today's reasons for an outcome, dispatched or found on the host,
+  superseded or exited, a kill with no status and no live wrapper, are the rows' notes. A root row
+  (.05) ignores an outcome while a final is active; it exists because completeness is syntactic
+  (statechart-engine §10) and no tier path posts it: the outbox refuses a second outcome before any
+  post, with the text it had, live and in replay as an outcome replay fault (DL-295), and forgets
+  the instance in the call that made it final. The outcome record stays the memory afterwards:
+  `state_of` reads it, else the open instance's leaf, else nothing. No actions and no deferral:
+  the outbox writes the outcome after the microstep. The deleted code: the table, its four
+  transitions, the outcome-to-row map, the derived state read, the two `take` sites and the
+  violation channel for this machine.
+  THE TIER. The outbox takes the executor at construction and makes its own when given none. An
+  engine builds its executor before its outbox and hands it over, and refuses an outbox on another
+  executor (statechart-engine §11). An instance is keyed by the outbox and the effect's id, so two
+  outboxes on one executor never collide: a refused resume leaves its instances on the wiring's
+  executor until the process exits, and a retry on the same wiring starts its own. At resume the
+  carried outbox and the replayed outbox are built on the engine's executor, so every open effect's
+  instance lives where the engine's seal and feed instances do; the executions a boundary carries
+  are recorded and resolved in one breath and leave no instance. Offline readers, the attestation,
+  the history, the journal verbs, take the default. A seal ends the process with exit 3, so no
+  second engine shares an executor with a dead one.
+  THE ERROR SURFACE. Nothing new. A statechart error out of a record or an outcome reaches the
+  paths that already exit 7: the engine loop (DL-325), a seal's drain, which re-raises it before
+  the seal-fault wrap and so neither aborts nor refuses (DL-327), resume, and replay, where the
+  report now names the record that met it, the decision's effects, the outcome of one effect, or
+  the carried intent or execution of one. A chart that lost an outcome row is a statechart error
+  too, never a bare iteration fault: the lookup that names the row in the second-outcome text
+  raises one. The effect outbox card's recovery bullet said that an attempt whose decision never
+  reached the WAL launches nothing at resume; DL-315 made the live engine commit the recovered
+  decision and its effects through the normal path, and the card now says so.
+  CHECKS. `well_formed` and `chart_warnings` pass. The generated completeness test holds a pending
+  SPAWN, a pending KILL and the three finals as witnesses, fifteen cells against a table written
+  from concurrency-model §5, the finals' cells resolving to the ignored row. The alphabet test runs
+  an engine through a SPAWN applied, a held SPAWN retired by a kill, a KILL applied and, at resume,
+  a KILL left indeterminate, and a carried execution; the exhaustive outbox walk reads the
+  executor's outcomes with its enumeration unchanged, and its nine second-outcome cells are the
+  outbox's errors with no post and an empty pool. New tests: a second outcome never reaches the
+  chart; a chart that lost an outcome row raises a statechart error with the WAL fact, and exits
+  7; a gap met at an outcome in the loop, in replay (the report names the record), in the carried
+  outbox (the report names the carried intent or execution) and while a seal drains (no abort, no
+  refusal, no seal record) ends `dsl41 run` with exit 7; a retry after a refused resume runs on
+  the same executor; two outboxes on one executor keep their own instances. Changed tests: the
+  seal walk and the seal chart's spy filter the engine's executor by key, since effect posts share
+  it now; the strict-session test expects the outbox's error where it expected the table's; the
+  violation-report example moved to the admission table. What an operator sees differently: no
+  `transition violation` line can name this machine, the strict variable raises the outbox's error
+  instead of the table's, and a gap in the chart is exit 7. The gates hold the rows and guard
+  outcomes at 100%, and the five owning modules at 100% of branches with no new pragma.
+  COST. Replaying a WAL costs about 25 microseconds per effect, up from 5, and the bare record
+  and outcome about 20, up from 2: the executor's selection internals, linear from a thousand
+  effects to a million. A thirty-day period at this project's target load is well under a second
+  of resume.
+  OPEN. The per-effect cost above: the executor could cache each row's domain and exit top; that
+  refinement comes before the oracle's conversion, which will post far more. runner_journal.py is
+  over the size advisory.
+  REVIEW. Semantic class: one Opus reviewer and one Codex pass, two rounds each. The Opus
+  reviewer found two outboxes on one executor colliding on an effect's key after a refused resume,
+  a carried outbox's error naming no record, a lost row raising a bare iteration fault, and three
+  test nits; the Codex pass found the same lost-row fault, the exclusions and the ignored row
+  covering the same cells, and the card's recovery bullet contradicting DL-315. All are fixed and
+  confirmed by the reviewer that raised them.

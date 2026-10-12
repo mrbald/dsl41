@@ -706,29 +706,47 @@ stateDiagram-v2
 
 ## effect
 
+Clock: logical.
+
 ```mermaid
 stateDiagram-v2
-    state "absent" as s0
-    state "applied" as s1
-    state "indeterminate" as s2
-    state "pending" as s3
-    state "retired" as s4
-    [*] --> s0
-    s0 --> s3 : effect.01 record [the id is unseen, the run_id binding stays one-to-one both ways] / bind the run_id both ways
-    s3 --> s1 : effect.02 resolve [dispatched, or resume found the run on the host or a kill landed, or a replayed effect_result, or a carried execution]
-    s3 --> s4 : effect.03 resolve [superseded at dispatch, or resume finds the run it would kill has exited]
-    s3 --> s2 : effect.04 resolve [resume finds no status and no live wrapper for a kill] / an exact retry answers outcome_unavailable
-    s1 --> [*]
-    s2 --> [*]
-    s4 --> [*]
+    state "effect" as s1
+    state s1 {
+        [*] --> s3
+        state "pending" as s3
+        state "applied" as s0
+        state "retired" as s4
+        state "indeterminate" as s2
+        s0 --> [*]
+        s4 --> [*]
+        s2 --> [*]
+    }
+    s3 --> s0 : effect.02 resolve [applied]
+    s3 --> s4 : effect.03 resolve [retired]
+    s3 --> s2 : effect.04 resolve [indeterminate]
 ```
 
-| Id | Source | Trigger | Guard | Effect | Target | Cite | Mark |
+| Id | Source | Event | Guard | Action | Target | Kind | Cite |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| effect.01 | absent | record | the id is unseen, the run_id binding stays one-to-one both ways | bind the run_id both ways | pending | concurrency-model ss4 step 7, ss5, DL-96, DL-118 |  |
-| effect.02 | pending | resolve | dispatched, or resume found the run on the host or a kill landed, or a replayed effect_result, or a carried execution |  | applied | concurrency-model ss5, DL-96, period-model ss3.5 |  |
-| effect.03 | pending | resolve | superseded at dispatch, or resume finds the run it would kill has exited |  | retired | concurrency-model ss5, DL-111, DL-232 |  |
-| effect.04 | pending | resolve | resume finds no status and no live wrapper for a kill | an exact retry answers outcome_unavailable | indeterminate | concurrency-model ss5, CM-06, DL-111 |  |
+| effect.02 | pending | resolve | applied | Dispatched, or resume found the run on the host, or a kill landed, or a replayed effect_result, or a carried execution. | applied | external | concurrency-model ss5, DL-96, period-model ss3.5 |
+| effect.03 | pending | resolve | retired | Superseded at dispatch, or resume finds that the run it would kill has exited. | retired | external | concurrency-model ss5, DL-111, DL-232 |
+| effect.04 | pending | resolve | indeterminate | Resume finds no status and no live wrapper for a kill. An exact retry answers outcome_unavailable. | indeterminate | external | concurrency-model ss5, CM-06, DL-111 |
+| effect.05 | effect | resolve | over | An outcome is final: the outbox refuses a second one with an EngineError before any post, and forgets the instance in the call that made it final (DL-295). No tier path posts this row. |  | ignored | statechart-engine ss10 |
+
+| State | In | Entry | Exit | Defers | Waits |
+| --- | --- | --- | --- | --- | --- |
+| effect |  |  |  |  |  |
+| pending | effect/outcome |  |  |  |  |
+| applied (final) | effect/outcome |  |  |  |  |
+| retired (final) | effect/outcome |  |  |  |  |
+| indeterminate (final) | effect/outcome |  |  |  |  |
+
+| Name | Kind | Prose |
+| --- | --- | --- |
+| applied | guard | The outcome's state is `applied`. |
+| retired | guard | The outcome's state is `retired`. |
+| indeterminate | guard | The outcome's state is `indeterminate`. |
+| over | guard | The effect rests in a final state. Nothing posts to it then: the outbox forgets the instance in the call that made it final, and refuses a second outcome before any post (DL-295). In `pending` an outcome that no row's guard takes raises `UnhandledEvent`. |
 
 ## subscription
 

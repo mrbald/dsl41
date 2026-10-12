@@ -62,7 +62,7 @@ import subprocess
 import sys
 import uuid
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -154,7 +154,7 @@ from dsl41.seal import (
     close_runtime,
     open_from_seal,
 )
-from dsl41.state_machine import StatechartError, StateMachine, Transition
+from dsl41.state_machine import Executor, StatechartError, StateMachine, Transition
 
 #: ss1.1's anchor directory, which is NOT inside any archivable root.
 ANCHOR_NAME: Final[str] = "anchor.json"
@@ -2181,7 +2181,9 @@ def check_candidate(ctx: BoundaryContext, *, sidecar: Seal, record: Mapping[str,
     open_from_seal(sidecar, expected_digest=sidecar.digest, manifest=ctx.committed_manifest)
 
 
-def carried_outbox(opened: OpenedRuntime | None, *, at: datetime) -> Outbox:
+def carried_outbox(
+    opened: OpenedRuntime | None, *, at: datetime, machines: Executor | None = None
+) -> Outbox:
     """The intents and applied bindings a period opens HOLDING (ss3.5).
 
     `outbox_pending` alone is not the whole carry: an APPLIED SPAWN for a
@@ -2196,12 +2198,18 @@ def carried_outbox(opened: OpenedRuntime | None, *, at: datetime) -> Outbox:
     afterwards: an `effect_result` in the new segment for an effect born
     in the old one is an outcome the replay has to attach, and
     `Outbox.resolve` refuses an outcome for an effect it never saw --
-    which is the right rule and the wrong order."""
-    outbox = Outbox()
+    which is the right rule and the wrong order.
+
+    `machines` is the executor its effects run on: the resuming engine's,
+    or the outbox's own for an offline reader. A statechart error out of a
+    carried record names that record in its report, as `read_outbox` names
+    a WAL record."""
+    outbox = Outbox(machines)
     if opened is None:
         return outbox
     for effect in opened.outbox_pending:
-        outbox.record(effect)
+        with _carried(f"the carried intent of effect {effect.effect_id}"):
+            outbox.record(effect)
     for entry in opened.executions:
         if entry.kind == "pending_spawn":
             continue  # its pending effect is in outbox_pending already
@@ -2216,16 +2224,28 @@ def carried_outbox(opened: OpenedRuntime | None, *, at: datetime) -> Outbox:
             run_id=entry.run_id,
             generation=getattr(entry, "generation", 0),
         )
-        outbox.record(effect)
-        outbox.resolve(
-            EffectOutcome(
-                effect_id=entry.effect_id,
-                state="applied",
-                run_id=entry.run_id,
-                detail="carried across the boundary as an applied binding (ss3.5)",
+        with _carried(f"the carried execution of effect {entry.effect_id}"):
+            outbox.record(effect)
+            outbox.resolve(
+                EffectOutcome(
+                    effect_id=entry.effect_id,
+                    state="applied",
+                    run_id=entry.run_id,
+                    detail="carried across the boundary as an applied binding (ss3.5)",
+                )
             )
-        )
     return outbox
+
+
+@contextlib.contextmanager
+def _carried(what: str) -> Iterator[None]:
+    """Add `what`, a carried record, to a statechart error's report
+    (statechart-engine ss5)."""
+    try:
+        yield
+    except StatechartError as exc:
+        exc.facts.append(("carried input", what))
+        raise
 
 
 # ------------------------------------------------------- the seal record

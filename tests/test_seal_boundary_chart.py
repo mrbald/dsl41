@@ -28,7 +28,7 @@ from dsl41.boundary import BoundaryFailStop, PeriodSealed
 from dsl41.machines import MACHINES
 from dsl41.oracle_state import Event, RuntimeState
 from dsl41.period import wal_path
-from dsl41.runner import Engine
+from dsl41.runner import Engine, _PendingSeal
 from dsl41.runner_admission import AdmissionRefused, TransitionStop
 from dsl41.runner_clock import EngineError
 from dsl41.runner_journal import read_journal
@@ -204,12 +204,16 @@ def test_the_in_doubt_note_names_the_first_flag(flags: tuple[str, ...], named: s
 
 
 def _spy(engine: Engine, posted: list[str]) -> None:
-    """Record every event the engine posts, and check that each post is one
-    microstep at depth 0 whose row reports at most one `SealExit`."""
+    """Record every event the engine posts to a seal boundary, and check that
+    each post is one microstep at depth 0 whose row reports at most one
+    `SealExit`. The outbox's effects run on the same executor; their posts
+    are not the seal's."""
     dispatch = engine._machines.dispatch
 
     def spy(key: Any, event: ChartEvent) -> Any:
         outcomes = dispatch(key, event)
+        if not isinstance(key, _PendingSeal):
+            return outcomes
         assert [outcome.depth for outcome in outcomes] == [0], outcomes
         assert all(isinstance(intent, SealExit) for intent in outcomes[0].intents)
         posted.append(event.name)

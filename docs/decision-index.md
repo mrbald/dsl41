@@ -326,7 +326,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-312 | period-model: the anchor's local-filesystem check and the seal's quiesce wait, stated as the code does them | [docs/period-model.md](period-model.md) |
 | DL-313 | At resume a held file-watcher start stays held, and a pending start counts only for its own run |  |
 | DL-314 | Small runner fixes from the spec reviews: the wrapper spec is written whole, an oversized grace is bad_spec, and the perimeter journal's name is made durable | [docs/access-model.md](access-model.md) |
-| DL-315 | At resume a recovered start is committed, and a start whose SPAWN was retired stays as the live engine left it | [docs/concurrency-model.md](concurrency-model.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md) |
+| DL-315 | At resume a recovered start is committed, and a start whose SPAWN was retired stays as the live engine left it | [docs/blocks/effect-outbox.md](blocks/effect-outbox.md), [docs/concurrency-model.md](concurrency-model.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md) |
 | DL-316 | Lint L023: a schedule time that a DST change moves, drops, repeats or merges | [docs/deployment-runbook.md](deployment-runbook.md) |
 | DL-317 | The tested size: a 200-job estate on a virtual and a real clock, what it costs, and the limits that follow | [docs/deployment-runbook.md](deployment-runbook.md) |
 | DL-318 | A DST and midnight drill runs the real runner on a fast fake clock, and L023 names every opening of a window with its day and pass | [docs/ir-design.md](ir-design.md) |
@@ -342,3 +342,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-328 | The supervisor's lifecycle runs on the statechart executor; the fence rule has one copy | [docs/statechart-engine.md](statechart-engine.md) |
 | DL-329 | The subscribe feed runs on the statechart executor; a statechart error in a control handler stops the engine with exit 7 |  |
 | DL-330 | The supervisor client runs on the statechart executor; a statechart error on its path stops the engine with exit 7 | [docs/statechart-engine.md](statechart-engine.md) |
+| DL-331 | The effect runs on the statechart executor: one instance per open effect, forgotten at its outcome | [docs/statechart-engine.md](statechart-engine.md) |

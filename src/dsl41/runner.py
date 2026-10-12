@@ -579,11 +579,21 @@ class Engine:
         #: observation -- but teardown must not raise the same failure a
         #: second time to a caller who already saw it
         self._corpses_raised: set[int] = set()
+        #: this engine's statechart executor (statechart-engine ss11): one
+        #: worklist for every instance. Its machines are `EFFECT`, one
+        #: instance per open effect of the outbox (DL-331), `SEAL_BOUNDARY`,
+        #: one instance per seal request (DL-327), `SUBSCRIPTION`, one
+        #: instance per subscribe feed, which the control server starts
+        #: through `machines`, and `SUPERVISOR_CLIENT`, the detached run's
+        #: client. The client is built before the engine, so the wiring makes
+        #: the process's executor and hands it to both; an engine given none
+        #: makes its own
+        self._machines = machines if machines is not None else Executor()
         #: concurrency-model ss5: what this engine intends to do to its
         #: execution hosts, and what came of it. Restored from the log on
         #: resume -- an engine that forgot a kill it had decided would leave a
         #: detached run orphaned for the rest of its life.
-        self.outbox = Outbox()
+        self.outbox = Outbox(self._machines)
         #: period-model ss1.3: what this engine leads besides its own run
         #: root. None on an engine with no lineage -- the bisimulation
         #: harness, a rehearsal -- and a seal request then has nothing to
@@ -609,15 +619,6 @@ class Engine:
         #: the one boundary queued or running; `submit_seal` refuses another
         #: while it is set, and `_seal_boundary` clears it when it exits
         self._seal: _PendingSeal | None = None
-        #: this engine's statechart executor (statechart-engine ss11): one
-        #: worklist for every instance. Its machines are `SEAL_BOUNDARY`, one
-        #: instance per seal request (DL-327), `SUBSCRIPTION`, one instance
-        #: per subscribe feed, which the control server starts through
-        #: `machines`, and `SUPERVISOR_CLIENT`, the detached run's client. The
-        #: client is built before the engine, so the wiring makes the
-        #: process's executor and hands it to both; an engine given none
-        #: makes its own
-        self._machines = machines if machines is not None else Executor()
         #: the index of an admitted attempt that is not yet fully applied:
         #: its admission line, decision, outbox entries and answer. Set when
         #: the frontier admits it and cleared when `_admit_and_apply`
@@ -636,8 +637,26 @@ class Engine:
     @property
     def machines(self) -> Executor:
         """This engine's one statechart executor, for the control server's
-        subscribe feeds (statechart-engine ss11)."""
+        subscribe feeds and the outbox resume rebuilds (statechart-engine
+        ss11)."""
         return self._machines
+
+    @property
+    def outbox(self) -> Outbox:
+        """The engine's outbox. It runs its effects on this engine's
+        executor: resume hands over the outbox replay rebuilt, and one on
+        another executor is refused, since it would split the process's one
+        worklist (statechart-engine ss11)."""
+        return self._outbox
+
+    @outbox.setter
+    def outbox(self, outbox: Outbox) -> None:
+        if outbox.machines is not self._machines:
+            raise StatechartError(
+                "effect: the outbox runs on another executor than the engine's"
+                " (statechart-engine ss11)"
+            )
+        self._outbox = outbox
 
     @property
     def sealing(self) -> bool:

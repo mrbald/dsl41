@@ -343,6 +343,11 @@ the boundary (`period-model.md` §6, DL-327).
 the engine and hands to both; the client posts nothing once closed, and a statechart error that
 its reader, renewal or LIST task meets stops the engine as one from the loop does.
 
+`effect` (DL-331) runs on the engine's executor, one instance per open effect from its record to
+its outcome; the outbox refuses a second outcome before any post, and a statechart error out of a
+record or an outcome stops the engine as one from the loop does, and in replay names the WAL
+record.
+
 Acceptance per machine:
 
 - the old decision code is deleted;
@@ -354,9 +359,9 @@ Acceptance per machine:
 - for oracle-tier machines also: fork isolation, replay, seal and reopen, and per-input
   revision equality against the old implementation.
 
-After the pilot, `seal_boundary` (DL-327), `supervisor_process` (DL-328) and `supervisor_client`
-(DL-330), the rest come in this order:
-`effect`, `host`, `admission`, `anchor_head`, `period_row`, `runtime_assembly`.
+After the pilot, `seal_boundary` (DL-327), `supervisor_process` (DL-328), `supervisor_client`
+(DL-330) and `effect` (DL-331), the rest come in this order:
+`host`, `admission`, `anchor_head`, `period_row`, `runtime_assembly`.
 
 The oracle comes last. A second oracle is built beside the old one under a new old-vs-new
 harness. The same inputs go to both. The harness compares the trace, the emitted events, the
