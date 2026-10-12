@@ -76,9 +76,9 @@ from typing import Final, Literal, get_args
 from pydantic import BaseModel, ConfigDict, Field
 
 from dsl41.oracle_state import LIVE, TERMINAL, Event, JobRuntime
-from dsl41.runner_admission import report_violation
 from dsl41.runner_clock import EngineError
-from dsl41.state_machine import StateMachine, Transition
+from dsl41.state_machine import Context, Executor, Region, Row, State, Statechart, StatechartError
+from dsl41.state_machine import Event as ChartEvent
 
 #: ss5's effect alphabet. SHUTDOWN is not here, and what defers it is no
 #: longer a missing identity: the incarnation is allocated by the supervisor
@@ -143,11 +143,9 @@ class Effect(BaseModel):
     generation: int | None = Field(default=None, strict=True)
 
 
-#: What became of one attempt: ss5's three outcomes.
+#: What became of one attempt: ss5's three outcomes. An effect is `pending`
+#: until it has one, and nothing leaves an outcome (ss5).
 Outcome = Literal["applied", "indeterminate", "retired"]
-#: One effect's state: `absent` before it is recorded, `pending` until it has
-#: an outcome, then the outcome. Nothing leaves an outcome (ss5).
-EffectState = Literal["absent", "pending", "applied", "indeterminate", "retired"]
 
 
 class EffectOutcome(BaseModel):
@@ -174,59 +172,154 @@ def effect_id_for(index: int, kind: EffectKind, job: str, run_number: int) -> st
     return f"e{index}:{kind}:{job}.{run_number}"
 
 
-EFFECT_RECORD: Final = Transition[EffectState](
-    "effect.01",
-    frozenset({"absent"}),
-    "record",
-    "pending",
-    guard="the id is unseen; the run_id binding stays one-to-one both ways",
-    effect="bind the run_id both ways",
-    cite="concurrency-model ss4 step 7, ss5, DL-96, DL-118",
-)
-EFFECT_APPLIED: Final = Transition[EffectState](
-    "effect.02",
-    frozenset({"pending"}),
-    "resolve",
-    "applied",
-    guard="dispatched; or resume found the run on the host or a kill landed; or a"
-    " replayed effect_result; or a carried execution",
-    cite="concurrency-model ss5, DL-96, period-model ss3.5",
-)
-EFFECT_RETIRED: Final = Transition[EffectState](
-    "effect.03",
-    frozenset({"pending"}),
-    "resolve",
-    "retired",
-    guard="superseded at dispatch; or resume finds the run it would kill has exited",
-    cite="concurrency-model ss5, DL-111, DL-232",
-)
-EFFECT_INDETERMINATE: Final = Transition[EffectState](
-    "effect.04",
-    frozenset({"pending"}),
-    "resolve",
-    "indeterminate",
-    guard="resume finds no status and no live wrapper for a kill",
-    effect="an exact retry answers outcome_unavailable",
-    cite="concurrency-model ss5, CM-06, DL-111",
-)
+# ---- one effect as a statechart (ss5)
+#
+# `EFFECT` is the declaration (docs/statechart-engine.md). The outbox holds one
+# instance per open effect, keyed by `(outbox, effect_id)`, in the executor it
+# runs on: the engine's, or its own when it is read offline. The outbox in the
+# key keeps two outboxes on one executor apart. There is no instance
+# before `record`: the outbox's own checks run first (an exact replay of a
+# recorded effect is a no-op; a reused id with other content, or a run_id bound
+# the other way, is an EngineError), and only then does the instance start, in
+# `pending`.
+#
+# `resolve` is the one event. Its payload is the `EffectOutcome`, and the
+# outcome's state is the partition the three rows' guards read. The rows have
+# no actions: after the microstep the outbox writes the outcome and forgets the
+# instance, which rests in a final state. The outcome record is then the memory
+# that `state_of`, `result_for` and `pending` read. A second outcome never
+# reaches the chart: the outbox refuses it before any post (DL-295). A pending
+# SPAWN held by a host that routes nothing posts nothing and stays pending.
+# The root's ignored row exists because the completeness check is syntactic
+# (statechart-engine ss10); no tier path posts it. A gap in the chart is a `StatechartError`, which
+# stops the engine with exit 7 (statechart-engine ss5).
 
-#: One effect's lifecycle (ss5). An outcome is final: `Outbox.resolve`
-#: refuses a second one. A pending SPAWN held by a host that routes nothing
-#: stays pending, and an exact replay of a recorded effect is a no-op;
-#: neither moves the state.
-EFFECT: Final[StateMachine[EffectState]] = StateMachine(
+#: The one event: what became of an attempt. Its payload is an `EffectOutcome`.
+RESOLVE: Final = "resolve"
+#: The states an effect rests in once it has an outcome.
+_FINALS: Final = frozenset(get_args(Outcome))
+
+
+# -- the guards. Each docstring is its rows' prose.
+
+
+def _applied(ctx: Context) -> bool:
+    """The outcome's state is `applied`."""
+    outcome: EffectOutcome = ctx.event.payload
+    return outcome.state == "applied"
+
+
+def _retired(ctx: Context) -> bool:
+    """The outcome's state is `retired`."""
+    outcome: EffectOutcome = ctx.event.payload
+    return outcome.state == "retired"
+
+
+def _indeterminate(ctx: Context) -> bool:
+    """The outcome's state is `indeterminate`."""
+    outcome: EffectOutcome = ctx.event.payload
+    return outcome.state == "indeterminate"
+
+
+def _over(ctx: Context) -> bool:
+    """The effect rests in a final state. Nothing posts to it then: the outbox
+    forgets the instance in the call that made it final, and refuses a second
+    outcome before any post (DL-295). In `pending` an outcome that no row's
+    guard takes raises `UnhandledEvent`."""
+    return bool(ctx.active & _FINALS)
+
+
+#: One effect's lifecycle (ss5), one instance per open effect.
+EFFECT: Final = Statechart(
     name="effect",
-    states=frozenset(get_args(EffectState)),
-    initial="absent",
-    finals=frozenset({"applied", "indeterminate", "retired"}),
-    transitions=(EFFECT_RECORD, EFFECT_APPLIED, EFFECT_RETIRED, EFFECT_INDETERMINATE),
+    root=State(
+        "effect",
+        regions=(
+            Region(
+                "outcome",
+                "pending",
+                (
+                    State("pending"),
+                    State("applied", final=True),
+                    State("retired", final=True),
+                    State("indeterminate", final=True),
+                ),
+            ),
+        ),
+    ),
+    rows=(
+        Row(
+            "effect.02",
+            "pending",
+            RESOLVE,
+            "applied",
+            guard="applied",
+            cite="concurrency-model ss5, DL-96, period-model ss3.5",
+            note=(
+                "Dispatched; or resume found the run on the host, or a kill landed; or a"
+                " replayed effect_result; or a carried execution."
+            ),
+        ),
+        Row(
+            "effect.03",
+            "pending",
+            RESOLVE,
+            "retired",
+            guard="retired",
+            cite="concurrency-model ss5, DL-111, DL-232",
+            note="Superseded at dispatch; or resume finds that the run it would kill has exited.",
+        ),
+        Row(
+            "effect.04",
+            "pending",
+            RESOLVE,
+            "indeterminate",
+            guard="indeterminate",
+            cite="concurrency-model ss5, CM-06, DL-111",
+            note=(
+                "Resume finds no status and no live wrapper for a kill. An exact retry"
+                " answers outcome_unavailable."
+            ),
+        ),
+        Row(
+            "effect.05",
+            "effect",
+            RESOLVE,
+            guard="over",
+            kind="ignored",
+            cite="statechart-engine ss10",
+            false_unreachable=(
+                "rows .02 to .04 partition every outcome in `pending`, so the walk"
+                " reaches the root only from a final state"
+            ),
+            note=(
+                "An outcome is final: the outbox refuses a second one with an EngineError"
+                " before any post, and forgets the instance in the call that made it final"
+                " (DL-295). No tier path posts this row."
+            ),
+        ),
+    ),
+    guards={
+        "applied": _applied,
+        "retired": _retired,
+        "indeterminate": _indeterminate,
+        "over": _over,
+    },
+    clock="logical",
 )
 
-_RESOLVE: Final[dict[Outcome, Transition[EffectState]]] = {
-    "applied": EFFECT_APPLIED,
-    "retired": EFFECT_RETIRED,
-    "indeterminate": EFFECT_INDETERMINATE,
-}
+
+def _outcome_row(state: Outcome) -> str:
+    """The id of the row that takes an outcome of `state` in `pending`.
+
+    The rows partition every `Outcome`, and pydantic admits no other state,
+    so a miss means the chart lost a row: a `StatechartError`, which stops
+    the engine with exit 7 (statechart-engine ss5), never a bare
+    `StopIteration`."""
+    for row in EFFECT.rows:
+        if row.source == "pending" and row.guard == state:
+            return row.id
+    raise StatechartError(f"effect: no row of pending takes the {state} outcome")
 
 
 class Outbox:
@@ -235,9 +328,17 @@ class Outbox:
     In memory here and in the ledger on disk: ss1 requires the log, the
     decision index and the outbox to commit in ONE transaction, so the WAL
     carries both records and replay rebuilds this from them. Nothing is
-    stored that the spool already knows."""
+    stored that the spool already knows.
 
-    def __init__(self) -> None:
+    Each open effect is an `EFFECT` instance in `machines`, keyed by
+    `key(effect_id)`. An engine's outbox runs on the engine's executor, so a
+    process has one (statechart-engine ss11); an outbox read offline makes
+    its own. Two outboxes on one executor never share a key: a resume that
+    was refused leaves its instances there until the process exits, and a
+    retry on the same executor builds its own."""
+
+    def __init__(self, machines: Executor | None = None) -> None:
+        self.machines = machines if machines is not None else Executor()
         self._effects: dict[str, Effect] = {}
         self._outcomes: dict[str, EffectOutcome] = {}
         #: insertion order IS admission order, and ss5 makes per-run ordering
@@ -305,8 +406,9 @@ class Outbox:
                 self._spawn_run_ids[run] = effect.run_id
         self._order.append(effect.effect_id)
         self._effects[effect.effect_id] = effect
-        # the id was unseen above, so the move is absent -> pending by construction
-        report_violation(EFFECT.take(EFFECT_RECORD, "absent", self._state(effect.effect_id)))
+        # the id was unseen above: the effect's instance starts in `pending`
+        self.machines.start(self.key(effect.effect_id), EFFECT)
+        self.machines.run()
 
     def resolve(self, outcome: EffectOutcome) -> None:
         """Record what became of one attempt. STRICT on association: an
@@ -315,12 +417,13 @@ class Outbox:
         run_id than its effect bound is a stranger's fate filed under this
         run's intent -- both refuse (DL-118).
 
-        An outcome is final (ss5): a second one is refused, through the
-        effect machine's own check, before anything is written. Every live
-        writer resolves only pending effects, so live this never fires; on
-        replay a log that holds two outcomes for one effect stops resume
-        (period-model ss11). Under the test suite's strict variable the
-        check raises `TransitionError` instead."""
+        An outcome is final (ss5): a second one is refused before anything
+        is written, and before any post, since the effect's instance is gone
+        (DL-295). Every live writer resolves only pending effects, so live
+        this never fires; on replay a log that holds two outcomes for one
+        effect stops resume (period-model ss11). Otherwise the effect's
+        instance takes the outcome, the outbox writes it, and the instance,
+        now final, is forgotten."""
         effect = self._effects.get(outcome.effect_id)
         if effect is None:
             raise EngineError(
@@ -336,27 +439,37 @@ class Outbox:
                 f"outcome for {outcome.effect_id} names run_id {outcome.run_id!r} but the"
                 f" effect bound {effect.run_id!r} -- a stranger's fate refused (DL-118)"
             )
-        old = self._state(outcome.effect_id)
-        violation = EFFECT.take(_RESOLVE[outcome.state], old, outcome.state)
-        if violation is not None:
+        first = self._outcomes.get(outcome.effect_id)
+        if first is not None:
+            row = _outcome_row(outcome.state)
             raise EngineError(
                 f"outcome {outcome.state} for {outcome.effect_id}: the effect is already"
-                f" {old}, and an outcome is final ({violation.transition}: {violation.reason})"
-                " (concurrency-model ss5)"
+                f" {first.state}, and an outcome is final ({row}: {first.state} is not a"
+                f" source of {row}) (concurrency-model ss5)"
             )
+        self.machines.dispatch(self.key(outcome.effect_id), ChartEvent(RESOLVE, outcome))
         self._outcomes[outcome.effect_id] = outcome
+        self.machines.forget(self.key(outcome.effect_id))
 
-    def state_of(self, effect_id: str) -> EffectState | None:
+    def state_of(self, effect_id: str) -> str | None:
         """`pending` | `applied` | `indeterminate` | `retired`, or None for an
-        effect this outbox never saw."""
+        effect this outbox never saw: the recorded outcome's state, else the
+        open effect's leaf."""
+        outcome = self._outcomes.get(effect_id)
+        if outcome is not None:
+            return outcome.state
         if effect_id not in self._effects:
             return None
-        return self._state(effect_id)
+        (leaf,) = self.machines.active(self.key(effect_id)) - {EFFECT.root.name}
+        return leaf
 
-    def _state(self, effect_id: str) -> EffectState:
-        """The state of an effect this outbox has recorded."""
-        outcome = self._outcomes.get(effect_id)
-        return "pending" if outcome is None else outcome.state
+    def key(self, effect_id: str) -> tuple[Outbox, str]:
+        """The executor's key of an effect's instance: this outbox and the id."""
+        return (self, effect_id)
+
+    def __repr__(self) -> str:
+        """What a statechart error's report shows for the outbox in a key."""
+        return "outbox"
 
     def result_for(self, effect_id: str) -> EffectOutcome | str | None:
         """The outcome of an effect, `OUTCOME_UNAVAILABLE` if it was attempted

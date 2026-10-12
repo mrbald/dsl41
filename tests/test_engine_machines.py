@@ -1,6 +1,7 @@
-"""The engine tier's table machines (DL-289): host routing, admission, the
-effect outbox and the subscription feed. The seal boundary is a statechart
-now (DL-327), tested in test_seal_boundary_chart.py.
+"""The engine tier's table machines (DL-289): host routing and admission;
+and the effect outbox and the subscription feed through their tiers. The
+seal boundary and the effect are statecharts now (DL-327, DL-331), tested
+in test_seal_boundary_chart.py and test_effect_chart.py.
 
 Each machine is registered and well formed, and each new rule has a test
 that triggers it and one that does not: the routing table's transitions and
@@ -39,7 +40,7 @@ from dsl41.runner_admission import (
 )
 from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.runner_control import ControlServer
-from dsl41.runner_effects import EFFECT, Effect, EffectOutcome, Outbox, effect_id_for
+from dsl41.runner_effects import Effect, EffectOutcome, Outbox, effect_id_for
 from dsl41.runner_hosts import (
     HOST,
     LOCAL_EXECUTOR_ID,
@@ -68,7 +69,6 @@ from dsl41.state_machine import (
     StatechartError,
     StateMachine,
     Transition,
-    TransitionError,
     Violation,
     well_formed,
 )
@@ -76,7 +76,7 @@ from dsl41.state_machine import Event as ChartEvent
 
 T0 = datetime(2026, 7, 1, 8, 0)
 _JIL = "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\n"
-ENGINE_MACHINES = (HOST, ADMISSION, EFFECT)
+ENGINE_MACHINES = (HOST, ADMISSION)
 
 
 @pytest.fixture
@@ -360,8 +360,8 @@ def test_a_pending_effect_takes_its_one_outcome(state: str) -> None:
 def test_a_second_outcome_is_refused_and_the_first_stands(
     recording: Path, first: str, second: str
 ) -> None:
-    """ss5: an outcome is final. The effect machine's check refuses a second
-    one before anything is written, the same outcome again included."""
+    """ss5: an outcome is final. The outbox refuses a second one before
+    anything is written or posted, the same outcome again included (DL-295)."""
     outbox = Outbox()
     effect = _effect()
     outbox.record(effect)
@@ -376,9 +376,12 @@ def test_a_second_outcome_is_refused_and_the_first_stands(
     )  # type: ignore[arg-type]
 
 
-def test_a_strict_session_raises_on_a_second_outcome(
+def test_a_strict_session_refuses_a_second_outcome_from_the_outbox(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The refusal is the outbox's own EngineError under the strict variable
+    too: the effect's instance is gone once it is final, so no chart is asked
+    (DL-295)."""
     directory = tmp_path / "hits"
     directory.mkdir()
     monkeypatch.setenv(HITS_ENV, str(directory))
@@ -387,44 +390,35 @@ def test_a_strict_session_raises_on_a_second_outcome(
     effect = _effect()
     outbox.record(effect)
     outbox.resolve(EffectOutcome(effect_id=effect.effect_id, state="applied"))
-    with pytest.raises(TransitionError, match=r"effect\.02"):
+    with pytest.raises(
+        EngineError,
+        match=r"the effect is already applied, and an outcome is final \(effect\.02: applied is"
+        r" not a source of effect\.02\) \(concurrency-model ss5\)$",
+    ):
         outbox.resolve(EffectOutcome(effect_id=effect.effect_id, state="applied"))
 
 
 class _ViolatingMachine:
-    """Stands for the effect machine with its record move undeclared: the
-    real table cannot be driven into that violation, because `record`
-    takes the move from `absent` by construction."""
+    """Stands for the admission machine with its admit move undeclared: the
+    real table cannot be driven into that violation, because `note` takes
+    the move from `unseen` on a fresh request id."""
 
     def take(self, t: Transition[Any], old: str, new: str) -> Violation:
-        return Violation("effect", t.id, old, new, "fake")
+        return Violation("admission", t.id, old, new, "fake")
 
 
-def test_a_recorded_effect_that_breaks_the_table_is_reported_and_still_recorded(
+def test_an_admission_move_that_breaks_the_table_is_reported_and_still_made(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Like every other engine-tier take, the record move's violation goes
-    to stderr under the shared prefix, and the move proceeds."""
-    monkeypatch.setattr("dsl41.runner_effects.EFFECT", _ViolatingMachine())
-    outbox = Outbox()
-    effect = _effect()
-    outbox.record(effect)
-    assert outbox.state_of(effect.effect_id) == "pending"
+    """Like every other engine-tier take, the admit move's violation goes to
+    stderr under the shared prefix, and the move proceeds."""
+    monkeypatch.setattr("dsl41.runner_admission.ADMISSION", _ViolatingMachine())
+    index = DecisionIndex()
+    index.note(_attempt("r1"))
+    assert index.state("r1") == "admitted"
     assert capsys.readouterr().err == (
-        f"{VIOLATION_LOG_PREFIX}: effect effect.01 absent->pending: fake\n"
+        f"{VIOLATION_LOG_PREFIX}: admission admission.01 unseen->admitted: fake\n"
     )
-
-
-def test_a_recorded_effect_that_takes_its_declared_move_reports_nothing(
-    recording: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    outbox = Outbox()
-    effect = _effect()
-    outbox.record(effect)
-    outbox.record(effect)
-    assert outbox.state_of(effect.effect_id) == "pending"
-    assert capsys.readouterr().err == ""
-    assert not list(recording.glob("violations-*.jsonl"))
 
 
 def test_a_log_with_two_outcomes_for_one_effect_does_not_replay(

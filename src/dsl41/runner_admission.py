@@ -648,8 +648,7 @@ class RequestCollision(AdmissionRefused):
 
 def report_violation(violation: Violation | None) -> None:
     """Report a broken transition of an engine-tier machine whose moves are
-    not oracle inputs (admission, the subscription feed, the seal
-    boundary, the outbox's record move). No `InputBatch` holds them, so no trace line can carry the
+    not oracle inputs (admission). No `InputBatch` holds them, so no trace line can carry the
     violation, and the oracle trace must stay equal to its replay. It is
     one line on stderr under `VIOLATION_LOG_PREFIX`, which the runbook's
     journal alert matches, and the move proceeds. Best effort, like

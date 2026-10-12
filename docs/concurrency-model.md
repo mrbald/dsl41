@@ -364,19 +364,16 @@ The engine run option `--on-transition-violation` sets the response:
 
 The option changes no derived state and is not part of the runtime
 profile. A violation of one of an input's moves never raises, live or on
-replay. Four machines refuse or raise by design instead (DL-297):
+replay. Three machines refuse or raise by design instead (DL-297):
 
 - `anchor_head` and `period_row` refuse the boundary operation before
   anything is written (DL-290). At resume, that stops the resume with an
   error that names the move. It is never a replayed fault, because head
   moves are not WAL inputs.
-- `effect` refuses a second outcome for a resolved effect: live, and on
-  replay, where it stops resume and names the effect (§5, DL-295).
 - `runtime_assembly` raises `OracleError` on a misused verb (DL-293).
 
-The option does not cover one other machine and one move. A violation
-in admission or the outbox's record move is not an
-oracle input, so `stop` does not stop on it. It is one line on stderr
+The option does not cover one other machine. A violation in admission is
+not an oracle input, so `stop` does not stop on it. It is one line on stderr
 under the shared violation prefix, and the move proceeds.
 The `host` machine is not among them. Its violations ride the oracle
 channel inside an input's batch, so the option covers them. A logged

@@ -1562,23 +1562,44 @@ def read_outbox(records: list[dict[str, Any]], outbox: Outbox | None = None) -> 
     `legacy_batch: true` fold that read it are retired dialects, refused by
     name at `check_record` before anything reaches here (DL-138). The
     per-effect shape is `decision_effects`, shared with run history since
-    DL-139."""
+    DL-139.
+
+    A `StatechartError` out of the outbox's effect chart is not a replay
+    fault: it stops replay as itself, its report naming the WAL record it
+    met, as `_at_input` names an input (statechart-engine ss5)."""
     outbox = outbox if outbox is not None else Outbox()
     for record in records:
-        if record.get("rec") == "decision":
-            for parsed in decision_effects(record):
-                outbox.record(parsed)
-        elif record.get("rec") == "effect_result":
-            outcome = EffectOutcome.model_validate({k: v for k, v in record.items() if k != "rec"})
-            try:
-                outbox.resolve(outcome)
-            except EngineError as exc:
-                # an outcome the outbox refuses -- for an unknown effect, a
-                # stranger's run_id, or a second outcome -- stops replay
-                # naming the effect, as a raising input does (period-model
-                # ss11)
-                raise OutcomeReplayFault(outcome, exc) from exc
+        try:
+            _read_effect_record(outbox, record)
+        except StatechartError as exc:
+            exc.facts.append(("WAL input", _effect_record_name(record)))
+            raise
     return outbox
+
+
+def _read_effect_record(outbox: Outbox, record: dict[str, Any]) -> None:
+    """Apply one WAL record's effects or outcome to `outbox`; any other
+    record holds neither."""
+    if record.get("rec") == "decision":
+        for parsed in decision_effects(record):
+            outbox.record(parsed)
+    elif record.get("rec") == "effect_result":
+        outcome = EffectOutcome.model_validate({k: v for k, v in record.items() if k != "rec"})
+        try:
+            outbox.resolve(outcome)
+        except EngineError as exc:
+            # an outcome the outbox refuses -- for an unknown effect, a
+            # stranger's run_id, or a second outcome -- stops replay
+            # naming the effect, as a raising input does (period-model
+            # ss11)
+            raise OutcomeReplayFault(outcome, exc) from exc
+
+
+def _effect_record_name(record: dict[str, Any]) -> str:
+    """A WAL record of the outbox, as a statechart error's report names it."""
+    if record.get("rec") == "decision":
+        return f"{record.get('index')}: the decision's effects"
+    return f"the {record.get('state')} outcome of effect {record.get('effect_id')}"
 
 
 class ReplayFault(EngineError):
