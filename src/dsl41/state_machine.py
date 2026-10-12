@@ -41,7 +41,7 @@ import os
 import re
 import reprlib
 from collections import deque
-from collections.abc import Callable, Hashable, Iterable, Mapping
+from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, ClassVar, Literal, TypeGuard, cast
@@ -525,6 +525,14 @@ class _Index:
     rows: dict[tuple[str, str], list[Row]] = field(default_factory=dict)
     choices: dict[str, Choice] = field(default_factory=dict)
     generational: frozenset[str] = frozenset()
+    #: the states of each region, by name: (owning state, region index), where
+    #: `(None, 0)` is the region that holds the root
+    members: dict[tuple[str | None, int], tuple[str, ...]] = field(default_factory=dict)
+    #: what the declaration alone fixes about an external row's run, built on
+    #: the row's first run and keyed by the row object's identity (see `_plan`)
+    plans: dict[int, _Plan] = field(default_factory=dict)
+    #: the initial entry, built on first use
+    initial: tuple[str, ...] = ()
 
 
 @functools.cache
@@ -537,6 +545,10 @@ def _index(chart: Statechart) -> _Index:
     _add_state(ix, chart.root, None, 0, 0)
     for row in chart.rows:
         ix.rows.setdefault((row.source, row.event), []).append(row)
+    regions: dict[tuple[str | None, int], list[str]] = {}
+    for name in sorted(ix.states):
+        regions.setdefault((ix.parent[name], ix.slot[name]), []).append(name)
+    ix.members = {region: tuple(names) for region, names in regions.items()}
     return ix
 
 
@@ -619,16 +631,22 @@ def _domain(ix: _Index, source: str, targets: Iterable[str]) -> _Domain:
     return top, ix.slot[paths[0][common]]
 
 
+def _top_below(ix: _Index, source: str, owner: str | None) -> str:
+    """The state of `source`'s path that `owner`'s region holds: the root for `None`."""
+    path = _path(ix, source)[::-1]
+    return path[0] if owner is None else path[path.index(owner) + 1]
+
+
 def _exit_top(ix: _Index, row: Row) -> str:
     """The outermost state an external row leaves."""
     owner, _ = _domain(ix, row.source, _targets(ix, row))
-    path = _path(ix, row.source)[::-1]
-    return path[0] if owner is None else path[path.index(owner) + 1]
+    return _top_below(ix, row.source, owner)
 
 
 def _active_child(ix: _Index, active: Iterable[str], owner: str | None, slot: int) -> str:
     """The active state of one region; `owner` None names the root's region."""
-    return next(s for s in sorted(active) if ix.parent[s] == owner and ix.slot[s] == slot)
+    held = active if isinstance(active, (set, frozenset)) else set(active)
+    return next(s for s in ix.members.get((owner, slot), ()) if s in held)
 
 
 def _leaves(ix: _Index, active: Iterable[str]) -> list[str]:
@@ -662,6 +680,57 @@ def _entry_path(ix: _Index, domain: _Domain, target: str) -> list[str]:
     path = _path(ix, target)[::-1]
     owner = domain[0]
     return path if owner is None else path[path.index(owner) + 1 :]
+
+
+@dataclass
+class _Plan:
+    """What the declaration alone fixes about one external row's run (§4).
+
+    `top` is the outermost state the row leaves: the one active state of its
+    domain's region, since the row's source is active. A `top` without regions
+    leaves nothing but itself, so `leaving` is then its whole exit, inner to
+    outer; otherwise the exit follows the live configuration. `entries` holds
+    the entry order of each target the row has ended in, built on first use.
+    """
+
+    row: Row
+    domain: _Domain
+    top: str
+    leaving: tuple[str, ...] | None
+    entries: dict[str, tuple[str, ...]] = field(default_factory=dict)
+
+
+def _build_plan(ix: _Index, row: Row) -> _Plan:
+    domain = _domain(ix, row.source, _targets(ix, row))
+    top = _top_below(ix, row.source, domain[0])
+    return _Plan(row, domain, top, None if ix.states[top].regions else (top,))
+
+
+def _plan(ix: _Index, row: Row) -> _Plan:
+    """The plan of an external row of the chart, built once per chart.
+
+    The key is the row's identity. The plan holds its row, so the row lives
+    as long as its plan and the identity cannot be taken by another object.
+    """
+    plan = ix.plans.get(id(row))
+    if plan is None:
+        plan = ix.plans[id(row)] = _build_plan(ix, row)
+    return plan
+
+
+def _entry_of(ix: _Index, plan: _Plan, target: str) -> tuple[str, ...]:
+    """The states a row enters, outer to inner, when it ends in `target`."""
+    order = plan.entries.get(target)
+    if order is None:
+        order = plan.entries[target] = tuple(_entry_order(ix, _entry_path(ix, plan.domain, target)))
+    return order
+
+
+def _initial_entry(ix: _Index) -> tuple[str, ...]:
+    """The states the initial entry enters, outer to inner."""
+    if not ix.initial:
+        ix.initial = tuple(_entry_order(ix, [ix.root]))
+    return ix.initial
 
 
 # -- hits (test tooling; off in production)
@@ -797,8 +866,8 @@ def _yielded(chart: Statechart, candidates: list[Row]) -> list[Row]:
 def _exit_set(ix: _Index, active: set[str], row: Row) -> frozenset[str]:
     if row.kind != "external":
         return frozenset()
-    owner, slot = _domain(ix, row.source, _targets(ix, row))
-    return frozenset(_exit_order(ix, active, _active_child(ix, active, owner, slot)))
+    plan = _plan(ix, row)
+    return frozenset(plan.leaving or _exit_order(ix, active, plan.top))
 
 
 def _without_conflicts(
@@ -1211,7 +1280,7 @@ class Executor:
         if kind == "continued":
             self._call(inst, step, item.name)
         if kind == "started":
-            self._enter(inst, step, _entry_order(ix, [ix.root]))
+            self._enter(inst, step, _initial_entry(ix))
         for row in rows:
             self._run_row(inst, step, row)
         queued = _queue_order(step, _completions(ix, inst, step))
@@ -1236,8 +1305,8 @@ class Executor:
         if row.kind != "external":
             self._call(inst, step, row.action)
             return
-        domain = _domain(ix, row.source, _targets(ix, row))
-        for state in _exit_order(ix, inst.active, _active_child(ix, inst.active, *domain)):
+        plan = _plan(ix, row)
+        for state in plan.leaving or _exit_order(ix, inst.active, plan.top):
             self._call(inst, step, ix.states[state].exit)
             inst.active.discard(state)
         self._call(inst, step, row.action)
@@ -1245,7 +1314,7 @@ class Executor:
         choice = ix.choices.get(target)
         if choice is not None:
             target = self._choose(inst, step, choice)
-        self._enter(inst, step, _entry_order(ix, _entry_path(ix, domain, target)))
+        self._enter(inst, step, _entry_of(ix, plan, target))
 
     def _choose(self, inst: _Instance, step: _Microstep, choice: Choice) -> str:
         """Resolve a choice inside the microstep: the first enabled branch (§4 step 3)."""
@@ -1259,7 +1328,7 @@ class Executor:
         self._call(inst, step, branch.action)
         return branch.target
 
-    def _enter(self, inst: _Instance, step: _Microstep, order: list[str]) -> None:
+    def _enter(self, inst: _Instance, step: _Microstep, order: Sequence[str]) -> None:
         ix = _index(inst.chart)
         for state in order:
             inst.active.add(state)
