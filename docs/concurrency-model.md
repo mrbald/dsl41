@@ -375,8 +375,9 @@ replay. Three machines refuse or raise by design instead (DL-297):
 The option does not cover one other machine. A violation in admission is
 not an oracle input, so `stop` does not stop on it. It is one line on stderr
 under the shared violation prefix, and the move proceeds.
-The `host` machine is not among them. Its violations ride the oracle
-channel inside an input's batch, so the option covers them. A logged
+The `host` machine records no violations: it is a statechart (DL-333),
+and a gap in it is a `StatechartError` that stops the engine, as above,
+so the option does not cover it. A logged
 input that raises on replay stops the replay with an error that names it,
 unless replay quarantines it as below (`docs/period-model.md` §11).
 
@@ -1058,7 +1059,7 @@ record both arrive with the relay (`docs/period-model.md` §3.3).
 **Eviction clears `state_before_quarantine`** (DL-111). The field is
 non-null only while the row is `quarantined`, and a gated eviction can
 only start from quarantined. Leaving it set would falsify that invariant.
-That is harmless while `reinstate_host` does nothing to a row that is not
+That is harmless while a reinstatement does nothing to a row that is not
 quarantined, and dangerous for the next transition anyone writes.
 
 Four rules settled by the code that implements this section (DL-94):

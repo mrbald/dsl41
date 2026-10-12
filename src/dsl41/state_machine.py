@@ -398,6 +398,9 @@ class Row:
     coverage gate then forbids that outcome instead of requiring it. `note` is
     the prose of a row with no guard or action, which has no docstring to
     carry it; the generated table shows it in the action column (§14).
+    `mark` is a table transition's mark on a row: "spec-only" for a contract
+    rule with no code yet. The coverage gate lists a marked row and its
+    guard's outcomes, never counts them, and fails when one is hit (§13).
     """
 
     id: str
@@ -411,6 +414,7 @@ class Row:
     cite: str = ""
     false_unreachable: str = ""
     note: str = ""
+    mark: Mark | None = None
 
 
 @dataclass(frozen=True)
@@ -759,15 +763,21 @@ def coverage_items(
 
     Required: every row and branch; both outcomes of every guard; a defer and a
     release for every state and event it defers. Forbidden: a false outcome
-    declared unreachable.
+    declared unreachable, and a marked row with its guard's outcomes.
     """
     required: list[tuple[str, str, str]] = []
     forbidden: list[tuple[str, str, str]] = []
-    guarded = [(r.id, r.guard, r.false_unreachable) for r in chart.rows]
+    rows = [r for r in chart.rows if r.mark is None]
+    for row in chart.rows:
+        if row.mark is not None:
+            forbidden.append(("row", row.id, ""))
+            if row.guard:
+                forbidden += [("guard", row.id, "true"), ("guard", row.id, "false")]
+    guarded = [(r.id, r.guard, r.false_unreachable) for r in rows]
     for choice in chart.choices:
         required += [("branch", b.id, "") for b in choice.branches]
         guarded += [(b.id, b.guard, b.false_unreachable) for b in choice.branches]
-    required += [("row", r.id, "") for r in chart.rows]
+    required += [("row", r.id, "") for r in rows]
     for ident, guard, unreachable in guarded:
         if guard:
             required.append(("guard", ident, "true"))
@@ -1124,7 +1134,9 @@ class Executor:
                 self._worklist.append(item)
         except BaseException as error:
             if isinstance(error, StatechartError) and not error.facts:
-                error.facts = self._facts(error)
+                # an error leaves a run only from a step or a release, and both set it
+                assert self._current is not None
+                error.facts = self._facts(error, self._current)
             self._worklist.clear()
             raise
         finally:
@@ -1149,6 +1161,18 @@ class Executor:
         """The data the instance was added with."""
         return self._instance(key).data
 
+    def explain(self, error: StatechartError, key: Hashable, event: Event) -> StatechartError:
+        """Give an error the tier raises about an instance's last outcome the
+        facts an error out of a run carries (§5): the machine, the instance,
+        its configuration, `event` as the item, the candidates the error
+        names, the deferred queue and the machine's recent microsteps. An
+        unknown instance raises; facts the error already carries stay."""
+        self._idle()
+        self._instance(key)
+        if not error.facts:
+            error.facts = self._facts(error, _Item(key, "event", event))
+        return error
+
     # -- inside
 
     def _idle(self) -> None:
@@ -1169,11 +1193,8 @@ class Executor:
         except KeyError:
             raise StatechartError(f"no instance {key!r}") from None
 
-    def _facts(self, error: StatechartError) -> list[tuple[str, str]]:
+    def _facts(self, error: StatechartError, item: _Item) -> list[tuple[str, str]]:
         """What an error's report says: the item in hand and the executor's recent past."""
-        item = self._current
-        # an error leaves a run only from a step or a release, and both set it
-        assert item is not None
         inst = self._instances[item.key]
         ancestry = " > ".join(f"{key!r} {name or 'completion'}" for key, name in item.ancestry)
         queue = ", ".join(f"{d.event.name} {reprlib.repr(d.event.payload)}" for d in inst.deferred)

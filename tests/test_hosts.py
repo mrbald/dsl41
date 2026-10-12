@@ -120,7 +120,7 @@ def _table(**rows: HostRuntime) -> RuntimeState:
     store.begin_input()
     for host_id, row in rows.items():
         store.register_host(host_id, deadman_s=row.deadman_s, at=row.last_contact)
-        store.set_host_state(host_id, row.state)
+        store.witness_host(host_id, state=row.state)
     store.commit_input()
     return store
 
@@ -165,13 +165,13 @@ def test_cm02_a_host_command_moves_its_row_exactly_one_revision() -> None:
     assert store.revision("host:h") == 1
 
     store.begin_input()
-    store.set_host_state("h", "passive")
-    store.set_host_state("h", "passive")  # twice, one input
+    store.witness_host("h", state="passive")
+    store.witness_host("h", state="passive")  # twice, one input
     assert store.commit_input() == ["host:h"]
     assert store.revision("host:h") == 2
 
     store.begin_input()
-    store.set_host_state("h", "passive")
+    store.witness_host("h", state="passive")
     assert store.commit_input() == []
     assert store.revision("host:h") == 2
 
@@ -184,7 +184,7 @@ def test_a_re_registration_does_not_undo_a_drain() -> None:
     the contact it just made."""
     store = _table(h=HostRuntime())
     store.begin_input()
-    store.set_host_state("h", "passive")
+    store.witness_host("h", state="passive")
     store.commit_input()
 
     later = T0 + timedelta(minutes=5)
@@ -347,7 +347,7 @@ def test_cm11_force_skips_the_preconditions_and_is_recorded_with_its_principal()
     assert host_rejection_reason(store, forced, T0, actor="alice@ops", grace_s=CMD_GRACE_S) is None
 
     store.begin_input()
-    store.evict_host("h", forced_by="alice@ops")
+    apply_host_command(store, forced, actor="alice@ops")
     store.commit_input()
     row = store.host("h")
     assert row is not None
@@ -363,7 +363,7 @@ def test_an_evicted_host_is_not_evicted_again_and_not_activated_back() -> None:
     it is not an operator flipping a state back."""
     store = _table(h=HostRuntime())
     store.begin_input()
-    store.evict_host("h", forced_by=None)
+    store.witness_host("h", state="evicted", generation=1)
     store.commit_input()
 
     again = host_rejection_reason(store, _cmd("evict", "h", force=True), T0, grace_s=CMD_GRACE_S)
@@ -1737,7 +1737,7 @@ def test_cm11_a_real_deadman_and_a_real_contact_make_the_bound_computable() -> N
     store = engine.oracle.store
     engine.note_executor_contact()  # last heard from at T0
     store.begin_input()
-    store.set_host_state(LOCAL_EXECUTOR_ID, "quarantined")  # S5d's producer, by hand
+    store.witness_host(LOCAL_EXECUTOR_ID, state="quarantined")  # S5d's producer, by hand
     store.commit_input()
 
     cmd = _cmd("evict")
@@ -1886,7 +1886,7 @@ def test_cm12_reaching_an_evicted_host_again_does_not_un_evict_it() -> None:
     not an engine that kills someone else's wrappers on a hunch."""
     store = _table(h=HostRuntime())
     store.begin_input()
-    store.evict_host("h", forced_by=None)
+    store.witness_host("h", state="evicted", generation=1)
     store.commit_input()
 
     for verb in ("quarantine", "reinstate"):
@@ -2014,13 +2014,13 @@ def test_eviction_clears_what_quarantine_interrupted(tmp_path: Path) -> None:
     """`state_before_quarantine` documents itself as non-null only while the
     row is `quarantined`, and a gated eviction can only START from
     quarantined (ss8 precondition 1) -- so before DL-111 every gated
-    eviction left the invariant false. Harmless today, because
-    `reinstate_host` refuses to act on a row that is not quarantined; a
+    eviction left the invariant false. Harmless today, because a
+    reinstatement does nothing to a row that is not quarantined; a
     stale "put this back" on an evicted host is a loaded gun for whoever
     writes the next transition."""
     store = _table(h=HostRuntime())
     store.begin_input()
-    store.quarantine_host("h")
+    apply_host_command(store, _cmd("quarantine", "h"), actor=None)
     store.commit_input()
     assert store.host("h").state_before_quarantine == "active"  # type: ignore[union-attr]
 

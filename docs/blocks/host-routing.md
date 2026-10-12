@@ -12,14 +12,16 @@ The code and its contract carry over unchanged if the storage under the runner c
 It needs no storage capability of its own.
 Reason: the row is a `HostRuntime` in the in-memory `RuntimeState`, under the state owner ([concurrency-model §3](../concurrency-model.md#3-state-ownership-and-state_rev); [DL-93](../decision-log.md)).
 A host command is an admitted input, so its durability is the [admission](admission.md) block's: replay rebuilds the row, and a drain survives a failover.
-Replay does not run the gate again. It applies the stored decision, and `host_move` without a gate gives the same transition.
+Replay does not run the gate again. It applies the stored decision: the chart is dispatched for an applied command, and the rows are enough to rebuild its instance.
 
 ## Interface
 
 - Wire: the `host` verb with `activate`, `drain` and `evict`, and `--force` on `evict` ([control-protocol §3, `host`](../control-protocol.md#host-s5a-dl-94)). The read is `hosts [ids]` ([§4](../control-protocol.md#hosts-ids)).
 - Verbs: `HOST_VERBS` are the operator's and reach the wire. `LEADER_VERBS`, `quarantine` and `reinstate`, are the leader's and enter through `Engine.inject_host` with no `expect`.
 - `HostCommand` is the input. `Engine.submit_host` admits an operator's command and returns its decision.
-- `host_move(row, cmd, gate)` returns the declared transition a verb takes, or the `Rejection` that stops it. `host_rejection_reason` is the gate half and `apply_host_command` the apply half. Both ask `host_move`.
+- `HOST` is a statechart ([statechart-engine](../statechart-engine.md), DL-333), declared in `oracle_state.py`. The store owns its executor, `RuntimeState.machines`, with one instance per host row under the key `host:<id>`. The instance's configuration is the host's state, and `HostRuntime.state` is its projection, written from the leaf after the microstep. A new row starts its instance in `active`; a fork and an install rebuild the executor from the rows (`host_machines`). A state write that no microstep made raises a `StatechartError`; a test's witness writes through `witness_host`, which rebuilds the executor.
+- `host_rejection_reason` is the gate. It reads the chart through `host_move`, which dispatches on a scratch executor rebuilt from the rows, so nothing moves. A refusal row's code is the rejection. On the gated eviction (host.10) and the forced one (host.11) the gate adds the checks that read the input's own facts: the bound, and the attribution.
+- `apply_host_command` dispatches an applied command to the store's instance and writes the row from the leaf through the store's verbs. An internal row writes nothing.
 - `routes_new_effects(row)` is the routing column as one predicate. Dispatch holds a SPAWN on a host it is false for ([effect outbox](effect-outbox.md)).
 - `seed_local_executor` puts this engine's own executor in the table at genesis, without a log index.
 - `kill_allowance` and `skew_allowance` derive the eviction bound's two allowances.
@@ -28,7 +30,7 @@ Replay does not run the gate again. It applies the stored decision, and `host_mo
 ## States
 
 One host row's states are [host](../state-machines.md#host). The anchor holds the generated diagram and transition table.
-A rejection takes no transition and moves nothing.
+A rejection moves nothing: the gate reads the chart on a scratch executor, and a refusal row is the cell with no move.
 
 ## Invariants
 
@@ -44,15 +46,15 @@ A rejection takes no transition and moves nothing.
 ## Failure and recovery
 
 - A rejected host command is a decision with a stored code, and it replays as the rejection it was ([concurrency-model §4](../concurrency-model.md#4-admission-and-application); [DL-272](../decision-log.md)).
-- A decided host command whose verb takes no declared transition stops the apply. Live, the gate makes this unreachable. On replay it stops resume with an error naming the input ([DL-295](../decision-log.md)).
-- An operator verb that breaks the table is refused before it is logged, under the default `--on-transition-violation refuse`. Under `continue` it is admitted and the violation is traced. A leader verb that breaks it is always taken and traced ([DL-292](../decision-log.md)).
+- A decided host command that the chart refuses, or one for a host with no instance, is a `StatechartError`. Live, the gate makes this unreachable. On replay the error names the WAL input, and `dsl41 run` exits 7 ([DL-295](../decision-log.md), DL-333; it was a replay fault, exit 2).
+- The chart records no transition violation, so `--on-transition-violation` does not cover it ([DL-292](../decision-log.md) keeps that channel for the table machines). A gap in the chart is a `StatechartError`: met in the loop, in a control input's dry apply or in replay, it stops the engine with exit 7 and nothing is logged for the input ([statechart-engine §5](../statechart-engine.md#5-the-step-and-the-worklist)).
 - A command naming a host that is not in the table is rejected.
 - A drain and a quarantine survive the engine that set them: resume replays the admitted inputs ([period-model §11](../period-model.md#11-resume-replay-and-recovery)).
 
 ## Owning modules
 
-- `src/dsl41/runner_hosts.py`: the table, the verbs, the gate, the bound and the routing predicate.
-- `src/dsl41/oracle_state.py`: `HostRuntime` and the owner's host verbs.
+- `src/dsl41/runner_hosts.py`: the verbs, the gate, the apply, the bound and the routing predicate.
+- `src/dsl41/oracle_state.py`: `HostRuntime`, the `HOST` chart, the owner's executor and its host verbs.
 - `src/dsl41/runner.py`: `Engine.submit_host`, `Engine.inject_host` and the quarantine on failed renewals.
 
 ## Tests
@@ -76,7 +78,21 @@ A rejection takes no transition and moves nothing.
 - `test_the_oracle_never_names_a_host_row`
 - `test_each_routing_verb_takes_its_declared_transition`
 - `test_a_rejected_verb_takes_no_transition_and_moves_nothing`
-- `test_a_replayed_host_decision_with_no_transition_stops_resume_naming_the_input`
+- `test_a_decided_host_command_with_no_transition_stops_the_apply`
+- `test_a_replayed_host_decision_the_chart_refuses_stops_resume_naming_the_input`
+- `test_the_completeness_table_is_section_8`
+- `test_every_event_a_poster_sends_is_in_the_alphabet`
+- `test_a_fork_rebuilds_its_own_executor_from_its_rows`
+- `test_a_state_write_no_microstep_made_raises_and_writes_nothing`
+- `test_a_second_quarantine_keeps_what_the_first_interrupted`
+- `test_a_refusal_code_the_gate_has_no_sentence_for_raises`
+- `test_a_dry_host_command_leaves_the_rows_revisions_and_instance_alone`
+- `test_a_carried_drain_is_the_configuration_the_next_period_opens_in`
+- `test_every_host_input_moves_the_revisions_the_table_implementation_moved`
+- `test_a_leader_s_quarantine_that_meets_a_gap_stops_the_loop_and_logs_nothing`
+- `test_an_operator_s_drain_whose_dry_apply_meets_a_gap_stops_the_loop_unrefused`
+- `test_replay_names_the_host_input_a_gap_meets`
+- `test_dsl41_run_exits_7_when_resume_replays_a_host_decision_the_chart_refuses`
 
 ## Open findings
 

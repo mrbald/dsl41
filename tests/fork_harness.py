@@ -12,8 +12,9 @@ checks both on every feed of every SEM trace test in test_oracle.py (the
   exception. A fork's trace and emitted log start empty, so they are
   compared with the original's tail.
 
-`state_bytes` serializes every attribute the fork must copy. `COPIED`
-and `SHARED` name every attribute an `Oracle` and a `RuntimeState` hold,
+`state_bytes` serializes every attribute the fork must copy, the host
+instances' configurations on the store's executor included. `COPIED`,
+`REBUILT` and `SHARED` name every attribute an `Oracle` and a `RuntimeState` hold,
 and test_dry_apply.py pins the two sets against `vars()`, so a new
 attribute cannot escape the check by being added after it.
 """
@@ -68,6 +69,9 @@ STORE_COPIED = frozenset(
         "_violations",
     }
 )
+#: RuntimeState attributes the fork rebuilds rather than copies: the store's
+#: executor, restored from the twin's host rows (statechart-engine ss11).
+STORE_REBUILT = frozenset({"machines"})
 
 
 def _when(at: datetime | None) -> str | None:
@@ -92,7 +96,20 @@ def state_bytes(oracle: Oracle, since: tuple[int, int] = (0, 0)) -> bytes:
     doc = {
         "jobs": {name: row.model_dump(mode="json") for name, row in store.job.items()},
         "globals": {name: row.model_dump(mode="json") for name, row in store.globals_.items()},
-        "hosts": {name: row.model_dump(mode="json") for name, row in store.hosts.items()},
+        # `deadman_s` is a float, which the canonical grammar has none of
+        "hosts": {
+            name: {**row.model_dump(mode="json"), "deadman_s": repr(row.deadman_s)}
+            for name, row in store.hosts.items()
+        },
+        # each host instance's configuration and deferred queue on the store's
+        # executor: a dispatch on a fork must not reach them
+        "machines": {
+            name: [
+                sorted(store.machines.active(store.host_key(name))),
+                len(store.machines.deferred(store.host_key(name))),
+            ]
+            for name in store.hosts
+        },
         # the heap's array layout, not only its firing order: a fork that
         # shared the list would reorder it here first
         "timers": [[_when(due), token, _event(ev)] for due, token, ev in store._timers],

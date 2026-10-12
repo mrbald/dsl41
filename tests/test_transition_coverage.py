@@ -5,12 +5,21 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
 
 import pytest
 
-from dsl41.state_machine import Region, Row, State, Statechart, StateMachine, Transition
+from dsl41.state_machine import (
+    Region,
+    Row,
+    State,
+    Statechart,
+    StateMachine,
+    Transition,
+    coverage_items,
+)
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "transition_coverage.py"
 
@@ -235,3 +244,40 @@ def test_statechart_hits_do_not_count_for_a_table_machine() -> None:
     renamed = [{**h, "machine": "demo"} for h in ALL_CHART]
     lines, status = tc.report([MACHINE], [*renamed, *ALL_UNMARKED])
     assert status == 0 and lines[0] == "demo: 2/2"
+
+
+#: The lamp with a spec-only row: a dimmer no code turns yet, one guarded and one not.
+MARKED = replace(
+    CHART,
+    rows=(
+        *CHART.rows,
+        Row("lamp.04", "on", "dim", "off", guard="cool", mark="spec-only"),
+        Row("lamp.05", "off", "dim", mark="spec-only", kind="ignored"),
+    ),
+)
+
+
+def test_a_marked_row_is_listed_never_counted_and_fails_when_hit() -> None:
+    """A row's mark is a table transition's mark (DL-333): the row and its
+    guard's outcomes are listed, not counted, and a hit on any fails."""
+    required, forbidden = coverage_items(MARKED)
+    assert ("row", "lamp.04", "") not in required
+    assert forbidden == [
+        ("row", "lamp.04", ""),
+        ("guard", "lamp.04", "true"),
+        ("guard", "lamp.04", "false"),
+        ("row", "lamp.05", ""),
+        ("guard", "lamp.01", "false"),
+    ]
+    lines, status = tc.report([MARKED], ALL_CHART)
+    assert status == 0 and lines[0] == "lamp: 8/8"
+    heading = "Marked transitions (excluded):"
+    assert lines[lines.index(heading) + 1 :][:2] == [
+        "lamp lamp.04 {on} --dim--> off [spec-only]",
+        "lamp lamp.05 {off} --dim--> ignored [spec-only]",
+    ]
+    hit = {"machine": "lamp", "kind": "row", "id": "lamp.04", "detail": ""}
+    lines, status = tc.report([MARKED], [*ALL_CHART, hit])
+    assert status == 1
+    heading = "Marked but hit (the mark is stale or wrong):"
+    assert lines[lines.index(heading) + 1] == "lamp row lamp.04"

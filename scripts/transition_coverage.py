@@ -16,7 +16,8 @@ A statechart (docs/statechart-engine.md §13) is gated on every class of its
 coverage items at once: rows, choice branches, both outcomes of each guard,
 and a defer and a release for each deferred event. All are held at 100%. A
 guard outcome declared unreachable is listed as forbidden and fails the gate
-when hit.
+when hit, and so is a marked row: it is listed with the marked transitions,
+never counted.
 
 Exit 0 when every unmarked transition and every statechart item was hit, 1 on
 any miss, on any recorded violation, or when a marked transition (`spec-only`
@@ -69,8 +70,9 @@ def chart_items(hits: Iterable[dict[str, str]]) -> set[tuple[str, str, str, str]
 
 def chart_report(
     chart: Statechart, items: set[tuple[str, str, str, str]]
-) -> tuple[str, list[str], list[str]]:
-    """The summary line, the misses and the forbidden hits of one statechart."""
+) -> tuple[str, list[str], list[str], list[str]]:
+    """The summary line, the misses, the forbidden hits and the marked rows of
+    one statechart."""
     required, forbidden = coverage_items(chart)
 
     def line(item: tuple[str, str, str]) -> str:
@@ -79,7 +81,12 @@ def chart_report(
     hit = [item for item in required if (chart.name, *item) in items]
     misses = [line(item) for item in required if (chart.name, *item) not in items]
     wrong = [line(item) for item in forbidden if (chart.name, *item) in items]
-    return f"{chart.name}: {len(hit)}/{len(required)}", misses, wrong
+    marked = [
+        f"{chart.name} {r.id} {{{r.source}}} --{r.event}--> {r.target or r.kind} [{r.mark}]"
+        for r in chart.rows
+        if r.mark is not None
+    ]
+    return f"{chart.name}: {len(hit)}/{len(required)}", misses, wrong, marked
 
 
 def describe(machine: StateMachine[Any], t: Transition[Any]) -> str:
@@ -105,10 +112,11 @@ def report(
     wrong_marks: list[str] = []
     for machine in machines:
         if is_statechart(machine):
-            line, chart_misses, chart_wrong = chart_report(machine, items)
+            line, chart_misses, chart_wrong, chart_marked = chart_report(machine, items)
             summary.append(line)
             misses += chart_misses
             wrong_marks += chart_wrong
+            marked += chart_marked
             continue
         unmarked = [t for t in machine.transitions if t.mark is None]
         hit = [t for t in unmarked if (machine.name, t.id) in seen]
