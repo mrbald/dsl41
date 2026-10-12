@@ -289,13 +289,14 @@ class ControlServer:
         self._closing = False
         #: each subscription's backlog budget (ss5); tests lower it
         self.subscriber_budget = SUBSCRIBER_BACKLOG_BYTES
-        #: the first `StatechartError` a connection handler met, and the
+        #: the first `StatechartError` a connection handler, or a background
+        #: task of the run's supervisor client, met (`stop_on`), and the
         #: event `_serve_run` waits on beside the engine loop. It stops the
         #: engine with exit 7, as one from the loop does (statechart-engine
         #: ss5): an assertion failure, never answered and never contained
         self.statechart_error: StatechartError | None = None
         self.failed = asyncio.Event()
-        #: what `_stop_on` calls first, before the event: `_serve_run` sets it
+        #: what `stop_on` calls first, before the event: `_serve_run` sets it
         #: to the loop task's cancel, so the engine takes no further step
         self.on_statechart_error: Callable[[], object] | None = None
         #: the armed perimeter, or None = the 0600 owner-only model,
@@ -490,16 +491,17 @@ class ControlServer:
         except StatechartError as exc:
             # statechart-engine ss5, concurrency-model ss4: no reply, the
             # connection hangs up, and the engine stops with exit 7
-            self._stop_on(exc)
+            self.stop_on(exc)
         finally:
             # still in _conn_tasks: a shutdown waits for this hangup too
             await self._hang_up(writer, at_once=at_once)
             if task is not None:  # pragma: no branch -- the same task as above
                 self._conn_tasks.discard(task)
 
-    def _stop_on(self, error: StatechartError) -> None:
+    def stop_on(self, error: StatechartError) -> None:
         """Hand a handler's `StatechartError` to the run, which stops the
-        engine and reports the first one (statechart-engine ss5)."""
+        engine and reports the first one (statechart-engine ss5). The
+        supervisor client hands its background tasks' errors here too."""
         self.statechart_error = self.statechart_error or error
         if self.on_statechart_error is not None:
             self.on_statechart_error()

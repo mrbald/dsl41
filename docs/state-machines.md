@@ -579,32 +579,52 @@ stateDiagram-v2
 
 ## supervisor_client
 
+Clock: logical.
+
 ```mermaid
 stateDiagram-v2
-    state "closed" as s0
-    state "connected" as s1
-    state "disconnected" as s2
-    state "lost" as s3
-    [*] --> s2
-    s2 --> s1 : supervisor_client.01 connect [the socket accepts] / a new connection epoch with its own reader and lost event, then PING, and a reconnect re-ACQUIREs when a token is held
-    s3 --> s1 : supervisor_client.01 connect [the socket accepts] / a new connection epoch with its own reader and lost event, then PING, and a reconnect re-ACQUIREs when a token is held
-    s1 --> s1 : supervisor_client.02 connect [the socket accepts] / close the previous writer and cancel its reader, then a new epoch
-    s1 --> s3 : supervisor_client.03 EOF or a read error on this epoch's connection / fail the pending request, the next request reconnects
-    s1 --> s3 : supervisor_client.04 a request cancelled mid-flight / fail the pending request and close the writer, since the stream has no correlation ids and the reply in flight could reach the next request
-    s3 --> s3 : supervisor_client.04 a request cancelled mid-flight / fail the pending request and close the writer, since the stream has no correlation ids and the reply in flight could reach the next request
-    s1 --> s0 : supervisor_client.05 close / cancel the renewal, reader and LIST tasks, then close the writer
-    s2 --> s0 : supervisor_client.05 close / cancel the renewal, reader and LIST tasks, then close the writer
-    s3 --> s0 : supervisor_client.05 close / cancel the renewal, reader and LIST tasks, then close the writer
-    s0 --> [*]
+    state "client" as s0
+    state s0 {
+        [*] --> s3
+        state "disconnected" as s3
+        state "connected" as s2
+        state "lost" as s4
+        state "closed" as s1
+        s1 --> [*]
+    }
+    s0 --> s2 : supervisor_client.01 connect [down]
+    s2 --> s4 : supervisor_client.03 eof
+    s2 --> s4 : supervisor_client.04 cancel
+    s0 --> s1 : supervisor_client.05 close [open]
 ```
 
-| Id | Source | Trigger | Guard | Effect | Target | Cite | Mark |
+| Id | Source | Event | Guard | Action | Target | Kind | Cite |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| supervisor_client.01 | disconnected, lost | connect | the socket accepts | a new connection epoch with its own reader and lost event, then PING, and a reconnect re-ACQUIREs when a token is held | connected | supervisor-protocol ss5, DL-48, DL-79 |  |
-| supervisor_client.02 | connected | connect | the socket accepts | close the previous writer and cancel its reader, then a new epoch | connected | DL-48 |  |
-| supervisor_client.03 | connected | EOF or a read error on this epoch's connection |  | fail the pending request, the next request reconnects | lost | supervisor-protocol ss5, runner-design ss7, DL-48 |  |
-| supervisor_client.04 | connected, lost | a request cancelled mid-flight |  | fail the pending request and close the writer, since the stream has no correlation ids and the reply in flight could reach the next request | lost | DL-48 |  |
-| supervisor_client.05 | connected, disconnected, lost | close |  | cancel the renewal, reader and LIST tasks, then close the writer | closed | DL-48 |  |
+| supervisor_client.01 | client | connect | down | A new epoch: the tier closes a writer the lost connection kept and cancels a reader still running, installs the new writer, a fresh lost event and its reader, then PINGs. A reconnect re-ACQUIREs when a token is held. | connected | external | supervisor-protocol ss5, DL-48, DL-79 |
+| supervisor_client.02 | connected | connect |  | Supersede: the tier closes the live writer and cancels its reader, then installs the new epoch as for row .01. |  | internal | DL-48 |
+| supervisor_client.03 | connected | eof |  | The tier has set the epoch's lost event and failed the pending request, the next request reconnects. | lost | external | supervisor-protocol ss5, runner-design ss7, DL-48 |
+| supervisor_client.04 | connected | cancel |  | Poisoned: the tier has failed the pending request and closed the writer, since the stream has no correlation ids and the reply in flight could reach the next request. | lost | external | DL-48 |
+| supervisor_client.05 | client | close | open |  | closed | external | DL-48 |
+| supervisor_client.06 | lost | cancel |  | Poisoned after the loss: EOF failed the pending request before the cancelled request resumed. The tier closes the writer the loss kept, so nothing more is written to that stream. |  | internal | DL-48 |
+| supervisor_client.07 | lost | eof |  | The reader of a poisoned epoch meets the EOF its own poison caused: the epoch is already lost. |  | ignored | statechart-engine ss10 |
+| supervisor_client.08 | client | connect | over |  |  | ignored | statechart-engine ss10 |
+| supervisor_client.09 | client | eof | over |  |  | ignored | statechart-engine ss10 |
+| supervisor_client.10 | client | cancel | over |  |  | ignored | statechart-engine ss10 |
+| supervisor_client.11 | client | close | over |  |  | ignored | statechart-engine ss10 |
+
+| State | In | Entry | Exit | Defers | Waits |
+| --- | --- | --- | --- | --- | --- |
+| client |  |  |  |  |  |
+| disconnected | client/phase |  |  |  |  |
+| connected | client/phase |  |  |  |  |
+| lost | client/phase |  |  |  |  |
+| closed (final) | client/phase |  |  |  |  |
+
+| Name | Kind | Prose |
+| --- | --- | --- |
+| down | guard | No connection is live: the client is disconnected, before its first connect, or lost. A connected client takes `supervisor_client.02` instead, and a closed one posts nothing. |
+| open | guard | The client is not closed yet: from disconnected, connected or lost, close cancels the renewal, reader and LIST tasks, then closes the writer. |
+| over | guard | The client is closed. Nothing posts to it then: a second close posts nothing, a connection that completes after the close is closed unposted, and the EOF and the cancel that the close itself causes do their transport work with no post. Before the first connect, an EOF or a cancel finds no row and raises `UnhandledEvent`. |
 
 ## host
 

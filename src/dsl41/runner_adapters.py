@@ -71,7 +71,17 @@ from dsl41.runner_clock import Clock, EngineError
 from dsl41.runner_journal import repair_tail
 from dsl41.runner_ledger import Proof
 from dsl41.semantics import FwExistence, fw_existence_immediate
-from dsl41.state_machine import StateMachine, Transition
+from dsl41.state_machine import (
+    Context,
+    Executor,
+    Exclusion,
+    Region,
+    Row,
+    State,
+    Statechart,
+    StatechartError,
+)
+from dsl41.state_machine import Event as ChartEvent
 
 if TYPE_CHECKING:  # annotation only: the Journal object is the engine's, not an adapter's
     from dsl41.runner_journal import Journal
@@ -1232,73 +1242,218 @@ def _parse_list_reply(raw: dict[str, Any]) -> SupervisorListReply:
     return SupervisorRefusal(ok=False, error=error if isinstance(error, str) else "")
 
 
-#: The engine side's connection to the supervisor. It is derived from the
-#: client's transport fields and never stored: see `SupervisorClient.phase`.
-type ClientPhase = Literal["disconnected", "connected", "lost", "closed"]
+# ---- the engine side's connection to the supervisor, as a statechart
+#
+# `SUPERVISOR_CLIENT` is the declaration (docs/statechart-engine.md). Its
+# configuration is the connection's state: `SupervisorClient.phase` reads the
+# active leaf. The instance is keyed by the client and lives in the process's
+# one executor, which the wiring hands to the client and to the engine; a
+# client built without one makes its own (statechart-engine ss11).
+#
+# The tier posts four facts: the socket accepted a connection (`connect`), EOF
+# or a read error on this epoch's connection (`eof`), a request cancelled
+# mid-flight (`cancel`), and `close`. The rows decide the configuration. The
+# transport work of each fact is the tier's, in the order it always had: EOF
+# sets the epoch's `lost` event and fails the pending request, and a cancel
+# also closes the writer, before the post; a connect retires what the last
+# epoch left and installs the new one, and a close tears down, after it. That
+# work is the same from every state the tier posts in, and it is needed in
+# `closed` too, where the tier posts nothing: closing cancels the reader and a
+# renewal in flight. So no row has an action; each row's note says what the
+# tier does around it.
+#
+# Nothing posts to a closed client. The root's ignored rows, guarded by
+# `closed`, exist because the completeness check is syntactic (statechart-
+# engine ss10). The lease token, the renewal loop and its five-failures rule,
+# pushes and the LIST net are extended state and tier procedures, not states.
+# A gap in the chart is a `StatechartError`: in a run it stops the engine with
+# exit 7, and outside one the client keeps it and raises it (`_fail`).
 
-CLIENT_CONNECT: Transition[ClientPhase] = Transition(
-    "supervisor_client.01",
-    frozenset({"disconnected", "lost"}),
-    "connect",
-    "connected",
-    guard="the socket accepts",
-    effect=(
-        "a new connection epoch with its own reader and lost event, then PING, and a"
-        " reconnect re-ACQUIREs when a token is held"
-    ),
-    cite="supervisor-protocol ss5, DL-48, DL-79",
+#: The socket accepted a connection: a new epoch.
+CONNECT: Final = "connect"
+#: EOF or a read error on this epoch's connection.
+EOF: Final = "eof"
+#: A request was cancelled between its write and its reply (DL-48 item 9).
+CANCEL: Final = "cancel"
+#: `close` began.
+CLOSE: Final = "close"
+
+#: Where the connection can be: the leaf states of `SUPERVISOR_CLIENT`.
+CLIENT_PHASES: Final = frozenset({"disconnected", "connected", "lost", "closed"})
+
+
+# -- the guards. Each docstring is its rows' prose.
+
+
+def _down(ctx: Context) -> bool:
+    """No connection is live: the client is disconnected, before its first
+    connect, or lost. A connected client takes `supervisor_client.02`
+    instead, and a closed one posts nothing."""
+    return bool(ctx.active & {"disconnected", "lost"})
+
+
+def _open(ctx: Context) -> bool:
+    """The client is not closed yet: from disconnected, connected or lost,
+    close cancels the renewal, reader and LIST tasks, then closes the writer."""
+    return "closed" not in ctx.active
+
+
+def _over(ctx: Context) -> bool:
+    """The client is closed. Nothing posts to it then: a second close posts
+    nothing, a connection that completes after the close is closed unposted,
+    and the EOF and the cancel that the close itself causes do their
+    transport work with no post. Before the first connect, an EOF or a cancel
+    finds no row and raises `UnhandledEvent`."""
+    return "closed" in ctx.active
+
+
+_NO_READER = (
+    "no reader runs before the first connect, and no row returns to disconnected,"
+    " so nothing reports EOF there; one posted raises UnhandledEvent"
 )
-CLIENT_SUPERSEDE: Transition[ClientPhase] = Transition(
-    "supervisor_client.02",
-    frozenset({"connected"}),
-    "connect",
-    "connected",
-    guard="the socket accepts",
-    effect="close the previous writer and cancel its reader, then a new epoch",
-    cite="DL-48",
-)
-CLIENT_LOST: Transition[ClientPhase] = Transition(
-    "supervisor_client.03",
-    frozenset({"connected"}),
-    "EOF or a read error on this epoch's connection",
-    "lost",
-    effect="fail the pending request; the next request reconnects",
-    cite="supervisor-protocol ss5, runner-design ss7, DL-48",
-)
-CLIENT_POISONED: Transition[ClientPhase] = Transition(
-    "supervisor_client.04",
-    frozenset({"connected", "lost"}),
-    "a request cancelled mid-flight",
-    "lost",
-    effect=(
-        "fail the pending request and close the writer, since the stream has no"
-        " correlation ids and the reply in flight could reach the next request"
-    ),
-    cite="DL-48",
-)
-CLIENT_CLOSED: Transition[ClientPhase] = Transition(
-    "supervisor_client.05",
-    frozenset({"disconnected", "connected", "lost"}),
-    "close",
-    "closed",
-    effect="cancel the renewal, reader and LIST tasks, then close the writer",
-    cite="DL-48",
+_NO_REQUEST = (
+    "a request enters its write only with a writer held and lost clear, which"
+    " first takes a connect, and no row returns to disconnected; one posted"
+    " raises UnhandledEvent"
 )
 
-#: The lease token is extended state, not a state of this machine. A reply that
-#: sets or drops it can land just before its connection is lost, so the token
-#: is orthogonal to the connection. The renewal loop keeps it alive.
-SUPERVISOR_CLIENT: StateMachine[ClientPhase] = StateMachine(
+#: The engine side's connection to the supervisor (supervisor-protocol ss5),
+#: one instance per client.
+SUPERVISOR_CLIENT: Final = Statechart(
     name="supervisor_client",
-    states=frozenset({"disconnected", "connected", "lost", "closed"}),
-    initial="disconnected",
-    finals=frozenset({"closed"}),
-    transitions=(
-        CLIENT_CONNECT,
-        CLIENT_SUPERSEDE,
-        CLIENT_LOST,
-        CLIENT_POISONED,
-        CLIENT_CLOSED,
+    root=State(
+        "client",
+        regions=(
+            Region(
+                "phase",
+                "disconnected",
+                (
+                    State("disconnected"),
+                    State("connected"),
+                    State("lost"),
+                    State("closed", final=True),
+                ),
+            ),
+        ),
+    ),
+    rows=(
+        Row(
+            "supervisor_client.01",
+            "client",
+            CONNECT,
+            "connected",
+            guard="down",
+            cite="supervisor-protocol ss5, DL-48, DL-79",
+            note=(
+                "A new epoch: the tier closes a writer the lost connection kept and"
+                " cancels a reader still running, installs the new writer, a fresh"
+                " lost event and its reader, then PINGs. A reconnect re-ACQUIREs"
+                " when a token is held."
+            ),
+        ),
+        Row(
+            "supervisor_client.02",
+            "connected",
+            CONNECT,
+            kind="internal",
+            cite="DL-48",
+            note=(
+                "Supersede: the tier closes the live writer and cancels its reader,"
+                " then installs the new epoch as for row .01."
+            ),
+        ),
+        Row(
+            "supervisor_client.03",
+            "connected",
+            EOF,
+            "lost",
+            cite="supervisor-protocol ss5, runner-design ss7, DL-48",
+            note=(
+                "The tier has set the epoch's lost event and failed the pending"
+                " request; the next request reconnects."
+            ),
+        ),
+        Row(
+            "supervisor_client.04",
+            "connected",
+            CANCEL,
+            "lost",
+            cite="DL-48",
+            note=(
+                "Poisoned: the tier has failed the pending request and closed the"
+                " writer, since the stream has no correlation ids and the reply in"
+                " flight could reach the next request."
+            ),
+        ),
+        Row(
+            "supervisor_client.05",
+            "client",
+            CLOSE,
+            "closed",
+            guard="open",
+            cite="DL-48",
+        ),
+        Row(
+            "supervisor_client.06",
+            "lost",
+            CANCEL,
+            kind="internal",
+            cite="DL-48",
+            note=(
+                "Poisoned after the loss: EOF failed the pending request before the"
+                " cancelled request resumed. The tier closes the writer the loss"
+                " kept, so nothing more is written to that stream."
+            ),
+        ),
+        Row(
+            "supervisor_client.07",
+            "lost",
+            EOF,
+            kind="ignored",
+            cite="statechart-engine ss10",
+            note=(
+                "The reader of a poisoned epoch meets the EOF its own poison caused:"
+                " the epoch is already lost."
+            ),
+        ),
+        Row(
+            "supervisor_client.08",
+            "client",
+            CONNECT,
+            guard="over",
+            kind="ignored",
+            cite="statechart-engine ss10",
+        ),
+        Row(
+            "supervisor_client.09",
+            "client",
+            EOF,
+            guard="over",
+            kind="ignored",
+            cite="statechart-engine ss10",
+        ),
+        Row(
+            "supervisor_client.10",
+            "client",
+            CANCEL,
+            guard="over",
+            kind="ignored",
+            cite="statechart-engine ss10",
+        ),
+        Row(
+            "supervisor_client.11",
+            "client",
+            CLOSE,
+            guard="over",
+            kind="ignored",
+            cite="statechart-engine ss10",
+        ),
+    ),
+    guards={"down": _down, "open": _open, "over": _over},
+    clock="logical",
+    exclusions=(
+        Exclusion("disconnected", EOF, _NO_READER),
+        Exclusion("disconnected", CANCEL, _NO_REQUEST),
     ),
 )
 
@@ -1324,7 +1479,14 @@ class SupervisorClient:
     mid-request the client fails the pending future, closes the socket, and
     re-raises; later calls lazily reconnect (connect-only, never spawning a
     supervisor) and re-ACQUIRE presenting the CURRENT token (DL-79), whose fresh
-    fencing token fences anything the poisoned connection had in flight."""
+    fencing token fences anything the poisoned connection had in flight.
+
+    The connection's state is a `SUPERVISOR_CLIENT` instance in `machines`,
+    the process's executor; `phase` reads its leaf. A `StatechartError` that a
+    background task meets (the reader, the renewal, the LIST net) goes to
+    `_fail`: in a run, to the run's stop (`on_statechart_error`), which
+    ends the engine with exit 7; outside one, the client keeps it until the
+    next request or `close` raises it."""
 
     #: engine defaults (spec ss2): 60s lease, renewed every 20s
     _TTL_S = 60.0
@@ -1338,6 +1500,7 @@ class SupervisorClient:
         *,
         deadman_s: float | None = None,
         on_contact: Callable[[], None] | None = None,
+        machines: Executor | None = None,
     ) -> None:
         self.run_root = run_root
         #: S5b (concurrency-model ss8): the deadman a supervisor WE spawn is
@@ -1388,7 +1551,13 @@ class SupervisorClient:
         #: supervisor we knew is gone and our runs died with it (re-acquire
         #: AND reconcile), which is the opposite of `stale_token`.
         self.incarnation: str | None = None
+        #: the current epoch: one event per connection, set when it is lost or
+        #: poisoned. A reader keeps its own epoch's event, so a superseded
+        #: reader neither delivers into nor reports on its successor, and the
+        #: adapters wait on it. It is a transport fact; `phase` is the state.
         self.lost = asyncio.Event()
+        #: the epoch's writer: None before the first connect, after a poison
+        #: and after close; an EOF keeps it until the next connect closes it
         self._writer: asyncio.StreamWriter | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._renew_task: asyncio.Task[None] | None = None
@@ -1396,6 +1565,9 @@ class SupervisorClient:
         self._renew_ttl_s = self._TTL_S
         self._lock = asyncio.Lock()
         self._reconnect_lock = asyncio.Lock()
+        #: set by `close` before anything else: the lazy reconnect, a connect
+        #: that completes late, the renewal loop and the LIST net read it, so
+        #: a closing client is never connected again
         self._closed = False
         self._pending: asyncio.Future[dict[str, Any]] | None = None
         self._exit_futures: dict[str, asyncio.Future[dict[str, Any]]] = {}
@@ -1404,17 +1576,73 @@ class SupervisorClient:
         self._list_wakeup = asyncio.Event()
         self._list_idle = asyncio.Event()
         self._list_idle.set()
+        #: in a run, the run's stop for a `StatechartError` a background task
+        #: meets; None outside a run (`on_statechart_error`)
+        self._stop: Callable[[StatechartError], object] | None = None
+        #: outside a run, the first `StatechartError` a background task met,
+        #: until the next request or `close` raises it
+        self._fatal: StatechartError | None = None
+        #: set when a post raised a `StatechartError`: the instance is then
+        #: discarded, and nothing more is posted to it, so the teardown that
+        #: follows the stop meets no second error on the chart
+        self._discarded = False
+        #: the process's executor, which holds this client's instance
+        self._machines = machines if machines is not None else Executor()
+        self._machines.start(self, SUPERVISOR_CLIENT)
+        self._machines.run()
 
-    def phase(self) -> ClientPhase:
-        """The connection's phase (SUPERVISOR_CLIENT), read off the transport.
+    def __repr__(self) -> str:
+        """The run root names the client in a statechart error's report."""
+        return f"SupervisorClient({str(self.run_root)!r})"
 
-        A writer whose `lost` event is set is lost: the reader saw EOF, or a
-        cancelled request poisoned it. A writer without one is connected."""
-        if self._closed:
-            return "closed"
-        if self.lost.is_set():
-            return "lost"
-        return "disconnected" if self._writer is None else "connected"
+    def phase(self) -> str:
+        """The connection's phase: the active leaf of this client's
+        `SUPERVISOR_CLIENT` instance. After a discarded post it is the leaf
+        the failed post found."""
+        (leaf,) = self._machines.active(self) & CLIENT_PHASES
+        return leaf
+
+    def _post(self, name: str) -> None:
+        """Post one fact to this client's instance. The rows have no actions,
+        so the tier needs nothing back. A gap raises `StatechartError`, and
+        the instance is discarded: its leaf stays readable but is no longer
+        the connection's state, and later facts go unposted. Whether a
+        request can be written is the transport's question (`_writer` held
+        and `lost` clear), so the teardown still reconnects, releases the
+        lease and closes."""
+        if self._discarded:
+            return
+        try:
+            self._machines.dispatch(self, ChartEvent(name))
+        except StatechartError:
+            self._discarded = True
+            raise
+
+    @property
+    def on_statechart_error(self) -> Callable[[StatechartError], object] | None:
+        """In a run, the run's stop: every `StatechartError` a background task
+        meets goes to it, and it stops the engine with exit 7 (statechart-
+        engine ss5). `_serve_run` sets it beside `on_contact` and
+        `on_unreachable`; one met before then is handed over as it is set."""
+        return self._stop
+
+    @on_statechart_error.setter
+    def on_statechart_error(self, stop: Callable[[StatechartError], object] | None) -> None:
+        self._stop = stop
+        if stop is not None and (fatal := self._fatal) is not None:
+            self._fatal = None
+            stop(fatal)
+
+    def _fail(self, error: StatechartError) -> None:
+        """A background task met `error`: an assertion failure, never a fault
+        to retry. In a run it stops the engine; outside one the client keeps
+        the first until the next request or `close` raises it, once: the
+        caller that meets it reports it, and a second raise from the teardown
+        would report it twice."""
+        if self._stop is not None:
+            self._stop(error)
+        elif self._fatal is None:
+            self._fatal = error
 
     # -- connection ---------------------------------------------------------
 
@@ -1455,24 +1683,9 @@ class SupervisorClient:
             # bind/listen window; unlinking here would hide a live successor.
             return False
         if self._closed:
-            writer.close()
+            writer.close()  # nothing posts to a closing client
             return False
-        before = self.phase()
-        # supersede any previous connection's remains BEFORE swapping identity:
-        # the epoch guard (each reader carries its own `lost` event) keeps a
-        # stale reader from poisoning or delivering into its successor
-        if self._writer is not None:
-            self._writer.close()
-        if self._reader_task is not None and not self._reader_task.done():
-            self._reader_task.cancel()
-        self._writer = writer
-        self.lost = asyncio.Event()
-        self._reader_task = asyncio.ensure_future(self._reader(reader, self.lost))
-        match before:
-            case "connected":
-                SUPERVISOR_CLIENT.take(CLIENT_SUPERSEDE, before, self.phase())
-            case _:
-                SUPERVISOR_CLIENT.take(CLIENT_CONNECT, before, self.phase())
+        self._new_epoch(reader, writer)
         try:
             resp = await self._request({"cmd": "PING"}, _connect=False)
         except SupervisorUnavailable:
@@ -1480,6 +1693,25 @@ class SupervisorClient:
         if resp.get("ok"):
             self._note_contact(resp)  # PING is where a REATTACH learns the deadman
         return bool(resp.get("ok"))
+
+    def _new_epoch(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        """Post `connect`, then retire the previous connection's remains and
+        install this one (supervisor_client.01, .02). The remains go BEFORE
+        the identity swaps: the epoch guard (each reader carries its own
+        `lost` event) keeps a stale reader from poisoning or delivering into
+        its successor. A connection the chart does not take is closed."""
+        try:
+            self._post(CONNECT)
+        except StatechartError:
+            writer.close()
+            raise
+        if self._writer is not None:
+            self._writer.close()
+        if self._reader_task is not None and not self._reader_task.done():
+            self._reader_task.cancel()
+        self._writer = writer
+        self.lost = asyncio.Event()
+        self._reader_task = asyncio.ensure_future(self._reader(reader, self.lost))
 
     def _spawn_supervisor(self) -> subprocess.Popen[bytes]:
         argv = supervisor_argv(self.run_root, self.deadman_s)
@@ -1512,7 +1744,7 @@ class SupervisorClient:
         if self._closed:
             raise SupervisorUnavailable("client closed")
         if self._writer is not None and not self.lost.is_set():
-            return
+            return  # the transport can write: `_request`'s own question
         if not await self.reconnect():
             raise SupervisorUnavailable("not connected")
 
@@ -1552,6 +1784,26 @@ class SupervisorClient:
             return True
 
     async def _request(self, obj: dict[str, Any], *, _connect: bool = True) -> dict[str, Any]:
+        """One request and its reply. A statechart error that a background
+        task met and kept (`_fail`) is raised once, in place of the request,
+        or in place of the `SupervisorUnavailable` the request met. The
+        reader fails the pending request before it posts the EOF that meets
+        the gap, so the requester wakes to a transport failure while the kept
+        error is already there; a caller that takes `SupervisorUnavailable`
+        for a fallback, such as the seal's supervisor proof, must not take it
+        then."""
+        if (fatal := self._fatal) is not None:
+            self._fatal = None  # raised once: its caller reports it
+            raise fatal
+        try:
+            return await self._exchange(obj, _connect=_connect)
+        except SupervisorUnavailable as unavailable:
+            if (fatal := self._fatal) is None:
+                raise
+            self._fatal = None
+            raise fatal from unavailable
+
+    async def _exchange(self, obj: dict[str, Any], *, _connect: bool) -> dict[str, Any]:
         if _connect:
             await self._ensure_connected()
         async with self._lock:
@@ -1590,7 +1842,11 @@ class SupervisorClient:
                 raise
 
     def _poison(self) -> None:
-        before = self.phase()
+        """A request was cancelled mid-flight (supervisor_client.04, .06). The
+        transport work comes first and in every state, a closed client's
+        included: `close` cancels a renewal in flight, and a request waiting
+        on the lock must find the stream poisoned when the lock passes to it.
+        Then the fact is posted, unless the client is closed."""
         self.lost.set()
         if self._pending is not None and not self._pending.done():
             self._pending.set_exception(
@@ -1600,34 +1856,39 @@ class SupervisorClient:
         if self._writer is not None:
             self._writer.close()  # the reader sees EOF and exits via its epoch
             self._writer = None
-        if before != "closed":  # a closing client: `close` owns the teardown
-            SUPERVISOR_CLIENT.take(CLIENT_POISONED, before, self.phase())
+        if self.phase() != "closed":  # nothing posts to a closed client
+            self._post(CANCEL)
 
     async def _reader(self, stream: asyncio.StreamReader, lost: asyncio.Event) -> None:
         """One reader per connection; `lost` is that connection's epoch. A
         reader superseded by a poison+reconnect must neither deliver into nor
-        poison its successor -- hence the `lost is self.lost` guards."""
+        poison its successor -- hence the `lost is self.lost` guards. A
+        statechart error in its report of the loss goes to `_fail`: nothing
+        awaits this task until `close`."""
         try:
-            while True:
-                line = await stream.readline()
-                if not line or lost is not self.lost:
-                    break
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(obj, dict) and obj.get("push") == "exit":
-                    self._deliver_push(obj)  # true exit facts: epoch-independent
-                else:
-                    if isinstance(obj, dict) and "pushes_dropped" in obj:
-                        self._arm_list_recheck()
-                    if self._pending is not None and not self._pending.done():
-                        pending, self._pending = self._pending, None
-                        pending.set_result(obj if isinstance(obj, dict) else {})
-        except (OSError, asyncio.IncompleteReadError):
-            pass
-        finally:
-            self._on_lost(lost)
+            try:
+                while True:
+                    line = await stream.readline()
+                    if not line or lost is not self.lost:
+                        break
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(obj, dict) and obj.get("push") == "exit":
+                        self._deliver_push(obj)  # true exit facts: epoch-independent
+                    else:
+                        if isinstance(obj, dict) and "pushes_dropped" in obj:
+                            self._arm_list_recheck()
+                        if self._pending is not None and not self._pending.done():
+                            pending, self._pending = self._pending, None
+                            pending.set_result(obj if isinstance(obj, dict) else {})
+            except (OSError, asyncio.IncompleteReadError):
+                pass
+            finally:
+                self._on_lost(lost)
+        except StatechartError as error:
+            self._fail(error)
 
     def _deliver_push(self, obj: dict[str, Any]) -> None:
         run_id = obj.get("run_id")
@@ -1636,17 +1897,19 @@ class SupervisorClient:
             fut.set_result(obj)
 
     def _on_lost(self, lost: asyncio.Event) -> None:
+        """EOF or a read error on epoch `lost` (supervisor_client.03, .07). A
+        superseded connection's reader reports nothing: its successor is
+        fine. The transport work comes first and in every state: `close`
+        cancels the reader, and the request it was waiting for must fail.
+        Then the fact is posted, unless the client is closed."""
         if lost is not self.lost:
-            return  # a superseded connection's reader: the successor is fine
-        if lost.is_set():
-            return  # already poisoned; _poison cleaned the pending future
-        before = self.phase()
+            return
         lost.set()
         if self._pending is not None and not self._pending.done():
             self._pending.set_exception(SupervisorUnavailable("connection lost"))
         self._pending = None
-        if before != "closed":  # a closing client cancels its reader: not a loss
-            SUPERVISOR_CLIENT.take(CLIENT_LOST, before, self.phase())
+        if self.phase() != "closed":  # nothing posts to a closed client
+            self._post(EOF)
 
     def exit_future(self, run_id: str) -> asyncio.Future[dict[str, Any]]:
         fut = self._exit_futures.get(run_id)
@@ -1687,31 +1950,37 @@ class SupervisorClient:
             self._list_wakeup.set()
 
     async def _list_recheck_loop(self) -> None:
-        while not self._closed:
-            if not self._listed_dead:
-                self._list_wakeup.clear()
-            await self._list_wakeup.wait()
-            await asyncio.sleep(_LIST_RECHECK_EVERY)
-            if self._closed:
-                return
-            # Snapshot BEFORE the request: waits accepted while this LIST is
-            # in flight cannot be judged against its older view of the runs.
-            eligible = dict(self._listed_dead)
-            if not eligible:
-                continue
-            self._list_idle.clear()
-            try:
-                listing = await self.list_runs()
-            except SupervisorUnavailable:
-                continue  # the adapters own reconnect failure and spool recovery
-            finally:
-                self._list_idle.set()
-            if not isinstance(listing, SupervisorListSuccess):
-                continue
-            alive = {row.run_id for row in listing.runs if row.wrapper_alive}
-            for run_id, dead in eligible.items():
-                if self._listed_dead.get(run_id) is dead and run_id not in alive:
-                    dead.set()  # evidence for the spool ladder, never an exit push
+        """The shared LIST net's task. A statechart error it meets on its
+        request's path goes to `_fail`: nothing awaits this task but
+        `watch_exit` and `close`."""
+        try:
+            while not self._closed:
+                if not self._listed_dead:
+                    self._list_wakeup.clear()
+                await self._list_wakeup.wait()
+                await asyncio.sleep(_LIST_RECHECK_EVERY)
+                if self._closed:
+                    return
+                # Snapshot BEFORE the request: waits accepted while this LIST is
+                # in flight cannot be judged against its older view of the runs.
+                eligible = dict(self._listed_dead)
+                if not eligible:
+                    continue
+                self._list_idle.clear()
+                try:
+                    listing = await self.list_runs()
+                except SupervisorUnavailable:
+                    continue  # the adapters own reconnect failure and spool recovery
+                finally:
+                    self._list_idle.set()
+                if not isinstance(listing, SupervisorListSuccess):
+                    continue
+                alive = {row.run_id for row in listing.runs if row.wrapper_alive}
+                for run_id, dead in eligible.items():
+                    if self._listed_dead.get(run_id) is dead and run_id not in alive:
+                        dead.set()  # evidence for the spool ladder, never an exit push
+        except StatechartError as error:
+            self._fail(error)
 
     # -- verbs --------------------------------------------------------------
 
@@ -1773,10 +2042,13 @@ class SupervisorClient:
         what reinstates the host. A loop that returned at the fifth failure
         left a later reconnect's lease unrenewed: it lapsed one TTL later.
 
-        The loop ends only when it is cancelled or the client is closed. An
-        unexpected error in one renewal is logged and counted as a failed
-        renewal, and an error in the unreachable report is logged; neither
-        ends the loop."""
+        The loop ends only when it is cancelled, the client is closed, or it
+        meets a `StatechartError`. An unexpected error in one renewal is logged
+        and counted as a failed renewal, and an error in the unreachable report
+        is logged; neither ends the loop. A statechart error is neither: it is
+        an assertion failure (statechart-engine ss5), so it ends the loop and
+        goes to `_fail`, whether the renewal's own path met it or a callback
+        into the engine did."""
         failures = 0
         try:
             while not self._closed:
@@ -1794,6 +2066,8 @@ class SupervisorClient:
                         continue
                 except SupervisorUnavailable:
                     pass
+                except StatechartError:
+                    raise  # an assertion failure is not a failed renewal: below
                 except Exception as exc:  # noqa: BLE001 -- one bad renewal must not end renewal
                     print(f"dsl41: supervisor lease renewal failed on {exc!r}", file=sys.stderr)
                 failures += 1
@@ -1811,6 +2085,8 @@ class SupervisorClient:
                     try:
                         if self.on_unreachable is not None:
                             self.on_unreachable()
+                    except StatechartError:
+                        raise  # the engine's assertion failure: below
                     except Exception as exc:  # noqa: BLE001 -- the report must not end renewal
                         print(
                             f"dsl41: reporting the supervisor unreachable failed on {exc!r}",
@@ -1818,6 +2094,8 @@ class SupervisorClient:
                         )
         except asyncio.CancelledError:
             pass
+        except StatechartError as error:
+            self._fail(error)
 
     async def _renew_once(self, ttl_s: float) -> dict[str, Any]:
         """One RENEW, and a re-ACQUIRE when it is refused. The reply that
@@ -1871,10 +2149,25 @@ class SupervisorClient:
                 await self._request({"cmd": "RELEASE"})
 
     async def close(self) -> None:
-        before = self.phase()
+        """Post `close` (supervisor_client.05), unless the client is already
+        closed, then tear down: cancel the renewal, reader and LIST tasks and
+        close the writer. A second close posts nothing and finds nothing left
+        to tear down. The teardown runs even when the post raises. Outside a
+        run, a statechart error a background task met and no request raised
+        is raised after it."""
         self._closed = True  # no lazy reconnect may resurrect a closing client
-        if before != "closed":
-            SUPERVISOR_CLIENT.take(CLIENT_CLOSED, before, self.phase())
+        try:
+            if self.phase() != "closed":  # nothing posts to a closed client
+                self._post(CLOSE)
+        finally:
+            await self._tear_down()
+        if (fatal := self._fatal) is not None:
+            self._fatal = None
+            raise fatal
+
+    async def _tear_down(self) -> None:
+        # Each task hands a statechart error to `_fail` itself, so none ends
+        # with one, and these suppressions cannot swallow it.
         for task in (self._renew_task, self._reader_task):
             if task is not None:
                 task.cancel()

@@ -13,10 +13,10 @@ None of these machines writes a trace line. A violation shows as a
 that starts with `VIOLATION_LOG_PREFIX`; each test checks all three. Each
 test records into its own directory and asserts which declared (transition,
 source) pairs its builder took; each pair it does not take is named, with the
-reason. `supervisor_lease` and `supervisor_process` are statecharts: their
-executor raises on an event no row takes, so their tests check the rows each
-event took, or that the run raised nothing, and the chart's coverage items
-instead. The fixture then hands the hits, never the violations, to the
+reason. `supervisor_lease`, `supervisor_process` and `supervisor_client`
+are statecharts: their executor raises on an event no row takes, so their
+tests check the rows each event took, or that the run raised nothing, and the
+chart's coverage items instead. The fixture then hands the hits, never the violations, to the
 session's directory, so the coverage gate counts them.
 """
 
@@ -48,6 +48,7 @@ from dsl41.boundary import (
     row_tag,
 )
 from dsl41.runner_adapters import SUPERVISOR_CLIENT, SupervisorClient, SupervisorUnavailable
+from dsl41.state_machine import Executor, Outcome
 from dsl41.runner_clock import EngineError
 from dsl41.state_machine import HITS_ENV, STRICT_ENV, VIOLATION_LOG_PREFIX, TransitionError
 
@@ -695,8 +696,8 @@ def test_every_process_event_at_every_reached_point_takes_a_declared_transition(
 
 class _FakeSupervisor:
     """A unix-socket peer that answers every request ok, except a SIGNAL for
-    run `hold`, which it never answers. The client's machine reads only its
-    transport, so the peer's lease rules do not matter here."""
+    run `hold`, which it never answers. The client's chart is moved by its
+    transport's facts only, so the peer's lease rules do not matter here."""
 
     def __init__(self) -> None:
         self.writers: list[asyncio.StreamWriter] = []
@@ -760,6 +761,21 @@ def _client_key(client: SupervisorClient) -> tuple[str, bool, bool]:
     return client.phase(), client._writer is not None, client.token is not None
 
 
+class _SpiedExecutor(Executor):
+    """An executor that keeps every outcome with the configuration it met, so
+    the walk can name what each event took and where it was posted."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.posts: list[tuple[frozenset[str], Outcome]] = []
+
+    def dispatch(self, key: Any, event: Any) -> list[Outcome]:
+        met = self.active(key)
+        outcomes = super().dispatch(key, event)
+        self.posts += [(met, outcome) for outcome in outcomes]
+        return outcomes
+
+
 def test_every_client_event_in_every_reached_client_state_takes_a_declared_transition(
     short_root: Path, strict: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
@@ -771,22 +787,28 @@ def test_every_client_event_in_every_reached_client_state_takes_a_declared_trans
     walk reaches disconnected; connected and lost (by EOF, writer kept; by a
     cancelled request, writer dropped), each with and without a token; and
     closed, with and without a token (`close` drops the writer). An event
-    passes when it completes or ends in SupervisorUnavailable, with no
-    TransitionError. The reader task would swallow one; the violations file
-    still records it.
+    passes when it completes or ends in SupervisorUnavailable, and every post
+    it made fired a row. The client's executor keeps each post with the
+    configuration it met: the tier never posts to a closed client, and no
+    background task handed a statechart error to `_fail`.
 
     Left out: spawning a supervisor. `ensure_running` spawns one when its
     connect is refused, as it always is on a closed client, so the test
     replaces `_spawn_supervisor` with a SupervisorUnavailable. A refused
-    connect takes no transition."""
+    connect posts nothing."""
     sock = short_root / "supervisor.sock"
     problems: list[str] = []
+    executors: list[_SpiedExecutor] = []
+    clients: list[SupervisorClient] = []
 
     def no_spawn() -> None:
         raise SupervisorUnavailable("the test spawns no supervisor")
 
     async def build(path: tuple[str, ...]) -> SupervisorClient:
-        client = SupervisorClient(short_root)
+        machines = _SpiedExecutor()
+        executors.append(machines)
+        client = SupervisorClient(short_root, machines=machines)
+        clients.append(client)
         client._spawn_supervisor = no_spawn  # type: ignore[assignment,method-assign]
         for step in path:
             await _client_event(client, peer, step)
@@ -841,9 +863,29 @@ def test_every_client_event_in_every_reached_client_state_takes_a_declared_trans
         ("closed", False, True),
     }
     assert applied == len(reached) * len(_CLIENT_EVENTS)
-    # a request failed by EOF and cancelled before it resumes: a race this walk does
-    # not build (test_runner_adapters builds it by hand)
-    assert _missed_sources(strict, SUPERVISOR_CLIENT) == {("supervisor_client.04", "lost")}
+    posts = [post for machines in executors for post in machines.posts]
+    assert [o.kind for _, o in posts] == ["fired"] * len(posts)
+    assert [(sorted(met), o.event.name) for met, o in posts if "closed" in met] == []
+    assert [c._fatal for c in clients if c._fatal is not None] == []
+    hits = {
+        (r["kind"], r["id"], r["detail"])
+        for r in _records(strict, "hits")
+        if r["machine"] == SUPERVISOR_CLIENT.name
+    }
+    required, forbidden = state_machine.coverage_items(SUPERVISOR_CLIENT)
+    # Left to other tests: a request failed by EOF and cancelled before it
+    # resumes, a race this walk does not build (06; test_runner_adapters builds
+    # it by hand); every cell of `closed`, where the tier posts nothing: the
+    # ignored rows (08 to 11) and the false outcomes of 01 and 05, which
+    # test_supervisor_client_chart.py's completeness test pins; and the false
+    # outcomes of 09 and 10, an EOF or a cancel before the first connect, which
+    # only that file's post into the excluded cells reaches.
+    ignored = {f"supervisor_client.{n:02}" for n in range(8, 12)}
+    left = {("row", "supervisor_client.06", "")} | {("row", row, "") for row in ignored}
+    left |= {("guard", row, "true") for row in ignored}
+    left |= {("guard", f"supervisor_client.{n}", "false") for n in ("01", "05", "09", "10")}
+    assert {item for item in required if item not in hits} == left
+    assert [item for item in forbidden if item in hits] == []
     _assert_no_violation(strict, capfd.readouterr().err)
 
 

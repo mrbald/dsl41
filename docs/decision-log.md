@@ -21376,3 +21376,78 @@ relitigate an entry; append a new one.
   the halt codes overridden at close, a report crowded out by the feeds' steps, and the client's
   unknown answer unstated. The Codex pass found the quadratic fan-out scan. All are fixed and
   confirmed by the reviewer that raised them.
+
+- DL-330 The supervisor client runs on the statechart executor; a statechart error on its path stops
+  the engine with exit 7
+  (2026-10-12; src/dsl41/runner_adapters.py, src/dsl41/runner_startup.py, src/dsl41/runner.py,
+  src/dsl41/runner_control.py, src/dsl41/cli_run.py, src/dsl41/cli_estate.py,
+  src/dsl41/state_machine.py; docs/blocks/supervisor.md; docs/statechart-engine.md §11 and §16;
+  docs/state-machines.md (generated))
+  THE CHART. `supervisor_client` is a `Statechart` on the logical clock: one region with
+  `disconnected`, `connected`, `lost` and the final `closed`. The connection's state is the chart's
+  configuration, and `phase` reads the active leaf. DL-291 derived the phase from three transport
+  attributes; this entry reverses that reading for this machine. The attributes stay as transport
+  facts: `lost` is the epoch's event, which each reader keeps and the adapters wait on; the writer
+  is the stream; the closed latch keeps a closing client from reconnecting. Whether a write can go
+  is still the transport's question: the request's guard and the two reconnect guards read the
+  writer and the epoch, so they keep working after a chart error has discarded the instance. Rows
+  .01 to .05 keep their meaning and ids: connect from disconnected or lost (.01, on the root with a
+  guard, since a row has one source), supersede (.02, internal), EOF (.03), a cancel (.04) and close
+  (.05, on the root with a guard). New rows: a cancel after the loss (.06, internal: the writer the
+  loss kept is closed), the EOF a poison itself caused (.07, ignored), and four ignored rows in
+  `closed` (.08 to .11), which exist because completeness is syntactic (statechart-engine §10);
+  nothing posts to a closed client. Two exclusions: no reader runs before the first connect, and no
+  request reaches its write before one. The rows carry notes, not actions. This machine's final
+  state is the object's teardown, where the transport work still runs: a close cancels the reader,
+  which fails the request it was waiting for, and a renewal in flight, which poisons the stream; so
+  that work stays the tier's, in today's order, and the chart decides the configuration only. The
+  deleted code: the table, its five transitions, the phase type, the derived read, the four `take`
+  sites and the early return a poisoned epoch's EOF took.
+  THE TIER. The instance lives in the process's one executor (statechart-engine §11). The client is
+  built before the engine, so the wiring builds the executor and hands it to the client and, through
+  `start_run` and `resume_run`, to the engine; an engine or a bare client given none makes its own.
+  A post that raises discards the instance: nothing more is posted, the configuration stays
+  readable, and the teardown that follows meets no second error.
+  THE ERROR SURFACE. A statechart error on the client's path is an assertion failure, never a
+  failed renewal. In a run, the reader, the renewal loop and the LIST net hand one to the control
+  server's stop (DL-329), which keeps the first error, cancels the engine loop at once and wakes the
+  run: the report prints once and the engine exits 7. The run installs that stop beside the contact
+  callbacks; one met before then is handed over as it is installed. The run gives the lease back
+  before it judges its error, because the reader is live during the RELEASE and the close, and an
+  error met there is judged by the same rule as one met while the server closed: 7 replaces 0 and
+  1, a halt the engine chose keeps its code. A foreground raise keeps its path: the adapter's task
+  fails and the loop re-raises it. Outside a run, the first error is kept and raised once, by the
+  next request or else by the close after its teardown, so the CLI wrapper reports it and exits 7.
+  A kept error pre-empts the transport's fallback: the reader fails the pending request before it
+  posts the EOF that meets the gap, so the request raises the kept error in place of the
+  unavailability it woke to, and the seal's supervisor proof never commits over it. The offline
+  sealer returns the lease and closes the client on every way out after the wiring, a statechart
+  error out of the resume included, and an error of that teardown's own is printed once and never
+  replaces the first; before this entry a statechart error out of the resume left the lease held.
+  The renewal loop's two broad arms re-raise a statechart error first. Three suppressions stay: the
+  close awaits tasks that have already handed their error over, and the transport's wait and the
+  exit future a push resolves cannot raise one.
+  CHECKS. `well_formed` and `chart_warnings` pass. The generated completeness test builds six
+  witnesses through the client's own code (disconnected; connected, idle and with a request in
+  flight; lost with the writer kept and with it dropped; closed) and checks twenty-two cells against
+  a table written from supervisor-protocol §5. The alphabet test drives a peer on a unix socket
+  through connect, supersede, EOF, cancel and close. The exhaustive client walk reads the executor's
+  outcomes with its enumeration unchanged and asserts that nothing posts to a closed client. New
+  tests: a gap met by the renewal task and by the reader ends `dsl41 run` with exit 7 and one
+  report, no loop step after it, the lease returned last and the client closed; one met during the
+  lease's return exits 7; one met at the teardown's close exits 7; the offline sealer exits 7 with
+  the period open, both when the gap is met by the resume and when the seal's proof meets it, with
+  no seal record and the lease returned; the kept error is raised once; an adapter's wait does not
+  spin after a discarded post; a request cancelled while it waits for the lock neither poisons nor
+  posts; a mutant with the old renewal arm logs the error as a failed renewal and keeps renewing.
+  The gates hold the rows and guard outcomes at 100% and runner_adapters.py at 100% of branches
+  with no pragma.
+  OPEN. runner_adapters.py is over the size advisory; the chart could move to a sibling module.
+  REVIEW. Semantic class: one Opus reviewer, three rounds, and one Codex pass, two rounds. The
+  Codex pass found a kept chart error losing to the transport's fallback, so the offline seal
+  committed over it; the same error met during the lease's return after the run had chosen exit 0,
+  unreported; and the offline sealer's cleanup skipped by a statechart error out of the resume, a
+  hole that predates this entry. The Opus reviewer found the latter two as well, a stale leaf after
+  a discarded post that skipped the lease's return and spun an adapter's wait, the pending order in
+  §16 and the §11 wording, and, in its second round, a lease return whose raise skipped the run's
+  judgement and its hints. All are fixed and confirmed by the reviewer that raised them.

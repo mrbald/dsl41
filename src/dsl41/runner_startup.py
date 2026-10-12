@@ -50,7 +50,7 @@ import contextlib
 import os
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
@@ -76,6 +76,7 @@ from dsl41.runner_adapters import (
 )
 from dsl41.runner_clock import Clock, EngineError
 from dsl41.runner_effects import Effect, EffectOutcome
+from dsl41.state_machine import Executor
 from dsl41.period import (
     GENESIS_PERIOD_ID,
     GENESIS_SEGMENT_NO,
@@ -264,6 +265,11 @@ class Wiring:
     scheduler: Scheduler
     client: SupervisorClient | None
     deadman_s: float | None
+    #: the process's statechart executor (statechart-engine ss11). The client
+    #: is built here, before any engine, and its instance lives in this
+    #: executor; the caller hands the same one to `start_run` or `resume_run`,
+    #: so a process with an engine has one executor
+    machines: Executor = field(default_factory=Executor)
 
     async def close(self) -> None:
         await _return_lease(self.client)
@@ -293,13 +299,14 @@ async def wire_from_profile(
     from dsl41.runner_adapters import FileWatcherAdapter, LocalCommandAdapter
 
     deadman_s = None if profile.deadman_us is None else profile.deadman_us / 1_000_000
+    machines = Executor()
     client = None
     try:
         # detached (ss6a Tier 1, spec ss3): the CMD adapter SPAWNs through a
         # supervisor that owns the wrapper lifelines, so an engine restart does
         # not kill the jobs. FW stays in-engine (no process to survive).
         if profile.execution_mode == "detached":
-            client = SupervisorClient(run_root, deadman_s=deadman_s)
+            client = SupervisorClient(run_root, deadman_s=deadman_s, machines=machines)
             try:
                 await client.ensure_running()
                 await client.acquire()
@@ -349,6 +356,7 @@ async def wire_from_profile(
         scheduler=scheduler,
         client=client,
         deadman_s=deadman_s,
+        machines=machines,
     )
 
 
@@ -455,6 +463,7 @@ def start_run(
     staged: StagedManifest | None = None,
     anchor_dir: Path | None = None,
     launched: RuntimeProfile | None = None,
+    machines: Executor | None = None,
 ) -> Engine:
     """ss1.1's GENESIS TRANSACTION, in its order, plus an Engine wired to
     what it created.
@@ -491,7 +500,8 @@ def start_run(
     `anchor_dir` defaults to the root's sibling (`boundary.default_anchor_dir`),
     which is outside every archivable root, as ss1.1 requires. A failure
     here releases both locks, because a caller that got this far and was
-    refused is on its way out."""
+    refused is on its way out. `machines` is the process's statechart
+    executor, the wiring's; with none the engine makes its own."""
     # the root is CREATED by acquire_run_root (mkdir_durable: every new
     # entry fsynced), never pre-created here -- a plain mkdir first would
     # make the durability helper see an existing directory and prove
@@ -530,6 +540,7 @@ def start_run(
             deadman_s=deadman_s,
             staged=staged,
             launched=launched,
+            machines=machines,
         )
     except BaseException:
         # a refused genesis holds nothing (same rule as the claim above):
@@ -555,9 +566,11 @@ def _finish_genesis(
     deadman_s: float | None,
     staged: StagedManifest | None,
     launched: RuntimeProfile | None,
+    machines: Executor | None,
 ) -> Engine:
     """ss1.1 steps 4-6 plus the Engine, split out so `start_run` can pair
-    the acquire with a release on every failure path."""
+    the acquire with a release on every failure path. The engine runs on
+    `machines`, the process's executor, when the caller has one."""
     (run_root / "runs").mkdir(exist_ok=True)
     (run_root / "logs").mkdir(exist_ok=True)
     at = clock.now()
@@ -633,6 +646,7 @@ def _finish_genesis(
         ),
         fence=fence,
         semantics=switches_of(manifest.runtime_profile),
+        machines=machines,
     )
 
 
@@ -651,6 +665,7 @@ async def resume_run(
     lock: LeaderLock | None = None,
     anchor_dir: Path | None = None,
     declared: RuntimeProfile | None = None,
+    machines: Executor | None = None,
 ) -> Engine:
     """ss7 resume: hash-gate, replay, reconcile. Returns an Engine with the
     reconciliation completions queued (source=reconcile); the caller runs
@@ -662,7 +677,11 @@ async def resume_run(
     unjournaled remainder of the window up to wall-now was missed
     across downtime and is dropped AND journaled -- reported on
     Engine.drops, never fired late (PENDING: E9; a live-but-stalled engine
-    fires its backlog, downtime never does)."""
+    fires its backlog, downtime never does).
+
+    `machines` is the process's statechart executor, the wiring's, which
+    already holds the supervisor client's instance; the engine runs on it.
+    With none the engine makes its own, as `start_run`'s does."""
     os.chmod(run_root, 0o700)  # tighten a pre-existing looser root (same reason as create)
     # ACQUIRE first (S6a, concurrency-model ss7): everything below this line
     # reads or acts -- the log is replayed, the estate is reconciled,
@@ -709,6 +728,7 @@ async def resume_run(
             supervisor=supervisor,
             deadman_s=deadman_s,
             declared=declared,
+            machines=machines,
         )
     except BaseException:
         # a refused resume holds nothing: the next engine may lead. The WAL
@@ -742,6 +762,7 @@ async def _resume_under_lock(
     deadman_s: float | None,
     declared: RuntimeProfile | None = None,
     journals: list[Journal],
+    machines: Executor | None = None,
 ) -> Engine:
     """The ss7 resume ladder proper, with leadership already held (S6a).
     Split from `resume_run` so the acquire/release pairing is one readable
@@ -916,6 +937,7 @@ async def _resume_under_lock(
         # the pin even with no estate home, so the oracle reads what replay
         # reads (DL-252); with one, the engine checks the two agree
         semantics=switches_of(manifest.runtime_profile),
+        machines=machines,
     )
     # ss3.5: the carry is what this segment OPENED holding -- C1's
     # undelivered intents and its applied bindings -- and it is seeded
