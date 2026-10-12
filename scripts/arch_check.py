@@ -395,6 +395,9 @@ def private_cross_module_imports(paths: Iterable[Path], allowed: Iterable[str]) 
 #: row with its own `state_rev` (concurrency-model ss2) -- added DL-151.
 _STATE_MODELS = ("JobRuntime", "HostRuntime", "CapacityReservation", "GlobalRuntime")
 _STATE_OWNER = "RuntimeState"
+#: The module that defines the owner and the key of its assembly instance.
+_STATE_OWNER_MODULE = "oracle_state.py"
+_ASSEMBLY_KEY = "ASSEMBLY_KEY"
 #: Containers on the owner that a caller could reach through instead. Both the
 #: private maps and the read-only views over them (DL-86): the views raise at
 #: runtime, but a static name is the better error, and a caller who reaches for
@@ -407,9 +410,11 @@ _STATE_OWNER = "RuntimeState"
 #: adds `timer_seq` beside it: the seal carries the timer allocator's
 #: high-water mark exactly as it carries the waiter allocator's, and a gate
 #: that protected one of the two would be narrower the day after it was
-#: written. The assembly phase (`_phase`, the `runtime_assembly` machine)
-#: replaced the three seed-and-genesis flags; it is a scalar too, so a
-#: rebind from outside the owner would skip the machine.
+#: written. The assembly phase is the configuration of the `runtime_assembly`
+#: instance on the owner's executor (`machines`), so a rebind of `machines`
+#: from outside the owner would drop the phase; and a dispatch on the
+#: assembly key from outside the owner module would move it with none of the
+#: verb's work (`state_owner_bypasses`). `_phase` is a read-only property.
 _STATE_MAPS = (
     "_jobs",
     "_globals",
@@ -419,7 +424,7 @@ _STATE_MAPS = (
     "_enqueue_counter",
     "_timer_seq",
     "_period_id",
-    "_phase",
+    "machines",
     "job",
     "globals_",
     "hosts",
@@ -498,6 +503,26 @@ def _owner_class_lines(tree: ast.Module) -> set[int]:
     return set()
 
 
+def _names_assembly_instance(node: ast.AST) -> bool:
+    """The owner's assembly key, by name or import, or its literal as the key of an executor call:
+    `store.machines.dispatch("assembly", ...)` moves the phase with none of the verb's
+    work (the capacity check, the revision bump, the snapshot reset)."""
+    if isinstance(node, ast.Name) and node.id == _ASSEMBLY_KEY:
+        return True
+    if isinstance(node, ast.Attribute) and node.attr == _ASSEMBLY_KEY:
+        return True
+    if isinstance(node, ast.ImportFrom) and any(a.name == _ASSEMBLY_KEY for a in node.names):
+        return True
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in ("dispatch", "post", "start", "restore", "forget", "resolve")
+        and bool(node.args)
+        and isinstance(node.args[0], ast.Constant)
+        and node.args[0].value == "assembly"
+    )
+
+
 def state_owner_bypasses(paths: Iterable[Path]) -> list[Finding]:
     """Blocking (DL-82, widened DL-83): a state-model field or a global
     assigned anywhere but the owner. Optimistic locking needs one place where
@@ -524,6 +549,15 @@ def state_owner_bypasses(paths: Iterable[Path]) -> list[Finding]:
 
         def _flag(line: int, message: str, path: Path = path) -> None:
             findings.append(Finding(_rel(path), line, f"{message} (DL-82)"))
+
+        if path.name != _STATE_OWNER_MODULE:
+            for node in ast.walk(tree):
+                if _names_assembly_instance(node):
+                    _flag(
+                        node.lineno,
+                        f"reaches the assembly instance ({_ASSEMBLY_KEY}): only the verbs of"
+                        f" {_STATE_OWNER} move the phase",
+                    )
 
         for node in ast.walk(tree):
             if node.lineno in exempt if hasattr(node, "lineno") else False:

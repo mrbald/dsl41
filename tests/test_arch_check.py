@@ -675,21 +675,45 @@ def test_reaching_past_the_read_only_views_blocks(tmp_path: Path) -> None:
     ]
 
 
-def test_rebinding_the_assembly_phase_outside_the_owner_blocks(tmp_path: Path) -> None:
-    """The assembly phase is a scalar on the owner: a rebind from outside it
-    would skip the `runtime_assembly` table. The removed seed flags are no
-    longer watched, and another class's own `_phase` is not the owner's."""
+def test_rebinding_the_owner_s_executor_outside_the_owner_blocks(tmp_path: Path) -> None:
+    """The assembly phase is the configuration of an instance on the owner's
+    executor: a rebind of `machines` from outside the owner would drop it. The
+    removed seed flags are no longer watched, and another class's own
+    `machines` is not the owner's."""
     mod = _write(
         tmp_path / "runner.py",
         "def poke(engine):\n"
-        "    engine.oracle.store._phase = 'live'\n"
+        "    engine.oracle.store.machines = None\n"
         "    engine.oracle.store._period_seeded = True\n\n\n"
         "class Other:\n"
         "    def __init__(self):\n"
-        "        self._phase = 'fresh'\n",
+        "        self.machines = 'fresh'\n",
     )
     findings = arch_check.state_owner_bypasses([mod])
-    assert [f.message.split(":")[0] for f in findings] == ["rebinds store._phase directly"]
+    assert [f.message.split(":")[0] for f in findings] == ["rebinds store.machines directly"]
+
+
+def test_reaching_the_assembly_instance_outside_the_owner_module_blocks(tmp_path: Path) -> None:
+    """A dispatch on the assembly key moves the phase with none of the verb's
+    work. The key by name, or its literal as an executor call's key, is
+    flagged outside oracle_state.py; the host instances' keys are not."""
+    mod = _write(
+        tmp_path / "runner.py",
+        "from dsl41.oracle_state import ASSEMBLY_KEY\n\n\n"
+        "def poke(store, event):\n"
+        "    store.machines.dispatch(ASSEMBLY_KEY, event)\n"
+        "    store.machines.dispatch('assembly', event)\n"
+        "    store.machines.dispatch(store.host_key('h'), event)\n"
+        "    other.dispatch('host:h', event)\n",
+    )
+    findings = arch_check.state_owner_bypasses([mod])
+    assert sorted((f.line, f.message.split(":")[0]) for f in findings) == [
+        (1, "reaches the assembly instance (ASSEMBLY_KEY)"),
+        (5, "reaches the assembly instance (ASSEMBLY_KEY)"),
+        (6, "reaches the assembly instance (ASSEMBLY_KEY)"),
+    ]
+    owner = _write(tmp_path / "oracle_state.py", mod.read_text())
+    assert arch_check.state_owner_bypasses([owner]) == []
 
 
 def test_setattr_outside_the_owner_blocks(tmp_path: Path) -> None:

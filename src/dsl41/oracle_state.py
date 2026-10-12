@@ -72,6 +72,7 @@ from dsl41.state_machine import (
     Context,
     Exclusion,
     Executor,
+    Outcome,
     Region,
     Row,
     State,
@@ -82,6 +83,7 @@ from dsl41.state_machine import (
     TransitionError,
     Violation,
 )
+from dsl41.state_machine import Event as ChartEvent
 
 
 class OracleError(ValueError):
@@ -1247,93 +1249,440 @@ JOB_HOLDING: Final[StateMachine[HoldingState]] = StateMachine(
 # --------------------------------------------------------------- assembly
 #
 # How a `RuntimeState` is put together before it runs, and the open input.
-# One phase replaces four flags. A move the table does not declare is
-# refused: these moves are not inputs, so a violation has no channel to ride
-# and raises, as an anchor move does (DL-224).
+# `RUNTIME_ASSEMBLY` is a statechart (docs/statechart-engine.md). The state
+# owner holds its one instance, `ASSEMBLY_KEY`, on `RuntimeState.machines`
+# from construction: the configuration IS the assembly phase, and `_phase`
+# reads its leaf. The rows have no actions: the tier's work follows the
+# microstep (install's row assignment, commit's capacity check and revision
+# bump, seed_period's id).
+#
+# A verb the phase does not allow is a refusal row, and the row's code names
+# why. These moves are not inputs, so a refusal has no channel to ride and
+# the verb raises (`_ASSEMBLY_REFUSALS`), as an anchor move does (DL-224). A
+# phase-dependent refusal is read before any tier work. The one rule that
+# reads a fact of the call, a period below one, is the verb's own check. A
+# cell the chart has no row for is a gap: a `StatechartError`, which stops
+# the tier (statechart-engine ss5). The chart records no violations.
 
 type AssemblyPhase = Literal[
     "fresh", "installed", "genesis_input", "genesis", "constructed", "seeded", "input", "live"
 ]
 #: the phases with an input open
 _OPEN: Final[frozenset[AssemblyPhase]] = frozenset({"genesis_input", "input"})
+#: The key of the assembly instance on the state owner's executor.
+ASSEMBLY_KEY: Final = "assembly"
 
-_INSTALL: Final = Transition[AssemblyPhase](
-    "runtime_assembly.01",
-    frozenset({"fresh"}),
-    "install",
-    "installed",
-    guard="nothing installed, committed or seeded",
-    effect="carried rows land verbatim, revisions included",
-    cite="period-model ss7",
-)
-_BEGIN_GENESIS: Final = Transition[AssemblyPhase](
-    "runtime_assembly.02",
-    frozenset({"fresh", "installed", "genesis"}),
-    "begin_input",
-    "genesis_input",
-    guard="construction is not finished",
-    effect="open the genesis seed's input",
-    cite="DL-87",
-)
-_COMMIT_GENESIS: Final = Transition[AssemblyPhase](
-    "runtime_assembly.03",
-    frozenset({"genesis_input"}),
-    "commit_input",
-    "genesis",
-    effect="one revision per changed entity",
-    cite="DL-87",
-)
-_FINISH_GENESIS: Final = Transition[AssemblyPhase](
-    "runtime_assembly.04",
-    frozenset({"fresh", "installed", "genesis"}),
-    "finish_genesis",
-    "constructed",
-    guard="once; not seeded",
-    effect="the genesis seed is not an input to the seed latch",
-    cite="DL-132",
-)
-_SEED_PERIOD: Final = Transition[AssemblyPhase](
-    "runtime_assembly.05",
-    frozenset({"fresh", "installed", "constructed"}),
-    "seed_period",
-    "seeded",
-    guard="the period is 1 or more",
-    effect="set the period id",
-    cite="period-model ss3.5, DL-132",
-)
-_BEGIN_INPUT: Final = Transition[AssemblyPhase](
-    "runtime_assembly.06",
-    frozenset({"constructed", "seeded", "live"}),
-    "begin_input",
-    "input",
-    effect="drop orphan violations; snapshot on first touch",
-    cite="DL-87, concurrency-model ss3",
-)
-_COMMIT_INPUT: Final = Transition[AssemblyPhase](
-    "runtime_assembly.07",
-    frozenset({"input"}),
-    "commit_input",
-    "live",
-    effect="check capacity; one revision per changed entity",
-    cite="DL-87, DL-120",
-)
+#: The events of `runtime_assembly`: the state owner's verbs.
+INSTALL: Final = "install"
+BEGIN_INPUT: Final = "begin_input"
+COMMIT_INPUT: Final = "commit_input"
+FINISH_GENESIS: Final = "finish_genesis"
+SEED_PERIOD: Final = "seed_period"
 
-RUNTIME_ASSEMBLY: Final[StateMachine[AssemblyPhase]] = StateMachine(
+#: What the tier raises for each refusal code: the class and the text.
+#: `{phase}` is the phase the verb met. A code with no entry here is a
+#: disagreement between the chart and the tier, never a borrowed sentence.
+_ASSEMBLY_REFUSALS: Final[dict[str, tuple[type[ValueError], str]]] = {
+    "install_on_used_state": (
+        ValueError,
+        "install on a used state: carried rows are assembly's first act, and a"
+        " live state advances through its own inputs alone (period-model ss7)",
+    ),
+    "input_already_open": (OracleError, "input already open: inputs do not nest"),
+    "no_input_open": (
+        OracleError,
+        "commit_input in assembly phase {phase}: {phase} is not a source of runtime_assembly.07",
+    ),
+    "inside_genesis_input": (
+        OracleError,
+        "finish_genesis in assembly phase {phase}: {phase} is not a source of runtime_assembly.04",
+    ),
+    "construction_finished": (ValueError, "finish_genesis twice: construction happens once"),
+    "construction_after_seed": (
+        ValueError,
+        "finish_genesis after seed_period: construction comes first",
+    ),
+    "seed_inside_input": (ValueError, "seed_period inside an input: assembly precedes inputs"),
+    "seed_on_used_state": (
+        ValueError,
+        "seed_period on a used state: seeding is assembly's first act, and a"
+        " live state never moves its period (I2)",
+    ),
+}
+
+#: A row has one source, so a move from several phases is one row per phase:
+#: the first phase keeps the old table's id and the others follow (.08-.15).
+#: Every phase by verb has a row: the rest are refusals (.16-.40), so a
+#: missing row is a gap, never a silent refusal.
+RUNTIME_ASSEMBLY: Final = Statechart(
     name="runtime_assembly",
-    states=frozenset(
-        {"fresh", "installed", "genesis_input", "genesis", "constructed", "seeded", "input", "live"}
+    root=State(
+        "runtime_assembly",
+        regions=(
+            Region(
+                "phase",
+                "fresh",
+                (
+                    State("fresh"),
+                    State("installed"),
+                    State("genesis_input"),
+                    State("genesis"),
+                    State("constructed"),
+                    State("seeded"),
+                    State("input"),
+                    State("live"),
+                ),
+            ),
+        ),
     ),
-    initial="fresh",
-    finals=frozenset(),
-    transitions=(
-        _INSTALL,
-        _BEGIN_GENESIS,
-        _COMMIT_GENESIS,
-        _FINISH_GENESIS,
-        _SEED_PERIOD,
-        _BEGIN_INPUT,
-        _COMMIT_INPUT,
+    rows=(
+        Row(
+            "runtime_assembly.01",
+            "fresh",
+            INSTALL,
+            "installed",
+            cite="period-model ss7",
+            note="Nothing is installed, committed or seeded. Carried rows land verbatim, revisions included.",
+        ),
+        Row(
+            "runtime_assembly.02",
+            "fresh",
+            BEGIN_INPUT,
+            "genesis_input",
+            cite="DL-87",
+            note="Construction is not finished. Open the genesis seed's input.",
+        ),
+        Row(
+            "runtime_assembly.03",
+            "genesis_input",
+            COMMIT_INPUT,
+            "genesis",
+            cite="DL-87",
+            note="One revision per changed entity.",
+        ),
+        Row(
+            "runtime_assembly.04",
+            "fresh",
+            FINISH_GENESIS,
+            "constructed",
+            cite="DL-132",
+            note="Construction ends. The genesis seed is not an input to the seed latch.",
+        ),
+        Row(
+            "runtime_assembly.05",
+            "fresh",
+            SEED_PERIOD,
+            "seeded",
+            cite="period-model ss3.5, DL-132",
+            note="Set the period id. A period below one is the verb's own check.",
+        ),
+        Row(
+            "runtime_assembly.06",
+            "constructed",
+            BEGIN_INPUT,
+            "input",
+            cite="DL-87, concurrency-model ss3",
+            note="Drop orphan violations. Snapshot on first touch.",
+        ),
+        Row(
+            "runtime_assembly.07",
+            "input",
+            COMMIT_INPUT,
+            "live",
+            cite="DL-87, DL-120",
+            note="Check capacity. One revision per changed entity.",
+        ),
+        Row(
+            "runtime_assembly.08",
+            "installed",
+            BEGIN_INPUT,
+            "genesis_input",
+            cite="DL-87",
+            note="As runtime_assembly.02.",
+        ),
+        Row(
+            "runtime_assembly.09",
+            "genesis",
+            BEGIN_INPUT,
+            "genesis_input",
+            cite="DL-87",
+            note="As runtime_assembly.02.",
+        ),
+        Row(
+            "runtime_assembly.10",
+            "installed",
+            FINISH_GENESIS,
+            "constructed",
+            cite="DL-132",
+            note="As runtime_assembly.04.",
+        ),
+        Row(
+            "runtime_assembly.11",
+            "genesis",
+            FINISH_GENESIS,
+            "constructed",
+            cite="DL-132",
+            note="As runtime_assembly.04.",
+        ),
+        Row(
+            "runtime_assembly.12",
+            "installed",
+            SEED_PERIOD,
+            "seeded",
+            cite="period-model ss3.5, DL-132",
+            note="As runtime_assembly.05.",
+        ),
+        Row(
+            "runtime_assembly.13",
+            "constructed",
+            SEED_PERIOD,
+            "seeded",
+            cite="period-model ss3.5, DL-132",
+            note="As runtime_assembly.05.",
+        ),
+        Row(
+            "runtime_assembly.14",
+            "seeded",
+            BEGIN_INPUT,
+            "input",
+            cite="DL-87, concurrency-model ss3",
+            note="As runtime_assembly.06.",
+        ),
+        Row(
+            "runtime_assembly.15",
+            "live",
+            BEGIN_INPUT,
+            "input",
+            cite="DL-87, concurrency-model ss3",
+            note="As runtime_assembly.06.",
+        ),
+        Row(
+            "runtime_assembly.16",
+            "installed",
+            INSTALL,
+            kind="refusal",
+            code="install_on_used_state",
+            cite="period-model ss7",
+            note="Carried rows are assembly's first act: only a fresh state installs them.",
+        ),
+        Row(
+            "runtime_assembly.17",
+            "genesis_input",
+            INSTALL,
+            kind="refusal",
+            code="install_on_used_state",
+            cite="period-model ss7",
+            note="Carried rows are assembly's first act: only a fresh state installs them.",
+        ),
+        Row(
+            "runtime_assembly.18",
+            "genesis",
+            INSTALL,
+            kind="refusal",
+            code="install_on_used_state",
+            cite="period-model ss7",
+            note="Carried rows are assembly's first act: only a fresh state installs them.",
+        ),
+        Row(
+            "runtime_assembly.19",
+            "constructed",
+            INSTALL,
+            kind="refusal",
+            code="install_on_used_state",
+            cite="period-model ss7",
+            note="Carried rows are assembly's first act: only a fresh state installs them.",
+        ),
+        Row(
+            "runtime_assembly.20",
+            "seeded",
+            INSTALL,
+            kind="refusal",
+            code="install_on_used_state",
+            cite="period-model ss7",
+            note="Carried rows are assembly's first act: only a fresh state installs them.",
+        ),
+        Row(
+            "runtime_assembly.21",
+            "input",
+            INSTALL,
+            kind="refusal",
+            code="install_on_used_state",
+            cite="period-model ss7",
+            note="Carried rows are assembly's first act: only a fresh state installs them.",
+        ),
+        Row(
+            "runtime_assembly.22",
+            "live",
+            INSTALL,
+            kind="refusal",
+            code="install_on_used_state",
+            cite="period-model ss7",
+            note="Carried rows are assembly's first act: only a fresh state installs them.",
+        ),
+        Row(
+            "runtime_assembly.23",
+            "fresh",
+            COMMIT_INPUT,
+            kind="refusal",
+            code="no_input_open",
+            cite="DL-87, DL-293",
+            note="A commit needs an input open.",
+        ),
+        Row(
+            "runtime_assembly.24",
+            "installed",
+            COMMIT_INPUT,
+            kind="refusal",
+            code="no_input_open",
+            cite="DL-87, DL-293",
+            note="A commit needs an input open.",
+        ),
+        Row(
+            "runtime_assembly.25",
+            "genesis",
+            COMMIT_INPUT,
+            kind="refusal",
+            code="no_input_open",
+            cite="DL-87, DL-293",
+            note="A commit needs an input open.",
+        ),
+        Row(
+            "runtime_assembly.26",
+            "constructed",
+            COMMIT_INPUT,
+            kind="refusal",
+            code="no_input_open",
+            cite="DL-87, DL-293",
+            note="A commit needs an input open.",
+        ),
+        Row(
+            "runtime_assembly.27",
+            "seeded",
+            COMMIT_INPUT,
+            kind="refusal",
+            code="no_input_open",
+            cite="DL-87, DL-293",
+            note="A commit needs an input open.",
+        ),
+        Row(
+            "runtime_assembly.28",
+            "live",
+            COMMIT_INPUT,
+            kind="refusal",
+            code="no_input_open",
+            cite="DL-87, DL-293",
+            note="A commit needs an input open.",
+        ),
+        Row(
+            "runtime_assembly.29",
+            "genesis_input",
+            BEGIN_INPUT,
+            kind="refusal",
+            code="input_already_open",
+            cite="DL-87",
+            note="Inputs do not nest.",
+        ),
+        Row(
+            "runtime_assembly.30",
+            "input",
+            BEGIN_INPUT,
+            kind="refusal",
+            code="input_already_open",
+            cite="DL-87",
+            note="Inputs do not nest.",
+        ),
+        Row(
+            "runtime_assembly.31",
+            "constructed",
+            FINISH_GENESIS,
+            kind="refusal",
+            code="construction_finished",
+            cite="DL-132",
+            note="Construction ends once: a second call would launder a used state back to fresh.",
+        ),
+        Row(
+            "runtime_assembly.32",
+            "seeded",
+            FINISH_GENESIS,
+            kind="refusal",
+            code="construction_after_seed",
+            cite="DL-132",
+            note="Construction comes before the seed.",
+        ),
+        Row(
+            "runtime_assembly.33",
+            "genesis_input",
+            FINISH_GENESIS,
+            kind="refusal",
+            code="inside_genesis_input",
+            cite="DL-87, DL-293",
+            note="Construction ends after the genesis input commits.",
+        ),
+        Row(
+            "runtime_assembly.34",
+            "input",
+            FINISH_GENESIS,
+            kind="refusal",
+            code="construction_finished",
+            cite="DL-132",
+            note="Construction ends once: a second call would launder a used state back to fresh.",
+        ),
+        Row(
+            "runtime_assembly.35",
+            "live",
+            FINISH_GENESIS,
+            kind="refusal",
+            code="construction_finished",
+            cite="DL-132",
+            note="Construction ends once: a second call would launder a used state back to fresh.",
+        ),
+        Row(
+            "runtime_assembly.36",
+            "genesis_input",
+            SEED_PERIOD,
+            kind="refusal",
+            code="seed_inside_input",
+            cite="DL-132",
+            note="Assembly precedes inputs.",
+        ),
+        Row(
+            "runtime_assembly.37",
+            "genesis",
+            SEED_PERIOD,
+            kind="refusal",
+            code="seed_on_used_state",
+            cite="period-model ss3.5, DL-132",
+            note="Seeding is assembly's first act: a live state never moves its period.",
+        ),
+        Row(
+            "runtime_assembly.38",
+            "seeded",
+            SEED_PERIOD,
+            kind="refusal",
+            code="seed_on_used_state",
+            cite="period-model ss3.5, DL-132",
+            note="Seeding is assembly's first act: a live state never moves its period.",
+        ),
+        Row(
+            "runtime_assembly.39",
+            "input",
+            SEED_PERIOD,
+            kind="refusal",
+            code="seed_inside_input",
+            cite="DL-132",
+            note="Assembly precedes inputs.",
+        ),
+        Row(
+            "runtime_assembly.40",
+            "live",
+            SEED_PERIOD,
+            kind="refusal",
+            code="seed_on_used_state",
+            cite="period-model ss3.5, DL-132",
+            note="Seeding is assembly's first act: a live state never moves its period.",
+        ),
     ),
+    clock="logical",
 )
 
 
@@ -1345,7 +1694,7 @@ RUNTIME_ASSEMBLY: Final[StateMachine[AssemblyPhase]] = StateMachine(
 # host's state; `HostRuntime.state` is its projection into the row, which
 # the tier writes from the active leaf after the microstep. The rows are
 # enough to rebuild the executor, so every place that rebuilds the rows
-# rebuilds it from them (`host_machines`): a fork, an install, the gate's
+# rebuilds it from them (`rebuild_machines`): a fork, an install, the gate's
 # scratch read of the chart, and a test's witness (`witness_host`). A state
 # write that no microstep made raises a `StatechartError`.
 #
@@ -1384,7 +1733,7 @@ class HostData:
 
 def host_configuration(state: HostState) -> frozenset[str]:
     """The configuration a host row's state projects from: its leaf and the
-    states above it. What `host_machines` restores an instance into."""
+    states above it. What `rebuild_machines` restores an instance into."""
     if state in ("active", "passive"):
         return frozenset({"host", "routed", state})
     return frozenset({"host", state})
@@ -1696,10 +2045,13 @@ class RuntimeState:
         #: the ss0 precondition check and the read verbs are all machinery
         #: that already exists here and works on namespaced keys.
         self._hosts: dict[str, HostRuntime] = {}
-        #: the state owner's own executor (statechart-engine ss11): one `HOST`
-        #: instance per host row. Rebuilt from the rows wherever the rows are
-        #: (`host_machines`); the engine's executor is the engine tier's.
+        #: the state owner's own executor (statechart-engine ss11): the
+        #: `RUNTIME_ASSEMBLY` instance, and one `HOST` instance per host row.
+        #: Rebuilt from the phase and the rows wherever they are
+        #: (`rebuild_machines`); the engine's executor is the engine tier's.
         self.machines = Executor()
+        self.machines.start(ASSEMBLY_KEY, RUNTIME_ASSEMBLY)
+        self.machines.run()
         self._timers: list[tuple[datetime, int, Event]] = []  # heap of (due, token, ev)
         self._timer_seq = 0
         #: which period this state machine is running (period-model ss3.5,
@@ -1708,11 +2060,6 @@ class RuntimeState:
         #: `start_period` at its actual start. Not per-input state: a period
         #: opens in a new state built over the carried rows (`Oracle`).
         self._period_id: int = 1
-        #: the `runtime_assembly` phase: how far assembly has come, and
-        #: whether an input is open. Seed-versus-advance is EXPLICIT, never
-        #: inferred from the rows: `seed_period` is legal exactly once,
-        #: before any committed input.
-        self._phase: AssemblyPhase = "fresh"
         #: DL-120: bucket key -> units PERMANENTLY spent (SEM-16 depletion,
         #: and `never`/unmet-`success` holds a terminal transition kept). The
         #: held half lives on the rows; this half belongs to no row, which is
@@ -1732,19 +2079,30 @@ class RuntimeState:
         #: drain. `InputBatch` drains it; `begin_input` drops orphans.
         self._violations: list[tuple[str, Violation]] = []
 
+    @property
+    def _phase(self) -> AssemblyPhase:
+        """The `runtime_assembly` phase: how far assembly has come, and
+        whether an input is open. It is the leaf of the assembly instance's
+        configuration, so nothing else holds it. Seed-versus-advance is
+        EXPLICIT, never inferred from the rows: `seed_period` is legal exactly
+        once, before any committed input."""
+        (leaf,) = self.machines.active(ASSEMBLY_KEY) - {RUNTIME_ASSEMBLY.root.name}
+        return cast(AssemblyPhase, leaf)
+
     def fork(self) -> RuntimeState:
         """An independent copy to dry-apply one input on (concurrency-model
         ss4). Shallow: rows are frozen and a write replaces a row, so copying
         each map and the heap list keeps every write on the copy. Heap events
         are shared; no verb changes one in place. The violation channel starts
         empty: an orphan must not refuse the input being dry-applied. The
-        twin's executor is its own, restored from the twin's host rows, so a
-        dispatch on the fork never reaches this one's instances."""
+        twin's executor is its own, restored from the source's phase and the
+        twin's host rows, so a dispatch on the fork never reaches this one's
+        instances."""
         twin = copy.copy(self)
         twin._jobs = dict(self._jobs)
         twin._globals = dict(self._globals)
         twin._hosts = dict(self._hosts)
-        twin.machines = twin.host_machines()
+        twin.machines = twin.rebuild_machines()  # the source's phase, restored
         twin._timers = list(self._timers)
         twin._consumed = dict(self._consumed)
         twin._snapshots = dict(self._snapshots)
@@ -1905,11 +2263,12 @@ class RuntimeState:
         ONE input and share its revision, which is what makes `expect`
         checkable -- a client that read revision 12 must be invalidated by
         the whole of the next input, not by its first transition."""
-        if self._phase in _OPEN:
-            raise OracleError("input already open: inputs do not nest")
-        self._drop_orphan_violations()
-        constructing = self._phase in _BEGIN_GENESIS.source
-        self._assemble(_BEGIN_GENESIS if constructing else _BEGIN_INPUT)
+        if self._violations:
+            # a refusal comes before the orphans are dropped; with none pending the
+            # drop is a no-op and the dispatch alone refuses
+            self._read_assembly(BEGIN_INPUT)
+            self._drop_orphan_violations()
+        self._assemble(BEGIN_INPUT)
         self._snapshots = {}
 
     def _drop_orphan_violations(self) -> None:
@@ -1918,10 +2277,12 @@ class RuntimeState:
         own: the Oracle's genesis seed, classify's seeding, the executor
         seed) would blame this input with a trace line replay never writes.
         Strict test runs raise, so the suite proves every `take` runs inside
-        an `InputBatch`; production writes it once to stderr and drops it."""
+        an `InputBatch`; production writes it once to stderr and drops it.
+
+        Precondition: the channel holds something. `begin_input` calls this
+        only then, and the assert states it."""
         orphans = self.drain_violations()
-        if not orphans:
-            return
+        assert orphans, "_drop_orphan_violations: the channel is empty"
         if os.environ.get(STRICT_ENV):
             raise TransitionError(
                 f"{len(orphans)} transition violation(s) noted outside an InputBatch, first"
@@ -1938,9 +2299,8 @@ class RuntimeState:
         """Close the transaction and increment each CHANGED entity exactly
         once. Returns the changed keys in a stable order -- S2's outbox and
         `ApplyResult` need the list, not just the effect. Committing with no
-        input open is refused: the table has no such move."""
-        genesis = self._phase == "genesis_input"
-        self._assemble(_COMMIT_GENESIS if genesis else _COMMIT_INPUT)
+        input open is refused: the chart has no such move."""
+        self._assemble(COMMIT_INPUT)
         snapshots, self._snapshots = self._snapshots, {}
         self._check_capacity(snapshots)
         changed = [key for key, before in snapshots.items() if self._projection(key) != before]
@@ -2327,21 +2687,24 @@ class RuntimeState:
 
     def witness_host(self, host_id: str, **fields: object) -> None:
         """A test's witness (DL-293): write a host row's fields with no
-        microstep, then rebuild the executor from the rows (`host_machines`).
+        microstep, then rebuild the executor from the rows (`rebuild_machines`).
         No tier calls it. The write takes the open input's revision like any
         other."""
         key = self.host_key(host_id)
         current = self._require_host(host_id)
         self._touch(key)
         self._hosts[host_id] = HostRuntime.model_validate({**dict(current), **fields})
-        self.machines = self.host_machines()
+        self.machines = self.rebuild_machines()
 
-    def host_machines(self) -> Executor:
-        """A new executor holding one `HOST` instance per host row, each in the
-        configuration its row's state projects (statechart-engine ss11). The
-        rows are enough to rebuild it: a fork, an install and the gate's
-        scratch read of the chart build theirs here, and no action runs."""
+    def rebuild_machines(self) -> Executor:
+        """A new executor holding the assembly instance in the phase the store
+        is in, and one `HOST` instance per host row, each in the configuration
+        its row's state projects (statechart-engine ss11). The phase and the
+        rows are enough to rebuild it: a fork, an install, a test's witness and
+        the gate's scratch read of the chart build theirs here, and no action
+        runs."""
         machines = Executor()
+        machines.restore(ASSEMBLY_KEY, RUNTIME_ASSEMBLY, self.machines.active(ASSEMBLY_KEY))
         for host_id, row in self._hosts.items():
             data = HostData(self, host_id)
             machines.restore(self.host_key(host_id), HOST, host_configuration(row.state), data)
@@ -2396,21 +2759,38 @@ class RuntimeState:
         the exact bypass the latch exists to close. Inside the genesis
         input it is refused too: construction ends after that input
         commits."""
-        if self._phase in ("constructed", "input", "live"):
-            raise ValueError("finish_genesis twice: construction happens once")
-        if self._phase == "seeded":
-            raise ValueError("finish_genesis after seed_period: construction comes first")
-        self._assemble(_FINISH_GENESIS)
+        self._assemble(FINISH_GENESIS)
 
-    def _assemble(self, t: Transition[AssemblyPhase]) -> None:
-        """Take one `runtime_assembly` move. A move the table does not
-        declare raises before the phase changes: assembly is not an input,
-        so a violation has no channel to ride (concurrency-model ss4)."""
-        new = cast(AssemblyPhase, t.target)
-        violation = RUNTIME_ASSEMBLY.take(t, self._phase, new)
-        if violation is not None:
-            raise OracleError(f"{t.trigger} in assembly phase {self._phase}: {violation.reason}")
-        self._phase = new
+    def _assemble(self, event: str) -> None:
+        """Move the assembly instance by one verb. A phase the chart refuses
+        it in raises before the phase changes: assembly is not an input, so a
+        violation has no channel to ride (concurrency-model ss4)."""
+        (outcome,) = self.machines.dispatch(ASSEMBLY_KEY, ChartEvent(event))
+        self._refuse(event, outcome)
+
+    def _read_assembly(self, event: str) -> None:
+        """The chart's answer to a verb, read with `Executor.resolve`: it
+        moves nothing. A verb with work of its own that can fail, or that must
+        not run on a refusal, reads first, so the work waits for the answer and
+        the phase moves after it."""
+        self._refuse(event, self.machines.resolve(ASSEMBLY_KEY, ChartEvent(event)))
+
+    def _refuse(self, event: str, outcome: Outcome) -> None:
+        """Raise a refusal outcome as the class and text its code declares."""
+        if not outcome.refusals:
+            return
+        code = outcome.refusals[0]
+        if code not in _ASSEMBLY_REFUSALS:
+            raise self.machines.explain(
+                StatechartError(
+                    f"{event} in assembly phase {self._phase}: the refusal code {code!r} has no"
+                    " sentence in the state owner"
+                ),
+                ASSEMBLY_KEY,
+                ChartEvent(event),
+            )
+        raised, text = _ASSEMBLY_REFUSALS[code]
+        raise raised(text.format(phase=self._phase))
 
     def install(self, carried: CarriedRows) -> None:
         """Install carried rows VERBATIM -- revisions included -- as the
@@ -2426,19 +2806,14 @@ class RuntimeState:
         The period is NOT seeded here: `finish_genesis` refuses a state
         that has already been seeded, and the constructor's own catalog
         seed still has to run over these rows. The assembler calls
-        `seed_period` after it (ss3.5's latch, DL-132). The host instances are
-        restored from the carried rows, so a carried drain is the
+        `seed_period` after it (ss3.5's latch, DL-132). The executor is
+        rebuilt from the phase and the carried rows, so a carried drain is the
         configuration the next period opens in."""
-        if self._phase != "fresh":
-            raise ValueError(
-                "install on a used state: carried rows are assembly's first act, and a"
-                " live state advances through its own inputs alone (period-model ss7)"
-            )
-        self._assemble(_INSTALL)
+        self._assemble(INSTALL)
         self._jobs = dict(carried.jobs)
         self._globals = dict(carried.globals_)
         self._hosts = dict(carried.hosts)
-        self.machines = self.host_machines()
+        self.machines = self.rebuild_machines()
         self._timers = sorted(carried.timers, key=_timer_order)
         heapq.heapify(self._timers)
         self._timer_seq = carried.timer_seq
@@ -2454,16 +2829,10 @@ class RuntimeState:
         committed input; the seal's own I2 and lineage bounds hold the
         seeded number to the lineage. A period opens in a new state over
         the carried rows, so a live state never moves its period."""
-        if self._phase in _OPEN:
-            raise ValueError("seed_period inside an input: assembly precedes inputs")
-        if self._phase not in _SEED_PERIOD.source:
-            raise ValueError(
-                "seed_period on a used state: seeding is assembly's first act, and a"
-                " live state never moves its period (I2)"
-            )
+        self._read_assembly(SEED_PERIOD)  # a refusal comes before the period is checked
         if period_id < 1:
             raise ValueError(f"seed_period({period_id}): periods count from 1 (I2)")
-        self._assemble(_SEED_PERIOD)
+        self._assemble(SEED_PERIOD)
         self._period_id = period_id
 
     def touch_host(self, host_id: str, at: datetime) -> None:

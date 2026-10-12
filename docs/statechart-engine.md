@@ -139,6 +139,13 @@ A macrostep is iterative on one executor worklist and never recursive.
 
    The executor itself does no I/O.
 
+A tier may read how an event would be selected without running it. `Executor.resolve` runs the
+selection of §3 for one instance and one event against the instance's present configuration:
+guards are evaluated, no action runs, nothing changes, and no hit is recorded. It answers neither
+the release of deferred events nor the pool ahead of the event, so it refuses an instance with a
+deferred event, and a full deferred queue is outside it. Inside a macrostep it raises
+`ReentrantDispatch` (DL-335).
+
 The executor's errors, among them `AmbiguousTransition` (§3), `ReentrantDispatch` (step 4) and
 `UnhandledEvent` (§10), subclass one base, `StatechartError`. Each is an assertion failure, not
 a fault to contain. DL-320's classification never catches it: `trial_apply` and
@@ -247,8 +254,8 @@ its instances. A process with an `Engine` has one executor for the engine tier's
 wiring builds it before the engine and hands it to the supervisor client first, then to the engine
 (DL-330). The oracle's state owner (`RuntimeState`) has its own executor, for the machines whose
 state it owns (DL-333). A fork has its own executor; a fork of the owner rebuilds it from the
-fork's rows. `ReentrantDispatch` is per executor; a call from one tier into another tier's
-executor is not re-entrance.
+source's phase and the fork's rows. `ReentrantDispatch` is per executor; a call from one tier
+into another tier's executor is not re-entrance.
 
 The oracle becomes one composite `job` machine per job, with named regions for its status, its
 flags and its holding. Its regions, its box variant and its write path through `RuntimeState`
@@ -365,6 +372,13 @@ answers an exact retry, or refuses a reused id, before any post. Replay rebuilds
 order on the resuming engine's executor. A statechart error at an attempt, a decision or the seal's
 readiness lookup stops the engine as one from the loop does, and in replay names the WAL record.
 
+`runtime_assembly` (DL-335) is the state owner's own life. Its one instance lives on the
+store's executor from construction, and the configuration is the assembly phase. A fork, an
+install and a test's witness rebuild the executor from the phase and the rows. A verb the phase
+does not allow is a refusal row with a code, read before any work of the verb; the verb raises
+the class and text it always raised. A cell with no row is a statechart error that stops the tier
+at the verb that meets it; the constructor meets the genesis cells.
+
 Acceptance per machine:
 
 - the old decision code is deleted;
@@ -377,8 +391,8 @@ Acceptance per machine:
   revision equality against the old implementation.
 
 After the pilot, `seal_boundary` (DL-327), `supervisor_process` (DL-328), `supervisor_client`
-(DL-330), `effect` (DL-331), `host` (DL-333) and `admission` (DL-334), the rest come in this
-order: `anchor_head`, `period_row`, `runtime_assembly`.
+(DL-330), `effect` (DL-331), `host` (DL-333), `admission` (DL-334) and `runtime_assembly`
+(DL-335), the rest come in this order: `anchor_head`, `period_row`.
 
 The oracle comes last. A second oracle is built beside the old one under a new old-vs-new
 harness. The same inputs go to both. The harness compares the trace, the emitted events, the
