@@ -1382,6 +1382,178 @@ def test_s11_start_enters_the_initial_configuration_and_runs_entry_actions() -> 
     assert executor.active("b") == {"boot", "ready"}
 
 
+# ---- §4 the row plan: an optimisation, never a rule
+
+PLAN_ACTIONS = logging("out_x1", "out_x2", "out_y1", "out_y2", "out_x", "in_z")
+
+
+def _plan_chart(name: str = "plan", rows: list[Row] | None = None) -> Statechart:
+    """A composite `x` of two regions beside a leaf `z`; one row leaves `x`, one a leaf."""
+    root = composite(
+        name,
+        region(
+            "main",
+            "x",
+            composite(
+                "x",
+                region("p", "x1", leaf("x1", exit="out_x1"), leaf("x2", exit="out_x2")),
+                region("q", "y1", leaf("y1", exit="out_y1"), leaf("y2", exit="out_y2")),
+                exit="out_x",
+            ),
+            leaf("z", entry="in_z"),
+        ),
+    )
+    ids = [f"{name}.{n:02d}" for n in (1, 2, 3)]
+    return chart(
+        name,
+        root,
+        rows
+        if rows is not None
+        else [
+            Row(ids[0], "x", "go", "z"),
+            Row(ids[1], "z", "back", "x"),
+            Row(ids[2], "x1", "tick", kind="internal"),
+        ],
+        actions=PLAN_ACTIONS,
+    )
+
+
+def _count_plans(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    built: list[str] = []
+    real = sm._build_plan
+
+    def counting(ix: sm._Index, row: Row) -> sm._Plan:
+        built.append(row.id)
+        return real(ix, row)
+
+    monkeypatch.setattr(sm, "_build_plan", counting)
+    return built
+
+
+def test_plan_is_built_once_per_chart_and_shared_by_executors_and_instances(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    machine = _plan_chart()
+    built = _count_plans(monkeypatch)
+    for _ in range(2):
+        executor = Executor()
+        for key in ("i", "j", "k"):
+            executor.restore(key, machine, {"plan", "x", "x1", "y1"}, data=[])
+            executor.dispatch(key, Event("tick"))
+            executor.dispatch(key, Event("go"))
+            executor.dispatch(key, Event("back"))
+            assert executor.active(key) == {"plan", "x", "x1", "y1"}
+    # `go` and `back` are the external rows, and the internal row needs no plan
+    assert sorted(built) == ["plan.01", "plan.02"]
+
+
+def test_s4_a_plan_follows_each_instances_own_configuration() -> None:
+    machine = _plan_chart()
+    executor = Executor()
+    executor.restore("a", machine, {"plan", "x", "x1", "y1"}, data=[])
+    executor.restore("b", machine, {"plan", "x", "x2", "y2"}, data=[])
+    executor.dispatch("a", Event("go"))
+    executor.dispatch("b", Event("go"))
+    assert executor.data("a") == ["out_x1", "out_y1", "out_x", "in_z"]
+    assert executor.data("b") == ["out_x2", "out_y2", "out_x", "in_z"]
+
+
+def test_plan_two_charts_of_one_shape_keep_their_own_plans(monkeypatch: pytest.MonkeyPatch) -> None:
+    first = _plan_chart()
+    second = _plan_chart()
+    assert first is not second and first.rows == second.rows
+    # the very row objects are shared, so only the chart can keep the plans apart
+    shared = _plan_chart("plan", list(first.rows))
+    twin = _plan_chart("plan", list(first.rows))
+    assert shared.rows[0] is twin.rows[0]
+    built = _count_plans(monkeypatch)
+    executor = Executor()
+    for machine in (first, second, shared, twin):
+        executor.restore(machine, machine, {"plan", "x", "x1", "y1"}, data=[])
+        executor.dispatch(machine, Event("go"))
+        executor.dispatch(machine, Event("back"))
+    assert built == ["plan.01", "plan.02"] * 4
+    plans = [sm._index(machine).plans for machine in (first, second, shared, twin)]
+    assert len({id(each) for each in plans}) == 4
+
+
+def test_plan_equals_the_live_derivation_for_its_row() -> None:
+    """Each plan against what the executor derives from a live configuration, and
+    against the states a run really enters, not against the helpers that built it."""
+    machine = _plan_chart()
+    ix = sm._index(machine)
+    live = {"plan.01": {"plan", "x", "x1", "y1"}, "plan.02": {"plan", "z"}}
+    entered = {"plan.01": ("z",), "plan.02": ("x", "x1", "y1")}
+    for row in machine.rows:
+        if row.kind != "external":
+            continue
+        plan = sm._plan(ix, row)
+        assert sm._plan(ix, row) is plan
+        assert plan.top == sm._active_child(ix, live[row.id], *plan.domain)
+        assert plan.domain == ("plan", 0)
+        assert sm._entry_of(ix, plan, row.target) == entered[row.id]
+        assert plan.leaving == (None if row.id == "plan.01" else ("z",))
+
+
+def _choice_cache_run() -> None:
+    """One external row ends in a choice of two branches; each branch's entry
+    is cached under its own target."""
+    executor = _order(
+        Row("ord.01", "a1", "go", "which", action="act"),
+        Row("ord.02", "b", "back", "a1"),
+        guards={"big": _big},
+    )
+    machine = executor._instances["o"].chart
+    executor.dispatch("o", Event("go", 10))
+    assert executor.active("o") == {"ord", "b", "b1"}
+    executor.dispatch("o", Event("back"))
+    executor.dispatch("o", Event("go", 1))
+    assert executor.active("o") == {"ord", "a", "a1"}
+    assert executor.data("o") == [
+        *("out_a1", "out_a", "act", "branch", "in_b", "in_b1"),
+        "in_a1",
+        *("out_a1", "out_a", "act", "in_a1"),
+    ]
+    entries = sm._plan(sm._index(machine), machine.rows[0]).entries
+    assert entries == {"b": ("b", "b1"), "a1": ("a", "a1")}
+
+
+def test_plan_a_choice_row_caches_each_branchs_entry_under_its_own_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _choice_cache_run()
+    real = sm._entry_of
+
+    def ignoring_the_target(ix: sm._Index, plan: sm._Plan, target: str) -> tuple[str, ...]:
+        # the first entry order built for the row serves every later target
+        return next(iter(plan.entries.values()), None) or real(ix, plan, target)
+
+    monkeypatch.setattr(sm, "_entry_of", ignoring_the_target)
+    with pytest.raises(AssertionError):
+        _choice_cache_run()
+
+
+def test_plan_cache_disabled_the_section_tests_still_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    built = _count_plans(monkeypatch)
+    monkeypatch.setattr(sm, "_plan", lambda ix, row: sm._build_plan(ix, row))
+    machine = _plan_chart()
+    executor = Executor()
+    executor.restore("i", machine, {"plan", "x", "x1", "y1"}, data=[])
+    for _ in range(3):
+        executor.dispatch("i", Event("go"))
+        executor.dispatch("i", Event("back"))
+    # nothing is kept, and every dispatch of `go` rebuilt its plan at least once
+    # (each lookup rebuilds; a dispatch makes several)
+    assert sm._index(machine).plans == {}
+    assert built.count("plan.01") >= 3
+    built.clear()
+    for test in _section_tests():
+        test()
+    assert built
+
+
 # ---- the mutant check
 
 MUTANTS: dict[str, tuple[str, Any]] = {

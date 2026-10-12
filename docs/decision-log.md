@@ -21523,3 +21523,38 @@ relitigate an entry; append a new one.
   test nits; the Codex pass found the same lost-row fault, the exclusions and the ignored row
   covering the same cells, and the card's recovery bullet contradicting DL-315. All are fixed and
   confirmed by the reviewer that raised them.
+
+- DL-332 The statechart executor plans each external row once per chart
+  (2026-10-12; src/dsl41/state_machine.py; tests/test_statechart.py)
+  WHAT. DL-331 measured the executor at about 25 microseconds for one effect's start, outcome and
+  forget against 5 for the bookkeeping it replaced, and its profile named the recomputation, on
+  every dispatch, of a row's domain, the outermost state it leaves and its target's entry path.
+  The declaration is immutable once a chart is built, so what depends on the chart and the row
+  alone is now computed once, on the chart's index: for each external row, its domain, the state it
+  leaves, that state's whole exit when it holds no regions, and the entry order of each target the
+  row has ended in; the initial entry; and the members of each region in name order, which the
+  active-child lookup reads instead of scanning the configuration. The exit order of a state that
+  holds regions still follows the live configuration, and the choice, the guards and every action
+  run on every firing as before. Plans are keyed by the row object's identity and belong to one
+  chart; a chart of the same shape has its own.
+  WHAT IT SAVES. Best of three: the bare loop of a hundred thousand start, outcome and forget on a
+  three-state chart, 17.8 to 13.0 microseconds; a WAL replay of ten thousand effects, 25.3 to 19.6
+  per effect, and of a hundred thousand, 26.6 to 21.6; one dispatch on the supervisor's lifecycle
+  chart, 14.9 to 9.5. The domain and path computations left the profile's top five.
+  CHECKS. Every existing test passes unchanged; the rendered state-machines.md is byte-identical;
+  no public name or signature moved. New tests: a plan is built once per chart and reused across
+  executors and instances; a second chart of the same shape gets its own; the live exit order of a
+  state with regions; and the cache switched off leaves the suite green, so it is an optimisation
+  only. The Codex pass compared old and new exit sets and entry traces over twenty-two
+  configurations and eight hundred and fifty-six rows and found them equal.
+  OPEN. The chart index retains every chart ever indexed, and now its plans with it; production
+  charts are module constants, so this is a test-session matter; weak-key retention is a possible
+  follow-up. Three smaller costs remain for a later pass: the step summary built on every
+  microstep, the hit recorder reading the environment on every guard and row, and the three
+  outcome tuples each firing builds.
+  REVIEW. Semantic class: one Opus reviewer, two rounds, and one Codex pass. The Opus reviewer
+  loaded the old module beside the new one and found no mismatch over a hundred thousand static
+  checks and eighty thousand dispatches; it found the entry cache's per-target key untested, a test
+  that checked the plan against the helpers that built it, a dead identity check and a pinned call
+  count. The Codex pass found no material defect and noted the chart index's retention. All are
+  fixed and confirmed by the reviewer that raised them, the last applied as it proposed.

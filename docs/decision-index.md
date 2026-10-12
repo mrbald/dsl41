@@ -343,3 +343,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-329 | The subscribe feed runs on the statechart executor; a statechart error in a control handler stops the engine with exit 7 |  |
 | DL-330 | The supervisor client runs on the statechart executor; a statechart error on its path stops the engine with exit 7 | [docs/statechart-engine.md](statechart-engine.md) |
 | DL-331 | The effect runs on the statechart executor: one instance per open effect, forgotten at its outcome | [docs/statechart-engine.md](statechart-engine.md) |
+| DL-332 | The statechart executor plans each external row once per chart |  |
