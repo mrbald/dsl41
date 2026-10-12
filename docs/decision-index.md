@@ -341,3 +341,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-327 | The seal boundary runs on the statechart executor; a statechart error in a seal stops the engine with exit 7 | [docs/blocks/seal-and-lineage.md](blocks/seal-and-lineage.md), [docs/statechart-engine.md](statechart-engine.md) |
 | DL-328 | The supervisor's lifecycle runs on the statechart executor; the fence rule has one copy | [docs/statechart-engine.md](statechart-engine.md) |
 | DL-329 | The subscribe feed runs on the statechart executor; a statechart error in a control handler stops the engine with exit 7 |  |
+| DL-330 | The supervisor client runs on the statechart executor; a statechart error on its path stops the engine with exit 7 | [docs/statechart-engine.md](statechart-engine.md) |

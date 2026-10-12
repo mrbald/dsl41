@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from dsl41.period import RuntimeProfile, StagedManifest
     from dsl41.runner import Engine
     from dsl41.runner_ledger import LeaderLock
+    from dsl41.runner_startup import Wiring
     from dsl41.seal import Seal, StagedNextPeriod
 
 
@@ -499,79 +500,103 @@ async def _offline_seal(
     staged, staged_manifest, _ = _stage_next(
         run_root, next_files, profile, permit_unknown, properties
     )
-    wiring = None
+    wiring: "Wiring | None" = None
+    #: what the body raised, so the lease's teardown does not mask it
+    failed: BaseException | None = None
     try:
-        # the OWNER's loader (DL-145): the copy this replaced dropped the
-        # JilParseError/LoweringError -> EngineError wrap, so a bundle
-        # that no longer parses left this `except EngineError` untouched
-        # and the verb exited 1 on a traceback.
-        #
-        # `permit_unknown` for `_period_catalog`'s reason: these are the
-        # exact bytes the CLOSING period ran, the gate that decided
-        # whether an unknown attribute was acceptable ran once at launch,
-        # and re-asking it here would make `dsl41 seal` refuse a root
-        # `dsl41 run` is serving.
-        catalog = load_bundle_catalog(run_root, pinned.source_bundle_hash, permit_unknown=True)
-        # DL-240: the live path's boundary check (`preflight_errors`) only
-        # ever sees the SUCCESSOR catalog (ss10.1); offline sealing resumes
-        # and dispatches the CLOSING period's own catalog first, so it is
-        # the one that needs this gate here, before any adapter is wired.
-        now = datetime.now(UTC).replace(tzinfo=None)
-        errors = preflight_errors(catalog, pinned.runtime_profile, at=now)
-        if errors:
-            return refuse(
-                f"{run_root}: the closing period's catalog fails preflight under"
-                f" this build: {'; '.join(errors)}; drain and recreate"
-                " the estate (DL-240)"
+        try:
+            # the OWNER's loader (DL-145): the copy this replaced dropped the
+            # JilParseError/LoweringError -> EngineError wrap, so a bundle
+            # that no longer parses left this `except EngineError` untouched
+            # and the verb exited 1 on a traceback.
+            #
+            # `permit_unknown` for `_period_catalog`'s reason: these are the
+            # exact bytes the CLOSING period ran, the gate that decided
+            # whether an unknown attribute was acceptable ran once at launch,
+            # and re-asking it here would make `dsl41 seal` refuse a root
+            # `dsl41 run` is serving.
+            catalog = load_bundle_catalog(run_root, pinned.source_bundle_hash, permit_unknown=True)
+            # DL-240: the live path's boundary check (`preflight_errors`) only
+            # ever sees the SUCCESSOR catalog (ss10.1); offline sealing resumes
+            # and dispatches the CLOSING period's own catalog first, so it is
+            # the one that needs this gate here, before any adapter is wired.
+            now = datetime.now(UTC).replace(tzinfo=None)
+            errors = preflight_errors(catalog, pinned.runtime_profile, at=now)
+            if errors:
+                return refuse(
+                    f"{run_root}: the closing period's catalog fails preflight under"
+                    f" this build: {'; '.join(errors)}; drain and recreate"
+                    " the estate (DL-240)"
+                )
+            wiring = await wire_from_profile(
+                run_root,
+                catalog,
+                pinned.runtime_profile,
+                start=now,
             )
-        wiring = await wire_from_profile(
-            run_root,
-            catalog,
-            pinned.runtime_profile,
-            start=now,
+            engine = await resume_run(
+                catalog,
+                run_root,
+                clock=RealClock(),
+                adapters=wiring.adapters,
+                scheduler=wiring.scheduler,
+                hold_open=True,
+                supervisor=wiring.client,
+                deadman_s=wiring.deadman_s,
+                lock=lock,
+                anchor_dir=estate_anchor,
+                machines=wiring.machines,
+            )
+        except EngineError as exc:
+            return refuse(exc)
+        retry = _committed_boundary(run_root, request_id)
+        request = SealRequest(
+            # ss2.2's retry route: a retry carries the envelope its ORIGINAL
+            # attempt carried, because the stored decision is fingerprinted over
+            # it. Composing from the engine's CURRENT header -- which the resume
+            # above has just moved on to the next period -- names a different
+            # command, and offline that does not merely fail to deduplicate:
+            # nothing between here and the cutoff would recognise the retry, so
+            # it would close a SECOND period (DL-151).
+            baseline_id=retry.baseline_id if retry is not None else engine.baseline_id,
+            epoch=retry.epoch if retry is not None else engine.epoch,
+            request_id=request_id or str(uuid.uuid4()),
+            next_period=staged,
+            stage_digest=staged.stage_digest,
+            force_seal=force_seal,
+            claimed_actor=actor,
         )
-        engine = await resume_run(
-            catalog,
-            run_root,
-            clock=RealClock(),
-            adapters=wiring.adapters,
-            scheduler=wiring.scheduler,
-            hold_open=True,
-            supervisor=wiring.client,
-            deadman_s=wiring.deadman_s,
-            lock=lock,
-            anchor_dir=estate_anchor,
-        )
-    except EngineError as exc:
-        code = refuse(exc)
+        answered = _answer_from_committed(retry, request, run_root, estate_anchor)
+        if answered is not None:
+            await _close_engine(engine)
+            return answered
+        return await _drive_boundary(engine, request, run_root, estate_anchor)
+    except BaseException as error:
+        failed = error
+        raise
+    finally:
+        # the lease goes back on every way out after the wiring (DL-145),
+        # a statechart error from the resume included
         if wiring is not None:
-            await wiring.close()
-        return code
-    retry = _committed_boundary(run_root, request_id)
-    request = SealRequest(
-        # ss2.2's retry route: a retry carries the envelope its ORIGINAL
-        # attempt carried, because the stored decision is fingerprinted over
-        # it. Composing from the engine's CURRENT header -- which the resume
-        # above has just moved on to the next period -- names a different
-        # command, and offline that does not merely fail to deduplicate:
-        # nothing between here and the cutoff would recognise the retry, so
-        # it would close a SECOND period (DL-151).
-        baseline_id=retry.baseline_id if retry is not None else engine.baseline_id,
-        epoch=retry.epoch if retry is not None else engine.epoch,
-        request_id=request_id or str(uuid.uuid4()),
-        next_period=staged,
-        stage_digest=staged.stage_digest,
-        force_seal=force_seal,
-        claimed_actor=actor,
-    )
-    answered = _answer_from_committed(retry, request, run_root, estate_anchor)
-    if answered is not None:
-        await _close_engine(engine)
+            await _give_back(wiring, failed)
+
+
+async def _give_back(wiring: "Wiring", failed: BaseException | None) -> None:
+    """Return the supervisor lease and close the client. On the way out of a
+    failure the first error is the one reported: an error of the teardown's
+    own is printed once and does not replace it."""
+    from dsl41.state_machine import StatechartError
+
+    if failed is None:
         await wiring.close()
-        return answered
-    code = await _drive_boundary(engine, request, run_root, estate_anchor)
-    await wiring.close()
-    return code
+        return
+    try:
+        await wiring.close()
+    except Exception as second:  # noqa: BLE001 -- printed; the first error goes on
+        if isinstance(second, StatechartError):
+            statechart_report(second)
+        else:
+            typer.echo(f"dsl41: giving back the supervisor lease failed: {second!r}", err=True)
 
 
 def _answer_from_committed(

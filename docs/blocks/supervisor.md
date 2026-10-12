@@ -52,6 +52,7 @@ Each anchor holds the generated diagram and transition table.
 - Five failed renewals in a row: the client reports the host unreachable, once per outage, and keeps retrying; the leader marks the host unreachable ([concurrency-model §8](../concurrency-model.md#8-host-lifecycle-active-passive-quarantined-evicted); DL-210). Outcomes still resolve from the spool. The first renewal that succeeds again reports contact, which reinstates the host.
 - A dropped push: the next reply to the holder carries `pushes_dropped`, and the client re-asks `LIST` (§5 "Pushes"; DL-210).
 - A start that loses the lock exits 1. The client respawns up to three times inside its connect window (DL-210).
+- A statechart error on the client's path, its reader, renewal and LIST tasks included, is not a failed renewal: it stops the engine with exit 7 and the report ([statechart-engine §5](../statechart-engine.md#5-the-step-and-the-worklist)). Outside a run, the next request or the close raises it.
 
 ## Owning modules
 
@@ -65,6 +66,7 @@ Each anchor holds the generated diagram and transition table.
 - Lease and fencing: `test_live_lease_yields_only_to_the_token_holder`, `test_dead_holder_frees_the_lease_without_waiting_out_the_ttl`, `test_fencing_survives_a_supervisor_restart_token_reuse`, `test_mutating_verbs_require_a_token`, `test_renew_loop_reacquires_after_lease_lapse`, `test_cancelled_request_poisons_and_reconnects`.
 - Signals and shutdown: `test_signal_pid_reuse_guard_refuses_spoofed_spawn`, `test_signal_in_the_spawn_window_is_not_ready_not_a_noop`, `test_shutdown_orderly_records_signaled_never_parent_lost`, `test_shutdown_waits_for_late_spawn_record`.
 - Deadman: `test_cm10_the_deadman_fires_and_takes_its_wrappers_with_it`, `test_a_live_leaseholder_reprieves_the_deadman`, `test_a_supervisor_with_no_deadman_outlives_its_controller`.
+- Engine-side client: `test_every_client_event_in_every_reached_client_state_takes_a_declared_transition`, `test_a_statechart_error_in_a_background_task_stops_the_run_with_exit_7`, `test_the_offline_sealer_exits_7_when_the_client_meets_a_gap`.
 - Engine and supervisor deaths: `test_sigkill_engine_detached_survives_and_reattaches`, `test_kill_supervisor_midrun_engine_resolves_via_spool`, `test_detach_stop_sigint_then_resume_reattaches`, `test_oracle_kill_detached_terminates`.
 - Ownership and transport: `test_supervisor_signal_handlers_are_installed_before_the_socket_is_published`, `test_dl210_lock_loser_exits_one_and_can_retry`, `test_dl210_pid_guard_requires_proven_absence`, `test_dl210_nonreader_cannot_block_reaping_ping_or_shutdown`, `test_full_listen_backlog_does_not_let_client_unlink_live_socket`.
 

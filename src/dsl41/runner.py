@@ -483,6 +483,7 @@ class Engine:
         fence: Fence | None = None,
         carried: CarriedRows | None = None,
         semantics: SemanticSwitches | None = None,
+        machines: Executor | None = None,
     ) -> None:
         # SEM-35: the base zone and alias table the oracle reads a job's time
         # attributes in. The period's pinned profile when there is one, which
@@ -610,10 +611,13 @@ class Engine:
         self._seal: _PendingSeal | None = None
         #: this engine's statechart executor (statechart-engine ss11): one
         #: worklist for every instance. Its machines are `SEAL_BOUNDARY`, one
-        #: instance per seal request (DL-327), and `SUBSCRIPTION`, one
-        #: instance per subscribe feed, which the control server starts
-        #: through `machines`
-        self._machines = Executor()
+        #: instance per seal request (DL-327), `SUBSCRIPTION`, one instance
+        #: per subscribe feed, which the control server starts through
+        #: `machines`, and `SUPERVISOR_CLIENT`, the detached run's client. The
+        #: client is built before the engine, so the wiring makes the
+        #: process's executor and hands it to both; an engine given none
+        #: makes its own
+        self._machines = machines if machines is not None else Executor()
         #: the index of an admitted attempt that is not yet fully applied:
         #: its admission line, decision, outbox entries and answer. Set when
         #: the frontier admits it and cleared when `_admit_and_apply`

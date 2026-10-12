@@ -855,6 +855,7 @@ async def _serve_run(
                     # with it, which is how a boundary that staged a new
                     # identity opened under the old one (DL-151)
                     declared=profile,
+                    machines=wiring.machines,
                 )
             else:
                 engine = start_run(
@@ -869,6 +870,7 @@ async def _serve_run(
                     staged=staged,
                     anchor_dir=anchor_dir,
                     launched=profile,
+                    machines=wiring.machines,
                 )
         except StatechartError as exc:
             # a replayed input that meets one: the report names the WAL input,
@@ -950,6 +952,11 @@ async def _serve_run(
         # loop does (statechart-engine ss5): the handler cancels the loop at
         # once, so it takes no further step, and the run wakes on `failed`
         server.on_statechart_error = loop_task.cancel
+        if client is not None:
+            # the same stop for one the supervisor client's background tasks
+            # meet: the reader, the renewal and the LIST net. One met before
+            # the loop began is handed over now
+            client.on_statechart_error = server.stop_on
         stop_task = asyncio.ensure_future(stop.wait())
         failed_task = asyncio.ensure_future(server.failed.wait())
         ui_task: asyncio.Task[Any] | None = None
@@ -1042,25 +1049,37 @@ async def _serve_run(
                 await server.close()
             finally:
                 await engine.shutdown()
-        if server.statechart_error is not None and code != EXIT_STATECHART_ERROR:
-            # recorded while a loop outcome took precedence, or met while the
-            # server closed (a feed's last post, at shutdown). A crash or a
-            # clean stop becomes 7; a halt the engine chose keeps its code
-            statechart_report(server.statechart_error)
-            if code in (0, 1):
-                code = EXIT_STATECHART_ERROR
-            else:
-                typer.echo(
-                    f"{STATECHART_LOG_PREFIX}: the engine had already stopped with exit {code}",
-                    err=True,
-                )
-        if sealed:
-            say_next(run_root, anchor_dir)
-        # a client exists exactly when the profile said detached; the lease
-        # itself is given back in the one teardown below
-        note = _reattach_note(reattach, run_root, detached=client is not None, code=code)
-        if note is not None:
-            typer.echo(note)
+        # the lease goes back before the run's error is judged: the client's
+        # reader is still live during RELEASE and close, and a statechart
+        # error it meets there reaches the server like any other. Taken off
+        # `wiring` first, so the teardown below does not give it back twice
+        returning, wiring = wiring, None
+        try:
+            await returning.close()
+        finally:
+            # judged, and the next step named, whatever the return raised: a
+            # raise from it still leaves afterwards, and the CLI wrapper reports
+            # a statechart error as exit 7
+            if server.statechart_error is not None and code != EXIT_STATECHART_ERROR:
+                # recorded while a loop outcome took precedence, met while the
+                # server closed (a feed's last post, at shutdown), or met while
+                # the lease went back. A crash or a clean stop becomes 7; a halt
+                # the engine chose keeps its code
+                statechart_report(server.statechart_error)
+                if code in (0, 1):
+                    code = EXIT_STATECHART_ERROR
+                else:
+                    typer.echo(
+                        f"{STATECHART_LOG_PREFIX}: the engine had already stopped with exit {code}",
+                        err=True,
+                    )
+            if sealed:
+                say_next(run_root, anchor_dir)
+            # a client exists exactly when the profile said detached; the lease
+            # was given back above
+            note = _reattach_note(reattach, run_root, detached=client is not None, code=code)
+            if note is not None:
+                typer.echo(note)
         return code
     finally:
         # EACH step guaranteed, whatever the one before it did (DL-145).

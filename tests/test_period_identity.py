@@ -2001,7 +2001,9 @@ def test_serve_wires_every_adapter_window_from_the_pinned_profile(
     class _FakeSupervisorClient:
         supervisor_deadman_s = None
 
-        def __init__(self, run_root: Path, deadman_s: float | None = None) -> None:
+        def __init__(
+            self, run_root: Path, deadman_s: float | None = None, machines: object = None
+        ) -> None:
             self.run_root = run_root
             self.deadman_s = deadman_s
             clients.append(self)
@@ -2088,7 +2090,9 @@ def test_an_early_refusal_after_the_wiring_gives_back_the_lease_and_the_lock(
     class _FakeSupervisorClient:
         supervisor_deadman_s = None
 
-        def __init__(self, run_root: Path, deadman_s: float | None = None) -> None:
+        def __init__(
+            self, run_root: Path, deadman_s: float | None = None, machines: object = None
+        ) -> None:
             self.deadman_s = deadman_s
 
         async def ensure_running(self) -> None:
@@ -2218,7 +2222,9 @@ def test_a_lease_release_that_raises_still_closes_the_journal_and_the_lock(
     class _FakeSupervisorClient:
         supervisor_deadman_s = None
 
-        def __init__(self, run_root: Path, deadman_s: float | None = None) -> None:
+        def __init__(
+            self, run_root: Path, deadman_s: float | None = None, machines: object = None
+        ) -> None:
             self.deadman_s = deadman_s
 
         async def ensure_running(self) -> None:
@@ -2313,7 +2319,9 @@ def test_wire_from_profile_gives_back_a_lease_it_cannot_finish_wiring(
     class _FakeSupervisorClient:
         supervisor_deadman_s = None
 
-        def __init__(self, run_root: Path, deadman_s: float | None = None) -> None:
+        def __init__(
+            self, run_root: Path, deadman_s: float | None = None, machines: object = None
+        ) -> None:
             self.deadman_s = deadman_s
 
         async def ensure_running(self) -> None:

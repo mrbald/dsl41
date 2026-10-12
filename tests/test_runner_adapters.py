@@ -789,15 +789,15 @@ def test_start_tokens_match_ticks_exact_only_and_mixed_forms_never_match() -> No
 
 
 class _ClientWire:
-    """In-memory transport with the real request lock and reply/push reader."""
+    """In-memory transport with the real request lock and reply/push reader,
+    installed as a connection the socket accepted: the client posts `connect`
+    and starts a new epoch on it."""
 
     def __init__(self, client: SupervisorClient) -> None:
         self.client = client
         self.stream = asyncio.StreamReader()
         self.sent: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-        client._writer = self  # type: ignore[assignment]
-        client.lost = asyncio.Event()
-        client._reader_task = asyncio.create_task(client._reader(self.stream, client.lost))
+        client._new_epoch(self.stream, self)  # type: ignore[arg-type]
 
     def write(self, data: bytes) -> None:
         self.sent.put_nowait(json.loads(data))
@@ -1305,9 +1305,10 @@ def test_dl210_close_during_connect_never_publishes_a_new_reader(tmp_path: Path,
 # ------------------------------------- the client's connection and renewal
 
 
-def test_client_phase_reads_the_transport(tmp_path: Path) -> None:
-    """supervisor_client's phase is derived: closed wins, then a set `lost`
-    event, then whether a writer is held."""
+def test_client_phase_is_the_chart_s_leaf(tmp_path: Path) -> None:
+    """supervisor_client's phase is the active leaf of the client's chart
+    instance, which the transport's facts move: a connection accepted, EOF on
+    it, and close."""
 
     async def scenario() -> list[str]:
         client = SupervisorClient(tmp_path)
@@ -1327,9 +1328,10 @@ def test_client_phase_reads_the_transport(tmp_path: Path) -> None:
 def test_a_request_cancelled_after_its_connection_was_lost_still_poisons(
     tmp_path: Path,
 ) -> None:
-    """supervisor_client.04 from lost. The reader fails the pending request,
-    and the request is cancelled before it resumes: it must still drop the
-    writer, so nothing more is written to a stream whose state is unknown."""
+    """supervisor_client.06, a cancel in lost. The reader fails the pending
+    request, and the request is cancelled before it resumes: it must still
+    drop the writer, so nothing more is written to a stream whose state is
+    unknown."""
 
     async def scenario() -> tuple[str, bool]:
         client = SupervisorClient(tmp_path)

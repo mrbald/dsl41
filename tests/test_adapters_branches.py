@@ -898,9 +898,11 @@ def test_cancelling_a_request_before_its_reply_fails_the_pending_future(tmp_path
 
     client = SupervisorClient(tmp_path)
     writer = _StuckDrain()
-    client._writer = writer  # type: ignore[assignment]
 
     async def scenario() -> BaseException | None:
+        stream = asyncio.StreamReader()
+        writer.stream = stream
+        client._new_epoch(stream, writer)  # type: ignore[arg-type]  # a connection accepted
         task = asyncio.create_task(client._request({"cmd": "PING"}, _connect=False))
         await asyncio.wait_for(entered.wait(), 3)
         pending = client._pending
@@ -916,6 +918,7 @@ def test_cancelling_a_request_before_its_reply_fails_the_pending_future(tmp_path
     assert client.lost.is_set()
     assert client._pending is None
     assert writer.closed
+    assert client.phase() == "lost"  # supervisor_client.04
 
 
 def test_poisoning_a_closed_client_with_no_writer_only_marks_it_lost(tmp_path: Path) -> None:

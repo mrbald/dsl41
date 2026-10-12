@@ -243,8 +243,10 @@ A declaration is a type. Instances are per job, per lease, per subscription, and
 variant of the job machine (§16).
 
 One executor per tier object (an `Oracle`, a `Supervisor`, an `Engine`) owns one worklist for all
-its instances. A fork has its own executor. `ReentrantDispatch` is per executor; a call from
-one tier into another tier's executor is not re-entrance.
+its instances. A process with an `Engine` has one executor: the wiring builds it before the
+engine and hands it to the supervisor client first, then to the engine (DL-330). A fork has its own
+executor. `ReentrantDispatch` is per executor; a call from one tier into another tier's executor
+is not re-entrance.
 
 The oracle becomes one composite `job` machine per job, with named regions for its status, its
 flags and its holding. Its regions, its box variant and its write path through `RuntimeState`
@@ -337,6 +339,10 @@ a statechart error that a control handler meets stops the engine as one from the
 `seal_boundary` comes third. `seal_boundary` defers nothing: an input after the cutoff refuses
 the boundary (`period-model.md` §6, DL-327).
 
+`supervisor_client` (DL-330) runs on the process's one executor, which the wiring builds before
+the engine and hands to both; the client posts nothing once closed, and a statechart error that
+its reader, renewal or LIST task meets stops the engine as one from the loop does.
+
 Acceptance per machine:
 
 - the old decision code is deleted;
@@ -348,10 +354,9 @@ Acceptance per machine:
 - for oracle-tier machines also: fork isolation, replay, seal and reopen, and per-input
   revision equality against the old implementation.
 
-After the pilot, `seal_boundary` (DL-327) and `supervisor_process` (DL-328), the rest come in
-this order:
-`supervisor_client`, `effect`, `host`, `admission`, `anchor_head`, `period_row`,
-`runtime_assembly`.
+After the pilot, `seal_boundary` (DL-327), `supervisor_process` (DL-328) and `supervisor_client`
+(DL-330), the rest come in this order:
+`effect`, `host`, `admission`, `anchor_head`, `period_row`, `runtime_assembly`.
 
 The oracle comes last. A second oracle is built beside the old one under a new old-vs-new
 harness. The same inputs go to both. The harness compares the trace, the emitted events, the

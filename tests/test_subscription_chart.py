@@ -589,7 +589,7 @@ def test_a_handler_s_statechart_error_beside_a_loop_crash_reports_both_and_tears
     def next_work(self: Engine, *args: Any) -> Any:
         if self._queue:  # the query below queued a start
             (server,) = servers
-            server._stop_on(UnhandledEvent("a handler met a gap"))
+            server.stop_on(UnhandledEvent("a handler met a gap"))
             raise RuntimeError("the loop crashed")
         return real_next(self, *args)
 

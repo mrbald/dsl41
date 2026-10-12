@@ -967,7 +967,8 @@ class Executor:
     §6). `dispatch` does both. A call while `run` is in flight raises
     `ReentrantDispatch`. An exception out of a guard or an action ends the run
     and empties the worklist; the instance stays as the failing microstep left
-    it, and the tier discards the executor.
+    it. Its configuration stays readable, and the tier dispatches nothing more
+    to that instance.
     """
 
     def __init__(self, history: int = HISTORY) -> None:
