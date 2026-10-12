@@ -346,6 +346,8 @@ class Context:
     active: frozenset[str]
     data: Any
     ancestry: tuple[Step, ...] = ()
+    #: set by `Executor.resolve`: a read, which records no hit (§5)
+    quiet: bool = False
 
     @property
     def depth(self) -> int:
@@ -803,7 +805,8 @@ def _holds(chart: Statechart, owner: str, guard: str, ctx: Context) -> bool:
     if not guard:
         return True
     held = bool(_lookup(chart.guards, guard, "guard")(ctx))
-    _hit(chart, "guard", owner, "true" if held else "false")
+    if not ctx.quiet:
+        _hit(chart, "guard", owner, "true" if held else "false")
     return held
 
 
@@ -1143,6 +1146,50 @@ class Executor:
             self._running = False
             self._current = None
 
+    def resolve(self, key: Hashable, event: Event) -> Outcome:
+        """Read how `event` would be selected for `key` as it stands, and do none of it.
+
+        The selection of §3 runs for this instance and event alone, against the
+        instance's present configuration: guards are evaluated, no action runs, the
+        configuration, the deferred queue and the history ring stay as they are, and
+        no hit is recorded. A guard that reaches into the executor meets
+        `ReentrantDispatch`, as under a dispatch. The outcome is the `kind`
+        (`fired`, `deferred` or `discarded`) with its `rows`, `ignored` and
+        `refusals`; it names no `branches` (a choice resolves as the row runs). A
+        selection error (unhandled, ambiguous) is raised with a dispatch's facts.
+
+        The read is not a forecast of a dispatch. A dispatch first releases deferred
+        events and runs the pool ahead of the event, and a full deferred queue meets
+        its overflow policy; the read answers none of that. An instance with a
+        deferred event is therefore refused, and the pool is outside the read.
+        """
+        self._idle()
+        inst = self._instance(key)
+        _check_event(inst.chart, event)
+        item = _Item(key, "event", event)
+        self._running = True
+        try:
+            if inst.deferred:
+                raise StatechartError(
+                    f"{inst.chart.name} {key!r}: a read is exact only with nothing deferred;"
+                    f" {len(inst.deferred)} deferred"
+                )
+            kind, firing, _ = self._decide(inst, item, self._context(inst, item, quiet=True))
+        except StatechartError as error:
+            if not error.facts:
+                error.facts = self._facts(error, item)
+            raise
+        finally:
+            self._running = False
+        return Outcome(
+            key,
+            event,
+            kind,
+            rows=tuple(r.id for r in firing),
+            ignored=tuple(r.id for r in firing if r.kind == "ignored"),
+            refusals=tuple(r.code for r in firing if r.kind == "refusal"),
+        )
+
     # -- reading an instance
 
     def active(self, key: Hashable) -> frozenset[str]:
@@ -1214,8 +1261,10 @@ class Executor:
         return facts
 
     @staticmethod
-    def _context(inst: _Instance, item: _Item) -> Context:
-        return Context(item.key, item.event, frozenset(inst.active), inst.data, item.ancestry)
+    def _context(inst: _Instance, item: _Item, quiet: bool = False) -> Context:
+        return Context(
+            item.key, item.event, frozenset(inst.active), inst.data, item.ancestry, quiet
+        )
 
     @staticmethod
     def _stale(inst: _Instance, event: Event) -> bool:
@@ -1240,15 +1289,28 @@ class Executor:
             if row is None:
                 raise UnhandledEvent(f"{chart.name} {item.key!r}: {item.name} completed")
             return self._fire(inst, item, [row], "fired")
+        kind, firing, deferring = self._decide(inst, item, ctx)
+        if kind == "discarded":
+            return _outcome(item, kind)
+        if kind == "fired":
+            return self._fire(inst, item, firing, kind)
+        return self._defer(inst, item, deferring, ctx)
+
+    def _decide(
+        self, inst: _Instance, item: _Item, ctx: Context
+    ) -> tuple[str, list[Row], list[str]]:
+        """What an event item comes to: `discarded`, `fired` with its firing set, or
+        `deferred` with the states that defer it; or an unhandled event raises. It
+        reads and changes nothing (§3, §5)."""
         if self._stale(inst, item.event):
-            return _outcome(item, "discarded")
-        firing, deferring = _select(chart, ix, inst.active, ctx)
+            return "discarded", [], []
+        firing, deferring = _select(inst.chart, _index(inst.chart), inst.active, ctx)
         if firing:
-            return self._fire(inst, item, firing, "fired")
+            return "fired", firing, deferring
         if deferring:
-            return self._defer(inst, item, deferring, ctx)
+            return "deferred", [], deferring
         raise UnhandledEvent(
-            f"{chart.name} {item.key!r}: no row and no deferral for {item.event.name}"
+            f"{inst.chart.name} {item.key!r}: no row and no deferral for {item.event.name}"
             f" in {sorted(inst.active)}"
         )
 

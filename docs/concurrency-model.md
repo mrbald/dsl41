@@ -370,7 +370,10 @@ replay. Three machines refuse or raise by design instead (DL-297):
   anything is written (DL-290). At resume, that stops the resume with an
   error that names the move. It is never a replayed fault, because head
   moves are not WAL inputs.
-- `runtime_assembly` raises `OracleError` on a misused verb (DL-293).
+- `runtime_assembly` refuses a misused verb (DL-293). The verb raises the refusal row's
+  class: `ValueError` for a state-dependent guard, `OracleError` for a commit with no input
+  open, the end of construction inside the genesis input, and an input opened twice
+  (DL-335). A gap in the chart is a `StatechartError`.
 
 The `host` and `admission` machines record no violations: they are
 statecharts (DL-333, DL-334), and a gap in either is a `StatechartError`

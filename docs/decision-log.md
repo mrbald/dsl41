@@ -21705,3 +21705,65 @@ relitigate an entry; append a new one.
   lookup texts with the previous implementation byte for byte, and the Fable pass built the WAL
   shapes that reach the new faults and found only corrupt ones do. All are fixed and confirmed by
   the reviewer that raised them.
+
+- DL-335 The state owner's assembly runs on the statechart executor; the executor gains a
+  selection read
+  (2026-10-12; src/dsl41/oracle_state.py, src/dsl41/state_machine.py, src/dsl41/runner_hosts.py;
+  docs/blocks/job-lifecycle.md; docs/blocks/host-routing.md; docs/concurrency-model.md §4;
+  docs/statechart-engine.md §5 and §16; docs/state-machines.md (generated))
+  THE CHART. This machine converts ahead of the anchors, out of §16's written order, because its
+  files are disjoint from theirs. `runtime_assembly` is a `Statechart` on the logical clock with one
+  region and the eight phases a `RuntimeState` passes through, from `fresh` to `live`. Its instance
+  lives in the state owner's executor from construction, started in `fresh`, and `_phase` is a read
+  of the active leaf; every rebuild of that executor, at a fork, at a reopen's install and in the
+  test witness, restores the assembly instance in its current phase beside the host rows, so a fork
+  taken inside an input starts in `input`. A row has one source, so the table's multi-source rows
+  split: .01 to .07 keep their ids on their first source, .08 to .15 take the other sources in
+  phase order, and the twenty-five cells with no move are refusal rows, .16 to .40, one per cell. A
+  root default refusal was tried and dropped: a deleted inner row fell into it as a wrong refusal
+  instead of raising a gap, and a missing row must be an unhandled event. No guards, no actions,
+  no data on the instance. The constructor's verb order, the batch boundaries (opening and
+  committing an input are the dispatches), the fork's phase and every message are unchanged, and
+  no persisted shape moves, so STATE_MACHINE_VERSION stays.
+  REFUSALS KEEP THEIR CLASS. A refusal outcome maps to the exception the verb raised before:
+  `OracleError` for the two designed refusals DL-296 names, a commit with no input open and a
+  finish inside the genesis input, and for an input opened twice; `ValueError` for the guards, an
+  install or a seed on a used state, a finish twice or after the seed, a seed inside an input. The
+  period id below one stays a check before the chart. An unknown refusal code is a statechart
+  error, as the host gate's is. concurrency-model §4 keeps its sentence: assembly refuses rather
+  than reports, and the refusals are rows now.
+  THE SELECTION READ. Opening an input and seeding the period must answer their refusal before
+  their own work, and that work must not run for a refused call: the orphan drop must not drain an
+  open input's violations, and a strict orphan raise must leave the phase unmoved. Rather than a
+  scratch executor per call, the executor gains `resolve`: a read that runs selection only for one
+  instance and one event, guards evaluated quietly and under the in-flight flag, with no action, no
+  configuration change, no history and no hit, and returns how the event would be selected against
+  the instance's configuration as it stands, or raises the error that selection would raise, with
+  the same facts. It answers only on an idle executor for an instance with nothing deferred, and
+  raises otherwise: a dispatch would release deferred events first, and the read releases nothing.
+  Selection is one function shared by the step and the read. statechart-engine §5 describes it. The
+  opening of an input skips the read when no orphan violation is pending. The host gate may adopt
+  the read in place of its scratch executor.
+  COST. Opening and committing an input with one write cost about 3 microseconds before and about
+  18 now, almost all of it the two dispatches; the read, taken only when an orphan violation is
+  pending, costs about 5. The microstep is the cost, not the read; the executor's remaining
+  per-step overheads are DL-332's open items. Real inputs cost far more than their batch boundary.
+  CHECKS. `well_formed` and `chart_warnings` pass. The generated completeness test builds the
+  eight phases through the store's own verbs and checks forty cells against a table written from
+  the constructor's order and DL-132. The alphabet tests run the constructor without and with
+  carried rows, an input batch, forks inside and outside an input, an install and the witness in
+  four phases. Gap tests: a chart copy missing a row raises through the constructor and at a
+  commit. The read's tests: it never mutates configuration, deferred queue, hits or ring; it agrees
+  with the dispatch on every assembly and host cell, under deferral, a stale time event, ambiguity,
+  an unhandled event, an unknown instance and re-entrance. The exhaustive assembly walk keeps its
+  enumeration and reads the executor's outcomes. The gates hold the rows at 100% and the two
+  owning modules at 100% of branches with no new pragma. The store's rebuild helper is renamed to
+  say it rebuilds every instance.
+  REVIEW. Semantic class: one Opus reviewer, three rounds, and one Fable advisor pass in place of
+  the Codex pass, two rounds. Neither found a blocker or a major. The Opus reviewer found the read's
+  claim wider than its behaviour (a dispatch releases deferred events first), the unknown-code error
+  without facts, the architecture gate still guarding a scalar that had become a property, two test
+  over-claims, a doc naming one exception class for two, and a cheap saving at the opening of an
+  input; the Fable pass found the read running selection without the in-flight flag and the same
+  over-claim. All are fixed and confirmed by the reviewer that raised them; the Fable pass probed
+  the read against the dispatch under deferral, stale events, ambiguity and re-entrance.

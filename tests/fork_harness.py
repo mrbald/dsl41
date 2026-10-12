@@ -62,7 +62,6 @@ STORE_COPIED = frozenset(
         "_timers",
         "_timer_seq",
         "_period_id",
-        "_phase",
         "_consumed",
         "_enqueue_counter",
         "_snapshots",
@@ -70,7 +69,8 @@ STORE_COPIED = frozenset(
     }
 )
 #: RuntimeState attributes the fork rebuilds rather than copies: the store's
-#: executor, restored from the twin's host rows (statechart-engine ss11).
+#: executor, restored from the source's assembly phase and the twin's host
+#: rows (statechart-engine ss11). The phase is its instance's configuration.
 STORE_REBUILT = frozenset({"machines"})
 
 

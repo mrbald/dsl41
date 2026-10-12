@@ -1,10 +1,11 @@
 """The job's machines and the RuntimeState assembly, declared with `state_machine.py`.
 
-`oracle_state` declares `job_status`, `job_flags`, `job_holding` and
-`runtime_assembly`; docs/state-machines.md renders them. The rule code in
-`oracle.py` names the transition of every move, and the store's verbs check it.
-A job move off its table is noted on the violation channel and the write still
-happens; an assembly move off its table raises before the phase changes. The SEM
+`oracle_state` declares `job_status`, `job_flags` and `job_holding` as tables
+and `runtime_assembly` as a statechart (tests/test_assembly_chart.py);
+docs/state-machines.md renders them. The rule code in `oracle.py` names the
+transition of every move, and the store's verbs check it. A job move off its
+table is noted on the violation channel and the write still happens; an
+assembly verb the chart refuses raises before the phase changes. The SEM
 corpus runs every job move under the suite's strict variable (test_oracle.py),
 and its autouse fixture proves each one is taken inside an InputBatch
 (batch_harness). These tests pin the declarations, both sides of each check,
@@ -44,7 +45,6 @@ from dsl41.oracle_state import (
     STATUS_INJECTED,
     TAKE_OVER_HELD,
     TERMINAL,
-    AssemblyPhase,
     CapacityReservation,
     CarriedRows,
     Event,
@@ -87,13 +87,12 @@ def _hits(directory: Path) -> set[tuple[str, str]]:
 
 
 def test_the_machines_are_registered_and_well_formed() -> None:
-    machines = (JOB_STATUS, JOB_FLAGS, JOB_HOLDING, RUNTIME_ASSEMBLY)
-    assert all(machine in MACHINES for machine in machines)
+    machines = (JOB_STATUS, JOB_FLAGS, JOB_HOLDING)
+    assert all(machine in MACHINES for machine in (*machines, RUNTIME_ASSEMBLY))
     assert {m.name: len(m.transitions) for m in machines} == {
         "job_status": 58,
         "job_flags": 17,
         "job_holding": 8,
-        "runtime_assembly": 7,
     }
     assert all(well_formed(machine) == [] for machine in machines)
     assert all(t.mark is None for machine in machines for t in machine.transitions)
@@ -105,7 +104,6 @@ def test_the_state_sets_are_the_code_s_own_names() -> None:
     assert JOB_STATUS.states == set(get_args(JobStatus))
     assert JOB_FLAGS.states == set(get_args(FlagState.__value__)) == set(FLAG_FIELDS)
     assert JOB_HOLDING.states == set(get_args(HoldingState.__value__))
-    assert RUNTIME_ASSEMBLY.states == set(get_args(AssemblyPhase.__value__))
     fields = {field for field, _ in FLAG_FIELDS.values()}
     assert fields == {"on_ice", "on_hold", "on_noexec", "armed"}
     assert all(JobRuntime.model_fields[field].annotation is bool for field in fields)
@@ -328,7 +326,9 @@ def test_assembly_walks_its_table(recording: Path) -> None:
         "input",
         "live",
     ]
-    assert len(_hits(recording)) == len(RUNTIME_ASSEMBLY.transitions)
+    assert _hits(recording) == {
+        ("runtime_assembly", f"runtime_assembly.{n:02d}") for n in (1, 3, 7, 8, 11, 13, 14, 15)
+    }
 
 
 def test_a_second_install_is_refused() -> None:
@@ -354,8 +354,8 @@ def test_an_assembly_move_off_its_table_raises_before_the_phase_moves(
     recording: Path, setup: tuple[str, ...], move: str, message: str
 ) -> None:
     """A commit with no input open, and the end of construction inside the
-    genesis input, are no rows of the table. Assembly is not an input, so
-    the violation has no channel: the move raises."""
+    genesis input, are refusal rows of the chart. Assembly is not an input, so
+    a refusal has no channel: the verb raises."""
     store = RuntimeState()
     for name in setup:
         getattr(store, name)()
@@ -365,12 +365,14 @@ def test_an_assembly_move_off_its_table_raises_before_the_phase_moves(
     assert store._phase == phase
 
 
-def test_a_strict_session_raises_the_same_assembly_move_as_a_transition_error(
+def test_a_strict_session_raises_the_same_assembly_refusal(
     monkeypatch: pytest.MonkeyPatch, recording: Path
 ) -> None:
+    """A refusal row is a decision of the chart, not a violation of a table:
+    the strict variable changes nothing about it."""
     monkeypatch.setenv(STRICT_ENV, "1")
     store = RuntimeState()
-    with pytest.raises(TransitionError, match=r"runtime_assembly\.07"):
+    with pytest.raises(OracleError, match="commit_input in assembly phase fresh"):
         store.commit_input()
     assert store._phase == "fresh"
 

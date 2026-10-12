@@ -441,33 +441,51 @@ _ASSEMBLY_PHASES: set[str] = {
     "input",
     "live",
 }
-#: the moves the table leaves out by design, which `_assemble` refuses with
-#: the table's own check (DL-293): a commit with no input open, and the
-#: end of construction inside the genesis input. No production path makes
-#: either. Every other refusal is a guard that raises before the table.
-_ASSEMBLY_REFUSED: frozenset[tuple[str, str]] = frozenset(
+#: the cells the constructor's order and DL-132 allow: a verb that moves
+#: the phase. Every other cell of the eight phases by five verbs is a
+#: refusal row of the chart.
+_ASSEMBLY_ALLOWED: frozenset[tuple[str, str]] = frozenset(
     {
-        *(
-            (phase, "commit_input")
-            for phase in ("fresh", "installed", "genesis", "constructed", "seeded", "live")
-        ),
-        ("genesis_input", "finish_genesis"),
+        ("fresh", "install"),
+        *((phase, "begin_input") for phase in ("fresh", "installed", "genesis")),
+        ("genesis_input", "commit_input"),
+        *((phase, "finish_genesis") for phase in ("fresh", "installed", "genesis")),
+        *((phase, "seed_period") for phase in ("fresh", "installed", "constructed")),
+        *((phase, "begin_input") for phase in ("constructed", "seeded", "live")),
+        ("input", "commit_input"),
     }
 )
 
 
-def test_every_assembly_verb_in_every_phase_takes_a_declared_transition(
-    strict_unforwarded: Path,
+def test_every_assembly_verb_in_every_phase_meets_a_row_or_a_refusal(
+    strict_unforwarded: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`runtime_assembly`: all eight phases, built on a `RuntimeState` by
     its own verbs (`_ASSEMBLY_BUILDS`), and each of its five verbs (and a
-    `seed_period(0)`) in each. A verb takes a declared transition, or its
-    guard refuses it (ValueError, OracleError) before the table is asked,
-    or the table refuses one of the moves it leaves out by design
-    (`_ASSEMBLY_REFUSED`). Left out: nothing; every phase is built. Its hits
-    stay private: most of these verb orders are no production path."""
+    `seed_period(0)`) in each. The chart's outcome decides: a verb fires a
+    row, or a refusal row raises before the phase moves; a `seed_period(0)`
+    in a phase that allows it fires and then fails its own check, and the
+    phase stays. Left out: nothing; every phase is built. Its hits stay
+    private: most of these verb orders are no production path."""
+    outcomes: list[Outcome] = []
+    dispatch = Executor.dispatch
+    resolve = Executor.resolve
+
+    def spy(self: Executor, key: object, event: Any) -> list[Outcome]:
+        result = dispatch(self, key, event)
+        outcomes.extend(result)
+        return result
+
+    def spy_read(self: Executor, key: object, event: Any) -> Outcome:
+        result = resolve(self, key, event)
+        outcomes.append(result)
+        return result
+
+    monkeypatch.setattr(Executor, "dispatch", spy)
+    monkeypatch.setattr(Executor, "resolve", spy_read)
     phases: set[str] = set()
     refused: set[tuple[str, str]] = set()
+    allowed: set[tuple[str, str]] = set()
     for build in _ASSEMBLY_BUILDS:
         for verb, move in _ASSEMBLY_VERBS.items():
             store = RuntimeState()
@@ -475,20 +493,35 @@ def test_every_assembly_verb_in_every_phase_takes_a_declared_transition(
                 _ASSEMBLY_VERBS[name](store)
             phase = store._phase
             phases.add(phase)
+            outcomes.clear()
             try:
                 move(store)
-            except (ValueError, OracleError):
-                assert store._phase == phase  # a guard: nothing moved
-            except TransitionError:
-                refused.add((phase, verb))
-                assert store._phase == phase
+                failed = False
+            except ValueError:  # an OracleError is a ValueError
+                failed = True
+            event = verb.removesuffix("(0)")
+            (outcome, *_) = outcomes
+            assert outcome.event.name == event
+            if outcome.refusals:
+                refused.add((phase, event))
+                assert failed
+                assert store._phase == phase  # a refusal: nothing moved
+            else:
+                allowed.add((phase, event))
+                assert failed is (verb == "seed_period(0)")  # the verb's own check
+                assert (store._phase == phase) is failed
     assert phases == _ASSEMBLY_PHASES
-    assert refused == _ASSEMBLY_REFUSED
-    commits = {p for p, verb in _ASSEMBLY_REFUSED if verb == "commit_input"}
-    assert _violations(strict_unforwarded) == {
-        *(("runtime_assembly", "runtime_assembly.07", p, "live") for p in commits),
-        ("runtime_assembly", "runtime_assembly.04", "genesis_input", "constructed"),
-    }
+    assert allowed == _ASSEMBLY_ALLOWED
+    assert (
+        refused
+        == {
+            (phase, event)
+            for phase in _ASSEMBLY_PHASES
+            for event in ("install", "begin_input", "commit_input", "finish_genesis", "seed_period")
+        }
+        - _ASSEMBLY_ALLOWED
+    )
+    assert _violations(strict_unforwarded) == set()
 
 
 # ------------------------------------------------------------------- host
