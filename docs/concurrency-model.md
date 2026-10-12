@@ -372,12 +372,15 @@ replay. Three machines refuse or raise by design instead (DL-297):
   moves are not WAL inputs.
 - `runtime_assembly` raises `OracleError` on a misused verb (DL-293).
 
-The option does not cover one other machine. A violation in admission is
-not an oracle input, so `stop` does not stop on it. It is one line on stderr
-under the shared violation prefix, and the move proceeds.
-The `host` machine records no violations: it is a statechart (DL-333),
-and a gap in it is a `StatechartError` that stops the engine, as above,
-so the option does not cover it. A logged
+The `host` and `admission` machines record no violations: they are
+statecharts (DL-333, DL-334), and a gap in either is a `StatechartError`
+that stops the engine, so the option does not cover them. For `host` that
+is as above. A gap in `admission` stops the engine with exit 7 at one of
+two points. At dedup or at the seal's readiness lookup it comes before any
+index is taken, and nothing is logged. At the attempt's note or its
+decision it comes after the frontier moved and the attempt line is
+durable: the attempt stays undecided, and replay decides it through the
+gate. A logged
 input that raises on replay stops the replay with an error that names it,
 unless replay quarantines it as below (`docs/period-model.md` §11).
 

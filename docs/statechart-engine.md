@@ -359,6 +359,12 @@ read the input's own facts. The chart is dispatched on the store's executor only
 decision; the gate's scratch read is separate and moves nothing. A durable `applied` the chart
 refuses is a statechart error that names the WAL input.
 
+`admission` (DL-334) runs on the engine's executor, one instance per request id from its durable
+attempt to its durable decision; the decided state is final and forgotten, and the stored decision
+answers an exact retry, or refuses a reused id, before any post. Replay rebuilds the index in WAL
+order on the resuming engine's executor. A statechart error at an attempt, a decision or the seal's
+readiness lookup stops the engine as one from the loop does, and in replay names the WAL record.
+
 Acceptance per machine:
 
 - the old decision code is deleted;
@@ -371,8 +377,8 @@ Acceptance per machine:
   revision equality against the old implementation.
 
 After the pilot, `seal_boundary` (DL-327), `supervisor_process` (DL-328), `supervisor_client`
-(DL-330), `effect` (DL-331) and `host` (DL-333), the rest come in this order:
-`admission`, `anchor_head`, `period_row`, `runtime_assembly`.
+(DL-330), `effect` (DL-331), `host` (DL-333) and `admission` (DL-334), the rest come in this
+order: `anchor_head`, `period_row`, `runtime_assembly`.
 
 The oracle comes last. A second oracle is built beside the old one under a new old-vs-new
 harness. The same inputs go to both. The harness compares the trace, the emitted events, the

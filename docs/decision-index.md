@@ -100,7 +100,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-87 | every entity carries a revision, and one input moves it at most once | [docs/blocks/job-lifecycle.md](blocks/job-lifecycle.md), [docs/concurrency-model.md](concurrency-model.md), [docs/runner-design.md](runner-design.md), [docs/state-machines.md](state-machines.md) |
 | DL-88 | the capacity pool gets its own module |  |
 | DL-89 | admission lands: one order for every input, and the log becomes a ledger | [docs/blocks/subscription.md](blocks/subscription.md), [docs/concurrency-model.md](concurrency-model.md), [docs/control-protocol.md](control-protocol.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md) |
-| DL-90 | preconditions become mandatory, and the wire breaks once | [docs/access-model.md](access-model.md), [docs/blocks/admission.md](blocks/admission.md), [docs/concurrency-model.md](concurrency-model.md), [docs/control-protocol.md](control-protocol.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md), [docs/state-machines.md](state-machines.md) |
+| DL-90 | preconditions become mandatory, and the wire breaks once | [docs/access-model.md](access-model.md), [docs/blocks/admission.md](blocks/admission.md), [docs/concurrency-model.md](concurrency-model.md), [docs/control-protocol.md](control-protocol.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md) |
 | DL-91 | architecture review | [docs/ir-design.md](ir-design.md) |
 | DL-92 | the operator gets the vocabulary S3 built |  |
 | DL-93 | how S5 is built, and where host state lives | [docs/blocks/host-routing.md](blocks/host-routing.md), [docs/citation-index.md](citation-index.md), [docs/concurrency-model.md](concurrency-model.md), [docs/control-protocol.md](control-protocol.md), [docs/ir-design.md](ir-design.md) |
@@ -331,7 +331,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-317 | The tested size: a 200-job estate on a virtual and a real clock, what it costs, and the limits that follow | [docs/deployment-runbook.md](deployment-runbook.md) |
 | DL-318 | A DST and midnight drill runs the real runner on a fast fake clock, and L023 names every opening of a window with its day and pass | [docs/ir-design.md](ir-design.md) |
 | DL-319 | The runbook requires an init that reaps orphaned processes, and lint and rehearse take the launcher's zone | [docs/deployment-runbook.md](deployment-runbook.md) |
-| DL-320 | An engine-made input whose apply raises is quarantined, or stops the engine before it is logged | [docs/statechart-engine.md](statechart-engine.md) |
+| DL-320 | An engine-made input whose apply raises is quarantined, or stops the engine before it is logged | [docs/state-machines.md](state-machines.md), [docs/statechart-engine.md](statechart-engine.md) |
 | DL-321 | The wrapper and the supervisor wake at a signal's delivery, so a command's exit is never missed |  |
 | DL-322 | The liveness check counts an exited, unreaped process as dead | [docs/deployment-runbook.md](deployment-runbook.md), [docs/runner-design.md](runner-design.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
 | DL-323 | The architecture review of 2026-10-11 is closed: the quarantine rule has one copy, and the engine keeps one list per kind of lost input |  |
@@ -345,3 +345,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-331 | The effect runs on the statechart executor: one instance per open effect, forgotten at its outcome | [docs/statechart-engine.md](statechart-engine.md) |
 | DL-332 | The statechart executor plans each external row once per chart |  |
 | DL-333 | The host routing row runs on the statechart executor: the state owner has its own executor, rebuilt from its rows | [docs/blocks/host-routing.md](blocks/host-routing.md), [docs/concurrency-model.md](concurrency-model.md), [docs/statechart-engine.md](statechart-engine.md) |
+| DL-334 | The admission of one request id runs on the statechart executor: the instance is the in-flight window, from the attempt line to the decision | [docs/blocks/admission.md](blocks/admission.md), [docs/concurrency-model.md](concurrency-model.md), [docs/statechart-engine.md](statechart-engine.md) |

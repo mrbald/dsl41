@@ -26,6 +26,7 @@ Monotone epoch allocation is not listed. Step 2 compares the envelope's epoch wi
 - `addressed_key(kind, payload)` names the one entity a verb addresses, as a `job:` or `global:` key.
 - `fingerprint(...)` hashes the envelope a retry must repeat. `at` is not in it.
 - `Attempt` is one admitted input; `ApplyResult` is its decision; `Frontiers` holds `committed_index`, `applied_index` and the stamp frontier.
+- `DecisionIndex(machines)` holds one `ADMISSION` instance per request id in flight, keyed by the index and the id, on the executor it is given: the engine's, or its own when read offline. `note` starts it at step 4; `record` posts the decision at step 7 and forgets it.
 - `DecisionIndex.lookup(request_id, fingerprint)` returns the prior decision, `None`, or raises `RequestCollision` carrying the earlier decision.
 - `apply_attempt(oracle, attempt, decided=..., grace_s=...) -> Applied` runs steps 5 to 7 for a live input and for a replayed one.
 - `precondition_reason` checks [`expect`](../glossary.md#expect); `stale_reason` is the stale-completion gate.
@@ -36,8 +37,9 @@ Monotone epoch allocation is not listed. Step 2 compares the envelope's epoch wi
 
 ## States
 
-One request id's states are [admission](../state-machines.md#admission), over `DecisionIndex`; the anchor holds the generated diagram and transition table.
-The machine starts at deduplication. The `period_sealing` refusal and the envelope's refusals come first and move no id.
+One request id's in-flight window is [admission](../state-machines.md#admission), a statechart on the engine's executor ([DL-334](../decision-log.md)); the anchor holds the generated diagram and transition table.
+An instance starts in `admitted` when the attempt line is durable and ends in `applied` or `rejected`, both final, when the decision is.
+An id before its attempt line has no instance: deduplication and every refusal before admission post nothing.
 
 ## Invariants
 
@@ -47,6 +49,7 @@ The machine starts at deduplication. The `period_sealing` refusal and the envelo
 - `expect` and `epoch` are in the fingerprint, so one verb at two revisions is two commands ([DL-90](../decision-log.md); [control-protocol §3](../control-protocol.md#3-mutating-verbs-sendevent-host-seal)).
 - The epoch check comes after deduplication ([concurrency-model §4](../concurrency-model.md#4-admission-and-application) step 2; [DL-90](../decision-log.md)).
 - A collision refusal carries the decision the id already holds ([DL-217](../decision-log.md)).
+- A decided id has no instance. The index answers its exact retry from the stored decision, and refuses its reuse carrying that decision, before any post ([DL-217](../decision-log.md); CM-05).
 - Every `ok: false` answer carries a stable code. A rejected `decision` stores its code, so an exact retry answers the same code. `Journal.decision` refuses a rejection whose code is outside `STORED_CODES` ([DL-272](../decision-log.md); [period-model §2.3](../period-model.md#23-decision--one-atomic-batch)).
 - The step-4 batch is one line ([DL-111](../decision-log.md)), and so is the step-7 batch ([DL-118](../decision-log.md)).
 - A timer that fires inside an input's own batch does not invalidate its precondition. One due strictly earlier fires first and does ([concurrency-model §0](../concurrency-model.md#0-the-invariant); [DL-232](../decision-log.md)).
@@ -57,6 +60,7 @@ The machine starts at deduplication. The `period_sealing` refusal and the envelo
 
 - Crash after step 4 and before step 7: replay applies the attempt through the gate ([concurrency-model §4](../concurrency-model.md#4-admission-and-application)). Its effects were never recorded. A command start it decided fails at resume, and a file watch starts again ([DL-102](../decision-log.md); `_resume_untraced_starts`).
 - An id admitted but undecided at lookup raises `EngineError`, and the engine stops ([concurrency-model §4](../concurrency-model.md#4-admission-and-application) step 2).
+- A gap in the chart is a `StatechartError`. Met at an attempt or a decision in the loop or a seal's drain, or at the seal's readiness lookup, it stops the engine with exit 7 before any further write; in replay its report names the WAL record. So are three faults the index refuses before any post, each naming `admission` and the request id: a decision for an id with no attempt in flight, a second attempt for an id in flight, and an attempt line for an id that already holds a decision. Only an engine bug or a corrupt log produces them; in replay the report names the WAL record ([statechart-engine §5](../statechart-engine.md#5-the-step-and-the-worklist)).
 - A stamp earlier than the frontier, or a decision out of index order, raises `EngineError` from `Frontiers`, and the engine stops. During a seal, a request whose stamp is behind the frontier is answered refused with `clock_regressed` instead. An engine-made input in that case still stops the engine, so resume observes it again ([concurrency-model §4](../concurrency-model.md#4-admission-and-application); [DL-274](../decision-log.md)).
 - An exception after the index is taken and before its decision, outbox entries and answer are all done stops the engine, and so does a failed WAL append. A seal does not turn either into a refusal: it [fail-stops](../glossary.md#fail-stop), and `Engine._applying` and `Journal.append_unfinished` record the window ([period-model §7](../period-model.md#7-the-seal-operation); [DL-274](../decision-log.md)).
 - A replay whose revisions differ from the logged decision raises "replay diverged" from `apply_attempt`. A changed gate re-decides a crash-window attempt differently, which is why [DL-235](../decision-log.md) moved the state-machine version.
@@ -95,6 +99,16 @@ The machine starts at deduplication. The `period_sealing` refusal and the envelo
 - `test_pr28b_an_exception_while_a_drained_attempt_applies_fail_stops`
 - `test_pr28b_a_clock_regression_in_the_drain_still_refuses`
 - `test_pr28b_a_clock_regression_on_an_engine_made_input_in_the_drain_fail_stops`
+- `test_the_completeness_table_is_section_4`
+- `test_a_decided_id_never_reaches_the_chart`
+- `test_every_event_a_poster_sends_is_in_the_alphabet`
+- `test_replay_keeps_one_instance_open_where_the_lines_interleave`
+- `test_dsl41_run_exits_7_when_a_decision_meets_a_gap_live_and_at_replay`
+- `test_dsl41_run_exits_7_when_the_seal_s_readiness_lookup_meets_a_gap`
+- `test_a_decision_with_no_open_instance_raises_and_writes_nothing`
+- `test_a_second_attempt_for_an_id_in_flight_carries_the_instance_s_facts`
+- `test_a_second_attempt_for_a_decided_id_is_refused_before_any_start`
+- `test_dsl41_run_exits_7_when_resume_meets_a_second_attempt_for_a_decided_id`
 
 ## Open findings
 

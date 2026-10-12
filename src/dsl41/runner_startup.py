@@ -944,13 +944,15 @@ async def _resume_under_lock(
     # BEFORE the segment's own records are read, never patched in
     # afterwards: an `effect_result` here for an effect born in C1 is an
     # outcome the replay has to attach, and `Outbox.resolve` refuses an
-    # outcome for an effect it never saw. It runs its effects on the
-    # engine's executor, the process's one (statechart-engine ss11).
+    # outcome for an effect it never saw. It runs its effects, and the
+    # rebuilt decision index its request ids in flight, on the engine's
+    # executor, the process's one (statechart-engine ss11).
     try:
         replay = replay_inputs(
             engine.oracle,
             records,
             outbox=carried_outbox(opened, at=opening_at(opening), machines=engine.machines),
+            machines=engine.machines,
         )
     except ReplayFault as exc:
         # period-model ss11: refuse, don't degrade. The same build raises at

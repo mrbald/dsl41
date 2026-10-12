@@ -942,12 +942,30 @@ def _admission_events() -> dict[str, _Command | None]:
     }
 
 
-async def _admission_case(state: str, event: str) -> tuple[str, str]:
+def _r_state(engine: Engine) -> str:
+    """`_R`'s state: the stored decision, the open instance's leaf, or
+    `unseen` for an id the index never saw."""
+    return engine.decisions.state(_R) or "unseen"
+
+
+async def _admission_case(state: str, event: str) -> tuple[str, str, tuple[str, ...]]:
     """Build `_R` in `state` at index 1, send `event`, and answer how it
-    ended and the id's state after it."""
+    ended, the id's state after it, and what the engine's executor reported
+    for `_R`'s instance meanwhile: `started`, or the row a post fired."""
+    outcomes: list[Outcome] = []
     engine = Engine(
-        lower_source(_HOST_JIL), clock=VirtualClock(start=T0), adapters={"CMD": FakeAdapter()}
+        lower_source(_HOST_JIL),
+        clock=VirtualClock(start=T0),
+        adapters={"CMD": FakeAdapter()},
+        machines=_run_spied(outcomes),
     )
+
+    def posts() -> tuple[str, ...]:
+        key = engine.decisions.key(_R)
+        return tuple(
+            o.kind if o.kind == "started" else o.rows[0] for o in outcomes[before:] if o.key == key
+        )
+
     try:
         built = {"applied": _APPLIES, "rejected": _REJECTED}.get(state, _APPLIES)
         if state in ("applied", "rejected"):
@@ -977,7 +995,8 @@ async def _admission_case(state: str, event: str) -> tuple[str, str]:
                     ),
                 )
             )
-        assert engine.decisions.state(_R) == state
+        assert _r_state(engine) == state
+        before = len(outcomes)
         command = _admission_events()[event]
         if event == "an engine-made input":
             engine.inject(_set_global("9"), source="scheduler")
@@ -987,13 +1006,13 @@ async def _admission_case(state: str, event: str) -> tuple[str, str]:
         try:
             await engine.run_until_quiescent(T0)
         except EngineError as exc:  # the loop's own stop: a second writer
-            return f"stopped: {exc}", engine.decisions.state(_R)
+            return f"stopped: {exc}", _r_state(engine), posts()
         if future is None:
-            return "made", engine.decisions.state(_R)
+            return "made", _r_state(engine), posts()
         try:
-            return (await future).decision, engine.decisions.state(_R)
+            return (await future).decision, _r_state(engine), posts()
         except EngineError as exc:
-            return f"refused {exc.code}", engine.decisions.state(_R)
+            return f"refused {exc.code}", _r_state(engine), posts()
     finally:
         await engine.shutdown()
 
@@ -1015,6 +1034,49 @@ def _wire_refuses_an_engine_name() -> bool:
     return False
 
 
+#: what an unseen id's admitted command is decided, by concurrency-model ss4
+#: steps 5-7: `expect` holds for the command that built the state, another
+#: command and a host command, and fails for the failed precondition
+_UNSEEN_DECISIONS = {
+    "the same command": "applied",
+    "another command": "applied",
+    "a failed precondition": "rejected",
+    "a host command": "applied",
+}
+#: what refuses an unseen id's command before admission (ss4 steps 2-3)
+_UNSEEN_REFUSALS = {"a stale epoch": "stale_epoch", "a faulting command": "apply_faulted"}
+
+
+def _admission_cell(state: str, event: str) -> tuple[str, str, tuple[str, ...]]:
+    """One cell, written from `(state, event)` and concurrency-model ss4,
+    without the rows and without the observed answer: the answer, `_R`'s
+    state after it, and what `_R`'s instance reports. An id is in flight from
+    its attempt line to its decision. An engine-made input has a name of its
+    own: it is made and posts nothing for `_R`. An unseen id refused before
+    admission starts nothing; one admitted starts and takes its decision. A
+    decided id is answered by the index from the stored decision, retry or
+    reuse, with no post (DL-217, CM-05); the epoch is checked only after
+    dedup, so a stale epoch is a reuse too. An id in flight refuses every
+    other command (`request_id_reused`, the epoch being in the fingerprint)
+    and stops the engine on the same command: a second writer. A `stopped`
+    answer is matched as a prefix."""
+    if event == "an engine-made input":
+        return "made", state, ()
+    if state == "unseen":
+        if event in _UNSEEN_REFUSALS:
+            return f"refused {_UNSEEN_REFUSALS[event]}", "unseen", ()
+        decision = _UNSEEN_DECISIONS[event]
+        row = "admission.02" if decision == "applied" else "admission.03"
+        return decision, decision, ("started", row)
+    if state == "admitted":
+        if event == "the same command":
+            return "stopped", "admitted", ("admission.10",)
+        return "refused request_id_reused", "admitted", ("admission.09",)
+    if event == "the same command":
+        return state, state, ()
+    return "refused request_id_reused", state, ()
+
+
 def test_every_input_in_every_request_id_state_takes_a_declared_transition(
     strict: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1023,26 +1085,27 @@ def test_every_input_in_every_request_id_state_takes_a_declared_transition(
     `read_decisions` leaves an attempt line with no decision (the engine
     itself never meets it at dedup: steps 5-7 do not yield to another
     input). Every input that can address the id (`_admission_events`) in
-    each. An input takes a declared transition, or the engine's own rule
-    refuses it (an AdmissionRefused answer, or the loop's stop on an
-    admitted, undecided id).
+    each. The engine's executor reports what `_R`'s instance did: a start
+    and a decision row, a refusal row, the second-writer row, or nothing,
+    where the index answered a decided id or a refusal came before
+    admission. A gap in the chart would raise a statechart error.
 
     Left out: the two refusals made only while a seal is in flight
-    (`period_sealing` comes before dedup and moves no id; a stamp behind
-    the frontier during the seal's drain is refused from `unseen`, as the
-    stale epoch is here); the seal's own request-id lookup
-    (`boundary._check_request_id`, which takes the reused-id row of the
-    id's state); and replay's moves (`read_decisions` notes every attempt
-    and records every decision, `replay_inputs` records a recovered one),
+    (`period_sealing` comes before dedup and starts no instance; a stamp
+    behind the frontier during the seal's drain is refused before
+    admission, as the stale epoch is here); the seal's own request-id
+    lookup (`boundary._check_request_id`, which posts to an id in flight
+    only); and replay's moves (`read_decisions` notes every attempt and
+    records every decision, `replay_inputs` records a recovered one),
     whose one collision the reserved `engine:` prefix closes
     (`test_a_client_request_id_in_the_engines_prefix_is_refused`)."""
-    outcomes: dict[tuple[str, str], tuple[str, str]] = {}
+    outcomes: dict[tuple[str, str], tuple[str, str, tuple[str, ...]]] = {}
     missing: set[tuple[str, str]] = set()
     for state in ("unseen", "applied", "rejected", "admitted"):
         for event in _admission_events():
             try:
                 outcomes[(state, event)] = asyncio.run(_admission_case(state, event))
-            except TransitionError:
+            except StatechartError:
                 missing.add((state, event))
     assert missing == set()
     assert _wire_refuses_an_engine_name()
@@ -1050,13 +1113,19 @@ def test_every_input_in_every_request_id_state_takes_a_declared_transition(
     _no_violation_line(capsys.readouterr().err)
     for state in ("unseen", "applied", "rejected", "admitted"):
         # an engine-made input has a name of its own and leaves the id alone
-        assert outcomes[(state, "an engine-made input")] == ("made", state)
-    assert outcomes[("unseen", "the same command")] == ("applied", "applied")
-    assert outcomes[("applied", "the same command")] == ("applied", "applied")
+        assert outcomes[(state, "an engine-made input")] == ("made", state, ())
+    assert outcomes[("unseen", "the same command")][:2] == ("applied", "applied")
+    assert outcomes[("applied", "the same command")] == ("applied", "applied", ())
     assert outcomes[("rejected", "a failed precondition")][0] == "refused request_id_reused"
-    assert outcomes[("unseen", "a faulting command")] == ("refused apply_faulted", "unseen")
+    assert outcomes[("unseen", "a faulting command")] == ("refused apply_faulted", "unseen", ())
     assert outcomes[("admitted", "the same command")][0].startswith("stopped:")
-    assert {t.id for t in ADMISSION.transitions} <= _hits(strict)
+    for cell, (answer, after, posted) in outcomes.items():
+        expected, expected_after, expected_posts = _admission_cell(*cell)
+        if expected == "stopped":
+            answer = "stopped" if answer.startswith("stopped:") else answer
+        assert (answer, after, posted) == (expected, expected_after, expected_posts), cell
+    taken = {row for _, _, posted in outcomes.values() for row in posted} - {"started"}
+    assert taken == {row.id for row in ADMISSION.rows if row.kind != "ignored"}
 
 
 # ------------------------------------- the engine's reserved request-id prefix

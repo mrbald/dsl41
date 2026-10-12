@@ -356,7 +356,7 @@ def _posting(posted: list[tuple[str, tuple[str, ...]]]) -> Executor:
 
     def spy(key: Any, event: ChartEvent) -> list[StepOutcome]:
         outcomes = dispatch(key, event)
-        if isinstance(key, tuple):  # an effect's key: (outbox, effect_id)
+        if isinstance(key, tuple) and isinstance(key[0], Outbox):  # (outbox, effect_id)
             assert [outcome.depth for outcome in outcomes] == [0], outcomes
             posted.append((event.name, tuple(row for o in outcomes for row in o.rows)))
         return outcomes

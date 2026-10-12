@@ -1,22 +1,22 @@
 """The engine tier's machines (DL-289): host routing and admission; and the
 effect outbox and the subscription feed through their tiers. The seal
-boundary, the effect and host routing are statecharts now (DL-327, DL-331,
-DL-333); their chart tests are test_seal_boundary_chart.py,
-test_effect_chart.py and test_host_chart.py.
+boundary, the effect, host routing and admission are statecharts now
+(DL-327, DL-331, DL-333, DL-334); their chart tests are
+test_seal_boundary_chart.py, test_effect_chart.py, test_host_chart.py and
+test_admission_chart.py.
 
 Each machine is registered and well formed, and each new rule has a test
 that triggers it and one that does not: the routing chart's rows and the
 gate's rejections, a decided host command the chart refuses, a second
-outcome refused by the outbox, and a violation outside an oracle batch
-reported on stderr. A test that breaks a transition on purpose records into
-its own directory without the strict variable, so the violation stays out
-of the session's gate."""
+outcome refused by the outbox, and a move outside an unconverted table
+refused before any write. A test that breaks a transition on purpose
+records into its own directory without the strict variable, so the
+violation stays out of the session's gate."""
 
 from __future__ import annotations
 
 import asyncio
 import json
-import os
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -36,7 +36,6 @@ from dsl41.runner_admission import (
     Attempt,
     DecisionIndex,
     apply_attempt,
-    report_violation,
 )
 from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.runner_effects import Effect, EffectOutcome, Outbox, effect_id_for
@@ -59,7 +58,6 @@ from dsl41.runner_startup import resume_run, start_run
 from dsl41.state_machine import (
     HITS_ENV,
     STRICT_ENV,
-    VIOLATION_LOG_PREFIX,
     Executor,
     Outcome,
     Row,
@@ -90,7 +88,7 @@ def test_the_engine_machines_are_registered_and_well_formed() -> None:
     for machine in ENGINE_MACHINES:
         assert machine in MACHINES
         assert well_formed(machine) == []
-    marked = [(t.id, t.mark) for t in ADMISSION.transitions if t.mark]
+    marked = [(row.id, row.mark) for row in ADMISSION.rows if row.mark]
     marked += [(row.id, row.mark) for row in HOST.rows if row.mark]
     # the relay's re-registration is a contract rule with no code yet
     assert marked == [("host.12", "spec-only")]
@@ -352,26 +350,33 @@ def test_a_strict_session_refuses_a_second_outcome_from_the_outbox(
 
 
 class _ViolatingMachine:
-    """Stands for the admission machine with its admit move undeclared: the
-    real table cannot be driven into that violation, because `note` takes
-    the move from `unseen` on a fresh request id."""
+    """Stands for the anchor head's table with its create move undeclared:
+    the real table cannot be driven into that violation, because
+    `create_open` takes the move from `absent` on a fresh anchor."""
 
     def take(self, t: Transition[Any], old: str, new: str) -> Violation:
-        return Violation("admission", t.id, old, new, "fake")
+        return Violation("anchor_head", t.id, old, new, "fake")
 
 
-def test_an_admission_move_that_breaks_the_table_is_reported_and_still_made(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def test_a_head_move_that_breaks_the_table_is_refused_before_any_write(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Like every other engine-tier take, the admit move's violation goes to
-    stderr under the shared prefix, and the move proceeds."""
-    monkeypatch.setattr("dsl41.runner_admission.ADMISSION", _ViolatingMachine())
-    index = DecisionIndex()
-    index.note(_attempt("r1"))
-    assert index.state("r1") == "admitted"
-    assert capsys.readouterr().err == (
-        f"{VIOLATION_LOG_PREFIX}: admission admission.01 unseen->admitted: fake\n"
-    )
+    """An unconverted table outside an oracle batch has no trace line to carry
+    a violation: the anchor's take refuses the move before its first write
+    (DL-290), and the anchor stays absent."""
+    from dsl41.boundary import EstateAnchor
+
+    monkeypatch.setattr("dsl41.boundary.ANCHOR_HEAD", _ViolatingMachine())
+    anchor = EstateAnchor(tmp_path / "anchor")
+    anchor.acquire()
+    try:
+        with pytest.raises(
+            EngineError, match=r"anchor_head anchor_head\.\d+: absent -> open is not a declared"
+        ):
+            anchor.create_open(estate_id="e", root=tmp_path / "run")
+        assert anchor.read() is None
+    finally:
+        anchor.release()
 
 
 def test_a_log_with_two_outcomes_for_one_effect_does_not_replay(
@@ -492,9 +497,7 @@ def _attempt(request_id: str, fingerprint: str = "fp", index: int = 1) -> Attemp
 
 def test_a_request_id_moves_unseen_admitted_decided() -> None:
     index = DecisionIndex()
-    assert index.state("r1") == "unseen" and index.state(None) == "unseen"
-    index.refuse("r1")  # refused after dedup: it stays unseen
-    assert index.state("r1") == "unseen"
+    assert index.state("r1") is None  # unseen: no instance, no decision
     index.note(_attempt("r1"))
     assert index.state("r1") == "admitted"
     index.record(
@@ -504,58 +507,6 @@ def test_a_request_id_moves_unseen_admitted_decided() -> None:
     )
     assert index.state("r1") == "rejected"
     assert index.lookup("r1", "fp") is not None  # the stored decision answers
-
-
-def test_an_admission_violation_is_one_stderr_line_and_the_move_proceeds(
-    recording: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """Admission's moves are not oracle inputs, so no trace line can carry a
-    violation: it is reported on stderr, and the index still records."""
-    index = DecisionIndex()
-    index.record(ApplyResult(index=1, request_id="r1", decision="applied"))  # never admitted
-    assert index.state("r1") == "applied"
-    err = capsys.readouterr().err
-    assert err == (
-        "dsl41: transition violation: admission admission.02 unseen->applied:"
-        " unseen is not a source of admission.02\n"
-    )
-    index.note(_attempt("r2"))  # a declared move reports nothing
-    report_violation(None)
-    assert capsys.readouterr().err == ""
-    violations = (recording / f"violations-{os.getpid()}.jsonl").read_text()
-    assert "admission.02" in violations
-
-
-class _BrokenStderr:
-    def write(self, _text: str) -> int:
-        raise BrokenPipeError(32, "Broken pipe")
-
-    def flush(self) -> None:
-        raise BrokenPipeError(32, "Broken pipe")
-
-
-def test_a_violation_report_with_a_broken_stderr_is_dropped_and_the_move_proceeds(
-    recording: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`report_violation` never raises: `DecisionIndex.record` runs between an
-    apply and its decision line, where a raise would stop the engine."""
-    import sys
-
-    monkeypatch.setattr(sys, "stderr", _BrokenStderr())
-    index = DecisionIndex()
-    index.record(ApplyResult(index=1, request_id="r1", decision="applied"))  # never admitted
-    assert index.state("r1") == "applied"
-    assert "admission.02" in (recording / f"violations-{os.getpid()}.jsonl").read_text()
-
-
-def test_an_engine_violation_line_carries_the_journal_alert_prefix(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """The runbook alerts on one journal prefix, `VIOLATION_LOG_PREFIX`."""
-    report_violation(Violation("admission", "admission.99", "a", "b", "fake"))
-    (line,) = capsys.readouterr().err.splitlines()
-    assert VIOLATION_LOG_PREFIX == "dsl41: transition violation"
-    assert line == f"{VIOLATION_LOG_PREFIX}: admission admission.99 a->b: fake"
 
 
 # ------------------------------------------------------- the subscription
