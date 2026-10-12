@@ -21638,3 +21638,70 @@ relitigate an entry; append a new one.
   Codex compared 3,840 cells and regenerated the recorded table from the previous implementation
   with no difference; Opus compared the walk's cells and texts with no difference but the error
   class the entry states. All are fixed and confirmed by the reviewer that raised them.
+
+- DL-334 The admission of one request id runs on the statechart executor: the instance is the
+  in-flight window, from the attempt line to the decision
+  (2026-10-12; src/dsl41/runner_admission.py, src/dsl41/runner_journal.py, src/dsl41/runner.py,
+  src/dsl41/runner_startup.py; docs/blocks/admission.md; docs/concurrency-model.md §4;
+  docs/deployment-runbook.md; docs/statechart-engine.md §16; docs/state-machines.md (generated))
+  THE CHART. `admission` is a `Statechart` on the logical clock with one region: `admitted`, the
+  initial, and the finals `applied` and `rejected`. An instance exists for one request id from the
+  moment its attempt line is durable (`note` starts it) to the moment its decision is durable
+  (`record` dispatches `decide` and forgets it). The old `unseen` state was the id's absence from
+  the index, so it leaves the chart as the feed's and the effect's `absent` did (DL-329, DL-331),
+  and with it the admit row and the refusal row, which recorded moves of nothing: a refusal leaves
+  nothing in the log and the index posts nothing for it. The resting states of the old table are
+  the finals, and the four rows that answered an exact retry or refused a reuse of a decided id are
+  the tier's reads of the stored decision, before any post: an exact retry is answered from it and
+  a reuse is refused `request_id_reused` carrying it, as DL-217 and CM-05 say and as the outbox
+  refuses a second outcome (DL-331). Every input carries a request id, the engine's own included,
+  so a resting instance per decided id would have held a period's inputs in memory for rows that
+  only read a stored decision. The rows that remain keep their ids: .02 and .03 decide by the
+  decision's partition; .09, a reuse of an id still in flight, is a refusal row with the code
+  `request_id_reused`, after which the tier raises the collision with no decision to carry; .10, an
+  exact retry of an id still in flight, is an internal row, after which the tier raises its
+  engine error, a second writer or steps five to seven yielding, as before. Two ignored root rows
+  absorb a decision or an input met while a final is active; completeness is syntactic and per
+  event (statechart-engine §10). No actions: the index writes its dicts after the microstep. The
+  attempt's note and its decision stay two macrosteps around the clock wait (§5).
+  THE TIER. The index takes the executor at construction and makes its own when given none; the
+  engine builds its executor first and hands it over, and refuses an index on another executor.
+  At resume the decisions are read in one pass in WAL order on the engine's executor, so the live
+  window is one id at a time except the attempts a crash left undecided, which stay open for the
+  second pass to decide; the offline readers take the default. Two conditions that the table
+  recorded as a violation line and then went past are faults now: a decision for an id with no
+  open window, and a second attempt line for an id whose window is open or already decided. Each
+  is a statechart error that stops the engine with exit 7 and, in replay, names the WAL input;
+  only a second writer or a corrupt log produces them. The violation report of the engine tier is
+  gone with its last caller: no `transition violation` line can name admission, and the strict
+  test variable raises nothing here.
+  THE ERROR SURFACE. Nothing new: the sites run in the engine loop before and after the clock wait
+  (DL-325). A gap met at dedup, or at the seal's readiness lookup, comes before any index is taken
+  and nothing is logged; one met at the note or the decision comes after the frontier moved and the
+  attempt line is durable, so the attempt stays undecided and replay re-decides it through the
+  gate. The seal's readiness check re-raises a statechart error before the seal-fault wrap and so
+  neither parks nor aborts nor refuses (DL-327), and in replay the report names
+  the attempt or the decision that met it.
+  CHECKS. `well_formed` and `chart_warnings` pass. The generated completeness test holds three
+  witnesses against four partitions, twelve cells, against a table written from concurrency-model
+  §4. The alphabet test drives a live note, decision and reuse, a resume with a recovered decision,
+  a readiness refusal during a seal and a second writer's stop. The exhaustive admission walk reads
+  the engine executor's outcomes with its enumeration unchanged; the cells of decided ids post
+  nothing. New tests: a decided id never reaches the chart; a decision for an id with no open
+  window raises and writes nothing; replay names the attempt and the decision a gap meets; `dsl41
+  run` exits 7 on a live decision gap and again at resume naming the recovered input; a gap met by
+  the readiness lookup during a seal exits 7 with no park, no abort, no refusal and no seal record;
+  a second attempt line for a decided id stops resume naming the input. The gates hold the rows and
+  guard outcomes at 100% and the four owning modules at 100% of branches with no new pragma.
+  COST. Replaying a period's index costs about 18 microseconds per input, up from 6: at the target
+  load, a thirty-day replay's index pass goes from a tenth of a second to a third.
+  OPEN. runner_admission.py is over the size advisory.
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass in place of the Codex pass,
+  three rounds each. Neither found a blocker or a major. The Opus reviewer found the two new faults
+  raising in the executor's bare words, the exhaustive walk deriving its expected posts from the
+  observed answer, and, on the rework, the frozen §4 clause naming only one of admission's two
+  stop points; the Fable pass found that clause missing altogether, the index storing a fingerprint
+  after a start that could fail, and an index repr that could not tell two apart. Both compared the
+  lookup texts with the previous implementation byte for byte, and the Fable pass built the WAL
+  shapes that reach the new faults and found only corrupt ones do. All are fixed and confirmed by
+  the reviewer that raised them.

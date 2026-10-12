@@ -97,6 +97,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import reprlib
 import sys
 
 from collections.abc import Mapping
@@ -114,13 +115,17 @@ from dsl41.runner_clock import EngineError
 from dsl41.runner_codes import Code, Rejection
 from dsl41.runner_hosts import HostCommand, apply_host_command, host_rejection_reason
 from dsl41.state_machine import (
-    VIOLATION_LOG_PREFIX,
+    Context,
+    Executor,
+    Region,
+    Row,
+    State,
+    Statechart,
     StatechartError,
-    StateMachine,
-    Transition,
     TransitionError,
     Violation,
 )
+from dsl41.state_machine import Event as ChartEvent
 
 #: The wire version of the ss6 envelope. There is no earlier version to fall
 #: back to: ss0 refuses a caller that does not name a version, and accepting
@@ -646,28 +651,6 @@ class RequestCollision(AdmissionRefused):
         self.original = original
 
 
-def report_violation(violation: Violation | None) -> None:
-    """Report a broken transition of an engine-tier machine whose moves are
-    not oracle inputs (admission). No `InputBatch` holds them, so no trace line can carry the
-    violation, and the oracle trace must stay equal to its replay. It is
-    one line on stderr under `VIOLATION_LOG_PREFIX`, which the runbook's
-    journal alert matches, and the move proceeds. Best effort, like
-    `runner_journal.best_effort_report` (not imported: runner_journal
-    imports this module): a write that fails is dropped. Under the test
-    suite's strict variable `take` has already raised."""
-    if violation is None:
-        return
-    try:
-        sys.stderr.write(
-            f"{VIOLATION_LOG_PREFIX}: {violation.machine} {violation.transition}"
-            f" {violation.old}->{violation.new}: {violation.reason}\n"
-        )
-    except Exception:  # noqa: BLE001, S110 -- a report that cannot be made is dropped
-        # never raise into the move: a broken or closed stderr must not stop
-        # the engine between an apply and its decision, or in a seal's exit
-        pass
-
-
 #: The stderr prefix of a quarantined input (concurrency-model ss4). The
 #: runbook's watch table alerts on it, beside the decision's stored code.
 QUARANTINE_LOG_PREFIX: Final = "dsl41: input quarantined"
@@ -677,191 +660,302 @@ def report_quarantine(result: ApplyResult) -> None:
     """One line on stderr for an input quarantined under
     `engine_apply_faulted`: by the live engine once its decision is durable,
     or by resume when it writes the decision replay recovered. Best effort,
-    like `report_violation`: a write that fails is dropped."""
+    like `runner_journal.best_effort_report` (not imported: runner_journal
+    imports this module): a write that fails is dropped."""
     try:
         sys.stderr.write(f"{QUARANTINE_LOG_PREFIX}: input {result.index}: {result.reason}\n")
     except Exception:  # noqa: BLE001, S110 -- a report that cannot be made is dropped
+        # never raise into the engine between a decision and its answer
         pass
 
 
-#: One request id's state in the admission order (concurrency-model ss4).
-#: `unseen` until its attempt is admitted; `admitted` while the attempt line
-#: is durable and the decision is not; then the decision.
-AdmissionState = Literal["unseen", "admitted", "applied", "rejected"]
+# ---- one request id's in-flight window as a statechart (concurrency-model ss4)
+#
+# `ADMISSION` is the declaration (docs/statechart-engine.md). The decision index
+# holds one instance per request id whose attempt line is durable and whose
+# decision is not, keyed by `(index, request_id)`, on the executor it runs on:
+# the engine's, or its own when it is read offline. `note` starts the instance
+# in `admitted` once the attempt line is written; `record` posts the decision,
+# and the instance, now final, is forgotten in the same call. There is no
+# instance before `note`: dedup and the refusals before admission (a stale
+# epoch, a stamp behind the frontier during a seal, a dry apply that refuses)
+# post nothing, so the old `unseen` state and its rows are gone.
+#
+# Two events. `decide` carries the `ApplyResult`; its decision is the partition
+# the rows in `admitted` read. `input` carries the fingerprint of an input that
+# names an open id; the guards compare it with the attempt's, which is the
+# instance's data. An input that names a decided id never reaches the chart:
+# the index answers an exact retry from the stored decision, and refuses a
+# reused id carrying that decision, before any post (DL-217, CM-05). Every
+# input carries a request id, engine-made ones too, so an instance resting per
+# decided id would keep a whole period's inputs in memory for rows that only
+# read a stored decision. The rows have no actions: the index writes its maps
+# after the microstep. The root's ignored rows exist because completeness is
+# syntactic (statechart-engine ss10); no tier path posts them. A gap in the
+# chart is a `StatechartError`, which stops the engine with exit 7
+# (statechart-engine ss5).
 
-ADMISSION_ADMIT: Final = Transition[AdmissionState](
-    "admission.01",
-    frozenset({"unseen"}),
-    "input",
-    "admitted",
-    guard="the epoch is current; the stamp is not behind the frontier; a control"
-    " input's dry apply is clean; an engine-made input's time half applies",
-    effect="take the next index; append the attempt line; note the fingerprint",
-    cite="concurrency-model ss4 steps 2-4, DL-292",
-)
-ADMISSION_APPLIED: Final = Transition[AdmissionState](
-    "admission.02",
-    frozenset({"admitted"}),
-    "decide",
-    "applied",
-    guard="the gate passes, or a replayed durable decision says applied",
-    effect="the decision line, with the outbox entries it implies",
-    cite="concurrency-model ss4 steps 5-7, DL-118",
-)
-ADMISSION_REJECTED: Final = Transition[AdmissionState](
-    "admission.03",
-    frozenset({"admitted"}),
-    "decide",
-    "rejected",
-    guard="a precondition, the stale-completion gate or a host guard rejects, the"
-    " input is quarantined, or a replayed durable decision says rejected",
-    effect="the decision line, with its stored code",
-    cite="concurrency-model ss4, DL-235, DL-272",
-)
-ADMISSION_REFUSED: Final = Transition[AdmissionState](
-    "admission.04",
-    frozenset({"unseen"}),
-    "input",
-    "unseen",
-    guard="a stale epoch; a stamp behind the frontier while the seal answers;"
-    " a control input's dry apply faults or breaks a declared transition",
-    effect="answer the refusal; no index is taken and nothing is logged",
-    cite="concurrency-model ss4 steps 2-3, DL-90, DL-274, DL-292",
-)
-ADMISSION_RETRY_APPLIED: Final = Transition[AdmissionState](
-    "admission.05",
-    frozenset({"applied"}),
-    "input",
-    "applied",
-    guard="the same fingerprint",
-    effect="answer the stored decision; no index, no clock",
-    cite="concurrency-model ss4 step 2, CM-05",
-)
-ADMISSION_RETRY_REJECTED: Final = Transition[AdmissionState](
-    "admission.06",
-    frozenset({"rejected"}),
-    "input",
-    "rejected",
-    guard="the same fingerprint",
-    effect="answer the stored decision and its code; no index, no clock",
-    cite="concurrency-model ss4 step 2, CM-05, DL-272",
-)
-ADMISSION_REUSED_APPLIED: Final = Transition[AdmissionState](
-    "admission.07",
-    frozenset({"applied"}),
-    "input",
-    "applied",
-    guard="another fingerprint",
-    effect="refuse request_id_reused, carrying the earlier decision",
-    cite="concurrency-model ss4 step 2, DL-217",
-)
-ADMISSION_REUSED_REJECTED: Final = Transition[AdmissionState](
-    "admission.08",
-    frozenset({"rejected"}),
-    "input",
-    "rejected",
-    guard="another fingerprint",
-    effect="refuse request_id_reused, carrying the earlier decision",
-    cite="concurrency-model ss4 step 2, DL-217",
-)
-ADMISSION_REUSED_ADMITTED: Final = Transition[AdmissionState](
-    "admission.09",
-    frozenset({"admitted"}),
-    "input",
-    "admitted",
-    guard="another fingerprint",
-    effect="refuse request_id_reused, with no decision to carry",
-    cite="concurrency-model ss4 step 2, DL-217",
-)
-ADMISSION_UNDECIDED: Final = Transition[AdmissionState](
-    "admission.10",
-    frozenset({"admitted"}),
-    "input",
-    "admitted",
-    guard="the same fingerprint",
-    effect="raise: a second writer is applying inputs, or steps 5-7 yielded",
-    cite="concurrency-model ss4 step 2",
+#: The decision of an admitted input; its payload is the `ApplyResult`.
+DECIDE: Final = "decide"
+#: An input that names an open request id; its payload is the input's fingerprint.
+INPUT: Final = "input"
+#: The states an instance rests in once its decision is made.
+_FINALS: Final = frozenset({"applied", "rejected"})
+
+
+# -- the guards. Each docstring is its rows' prose.
+
+
+def _applied(ctx: Context) -> bool:
+    """The decision is `applied`: the gate passed, or a replayed durable decision
+    says applied."""
+    result: ApplyResult = ctx.event.payload
+    return result.decision == "applied"
+
+
+def _rejected(ctx: Context) -> bool:
+    """The decision is `rejected`: a precondition, the stale-completion gate or a
+    host guard rejected the input, the input was quarantined, or a replayed
+    durable decision says rejected."""
+    result: ApplyResult = ctx.event.payload
+    return result.decision == "rejected"
+
+
+def _same(ctx: Context) -> bool:
+    """The input carries the fingerprint the attempt was admitted under."""
+    attempt: Attempt = ctx.data
+    return bool(ctx.event.payload == attempt.fingerprint)
+
+
+def _other(ctx: Context) -> bool:
+    """The input carries another fingerprint than the attempt's."""
+    attempt: Attempt = ctx.data
+    return bool(ctx.event.payload != attempt.fingerprint)
+
+
+def _decided(ctx: Context) -> bool:
+    """The instance rests in a final state. Nothing posts to it then: the index
+    forgets the instance in the call that made it final, and answers an input
+    for a decided id from the stored decision before any post (DL-217,
+    CM-05)."""
+    return bool(ctx.active & _FINALS)
+
+
+_DECIDED_NOTE: Final = (
+    "A decision is final: the index answers an exact retry from the stored decision,"
+    " and refuses a reused id with request_id_reused carrying it, before any post"
+    " (DL-217, CM-05). It forgets the instance in the call that made it final. No tier"
+    " path posts this row."
 )
 
-#: One request id through the admission order (concurrency-model ss4),
-#: over `DecisionIndex` and the frontiers. It starts at dedup: the
-#: `period_sealing` refusal at the engine's queue (period-model ss6 step 2)
-#: and the envelope's own refusals come before it and move no id. A seal
-#: request is never admitted into it: its decision is the `seal` record.
-#: Readiness does ask `lookup` whether the seal's request_id is already
-#: spent on another command (`boundary._check_request_id`); on a collision
-#: that takes the reused-id row of the id's own machine, which is the rule
-#: it applies.
-ADMISSION: Final[StateMachine[AdmissionState]] = StateMachine(
+#: One request id from its durable attempt to its durable decision
+#: (concurrency-model ss4), one instance per id in flight. A seal request
+#: never starts one: its decision is the `seal` record. Readiness does ask
+#: `lookup` whether the seal's request_id is already spent on another command
+#: (`boundary._check_request_id`).
+ADMISSION: Final = Statechart(
     name="admission",
-    states=frozenset(get_args(AdmissionState)),
-    initial="unseen",
-    finals=frozenset(),
-    transitions=(
-        ADMISSION_ADMIT,
-        ADMISSION_APPLIED,
-        ADMISSION_REJECTED,
-        ADMISSION_REFUSED,
-        ADMISSION_RETRY_APPLIED,
-        ADMISSION_RETRY_REJECTED,
-        ADMISSION_REUSED_APPLIED,
-        ADMISSION_REUSED_REJECTED,
-        ADMISSION_REUSED_ADMITTED,
-        ADMISSION_UNDECIDED,
+    root=State(
+        "admission",
+        regions=(
+            Region(
+                "window",
+                "admitted",
+                (
+                    State("admitted"),
+                    State("applied", final=True),
+                    State("rejected", final=True),
+                ),
+            ),
+        ),
     ),
+    rows=(
+        Row(
+            "admission.02",
+            "admitted",
+            DECIDE,
+            "applied",
+            guard="applied",
+            cite="concurrency-model ss4 steps 5-7, DL-118",
+            note="The decision line, with the outbox entries it implies.",
+        ),
+        Row(
+            "admission.03",
+            "admitted",
+            DECIDE,
+            "rejected",
+            guard="rejected",
+            cite="concurrency-model ss4, DL-235, DL-272, DL-320",
+            note="The decision line, with its stored code.",
+        ),
+        Row(
+            "admission.09",
+            "admitted",
+            INPUT,
+            guard="other",
+            kind="refusal",
+            code="request_id_reused",
+            cite="concurrency-model ss4 step 2, DL-217",
+            note="Refuse request_id_reused, with no decision to carry.",
+        ),
+        Row(
+            "admission.10",
+            "admitted",
+            INPUT,
+            guard="same",
+            kind="internal",
+            cite="concurrency-model ss4 step 2",
+            note=(
+                "The index raises an EngineError: a second writer is applying inputs, or"
+                " steps 5-7 yielded. The engine stops."
+            ),
+        ),
+        Row(
+            "admission.11",
+            "admission",
+            DECIDE,
+            guard="decided",
+            kind="ignored",
+            cite="statechart-engine ss10",
+            false_unreachable=(
+                "rows .02 and .03 partition every decision in `admitted`, so the walk"
+                " reaches the root only from a final state"
+            ),
+            note=_DECIDED_NOTE,
+        ),
+        Row(
+            "admission.12",
+            "admission",
+            INPUT,
+            guard="decided",
+            kind="ignored",
+            cite="statechart-engine ss10",
+            false_unreachable=(
+                "rows .09 and .10 partition every fingerprint in `admitted`, so the walk"
+                " reaches the root only from a final state"
+            ),
+            note=_DECIDED_NOTE,
+        ),
+    ),
+    guards={
+        "applied": _applied,
+        "rejected": _rejected,
+        "same": _same,
+        "other": _other,
+        "decided": _decided,
+    },
+    clock="logical",
 )
-
-_RETRY: Final[dict[str, Transition[AdmissionState]]] = {
-    "applied": ADMISSION_RETRY_APPLIED,
-    "rejected": ADMISSION_RETRY_REJECTED,
-}
-_REUSED: Final[dict[str, Transition[AdmissionState]]] = {
-    "admitted": ADMISSION_REUSED_ADMITTED,
-    "applied": ADMISSION_REUSED_APPLIED,
-    "rejected": ADMISSION_REUSED_REJECTED,
-}
 
 
 class DecisionIndex:
     """`request_id` -> the decision that request already got, plus the
     fingerprint it was admitted under (concurrency-model ss4 step 2).
 
-    Each id moves through `ADMISSION`; `state` derives where it is, and
-    every move here names its transition."""
+    An id whose attempt line is durable and whose decision is not is an
+    `ADMISSION` instance in `machines`, keyed by `key(request_id)`; its
+    decision is the stored `ApplyResult` once made, and the instance is gone.
+    An engine's index runs on the engine's executor, so a process has one
+    (statechart-engine ss11); an index read offline makes its own. Two indexes
+    on one executor never share a key."""
 
-    def __init__(self) -> None:
+    def __init__(self, machines: Executor | None = None) -> None:
+        self.machines = machines if machines is not None else Executor()
         self._results: dict[str, ApplyResult] = {}
         self._by_index: dict[int, ApplyResult] = {}
         self._fingerprints: dict[str, str] = {}
 
-    def state(self, request_id: str | None) -> AdmissionState:
-        """Where `request_id` is in the admission order. An input with no id
-        has not been admitted, so it is `unseen`."""
-        if request_id is None:
-            return "unseen"
+    def key(self, request_id: str) -> tuple[DecisionIndex, str]:
+        """The executor's key of a request id's instance: this index and the id."""
+        return (self, request_id)
+
+    def __repr__(self) -> str:
+        """What a statechart error's report shows for the index in a key. The
+        index's identity tells two indexes on one executor apart: a refused
+        resume leaves its instances beside a retry's."""
+        return f"decisions@{id(self):x}"
+
+    def state(self, request_id: str) -> str | None:
+        """`admitted` | `applied` | `rejected`, or None for an id this index
+        never saw: the stored decision, else the open instance's leaf."""
         result = self._results.get(request_id)
         if result is not None:
             return result.decision
-        return "admitted" if request_id in self._fingerprints else "unseen"
+        if request_id not in self._fingerprints:
+            return None
+        (leaf,) = self.machines.active(self.key(request_id)) - {ADMISSION.root.name}
+        return leaf
 
     def note(self, attempt: Attempt) -> None:
-        old = self.state(attempt.request_id)
-        self._fingerprints[attempt.request_id] = attempt.fingerprint
-        report_violation(ADMISSION.take(ADMISSION_ADMIT, old, self.state(attempt.request_id)))
+        """Step 4 is durable: the id's instance starts in `admitted`, with the
+        attempt as its data.
+
+        An id that already has an attempt is refused before any start: the
+        live engine answers a decided id at dedup and raises on an id in
+        flight, so a second attempt line means the log disagrees with
+        itself. The fingerprint is stored once the instance exists and
+        before its entry runs, so a failed entry leaves the index and the
+        executor agreeing that the id is in flight."""
+        request_id = attempt.request_id
+        decided = self._results.get(request_id)
+        if decided is not None:
+            raise self._fault(
+                request_id,
+                f"an attempt at index {attempt.index} for a request id decided at index"
+                f" {decided.index} ({decided.decision}): the log disagrees with itself",
+                ChartEvent(INPUT, attempt.fingerprint),
+            )
+        if request_id in self._fingerprints:
+            first: Attempt = self.machines.data(self.key(request_id))
+            raise self._fault(
+                request_id,
+                f"an attempt at index {attempt.index} for a request id in flight since index"
+                f" {first.index}: the log disagrees with itself",
+                ChartEvent(INPUT, attempt.fingerprint),
+            )
+        self.machines.start(self.key(request_id), ADMISSION, attempt)
+        self._fingerprints[request_id] = attempt.fingerprint
+        self.machines.run()
 
     def record(self, result: ApplyResult) -> None:
-        old = self.state(result.request_id)
-        self._results[result.request_id] = result
+        """Step 7: the instance takes the decision, the index stores it, and
+        the instance, now final, is forgotten. A decision for an id with no
+        attempt in flight, never admitted or already decided, is refused
+        before any post: the log or the engine lost the attempt it decides."""
+        request_id = result.request_id
+        if request_id not in self._fingerprints or request_id in self._results:
+            raise self._fault(
+                request_id,
+                f"a decision at index {result.index} for a request id with no attempt in flight",
+                ChartEvent(DECIDE, result),
+            )
+        key = self.key(request_id)
+        self.machines.dispatch(key, ChartEvent(DECIDE, result))
+        self._results[request_id] = result
         self._by_index[result.index] = result
-        decided = ADMISSION_APPLIED if result.decision == "applied" else ADMISSION_REJECTED
-        report_violation(ADMISSION.take(decided, old, self.state(result.request_id)))
+        self.machines.forget(key)
 
-    def refuse(self, request_id: str | None) -> None:
-        """Record a refusal after dedup (`admission.04`): the id stays where
-        it was, which is `unseen`, because dedup answered every id it had
-        seen."""
-        state = self.state(request_id)
-        report_violation(ADMISSION.take(ADMISSION_REFUSED, state, state))
+    def _fault(self, request_id: str, message: str, event: ChartEvent) -> StatechartError:
+        """A fault of the log or the engine that the index refuses before any
+        post, in its own words (statechart-engine ss5). An id in flight gets
+        the executor's facts about its instance; an id with none gets the
+        machine, the key, the item and its payload, and the stored decision
+        when it has one."""
+        key = self.key(request_id)
+        error = StatechartError(f"{ADMISSION.name} {key!r}: {message}")
+        if request_id in self._fingerprints and request_id not in self._results:
+            return self.machines.explain(error, key, event)
+        error.facts = [
+            ("machine", ADMISSION.name),
+            ("instance", repr(key)),
+            ("active", "no instance"),
+            ("item", f"the event {event.name}"),
+            ("payload", reprlib.repr(event.payload)),
+        ]
+        decided = self._results.get(request_id)
+        if decided is not None:
+            error.facts.append(("stored decision", f"{decided.decision} at index {decided.index}"))
+        return error
 
     def for_index(self, index: int) -> ApplyResult | None:
         return self._by_index.get(index)
@@ -872,27 +966,36 @@ class DecisionIndex:
         holds (DL-217), and on an id whose attempt has no
         decision yet -- unreachable while one writer owns the oracle and
         steps 5-7 do not yield, which is exactly why meeting it would mean
-        something else is writing."""
+        something else is writing.
+
+        A decided id is answered here, before any post: its instance is gone
+        and the stored decision is the memory. Only an id in flight is asked
+        of its instance."""
         seen = self._fingerprints.get(request_id)
         if seen is None:
             return None
         result = self._results.get(request_id)
-        state = self.state(request_id)
-        if seen != fingerprint:
-            report_violation(ADMISSION.take(_REUSED[state], state, state))
-            raise RequestCollision(
-                f"request_id {request_id!r} was admitted for a different command"
-                " (fingerprint mismatch): reuse an id only for an exact retry",
-                original=result,
-            )
         if result is None:
-            report_violation(ADMISSION.take(ADMISSION_UNDECIDED, state, state))
+            (outcome,) = self.machines.dispatch(
+                self.key(request_id), ChartEvent(INPUT, fingerprint)
+            )
+            if outcome.refusals:
+                raise _collision(request_id, None)
             raise EngineError(
                 f"request_id {request_id!r} is admitted but undecided: a second writer"
                 " is applying inputs, or steps 5-7 yielded"
             )
-        report_violation(ADMISSION.take(_RETRY[state], state, state))
+        if seen != fingerprint:
+            raise _collision(request_id, result)
         return result
+
+
+def _collision(request_id: str, original: ApplyResult | None) -> RequestCollision:
+    return RequestCollision(
+        f"request_id {request_id!r} was admitted for a different command"
+        " (fingerprint mismatch): reuse an id only for an exact retry",
+        original=original,
+    )
 
 
 def precondition_reason(oracle: Oracle, expect: Mapping[str, int]) -> Rejection | None:

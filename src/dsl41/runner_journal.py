@@ -1403,75 +1403,92 @@ def baseline_id(records: list[dict[str, Any]]) -> str:
 
 
 def read_attempts(records: list[dict[str, Any]]) -> list[Attempt]:
-    """The log's admitted inputs, in admission order.
+    """The log's admitted inputs, in admission order."""
+    base = baseline_id(records)
+    attempts = [a for record in records if (a := _attempt_of(record, base)) is not None]
+    return sorted(attempts, key=lambda a: a.index)
+
+
+def _attempt_of(record: dict[str, Any], base: str) -> Attempt | None:
+    """The attempt one WAL record admitted, or None for a record that is not
+    an attempt. `base` is the log's `baseline_id`.
 
     A record written before S2 carries no `request_id` and no
     `fingerprint`; it gets the ones it would have been admitted under, so
     the rest of the pipeline sees one kind of attempt rather than two. The
     synthesized id names its position in this log, which is the only thing
     that could ever have identified it."""
-    base = baseline_id(records)
-    attempts: list[Attempt] = []
-    for record in records:
-        rec = record.get("rec")
-        if rec not in ("input", "advance", "host"):
-            continue
-        kind = record.get("kind") if rec == "input" else None
-        payload = record.get("payload") or {}
-        host = HostCommand.from_wire(record["host"]) if rec == "host" else None
-        source = record.get("source")
-        expect = record.get("expect")
-        actor = record.get("claimed_actor")
-        epoch = int(record.get("epoch", INERT_EPOCH))
-        attempts.append(
-            Attempt(
-                index=int(record["seq"]),
-                at=datetime.fromisoformat(record["at"]),
-                request_id=str(record.get("request_id") or f"log:{record['seq']}"),
-                fingerprint=str(
-                    record.get("fingerprint")
-                    or fingerprint(
-                        baseline_id=base,
-                        kind=kind,
-                        payload=payload,
-                        source=source,
-                        epoch=epoch,
-                        expect=expect,
-                        claimed_actor=actor,
-                        host=host,
-                    )
-                ),
+    rec = record.get("rec")
+    if rec not in ("input", "advance", "host"):
+        return None
+    kind = record.get("kind") if rec == "input" else None
+    payload = record.get("payload") or {}
+    host = HostCommand.from_wire(record["host"]) if rec == "host" else None
+    source = record.get("source")
+    expect = record.get("expect")
+    actor = record.get("claimed_actor")
+    epoch = int(record.get("epoch", INERT_EPOCH))
+    return Attempt(
+        index=int(record["seq"]),
+        at=datetime.fromisoformat(record["at"]),
+        request_id=str(record.get("request_id") or f"log:{record['seq']}"),
+        fingerprint=str(
+            record.get("fingerprint")
+            or fingerprint(
+                baseline_id=base,
                 kind=kind,
                 payload=payload,
-                host=host,
                 source=source,
-                # the precondition replays with the attempt: an input admitted
-                # without a result is re-decided through the same gate, and the
-                # revision it named is half of what that gate reads
-                expect=expect,
                 epoch=epoch,
+                expect=expect,
                 claimed_actor=actor,
+                host=host,
             )
-        )
-    return sorted(attempts, key=lambda a: a.index)
+        ),
+        kind=kind,
+        payload=payload,
+        host=host,
+        source=source,
+        # the precondition replays with the attempt: an input admitted
+        # without a result is re-decided through the same gate, and the
+        # revision it named is half of what that gate reads
+        expect=expect,
+        epoch=epoch,
+        claimed_actor=actor,
+    )
 
 
-def read_decisions(records: list[dict[str, Any]]) -> DecisionIndex:
+def read_decisions(
+    records: list[dict[str, Any]], machines: Executor | None = None
+) -> DecisionIndex:
     """Pass one: the durable decisions, indexed. Built from the whole log
     before anything is applied, because an attempt says nothing about its
     own fate -- its decision is a LATER record, and the gap between them is
     the crash window (concurrency-model ss4).
 
+    One read in WAL order: an attempt opens its request id's `ADMISSION`
+    instance and its decision closes it, so only the attempts still in the
+    crash window are open when the read ends, and replay's second pass
+    decides them. `machines` is the executor the index runs on: a resuming
+    engine's, or the index's own.
+
+    A `StatechartError` out of the index stops replay as itself, its report
+    naming the WAL record it met, as `_at_input` names an input
+    (statechart-engine ss5).
+
     One kind, not two: `result` was the pre-DL-118 spelling of the same
     fact and is refused by name at `check_record` (DL-138)."""
-    index = DecisionIndex()
-    for attempt in read_attempts(records):
-        index.note(attempt)
+    index = DecisionIndex(machines)
+    base = baseline_id(records)
     for record in records:
-        if record.get("rec") != "decision":
-            continue
-        index.record(
-            ApplyResult(
+        attempt = _attempt_of(record, base)
+        if attempt is not None:
+            try:
+                index.note(attempt)
+            except StatechartError as exc:
+                raise _at_input(exc, attempt)
+        elif record.get("rec") == "decision":
+            result = ApplyResult(
                 index=int(record["index"]),
                 request_id=str(record["request_id"]),
                 decision=record["decision"],
@@ -1481,7 +1498,11 @@ def read_decisions(records: list[dict[str, Any]]) -> DecisionIndex:
                 code=record.get("code"),
                 revisions=record.get("revisions") or {},
             )
-        )
+            try:
+                index.record(result)
+            except StatechartError as exc:
+                exc.facts.append(("WAL input", f"{result.index}: the {result.decision} decision"))
+                raise
     return index
 
 
@@ -1690,12 +1711,18 @@ class Replay:
 
 
 def replay_inputs(
-    oracle: Oracle, records: list[dict[str, Any]], *, outbox: Outbox | None = None
+    oracle: Oracle,
+    records: list[dict[str, Any]],
+    *,
+    outbox: Outbox | None = None,
+    machines: Executor | None = None,
 ) -> Replay:
     """Apply the journal through `oracle`, two-pass (concurrency-model ss4).
 
     `outbox` is the carry: a segment opened from a seal starts with C1's
     undelivered intents and applied bindings already in it (`read_outbox`).
+    `machines` is the executor the decision index runs on: a resuming
+    engine's, or the index's own (`read_decisions`).
 
     Pass one indexes the decisions; pass two applies each attempt in
     admission order. A durable decision is authoritative -- a rejected
@@ -1723,7 +1750,7 @@ def replay_inputs(
     # the live engine fitted the limit to this catalog; a replay in another
     # process must fit it too, or it raises where the engine did not
     fit_recursion_limit(len(oracle.catalog.jobs))
-    decisions = read_decisions(records)
+    decisions = read_decisions(records, machines)
     # I2: indices are monotone across the ESTATE, not across the segment, so
     # a segment that opens at 5311 replays from 5310 -- the number its own
     # opening record carries. Derived from the record rather than passed in:
@@ -1769,7 +1796,10 @@ def replay_inputs(
             # recovery ladder would re-derive, so the error names the input
             raise ReplayFault(attempt, exc) from exc
         if durable is None:
-            decisions.record(applied.result)
+            try:
+                decisions.record(applied.result)
+            except StatechartError as exc:
+                raise _at_input(exc, attempt)
             replay.recovered_attempts.append(
                 RecoveredAttempt(
                     result=applied.result,

@@ -544,7 +544,6 @@ class Engine:
         #: old-epoch retry still recovers its original result.
         self.epoch = epoch
         self.frontiers = Frontiers()
-        self.decisions = DecisionIndex()
         #: retries answered from the index rather than re-applied (CM-05)
         self.deduped: list[tuple[str, ApplyResult]] = []
         #: refused before admission (concurrency-model ss4), so this list is
@@ -580,7 +579,8 @@ class Engine:
         #: second time to a caller who already saw it
         self._corpses_raised: set[int] = set()
         #: this engine's statechart executor (statechart-engine ss11): one
-        #: worklist for every instance. Its machines are `EFFECT`, one
+        #: worklist for every instance. Its machines are `ADMISSION`, one
+        #: instance per request id in flight (DL-334), `EFFECT`, one
         #: instance per open effect of the outbox (DL-331), `SEAL_BOUNDARY`,
         #: one instance per seal request (DL-327), `SUBSCRIPTION`, one
         #: instance per subscribe feed, which the control server starts
@@ -594,6 +594,9 @@ class Engine:
         #: resume -- an engine that forgot a kill it had decided would leave a
         #: detached run orphaned for the rest of its life.
         self.outbox = Outbox(self._machines)
+        #: the decision index beside `frontiers` above, built here because it
+        #: runs each request id in flight on this engine's executor
+        self.decisions = DecisionIndex(self._machines)
         #: period-model ss1.3: what this engine leads besides its own run
         #: root. None on an engine with no lineage -- the bisimulation
         #: harness, a rehearsal -- and a seal request then has nothing to
@@ -657,6 +660,23 @@ class Engine:
                 " (statechart-engine ss11)"
             )
         self._outbox = outbox
+
+    @property
+    def decisions(self) -> DecisionIndex:
+        """The engine's decision index. It runs each request id in flight on
+        this engine's executor: resume hands over the index replay rebuilt,
+        and one on another executor is refused, since it would split the
+        process's one worklist (statechart-engine ss11)."""
+        return self._decisions
+
+    @decisions.setter
+    def decisions(self, decisions: DecisionIndex) -> None:
+        if decisions.machines is not self._machines:
+            raise StatechartError(
+                "admission: the decision index runs on another executor than the engine's"
+                " (statechart-engine ss11)"
+            )
+        self._decisions = decisions
 
     @property
     def sealing(self) -> bool:
@@ -1740,7 +1760,6 @@ class Engine:
             # the leader that held that epoch), while an UNSEEN old-epoch
             # request is refused -- it was composed by a client still talking
             # to a leader that has been superseded.
-            self.decisions.refuse(pending.request_id)
             self._refuse(
                 pending,
                 AdmissionRefused(
@@ -1756,7 +1775,6 @@ class Engine:
             if self.sealing and pending.future is not None:
                 # the seal refuses on this and C1 reopens, so the request it
                 # popped is answered rather than dropped (DL-274)
-                self.decisions.refuse(pending.request_id)
                 self._refuse(pending, AdmissionRefused(str(exc), code=exc.code or "engine_error"))
             else:
                 # an engine-made input -- a completion, a tick, a routing
@@ -1769,7 +1787,6 @@ class Engine:
         if not attempt.engine_made:
             refusal = self._dry_apply(attempt)
             if refusal is not None:
-                self.decisions.refuse(pending.request_id)
                 self._refuse(pending, refusal)
                 return []
         else:

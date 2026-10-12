@@ -702,37 +702,46 @@ stateDiagram-v2
 
 ## admission
 
+Clock: logical.
+
 ```mermaid
 stateDiagram-v2
-    state "admitted" as s0
-    state "applied" as s1
-    state "rejected" as s2
-    state "unseen" as s3
-    [*] --> s3
-    s3 --> s0 : admission.01 input [the epoch is current, the stamp is not behind the frontier, a control input's dry apply is clean, an engine-made input's time half applies] / take the next index, append the attempt line, note the fingerprint
-    s0 --> s1 : admission.02 decide [the gate passes, or a replayed durable decision says applied] / the decision line, with the outbox entries it implies
-    s0 --> s2 : admission.03 decide [a precondition, the stale-completion gate or a host guard rejects, the input is quarantined, or a replayed durable decision says rejected] / the decision line, with its stored code
-    s3 --> s3 : admission.04 input [a stale epoch, a stamp behind the frontier while the seal answers, a control input's dry apply faults or breaks a declared transition] / answer the refusal, no index is taken and nothing is logged
-    s1 --> s1 : admission.05 input [the same fingerprint] / answer the stored decision, no index, no clock
-    s2 --> s2 : admission.06 input [the same fingerprint] / answer the stored decision and its code, no index, no clock
-    s1 --> s1 : admission.07 input [another fingerprint] / refuse request_id_reused, carrying the earlier decision
-    s2 --> s2 : admission.08 input [another fingerprint] / refuse request_id_reused, carrying the earlier decision
-    s0 --> s0 : admission.09 input [another fingerprint] / refuse request_id_reused, with no decision to carry
-    s0 --> s0 : admission.10 input [the same fingerprint] / raise: a second writer is applying inputs, or steps 5-7 yielded
+    state "admission" as s0
+    state s0 {
+        [*] --> s1
+        state "admitted" as s1
+        state "applied" as s2
+        state "rejected" as s3
+        s2 --> [*]
+        s3 --> [*]
+    }
+    s1 --> s2 : admission.02 decide [applied]
+    s1 --> s3 : admission.03 decide [rejected]
 ```
 
-| Id | Source | Trigger | Guard | Effect | Target | Cite | Mark |
+| Id | Source | Event | Guard | Action | Target | Kind | Cite |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| admission.01 | unseen | input | the epoch is current, the stamp is not behind the frontier, a control input's dry apply is clean, an engine-made input's time half applies | take the next index, append the attempt line, note the fingerprint | admitted | concurrency-model ss4 steps 2-4, DL-292 |  |
-| admission.02 | admitted | decide | the gate passes, or a replayed durable decision says applied | the decision line, with the outbox entries it implies | applied | concurrency-model ss4 steps 5-7, DL-118 |  |
-| admission.03 | admitted | decide | a precondition, the stale-completion gate or a host guard rejects, the input is quarantined, or a replayed durable decision says rejected | the decision line, with its stored code | rejected | concurrency-model ss4, DL-235, DL-272 |  |
-| admission.04 | unseen | input | a stale epoch, a stamp behind the frontier while the seal answers, a control input's dry apply faults or breaks a declared transition | answer the refusal, no index is taken and nothing is logged | unseen | concurrency-model ss4 steps 2-3, DL-90, DL-274, DL-292 |  |
-| admission.05 | applied | input | the same fingerprint | answer the stored decision, no index, no clock | applied | concurrency-model ss4 step 2, CM-05 |  |
-| admission.06 | rejected | input | the same fingerprint | answer the stored decision and its code, no index, no clock | rejected | concurrency-model ss4 step 2, CM-05, DL-272 |  |
-| admission.07 | applied | input | another fingerprint | refuse request_id_reused, carrying the earlier decision | applied | concurrency-model ss4 step 2, DL-217 |  |
-| admission.08 | rejected | input | another fingerprint | refuse request_id_reused, carrying the earlier decision | rejected | concurrency-model ss4 step 2, DL-217 |  |
-| admission.09 | admitted | input | another fingerprint | refuse request_id_reused, with no decision to carry | admitted | concurrency-model ss4 step 2, DL-217 |  |
-| admission.10 | admitted | input | the same fingerprint | raise: a second writer is applying inputs, or steps 5-7 yielded | admitted | concurrency-model ss4 step 2 |  |
+| admission.02 | admitted | decide | applied | The decision line, with the outbox entries it implies. | applied | external | concurrency-model ss4 steps 5-7, DL-118 |
+| admission.03 | admitted | decide | rejected | The decision line, with its stored code. | rejected | external | concurrency-model ss4, DL-235, DL-272, DL-320 |
+| admission.09 | admitted | input | other | Refuse request_id_reused, with no decision to carry. |  | refusal request_id_reused | concurrency-model ss4 step 2, DL-217 |
+| admission.10 | admitted | input | same | The index raises an EngineError: a second writer is applying inputs, or steps 5-7 yielded. The engine stops. |  | internal | concurrency-model ss4 step 2 |
+| admission.11 | admission | decide | decided | A decision is final: the index answers an exact retry from the stored decision, and refuses a reused id with request_id_reused carrying it, before any post (DL-217, CM-05). It forgets the instance in the call that made it final. No tier path posts this row. |  | ignored | statechart-engine ss10 |
+| admission.12 | admission | input | decided | A decision is final: the index answers an exact retry from the stored decision, and refuses a reused id with request_id_reused carrying it, before any post (DL-217, CM-05). It forgets the instance in the call that made it final. No tier path posts this row. |  | ignored | statechart-engine ss10 |
+
+| State | In | Entry | Exit | Defers | Waits |
+| --- | --- | --- | --- | --- | --- |
+| admission |  |  |  |  |  |
+| admitted | admission/window |  |  |  |  |
+| applied (final) | admission/window |  |  |  |  |
+| rejected (final) | admission/window |  |  |  |  |
+
+| Name | Kind | Prose |
+| --- | --- | --- |
+| applied | guard | The decision is `applied`: the gate passed, or a replayed durable decision says applied. |
+| rejected | guard | The decision is `rejected`: a precondition, the stale-completion gate or a host guard rejected the input, the input was quarantined, or a replayed durable decision says rejected. |
+| same | guard | The input carries the fingerprint the attempt was admitted under. |
+| other | guard | The input carries another fingerprint than the attempt's. |
+| decided | guard | The instance rests in a final state. Nothing posts to it then: the index forgets the instance in the call that made it final, and answers an input for a decided id from the stored decision before any post (DL-217, CM-05). |
 
 ## effect
 
