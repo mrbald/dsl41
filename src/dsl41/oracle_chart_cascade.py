@@ -33,10 +33,12 @@ ends`, job.215, or job.228); a box that ends FAILURE or TERMINATED terminates
 its live job_terminator members (`box ends FAILURE or TERMINATED`, job.116,
 or job.197); a box set INACTIVE takes every job it contains with it (`box set
 INACTIVE`, job.123, job.159 and job.160, or job.196 for a job already
-INACTIVE), on the batch INACTIVE path of DL-242; a box taken OFF_NOEXEC
-clears its contained jobs' flag (`OFF_NOEXEC on its box`, job.211, or
-job.229). A batch row is compared when it is written and settled, a flag
-row after its write, a member's termination as a STATUS move.
+INACTIVE), on the batch INACTIVE path of DL-242; a box put ON_NOEXEC sets its
+contained jobs' flag and takes their hold off (`ON_NOEXEC on its box`,
+job.231 or job.233, and job.232, DL-347); a box taken OFF_NOEXEC clears
+its contained jobs' flag (`OFF_NOEXEC on its box`, job.211, or job.229). A
+batch row is compared when it is written and settled, a flag row after its
+write, a member's termination as a STATUS move.
 
 The period opening (`first input of a period`): a removed job that holds
 units gives them back (job.308), then the waiters wake.
@@ -44,13 +46,13 @@ units gives them back (job.308), then the waiters wake.
 Audiences. The chart decides each box rule's row; the oracle decides when a
 rule is posted and to which instances. `box running`, `box run ends` and `box
 ends FAILURE or TERMINATED` reach the box's direct members; `box start`, `box
-set INACTIVE` and `OFF_NOEXEC on its box` reach every job it contains. Where a
-code gate chooses the audience, the audience is the sender's, and the worklist
-slice declares it in the sender's action (statechart-engine §8, §11).
+set INACTIVE`, `ON_NOEXEC on its box` and `OFF_NOEXEC on its box` reach every
+job it contains. Where a code gate chooses the audience, the audience is the
+sender's, and the worklist slice declares it in the sender's action
+(statechart-engine §8, §11).
 
-Not declared by the chart, so today's code: the members' ON_NOEXEC and its
-hold clear on a box's ON_NOEXEC; the moves of the box row's sets (the
-resolutions, the iced-out marks, the ran members); and the window
+Not declared by the chart, so today's code: the moves of the box row's sets
+(the resolutions, the iced-out marks, the ran members); and the window
 decisions at an outermost box start, which move no status.
 """
 
@@ -63,6 +65,7 @@ from dsl41.ir import JobIR
 from dsl41.job_chart import (
     BOX_ENDS,
     BOX_OFF_NOEXEC,
+    BOX_ON_NOEXEC,
     BOX_RECOMPUTE,
     BOX_RUN_ENDS,
     BOX_RUNNING,
@@ -121,6 +124,14 @@ _RECOMPUTED: Final[dict[tuple[str, ...], bool]] = {
 }
 #: `box set INACTIVE` on a contained job: it goes INACTIVE with its box.
 _CASCADED: Final = frozenset({("job.123",), ("job.159",), ("job.160",)})
+#: `ON_NOEXEC on its box` on a contained job: the flag's row, after the hold's
+#: where it clears one (region order), and whether the hold goes.
+_NOEXEC_HOLD: Final[dict[tuple[str, ...], bool]] = {
+    ("job.231",): False,
+    ("job.233",): False,
+    ("job.232", "job.231"): True,
+    ("job.232", "job.233"): True,
+}
 #: The rows that move nothing, by event.
 _NO_MOVE: Final[dict[str, tuple[str, ...]]] = {
     MEMBER_ENDS: ("job.189",),
@@ -138,7 +149,7 @@ _NO_MOVE: Final[dict[str, tuple[str, ...]]] = {
 
 class CascadeOracle(AgreeingOracle):
     """`Oracle` with the box rules and the period opening decided by the
-    `job` chart (DL-346), each at today's place in the cascade."""
+    `job` chart (DL-346, DL-347), each at today's place in the cascade."""
 
     def _box_rule(self, job: str, event: ChartEvent) -> tuple[tuple[str, ...], str, str]:
         """Dispatch a box rule's moment to the job's instance, brought to its
@@ -415,6 +426,42 @@ class CascadeOracle(AgreeingOracle):
             self.store.move_flag(member, BOX_NOEXEC_OFF)
             self._record(member, "OFF_NOEXEC", f"box {box!r} taken OFF_NOEXEC (DL-254)")
             self._agree_after(self._stays(member, key, event, old), "the flag's writes")
+
+    def _box_on_noexec(self, box: str, contained: list[str]) -> list[str]:
+        """`ON_NOEXEC on its box` on each job the box contains (DL-254,
+        DL-347), each through today's `_set_noexec` with today's lines:
+        the flag on (job.231, or job.233 for a job already flagged), then the
+        hold it supersedes off (job.232). Two dimensions are checked before
+        the job's write (the box's own flag is written already): a row the
+        chart ignores, where today's rule writes the flag and its line (as
+        DL-344 rules for the flag inputs), and whether the hold goes, the
+        row's choice. The jobs whose hold it cleared, by the fired row: they
+        retry their start once the box's own move is done."""
+        store = self.store
+        released = []
+        for job in contained:
+            event = ChartEvent(BOX_ON_NOEXEC)
+            store.follow_job(job)
+            key, old = store.job_key(job), store.job[job].status
+            outcomes = store.machines.dispatch(key, event)
+            fired = fired_rows(outcomes)
+            clears = _NOEXEC_HOLD.get(fired)
+            if clears is None:
+                raise self._unwritten(job, event, fired, "box rule row")
+            stays = self._stays(job, key, event, old)
+            ignored = [ident for outcome in outcomes for ident in outcome.ignored]
+            if ignored:
+                raise self._differ(
+                    f"{', '.join(ignored)} ignores {event.name}, which today's rules apply", stays
+                )
+            if clears != store.job[job].on_hold:
+                held = "held" if store.job[job].on_hold else "not held"
+                raise self._differ(f"{', '.join(fired)} fired for a job {held}", stays)
+            self._set_noexec(job, self._noexec_cause(box, job))
+            self._agree_after(stays, "the flags' writes")
+            if clears:
+                released.append(job)
+        return released
 
     def _cascaded(self, box: str) -> dict[str, Agreement]:
         """`box set INACTIVE` on each job the box contains (SEM-18, DL-242):

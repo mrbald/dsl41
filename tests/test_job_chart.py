@@ -49,6 +49,7 @@ from dsl41.job_chart import (
     ADMITTED_START,
     BOX_ENDS,
     BOX_OFF_NOEXEC,
+    BOX_ON_NOEXEC,
     BOX_RECOMPUTE,
     BOX_RUN_ENDS,
     BOX_RUNNING,
@@ -167,6 +168,9 @@ LATE_SETTLEMENT = "job.312"
 FLAG_REPORT = "job.230"
 #: The per-job start bound (DL-304), a refusal no table declared.
 START_BOUND = "job.100"
+#: A box's ON_NOEXEC on each job it contains (DL-347): the old row each
+#: stands for, which takes it under the job's own ON_NOEXEC.
+BOX_NOEXEC = {"job.231": "job_flags.09", "job.232": "job_flags.07", "job.233": "job_flags.09"}
 
 
 def _tree() -> tuple[dict[str, tuple[str, ...]], dict[str, str]]:
@@ -225,7 +229,7 @@ def test_the_chart_is_well_formed_draws_no_warning_and_is_not_registered() -> No
     assert chart_warnings(CHART) == []
     assert CHART.clock == "logical"
     assert CHART not in MACHINES  # the second oracle registers it when it drives it
-    assert len(CHART.rows) == 143
+    assert len(CHART.rows) == 146
     assert [b.id for c in CHART.choices for b in c.branches] == [
         *(f"job.{n}" for n in range(171, 177)),
         "job.309",
@@ -238,7 +242,8 @@ def test_the_chart_is_well_formed_draws_no_warning_and_is_not_registered() -> No
             ON_NOEXEC, OFF_NOEXEC, DISARM, RELEASE_RESOURCE, TERM_RUN_TIME, RUN_WINDOW, START,
             STARTED, READMIT, ACTUAL_START, ADMITTED_START, LEAVE_LIVE, MEMBER_MOVES,
             COMPLETION_MOMENT, MEMBER_ENDS, BOX_RECOMPUTE, BOX_START, BOX_RUNNING,
-            BOX_SET_INACTIVE, BOX_RUN_ENDS, BOX_ENDS, BOX_OFF_NOEXEC, PERIOD_OPENING, FLAG_MOVED,
+            BOX_SET_INACTIVE, BOX_RUN_ENDS, BOX_ENDS, BOX_OFF_NOEXEC, BOX_ON_NOEXEC, PERIOD_OPENING,
+            FLAG_MOVED,
         ]
     )  # fmt: skip
 
@@ -299,7 +304,7 @@ def test_the_mapping_is_total_injective_and_keeps_sources_and_targets() -> None:
 
 def test_every_other_row_moves_nothing_relays_an_attempt_or_settles_held_units() -> None:
     others = [row for row in CHART.rows if row.id not in OLD_OF]
-    assert len(OLD_OF) == 83 + 21 and len(others) == 39
+    assert len(OLD_OF) == 83 + 21 and len(others) == 42
     for row in others:
         if row.id in RELAYS:
             assert row.kind == "internal" and row.action == "relay_start"
@@ -313,6 +318,12 @@ def test_every_other_row_moves_nothing_relays_an_attempt_or_settles_held_units()
         elif row.id == START_BOUND:
             assert (row.source, row.event, row.kind) == ("IDLE", START, "internal")
             assert row.guard == "start_bounded" and "L010" in row.note
+        elif row.id in BOX_NOEXEC:
+            old = OLD[BOX_NOEXEC[row.id]]
+            assert (row.event, row.kind) == (BOX_ON_NOEXEC, "external")
+            assert not (row.guard or row.action), row.id
+            assert row.source in {state_name(s) for s in old.source}
+            assert _targets(row) <= {state_name(s) for s in old.targets()}
         else:
             assert row.kind == "ignored" and row.note, row.id
 
@@ -566,6 +577,12 @@ def test_the_completeness_table_matches_the_declaration_in_every_cell() -> None:
     assert table[("member RUNNING", BOX_ENDS, sc.ANY)] == "job.116"
     assert table[("job RUNNING reserved free", BOX_ENDS, sc.ANY)] == "ignored job.197"
     assert table[("member INACTIVE", BOX_RUNNING, sc.ANY)] == "job.208"
+    # a box's ON_NOEXEC on a job it contains: the flag on from either value,
+    # and the hold off; the hold region of a job not held takes no part
+    assert table[("job SUCCESS", BOX_ON_NOEXEC, sc.ANY)] == "job.231"
+    assert table[("job INACTIVE noexec", BOX_ON_NOEXEC, sc.ANY)] == "job.233"
+    assert table[("job INACTIVE hold", BOX_ON_NOEXEC, sc.ANY)] == "job.231 + job.232"
+    assert table[("job FAILURE every flag held", BOX_ON_NOEXEC, sc.ANY)] == "job.232 + job.233"
     assert table[("job INACTIVE", BOX_RUNNING, sc.ANY)] == "ignored job.227"
 
 
@@ -1423,3 +1440,49 @@ def test_a_late_settlement_finds_the_member_live_and_settles_nothing() -> None:
             assert len(sent) == sends, (name, status)
             for key, event in sent:
                 assert (key, event.name, event.payload) == ("j", LEAVE_LIVE, Settlement(success))
+
+
+# ---- a box's ON_NOEXEC on the jobs it contains (DL-347)
+
+#: A box `nb` and four jobs in it: one with no flag, one held, one ON_NOEXEC,
+#: and one ON_NOEXEC and then held.
+_NOEXEC_MEMBERS = ("n0", "nh", "nx", "nxh")
+_NOEXEC_JIL = "insert_job: nb\njob_type: b\n\n" + "".join(
+    f"insert_job: {job}\njob_type: c\ncommand: x\nmachine: m1\nbox_name: nb\n\n"
+    for job in _NOEXEC_MEMBERS
+)
+
+
+def test_a_boxs_noexec_on_the_jobs_it_contains_replays_through_the_chart(
+    takes: list[Take],
+) -> None:
+    """Today `_noexec_box` sets each contained job's flag, from either value
+    (job_flags.09), and clears its hold (job_flags.07), under the job's own
+    ON_NOEXEC's rows. Replayed through `ON_NOEXEC on its box` from each
+    job's row before the input, the chart fires the rows that stand for
+    those takes (job.231 to job.233), and ends in the flags each row has
+    after it."""
+    oracle = Oracle(lower_source(_NOEXEC_JIL))
+    for minute, (kind, job) in enumerate(
+        [("ON_HOLD", "nh"), ("ON_NOEXEC", "nx"), ("ON_NOEXEC", "nxh"), ("ON_HOLD", "nxh")], 1
+    ):
+        oracle.feed(Event(at=T0 + timedelta(minutes=minute), kind=kind, payload={"job": job}))  # type: ignore[arg-type]
+    before = {job: row_configuration(oracle.store.runtime(job)) for job in _NOEXEC_MEMBERS}
+    del takes[:]
+    oracle.feed(Event(at=T0 + timedelta(minutes=5), kind="ON_NOEXEC", payload={"job": "nb"}))
+    fired: dict[str, list[str]] = {}
+    for job in _NOEXEC_MEMBERS:
+        old = [take[2] for take in takes if take[0] == job]
+        executor = Executor()
+        executor.restore(job, CHART, before[job], JOB_DATA)
+        outcomes = executor.dispatch(job, ChartEvent(BOX_ON_NOEXEC))
+        fired[job] = [ident for outcome in outcomes for ident in outcome.rows]
+        assert sorted(BOX_NOEXEC[ident] for ident in fired[job]) == sorted(old), job
+        after = projection(row_configuration(oracle.store.runtime(job)))
+        assert projection(executor.active(job)) == after, job
+    assert fired == {
+        "n0": ["job.231"],
+        "nh": ["job.232", "job.231"],
+        "nx": ["job.233"],
+        "nxh": ["job.232", "job.233"],
+    }

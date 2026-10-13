@@ -25,7 +25,11 @@ Ids. Every id carries the chart's name, so each old table's id space is a
 hundred: `job.1NN` is `job_status.NN`, `job.2NN` is `job_flags.NN` and
 `job.3NN` is `job_holding.NN`, with the same number and meaning. A row that had
 several sources is one row per source: the first keeps the number, and the
-others take new numbers in the same hundred. Internal rows stay internal.
+others take new numbers in the same hundred. Internal rows stay internal. A
+box's ON_NOEXEC on the jobs it contains, which `job_flags.09` and `.07` take
+under the job's own ON_NOEXEC, is an event of its own, `ON_NOEXEC on its box`,
+as its OFF_NOEXEC twin is in the table (`job_flags.11`); its rows take new
+numbers (job.231 to job.233, DL-347).
 
 Guards read three things: the instance's configuration, its data (`JobData`),
 and the event's payload. The payload carries the facts the rule code reads
@@ -79,302 +83,83 @@ the facts of those paths are checked by synthesized cells and one windowed
 replay, and the old-vs-new harness is their proof. `JobData`'s release fields
 are the current run's: the tier refreshes them from the row's units when it
 brings the instance to its row (`RuntimeState.follow_job`).
+
+Modules. The declaration has three parts: the events, the data and the
+payloads (`job_chart_events`); the states, the rows and the configuration a
+row projects to (`job_chart_rows`); and here the guards, the actions and the
+chart `JOB`. This module re-exports the other two's names, so `job_chart`
+stays the one import, and this docstring is the contract of all three.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import Final, Literal
 
-from dsl41.oracle_state import LIVE, JobRuntime, JobStatus
-from dsl41.state_machine import (
-    Branch,
-    Choice,
-    Context,
-    Effects,
-    Event,
-    Region,
-    Row,
-    State,
-    Statechart,
+from dsl41.job_chart_events import (
+    ACTUAL_START,
+    ADMITTED_START,
+    FLAG_MOVED,
+    FORCE_STARTJOB,
+    LEAVE_LIVE,
+    ON_NOEXEC,
+    READMIT,
+    START,
+    Admission,
+    Attempt,
+    BoxVerdict,
+    Deadline,
+    FlagMoved,
+    Injection,
+    JobData,
+    Noexec,
+    Readmission,
+    Release,
+    Settlement,
+    Terminator,
+    Verdict,
 )
 
-# ---- events
-
-#: The oracle's inputs that move a job row.
-STATUS: Final = "STATUS"
-STARTJOB: Final = "STARTJOB"
-FORCE_STARTJOB: Final = "FORCE_STARTJOB"
-KILLJOB: Final = "KILLJOB"
-ON_ICE: Final = "ON_ICE"
-OFF_ICE: Final = "OFF_ICE"
-ON_HOLD: Final = "ON_HOLD"
-OFF_HOLD: Final = "OFF_HOLD"
-ON_NOEXEC: Final = "ON_NOEXEC"
-OFF_NOEXEC: Final = "OFF_NOEXEC"
-DISARM: Final = "DISARM"
-RELEASE_RESOURCE: Final = "RELEASE_RESOURCE"
-TERM_RUN_TIME: Final = "TIMER term_run_time"
-#: A window-postponed start fires (SEM-33), or a scan for the next eligible
-#: day resumes (DL-257).
-RUN_WINDOW: Final = "TIMER run_window"
-
-#: The moments the rules name inside one input.
-START: Final = "start"
-STARTED: Final = "started"
-READMIT: Final = "readmit"
-ACTUAL_START: Final = "actual start"
-ADMITTED_START: Final = "admitted start"
-LEAVE_LIVE: Final = "leave STARTING or RUNNING"
-#: A flag move whose status rule reads the flag: it follows the move.
-FLAG_MOVED: Final = "flag moved"
-MEMBER_MOVES: Final = "member moves"
-COMPLETION_MOMENT: Final = "completion moment"
-MEMBER_ENDS: Final = "member ends FAILURE or TERMINATED"
-BOX_RECOMPUTE: Final = "box recompute"
-BOX_START: Final = "box start"
-BOX_RUNNING: Final = "box running"
-BOX_SET_INACTIVE: Final = "box set INACTIVE"
-BOX_RUN_ENDS: Final = "box run ends"
-BOX_ENDS: Final = "box ends FAILURE or TERMINATED"
-BOX_OFF_NOEXEC: Final = "OFF_NOEXEC on its box"
-PERIOD_OPENING: Final = "first input of a period"
-
-# ---- data and payloads
-
-#: What leaving a run does with its units (DL-50, DL-256, SEM-16).
-type Release = Literal["free", "keep", "spend"]
-#: A member's view of its box's run, for a start attempt; `none` for a job in no box.
-type BoxGate = Literal["none", "running", "idle", "ran", "iced_out"]
-#: `Oracle._window_side`: the SEM-33 closer-edge rule at this instant.
-type WindowSide = Literal["inside", "defer", "skip"]
-type HoldingState = Literal["none", "reserved", "held"]
-
-
-@dataclass(frozen=True)
-class JobData:
-    """What a job instance's guards read besides its configuration and the event.
-
-    `box`: the job type is BOX. `catalog`: the job has a catalog entry; a row
-    can outlive its entry, and STATUS can create one (DL-264).
-    `job_terminator` and `auto_hold`: the member's attributes the box's rules
-    test (SEM-14, `_cascade_job_terminators`; `_on_box_started`). The release
-    fields say what leaving the run does with the units the run holds, after a
-    SUCCESS and after any other end (`RuntimeState.release_reservations` with
-    the pool's `keeps_held`). They are the current run's: a start that takes
-    units, or held units an injected live status makes the run's, changes them.
-    """
-
-    box: bool = False
-    catalog: bool = True
-    job_terminator: bool = False
-    auto_hold: bool = False
-    release_on_success: Release = "free"
-    release_otherwise: Release = "free"
-
-
-@dataclass(frozen=True)
-class Attempt:
-    """One start attempt: `Oracle._attempt_start`, `_start` and `_start_admitted`.
-
-    `force`, `explicit` and `scheduled` say who asks: a relay from STARTJOB,
-    FORCE_STARTJOB or a window-postponed start sets all three as `_dispatch`
-    passes them; an attempt a wake or a retry makes leaves them false, and its
-    refusals go untraced (DL-81). `stale`: a postponed start no longer belongs
-    to its box run (`_deferral_is_stale`), or a scan continuation is
-    superseded (`_rescan_superseded`). `rescan`: the timer resumes a scan and
-    attempts nothing. `dated`: the job has date conditions (`schedule`).
-    `box`: the member's gate on its box's run (SEM-10, SEM-20). `condition`:
-    the job's condition holds, or it has none. `window`: `_window_side`.
-    `bounded`: the job already has `MAX_NESTED_STARTS` starts in progress
-    on the call stack (`_starts_in_progress`, the bound `_start` reads).
-    `box_noexec`: a box above the job is ON_NOEXEC (`_noexec_bypasses`).
-    `admissible`: `_admissible`. `demand`: the demand vector reserves units
-    (`to_reservations`; a gate entry reserves nothing, so `reserve` moves
-    nothing for it).
-    The guards read the fields in `start_verdict`'s order, so a tier that
-    computes each fact on its first read computes only those today's rule
-    code reads (`oracle_chart`).
-    """
-
-    force: bool = False
-    explicit: bool = False
-    scheduled: bool = False
-    stale: bool = False
-    rescan: bool = False
-    dated: bool = False
-    box: BoxGate = "none"
-    condition: bool = True
-    window: WindowSide = "inside"
-    bounded: bool = False
-    box_noexec: bool = False
-    admissible: bool = True
-    demand: bool = True
-
-    def relayed(self, *, force: bool) -> Attempt:
-        """The attempt a relay passes on (`relay_start`): scheduled, its
-        refusal traced, forced for FORCE_STARTJOB."""
-        return replace(self, force=force, explicit=True, scheduled=True)
-
-
-@dataclass(frozen=True)
-class Readmission:
-    """One queue scan's attempt for a waiter: `Oracle._readmit`.
-
-    `box`: the member's box is RUNNING or not; `none` for a job in no box.
-    `keep_stopped`: an admit-only scan keeps a member of a stopped box queued
-    (DL-247, DL-255). `admissible`: `_admissible`. `recheck_fails`:
-    `_queued_recheck` names a failed check (DL-257). `demand` as for `Attempt`.
-    """
-
-    box: Literal["none", "running", "idle"] = "none"
-    keep_stopped: bool = False
-    admissible: bool = True
-    recheck_fails: bool = False
-    demand: bool = True
-
-
-@dataclass(frozen=True)
-class Injection:
-    """An injected STATUS: a status, or with none an exit code, read by
-    `Semantics.exit_is_success` as `success` (SEM-09)."""
-
-    status: str | None = None
-    success: bool = False
-
-
-@dataclass(frozen=True)
-class Noexec:
-    """ON_NOEXEC on a box (DL-254): `tree_busy`, a job it contains is on ice,
-    live or queued (`_oob_ignored`); `change`, its parent is RUNNING or a job
-    it contains is not INACTIVE. `_noexec_box` also counts the box's own
-    status, which the configuration decides."""
-
-    tree_busy: bool = False
-    change: bool = True
-
-
-@dataclass(frozen=True)
-class Deadline:
-    """A term_run_time timer: `current`, its run is the row's run."""
-
-    current: bool = True
-
-
-@dataclass(frozen=True)
-class Verdict:
-    """One step of a RUNNING box's completion door: `target`, the status it
-    decides, or none. `member moves` reads the overrides
-    (`_apply_box_overrides`), `completion moment` the default fold
-    (`_all_members_done`, `_fold_box_default`)."""
-
-    target: Literal["SUCCESS", "FAILURE"] | None = None
-
-
-@dataclass(frozen=True)
-class BoxVerdict:
-    """An idle box's recompute (`_idle_box_recompute`, SEM-15): `target`, the
-    status it decides, or none; `override`, a box_success or box_failure
-    condition decided it rather than the default verdict."""
-
-    target: Literal["SUCCESS", "FAILURE"] | None = None
-    override: bool = False
-
-
-@dataclass(frozen=True)
-class FlagMoved:
-    """The flag move a status rule follows: `cause` is the input that moved it,
-    and `noexec` ON_NOEXEC's payload, passed on."""
-
-    cause: Literal["ON_ICE", "KILLJOB", "readmit", "ON_NOEXEC"]
-    noexec: Noexec = Noexec()
-
-
-@dataclass(frozen=True)
-class Terminator:
-    """A member's end at its box: `fires`, `_box_terminator_fires` (the
-    member's box_terminator, its end, `box-terminator-on-terminated`)."""
-
-    fires: bool = True
-
-
-@dataclass(frozen=True)
-class Settlement:
-    """The end of a run whose units settle: `success`, the move ended in
-    SUCCESS, which frees a `success` policy's units (`release_reservations`)."""
-
-    success: bool = False
-
-
-@dataclass(frozen=True)
-class Admission:
-    """The units of an admitted start (`_acquire`, `_start_on_held`):
-    `on_held`, a FORCE_STARTJOB starts on held units (DL-256); `demand` as
-    for `Attempt`."""
-
-    on_held: bool = False
-    demand: bool = True
-    #: the end of the run whose units are still on the row when a box restarted
-    #: by its own completion starts the member again (job.312)
-    previous: Settlement = Settlement()
-
-
-# ---- configuration
-
-#: Each status's ancestors inside the `status` region, outermost first.
-_STATUS_PATH: Final[dict[str, tuple[str, ...]]] = {
-    "INACTIVE": ("lifecycle", "IDLE"),
-    "SUCCESS": ("lifecycle", "IDLE", "TERMINAL"),
-    "FAILURE": ("lifecycle", "IDLE", "TERMINAL", "FAILED"),
-    "TERMINATED": ("lifecycle", "IDLE", "TERMINAL", "FAILED"),
-    "QUE_WAIT": ("lifecycle",),
-    "STARTING": ("lifecycle", "LIVE"),
-    "RUNNING": ("lifecycle", "LIVE"),
-}
-_FLAGS: Final = ("ice", "hold", "noexec", "arm")
-
-
-def configuration(
-    status: JobStatus,
-    *,
-    ice: bool = False,
-    hold: bool = False,
-    noexec: bool = False,
-    armed: bool = False,
-    holding: HoldingState = "none",
-) -> frozenset[str]:
-    """The active states of an instance with this status, these flags and this holding."""
-    flags = {
-        f"{name}_{'on' if on else 'off'}" for name, on in zip(_FLAGS, (ice, hold, noexec, armed))
-    }
-    return frozenset({"job", *_STATUS_PATH[status], status, "flags", *flags, holding})
-
-
-def row_holding(row: JobRuntime) -> HoldingState:
-    """A row's holding state: its units are a run's while it is live, and held after."""
-    if not row.reservations:
-        return "none"
-    return "reserved" if row.status in LIVE else "held"
-
-
-def row_configuration(row: JobRuntime) -> frozenset[str]:
-    """The configuration a job row projects from."""
-    return configuration(
-        row.status,
-        ice=row.on_ice,
-        hold=row.on_hold,
-        noexec=row.on_noexec,
-        armed=row.armed,
-        holding=row_holding(row),
-    )
-
-
-def projection(active: frozenset[str]) -> tuple[str, bool, bool, bool, bool, str]:
-    """The row fields a configuration stands for: status, the four flags, holding."""
-    status = next(s for s in _STATUS_PATH if s in active)
-    holding = next(h for h in ("none", "reserved", "held") if h in active)
-    ice, hold, noexec, armed = (f"{name}_on" in active for name in _FLAGS)
-    return status, ice, hold, noexec, armed, holding
+# the names `job_chart` re-exports for its importers (`X as X`)
+from dsl41.job_chart_events import (
+    BOX_ENDS as BOX_ENDS,
+    BOX_OFF_NOEXEC as BOX_OFF_NOEXEC,
+    BOX_ON_NOEXEC as BOX_ON_NOEXEC,
+    BOX_RECOMPUTE as BOX_RECOMPUTE,
+    BOX_RUNNING as BOX_RUNNING,
+    BOX_RUN_ENDS as BOX_RUN_ENDS,
+    BOX_SET_INACTIVE as BOX_SET_INACTIVE,
+    BOX_START as BOX_START,
+    COMPLETION_MOMENT as COMPLETION_MOMENT,
+    DISARM as DISARM,
+    KILLJOB as KILLJOB,
+    MEMBER_ENDS as MEMBER_ENDS,
+    MEMBER_MOVES as MEMBER_MOVES,
+    OFF_HOLD as OFF_HOLD,
+    OFF_ICE as OFF_ICE,
+    OFF_NOEXEC as OFF_NOEXEC,
+    ON_HOLD as ON_HOLD,
+    ON_ICE as ON_ICE,
+    PERIOD_OPENING as PERIOD_OPENING,
+    RELEASE_RESOURCE as RELEASE_RESOURCE,
+    RUN_WINDOW as RUN_WINDOW,
+    STARTED as STARTED,
+    STARTJOB as STARTJOB,
+    STATUS as STATUS,
+    TERM_RUN_TIME as TERM_RUN_TIME,
+    BoxGate as BoxGate,
+    WindowSide as WindowSide,
+)
+from dsl41.job_chart_rows import CHOICES, ROOT, ROWS
+from dsl41.job_chart_rows import (
+    HoldingState as HoldingState,
+    configuration as configuration,
+    projection as projection,
+    row_configuration as row_configuration,
+    row_holding as row_holding,
+)
+from dsl41.oracle_state import LIVE
+from dsl41.state_machine import Context, Effects, Event, Statechart
 
 
 def _data(ctx: Context) -> JobData:
@@ -1054,503 +839,11 @@ ACTIONS: Final = {
     )
 }
 
-# ---- the chart
-
-_SEM10 = "SEM-10"
-_DL254 = "DL-254"
-_DL256 = "DL-256"
-_SEM15 = "SEM-15"
-_SS5 = "autosys-semantics ss5"
-_DL264 = "DL-13, DL-264"
-_DL242 = "DL-242, DL-235"
-
-
-def _never(ident: str, source: str, event: str, why: str, guard: str = "") -> Row:
-    """A cell the rules never post: an ignored row marked unreachable, with the reason."""
-    return Row(ident, source, event, guard=guard, kind="ignored", mark="unreachable", note=why)
-
-
-def _flag(name: str) -> Region:
-    return Region(name, f"{name}_off", (State(f"{name}_off"), State(f"{name}_on")))
-
-
-_FAILED: Final = State(
-    "FAILED", regions=(Region("failed", "FAILURE", (State("FAILURE"), State("TERMINATED"))),)
-)
-_TERMINAL: Final = State(
-    "TERMINAL", regions=(Region("terminal", "SUCCESS", (State("SUCCESS"), _FAILED)),)
-)
-_IDLE: Final = State("IDLE", regions=(Region("idle", "INACTIVE", (State("INACTIVE"), _TERMINAL)),))
-_LIVE: Final = State(
-    "LIVE",
-    regions=(Region("live", "STARTING", (State("STARTING"), State("RUNNING"))),),
-)
-#: Every status. Its rows are the ones whose old source was every status.
-_LIFECYCLE: Final = State(
-    "lifecycle", regions=(Region("status", "IDLE", (_IDLE, State("QUE_WAIT"), _LIVE)),)
-)
-_ROOT: Final = State(
-    "job",
-    regions=(
-        Region("status", "lifecycle", (_LIFECYCLE,)),
-        Region("flags", "flags", (State("flags", regions=tuple(_flag(f) for f in _FLAGS)),)),
-        Region("holding", "none", (State("none"), State("reserved"), State("held"))),
-    ),
-)
-
-#: The status rows, `job.1NN`. 101 to 158 are `job_status.01` to `.58`; 159
-#: and above are the rows a split source or a cell the table lacked adds; 100
-#: is the start bound, which no table declared (`_start` refused in code).
-_STATUS_ROWS: Final = (
-    Row(
-        "job.100",
-        "IDLE",
-        START,
-        guard="start_bounded",
-        kind="internal",
-        cite="DL-304",
-        note=(
-            "L010: a re-trigger loop inside one instant. A start nested inside"
-            " MAX_NESTED_STARTS starts of the same job is refused with a START_REFUSED line."
-        ),
-    ),
-    Row("job.101", "IDLE", START, "SUCCESS", "start_bypasses", "consume_arm", cite="SEM-22, DL-54"),
-    Row("job.102", "IDLE", START, "STARTING", "start_admits_job", "admit", cite="SEM-10, DL-120"),
-    Row("job.103", "IDLE", START, "QUE_WAIT", "start_queues", cite="DL-50, DL-247, DL-255"),
-    Row("job.104", "FAILED", START, "STARTING", "start_on_held", "admit_on_held", cite=_DL256),
-    Row("job.105", "STARTING", STARTED, "RUNNING", "is_job", cite=_SEM10),
-    Row("job.106", "TERMINAL", START, "INACTIVE", "start_skips", cite="SEM-33, DL-246"),
-    Row("job.107", "TERMINAL", START, "INACTIVE", "start_skips_member", cite="SEM-33, DL-154"),
-    Row(
-        "job.108", "QUE_WAIT", READMIT, "STARTING", "readmit_admits", "admit", cite="DL-50, DL-257"
-    ),
-    Row("job.109", "QUE_WAIT", READMIT, "INACTIVE", "readmit_cancels", cite="DL-50, DL-247"),
-    Row("job.110", "QUE_WAIT", FLAG_MOVED, "INACTIVE", "left_waiter", cite="DL-257"),
-    Row("job.111", "QUE_WAIT", FLAG_MOVED, "TERMINATED", "killed_waiter", cite="DL-50, DL-54"),
-    Row("job.112", "QUE_WAIT", FLAG_MOVED, "INACTIVE", "iced_waiter", cite="DL-50, DL-285"),
-    Row("job.113", "QUE_WAIT", FLAG_MOVED, "INACTIVE", "noexec_settles_job", cite=_DL254),
-    Row("job.114", "LIVE", KILLJOB, "TERMINATED", action="settle_after", cite="SEM-14"),
-    Row(
-        "job.115", "RUNNING", TERM_RUN_TIME, "TERMINATED", "current_run", "settle_after", cite=_SS5
-    ),
-    Row("job.116", "LIVE", BOX_ENDS, "TERMINATED", "is_terminator", "settle_after", cite="SEM-14"),
-    Row(
-        "job.117",
-        "lifecycle",
-        STATUS,
-        "SUCCESS",
-        "exit_success",
-        "settle_after_success",
-        cite="SEM-09",
-    ),
-    Row("job.118", "lifecycle", STATUS, "FAILURE", "exit_failure", "settle_after", cite="SEM-09"),
-    Row("job.119", "lifecycle", STATUS, "injected status", "injects", cite=_DL264),
-    Row(
-        "job.120",
-        "lifecycle",
-        STATUS,
-        "INACTIVE",
-        "injects_inactive_job",
-        "settle_after",
-        cite=_DL242,
-    ),
-    Row("job.121", "FAILED", FLAG_MOVED, "INACTIVE", "noexec_settles_job", cite="SEM-22, DL-243"),
-    Row("job.122", "TERMINAL", BOX_START, "INACTIVE", cite="SEM-10, DL-242", note="reset"),
-    Row("job.123", "QUE_WAIT", BOX_SET_INACTIVE, "INACTIVE", cite="SEM-18, DL-242", note="cascade"),
-    Row("job.124", "IDLE", START, "STARTING", "start_admits_box", "admit", cite="SEM-10, DL-242"),
-    Row("job.125", "STARTING", STARTED, "RUNNING", "is_box", cite="SEM-10, SEM-33, DL-246"),
-    Row(
-        "job.126",
-        "RUNNING",
-        MEMBER_MOVES,
-        "SUCCESS",
-        "verdict_success",
-        "settle_after_success",
-        cite="SEM-12",
-    ),
-    Row(
-        "job.127",
-        "RUNNING",
-        MEMBER_MOVES,
-        "FAILURE",
-        "verdict_failure",
-        "settle_after",
-        cite="SEM-12, SEM-14",
-    ),
-    Row(
-        "job.128",
-        "RUNNING",
-        COMPLETION_MOMENT,
-        "SUCCESS",
-        "verdict_success",
-        "settle_after_success",
-        cite="SEM-11",
-    ),
-    Row(
-        "job.129",
-        "RUNNING",
-        COMPLETION_MOMENT,
-        "FAILURE",
-        "verdict_failure",
-        "settle_after",
-        cite="SEM-11, SEM-14",
-    ),
-    Row(
-        "job.130",
-        "RUNNING",
-        MEMBER_ENDS,
-        "TERMINATED",
-        "terminator_fires",
-        "settle_after",
-        cite="SEM-14",
-    ),
-    Row("job.131", "INACTIVE", BOX_RECOMPUTE, "SUCCESS", "overrides_success", cite=_SEM15),
-    Row("job.132", "INACTIVE", BOX_RECOMPUTE, "FAILURE", "overrides_failure", cite=_SEM15),
-    Row("job.133", "INACTIVE", BOX_RECOMPUTE, "SUCCESS", "derives_success", cite=_SEM15),
-    Row("job.134", "INACTIVE", BOX_RECOMPUTE, "FAILURE", "derives_failure", cite=_SEM15),
-    Row(
-        "job.135", "lifecycle", STATUS, "INACTIVE", "injects_inactive_box", "settle", cite="SEM-18"
-    ),
-    Row("job.136", "IDLE", FLAG_MOVED, "INACTIVE", "noexec_settles_box", cite=_DL254),
-    *(
-        Row(
-            f"job.{137 + i}", s, KILLJOB, kind="internal", cite="DL-64, DL-81", note="EVENT_IGNORED"
-        )
-        for i, s in enumerate(("INACTIVE", "SUCCESS", "FAILURE", "TERMINATED"))
-    ),
-    *(
-        Row(
-            f"job.{141 + i}", s, START, guard="start_refused", kind="internal", cite="DL-81, DL-246"
-        )
-        for i, s in enumerate(
-            ("INACTIVE", "QUE_WAIT", "STARTING", "RUNNING", "SUCCESS", "FAILURE", "TERMINATED")
-        )
-    ),
-    Row("job.148", "STARTING", ON_ICE, kind="internal", cite=_DL254, note="EVENT_IGNORED"),
-    Row("job.149", "RUNNING", ON_ICE, kind="internal", cite=_DL254, note="EVENT_IGNORED"),
-    Row("job.150", "STARTING", ON_HOLD, kind="internal", cite=_DL254, note="EVENT_IGNORED"),
-    Row("job.151", "RUNNING", ON_HOLD, kind="internal", cite=_DL254, note="EVENT_IGNORED"),
-    *(
-        Row(f"job.{152 + i}", s, ON_NOEXEC, guard="noexec_ignored", kind="internal", cite=_DL254)
-        for i, s in enumerate(
-            ("INACTIVE", "STARTING", "RUNNING", "SUCCESS", "FAILURE", "TERMINATED", "QUE_WAIT")
-        )
-    ),
-    # a split source: job.123's, job.131 to job.134's and job.136's other sources
-    Row("job.159", "LIVE", BOX_SET_INACTIVE, "INACTIVE", action="settle", cite="SEM-18, DL-242"),
-    Row("job.160", "TERMINAL", BOX_SET_INACTIVE, "INACTIVE", cite="SEM-18", note="as job.123"),
-    Row("job.161", "QUE_WAIT", BOX_RECOMPUTE, "SUCCESS", "overrides_success", cite=_SEM15),
-    Row("job.162", "FAILURE", BOX_RECOMPUTE, "SUCCESS", "overrides_success", cite=_SEM15),
-    Row("job.163", "QUE_WAIT", BOX_RECOMPUTE, "FAILURE", "overrides_failure", cite=_SEM15),
-    Row("job.164", "SUCCESS", BOX_RECOMPUTE, "FAILURE", "overrides_failure", cite=_SEM15),
-    Row("job.165", "QUE_WAIT", BOX_RECOMPUTE, "SUCCESS", "derives_success", cite=_SEM15),
-    Row("job.166", "FAILURE", BOX_RECOMPUTE, "SUCCESS", "derives_success", cite=_SEM15),
-    Row("job.167", "QUE_WAIT", BOX_RECOMPUTE, "FAILURE", "derives_failure", cite=_SEM15),
-    Row("job.168", "SUCCESS", BOX_RECOMPUTE, "FAILURE", "derives_failure", cite=_SEM15),
-    Row("job.169", "QUE_WAIT", FLAG_MOVED, "INACTIVE", "noexec_settles_box", cite=_DL254),
-    Row("job.170", "STARTING", FLAG_MOVED, "INACTIVE", "noexec_settles_box", "settle", cite=_DL254),
-    # 171 to 176 are job.119's choice branches
-    # the inputs that relay a start attempt (statechart-engine §8)
-    Row("job.177", "lifecycle", STARTJOB, action="relay_start", kind="internal", cite=_SEM10),
-    Row(
-        "job.178", "lifecycle", FORCE_STARTJOB, action="relay_start", kind="internal", cite="SEM-23"
-    ),
-    Row("job.179", "lifecycle", RUN_WINDOW, action="relay_start", kind="internal", cite="SEM-33"),
-    # cells the table had no row for: the rules move nothing there
-    Row(
-        "job.180",
-        "lifecycle",
-        START,
-        guard="start_moves_nothing",
-        kind="ignored",
-        cite="SEM-20, SEM-21, SEM-32, SEM-33",
-        note="A gate holds the attempt silently, a tick arms, or a postponed start waits.",
-    ),
-    Row(
-        "job.181",
-        "QUE_WAIT",
-        READMIT,
-        guard="readmit_keeps",
-        kind="ignored",
-        cite="DL-50, DL-247",
-        note="The waiter stays queued.",
-    ),
-    _never("job.182", "lifecycle", READMIT, "A queue scan addresses a waiter.", "not_queued"),
-    _never(
-        "job.183", "lifecycle", STARTED, "The rules post it only while the run is still STARTING."
-    ),
-    Row(
-        "job.184",
-        "lifecycle",
-        TERM_RUN_TIME,
-        kind="ignored",
-        cite="SEM-14",
-        note="The deadline is an earlier run's, or the run is no longer RUNNING.",
-    ),
-    Row(
-        "job.185",
-        "RUNNING",
-        MEMBER_MOVES,
-        guard="decides_nothing",
-        kind="ignored",
-        cite="SEM-11, SEM-12",
-        note="No override holds; the default fold may follow.",
-    ),
-    _never(
-        "job.186",
-        "lifecycle",
-        MEMBER_MOVES,
-        "Only a RUNNING box's completion door reads its overrides.",
-    ),
-    Row(
-        "job.187",
-        "RUNNING",
-        COMPLETION_MOMENT,
-        guard="decides_nothing",
-        kind="ignored",
-        cite="SEM-11, SEM-12",
-        note="A member is not done, or an unmet override suppresses the default.",
-    ),
-    _never("job.188", "lifecycle", COMPLETION_MOMENT, "Only a RUNNING box folds."),
-    Row(
-        "job.189",
-        "lifecycle",
-        MEMBER_ENDS,
-        guard="is_box",
-        kind="ignored",
-        cite="SEM-13, SEM-14",
-        note="A terminator ends only a RUNNING box; the door or the recompute follows.",
-    ),
-    _never("job.190", "lifecycle", MEMBER_ENDS, "Only a box has members.", guard="is_job"),
-    Row(
-        "job.191",
-        "lifecycle",
-        BOX_RECOMPUTE,
-        guard="is_box",
-        kind="ignored",
-        cite=_SEM15,
-        note="No verdict, or the box already has it.",
-    ),
-    _never("job.192", "lifecycle", BOX_RECOMPUTE, "Only a box has members.", guard="is_job"),
-    _never("job.193", "LIVE", BOX_RECOMPUTE, "A live box is not idle; its own end decides it."),
-    _never(
-        "job.194",
-        "TERMINATED",
-        BOX_RECOMPUTE,
-        "TERMINATED is sticky until the next box start (SEM-13).",
-    ),
-    Row(
-        "job.195",
-        "lifecycle",
-        BOX_START,
-        kind="ignored",
-        cite="SEM-10, DL-242",
-        note="INACTIVE loses its exit code by a plain write; a live or queued job keeps its run.",
-    ),
-    Row(
-        "job.196",
-        "INACTIVE",
-        BOX_SET_INACTIVE,
-        kind="ignored",
-        cite="SEM-18",
-        note="Already INACTIVE: the cascade leaves it out.",
-    ),
-    Row(
-        "job.197",
-        "lifecycle",
-        BOX_ENDS,
-        kind="ignored",
-        cite="SEM-14",
-        note="Not live, or no job_terminator: nothing to terminate.",
-    ),
-    Row(
-        "job.198",
-        "lifecycle",
-        FLAG_MOVED,
-        guard="flag_moves_nothing",
-        kind="ignored",
-        cite="SEM-20, DL-254",
-        note="Not queued, or no status move: the member's completion moment and the wakes follow.",
-    ),
-    _never(
-        "job.199",
-        "lifecycle",
-        FLAG_MOVED,
-        "Only a waiter's kill or failed recheck reports it; an ignored ON_NOEXEC moves no flag.",
-        "flag_move_unposted",
-    ),
-)
-
-#: The flag rows, `job.2NN`: 201 to 217 are `job_flags.01` to `.17`.
-_FLAG_ROWS: Final = (
-    Row(
-        "job.201",
-        "ice_off",
-        ON_ICE,
-        "ice_on",
-        "not_live",
-        "report_flag_move",
-        cite="SEM-20, DL-254, DL-285",
-    ),
-    Row("job.202", "ice_on", OFF_ICE, "ice_off", cite="SEM-20", note="no re-evaluation"),
-    Row("job.203", "ice_on", FORCE_STARTJOB, "ice_off", "force_clears", cite="SEM-23, DL-243"),
-    Row("job.204", "hold_off", ON_HOLD, "hold_on", "not_live", cite="SEM-21, DL-254, DL-247"),
-    Row("job.205", "hold_on", OFF_HOLD, "hold_off", cite="SEM-21, DL-50", note="attempt the start"),
-    Row("job.206", "hold_on", FORCE_STARTJOB, "hold_off", "force_clears", cite="SEM-23, DL-243"),
-    Row("job.207", "hold_on", ON_NOEXEC, "hold_off", "noexec_applies", cite=_DL254),
-    Row(
-        "job.208", "hold_off", BOX_RUNNING, "hold_on", "has_auto_hold", cite="autosys-semantics ss5"
-    ),
-    Row(
-        "job.209",
-        "noexec_off",
-        ON_NOEXEC,
-        "noexec_on",
-        "noexec_applies",
-        "report_flag_move",
-        cite="SEM-22, DL-254",
-    ),
-    Row("job.210", "noexec_on", OFF_NOEXEC, "noexec_off", cite="DL-243"),
-    Row("job.211", "noexec_on", BOX_OFF_NOEXEC, "noexec_off", cite=_DL254),
-    Row("job.212", "arm_off", START, "arm_on", "start_arms", cite="SEM-32, DL-54"),
-    Row("job.213", "arm_on", ACTUAL_START, "arm_off", cite="DL-54"),
-    Row("job.214", "arm_on", DISARM, "arm_off", cite="DL-158"),
-    Row("job.215", "arm_on", BOX_RUN_ENDS, "arm_off", cite="DL-54", note="SCHED_DISARM"),
-    Row(
-        "job.216", "arm_on", READMIT, "arm_off", "readmit_leaves", "report_flag_move", cite="DL-257"
-    ),
-    Row("job.217", "arm_on", KILLJOB, "arm_off", "queued", "report_flag_move", cite="DL-54"),
-    # a split source: the second source of job.201, .202, .204, .205, .209, .210, .213, .214, .217
-    Row("job.218", "ice_on", ON_ICE, "ice_on", "not_live", cite="SEM-20", note="as job.201"),
-    Row("job.219", "ice_off", OFF_ICE, "ice_off", cite="SEM-20", note="as job.202"),
-    Row("job.220", "hold_on", ON_HOLD, "hold_on", "not_live", cite="SEM-21", note="as job.204"),
-    Row("job.221", "hold_off", OFF_HOLD, "hold_off", cite="SEM-21", note="as job.205"),
-    Row(
-        "job.222",
-        "noexec_on",
-        ON_NOEXEC,
-        "noexec_on",
-        "noexec_applies",
-        "report_flag_move",
-        cite="SEM-22, DL-254",
-    ),
-    Row("job.223", "noexec_off", OFF_NOEXEC, "noexec_off", cite="DL-243", note="as job.210"),
-    Row("job.224", "arm_off", ACTUAL_START, "arm_off", cite="DL-54", note="as job.213"),
-    Row("job.225", "arm_off", DISARM, "arm_off", cite="DL-158", note="as job.214"),
-    Row("job.226", "arm_off", KILLJOB, "arm_off", "queued", "report_flag_move", cite="DL-54"),
-    # cells the table had no row for
-    Row("job.227", "flags", BOX_RUNNING, kind="ignored", note="Not auto_hold, or already held."),
-    Row("job.228", "arm_off", BOX_RUN_ENDS, kind="ignored", note="Only an armed member disarms."),
-    Row("job.229", "noexec_off", BOX_OFF_NOEXEC, kind="ignored", note="Only a flagged job clears."),
-    Row(
-        "job.230",
-        "arm_off",
-        READMIT,
-        guard="readmit_leaves",
-        action="report_flag_move",
-        kind="internal",
-        cite="DL-257",
-        note="No arm to drop: the status move follows.",
-    ),
-)
-
-#: The holding rows, `job.3NN`: 301 to 308 are `job_holding.01` to `.08`.
-_HOLDING_ROWS: Final = (
-    Row("job.301", "none", ADMITTED_START, "reserved", "has_demand", cite="DL-120"),
-    Row("job.302", "held", ADMITTED_START, "taken over", "takes_over", cite=_DL256),
-    Row("job.303", "held", ADMITTED_START, "reserved", "on_held_units", cite=_DL256),
-    Row("job.304", "reserved", LEAVE_LIVE, "none", "frees_all", cite="DL-120"),
-    Row("job.305", "reserved", LEAVE_LIVE, "held", "keeps_held", cite=_DL256),
-    Row("job.306", "reserved", LEAVE_LIVE, "none", "spends", cite="SEM-16, DL-120"),
-    Row("job.307", "held", RELEASE_RESOURCE, "none", cite=_DL256, note="wake the waiters"),
-    Row("job.308", "held", PERIOD_OPENING, "none", "left_catalog", cite=_DL256),
-    # 309 and 310 are job.302's choice branches; cells the table had no row for
-    Row("job.311", "none", ADMITTED_START, guard="no_demand", kind="ignored", note="No units."),
-    Row(
-        "job.312",
-        "reserved",
-        ADMITTED_START,
-        "",
-        "takes_over",
-        "settle_ended_run",
-        kind="internal",
-        cite=_DL256,
-        note=(
-            "A box restarted by its own completion starts the member again before the"
-            " member's late settlement. The run that ended settles first, by the end it"
-            " made (frees, keeps, or spends); the start is then admitted again, to reserve"
-            " or to take over what was kept."
-        ),
-    ),
-    Row("job.313", "none", LEAVE_LIVE, kind="ignored", note="The run held nothing."),
-    Row("job.314", "held", LEAVE_LIVE, kind="ignored", note="An earlier run's units stay held."),
-    Row("job.315", "none", RELEASE_RESOURCE, kind="ignored", cite=_DL256, note="Nothing held."),
-    Row(
-        "job.316",
-        "reserved",
-        RELEASE_RESOURCE,
-        kind="ignored",
-        cite=_DL256,
-        note="The run's units go back when it ends.",
-    ),
-    _never(
-        "job.317",
-        "none",
-        PERIOD_OPENING,
-        "The opening addresses only a removed job that holds units.",
-    ),
-    _never(
-        "job.318",
-        "reserved",
-        PERIOD_OPENING,
-        "The boundary refuses a live removed job (period-model ss10.1).",
-    ),
-    Row(
-        "job.319",
-        "held",
-        STATUS,
-        "reserved",
-        "injects_live",
-        cite="DL-120, DL-256",
-        note="Units on a live row are the run's: they settle when it ends.",
-    ),
-    _never(
-        "job.320",
-        "reserved",
-        ADMITTED_START,
-        "A forced start on held units starts from FAILED, never mid-cascade.",
-        "on_held_units",
-    ),
-    _never(
-        "job.321",
-        "held",
-        PERIOD_OPENING,
-        "The opening addresses only a job the catalog no longer defines.",
-        "in_catalog",
-    ),
-)
-
 JOB: Final = Statechart(
     name="job",
-    root=_ROOT,
-    rows=(*_STATUS_ROWS, *_FLAG_ROWS, *_HOLDING_ROWS),
-    choices=(
-        Choice(
-            "injected status",
-            (
-                Branch("job.171", "INACTIVE", "injected_inactive", "settle_after"),
-                Branch("job.172", "STARTING", "injected_starting"),
-                Branch("job.173", "RUNNING", "injected_running"),
-                Branch("job.174", "SUCCESS", "injected_success", "settle_after_success"),
-                Branch("job.175", "FAILURE", "injected_failure", "settle_after"),
-                Branch("job.176", "TERMINATED", action="settle_after"),
-            ),
-        ),
-        Choice(
-            "taken over",
-            (Branch("job.309", "reserved", "has_demand"), Branch("job.310", "none")),
-        ),
-    ),
+    root=ROOT,
+    rows=ROWS,
+    choices=CHOICES,
     guards=GUARDS,
     actions=ACTIONS,
     clock="logical",

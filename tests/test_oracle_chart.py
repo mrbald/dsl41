@@ -20,7 +20,7 @@ import pytest
 from estate_gen import SealPoint
 from oracle_lockstep import EPOCH, LockstepDivergence, LockstepOracle
 
-from dsl41 import job_chart, oracle_chart
+from dsl41 import job_chart, oracle_chart, oracle_chart_cascade
 from dsl41.capacity import CapacityPool
 from dsl41.ir import lower_source
 from dsl41.job_chart import JobData, configuration, row_configuration
@@ -2626,6 +2626,7 @@ _BOX_ITEMS = (
     "box ends FAILURE or TERMINATED",
     "box set INACTIVE",
     "OFF_NOEXEC on its box",
+    "ON_NOEXEC on its box",
     "first input of a period",
 )
 
@@ -2722,6 +2723,15 @@ _OFF_NOEXEC = [
     _box_ev(0, "ON_NOEXEC", "nb"),
     _box_ev(1, "OFF_NOEXEC", "nm"),
     _box_ev(2, "OFF_NOEXEC", "nb"),
+]
+#: A box's ON_NOEXEC on its jobs: `nm` held and `nn` with no flag; then `nm`
+#: already ON_NOEXEC, and `nn` ON_NOEXEC and then held.
+_ON_NOEXEC = [_box_ev(0, "ON_HOLD", "nm"), _box_ev(1, "ON_NOEXEC", "nb")]
+_ON_NOEXEC_FLAGGED = [
+    _box_ev(0, "ON_NOEXEC", "nm"),
+    _box_ev(1, "ON_NOEXEC", "nn"),
+    _box_ev(2, "ON_HOLD", "nn"),
+    _box_ev(3, "ON_NOEXEC", "nb"),
 ]
 _FOLD_FAILURE = [
     _box_ev(0, "FORCE_STARTJOB", "fb"),
@@ -3020,6 +3030,41 @@ _BOX_OUTCOMES: dict[str, tuple[str, list[Event], str, list[tuple[str, ...]], str
         [("job.229",)],
         "",
     ),
+    "a box put ON_NOEXEC flags its member": (
+        _BOX_JIL,
+        _ON_NOEXEC,
+        "nn",
+        [("job.231",)],
+        "ON_NOEXEC",
+    ),
+    "a box put ON_NOEXEC flags its held member and takes its hold off": (
+        _BOX_JIL,
+        _ON_NOEXEC,
+        "nm",
+        [("job.232", "job.231")],
+        "OFF_HOLD",
+    ),
+    "a box put ON_NOEXEC flags its member already ON_NOEXEC again": (
+        _BOX_JIL,
+        _ON_NOEXEC_FLAGGED,
+        "nm",
+        [("job.233",)],
+        "ON_NOEXEC",
+    ),
+    "the directed flag estate reaches a flagged and held job under its box's ON_NOEXEC": (
+        oracle_lockstep.FLAG_JIL,
+        _flag_steps("ON_NOEXEC on a box over a flagged and held job", 3),
+        "fl_qs",
+        [("job.232", "job.233")],
+        "OFF_HOLD",
+    ),
+    "a box put ON_NOEXEC takes the hold off its member already ON_NOEXEC": (
+        _BOX_JIL,
+        _ON_NOEXEC_FLAGGED,
+        "nn",
+        [("job.232", "job.233")],
+        "OFF_HOLD",
+    ),
 }
 
 
@@ -3305,6 +3350,129 @@ def test_a_batch_that_does_not_write_the_charts_move_is_a_statechart_error(
     with pytest.raises(StatechartError, match="'in': the batch never wrote the chart's move"):
         oracle.feed(_CASCADE[2])
     assert oracle._batch is None
+
+
+def test_a_box_noexec_flag_whose_write_differs_from_the_charts_is_a_statechart_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Planted: a job the box contains has an iced instance and no follow
+    brings it back, so the chart's `ON_NOEXEC on its box` keeps an ice that
+    today's flag writes do not have: caught after the job's flag writes."""
+    oracle = _box_oracle()
+    store = oracle.store
+    monkeypatch.setattr(store, "follow_job", lambda job: None)
+    store.machines.realign(
+        "job:nn", configuration("INACTIVE", ice=True), store.machines.data("job:nn")
+    )
+    with pytest.raises(StatechartError, match="'nn': the flags' writes differ") as raised:
+        oracle.feed(_ON_NOEXEC[-1])
+    text = str(raised.value)
+    assert "ice_on" in text and "ice_off" in text and "ON_NOEXEC on its box" in text
+
+
+@pytest.mark.parametrize(
+    ("row", "steps"),
+    [("job_231", _ON_NOEXEC[1:]), ("job_233", _ON_NOEXEC_FLAGGED[:1] + _ON_NOEXEC_FLAGGED[3:])],
+    ids=["a job not flagged", "a job already flagged"],
+)
+def test_a_box_noexec_row_the_chart_ignores_and_today_writes_is_a_statechart_error(
+    row: str, steps: list[Event], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Mutant: job.231 or job.233 re-kinded to ignored, so the chart ignores
+    `ON_NOEXEC on its box` for a contained job, not held, where today's
+    `_set_noexec` writes the flag and its line. Caught at the input, before
+    the job's write (DL-344's rule for the flag inputs). The mutant's hits
+    stay out of the session."""
+    monkeypatch.setenv(HITS_ENV, str(tmp_path))
+    oracle = _fed_boxes(_box_oracle(_rows_changed(**{row: {"kind": "ignored"}})), steps[:-1])
+    before = oracle.store.job["nm"]
+    traced = len(oracle.trace())
+    ident = row.replace("_", ".")
+    with pytest.raises(
+        StatechartError, match=f"'nm': {ident} ignores ON_NOEXEC on its box, which today's"
+    ):
+        oracle.feed(steps[-1])
+    assert oracle.store.job["nm"] == before
+    assert [t for t in oracle.trace()[traced:] if t.job == "nm"] == []
+
+
+@pytest.mark.parametrize(
+    ("steps", "released"),
+    [(_ON_NOEXEC, ["nm"]), (_ON_NOEXEC_FLAGGED, ["nn"]), (_ON_NOEXEC[1:], [])],
+    ids=["a held job", "a held job already flagged", "no job held"],
+)
+def test_a_box_noexec_releases_exactly_the_jobs_whose_hold_row_fired(
+    steps: list[Event], released: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_box_on_noexec` returns the contained jobs whose hold row (job.232)
+    fired, in order: they retry their start. A retry is silent in every
+    run today (the box is not RUNNING), so this assertion is what pins the
+    list."""
+    oracle = _fed_boxes(_box_oracle(), steps[:-1])
+    seen = _spied(oracle)
+    returned: list[list[str]] = []
+    on_noexec = oracle._box_on_noexec
+
+    def spy(box: str, contained: list[str]) -> list[str]:
+        returned.append(on_noexec(box, contained))
+        return returned[-1]
+
+    monkeypatch.setattr(oracle, "_box_on_noexec", spy)
+    oracle.feed(steps[-1])
+    held = [
+        o.key[4:] for o in seen if o.event.name == "ON_NOEXEC on its box" and "job.232" in o.rows
+    ]
+    assert returned == [released] and held == released
+
+
+def test_a_box_noexec_flag_the_oracle_does_not_write_is_a_statechart_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mutant: today's `_set_noexec` writes nothing for a job the box
+    contains, which the chart flags (job.231). Caught at the input."""
+    oracle = _box_oracle()
+    monkeypatch.setattr(oracle, "_set_noexec", lambda job, cause: False)
+    with pytest.raises(StatechartError, match="'nm': the flags' writes differ") as raised:
+        oracle.feed(_ON_NOEXEC[-1])
+    assert "noexec_on" in str(raised.value) and "noexec_off" in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("steps", "message"),
+    [
+        (_ON_NOEXEC, "'nm': job.231 fired for a job held"),
+        (_ON_NOEXEC[1:], "'nm': job.232, job.231 fired for a job not held"),
+    ],
+    ids=["a held job keeps its hold", "a job not held loses one"],
+)
+def test_a_box_noexec_hold_the_chart_decides_otherwise_fails_before_any_write(
+    steps: list[Event], message: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Mutant: job.232's source moved to `hold_off`, so the chart takes the
+    hold off a job not held and leaves it on a held one. Whether the hold
+    goes is the row's choice, and the jobs released retry their start by it:
+    a statechart error before the job's writes. The mutant's hits stay out
+    of the session."""
+    monkeypatch.setenv(HITS_ENV, str(tmp_path))
+    oracle = _fed_boxes(_box_oracle(_rows_changed(job_232={"source": "hold_off"})), steps[:-1])
+    row = oracle.store.job["nm"]
+    traced = len(oracle.trace())
+    with pytest.raises(StatechartError, match=message):
+        oracle.feed(steps[-1])
+    assert oracle.store.job["nm"] == row
+    assert [t for t in oracle.trace()[traced:] if t.job == "nm"] == []
+
+
+def test_a_box_noexec_row_the_oracle_does_not_perform_is_a_statechart_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Planted: the oracle forgets job.231 alone; the row fired is named."""
+    rows = {k: v for k, v in oracle_chart_cascade._NOEXEC_HOLD.items() if k != ("job.231",)}
+    monkeypatch.setattr(oracle_chart_cascade, "_NOEXEC_HOLD", rows)
+    with pytest.raises(
+        StatechartError, match="'nm': ON_NOEXEC on its box fired job.231, and no box rule row"
+    ):
+        _box_oracle().feed(_ON_NOEXEC[-1])
 
 
 def test_sem12_a_box_rule_computes_only_the_facts_todays_rule_reads(

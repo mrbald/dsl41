@@ -7,9 +7,10 @@ which names it as `dsl41.oracle_chart:ChartOracle`. It overrides the handlers
 of the families converted so far and inherits every other one, so `oracle.py`
 stays the twin it is compared with. The STATUS family, the start attempt
 (DL-342), KILLJOB and the TIMER input (DL-343), the flag inputs (DL-344),
-RELEASE_RESOURCE and the readmission out of the queue (DL-345), and the box
+RELEASE_RESOURCE and the readmission out of the queue (DL-345), the box
 rules and the period opening's release (DL-346, `CascadeOracle` in
-`oracle_chart_cascade`) are converted. SET_GLOBAL, the cascade's order (the
+`oracle_chart_cascade`), and a box's ON_NOEXEC on the jobs it contains
+(DL-347) are converted. SET_GLOBAL, the cascade's order (the
 recursion, with the wakes of referencers), the registration of `job` in
 `machines.MACHINES` and the retirement of `--on-transition-violation` for
 jobs are not: until they are, today's code runs them in today's order, and
@@ -107,9 +108,10 @@ only where today's rule does. The moves the chart does not declare stay
 today's code, in today's order: the wakes of referencers after an ice (its
 box rules are the chart's, DL-346), the mark of a member taken off ice
 in its running box, a waiter's wake on a hold, OFF_HOLD's start retry and
-ON_NOEXEC's (each one `start`, DL-342), and a box's ON_NOEXEC on the jobs it
-contains, which the chart does not declare. A box's OFF_NOEXEC clears them
-through the chart's `OFF_NOEXEC on its box` (DL-346).
+ON_NOEXEC's (each one `start`, DL-342). A box's ON_NOEXEC flags the jobs it
+contains and takes their hold off through the chart's `ON_NOEXEC on its box`
+(DL-347), and a box's OFF_NOEXEC clears them through `OFF_NOEXEC on its
+box` (DL-346).
 
 The queue (DL-345). RELEASE_RESOURCE is dispatched to the job's
 instance: held units go back to the pool with today's line and the waiters
@@ -368,7 +370,7 @@ class ChartOracle(CascadeOracle):
     """`Oracle` with the STATUS family (DL-341), the start attempt (DL-342),
     KILLJOB and the TIMER input (DL-343), the flag inputs (DL-344),
     RELEASE_RESOURCE and the readmission (DL-345), and the box rules and the
-    period opening (DL-346, `CascadeOracle`) on the `job` chart."""
+    period opening (DL-346, DL-347, `CascadeOracle`) on the `job` chart."""
 
     #: Measured as for the old oracle (tests/test_cascade_depth.py): 11 frames
     #: per nested start on the box chain, 22 per job on the ring, 6.5 on the
@@ -626,7 +628,9 @@ class ChartOracle(CascadeOracle):
         moves the chart does not declare run after, as today: an ice's wakes
         (its box rules are the chart's), a waiter's wake on a hold, OFF_HOLD's
         start retry; a box's OFF_NOEXEC then clears the jobs it contains
-        (`OFF_NOEXEC on its box`)."""
+        (`OFF_NOEXEC on its box`). A box's ON_NOEXEC flags them and takes
+        their hold off before its own status row (`ON_NOEXEC on its box`,
+        `_noexec_on_box`)."""
         store = self.store
         store.follow_job(job)
         key = store.job_key(job)
@@ -756,19 +760,19 @@ class ChartOracle(CascadeOracle):
             self._retry_released(job, run_number)
 
     def _noexec_on_box(self, box_ir: JobIR, settles: str, hold: bool, agreement: Agreement) -> None:
-        """ON_NOEXEC on a box (`_noexec_box`): its flag rows; the flag on every
-        job it contains, and their exit codes cleared, as today (the chart
-        declares no row for the members' flags); then the status row
-        its `flag moved` fires, through DL-242's box INACTIVE path: from an
-        idle status (job.136), the queue (job.169) or STARTING (job.170); or
-        nothing moves (job.198). The jobs whose hold it cleared retry their
-        start, as today."""
+        """ON_NOEXEC on a box (`_noexec_box`): its flag rows; `ON_NOEXEC on
+        its box` on every job it contains (`_box_on_noexec`, DL-347); their
+        exit codes cleared, as today; then the status row its `flag moved`
+        fires, through DL-242's box INACTIVE path: from an idle status
+        (job.136), the queue (job.169) or STARTING (job.170); or nothing moves
+        (job.198). The jobs whose hold the chart cleared retry their start, as
+        today."""
         box = box_ir.name
         tree = [box, *self._contained(box, skip_live=False)]
         runs = {job: self._runtime(job).run_number for job in tree}
         self._noexec_flags(box, hold)
         released = [box] if hold else []
-        released += [job for job in tree[1:] if self._set_noexec(job, self._noexec_cause(box, job))]
+        released += self._box_on_noexec(box, tree[1:])
         for job in tree:
             rt = self._runtime(job)
             if rt.status == "INACTIVE" and rt.exit_code is not None:

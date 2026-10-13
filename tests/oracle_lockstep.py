@@ -1222,6 +1222,12 @@ def _flag_scripts() -> dict[str, tuple[Step, ...]]:
             event(at(1), "ON_NOEXEC", "fl_q"),
             SealPoint(),
         ),
+        "ON_NOEXEC on a box over a flagged and held job": (
+            event(t0, "ON_NOEXEC", "fl_qs"),
+            event(at(1), "ON_HOLD", "fl_qs"),
+            event(at(2), "ON_NOEXEC", "fl_q"),
+            SealPoint(),
+        ),
         "DISARM on an armed job and box": (
             event(t0 - minute, "ON_HOLD", "fl_dated"),
             event(t0 - minute, "ON_HOLD", "fl_box"),
