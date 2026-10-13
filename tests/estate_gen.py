@@ -16,8 +16,9 @@ toward it. Every name is invented.
 
 The catalog has machines with and without a load cap, renewable, depletable
 and threshold resources, globals, standard and extended calendars, and boxes
-nested up to three deep. Jobs carry conditions over status, exit code and
-global atoms, some with a lookback; run windows, start times, calendars and
+nested up to three deep; a small share of the boxes name resources. Jobs
+carry conditions over status, exit code and global atoms, some with a
+lookback; run windows, start times, calendars and
 time zones; resources, load and priority; box_success, box_failure,
 box_terminator, job_terminator, auto_hold, term_run_time and must times;
 start_times or start_mins; and an initial ice, hold or noexec status. Most
@@ -162,6 +163,8 @@ BASES = (
     datetime(2026, 3, 7, 20, 0),
     datetime(2026, 10, 24, 20, 0),
 )
+#: the share of boxes that name resources, when the estate has any
+BOX_RESOURCES_PERCENT = 20
 ZONES = ("America/New_York", "Europe/London", "Asia/Tokyo")
 STATUSES = ("SUCCESS", "FAILURE", "SUCCESS", "TERMINATED", "INACTIVE", "RUNNING", "STARTING")
 OOB = ("ON_ICE", "OFF_ICE", "ON_HOLD", "OFF_HOLD", "ON_NOEXEC", "OFF_NOEXEC", "DISARM")
@@ -301,9 +304,16 @@ def estate(c: Chooser, size: int, label: str = "", min_size: int = 1) -> Case:
             if c.chance(20):
                 made.lines.append(f"box_failure: {_condition(c, members, ())}")
         blocks.append(made.lines)
-    jil = "\n\n".join("\n".join(lines) for lines in blocks) + "\n"
     holders = [j.name for j in jobs.values() if j.resources]
     script = steps(c, base, list(jobs), holders, globals_, 4 * size + 8)
+    # a small share of the boxes name resources too (DL-346), so the
+    # sample reaches queued and unit-holding boxes. Drawn after the script,
+    # so every earlier draw, and with it every job and every input, is the
+    # same as without them
+    for made in jobs.values():
+        if made.box and resources and c.chance(BOX_RESOURCES_PERCENT):
+            made.lines.append(_resources(c, resources))
+    jil = "\n\n".join("\n".join(lines) for lines in blocks) + "\n"
     return Case(label=label, jil=jil, script=tuple(script), jobs=len(jobs))
 
 
@@ -360,21 +370,26 @@ def _job_attributes(
     if not job.box and c.chance(15):
         lines.append(f"term_run_time: {c.integer(1, 120)}")
     if not job.box and resources and c.chance(30):
-        refs = []
-        for name in sorted({c.choice(sorted(resources)) for _ in range(c.integer(1, 2))}):
-            ref = f"({name}, QUANTITY={c.integer(1, 2)}"
-            if resources[name] == "R" and c.chance(50):
-                ref += f", FREE={c.choice(('Y', 'N', 'A'))}"
-            elif resources[name] == "D" and c.chance(30):
-                ref += ", FREE=N"
-            refs.append(ref + ")")
-        lines.append("resources: " + " and ".join(refs))
+        lines.append(_resources(c, resources))
         job.resources = True
     if not job.box and c.chance(15):
         lines.append(f"job_load: {c.integer(1, 3)}")
         lines.append(f"priority: {c.integer(0, 2)}")
     if not job.box and c.chance(10):
         lines.append(f"max_exit_success: {c.integer(0, 3)}")
+
+
+def _resources(c: Chooser, resources: dict[str, str]) -> str:
+    """A `resources:` line naming one or two of the estate's resources."""
+    refs = []
+    for name in sorted({c.choice(sorted(resources)) for _ in range(c.integer(1, 2))}):
+        ref = f"({name}, QUANTITY={c.integer(1, 2)}"
+        if resources[name] == "R" and c.chance(50):
+            ref += f", FREE={c.choice(('Y', 'N', 'A'))}"
+        elif resources[name] == "D" and c.chance(30):
+            ref += ", FREE=N"
+        refs.append(ref + ")")
+    return "resources: " + " and ".join(refs)
 
 
 def steps(

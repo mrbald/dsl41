@@ -7,13 +7,13 @@ which names it as `dsl41.oracle_chart:ChartOracle`. It overrides the handlers
 of the families converted so far and inherits every other one, so `oracle.py`
 stays the twin it is compared with. The STATUS family, the start attempt
 (DL-342), KILLJOB and the TIMER input (DL-343), the flag inputs (DL-344),
-and RELEASE_RESOURCE and the readmission out of the queue (DL-345) are
-converted. SET_GLOBAL, the cascade between instances (the box rules and the
-wakes of referencers), the period opening's release of a removed job's units,
-the registration of `job` in `machines.MACHINES` and the retirement of
-`--on-transition-violation` for jobs are not: until they are, today's code runs
-them in today's order, and the old tables keep validating inside the store's
-verbs.
+RELEASE_RESOURCE and the readmission out of the queue (DL-345), and the box
+rules and the period opening's release (DL-346, `CascadeOracle` in
+`oracle_chart_cascade`) are converted. SET_GLOBAL, the cascade's order (the
+recursion, with the wakes of referencers), the registration of `job` in
+`machines.MACHINES` and the retirement of `--on-transition-violation` for
+jobs are not: until they are, today's code runs them in today's order, and
+the old tables keep validating inside the store's verbs.
 
 Instances. Each job row has one `job` instance on the state owner's executor
 (`RuntimeState.machines`), under the row's `job_key`, with `JobData` from the
@@ -62,16 +62,17 @@ attempt that moves no status is compared after its own writes. The
 must_start and must_complete deadlines a STARTJOB arms stay in `_dispatch`,
 before the attempt. The cascade still recurses, one attempt inside the next,
 and is fitted by this class's own measured `FRAMES_PER_NESTED_START` until
-the cascade slice removes the recursion.
+the cascade becomes the executor's worklist and the recursion goes.
 
 Kills and timers (DL-343). `_dispatch` is overridden: STATUS, the start
 inputs, KILLJOB and TIMER are handled here and the rest are inherited, so a
 start input's attempt sits as deep on the stack as today's and passes its
 relay (`relay`), never read from the cause text. KILLJOB is dispatched to the
 job's instance: job.114 terminates a live job through `_terminate` (a box's
-terminator cascade is today's code); job.217 or job.226 drops a waiter's arm
-and job.111 terminates it (dequeue, KILL_DISARMS, JOB_KILL_QUEUED); job.137 to
-job.140 ignore it with today's EVENT_IGNORED line. Each move is compared as a
+terminator cascade is the chart's `box ends FAILURE or TERMINATED`,
+DL-346); job.217 or job.226 drops a waiter's arm and job.111 terminates
+it (dequeue, KILL_DISARMS, JOB_KILL_QUEUED); job.137 to job.140 ignore it with
+today's EVENT_IGNORED line. Each move is compared as a
 STATUS move is (`_moving`). The TIMER input's deadline alarms move no state and
 stay `_dispatch_timer_check`. `TIMER term_run_time` carries whether its run is
 the row's (`Deadline`): job.115 terminates the running run, job.184 is the
@@ -103,10 +104,12 @@ queue (job.112, `_set_status`); ON_NOEXEC settles a waiter or a FAILED job
 (job.113, job.121) or a box (job.136, job.169, job.170) through
 `_inject_inactive`. ON_NOEXEC's payload (`NoexecFacts`) reads the box's tree
 only where today's rule does. The moves the chart does not declare stay
-today's code, in today's order: the box rules and the wakes of referencers
-after an ice, the mark of a member taken off ice in its running box, a
-waiter's wake on a hold, OFF_HOLD's start retry and ON_NOEXEC's (each one
-`start`, DL-342), and a box's members on ON_NOEXEC and OFF_NOEXEC.
+today's code, in today's order: the wakes of referencers after an ice (its
+box rules are the chart's, DL-346), the mark of a member taken off ice
+in its running box, a waiter's wake on a hold, OFF_HOLD's start retry and
+ON_NOEXEC's (each one `start`, DL-342), and a box's ON_NOEXEC on the jobs it
+contains, which the chart does not declare. A box's OFF_NOEXEC clears them
+through the chart's `OFF_NOEXEC on its box` (DL-346).
 
 The queue (DL-345). RELEASE_RESOURCE is dispatched to the job's
 instance: held units go back to the pool with today's line and the waiters
@@ -164,11 +167,11 @@ from dsl41.job_chart import (
     row_configuration,
 )
 from dsl41.oracle import DEFERRED_RESCAN_KEY, DEFERRED_TIMER_KEY
-from dsl41.oracle_chart_agreement import AgreeingOracle, Agreement, fired_rows, listed
+from dsl41.oracle_chart_agreement import Agreement, fired_rows, listed
+from dsl41.oracle_chart_cascade import CascadeOracle
 from dsl41.oracle_chart_facts import NoexecFacts, ReadmitFacts, StartFacts, job_data
 from dsl41.oracle_state import (
     BOX_NOEXEC,
-    BOX_NOEXEC_OFF,
     BOX_START,
     BOX_STATUS_INACTIVE,
     FAILED,
@@ -261,7 +264,7 @@ _ADMIT_MOVES: Final[dict[str, Transition[JobStatus]]] = {
     "job.124": BOX_START,
 }
 #: The frames the chart's selection adds once, at a cascade's innermost
-#: attempt, over today's gates: measured 0 to 12, bounded here
+#: attempt or box rule, over today's gates: measured 7 to 12, bounded here
 #: (tests/test_cascade_depth.py). `RECURSION_LIMIT_BASE` absorbs them.
 SELECTION_FRAMES: Final = 16
 #: The skip of a job in a box, beside job.106's skip of a job in none.
@@ -361,23 +364,24 @@ _READMIT_FIRED: Final[dict[tuple[str, ...], str]] = {
 _LEAVE_ARMED: Final = "job.216"
 
 
-class ChartOracle(AgreeingOracle):
+class ChartOracle(CascadeOracle):
     """`Oracle` with the STATUS family (DL-341), the start attempt (DL-342),
-    KILLJOB and the TIMER input (DL-343), the flag inputs (DL-344), and
-    RELEASE_RESOURCE and the readmission (DL-345) on the `job` chart."""
+    KILLJOB and the TIMER input (DL-343), the flag inputs (DL-344),
+    RELEASE_RESOURCE and the readmission (DL-345), and the box rules and the
+    period opening (DL-346, `CascadeOracle`) on the `job` chart."""
 
     #: Measured as for the old oracle (tests/test_cascade_depth.py): 11 frames
     #: per nested start on the box chain, 22 per job on the ring, 6.5 on the
     #: running-box fold, 7 on the ON_NOEXEC chain, 2 per box on a kill's
     #: terminator chain, the same slopes as `Oracle`'s. The executor's
-    #: selection adds 0 to 12 frames once, at the innermost attempt
-    #: (`SELECTION_FRAMES` bounds it), and one at the base for a kill or a
-    #: term_run_time (its handler) and for an input this class inherits
-    #: (`super()._dispatch`), which the base absorbs: at most 13 in all. A
-    #: flag input's retry sits at today's depth (`_handle_oob`), and so do
-    #: RELEASE_RESOURCE and the readmission, measured on a release whose
-    #: readmission begins the box chain: 11 per job, 5 over today's.
-    #: The budget keeps the old one's margin: 16.
+    #: selection adds 7 to 12 frames once, at the innermost attempt or box
+    #: rule (`SELECTION_FRAMES` bounds it), and one at the base for a kill or
+    #: a term_run_time (its handler) and for an input this class inherits
+    #: (`super()._dispatch`), which the base absorbs. A flag input's retry
+    #: sits at today's depth (`_handle_oob`), and so do RELEASE_RESOURCE, the
+    #: readmission and each box rule (`CascadeOracle` replaces today's
+    #: methods in place, the fold under the door as today's). The budget keeps
+    #: the old one's margin: 16.
     FRAMES_PER_NESTED_START = 16
 
     def __init__(
@@ -619,9 +623,10 @@ class ChartOracle(AgreeingOracle):
         row is `move_flag` with today's marker and line, compared with the
         chart at once; a status move its `flag moved` fires (ON_ICE's waiter,
         job.112; ON_NOEXEC's settlements) is compared as a STATUS move is. The
-        moves the chart does not declare run after, as today: an ice's box
-        rules and wakes, a waiter's wake on a hold, OFF_HOLD's start retry, a
-        box's members on OFF_NOEXEC."""
+        moves the chart does not declare run after, as today: an ice's wakes
+        (its box rules are the chart's), a waiter's wake on a hold, OFF_HOLD's
+        start retry; a box's OFF_NOEXEC then clears the jobs it contains
+        (`OFF_NOEXEC on its box`)."""
         store = self.store
         store.follow_job(job)
         key = store.job_key(job)
@@ -698,13 +703,10 @@ class ChartOracle(AgreeingOracle):
             # SEM-21: if conditions are already satisfied, run immediately
             self._attempt_start(job, force=False, scheduled=False, cause="OFF_HOLD")
         elif kind == OFF_NOEXEC:
-            # DL-254: on a box, every job it contains is cleared too (today's code)
+            # DL-254: on a box, every job it contains is cleared too
             job_ir = self.catalog.jobs.get(job)
             if job_ir is not None and job_ir.job_type == "BOX":
-                for member in self._contained(job, skip_live=False):
-                    if self._runtime(member).on_noexec:
-                        store.move_flag(member, BOX_NOEXEC_OFF)
-                        self._record(member, kind, f"box {job!r} taken OFF_NOEXEC (DL-254)")
+                self._box_off_noexec(job)
 
     def _noexec_flags(self, job: str, hold: bool) -> None:
         """ON_NOEXEC's flag rows on the job's row, with today's markers
@@ -755,8 +757,8 @@ class ChartOracle(AgreeingOracle):
 
     def _noexec_on_box(self, box_ir: JobIR, settles: str, hold: bool, agreement: Agreement) -> None:
         """ON_NOEXEC on a box (`_noexec_box`): its flag rows; the flag on every
-        job it contains, and their exit codes cleared, as today (the members'
-        moves are today's code until the cascade slice); then the status row
+        job it contains, and their exit codes cleared, as today (the chart
+        declares no row for the members' flags); then the status row
         its `flag moved` fires, through DL-242's box INACTIVE path: from an
         idle status (job.136), the queue (job.169) or STARTING (job.170); or
         nothing moves (job.198). The jobs whose hold it cleared retry their

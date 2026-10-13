@@ -372,6 +372,41 @@ staying old code; any other waiter stays queued (`job.181`). A cancel and a leav
 a STATUS move is, and a move compared inside the cascade of another leaves the other waiting for
 its own settlement.
 
+The box rules are dispatched to the instance each one moves (DL-346), where the old cascade
+runs the rule, so the cascade keeps the old recursion's order and depth. A member's status write
+reaches its box. A member that ends FAILURE or TERMINATED meets the box's terminator (`job.130`).
+A RUNNING box's completion door reads its overrides (`member moves`), then the default fold
+(`completion moment`). An idle box re-derives its status (`box recompute`). The walk up to the
+boxes above reads their overrides through `member moves`. A box's start, run and end reach its
+members: the reset (`box start`), auto_hold (`box running`), the end of the run's arms (`box run
+ends`), the job_terminators (`box ends FAILURE or TERMINATED`), the batch INACTIVE cascade (`box
+set INACTIVE`), and OFF_NOEXEC's clear (`OFF_NOEXEC on its box`). The period's first input gives a
+removed job's held units back (`job.308`). Each payload computes its facts where the old rule reads
+them. A box rule's target is the chart's choice: the status written is the one the chart reached,
+and a fact that derives another target is a statechart error before any write. A box's move is
+compared as a STATUS move is, a batch row once the batch has written and settled it, and a flag row
+after its write; a row that moves nothing must leave the instance's configuration as it was.
+
+The chart decides each box rule's row; the oracle decides when a rule is posted, and to which
+instances. `box running`, `box run ends` and `box ends FAILURE or TERMINATED` reach the box's
+direct members; `box start`, `box set INACTIVE` and `OFF_NOEXEC on its box` reach every job it
+contains. Five code gates choose an audience the chart does not see: `box start` skips a live
+subbox's subtree (`_contained(skip_live=True)`, which also skips a live or queued job); `member
+moves` is sent by the completion door on the moves it sees, not on a non-terminal move (a
+terminal, RUNNING or resolving move only); `box recompute` is sent by its callers' gates, run
+numbers and the cascaded-subbox case, LIVE and TERMINATED excluded (a member's terminal move, or
+the direct target of an operator's INACTIVE, never a row the cascade took INACTIVE); the walk up
+skips an ancestor whose run number moved; and the parent recompute after an operator's INACTIVE
+needs the parent's run number unchanged. These audiences are the sender's: the worklist slice
+declares them in the action of the row that sends the event (§8).
+
+The chart does not declare a box's ON_NOEXEC on the jobs it contains (their noexec on and their
+hold off), so that stays old code, as do the box row's sets of members and the window decisions at
+a box start, which move no status. What keeps those two flags in step today is the follow before
+each dispatch and the realign at commit. The commit's realign also covers the refresh of an
+instance's data when its units change, and the holding of a member whose settlement waits behind
+its box rules, which the chart settles inside the member's own dispatch.
+
 ## 12. Durability of deferred queues
 
 A deferred input is admitted and applied. The apply's effect is the enqueue. There is no new
@@ -523,8 +558,8 @@ the second oracle moves anything, the composite `job` chart is declared and chec
 old tables (DL-337). The second oracle, `ChartOracle` in `src/dsl41/oracle_chart.py`, subclasses
 the old one and overrides one input family's handlers per entry, STATUS first (DL-341), then the
 start attempt (DL-342), then KILLJOB and the TIMER input (DL-343), then the flag inputs
-(DL-344), then RELEASE_RESOURCE and the readmission (DL-345); the families not yet
-converted, and the cascade between instances, run the old code in its order.
+(DL-344), then RELEASE_RESOURCE and the readmission (DL-345), then the box rules (DL-346);
+the families not yet converted, and the cascade's order, run the old code in its order.
 
 Each slice is a semantic-class change. Each has its own decision-log entry.
 

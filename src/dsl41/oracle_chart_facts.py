@@ -10,6 +10,8 @@ the store, the trace, the timers or the resolutions.
 - `StartFacts`: a `start` attempt's payload, `Attempt`'s fields (DL-342).
 - `NoexecFacts`: ON_NOEXEC's payload, `Noexec`'s fields (DL-344).
 - `ReadmitFacts`: a `readmit` payload, `Readmission`'s fields (DL-345).
+- `OverrideFacts`, `FoldFacts` and `RecomputeFacts`: the box rules' payloads,
+  `Verdict`'s and `BoxVerdict`'s fields (DL-346).
 - `job_data`: a job instance's `JobData`, from its catalog entry and the
   units its row holds.
 """
@@ -19,10 +21,14 @@ from __future__ import annotations
 from typing import Any, Literal, cast
 
 from dsl41.capacity import DemandEntry, to_reservations
+from dsl41.conditions import Cond, GlobalAtom, iter_atoms
 from dsl41.ir import JobIR
 from dsl41.job_chart import BoxGate, JobData, Release, WindowSide
 from dsl41.oracle import MAX_NESTED_STARTS, Oracle
-from dsl41.oracle_state import LIVE, JobRuntime
+from dsl41.oracle_state import FAILED, LIVE, TERMINAL, JobRuntime, JobStatus
+
+#: A box rule's verdict: the status it decides, or none.
+type Target = Literal["SUCCESS", "FAILURE"] | None
 
 
 class StartFacts:
@@ -360,3 +366,176 @@ class ReadmitFacts:
         if "vector" not in self._known:
             self._known["vector"] = self._oracle._pool.demand_vector(self._job_ir)
         return cast(list[DemandEntry], self._known["vector"])
+
+
+def _named_jobs(cond: Cond) -> set[str]:
+    """The local jobs a condition names, as the old oracle's override rule
+    reads them (its module's `_cond_job_names`)."""
+    return {
+        atom.job.name
+        for atom in iter_atoms(cond)
+        if not isinstance(atom, GlobalAtom) and atom.job.instance is None
+    }
+
+
+class OverrideFacts:
+    """`member moves`' payload (`Verdict`): the step of a RUNNING box's
+    completion door that reads its overrides, for the direct parent and for
+    each box above it (`Oracle._apply_box_overrides`, SEM-12). `target` is
+    computed on the guards' first read, in today's order: box_success, then
+    box_failure, each only when the box declares it and the moment evaluates
+    it (the condition names the member, or the moment completes the member),
+    the second only when the first does not hold. Each is `_cond_true`, a
+    read."""
+
+    __slots__ = ("_oracle", "_box_ir", "_member", "_completed", "_known")
+
+    def __init__(
+        self,
+        oracle: Oracle,
+        box_ir: JobIR,
+        member: str | None,
+        new: str | None,
+        *,
+        completion_moment: bool,
+    ) -> None:
+        self._oracle = oracle
+        self._box_ir = box_ir
+        self._member = member
+        self._completed = completion_moment or (new is not None and new in TERMINAL)
+        self._known: dict[str, Any] = {}
+
+    def __repr__(self) -> str:
+        known = (f"{name}={value!r}" for name, value in self._known.items())
+        return f"OverrideFacts({', '.join((repr(self._box_ir.name), *known))})"
+
+    def known(self, name: str) -> Any:
+        """A fact if it was computed, else None."""
+        return self._known.get(name)
+
+    @property
+    def target(self) -> Target:
+        """The status the first override that holds decides, or None."""
+        if "target" not in self._known:
+            sem = self._box_ir.sem
+            target: Target = None
+            for attr, status in ((sem.box_success, "SUCCESS"), (sem.box_failure, "FAILURE")):
+                if attr is None:
+                    continue
+                # an internal reference is evaluated the moment its job moves;
+                # an external or global one only at a member's completion moment
+                named = self._member is not None and self._member in _named_jobs(attr.cond)
+                if (named or self._completed) and self._oracle._cond_true(
+                    attr.cond, self._box_ir.name
+                ):
+                    target = cast(Target, status)
+                    break
+            self._known["target"] = target
+        return cast(Target, self._known["target"])
+
+
+class FoldFacts:
+    """`completion moment`'s payload (`Verdict`): the default fold of a
+    RUNNING box's completion door (SEM-11), after no override fired. `target`
+    is computed on the guards' first read, in today's order: whether every
+    member is done (`_all_members_done`), and only then the vote of the
+    members that ran (`_fold_box_default`): SUCCESS when none failed and no
+    box_success is declared, FAILURE when one failed and no box_failure is
+    declared, else None (an unmet override suppresses the default)."""
+
+    __slots__ = ("_oracle", "_box_ir", "_known")
+
+    def __init__(self, oracle: Oracle, box_ir: JobIR) -> None:
+        self._oracle = oracle
+        self._box_ir = box_ir
+        self._known: dict[str, Any] = {}
+
+    def __repr__(self) -> str:
+        known = (f"{name}={value!r}" for name, value in self._known.items())
+        return f"FoldFacts({', '.join((repr(self._box_ir.name), *known))})"
+
+    def known(self, name: str) -> Any:
+        """A fact if it was computed, else None."""
+        return self._known.get(name)
+
+    @property
+    def target(self) -> Target:
+        """The fold's verdict, or None while a member is not done."""
+        if "target" not in self._known:
+            oracle = self._oracle
+            box = self._box_ir.name
+            target: Target = None
+            self._known["done"] = done = oracle._all_members_done(box)
+            if done:
+                ran = oracle._runtime(box).ran_members
+                statuses = [oracle._runtime(m).status for m in oracle._members(box) if m in ran]
+                failed = any(s in FAILED for s in statuses)
+                sem = self._box_ir.sem
+                if not failed and sem.box_success is None:
+                    target = "SUCCESS"
+                elif failed and sem.box_failure is None:
+                    target = "FAILURE"
+            self._known["target"] = target
+        return cast(Target, self._known["target"])
+
+
+class RecomputeFacts:
+    """`box recompute`'s payload (`BoxVerdict`): an idle box re-derives its
+    status from its members (`Oracle._idle_box_recompute`, SEM-15). `target`
+    and `override` are computed together on the guards' first read of either,
+    in today's order: the members that vote (INACTIVE ignored, and under
+    `idle-box-iced-member=ignore` a member out of the run on ice); no verdict
+    when the trigger is out of the run and nothing else votes, or when a voter
+    is not terminal; then box_success and box_failure (`_cond_true`, the
+    second only when the first does not hold), whose verdict stands whatever
+    the box's status; then the default verdict, unless the override of its
+    kind is declared. The box's own status is the configuration's."""
+
+    __slots__ = ("_oracle", "_box_ir", "_trigger", "_known")
+
+    def __init__(self, oracle: Oracle, box_ir: JobIR, trigger: str) -> None:
+        self._oracle = oracle
+        self._box_ir = box_ir
+        self._trigger = trigger
+        self._known: dict[str, Any] = {}
+
+    def __repr__(self) -> str:
+        known = (f"{name}={value!r}" for name, value in self._known.items())
+        return f"RecomputeFacts({', '.join((repr(self._box_ir.name), *known))})"
+
+    @property
+    def target(self) -> Target:
+        """The status the recompute decides, or None."""
+        return self._verdict()[0]
+
+    @property
+    def override(self) -> bool:
+        """box_success or box_failure decided it, not the default verdict."""
+        return self._verdict()[1]
+
+    def _verdict(self) -> tuple[Target, bool]:
+        if "verdict" not in self._known:
+            self._known["verdict"] = self._recompute()
+        return cast(tuple[Target, bool], self._known["verdict"])
+
+    def _recompute(self) -> tuple[Target, bool]:
+        oracle = self._oracle
+        box = self._box_ir.name
+        ignore_iced = oracle.semantics.idle_box_iced_member == "ignore"
+        statuses: list[JobStatus] = [
+            status
+            for member in oracle._members(box)
+            if (status := oracle._runtime(member).status) != "INACTIVE"
+            and not (ignore_iced and oracle._out_of_the_run(member))
+        ]
+        if ignore_iced and not statuses and oracle._out_of_the_run(self._trigger):
+            return None, False  # an iced member's own change is no verdict
+        if not all(s in TERMINAL for s in statuses):
+            return None, False
+        sem = self._box_ir.sem
+        for attr, status in ((sem.box_success, "SUCCESS"), (sem.box_failure, "FAILURE")):
+            if attr is not None and oracle._cond_true(attr.cond, box):
+                return cast(Target, status), True
+        failed = any(s in FAILED for s in statuses)
+        suppressed = sem.box_failure is not None if failed else sem.box_success is not None
+        return (None if suppressed else "FAILURE" if failed else "SUCCESS"), False

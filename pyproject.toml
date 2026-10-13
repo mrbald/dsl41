@@ -198,6 +198,7 @@ include = [
     # the second oracle, converted family by family under the lockstep harness
     "src/dsl41/oracle_chart.py",
     "src/dsl41/oracle_chart_agreement.py",
+    "src/dsl41/oracle_chart_cascade.py",
     "src/dsl41/oracle_chart_facts.py",
     "src/dsl41/oracle_state.py",
     "src/dsl41/period.py",

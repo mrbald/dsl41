@@ -1652,12 +1652,180 @@ def _queue_scripts() -> dict[str, tuple[Step, ...]]:
     }
 
 
+#: A directed estate for the box rules (DL-346) that the corpus does not
+#: reach. `bx_live` holds BX_R while it runs, so `bx_q` runs with its member
+#: `bx_qm` queued behind it, and the boxes `bx_q1`, `bx_q2` and `bx_q3`,
+#: which need BX_R too, queue: an idle queued box re-derives its status
+#: when a member ends (box_success, box_failure, the default). `bx_sf` ends
+#: SUCCESS, and its box_failure then holds. `bx_a` holds `bx_ah` on its
+#: start (auto_hold); a scheduled tick arms it, and the box's kill drops
+#: the arm. `bx_g`'s box_success names `bx_gc`, a member of its subbox
+#: `bx_c`, which `bx_cw` keeps running: the override is the grandparent's.
+BOX_JIL = """insert_resource: BX_R
+res_type: R
+amount: 1
+
+insert_job: bx_live
+job_type: c
+machine: m1
+command: x
+resources: (BX_R, QUANTITY=1, FREE=Y)
+
+insert_job: bx_never
+job_type: c
+machine: m1
+command: x
+
+insert_job: bx_q
+job_type: b
+
+insert_job: bx_qm
+job_type: c
+machine: m1
+command: x
+box_name: bx_q
+resources: (BX_R, QUANTITY=1, FREE=Y)
+
+insert_job: bx_q1
+job_type: b
+resources: (BX_R, QUANTITY=1, FREE=Y)
+box_success: s(bx_q1m)
+
+insert_job: bx_q1m
+job_type: c
+machine: m1
+command: x
+box_name: bx_q1
+
+insert_job: bx_q2
+job_type: b
+resources: (BX_R, QUANTITY=1, FREE=Y)
+box_failure: f(bx_q2m)
+
+insert_job: bx_q2m
+job_type: c
+machine: m1
+command: x
+box_name: bx_q2
+
+insert_job: bx_q3
+job_type: b
+resources: (BX_R, QUANTITY=1, FREE=Y)
+
+insert_job: bx_q3m
+job_type: c
+machine: m1
+command: x
+box_name: bx_q3
+
+insert_job: bx_sf
+job_type: b
+box_failure: f(bx_sfm)
+
+insert_job: bx_sfm
+job_type: c
+machine: m1
+command: x
+box_name: bx_sf
+
+insert_job: bx_sfn
+job_type: c
+machine: m1
+command: x
+box_name: bx_sf
+
+insert_job: bx_a
+job_type: b
+
+insert_job: bx_ah
+job_type: c
+machine: m1
+command: x
+box_name: bx_a
+auto_hold: 1
+date_conditions: 1
+days_of_week: all
+start_times: "08:00"
+
+insert_job: bx_g
+job_type: b
+box_success: s(bx_gc)
+
+insert_job: bx_c
+job_type: b
+box_name: bx_g
+
+insert_job: bx_gc
+job_type: c
+machine: m1
+command: x
+box_name: bx_c
+
+insert_job: bx_cw
+job_type: c
+machine: m1
+command: x
+box_name: bx_c
+condition: s(bx_never)
+"""
+
+
+def _box_scripts() -> dict[str, tuple[Step, ...]]:
+    def event(at: datetime, kind: str, job: str, **payload: object) -> Event:
+        return Event.model_validate({"at": at, "kind": kind, "payload": {"job": job, **payload}})
+
+    t0 = EPOCH + timedelta(hours=8)
+    minute = timedelta(minutes=1)
+
+    def at(n: int) -> datetime:
+        return t0 + n * minute
+
+    live = event(t0, "STARTJOB", "bx_live")
+    return {
+        "a queued member goes INACTIVE with its box": (
+            live,
+            event(at(1), "FORCE_STARTJOB", "bx_q"),
+            event(at(2), "STATUS", "bx_q", status="INACTIVE"),
+            SealPoint(),
+        ),
+        "queued boxes re-derive their status as a member ends": (
+            live,
+            event(at(1), "STARTJOB", "bx_q1"),
+            event(at(1), "STARTJOB", "bx_q2"),
+            event(at(1), "STARTJOB", "bx_q3"),
+            event(at(2), "STATUS", "bx_q1m", status="SUCCESS"),
+            event(at(3), "STATUS", "bx_q2m", status="FAILURE"),
+            event(at(4), "STATUS", "bx_q3m", status="FAILURE"),
+            SealPoint(),
+        ),
+        "a box that ended SUCCESS meets its box_failure": (
+            event(t0, "FORCE_STARTJOB", "bx_sf"),
+            event(at(1), "STATUS", "bx_sfm", status="SUCCESS"),
+            event(at(2), "STATUS", "bx_sfn", status="SUCCESS"),
+            event(at(3), "STATUS", "bx_sfm", status="FAILURE"),
+            SealPoint(),
+        ),
+        "an auto_hold member armed, and its box's kill drops the arm": (
+            event(t0, "FORCE_STARTJOB", "bx_a"),
+            event(t0, "STARTJOB", "bx_ah", source="scheduler"),
+            event(at(1), "KILLJOB", "bx_a"),
+            SealPoint(),
+        ),
+        "a grandparent's box_success names a member of its subbox": (
+            event(t0, "FORCE_STARTJOB", "bx_g"),
+            event(at(1), "STATUS", "bx_gc", status="SUCCESS"),
+            SealPoint(),
+        ),
+    }
+
+
 def directed_jobs() -> list[Job]:
     """The directed estates the matrix runs besides the corpus."""
     restart = lower_source(RESTART_JIL)
     kill_timer = lower_source(KILL_TIMER_JIL)
     flags = lower_source(FLAG_JIL)
     queue = lower_source(QUEUE_JIL)
+    boxes = lower_source(BOX_JIL)
     return (
         [Job("<directed wekr>", lower_source(WEKR_JIL), _wekr_script())]
         + [
@@ -1686,6 +1854,7 @@ def directed_jobs() -> list[Job]:
             )
             for name, script in _queue_scripts().items()
         ]
+        + [Job(f"<directed box: {name}>", boxes, script) for name, script in _box_scripts().items()]
     )
 
 

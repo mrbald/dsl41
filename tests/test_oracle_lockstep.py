@@ -158,6 +158,19 @@ def test_a_seeded_estate_has_the_jobs_it_was_sized_for() -> None:
     assert all(1 <= seeded(seed, 5).jobs <= 5 for seed in range(30))
 
 
+def test_a_share_of_the_generated_boxes_names_resources_after_the_script() -> None:
+    """A small share of the boxes name resources (DL-346), so the
+    sample reaches queued and unit-holding boxes. They are drawn after the
+    script, so the jobs' draws and every input stay what they were, and a
+    box's resources line is the last of its block."""
+    sample = [seeded(seed, 50) for seed in range(30)]
+    blocks = [block for case in sample for block in case.jil.split("\n\n")]
+    boxes = [block for block in blocks if "job_type: b" in block]
+    held = [block for block in boxes if "resources:" in block]
+    assert 0 < len(held) < len(boxes) / 2
+    assert all(block.splitlines()[-1].startswith("resources:") for block in held)
+
+
 def test_the_generated_sample_carries_every_family() -> None:
     sample = [seeded(seed, 50) for seed in range(30)]
     kinds = {step.kind for case in sample for step in case.script if isinstance(step, Event)}
