@@ -685,11 +685,15 @@ def _switch_label(overrides: Mapping[str, str]) -> str:
 
 @dataclass(frozen=True)
 class Job:
-    """One catalog and one script to run in lockstep."""
+    """One catalog and one script to run in lockstep. `switches` fill the
+    switches a matrix row leaves out, for a directed estate that needs a
+    value other than the default to reach its cells; a row that sets one
+    wins, so the job runs under every value the matrix names."""
 
     label: str
     catalog: CatalogIR
     script: tuple[Step, ...]
+    switches: Mapping[str, str] = field(default_factory=dict)
 
 
 def corpus_jobs(scripts: int = 3, length: int = 40) -> list[Job]:
@@ -815,13 +819,215 @@ def _restart_scripts() -> list[tuple[Step, ...]]:
     return [never_run, after_a_failure]
 
 
+#: A directed estate for the kill and timer cells the seeded sample does
+#: not reach (DL-343). `kt_hold` holds the one unit.
+#: - `kt_wait` is armed on hold, then queued by OFF_HOLD's retry: a kill on a
+#:   waiter whose arm is latched (job.217).
+#: - `kt_box` is a box that declares the unit (the generator gives boxes no
+#:   resources): it queues behind `kt_hold` (a kill on a queued box, armed or
+#:   not), or runs holding it with its terminator member `kt_bm` (a kill, a
+#:   term_run_time, each settling the box's units).
+#: - `kt_scan` queues behind `kt_hold` on 2000-01-01, which `kt_never`
+#:   excludes with every day of the scan's two-year span, so the queued
+#:   recheck sends it back to INACTIVE with a continuation at the span's end,
+#:   2002-01-02 (DL-257): it resumes, or is refused because the job ran since
+#:   or is no longer INACTIVE. `kt_mem` does the same inside box `kb`, so its
+#:   continuation carries the box's run (DL-246) and can be box-stale.
+#:   These need `queued-recheck` 1 or 2.
+KILL_TIMER_JIL = (
+    "calendar: kt_never\n"
+    + "\n".join(f"{EPOCH.date() + timedelta(days=d):%m/%d/%Y}" for d in range(760))
+    + """
+
+insert_resource: KT_R
+res_type: R
+amount: 1
+
+insert_job: kt_hold
+job_type: c
+machine: m1
+command: x
+resources: (KT_R, QUANTITY=1, FREE=Y)
+
+insert_job: kt_wait
+job_type: c
+machine: m1
+command: x
+resources: (KT_R, QUANTITY=1, FREE=Y)
+date_conditions: 1
+days_of_week: all
+start_times: "08:00"
+
+insert_job: kt_box
+job_type: b
+resources: (KT_R, QUANTITY=1, FREE=Y)
+term_run_time: 5
+date_conditions: 1
+days_of_week: all
+start_times: "08:00"
+
+insert_job: kt_bm
+job_type: c
+machine: m1
+command: x
+box_name: kt_box
+job_terminator: 1
+
+insert_job: kt_scan
+job_type: c
+machine: m1
+command: x
+resources: (KT_R, QUANTITY=1, FREE=Y)
+date_conditions: 1
+days_of_week: mo
+exclude_calendar: kt_never
+run_window: "07:00-10:00"
+
+insert_job: kb
+job_type: b
+
+insert_job: kt_mem
+job_type: c
+machine: m1
+command: x
+box_name: kb
+resources: (KT_R, QUANTITY=1, FREE=Y)
+date_conditions: 1
+days_of_week: mo
+exclude_calendar: kt_never
+run_window: "07:00-10:00"
+"""
+)
+#: The scripts of `KILL_TIMER_JIL` that reach a scan continuation, and so
+#: need `queued-recheck` 1 or 2.
+KILL_TIMER_RESCANS = frozenset(
+    {
+        "rescan resumes",
+        "rescan after a run",
+        "rescan after a status",
+        "rescan after a run, INACTIVE again",
+        "member rescan, box restarted and member ran",
+        "member rescan, box restarted",
+    }
+)
+
+
+def _kill_timer_scripts() -> dict[str, tuple[Step, ...]]:
+    def event(at: datetime, kind: str, job: str, **payload: object) -> Event:
+        return Event.model_validate({"at": at, "kind": kind, "payload": {"job": job, **payload}})
+
+    t0 = EPOCH + timedelta(hours=8)
+    minute = timedelta(minutes=1)
+    bound = datetime(2002, 1, 2)  # the continuation: midnight of the span's last day
+    held = event(t0, "STARTJOB", "kt_hold")
+    queued = (
+        held,
+        event(t0, "STARTJOB", "kt_scan"),
+        event(t0 + minute, "STATUS", "kt_hold", status="SUCCESS"),
+        SealPoint(),
+    )
+    member = (
+        held,
+        event(t0, "FORCE_STARTJOB", "kb"),
+        event(t0, "STARTJOB", "kt_mem"),
+        event(t0 + minute, "STATUS", "kt_hold", status="SUCCESS"),
+        SealPoint(),
+    )
+    return {
+        "armed waiter killed": (
+            held,
+            event(t0 + minute, "ON_HOLD", "kt_wait"),
+            event(t0 + minute, "STARTJOB", "kt_wait"),
+            event(t0 + 2 * minute, "OFF_HOLD", "kt_wait"),
+            event(t0 + 3 * minute, "KILLJOB", "kt_wait"),
+            SealPoint(),
+        ),
+        "queued box killed": (
+            held,
+            event(t0 + minute, "STARTJOB", "kt_box"),
+            event(t0 + 2 * minute, "KILLJOB", "kt_box"),
+            SealPoint(),
+        ),
+        "armed queued box killed": (
+            held,
+            event(t0 + minute, "ON_HOLD", "kt_box"),
+            event(t0 + minute, "STARTJOB", "kt_box"),
+            event(t0 + 2 * minute, "OFF_HOLD", "kt_box"),
+            event(t0 + 3 * minute, "KILLJOB", "kt_box"),
+            SealPoint(),
+        ),
+        "running box with units killed": (
+            event(t0, "STARTJOB", "kt_box"),
+            event(t0 + minute, "KILLJOB", "kt_box"),
+            SealPoint(),
+        ),
+        "running box with units past term_run_time": (
+            event(t0, "STARTJOB", "kt_box"),
+            Advance(t0 + 6 * minute),
+            SealPoint(),
+        ),
+        "rescan resumes": (
+            *queued,
+            Advance(bound + minute),
+            Advance(datetime(2002, 2, 4, 7, 1)),
+            SealPoint(),
+        ),
+        "rescan after a run": (
+            *queued,
+            event(t0 + 2 * minute, "FORCE_STARTJOB", "kt_scan"),
+            event(t0 + 3 * minute, "STATUS", "kt_scan", status="SUCCESS"),
+            Advance(bound + minute),
+        ),
+        "rescan after a status": (
+            *queued,
+            event(t0 + 2 * minute, "STATUS", "kt_scan", status="FAILURE"),
+            Advance(bound + minute),
+        ),
+        "rescan after a run, INACTIVE again": (
+            *queued,
+            event(t0 + 2 * minute, "FORCE_STARTJOB", "kt_scan"),
+            event(t0 + 3 * minute, "STATUS", "kt_scan", status="SUCCESS"),
+            event(t0 + 4 * minute, "STATUS", "kt_scan", status="INACTIVE"),
+            Advance(bound + minute),
+        ),
+        "member rescan, box restarted and member ran": (
+            *member,
+            event(t0 + 2 * minute, "STATUS", "kb", status="SUCCESS"),
+            event(t0 + 3 * minute, "FORCE_STARTJOB", "kb"),
+            event(t0 + 3 * minute, "FORCE_STARTJOB", "kt_mem"),
+            event(t0 + 4 * minute, "STATUS", "kt_mem", status="SUCCESS"),
+            Advance(bound + minute),
+        ),
+        "member rescan, box restarted": (
+            *member,
+            event(t0 + 2 * minute, "STATUS", "kb", status="SUCCESS"),
+            event(t0 + 3 * minute, "STARTJOB", "kt_hold"),
+            event(t0 + 3 * minute, "FORCE_STARTJOB", "kb"),
+            Advance(bound + minute),
+        ),
+    }
+
+
 def directed_jobs() -> list[Job]:
     """The directed estates the matrix runs besides the corpus."""
     restart = lower_source(RESTART_JIL)
-    return [Job("<directed wekr>", lower_source(WEKR_JIL), _wekr_script())] + [
-        Job(f"<directed idle restart {index}>", restart, script)
-        for index, script in enumerate(_restart_scripts())
-    ]
+    kill_timer = lower_source(KILL_TIMER_JIL)
+    return (
+        [Job("<directed wekr>", lower_source(WEKR_JIL), _wekr_script())]
+        + [
+            Job(f"<directed idle restart {index}>", restart, script)
+            for index, script in enumerate(_restart_scripts())
+        ]
+        + [
+            Job(
+                f"<directed kill and timer: {name}>",
+                kill_timer,
+                script,
+                {"queued-recheck": "1"} if name in KILL_TIMER_RESCANS else {},
+            )
+            for name, script in _kill_timer_scripts().items()
+        ]
+    )
 
 
 def generated_jobs(seeds: Iterable[int], size: int, min_size: int = 1) -> list[Job]:
@@ -876,10 +1082,20 @@ def run_all(
     stop_at_first: bool = False,
 ) -> Summary:
     summary = Summary()
-    for overrides in matrix:
-        semantics = resolve(overrides)
-        for job in jobs:
+    ran: set[tuple[int, tuple[tuple[str, str], ...]]] = set()
+    for row in matrix:
+        for index, job in enumerate(jobs):
+            # the row wins; a job's own switch fills only one the row leaves
+            # out, and a merged row the job has already run under runs once
+            # (keyed by the job's place in `jobs`, not its label, which two
+            # jobs may share)
+            overrides = {**job.switches, **row}
+            merged = (index, tuple(sorted(overrides.items())))
+            if merged in ran:
+                continue
+            ran.add(merged)
             label = f"{job.label}; switches {_switch_label(overrides)}"
+            semantics = resolve(overrides)
             summary.add(run(job.catalog, job.script, new=new, semantics=semantics, label=label))
             if stop_at_first and summary.divergences:
                 return summary

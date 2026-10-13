@@ -200,11 +200,39 @@ def _running_box_fold(jobs: int) -> tuple[str, list[Event]]:
     return jil, setup
 
 
+def _terminator_chain(jobs: int) -> tuple[str, list[Event]]:
+    """Boxes nested one inside the next, each a job_terminator of the box
+    around it, a command job innermost. All run; then the kill of `q0`
+    terminates them in today's cascade, one `_terminate` inside the next
+    (SEM-14, DL-343). The kill nests no start: the slope is the
+    terminator cascade's own."""
+    jil = _box("q0") + "".join(
+        _box(f"q{i}", extra=f"box_name: q{i - 1}\njob_terminator: 1\n") for i in range(1, jobs - 1)
+    )
+    jil += _cmd(f"q{jobs - 1}", extra=f"box_name: q{jobs - 2}\njob_terminator: 1\n")
+    return jil, [_force_q0()]
+
+
 SLOPE_SHAPES = {
     "box-chain": lambda jobs: (_box_chain(jobs)[0], []),
     "box-ring": lambda jobs: (_box_ring(jobs)[0], []),
     "running-box-fold": _running_box_fold,
+    "terminator-chain": _terminator_chain,
 }
+#: The input that runs a shape's cascade, and the status it leaves every job
+#: in; a forced start of `q0` and SUCCESS unless named here.
+_LAST: dict[str, tuple[Event, str]] = {
+    "terminator-chain": (Event(at=T0, kind="KILLJOB", payload={"job": "q0"}), "TERMINATED"),
+    "off-hold-chain": (Event(at=T0, kind="OFF_HOLD", payload={"job": "q0"}), "SUCCESS"),
+}
+
+
+def _off_hold_chain(jobs: int) -> tuple[str, list[Event]]:
+    """The box chain, begun by OFF_HOLD's retry of a held `q0`: an input the
+    chart oracle inherits from `Oracle._dispatch`, one frame deeper there
+    than in the old oracle (DL-343)."""
+    jil = _box("q0") + "".join(_box(f"q{i}", f"s(q{i - 1})") for i in range(1, jobs))
+    return jil, [Event(at=T0, kind="ON_HOLD", payload={"job": "q0"})]
 
 
 def _paren_chain(jobs: int) -> tuple[str, list[Event]]:
@@ -218,22 +246,26 @@ def _paren_chain(jobs: int) -> tuple[str, list[Event]]:
 def _frames_needed(shape: str, jobs: int, oracle: type[Oracle] = Oracle) -> int:
     """The fewest frames above the caller that a forced start of `q0` needs
     to run the shape's cascade over `jobs` jobs on `oracle`, by bisection."""
-    jil, setup = {**SLOPE_SHAPES, "paren-chain": _paren_chain}[shape](jobs)
+    shapes = {**SLOPE_SHAPES, "paren-chain": _paren_chain, "off-hold-chain": _off_hold_chain}
+    jil, setup = shapes[shape](jobs)
     catalog = lower_source(jil)
     assert len(catalog.jobs) == jobs
 
+    last, status = _LAST.get(shape, (_force_q0(), "SUCCESS"))
+
     def fits(frames: int) -> bool:
         built = oracle(catalog)
+        sys.setrecursionlimit(100_000)
         for event in setup:
             built.feed(event)
         sys.setrecursionlimit(_depth() + frames)
         try:
-            built.feed(_force_q0())
+            built.feed(last)
         except RecursionError:
             return False
         finally:
             sys.setrecursionlimit(100_000)
-        assert {row.status for row in built.store.job.values()} == {"SUCCESS"}
+        assert {row.status for row in built.store.job.values()} == {status}
         return True
 
     low, high = 1, 4 * oracle.FRAMES_PER_NESTED_START * jobs
@@ -258,7 +290,8 @@ def test_sem10_frames_per_job_stay_within_the_fitted_budget(
     it. The ring nests two starts per job, the chain one; the fold shape
     adds a completion of a run begun before the cascade to each bypass. The
     chart oracle (DL-342) is held to its own constant."""
-    small, large = 41, 81
+    # box nesting stops at 64 levels (the lowering's bound)
+    small, large = (21, 61) if shape == "terminator-chain" else (41, 81)
     needed = (_frames_needed(shape, large, oracle) - _frames_needed(shape, small, oracle)) / (
         large - small
     )
@@ -267,14 +300,16 @@ def test_sem10_frames_per_job_stay_within_the_fitted_budget(
     assert needed > (frames if shape == "box-ring" else 0)
 
 
-@pytest.mark.parametrize("shape", [*sorted(SLOPE_SHAPES), "paren-chain"])
+@pytest.mark.parametrize("shape", [*sorted(SLOPE_SHAPES), "paren-chain", "off-hold-chain"])
 def test_sem10_the_chart_oracle_adds_a_bounded_constant_at_the_innermost_attempt(
     shape: str,
 ) -> None:
     """The chart oracle needs the old oracle's frames per job plus a
     constant: the executor's selection at the innermost attempt, which the
-    base of the fit absorbs. The constant stays within `SELECTION_FRAMES`
-    (measured 0 to 12, the parenthesised conditions the deepest)."""
+    base of the fit absorbs, and one frame at the base for a kill and for an
+    input the chart oracle inherits (`ChartOracle._dispatch` calls the old
+    one). The constant stays within `SELECTION_FRAMES` (measured 0 to 12, the
+    parenthesised conditions the deepest; 6 for the OFF_HOLD retry)."""
     extra = _frames_needed(shape, 41, ChartOracle) - _frames_needed(shape, 41)
     assert 0 <= extra <= SELECTION_FRAMES
 
