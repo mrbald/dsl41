@@ -13,7 +13,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import oracle_lockstep
 import pytest
@@ -853,7 +853,7 @@ def test_a_start_whose_units_the_chart_reserves_and_the_row_does_not_is_a_statec
     """Planted: the attempt's payload says the start reserves units, and
     today's admission reserves none for a job with no resources: the chart's
     `reserved` is caught at the STARTING write."""
-    monkeypatch.setattr(oracle_chart._Facts, "demand", property(lambda self: True))
+    monkeypatch.setattr(oracle_chart.StartFacts, "demand", property(lambda self: True))
     oracle = ChartOracle(lower_source(_START_JIL))
     with pytest.raises(StatechartError, match="the start's status write differs") as raised:
         oracle.feed(ev("STARTJOB", 1, job="plain"))
@@ -1610,3 +1610,419 @@ def test_sem34_a_startjob_arms_its_deadlines_before_its_attempt_as_today() -> No
     checks = sorted(str(e.payload.get("check")) for _due, _seq, e in paired.twin.store.timers())
     assert checks == ["must_complete", "must_start"]
     assert paired.twin.store.job["sla"].status == "RUNNING"
+
+
+# ---- the flag family (DL-344)
+
+_FLAG_ITEMS = (
+    "ON_ICE",
+    "OFF_ICE",
+    "ON_HOLD",
+    "OFF_HOLD",
+    "ON_NOEXEC",
+    "OFF_NOEXEC",
+    "DISARM",
+    "flag moved",
+    "start",
+)
+
+
+def _flag_steps(name: str, count: int) -> list[Event]:
+    """The first `count` inputs of a script of the harness's directed flag
+    estate, its seal points left out."""
+    script = oracle_lockstep._flag_scripts()[name]
+    return [s for s in script if isinstance(s, Event)][:count]
+
+
+_LIVE = "flags on live jobs ignored"
+_ICED = "ON_NOEXEC on an iced job ignored"
+_BUSY = "ON_NOEXEC on boxes with busy members ignored"
+_WAITERS = "ON_HOLD and ON_ICE on waiters"
+_NOEXEC_WAITERS = "ON_NOEXEC on waiters"
+_FAILED = "ON_NOEXEC on a FAILED job"
+_QUEUED_BOX = "flags on a queued box"
+_STARTING_BOX = "ON_NOEXEC on a STARTING box"
+_DISARMS = "DISARM on an armed job and box"
+_RUNNING_BOX = "OFF_ICE in a running box, ON_NOEXEC on its idle subbox"
+#: Per outcome class: the directed flag script and how many of its inputs to
+#: feed, the job, the rows the last input fires on the job's instance (the
+#: flag row, then the `flag moved` status row where one fires, then the start
+#: a retry posts), and a trace line the old oracle writes for the job there.
+_FLAG_OUTCOMES: dict[str, tuple[str, int, str, list[tuple[str, ...]], str]] = {
+    "ON_ICE ignored: RUNNING": (_LIVE, 2, "fl_job", [("job.149",)], "EVENT_IGNORED"),
+    "ON_HOLD ignored: RUNNING": (_LIVE, 3, "fl_job", [("job.151",)], "EVENT_IGNORED"),
+    "ON_NOEXEC ignored: RUNNING": (_LIVE, 4, "fl_job", [("job.154",)], "EVENT_IGNORED"),
+    "ON_ICE ignored: STARTING": (_LIVE, 6, "fl_hold", [("job.148",)], "EVENT_IGNORED"),
+    "ON_HOLD ignored: STARTING": (_LIVE, 7, "fl_hold", [("job.150",)], "EVENT_IGNORED"),
+    "ON_NOEXEC ignored: STARTING": (_LIVE, 8, "fl_hold", [("job.153",)], "EVENT_IGNORED"),
+    "ON_ICE": (_ICED, 1, "fl_job", [("job.201",), ("job.198",)], "ON_ICE"),
+    "ON_ICE on an iced job": (_ICED, 2, "fl_job", [("job.218",)], "ON_ICE"),
+    "ON_NOEXEC ignored: ON_ICE": (_ICED, 3, "fl_job", [("job.152",)], "EVENT_IGNORED"),
+    "OFF_ICE": (_ICED, 4, "fl_job", [("job.202",)], "OFF_ICE"),
+    "OFF_ICE on a job not iced": (_ICED, 5, "fl_job", [("job.219",)], "OFF_ICE"),
+    "ON_NOEXEC ignored: a box with a queued member": (
+        _BUSY,
+        3,
+        "fl_q",
+        [("job.152",)],
+        "EVENT_IGNORED",
+    ),
+    "ON_NOEXEC ignored: a queued box with a running member": (
+        _BUSY,
+        6,
+        "fl_box",
+        [("job.158",)],
+        "EVENT_IGNORED",
+    ),
+    "ON_NOEXEC ignored: a box with a STARTING member": (
+        "ON_NOEXEC on a box with a STARTING member ignored",
+        2,
+        "fl_q",
+        [("job.152",)],
+        "EVENT_IGNORED",
+    ),
+    "ON_HOLD on a waiter": (_WAITERS, 3, "fl_wait", [("job.204",)], "ON_HOLD"),
+    "ON_HOLD on a held waiter": (_WAITERS, 4, "fl_wait", [("job.220",)], "ON_HOLD"),
+    "OFF_HOLD on a held waiter": (_WAITERS, 6, "fl_wait", [("job.205",)], "QUE_WAIT->STARTING"),
+    "ON_ICE on a waiter": (
+        _WAITERS,
+        8,
+        "fl_hold",
+        [("job.201",), ("job.112",)],
+        "QUE_WAIT->INACTIVE",
+    ),
+    "ON_NOEXEC on a held waiter": (
+        _NOEXEC_WAITERS,
+        4,
+        "fl_wait",
+        [("job.207", "job.209"), ("job.113",), ("job.101",)],
+        "QUE_WAIT->INACTIVE",
+    ),
+    "OFF_NOEXEC": (_NOEXEC_WAITERS, 6, "fl_wait", [("job.210",)], "OFF_NOEXEC"),
+    "ON_NOEXEC on a waiter": (
+        _NOEXEC_WAITERS,
+        8,
+        "fl_wait",
+        [("job.209",), ("job.113",), ("job.101",)],
+        "QUE_WAIT->INACTIVE",
+    ),
+    "ON_NOEXEC on a FAILED job": (
+        _FAILED,
+        2,
+        "fl_job",
+        [("job.209",), ("job.121",)],
+        "FAILURE->INACTIVE",
+    ),
+    "OFF_NOEXEC on a job not ON_NOEXEC": (_FAILED, 4, "fl_job", [("job.223",)], "OFF_NOEXEC"),
+    "ON_HOLD on a queued box": (_QUEUED_BOX, 3, "fl_box", [("job.204",)], "ON_HOLD"),
+    "OFF_HOLD on a held queued box": (_QUEUED_BOX, 4, "fl_box", [("job.205",)], "OFF_HOLD"),
+    "DISARM on a queued box": (_QUEUED_BOX, 5, "fl_box", [("job.225",)], "DISARM"),
+    "ON_ICE on a queued box": (
+        _QUEUED_BOX,
+        6,
+        "fl_box",
+        [("job.201",), ("job.112",)],
+        "QUE_WAIT->INACTIVE",
+    ),
+    "OFF_NOEXEC on a box whose members are not ON_NOEXEC": (
+        _QUEUED_BOX,
+        7,
+        "fl_box",
+        [("job.223",)],
+        "OFF_NOEXEC",
+    ),
+    "ON_NOEXEC on a queued box": (
+        "ON_NOEXEC on a queued box",
+        3,
+        "fl_box",
+        [("job.209",), ("job.169",)],
+        "QUE_WAIT->INACTIVE",
+    ),
+    "ON_NOEXEC on a STARTING box": (
+        _STARTING_BOX,
+        3,
+        "fl_q",
+        [("job.209",), ("job.170",)],
+        "STARTING->INACTIVE",
+    ),
+    "OFF_NOEXEC on a box": (_STARTING_BOX, 4, "fl_q", [("job.210",)], "OFF_NOEXEC"),
+    "ON_NOEXEC on a STARTING box that holds a unit": (
+        "ON_NOEXEC on a STARTING box that holds a unit",
+        5,
+        "fl_box",
+        [("job.209",), ("job.170",)],
+        "STARTING->INACTIVE",
+    ),
+    "ON_NOEXEC on a held idle box": (
+        "ON_NOEXEC on a held idle box",
+        3,
+        "fl_q",
+        [("job.207", "job.209"), ("job.198",), ("job.124",)],
+        "OFF_HOLD",
+    ),
+    "DISARM on an armed job": (_DISARMS, 5, "fl_dated", [("job.214",)], "DISARM"),
+    "DISARM with no latch": (_DISARMS, 6, "fl_dated", [("job.225",)], "DISARM"),
+    "DISARM on an armed box": (_DISARMS, 7, "fl_box", [("job.214",)], "DISARM"),
+    "OFF_HOLD retries the start": (
+        _DISARMS,
+        8,
+        "fl_box",
+        [("job.205",), ("job.180",)],
+        "OFF_HOLD",
+    ),
+    "OFF_ICE in a running box": (_RUNNING_BOX, 3, "fl_rm", [("job.202",)], "OFF_ICE"),
+    "ON_NOEXEC on an idle box in a running box": (
+        _RUNNING_BOX,
+        5,
+        "fl_sub",
+        [("job.209",), ("job.136",)],
+        "INACTIVE->INACTIVE",
+    ),
+    "ON_ICE on a member a running box waits for": (
+        "ON_ICE on the last member a running box waits for",
+        4,
+        "fl_sub",
+        [("job.201",), ("job.198",)],
+        "ON_ICE",
+    ),
+    "ON_NOEXEC on a job outside the catalog": (
+        "ON_NOEXEC on a job outside the catalog",
+        2,
+        "fl_ghost",
+        [("job.207", "job.209"), ("job.198",)],
+        "OFF_HOLD",
+    ),
+}
+
+
+#: The cases whose job holds units before the last input: the cell is the
+#: settlement of a run's units, so the precondition is asserted, not assumed.
+_HOLDS_BEFORE: Final = frozenset({"ON_NOEXEC on a STARTING box that holds a unit"})
+
+
+@pytest.mark.parametrize("case", sorted(_FLAG_OUTCOMES))
+def test_each_flag_outcome_fires_its_rows_and_writes_what_the_old_oracle_writes(
+    case: str,
+) -> None:
+    """The flag inputs are dispatched to the job's instance: the flag row
+    fires, then the status row its `flag moved` fires where one does, then the
+    start a retry posts; and the chart oracle leaves the trace, the events,
+    the rows, the revisions and the seal the old oracle leaves."""
+    name, count, job, rows, line = _FLAG_OUTCOMES[case]
+    steps = _flag_steps(name, count)
+    paired = LockstepOracle(lower_source(oracle_lockstep.FLAG_JIL), new=ChartOracle)
+    for step in steps[:-1]:
+        paired.feed(step)
+    if case in _HOLDS_BEFORE:  # job.170 settles a run's units: the box holds FL_R
+        row = paired.twin.store.job[job]
+        assert (row.status, [r.bucket for r in row.reservations]) == ("STARTING", ["r:FL_R"])
+    seen = _spied(paired.twin)
+    traced = len(paired.twin.trace())
+    paired.feed(steps[-1])
+    paired.check_seal()
+    _agrees(paired.twin)
+    key = RuntimeState.job_key(job)
+    mine = [o.rows for o in seen if o.key == key and o.event.name in _FLAG_ITEMS and o.rows]
+    assert mine == rows
+    assert line in [t.transition for t in paired.twin.trace()[traced:] if t.job == job]
+
+
+def _flag_oracle(cls: type[ChartOracle] = ChartOracle) -> ChartOracle:
+    return cls(lower_source(oracle_lockstep.FLAG_JIL))
+
+
+def test_a_flag_whose_write_differs_from_the_charts_is_a_statechart_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Planted: the job's instance is held and no follow brings it back, so
+    the chart's ice keeps a hold that today's ON_ICE does not write."""
+    oracle = _flag_oracle()
+    store = oracle.store
+    monkeypatch.setattr(store, "follow_job", lambda job: None)
+    store.machines.realign(
+        "job:fl_job", configuration("INACTIVE", hold=True), store.machines.data("job:fl_job")
+    )
+    with pytest.raises(
+        StatechartError, match="the flag's writes differ from the chart's"
+    ) as raised:
+        oracle.feed(ev("ON_ICE", 1, job="fl_job"))
+    text = str(raised.value)
+    assert "hold_on" in text and "hold_off" in text and "item: the event ON_ICE" in text
+
+
+def test_a_flag_moved_status_whose_write_differs_from_the_charts_is_a_statechart_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Planted: the waiter's instance is ON_NOEXEC and no follow brings it
+    back, so the INACTIVE its `flag moved` reaches (job.112) keeps a flag that
+    today's write does not have; it is caught at the status write."""
+    oracle = _flag_oracle()
+    oracle.feed(ev("STARTJOB", 1, job="fl_hold"))
+    oracle.feed(ev("STARTJOB", 1, job="fl_wait"))
+    store = oracle.store
+    monkeypatch.setattr(store, "follow_job", lambda job: None)
+    store.machines.realign(
+        "job:fl_wait", configuration("QUE_WAIT", noexec=True), store.machines.data("job:fl_wait")
+    )
+    with pytest.raises(StatechartError, match="the configuration differs as written") as raised:
+        oracle.feed(ev("ON_ICE", 2, job="fl_wait"))
+    text = str(raised.value)
+    assert "noexec_on" in text and "noexec_off" in text
+
+
+def test_an_input_the_chart_ignores_and_today_applies_is_a_statechart_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Planted: ON_NOEXEC's ignored and applying guards swapped, so the chart
+    ignores it on a plain INACTIVE job; today's rules give no reason to."""
+    monkeypatch.setenv(HITS_ENV, str(tmp_path))
+
+    class Swapped(ChartOracle):
+        def _job_instance(
+            self, job: str, row: JobRuntime
+        ) -> tuple[Statechart, frozenset[str], object]:
+            chart, active, data = super()._job_instance(job, row)
+            return _swapped(chart, "noexec_ignored", "noexec_applies"), active, data
+
+    oracle = _flag_oracle(Swapped)
+    with pytest.raises(
+        StatechartError, match="'fl_job': job.152 ignores ON_NOEXEC, which today's rules apply"
+    ) as raised:
+        oracle.feed(ev("ON_NOEXEC", 1, job="fl_job"))
+    assert "NoexecFacts('fl_job')" in str(raised.value)
+
+
+def test_a_flag_row_the_oracle_does_not_write_is_a_statechart_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Planted: the oracle forgets DISARM's row for a job with no latch."""
+    fired = {**oracle_chart._FLAG_FIRED, "DISARM": {("job.214",): "moved"}}
+    monkeypatch.setattr(oracle_chart, "_FLAG_FIRED", fired)
+    with pytest.raises(StatechartError, match="'fl_job': DISARM fired job.225, and no flag row"):
+        _flag_oracle().feed(ev("DISARM", 1, job="fl_job"))
+
+
+def test_a_row_beyond_the_ones_a_flag_input_performs_is_a_statechart_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Planted: ON_HOLD's row reports a flag move as well, which fires a
+    further row (job.199). The handler checks every row the input fired. The
+    marked row's hit stays out of the session."""
+    monkeypatch.setenv(HITS_ENV, str(tmp_path))
+    oracle = _flag_oracle(_rows_changed(job_204={"action": "report_flag_move"}))
+    with pytest.raises(
+        StatechartError, match="'fl_job': ON_HOLD fired job.204, job.199, and no flag row"
+    ):
+        oracle.feed(ev("ON_HOLD", 1, job="fl_job"))
+
+
+@pytest.mark.parametrize(
+    ("script", "message"),
+    [
+        (
+            [ev("STARTJOB", 1, job="fl_hold"), ev("STARTJOB", 1, job="fl_wait")],
+            "'fl_wait': job.169 fired for a non-box job",
+        ),
+        ([ev("STATUS", 1, job="fl_q", exit_code=1)], "'fl_q': job.121 fired for a BOX job"),
+    ],
+    ids=["a queued job takes the box's row", "a failed box takes the job's row"],
+)
+def test_a_noexec_settlement_for_the_other_job_type_is_a_statechart_error(
+    script: list[Event], message: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Mutant: ON_NOEXEC's job and box settlement guards swapped. The row the
+    chart fires decides the path, and a catalog that disagrees with the row's
+    job type is a statechart error before any write. The mutant's hits stay
+    out of the session."""
+    monkeypatch.setenv(HITS_ENV, str(tmp_path))
+
+    class Swapped(ChartOracle):
+        def _job_instance(
+            self, job: str, row: JobRuntime
+        ) -> tuple[Statechart, frozenset[str], object]:
+            chart, active, data = super()._job_instance(job, row)
+            return _swapped(chart, "noexec_settles_job", "noexec_settles_box"), active, data
+
+    oracle = _flag_oracle(Swapped)
+    for event in script:
+        oracle.feed(event)
+    job = "fl_wait" if "fl_wait" in message else "fl_q"
+    traced = len(oracle.trace())
+    with pytest.raises(StatechartError, match=message):
+        oracle.feed(ev("ON_NOEXEC", 2, job=job))
+    assert oracle.trace()[traced:] == []
+
+
+def test_an_ice_whose_waiter_row_is_moved_to_a_live_status_is_a_statechart_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Mutant: job.112 (an iced waiter leaves the queue) declared on a live
+    status instead of QUE_WAIT. The waiter's ice then fires job.198, which
+    moves nothing, and the row says the job is queued: a statechart error
+    before any write, not a waiter left in the queue."""
+    monkeypatch.setenv(HITS_ENV, str(tmp_path))
+    oracle = _flag_oracle(_rows_changed(job_112={"source": "LIVE"}))
+    oracle.feed(ev("STARTJOB", 1, job="fl_hold"))
+    oracle.feed(ev("STARTJOB", 1, job="fl_wait"))
+    traced = len(oracle.trace())
+    with pytest.raises(StatechartError, match="'fl_wait': job.198 fired for a QUE_WAIT job"):
+        oracle.feed(ev("ON_ICE", 2, job="fl_wait"))
+    assert oracle.trace()[traced:] == []
+
+
+def test_sem20_an_ice_on_the_last_member_completes_its_running_box_in_todays_cascade() -> None:
+    """ON_ICE on a member that a RUNNING box still waits for fires the flag
+    row and job.198; the box's completion moment (DL-285) is today's code,
+    run after the flag is compared, and the box ends SUCCESS."""
+    steps = _flag_steps("ON_ICE on the last member a running box waits for", 4)
+    paired = _lockstep(oracle_lockstep.FLAG_JIL, steps)
+    assert paired.twin.store.job["fl_run"].status == "SUCCESS"
+    lines = [(t.job, t.transition) for t in paired.twin.trace()[-2:]]
+    assert lines == [("fl_sub", "ON_ICE"), ("fl_run", "RUNNING->SUCCESS")]
+
+
+@pytest.mark.parametrize(
+    ("guard", "script", "job", "message"),
+    [
+        (
+            "noexec_settles_job",
+            [ev("STARTJOB", 1, job="fl_hold"), ev("STARTJOB", 1, job="fl_wait")],
+            "fl_wait",
+            "'fl_wait': job.198 fired for a QUE_WAIT job",
+        ),
+        (
+            "noexec_settles_job",
+            [ev("STATUS", 1, job="fl_job", exit_code=1)],
+            "fl_job",
+            "'fl_job': job.198 fired for a FAILURE job",
+        ),
+        (
+            "noexec_settles_box",
+            [ev("STATUS", 1, job="fl_q", exit_code=1)],
+            "fl_q",
+            "'fl_q': job.198 fired for a FAILURE job",
+        ),
+    ],
+    ids=["a waiter left queued", "a FAILED job left FAILED", "a FAILED box left FAILED"],
+)
+def test_a_noexec_that_settles_nothing_where_today_settles_is_a_statechart_error(
+    guard: str,
+    script: list[Event],
+    job: str,
+    message: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Mutant: ON_NOEXEC's settlement guard never holds, so `flag moved` fires
+    job.198 (no move) for a waiter, a FAILED job or a box that is not
+    INACTIVE. The status the row has disagrees with the chart's choice: a
+    statechart error before any write, not a waiter left queued with the flag
+    set. The mutant's hits stay out of the session."""
+    monkeypatch.setenv(HITS_ENV, str(tmp_path))
+    oracle = _flag_oracle(_planted(**{guard: lambda ctx: False}))
+    for event in script:
+        oracle.feed(event)
+    traced = len(oracle.trace())
+    with pytest.raises(StatechartError, match=message):
+        oracle.feed(ev("ON_NOEXEC", 2, job=job))
+    assert oracle.trace()[traced:] == []

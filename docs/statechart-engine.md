@@ -299,8 +299,9 @@ input from the row's projection. A converted input is dispatched to the job's in
 fired row's writes are made by the old oracle's methods. The status written is the one the chart
 reached; the old-versus-new harness judges a wrong status row. The check covers what the old code
 still decides: the holding, the job type behind a row that takes a job's or a box's path, and the
-flags, where it shows only that the converted input's write moves none; the flag moves of the
-families not yet converted are realigned before the dispatch, not checked. A move that leaves
+flags, which the converted inputs move (a flag input, a waiter's kill, a forced start's clears, a
+start's arm and its consumption) and the other converted writes leave alone; the flag moves of code
+the chart does not drive yet are realigned before the dispatch, not checked. A move that leaves
 STARTING or RUNNING has its flags compared when its status is written and its holding when its own
 settlement has run; any other move has both compared when its status is written, before the box
 rules can start the job again. A difference is a statechart error. The
@@ -337,6 +338,24 @@ still belongs to its box run, and whether a scan continuation is superseded. The
 of its relayed `start`: a stale one is refused with the old text, a live continuation resumes the
 scan, and any other is the attempt. Timers stay armed by code; the chart declares moves, not timer
 writes.
+
+The flag inputs are dispatched to the job's instance too (DL-344). The fired rows decide each
+dimension the old code read from the row or the catalog. Whether the flag was already set is the
+row's source state, which the follow before the dispatch makes the row's; a wrong flag target is
+caught by the compare after the flag's write. Three dimensions a guard decides are checked against
+the row or the catalog before any write, each a statechart error: whether ON_ICE meets a waiter,
+whether ON_NOEXEC settles a job or a box, and whether it settles at all (a job settles out of the
+queue or from FAILURE or TERMINATED; a box that is not INACTIVE settles; whether an INACTIVE box
+settles is a fact of the payload, left to the harness). An input the job ignores
+takes the status region's ignored row (`job.148` to `job.158`) and writes the old EVENT_IGNORED
+line. A flag row is written by the old flag move, with its marker and line, and the row is
+compared with the chart's configuration after it. A status that the `flag moved` fires is
+compared as a STATUS move is: an iced waiter leaves the queue (`job.112`), and ON_NOEXEC settles a
+waiter, a FAILED job or a box (`job.113`, `job.121`, `job.136`, `job.169`, `job.170`). ON_NOEXEC's
+payload reads a box's contained jobs only where the old rule reads them. The moves the chart does
+not declare stay old code, in the old order: an ice's box rules and wakes, the mark of a member
+taken off ice in its running box, the waiters' wake on a hold, the start retries of OFF_HOLD and
+ON_NOEXEC (each one `start`), and a box's members on ON_NOEXEC and OFF_NOEXEC.
 
 ## 12. Durability of deferred queues
 
@@ -488,8 +507,9 @@ proven old-vs-old before the second oracle exists (DL-338). Then the old oracle 
 the second oracle moves anything, the composite `job` chart is declared and checked against the
 old tables (DL-337). The second oracle, `ChartOracle` in `src/dsl41/oracle_chart.py`, subclasses
 the old one and overrides one input family's handlers per entry, STATUS first (DL-341), then the
-start attempt (DL-342), then KILLJOB and the TIMER input (DL-343); the
-families not yet converted, and the cascade between instances, run the old code in its order.
+start attempt (DL-342), then KILLJOB and the TIMER input (DL-343), then the flag inputs
+(DL-344); the families not yet converted, and the cascade between instances, run the old code
+in its order.
 
 Each slice is a semantic-class change. Each has its own decision-log entry.
 

@@ -224,14 +224,25 @@ SLOPE_SHAPES = {
 _LAST: dict[str, tuple[Event, str]] = {
     "terminator-chain": (Event(at=T0, kind="KILLJOB", payload={"job": "q0"}), "TERMINATED"),
     "off-hold-chain": (Event(at=T0, kind="OFF_HOLD", payload={"job": "q0"}), "SUCCESS"),
+    "noexec-box-chain": (Event(at=T0, kind="ON_NOEXEC", payload={"job": "q0"}), "SUCCESS"),
 }
 
 
 def _off_hold_chain(jobs: int) -> tuple[str, list[Event]]:
-    """The box chain, begun by OFF_HOLD's retry of a held `q0`: an input the
-    chart oracle inherits from `Oracle._dispatch`, one frame deeper there
-    than in the old oracle (DL-343)."""
+    """The box chain, begun by OFF_HOLD's retry of a held `q0`. The chart
+    oracle inherited the input from `Oracle._dispatch` one frame deeper
+    (DL-343); since its flag handler (DL-344) the retry sits as deep as
+    the old oracle's."""
     jil = _box("q0") + "".join(_box(f"q{i}", f"s(q{i - 1})") for i in range(1, jobs))
+    return jil, [Event(at=T0, kind="ON_HOLD", payload={"job": "q0"})]
+
+
+def _noexec_box_chain(jobs: int) -> tuple[str, list[Event]]:
+    """The box chain, begun by ON_NOEXEC on a held `q0` with one member `p`
+    (DL-344): the flag clears the hold, so the box's retry starts it, its
+    member bypasses (SEM-22) and its SUCCESS starts `q1`."""
+    jil = _box("q0") + _cmd("p", extra="box_name: q0\n")
+    jil += "".join(_box(f"q{i}", f"s(q{i - 1})") for i in range(1, jobs - 1))
     return jil, [Event(at=T0, kind="ON_HOLD", payload={"job": "q0"})]
 
 
@@ -246,7 +257,12 @@ def _paren_chain(jobs: int) -> tuple[str, list[Event]]:
 def _frames_needed(shape: str, jobs: int, oracle: type[Oracle] = Oracle) -> int:
     """The fewest frames above the caller that a forced start of `q0` needs
     to run the shape's cascade over `jobs` jobs on `oracle`, by bisection."""
-    shapes = {**SLOPE_SHAPES, "paren-chain": _paren_chain, "off-hold-chain": _off_hold_chain}
+    shapes = {
+        **SLOPE_SHAPES,
+        "paren-chain": _paren_chain,
+        "off-hold-chain": _off_hold_chain,
+        "noexec-box-chain": _noexec_box_chain,
+    }
     jil, setup = shapes[shape](jobs)
     catalog = lower_source(jil)
     assert len(catalog.jobs) == jobs
@@ -300,7 +316,9 @@ def test_sem10_frames_per_job_stay_within_the_fitted_budget(
     assert needed > (frames if shape == "box-ring" else 0)
 
 
-@pytest.mark.parametrize("shape", [*sorted(SLOPE_SHAPES), "paren-chain", "off-hold-chain"])
+@pytest.mark.parametrize(
+    "shape", [*sorted(SLOPE_SHAPES), "paren-chain", "off-hold-chain", "noexec-box-chain"]
+)
 def test_sem10_the_chart_oracle_adds_a_bounded_constant_at_the_innermost_attempt(
     shape: str,
 ) -> None:
@@ -308,8 +326,10 @@ def test_sem10_the_chart_oracle_adds_a_bounded_constant_at_the_innermost_attempt
     constant: the executor's selection at the innermost attempt, which the
     base of the fit absorbs, and one frame at the base for a kill and for an
     input the chart oracle inherits (`ChartOracle._dispatch` calls the old
-    one). The constant stays within `SELECTION_FRAMES` (measured 0 to 12, the
-    parenthesised conditions the deepest; 6 for the OFF_HOLD retry)."""
+    one). The flag inputs' retries sit at today's depth (DL-344). The
+    constant stays within `SELECTION_FRAMES` (measured 0 to 12, the
+    parenthesised conditions the deepest; 5 for the OFF_HOLD and ON_NOEXEC
+    retries)."""
     extra = _frames_needed(shape, 41, ChartOracle) - _frames_needed(shape, 41)
     assert 0 <= extra <= SELECTION_FRAMES
 

@@ -22265,3 +22265,54 @@ relitigate an entry; append a new one.
   fired row beyond the ones they perform, now a statechart error. Smaller items, a continuation
   both box-stale and superseded, one expected error per mutant case, the strict mode a test relied
   on, the dedupe's key, are fixed and confirmed by the reviewer that raised them.
+- DL-344 The flag family is decided by the job chart: ice, hold, noexec and disarm, and the
+  status consequences a flag move fires; the payload facts move to their own module
+  (2026-10-13; src/dsl41/oracle_chart.py, src/dsl41/oracle_chart_facts.py;
+  tests/test_oracle_chart.py, tests/oracle_lockstep.py, tests/test_cascade_depth.py;
+  docs/statechart-engine.md §11, §16;
+  docs/blocks/job-lifecycle.md; README.md; pyproject.toml)
+  THE FAMILY. The chart oracle (DL-341 to DL-343) now decides the seven flag inputs, ON_ICE,
+  OFF_ICE, ON_HOLD, OFF_HOLD, ON_NOEXEC, OFF_NOEXEC and DISARM; only SET_GLOBAL and
+  RELEASE_RESOURCE still reach the old handler. Each input is dispatched on the job's instance
+  with the facts the flag rows read, and the fired flag row is performed by today's flag verb with
+  today's marker and line, compared with the chart at once; a flag on a job in a state that
+  ignores it fires the ignored row, and the line written is the one today's rule gives, so a
+  chart that ignores where today's rule does not is a statechart error. The consequences the
+  chart declares are chained rows: the `flag moved` event the flags region sends to the status
+  region fires the move of an iced waiter to INACTIVE and the noexec settlements of a job and of a
+  box's members, performed by today's status and injection verbs with the fired row's marker and
+  compared as a status move. The consequences the chart does not declare run where today's code
+  runs them: a box member's resolution and the referencers' wakes on ice, the queue's wake on hold
+  and off hold, the retry of a start after off hold, the hold a noexec clears and the release that
+  follows its settlement, the member loop of a box taken off noexec, the members a box disarms.
+  Every fact is computed on first read, where today's rules read it; none is eager. The payload
+  classes, the start facts and the new noexec facts, move to a module of their own, since the
+  architecture check forbids a private import across modules and a family subclass would add a
+  frame to the cascade or an import cycle.
+  PROOF. The harness, old against chart, shows no difference: the corpus and two hundred estates
+  of up to fifty jobs, 23,141 inputs; twenty estates of 150 to 200 jobs, 7,999; the corpus and
+  forty estates under every switch, 100,622; a further thousand seeds, 94,353, three inputs
+  raising alike; the oracle's tests pass through the fourth arm. The generator never reaches two
+  ignored cells, a flag on a queued box, or a hold or noexec input on a held waiter, so fifteen
+  directed scripts join the corpus run; one of them catches a planted skip of the member's
+  resolution on ice that the corpus and two hundred seeds let pass. The chart's frames per nested
+  start equal the old oracle's on seven shapes, with a constant of at most twelve within its bound.
+  STATE_MACHINE_VERSION is unchanged (DL-235). Cost per input on the corpus about 146 microseconds
+  against 59, on the large estates 272 against 85: each converted family adds its dispatch, and
+  the switch-over's optimisation, the verdict computed once per attempt and the write per state
+  (DL-339), is the recorded candidate.
+  NOT HERE. SET_GLOBAL, whose wakes already attempt through the chart; RELEASE_RESOURCE and the
+  readmission, with the waiter's leave row job.110; the box rules and the cascade; `job` in the
+  machine registry; the split of job_chart.py, which this slice did not grow.
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass in place of the Codex pass,
+  two rounds each. The question put to both was whether a statechart error before any write is
+  owed for every dimension a flag row declares, or only where the code's path depends on it.
+  Both found the source-state dimensions, the flag that was on and the hold a noexec clears, need
+  none: the realign makes them equal to the row and the harness caught every swapped guard. The
+  Opus reviewer found the noexec input's status dimension unchecked: a guard that settles nothing
+  where today settles a waiter left it queued with the flag set, caught by the harness's trace
+  compare alone; the check now covers it, as the Fable pass had offered. Both found the texts
+  implying a check that does not exist and claiming the converted writes leave the flags alone,
+  now corrected; a directed script for a box holding a unit taken off exec was added; one planted
+  mutant nothing catches is equivalent, since a second ice re-resolves through an idempotent door.
+  Every finding fixed or recorded and confirmed by the reviewer that raised it.
