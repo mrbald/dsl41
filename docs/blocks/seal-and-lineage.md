@@ -27,21 +27,25 @@ It needs atomic multi-record commit too: the `seal` record is one line, and the 
 
 ## States
 
-Two declared machines and one statechart hold this block's states:
+Three statecharts hold this block's states:
 
 - [anchor_head](../state-machines.md#anchor_head): the lineage head, from genesis through each seal, claim and opening.
 - [period_row](../state-machines.md#period_row): one period's registry row, provisional at genesis or durable for a successor, then attested.
 - [seal_boundary](../state-machines.md#seal_boundary): one seal request's phases in the engine and its three exits, run by the statechart executor ([DL-327](../decision-log.md)).
 
 Each anchor holds the generated diagram and transition table.
-A repeat that writes nothing takes no transition.
+The anchor's two charts keep their state in `anchor.json`, which no process owns ([DL-336](../decision-log.md)).
+The head's tag and each row's flags are the instances' configurations.
+Each anchor method builds an executor from the file it read under the anchor lock, posts its move, and reads and settles the outcome before its one anchor write; a claim writes its claim file first, then the head. Then it drops the executor.
+No file or no row means no instance: genesis creates the file, and a successor's opening creates its row.
+A repeat that writes nothing posts nothing.
 
 ## Invariants
 
 - Exactly one root may succeed a seal; the head is the fence ([period-model §1.3](../period-model.md#13-the-successor-fence); [DL-133](../decision-log.md)).
 - The head moves after the fact it records. A successor's registry row is written in the same anchor write as its opening, after its first segment is durable (PR-02c in [period-model §13.1](../period-model.md#131-lineage)).
 - A claim is keyed on its `claim_id`, not on a process, so a crashed claimant's replacement resumes it ([period-model §1.3](../period-model.md#13-the-successor-fence)).
-- A move outside the anchor's tables is refused with `EngineError` before anything is written, and it never becomes a replayed fault ([DL-290](../decision-log.md)).
+- A cell with no move is a refusal row, raised as the anchor method's `EngineError` before anything is written, and it never becomes a replayed fault ([DL-290](../decision-log.md), [DL-336](../decision-log.md)).
 - The seal's writes follow a fixed order, and the `seal` append is the point of no return ([period-model §7](../period-model.md#7-the-seal-operation)).
 - During a seal, admission is frozen and the cutoff owns every tick up to T ([period-model §6](../period-model.md#6-the-cutoff-barrier)).
 - The seal proves the supervisor before it commits (PR-27 in [period-model §13.5](../period-model.md#135-the-boundary)).
@@ -58,6 +62,7 @@ A repeat that writes nothing takes no transition.
 - A crashed claimant: the same claim resumes, and a different claim against the same seal is refused, naming the holder. `reclaim` is the attributed break-glass ([period-model §1.3](../period-model.md#13-the-successor-fence)).
 - `--on-transition-violation stop` in the drain stops the engine after the decision is durable ([DL-292](../decision-log.md)).
 - A statechart error anywhere in the seal stops the engine with exit 7. Nothing aborts, the request is not answered, and resume reads where the period stands ([period-model §7](../period-model.md#7-the-seal-operation)).
+- A gap in an anchor chart is a statechart error before the anchor write. At the seal's close CAS the `seal` record is durable and the head still open, and the next resume closes it. At resume, at genesis, in the roll and in `estate reclaim` it stops the verb with exit 7 ([DL-336](../decision-log.md)).
 
 ## Owning modules
 
@@ -77,9 +82,12 @@ A repeat that writes nothing takes no transition.
 - `test_pr02b_the_open_to_closed_cas_is_performed_at_resume`
 - `test_pr45_a_claim_with_a_durable_segment_moves_the_head_at_resume`
 - `test_ss1_3_a_reclaim_goes_back_to_the_closed_head_the_claim_names`
-- `test_a_lineage_walk_takes_every_declared_move_and_reports_no_violation`
-- `test_a_move_outside_the_table_is_refused_naming_the_machine_and_the_move`
-- `test_an_idempotent_repeat_writes_nothing_and_takes_nothing`
+- `test_a_lineage_walk_fires_every_move_and_posts_only_the_alphabet`
+- `test_the_head_completeness_table_is_section_1_3`
+- `test_the_row_completeness_table_is_sections_1_3_and_11`
+- `test_every_poster_posts_only_its_chart_s_alphabet`
+- `test_an_idempotent_repeat_writes_nothing_and_posts_nothing`
+- `test_a_gap_at_the_seal_s_close_stops_with_the_record_durable_and_the_head_open`
 - `test_pr28b_every_non_commit_exit_before_the_append_aborts_and_retries`
 - `test_pr28b_a_fence_loss_inside_the_interval_fail_stops`
 - `test_pr28d_a_failure_at_the_seal_append_fail_stops_without_reopening`

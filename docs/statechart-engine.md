@@ -254,8 +254,11 @@ its instances. A process with an `Engine` has one executor for the engine tier's
 wiring builds it before the engine and hands it to the supervisor client first, then to the engine
 (DL-330). The oracle's state owner (`RuntimeState`) has its own executor, for the machines whose
 state it owns (DL-333). A fork has its own executor; a fork of the owner rebuilds it from the
-source's phase and the fork's rows. `ReentrantDispatch` is per executor; a call from one tier
-into another tier's executor is not re-entrance.
+source's phase and the fork's rows. A durable file that no process owns has an executor per move:
+the lineage anchor's methods each build one from the file they read under the anchor lock, post the
+move's events, read and settle the outcomes before the one anchor write (a claim writes its claim
+file first, then the head), and drop it (DL-336). `ReentrantDispatch` is per executor; a call from
+one tier into another tier's executor is not re-entrance.
 
 The oracle becomes one composite `job` machine per job, with named regions for its status, its
 flags and its holding. Its regions, its box variant and its write path through `RuntimeState`
@@ -379,6 +382,14 @@ does not allow is a refusal row with a code, read before any work of the verb; t
 the class and text it always raised. A cell with no row is a statechart error that stops the tier
 at the verb that meets it; the constructor meets the genesis cells.
 
+`anchor_head` and `period_row` (DL-336) run on an executor per move, built from `anchor.json` read
+under the anchor lock; the head's tag and each row's flags are the instances' configurations, and
+no file or no row means no instance. A refusal row is the anchor method's `EngineError`, with its
+text, before any write; the checks that read the method's own facts and the idempotent repeats
+come before the post. A gap is a statechart error, also before any write: at the seal's close CAS
+it stops the engine with the `seal` record durable and the head open, and at resume, at genesis,
+in the roll and in `estate reclaim` it reaches the CLI's stop, exit 7.
+
 Acceptance per machine:
 
 - the old decision code is deleted;
@@ -391,8 +402,8 @@ Acceptance per machine:
   revision equality against the old implementation.
 
 After the pilot, `seal_boundary` (DL-327), `supervisor_process` (DL-328), `supervisor_client`
-(DL-330), `effect` (DL-331), `host` (DL-333), `admission` (DL-334) and `runtime_assembly`
-(DL-335), the rest come in this order: `anchor_head`, `period_row`.
+(DL-330), `effect` (DL-331), `host` (DL-333), `admission` (DL-334), `runtime_assembly` (DL-335),
+and `anchor_head` and `period_row` (DL-336); the rest is the oracle.
 
 The oracle comes last. A second oracle is built beside the old one under a new old-vs-new
 harness. The same inputs go to both. The harness compares the trace, the emitted events, the

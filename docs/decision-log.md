@@ -21767,3 +21767,67 @@ relitigate an entry; append a new one.
   input; the Fable pass found the read running selection without the in-flight flag and the same
   over-claim. All are fixed and confirmed by the reviewer that raised them; the Fable pass probed
   the read against the dispatch under deferral, stale events, ambiguity and re-entrance.
+
+- DL-336 The anchor's head and period rows run on the statechart executor: a durable file no process
+  owns gets its executor per move
+  (2026-10-13; src/dsl41/boundary.py, src/dsl41/period.py, src/dsl41/runner_startup.py;
+  docs/blocks/seal-and-lineage.md; docs/concurrency-model.md §4; docs/period-model.md §1.3;
+  docs/statechart-engine.md §11 and §16; docs/state-machines.md (generated))
+  THE CHARTS. `anchor_head` and `period_row` are two `Statechart`s on the logical clock, declared
+  beside the anchor they describe. The head's region holds `open`, the initial, `closed` and
+  `claimed`; the row's holds a composite `unattested`, with `provisional`, the initial, and
+  `durable`, and the final `attested`. `absent` left both: no file or no row means no instance, as
+  the feed's, the effect's and the admission's absence did (DL-329, DL-331, DL-334), so the head's
+  creation row and the row's two birth rows are gone; the head's rows .02 to .05 and the row's .02,
+  .04 and .05 keep their ids, and the row's close now has one id over its two reachable sources,
+  with the tolerated-source sentence as its note. The claim rewritten in place (.06) stays an
+  internal row; DL-290's open question on its reachability is cited, not answered. The cells with
+  no move are refusal rows on each chart's root, carrying the reasons the methods raised before as
+  codes. No guards, no actions, no data.
+  THE EXECUTOR PER MOVE. No process owns the head: every move is a read-compare-write under the
+  anchor lock, by the live engine, the offline sealer, a roll, a reclaim or the audit, each in its
+  own process. So the executor is built for one move, after the method's fact checks: it restores
+  the head instance in the tag read under the lock and the period's row instance in its flags,
+  posts the move's events, head then row, reads the outcomes, and settles before the one durable
+  write: every held instance must rest exactly in the configuration the write records, or the move
+  is a statechart error and nothing is written; an instance the write creates is restored in it.
+  The write, the fsyncs, the lock check before it and the claim-file-first order are unchanged.
+  statechart-engine §11 names this third home beside the engine's shared executor and the state
+  owner's own.
+  REFUSE BEFORE WRITE, ONE COPY. The dispatch precedes the write, so DL-290's rule holds. The
+  methods' state checks are gone; the refusal rows carry them, and a refusal outcome raises the
+  engine error the method raised before, with its text, because the dispatch is the decision point
+  and these refusals are the contract's (CM §4, DL-297). Three cells that had only the table's
+  generated sentence have their own now: a close over an attested row, an opening over an existing
+  row, a finalize of a forged row. The fact checks stay the methods': the digest and the root, the
+  segment's presence and agreement, the claim file's content, the version. The retired head
+  format's refusal and the absence check stay before any instance exists. A code without a text,
+  a gap, or a write the chart does not rest in is a statechart error.
+  THE ERROR SURFACE. Nothing new. A statechart error at the close past the seal's point of no
+  return is re-raised before the seal-fault wrap (DL-327): the run exits 7 with one seal record,
+  the head still open, and the next resume closes it and opens the next period. At resume's three
+  repairs, at genesis, in the roll and in `estate reclaim` it reaches the CLI wrapper and exits 7
+  with the anchor file unchanged. Genesis now closes its journal when the finalize raises: that
+  handle leaked on any finalize failure before.
+  CHECKS. `well_formed` and `chart_warnings` pass for both. The completeness tests hold the head's
+  four witnesses, the claimed one with and without its claim file, against five events, and the
+  row's three against five, with tables written from period-model §1.3 and §11. The poster test
+  runs genesis, an offline seal, the audit, a roll stopped after its claim and then a forced
+  reclaim, a full roll, a live seal, the opening at resume and resume's three repairs, and every
+  posted name is in the charts' alphabets. The exhaustive walk keeps its enumeration and reads the
+  executor's outcomes. New tests: idempotent repeats post nothing; three forged anchors are
+  refused with their texts; a gap, a code with no text and a write the chart does not rest in are
+  statechart errors; the seal's gap past the point of no return, resume's gap and genesis's gap
+  each exit 7; a forced reclaim meeting a gap exits 7. The boundary, estate and attestation tests
+  pass unchanged. STATE_MACHINE_VERSION is unchanged: the anchor's shape and every derivation
+  stay. The strict test variable and the run option no longer apply to these machines.
+  OPEN. boundary.py is over the size advisory; the risk map's open anchor items stand.
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass in place of the Codex pass,
+  two rounds each. Neither found a blocker or a major. The Opus reviewer found the new genesis
+  journal close unguarded and too narrow, so a failing fsync could replace the finalize's error, and
+  a kept docstring gone false; the Fable pass found the reclaim method's agreement with its chart
+  guarded by a bare assert, which would surface without a report, two of resume's three repairs
+  without a gap test, and a "one write" sentence false for the claim, which writes its file first.
+  Both ran the old and the new methods over the same on-disk anchors, nearly two thousand states
+  and five hundred cells, and found only the three announced texts different. All are fixed and
+  confirmed by the reviewer that raised them.

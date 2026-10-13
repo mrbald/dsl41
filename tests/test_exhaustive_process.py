@@ -13,10 +13,10 @@ None of these machines writes a trace line. A violation shows as a
 that starts with `VIOLATION_LOG_PREFIX`; each test checks all three. Each
 test records into its own directory and asserts which declared (transition,
 source) pairs its builder took; each pair it does not take is named, with the
-reason. `supervisor_lease`, `supervisor_process` and `supervisor_client`
-are statecharts: their executor raises on an event no row takes, so their
-tests check the rows each event took, or that the run raised nothing, and the
-chart's coverage items instead. The fixture then hands the hits, never the violations, to the
+reason. `supervisor_lease`, `supervisor_process`, `supervisor_client`,
+`anchor_head` and `period_row` are statecharts: their executor raises on an
+event no row takes, so their tests check the rows each event took, or that
+the run raised nothing, and the chart's coverage items instead. The fixture then hands the hits, never the violations, to the
 session's directory, so the coverage gate counts them.
 """
 
@@ -50,7 +50,13 @@ from dsl41.boundary import (
 from dsl41.runner_adapters import SUPERVISOR_CLIENT, SupervisorClient, SupervisorUnavailable
 from dsl41.state_machine import Executor, Outcome
 from dsl41.runner_clock import EngineError
-from dsl41.state_machine import HITS_ENV, STRICT_ENV, VIOLATION_LOG_PREFIX, TransitionError
+from dsl41.state_machine import (
+    HITS_ENV,
+    STRICT_ENV,
+    VIOLATION_LOG_PREFIX,
+    StatechartError,
+    coverage_items,
+)
 
 
 @pytest.fixture
@@ -76,34 +82,9 @@ def _records(directory: Path, prefix: str) -> list[dict[str, str]]:
     ]
 
 
-def _missed_sources(directory: Path, machine: Any) -> set[tuple[str, str]]:
-    """The declared (transition, source) pairs the test did not take."""
-    taken = {
-        (r["id"], r["old"]) for r in _records(directory, "hits") if r["machine"] == machine.name
-    }
-    return {(t.id, s) for t in machine.transitions for s in t.source} - taken
-
-
 def _assert_no_violation(directory: Path, stderr: str) -> None:
     assert _records(directory, "violations") == []
     assert VIOLATION_LOG_PREFIX not in stderr
-
-
-def _spy_on_take(monkeypatch: pytest.MonkeyPatch, machine: Any) -> list[str]:
-    """Record the id of every transition taken by any machine of `machine`'s
-    class, so a test can name what one event took. The supervisor's machines
-    are instances of another module's class (DL-42), so the class is read off
-    the machine."""
-    taken: list[str] = []
-    cls = type(machine)
-    take = cls.take
-
-    def spy(self: Any, t: Any, old: Any, new: Any) -> Any:
-        taken.append(t.id)
-        return take(self, t, old, new)
-
-    monkeypatch.setattr(cls, "take", spy)
-    return taken
 
 
 # ------------------------------------------------------------ supervisor_lease
@@ -1045,7 +1026,7 @@ def test_every_anchor_verb_in_every_reached_anchor_state_takes_a_declared_transi
     monkeypatch: pytest.MonkeyPatch,
     capfd: pytest.CaptureFixture[str],
 ) -> None:
-    """anchor_head and period_row, which the anchor's verbs take together.
+    """anchor_head and period_row, which the anchor's verbs move together.
     From an empty anchor directory, a breadth-first walk applies every event
     to every state it reaches, keyed on the head, the registry rows, whether
     the head's claim file exists, and whether a reclaim was recorded. The
@@ -1055,11 +1036,12 @@ def test_every_anchor_verb_in_every_reached_anchor_state_takes_a_declared_transi
     `claim_successor`, and the same claim crashing between its claim file
     and the head write; `open_claimed` with the head's claim at its own next
     period, as both production callers bind it; `reclaim`; and the head's
-    claim file going missing. An event passes when it writes after taking
-    exactly the transitions its verb names, or is refused with EngineError,
-    the anchor's own refusal, having taken none (a crashed claim may have
-    taken its row before the write failed). A TransitionError means a row is
-    missing.
+    claim file going missing. Each move builds its own executor from the
+    file it read, so the walk reads every outcome off the executor class. An
+    event passes when it writes after firing exactly the rows its verb names,
+    or is refused with EngineError, the anchor's own refusal, having fired
+    none (a crashed claim fired its row before the write failed). A
+    StatechartError means a chart has a gap.
 
     Left out: `open_claimed` with a period other than its claim's next
     period, which no caller passes and the verb does not check; the rows of
@@ -1068,15 +1050,29 @@ def test_every_anchor_verb_in_every_reached_anchor_state_takes_a_declared_transi
     rig = _AnchorRig(tmp_path)
     events = _anchor_events()
     problems: list[str] = []
-    taken = _spy_on_take(monkeypatch, ANCHOR_HEAD)
+    fired: list[str] = []
+    refused: set[tuple[str, str, str]] = set()
+    dispatch = Executor.dispatch
+
+    def spy(self: Executor, key: Any, event: Any) -> list[Outcome]:
+        outcomes = dispatch(self, key, event)
+        for outcome in outcomes:
+            if outcome.refusals:
+                machine = outcome.rows[0].split(".")[0]
+                refused.add((machine, outcome.event.name, outcome.refusals[0]))
+            else:
+                fired.extend(outcome.rows)
+        return outcomes
+
+    monkeypatch.setattr(Executor, "dispatch", spy)
     head, row = "anchor_head.", "period_row."
-    takes = {
-        "create_open": [{head + "01", row + "01"}],
-        "create_open_stranger": [{head + "01", row + "01"}],
+    fires = {
+        "create_open": [set()],  # no file, no instance: the write creates both
+        "create_open_stranger": [set()],
         "close_period": [{head + "02", row + "02"}],
         "claim": [{head + "03"}, {head + "06"}],
         "claim_crash": [{head + "03"}, {head + "06"}],
-        "open_claimed": [{head + "04", row + "03"}],
+        "open_claimed": [{head + "04"}],  # the successor's row is created with it
         "reclaim": [{head + "05"}],
         "finalize": [{row + "04"}],
         "attest": [{row + "05"}],
@@ -1099,21 +1095,21 @@ def test_every_anchor_verb_in_every_reached_anchor_state_takes_a_declared_transi
             for event in events:
                 rig.restore(state)
                 applied += 1
-                taken.clear()
+                fired.clear()
                 try:
                     rig.apply(event)
                 except (EngineError, _Crash):
                     pass  # the anchor's own refusal, or the injected crash
-                except TransitionError as exc:
+                except StatechartError as exc:
                     problems.append(f"{event} at {key_of(state)}: {exc}")
                 after = rig.snapshot()
-                verb, moved = event[0], set(taken)
+                verb, moved = event[0], set(fired)
                 wrote = after != state and verb not in ("lose_claim", "claim_crash")
                 if wrote or (verb == "claim_crash" and moved):
-                    if moved not in takes[verb]:
-                        problems.append(f"{event} at {key_of(state)}: took {sorted(moved)}")
+                    if moved not in fires[verb]:
+                        problems.append(f"{event} at {key_of(state)}: fired {sorted(moved)}")
                 elif moved:
-                    problems.append(f"{event} at {key_of(state)}: wrote nothing, took {moved}")
+                    problems.append(f"{event} at {key_of(state)}: wrote nothing, fired {moved}")
                 if key_of(after) not in reached:
                     reached[key_of(after)] = after
                     frontier.append(after)
@@ -1121,9 +1117,38 @@ def test_every_anchor_verb_in_every_reached_anchor_state_takes_a_declared_transi
         rig.anchor.release()
     assert problems == [], "\n".join(problems)
     heads = {k[0] for k in reached}
-    assert heads == set(ANCHOR_HEAD.states)
+    assert heads == {"absent", "open", "closed", "claimed"}
     assert applied == len(reached) * len(events)
-    assert _missed_sources(strict, ANCHOR_HEAD) == set()
-    # an open head always has its row: `absent` is the close's tolerance (the row's guard)
-    assert _missed_sources(strict, PERIOD_ROW) == {("period_row.02", "absent")}
+    hits = {
+        (r["kind"], r["id"], r["detail"])
+        for r in _records(strict, "hits")
+        if r["machine"] in (ANCHOR_HEAD.name, PERIOD_ROW.name)
+    }
+    required = [item for chart in (ANCHOR_HEAD, PERIOD_ROW) for item in coverage_items(chart)[0]]
+    # every move of both charts, and every refusal of the head. Of the row's
+    # refusals the walk posts none: a close, a finalize or an attest of an
+    # attested row (the verbs answer a repeat before any post, and an open
+    # head over an attested row is a hand-edited anchor); a finalize of a
+    # durable row (a repeat); an attest of a provisional row (its digest is
+    # null until the close, and the digest check comes first); and a row's
+    # `create_open` and `open_claimed` (the head refuses first; the
+    # successor's row has no instance before its opening).
+    # test_anchor_machines.py's completeness tests and its forged anchors
+    # pin them.
+    assert {item[1] for item in required if item not in hits} == {
+        "period_row.06",
+        "period_row.07",
+        "period_row.08",
+        "period_row.09",
+        "period_row.10",
+        "period_row.11",
+        "period_row.12",
+    }
+    assert refused == {
+        ("anchor_head", "create_open", "anchor_exists"),
+        ("anchor_head", "close_period", "head_not_open"),
+        ("anchor_head", "claim_successor", "head_not_closed"),
+        ("anchor_head", "open_claimed", "head_not_claimed"),
+        ("anchor_head", "reclaim", "head_not_claimed"),
+    }
     _assert_no_violation(strict, capfd.readouterr().err)

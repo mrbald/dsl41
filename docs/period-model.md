@@ -376,9 +376,8 @@ and lifetime.
   it, and estate-wide `audit`, `journal` and `runs` could lose it after a
   physical roll (PR-02f).
 
-  Every head move (the six of the anchor_head machine: the contract
-  block's four, which include genesis, and the two moves from `claimed`)
-  is one liturgy write. The CAS is
+  Every head move (genesis, which creates the file, and the five moves of
+  the anchor_head chart, DL-336) is one liturgy write. The CAS is
   read-compare-write under the lock. A rename without `fsync(dir)` is not
   durable: a power loss could keep B's first segment and revert the head,
   and a second target would then claim the same seal. Process-kill tests do

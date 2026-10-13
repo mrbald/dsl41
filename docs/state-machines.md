@@ -396,56 +396,86 @@ stateDiagram-v2
 
 ## anchor_head
 
+Clock: logical.
+
 ```mermaid
 stateDiagram-v2
-    state "absent" as s0
-    state "claimed" as s1
-    state "closed" as s2
-    state "open" as s3
-    [*] --> s0
-    s0 --> s3 : anchor_head.01 create_open [no anchor exists] / write the anchor with a provisional registry row
-    s3 --> s2 : anchor_head.02 close_period [the head is open at this period] / write the head as closed at the seal digest
-    s2 --> s1 : anchor_head.03 claim_successor [the head is closed at this seal digest] / write the claim file first, then the head
-    s1 --> s3 : anchor_head.04 open_claimed [the head names this claim] / write the successor's durable registry row in the same write
-    s1 --> s2 : anchor_head.05 reclaim [the claim file binds its body, the estate and the head, the registry holds the previous seal as committed] / append a Reclaimed entry, return the head to the previous seal
-    s1 --> s1 : anchor_head.06 claim_successor [the head names this claim and the claim file is gone] / write the claim file again, the head is written unchanged
+    state "anchor_head" as s0
+    state s0 {
+        [*] --> s3
+        state "open" as s3
+        state "closed" as s2
+        state "claimed" as s1
+    }
+    s3 --> s2 : anchor_head.02 close_period
+    s2 --> s1 : anchor_head.03 claim_successor
+    s1 --> s3 : anchor_head.04 open_claimed
+    s1 --> s2 : anchor_head.05 reclaim
 ```
 
-| Id | Source | Trigger | Guard | Effect | Target | Cite | Mark |
+| Id | Source | Event | Guard | Action | Target | Kind | Cite |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| anchor_head.01 | absent | create_open | no anchor exists | write the anchor with a provisional registry row | open | period-model ss1.1, ss1.3 |  |
-| anchor_head.02 | open | close_period | the head is open at this period | write the head as closed at the seal digest | closed | period-model ss1.3, ss3 |  |
-| anchor_head.03 | closed | claim_successor | the head is closed at this seal digest | write the claim file first, then the head | claimed | period-model ss1.3 |  |
-| anchor_head.04 | claimed | open_claimed | the head names this claim | write the successor's durable registry row in the same write | open | period-model ss1.3, PR-02c |  |
-| anchor_head.05 | claimed | reclaim | the claim file binds its body, the estate and the head, the registry holds the previous seal as committed | append a Reclaimed entry, return the head to the previous seal | closed | period-model ss1.3 |  |
-| anchor_head.06 | claimed | claim_successor | the head names this claim and the claim file is gone | write the claim file again, the head is written unchanged | claimed | period-model ss1.3 |  |
+| anchor_head.02 | open | close_period |  | The head is open at this period (the method's check). Write it closed at the seal digest, with the period's row in the same write. | closed | external | period-model ss1.3, ss3 |
+| anchor_head.03 | closed | claim_successor |  | The head is closed at this seal digest (the method's check). Write the claim file first, then the head. | claimed | external | period-model ss1.3 |
+| anchor_head.04 | claimed | open_claimed |  | The head names this claim (the method's check). Write the successor's durable registry row in the same write. | open | external | period-model ss1.3, PR-02c |
+| anchor_head.05 | claimed | reclaim |  | The claim file binds its body, the estate and the head, and the registry holds the previous seal as committed (the method's checks). Append a Reclaimed entry and return the head to the previous seal. | closed | external | period-model ss1.3 |
+| anchor_head.06 | claimed | claim_successor |  | The head names this claim and the claim file is gone (the method's checks). Write the claim file again, the head is written unchanged. DL-290 leaves open whether this is reachable: `reclaim` and the resume step refuse the same state as unreachable. |  | internal | period-model ss1.3, DL-290 |
+| anchor_head.07 | anchor_head | create_open |  | The method answers its own interrupted genesis before any post. |  | refusal anchor_exists | period-model ss1.1, PR-01b |
+| anchor_head.08 | anchor_head | close_period |  | The method answers a repeat at this period's closed head before any post. |  | refusal head_not_open | period-model ss1.3 |
+| anchor_head.09 | anchor_head | claim_successor |  |  |  | refusal head_not_closed | period-model ss1.3 |
+| anchor_head.10 | anchor_head | open_claimed |  | The method answers a repeat at this period's open head before any post. |  | refusal head_not_claimed | period-model ss1.3 |
+| anchor_head.11 | anchor_head | reclaim |  |  |  | refusal head_not_claimed | period-model ss1.3 |
+
+| State | In | Entry | Exit | Defers | Waits |
+| --- | --- | --- | --- | --- | --- |
+| anchor_head |  |  |  |  |  |
+| open | anchor_head/head |  |  |  |  |
+| closed | anchor_head/head |  |  |  |  |
+| claimed | anchor_head/head |  |  |  |  |
 
 ## period_row
 
+Clock: logical.
+
 ```mermaid
 stateDiagram-v2
-    state "absent" as s0
-    state "attested" as s1
-    state "durable" as s2
-    state "provisional" as s3
-    [*] --> s0
-    s0 --> s3 : period_row.01 create_open [genesis writes the first anchor] / insert the row before any segment exists
-    s0 --> s2 : period_row.02 close_period [the head closes this period, `absent` and `provisional` are tolerated sources, not reachable after a crash (the row is present and finalized before any run)] / record the seal digest, mark the segment durable
-    s2 --> s2 : period_row.02 close_period [the head closes this period, `absent` and `provisional` are tolerated sources, not reachable after a crash (the row is present and finalized before any run)] / record the seal digest, mark the segment durable
-    s3 --> s2 : period_row.02 close_period [the head closes this period, `absent` and `provisional` are tolerated sources, not reachable after a crash (the row is present and finalized before any run)] / record the seal digest, mark the segment durable
-    s0 --> s2 : period_row.03 open_claimed [the head moves from claimed to open] / insert the successor's row, durable, in the same write as the head
-    s3 --> s2 : period_row.04 finalize [the segment has landed, the row is not durable yet] / mark the segment durable
-    s2 --> s1 : period_row.05 attest [the row is durable, its digest and root match the audit] / mark the row attested
-    s1 --> [*]
+    state "period_row" as s2
+    state s2 {
+        [*] --> s4
+        state "unattested" as s4
+        state s4 {
+            [*] --> s3
+            state "provisional" as s3
+            state "durable" as s1
+        }
+        state "attested" as s0
+        s0 --> [*]
+    }
+    s4 --> s1 : period_row.02 close_period
+    s3 --> s1 : period_row.04 finalize
+    s1 --> s0 : period_row.05 attest
 ```
 
-| Id | Source | Trigger | Guard | Effect | Target | Cite | Mark |
+| Id | Source | Event | Guard | Action | Target | Kind | Cite |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| period_row.01 | absent | create_open | genesis writes the first anchor | insert the row before any segment exists | provisional | period-model ss1.3, PR-02c |  |
-| period_row.02 | absent, durable, provisional | close_period | the head closes this period, `absent` and `provisional` are tolerated sources, not reachable after a crash (the row is present and finalized before any run) | record the seal digest, mark the segment durable | durable | period-model ss1.3, ss3 |  |
-| period_row.03 | absent | open_claimed | the head moves from claimed to open | insert the successor's row, durable, in the same write as the head | durable | period-model ss1.3, PR-02c |  |
-| period_row.04 | provisional | finalize | the segment has landed, the row is not durable yet | mark the segment durable | durable | period-model ss1.3 |  |
-| period_row.05 | durable | attest | the row is durable, its digest and root match the audit | mark the row attested | attested | period-model ss1.3, ss11 |  |
+| period_row.02 | unattested | close_period |  | The head closes this period. Record the seal digest and mark the segment durable. `provisional` is a tolerated source, not reachable after a crash: the row is present and finalized before any run. With no row the close writes one, durable, and no instance existed to move. | durable | external | period-model ss1.3, ss3 |
+| period_row.04 | provisional | finalize |  | The segment has landed. Mark it durable. | durable | external | period-model ss1.3 |
+| period_row.05 | durable | attest |  | The row's seal digest and root match the audit (the method's checks). Mark the row attested. | attested | external | period-model ss1.3, ss11 |
+| period_row.06 | period_row | create_open |  | The head refuses first: genesis meets an existing anchor. |  | refusal row_exists | period-model ss1.3, PR-02c |
+| period_row.07 | period_row | open_claimed |  | A successor's row is written only in the write that opens it. |  | refusal row_exists | period-model ss1.3, PR-02c |
+| period_row.08 | period_row | close_period |  | Only `attested` reaches this row. |  | refusal row_attested | period-model ss1.3 |
+| period_row.09 | durable | finalize |  | The method answers this repeat before any post. |  | refusal row_durable | period-model ss1.3 |
+| period_row.10 | period_row | finalize |  | Only `attested` reaches this row. The method answers a durable row before any post. It meets a forged row only: attested without its durable flag. |  | refusal row_attested | period-model ss1.3 |
+| period_row.11 | provisional | attest |  |  |  | refusal row_not_durable | period-model ss1.3 |
+| period_row.12 | period_row | attest |  | Only `attested` reaches this row. The method answers a repeat before any post. It meets a forged row only: attested without its durable flag. |  | refusal row_attested | period-model ss1.3 |
+
+| State | In | Entry | Exit | Defers | Waits |
+| --- | --- | --- | --- | --- | --- |
+| period_row |  |  |  |  |  |
+| unattested | period_row/row |  |  |  |  |
+| provisional | unattested/segment |  |  |  |  |
+| durable | unattested/segment |  |  |  |  |
+| attested (final) | period_row/row |  |  |  |  |
 
 ## supervisor_process
 

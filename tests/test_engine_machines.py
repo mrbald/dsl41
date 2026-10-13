@@ -7,9 +7,9 @@ test_admission_chart.py.
 
 Each machine is registered and well formed, and each new rule has a test
 that triggers it and one that does not: the routing chart's rows and the
-gate's rejections, a decided host command the chart refuses, a second
-outcome refused by the outbox, and a move outside an unconverted table
-refused before any write. A test that breaks a transition on purpose
+gate's rejections, a decided host command the chart refuses, and a second
+outcome refused by the outbox. The anchor's machines are statecharts too
+(DL-336): test_anchor_machines.py. A test that breaks a transition on purpose
 records into its own directory without the strict variable, so the
 violation stays out of the session's gate."""
 
@@ -62,8 +62,6 @@ from dsl41.state_machine import (
     Outcome,
     Row,
     StatechartError,
-    Transition,
-    Violation,
     well_formed,
 )
 from dsl41.state_machine import Event as ChartEvent
@@ -347,36 +345,6 @@ def test_a_strict_session_refuses_a_second_outcome_from_the_outbox(
         r" not a source of effect\.02\) \(concurrency-model ss5\)$",
     ):
         outbox.resolve(EffectOutcome(effect_id=effect.effect_id, state="applied"))
-
-
-class _ViolatingMachine:
-    """Stands for the anchor head's table with its create move undeclared:
-    the real table cannot be driven into that violation, because
-    `create_open` takes the move from `absent` on a fresh anchor."""
-
-    def take(self, t: Transition[Any], old: str, new: str) -> Violation:
-        return Violation("anchor_head", t.id, old, new, "fake")
-
-
-def test_a_head_move_that_breaks_the_table_is_refused_before_any_write(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """An unconverted table outside an oracle batch has no trace line to carry
-    a violation: the anchor's take refuses the move before its first write
-    (DL-290), and the anchor stays absent."""
-    from dsl41.boundary import EstateAnchor
-
-    monkeypatch.setattr("dsl41.boundary.ANCHOR_HEAD", _ViolatingMachine())
-    anchor = EstateAnchor(tmp_path / "anchor")
-    anchor.acquire()
-    try:
-        with pytest.raises(
-            EngineError, match=r"anchor_head anchor_head\.\d+: absent -> open is not a declared"
-        ):
-            anchor.create_open(estate_id="e", root=tmp_path / "run")
-        assert anchor.read() is None
-    finally:
-        anchor.release()
 
 
 def test_a_log_with_two_outcomes_for_one_effect_does_not_replay(
