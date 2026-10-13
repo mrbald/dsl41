@@ -32,6 +32,7 @@ import batch_harness
 import pytest
 from bisim_harness import EngineHarness
 from fork_harness import ForkCheckedOracle
+from oracle_lockstep import LockstepOracle, new_oracle_factory
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
@@ -51,10 +52,15 @@ _FREE_A = resolve_switches({"renewable-free": "A"})
 #: flipped by the autouse fixture below; oracle() consults them
 _ENGINE_PATH = False
 _FORK_PATH = False
+_LOCKSTEP_PATH = False
 _HARNESSES: list[EngineHarness] = []
+_LOCKSTEPS: list[LockstepOracle] = []
+
+#: the fourth path runs only when `DSL41_ORACLE_LOCKSTEP` names a new oracle
+_PATHS = ["direct", "engine", "fork", *(["lockstep"] if new_oracle_factory() else [])]
 
 
-@pytest.fixture(autouse=True, params=["direct", "engine", "fork"])
+@pytest.fixture(autouse=True, params=_PATHS)
 def sem_path(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     """Bisimulation gate (runner-design ss13, DL-41 decision 9): every SEM
     trace test in this module runs Oracle-direct and through
@@ -68,16 +74,28 @@ def sem_path(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) ->
     The dry apply must leave the original byte-equal, and the fork must
     reach the real apply's result (fork_harness.ForkCheckedOracle).
 
+    The fourth run, only with `DSL41_ORACLE_LOCKSTEP` set, is the old-vs-new
+    harness (statechart-engine ss16, DL-338): every input also goes to
+    the new oracle the variable names, and the trace slice, the emitted
+    events, the store rows, the revisions, the violations and the pending
+    timers must agree after it, and the seal digests at the end
+    (oracle_lockstep.LockstepOracle).
+
     On every path, each move of the job's machines must be taken inside an
     InputBatch, and the violation channel must be empty at every
     `begin_input` (batch_harness)."""
-    global _ENGINE_PATH, _FORK_PATH
+    global _ENGINE_PATH, _FORK_PATH, _LOCKSTEP_PATH
     _ENGINE_PATH = request.param == "engine"
     _FORK_PATH = request.param == "fork"
+    _LOCKSTEP_PATH = request.param == "lockstep"
     misplaced = batch_harness.install(monkeypatch)
     yield request.param
-    _ENGINE_PATH = _FORK_PATH = False
+    _ENGINE_PATH = _FORK_PATH = _LOCKSTEP_PATH = False
     _close_harnesses()
+    # emptied first, so a divergence is never reported against the next test
+    pending, _LOCKSTEPS[:] = list(_LOCKSTEPS), []
+    for paired in pending:
+        paired.check_seal()
     assert misplaced == []
 
 
@@ -122,6 +140,12 @@ def oracle(
         return ForkCheckedOracle(
             catalog, default_tz=default_tz, tz_aliases=tz_aliases, semantics=semantics
         )
+    if _LOCKSTEP_PATH:
+        paired = LockstepOracle(
+            catalog, default_tz=default_tz, tz_aliases=tz_aliases, semantics=semantics
+        )
+        _LOCKSTEPS.append(paired)
+        return paired
     return Oracle(catalog, default_tz=default_tz, tz_aliases=tz_aliases, semantics=semantics)
 
 
@@ -8588,9 +8612,12 @@ def _more_jil(quantity: int) -> str:
 
 def _rebaseline(o: Oracle, text: str) -> None:
     """Swap a bare Oracle's catalog in place: the re-baseline a holder's
-    restart can meet (PR-20's own technique)."""
+    restart can meet (PR-20's own technique). The lockstep path swaps the
+    new oracle's catalog too."""
     o.catalog = lower_source(text)
     o._pool = CapacityPool(o.catalog)
+    if isinstance(o, LockstepOracle):
+        _rebaseline(o.twin, text)
 
 
 def test_dl256_a_restart_asking_for_more_takes_the_difference_or_queues() -> None:
@@ -9967,10 +9994,11 @@ def _leap_257(o, monkeypatch: pytest.MonkeyPatch) -> int:
     release = datetime(2028, 3, 1, 8, 30)
     o.feed(Event(at=release, kind="STATUS", payload={"job": "hq257", "status": "SUCCESS"}))
     monkeypatch.setattr(CompiledCalendar, "days_between", expand)
-    if isinstance(o, (ForkCheckedOracle, EngineHarness)):
+    if isinstance(o, (ForkCheckedOracle, EngineHarness, LockstepOracle)):
         # the fork path applies every input twice, once on the fork, and so
         # does the engine path: it dry-applies every input (concurrency-model
-        # ss4), and a fork expands a calendar for itself
+        # ss4), and a fork expands a calendar for itself. The lockstep path
+        # applies it to two oracles.
         assert len(calls) % 2 == 0
         return len(calls) // 2
     return len(calls)

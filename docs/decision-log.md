@@ -21903,3 +21903,54 @@ relitigate an entry; append a new one.
   restarted by its own completion, where the chart had marked it unreachable; it is declared as
   today's behaviour with the defect recorded. Round three closed both sides with nothing open. All
   findings are fixed and confirmed by the reviewer that raised them.
+
+- DL-338 The oracle's old-versus-new harness: a lockstep driver, generated estates and the
+  switch matrix, proven on the oracle against itself
+  (2026-10-13; tests/oracle_lockstep.py, tests/estate_gen.py, tests/test_oracle_lockstep.py,
+  tests/test_oracle.py; docs/statechart-engine.md §16)
+  WHAT. statechart-engine §16 asks that the second oracle be built beside the old one under a
+  harness that feeds both the same inputs and compares the trace, the emitted events, the store
+  rows, the revisions per input and the seal digests, on the corpus and on generated estates. The
+  harness comes first, so the oracle's conversion is gated from its first slice. The driver takes
+  two oracle factories, one catalog, one set of semantic switches and one input sequence; each side
+  gets its own copy of the catalog and of every input, so a side that writes to either is caught
+  and not hidden. After every input it compares the trace slice the input produced, the emitted
+  events, the store rows as canonical bytes (jobs, globals, hosts, timers and their sequence, the
+  consumed set, the enqueue counter), rendered as the seal renders them with every set sorted, the
+  revisions the input moved, the violations, the pending timers and the next wake-up due; at the
+  end, and at every seal the script asks for, it compares the seal digest over the seal's state
+  section. The first difference stops with a report naming the input's index, the input, the field
+  and both renderings. A fork of the pair forks both sides. A generator builds estates from a seed:
+  boxes, conditions with forward and self edges, run windows and calendars, resources and capacity,
+  ice, hold, noexec and auto-hold, and scripts of every job verb with time advances that fire timers
+  and cross windows, from a few jobs to two hundred; one directed estate exercises the
+  week-of-month rule, which the sample does not reach on its own. The switch matrix runs every
+  value of every semantic switch one at a time, and the one pair known to reach the oracle only
+  together, the week-of-month rule with the queued recheck. A command line drives the harness from
+  a shell. The oracle's test module gains a fourth arm beside direct, engine and fork, off by
+  default and switched on by an environment variable that names the old oracle as its own twin or
+  the new oracle's factory.
+  PROOF. With the old oracle on both sides there is no difference: the corpus and two hundred
+  estates of up to fifty jobs, 22,993 inputs; twenty estates of 150 to 200 jobs, 6,696 inputs; the
+  corpus and forty estates under the fourteen matrix rows, 98,714 inputs. The comparison itself
+  costs about 130 microseconds per input at fifty jobs and twice that at two hundred. Two one-line
+  faults planted in a copy of the oracle, a changed cause string and a dropped clear of the hold
+  flag, are caught at the first input they affect, over a hundred seeds, and shrink to one or two
+  inputs; a side that edits an armed timer in place, or writes to its catalog, is caught at that
+  input; the old oracle under the two values of the week-of-month rule differs on the directed
+  estate at the first release. The costly shrink and the full proof run only under the variable;
+  the default suite grows by about ten seconds. The module passes under fixed and random hash
+  seeds.
+  LIMITS. The harness compares the oracle's half: the host and assembly instances are compared as
+  rows only, and the engine's other seal sections, the write-ahead log and replay across versions
+  need an engine-level harness. The matrix crosses no pair beyond the named one. The seal digest
+  covers the seal's state section with routes left empty, pinned against a real seal, and a pin on
+  the engine's one seal-state construction keeps the fields compared equal to the fields sealed.
+  REVIEW. Multi-file test change, no production code: one Opus reviewer, three rounds. Round one
+  found a blocker, store rows rendered through set iteration order, so the default suite was flaky
+  under some hash seeds, and a major, one catalog shared by both sides, which could hide a new
+  oracle writing to it; nine smaller items followed, among them a fork of the pair that forked one
+  side, the wake-up read not compared and the named switch pair missing from the matrix. Round two
+  found the timer-edit test proving nothing, since it edited at the arming input, and the named
+  pair never reaching the switch on the sample, which the directed estate answers. Round three
+  closed the review. All findings are fixed and confirmed by the reviewer that raised them.

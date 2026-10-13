@@ -414,7 +414,8 @@ and `anchor_head` and `period_row` (DL-336); the rest is the oracle.
 The oracle comes last. A second oracle is built beside the old one under a new old-vs-new
 harness. The same inputs go to both. The harness compares the trace, the emitted events, the
 store rows, the revisions per input and the seal digests, on the corpus and on generated
-estates. A divergence is a bug or a fidelity question. Then the old oracle is deleted. Before
+estates. A divergence is a bug or a fidelity question. The harness is `tests/oracle_lockstep.py`,
+proven old-vs-old before the second oracle exists (DL-338). Then the old oracle is deleted. Before
 the second oracle moves anything, the composite `job` chart is declared and checked against the
 old tables (DL-337).
 

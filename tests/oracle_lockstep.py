@@ -1,0 +1,792 @@
+"""The old-vs-new oracle harness (statechart-engine ss16, DL-338).
+
+Two oracles, `old` and `new`, are built from the same catalog and the same
+semantic switches, and the same inputs go to both. After every input the
+harness compares, in this order:
+
+- `outcome`: whether the apply raised, and the exception's class and text;
+- `trace`: the trace entries the input added, as the trace contract prints
+  them (at, job, transition, cause);
+- `emitted`: the events the input emitted (`InputBatch.emitted`);
+- `store`: the store rows as canonical bytes: jobs, globals, hosts, the
+  timers in `(due, token)` order, `timer_seq`, `consumed` and
+  `enqueue_counter`;
+- `revisions`: the revisions the input moved, in the order the commit
+  returned them (`InputBatch.revisions`);
+- `violations` and `command_violations`: what the input broke;
+- `pending_timers`: `Oracle.pending_timers()`, in its order;
+- `next_timer_due`: the engine's wake-up read.
+
+The store is written as the seal writes its rows: sets sorted, keys sorted,
+reservations by bucket, rows by name. Equal stores render the same, so an
+order the seal ignores is never a divergence.
+
+At every `SealPoint` in the script, and once at the end, it compares the seal
+digests. The digest is the one over the seal's `state` section: the
+`SealedState` that `Engine._snapshot` builds from the store, serialized as
+`Seal.to_payload` serializes it. Its route table is left empty: the engine
+projects it from its own executor id, and the oracle holds none. The other
+sections of a seal are the engine's or derive from the rows and the pending
+timers, which are compared on their own. `test_oracle_lockstep` pins this
+serialization against a real `close_runtime` seal.
+
+The first difference stops the run. Its `Divergence` names the input's
+index (0 is the genesis seed), the input, the first field that differs, the
+other fields that differ at the same input, and a diff of the two
+renderings.
+
+The harness drives each side through `batch` only and reads it through
+`trace_since`, `pending_timers` and the store's `job`, `globals_`, `hosts`,
+`timers()`, `timer_seq`, `consumed` and `enqueue_counter`. A new oracle
+offers the same, built as `factory(catalog, semantics=...)`.
+
+The fourth arm of test_oracle.py's autouse fixture runs every SEM trace
+test through `LockstepOracle` when `DSL41_ORACLE_LOCKSTEP` is set: `1` pairs
+the oracle with itself; `MODULE:NAME` names the new oracle's factory. That
+is the hook the new oracle plugs into.
+
+Command line, from the repository root:
+
+    uv run python tests/oracle_lockstep.py --corpus --seeds 200 --size 50
+    uv run python tests/oracle_lockstep.py --seeds 20 --size 200 --switches all
+    uv run python tests/oracle_lockstep.py --corpus --mutant cause
+
+`--switches` takes `default`, `all` (the default, every other value of
+each switch one switch at a time, and the `SWITCH_PAIRS`), or
+`NAME=VALUE[,NAME=VALUE...]`.
+"""
+
+from __future__ import annotations
+
+import argparse
+import difflib
+import importlib
+import os
+import sys
+import time
+import types
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any, cast
+
+from estate_gen import Advance, SealPoint, Step, catalog_script, seeded
+
+import dsl41.oracle
+from dsl41.canon import canonical_bytes, digest
+from dsl41.cli_run import _trace_line
+from dsl41.equiv import equiv_scripts
+from dsl41.ir import CatalogIR, lower_catalog, lower_source
+from dsl41.ast_jil import parse_file
+from dsl41.oracle import InputBatch, Oracle, fit_recursion_limit
+from dsl41.oracle_state import Event
+from dsl41.seal import SealedHost, SealedState, _canon_ready
+from dsl41.semantics import REGISTRY, SemanticSwitches, resolve
+
+LOCKSTEP_ENV = "DSL41_ORACLE_LOCKSTEP"
+CORPUS_DIR = Path(__file__).parent / "corpus"
+#: the one corpus file that does not lower, on purpose (SEM-31)
+CORPUS_UNLOWERABLE = frozenset({"sem31_xor.jil"})
+#: the seal instant before any input has set one
+EPOCH = datetime(2000, 1, 1)
+
+OracleFactory = Callable[..., Oracle]
+
+FIELDS = (
+    "outcome",
+    "trace",
+    "emitted",
+    "store",
+    "revisions",
+    "violations",
+    "command_violations",
+    "pending_timers",
+    "next_timer_due",
+)
+
+
+# ------------------------------------------------------------------ renderings
+
+
+def _json(value: object) -> str:
+    return canonical_bytes(value).decode()
+
+
+def describe(step: Step) -> str:
+    """One line naming an input."""
+    if isinstance(step, SealPoint):
+        return "SEAL"
+    if isinstance(step, Advance):
+        return f"{step.at.isoformat()} ADVANCE"
+    payload = " ".join(f"{key}={value}" for key, value in step.payload.items())
+    source = f" source={step.source}" if step.source else ""
+    return f"{step.at.isoformat()} {step.kind} {payload}{source}"
+
+
+def _canonical(value: object) -> str:
+    """`value` in the seal's canonical form: sets sorted (`_canon_ready`),
+    object keys sorted (`canonical_bytes`)."""
+    return _json(_canon_ready(value))
+
+
+def _job_dump(row: Any) -> dict[str, Any]:
+    """A job row as the seal writes it: reservations sorted by bucket."""
+    dumped: dict[str, Any] = row.model_dump(by_alias=True)
+    dumped["reservations"] = sorted(dumped["reservations"], key=lambda held: held["bucket"])
+    return dumped
+
+
+def _host_dump(row: Any) -> dict[str, Any]:
+    dumped: dict[str, Any] = row.model_dump(by_alias=True)
+    dumped["deadman_s"] = repr(row.deadman_s)  # the canonical grammar has no floats
+    return dumped
+
+
+class _Rows:
+    """The store as canonical lines, written as the seal writes its rows:
+    sets sorted, keys sorted, reservations by bucket, rows by name. So two
+    equal stores render the same whatever order a set iterates in or a row
+    was inserted in.
+
+    A row's line is cached by the row's identity. Job, global and host rows
+    are frozen all the way down (frozensets, tuples of frozen reservations),
+    and every write replaces one, so only the rows an input replaced are
+    serialized again; the cache holds each row it keys, so an identity is
+    never reused while cached. Timer events are not frozen (an `Event`'s
+    payload is a dict), so each is rendered afresh at every input."""
+
+    def __init__(self) -> None:
+        self._memo: dict[int, tuple[object, str]] = {}
+        self._next: dict[int, tuple[object, str]] = {}
+
+    def _row(self, prefix: str, name: str, row: Any, dump: Callable[[Any], object]) -> str:
+        cached = self._memo.get(id(row))
+        if cached is None or cached[0] is not row:
+            cached = (row, f"{prefix}/{name} {_canonical(dump(row))}")
+        self._next[id(row)] = cached
+        return cached[1]
+
+    def _rows(self, prefix: str, rows: Any, dump: Callable[[Any], object]) -> list[str]:
+        return [self._row(prefix, name, rows[name], dump) for name in sorted(rows)]
+
+    def render(self, oracle: Oracle) -> list[str]:
+        store = oracle.store
+        self._next = {}
+        lines = self._rows("jobs", store.job, _job_dump)
+        lines += self._rows("globals", store.globals_, lambda row: row.model_dump(by_alias=True))
+        lines += self._rows("hosts", store.hosts, _host_dump)
+        self._memo = self._next
+        lines += [
+            f"timer {_canonical([due, token, ev.model_dump(by_alias=True)])}"
+            for due, token, ev in store.timers()
+        ]
+        lines += [f"consumed/{key} {units}" for key, units in sorted(store.consumed.items())]
+        lines.append(f"timer_seq {store.timer_seq}")
+        lines.append(f"enqueue_counter {store.enqueue_counter}")
+        return lines
+
+
+def seal_state_payload(state: SealedState) -> dict[str, Any]:
+    """The `state` section exactly as `Seal.to_payload` writes it."""
+    payload = state.model_dump(by_alias=True)
+    payload["jobs"] = {
+        name: {**row, "reservations": sorted(row["reservations"], key=lambda h: h["bucket"])}
+        for name, row in payload["jobs"].items()
+    }
+    canon = _canon_ready(payload)
+    assert isinstance(canon, dict)
+    return canon
+
+
+def sealed_state(oracle: Oracle, at: datetime) -> SealedState:
+    """The `SealedState` `Engine._snapshot` builds from this store at `at`."""
+    store = oracle.store
+    return SealedState(
+        jobs=dict(store.job),
+        globals=dict(store.globals_),
+        hosts={host_id: SealedHost.of(row) for host_id, row in store.hosts.items()},
+        # the engine projects the route table from its own executor id, which
+        # has a host row there and none here: not oracle state
+        routes={},
+        timers=tuple(store.timers()),
+        timer_seq=store.timer_seq,
+        consumed=dict(store.consumed),
+        enqueue_counter=store.enqueue_counter,
+        now=at,
+    )
+
+
+def seal_digest(oracle: Oracle, at: datetime) -> tuple[str, dict[str, Any] | None]:
+    """The digest of the seal's `state` section, and the section. A state
+    the seal model refuses gives the refusal and no section."""
+    try:
+        payload = seal_state_payload(sealed_state(oracle, at))
+    except Exception as exc:  # noqa: BLE001 -- the refusal is the compared value
+        return f"unsealable: {type(exc).__name__}: {exc}", None
+    return digest({"state": payload}), payload
+
+
+def seal_lines(sealed: tuple[str, dict[str, Any] | None]) -> list[str]:
+    """The digest, then the section one row per line: what a seal
+    divergence diffs."""
+    found, payload = sealed
+    lines = [f"digest {found}"]
+    for key, value in (payload or {}).items():
+        if isinstance(value, dict):
+            lines += [f"{key}/{name} {_json(item)}" for name, item in value.items()]
+        else:
+            lines.append(f"{key} {_json(value)}")
+    return lines
+
+
+# ------------------------------------------------------------------ the pair
+
+
+def _own(value: Any) -> Any:
+    """A deep copy of a catalog or an input, for one side alone."""
+    return value.model_copy(deep=True) if hasattr(value, "model_copy") else value
+
+
+@dataclass(frozen=True)
+class Divergence:
+    """The first difference between the two oracles."""
+
+    index: int
+    input: str
+    field: str
+    also: tuple[str, ...]
+    old: tuple[str, ...]
+    new: tuple[str, ...]
+    label: str = ""
+
+    def report(self) -> str:
+        where = f" ({self.label})" if self.label else ""
+        also = f" (also: {', '.join(self.also)})" if self.also else ""
+        diff = difflib.unified_diff(list(self.old), list(self.new), "old", "new", n=2, lineterm="")
+        return "\n".join(
+            [
+                f"lockstep divergence at input {self.index}{where}",
+                f"input: {self.input}",
+                f"field: {self.field}{also}",
+                *diff,
+            ]
+        )
+
+
+class LockstepDivergence(AssertionError):
+    """Raised by `LockstepOracle` at the first divergence."""
+
+
+@dataclass
+class _Applied:
+    batch: InputBatch
+    error: Exception | None
+    observed: dict[str, list[str]] = field(default_factory=dict)
+
+
+class _Side:
+    """One oracle and what the harness keeps about it."""
+
+    def __init__(self, oracle: Oracle) -> None:
+        self.oracle = oracle
+        self.rows = _Rows()
+        self.traced = 0
+
+    def apply(self, step: Event | Advance) -> _Applied:
+        at = step.at
+        batch = self.oracle.batch(at)
+        error: Exception | None = None
+        try:
+            with batch:
+                if isinstance(step, Event):
+                    batch.feed(step)
+        except Exception as exc:  # noqa: BLE001 -- compared, then re-raised by the arm
+            error = exc
+        return _Applied(batch, error)
+
+    def observe(self, batch: InputBatch | None, error: Exception | None) -> dict[str, list[str]]:
+        oracle = self.oracle
+        self.traced, entries = oracle.trace_since(self.traced)
+        observed = {
+            "outcome": [] if error is None else [f"{type(error).__name__}: {error}"],
+            "trace": [_trace_line(entry) for entry in entries],
+            "store": self.rows.render(oracle),
+            "pending_timers": [
+                f"{due.isoformat()} {job} {kind}" for due, job, kind in oracle.pending_timers()
+            ],
+            "next_timer_due": [str(oracle.next_timer_due())],
+        }
+        if batch is not None:
+            observed["emitted"] = [_canonical(ev.model_dump(by_alias=True)) for ev in batch.emitted]
+            observed["revisions"] = [f"{key} {rev}" for key, rev in batch.revisions.items()]
+            observed["violations"] = [f"{s} {v!r}" for s, v in batch.violations]
+            observed["command_violations"] = [f"{s} {v!r}" for s, v in batch.command_violations]
+        return observed
+
+
+class Lockstep:
+    """Two oracles driven in lockstep. `step` applies one input to both and
+    returns the old side's result and the divergence, if any."""
+
+    def __init__(self, old: Oracle, new: Oracle, *, label: str = "") -> None:
+        self.old, self.new = _Side(old), _Side(new)
+        self.label = label
+        self.index = 0
+        self.now: datetime | None = None
+        self.inputs = 0
+        self.seals = 0
+        self.unsealable = False
+        #: the time spent observing and comparing, the applies excluded
+        self.compare_seconds = 0.0
+
+    def fork(self, old: Oracle) -> Lockstep:
+        """This pair with `old`, a fork of the old side, and a fork of the
+        new side. A fork's trace starts empty."""
+        twin = Lockstep(old, self.new.oracle.fork(), label=self.label)
+        twin.index, twin.now = self.index, self.now
+        return twin
+
+    def genesis(self) -> Divergence | None:
+        """Compare the two stores as their constructors left them."""
+        started = time.perf_counter()
+        old = self.old.observe(None, None)
+        new = self.new.observe(None, None)
+        found = self._compare("<genesis>", old, new)
+        self.compare_seconds += time.perf_counter() - started
+        return found
+
+    def step(self, step: Step) -> tuple[_Applied | None, Divergence | None]:
+        self.index += 1
+        if isinstance(step, SealPoint):
+            return None, self.seal()
+        self.inputs += 1
+        self.now = step.at
+        # each side gets its own copy: an oracle that edits its input in
+        # place must not reach the other side or a later run of the script
+        old = self.old.apply(_own(step))
+        new = self.new.apply(_own(step))
+        started = time.perf_counter()
+        old.observed = self.old.observe(old.batch, old.error)
+        new.observed = self.new.observe(new.batch, new.error)
+        found = self._compare(describe(step), old.observed, new.observed)
+        self.compare_seconds += time.perf_counter() - started
+        return old, found
+
+    def seal(self) -> Divergence | None:
+        """Compare the seal digests at the last input's instant."""
+        self.seals += 1
+        at = self.now or EPOCH
+        old = seal_digest(self.old.oracle, at)
+        new = seal_digest(self.new.oracle, at)
+        self.unsealable = old[1] is None
+        if old[0] == new[0]:
+            return None
+        return Divergence(
+            self.index,
+            f"SEAL at {at.isoformat()}",
+            "seal",
+            (),
+            tuple(seal_lines(old)),
+            tuple(seal_lines(new)),
+            self.label,
+        )
+
+    def _compare(
+        self, described: str, old: dict[str, list[str]], new: dict[str, list[str]]
+    ) -> Divergence | None:
+        differing = [name for name in FIELDS if old.get(name) != new.get(name)]
+        if not differing:
+            return None
+        first = differing[0]
+        return Divergence(
+            self.index,
+            described,
+            first,
+            tuple(differing[1:]),
+            tuple(old.get(first, ())),
+            tuple(new.get(first, ())),
+            self.label,
+        )
+
+
+@dataclass
+class RunResult:
+    """What one lockstep run over one script found."""
+
+    label: str
+    inputs: int
+    seals: int
+    seconds: float
+    compare_seconds: float
+    divergence: Divergence | None
+    unsealable: int = 0
+
+
+def run(
+    catalog: CatalogIR,
+    script: Iterable[Step],
+    *,
+    new: OracleFactory = Oracle,
+    old: OracleFactory = Oracle,
+    semantics: SemanticSwitches | None = None,
+    label: str = "",
+) -> RunResult:
+    """Drive `old` and `new` over `script` and stop at the first divergence.
+    The end of the script is a seal point. Each side is built on its own
+    copy of `catalog`: the IR is mutable and read lazily, so an oracle that
+    wrote to a shared catalog would make the other side agree with it."""
+    started = time.perf_counter()
+    fit_recursion_limit(len(catalog.jobs))
+    pair = Lockstep(
+        old(_own(catalog), semantics=semantics),
+        new(_own(catalog), semantics=semantics),
+        label=label,
+    )
+    found = pair.genesis()
+    for step in script:
+        if found is not None:
+            break
+        _, found = pair.step(step)
+    if found is None:
+        found = pair.seal()
+    return RunResult(
+        label,
+        pair.inputs,
+        pair.seals,
+        time.perf_counter() - started,
+        pair.compare_seconds,
+        found,
+        int(pair.unsealable),
+    )
+
+
+# ------------------------------------------------------------------ the arm
+
+
+def new_oracle_factory(value: str | None = None) -> OracleFactory | None:
+    """The new oracle `DSL41_ORACLE_LOCKSTEP` names: None when unset, empty
+    or `0`; the current `Oracle` for `1`; or the factory at `MODULE:NAME`.
+    Any other value is refused by name."""
+    value = os.environ.get(LOCKSTEP_ENV, "") if value is None else value
+    if value in ("", "0"):
+        return None
+    if value == "1":
+        return Oracle
+    module, sep, name = value.partition(":")
+    if not (sep and module and name):
+        raise ValueError(f"{LOCKSTEP_ENV}={value!r}: expected 0, 1 or MODULE:NAME")
+    factory: OracleFactory = getattr(importlib.import_module(module), name)
+    return factory
+
+
+class LockstepOracle(Oracle):
+    """An Oracle whose every input is also applied to a new oracle and
+    compared. Reads go to this one, the old one; the first divergence
+    raises `LockstepDivergence` with the report."""
+
+    def __init__(
+        self, catalog: CatalogIR, *, new: OracleFactory | None = None, **kwargs: Any
+    ) -> None:
+        super().__init__(catalog, **kwargs)
+        twin = (new or new_oracle_factory() or Oracle)(_own(catalog), **kwargs)
+        self._lockstep = Lockstep(self, twin)
+        self._raise(self._lockstep.genesis())
+
+    def fork(self) -> LockstepOracle:
+        """A paired fork: this oracle's fork and the new oracle's fork, in
+        lockstep, so a dry apply on it reaches neither original."""
+        twin = cast(LockstepOracle, Oracle.fork(self))
+        twin._lockstep = self._lockstep.fork(twin)
+        return twin
+
+    @property
+    def twin(self) -> Oracle:
+        """The new oracle, for a test that changes both outside an input."""
+        return self._lockstep.new.oracle
+
+    def feed(self, ev: Event) -> list[Event]:
+        return self._apply(ev)
+
+    def advance(self, now: datetime) -> list[Event]:
+        return self._apply(Advance(now))
+
+    def check_seal(self) -> None:
+        """Compare the seal digests now."""
+        self._raise(self._lockstep.seal())
+
+    def _apply(self, step: Event | Advance) -> list[Event]:
+        applied, found = self._lockstep.step(step)
+        self._raise(found)
+        assert applied is not None
+        if applied.error is not None:
+            raise applied.error
+        return applied.batch.emitted
+
+    @staticmethod
+    def _raise(found: Divergence | None) -> None:
+        if found is not None:
+            raise LockstepDivergence(found.report())
+
+
+# ------------------------------------------------------------------ mutants
+
+#: One-line faults for the mutant check: (the line as oracle.py has it, its
+#: replacement). Each must occur exactly once.
+MUTANTS: Mapping[str, tuple[str, str]] = {
+    # a swapped cause string
+    "cause": ('cause="injected STATUS", exit_code=code', 'cause="injected status", exit_code=code'),
+    # a dropped flag clear: OFF_HOLD leaves the hold on
+    "hold-clear": ("            self.store.move_flag(job, HOLD_OFF)\n", "            pass\n"),
+}
+_MUTANT_MODULES: dict[str, types.ModuleType] = {}
+
+
+def mutant_factory(name: str) -> OracleFactory:
+    """The `Oracle` of a copy of oracle.py with the mutant's one line changed."""
+    module = _MUTANT_MODULES.get(name)
+    if module is None:
+        old, new = MUTANTS[name]
+        path = Path(dsl41.oracle.__file__)
+        source = path.read_text(encoding="utf-8")
+        if source.count(old) != 1:
+            raise ValueError(f"mutant {name!r}: its line occurs {source.count(old)} times")
+        module = types.ModuleType(f"dsl41_oracle_mutant_{name.replace('-', '_')}")
+        sys.modules[module.__name__] = module
+        exec(
+            compile(source.replace(old, new), f"<oracle.py, mutant {name}>", "exec"),
+            module.__dict__,
+        )
+        _MUTANT_MODULES[name] = module
+    factory: OracleFactory = module.Oracle
+    return factory
+
+
+# ------------------------------------------------------------------ inputs
+
+
+#: Switches that reach the oracle only together with another: the oracle
+#: compiles an extended calendar, so reads `wekr-first-week`, only in the
+#: queued recheck, which `queued-recheck=0` turns off. Each pair is the
+#: other value of the first switch under each value of the second that lets
+#: it through; under the default the pair is the single-switch row.
+SWITCH_PAIRS: tuple[tuple[str, str], ...] = (("wekr-first-week", "queued-recheck"),)
+
+
+def switch_matrix() -> list[dict[str, str]]:
+    """The defaults, then every other value of each switch, one at a time,
+    then the `SWITCH_PAIRS`."""
+    matrix: list[dict[str, str]] = [{}]
+    for name, switch in REGISTRY.items():
+        matrix += [{name: value} for value in switch.values if value != switch.default]
+    for name, through in SWITCH_PAIRS:
+        gate = REGISTRY[through]
+        matrix += [
+            {name: value, through: opened}
+            for value in REGISTRY[name].values
+            if value != REGISTRY[name].default
+            for opened in gate.values
+            if opened != gate.default
+        ]
+    return matrix
+
+
+def parse_switches(text: str) -> list[dict[str, str]]:
+    if text == "all":
+        return switch_matrix()
+    if text == "default":
+        return [{}]
+    overrides = dict(item.split("=", 1) for item in text.split(","))
+    resolve(overrides)  # refuses an unknown switch or value
+    return [overrides]
+
+
+def _switch_label(overrides: Mapping[str, str]) -> str:
+    return ",".join(f"{k}={v}" for k, v in overrides.items()) or "defaults"
+
+
+@dataclass(frozen=True)
+class Job:
+    """One catalog and one script to run in lockstep."""
+
+    label: str
+    catalog: CatalogIR
+    script: tuple[Step, ...]
+
+
+def corpus_jobs(scripts: int = 3, length: int = 40) -> list[Job]:
+    """Every lowerable corpus file, and the whole corpus as one catalog, each
+    with `scripts` scripts from tier (c)'s generator and as many from this
+    harness's."""
+    files = sorted(p for p in CORPUS_DIR.glob("*.jil") if p.name not in CORPUS_UNLOWERABLE)
+    catalogs = [(p.name, lower_catalog([parse_file(p)])) for p in files]
+    catalogs.append(("<whole corpus>", lower_catalog([parse_file(p) for p in files])))
+    jobs: list[Job] = []
+    for name, catalog in catalogs:
+        if not catalog.jobs:
+            continue
+        for index, events in enumerate(equiv_scripts(catalog, scripts=scripts, seed=41)):
+            jobs.append(Job(f"{name} tier-c script {index}", catalog, tuple(events)))
+        for seed in range(scripts):
+            script = catalog_script(catalog, seed, length)
+            jobs.append(Job(f"{name} script seed {seed}", catalog, tuple(script)))
+    return jobs
+
+
+#: A directed estate for the `SWITCH_PAIRS` rows: random estates almost
+#: never compile an extended calendar. 2014-01-01 is a Wednesday, so the
+#: week-of-month rule `WEKRmon#02` holds 2014-01-06..12 under
+#: `wekr-first-week=partial` and 2014-01-13..19 under `first-full`. Two
+#: waiters queue on one-unit resources and their holders end on 2014-01-06:
+#: `wk_skip` excludes the calendar's days (read under `queued-recheck` 1
+#: and 2), `wk_only` runs on them (read under 2).
+WEKR_JIL = """extended_calendar: wk_rule
+condition: WEKRmon#02
+
+insert_resource: WK_A
+res_type: R
+amount: 1
+
+insert_resource: WK_B
+res_type: R
+amount: 1
+
+insert_job: wk_hold_a
+job_type: c
+machine: m1
+command: x
+resources: (WK_A, QUANTITY=1, FREE=A)
+
+insert_job: wk_hold_b
+job_type: c
+machine: m1
+command: x
+resources: (WK_B, QUANTITY=1, FREE=A)
+
+insert_job: wk_skip
+job_type: c
+machine: m1
+command: x
+resources: (WK_A, QUANTITY=1)
+date_conditions: 1
+start_times: "08:00"
+days_of_week: all
+exclude_calendar: wk_rule
+
+insert_job: wk_only
+job_type: c
+machine: m1
+command: x
+resources: (WK_B, QUANTITY=1)
+date_conditions: 1
+start_times: "08:00"
+run_calendar: wk_rule
+"""
+
+
+def _wekr_script() -> tuple[Step, ...]:
+    def event(at: datetime, kind: str, job: str, **payload: object) -> Event:
+        return Event.model_validate({"at": at, "kind": kind, "payload": {"job": job, **payload}})
+
+    day5, day6 = datetime(2014, 1, 5, 8, 0), datetime(2014, 1, 6, 8, 0)
+    minute = timedelta(minutes=1)
+    return (
+        event(day5 - minute, "STARTJOB", "wk_hold_a"),
+        event(day5, "STARTJOB", "wk_skip"),
+        event(day6 - minute, "STARTJOB", "wk_hold_b"),
+        event(day6, "STARTJOB", "wk_only"),
+        event(day6 + minute, "STATUS", "wk_hold_a", status="SUCCESS"),
+        event(day6 + 2 * minute, "STATUS", "wk_hold_b", status="SUCCESS"),
+        SealPoint(),
+    )
+
+
+def directed_jobs() -> list[Job]:
+    """The directed estates the matrix runs besides the corpus."""
+    return [Job("<directed wekr>", lower_source(WEKR_JIL), _wekr_script())]
+
+
+def generated_jobs(seeds: Iterable[int], size: int, min_size: int = 1) -> list[Job]:
+    """The seeded estates, each with `min_size` to `size` jobs."""
+    jobs = []
+    for seed in seeds:
+        case = seeded(seed, size, min_size)
+        jobs.append(Job(case.label, lower_source(case.jil), case.script))
+    return jobs
+
+
+@dataclass
+class Summary:
+    runs: int = 0
+    inputs: int = 0
+    seals: int = 0
+    unsealable: int = 0
+    seconds: float = 0.0
+    compare_seconds: float = 0.0
+    divergences: list[Divergence] = field(default_factory=list)
+
+    def add(self, result: RunResult) -> None:
+        self.runs += 1
+        self.inputs += result.inputs
+        self.seals += result.seals
+        self.unsealable += result.unsealable
+        self.seconds += result.seconds
+        self.compare_seconds += result.compare_seconds
+        if result.divergence is not None:
+            self.divergences.append(result.divergence)
+
+    def line(self) -> str:
+        per_input = self.compare_seconds / self.inputs * 1e6 if self.inputs else 0.0
+        return (
+            f"{self.runs} runs, {self.inputs} inputs, {self.seals} seal points,"
+            f" {len(self.divergences)} divergences, {self.unsealable} unsealable ends;"
+            f" {self.seconds:.1f} s, comparison {per_input:.0f} us per input"
+        )
+
+
+def run_all(
+    jobs: Sequence[Job],
+    matrix: Sequence[Mapping[str, str]],
+    *,
+    new: OracleFactory = Oracle,
+    stop_at_first: bool = False,
+) -> Summary:
+    summary = Summary()
+    for overrides in matrix:
+        semantics = resolve(overrides)
+        for job in jobs:
+            label = f"{job.label}; switches {_switch_label(overrides)}"
+            summary.add(run(job.catalog, job.script, new=new, semantics=semantics, label=label))
+            if stop_at_first and summary.divergences:
+                return summary
+    return summary
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--corpus", action="store_true", help="run the corpus")
+    parser.add_argument("--seeds", type=int, default=0, help="generated estates to run")
+    parser.add_argument("--first-seed", type=int, default=0)
+    parser.add_argument("--size", type=int, default=50, help="the most jobs per estate")
+    parser.add_argument("--min-size", type=int, default=1, help="the fewest jobs per estate")
+    parser.add_argument("--switches", default="default", help="default, all, or NAME=VALUE,...")
+    parser.add_argument("--mutant", choices=sorted(MUTANTS), help="pair the oracle with a mutant")
+    parser.add_argument("--new", help="the new oracle's factory, MODULE:NAME")
+    args = parser.parse_args(argv)
+    new: OracleFactory = Oracle
+    if args.mutant:
+        new = mutant_factory(args.mutant)
+    elif args.new:
+        new = new_oracle_factory(args.new) or Oracle
+    jobs = corpus_jobs() + directed_jobs() if args.corpus else []
+    seeds = range(args.first_seed, args.first_seed + args.seeds)
+    jobs += generated_jobs(seeds, args.size, args.min_size)
+    summary = run_all(jobs, parse_switches(args.switches), new=new, stop_at_first=True)
+    print(summary.line())
+    for found in summary.divergences:
+        print(found.report())
+    return 1 if summary.divergences else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
