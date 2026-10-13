@@ -45,7 +45,7 @@ A threshold request is checked at admission and never reserved.
 - Usage is spent units plus units on rows; nothing stores the sum ([DL-120](../decision-log.md)).
 - A renewable's unfreed units stay held by the job; a depletable's are spent ([DL-256](../decision-log.md)).
 - What a job re-checks as it leaves the queue is a switch ([DL-257](../decision-log.md)).
-- A holder's units are released before its referencers wake ([DL-50](../decision-log.md), amendment 1).
+- A holder's units are released before its referencers wake ([DL-50](../decision-log.md), amendment 1). A box that restarts on its own completion starts the member again before that release: the start settles the run that ended first, by the policy of its end, and then reserves or queues like any start (DL-340).
 - QUE_WAIT belongs to this block; an operator never injects it ([DL-264](../decision-log.md)).
 - How the dossier reads `job_load`, `priority` and `resources`: [autosys-semantics §5](../autosys-semantics.md#5-attributes-with-control-flow-teeth-quick-inventory).
 
@@ -68,6 +68,9 @@ A threshold request is checked at admission and never reserved.
 - `test_dl50_admission_never_overcommits_and_is_deadlock_free`
 - `test_dl50_mutex_second_requester_queues_then_admits_on_release`
 - `test_dl50_depletable_drains_and_never_refills`
+- `test_sem10_a_box_restarted_by_its_own_completion_leaves_the_member_its_new_runs_units`
+- `test_sem16_a_depletable_is_spent_by_each_run_of_a_self_restarting_member`
+- `test_sem16_a_member_the_restart_queues_by_depletion_keeps_its_rank`
 - `test_dl50_killing_a_queued_job_removes_it_and_it_never_runs`
 - `test_dl247_cheetah_jobc_first_keeps_both_queued_until_jobb_ends`
 - `test_dl247_checked_starts_fit_and_respect_priority_blocking`

@@ -281,6 +281,7 @@ import sys
 
 from collections import deque
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time as dtime, timedelta, tzinfo
 from typing import Final, cast
 
@@ -622,6 +623,20 @@ DEFERRED_TIMER_KEY: Final = "deferred_cause"
 DEFERRED_RESCAN_KEY: Final = "rescan_run"
 
 
+@dataclass(eq=False)
+class _LateSettlement:
+    """The settlement `_after_transition` owes for the run a move ended: the
+    move's `old` and `new` status and the run number it ended. `done`: a start
+    in the box rules' cascade settled it early (`_settle_ended_run`), and
+    `released` is what that settlement freed."""
+
+    old: str
+    new: str
+    run: int
+    done: bool = False
+    released: bool = False
+
+
 class Oracle:
     """Deterministic interpreter over one CatalogIR (ir-design ss7)."""
 
@@ -753,6 +768,11 @@ class Oracle:
         #: cascade it drives). Empty between inputs, so a fork, a replay and
         #: the live apply agree.
         self._starts_in_progress: dict[str, int] = {}
+        #: DL-340: per job, the settlements of ended runs that the box
+        #: rules of the ending transition have not yet let run
+        #: (`_after_transition`). Only a job with a settlement in flight has an
+        #: entry, so the dict is empty between inputs.
+        self._late_settlements: dict[str, list[_LateSettlement]] = {}
 
     def fork(self) -> Oracle:
         """An independent copy to dry-apply one input on (concurrency-model
@@ -781,6 +801,9 @@ class Oracle:
         twin._calendars = dict(self._calendars)
         twin._window_starts = None if self._window_starts is None else list(self._window_starts)
         twin._starts_in_progress = dict(self._starts_in_progress)
+        twin._late_settlements = {
+            job: [replace(late) for late in lates] for job, lates in self._late_settlements.items()
+        }
         return twin
 
     # ------------------------------------------------------------------ plumbing
@@ -971,9 +994,35 @@ class Oracle:
         every row settled before anything is notified."""
         if self._box_stopped(job, old, new):
             self._scan_owed = True
-        self._notify_boxes(job, old, new)
-        released = self._settle_row(job, old, new)
+        late = _LateSettlement(old, new, self._runtime(job).run_number)
+        releasing = old in LIVE and new not in LIVE
+        if releasing:
+            self._late_settlements.setdefault(job, []).append(late)
+        try:
+            self._notify_boxes(job, old, new)
+        finally:
+            if releasing:
+                self._late_settlements[job].remove(late)
+                self._late_settlements = {j: x for j, x in self._late_settlements.items() if x}
+        released = late.released if late.done else self._settle_row(job, old, new, run=late.run)
         self._notify_wakes(job, new, wake_queue=released or self._lifts_a_block(old, new))
+
+    def _settle_ended_run(self, job: str) -> None:
+        """DL-340: a start meets units that the run which just ended
+        still holds, its settlement waiting behind the box rules of its ending
+        move (a box restarted by its own completion starts the member again
+        in that cascade). Settle that run now, by the policy of the end it
+        made: what the policy frees goes back to the pool, what it keeps stays
+        held for the new run to take over (DL-256), what it spends is debited
+        (SEM-16). The new run then acquires as any start does, and the
+        settlement the ending move still owes finds it done."""
+        run = self._runtime(job).run_number
+        late = next(
+            (x for x in self._late_settlements.get(job, ()) if x.run == run and not x.done), None
+        )
+        if late is not None:
+            late.done = True
+            late.released = self._settle_row(job, late.old, late.new, run=late.run)
 
     def _notify_boxes(
         self, job: str, old: str, new: str, *, runs: Mapping[str, int] | None = None
@@ -1045,9 +1094,11 @@ class Oracle:
                     f"unconsumed arm dies with box {box!r} run (Q3c pin, DL-54/58)",
                 )
 
-    def _settle_row(self, job: str, old: str, new: str) -> bool:
+    def _settle_row(self, job: str, old: str, new: str, *, run: int | None = None) -> bool:
         """The row-local consequences of a transition; True when it released
         reservations, so the caller wakes the waiters after the referencers.
+        `run` is the run number the transition ended, for a settlement that
+        runs after the box rules (`_after_transition`).
 
         DL-120: a job leaves QUE_WAIT through one of three paths that drop
         its rank first (admitted, killed, cancelled) -- or through an
@@ -1075,10 +1126,25 @@ class Oracle:
         and FREE=Y or an omitted FREE under `renewable-free=Y` after a
         FAILURE or TERMINATED) stay on the row, held by the job. So the edge
         is read from `old`, not from the row: a later transition of a job
-        that is not live, INACTIVE or QUE_WAIT included, keeps them."""
-        if new != "QUE_WAIT" and self._runtime(job).waiter_seq is not None:
+        that is not live, INACTIVE or QUE_WAIT included, keeps them.
+
+        DL-340: the box rules run before the settlement, and a box
+        restarted by its own completion resets the member and starts it again
+        in that cascade. That start settles the ended run first
+        (`_settle_ended_run`) and bumps the run number when it runs, so the
+        late settlement finds a later run: the units on the row are the new
+        run's and it frees nothing. The rank is dropped by the row's status
+        now, not the move's: the cascade can have queued the member again,
+        and its new rank is that run's."""
+        row = self._runtime(job)
+        if row.status != "QUE_WAIT" and row.waiter_seq is not None:
             self.store.dequeue_waiter(job)
-        released = old in LIVE and new not in LIVE and self._pool.holds(self._runtime(job))
+        released = (
+            old in LIVE
+            and new not in LIVE
+            and (run is None or row.run_number == run)
+            and self._pool.holds(row)
+        )
         if released:
             self.store.release_reservations(job, old, new, self._pool.keeps_held)
         return released
@@ -2143,6 +2209,7 @@ class Oracle:
 
     def _start_admitted(self, job: str, cause: str, *, force: bool) -> None:
         job_ir = self.catalog.jobs[job]
+        self._settle_ended_run(job)
         if self._noexec_bypasses(job_ir):
             # SEM-22: lifecycle bypass -- straight to SUCCESS, downstream normal.
             # A bypassed job never runs, so it acquires no resources (DL-50).
@@ -2573,15 +2640,17 @@ class Oracle:
 
     def _rescan_superseded(self, job: str, run: object) -> bool:
         """Whether a scan continuation armed at the job's run number `run` is
-        permanently dead: the job has started since (DL-257). One test for
-        `pending_timers` and the firing, so the two cannot disagree. A
-        continuation at the same run number stays live whatever the status,
-        which can return to INACTIVE before it fires."""
-        return self._runtime(job).run_number != run
+        permanently dead: the job has started since, or the catalog no longer
+        defines it (DL-257, DL-340). One test for `pending_timers` and
+        the firing, so the two cannot disagree. A continuation at the same
+        run number stays live whatever the status, which can return to
+        INACTIVE before it fires."""
+        return job not in self.catalog.jobs or self._runtime(job).run_number != run
 
     def _resume_opening_scan(self, job: str, run: object, cause: str) -> None:
         """A continuation timer of `_defer_to_next_opening` fired: scan on
-        from here, unless the job has started since or is not INACTIVE now."""
+        from here, unless the job has started since, is not INACTIVE now, or
+        has left the catalog (`_rescan_superseded`)."""
         if self._rescan_superseded(job, run) or self._runtime(job).status != "INACTIVE":
             self._ignore(
                 job,

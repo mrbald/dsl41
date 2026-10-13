@@ -222,6 +222,38 @@ def test_pr40_que_wait_removed_in_c2_is_r() -> None:
     assert CapacityPool(opening.catalog).sorted_waiters(carried.rows) == ["j"]
 
 
+def test_dl257_a_scan_continuation_of_a_removed_job_is_dead_intent_not_latent() -> None:
+    """DL-257, PR-40: a carried scan continuation of a job the catalog no
+    longer defines is permanently dead (`Oracle._rescan_superseded`), so the
+    interpreter does not list it as pending and the job is a retained ghost,
+    not latent intent that a removal refuses. The contrast is the same row
+    with the timer reported live."""
+    gone_timer = Event(
+        at=T0 + timedelta(days=1),
+        kind="TIMER",
+        payload={"job": "j", "deferred_cause": "left the queue", "rescan_run": 0},
+    )
+    oracle = Oracle(
+        lower_source("insert_job: k\njob_type: c\nmachine: m1\ncommand: /bin/ccc\n"),
+        carried=CarriedRows(
+            jobs={"j": JobRuntime()}, timers=((T0 + timedelta(days=1), 0, gone_timer),), now=T0
+        ),
+    )
+    assert oracle.pending_timers() == []
+    estate = _side("insert_job: k\njob_type: c\nmachine: m1\ncommand: /bin/ccc\n")
+    dead = classify(closing=estate, opening=estate, carried=carried_from_oracle(oracle, now=T0))
+    assert dead.ghosts == ("j",)
+    assert (dead.by_job["j"].tier, dead.by_job["j"].verdict) == ("not_live", "carry")
+    assert dead.refused == ()
+    live = classify(
+        closing=estate,
+        opening=estate,
+        carried=carried_from_oracle(oracle, now=T0, timers=["j"]),
+    )
+    assert (live.by_job["j"].tier, live.by_job["j"].verdict) == ("latent", "R")
+    assert live.refused == ("j",)
+
+
 def test_ss10_1_removed_and_not_live_is_a_retained_ghost() -> None:
     """Removed AND dead is a ghost: retained, listed, and not a refusal. The
     contrast with the test above is liveness alone."""

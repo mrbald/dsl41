@@ -132,7 +132,16 @@ from dsl41.runner_clock import EngineError
 #: ancestors skips an ancestor that the same cascade completed and started
 #: again. A replay with such an input can derive a box status that v19 did
 #: not.
-STATE_MACHINE_VERSION = 20
+#: 21 since DL-340: a member whose box restarts on its own completion
+#: settles the run that ended when it starts again, by that run's policy
+#: (frees, keeps or spends its units), and then reserves or queues as any
+#: start does; v20 handed the old run's unsettled units to the new run and
+#: freed them at the late settlement, and spent a depletable's never. A member
+#: that the restart queues keeps its rank. A scan continuation of a job the
+#: catalog no longer defines is dead, not pending, which the classifier reads
+#: as no timer. A replay with such an input can derive a job's reservations,
+#: spent units or queue that v20 did not.
+STATE_MACHINE_VERSION = 21
 
 LOCK_NAME = "leader.lock"
 
