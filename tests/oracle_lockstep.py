@@ -1008,10 +1008,261 @@ def _kill_timer_scripts() -> dict[str, tuple[Step, ...]]:
     }
 
 
+#: A directed estate for the flag cells (DL-344) that the seeded sample
+#: reaches rarely or never. `fl_hold` holds the one unit, so `fl_wait` and
+#: the box `fl_box` queue behind it (the generator gives boxes no resources).
+#: `fl_q`'s members can be busy while it is not running: `fl_qm` forced and
+#: queued, `fl_qs` injected STARTING. `fl_run` runs with `fl_rn`; its member
+#: `fl_rm` is iced first, and its subbox `fl_sub` waits on a job that never
+#: runs, so it stays INACTIVE inside a RUNNING box, and its ice is the box's
+#: completion moment (DL-285). `fl_dated` and `fl_box` arm on a held start
+#: tick.
+FLAG_JIL = """insert_resource: FL_R
+res_type: R
+amount: 1
+
+insert_job: fl_hold
+job_type: c
+machine: m1
+command: x
+resources: (FL_R, QUANTITY=1, FREE=Y)
+
+insert_job: fl_wait
+job_type: c
+machine: m1
+command: x
+resources: (FL_R, QUANTITY=1, FREE=Y)
+
+insert_job: fl_job
+job_type: c
+machine: m1
+command: x
+
+insert_job: fl_dated
+job_type: c
+machine: m1
+command: x
+date_conditions: 1
+days_of_week: all
+start_times: "08:00"
+
+insert_job: fl_box
+job_type: b
+resources: (FL_R, QUANTITY=1, FREE=Y)
+date_conditions: 1
+days_of_week: all
+start_times: "08:00"
+
+insert_job: fl_bm
+job_type: c
+machine: m1
+command: x
+box_name: fl_box
+
+insert_job: fl_q
+job_type: b
+
+insert_job: fl_qm
+job_type: c
+machine: m1
+command: x
+box_name: fl_q
+resources: (FL_R, QUANTITY=1, FREE=Y)
+
+insert_job: fl_qs
+job_type: c
+machine: m1
+command: x
+box_name: fl_q
+
+insert_job: fl_run
+job_type: b
+
+insert_job: fl_rm
+job_type: c
+machine: m1
+command: x
+box_name: fl_run
+
+insert_job: fl_rn
+job_type: c
+machine: m1
+command: x
+box_name: fl_run
+
+insert_job: fl_sub
+job_type: b
+box_name: fl_run
+condition: s(fl_never)
+
+insert_job: fl_sm
+job_type: c
+machine: m1
+command: x
+box_name: fl_sub
+
+insert_job: fl_never
+job_type: c
+machine: m1
+command: x
+"""
+
+
+def _flag_scripts() -> dict[str, tuple[Step, ...]]:
+    def event(at: datetime, kind: str, job: str, **payload: object) -> Event:
+        return Event.model_validate({"at": at, "kind": kind, "payload": {"job": job, **payload}})
+
+    t0 = EPOCH + timedelta(hours=8)
+    minute = timedelta(minutes=1)
+
+    def at(n: int) -> datetime:
+        return t0 + n * minute
+
+    held = event(t0, "STARTJOB", "fl_hold")
+    return {
+        "flags on live jobs ignored": (
+            event(t0, "STARTJOB", "fl_job"),
+            event(at(1), "ON_ICE", "fl_job"),
+            event(at(1), "ON_HOLD", "fl_job"),
+            event(at(1), "ON_NOEXEC", "fl_job"),
+            event(at(2), "STATUS", "fl_hold", status="STARTING"),
+            event(at(3), "ON_ICE", "fl_hold"),
+            event(at(3), "ON_HOLD", "fl_hold"),
+            event(at(3), "ON_NOEXEC", "fl_hold"),
+            SealPoint(),
+        ),
+        "ON_NOEXEC on an iced job ignored": (
+            event(t0, "ON_ICE", "fl_job"),
+            event(at(1), "ON_ICE", "fl_job"),
+            event(at(1), "ON_NOEXEC", "fl_job"),
+            event(at(2), "OFF_ICE", "fl_job"),
+            event(at(2), "OFF_ICE", "fl_job"),
+            SealPoint(),
+        ),
+        "ON_NOEXEC on boxes with busy members ignored": (
+            held,
+            event(at(1), "FORCE_STARTJOB", "fl_qm"),
+            event(at(2), "ON_NOEXEC", "fl_q"),
+            event(at(3), "STARTJOB", "fl_box"),
+            event(at(4), "FORCE_STARTJOB", "fl_bm"),
+            event(at(5), "ON_NOEXEC", "fl_box"),
+            SealPoint(),
+        ),
+        "ON_NOEXEC on a box with a STARTING member ignored": (
+            event(t0, "STATUS", "fl_qs", status="STARTING"),
+            event(at(1), "ON_NOEXEC", "fl_q"),
+            SealPoint(),
+        ),
+        "ON_HOLD and ON_ICE on waiters": (
+            held,
+            event(t0, "STARTJOB", "fl_wait"),
+            event(at(1), "ON_HOLD", "fl_wait"),
+            event(at(1), "ON_HOLD", "fl_wait"),
+            event(at(2), "STATUS", "fl_hold", status="SUCCESS"),
+            event(at(3), "OFF_HOLD", "fl_wait"),
+            event(at(4), "STARTJOB", "fl_hold"),
+            event(at(5), "ON_ICE", "fl_hold"),
+            event(at(6), "STATUS", "fl_wait", status="SUCCESS"),
+            SealPoint(),
+        ),
+        "ON_NOEXEC on waiters": (
+            held,
+            event(t0, "STARTJOB", "fl_wait"),
+            event(at(1), "ON_HOLD", "fl_wait"),
+            event(at(2), "ON_NOEXEC", "fl_wait"),
+            event(at(3), "STARTJOB", "fl_job"),
+            event(at(3), "OFF_NOEXEC", "fl_wait"),
+            event(at(4), "STARTJOB", "fl_wait"),
+            event(at(5), "ON_NOEXEC", "fl_wait"),
+            SealPoint(),
+        ),
+        "ON_NOEXEC on a FAILED job": (
+            event(t0, "STATUS", "fl_job", exit_code=1),
+            event(at(1), "ON_NOEXEC", "fl_job"),
+            event(at(2), "OFF_NOEXEC", "fl_job"),
+            event(at(2), "OFF_NOEXEC", "fl_job"),
+            SealPoint(),
+        ),
+        "flags on a queued box": (
+            held,
+            event(at(1), "STARTJOB", "fl_box"),
+            event(at(2), "ON_HOLD", "fl_box"),
+            event(at(3), "OFF_HOLD", "fl_box"),
+            event(at(4), "DISARM", "fl_box"),
+            event(at(5), "ON_ICE", "fl_box"),
+            event(at(6), "OFF_NOEXEC", "fl_box"),
+            SealPoint(),
+        ),
+        "ON_NOEXEC on a queued box": (
+            held,
+            event(at(1), "STARTJOB", "fl_box"),
+            event(at(2), "ON_NOEXEC", "fl_box"),
+            event(at(3), "STATUS", "fl_hold", status="SUCCESS"),
+            SealPoint(),
+        ),
+        "ON_NOEXEC on a STARTING box": (
+            event(t0, "STATUS", "fl_qs", status="INACTIVE", exit_code=3),
+            event(at(1), "STATUS", "fl_q", status="STARTING"),
+            event(at(2), "ON_NOEXEC", "fl_q"),
+            event(at(3), "OFF_NOEXEC", "fl_q"),
+            SealPoint(),
+        ),
+        "ON_NOEXEC on a STARTING box that holds a unit": (
+            event(t0, "ON_HOLD", "fl_bm"),
+            event(t0, "STARTJOB", "fl_box"),
+            event(at(1), "STATUS", "fl_box", status="STARTING"),
+            event(at(2), "STARTJOB", "fl_wait"),
+            event(at(3), "ON_NOEXEC", "fl_box"),
+            event(at(4), "OFF_HOLD", "fl_bm"),
+            SealPoint(),
+        ),
+        "ON_NOEXEC on a held idle box": (
+            event(t0, "ON_HOLD", "fl_q"),
+            event(t0, "ON_HOLD", "fl_qs"),
+            event(at(1), "ON_NOEXEC", "fl_q"),
+            SealPoint(),
+        ),
+        "DISARM on an armed job and box": (
+            event(t0 - minute, "ON_HOLD", "fl_dated"),
+            event(t0 - minute, "ON_HOLD", "fl_box"),
+            event(t0, "STARTJOB", "fl_dated"),
+            event(t0, "STARTJOB", "fl_box"),
+            event(at(1), "DISARM", "fl_dated"),
+            event(at(1), "DISARM", "fl_dated"),
+            event(at(2), "DISARM", "fl_box"),
+            event(at(3), "OFF_HOLD", "fl_box"),
+            SealPoint(),
+        ),
+        "OFF_ICE in a running box, ON_NOEXEC on its idle subbox": (
+            event(t0, "ON_ICE", "fl_rm"),
+            event(at(1), "FORCE_STARTJOB", "fl_run"),
+            event(at(2), "OFF_ICE", "fl_rm"),
+            event(at(3), "ON_HOLD", "fl_sm"),
+            event(at(4), "ON_NOEXEC", "fl_sub"),
+            event(at(5), "OFF_NOEXEC", "fl_sub"),
+            event(at(6), "STATUS", "fl_rn", status="SUCCESS"),
+            SealPoint(),
+        ),
+        "ON_ICE on the last member a running box waits for": (
+            event(t0, "FORCE_STARTJOB", "fl_run"),
+            event(at(1), "STATUS", "fl_rm", status="SUCCESS"),
+            event(at(1), "STATUS", "fl_rn", status="SUCCESS"),
+            event(at(2), "ON_ICE", "fl_sub"),
+            SealPoint(),
+        ),
+        "ON_NOEXEC on a job outside the catalog": (
+            event(t0, "ON_HOLD", "fl_ghost"),
+            event(at(1), "ON_NOEXEC", "fl_ghost"),
+            SealPoint(),
+        ),
+    }
+
+
 def directed_jobs() -> list[Job]:
     """The directed estates the matrix runs besides the corpus."""
     restart = lower_source(RESTART_JIL)
     kill_timer = lower_source(KILL_TIMER_JIL)
+    flags = lower_source(FLAG_JIL)
     return (
         [Job("<directed wekr>", lower_source(WEKR_JIL), _wekr_script())]
         + [
@@ -1026,6 +1277,10 @@ def directed_jobs() -> list[Job]:
                 {"queued-recheck": "1"} if name in KILL_TIMER_RESCANS else {},
             )
             for name, script in _kill_timer_scripts().items()
+        ]
+        + [
+            Job(f"<directed flags: {name}>", flags, script)
+            for name, script in _flag_scripts().items()
         ]
     )
 
