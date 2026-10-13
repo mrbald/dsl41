@@ -264,6 +264,12 @@ The oracle becomes one composite `job` machine per job, with named regions for i
 flags and its holding. Its regions, its box variant and its write path through `RuntimeState`
 are ruled by the entry that converts it (§16).
 
+DL-337 declares that machine in `src/dsl41/job_chart.py`: one chart `job` with the regions
+`status`, `flags` and `holding`, the box as rows guarded by the job type, and the three tables'
+id spaces kept as `job.1NN`, `job.2NN` and `job.3NN`. It is checked against the three tables,
+row by row and through replays of the old oracle's walks, and nothing drives it yet: the oracle
+still takes the tables, and the chart is not registered.
+
 ## 12. Durability of deferred queues
 
 A deferred input is admitted and applied. The apply's effect is the enqueue. There is no new
@@ -408,7 +414,9 @@ and `anchor_head` and `period_row` (DL-336); the rest is the oracle.
 The oracle comes last. A second oracle is built beside the old one under a new old-vs-new
 harness. The same inputs go to both. The harness compares the trace, the emitted events, the
 store rows, the revisions per input and the seal digests, on the corpus and on generated
-estates. A divergence is a bug or a fidelity question. Then the old oracle is deleted.
+estates. A divergence is a bug or a fidelity question. Then the old oracle is deleted. Before
+the second oracle moves anything, the composite `job` chart is declared and checked against the
+old tables (DL-337).
 
 Each slice is a semantic-class change. Each has its own decision-log entry.
 

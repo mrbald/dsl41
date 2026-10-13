@@ -573,6 +573,9 @@ Semantics:
   JobStatus, Event, TraceEntry, the frozen runtime rows, RuntimeState with
   its typed verbs, the timer heap, and the input transaction. It imports
   nothing from the interpreter.
+- `src/dsl41/job_chart.py`: the composite `job` statechart: one job's status,
+  flags and holding in one declaration, checked against the three job tables
+  and not yet driven.
 - `src/dsl41/oracle.py`: the AutoSys discrete-event interpreter:
   script-driven completion, edge-triggered re-evaluation, and `InputBatch`,
   one admitted input as one store transaction.
@@ -753,7 +756,7 @@ CLI and scripts:
 
 ### Tests
 
-The suite has 120 test files (`pytest --collect-only -q` shows the current
+The suite has 121 test files (`pytest --collect-only -q` shows the current
 count) and a 31-file synthetic or doc-derived JIL corpus under
 `tests/corpus/`. Every oracle trace test runs three times: against the
 oracle directly, through the engine under a virtual clock via
