@@ -229,8 +229,10 @@ def host_move(store: RuntimeState, cmd: HostCommand) -> Outcome:
     the rows, the way an install rebuilds one. The gate must answer before the
     configuration moves, and the gate also runs where no dry apply precedes
     it (the real apply, the leader's inputs, a recovered attempt at replay),
-    so it cannot borrow a dry apply's outcome. The host must have a row."""
-    (outcome,) = store.rebuild_machines().dispatch(cmd.key, host_event(cmd))
+    so it cannot borrow a dry apply's outcome. The host must have a row. The
+    scratch executor holds no job instance (DL-341), so the read's cost does
+    not grow with the job count."""
+    (outcome,) = store.rebuild_machines(jobs=False).dispatch(cmd.key, host_event(cmd))
     return outcome
 
 

@@ -1,11 +1,11 @@
 """The composite `job` statechart: one job's status, flags and holding in one
 declaration (docs/statechart-engine.md §11, DL-337).
 
-The chart is declared and checked, and nothing drives it yet. The oracle still
-moves a job through the three tables in `oracle_state` (`job_status`,
-`job_flags`, `job_holding`), and tests/test_job_chart.py checks this chart
-against them cell by cell. The chart joins `machines.MACHINES` when the second
-oracle drives it.
+The chart is declared and checked. The oracle moves a job through the three
+tables in `oracle_state` (`job_status`, `job_flags`, `job_holding`), and
+tests/test_job_chart.py checks this chart against them cell by cell. The second
+oracle (`oracle_chart`, DL-341) drives it for the input families converted
+so far, and the chart joins `machines.MACHINES` when the last one converts.
 
 Shape. The root `job` has three orthogonal regions, in this order: `status`,
 `flags` and `holding`. `status` holds `lifecycle`, the superstate of every
@@ -74,7 +74,8 @@ start retry that OFF_HOLD and ON_NOEXEC make. No state defers (§12).
 The walks that check this chart carry no run window and no true condition;
 the facts of those paths are checked by synthesized cells and one windowed
 replay, and the old-vs-new harness is their proof. `JobData`'s release fields
-are the current run's: the tier refreshes them when a start takes units.
+are the current run's: the tier refreshes them from the row's units when it
+brings the instance to its row (`RuntimeState.follow_job`).
 """
 
 from __future__ import annotations

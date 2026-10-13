@@ -701,9 +701,49 @@ def _wekr_script() -> tuple[Step, ...]:
     )
 
 
+#: A directed estate for a box restarted inside its member's own box rules by
+#: a STATUS that ends no run (DL-341): `rb` restarts on its own success,
+#: and its member `rm` takes a unit when it runs. The seeded sample reaches
+#: this rarely (seed 2870 alone of seeds 0 to 2999).
+RESTART_JIL = """insert_resource: RR
+res_type: R
+amount: 1
+
+insert_job: rb
+job_type: b
+condition: s(rb)
+
+insert_job: rm
+job_type: c
+machine: m1
+command: x
+box_name: rb
+resources: (RR, QUANTITY=1, FREE=Y)
+"""
+
+
+def _restart_scripts() -> list[tuple[Step, ...]]:
+    def event(minutes: int, kind: str, job: str, **payload: object) -> Event:
+        at = EPOCH + timedelta(minutes=minutes)
+        return Event.model_validate({"at": at, "kind": kind, "payload": {"job": job, **payload}})
+
+    never_run = (event(1, "STATUS", "rm", exit_code=0), SealPoint())
+    after_a_failure = (
+        event(1, "FORCE_STARTJOB", "rb"),
+        event(2, "STATUS", "rm", status="FAILURE"),
+        event(3, "STATUS", "rm", status="SUCCESS"),
+        SealPoint(),
+    )
+    return [never_run, after_a_failure]
+
+
 def directed_jobs() -> list[Job]:
     """The directed estates the matrix runs besides the corpus."""
-    return [Job("<directed wekr>", lower_source(WEKR_JIL), _wekr_script())]
+    restart = lower_source(RESTART_JIL)
+    return [Job("<directed wekr>", lower_source(WEKR_JIL), _wekr_script())] + [
+        Job(f"<directed idle restart {index}>", restart, script)
+        for index, script in enumerate(_restart_scripts())
+    ]
 
 
 def generated_jobs(seeds: Iterable[int], size: int, min_size: int = 1) -> list[Job]:

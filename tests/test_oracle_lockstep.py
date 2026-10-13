@@ -616,7 +616,7 @@ def test_the_directed_estate_makes_the_wekr_rows_live(recheck: str) -> None:
     and `first-full` on the other. The estate tells them apart wherever
     `queued-recheck` reads a calendar, so a new oracle that ignored the
     switch would fail the pair rows."""
-    [job] = directed_jobs()
+    [job] = [job for job in directed_jobs() if job.label == "<directed wekr>"]
     found = run(
         lower_source(WEKR_JIL),
         job.script,

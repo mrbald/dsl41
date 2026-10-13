@@ -540,6 +540,9 @@ class _Index:
     plans: dict[int, _Plan] = field(default_factory=dict)
     #: the initial entry, built on first use
     initial: tuple[str, ...] = ()
+    #: the configurations already found legal (`_configuration_problem`), so a
+    #: restore or a realign into one costs a lookup
+    legal: set[frozenset[str]] = field(default_factory=set)
 
 
 @functools.cache
@@ -986,8 +989,11 @@ def _check_event(chart: Statechart, event: Event) -> None:
         raise StatechartError(f"{chart.name}: time event {event.name} needs its generation")
 
 
-def _configuration_problem(ix: _Index, active: Iterable[str]) -> str:
-    """Why `active` is not a configuration of the chart; empty when it is."""
+def _configuration_problem(ix: _Index, active: frozenset[str]) -> str:
+    """Why `active` is not a configuration of the chart; empty when it is. A
+    legal one is remembered, and found again by a lookup."""
+    if active in ix.legal:
+        return ""
     states = set(active)
     unknown = sorted(states - set(ix.states))
     if unknown:
@@ -1002,6 +1008,7 @@ def _configuration_problem(ix: _Index, active: Iterable[str]) -> str:
             count = sum(1 for s in states if ix.parent[s] == state and ix.slot[s] == slot)
             if count != 1:
                 return f"{state} has {count} active states in region {region.name}"
+    ix.legal.add(active)
     return ""
 
 
@@ -1095,12 +1102,35 @@ class Executor:
         generations: Mapping[str, int] | None = None,
     ) -> None:
         """Add an instance in a given configuration; no action runs."""
+        active = frozenset(active)
         problem = _configuration_problem(_index(chart), active)
         if problem:
             raise StatechartError(f"{chart.name} {key!r}: {problem}")
-        self._add(
-            key, _Instance(chart, data, frozenset(active), generations=dict(generations or {}))
-        )
+        self._add(key, _Instance(chart, data, active, generations=dict(generations or {})))
+
+    def realign(self, key: Hashable, active: Iterable[str], data: Any) -> None:
+        """Put an existing instance in a given configuration with the given data;
+        no action runs. It is for a tier whose rows code outside the chart still
+        moves: the instance follows the row (DL-341). The states active after
+        it have no entry yet, as after `restore`, and its generations stay. An
+        instance with a deferred event raises, since no configuration change of
+        its own would release it, and so does one with an item in the pool, as
+        for `forget`. Inside a macrostep it raises `ReentrantDispatch`. The
+        machine's history ring gets a line for it, so an error's report shows
+        the jump. It is transitional: the slice that converts the oracle's last
+        input family removes it."""
+        if self._running:
+            raise ReentrantDispatch("a realign while a macrostep of this executor is in flight")
+        inst = self._instance(key)
+        active = frozenset(active)
+        problem = _configuration_problem(_index(inst.chart), active)
+        if problem:
+            raise StatechartError(f"{inst.chart.name} {key!r}: {problem}")
+        if inst.deferred or any(item.key == key for item in self._pool):
+            raise StatechartError(f"{inst.chart.name} {key!r}: has events still to handle")
+        self._write(key, active=active, data=data, entered=_NOTHING)
+        ring = self._recent.setdefault(inst.chart.name, deque(maxlen=self._history))
+        ring.append(f"{key!r} realigned to {', '.join(sorted(active))}")
 
     def forget(self, key: Hashable) -> None:
         """Remove an instance that rests in a final configuration: every region of

@@ -1356,6 +1356,69 @@ def test_s11_forget_refuses_a_root_without_regions() -> None:
         executor.forget("s")
 
 
+def test_s11_realign_sets_the_configuration_and_the_data_and_keeps_the_generations() -> None:
+    """DL-341: a tier whose rows move outside the chart brings the
+    instance to its row. No action runs, and a re-armed time event keeps its
+    generation."""
+    executor = _lease()
+    executor.dispatch("l", Event("renew"))
+    executor.realign("l", {"lease", "lost"}, ["realigned"])
+    assert executor.active("l") == {"lease", "lost"}
+    assert executor.data("l") == ["realigned"]
+    assert executor.generation("l", "expire") == 1
+    assert kinds(executor.dispatch("l", Event("expire", generation=1))) == [
+        ("expire", "fired", ("lease.04",))
+    ]
+    assert executor.data("l") == ["realigned"]
+
+
+def test_s11_realign_on_a_fork_leaves_the_parent_as_it_was() -> None:
+    executor = _lease()
+    twin = executor.fork()
+    twin.realign("l", {"lease", "lost"}, [])
+    assert executor.active("l") == {"lease", "held"}
+    assert twin.active("l") == {"lease", "lost"}
+
+
+def test_s11_realign_refuses_an_unknown_configuration_and_a_deferred_event() -> None:
+    executor = _lease()
+    with pytest.raises(StatechartError, match="lease 'l': nowhere is not a declared state"):
+        executor.realign("l", {"lease", "nowhere"}, [])
+    assert executor.active("l") == {"lease", "held"}
+    ending, _ = _ending()
+    ending.post("e", Event("stop"))
+    with pytest.raises(StatechartError, match="'e': has events still to handle"):
+        ending.realign("e", {"ending", "end"}, None)
+    ending.run()
+    ending.realign("e", {"ending", "s"}, None)
+    ending.dispatch("e", Event("late"))
+    with pytest.raises(StatechartError, match="'e': has events still to handle"):
+        ending.realign("e", {"ending", "end"}, None)
+    assert ending.active("e") == {"ending", "s"}
+
+
+def test_s11_realign_inside_a_macrostep_raises_and_leaves_a_line_in_the_ring() -> None:
+    """A realign is a tier's call between macrosteps, as a fork is; the ring
+    shows it, so a later error's report names the jump."""
+    executor = Executor()
+
+    def call(ctx: Context) -> None:
+        executor.realign("o", {"outer", "s"}, None)
+
+    machine = chart(
+        "outer",
+        composite("outer", region("main", "s", leaf("s"))),
+        [Row("outer.01", "s", "go", kind="internal", action="call")],
+        actions={"call": call},
+    )
+    executor.restore("o", machine, {"outer", "s"})
+    with pytest.raises(ReentrantDispatch, match="a realign while a macrostep"):
+        executor.dispatch("o", Event("go"))
+    executor.realign("o", {"outer", "s"}, ["new"])
+    error = executor.explain(StatechartError("planted"), "o", Event("go"))
+    assert ("microstep", "'o' realigned to outer, s") in error.facts
+
+
 def test_s11_start_enters_the_initial_configuration_and_runs_entry_actions() -> None:
     seen: list[str] = []
 
