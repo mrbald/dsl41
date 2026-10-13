@@ -300,11 +300,11 @@ fired row's writes are made by the old oracle's methods. The status written is t
 reached; the old-versus-new harness judges a wrong status row. The check covers what the old code
 still decides: the holding, the job type behind a row that takes a job's or a box's path, and the
 flags, which the converted inputs move (a flag input, a waiter's kill, a forced start's clears, a
-start's arm and its consumption) and the other converted writes leave alone; the flag moves of code
-the chart does not drive yet are realigned before the dispatch, not checked. A move that leaves
-STARTING or RUNNING has its flags compared when its status is written and its holding when its own
-settlement has run; any other move has both compared when its status is written, before the box
-rules can start the job again. A difference is a statechart error. The
+start's arm and its consumption, a leaving waiter's arm) and the other converted writes leave
+alone; the flag moves of code the chart does not drive yet are realigned before the dispatch, not
+checked. A move that leaves STARTING or RUNNING has its flags compared when its status is written
+and its holding when its own settlement has run; any other move has both compared when its status
+is written, before the box rules can start the job again. A difference is a statechart error. The
 chart is registered when the last input family converts.
 
 Every attempt to start a job is one `start` on its instance (DL-342): a wake, a box start and a
@@ -356,6 +356,21 @@ payload reads a box's contained jobs only where the old rule reads them. The mov
 not declare stay old code, in the old order: an ice's box rules and wakes, the mark of a member
 taken off ice in its running box, the waiters' wake on a hold, the start retries of OFF_HOLD and
 ON_NOEXEC (each one `start`), and a box's members on ON_NOEXEC and OFF_NOEXEC.
+
+RELEASE_RESOURCE and each waiter's readmission are dispatched to the job's instance too
+(DL-345). Held units go back with the old line and the queue wakes (`job.307`); a job that
+holds nothing (`job.315`), or a live run whose units go back when it ends (`job.316`), takes the
+old no-effect line. Whether the job holds units it can give back is the row's, checked before any
+write. The queue's scan and its order stay code: the chart has one instance per job, and the
+waiters' order (rank, then the queue's order) is the store's. Each waiter the scan reaches gets
+one `readmit`, whose payload computes each fact where the old scan reads it. An admission
+(`job.108`) is written by the old admission and run, its status writes compared as a start's; a
+member of a box that stopped running is cancelled (`job.109`); a waiter that fails the queued
+recheck drops its arm (`job.216`, or `job.230` with none, the row's choice, checked before any
+write) and its `flag moved` leaves the queue (`job.110`), the window or day disposition after it
+staying old code; any other waiter stays queued (`job.181`). A cancel and a leave are compared as
+a STATUS move is, and a move compared inside the cascade of another leaves the other waiting for
+its own settlement.
 
 ## 12. Durability of deferred queues
 
@@ -508,8 +523,8 @@ the second oracle moves anything, the composite `job` chart is declared and chec
 old tables (DL-337). The second oracle, `ChartOracle` in `src/dsl41/oracle_chart.py`, subclasses
 the old one and overrides one input family's handlers per entry, STATUS first (DL-341), then the
 start attempt (DL-342), then KILLJOB and the TIMER input (DL-343), then the flag inputs
-(DL-344); the families not yet converted, and the cascade between instances, run the old code
-in its order.
+(DL-344), then RELEASE_RESOURCE and the readmission (DL-345); the families not yet
+converted, and the cascade between instances, run the old code in its order.
 
 Each slice is a semantic-class change. Each has its own decision-log entry.
 

@@ -1,5 +1,5 @@
 """The payloads the chart oracle gives the `job` chart, and a job instance's
-data (docs/statechart-engine.md §11, DL-342, DL-344).
+data (docs/statechart-engine.md §11, DL-342, DL-344, DL-345).
 
 `oracle_chart` dispatches each converted input to the job's instance with a
 payload whose fields are oracle facts. A fact is computed on the guards' first
@@ -9,13 +9,14 @@ the store, the trace, the timers or the resolutions.
 
 - `StartFacts`: a `start` attempt's payload, `Attempt`'s fields (DL-342).
 - `NoexecFacts`: ON_NOEXEC's payload, `Noexec`'s fields (DL-344).
+- `ReadmitFacts`: a `readmit` payload, `Readmission`'s fields (DL-345).
 - `job_data`: a job instance's `JobData`, from its catalog entry and the
   units its row holds.
 """
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from dsl41.capacity import DemandEntry, to_reservations
 from dsl41.ir import JobIR
@@ -287,3 +288,75 @@ class NoexecFacts:
         )
         self._known["change"] = change
         return change
+
+
+class ReadmitFacts:
+    """A `readmit` payload (`Readmission`): one queue scan's attempt for a
+    waiter (DL-345), each fact computed when a guard first reads it.
+
+    `keep_stopped` is eager: it is the scan's own mode, not a fact. `box`,
+    `admissible`, `recheck_fails` and `demand` are lazy. `readmit_verdict`
+    reads them in `Oracle._readmit`'s order, so a readmission computes the
+    facts the old oracle computes and no other: the box's status for a member
+    only, the demand vector and `_admissible` only for a waiter that is not
+    held and whose box runs, `_queued_recheck` only for one that fits, and the
+    reservations only for one admitted. Every fact is a read: `_runtime` of
+    the box, the pool's `demand_vector`, `_admissible` and `_queued_recheck`
+    write nothing to the store, the trace, the timers or the resolutions
+    (`_queued_recheck` fills the calendar and zone caches, as it does today).
+    The order of the waiters is not a fact: the scan reads it off the rows
+    (`CapacityPool.sorted_waiters`), and each waiter gets its own `readmit`."""
+
+    __slots__ = ("keep_stopped", "_oracle", "_job", "_job_ir", "_known")
+
+    def __init__(self, oracle: Oracle, job: str, job_ir: JobIR, *, keep_stopped: bool) -> None:
+        self.keep_stopped = keep_stopped
+        self._oracle = oracle
+        self._job = job
+        self._job_ir = job_ir
+        self._known: dict[str, Any] = {}
+
+    def __repr__(self) -> str:
+        known = (f"{name}={value!r}" for name, value in self._known.items())
+        return f"ReadmitFacts({', '.join((repr(self._job), f'keep_stopped={self.keep_stopped}', *known))})"
+
+    def known(self, name: str) -> Any:
+        """A fact if it was computed, else None."""
+        return self._known.get(name)
+
+    @property
+    def box(self) -> Literal["none", "running", "idle"]:
+        """The member's box is RUNNING or not; `none` for a job in no box."""
+        if "box" not in self._known:
+            box = self._job_ir.box.box_name
+            running = box is not None and self._oracle._runtime(box).status == "RUNNING"
+            self._known["box"] = "none" if box is None else "running" if running else "idle"
+        return cast(Literal["none", "running", "idle"], self._known["box"])
+
+    @property
+    def admissible(self) -> bool:
+        """`_admissible` over the demand vector, unforced."""
+        if "admissible" not in self._known:
+            self._known["admissible"] = self._oracle._admissible(
+                self._job_ir, self.vector(), force=False
+            )
+        return cast(bool, self._known["admissible"])
+
+    @property
+    def recheck_fails(self) -> bool:
+        """`_queued_recheck` names a failed check (DL-257); the check and its
+        reason are kept for the write (`known("recheck")`)."""
+        if "recheck" not in self._known:
+            self._known["recheck"] = self._oracle._queued_recheck(self._job_ir)
+        return self._known["recheck"] is not None
+
+    @property
+    def demand(self) -> bool:
+        """The demand vector reserves units (`to_reservations`)."""
+        return bool(to_reservations(self.vector()))
+
+    def vector(self) -> list[DemandEntry]:
+        """The pool's `demand_vector`, which `_readmit` reads."""
+        if "vector" not in self._known:
+            self._known["vector"] = self._oracle._pool.demand_vector(self._job_ir)
+        return cast(list[DemandEntry], self._known["vector"])

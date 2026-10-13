@@ -6,10 +6,11 @@ a time, under the old-versus-new harness (tests/oracle_lockstep.py, DL-338),
 which names it as `dsl41.oracle_chart:ChartOracle`. It overrides the handlers
 of the families converted so far and inherits every other one, so `oracle.py`
 stays the twin it is compared with. The STATUS family, the start attempt
-(DL-342), KILLJOB and the TIMER input (DL-343) and the flag inputs
-(DL-344) are converted. RELEASE_RESOURCE and SET_GLOBAL, the cascade
-between instances (the box rules and the wakes), readmission out of the
-queue, the registration of `job` in `machines.MACHINES` and the retirement of
+(DL-342), KILLJOB and the TIMER input (DL-343), the flag inputs (DL-344),
+and RELEASE_RESOURCE and the readmission out of the queue (DL-345) are
+converted. SET_GLOBAL, the cascade between instances (the box rules and the
+wakes of referencers), the period opening's release of a removed job's units,
+the registration of `job` in `machines.MACHINES` and the retirement of
 `--on-transition-violation` for jobs are not: until they are, today's code runs
 them in today's order, and the old tables keep validating inside the store's
 verbs.
@@ -41,43 +42,27 @@ rules, settle the run's units and run the wakes, in today's order. The
 `leave STARTING or RUNNING` that an idle status posts lands on the ignored
 holding rows job.313 and job.314 and writes nothing.
 
-Agreement. The code writes the status the chart reached, so for this family the
-status agrees by construction, and the harness is what judges a wrong status
-row. The check covers what the code still decides: the holding, which today's
-settlement writes; the flags, which the converted inputs move (a flag input, a
-waiter's kill, a forced start's clears of ice and hold, a start's arm and its
-consumption) and the other converted writes leave alone (the flag moves of code
-the chart does not drive yet, a box's members and a readmission's arm among
-them, are realigned before the dispatch, not checked); and the job type behind
-the INACTIVE pair, which `_inject_inactive` reads from the catalog (a box that
-fires job.120, or a job that fires job.135, is a `StatechartError`). A move
-that leaves STARTING or RUNNING has its flags compared when its status is
-written, before the box rules run, and its holding when its own settlement has
-run (late, early in a restart by DL-340, or first on the batch path). Any other
-move settles nothing, so its holding is compared with the flags at the write,
-before the box rules can start the job again. A later move of the same job by
-the cascade, which the chart does not declare yet, is never taken for a
-difference. A difference is a `StatechartError` naming both configurations. The
-constructor compares every row with its instance.
+Agreement. Each converted family records the chart's move and has today's
+writes compared with it (`AgreeingOracle`, in `oracle_chart_agreement`).
 
 Starts (DL-342). Every attempt to start a job, a wake's, a box start's, a
 retry's, an input's, is one `start` on the job's instance (`_attempt_start`);
 STARTJOB, FORCE_STARTJOB and a TIMER's replay dispatch their own event, which
 relays it after FORCE_STARTJOB's clears of ice and hold (job.177 to job.179,
 job.203, job.206). The payload (`StartFacts`) computes each fact on its first
-read (`oracle_chart_facts`). The fired row is performed by today's methods: a refusal returns
-today's reason to the caller that traces it, job.180 does nothing, job.212
-arms (`_arm`), a postponed start or a skip goes through `_defer_start` or
-`_window_skip_bypass`, and the bound (job.100), a bypass, a start on held
-units, a queue and an admission go through `_start` and `_start_admitted`,
-which keep the conversion of a cascade's RecursionError. Readmission
-(`_readmit`) stays today's code. The attempt's first status write is compared
-with the chart's configuration; the RUNNING after an admission dispatches
-`started` and is compared; an attempt that moves no status is compared after
-its own writes. The must_start and must_complete deadlines a STARTJOB arms
-stay in `_dispatch`, before the attempt. The cascade still recurses, one
-attempt inside the next, and is fitted by this class's own measured
-`FRAMES_PER_NESTED_START` until the cascade slice removes the recursion.
+read (`oracle_chart_facts`). The fired row is performed by today's methods: a
+refusal returns today's reason to the caller that traces it, job.180 does
+nothing, job.212 arms (`_arm`), a postponed start or a skip goes through
+`_defer_start` or `_window_skip_bypass`, and the bound (job.100), a bypass, a
+start on held units, a queue and an admission go through `_start` and
+`_start_admitted`, which keep the conversion of a cascade's RecursionError.
+The attempt's first status write is compared with the chart's configuration;
+the RUNNING after an admission dispatches `started` and is compared; an
+attempt that moves no status is compared after its own writes. The
+must_start and must_complete deadlines a STARTJOB arms stay in `_dispatch`,
+before the attempt. The cascade still recurses, one attempt inside the next,
+and is fitted by this class's own measured `FRAMES_PER_NESTED_START` until
+the cascade slice removes the recursion.
 
 Kills and timers (DL-343). `_dispatch` is overridden: STATUS, the start
 inputs, KILLJOB and TIMER are handled here and the rest are inherited, so a
@@ -122,14 +107,32 @@ today's code, in today's order: the box rules and the wakes of referencers
 after an ice, the mark of a member taken off ice in its running box, a
 waiter's wake on a hold, OFF_HOLD's start retry and ON_NOEXEC's (each one
 `start`, DL-342), and a box's members on ON_NOEXEC and OFF_NOEXEC.
+
+The queue (DL-345). RELEASE_RESOURCE is dispatched to the job's
+instance: held units go back to the pool with today's line and the waiters
+wake (job.307); a job holding nothing (job.315), or a live run whose units go
+back when it ends (job.316), takes today's no-effect line. Whether the job
+holds units it can give back is the row's, checked before any write. Each
+waiter's readmission is one `readmit` on its instance, with a payload
+(`ReadmitFacts`) that computes each fact where today's scan reads it. The
+scan and its order stay code (`_wake_waiters`, the rank, then the queue's
+order): the chart has one instance per job, and the order is the store's.
+The fired rows are written by today's methods: an admission (job.108)
+dequeues, `_acquire` reserves or takes over held units, and `_run` starts
+the job, its STARTING and RUNNING compared as a start's; a member of a box
+that stopped running is cancelled (job.109, `_cancel_waiter`); a waiter that
+fails the queued recheck drops its arm (job.216; job.230 has none, the row's
+choice, checked before any write) and its `flag moved` leaves the queue
+(job.110, `_leave_queue_unstarted`, whose window or day disposition stays
+code); any other stays queued (job.181). A cancel and a leave are compared as
+a STATUS move is. ON_NOEXEC's retry (`_retry_released`) is one `start`, as
+before.
 """
 
 from __future__ import annotations
 
 import sys
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
-from dataclasses import dataclass
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Final, cast
 
@@ -140,16 +143,16 @@ from dsl41.job_chart import (
     FORCE_STARTJOB,
     JOB,
     KILLJOB,
-    LEAVE_LIVE,
     OFF_HOLD,
     OFF_ICE,
     OFF_NOEXEC,
     ON_HOLD,
     ON_ICE,
     ON_NOEXEC,
+    READMIT,
+    RELEASE_RESOURCE,
     RUN_WINDOW,
     START,
-    STARTED,
     STARTJOB,
     STATUS,
     TERM_RUN_TIME,
@@ -160,8 +163,9 @@ from dsl41.job_chart import (
     projection,
     row_configuration,
 )
-from dsl41.oracle import DEFERRED_RESCAN_KEY, DEFERRED_TIMER_KEY, Oracle
-from dsl41.oracle_chart_facts import NoexecFacts, StartFacts, job_data
+from dsl41.oracle import DEFERRED_RESCAN_KEY, DEFERRED_TIMER_KEY
+from dsl41.oracle_chart_agreement import AgreeingOracle, Agreement, fired_rows, listed
+from dsl41.oracle_chart_facts import NoexecFacts, ReadmitFacts, StartFacts, job_data
 from dsl41.oracle_state import (
     BOX_NOEXEC,
     BOX_NOEXEC_OFF,
@@ -170,6 +174,7 @@ from dsl41.oracle_state import (
     FAILED,
     FORCE_CLEARS_HOLD,
     FORCE_CLEARS_ICE,
+    HELD_RELEASED,
     HOLD_IGNORED,
     HOLD_OFF,
     HOLD_ON,
@@ -182,6 +187,7 @@ from dsl41.oracle_state import (
     JOB_KILL,
     JOB_KILL_QUEUED,
     JOB_NOEXEC_QUEUED,
+    JOB_READMIT,
     JOB_START,
     JOB_TERM_RUN_TIME,
     KILL_DISARMS,
@@ -192,6 +198,7 @@ from dsl41.oracle_state import (
     NOEXEC_IGNORED,
     NOEXEC_OFF,
     NOEXEC_ON,
+    QUEUE_LEFT_DISARMS,
     START_REFUSED,
     STATUS_EXIT_FAILURE,
     STATUS_EXIT_SUCCESS,
@@ -279,7 +286,7 @@ _TERM_STALE: Final = ("job.184",)
 _NOEXEC_JOB: Final = frozenset({"job.113", "job.121"})
 _NOEXEC_BOX: Final = frozenset({"job.136", "job.169", "job.170"})
 _NO_STATUS_MOVE: Final = "job.198"
-#: The flag inputs' rows on the job's instance, as `_fired` lists them, and
+#: The flag inputs' rows on the job's instance, as `fired` lists them, and
 #: what each comes to: `ignored`, the status region ignores the input for the
 #: job (job.148 to job.158); `moved`, the flag changes value; `kept`, it had
 #: the value already; `queued`, ON_ICE's waiter leaves the queue (job.112).
@@ -328,33 +335,36 @@ _FLAG_IGNORED: Final[dict[str, Mapping[JobStatus, Transition[JobStatus]]]] = {
     ON_HOLD: HOLD_IGNORED,
     ON_NOEXEC: NOEXEC_IGNORED,
 }
+#: RELEASE_RESOURCE's rows: held units go back (job.307); the job holds
+#: nothing (job.315), or its units are a live run's (job.316).
+_RELEASED: Final = ("job.307",)
+_RELEASE_IGNORED: Final = frozenset({("job.315",), ("job.316",)})
+#: A readmission's rows on the waiter's instance, as `fired` lists them, and
+#: what each comes to: `admit`, the status row (job.108), then the admitted
+#: start's holding row (job.301 reserves, job.302 takes held units over,
+#: job.311 reserves nothing) and the arm's (job.213 consumes it, job.224 finds
+#: none); `cancel`, a member of a stopped box (job.109); `leave`, the arm row
+#: (job.216 drops it, job.230 finds none) and the `flag moved` it reports
+#: (job.110); `keep`, the waiter stays queued (job.181).
+_READMIT_FIRED: Final[dict[tuple[str, ...], str]] = {
+    **{
+        ("job.108", holding, arm): "admit"
+        for holding in ("job.301", "job.302", "job.311")
+        for arm in ("job.213", "job.224")
+    },
+    ("job.109",): "cancel",
+    ("job.216", "job.110"): "leave",
+    ("job.230", "job.110"): "leave",
+    ("job.181",): "keep",
+}
+#: The arm row of a waiter that leaves the queue with an arm to drop.
+_LEAVE_ARMED: Final = "job.216"
 
 
-@dataclass
-class _Agreement:
-    """The chart's move for one input (a STATUS, a kill, a term_run_time, a
-    flag input and the status its `flag moved` fires) or one start, waiting for
-    today's writes to compare against: the job, its instance's key, the event,
-    the configuration the chart left, the move as its two statuses, and whether
-    it leaves STARTING or RUNNING, so that its holding waits for its
-    settlement. `written`: the first write is compared. `moves`: for a start,
-    whether the chart's row moves the status, so that a status write must
-    come."""
-
-    job: str
-    key: str
-    event: ChartEvent
-    active: frozenset[str]
-    move: tuple[str, str]
-    releasing: bool
-    written: bool = False
-    moves: bool = True
-
-
-class ChartOracle(Oracle):
+class ChartOracle(AgreeingOracle):
     """`Oracle` with the STATUS family (DL-341), the start attempt (DL-342),
-    KILLJOB and the TIMER input (DL-343) and the flag inputs (DL-344) on
-    the `job` chart."""
+    KILLJOB and the TIMER input (DL-343), the flag inputs (DL-344), and
+    RELEASE_RESOURCE and the readmission (DL-345) on the `job` chart."""
 
     #: Measured as for the old oracle (tests/test_cascade_depth.py): 11 frames
     #: per nested start on the box chain, 22 per job on the ring, 6.5 on the
@@ -364,7 +374,9 @@ class ChartOracle(Oracle):
     #: (`SELECTION_FRAMES` bounds it), and one at the base for a kill or a
     #: term_run_time (its handler) and for an input this class inherits
     #: (`super()._dispatch`), which the base absorbs: at most 13 in all. A
-    #: flag input's retry sits at today's depth (`_handle_oob`).
+    #: flag input's retry sits at today's depth (`_handle_oob`), and so do
+    #: RELEASE_RESOURCE and the readmission, measured on a release whose
+    #: readmission begins the box chain: 11 per job, 5 over today's.
     #: The budget keeps the old one's margin: 16.
     FRAMES_PER_NESTED_START = 16
 
@@ -384,18 +396,14 @@ class ChartOracle(Oracle):
             default_tz=default_tz,
             semantics=semantics,
         )
-        #: the STATUS move being written, between its dispatch and its settlement
-        self._agreement: _Agreement | None = None
-        #: a start's status move, between its dispatch and its first status write
-        self._start_move: _Agreement | None = None
         self.store.keep_job_instances(self._job_instance)
         for job, row in self.store.job.items():
             active = self.store.machines.active(self.store.job_key(job))
             if active != row_configuration(row):
                 raise StatechartError(
                     f"job {job!r}: the instance and the row differ at construction: the"
-                    f" instance's configuration is {_listed(active)}, the row's"
-                    f" {_listed(row_configuration(row))}"
+                    f" instance's configuration is {listed(active)}, the row's"
+                    f" {listed(row_configuration(row))}"
                 )
 
     def _job_instance(self, job: str, row: JobRuntime) -> tuple[Statechart, frozenset[str], object]:
@@ -443,51 +451,23 @@ class ChartOracle(Oracle):
                     job, _MOVES[row], cause="injected STATUS", exit_code=code, status=new
                 )
 
-    @contextmanager
-    def _moving(self, job: str, key: str, event: ChartEvent, old: str) -> Iterator[_Agreement]:
-        """The status move the chart just made for an input, from `old` to the
-        configuration its instance is in, waiting for today's writes inside
-        the block: its status and flags are compared at the job's first write,
-        and its holding there too or, for a move that leaves STARTING or
-        RUNNING, when its own settlement has run. The block runs in the
-        caller's frame, so it adds no frame under the cascade."""
-        active = self.store.machines.active(key)
-        new = projection(active)[0]
-        releasing = old in LIVE and new not in LIVE
-        agreement = self._agreement = _Agreement(job, key, event, active, (old, new), releasing)
-        try:
-            yield agreement
-            if self._agreement is not None:
-                raise self._differ("the move's settlement never ran", self._agreement)
-        finally:
-            self._agreement = None
-
-    def _unwritten(
-        self, job: str, event: ChartEvent, fired: tuple[str, ...], what: str
-    ) -> StatechartError:
-        """The chart fired rows the oracle has no write for."""
-        error = StatechartError(
-            f"job {job!r}: {event.name} fired {', '.join(fired) or 'no row'}, and no {what}"
-            " the oracle writes"
-        )
-        store = self.store
-        return store.machines.explain(error, store.job_key(job), event)
-
     # ---- the inputs
 
     def _dispatch(self, ev: Event) -> None:
         """The inputs whose job rows the chart decides: STATUS (DL-341),
         STARTJOB, FORCE_STARTJOB and a window timer's replay (DL-342), KILLJOB
-        and the TIMER input (DL-343), and the flag inputs (DL-344). The
-        others, SET_GLOBAL and RELEASE_RESOURCE, are `Oracle._dispatch`'s. A start input
-        makes its attempt here, as today's `_dispatch` does, so the cascade it
-        begins sits as deep on the stack as today's; its relay is its own
-        event, and a timer's is the window's relay (job.179)."""
+        and the TIMER input (DL-343), the flag inputs (DL-344) and
+        RELEASE_RESOURCE (DL-345). SET_GLOBAL is `Oracle._dispatch`'s. A
+        start input makes its attempt here, as today's `_dispatch` does, so the
+        cascade it begins sits as deep on the stack as today's; its relay is its
+        own event, and a timer's is the window's relay (job.179)."""
         kind = ev.kind
         if kind == STATUS:
             self._handle_status(ev)
         elif kind == KILLJOB:
             self._handle_kill(self._required_job(ev))
+        elif kind == RELEASE_RESOURCE:
+            self._release_resource(self._required_job(ev))
         elif kind == "TIMER" and self._handle_timer(ev):
             return
         elif kind in _FLAG_FIRED:
@@ -530,7 +510,7 @@ class ChartOracle(Oracle):
         key = store.job_key(job)
         event = ChartEvent(KILLJOB)
         old = store.job[job].status
-        fired = _fired(store.machines.dispatch(key, event))
+        fired = fired_rows(store.machines.dispatch(key, event))
         if fired == _KILL_LIVE:
             with self._moving(job, key, event, old):
                 self._terminate(job, JOB_KILL, cause="KILLJOB")
@@ -594,7 +574,7 @@ class ChartOracle(Oracle):
         verdict = self._start_verdict(job, start)
         key = self.store.job_key(job)
         status = self.store.job[job].status
-        agreement = _Agreement(job, key, start.event, active, (status, status), False, moves=False)
+        agreement = Agreement(job, key, start.event, active, (status, status), False, moves=False)
         if verdict == "refused":
             if stale is None:
                 why = (
@@ -620,7 +600,7 @@ class ChartOracle(Oracle):
         key = store.job_key(job)
         row = store.job[job]
         event = ChartEvent(TERM_RUN_TIME, Deadline(current=run == row.run_number))
-        fired = _fired(store.machines.dispatch(key, event))
+        fired = fired_rows(store.machines.dispatch(key, event))
         if fired == _TERM_RUN_TIME:
             with self._moving(job, key, event, row.status):
                 self._terminate(
@@ -647,10 +627,10 @@ class ChartOracle(Oracle):
         key = store.job_key(job)
         old = store.job[job].status
         event = ChartEvent(kind, NoexecFacts(self, job) if kind == ON_NOEXEC else None)
-        fired = _fired(store.machines.dispatch(key, event))
+        fired = fired_rows(store.machines.dispatch(key, event))
         active = store.machines.active(key)
         move = (old, projection(active)[0])
-        agreement = _Agreement(job, key, event, active, move, False, moves=False)
+        agreement = Agreement(job, key, event, active, move, False, moves=False)
         outcome = _FLAG_FIRED[kind].get(fired)
         if outcome is None:
             raise self._unwritten(job, event, fired, "flag row")
@@ -737,7 +717,7 @@ class ChartOracle(Oracle):
             self._record(job, OFF_HOLD, "ON_NOEXEC supersedes ON_HOLD (SEM-22, DL-254)")
 
     def _noexec_on_job(
-        self, job: str, job_ir: JobIR | None, settles: str, hold: bool, agreement: _Agreement
+        self, job: str, job_ir: JobIR | None, settles: str, hold: bool, agreement: Agreement
     ) -> None:
         """ON_NOEXEC on a job that is not a box (`_noexec_job`): its flag rows,
         then the status row its `flag moved` fires, through DL-242's INACTIVE
@@ -773,9 +753,7 @@ class ChartOracle(Oracle):
         if hold or settles == "job.113":
             self._retry_released(job, run_number)
 
-    def _noexec_on_box(
-        self, box_ir: JobIR, settles: str, hold: bool, agreement: _Agreement
-    ) -> None:
+    def _noexec_on_box(self, box_ir: JobIR, settles: str, hold: bool, agreement: Agreement) -> None:
         """ON_NOEXEC on a box (`_noexec_box`): its flag rows; the flag on every
         job it contains, and their exit codes cleared, as today (the members'
         moves are today's code until the cascade slice); then the status row
@@ -807,15 +785,125 @@ class ChartOracle(Oracle):
         for job in released:
             self._retry_released(job, runs[job])
 
-    def _record(self, job: str, transition: str, cause: str) -> None:
-        """Every status write is followed at once by its trace line, before
-        the box rules or the settlement run, so the first write is compared
-        here. A start's writes are compared here too, and the RUNNING that
-        follows an admitted start dispatches `started` first."""
-        self._compare_written(job)
-        if self._start_move is not None or transition == "STARTING->RUNNING":
-            self._compare_start_write(job, transition)
-        super()._record(job, transition, cause)
+    # ---- the queue: RELEASE_RESOURCE and the readmission
+
+    def _release_resource(self, job: str) -> None:
+        """RELEASE_RESOURCE on the job's instance (DL-345), its fired row
+        performed by today's writes (DL-256): units the job holds after its run
+        go back to the pool with today's line, and the waiters wake (job.307);
+        a job that holds nothing (job.315), or a live run whose units go back
+        when it ends (job.316), takes today's no-effect line, which names a
+        live status where there is one. Whether the job holds units it can
+        give back is the row's: a row that says otherwise is a
+        `StatechartError` before any write. The release is compared with the
+        chart after its writes, before the waiters wake."""
+        store = self.store
+        store.follow_job(job)
+        key = store.job_key(job)
+        row = store.job[job]
+        event = ChartEvent(RELEASE_RESOURCE)
+        fired = fired_rows(store.machines.dispatch(key, event))
+        if fired != _RELEASED and fired not in _RELEASE_IGNORED:
+            raise self._unwritten(job, event, fired, "release row")
+        active = store.machines.active(key)
+        move = (row.status, row.status)
+        agreement = Agreement(job, key, event, active, move, False, moves=False)
+        if (fired == _RELEASED) != (bool(row.reservations) and row.status not in LIVE):
+            units = "holding units" if row.reservations else "holding nothing"
+            raise self._differ(f"{fired[0]} fired for a {row.status} job {units}", agreement)
+        if fired != _RELEASED:
+            why = "nothing held"
+            if row.status in LIVE:
+                why = f"no effect: {row.status}; the run's units go back when it ends"
+            self._record(job, RELEASE_RESOURCE, f"sendevent RELEASE_RESOURCE ({why})")
+            return
+        freed = store.release_held(job, HELD_RELEASED)
+        units = ", ".join(f"{held.units} of {held.bucket[2:]}" for held in freed)
+        self._record(job, RELEASE_RESOURCE, f"sendevent RELEASE_RESOURCE (frees {units})")
+        self._agree_after(agreement, "the release's writes")
+        self._wake_waiters()
+
+    def _readmit(self, job: str, *, keep_stopped: bool = False) -> str:
+        """One queue scan's attempt for a waiter is one `readmit` on its
+        instance (DL-345). The scan and its order stay today's code
+        (`_wake_waiters` reads the order off the rows, DL-50, DL-255); the
+        chart decides each waiter, and today's methods write what its rows
+        say. A waiter that fits leaves the queue and starts (job.108:
+        `_acquire`, then `_run`, its status writes compared as a start's,
+        DL-342). A member whose box stopped running is cancelled (job.109,
+        `_cancel_waiter`). One that fails the queued recheck loses its arm
+        first (job.216; job.230 finds none), and its `flag moved` leaves the
+        queue unstarted (job.110, `_leave_queue_unstarted`). The arm the row
+        drops, and whether the recheck failed, are the rows' choices, checked
+        before any write. Any other stays queued (job.181). A cancel and a
+        leave are compared as a STATUS move is. The return value is today's,
+        for the scan."""
+        store = self.store
+        store.follow_job(job)
+        key = store.job_key(job)
+        row = store.job[job]
+        job_ir = self.catalog.jobs[job]
+        facts = ReadmitFacts(self, job, job_ir, keep_stopped=keep_stopped)
+        event = ChartEvent(READMIT, facts)
+        fired = fired_rows(store.machines.dispatch(key, event))
+        outcome = _READMIT_FIRED.get(fired)
+        if outcome is None:
+            raise self._unwritten(job, event, fired, "readmit row")
+        if outcome == "keep":
+            return "held" if row.on_hold and facts.known("box") != "idle" else "waiting"
+        active = store.machines.active(key)
+        old = row.status
+        agreement = Agreement(job, key, event, active, (old, projection(active)[0]), False)
+        if outcome == "cancel":
+            with self._moving(job, key, event, old):
+                return self._cancel_waiter(job, f"box {job_ir.box.box_name!r} no longer RUNNING")
+        failed = facts.known("recheck")
+        if (outcome == "leave") != (failed is not None):
+            verdict = "failed" if failed else "passed"
+            raise self._differ(
+                f"{fired[0]} fired for a waiter whose queued recheck {verdict}", agreement
+            )
+        if outcome == "leave":
+            armed = fired[0] == _LEAVE_ARMED
+            if armed != row.armed:
+                raise self._differ(
+                    f"{fired[0]} fired for a waiter with armed={row.armed}", agreement
+                )
+            if armed:
+                # DL-257: the arm goes first, before any wake can ride it
+                store.move_flag(job, QUEUE_LEFT_DISARMS)
+                self._record(
+                    job,
+                    "SCHED_DISARM",
+                    f"left QUE_WAIT unstarted; waits for its next start time"
+                    f" (queued-recheck={self.semantics.queued_recheck}, DL-257)",
+                )
+            check, why = failed
+            with self._moving(job, key, event, old):
+                return self._leave_queue_unstarted(job_ir, check, why)
+        if self._start_move is not None and self._start_move.moves:
+            raise self._differ("a readmission began before a start's status write", agreement)
+        # a window's start that moves nothing (job.180) is done once the cascade
+        # readmits: DL-154's window skip of a member already INACTIVE passes the
+        # completion door, its box may end and release, and the release readmits
+        self._start_move = agreement
+        try:
+            store.dequeue_waiter(job)
+            # a held excess freed here is seen by the running scan's next pass
+            self._acquire(job, facts.vector())
+            self._run(
+                job_ir,
+                JOB_READMIT,
+                cause="resources freed (QUE_WAIT admitted, DL-50)",
+                had_demand=True,
+            )
+        finally:
+            unwritten = self._start_move is agreement
+            if unwritten:
+                self._start_move = None
+        if unwritten:
+            raise self._differ("the readmission's status write never ran", agreement)
+        return "admitted"
 
     # ---- the start family
 
@@ -859,7 +947,7 @@ class ChartOracle(Oracle):
             return None
         key = self.store.job_key(job)
         moves = verdict in _STATUS_MOVES
-        agreement = _Agreement(
+        agreement = Agreement(
             job, key, start.event, active, (rt.status, status), False, moves=moves
         )
         row = start.rows[0]
@@ -1075,90 +1163,3 @@ class ChartOracle(Oracle):
                 self._wake_waiters()
         if takes_machine_load(vector):
             self._scan_owed = True
-
-    def _agree_after(self, agreement: _Agreement, what: str = "the start's writes") -> None:
-        """An attempt or a flag input whose row moves no status: after its own
-        writes (the forced clears, the arm, the flag), the row is the chart's
-        configuration."""
-        if self._row_active(agreement.job) != projection(agreement.active):
-            raise self._differ(f"{what} differ from the chart's", agreement)
-
-    def _compare_start_write(self, job: str, transition: str) -> None:
-        """A start's first status write is the chart's move; a RUNNING after an
-        admitted start is the chart's `started` (job.105, job.125), dispatched
-        to the instance the admission left in STARTING. A RUNNING that no
-        admission of the chart precedes (a readmission, an injected status) is
-        not the start family's. A window's skip that the chart says moves
-        nothing (job.180) is watched the same way until its writes are done:
-        a status write there differs from the chart's configuration."""
-        agreement = self._start_move
-        if agreement is not None and agreement.job == job and "->" in transition:
-            self._start_move = None
-            if self._row_active(job) != projection(agreement.active):
-                raise self._differ("the start's status write differs", agreement)
-            return
-        if transition != "STARTING->RUNNING":
-            return
-        machines = self.store.machines
-        key = self.store.job_key(job)
-        if "STARTING" not in machines.active(key):
-            return
-        event = ChartEvent(STARTED)
-        fired = machines.dispatch(key, event)[0].rows
-        started = _Agreement(job, key, event, machines.active(key), ("STARTING", "RUNNING"), False)
-        job_type = self.catalog.jobs[job].job_type
-        if fired != (("job.125",) if job_type == "BOX" else ("job.105",)):
-            raise self._differ(
-                f"started fired {', '.join(fired) or 'no row'} for a {job_type} job", started
-            )
-        if self._row_active(job) != projection(started.active):
-            raise self._differ("the RUNNING write differs", started)
-
-    def _settle_row(self, job: str, old: str, new: str, *, run: int | None = None) -> bool:
-        released = super()._settle_row(job, old, new, run=run)
-        agreement = self._agreement
-        if agreement is not None and agreement.job == job and agreement.move == (old, new):
-            self._agreement = None
-            if self._row_active(job)[-1] != projection(agreement.active)[-1]:
-                raise self._differ("the holding differs after the settlement", agreement)
-        return released
-
-    def _compare_written(self, job: str) -> None:
-        """At the first write of the job after the dispatch, the status
-        move's: its status and flags are the chart's. A move that does not
-        leave STARTING or RUNNING settles nothing, so its holding is compared
-        here too, and its agreement closes: the box rules that follow may start
-        the job again and take units for the new run."""
-        agreement = self._agreement
-        if agreement is None or agreement.job != job or agreement.written:
-            return
-        agreement.written = True
-        width, what = 5, "the status and the flags differ"
-        if not agreement.releasing:
-            self._agreement = None
-            width, what = 6, "the configuration differs"
-        if self._row_active(job)[:width] != projection(agreement.active)[:width]:
-            raise self._differ(f"{what} as written", agreement)
-
-    def _row_active(self, job: str) -> tuple[str, bool, bool, bool, bool, str]:
-        return projection(row_configuration(self.store.job[job]))
-
-    def _differ(self, what: str, agreement: _Agreement) -> StatechartError:
-        row = row_configuration(self.store.job[agreement.job])
-        error = StatechartError(
-            f"job {agreement.job!r}: {what}: the chart's configuration is"
-            f" {_listed(agreement.active)}, the row's {_listed(row)}"
-        )
-        return self.store.machines.explain(error, agreement.key, agreement.event)
-
-
-def _fired(outcomes: list[Outcome]) -> tuple[str, ...]:
-    """Every row an input fired on its instance, in order, but the settlement
-    of the run it ends (`leave STARTING or RUNNING`), which `_moving` compares
-    as the holding. A row beyond the ones a handler performs is named in its
-    error."""
-    return tuple(r for o in outcomes if o.event.name != LEAVE_LIVE for r in o.rows)
-
-
-def _listed(active: frozenset[str]) -> str:
-    return ", ".join(sorted(active))

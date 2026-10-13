@@ -22316,3 +22316,78 @@ relitigate an entry; append a new one.
   now corrected; a directed script for a box holding a unit taken off exec was added; one planted
   mutant nothing catches is equivalent, since a second ice re-resolves through an idempotent door.
   Every finding fixed or recorded and confirmed by the reviewer that raised it.
+- DL-345 RELEASE_RESOURCE and the readmission are decided by the job chart; the queue's scan
+  addresses only a queued row, a defect the chart's declaration exposed, and the state-machine
+  version moves to 22
+  (2026-10-13; src/dsl41/oracle_chart.py, src/dsl41/oracle_chart_agreement.py,
+  src/dsl41/oracle_chart_facts.py, src/dsl41/oracle.py, src/dsl41/runner_ledger.py;
+  tests/test_oracle_chart.py, tests/test_oracle.py, tests/oracle_lockstep.py,
+  tests/test_cascade_depth.py; docs/statechart-engine.md §11, §16; docs/blocks/job-lifecycle.md;
+  README.md; pyproject.toml)
+  THE FAMILY. The chart oracle (DL-341 to DL-344) now decides RELEASE_RESOURCE and each waiter's
+  readmission; SET_GLOBAL, a wake whose attempts already go through the chart, is the one input
+  the old handler still takes. A RELEASE_RESOURCE dispatches on the job's instance: the row for a
+  job holding units performs today's release with its line and the queue's wake, and the rows for
+  a job holding nothing or running write today's no-effect line. The queue's wake is not a chart
+  decision: the chart has one instance per job, the queue's order is the store's, so today's scan
+  stays code, by rank then by enqueue sequence, and dispatches one `readmit` on each waiter's
+  instance. The fired rows are performed by today's methods: the waiter admitted dequeues,
+  acquires and runs, its writes compared as a start's; the waiter cancelled leaves the queue; the
+  waiter whose recheck fails drops its arm and leaves unstarted through the chained status row;
+  the waiter that stays queued writes nothing. Three checks run before any write, where the
+  code's path depends on the row's choice: whether the job holds units, which arm row fired, and
+  leave against admit on the recheck. A readmission is compared inside the move that released the
+  units, so the agreement for a move nests. The agreement check moves to a base class of its own
+  module, between the old oracle and the chart oracle, which the frames measurement shows adds no
+  frame to the cascade. After this slice the realign at commit covers the box rules and the
+  cascade, the noexec flags of a box's members, the dispositions after a leave and the period
+  opening's release; the readmission no longer needs it.
+  THE DEFECT. The chart's declaration marks the readmission of a job that is not queued
+  unreachable: a scan addresses a waiter. The engineer reached it: a queued member that leaves
+  QUE_WAIT inside its own box rules keeps its rank until its own settlement, which runs after
+  those rules; when the box folds and its release wakes the queue inside them, the scan cancelled
+  or readmitted the member a second time from its new status, with a transition violation. Two
+  inputs reach the shape. An injected status on a queued member of a box holding units: refused
+  under the default policy, logged with the violation under `continue`. And an ordinary
+  completion that folds a queued box out of the queue through its idle-box recompute: an
+  engine-made input, which the engine admits under the default policy despite the violation,
+  since only a fault quarantines one; the old oracle left the box INACTIVE and a job conditioned
+  on its success never started, where the fixed oracle completes the box and starts the job. The
+  chart oracle raised a statechart error there, which the brief's rule turned into a stop and a
+  ruling: an old-oracle defect, fixed as DL-340 fixed the defects the declaration exposed. The scan
+  now skips a row that is not in QUE_WAIT; dropping the rank at the status write was the other
+  fix, and it would reorder an accepted input. The fixed oracle against DL-344's differs on the
+  directed scripts' inputs alone, in trace, emitted events, store and launches; a logged input
+  derives what version 21 did not, so STATE_MACHINE_VERSION moves from 21 to 22 (DL-235), with
+  tests pinning both shapes that fail on the old scan. The cell stays marked unreachable. Stated
+  limit: priority blocking still counts the stale-ranked row until its settlement, as before.
+  Open, for a slice of its own with its own version test: a re-queue inside the same cascade
+  keeps the stale rank in a self-restarting box, so a member is admitted ahead of a waiter of the
+  same priority that queued before the re-queue, without a violation, against the wording of
+  DL-120 and DL-340.
+  PROOF. The harness, the fixed old oracle against the chart, shows no difference: the corpus and
+  two hundred estates of up to fifty jobs, 23,230 inputs; twenty estates of 150 to 200 jobs,
+  7,999; the corpus and forty estates under every switch, 101,836; a further thousand seeds,
+  94,353, three inputs raising alike; the oracle's tests pass through the fourth arm. The
+  generator reaches the release rows, the admission, the cancel and the stay; a directed estate of
+  seventeen scripts reaches the rest, the arm rows, the leave, the owed scan's admission, a
+  readmitted box, a cancel nested in another move, and the three shapes the fix changes. The
+  chart's frames per nested start equal the old oracle's on a release waking a box chain. Cost
+  per input on the corpus about 119 microseconds against 52, on the large estates 199 against
+  72; the switch-over's optimisation remains the candidate.
+  NOT HERE. SET_GLOBAL; the period opening's release of removed holders; the box rules and the
+  cascade; `job` in the machine registry; the split of job_chart.py, which this slice did not
+  grow.
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass in place of the Codex pass,
+  two rounds each. Both accepted the scan's fix and the version's move, and both reproduced the
+  version test. The Opus reviewer found the recorded reason for the move wrong: the note named
+  the injected status alone, refused by default, while an ordinary completion reaches the same
+  stale rank through a queued box's recompute and is admitted under the default policy, so a
+  store and a launch differed; the note, the scan's docstring and this entry now name both, and
+  the completion's shape is pinned. The Fable pass found the re-queue that keeps a stale rank
+  inside one cascade, recorded above as open, and asked for the terminal form of the fix's shape
+  as a script. Both found the readmission branch-equal to today's, the nested agreement without a
+  false error or a hole, the pre-write checks unable to raise on a legitimate input, every
+  planted guard caught at its first input, and the agreement's base module adding no frame.
+  Smaller items, two test docstrings claiming more than the tests check and the facts' stale
+  header, are fixed and confirmed by the reviewer that raised them.

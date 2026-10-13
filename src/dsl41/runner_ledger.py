@@ -141,7 +141,17 @@ from dsl41.runner_clock import EngineError
 #: catalog no longer defines is dead, not pending, which the classifier reads
 #: as no timer. A replay with such an input can derive a job's reservations,
 #: spent units or queue that v20 did not.
-STATE_MACHINE_VERSION = 21
+#: 22 since DL-345: the queue's scan addresses only a row in QUE_WAIT. A
+#: scan in a job's box rules, woken by a release, could meet a job that left
+#: QUE_WAIT without dropping its rank (an injected STATUS, or a queued box's
+#: idle-box recompute); v21 cancelled or admitted it again with a transition
+#: violation. A control input with it was refused under the default policy
+#: and logged under `continue`; an engine-made input, such as a job
+#: completion, was admitted and logged under any policy. A replay with such
+#: an input can derive a status, and so wakes and launches, that v21 did not.
+#: Where the box rules queue the job again (a box restarted by its own
+#: completion), the rank it keeps is the same under both versions.
+STATE_MACHINE_VERSION = 22
 
 LOCK_NAME = "leader.lock"
 

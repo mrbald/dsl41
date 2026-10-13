@@ -9372,6 +9372,68 @@ def test_dl247_a_release_inside_the_box_stop_scan_still_cancels() -> None:
     }
 
 
+def test_dl50_a_scan_in_the_box_rules_skips_a_member_a_status_took_out_of_the_queue() -> None:
+    """An injected STATUS INACTIVE on a queued member keeps its rank until its
+    own settlement, which runs after its box rules. Here those rules fold the
+    box to SUCCESS, and the box's release wakes the queue first: the scan
+    skips the member, now INACTIVE, rather than cancel it a second time
+    (INACTIVE->INACTIVE, a move the job_status table refuses). The member
+    moves once, the box ends, its unit goes back, and the member's settlement
+    drops the rank (DL-345)."""
+    text = (
+        "insert_resource: SB50\nres_type: R\namount: 1\n\n"
+        "insert_resource: SR50\nres_type: R\namount: 1\n\n"
+        "insert_job: sh50\njob_type: c\ncommand: h\nmachine: m1\n"
+        "resources: (SR50, QUANTITY=1, FREE=Y)\n\n"
+        "insert_job: sb50\njob_type: b\nresources: (SB50, QUANTITY=1, FREE=Y)\n\n"
+        "insert_job: sm50\njob_type: c\ncommand: m\nmachine: m1\nbox_name: sb50\n"
+        "resources: (SR50, QUANTITY=1, FREE=Y)\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="sh50"))
+    o.feed(ev("FORCE_STARTJOB", 1, job="sb50"))
+    assert o.store.job["sm50"].status == "QUE_WAIT"
+    traced = len(o.trace())
+    o.feed(ev("STATUS", 2, job="sm50", status="INACTIVE"))
+    lines = [(t.job, t.transition) for t in o.trace()[traced:]]
+    assert lines == [("sm50", "QUE_WAIT->INACTIVE"), ("sb50", "RUNNING->SUCCESS")]
+    member, box = o.store.job["sm50"], o.store.job["sb50"]
+    assert (member.status, member.waiter_seq, box.status) == ("INACTIVE", None, "SUCCESS")
+    assert box.reservations == ()
+
+
+def test_dl50_a_scan_in_the_box_rules_skips_a_queued_box_its_member_ended() -> None:
+    """A queued box leaves QUE_WAIT through its idle-box recompute when a
+    forced member ends (SEM-15), and keeps its rank until its own settlement.
+    Its SUCCESS meets its parent's box_success, the parent's release wakes the
+    queue first, and the scan skips the box rather than cancel it from
+    SUCCESS. So the box stays SUCCESS, the job waiting on it starts, and no
+    violation is written; the completion is an ordinary input the engine
+    admits (DL-345)."""
+    text = (
+        "insert_resource: QP50\nres_type: R\namount: 1\n\n"
+        "insert_resource: QQ50\nres_type: R\namount: 1\n\n"
+        "insert_job: qh50\njob_type: c\ncommand: h\nmachine: m1\n"
+        "resources: (QQ50, QUANTITY=1, FREE=Y)\n\n"
+        "insert_job: qp50\njob_type: b\nbox_success: s(qq50)\n"
+        "resources: (QP50, QUANTITY=1, FREE=Y)\n\n"
+        "insert_job: qq50\njob_type: b\nbox_name: qp50\nresources: (QQ50, QUANTITY=1, FREE=Y)\n\n"
+        "insert_job: qx50\njob_type: c\ncommand: x\nmachine: m1\nbox_name: qq50\n\n"
+        "insert_job: qa50\njob_type: c\ncommand: a\nmachine: m1\ncondition: s(qq50)\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="qh50"))
+    o.feed(ev("FORCE_STARTJOB", 1, job="qp50"))
+    o.feed(ev("FORCE_STARTJOB", 2, job="qx50"))
+    assert o.store.job["qq50"].status == "QUE_WAIT"
+    traced = len(o.trace())
+    o.feed(ev("STATUS", 4, job="qx50", exit_code=0))
+    assert all(t.transition != "TRANSITION_VIOLATION" for t in o.trace()[traced:])
+    box = o.store.job["qq50"]
+    assert (box.status, box.waiter_seq) == ("SUCCESS", None)
+    assert _statuses(o, "qp50", "qa50") == {"qp50": "SUCCESS", "qa50": "RUNNING"}
+
+
 def test_dl247_a_waiter_short_only_on_a_named_resource_does_not_block() -> None:
     """A queued job whose load fits waits on a named resource, and the vendor
     says such a job does "not automatically block lower priority jobs that
