@@ -35,6 +35,7 @@ from dsl41.oracle import (
     Oracle,
     fit_recursion_limit,
 )
+from dsl41.oracle_chart import SELECTION_FRAMES, ChartOracle
 from dsl41.oracle_state import CascadeDepthError, Event, OracleError
 
 START = "2026-01-05T09:00:00"
@@ -132,7 +133,7 @@ def test_sem10_a_300_job_instant_cascade_runs_and_replays_in_a_fresh_process(
 
 
 def test_sem10_the_recursion_limit_fits_the_job_count_and_never_drops() -> None:
-    """Two nested starts per job at most, each at most
+    """Two nested starts per job at most, each at most the oracle class's
     `FRAMES_PER_NESTED_START` frames, over a base. A limit already higher is
     kept."""
     sys.setrecursionlimit(1000)
@@ -141,6 +142,12 @@ def test_sem10_the_recursion_limit_fits_the_job_count_and_never_drops() -> None:
     assert sys.getrecursionlimit() == fitted
     assert fit_recursion_limit(1) == fitted
     assert sys.getrecursionlimit() == fitted
+
+    class Deeper(Oracle):
+        FRAMES_PER_NESTED_START = FRAMES_PER_NESTED_START + 4
+
+    deeper = fit_recursion_limit(JOBS, Deeper)
+    assert deeper == fitted + 4 * MAX_NESTED_STARTS * JOBS
 
 
 def _depth() -> int:
@@ -200,28 +207,36 @@ SLOPE_SHAPES = {
 }
 
 
-def _frames_needed(shape: str, jobs: int) -> int:
+def _paren_chain(jobs: int) -> tuple[str, list[Event]]:
+    """The box chain with each condition 30 parentheses deep: the deepest
+    read of a fact at the innermost attempt."""
+    wrap = "(" * 30 + "{} " + ")" * 30
+    jil = _box("q0") + "".join(_box(f"q{i}", wrap.format(f"s(q{i - 1})")) for i in range(1, jobs))
+    return jil, []
+
+
+def _frames_needed(shape: str, jobs: int, oracle: type[Oracle] = Oracle) -> int:
     """The fewest frames above the caller that a forced start of `q0` needs
-    to run the shape's cascade over `jobs` jobs, by bisection."""
-    jil, setup = SLOPE_SHAPES[shape](jobs)
+    to run the shape's cascade over `jobs` jobs on `oracle`, by bisection."""
+    jil, setup = {**SLOPE_SHAPES, "paren-chain": _paren_chain}[shape](jobs)
     catalog = lower_source(jil)
     assert len(catalog.jobs) == jobs
 
     def fits(frames: int) -> bool:
-        oracle = Oracle(catalog)
+        built = oracle(catalog)
         for event in setup:
-            oracle.feed(event)
+            built.feed(event)
         sys.setrecursionlimit(_depth() + frames)
         try:
-            oracle.feed(_force_q0())
+            built.feed(_force_q0())
         except RecursionError:
             return False
         finally:
             sys.setrecursionlimit(100_000)
-        assert {row.status for row in oracle.store.job.values()} == {"SUCCESS"}
+        assert {row.status for row in built.store.job.values()} == {"SUCCESS"}
         return True
 
-    low, high = 1, 4 * FRAMES_PER_NESTED_START * jobs
+    low, high = 1, 4 * oracle.FRAMES_PER_NESTED_START * jobs
     while low < high:
         middle = (low + high) // 2
         if fits(middle):
@@ -231,18 +246,37 @@ def _frames_needed(shape: str, jobs: int) -> int:
     return low
 
 
+@pytest.mark.parametrize("oracle", [Oracle, ChartOracle], ids=["oracle", "chart"])
 @pytest.mark.parametrize("shape", sorted(SLOPE_SHAPES))
-def test_sem10_frames_per_job_stay_within_the_fitted_budget(shape: str) -> None:
+def test_sem10_frames_per_job_stay_within_the_fitted_budget(
+    shape: str, oracle: type[Oracle]
+) -> None:
     """The fit budgets `MAX_NESTED_STARTS` x `FRAMES_PER_NESTED_START`
-    frames per job. The frames a cascade needs grow by at most that much
-    per job: a change to the oracle that makes a start deeper than the
-    budget fails here, before an estate meets it. The ring nests two starts
-    per job, the chain one; the fold shape adds a completion of a run begun
-    before the cascade to each bypass."""
+    frames per job, the oracle class's own constant. The frames a cascade
+    needs grow by at most that much per job: a change to the oracle that
+    makes a start deeper than the budget fails here, before an estate meets
+    it. The ring nests two starts per job, the chain one; the fold shape
+    adds a completion of a run begun before the cascade to each bypass. The
+    chart oracle (DL-342) is held to its own constant."""
     small, large = 41, 81
-    per_job = (_frames_needed(shape, large) - _frames_needed(shape, small)) / (large - small)
-    assert per_job <= MAX_NESTED_STARTS * FRAMES_PER_NESTED_START
-    assert per_job > (FRAMES_PER_NESTED_START if shape == "box-ring" else 0)
+    needed = (_frames_needed(shape, large, oracle) - _frames_needed(shape, small, oracle)) / (
+        large - small
+    )
+    frames = oracle.FRAMES_PER_NESTED_START
+    assert needed <= MAX_NESTED_STARTS * frames
+    assert needed > (frames if shape == "box-ring" else 0)
+
+
+@pytest.mark.parametrize("shape", [*sorted(SLOPE_SHAPES), "paren-chain"])
+def test_sem10_the_chart_oracle_adds_a_bounded_constant_at_the_innermost_attempt(
+    shape: str,
+) -> None:
+    """The chart oracle needs the old oracle's frames per job plus a
+    constant: the executor's selection at the innermost attempt, which the
+    base of the fit absorbs. The constant stays within `SELECTION_FRAMES`
+    (measured 0 to 12, the parenthesised conditions the deepest)."""
+    extra = _frames_needed(shape, 41, ChartOracle) - _frames_needed(shape, 41)
+    assert 0 <= extra <= SELECTION_FRAMES
 
 
 def test_sem10_equiv_tier_c_fits_the_limit_to_the_larger_catalog() -> None:
@@ -272,7 +306,7 @@ def test_sem10_a_log_written_past_the_limit_names_the_cascade_and_replays_once_f
     fit recovers such an estate."""
     jil, _ = _box_chain(200)
     (tmp_path / "estate.jil").write_text(jil)
-    monkeypatch.setattr(runner, "fit_recursion_limit", lambda _jobs: sys.getrecursionlimit())
+    monkeypatch.setattr(runner, "fit_recursion_limit", lambda *_: sys.getrecursionlimit())
     sys.setrecursionlimit(1000)
     invoke = CliRunner().invoke
     rehearse = ["rehearse", str(tmp_path / "estate.jil"), "--start", START, "--hours", "1"]
@@ -280,7 +314,7 @@ def test_sem10_a_log_written_past_the_limit_names_the_cascade_and_replays_once_f
     def unfitted_journal(root: Path) -> Any:
         with monkeypatch.context() as unfitted:
             unfitted.setattr(
-                runner_journal, "fit_recursion_limit", lambda _jobs: sys.getrecursionlimit()
+                runner_journal, "fit_recursion_limit", lambda *_: sys.getrecursionlimit()
             )
             return invoke(app, ["journal", str(root)])
 

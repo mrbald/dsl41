@@ -306,6 +306,25 @@ settlement has run; any other move has both compared when its status is written,
 rules can start the job again. A difference is a statechart error. The
 chart is registered when the last input family converts.
 
+Every attempt to start a job is one `start` on its instance (DL-342): a wake, a box start and a
+retry post it, and STARTJOB, FORCE_STARTJOB and the window timer's replay relay it, through
+`job.177` to `job.179`, FORCE_STARTJOB after its clears. Its payload computes each oracle fact on
+the guards' first read, in the order today's rules test them, so an attempt computes only the facts
+the old oracle computes. The per-job start bound is a refusal row, `job.100`, on a fact: the job's
+starts in progress. An attempt that reaches the admission settles a run whose settlement the box
+rules hold back first, and the admission is read after it (DL-340); a read of the attempt says
+whether it gets that far. The chart decides; the old methods write the verdict. The first status
+write of the attempt is compared with the chart's configuration, and the RUNNING that follows an
+admission is the chart's `started`, dispatched and compared at that write; an attempt that moves no
+status is compared after its own writes. Until the cascade slice removes the recursion, the chart
+oracle's cascade is fitted by its own measured frames per nested start (`fit_recursion_limit` takes
+the oracle class). An input on which both oracles raise alike, a RecursionError of either kind or
+the same error, agrees in the harness on its attempt half, whose writes are not compared: a control
+input that raises is refused and commits nothing, and an engine-made one is quarantined with its
+rejection logged and its time half committed. So the harness applies that time half alone on both
+oracles, compares it and goes on; the engine stops only when the time half itself raises, and where
+it raises on both the harness stops there too.
+
 ## 12. Durability of deferred queues
 
 A deferred input is admitted and applied. The apply's effect is the enqueue. There is no new
@@ -455,7 +474,8 @@ estates. A divergence is a bug or a fidelity question. The harness is `tests/ora
 proven old-vs-old before the second oracle exists (DL-338). Then the old oracle is deleted. Before
 the second oracle moves anything, the composite `job` chart is declared and checked against the
 old tables (DL-337). The second oracle, `ChartOracle` in `src/dsl41/oracle_chart.py`, subclasses
-the old one and overrides one input family's handlers per entry, STATUS first (DL-341); the
+the old one and overrides one input family's handlers per entry, STATUS first (DL-341), then the
+start attempt (DL-342); the
 families not yet converted, and the cascade between instances, run the old code in its order.
 
 Each slice is a semantic-class change. Each has its own decision-log entry.

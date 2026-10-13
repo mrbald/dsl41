@@ -18,6 +18,7 @@ import pytest
 from oracle_lockstep import LockstepOracle
 
 from dsl41 import oracle_chart
+from dsl41.capacity import CapacityPool
 from dsl41.ir import lower_source
 from dsl41.job_chart import JobData, configuration, row_configuration
 from dsl41.oracle import Oracle, fit_recursion_limit
@@ -34,6 +35,7 @@ from dsl41.oracle_state import (
     RuntimeState,
 )
 from dsl41.runner_hosts import HostCommand, host_move
+from dsl41.state_machine import Event as ChartEvent
 from dsl41.state_machine import Executor, Outcome, Statechart, StatechartError
 
 T0 = datetime(2026, 7, 1, 8, 0)
@@ -180,22 +182,12 @@ def test_sem09_status_on_the_chart_oracle_writes_what_the_old_oracle_writes(case
     _lockstep(jil, script)
 
 
-def _padded(depth: int, call: Callable[[], None]) -> None:
-    if depth:
-        _padded(depth - 1, call)
-    else:
-        call()
-
-
-@pytest.mark.parametrize("depth", [0, 25, 400, 900])
-def test_a_terminator_loop_meets_the_recursion_limit_where_the_old_oracle_meets_it(
-    depth: int,
-) -> None:
+def test_a_terminator_loop_raises_the_cascade_error_on_both_oracles() -> None:
     """A box that restarts on its own TERMINATED, and a member that is its
     box_terminator and a job_terminator: a failed member ends and restarts the
     box until the cascade passes the fitted recursion limit (DL-340 records
-    the loop). The chart oracle adds no frame to that recursion, so both sides
-    raise after the same trace, whatever depth the input is applied from."""
+    the loop). Both oracles raise `CascadeDepthError`; where in the cascade
+    each meets the limit is not compared (the harness's rule)."""
     jil = (
         "insert_job: tb\njob_type: b\ncondition: t(tb)\n\n"
         "insert_job: tm\njob_type: c\ncommand: x\nmachine: m1\nbox_name: tb\n"
@@ -203,11 +195,12 @@ def test_a_terminator_loop_meets_the_recursion_limit_where_the_old_oracle_meets_
     )
     limit = sys.getrecursionlimit()
     try:
-        fit_recursion_limit(2)
+        sys.setrecursionlimit(1000)
+        fit_recursion_limit(2, ChartOracle)
         paired = LockstepOracle(lower_source(jil), new=ChartOracle)
         paired.feed(ev("FORCE_STARTJOB", 1, job="tb"))
         with pytest.raises(CascadeDepthError):
-            _padded(depth, lambda: paired.feed(ev("STATUS", 2, job="tm", exit_code=2)))
+            paired.feed(ev("STATUS", 2, job="tm", exit_code=2))
     finally:
         sys.setrecursionlimit(limit)
 
@@ -497,3 +490,579 @@ def test_the_host_gates_scratch_executor_holds_no_job_instance(
     with pytest.raises(StatechartError, match="no instance 'job:j'"):
         machines.active("job:j")
     assert store.machines.active("job:j") == configuration("INACTIVE")
+
+
+# ---- the start family (STARTJOB, FORCE_STARTJOB, every attempt)
+
+_DAILY = 'date_conditions: 1\ndays_of_week: all\nstart_times: "09:00"\n'
+_START_JIL = (
+    "insert_resource: R\nres_type: R\namount: 1\n\n"
+    "insert_resource: KEPT\nres_type: R\namount: 2\n\n"
+    "insert_job: plain\njob_type: c\ncommand: x\nmachine: m1\n\n"
+    "insert_job: cond\njob_type: c\ncommand: x\nmachine: m1\ncondition: s(plain)\n\n"
+    f"insert_job: dated\njob_type: c\ncommand: x\nmachine: m1\n{_DAILY}\n"
+    f'insert_job: wdefer\njob_type: c\ncommand: x\nmachine: m1\n{_DAILY}run_window: "10:00-11:00"\n\n'
+    f'insert_job: wskip\njob_type: c\ncommand: x\nmachine: m1\n{_DAILY}run_window: "06:00-07:00"\n\n'
+    "insert_job: nx\njob_type: c\ncommand: x\nmachine: m1\nstatus: ON_NOEXEC\n\n"
+    "insert_job: q1\njob_type: c\ncommand: x\nmachine: m1\nresources: (R, QUANTITY=1, FREE=Y)\n\n"
+    "insert_job: q2\njob_type: c\ncommand: x\nmachine: m1\nresources: (R, QUANTITY=1, FREE=Y)\n\n"
+    "insert_job: kh\njob_type: c\ncommand: x\nmachine: m1\nresources: (KEPT, QUANTITY=1, FREE=N)\n\n"
+    "insert_job: lp\njob_type: c\ncommand: x\nmachine: m1\nstatus: ON_NOEXEC\ncondition: s(lp)\n\n"
+    "insert_job: b\njob_type: b\n\n"
+    "insert_job: m\njob_type: c\ncommand: x\nmachine: m1\nbox_name: b\n\n"
+    "insert_job: mw\njob_type: c\ncommand: x\nmachine: m1\nbox_name: b\ncondition: s(plain)\n\n"
+    "insert_job: wm\njob_type: c\ncommand: x\nmachine: m1\nbox_name: b\ncondition: s(plain)\n"
+    f'{_DAILY}run_window: "06:00-07:00"\n\n'
+    "insert_job: b2\njob_type: b\n\n"
+    f'insert_job: wx\njob_type: c\ncommand: x\nmachine: m1\nbox_name: b2\n{_DAILY}run_window: "06:00-07:00"\n\n'
+    "insert_job: after\njob_type: c\ncommand: x\nmachine: m1\ncondition: s(b2)\n"
+)
+
+#: Per outcome class: the script, the job, the rows its last input's relay
+#: fires (none for an attempt no input makes), the rows of that input's
+#: `start` items for the job, and a trace line the old oracle writes for it.
+_OUTCOMES: dict[str, tuple[list[Event], str, tuple[str, ...], list[tuple[str, ...]], str]] = {
+    "admit a job": (
+        [ev("STARTJOB", 1, job="plain")],
+        "plain",
+        ("job.177",),
+        [("job.102",)],
+        "INACTIVE->STARTING",
+    ),
+    "admit a box": (
+        [ev("FORCE_STARTJOB", 1, job="b")],
+        "b",
+        ("job.178",),
+        [("job.124",)],
+        "INACTIVE->STARTING",
+    ),
+    "queue": (
+        [ev("STARTJOB", 1, job="q1"), ev("STARTJOB", 2, job="q2")],
+        "q2",
+        ("job.177",),
+        [("job.103",)],
+        "INACTIVE->QUE_WAIT",
+    ),
+    "bypass": (
+        [ev("STARTJOB", 1, job="nx")],
+        "nx",
+        ("job.177",),
+        [("job.101",)],
+        "INACTIVE->SUCCESS",
+    ),
+    "forced on held units": (
+        [
+            ev("STARTJOB", 1, job="kh"),
+            ev("STATUS", 2, job="kh", status="FAILURE"),
+            ev("FORCE_STARTJOB", 3, job="kh"),
+        ],
+        "kh",
+        ("job.178",),
+        [("job.104",)],
+        "FAILURE->STARTING",
+    ),
+    "forced clears of ice and hold": (
+        [
+            ev("ON_ICE", 1, job="plain"),
+            ev("ON_HOLD", 2, job="plain"),
+            ev("FORCE_STARTJOB", 3, job="plain"),
+        ],
+        "plain",
+        ("job.178", "job.203", "job.206"),
+        [("job.102",)],
+        "OFF_HOLD",
+    ),
+    "refused: live": (
+        [ev("STARTJOB", 1, job="plain"), ev("STARTJOB", 2, job="plain")],
+        "plain",
+        ("job.177",),
+        [("job.144",)],
+        "START_REFUSED",
+    ),
+    "refused: the box is not running": (
+        [ev("STARTJOB", 1, job="m")],
+        "m",
+        ("job.177",),
+        [("job.141",)],
+        "START_REFUSED",
+    ),
+    "refused: ran in this box run": (
+        [
+            ev("FORCE_STARTJOB", 1, job="b"),
+            ev("STATUS", 2, job="m", exit_code=0),
+            ev("STARTJOB", 3, job="m"),
+        ],
+        "m",
+        ("job.177",),
+        [("job.145",)],
+        "START_REFUSED",
+    ),
+    "refused: taken off ice in this box run": (
+        [
+            ev("ON_ICE", 1, job="m"),
+            ev("FORCE_STARTJOB", 2, job="b"),
+            ev("OFF_ICE", 3, job="m"),
+            ev("STARTJOB", 4, job="m"),
+        ],
+        "m",
+        ("job.177",),
+        [("job.141",)],
+        "START_REFUSED",
+    ),
+    "nothing": ([ev("STARTJOB", 1, job="cond")], "cond", ("job.177",), [("job.180",)], ""),
+    "arm": (
+        [ev("ON_HOLD", 1, job="dated"), ev("STARTJOB", 2, job="dated")],
+        "dated",
+        ("job.177",),
+        [("job.212",)],
+        "SCHED_ARM",
+    ),
+    "defer": (
+        [ev("STARTJOB", 1, job="wdefer")],
+        "wdefer",
+        ("job.177",),
+        [("job.180",)],
+        "RUN_WINDOW_DEFER",
+    ),
+    "skip": (
+        [ev("STATUS", 1, job="wskip", status="SUCCESS"), ev("STARTJOB", 2, job="wskip")],
+        "wskip",
+        ("job.177",),
+        [("job.106",)],
+        "SUCCESS->INACTIVE",
+    ),
+    "skip a member": (
+        [
+            ev("FORCE_STARTJOB", 1, job="b"),
+            ev("STATUS", 2, job="wm", status="FAILURE"),
+            ev("FORCE_STARTJOB", 3, job="wm"),
+        ],
+        "wm",
+        ("job.178",),
+        [("job.107",)],
+        "FAILURE->INACTIVE",
+    ),
+    "a skip that moves nothing and completes the box": (
+        [
+            ev("ON_HOLD", 1, job="wx"),
+            ev("FORCE_STARTJOB", 2, job="b2"),
+            ev("OFF_HOLD", 3, job="wx"),
+            ev("STARTJOB", 4, job="wx"),
+        ],
+        "wx",
+        ("job.177",),
+        [("job.180",)],
+        "RUN_WINDOW_SKIP",
+    ),
+    "the start bound": (
+        [ev("FORCE_STARTJOB", 1, job="lp")],
+        "lp",
+        ("job.178",),
+        [("job.101",), ("job.101",), ("job.100",)],
+        "START_REFUSED",
+    ),
+    "an OFF_HOLD retry": (
+        [ev("ON_HOLD", 1, job="plain"), ev("OFF_HOLD", 2, job="plain")],
+        "plain",
+        (),
+        [("job.102",)],
+        "INACTIVE->STARTING",
+    ),
+    "a wake": (
+        [ev("STARTJOB", 1, job="plain"), ev("STATUS", 2, job="plain", exit_code=0)],
+        "cond",
+        (),
+        [("job.102",)],
+        "INACTIVE->STARTING",
+    ),
+}
+
+
+def _spied(oracle: Oracle) -> list[Outcome]:
+    """Every outcome the oracle's executor reports from now on."""
+    machines = oracle.store.machines
+    seen: list[Outcome] = []
+    dispatch = machines.dispatch
+
+    def spy(key: Any, event: Any) -> list[Outcome]:
+        outcomes = dispatch(key, event)
+        seen.extend(outcomes)
+        return outcomes
+
+    machines.dispatch = spy  # type: ignore[method-assign]
+    return seen
+
+
+@pytest.mark.parametrize("case", sorted(_OUTCOMES))
+def test_sem10_each_start_outcome_fires_its_row_and_writes_what_the_old_oracle_writes(
+    case: str,
+) -> None:
+    """Every attempt is one `start` on the job's instance, an input's through
+    its relay: the row the chart fires is the outcome today's rule code
+    reaches, and the chart oracle leaves the trace, the events, the rows, the
+    revisions and the seal the old oracle leaves."""
+    script, job, relay, starts, line = _OUTCOMES[case]
+    paired = LockstepOracle(lower_source(_START_JIL), new=ChartOracle)
+    for event in script[:-1]:
+        paired.feed(event)
+    seen = _spied(paired.twin)
+    traced = len(paired.twin.trace())
+    paired.feed(script[-1])
+    paired.check_seal()
+    _agrees(paired.twin)
+    mine = [o for o in seen if o.key == RuntimeState.job_key(job)]
+    relayed = [o.rows for o in mine if o.event.name in ("STARTJOB", "FORCE_STARTJOB")]
+    assert relayed == ([relay] if relay else [])
+    assert [o.rows for o in mine if o.event.name == "start"] == starts
+    lines = [t.transition for t in paired.twin.trace()[traced:] if t.job == job]
+    assert (line in lines) if line else lines == []
+    if starts[-1] in (("job.102",), ("job.124",), ("job.104",)):
+        started = [o.rows for o in mine if o.event.name == "started"]
+        assert started == [("job.124",) == starts[-1] and ("job.125",) or ("job.105",)]
+
+
+def test_sem33_a_postponed_start_replays_through_the_window_relay() -> None:
+    """A run_window-deferred start's timer replays the attempt through its
+    own relay (job.179) on the chart oracle, as the old oracle replays it."""
+    paired = LockstepOracle(lower_source(_START_JIL), new=ChartOracle)
+    paired.feed(ev("STARTJOB", 1, job="wdefer"))
+    seen = _spied(paired.twin)
+    paired.advance(T0 + timedelta(hours=2, minutes=1))
+    paired.check_seal()
+    rows = [(o.event.name, o.rows) for o in seen if o.key == "job:wdefer"]
+    assert rows[:2] == [("TIMER run_window", ("job.179",)), ("start", ("job.102",))]
+    assert paired.twin.store.job["wdefer"].status == "RUNNING"
+
+
+def test_an_attempt_on_a_job_outside_the_catalog_moves_nothing() -> None:
+    """With no row there is no instance and nothing to dispatch; with a row
+    the chart ignores the job (job.180), as the old oracle does."""
+    paired = LockstepOracle(lower_source(_START_JIL), new=ChartOracle)
+    seen = _spied(paired.twin)
+    paired.feed(ev("STARTJOB", 1, job="ghost"))
+    assert "ghost" not in paired.twin.store.job
+    assert [o for o in seen if o.key == "job:ghost"] == []
+    paired.feed(ev("STATUS", 2, job="ghost", status="SUCCESS"))
+    paired.feed(ev("FORCE_STARTJOB", 3, job="ghost"))
+    paired.check_seal()
+    rows = [o.rows for o in seen if o.key == "job:ghost" and o.event.name == "start"]
+    assert rows == [("job.180",)]
+
+
+def test_dl256_an_admission_that_frees_held_units_and_holds_load_writes_what_the_old_one_does() -> (
+    None
+):
+    """A restart that no longer asks for the resource its job holds takes
+    the new one and gives the old back, which wakes the queue; a start that
+    holds a machine's load owes the admit-only scan (DL-255)."""
+    text = (
+        "insert_machine: box1\ntype: a\nnode_name: box1\nmax_load: 2\n\n"
+        "insert_resource: OLD\nres_type: R\namount: 1\n\n"
+        "insert_resource: NEW\nres_type: R\namount: 1\n\n"
+        "insert_job: ha\njob_type: c\ncommand: x\nmachine: m1\nresources: (OLD, QUANTITY=1)\n\n"
+        "insert_job: wa\njob_type: c\ncommand: y\nmachine: m1\nresources: (OLD, QUANTITY=1)\n\n"
+        "insert_job: ml\njob_type: c\ncommand: x\nmachine: box1\njob_load: 1\npriority: 1\n"
+    )
+    paired = LockstepOracle(lower_source(text), new=ChartOracle)
+    for event in (
+        ev("STARTJOB", 0, job="ha"),
+        ev("STATUS", 1, job="ha", status="FAILURE"),
+        ev("STARTJOB", 2, job="wa"),
+        ev("STARTJOB", 2, job="ml"),
+    ):
+        paired.feed(event)
+    moved = lower_source(
+        text.replace("(OLD, QUANTITY=1)\n\ninsert_job: wa", "(NEW, QUANTITY=1)\n\ninsert_job: wa")
+    )
+    for side in (paired, paired.twin):
+        side.catalog = moved
+        side._pool = CapacityPool(moved)
+    paired.feed(ev("STARTJOB", 3, job="ha"))
+    paired.check_seal()
+    _agrees(paired.twin)
+    assert paired.twin.store.job["wa"].status == "RUNNING"
+
+
+# ---- the facts are lazy
+
+
+def test_sem20_a_fact_today_never_reads_is_never_computed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An iced job's condition is not evaluated, nor the run window of a job
+    whose condition is false: the payload computes a fact on its first read,
+    in `start_verdict`'s order. Read later, it is computed then."""
+    oracle = ChartOracle(lower_source(_START_JIL))
+    computed: list[tuple[str, str]] = []
+    cond_true, window_side = oracle._cond_true, oracle._window_side
+
+    def counted_condition(cond: Any, job: str) -> bool:
+        computed.append((job, "condition"))
+        return cond_true(cond, job)
+
+    def counted_window(job_ir: Any) -> Any:
+        computed.append((job_ir.name, "window"))
+        return window_side(job_ir)
+
+    monkeypatch.setattr(oracle, "_cond_true", counted_condition)
+    monkeypatch.setattr(oracle, "_window_side", counted_window)
+    seen = _spied(oracle)
+
+    def attempt(job: str) -> Any:
+        starts = [o for o in seen if o.key == f"job:{job}" and o.event.name == "start"]
+        return starts[-1].event.payload
+
+    oracle.feed(ev("ON_ICE", 1, job="cond"))
+    oracle.feed(ev("STARTJOB", 2, job="cond"))
+    assert computed == []
+    oracle.feed(ev("FORCE_STARTJOB", 3, job="b"))
+    del computed[:]  # the box start's own window pass reads wm's window
+    oracle.feed(ev("STARTJOB", 4, job="wm"))  # the box runs, the condition is false: it arms
+    iced, member = attempt("cond"), attempt("wm")
+    assert iced.known("condition") is None
+    assert computed == [("wm", "condition")]
+    assert member.known("condition") is False and member.known("window") is None
+    assert member.window == "skip" and computed[-1] == ("wm", "window")
+    assert "window='skip'" in repr(member)
+
+
+# ---- the agreement check at a start's writes
+
+
+def _planted(**guards: Callable[..., bool]) -> type[ChartOracle]:
+    class Planted(ChartOracle):
+        def _job_instance(
+            self, job: str, row: JobRuntime
+        ) -> tuple[Statechart, frozenset[str], object]:
+            chart, active, data = super()._job_instance(job, row)
+            return replace(chart, guards={**chart.guards, **guards}), active, data
+
+    return Planted
+
+
+def test_a_start_whose_units_the_chart_reserves_and_the_row_does_not_is_a_statechart_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Planted: the attempt's payload says the start reserves units, and
+    today's admission reserves none for a job with no resources: the chart's
+    `reserved` is caught at the STARTING write."""
+    monkeypatch.setattr(oracle_chart._Facts, "demand", property(lambda self: True))
+    oracle = ChartOracle(lower_source(_START_JIL))
+    with pytest.raises(StatechartError, match="the start's status write differs") as raised:
+        oracle.feed(ev("STARTJOB", 1, job="plain"))
+    assert "reserved" in str(raised.value) and "instance: 'job:plain'" in str(raised.value)
+
+
+def test_a_running_write_the_chart_does_not_follow_is_a_statechart_error() -> None:
+    """Planted: `started` finds no row for a job, so the instance stays
+    STARTING while today's code writes RUNNING."""
+    oracle = _planted(is_job=lambda ctx: False)(lower_source(_START_JIL))
+    with pytest.raises(StatechartError, match="started fired job.183 for a CMD job"):
+        oracle.feed(ev("STARTJOB", 1, job="plain"))
+
+
+_JOB_TYPE_PAIRS = {
+    "admission": (
+        ("start_admits_job", "start_admits_box"),
+        [ev("STARTJOB", 1, job="plain")],
+        "job.124 fired for a CMD job",
+    ),
+    "skip": (
+        ("start_skips", "start_skips_member"),
+        [ev("STATUS", 1, job="wskip", status="SUCCESS"), ev("STARTJOB", 2, job="wskip")],
+        "job.107 fired for a job in box None",
+    ),
+    "started": (("is_job", "is_box"), [ev("STARTJOB", 1, job="plain")], "started fired job.125"),
+}
+
+
+@pytest.mark.parametrize("pair", sorted(_JOB_TYPE_PAIRS))
+def test_a_start_row_for_the_other_job_type_is_a_statechart_error(pair: str) -> None:
+    """Planted: the guards of a row pair that differs only by the job type
+    swapped (job.102/124, job.106/107, job.105/125). The fired row decides
+    the move, and a catalog that disagrees with it is caught at once, as for
+    job.120 and job.135."""
+    (a, b), script, message = _JOB_TYPE_PAIRS[pair]
+    guards = oracle_chart.JOB.guards
+    oracle = _planted(**{a: guards[b], b: guards[a]})(lower_source(_START_JIL))
+    for event in script[:-1]:
+        oracle.feed(event)
+    with pytest.raises(StatechartError, match=message):
+        oracle.feed(script[-1])
+
+
+def test_a_running_write_whose_flags_differ_from_the_charts_is_a_statechart_error() -> None:
+    """Planted: after the STARTING write the instance is iced, so `started`
+    fires its row and the chart's RUNNING keeps an ice the row does not."""
+
+    class Iced(ChartOracle):
+        def _record(self, job: str, transition: str, cause: str) -> None:
+            super()._record(job, transition, cause)
+            if transition == "INACTIVE->STARTING":
+                key = self.store.job_key(job)
+                active = configuration("STARTING", ice=True)
+                self.store.machines.realign(key, active, self.store.machines.data(key))
+
+    oracle = Iced(lower_source(_START_JIL))
+    with pytest.raises(StatechartError, match="the RUNNING write differs"):
+        oracle.feed(ev("STARTJOB", 1, job="plain"))
+
+
+def test_an_arm_the_code_does_not_write_is_a_statechart_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Planted: today's arm is dropped, so the chart's arm_on differs from
+    the row after the attempt's writes."""
+    monkeypatch.setattr(Oracle, "_arm", lambda *args: None)
+    oracle = ChartOracle(lower_source(_START_JIL))
+    oracle.feed(ev("ON_HOLD", 1, job="dated"))
+    with pytest.raises(StatechartError, match="the start's writes differ"):
+        oracle.feed(ev("STARTJOB", 2, job="dated"))
+
+
+def test_a_start_whose_status_write_never_runs_is_a_statechart_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Planted: the admission is dropped, so the chart's STARTING is never written."""
+    monkeypatch.setattr(ChartOracle, "_start", lambda *args, **kwargs: None)
+    oracle = ChartOracle(lower_source(_START_JIL))
+    with pytest.raises(StatechartError, match="the start's status write never ran"):
+        oracle.feed(ev("STARTJOB", 1, job="plain"))
+    assert oracle._start_move is None
+
+
+def test_a_start_before_the_last_ones_status_write_is_a_statechart_error() -> None:
+    oracle = ChartOracle(lower_source(_START_JIL))
+    oracle._start_move = oracle_chart._Agreement(
+        "q1",
+        "job:q1",
+        ChartEvent("start"),
+        configuration("STARTING"),
+        ("INACTIVE", "STARTING"),
+        False,
+    )
+    with pytest.raises(StatechartError, match="a start began before the last one's status write"):
+        oracle.feed(ev("STARTJOB", 1, job="plain"))
+
+
+def test_a_start_that_fires_two_rows_is_a_statechart_error() -> None:
+    """Planted: a plain admission that also arms. The rows fired are named."""
+    oracle = _planted(start_arms=lambda ctx: True)(lower_source(_START_JIL))
+    with pytest.raises(StatechartError, match="start fired job.102, job.212, and no start row"):
+        oracle.feed(ev("STARTJOB", 1, job="plain"))
+
+
+def test_a_failed_start_leaves_no_status_move_behind(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An attempt that raises before its status write clears its move, so the
+    next input is not compared against it."""
+
+    def broken(*args: Any, **kwargs: Any) -> None:
+        raise OracleError("planted")
+
+    monkeypatch.setattr(Oracle, "_acquire", broken)
+    oracle = ChartOracle(lower_source(_START_JIL))
+    with pytest.raises(OracleError, match="planted"):
+        oracle.feed(ev("STARTJOB", 1, job="plain"))
+    assert oracle._start_move is None
+
+
+# ---- DL-340's settlement and the recursion bound
+
+
+def _member_restart_jil(resource: str, sibling: str) -> str:
+    """A box restarted by its own completion, and a member `rm` holding a
+    unit: the box's restart attempts the member before the member's run
+    settles. `sibling` adds members beside it."""
+    return (
+        f"insert_resource: U\nres_type: {resource}\namount: 1\n\n"
+        "insert_job: rb\njob_type: b\ncondition: s(rb)\n\n"
+        "insert_job: rm\njob_type: c\ncommand: x\nmachine: m1\nbox_name: rb\n"
+        f"resources: (U, QUANTITY=1{', FREE=Y' if resource == 'R' else ''})\n{sibling}\n"
+        "insert_job: rg\njob_type: c\ncommand: x\nmachine: m1\n"
+    )
+
+
+_GATED = "condition: s(rg)\n\ninsert_job: rs\njob_type: c\ncommand: x\nmachine: m1\nbox_name: rb\n"
+_SETTLEMENTS: dict[str, tuple[str, list[Event], dict[str, str]]] = {
+    "admitted: the spent unit leaves nothing, it queues": (
+        _member_restart_jil("D", ""),
+        [ev("FORCE_STARTJOB", 1, job="rb"), ev("FORCE_STARTJOB", 2, job="rm")]
+        + [ev("STATUS", 3, job="rm", exit_code=0)],
+        {"rm": "QUE_WAIT"},
+    ),
+    "held by its condition: a sibling waits for the late settlement": (
+        _member_restart_jil("R", _GATED + "resources: (U, QUANTITY=1, FREE=Y)\n"),
+        [
+            ev("FORCE_STARTJOB", 1, job="rb"),
+            ev("STATUS", 2, job="rs", exit_code=0),
+            ev("FORCE_STARTJOB", 3, job="rm"),
+            ev("STATUS", 4, job="rm", exit_code=0),
+        ],
+        {"rm": "INACTIVE", "rs": "RUNNING"},
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_SETTLEMENTS))
+def test_sem16_a_restart_settles_the_ended_run_before_the_admission_it_reads(case: str) -> None:
+    """DL-340: the restarted member's attempt reads its admission after the
+    ended run settles, so a depletable unit it spent leaves nothing to admit
+    on. A member whose own condition holds it settles nothing at the attempt:
+    the late settlement runs as today, after the box rules, so a sibling the
+    restart attempts first finds the unit still taken and queues, to be
+    admitted when the settlement frees it (`Executor.resolve` reads whether
+    the attempt reaches the admission; settling whenever one is owed would
+    start the sibling at once)."""
+    jil, script, statuses = _SETTLEMENTS[case]
+    paired = _lockstep(jil, script)
+    assert {job: paired.twin.store.job[job].status for job in statuses} == statuses
+    if "rs" in statuses:
+        assert "INACTIVE->QUE_WAIT" in [t.transition for t in paired.twin.trace() if t.job == "rs"]
+
+
+def _empty_box(name: str, condition: str = "") -> str:
+    return f"insert_job: {name}\njob_type: b\n" + (f"condition: {condition}\n" if condition else "")
+
+
+def _cmd(name: str, condition: str = "") -> str:
+    return f"insert_job: {name}\njob_type: c\ncommand: x\nmachine: m1\n" + (
+        f"condition: {condition}\n" if condition else ""
+    )
+
+
+_DEEP = 100
+#: The deepest legal shapes of tests/test_cascade_depth.py: empty boxes each
+#: started by the one before; a ring of them that goes round twice, nested,
+#: until the start bound refuses; ON_NOEXEC jobs bypassed one inside the next.
+_DEEP_SHAPES: dict[str, tuple[str, list[Event]]] = {
+    "box chain": (
+        "\n".join(_empty_box(f"q{i}", f"s(q{i - 1})" if i else "") for i in range(_DEEP)),
+        [ev("FORCE_STARTJOB", 1, job="q0")],
+    ),
+    "box ring": (
+        "\n".join(
+            [_empty_box("q0"), _empty_box("q1", f"s(q0) | s(q{_DEEP - 1})")]
+            + [_empty_box(f"q{i}", f"s(q{i - 1})") for i in range(2, _DEEP)]
+        ),
+        [ev("FORCE_STARTJOB", 1, job="q0")],
+    ),
+    "ON_NOEXEC chain": (
+        "\n".join(_cmd(f"q{i}", f"s(q{i - 1})" if i else "") for i in range(_DEEP)),
+        [ev("ON_NOEXEC", 0, job=f"q{i}") for i in range(1, _DEEP)]
+        + [ev("FORCE_STARTJOB", 1, job="q0"), ev("STATUS", 2, job="q0", exit_code=0)],
+    ),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_DEEP_SHAPES))
+def test_sem10_a_deep_legal_cascade_runs_on_the_chart_oracle_at_its_fit(shape: str) -> None:
+    """At the limit fitted for the chart oracle (its own
+    `FRAMES_PER_NESTED_START`), the deepest legal shapes run to the end
+    without a cascade error and write what the old oracle writes."""
+    jil, script = _DEEP_SHAPES[shape]
+    limit = sys.getrecursionlimit()
+    try:
+        sys.setrecursionlimit(1000)
+        fit_recursion_limit(_DEEP, ChartOracle)
+        paired = _lockstep(jil, script)
+    finally:
+        sys.setrecursionlimit(limit)
+    assert {row.status for row in paired.twin.store.job.values()} == {"SUCCESS"}

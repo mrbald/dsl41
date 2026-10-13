@@ -505,7 +505,7 @@ class Engine:
         self.oracle = Oracle(catalog, carried=carried, **reading)
         # an engine-made input is in the WAL before it is applied, so a
         # cascade too deep for the stack would stop every resume
-        fit_recursion_limit(len(catalog.jobs))
+        fit_recursion_limit(len(catalog.jobs), type(self.oracle))
         #: concurrency-model ss2/ss8: the execution host this engine dispatches
         #: to. One engine per run root owns one local executor; machine names
         #: resolve to a relay through the routing table (ss5) and there is no

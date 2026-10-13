@@ -14,11 +14,12 @@ import ast
 import inspect
 import os
 import re
+import sys
 import textwrap
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import cast
+from typing import ClassVar, cast
 
 import pytest
 from estate_gen import Advance, Case, SealPoint, Step, cases, seeded
@@ -47,7 +48,7 @@ from test_seal_artifact import _seal
 
 from dsl41.ir import CatalogIR, lower_source
 from dsl41.oracle import InputBatch, Oracle
-from dsl41.oracle_state import Event, JobRuntime, OracleError
+from dsl41.oracle_state import CascadeDepthError, Event, JobRuntime, OracleError
 from dsl41.runner import Engine
 from dsl41.seal import SealedState
 from dsl41.semantics import REGISTRY
@@ -630,3 +631,144 @@ def test_the_directed_estate_makes_the_wekr_rows_live(recheck: str) -> None:
     # the first release: wk_skip's exclusion holds 2014-01-06 only under partial
     assert (found.index, found.field) == (5, "trace")
     assert "wk_skip" in found.report()
+
+
+_TERMINATOR_LOOP = (
+    "insert_job: tb\njob_type: b\ncondition: t(tb)\n\n"
+    "insert_job: tm\njob_type: c\ncommand: x\nmachine: m1\nbox_name: tb\n"
+    "box_terminator: 1\njob_terminator: 1\n\n"
+    "insert_job: wd\njob_type: c\ncommand: x\nmachine: m1\n"
+    'date_conditions: 1\ndays_of_week: all\nstart_times: "09:00"\nrun_window: "10:00-11:00"\n'
+)
+
+
+class _RaisesOnStatus(Oracle):
+    """An oracle that raises on every STATUS: a cascade error, or a
+    planted error of another text."""
+
+    error: Exception = CascadeDepthError("tm", "STATUS", 0)
+
+    def _handle_status(self, ev: Event) -> None:
+        raise self.error
+
+
+class _OtherText(_RaisesOnStatus):
+    error = OracleError("planted")
+
+
+class _NoTimers(Oracle):
+    """An oracle whose time half fires no timer."""
+
+    def _fire_timers_due(self, at: datetime) -> None:
+        return None
+
+
+_T0 = datetime(2026, 7, 1, 8, 0)
+
+
+def _loop_script(at: datetime) -> list[Event]:
+    """The terminator loop's raising STATUS at `at`, after a postponed start
+    whose timer falls due at 10:00, and one more input after it."""
+    return [
+        Event(at=_T0, kind="FORCE_STARTJOB", payload={"job": "tb"}),
+        Event(at=_T0 + timedelta(minutes=1), kind="STARTJOB", payload={"job": "wd"}),
+        Event(at=at, kind="STATUS", payload={"job": "tm", "exit_code": 2}),
+        Event(at=at + timedelta(minutes=1), kind="STARTJOB", payload={"job": "tb"}),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("loop", "new", "expected"),
+    [
+        ("t(tb)", Oracle, None),
+        ("t(tb)", _NoTimers, "STATUS job=tm exit_code=2 (both raised CascadeDepthError"),
+        ("s(tb)", _RaisesOnStatus, "outcome"),
+        ("t(tb)", _OtherText, "outcome"),
+    ],
+    ids=["alike", "time half differs", "one side", "different errors"],
+)
+def test_an_input_both_sides_raise_alike_compares_its_time_half_and_goes_on(
+    loop: str, new: Callable[..., Oracle], expected: str | None
+) -> None:
+    """Both sides raising alike agree on the input's attempt half, whose
+    partial writes the engine never commits. Its time half, which a
+    quarantined engine-made input commits, is applied alone on both and
+    compared, here the postponed start's timer, and the script goes on to its
+    seal. One side raising, or the two raising differently, is a divergence
+    of the outcome that names both errors."""
+    limit = sys.getrecursionlimit()
+    try:
+        sys.setrecursionlimit(1000)
+        result = run(
+            lower_source(_TERMINATOR_LOOP.replace("t(tb)", loop)),
+            _loop_script(_T0 + timedelta(hours=2)),
+            new=new,
+        )
+    finally:
+        sys.setrecursionlimit(limit)
+    if expected is None:
+        assert result.divergence is None
+        assert (result.raised_alike, result.inputs, result.seals) == (1, 4, 1)
+        return
+    found = result.divergence
+    assert found is not None and found.index == 3
+    if expected == "outcome":
+        assert found.field == "outcome" and result.raised_alike == 0
+        assert found.old != found.new and (found.old or found.new)
+    else:
+        assert expected in found.input and found.field == "trace"
+
+
+class _TimeHalfFault(Oracle):
+    """An oracle whose time half raises from 10:00 on."""
+
+    def _fire_timers_due(self, at: datetime) -> None:
+        if at >= _T0 + timedelta(hours=2):
+            raise OracleError("planted time-half fault")
+        super()._fire_timers_due(at)
+
+
+class _RetriedTimeHalfFault(Oracle):
+    """An oracle whose time half raises only when applied alone, after the
+    input's attempt half raised: the second application at one instant."""
+
+    applied: ClassVar[list[datetime]] = []
+
+    def _fire_timers_due(self, at: datetime) -> None:
+        if at >= _T0 + timedelta(hours=2):
+            self.applied.append(at)
+            if self.applied.count(at) > 1:
+                raise OracleError("planted time-half fault")
+        super()._fire_timers_due(at)
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [(_TimeHalfFault, _TimeHalfFault), (Oracle, _RetriedTimeHalfFault)],
+    ids=["alike", "one side"],
+)
+def test_a_time_half_that_raises_alike_stops_the_pair_as_it_stops_the_engine(
+    old: Callable[..., Oracle], new: Callable[..., Oracle]
+) -> None:
+    """When an input raises alike on both sides and its time half, applied
+    alone, raises alike too, the engine stops there (`TimeHalfStop`), and so
+    does the pair: no seal, no divergence. A time half that raises on one
+    side only is a divergence of the outcome that names both."""
+    _RetriedTimeHalfFault.applied = []
+    limit = sys.getrecursionlimit()
+    try:
+        sys.setrecursionlimit(1000)
+        result = run(
+            lower_source(_TERMINATOR_LOOP), _loop_script(_T0 + timedelta(hours=2)), old=old, new=new
+        )
+    finally:
+        sys.setrecursionlimit(limit)
+    if new is _TimeHalfFault:
+        assert result.divergence is None
+        assert (result.raised_alike, result.time_half_stopped) == (1, 1)
+        assert (result.inputs, result.seals) == (3, 0)
+        return
+    found = result.divergence
+    assert found is not None and found.index == 3 and found.field == "outcome"
+    assert "its time half alone" in found.input
+    assert found.new == ("OracleError: planted time-half fault",) and found.old == ()

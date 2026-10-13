@@ -79,9 +79,10 @@ STORE_REBUILT = frozenset({"machines"})
 #: same None; the chart oracle's fork then rebinds its twin's to the twin
 #: (`ChartOracle.fork`), so there it is rebound, not shared.
 STORE_SHARED = frozenset({"job_instance"})
-#: The chart oracle's own attribute, on top of the oracle's: the STATUS move
-#: being written, None between inputs, so its fork starts with None.
-CHART_ORACLE_FRESH = frozenset({"_agreement"})
+#: The chart oracle's own attributes, on top of the oracle's: the STATUS move
+#: being written and a start's status move before its write, None between
+#: inputs, so its fork starts with None.
+CHART_ORACLE_FRESH = frozenset({"_agreement", "_start_move"})
 
 
 def _when(at: datetime | None) -> str | None:

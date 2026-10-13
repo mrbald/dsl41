@@ -22129,3 +22129,85 @@ relitigate an entry; append a new one.
   at its first input. Smaller items, the realign's pool check and history line, the commit follow
   of rowed jobs only, the fork pin, the row picked by region, the configuration-check cache and
   the docstrings, are fixed and confirmed by the reviewer that raised them.
+- DL-342 The start family is decided by the job chart: every attempt to start a job is one
+  `start` on the job's instance, with lazy payload facts, the per-job start bound as a row, and
+  the recursion fit per oracle class
+  (2026-10-13; src/dsl41/oracle_chart.py, src/dsl41/job_chart.py, src/dsl41/oracle.py,
+  src/dsl41/runner.py, src/dsl41/runner_journal.py, src/dsl41/equiv.py;
+  tests/test_oracle_chart.py, tests/test_job_chart.py, tests/test_cascade_depth.py,
+  tests/oracle_lockstep.py, tests/test_oracle_lockstep.py, tests/fork_harness.py;
+  docs/statechart-engine.md §11, §16; docs/blocks/job-lifecycle.md; docs/decision-index.md)
+  THE FAMILY. The chart oracle (DL-341) now decides every attempt to start a job, whatever its
+  cause: the STARTJOB and FORCE_STARTJOB inputs and a window timer's replay dispatch their own
+  event, which the chart relays to `start` after the forced clears of ice and hold (DL-337's
+  relays); a wake, a box start and the retries after OFF_HOLD and ON_NOEXEC, which stay old code
+  until their slices, call the overridden attempt, so the chart decides them too. The payload is
+  the attempt's facts, computed on first read in the order the guards read them, which is the
+  order today's code tests them: the box, the condition, the window, the bound, the box's noexec,
+  the admission and the demand are never computed for an attempt today's code refuses before
+  reading them, and none of them writes. The fired row is performed by today's method: the
+  refusal reason returned to the input handler that traces it, the arm, the deferral, the window
+  skip, the bypass, the start on held units, the queue, and the admitted start through DL-340's
+  early settlement, the acquisition and the run; `started` is dispatched at the RUNNING write.
+  Three cells the code reached: the per-job start bound (the L010 refusal) is a row of its own,
+  job.100, over a boolean fact, so the chart does not restate the bound's number; `demand` means
+  that the vector reserves units, since a vector of gate entries only moves nothing today and
+  the declaration said "not empty", a wrong declaration and no row changed; when a settlement is
+  owed, a resolution of the attempt with the admission taken as admitting says whether today's
+  code reaches the settlement before the admission it reads, and the real dispatch follows it. A
+  status write by old code during a window attempt the chart left unmoved is a statechart error,
+  which closes a hole a mutant found.
+  THE BOUND. DL-341 pinned the point where the cascade meets the recursion limit to the old
+  oracle's, and the chart's dispatch between an attempt and today's rule code cannot keep that
+  literally. The contract is the fit's own design (the cascade-depth entry): a measured constant
+  per nested start sizes the limit for the catalog, and an input past it is never committed: a
+  control input fails its dry apply, an engine-made input is quarantined with its time half
+  committed and the rejection logged, and the engine stops only where the time half itself
+  raises. So where the attempt raises is not observable, and the time half is. Each oracle
+  class carries its constant and `fit_recursion_limit` fits for the class in hand; the chart's
+  slopes equal the old oracle's (eleven frames per nested start on a box chain, twenty-two per
+  job on a ring), and its one-time frames at the innermost attempt come out of the base. The
+  harness forks both oracles before each input; where both raise the same error it applies the
+  time half alone on the forks, compares it, and the script continues; one side raising, or
+  different errors, is a divergence. An attempt whose decision
+  meets the limit outside any start converts the error as the outermost start does, since a
+  terminator loop recurses through the kill, not the start. Stated limit: with the limit
+  exhausted below the base, which the fit never allows, the old oracle raises bare where the
+  chart converts.
+  PROOF. The harness, old against chart, shows no difference: the corpus and two hundred estates
+  of up to fifty jobs, 23,003 inputs; twenty estates of 150 to 200 jobs, 7,999; the corpus and
+  forty estates under every switch, 98,770; a further thousand seeds, 94,241, one script stopped
+  where both oracles passed the limit; the oracle's tests pass through the fourth arm. Planted
+  wrong start guards, the queue and the admission swapped, the bound removed, the arm never
+  taken, the skip ignored, each diverge at the first input that reaches them. The chart's frames
+  per job stay within its budget on the shapes the cascade-depth entry measures; a hundred-job
+  chain, ring and ON_NOEXEC chain run at its fit; the terminator loop raises on both.
+  STATE_MACHINE_VERSION is unchanged (DL-235). Cost per input on the corpus about 113
+  microseconds against 54, on the large estates 203 against 80, about 35 per attempt, of which
+  the verdict is recomputed per guard: the candidate for the switch-over, with DL-339's write per
+  state. The chart module is at 100% of statements and branches.
+  NOT HERE. The timer input's own handling, KILLJOB, the flag inputs, RELEASE_RESOURCE and the
+  readmission, which still calls the old acquisition and run and whose writes the commit's
+  realign covers; the
+  cascade, which replaces the bound's fact with the §8 ancestry depth and removes the recursion
+  and its fit; `job` in the machine registry; the split of job_chart.py, owed by the next slice
+  that grows it.
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass in place of the Codex pass,
+  Opus three rounds, Fable two. Before the review, the engineer's own mechanism for DL-341's
+  parity pin, the chart's work under a raised recursion limit and each fact's old call under a
+  limit fitted by frame arithmetic, was rejected by the top level for the budget above, and the
+  rework found the terminator loop's conversion cell. The Opus reviewer accepted the budget and
+  contested the harness rule it came with, which took an input raising on both sides as agreement
+  and compared nothing of it: an engine-made input that faults commits its time half (DL-320),
+  and a planted wrong verdict on a window timer firing on such an input passed; the harness now
+  forks both oracles before each input, and where both raise alike it compares the time half
+  applied alone on the forks and goes on, stopping only where the time half itself raises, as
+  the engine does. The Fable pass accepted the budget but held that nothing of a raising input
+  commits; the code settled it for the Opus reading. Fable found the job-type dimension of three
+  row pairs re-decided from the catalog, so a row of the other type passed; the handler now takes
+  the move from the fired row and a disagreement is a statechart error, as DL-341 did for the
+  INACTIVE rows. Smaller items, the settlement test pinning both probe mutants, the offset's bound
+  and pin, a forced start's window read before its clears recorded, the §11 and citation wording,
+  are fixed and confirmed by the reviewer that raised them. Both passes found the facts read in
+  today's order and writing nothing, every row performed with today's writes and texts, and each
+  planted start guard caught at its first input.
