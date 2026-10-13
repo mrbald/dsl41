@@ -278,6 +278,23 @@ class LockstepDivergence(AssertionError):
     """Raised by `LockstepOracle` at the first divergence."""
 
 
+def _fork(oracle: Oracle) -> Oracle:
+    """A copy of one side before an input. A `LockstepOracle` is forked as
+    the plain oracle it is, not as a pair."""
+    return Oracle.fork(oracle) if isinstance(oracle, LockstepOracle) else oracle.fork()
+
+
+def _alike(old: Exception | None, new: Exception | None) -> bool:
+    """Both sides raised the same: the same type and message, or a
+    RecursionError on each, bare or converted (`CascadeDepthError`): where
+    each met its fitted limit is the stated limit of the comparison."""
+    if old is None or new is None:
+        return False
+    if isinstance(old, RecursionError) and isinstance(new, RecursionError):
+        return True
+    return type(old) is type(new) and str(old) == str(new)
+
+
 @dataclass
 class _Applied:
     batch: InputBatch
@@ -304,6 +321,21 @@ class _Side:
         except Exception as exc:  # noqa: BLE001 -- compared, then re-raised by the arm
             error = exc
         return _Applied(batch, error)
+
+    def restore(self, fork: Oracle, emitted: int) -> None:
+        """Put this side's oracle back as `fork`, a fork taken before the
+        input, in place, since a `LockstepOracle` is its own old side: the
+        trace and the emitted log are cut back to their length then (a
+        fork's start empty), and a chart oracle's store asks this oracle
+        for its job instances again."""
+        oracle = self.oracle
+        trace, out = oracle._trace[: self.traced], oracle._emitted[:emitted]
+        kept = {name: value for name, value in vars(oracle).items() if name == "_lockstep"}
+        vars(oracle).update(vars(fork))
+        vars(oracle).update(kept)
+        oracle._trace, oracle._emitted = trace, out
+        if oracle.store.job_instance is not None:
+            oracle.store.job_instance = getattr(oracle, "_job_instance")  # noqa: B009
 
     def observe(self, batch: InputBatch | None, error: Exception | None) -> dict[str, list[str]]:
         oracle = self.oracle
@@ -337,6 +369,10 @@ class Lockstep:
         self.inputs = 0
         self.seals = 0
         self.unsealable = False
+        #: inputs on which both sides raised alike (`step`)
+        self.raised_alike = 0
+        #: the time half of such an input raised alike too: the engine stops
+        self.time_half_stopped = False
         #: the time spent observing and comparing, the applies excluded
         self.compare_seconds = 0.0
 
@@ -357,6 +393,21 @@ class Lockstep:
         return found
 
     def step(self, step: Step) -> tuple[_Applied | None, Divergence | None]:
+        """Apply one input to both sides and compare what they leave.
+
+        An input on which both sides raise alike (`_alike`) agrees on its
+        attempt half, whose partial writes are not compared: the engine
+        commits none of them. A control input that raises is refused and
+        commits nothing; an engine-made one is quarantined, its rejection
+        logged with the error's text and its time half committed; the engine
+        stops only when the time half itself raises. So both sides are put
+        back as they were before the input (`_Side.restore`), the time half
+        is applied alone on both and compared as any step, and the script
+        goes on, except where the time half raises alike on both too: the
+        engine stops there (`TimeHalfStop`), and so does the pair
+        (`time_half_stopped`, no seal). One side raising, or the two raising
+        differently, is compared as any input is: the outcome names both
+        errors."""
         self.index += 1
         if isinstance(step, SealPoint):
             return None, self.seal()
@@ -364,12 +415,33 @@ class Lockstep:
         self.now = step.at
         # each side gets its own copy: an oracle that edits its input in
         # place must not reach the other side or a later run of the script
+        forks = [
+            (side, _fork(side.oracle), len(side.oracle._emitted)) for side in (self.old, self.new)
+        ]
         old = self.old.apply(_own(step))
         new = self.new.apply(_own(step))
         started = time.perf_counter()
+        described = describe(step)
+        if isinstance(step, Event) and _alike(old.error, new.error):
+            self.raised_alike += 1
+            for side, fork, emitted in forks:
+                side.restore(fork, emitted)
+            raised = old
+            old = self.old.apply(Advance(step.at))
+            new = self.new.apply(Advance(step.at))
+            described += f" (both raised {type(raised.error).__name__}; its time half alone)"
+            raised.observed = self.old.observe(old.batch, old.error)
+            new.observed = self.new.observe(new.batch, new.error)
+            if _alike(old.error, new.error):
+                self.time_half_stopped = True
+                self.compare_seconds += time.perf_counter() - started
+                return raised, None
+            found = self._compare(described, raised.observed, new.observed)
+            self.compare_seconds += time.perf_counter() - started
+            return raised, found
         old.observed = self.old.observe(old.batch, old.error)
         new.observed = self.new.observe(new.batch, new.error)
-        found = self._compare(describe(step), old.observed, new.observed)
+        found = self._compare(described, old.observed, new.observed)
         self.compare_seconds += time.perf_counter() - started
         return old, found
 
@@ -421,6 +493,8 @@ class RunResult:
     compare_seconds: float
     divergence: Divergence | None
     unsealable: int = 0
+    raised_alike: int = 0
+    time_half_stopped: int = 0
 
 
 def run(
@@ -437,18 +511,20 @@ def run(
     copy of `catalog`: the IR is mutable and read lazily, so an oracle that
     wrote to a shared catalog would make the other side agree with it."""
     started = time.perf_counter()
-    fit_recursion_limit(len(catalog.jobs))
     pair = Lockstep(
         old(_own(catalog), semantics=semantics),
         new(_own(catalog), semantics=semantics),
         label=label,
     )
+    # the larger of the two sides' fits: the limit is never lowered
+    for side in (pair.old, pair.new):
+        fit_recursion_limit(len(catalog.jobs), type(side.oracle))
     found = pair.genesis()
     for step in script:
-        if found is not None:
+        if found is not None or pair.time_half_stopped:
             break
         _, found = pair.step(step)
-    if found is None:
+    if found is None and not pair.time_half_stopped:
         found = pair.seal()
     return RunResult(
         label,
@@ -458,6 +534,8 @@ def run(
         pair.compare_seconds,
         found,
         int(pair.unsealable),
+        pair.raised_alike,
+        int(pair.time_half_stopped),
     )
 
 
@@ -761,6 +839,8 @@ class Summary:
     inputs: int = 0
     seals: int = 0
     unsealable: int = 0
+    raised_alike: int = 0
+    time_half_stopped: int = 0
     seconds: float = 0.0
     compare_seconds: float = 0.0
     divergences: list[Divergence] = field(default_factory=list)
@@ -770,6 +850,8 @@ class Summary:
         self.inputs += result.inputs
         self.seals += result.seals
         self.unsealable += result.unsealable
+        self.raised_alike += result.raised_alike
+        self.time_half_stopped += result.time_half_stopped
         self.seconds += result.seconds
         self.compare_seconds += result.compare_seconds
         if result.divergence is not None:
@@ -779,7 +861,9 @@ class Summary:
         per_input = self.compare_seconds / self.inputs * 1e6 if self.inputs else 0.0
         return (
             f"{self.runs} runs, {self.inputs} inputs, {self.seals} seal points,"
-            f" {len(self.divergences)} divergences, {self.unsealable} unsealable ends;"
+            f" {len(self.divergences)} divergences, {self.unsealable} unsealable ends,"
+            f" {self.raised_alike} inputs both raised alike (time half compared),"
+            f" {self.time_half_stopped} stopped where the time half raised on both;"
             f" {self.seconds:.1f} s, comparison {per_input:.0f} us per input"
         )
 

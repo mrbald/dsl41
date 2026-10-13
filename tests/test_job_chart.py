@@ -165,6 +165,8 @@ RELABEL = "job.319"
 LATE_SETTLEMENT = "job.312"
 #: An arm the queued recheck finds already off reports the status move all the same.
 FLAG_REPORT = "job.230"
+#: The per-job start bound (DL-304), a refusal no table declared.
+START_BOUND = "job.100"
 
 
 def _tree() -> tuple[dict[str, tuple[str, ...]], dict[str, str]]:
@@ -223,7 +225,7 @@ def test_the_chart_is_well_formed_draws_no_warning_and_is_not_registered() -> No
     assert chart_warnings(CHART) == []
     assert CHART.clock == "logical"
     assert CHART not in MACHINES  # the second oracle registers it when it drives it
-    assert len(CHART.rows) == 142
+    assert len(CHART.rows) == 143
     assert [b.id for c in CHART.choices for b in c.branches] == [
         *(f"job.{n}" for n in range(171, 177)),
         "job.309",
@@ -297,7 +299,7 @@ def test_the_mapping_is_total_injective_and_keeps_sources_and_targets() -> None:
 
 def test_every_other_row_moves_nothing_relays_an_attempt_or_settles_held_units() -> None:
     others = [row for row in CHART.rows if row.id not in OLD_OF]
-    assert len(OLD_OF) == 83 + 21 and len(others) == 38
+    assert len(OLD_OF) == 83 + 21 and len(others) == 39
     for row in others:
         if row.id in RELAYS:
             assert row.kind == "internal" and row.action == "relay_start"
@@ -308,6 +310,9 @@ def test_every_other_row_moves_nothing_relays_an_attempt_or_settles_held_units()
             assert row.action == "settle_ended_run" and "settles first" in row.note
         elif row.id == RELABEL:
             assert (row.source, row.event, row.target) == ("held", STATUS, "reserved")
+        elif row.id == START_BOUND:
+            assert (row.source, row.event, row.kind) == ("IDLE", START, "internal")
+            assert row.guard == "start_bounded" and "L010" in row.note
         else:
             assert row.kind == "ignored" and row.note, row.id
 
@@ -367,7 +372,11 @@ def _attempts() -> list[Attempt]:
         for window in ("inside", "defer", "skip")
         for fits in (True, False)
     ]
-    return found + [replace(who, box_noexec=True, demand=False) for who in _WHO]
+    return found + [
+        variant
+        for who in _WHO
+        for variant in (replace(who, box_noexec=True, demand=False), replace(who, bounded=True))
+    ]
 
 
 _NOEXECS = [Noexec(busy, change) for busy in (False, True) for change in (True, False)]
@@ -510,6 +519,7 @@ ABSTRACTION = sc.Abstraction(
                 Attempt(window="skip"),
                 Attempt(window="skip", box="running"),
                 Attempt(box_noexec=True),
+                Attempt(bounded=True),
                 Attempt(force=True),
                 Attempt(admissible=False),
             )
@@ -532,6 +542,8 @@ def test_the_completeness_table_matches_the_declaration_in_every_cell() -> None:
     assert table[("job QUE_WAIT hold", ON_ICE, sc.ANY)] == "job.201"
     assert table[("job INACTIVE ice", FORCE_STARTJOB, repr(Attempt()))] == "job.178 + job.203"
     assert table[("job INACTIVE", START, repr(Attempt(window="defer")))] == "ignored job.180"
+    assert table[("job INACTIVE", START, repr(Attempt(bounded=True)))] == "job.100"
+    assert table[("job RUNNING", START, repr(Attempt(bounded=True)))] == "ignored job.180"
     # ON_NOEXEC bypasses before held units are read (SEM-22, `_start_admitted`)
     assert table[("job FAILURE every flag held", START, repr(Attempt(force=True)))] == "job.101"
     assert table[("job FAILURE every flag held", START, repr(Attempt()))] == "ignored job.180"
@@ -794,7 +806,7 @@ def _attempt(oracle: Oracle, job: str, *, force: bool, at: datetime) -> Attempt:
         condition=gate is None or oracle._cond_true(gate.cond, job),
         box_noexec=any(oracle.store.runtime(b).on_noexec for b in oracle._ancestor_boxes(job)),
         admissible=oracle._admissible(job_ir, vector, force=force),
-        demand=bool(vector),
+        demand=bool(to_reservations(vector)),
     )
 
 
@@ -886,8 +898,10 @@ def _moment(
     vector = oracle._pool.demand_vector(job_ir)
     member = "running" if job_ir.box.box_name is not None else "none"
     if lead == "job_status.08":
-        return ChartEvent(READMIT, Readmission(box=member, demand=bool(vector)))  # type: ignore[arg-type]
-    facts: dict[str, Any] = {"box": member, "demand": bool(vector)} | _ATTEMPTS[lead]
+        reserves = bool(to_reservations(vector))
+        return ChartEvent(READMIT, Readmission(box=member, demand=reserves))  # type: ignore[arg-type]
+    facts: dict[str, Any] = {"box": member, "demand": bool(to_reservations(vector))}
+    facts |= _ATTEMPTS[lead]
     return ChartEvent(START, Attempt(**facts))
 
 

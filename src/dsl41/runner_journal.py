@@ -1749,7 +1749,7 @@ def replay_inputs(
     the replay with a `ReplayFault` that names it."""
     # the live engine fitted the limit to this catalog; a replay in another
     # process must fit it too, or it raises where the engine did not
-    fit_recursion_limit(len(oracle.catalog.jobs))
+    fit_recursion_limit(len(oracle.catalog.jobs), type(oracle))
     decisions = read_decisions(records, machines)
     # I2: indices are monotone across the ESTATE, not across the segment, so
     # a segment that opens at 5311 replays from 5310 -- the number its own

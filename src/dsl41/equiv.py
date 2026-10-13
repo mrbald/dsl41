@@ -932,7 +932,7 @@ def equivalent_tier_c(
     if len(set(mapped_names)) != len(mapped_names):
         raise RenameError("job name collision after rename/fold (tier c)")
     # a script can start a cascade of instant starts as deep as a live one
-    fit_recursion_limit(max(len(a.jobs), len(b.jobs)))
+    fit_recursion_limit(max(len(a.jobs), len(b.jobs)), Oracle)
     for index, script in enumerate(scripts):
         # the default switches: equiv is a static tool with no runtime
         # profile, and compares both catalogs under one reading

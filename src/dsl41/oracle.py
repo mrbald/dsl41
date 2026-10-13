@@ -283,7 +283,7 @@ from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time as dtime, timedelta, tzinfo
-from typing import Final, cast
+from typing import ClassVar, Final, cast
 
 from dsl41.autocal import CalendarRuleError, CompiledCalendar, compile_calendar, standard_days
 from dsl41.canon import CanonError, canonical_bytes
@@ -569,10 +569,11 @@ FRAMES_PER_NESTED_START: Final = 16
 RECURSION_LIMIT_BASE: Final = 1000
 
 
-def fit_recursion_limit(job_count: int) -> int:
+def fit_recursion_limit(job_count: int, oracle: type[Oracle] | None = None) -> int:
     """Raise the interpreter's recursion limit so that the deepest instant
-    cascade over `job_count` jobs fits, and return the limit in force. Never
-    lowers it.
+    cascade over `job_count` jobs fits on an oracle of the class `oracle`
+    (`Oracle` when None), and return the limit in force. Never lowers it.
+    Each oracle class carries its own measured `FRAMES_PER_NESTED_START`.
 
     The oracle evaluates a cascade of instant starts recursively, one start
     inside the next. A job has at most `MAX_NESTED_STARTS` starts on the
@@ -593,7 +594,8 @@ def fit_recursion_limit(job_count: int) -> int:
     Since Python 3.12 the limit counts Python frames only. A call from
     Python to Python takes no C stack, and C recursion has its own guard, so
     a high limit does not risk the C stack."""
-    needed = RECURSION_LIMIT_BASE + FRAMES_PER_NESTED_START * MAX_NESTED_STARTS * job_count
+    frames = (oracle or Oracle).FRAMES_PER_NESTED_START
+    needed = RECURSION_LIMIT_BASE + frames * MAX_NESTED_STARTS * job_count
     if needed > sys.getrecursionlimit():
         sys.setrecursionlimit(needed)
     return sys.getrecursionlimit()
@@ -639,6 +641,10 @@ class _LateSettlement:
 
 class Oracle:
     """Deterministic interpreter over one CatalogIR (ir-design ss7)."""
+
+    #: the frames one nested start takes on this class, at most, with margin
+    #: (`fit_recursion_limit`); a subclass that adds frames measures its own
+    FRAMES_PER_NESTED_START: ClassVar[int] = FRAMES_PER_NESTED_START
 
     def __init__(
         self,

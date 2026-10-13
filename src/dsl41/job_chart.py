@@ -66,10 +66,13 @@ reserves or takes over as any start does; the late settlement, finding the
 member live, does nothing (DL-340). `Attempt.admissible` for such a
 start is read after that settlement.
 
-Not declared here, and left to the entry that drives the chart: the cascade
+The per-job start bound (DL-304) is the refusal row job.100: an attempt past
+the gates and the window, for a job with `MAX_NESTED_STARTS` starts already in
+progress, is refused with a trace line whoever asked (`Attempt.bounded`). Not
+declared here, and left to the entries that drive the chart: the cascade
 between instances (a box's rules on its members, a member's moves on its box,
-wakes), the per-job start bound (it attaches to the `start` rows), and the
-start retry that OFF_HOLD and ON_NOEXEC make. No state defers (§12).
+wakes), and the start retry that OFF_HOLD and ON_NOEXEC make. No state
+defers (§12).
 
 The walks that check this chart carry no run window and no true condition;
 the facts of those paths are checked by synthesized cells and one windowed
@@ -183,8 +186,15 @@ class Attempt:
     attempts nothing. `dated`: the job has date conditions (`schedule`).
     `box`: the member's gate on its box's run (SEM-10, SEM-20). `condition`:
     the job's condition holds, or it has none. `window`: `_window_side`.
+    `bounded`: the job already has `MAX_NESTED_STARTS` starts in progress
+    on the call stack (`_starts_in_progress`, the bound `_start` reads).
     `box_noexec`: a box above the job is ON_NOEXEC (`_noexec_bypasses`).
-    `admissible`: `_admissible`. `demand`: the demand vector is not empty.
+    `admissible`: `_admissible`. `demand`: the demand vector reserves units
+    (`to_reservations`; a gate entry reserves nothing, so `reserve` moves
+    nothing for it).
+    The guards read the fields in `start_verdict`'s order, so a tier that
+    computes each fact on its first read computes only those today's rule
+    code reads (`oracle_chart`).
     """
 
     force: bool = False
@@ -196,9 +206,15 @@ class Attempt:
     box: BoxGate = "none"
     condition: bool = True
     window: WindowSide = "inside"
+    bounded: bool = False
     box_noexec: bool = False
     admissible: bool = True
     demand: bool = True
+
+    def relayed(self, *, force: bool) -> Attempt:
+        """The attempt a relay passes on (`relay_start`): scheduled, its
+        refusal traced, forced for FORCE_STARTJOB."""
+        return replace(self, force=force, explicit=True, scheduled=True)
 
 
 @dataclass(frozen=True)
@@ -374,7 +390,16 @@ def _injected(ctx: Context) -> str | None:
 # ---- the start attempt (SEM-10, SEM-20 to SEM-23, SEM-32, SEM-33, DL-50)
 
 type StartVerdict = Literal[
-    "refused", "ignored", "arm", "bypass", "on_held", "queue", "admit", "skip", "skip_member"
+    "refused",
+    "ignored",
+    "arm",
+    "bounded",
+    "bypass",
+    "on_held",
+    "queue",
+    "admit",
+    "skip",
+    "skip_member",
 ]
 _LIVE_OR_QUEUED: Final = frozenset({"STARTING", "RUNNING", "QUE_WAIT"})
 
@@ -402,6 +427,8 @@ def start_verdict(ctx: Context) -> StartVerdict:
             return gated
     if attempt.window != "inside":
         return _skipped(attempt, active)
+    if attempt.bounded:
+        return "bounded"
     if not data.box and ("noexec_on" in active or attempt.box_noexec):
         return "bypass"
     if attempt.force and "held" in active and "FAILED" in active:
@@ -456,6 +483,12 @@ def start_moves_nothing(ctx: Context) -> bool:
 def start_arms(ctx: Context) -> bool:
     """`start_verdict` is `arm`: the tick latches (SEM-32, DL-54)."""
     return start_verdict(ctx) == "arm"
+
+
+def start_bounded(ctx: Context) -> bool:
+    """`start_verdict` is `bounded`: the job has `MAX_NESTED_STARTS` starts in
+    progress (DL-304), so a START_REFUSED line, whoever asked, and no move."""
+    return start_verdict(ctx) == "bounded"
 
 
 def start_bypasses(ctx: Context) -> bool:
@@ -797,13 +830,13 @@ def terminator_fires(ctx: Context) -> bool:
 
 
 def has_demand(ctx: Context) -> bool:
-    """The payload's demand vector is not empty."""
+    """The payload's demand vector reserves units."""
     admission: Admission = ctx.event.payload
     return admission.demand
 
 
 def no_demand(ctx: Context) -> bool:
-    """The payload's demand vector is empty: reserving nothing is no move."""
+    """The payload's demand vector reserves nothing: reserving nothing is no move."""
     admission: Admission = ctx.event.payload
     return not admission.demand
 
@@ -848,6 +881,7 @@ GUARDS: Final = {
         start_refused,
         start_moves_nothing,
         start_arms,
+        start_bounded,
         start_bypasses,
         start_admits_job,
         start_admits_box,
@@ -915,13 +949,10 @@ def relay_start(ctx: Context) -> Effects:
     """STARTJOB, FORCE_STARTJOB or a fired run_window timer: the attempt
     itself, as `_dispatch` makes it: scheduled, its refusal traced, forced
     for FORCE_STARTJOB. The payload's facts pass on."""
-    attempt = replace(
-        ctx.event.payload,
-        force=ctx.event.name == FORCE_STARTJOB,
-        explicit=True,
-        scheduled=True,
+    attempt: Attempt = ctx.event.payload
+    return Effects(
+        send=((ctx.key, Event(START, attempt.relayed(force=ctx.event.name == FORCE_STARTJOB))),)
     )
-    return Effects(send=((ctx.key, Event(START, attempt)),))
 
 
 def consume_arm(ctx: Context) -> Effects:
@@ -1068,8 +1099,21 @@ _ROOT: Final = State(
 )
 
 #: The status rows, `job.1NN`. 101 to 158 are `job_status.01` to `.58`; 159
-#: and above are the rows a split source or a cell the table lacked adds.
+#: and above are the rows a split source or a cell the table lacked adds; 100
+#: is the start bound, which no table declared (`_start` refused in code).
 _STATUS_ROWS: Final = (
+    Row(
+        "job.100",
+        "IDLE",
+        START,
+        guard="start_bounded",
+        kind="internal",
+        cite="DL-304",
+        note=(
+            "L010: a re-trigger loop inside one instant. A start nested inside"
+            " MAX_NESTED_STARTS starts of the same job is refused with a START_REFUSED line."
+        ),
+    ),
     Row("job.101", "IDLE", START, "SUCCESS", "start_bypasses", "consume_arm", cite="SEM-22, DL-54"),
     Row("job.102", "IDLE", START, "STARTING", "start_admits_job", "admit", cite="SEM-10, DL-120"),
     Row("job.103", "IDLE", START, "QUE_WAIT", "start_queues", cite="DL-50, DL-247, DL-255"),
