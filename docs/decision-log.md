@@ -21831,3 +21831,75 @@ relitigate an entry; append a new one.
   Both ran the old and the new methods over the same on-disk anchors, nearly two thousand states
   and five hundred cells, and found only the three announced texts different. All are fixed and
   confirmed by the reviewer that raised them.
+
+- DL-337 The composite job statechart, declared and checked against the three job tables,
+  not yet driven
+  (2026-10-13; src/dsl41/job_chart.py, tests/test_job_chart.py; pyproject.toml; README.md;
+  docs/blocks/job-lifecycle.md; docs/citation-index.md; docs/statechart-engine.md §11 and §16)
+  THE CHART. One `Statechart`, `job`, with three orthogonal regions, as §11 asked. The status
+  region keeps the seven statuses under the superstates the state owner already names: `lifecycle`
+  over all, `IDLE` over `INACTIVE` and `TERMINAL`, `TERMINAL` over `SUCCESS` and `FAILED`, `FAILED`
+  over `FAILURE` and `TERMINATED`, and `LIVE` over `STARTING` and `RUNNING`, so a row the table gave
+  several sources keeps one row where the sources are a named set. The flags region holds four
+  sub-regions, ice, hold, noexec and arm, each off or on; the holding region holds none, reserved
+  and held. The box is not a chart of its own: its rows are rows of `job` guarded by the job type,
+  and members stay catalog relations the rules read. Ids keep the three spaces by hundreds, since
+  the executor spells a chart's ids by its name: `job.1NN` is the status table's NN, `job.2NN` the
+  flags', `job.3NN` the holding's, and the citation index says so. Of 142 rows and eight choice
+  branches, 104 stand for the 83 table rows, 83 under their numbers and 21 for sources that split;
+  three relay the start (a start command, a forced start and the window timer each chain `start`,
+  so the forced clears of ice and hold run before the attempt, and a wake posts `start` itself);
+  three are moves the tables left implicit: an injected live status relabelling held units as the
+  run's, an admitted start meeting units the run before still holds, and the arm's clearing
+  reported when a waiter leaves the queue; nineteen are ignored rows for cells where the rules do
+  nothing, each with the rule that ignores named in its note; thirteen are marked unreachable with
+  the reason. Cross-region moves take the §8 form, and today's orders are the contract. The
+  admitted start and the actual start are items the start rows report, in today's order: acquire,
+  then start. A status rule that reads a flag follows a `flag moved` item the flag's row reports.
+  A status move that may end a run requests a continuation, `settle`, which runs after every item
+  the row reported, reports the run's leaving a live state and then the wakes, so the box rules
+  come first, as today; the batch path to INACTIVE reports the leaving first, as today. Wherever
+  today's rule code writes one region and then reads that write in the same call, the second step
+  is such an item, reading the configuration at its own time; sibling rows on one event remain
+  only where both read the configuration the input met. The settlement carries the end the move
+  made, not the status it finds, as today: a box restarted by its own completion starts its member
+  again before the member's late settlement, which then frees the new run's units. That is a
+  defect of the old oracle, declared here as today's behaviour and fixed by a follow-up entry.
+  Guards read the configuration, the instance's data (the box, the catalog, the member facts, the
+  release policies) and a per-event payload whose fields are the oracle's predicates, so the §13
+  abstraction stays per event: two verdict functions restate the start and readmission rules as
+  one ordered function each. No refusal rows: the rules raise for no job cell. No deferral. Not
+  declared here and attached in the next entry: the cascade between instances, the start bound,
+  the retries and the fold continuation.
+  CHECKS. `well_formed` and `chart_warnings` pass. The mapping of the 83 table rows is total and
+  injective, each row's sources partitioned by its rows, targets within the table's, internal where
+  the table had a stay, and no mapped row marked. A sweep of every buildable configuration against
+  every event and payload partition, more than two hundred thousand cells read through the
+  executor's selection read, meets no statechart error and selects every row somewhere. The §13
+  completeness test holds twenty-six witnesses over 2,574 cells, twelve pinned from the tables and
+  the rule code. The three exhaustive job walks replay through the chart with zero differences:
+  10,440 inputs and 10,905 takes on the addressed job, the ignorable walk and the period opening,
+  with equal final status, flags and holding; the replay refuses a chart that ignores the input's
+  own start. A fourth replay, a box restarted by its own completion, pins the late settlement
+  against the old oracle. The module stands at 100% of its statements and branches through its own
+  tests and joins the branch gate; it is not in the machine registry, since nothing in production
+  drives it yet. It is above the architecture check's advisory size; the driving entry splits the
+  payloads, verdicts and guards from the rows. The old oracle, its tables and the executor are
+  untouched.
+  OPEN FOR THE NEXT ENTRY. Payload facts computed only on the paths today's rules reach;
+  whether the relabelling row stays or the holding region reverts to a derivation; the two box
+  moments as two events; the leave item an idle status posts, which lands on an ignored holding
+  row and must write no trace line; the release fields of the instance data, which are the current
+  run's and are refreshed when a start takes units. Two defects of the old oracle, found by this
+  declaration and fixed by the follow-up entry: the late settlement above, and a carried rescan
+  timer for a job the catalog no longer has, which raises instead of ignoring the job.
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass in place of the Codex pass,
+  three rounds each. Round one: the Opus reviewer found the walk replay accepting a chart that
+  ignored the input's own start, and both reviewers found the cross-region order declared as
+  siblings where today's rule code writes a flag and then reads it; the order became today's, as
+  items. The Fable pass found the member facts the terminator and auto-hold rules read missing
+  from the instance data, and the noexec settlement refusing a box in SUCCESS that today settles.
+  Round two: the Opus reviewer found the admitted start on reserved units reachable, through a box
+  restarted by its own completion, where the chart had marked it unreachable; it is declared as
+  today's behaviour with the defect recorded. Round three closed both sides with nothing open. All
+  findings are fixed and confirmed by the reviewer that raised them.

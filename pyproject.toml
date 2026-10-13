@@ -192,6 +192,8 @@ include = [
     "src/dsl41/cli_control.py",
     "src/dsl41/conditions.py",
     "src/dsl41/estate.py",
+    # the composite job chart, declared before the second oracle drives it
+    "src/dsl41/job_chart.py",
     "src/dsl41/oracle.py",
     "src/dsl41/oracle_state.py",
     "src/dsl41/period.py",
