@@ -194,6 +194,8 @@ include = [
     "src/dsl41/estate.py",
     # the composite job chart, declared before the second oracle drives it
     "src/dsl41/job_chart.py",
+    "src/dsl41/job_chart_events.py",
+    "src/dsl41/job_chart_rows.py",
     "src/dsl41/oracle.py",
     # the second oracle, converted family by family under the lockstep harness
     "src/dsl41/oracle_chart.py",

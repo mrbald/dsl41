@@ -22469,3 +22469,56 @@ relitigate an entry; append a new one.
   items, two planted tests asserting nothing was written before the error, the realign counts
   reconciled by their counting rule and the facts' wording on what keeps the members' flags in
   step, are fixed and confirmed by the reviewer that raised them.
+- DL-347 A box's ON_NOEXEC on the jobs it contains is declared on the job chart as the twin of the
+  box taken off, and the chart module is split by concern
+  (2026-10-14; src/dsl41/job_chart.py, src/dsl41/job_chart_events.py, src/dsl41/job_chart_rows.py,
+  src/dsl41/oracle_chart.py, src/dsl41/oracle_chart_agreement.py, src/dsl41/oracle_chart_cascade.py;
+  tests/test_job_chart.py, tests/test_oracle_chart.py; docs/statechart-engine.md §11, §16;
+  docs/citation-index.md; README.md; pyproject.toml)
+  THE GAP. DL-346 left one flag move to code the chart did not declare: a box's ON_NOEXEC sets the
+  non-execution flag of every job it contains and clears their holds (DL-254), where the chart
+  declared the twin of the box taken off (job.211, job.229) and nothing for the box put on. A
+  chart gap is an assertion, so the chart now carries the event `ON_NOEXEC on its box`, sent to
+  each job the box contains, with three rows in the flags region: the flag put on, the hold
+  cleared, and the flag written again on a job already flagged, which today's code does, with
+  its line, as the job's own ON_NOEXEC does (job.222); the brief had asked for an ignored row
+  there and for one on a job not held, and both were wrong, the first against the code and the
+  second unselectable, since the non-execution region fires on every such job and §3 selects an
+  ignored row only where no region fires. The chart oracle dispatches the event where today's code
+  set the members' flags, one per contained job in today's order, checks the chart's choice of the
+  hold against the row before any write, performs the fired rows by today's method with today's
+  line, and compares both flags after; the jobs that retry their start afterwards are those whose
+  hold row fired. After this entry no flag move of the chart oracle is made outside a chart path,
+  and the realign at commit and the follow before a dispatch cover two things only, the interim
+  holding of a member whose settlement waits behind its box rules and the refresh of an instance's
+  data, both for the worklist slice to remove. The entry was a stop by DL-346's brief and its
+  deferral to this slice, before the worklist, was the second reviewer's ask.
+  THE SPLIT. The chart module, owed a split since DL-344, is three modules by concern: the contract
+  docstring, the guards, the actions and the chart object stay in `job_chart`, which re-exports the
+  rest; the events, the data and the payload classes are `job_chart_events`; the states, the
+  configuration and the rows are `job_chart_rows`. Every public name imports from `job_chart` as
+  before, the row ids and their anchors are unchanged, and the guards stay where the tests patch
+  them.
+  PROOF. The harness, old against chart, shows no difference: the corpus and two hundred estates
+  of up to fifty jobs, 23,249 inputs, firing the three rows; twenty estates of 150 to 200 jobs,
+  7,999; the corpus and forty estates under every switch, 102,102; a further thousand seeds,
+  94,353, three inputs raising alike; the oracle's tests pass through the fourth arm. A spy on the
+  realign over 50,020 inputs shows the non-execution class gone at both sites. STATE_MACHINE_VERSION
+  is unchanged (DL-235).
+  NOT HERE. The worklist and the realign's removal, the audiences declared in the senders' actions,
+  the start bound as an ancestry-depth row, `job` in the machine registry (the next slice); the
+  switch-over (6.4).
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass in place of the Codex pass.
+  Both upheld the two corrections to the brief, found the split equal to the base field by field
+  with the guards' and actions' bytecode identical, every imported name resolving, the retry list
+  equal to today's return on every input, the pre-write check unable to raise on a legitimate
+  input, and every flag move of the chart oracle on a chart path. The Opus reviewer found a
+  mutant that drops every member from the retry list surviving the harness, since a member's
+  retry after the hold a box's non-execution clears is unobservable in every run; a unit
+  assertion on the list now fails it. It also found the member both held and already flagged
+  reached by no harness run; a directed script now reaches it. The Fable pass found the kind of
+  the self row unchecked at run time, so a chart that ignored a flagged member would not have
+  stopped the write; the fired row's kind is now read before the member's write and an ignored
+  row is a statechart error, as DL-344 rules. Smaller items, the per-entry lists in the lifecycle
+  block and the README, a docstring naming one twin, and "before any write" where the box's own
+  flag is already written, are fixed and confirmed by the reviewer that raised them.

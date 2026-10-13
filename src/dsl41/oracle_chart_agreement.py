@@ -3,26 +3,26 @@ DL-341): the job chart's move for an input or a start, recorded at its
 dispatch, and today's writes compared with it.
 
 The code writes the status the chart reached, so the status agrees by
-construction, and the harness is what judges a wrong status row. The check covers what the code still decides: the holding, which today's
-settlement writes; the flags, which the converted inputs move (a flag input, a
-waiter's kill, a forced start's clears of ice and hold, a start's arm and its
-consumption, the arm of a waiter that leaves the queue) and the other converted
-writes leave alone (the flag moves of code the chart does not drive yet, a
-box's members among them, are realigned before the dispatch, not checked); and
-the job type behind the INACTIVE pair, which `_inject_inactive` reads from the
-catalog (a box that fires job.120, or a job that fires job.135, is a
-`StatechartError`). A move that leaves STARTING or RUNNING has its flags
-compared when its status is written, before the box rules run, and its holding
-when its own settlement has run (late, early in a restart by DL-340, or first
-on the batch path). Any other move settles nothing, so its holding is compared
-with the flags at the write, before the box rules can start the job again. A
-later move of the same job by the cascade, which the chart does not declare
-yet, is never taken for a difference. A move compared inside the cascade of
-another (a readmission in the wakes of the box rules) leaves the other waiting
-for its own settlement. A row that the batch INACTIVE path writes for a box
-rule (a box start's reset, a box's cascade) is compared whole once the batch
-has written and settled it. A difference is a `StatechartError` naming both
-configurations.
+construction, and the harness is what judges a wrong status row. The check
+covers what the code still decides: the holding, which today's settlement
+writes; the flags, which the converted inputs and box rules move (a flag input,
+a waiter's kill, a forced start's clears of ice and hold, a start's arm and its
+consumption, the arm of a waiter that leaves the queue, a box's moves of its
+members' flags) and the other converted writes leave alone (no flag move is
+left to code the chart does not drive, DL-347); and the job type behind the
+INACTIVE pair, which `_inject_inactive` reads from the catalog (a box that
+fires job.120, or a job that fires job.135, is a `StatechartError`). A move
+that leaves STARTING or RUNNING has its flags compared when its status is
+written, before the box rules run, and its holding when its own settlement has
+run (late, early in a restart by DL-340, or first on the batch path). Any other
+move settles nothing, so its holding is compared with the flags at the write,
+before the box rules can start the job again. A later move of the same job by
+the cascade, which the chart does not declare yet, is never taken for a
+difference. A move compared inside the cascade of another (a readmission in the
+wakes of the box rules) leaves the other waiting for its own settlement. A row
+that the batch INACTIVE path writes for a box rule (a box start's reset, a
+box's cascade) is compared whole once the batch has written and settled it. A
+difference is a `StatechartError` naming both configurations.
 
 `AgreeingOracle` is `Oracle` with that check at today's write points (the
 trace line that follows every status write, the settlement of a run's
