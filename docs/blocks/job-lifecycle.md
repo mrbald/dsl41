@@ -31,7 +31,7 @@ One job row carries three orthogonal regions, each a declared machine:
 - [job_flags](../state-machines.md#job_flags): ON_ICE, ON_HOLD and ON_NOEXEC, and the schedule arm.
 - [job_holding](../state-machines.md#job_holding): the units a job reserves or keeps; the [capacity](capacity.md) card explains it.
 
-The three are also declared as one composite statechart, `job` in `src/dsl41/job_chart.py`, which is checked against these tables (DL-337). The second oracle drives it for the STATUS input (DL-341) and for every start attempt (DL-342), beside the oracle that takes the tables.
+The three are also declared as one composite statechart, `job` in `src/dsl41/job_chart.py`, which is checked against these tables (DL-337). The second oracle drives it for the STATUS input (DL-341), for every start attempt (DL-342), and for KILLJOB and the TIMER input (DL-343), beside the oracle that takes the tables.
 
 [runtime_assembly](../state-machines.md#runtime_assembly) is the state owner's own life: carried rows or a genesis seed, then one input at a time. It is a statechart ([statechart-engine](../statechart-engine.md), DL-335). The state owner holds its instance from construction, and the configuration is the assembly phase. A verb the phase does not allow is a refusal row, which the verb raises as `OracleError` or `ValueError`.
 Each anchor holds the generated diagram and transition table.

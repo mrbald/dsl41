@@ -51,7 +51,7 @@ from dsl41.oracle import InputBatch, Oracle
 from dsl41.oracle_state import CascadeDepthError, Event, JobRuntime, OracleError
 from dsl41.runner import Engine
 from dsl41.seal import SealedState
-from dsl41.semantics import REGISTRY
+from dsl41.semantics import REGISTRY, SemanticSwitches
 from dsl41.semantics import resolve as resolve_switches
 from dsl41.state_machine import HITS_ENV, STRICT_ENV
 
@@ -115,7 +115,12 @@ def test_old_vs_old_under_every_switch_value() -> None:
     jobs += [job for job in corpus_jobs(scripts=1) if job.label.startswith("<whole corpus>")]
     summary = run_all(jobs, switch_matrix())
     assert summary.divergences == []
-    assert summary.runs == len(jobs) * len(switch_matrix())
+    # a directed estate's own switch can make two rows one (`Job.switches`)
+    rows = [
+        {tuple(sorted({**job.switches, **row}.items())) for row in switch_matrix()} for job in jobs
+    ]
+    assert summary.runs == sum(len(merged) for merged in rows)
+    assert summary.runs < len(jobs) * len(switch_matrix())
 
 
 @given(cases(max_size=8))
@@ -772,3 +777,55 @@ def test_a_time_half_that_raises_alike_stops_the_pair_as_it_stops_the_engine(
     assert found is not None and found.index == 3 and found.field == "outcome"
     assert "its time half alone" in found.input
     assert found.new == ("OracleError: planted time-half fault",) and found.old == ()
+
+
+def test_a_jobs_own_switch_fills_only_what_the_matrix_row_leaves_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A directed estate's switch (`Job.switches`) fills a switch the row
+    leaves out; a row that sets it wins, so the estate runs under every value
+    the matrix names, and a merged row it has run under already runs once."""
+    import oracle_lockstep
+
+    labels: list[str] = []
+    resolved: list[str] = []
+
+    def spy(*args: object, semantics: object = None, label: str = "", **kwargs: object) -> object:
+        labels.append(label)
+        resolved.append(cast(SemanticSwitches, semantics).queued_recheck)
+        return oracle_lockstep.RunResult(label, 0, 0, 0.0, 0.0, None, 0, 0, 0)
+
+    monkeypatch.setattr(oracle_lockstep, "run", spy)
+    pinned = next(j for j in directed_jobs() if j.switches)
+    plain = next(j for j in directed_jobs() if "kill and timer" in j.label and not j.switches)
+    run_all(
+        [pinned, plain],
+        [{}, {"queued-recheck": "1"}, {"queued-recheck": "2"}, {"queued-recheck": "0"}],
+    )
+    assert len(labels) == len(set(labels))
+    pinned_runs = [
+        r for label, r in zip(labels, resolved, strict=True) if label.startswith(pinned.label)
+    ]
+    plain_runs = [
+        r for label, r in zip(labels, resolved, strict=True) if label.startswith(plain.label)
+    ]
+    assert pinned_runs == ["1", "2", "0"]
+    assert plain_runs == ["0", "1", "2", "0"]
+
+
+def test_two_jobs_with_one_label_each_run_under_every_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The dedupe of merged rows is per job, not per label: two jobs that
+    share a label both run."""
+    import oracle_lockstep
+
+    calls: list[str] = []
+
+    def spy(*args: object, label: str = "", **kwargs: object) -> object:
+        calls.append(label)
+        return oracle_lockstep.RunResult(label, 0, 0, 0.0, 0.0, None, 0, 0, 0)
+
+    monkeypatch.setattr(oracle_lockstep, "run", spy)
+    job = directed_jobs()[0]
+    twin = oracle_lockstep.Job(job.label, job.catalog, job.script[:1])
+    run_all([job, twin], [{}, {"queued-recheck": "2"}])
+    assert len(calls) == 4

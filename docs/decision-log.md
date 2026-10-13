@@ -22211,3 +22211,57 @@ relitigate an entry; append a new one.
   are fixed and confirmed by the reviewer that raised them. Both passes found the facts read in
   today's order and writing nothing, every row performed with today's writes and texts, and each
   planted start guard caught at its first input.
+- DL-343 The kill family and the TIMER input are decided by the job chart: KILLJOB, the
+  term_run_time alarm and a deferred start's replay, with the deadline alarms staying code
+  (2026-10-13; src/dsl41/oracle_chart.py; tests/test_oracle_chart.py, tests/oracle_lockstep.py,
+  tests/test_cascade_depth.py; docs/statechart-engine.md §11, §16; docs/blocks/job-lifecycle.md)
+  THE FAMILY. The chart oracle (DL-341, DL-342) now takes the five inputs it decides, STATUS, the
+  two start inputs, TIMER and KILLJOB, in its own input handler and sends the rest to the old one;
+  the start attempt is made where today's handler makes it, after a copy of today's deadline
+  arming, and the relay a start input chains through is passed by the handler, not read from the
+  cause text. A KILLJOB dispatches the input on the job's instance: a live job or box goes to
+  TERMINATED through today's terminate verb, after which a box's terminator cascade runs as today;
+  a queued job fires its arm row and the dequeue row, and the oracle dequeues the waiter, disarms
+  and writes today's queued-kill line; a kill on any other status fires the ignored row and
+  today's ignored line. A TIMER input first runs the deadline checks that move no state, the
+  must_start and must_complete alarms, as today; a term_run_time alarm dispatches its own event
+  with the fact of whether it names the current run, and the row for the current run terminates
+  through the same verb while a stale alarm fires a row that writes nothing, as today; a deferred
+  start's replay dispatches the window event with the facts of a stale deferral, which includes
+  a superseded rescan, and of a rescan, computed in today's order, so a stale replay fires the
+  refusal row with today's text, a rescan that finds the window still shut fires the ignored row
+  and defers to the next opening, and any other replay is the ordinary attempt. The rescan is
+  decided by the chart's verdict, not by today's scan method, which would decide it again.
+  The two plan slices for timers and kills are one here: the timer family is three rows and both
+  end in the terminate verb. A context manager now holds the agreement for a move's block, and the
+  status family uses it too.
+  PROOF. The harness, old against chart, shows no difference: the corpus and two hundred estates
+  of up to fifty jobs, 23,024 inputs; twenty estates of 150 to 200 jobs, 7,999; the corpus and
+  forty estates under every switch, 99,064; a further thousand seeds, 94,353, three inputs raising
+  alike; the oracle's tests pass through the fourth arm. The generator reaches every cell of the
+  family but a rescan's continuation, which needs a queued recheck and a two-year gap, and reaches
+  the armed waiter's kill once in a thousand seeds, and gives a box no resources, so it never
+  queues a box; a directed estate joins the corpus run with scripts for the rescan's three
+  outcomes, the superseded continuation, the armed waiter's kill, and a box holding units that is
+  queued and killed, running and killed, and timed out, with the recheck switch pinned per job
+  where the matrix row leaves it. Planted wrong guards, an alarm ignoring its
+  run, an alarm never firing, a killed waiter leaving for INACTIVE, a stale deferral not refused,
+  each diverge at the first input that reaches them. A terminator chain costs two frames per box
+  on both oracles; the chart's constant frames stay within their bound. STATE_MACHINE_VERSION is
+  unchanged (DL-235). Cost per input on the corpus about 110 microseconds against 49, on the large
+  estates 198 against 76.
+  NOT HERE. The flag inputs, RELEASE_RESOURCE and the readmission, the cascade, `job` in the
+  machine registry, the split of job_chart.py.
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass in place of the Codex pass,
+  Opus three rounds, Fable two. Both judged the rescan decided by the chart's verdict sound: the
+  old scan method has three branches and two effects, each a row with the same text, cause and
+  timer key. Both found that a box declaring resources lowers and queues, so a kill on a queued box
+  was reachable while the facts said it was not; the generator gives boxes no resources, and the
+  directed estate now holds a box with units, queued and killed, running and killed, and timed
+  out. The Fable pass found the superseded half of the stale fact pinned by nothing, a blind
+  surviving the corpus and the sample, closed by a directed script. The Opus reviewer found the
+  per-job switch pin beating the matrix row, now the reverse; an unmeasured frame on the inputs
+  the chart oracle still inherits, now a shape in the budget test; and the handlers ignoring a
+  fired row beyond the ones they perform, now a statechart error. Smaller items, a continuation
+  both box-stale and superseded, one expected error per mutant case, the strict mode a test relied
+  on, the dedupe's key, are fixed and confirmed by the reviewer that raised them.

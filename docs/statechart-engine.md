@@ -325,6 +325,19 @@ rejection logged and its time half committed. So the harness applies that time h
 oracles, compares it and goes on; the engine stops only when the time half itself raises, and where
 it raises on both the harness stops there too.
 
+KILLJOB and the TIMER input are dispatched to the job's instance too (DL-343), and the input
+passes its own relay to the attempt, so no cause text is read. A live job's kill (`job.114`) and a
+term_run_time on the running run it was armed for (`job.115`) terminate through the old method,
+whose terminator cascade for a box stays old code until the cascade slice. A waiter's kill drops
+its arm (`job.217`, `job.226`) and the flag move terminates it (`job.111`); a kill on any other
+status is ignored with a trace line, and a stale term_run_time writes nothing (`job.184`). Each
+move is compared as a STATUS move is. The deadline alarms move no state and stay code. A window
+timer reads its own facts before any gate, as the old oracle does: whether the postponed start
+still belongs to its box run, and whether a scan continuation is superseded. They are real facts
+of its relayed `start`: a stale one is refused with the old text, a live continuation resumes the
+scan, and any other is the attempt. Timers stay armed by code; the chart declares moves, not timer
+writes.
+
 ## 12. Durability of deferred queues
 
 A deferred input is admitted and applied. The apply's effect is the enqueue. There is no new
@@ -475,7 +488,7 @@ proven old-vs-old before the second oracle exists (DL-338). Then the old oracle 
 the second oracle moves anything, the composite `job` chart is declared and checked against the
 old tables (DL-337). The second oracle, `ChartOracle` in `src/dsl41/oracle_chart.py`, subclasses
 the old one and overrides one input family's handlers per entry, STATUS first (DL-341), then the
-start attempt (DL-342); the
+start attempt (DL-342), then KILLJOB and the TIMER input (DL-343); the
 families not yet converted, and the cascade between instances, run the old code in its order.
 
 Each slice is a semantic-class change. Each has its own decision-log entry.

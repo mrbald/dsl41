@@ -12,12 +12,15 @@ import sys
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
+import oracle_lockstep
 import pytest
-from oracle_lockstep import LockstepOracle
+from estate_gen import SealPoint
+from oracle_lockstep import EPOCH, LockstepDivergence, LockstepOracle
 
-from dsl41 import oracle_chart
+from dsl41 import job_chart, oracle_chart
 from dsl41.capacity import CapacityPool
 from dsl41.ir import lower_source
 from dsl41.job_chart import JobData, configuration, row_configuration
@@ -35,8 +38,9 @@ from dsl41.oracle_state import (
     RuntimeState,
 )
 from dsl41.runner_hosts import HostCommand, host_move
+from dsl41.semantics import resolve
 from dsl41.state_machine import Event as ChartEvent
-from dsl41.state_machine import Executor, Outcome, Statechart, StatechartError
+from dsl41.state_machine import HITS_ENV, STRICT_ENV, Executor, Outcome, Statechart, StatechartError
 
 T0 = datetime(2026, 7, 1, 8, 0)
 
@@ -716,6 +720,11 @@ def test_sem10_each_start_outcome_fires_its_row_and_writes_what_the_old_oracle_w
     assert [o.rows for o in mine if o.event.name == "start"] == starts
     lines = [t.transition for t in paired.twin.trace()[traced:] if t.job == job]
     assert (line in lines) if line else lines == []
+    causes = [t.cause for t in paired.twin.trace()[traced:] if t.job == job]
+    if "member's continuation" in case:  # box-stale wins over superseded, as today
+        assert causes[-1].startswith("deferred start belongs to box 'kb' run 1")
+    elif "continuation after" in case:
+        assert causes[-1].startswith("the job has moved on since the scan stopped")
     if starts[-1] in (("job.102",), ("job.124",), ("job.104",)):
         started = [o.rows for o in mine if o.event.name == "started"]
         assert started == [("job.124",) == starts[-1] and ("job.125",) or ("job.105",)]
@@ -1066,3 +1075,538 @@ def test_sem10_a_deep_legal_cascade_runs_on_the_chart_oracle_at_its_fit(shape: s
     finally:
         sys.setrecursionlimit(limit)
     assert {row.status for row in paired.twin.store.job.values()} == {"SUCCESS"}
+
+
+# ---- KILLJOB and the TIMER input (DL-343)
+
+_KT_JIL = (
+    "insert_resource: R\nres_type: R\namount: 1\n\n"
+    "insert_job: h\njob_type: c\ncommand: x\nmachine: m1\nresources: (R, QUANTITY=1, FREE=Y)\n\n"
+    "insert_job: w\njob_type: c\ncommand: x\nmachine: m1\nresources: (R, QUANTITY=1, FREE=Y)\n"
+    f"{_DAILY}\n"
+    "insert_job: t\njob_type: c\ncommand: x\nmachine: m1\nterm_run_time: 5\n\n"
+    "insert_resource: KEPT\nres_type: R\namount: 1\n\n"
+    "insert_job: tk\njob_type: c\ncommand: x\nmachine: m1\nterm_run_time: 5\n"
+    "resources: (KEPT, QUANTITY=1, FREE=Y)\n\n"
+    "insert_job: b\njob_type: b\n\n"
+    "insert_job: m\njob_type: c\ncommand: x\nmachine: m1\nbox_name: b\njob_terminator: 1\n\n"
+    "insert_job: n\njob_type: c\ncommand: x\nmachine: m1\nbox_name: b\n\n"
+    "insert_job: bw\njob_type: b\n\n"
+    f'insert_job: d\njob_type: c\ncommand: x\nmachine: m1\nbox_name: bw\n{_DAILY}run_window: "10:00-11:00"\n\n'
+    f'insert_job: wd\njob_type: c\ncommand: x\nmachine: m1\n{_DAILY}run_window: "10:00-11:00"\n'
+)
+#: The window timers' scan continuation (DL-257), from the harness's directed
+#: estate: `kt_scan` queues behind `kt_hold` and leaves the queue for a scan
+#: that finds no eligible day in its span, so a continuation waits at its end.
+_SCAN_SETUP = [
+    Event(at=EPOCH + timedelta(hours=8), kind="STARTJOB", payload={"job": "kt_hold"}),
+    Event(at=EPOCH + timedelta(hours=8), kind="STARTJOB", payload={"job": "kt_scan"}),
+    Event(
+        at=EPOCH + timedelta(hours=8, minutes=1),
+        kind="STATUS",
+        payload={"job": "kt_hold", "status": "SUCCESS"},
+    ),
+]
+_SCAN_BOUND = datetime(2002, 1, 2, 0, 1)
+
+
+def _scan_ev(minutes: int, kind: EventKind, **payload: object) -> Event:
+    return Event(at=EPOCH + timedelta(hours=8, minutes=minutes), kind=kind, payload=payload)
+
+
+def _directed(name: str) -> list[Event | datetime]:
+    """A script of the harness's directed kill and timer estate, its seal
+    points left out and its time observations as instants."""
+    script = oracle_lockstep._kill_timer_scripts()[name]
+    return [s if isinstance(s, Event) else s.at for s in script if not isinstance(s, SealPoint)]
+
+
+_ITEMS = ("KILLJOB", "flag moved", "TIMER term_run_time", "TIMER run_window", "start")
+#: Per outcome class: the estate, the script (an Event is fed, a datetime
+#: advanced to), the job, the rows its last step fires on the job's
+#: instance for KILLJOB, the flag move, the TIMER events and `start` (the
+#: stale deferral's box restarted, so a second timer replays after it), and
+#: a trace line the old oracle writes for the job at that step ("" for none).
+_KT_OUTCOMES: dict[str, tuple[str, list[Event | datetime], str, list[tuple[str, ...]], str]] = {
+    "kill a live job": (
+        _KT_JIL,
+        [ev("STARTJOB", 1, job="t"), ev("KILLJOB", 2, job="t")],
+        "t",
+        [("job.114",)],
+        "RUNNING->TERMINATED",
+    ),
+    "kill a live box with a terminator": (
+        _KT_JIL,
+        [ev("FORCE_STARTJOB", 1, job="b"), ev("KILLJOB", 2, job="b")],
+        "b",
+        [("job.114",)],
+        "RUNNING->TERMINATED",
+    ),
+    "kill a waiter": (
+        _KT_JIL,
+        [ev("STARTJOB", 1, job="h"), ev("STARTJOB", 2, job="w"), ev("KILLJOB", 3, job="w")],
+        "w",
+        [("job.226",), ("job.111",)],
+        "QUE_WAIT->TERMINATED",
+    ),
+    "kill an armed waiter": (
+        _KT_JIL,
+        [
+            ev("STARTJOB", 1, job="h"),
+            ev("ON_HOLD", 2, job="w"),
+            ev("STARTJOB", 2, job="w"),
+            ev("OFF_HOLD", 3, job="w"),
+            ev("KILLJOB", 4, job="w"),
+        ],
+        "w",
+        [("job.217",), ("job.111",)],
+        "QUE_WAIT->TERMINATED",
+    ),
+    "kill ignored: INACTIVE": (
+        _KT_JIL,
+        [ev("KILLJOB", 1, job="t")],
+        "t",
+        [("job.137",)],
+        "EVENT_IGNORED",
+    ),
+    "kill ignored: SUCCESS": (
+        _KT_JIL,
+        [
+            ev("STARTJOB", 1, job="t"),
+            ev("STATUS", 2, job="t", status="SUCCESS"),
+            ev("KILLJOB", 3, job="t"),
+        ],
+        "t",
+        [("job.138",)],
+        "EVENT_IGNORED",
+    ),
+    "kill ignored: FAILURE": (
+        _KT_JIL,
+        [
+            ev("STARTJOB", 1, job="t"),
+            ev("STATUS", 2, job="t", exit_code=1),
+            ev("KILLJOB", 3, job="t"),
+        ],
+        "t",
+        [("job.139",)],
+        "EVENT_IGNORED",
+    ),
+    "kill ignored: TERMINATED": (
+        _KT_JIL,
+        [ev("STARTJOB", 1, job="t"), ev("KILLJOB", 2, job="t"), ev("KILLJOB", 3, job="t")],
+        "t",
+        [("job.140",)],
+        "EVENT_IGNORED",
+    ),
+    "term_run_time on its run": (
+        _KT_JIL,
+        [ev("STARTJOB", 1, job="t"), T0 + timedelta(minutes=7)],
+        "t",
+        [("job.115",)],
+        "RUNNING->TERMINATED",
+    ),
+    "term_run_time of an earlier run": (
+        _KT_JIL,
+        [
+            ev("STARTJOB", 1, job="t"),
+            ev("STATUS", 2, job="t", status="SUCCESS"),
+            ev("STARTJOB", 3, job="t"),
+            T0 + timedelta(minutes=7),
+        ],
+        "t",
+        [("job.184",)],
+        "",
+    ),
+    "term_run_time after its run ended": (
+        _KT_JIL,
+        [
+            ev("STARTJOB", 1, job="t"),
+            ev("STATUS", 2, job="t", status="SUCCESS"),
+            T0 + timedelta(minutes=7),
+        ],
+        "t",
+        [("job.184",)],
+        "",
+    ),
+    "a deferral replayed": (
+        _KT_JIL,
+        [ev("STARTJOB", 1, job="wd"), T0 + timedelta(hours=2, minutes=1)],
+        "wd",
+        [("job.179",), ("job.102",)],
+        "INACTIVE->STARTING",
+    ),
+    "a deferral that no longer belongs to its box run": (
+        _KT_JIL,
+        [
+            ev("FORCE_STARTJOB", 1, job="bw"),
+            ev("KILLJOB", 2, job="bw"),
+            ev("FORCE_STARTJOB", 3, job="bw"),
+            T0 + timedelta(hours=2, minutes=1),
+        ],
+        "d",
+        [("job.179",), ("job.141",), ("job.179",), ("job.102",)],
+        "START_REFUSED",
+    ),
+    "a scan continuation resumes": (
+        oracle_lockstep.KILL_TIMER_JIL,
+        [*_SCAN_SETUP, _SCAN_BOUND],
+        "kt_scan",
+        [("job.179",), ("job.180",)],
+        "RUN_WINDOW_DEFER",
+    ),
+    "a scan continuation after the job started": (
+        oracle_lockstep.KILL_TIMER_JIL,
+        [
+            *_SCAN_SETUP,
+            _scan_ev(2, "FORCE_STARTJOB", job="kt_scan"),
+            _scan_ev(3, "STATUS", job="kt_scan", status="SUCCESS"),
+            _SCAN_BOUND,
+        ],
+        "kt_scan",
+        [("job.179",), ("job.145",)],
+        "START_REFUSED",
+    ),
+    "a scan continuation after the job moved on": (
+        oracle_lockstep.KILL_TIMER_JIL,
+        [*_SCAN_SETUP, _scan_ev(2, "STATUS", job="kt_scan", status="FAILURE"), _SCAN_BOUND],
+        "kt_scan",
+        [("job.179",), ("job.146",)],
+        "START_REFUSED",
+    ),
+    "kill a queued box": (
+        oracle_lockstep.KILL_TIMER_JIL,
+        _directed("queued box killed"),
+        "kt_box",
+        [("job.226",), ("job.111",)],
+        "QUE_WAIT->TERMINATED",
+    ),
+    "kill an armed queued box": (
+        oracle_lockstep.KILL_TIMER_JIL,
+        _directed("armed queued box killed"),
+        "kt_box",
+        [("job.217",), ("job.111",)],
+        "QUE_WAIT->TERMINATED",
+    ),
+    "kill a running box that holds units": (
+        oracle_lockstep.KILL_TIMER_JIL,
+        _directed("running box with units killed"),
+        "kt_box",
+        [("job.114",)],
+        "RUNNING->TERMINATED",
+    ),
+    "term_run_time on a running box that holds units": (
+        oracle_lockstep.KILL_TIMER_JIL,
+        _directed("running box with units past term_run_time"),
+        "kt_box",
+        [("job.115",)],
+        "RUNNING->TERMINATED",
+    ),
+    "a scan continuation after the job ran and is INACTIVE again": (
+        oracle_lockstep.KILL_TIMER_JIL,
+        _directed("rescan after a run, INACTIVE again"),
+        "kt_scan",
+        [("job.179",), ("job.141",)],
+        "START_REFUSED",
+    ),
+    "a member's continuation after its box restarted and it ran": (
+        oracle_lockstep.KILL_TIMER_JIL,
+        _directed("member rescan, box restarted and member ran"),
+        "kt_mem",
+        [("job.179",), ("job.145",)],
+        "START_REFUSED",
+    ),
+    "a member's continuation after its box restarted": (
+        oracle_lockstep.KILL_TIMER_JIL,
+        _directed("member rescan, box restarted"),
+        "kt_mem",
+        [("job.179",), ("job.141",)],
+        "START_REFUSED",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_KT_OUTCOMES))
+def test_each_kill_and_timer_outcome_fires_its_row_and_writes_what_the_old_oracle_writes(
+    case: str,
+) -> None:
+    """KILLJOB and the TIMER input are dispatched to the job's instance: the
+    row the chart fires is the outcome today's code reaches, and the chart
+    oracle leaves the trace, the events, the rows, the revisions and the seal
+    the old oracle leaves. The window timer's own facts, a deferral that no
+    longer belongs to its box run and a scan continuation, are decided by the
+    `start` its relay posts."""
+    jil, script, job, rows, line = _KT_OUTCOMES[case]
+    semantics = resolve({"queued-recheck": "1"}) if jil is oracle_lockstep.KILL_TIMER_JIL else None
+    paired = LockstepOracle(lower_source(jil), new=ChartOracle, semantics=semantics)
+
+    def step(item: Event | datetime) -> None:
+        if isinstance(item, Event):
+            paired.feed(item)
+        else:
+            paired.advance(item)
+
+    for item in script[:-1]:
+        step(item)
+    seen = _spied(paired.twin)
+    traced = len(paired.twin.trace())
+    step(script[-1])
+    paired.check_seal()
+    _agrees(paired.twin)
+    key = RuntimeState.job_key(job)
+    mine = [o.rows for o in seen if o.key == key and o.event.name in _ITEMS and o.rows]
+    assert mine == rows
+    lines = [t.transition for t in paired.twin.trace()[traced:] if t.job == job]
+    assert (line in lines) if line else lines == []
+    causes = [t.cause for t in paired.twin.trace()[traced:] if t.job == job]
+    if "member's continuation" in case:  # box-stale wins over superseded, as today
+        assert causes[-1].startswith("deferred start belongs to box 'kb' run 1")
+    elif "continuation after" in case:
+        assert causes[-1].startswith("the job has moved on since the scan stopped")
+
+
+def test_sem14_a_killed_box_terminates_its_terminator_members_in_todays_cascade() -> None:
+    """The kill of a live box is job.114 on the box; the members with
+    job_terminator die in today's cascade (`_cascade_job_terminators`, old
+    code until the cascade slice), and the others run on."""
+    paired = _lockstep(_KT_JIL, [ev("FORCE_STARTJOB", 1, job="b"), ev("KILLJOB", 2, job="b")])
+    rows = paired.twin.store.job
+    assert (rows["b"].status, rows["m"].status, rows["n"].status) == (
+        "TERMINATED",
+        "TERMINATED",
+        "RUNNING",
+    )
+    causes = [t.cause for t in paired.twin.trace() if t.job == "m"]
+    assert causes[-1] == "job_terminator: box 'b' ended"
+
+
+def test_sem33_a_bare_timer_relays_its_start_through_the_window_relay() -> None:
+    """An injected TIMER with no check and no deferral is an attempt, relayed
+    by job.179 as a window timer's replay is: the relay is the input's, not
+    read from the cause text."""
+    paired = LockstepOracle(lower_source(_KT_JIL), new=ChartOracle)
+    seen = _spied(paired.twin)
+    paired.feed(ev("TIMER", 1, job="t"))
+    paired.check_seal()
+    rows = [(o.event.name, o.rows) for o in seen if o.key == "job:t"]
+    assert rows[:2] == [("TIMER run_window", ("job.179",)), ("start", ("job.102",))]
+    assert [t.cause for t in paired.twin.trace() if t.job == "t"][0] == "TIMER event"
+
+
+def test_sem34_a_deadline_alarm_stays_code_and_dispatches_nothing() -> None:
+    """must_start and must_complete move no state: their alarms are today's
+    code, before any dispatch, and the job's instance sees no event."""
+    paired = LockstepOracle(lower_source(_KT_JIL), new=ChartOracle)
+    seen = _spied(paired.twin)
+    paired.feed(ev("TIMER", 1, job="t", check="must_start", run=0))
+    paired.feed(ev("TIMER", 2, job="t", check="must_complete", run=0))
+    paired.check_seal()
+    assert [o for o in seen if o.key == "job:t"] == []
+    lines = [t.transition for t in paired.twin.trace() if t.job == "t"]
+    assert lines == ["MUST_START_ALARM", "MUST_COMPLETE_ALARM"]
+
+
+def test_a_kill_whose_flags_differ_from_the_charts_is_a_statechart_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Planted: the running job's instance is iced and no follow brings it
+    back, so the chart's TERMINATED keeps an ice today's kill does not."""
+    oracle = ChartOracle(lower_source(_KT_JIL))
+    oracle.feed(ev("STARTJOB", 1, job="t"))
+    store = oracle.store
+    monkeypatch.setattr(store, "follow_job", lambda job: None)
+    store.machines.realign(
+        "job:t", configuration("RUNNING", ice=True), store.machines.data("job:t")
+    )
+    with pytest.raises(
+        StatechartError, match="the status and the flags differ as written"
+    ) as raised:
+        oracle.feed(ev("KILLJOB", 2, job="t"))
+    assert "item: the event KILLJOB" in str(raised.value)
+
+
+def test_a_term_run_time_whose_holding_differs_from_the_charts_is_a_statechart_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Planted: the data says the run's units are freed, and today's
+    settlement after the term_run_time kill keeps them held (FREE=Y frees on
+    SUCCESS only, DL-256)."""
+    oracle = ChartOracle(lower_source(_KT_JIL))
+    oracle.feed(ev("STARTJOB", 1, job="tk"))
+    monkeypatch.setattr(oracle_chart, "job_data", lambda *_: JobData())
+    with pytest.raises(StatechartError, match="the holding differs after the settlement"):
+        oracle.advance(T0 + timedelta(minutes=7))
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "script", "message"),
+    [
+        (
+            "_KILL_IGNORED",
+            frozenset(),
+            [ev("KILLJOB", 1, job="t")],
+            "'t': KILLJOB fired job.137, and no kill row",
+        ),
+        (
+            "_KILL_WAITER",
+            frozenset(),
+            [ev("STARTJOB", 1, job="h"), ev("STARTJOB", 2, job="w"), ev("KILLJOB", 3, job="w")],
+            "'w': KILLJOB fired job.226, job.111, and no kill row",
+        ),
+        (
+            "_TERM_STALE",
+            ("job.115",),
+            [ev("TIMER", 1, job="t", check="term_run_time", run=7)],
+            "'t': TIMER term_run_time fired job.184, and no term_run_time row",
+        ),
+    ],
+)
+def test_a_kill_or_timer_row_the_oracle_does_not_write_is_a_statechart_error(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: object, script: list[Event], message: str
+) -> None:
+    """Planted: the oracle forgets one of the rows; the rows fired are named."""
+    monkeypatch.setattr(oracle_chart, name, value)
+    oracle = ChartOracle(lower_source(_KT_JIL))
+    for event in script[:-1]:
+        oracle.feed(event)
+    with pytest.raises(StatechartError, match=message):
+        oracle.feed(script[-1])
+
+
+def test_a_window_timer_whose_own_facts_the_chart_ignores_is_a_statechart_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Planted: the chart's verdict reads a scan continuation as a plain
+    replay and admits it; the oracle performs only a refusal or the scan."""
+    verdict = job_chart.start_verdict
+    monkeypatch.setattr(
+        job_chart,
+        "start_verdict",
+        lambda ctx: "admit" if ctx.event.payload.rescan else verdict(ctx),
+    )
+    semantics = resolve({"queued-recheck": "1"})
+    oracle = ChartOracle(lower_source(oracle_lockstep.KILL_TIMER_JIL), semantics=semantics)
+    for event in _SCAN_SETUP:
+        oracle.feed(event)
+    with pytest.raises(
+        StatechartError, match="a stale or rescanning window timer's start is admit"
+    ):
+        oracle.advance(_SCAN_BOUND)
+
+
+def _rows_changed(**changes: dict[str, str]) -> type[ChartOracle]:
+    """A chart whose named rows have the fields given changed."""
+
+    class Changed(ChartOracle):
+        def _job_instance(
+            self, job: str, row: JobRuntime
+        ) -> tuple[Statechart, frozenset[str], object]:
+            chart, active, data = super()._job_instance(job, row)
+            rows = tuple(
+                replace(r, **changes[r.id.replace(".", "_")])
+                if r.id.replace(".", "_") in changes
+                else r
+                for r in chart.rows
+            )
+            return replace(chart, rows=rows), active, data
+
+    return Changed
+
+
+_SWAPPED = {"job_114": {"source": "INACTIVE"}, "job_137": {"source": "LIVE"}}
+
+
+@pytest.mark.parametrize(
+    ("changes", "script", "message"),
+    [
+        (
+            _SWAPPED,
+            [ev("STARTJOB", 1, job="t"), ev("KILLJOB", 2, job="t")],
+            "TransitionError: .*RUNNING is not a source of job_status.37",
+        ),
+        (
+            _SWAPPED,
+            [ev("KILLJOB", 1, job="t")],
+            "TransitionError: .*INACTIVE is not a source of job_status.14",
+        ),
+        (
+            {"job_114": {"guard": "is_job"}},
+            [ev("FORCE_STARTJOB", 1, job="b"), ev("KILLJOB", 2, job="b")],
+            "UnhandledEvent: .*'job:b'",
+        ),
+        (
+            {"job_114": {"guard": "is_box"}},
+            [ev("STARTJOB", 1, job="t"), ev("KILLJOB", 2, job="t")],
+            "UnhandledEvent: .*'job:t'",
+        ),
+    ],
+    ids=["state swapped: a live kill", "state swapped: an idle kill", "jobs only", "boxes only"],
+)
+def test_a_live_kill_row_with_its_state_or_job_type_swapped_fails(
+    changes: dict[str, dict[str, str]],
+    script: list[Event],
+    message: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Mutants of job.114: its state dimension swapped with job.137's (a live
+    kill ignored, an idle kill terminating), which today's tables refuse in
+    the chart oracle's write (strict under the suite); or the row narrowed to
+    one job type, so the other type's live kill meets a gap, a statechart
+    error (DL-292's Q1). Either way the harness names the chart oracle's
+    error as the kill's outcome. The mutant's hits stay out of the session."""
+    monkeypatch.setenv(HITS_ENV, str(tmp_path))
+    monkeypatch.setenv(STRICT_ENV, "1")  # the table refuses the swapped move
+    paired = LockstepOracle(lower_source(_KT_JIL), new=_rows_changed(**changes))
+    for event in script[:-1]:
+        paired.feed(event)
+    with pytest.raises(LockstepDivergence, match=message):
+        paired.feed(script[-1])
+
+
+@pytest.mark.parametrize(
+    ("row", "script", "message"),
+    [
+        (
+            "job_114",
+            [ev("STARTJOB", 1, job="t"), ev("KILLJOB", 2, job="t")],
+            "'t': KILLJOB fired job.114, job.199, and no kill row",
+        ),
+        (
+            "job_115",
+            [ev("STARTJOB", 1, job="t"), ev("TIMER", 2, job="t", check="term_run_time", run=1)],
+            "'t': TIMER term_run_time fired job.115, job.199, and no term_run_time row",
+        ),
+    ],
+)
+def test_a_row_beyond_the_ones_a_kill_or_timer_performs_is_a_statechart_error(
+    row: str,
+    script: list[Event],
+    message: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Planted: the terminating row reports a flag move as well, which fires
+    a further row (job.199). The handler checks every row the input fired, not
+    only the first, and names them all. The marked row's hit stays out of the
+    session."""
+    monkeypatch.setenv(HITS_ENV, str(tmp_path))
+    oracle = _rows_changed(**{row: {"action": "report_flag_move"}})(lower_source(_KT_JIL))
+    for event in script[:-1]:
+        oracle.feed(event)
+    with pytest.raises(StatechartError, match=message):
+        oracle.feed(script[-1])
+
+
+def test_sem34_a_startjob_arms_its_deadlines_before_its_attempt_as_today() -> None:
+    """The chart oracle's own `_dispatch` makes a start input's attempt; a
+    STARTJOB at a start time still arms must_start and must_complete first,
+    and the attempt that follows is the chart's."""
+    text = (
+        "insert_job: sla\njob_type: c\ncommand: x\nmachine: m1\ndate_conditions: 1\n"
+        'days_of_week: all\nstart_times: "08:01"\nmust_start_times: "08:05"\n'
+        'must_complete_times: "08:30"\n'
+    )
+    paired = _lockstep(text, [ev("STARTJOB", 1, job="sla")])
+    checks = sorted(str(e.payload.get("check")) for _due, _seq, e in paired.twin.store.timers())
+    assert checks == ["must_complete", "must_start"]
+    assert paired.twin.store.job["sla"].status == "RUNNING"
