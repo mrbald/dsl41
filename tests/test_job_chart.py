@@ -112,6 +112,7 @@ from dsl41.oracle_state import (
 from dsl41.state_machine import (
     HITS_ENV,
     STRICT_ENV,
+    Context,
     Executor,
     Row,
     StateMachine,
@@ -160,7 +161,7 @@ OLD_OF: dict[str, str] = {new: old for old, news in MAPPING.items() for new in n
 #: The rows no old row maps to, by why they exist.
 RELAYS = ("job.177", "job.178", "job.179")
 RELABEL = "job.319"
-#: Today's late settlement after a box restart, declared as it is (a known oracle bug).
+#: The start of a member that its box restarted before the member's late settlement.
 LATE_SETTLEMENT = "job.312"
 #: An arm the queued recheck finds already off reports the status move all the same.
 FLAG_REPORT = "job.230"
@@ -253,8 +254,8 @@ def test_every_guard_and_action_says_what_it_reads() -> None:
     actions = {row.action for row in CHART.rows} | {
         b.action for c in CHART.choices for b in c.branches
     }
-    # the two settlements also run as continuations, named by `then`
-    assert actions - {""} | {"settle_success"} == set(CHART.actions)
+    # the two late settlements run as continuations, named by `then`
+    assert actions - {""} | {"settle_late", "settle_late_success"} == set(CHART.actions)
     assert not any(state.entry or state.exit for state in _states(CHART.root))
     for name, function in (*CHART.guards.items(), *CHART.actions.items()):
         assert function.__doc__, name
@@ -303,8 +304,8 @@ def test_every_other_row_moves_nothing_relays_an_attempt_or_settles_held_units()
         elif row.id == FLAG_REPORT:
             assert row.kind == "internal" and row.action == "report_flag_move"
         elif row.id == LATE_SETTLEMENT:
-            assert (row.source, row.event, row.target) == ("reserved", ADMITTED_START, "taken over")
-            assert "pre-existing oracle bug" in row.note
+            assert (row.source, row.event, row.kind) == ("reserved", ADMITTED_START, "internal")
+            assert row.action == "settle_ended_run" and "settles first" in row.note
         elif row.id == RELABEL:
             assert (row.source, row.event, row.target) == ("held", STATUS, "reserved")
         else:
@@ -541,7 +542,7 @@ def test_the_completeness_table_matches_the_declaration_in_every_cell() -> None:
     )
     assert table[("job TERMINATED reserved keep", LEAVE_LIVE, repr(Settlement(False)))] == "job.305"
     assert table[("job RUNNING reserved keep", LEAVE_LIVE, repr(Settlement(True)))] == "job.305"
-    # today's late settlement after a box restart: the start takes the old run's units over
+    # a box restart: the start settles the run that ended before it is admitted again
     assert table[("job INACTIVE reserved", ADMITTED_START, repr(Admission(False, True)))] == (
         "job.312"
     )
@@ -1122,13 +1123,13 @@ def test_a_move_on_its_own_settles_after_the_box_rules_and_before_its_wakes(
 
     def settle_then_wake(ctx: Any) -> Any:
         """om's settlement frees R, and the queue scan follows it."""
-        effects = CHART.actions["settle_success"](ctx)
+        effects = CHART.actions["settle_late_success"](ctx)
         if ctx.key != "om":
             return effects
         return replace(effects, send=(*effects.send, ("ox", ChartEvent(READMIT, Readmission()))))
 
     executor = Executor()
-    chart = _with(settle_after_success=cascade_after, settle_success=settle_then_wake)
+    chart = _with(settle_after_success=cascade_after, settle_late_success=settle_then_wake)
     executor.restore("om", chart, configuration("RUNNING", holding="reserved"), JOB_DATA)
     executor.restore("ob", chart, configuration("RUNNING"), BOX_DATA)
     executor.restore("ox", chart, configuration("INACTIVE"), JOB_DATA)
@@ -1294,41 +1295,52 @@ def test_a_windowed_job_with_a_true_condition_replays_through_the_chart(
 
 
 #: A box `ob` whose condition reads its own SUCCESS, so its completion
-#: restarts it; its member `om` holds the only unit of R.
-_RESTART_JIL = (
-    "insert_resource: R\nres_type: R\namount: 1\n\n"
-    "insert_job: ob\njob_type: b\ncondition: s(ob)\n\n"
-    "insert_job: om\njob_type: c\ncommand: m\nmachine: m1\nbox_name: ob\n"
-    "resources: (R, QUANTITY=1, FREE=Y)\n"
+#: restarts it; its member `om` holds the only unit of `Q`.
+def _restart_jil(res_type: str, free: str) -> str:
+    return (
+        f"insert_resource: Q\nres_type: {res_type}\namount: 2\n\n"
+        "insert_job: ob\njob_type: b\ncondition: s(ob)\n\n"
+        "insert_job: om\njob_type: c\ncommand: m\nmachine: m1\nbox_name: ob\n"
+        f"resources: (Q, QUANTITY=1{free})\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("jil", "release", "settling", "reserving"),
+    [
+        (_restart_jil("R", ", FREE=Y"), "free", "job_holding.04", "job_holding.01"),
+        (_restart_jil("R", ", FREE=N"), "keep", "job_holding.05", "job_holding.02"),
+        (_restart_jil("D", ""), "spend", "job_holding.06", "job_holding.01"),
+    ],
+    ids=["free", "keep", "spend"],
 )
-
-
 def test_a_box_restarted_by_its_own_completion_meets_the_member_before_its_late_settlement(
-    takes: list[Take],
+    takes: list[Take], jil: str, release: Release, settling: str, reserving: str
 ) -> None:
-    """Today: om's SUCCESS completes ob, ob restarts, resets om and starts it
-    again, and the start takes the old run's units over; only then does om's
-    own settlement run, and it frees the new run's units. om runs in its
-    second run holding nothing: a pre-existing oracle bug, which the chart
-    declares as it is (`job.312`) until the follow-up fix."""
-    oracle = Oracle(lower_source(_RESTART_JIL))
+    """om's SUCCESS completes ob, ob restarts, resets om and starts it again.
+    The start settles the run that ended first, by the policy of its end (free,
+    keep or spend), and then reserves or takes over what was kept. om's own
+    settlement runs last, finds a later run and does nothing."""
+    oracle = Oracle(lower_source(jil))
     oracle.feed(Event(at=T0 + timedelta(minutes=1), kind="FORCE_STARTJOB", payload={"job": "ob"}))
     del takes[:]
     oracle.feed(
         Event(at=T0 + timedelta(minutes=2), kind="STATUS", payload={"job": "om", "exit_code": 0})
     )
-    old = [(take[2], take[3], take[4]) for take in takes if take[0] == "om"]
+    old = [take[2] for take in takes if take[0] == "om"]
     assert old == [
-        ("job_status.17", "RUNNING", "SUCCESS"),
-        ("job_status.22", "SUCCESS", "INACTIVE"),
-        ("job_holding.02", "held", "reserved"),
-        ("job_flags.13", "arm_off", "arm_off"),
-        ("job_status.02", "INACTIVE", "STARTING"),
-        ("job_status.05", "STARTING", "RUNNING"),
-        ("job_holding.04", "reserved", "none"),
+        "job_status.17",
+        "job_status.22",
+        settling,
+        reserving,
+        "job_flags.13",
+        "job_status.02",
+        "job_status.05",
     ]
     row = oracle.store.job["om"]
-    assert (row.status, row.run_number, row.reservations) == ("RUNNING", 2, ())
+    assert (row.status, row.run_number) == ("RUNNING", 2)
+    assert [(r.bucket, r.units) for r in row.reservations] == [("r:Q", 1)]
+    assert dict(oracle.store.consumed) == ({"r:Q": 1} if release == "spend" else {})
 
     def cascade_after(ctx: Any) -> Any:
         """om's SUCCESS completes ob; ob's SUCCESS restarts it, which resets om
@@ -1343,14 +1355,57 @@ def test_a_box_restarted_by_its_own_completion_meets_the_member_before_its_late_
         )
         return replace(effects, send=tuple(("om", event) for event in restart))
 
+    def admit_after_success(ctx: Any) -> Any:
+        """The tier names the end whose units the start meets."""
+        effects = CHART.actions["admit"](ctx)
+        (key, started), *rest = effects.send
+        started = ChartEvent(
+            started.name, replace(started.payload, previous=Settlement(success=True))
+        )
+        return replace(effects, send=((key, started), *rest))
+
     executor = Executor()
-    chart = _with(settle_after_success=cascade_after)
-    executor.restore("om", chart, configuration("RUNNING", holding="reserved"), JOB_DATA)
+    chart = _with(settle_after_success=cascade_after, admit=admit_after_success)
+    data = JobData(release_on_success=release, release_otherwise=release)
+    executor.restore("om", chart, configuration("RUNNING", holding="reserved"), data)
     rows = [
         ident
         for _key, ident in _rows(
             executor.dispatch("om", ChartEvent(STATUS, Injection(success=True)))
         )
     ]
-    assert rows == ["job.117", "job.122", "job.102", "job.312", "job.224", "job.105", "job.304"]
-    assert projection(executor.active("om")) == ("RUNNING", False, False, False, False, "none")
+    ids = {"job_holding.0%d" % n: "job.30%d" % n for n in range(1, 7)}
+    assert rows == [
+        "job.117",
+        "job.122",
+        "job.102",
+        "job.312",
+        ids[settling],
+        ids[reserving],
+        "job.224",
+        "job.105",
+    ]
+    assert projection(executor.active("om")) == ("RUNNING", False, False, False, False, "reserved")
+
+
+def test_a_late_settlement_finds_the_member_live_and_settles_nothing() -> None:
+    """The two continuations settle an ended run unless the member has started
+    again since: a live configuration means the units are the new run's."""
+    for name, success in (("settle_late", False), ("settle_late_success", True)):
+        for status, holding, sends in (
+            ("TERMINATED" if not success else "SUCCESS", "reserved", 1),
+            ("INACTIVE", "reserved", 1),
+            ("RUNNING", "reserved", 0),
+            ("STARTING", "reserved", 0),
+        ):
+            ctx = Context(
+                key="j",
+                event=ChartEvent(STATUS, Injection(success=success)),
+                active=configuration(status, holding=holding),  # type: ignore[arg-type]
+                data=JOB_DATA,
+            )
+            effects = CHART.actions[name](ctx)
+            sent = [] if effects is None else list(effects.send)
+            assert len(sent) == sends, (name, status)
+            for key, event in sent:
+                assert (key, event.name, event.payload) == ("j", LEAVE_LIVE, Settlement(success))

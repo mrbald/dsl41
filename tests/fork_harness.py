@@ -42,6 +42,7 @@ ORACLE_COPIED = frozenset(
         "_calendars",
         "_window_starts",
         "_starts_in_progress",
+        "_late_settlements",
     }
 )
 #: Oracle attributes the fork starts empty: the append-only history, which
@@ -132,6 +133,11 @@ def state_bytes(oracle: Oracle, since: tuple[int, int] = (0, 0)) -> bytes:
             None if oracle._window_starts is None else [list(w) for w in oracle._window_starts]
         ),
         "starts_in_progress": dict(sorted(oracle._starts_in_progress.items())),
+        "late_settlements": sorted(
+            [job, late.old, late.new, late.run, late.done, late.released]
+            for job, lates in oracle._late_settlements.items()
+            for late in lates
+        ),
     }
     return canonical_bytes(doc)
 

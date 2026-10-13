@@ -22002,3 +22002,61 @@ relitigate an entry; append a new one.
   action with effects on its own instance, and both asked that the sharing of payloads and data be
   stated. All are fixed and confirmed by the reviewer that raised them; the write per entered or
   exited state is the candidate above.
+
+- DL-340 Oracle defects the job chart's declaration exposed: the member of a box restarted by its
+  own completion, and the carried rescan timer of a job the catalog no longer has
+  (2026-10-13; src/dsl41/oracle.py, src/dsl41/job_chart.py, src/dsl41/runner_ledger.py;
+  tests/test_oracle.py, tests/test_job_chart.py, tests/test_classification.py,
+  tests/fork_harness.py; docs/blocks/capacity.md)
+  THE DEFECTS. DL-337 declared the job chart against the old tables and found a cell where the rule
+  code did not do what its rules say: a box whose completion restarts it, by a condition on its own
+  success or an outer box's condition on it, resets and restarts its member before the member's
+  previous run is settled. Three faults met there. The restart took the previous run's unsettled
+  units over as if a settled run had kept them, so a depletable resource was never spent and its
+  units were reused without bound. The late settlement then released the units it found, which
+  were the new run's, so the member ran holding nothing. And when the restart queued the member
+  behind a waiter of higher priority, the late settlement dropped the member's rank, and the commit
+  raised on a journaled completion. Apart from that cell, a carried timer for the rescan of a job
+  that has since left the catalog made the opening scan raise instead of ignoring the job.
+  THE FIXES. A start that meets units the previous run still holds settles that run first, by the
+  policy of the end it made: units freed return to the pool, units kept are held and then taken
+  over as DL-256 says, units spent are debited; the new run then acquires as any start does, from
+  the pool or in the queue. A status move that ends a run registers its settlement for the
+  duration of the box rules, and the late settlement runs only if the restart did not settle it
+  first, which also ends the rank drop; the late settlement drops a rank only when the row is not
+  queued now, as a defence. Settling before the box rules everywhere was rejected: it would change
+  what the cascade can start against held capacity on ordinary estates, and today's order, box
+  rules, then the settlement, then the wakes, is the contract DL-337 recorded. The rescan treats a
+  job the catalog no longer has as superseded and writes the line the superseded case writes. The
+  chart follows: the admitted start on units still reserved is an internal row that reports the
+  run's leaving with the previous run named, then the admitted start again, so the holding rows do
+  the rest; the status rows' continuation settles nothing when the configuration is live again,
+  and the box-restart replay, for the free, keep and spend policies, ends with the member holding
+  its new run's units. Trace tests pin each fix under the closest rules, SEM-10 for the box, SEM-16
+  for the depletable and DL-255 for the rank, in the self-restarting and the outer-box forms on the
+  three paths, direct, engine and fork; each fails on the old code. The boundary verdict for a
+  retained ghost whose catalog no longer defines it follows the scan: the ghost carries as not live
+  instead of refusing every later opening, which DL-257 intended, and a test pins it; a removed job
+  whose timer is still live stays refused. STATE_MACHINE_VERSION moves from 20 to 21 (DL-235): a
+  logged status input on a member of a self-restarting box reaches the cell, so a replay derives
+  different reservations. The old-versus-new harness (DL-338), with the previous oracle as the
+  twin, shows no difference on the corpus under every switch, none on twenty large estates, and one
+  in a thousand generated estates, where a box restarts on its own completion with a member
+  holding units.
+  ORDER KEPT, PINNED. A restarted member of lower priority takes the unit its previous run freed
+  ahead of a queued waiter of higher priority that the free made whole: the admission order
+  (DL-50's amendment, DL-255) protects a waiter only while it is short, and the old code queued the
+  member only through the defect. A trace test pins the order; changing it would reopen a settled
+  decision.
+  RECORDED, NOT CHANGED. The previous run's terminator cascade can kill the new run of a member
+  that is both a box terminator and a job terminator, restarting the box many times in one input
+  until an invariant error; both versions do it; a follow-up of the DL-304 class. The rescan line
+  for a removed job that was a box member follows the stale-box line; acceptable for a floor the
+  boundary already holds (PR-40).
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass in place of the Codex pass,
+  three rounds each. Both found, independently and reproduced, the two faults above that the first
+  fix had left: the rank drop, and the take-over of unsettled units with the depletable never
+  spent; both ruled the same direction, settle the previous run at the take-over, which this entry
+  adopts over the first fix's guard alone. Round two confirmed every fix and found the admission
+  order above, recorded and pinned, and three nits, folded. Round three closed both sides. All
+  findings are fixed or recorded and confirmed by the reviewer that raised them.

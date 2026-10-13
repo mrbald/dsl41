@@ -53,15 +53,18 @@ it:
 
 The settlement of a run's units keeps today's two orders. A move on its own
 (`Oracle._after_transition`) runs the box rules, then the settlement, then the
-wakes: a status move that may end a run requests the continuation `settle`
-(or `settle_success` for an end in SUCCESS), which runs after every item the
+wakes: a status move that may end a run requests the continuation `settle_late`
+(or `settle_late_success` for an end in SUCCESS), which runs after every item the
 row reports and reports `leave STARTING or RUNNING`; the wakes follow it. A
 move of the batch INACTIVE path (`Oracle._set_inactive_batch`) settles first:
 its row reports `leave STARTING or RUNNING` ahead of anything else. As today,
-the settlement carries the end the move made, not the status it finds: a box
-restarted by its own completion can start the member again before the
-member's late settlement, which then frees the new run's units (job.312, a
-pre-existing oracle bug that a follow-up fix removes).
+the settlement carries the end the move made, not the status it finds. One
+case reads the status: a box restarted by its own completion can start the
+member again before the member's late settlement (job.312). That start settles
+the run that ended first, by the end it made (`Admission.previous`), and then
+reserves or takes over as any start does; the late settlement, finding the
+member live, does nothing (DL-340). `Attempt.admissible` for such a
+start is read after that settlement.
 
 Not declared here, and left to the entry that drives the chart: the cascade
 between instances (a box's rules on its members, a member's moves on its box,
@@ -294,6 +297,9 @@ class Admission:
 
     on_held: bool = False
     demand: bool = True
+    #: the end of the run whose units are still on the row when a box restarted
+    #: by its own completion starts the member again (job.312)
+    previous: Settlement = Settlement()
 
 
 # ---- configuration
@@ -939,16 +945,29 @@ def admit_on_held(ctx: Context) -> Effects:
     )
 
 
+def settle_ended_run(ctx: Context) -> Effects:
+    """A start meets the units of a run whose settlement is still owed
+    (`_settle_ended_run`): that run settles first, by the end it made, then
+    the start is admitted again against what the settlement left."""
+    admission: Admission = ctx.event.payload
+    return Effects(
+        send=(
+            (ctx.key, Event(LEAVE_LIVE, admission.previous)),
+            (ctx.key, Event(ADMITTED_START, replace(admission, previous=Settlement()))),
+        )
+    )
+
+
 def settle_after(ctx: Context) -> Effects:
     """A move on its own (`_after_transition`) that may end a run in a status
-    other than SUCCESS: the settlement is the continuation `settle`, after the
-    box rules this row reports; the wakes follow the settlement."""
-    return Effects(then="settle")
+    other than SUCCESS: the settlement is the continuation `settle_late`, after
+    the box rules this row reports; the wakes follow the settlement."""
+    return Effects(then="settle_late")
 
 
 def settle_after_success(ctx: Context) -> Effects:
-    """As `settle_after`, for an end in SUCCESS: the continuation `settle_success`."""
-    return Effects(then="settle_success")
+    """As `settle_after`, for an end in SUCCESS: the continuation `settle_late_success`."""
+    return Effects(then="settle_late_success")
 
 
 def settle(ctx: Context) -> Effects:
@@ -958,8 +977,21 @@ def settle(ctx: Context) -> Effects:
     return Effects(send=((ctx.key, Event(LEAVE_LIVE, Settlement())),))
 
 
-def settle_success(ctx: Context) -> Effects:
-    """The run's units settle for an end in SUCCESS."""
+def settle_late(ctx: Context) -> Effects | None:
+    """The settlement `settle_after` asked for, an end other than SUCCESS. A
+    live configuration means the member has started again since the end: the
+    units are the new run's, and nothing settles (the run guard of
+    `_settle_row`)."""
+    if "LIVE" in ctx.active:
+        return None
+    return settle(ctx)
+
+
+def settle_late_success(ctx: Context) -> Effects | None:
+    """The settlement `settle_after_success` asked for, an end in SUCCESS,
+    unless the member is live again (`settle_late`)."""
+    if "LIVE" in ctx.active:
+        return None
     return Effects(send=((ctx.key, Event(LEAVE_LIVE, Settlement(success=True))),))
 
 
@@ -980,10 +1012,12 @@ ACTIONS: Final = {
         consume_arm,
         admit,
         admit_on_held,
+        settle_ended_run,
         settle_after,
         settle_after_success,
         settle,
-        settle_success,
+        settle_late,
+        settle_late_success,
         report_flag_move,
     )
 }
@@ -1391,14 +1425,16 @@ _HOLDING_ROWS: Final = (
         "job.312",
         "reserved",
         ADMITTED_START,
-        "taken over",
+        "",
         "takes_over",
+        "settle_ended_run",
+        kind="internal",
         cite=_DL256,
         note=(
-            "Today's behaviour, a pre-existing oracle bug: a box restarted by its own"
-            " completion starts the member again before the member's late settlement, the"
-            " start takes the old run's units over, and the late settlement then frees the"
-            " new run's. A follow-up fix removes the cell."
+            "A box restarted by its own completion starts the member again before the"
+            " member's late settlement. The run that ended settles first, by the end it"
+            " made (frees, keeps, or spends); the start is then admitted again, to reserve"
+            " or to take over what was kept."
         ),
     ),
     Row("job.313", "none", LEAVE_LIVE, kind="ignored", note="The run held nothing."),

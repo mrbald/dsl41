@@ -153,11 +153,15 @@ def transitions(o: Oracle | EngineHarness, job: str) -> list[str]:
     return [t.transition for t in o.trace() if t.job == job]
 
 
+def oracle_of(o: Oracle | EngineHarness) -> Oracle:
+    """The engine path's oracle lives at `.engine.oracle` on the harness
+    (bisim_harness.EngineHarness)."""
+    return o if isinstance(o, Oracle) else o.engine.oracle
+
+
 def pending_timer_jobs(o: Oracle | EngineHarness) -> set[str]:
-    """pending_timers() is Oracle-only; the engine path's oracle lives at
-    `.engine.oracle` on the harness (bisim_harness.EngineHarness)."""
-    oracle_obj = o if isinstance(o, Oracle) else o.engine.oracle
-    return {job for _, job, _ in oracle_obj.pending_timers()}
+    """pending_timers() is Oracle-only."""
+    return {job for _, job, _ in oracle_of(o).pending_timers()}
 
 
 def test_bisim_gate_meta_all_tests_go_through_the_oracle_helper() -> None:
@@ -1159,6 +1163,173 @@ def test_sem10_second_box_run_resets_an_on_noexec_member_then_bypasses_it() -> N
     o.feed(ev("STATUS", 11, job="nx_a", status="SUCCESS"))
     assert transitions(o, "nx_n")[-2:] == ["SUCCESS->INACTIVE", "INACTIVE->SUCCESS"]
     assert o.store.job["box_nx"].status == "SUCCESS"
+
+
+#: A box that restarts when its own completion is seen, and a box whose outer box
+#: restarts when the inner one completes. Each member holds the only unit of R;
+#: `outsider` asks for the same unit.
+_RESTART_UNITS = (
+    "insert_resource: R\nres_type: R\namount: 1\n\n"
+    "insert_job: outsider\njob_type: c\ncommand: w\nmachine: m1\n"
+    "resources: (R, QUANTITY=1, FREE=Y)\n\n"
+)
+_SELF_RESTART = _RESTART_UNITS + (
+    "insert_job: ob\njob_type: b\ncondition: s(ob)\n\n"
+    "insert_job: om\njob_type: c\ncommand: m\nmachine: m1\nbox_name: ob\n"
+    "resources: (R, QUANTITY=1, FREE=Y)\n"
+)
+_OUTER_RESTART = _RESTART_UNITS + (
+    "insert_job: ob\njob_type: b\ncondition: s(ib)\n\n"
+    "insert_job: ib\njob_type: b\nbox_name: ob\n\n"
+    "insert_job: om\njob_type: c\ncommand: m\nmachine: m1\nbox_name: ib\n"
+    "resources: (R, QUANTITY=1, FREE=Y)\n"
+)
+
+
+@pytest.mark.parametrize("jil", [_SELF_RESTART, _OUTER_RESTART], ids=["self", "outer"])
+def test_sem10_a_box_restarted_by_its_own_completion_leaves_the_member_its_new_runs_units(
+    jil: str,
+) -> None:
+    """SEM-10, SEM-11, DL-50: the member's SUCCESS completes the box, the box
+    restarts in that cascade, resets the member and starts it again. The
+    start settles the run that just ended first: its FREE=Y unit goes back to
+    the pool and the second run reserves one anew. The member's own settlement
+    runs after the box rules, finds a later run and frees nothing. `outsider`
+    asks for the unit while the second run is live and queues, where a
+    settlement that freed the second run's unit would have started it."""
+    o = oracle(jil)
+    o.feed(ev("FORCE_STARTJOB", 0, job="ob"))
+    assert o.store.job["om"].run_number == 1
+    o.feed(ev("STATUS", 1, job="om", exit_code=0))
+    row = o.store.job["om"]
+    assert (row.status, row.run_number) == ("RUNNING", 2)
+    assert _held_units(o, "om") == [("r:R", 1, "success")]
+    assert dict(o.store.consumed) == {}
+    o.feed(ev("STARTJOB", 2, job="outsider"))
+    assert transitions(o, "om") == [
+        "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+        "RUNNING->SUCCESS",
+        "SUCCESS->INACTIVE",
+        "INACTIVE->STARTING",
+        "STARTING->RUNNING",
+    ]
+    assert o.store.job["outsider"].status == "QUE_WAIT"
+
+
+def _restart_text(res_type: str, amount: int, free: str = "") -> str:
+    """`ob` restarts on its own completion; its member `om` and a later `third`
+    each ask for one unit of `Q`."""
+    return (
+        f"insert_resource: Q\nres_type: {res_type}\namount: {amount}\n\n"
+        "insert_job: third\njob_type: c\ncommand: t\nmachine: m1\n"
+        f"resources: (Q, QUANTITY=1{free})\n\n"
+        "insert_job: ob\njob_type: b\ncondition: s(ob)\n\n"
+        "insert_job: om\njob_type: c\ncommand: m\nmachine: m1\nbox_name: ob\n"
+        f"resources: (Q, QUANTITY=1{free})\n"
+    )
+
+
+def test_sem16_a_depletable_is_spent_by_each_run_of_a_self_restarting_member() -> None:
+    """SEM-16, DL-50 (3): a depletable drains and never refills. The first
+    run's end spends its unit when the box restarts the member, so with two
+    units the second run takes the last and `third` queues; the run that
+    started again was not handed the spent unit back."""
+    o = oracle(_restart_text("D", 2))
+    o.feed(ev("FORCE_STARTJOB", 0, job="ob"))
+    o.feed(ev("STATUS", 1, job="om", exit_code=0))
+    assert (o.store.job["om"].status, o.store.job["om"].run_number) == ("RUNNING", 2)
+    assert dict(o.store.consumed) == {"r:Q": 1}
+    assert _held_units(o, "om") == [("r:Q", 1, "never")]
+    o.feed(ev("STARTJOB", 2, job="third"))
+    assert o.store.job["third"].status == "QUE_WAIT"
+
+
+def test_sem16_a_member_the_restart_queues_by_depletion_keeps_its_rank() -> None:
+    """DL-255, SEM-16: with one unit, the first run's end spends it, so the
+    restart finds the pool empty and queues the member. Its rank belongs to
+    that queueing; the settlement that follows the box rules must not drop
+    it, or the input faults with a QUE_WAIT row that has no rank."""
+    o = oracle(_restart_text("D", 1))
+    o.feed(ev("FORCE_STARTJOB", 0, job="ob"))
+    o.feed(ev("STATUS", 1, job="om", exit_code=0))
+    row = o.store.job["om"]
+    assert (row.status, row.run_number) == ("QUE_WAIT", 1)
+    assert row.waiter_seq is not None
+    assert dict(o.store.consumed) == {"r:Q": 1}
+    assert o.store.job["ob"].status == "RUNNING"
+
+
+def test_dl255_a_restarted_member_takes_the_freed_unit_ahead_of_a_waiter_it_made_whole() -> None:
+    """DL-255, DL-50 (amendment 1): the documented admission order, not a
+    choice made here. A queued waiter blocks lower priorities only while it is
+    short of what it names. `outsider` (priority 1) waits for the one unit that
+    `om` (priority 2) holds. `om`'s end frees the unit, which makes `outsider`
+    whole, so it no longer blocks; the box restarts and `om`, starting in that
+    cascade, takes the unit before the queue is scanned. `outsider` stays
+    queued behind the second run."""
+    o = oracle(
+        "insert_resource: R\nres_type: R\namount: 1\n\n"
+        "insert_job: outsider\njob_type: c\ncommand: w\nmachine: m1\npriority: 1\n"
+        "resources: (R, QUANTITY=1, FREE=Y)\n\n"
+        "insert_job: ob\njob_type: b\ncondition: s(ob)\n\n"
+        "insert_job: om\njob_type: c\ncommand: m\nmachine: m1\nbox_name: ob\npriority: 2\n"
+        "resources: (R, QUANTITY=1, FREE=Y)\n"
+    )
+    o.feed(ev("FORCE_STARTJOB", 0, job="ob"))
+    o.feed(ev("STARTJOB", 1, job="outsider"))
+    assert o.store.job["outsider"].status == "QUE_WAIT"
+    o.feed(ev("STATUS", 2, job="om", exit_code=0))
+    row = o.store.job["om"]
+    assert (row.status, row.run_number) == ("RUNNING", 2)
+    assert _held_units(o, "om") == [("r:R", 1, "success")]
+    assert o.store.job["outsider"].status == "QUE_WAIT"
+    assert o.store.job["outsider"].waiter_seq is not None
+
+
+def test_dl255_a_member_queued_behind_a_wider_waiter_runs_after_it() -> None:
+    """DL-255: `wide` (priority 1) waits for both units of R while `hog` and
+    `om` hold one each. The first run's end frees `om`'s unit, but `wide` is
+    still short, so it blocks the restarted `om` (priority 2), which queues
+    and keeps its rank. `hog` ends: `wide` runs. `wide` ends: `om` runs its
+    second run."""
+    o = oracle(
+        "insert_resource: R\nres_type: R\namount: 2\n\n"
+        "insert_job: hog\njob_type: c\ncommand: h\nmachine: m1\n"
+        "resources: (R, QUANTITY=1, FREE=A)\n\n"
+        "insert_job: wide\njob_type: c\ncommand: w\nmachine: m1\npriority: 1\n"
+        "resources: (R, QUANTITY=2, FREE=A)\n\n"
+        "insert_job: ob\njob_type: b\ncondition: s(ob)\n\n"
+        "insert_job: om\njob_type: c\ncommand: m\nmachine: m1\nbox_name: ob\npriority: 2\n"
+        "resources: (R, QUANTITY=1, FREE=A)\n"
+    )
+    o.feed(ev("FORCE_STARTJOB", 0, job="ob"))
+    o.feed(ev("STARTJOB", 1, job="hog"))
+    o.feed(ev("STARTJOB", 2, job="wide"))
+    o.feed(ev("STATUS", 3, job="om", exit_code=0))
+    assert _statuses(o, "om", "wide") == {"om": "QUE_WAIT", "wide": "QUE_WAIT"}
+    assert o.store.job["om"].waiter_seq is not None
+    o.feed(ev("STATUS", 4, job="hog", exit_code=0))
+    assert _statuses(o, "om", "wide") == {"om": "QUE_WAIT", "wide": "RUNNING"}
+    o.feed(ev("STATUS", 5, job="wide", exit_code=0))
+    row = o.store.job["om"]
+    assert (row.status, row.run_number) == ("RUNNING", 2)
+    assert _held_units(o, "om") == [("r:R", 1, "completion")]
+
+
+def test_sem10_a_restarted_member_keeps_the_units_its_policy_holds() -> None:
+    """SEM-10, DL-256: FREE=N keeps the first run's unit on the member; the
+    restart takes it over as any start of a holder does, and nothing is spent.
+    `third` finds the unit held."""
+    o = oracle(_restart_text("R", 1, ", FREE=N"))
+    o.feed(ev("FORCE_STARTJOB", 0, job="ob"))
+    o.feed(ev("STATUS", 1, job="om", exit_code=0))
+    row = o.store.job["om"]
+    assert (row.status, row.run_number) == ("RUNNING", 2)
+    assert _held_units(o, "om") == [("r:Q", 1, "never")]
+    assert dict(o.store.consumed) == {}
+    o.feed(ev("STARTJOB", 2, job="third"))
+    assert o.store.job["third"].status == "QUE_WAIT"
 
 
 # ------------------------------------------------------------------ 9. SEM-11 box fold
@@ -4220,6 +4391,46 @@ def test_sem33_run_window_exact_midpoint_ties_to_next_opening() -> None:
         Event(at=datetime(2026, 7, 1, 22, 31), kind="STARTJOB", payload={"job": "rw_tie"})
     )
     assert transitions(just_after, "rw_tie") == ["RUN_WINDOW_DEFER"]
+
+
+def test_sem33_a_scan_for_the_next_opening_ends_when_the_job_has_left_the_catalog() -> None:
+    """SEM-33, DL-257: a tickless job that the queued recheck sends back to
+    INACTIVE has no eligible day in the scan's span, so one continuation timer
+    waits at the end of the span. If the catalog no longer defines the job
+    when the timer is due, the continuation is dead, like one for a job that
+    started since: it is not listed as pending, and its firing writes the
+    same START_REFUSED line, where it used to be listed live and then raise
+    a KeyError at the firing. A period boundary refuses a removed job that
+    still has a live timer (PR-40), so this is a floor under that gate and not
+    a path the runner takes. The catalog is edited in place, which only a test
+    does."""
+    every_day = "\n".join(f"{date(2026, 7, 2) + timedelta(days=i):%m/%d/%Y}" for i in range(760))
+    o = oracle(
+        f"calendar: every\n{every_day}\n\n"
+        "insert_resource: R\nres_type: R\namount: 1\n\n"
+        "insert_job: h\njob_type: c\ncommand: x\nmachine: m1\nresources: (R, QUANTITY=1)\n\n"
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\nresources: (R, QUANTITY=1)\n"
+        'date_conditions: 1\ndays_of_week: mo\nexclude_calendar: every\nrun_window: "07:00-10:00"\n',
+        semantics=resolve_switches({"queued-recheck": "2"}),
+    )
+    o.feed(ev("STARTJOB", 0, job="h"))
+    o.feed(ev("STARTJOB", 0, job="j"))
+    o.feed(ev("STATUS", 1, job="h", status="SUCCESS"))
+    assert o.store.job["j"].status == "INACTIVE"
+    assert transitions(o, "j")[-1] == "RUN_WINDOW_DEFER"
+    assert pending_timer_jobs(o) == {"j"}
+
+    del oracle_of(o).catalog.jobs["j"]
+    if isinstance(o, LockstepOracle):  # the paired oracle has its own catalog
+        del o.twin.catalog.jobs["j"]
+    assert pending_timer_jobs(o) == set()
+    o.feed(Event(at=datetime(2028, 7, 3), kind="STATUS", payload={"job": "h", "status": "FAILURE"}))
+    assert transitions(o, "j")[-2:] == ["RUN_WINDOW_DEFER", "START_REFUSED"]
+    refused = [t for t in o.trace() if t.job == "j" and t.transition == "START_REFUSED"]
+    assert len(refused) == 1 and "moved on since the scan stopped" in refused[0].cause
+    assert o.store.job["j"].status == "INACTIVE"
+    assert o.store.job["j"].run_number == 0
+    assert pending_timer_jobs(o) == set()
 
 
 def test_sem33_box_variant_sole_deferred_member_keeps_box_running_until_it_completes() -> None:
