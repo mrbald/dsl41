@@ -226,7 +226,7 @@ def host_move(store: RuntimeState, cmd: HostCommand) -> Outcome:
     instance, and nothing moves.
 
     It dispatches on a scratch executor that `rebuild_machines` rebuilds from
-    the rows, the way a fork rebuilds one. The gate must answer before the
+    the rows, the way an install rebuilds one. The gate must answer before the
     configuration moves, and the gate also runs where no dry apply precedes
     it (the real apply, the leader's inputs, a recovered attempt at replay),
     so it cannot borrow a dry apply's outcome. The host must have a row."""

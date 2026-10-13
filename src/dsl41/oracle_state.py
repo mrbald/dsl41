@@ -1694,8 +1694,10 @@ RUNTIME_ASSEMBLY: Final = Statechart(
 # host's state; `HostRuntime.state` is its projection into the row, which
 # the tier writes from the active leaf after the microstep. The rows are
 # enough to rebuild the executor, so every place that rebuilds the rows
-# rebuilds it from them (`rebuild_machines`): a fork, an install, the gate's
-# scratch read of the chart, and a test's witness (`witness_host`). A state
+# rebuilds it from them (`rebuild_machines`): an install, the gate's scratch
+# read of the chart, and a test's witness (`witness_host`). A fork copies the
+# executor instead (`Executor.fork`, DL-339) and binds each host instance's
+# data to the fork's store. A state
 # write that no microstep made raises a `StatechartError`.
 #
 # The chart is dispatched only for an APPLIED host command: the gate in
@@ -2047,8 +2049,9 @@ class RuntimeState:
         self._hosts: dict[str, HostRuntime] = {}
         #: the state owner's own executor (statechart-engine ss11): the
         #: `RUNTIME_ASSEMBLY` instance, and one `HOST` instance per host row.
-        #: Rebuilt from the phase and the rows wherever they are
-        #: (`rebuild_machines`); the engine's executor is the engine tier's.
+        #: A fork copies it (DL-339); an install and a test's witness rebuild
+        #: it from the phase and the rows (`rebuild_machines`). The engine's
+        #: executor is the engine tier's.
         self.machines = Executor()
         self.machines.start(ASSEMBLY_KEY, RUNTIME_ASSEMBLY)
         self.machines.run()
@@ -2095,14 +2098,17 @@ class RuntimeState:
         each map and the heap list keeps every write on the copy. Heap events
         are shared; no verb changes one in place. The violation channel starts
         empty: an orphan must not refuse the input being dry-applied. The
-        twin's executor is its own, restored from the source's phase and the
-        twin's host rows, so a dispatch on the fork never reaches this one's
-        instances."""
+        twin's executor is a copy of this one's (`Executor.fork`, DL-339): it
+        shares the instance records until it writes one, so a dispatch on the
+        fork never reaches this one's instances. Each host instance's data is
+        bound to the twin, so its guards read the twin's rows."""
         twin = copy.copy(self)
         twin._jobs = dict(self._jobs)
         twin._globals = dict(self._globals)
         twin._hosts = dict(self._hosts)
-        twin.machines = twin.rebuild_machines()  # the source's phase, restored
+        twin.machines = self.machines.fork(
+            {self.host_key(host_id): HostData(twin, host_id) for host_id in self._hosts}
+        )
         twin._timers = list(self._timers)
         twin._consumed = dict(self._consumed)
         twin._snapshots = dict(self._snapshots)
@@ -2700,9 +2706,9 @@ class RuntimeState:
         """A new executor holding the assembly instance in the phase the store
         is in, and one `HOST` instance per host row, each in the configuration
         its row's state projects (statechart-engine ss11). The phase and the
-        rows are enough to rebuild it: a fork, an install, a test's witness and
-        the gate's scratch read of the chart build theirs here, and no action
-        runs."""
+        rows are enough to rebuild it: an install, a test's witness and the
+        gate's scratch read of the chart build theirs here, and no action runs.
+        A fork copies the executor instead (`fork`, DL-339)."""
         machines = Executor()
         machines.restore(ASSEMBLY_KEY, RUNTIME_ASSEMBLY, self.machines.active(ASSEMBLY_KEY))
         for host_id, row in self._hosts.items():

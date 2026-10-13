@@ -21954,3 +21954,51 @@ relitigate an entry; append a new one.
   found the timer-edit test proving nothing, since it edited at the arming input, and the named
   pair never reaching the switch on the sample, which the directed estate answers. Round three
   closed the review. All findings are fixed and confirmed by the reviewer that raised them.
+
+- DL-339 The statechart executor forks: a copy that shares immutable instance records until a
+  dispatch writes one
+  (2026-10-13; src/dsl41/state_machine.py, src/dsl41/oracle_state.py, src/dsl41/runner_hosts.py;
+  tests/test_statechart.py, tests/test_host_chart.py, tests/test_assembly_chart.py,
+  tests/fork_harness.py; docs/statechart-engine.md §5, §11, §12, §16;
+  docs/blocks/host-routing.md)
+  WHY. The oracle forks per input for the dry apply (DL-320), and its state owner rebuilt its
+  executor from the phase and host rows at each fork (DL-333), dropping deferred events and
+  generations. With one job instance per job on the way (DL-337, §16), a rebuild per fork is too
+  slow, and a rebuild is not a copy. The owner's decision of 2026-10-13: the fork is an executor
+  copy with copy-on-write instances.
+  WHAT. An instance record is never written in place. It is a named tuple holding the chart, the
+  data, the active configuration as a frozen set, the deferred events as a tuple, the generations
+  and entry counts as mappings replaced on write, and every former in-place write goes through one
+  helper that stores a new record. The microstep reads the current record at each step. `fork()`
+  returns a new executor holding a new dictionary of the same records, copies of the recent rings,
+  the deferral marks, the added set and the history, and an empty pool and worklist; it is allowed
+  only between macrosteps, and raises the reentrancy error inside one and a statechart error with
+  root items pending. A dispatch on either side then replaces records on that side alone. The copy
+  may give named instances new data, since a host instance's data binds its state owner: the state
+  owner's fork rebinds each host to the twin, and the rebuild from rows stays for install, witness
+  and restore. This narrows DL-333's sentence that a fork gives its twin a new executor restored
+  from the twin's rows, and DL-335's that every rebuild of that executor, at a fork, restores the
+  assembly instance: a fork copies, and the rebuild runs at an install and in the witness. It
+  closes DL-333's open item, the cheap fork DL-325 asked for the job machines; a fork now carries
+  deferred events and generations, which the rebuild dropped, and §12 says so for the dry apply.
+  The fork of two hundred instances costs about a microsecond; the oracle's fork on
+  the corpus estate with the most hosts fell from about 410 to about 150 microseconds, the rest
+  being the rebind; a host dispatch costs about two microseconds more for the record replaced.
+  STATE_MACHINE_VERSION is unchanged: no oracle chart defers or waits on time and the worklist is
+  empty at a fork, so no logged input derives a different state (DL-235). Tests pin the isolation
+  by identity, the deferred events and generations carried, the preconditions, the sharing of two
+  hundred records, and random event sequences on a parent and a fork against two fresh executors;
+  three hand mutants of the fork fail them. The cited test names stay; their texts say what a fork
+  does now.
+  CANDIDATE. An owner reachable from the executor's context, instead of data that binds the
+  owner, would make the fork's rebind unnecessary; recorded for the job slices, which carry value
+  data.
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass in place of the Codex pass,
+  two rounds each. Neither found a blocker or a major. The Opus reviewer ran the old executor
+  against the new over four thousand generated cases and nine hand mutants of the fork, and found
+  texts outside the slice still saying a fork rebuilds, the dry-apply contract silent on the
+  deferred queues a fork now carries, and the deferral test killing the shared-marks mutant only
+  through the random test; the Fable pass found no fork test driving a continuation or an exit
+  action with effects on its own instance, and both asked that the sharing of payloads and data be
+  stated. All are fixed and confirmed by the reviewer that raised them; the write per entered or
+  exited state is the candidate above.

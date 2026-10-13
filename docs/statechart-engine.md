@@ -146,6 +146,18 @@ the release of deferred events nor the pool ahead of the event, so it refuses an
 deferred event, and a full deferred queue is outside it. Inside a macrostep it raises
 `ReentrantDispatch` (DL-335).
 
+A tier may copy an idle executor. `Executor.fork` returns a new executor that holds every
+instance as it stands: its configuration, its deferred queue, its generations and its entry
+serials, and the history rings. The two share each instance's record until a dispatch on either
+side writes it. A write stores a new record on its own side, so neither side sees the other's
+moves. A fork costs one reference copy per instance, a copy of each history ring, and one new
+record per instance the tier gives new data; the state owner gives every host instance new data,
+bound to the fork's rows, so the rest of its fork's cost is one record per host. Data not given a
+new value, and every event payload, stay shared by design, so a tier treats them as immutable. A
+fork inside a macrostep raises
+`ReentrantDispatch`. A fork with a root item in the pool raises a `StatechartError`, because
+that item would run on one side only (DL-339).
+
 The executor's errors, among them `AmbiguousTransition` (§3), `ReentrantDispatch` (step 4) and
 `UnhandledEvent` (§10), subclass one base, `StatechartError`. Each is an assertion failure, not
 a fault to contain. DL-320's classification never catches it: `trial_apply` and
@@ -253,12 +265,13 @@ One executor per tier object (an `Oracle`, a `Supervisor`, an `Engine`) owns one
 its instances. A process with an `Engine` has one executor for the engine tier's machines: the
 wiring builds it before the engine and hands it to the supervisor client first, then to the engine
 (DL-330). The oracle's state owner (`RuntimeState`) has its own executor, for the machines whose
-state it owns (DL-333). A fork has its own executor; a fork of the owner rebuilds it from the
-source's phase and the fork's rows. A durable file that no process owns has an executor per move:
-the lineage anchor's methods each build one from the file they read under the anchor lock, post the
-move's events, read and settle the outcomes before the one anchor write (a claim writes its claim
-file first, then the head), and drop it (DL-336). `ReentrantDispatch` is per executor; a call from
-one tier into another tier's executor is not re-entrance.
+state it owns (DL-333). A fork has its own executor; a fork of the owner copies the source's
+(`Executor.fork`, §5) and binds each host instance's data to the fork's rows (DL-339). A durable
+file that no process owns has an executor per move: the lineage anchor's methods each build one from
+the file they read under the anchor lock, post the move's events, read and settle the outcomes
+before the one anchor write (a claim writes its claim file first, then the head), and drop it
+(DL-336). `ReentrantDispatch` is per executor; a call from one tier into another tier's executor is
+not re-entrance.
 
 The oracle becomes one composite `job` machine per job, with named regions for its status, its
 flags and its holding. Its regions, its box variant and its write path through `RuntimeState`
@@ -289,7 +302,8 @@ The representation of a deferred queue inside the oracle (its place in the store
 projection, concurrency-model §3; the seal format), its dry apply, and the handling of a fault at
 release under DL-292 and DL-320 are ruled by the entry that first makes an oracle machine defer.
 That entry narrows concurrency-model §4, DL-292 and DL-320 and says so. Until then no oracle
-machine defers.
+machine defers. A fork of the state owner carries its deferred queues into DL-320's dry apply, so
+an event the trial releases is released on the twin only (DL-339).
 
 `STATE_MACHINE_VERSION` and the artifact formats are reviewed on every slice that changes a
 derivation (the VERSIONS paragraph of DL-320).
@@ -381,12 +395,12 @@ answers an exact retry, or refuses a reused id, before any post. Replay rebuilds
 order on the resuming engine's executor. A statechart error at an attempt, a decision or the seal's
 readiness lookup stops the engine as one from the loop does, and in replay names the WAL record.
 
-`runtime_assembly` (DL-335) is the state owner's own life. Its one instance lives on the
-store's executor from construction, and the configuration is the assembly phase. A fork, an
-install and a test's witness rebuild the executor from the phase and the rows. A verb the phase
-does not allow is a refusal row with a code, read before any work of the verb; the verb raises
-the class and text it always raised. A cell with no row is a statechart error that stops the tier
-at the verb that meets it; the constructor meets the genesis cells.
+`runtime_assembly` (DL-335) is the state owner's own life. Its one instance lives on the store's
+executor from construction, and the configuration is the assembly phase. An install and a test's
+witness rebuild the executor from the phase and the rows; a fork copies it (DL-339). A verb the
+phase does not allow is a refusal row with a code, read before any work of the verb; the verb raises
+the class and text it always raised. A cell with no row is a statechart error that stops the tier at
+the verb that meets it; the constructor meets the genesis cells.
 
 `anchor_head` and `period_row` (DL-336) run on an executor per move, built from `anchor.json` read
 under the anchor lock; the head's tag and each row's flags are the instances' configurations, and

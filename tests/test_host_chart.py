@@ -8,10 +8,11 @@ excluded cell. Every event a poster sends is in the chart's alphabet, and its
 guards raise nothing.
 
 It is the first oracle-tier machine: the store owns its executor. A new row
-starts its instance, a re-registration starts nothing, a fork rebuilds its
-own from its rows, and a carried drain is the configuration the next period
-opens in. The per-input revisions over the exhaustive host walk equal the
-ones the table implementation recorded. A gap in the chart is a
+starts its instance, a re-registration starts nothing, a fork copies the
+executor with each host's data bound to the fork's rows (DL-339), and a
+carried drain is the configuration the next period opens in. The per-input
+revisions over the exhaustive host walk equal the ones the table
+implementation recorded. A gap in the chart is a
 `StatechartError`, met live, on the dry apply of an operator's command, and
 in replay, where it names the WAL input.
 """
@@ -261,6 +262,9 @@ def test_a_new_row_starts_its_instance_and_a_re_registration_starts_nothing() ->
 
 
 def test_a_fork_rebuilds_its_own_executor_from_its_rows() -> None:
+    """A fork's executor is its own: a copy of the source's (DL-339), in the
+    same configuration, with the host's data bound to the fork's store, and
+    its moves never reach the source."""
     store = _store("quarantine")
     twin = store.fork()
     assert twin.machines is not store.machines
@@ -304,7 +308,7 @@ def test_a_state_write_no_microstep_made_raises_and_writes_nothing(write: Any, s
 def test_a_witness_writes_the_row_and_rebuilds_the_executor_from_the_rows() -> None:
     """A test's witness (DL-293) writes a row directly, with no microstep,
     through the one explicit store method, which rebuilds the executor from
-    the rows as a fork does. The write takes the input's revision."""
+    the rows as an install does. The write takes the input's revision."""
     store = _store()
     machines = store.machines
     store.begin_input()
