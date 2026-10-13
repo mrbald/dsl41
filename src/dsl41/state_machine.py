@@ -44,7 +44,8 @@ from collections import deque
 from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, ClassVar, Literal, TypeGuard, cast
+from types import MappingProxyType
+from typing import Any, ClassVar, Literal, NamedTuple, TypeGuard, cast
 
 HITS_ENV = "DSL41_TRANSITION_HITS"
 STRICT_ENV = "DSL41_TRANSITION_STRICT"
@@ -660,7 +661,7 @@ def _leaves(ix: _Index, active: Iterable[str]) -> list[str]:
     return sorted((s for s in active if not ix.states[s].regions), key=ix.order.__getitem__)
 
 
-def _exit_order(ix: _Index, active: set[str], top: str) -> list[str]:
+def _exit_order(ix: _Index, active: frozenset[str], top: str) -> list[str]:
     """The active subtree of `top`, inner to outer, regions in declaration order."""
     order: list[str] = []
     for slot in range(len(ix.states[top].regions)):
@@ -823,7 +824,7 @@ def _enabled(chart: Statechart, ix: _Index, state: str, event: str, ctx: Context
 
 
 def _select(
-    chart: Statechart, ix: _Index, active: set[str], ctx: Context
+    chart: Statechart, ix: _Index, active: frozenset[str], ctx: Context
 ) -> tuple[list[Row], list[str]]:
     """The firing set, and the states whose deferral ended a walk. No action runs (§3)."""
     found: dict[str, Row | None] = {}
@@ -850,7 +851,7 @@ def _select(
     return _without_exited_sources(ix, active, firing), deferring
 
 
-def _without_exited_sources(ix: _Index, active: set[str], candidates: list[Row]) -> list[Row]:
+def _without_exited_sources(ix: _Index, active: frozenset[str], candidates: list[Row]) -> list[Row]:
     """A candidate whose source another surviving candidate exits is dropped, internal
     rows included (§3): its action would run on a state already left."""
     exits = [(row, _exit_set(ix, active, row)) for row in candidates]
@@ -876,7 +877,7 @@ def _yielded(chart: Statechart, candidates: list[Row]) -> list[Row]:
     return candidates
 
 
-def _exit_set(ix: _Index, active: set[str], row: Row) -> frozenset[str]:
+def _exit_set(ix: _Index, active: frozenset[str], row: Row) -> frozenset[str]:
     if row.kind != "external":
         return frozenset()
     plan = _plan(ix, row)
@@ -884,7 +885,7 @@ def _exit_set(ix: _Index, active: set[str], row: Row) -> frozenset[str]:
 
 
 def _without_conflicts(
-    chart: Statechart, ix: _Index, active: set[str], candidates: list[Row]
+    chart: Statechart, ix: _Index, active: frozenset[str], candidates: list[Row]
 ) -> list[Row]:
     """Resolve crossing exit sets from the deepest candidate outward (§3).
 
@@ -913,23 +914,31 @@ def _without_conflicts(
 # -- the executor (§4-§8)
 
 
-@dataclass
+#: The empty mapping a new record starts with.
+_NOTHING: Mapping[str, int] = MappingProxyType({})
+
+
+@dataclass(frozen=True)
 class _Deferred:
     event: Event
     states: tuple[str, ...]
 
 
-@dataclass
-class _Instance:
+class _Instance(NamedTuple):
+    """One instance's record. A stored record is never changed: a write stores a
+    new one (`Executor._write`), so a fork shares the records until it writes
+    (DL-339). The mappings are never written in place either. A named tuple,
+    because its `_replace` is the cheapest copy with changes."""
+
     chart: Statechart
     data: Any
-    active: set[str]
-    deferred: deque[_Deferred] = field(default_factory=deque)
-    generations: dict[str, int] = field(default_factory=dict)
+    active: frozenset[str]
+    deferred: tuple[_Deferred, ...] = ()
+    generations: Mapping[str, int] = _NOTHING
     #: each state's latest entry, by a serial of this instance's entries: a
     #: completion belongs to one occurrence of its state (§4). A state active
     #: since `restore` has no entry yet and reads as serial 0
-    entered: dict[str, int] = field(default_factory=dict)
+    entered: Mapping[str, int] = _NOTHING
     entries: int = 0
     #: the executor's serial of this instance's addition: the release scan
     #: visits deferring instances in this order (§6)
@@ -1046,11 +1055,12 @@ class Executor:
 
     `post` puts a root item in the pool and `run` drains everything, one
     macrostep per root item, released deferred events ahead of the pool (§5,
-    §6). `dispatch` does both. A call while `run` is in flight raises
-    `ReentrantDispatch`. An exception out of a guard or an action ends the run
-    and empties the worklist; the instance stays as the failing microstep left
-    it. Its configuration stays readable, and the tier dispatches nothing more
-    to that instance.
+    §6). `dispatch` does both. `fork` copies an idle executor, sharing its
+    instance records until either side writes one (DL-339). A call while
+    `run` is in flight raises `ReentrantDispatch`. An exception out of a guard
+    or an action ends the run and empties the worklist; the instance stays as
+    the failing microstep left it. Its configuration stays readable, and the
+    tier dispatches nothing more to that instance.
     """
 
     def __init__(self, history: int = HISTORY) -> None:
@@ -1073,7 +1083,7 @@ class Executor:
 
     def start(self, key: Hashable, chart: Statechart, data: Any = None) -> None:
         """Add an instance. Its initial entry runs as a root item of the next run."""
-        self._add(key, _Instance(chart, data, set()))
+        self._add(key, _Instance(chart, data, frozenset()))
         self._pool.append(_Item(key, "start", START))
 
     def restore(
@@ -1088,7 +1098,9 @@ class Executor:
         problem = _configuration_problem(_index(chart), active)
         if problem:
             raise StatechartError(f"{chart.name} {key!r}: {problem}")
-        self._add(key, _Instance(chart, data, set(active), generations=dict(generations or {})))
+        self._add(
+            key, _Instance(chart, data, frozenset(active), generations=dict(generations or {}))
+        )
 
     def forget(self, key: Hashable) -> None:
         """Remove an instance that rests in a final configuration: every region of
@@ -1190,11 +1202,41 @@ class Executor:
             refusals=tuple(r.code for r in firing if r.kind == "refusal"),
         )
 
+    def fork(self, data: Mapping[Hashable, Any] | None = None) -> Executor:
+        """A copy of this idle executor that shares its instance records (DL-339).
+
+        The copy holds every instance, each in its configuration with its
+        deferred queue, generations and entry serials, and the history rings as
+        they stand. A record is shared until a dispatch on either side writes
+        it, and a write stores a new record on that side only, so neither side
+        sees the other's moves. `data` gives the copy new data for the instances
+        it names; every other instance shares its data object with this one.
+        Event payloads and data that get no new value stay shared by design, so
+        a tier treats them as immutable.
+
+        A fork inside a macrostep raises `ReentrantDispatch`; a fork with a root
+        item still in the pool raises a `StatechartError`, because the item
+        would run on one side only.
+        """
+        if self._running:
+            raise ReentrantDispatch("a fork while a macrostep of this executor is in flight")
+        if self._pool:
+            raise StatechartError(f"a fork with {len(self._pool)} root items still in the pool")
+        twin = Executor(self._history)
+        twin._instances = dict(self._instances)
+        twin._recent = {name: ring.copy() for name, ring in self._recent.items()}
+        twin._deferring = set(self._deferring)
+        twin._added = self._added
+        for key, value in (data or {}).items():
+            twin._instance(key)
+            twin._write(key, data=value)
+        return twin
+
     # -- reading an instance
 
     def active(self, key: Hashable) -> frozenset[str]:
         """The instance's active states."""
-        return frozenset(self._instance(key).active)
+        return self._instance(key).active
 
     def deferred(self, key: Hashable) -> tuple[Event, ...]:
         """The instance's deferred queue, head first."""
@@ -1231,8 +1273,15 @@ class Executor:
         if key in self._instances:
             raise StatechartError(f"instance {key!r} already exists")
         self._added += 1
-        instance.added = self._added
-        self._instances[key] = instance
+        self._instances[key] = instance._replace(added=self._added)
+
+    def _write(self, key: Hashable, **changes: Any) -> _Instance:
+        """The one write of an instance: store a new record with `changes`. The
+        record it replaces may be shared with a fork, so it stays as it was
+        (DL-339)."""
+        record = self._instances[key]._replace(**changes)
+        self._instances[key] = record
+        return record
 
     def _instance(self, key: Hashable) -> _Instance:
         try:
@@ -1262,9 +1311,7 @@ class Executor:
 
     @staticmethod
     def _context(inst: _Instance, item: _Item, quiet: bool = False) -> Context:
-        return Context(
-            item.key, item.event, frozenset(inst.active), inst.data, item.ancestry, quiet
-        )
+        return Context(item.key, item.event, inst.active, inst.data, item.ancestry, quiet)
 
     @staticmethod
     def _stale(inst: _Instance, event: Event) -> bool:
@@ -1278,9 +1325,9 @@ class Executor:
         inst = self._instances[item.key]
         chart, ix = inst.chart, _index(inst.chart)
         if item.kind == "continuation":
-            return self._fire(inst, item, [], "continued")
+            return self._fire(item, [], "continued")
         if item.kind == "start":
-            return self._fire(inst, item, [], "started")
+            return self._fire(item, [], "started")
         ctx = self._context(inst, item)
         if item.kind == "completion":
             if _occurrence_gone(inst, item):
@@ -1288,12 +1335,12 @@ class Executor:
             row = _enabled(chart, ix, item.name, COMPLETION, ctx)
             if row is None:
                 raise UnhandledEvent(f"{chart.name} {item.key!r}: {item.name} completed")
-            return self._fire(inst, item, [row], "fired")
+            return self._fire(item, [row], "fired")
         kind, firing, deferring = self._decide(inst, item, ctx)
         if kind == "discarded":
             return _outcome(item, kind)
         if kind == "fired":
-            return self._fire(inst, item, firing, kind)
+            return self._fire(item, firing, kind)
         return self._defer(inst, item, deferring, ctx)
 
     def _decide(
@@ -1318,7 +1365,9 @@ class Executor:
         """Queue the event, or apply the overflow policy (§6)."""
         chart = inst.chart
         if len(inst.deferred) < chart.defer_bound:
-            inst.deferred.append(_Deferred(item.event, tuple(deferring)))
+            self._write(
+                item.key, deferred=(*inst.deferred, _Deferred(item.event, tuple(deferring)))
+            )
             self._deferring.add(item.key)
             for state in deferring:
                 _hit(chart, "defer", state, item.event.name)
@@ -1331,7 +1380,7 @@ class Executor:
         row = _enabled(chart, _index(chart), deferring[0], OVERFLOWED, ctx)
         if row is None:
             raise UnhandledEvent(f"{chart.name}: no enabled overflowed row in {deferring[0]}")
-        return self._fire(inst, item, [row], "overflowed")
+        return self._fire(item, [row], "overflowed")
 
     def _release(self) -> _Item | None:
         """The first deferred head its configuration no longer defers, as a root item (§6).
@@ -1348,25 +1397,27 @@ class Executor:
                 firing, deferring = _select(inst.chart, ix, inst.active, self._context(inst, item))
                 if not firing and deferring:
                     continue
-            inst.deferred.popleft()
-            if not inst.deferred:
+            if not self._write(key, deferred=inst.deferred[1:]).deferred:
                 self._deferring.discard(key)
             for state in head.states:
                 _hit(inst.chart, "release", state, head.event.name)
             return item
         return None
 
-    def _fire(self, inst: _Instance, item: _Item, rows: list[Row], kind: str) -> Outcome:
-        """Execute a firing set in region order and queue what it reported (§4, §5 step 3)."""
-        ix = _index(inst.chart)
+    def _fire(self, item: _Item, rows: list[Row], kind: str) -> Outcome:
+        """Execute a firing set in region order and queue what it reported (§4, §5 step 3).
+
+        Each write stores a new record (`_write`), so every read of the instance
+        here and below takes the record in `_instances` as it stands."""
+        ix = _index(self._instances[item.key].chart)
         step = _Microstep(item)
         if kind == "continued":
-            self._call(inst, step, item.name)
+            self._call(step, item.name)
         if kind == "started":
-            self._enter(inst, step, _initial_entry(ix))
+            self._enter(step, _initial_entry(ix))
         for row in rows:
-            self._run_row(inst, step, row)
-        queued = _queue_order(step, _completions(ix, inst, step))
+            self._run_row(step, row)
+        queued = _queue_order(step, _completions(ix, self._instances[item.key], step))
         self._worklist.extendleft(reversed(queued))
         return Outcome(
             item.key,
@@ -1382,25 +1433,28 @@ class Executor:
             action=item.name if kind == "continued" else "",
         )
 
-    def _run_row(self, inst: _Instance, step: _Microstep, row: Row) -> None:
-        chart, ix = inst.chart, _index(inst.chart)
+    def _run_row(self, step: _Microstep, row: Row) -> None:
+        key = step.item.key
+        chart = self._instances[key].chart
+        ix = _index(chart)
         _hit(chart, "row", row.id)
         if row.kind != "external":
-            self._call(inst, step, row.action)
+            self._call(step, row.action)
             return
         plan = _plan(ix, row)
-        for state in plan.leaving or _exit_order(ix, inst.active, plan.top):
-            self._call(inst, step, ix.states[state].exit)
-            inst.active.discard(state)
-        self._call(inst, step, row.action)
+        for state in plan.leaving or _exit_order(ix, self._instances[key].active, plan.top):
+            self._call(step, ix.states[state].exit)
+            self._write(key, active=self._instances[key].active - {state})
+        self._call(step, row.action)
         target = row.target
         choice = ix.choices.get(target)
         if choice is not None:
-            target = self._choose(inst, step, choice)
-        self._enter(inst, step, _entry_of(ix, plan, target))
+            target = self._choose(step, choice)
+        self._enter(step, _entry_of(ix, plan, target))
 
-    def _choose(self, inst: _Instance, step: _Microstep, choice: Choice) -> str:
+    def _choose(self, step: _Microstep, choice: Choice) -> str:
         """Resolve a choice inside the microstep: the first enabled branch (§4 step 3)."""
+        inst = self._instances[step.item.key]
         chart = inst.chart
         ctx = self._context(inst, step.item)
         branch = next((b for b in choice.branches if _holds(chart, b.id, b.guard, ctx)), None)
@@ -1408,23 +1462,30 @@ class Executor:
             raise UnhandledEvent(f"{chart.name}: choice {choice.name} has no enabled branch")
         _hit(chart, "branch", branch.id)
         step.branches.append(branch.id)
-        self._call(inst, step, branch.action)
+        self._call(step, branch.action)
         return branch.target
 
-    def _enter(self, inst: _Instance, step: _Microstep, order: Sequence[str]) -> None:
-        ix = _index(inst.chart)
+    def _enter(self, step: _Microstep, order: Sequence[str]) -> None:
+        key = step.item.key
+        ix = _index(self._instances[key].chart)
         for state in order:
-            inst.active.add(state)
-            inst.entries += 1
-            inst.entered[state] = inst.entries
-            self._call(inst, step, ix.states[state].entry)
+            inst = self._instances[key]
+            entries = inst.entries + 1
+            self._write(
+                key,
+                active=inst.active | {state},
+                entries=entries,
+                entered={**inst.entered, state: entries},
+            )
+            self._call(step, ix.states[state].entry)
             step.entered.append(state)
 
-    def _call(self, inst: _Instance, step: _Microstep, name: str) -> None:
+    def _call(self, step: _Microstep, name: str) -> None:
         """Run one action and gather what it reports (§8)."""
         if not name:
             return
         item = step.item
+        inst = self._instances[item.key]
         effects = _lookup(inst.chart.actions, name, "action")(self._context(inst, item))
         if effects is None:
             return
@@ -1439,7 +1500,8 @@ class Executor:
         for timer in effects.rearm:
             if timer not in _index(inst.chart).generational:
                 raise StatechartError(f"{inst.chart.name}: {timer} is not a re-armable time event")
-            inst.generations[timer] = inst.generations.get(timer, 0) + 1
+            generations = self._instances[item.key].generations
+            self._write(item.key, generations={**generations, timer: generations.get(timer, 0) + 1})
 
 
 def _describe(item: _Item) -> str:
@@ -1487,7 +1549,7 @@ def chart_problems(chart: Statechart) -> list[str]:
     problems = _id_problems(chart.name, ids, "id")
     if INITIAL in alphabet(chart):
         problems.append(f"the event name {INITIAL} is reserved for the initial entry")
-    problems += _tree_problems(chart, ix)
+    problems += _tree_problems(chart)
     problems += _row_problems(chart, ix)
     problems += _choice_problems(chart, ix)
     if problems:
@@ -1520,7 +1582,7 @@ def _id_problems(name: str, ids: list[str], what: str) -> list[str]:
     return problems
 
 
-def _tree_problems(chart: Statechart, ix: _Index) -> list[str]:
+def _tree_problems(chart: Statechart) -> list[str]:
     problems: list[str] = []
     states = _all_states(chart.root)
     names = [s.name for s in states] + [c.name for c in chart.choices]

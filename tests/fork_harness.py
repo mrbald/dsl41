@@ -68,9 +68,10 @@ STORE_COPIED = frozenset(
         "_violations",
     }
 )
-#: RuntimeState attributes the fork rebuilds rather than copies: the store's
-#: executor, restored from the source's assembly phase and the twin's host
-#: rows (statechart-engine ss11). The phase is its instance's configuration.
+#: RuntimeState attributes the fork gives its own value rather than a
+#: shallow copy: the store's executor, copied by `Executor.fork` with each
+#: host instance's data bound to the twin (statechart-engine ss11, DL-339).
+#: The phase is its assembly instance's configuration.
 STORE_REBUILT = frozenset({"machines"})
 
 

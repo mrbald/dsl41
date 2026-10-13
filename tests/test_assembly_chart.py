@@ -5,7 +5,7 @@ test runs a witness for each of the eight phases, built through the store's
 own verbs, and posts each of the five verbs, against a table written from the
 constructor's order (period-model §7) and DL-132, not from the rows. The state
 owner holds the instance from construction: the configuration is the phase,
-a fork and a rebuild restore it, and a refusal raises the class and text the
+a fork copies it (DL-339) and a rebuild restores it, and a refusal raises the class and text the
 verb always raised. A gap in the chart is a `StatechartError`, met by the
 constructor.
 """
@@ -345,7 +345,7 @@ def test_an_input_opened_twice_is_refused_and_leaves_the_pending_violations() ->
 
 
 def test_a_fork_keeps_the_source_s_phase_in_its_own_executor() -> None:
-    """At rest and mid-input: the twin restores the source's phase, its
+    """At rest and mid-input: the twin carries the source's phase, its
     moves never reach the source's instance, and the source's never reach
     the twin's."""
     store = _built("live")

@@ -1554,6 +1554,308 @@ def test_plan_cache_disabled_the_section_tests_still_pass(
     assert built
 
 
+# ---- a fork: a copy of an idle executor that shares its records (DL-339)
+
+
+def _gate_work(ctx: Context) -> Effects:
+    return Effects(intents=(ctx.event.payload,))
+
+
+def _gate_renew(ctx: Context) -> Effects:
+    return Effects(rearm=("expire",))
+
+
+def _gate_relay(ctx: Context) -> Effects:
+    return Effects(send=((ctx.event.payload, Event("shut")),))
+
+
+#: A gate that defers `job` while shut, drops a job past its bound, re-arms
+#: `expire`, passes through a transient state on `go` and relays `shut` to
+#: another instance: every part of a record a microstep writes.
+GATE = chart(
+    "gate",
+    composite(
+        "gate",
+        region(
+            "main",
+            "open",
+            leaf("open"),
+            leaf("shut", defer=frozenset({"job"})),
+            leaf("pass"),
+        ),
+    ),
+    [
+        Row("gate.01", "open", "shut", "shut"),
+        Row("gate.02", "shut", "open", "open"),
+        Row("gate.03", "open", "go", "pass"),
+        Row("gate.04", "pass", COMPLETION, "open"),
+        Row("gate.05", "gate", "job", kind="internal", action="work"),
+        Row("gate.06", "gate", "renew", kind="internal", action="renew"),
+        Row("gate.07", "gate", "expire", kind="internal"),
+        Row("gate.08", "gate", "shut", kind="ignored"),
+        Row("gate.09", "gate", "open", kind="ignored"),
+        Row("gate.10", "gate", "go", kind="ignored"),
+        Row("gate.11", "shut", OVERFLOWED, kind="internal"),
+        Row("gate.12", "gate", "relay", kind="internal", action="relay"),
+    ],
+    actions={"work": _gate_work, "renew": _gate_renew, "relay": _gate_relay},
+    time_events=(TimeEvent("expire", generation=True),),
+    defer_bound=2,
+    overflow="drop",
+)
+GATE_KEYS = ("a", "b")
+
+
+def _gates() -> Executor:
+    executor = Executor()
+    for key in GATE_KEYS:
+        executor.restore(key, GATE, {"gate", "open"})
+    return executor
+
+
+def _drive(executor: Executor, inputs: list[tuple[str, Event]]) -> list[sm.Outcome]:
+    return [outcome for key, event in inputs for outcome in executor.dispatch(key, event)]
+
+
+def _records(executor: Executor) -> dict[Any, Any]:
+    return dict(executor._instances)
+
+
+def test_fork_the_gate_is_well_formed() -> None:
+    assert chart_problems(GATE) == []
+
+
+def test_fork_a_dispatch_on_the_fork_leaves_every_parent_record_the_same_object() -> None:
+    parent = _gates()
+    before = _records(parent)
+    twin = parent.fork()
+    twin.dispatch("a", Event("shut"))
+    assert all(parent._instances[key] is record for key, record in before.items())
+    assert parent.active("a") == {"gate", "open"}
+    assert twin.active("a") == {"gate", "shut"}
+    assert twin._instances["b"] is before["b"]
+
+
+def test_fork_a_dispatch_on_the_parent_leaves_every_fork_record_the_same_object() -> None:
+    parent = _gates()
+    twin = parent.fork()
+    before = _records(twin)
+    parent.dispatch("a", Event("shut"))
+    assert all(twin._instances[key] is record for key, record in before.items())
+    assert twin.active("a") == {"gate", "open"}
+    assert parent.active("a") == {"gate", "shut"}
+
+
+def test_fork_both_sides_diverge_and_each_equals_a_fresh_executor() -> None:
+    prefix = [("a", Event("renew")), ("b", Event("go")), ("a", Event("shut"))]
+    on_parent = [("a", Event("job", 1)), ("b", Event("relay", "a")), ("a", Event("open"))]
+    on_twin = [("b", Event("shut")), ("a", Event("open")), ("b", Event("job", 2))]
+    parent = _gates()
+    _drive(parent, prefix)
+    twin = parent.fork()
+    parent_outcomes, twin_outcomes = _drive(parent, on_parent), _drive(twin, on_twin)
+    fresh_parent, fresh_twin = _gates(), _gates()
+    _drive(fresh_parent, prefix)
+    _drive(fresh_twin, prefix)
+    assert parent_outcomes == _drive(fresh_parent, on_parent)
+    assert twin_outcomes == _drive(fresh_twin, on_twin)
+    assert _records(parent) == _records(fresh_parent)
+    assert _records(twin) == _records(fresh_twin)
+    assert _records(parent) != _records(twin)
+
+
+def test_fork_deferred_events_and_generations_survive_and_release_on_one_side_only() -> None:
+    parent = _gates()
+    _drive(parent, [("a", Event("renew")), ("a", Event("shut")), ("a", Event("job", 1))])
+    assert parent.deferred("a") == (Event("job", 1),)
+    twin = parent.fork()
+    assert twin.deferred("a") == (Event("job", 1),)
+    assert twin.generation("a", "expire") == 1
+    released = twin.dispatch("a", Event("open"))
+    assert [(o.event, o.released, o.intents) for o in released] == [
+        (Event("open"), False, ()),
+        (Event("job", 1), True, (1,)),
+    ]
+    assert twin.deferred("a") == ()
+    assert parent.deferred("a") == (Event("job", 1),)
+    assert parent.active("a") == {"gate", "shut"}
+    assert kinds(twin.dispatch("a", Event("expire", generation=0))) == [("expire", "discarded", ())]
+    assert kinds(parent.dispatch("a", Event("expire", generation=1))) == [
+        ("expire", "fired", ("gate.07",))
+    ]
+    # the twin's release left the parent's queue, and its release scan, as they were
+    assert [(o.event, o.released, o.intents) for o in parent.dispatch("a", Event("open"))] == [
+        (Event("open"), False, ()),
+        (Event("job", 1), True, (1,)),
+    ]
+    assert parent.deferred("a") == ()
+
+
+def _seen(name: str, ctx: Context) -> tuple[str, str, tuple[str, ...]]:
+    return (name, ctx.event.name, tuple(sorted(ctx.active)))
+
+
+def _leave(ctx: Context) -> Effects:
+    """The exit action of `a`: re-arm, and send an event to its own instance."""
+    return Effects(
+        intents=(_seen("leave", ctx),), rearm=("tick",), send=((ctx.key, Event("ping")),)
+    )
+
+
+def _arrive(ctx: Context) -> Effects:
+    """The entry action of `b`: re-arm, and request a continuation."""
+    return Effects(intents=(_seen("arrive", ctx),), rearm=("tock",), then="after")
+
+
+def _report(ctx: Context) -> Effects:
+    """`ping`'s action and the continuation: report what they see."""
+    return Effects(intents=(_seen("report", ctx),))
+
+
+#: `go` leaves `a` through an exit action that re-arms `tick` and sends `ping`
+#: to its own instance, and enters `b` through an entry action that re-arms
+#: `tock` and requests the continuation `after`.
+PROBE = chart(
+    "probe",
+    composite(
+        "probe",
+        region("main", "a", leaf("a", exit="leave"), leaf("b", entry="arrive")),
+    ),
+    [
+        Row("probe.01", "a", "go", "b"),
+        Row("probe.02", "probe", "ping", kind="internal", action="report"),
+        Row("probe.03", "probe", "go", kind="ignored"),
+        Row("probe.04", "probe", "tick", kind="ignored"),
+        Row("probe.05", "probe", "tock", kind="ignored"),
+    ],
+    actions={"leave": _leave, "arrive": _arrive, "report": _report, "after": _report},
+    time_events=(TimeEvent("tick", generation=True), TimeEvent("tock", generation=True)),
+)
+
+
+def test_fork_exit_and_entry_effects_on_their_own_instance_stay_on_the_fork() -> None:
+    """The writes that follow an exit or an entry action re-read the record the
+    action's own effects left: none is lost on the fork, and none reaches the
+    parent."""
+    assert chart_problems(PROBE) == []
+    parent = Executor()
+    parent.restore("p", PROBE, {"probe", "a"})
+    before = parent._instances["p"]
+    twin = parent.fork()
+    outcomes = twin.dispatch("p", Event("go"))
+    assert [(o.event.name, o.kind, o.depth, o.action, o.intents) for o in outcomes] == [
+        ("go", "fired", 0, "", (("leave", "go", ("a", "probe")), ("arrive", "go", ("b", "probe")))),
+        ("ping", "fired", 1, "", (("report", "ping", ("b", "probe")),)),
+        ("go", "continued", 1, "after", (("report", "go", ("b", "probe")),)),
+    ]
+    record = twin._instances["p"]
+    assert (dict(record.generations), dict(record.entered)) == ({"tick": 1, "tock": 1}, {"b": 1})
+    assert parent._instances["p"] is before
+    assert parent.generation("p", "tick") == 0
+    fresh = Executor()
+    fresh.restore("p", PROBE, {"probe", "a"})
+    assert fresh.dispatch("p", Event("go")) == outcomes
+    assert _records(fresh) == _records(twin)
+    assert parent.dispatch("p", Event("go")) == outcomes
+    assert _records(parent) == _records(twin)
+
+
+def test_fork_keeps_the_history_ring_and_the_addition_order() -> None:
+    parent = _gates()
+    parent.dispatch("a", Event("shut"))
+    twin = parent.fork()
+    assert twin._recent == parent._recent and twin._recent["gate"] is not parent._recent["gate"]
+    twin.dispatch("a", Event("open"))
+    assert len(twin._recent["gate"]) == 2 and len(parent._recent["gate"]) == 1
+    twin.restore("c", GATE, {"gate", "open"})
+    parent.restore("c", GATE, {"gate", "open"})
+    assert twin._instances["c"].added == parent._instances["c"].added == 3
+
+
+def test_fork_from_inside_an_action_raises_reentrant_dispatch() -> None:
+    def fork_inside(ctx: Context) -> None:
+        ctx.data[0].fork()
+
+    machine = chart(
+        "inner",
+        composite("inner", region("main", "s", leaf("s"))),
+        [Row("inner.01", "s", "go", kind="internal", action="fork")],
+        actions={"fork": fork_inside},
+    )
+    executor = Executor()
+    executor.restore("i", machine, {"inner", "s"}, data=[executor])
+    with pytest.raises(ReentrantDispatch, match="a fork while a macrostep"):
+        executor.dispatch("i", Event("go"))
+
+
+def test_fork_with_a_root_item_in_the_pool_raises() -> None:
+    executor = _gates()
+    executor.post("a", Event("shut"))
+    with pytest.raises(StatechartError, match="a fork with 1 root items still in the pool"):
+        executor.fork()
+    executor.run()
+    executor.start("c", GATE)
+    with pytest.raises(StatechartError, match="a fork with 1 root items still in the pool"):
+        executor.fork()
+
+
+def test_fork_of_200_instances_shares_every_record() -> None:
+    parent = Executor()
+    for n in range(200):
+        parent.restore(n, GATE, {"gate", "open"})
+    twin = parent.fork()
+    assert twin._instances is not parent._instances
+    assert len(twin._instances) == 200
+    assert all(twin._instances[n] is parent._instances[n] for n in range(200))
+
+
+def test_fork_gives_the_instances_it_names_their_new_data() -> None:
+    parent = Executor()
+    for key in GATE_KEYS:
+        parent.restore(key, GATE, {"gate", "open"}, data=f"{key} of the parent")
+    twin = parent.fork({"a": "a of the fork"})
+    assert (twin.data("a"), parent.data("a")) == ("a of the fork", "a of the parent")
+    assert twin._instances["b"] is parent._instances["b"]
+    with pytest.raises(StatechartError, match="no instance 'x'"):
+        parent.fork({"x": None})
+
+
+GATE_EVENTS = st.sampled_from(
+    [
+        Event("shut"),
+        Event("open"),
+        Event("go"),
+        Event("job", 1),
+        Event("job", 2),
+        Event("renew"),
+        Event("expire", generation=0),
+        Event("expire", generation=1),
+        Event("relay", "a"),
+        Event("relay", "b"),
+    ]
+)
+GATE_INPUTS = st.lists(st.tuples(st.sampled_from(GATE_KEYS), GATE_EVENTS), max_size=8)
+
+
+@settings(max_examples=60, deadline=None)
+@given(GATE_INPUTS, GATE_INPUTS, GATE_INPUTS)
+def test_fork_random_inputs_on_both_sides_equal_two_fresh_executors(
+    prefix: list[tuple[str, Event]],
+    on_parent: list[tuple[str, Event]],
+    on_twin: list[tuple[str, Event]],
+) -> None:
+    parent = _gates()
+    _drive(parent, prefix)
+    twin = parent.fork()
+    fresh_parent, fresh_twin = _gates(), _gates()
+    _drive(fresh_parent, prefix)
+    _drive(fresh_twin, prefix)
+    assert _drive(parent, on_parent) == _drive(fresh_parent, on_parent)
+    assert _drive(twin, on_twin) == _drive(fresh_twin, on_twin)
+    assert _records(parent) == _records(fresh_parent)
+    assert _records(twin) == _records(fresh_twin)
+
+
 # ---- the mutant check
 
 MUTANTS: dict[str, tuple[str, Any]] = {
