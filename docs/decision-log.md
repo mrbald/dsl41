@@ -22060,3 +22060,72 @@ relitigate an entry; append a new one.
   adopts over the first fix's guard alone. Round two confirmed every fix and found the admission
   order above, recorded and pinned, and three nits, folded. Round three closed both sides. All
   findings are fixed or recorded and confirmed by the reviewer that raised them.
+
+- DL-341 The second oracle begins: a chart oracle beside the old one, with one job instance per
+  row on the state owner's executor, and the STATUS family decided by the job chart
+  (2026-10-13; src/dsl41/oracle_chart.py, src/dsl41/oracle_state.py, src/dsl41/state_machine.py,
+  src/dsl41/job_chart.py; tests/test_oracle_chart.py, tests/test_statechart.py,
+  tests/fork_harness.py, tests/test_dry_apply.py; docs/statechart-engine.md §5, §11, §16;
+  docs/blocks/job-lifecycle.md; README.md; pyproject.toml)
+  SHAPE. statechart-engine §16 asks that the second oracle be built beside the old one under the
+  harness (DL-338), family by family. The chart oracle is a subclass of the old one in its own
+  module: each slice overrides one input family's handlers and inherits the rest, so the harness
+  names it as the new side and the old oracle stays the twin, and the old module is untouched
+  until the switch-over folds the overrides in and deletes the old bodies. The state owner's
+  executor, which held the host and assembly instances (DL-333, DL-335), now holds one `job`
+  instance per job row under the row's key, restored from the row's projection (DL-337) with the
+  job's catalog facts as its data: at construction, at a carried install, in the test witness, and
+  when a row is first created; a fork copies them (DL-339) and rebinds the hook that reaches the
+  store to the twin. The old oracle's store keeps no job instance, so its behaviour and cost are
+  unchanged.
+  THE FAMILY. The STATUS handler computes the injection facts the old rules read, dispatches the
+  input to the job's instance, and performs what the fired row dictates through today's verbs and
+  methods: the status rows for an exit, a failure and a live injection write the status with
+  today's marker and text; the rows into INACTIVE run today's batch path, which also moves a box's
+  members, an undeclared cascade that stays old code until its slice. The row's consequences, box
+  rules, settlement and wakes, run as today, where today runs them. The chart decides and the code
+  agrees: at the job's first write after the dispatch the instance's status and flags must equal
+  the row's, and its holding must where the move ends no run, or at the move's own settlement
+  where it does; a difference is a statechart error naming both, and a settlement that never comes
+  raises. The check covers what the code still moves on its own, the holding and the flags that
+  unconverted families move; the status the chart decides is written as decided, so a wrong
+  status row shows under the harness, not in the check, and no second decision procedure restates
+  the old rules in code. Since the cascade the chart does not yet declare can move the same job
+  after the decision, the instance is realigned to its row before the dispatch and at the commit
+  for the jobs the input touched; the realign is a new executor method, transitional, documented
+  in §5 with a history line and removed by the cascade slice when the last family converts. While
+  it stands, the chart is a stateless decision over the row's projection, and the harness proves
+  the STATUS rows, not the chart's evolution; the evolution becomes the contract as the families
+  convert. After a fork the agreement is a test, not a check per dry apply.
+  The capture of a job's first write hangs on the trace writer, not on a wrapper around the
+  transition method: a wrapper added a stack frame per nested transition and moved the recursion
+  bound (DL-340's terminator loop) earlier than the old oracle's, which a test now pins.
+  PROOF. The harness, old against chart, shows no difference: the corpus and two hundred estates
+  of up to fifty jobs, 23,003 inputs; twenty estates of 150 to 200 jobs, 7,999 inputs; the corpus
+  and forty estates under every switch, 98,770 inputs; a further thousand seeds, 94,353 inputs; the
+  oracle's tests pass through the fourth arm. The generator reaches the cell of a never-run box
+  restarted by its member's injected success about once in three thousand seeds, so a directed
+  estate for it joins the harness's corpus run. No chart cell disagreed with today's code.
+  STATE_MACHINE_VERSION is unchanged (DL-235). The module is at 100% of statements and branches and
+  joins the branch gate. Cost per input on the corpus: about 50 microseconds for the old oracle and
+  about 85 for the chart oracle, of which a STATUS dispatch is about 30 on the executor and 50
+  inside the oracle; the configuration check a realign makes is cached per chart and
+  configuration; the write per entered or exited state (DL-339) remains the candidate.
+  NOT HERE. The other families inherit the old handlers; `job` joins the machine registry when the
+  last family converts, so the transition gate does not demand rows no production path drives;
+  DL-292's violation option retires at the switch-over.
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass in place of the Codex pass,
+  three rounds each. The Opus reviewer found a blocker: the holding check waited for a settlement
+  that a move ending no run never makes, and then saw the restart's take, a false statechart error
+  in one input on a never-run box restarted by its member's injected success; the fix above closes
+  such a check at the first write, and the rework found, beside it, the wrapper frame that moved
+  the recursion bound. Both reviewers found the two rows into INACTIVE decorative, since the batch
+  path re-derived the box-ness itself: the fired row's marker is now what is written, and a wrong
+  row is a statechart error. Both asked whether the status half of the check should compare
+  against a second decision in code, and both accepted the ruling that it must not: the chart
+  decides, the harness arbitrates, and the entry says what the check covers. Both swept the
+  recursion depth against the old oracle over every limit and five cascade shapes with no
+  difference, and planted wrong guards in a scratch chart, each caught by the harness or the check
+  at its first input. Smaller items, the realign's pool check and history line, the commit follow
+  of rowed jobs only, the fork pin, the row picked by region, the configuration-check cache and
+  the docstrings, are fixed and confirmed by the reviewer that raised them.

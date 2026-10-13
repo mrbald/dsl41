@@ -574,11 +574,15 @@ Semantics:
   its typed verbs, the timer heap, and the input transaction. It imports
   nothing from the interpreter.
 - `src/dsl41/job_chart.py`: the composite `job` statechart: one job's status,
-  flags and holding in one declaration, checked against the three job tables
-  and not yet driven.
+  flags and holding in one declaration, checked against the three job tables;
+  the chart oracle drives it for STATUS, the old rules the rest until their
+  families convert.
 - `src/dsl41/oracle.py`: the AutoSys discrete-event interpreter:
   script-driven completion, edge-triggered re-evaluation, and `InputBatch`,
   one admitted input as one store transaction.
+- `src/dsl41/oracle_chart.py`: the second oracle, which drives the job rows
+  through the `job` chart one input family at a time, compared with the
+  first by the lockstep harness.
 - `src/dsl41/capacity.py`: sized buckets (machine `max_load`, resource
   amounts) and the QUE_WAIT queue with its admission order.
 - `src/dsl41/semantics.py`: the closed registry of semantic switches
@@ -756,7 +760,7 @@ CLI and scripts:
 
 ### Tests
 
-The suite has 122 test files (`pytest --collect-only -q` shows the current
+The suite has 123 test files (`pytest --collect-only -q` shows the current
 count) and a 31-file synthetic or doc-derived JIL corpus under
 `tests/corpus/`. Every oracle trace test runs three times: against the
 oracle directly, through the engine under a virtual clock via

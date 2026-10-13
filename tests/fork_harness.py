@@ -74,6 +74,14 @@ STORE_COPIED = frozenset(
 #: host instance's data bound to the twin (statechart-engine ss11, DL-339).
 #: The phase is its assembly instance's configuration.
 STORE_REBUILT = frozenset({"machines"})
+#: RuntimeState attributes the store's fork shares: the source of the job
+#: instances (DL-341). It is None on this oracle, so the twin's is the
+#: same None; the chart oracle's fork then rebinds its twin's to the twin
+#: (`ChartOracle.fork`), so there it is rebound, not shared.
+STORE_SHARED = frozenset({"job_instance"})
+#: The chart oracle's own attribute, on top of the oracle's: the STATUS move
+#: being written, None between inputs, so its fork starts with None.
+CHART_ORACLE_FRESH = frozenset({"_agreement"})
 
 
 def _when(at: datetime | None) -> str | None:

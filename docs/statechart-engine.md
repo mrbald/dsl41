@@ -158,6 +158,14 @@ fork inside a macrostep raises
 `ReentrantDispatch`. A fork with a root item in the pool raises a `StatechartError`, because
 that item would run on one side only (DL-339).
 
+A tier whose rows code outside a chart still moves may bring an idle instance back to its row.
+`Executor.realign` sets an existing instance's configuration and data as `restore` sets a new
+one's: no action runs, its states have no entry yet, and its generations stay. An instance with a
+deferred event or an item in the pool raises, since no move of its own would handle it, and a
+realign inside a macrostep raises `ReentrantDispatch`. The machine's history ring gets a line for
+it, so an error's report shows the jump (DL-341). The method is transitional: the entry that
+converts the oracle's last input family removes it.
+
 The executor's errors, among them `AmbiguousTransition` (§3), `ReentrantDispatch` (step 4) and
 `UnhandledEvent` (§10), subclass one base, `StatechartError`. Each is an assertion failure, not
 a fault to contain. DL-320's classification never catches it: `trial_apply` and
@@ -280,8 +288,23 @@ are ruled by the entry that converts it (§16).
 DL-337 declares that machine in `src/dsl41/job_chart.py`: one chart `job` with the regions
 `status`, `flags` and `holding`, the box as rows guarded by the job type, and the three tables'
 id spaces kept as `job.1NN`, `job.2NN` and `job.3NN`. It is checked against the three tables,
-row by row and through replays of the old oracle's walks, and nothing drives it yet: the oracle
-still takes the tables, and the chart is not registered.
+row by row and through replays of the old oracle's walks.
+
+The second oracle drives it (DL-341). Each job row has one `job` instance on the state owner's
+executor under the row's key; the owner restores them from the rows where it restores the host
+instances, and a fork copies them. While code outside the chart still moves rows, the owner
+realigns each instance an input touched with its row at the input's commit, and the second oracle
+does so for a job before it dispatches to it, so during the conversion the chart decides each
+input from the row's projection. A converted input is dispatched to the job's instance, and the
+fired row's writes are made by the old oracle's methods. The status written is the one the chart
+reached; the old-versus-new harness judges a wrong status row. The check covers what the old code
+still decides: the holding, the job type behind a row that takes a job's or a box's path, and the
+flags, where it shows only that the converted input's write moves none; the flag moves of the
+families not yet converted are realigned before the dispatch, not checked. A move that leaves
+STARTING or RUNNING has its flags compared when its status is written and its holding when its own
+settlement has run; any other move has both compared when its status is written, before the box
+rules can start the job again. A difference is a statechart error. The
+chart is registered when the last input family converts.
 
 ## 12. Durability of deferred queues
 
@@ -431,7 +454,9 @@ store rows, the revisions per input and the seal digests, on the corpus and on g
 estates. A divergence is a bug or a fidelity question. The harness is `tests/oracle_lockstep.py`,
 proven old-vs-old before the second oracle exists (DL-338). Then the old oracle is deleted. Before
 the second oracle moves anything, the composite `job` chart is declared and checked against the
-old tables (DL-337).
+old tables (DL-337). The second oracle, `ChartOracle` in `src/dsl41/oracle_chart.py`, subclasses
+the old one and overrides one input family's handlers per entry, STATUS first (DL-341); the
+families not yet converted, and the cascade between instances, run the old code in its order.
 
 Each slice is a semantic-class change. Each has its own decision-log entry.
 

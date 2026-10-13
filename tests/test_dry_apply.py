@@ -30,16 +30,19 @@ from typing import Any
 import pytest
 
 from fork_harness import (
+    CHART_ORACLE_FRESH,
     ORACLE_COPIED,
     ORACLE_FRESH,
     ORACLE_SHARED,
     STORE_COPIED,
     STORE_REBUILT,
+    STORE_SHARED,
     history,
     state_bytes,
 )
 from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
+from dsl41.oracle_chart import ChartOracle
 from dsl41.oracle_state import VIOLATION_MARKER, Event, JobStatus, RuntimeState
 from dsl41.runner import Engine, _Pending
 from dsl41.runner_adapters import FakeAdapter
@@ -148,7 +151,7 @@ def test_the_fork_copies_every_mutable_attribute_and_shares_only_fixed_ones() ->
     length."""
     oracle = Oracle(lower_source(_JIL))
     assert set(vars(oracle)) == ORACLE_COPIED | ORACLE_FRESH | ORACLE_SHARED
-    assert set(vars(oracle.store)) == STORE_COPIED | STORE_REBUILT
+    assert set(vars(oracle.store)) == STORE_COPIED | STORE_REBUILT | STORE_SHARED
     oracle.feed(_start())
     assert oracle._trace and oracle._emitted  # history to leave behind
     oracle._window_starts = [("b", 1, "cause")]  # set only inside a box start
@@ -170,12 +173,31 @@ def test_the_fork_copies_every_mutable_attribute_and_shares_only_fixed_ones() ->
             assert getattr(twin.store, name) is not value, name
     for name in STORE_REBUILT:  # the twin's own executor
         assert getattr(twin.store, name) is not getattr(oracle.store, name), name
+    for name in STORE_SHARED:
+        assert getattr(twin.store, name) is getattr(oracle.store, name), name
     seed_local_executor(oracle.store, "local", at=T0)
     assert oracle.fork().store.machines.active("host:local") == frozenset(
         {"host", "routed", "active"}
     )
     oracle._window_starts = None
     assert oracle.fork()._window_starts is None
+
+
+def test_the_chart_oracles_fork_pins_its_own_attribute_and_rebinds_its_job_source() -> None:
+    """The chart oracle (DL-341) holds the oracle's attributes and its
+    own `_agreement`, None between inputs and on the fork; its store holds
+    the same attributes, and the fork's `job_instance` is rebound to the fork."""
+    oracle = ChartOracle(lower_source(_JIL))
+    assert set(vars(oracle)) == ORACLE_COPIED | ORACLE_FRESH | ORACLE_SHARED | CHART_ORACLE_FRESH
+    assert set(vars(oracle.store)) == STORE_COPIED | STORE_REBUILT | STORE_SHARED
+    oracle.feed(_start())
+    twin = oracle.fork()
+    for name in CHART_ORACLE_FRESH:
+        assert getattr(oracle, name) is None and getattr(twin, name) is None, name
+    for name in STORE_SHARED:
+        rebound = getattr(twin.store, name)
+        assert rebound is not getattr(oracle.store, name), name
+        assert getattr(rebound, "__self__", None) is twin, name
 
 
 def test_a_dry_host_command_on_a_fork_leaves_the_routing_table_alone() -> None:

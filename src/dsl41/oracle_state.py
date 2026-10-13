@@ -1998,6 +1998,17 @@ HOST: Final = Statechart(
 )
 
 
+#: What the job instances' tier gives the state owner for one job row
+#: (DL-341): the chart, the configuration the row projects, and the
+#: instance's data.
+type JobInstance = Callable[[str, JobRuntime], tuple[Statechart, frozenset[str], object]]
+
+
+def _restore_job(machines: Executor, instance: JobInstance, job: str, row: JobRuntime) -> None:
+    chart, active, data = instance(job, row)
+    machines.restore(RuntimeState.job_key(job), chart, active, data)
+
+
 class RuntimeState:
     """The authoritative state of one Oracle: job rows, global rows, and the
     timer heap. SEM-01 latching applies throughout -- a recorded status is
@@ -2055,6 +2066,11 @@ class RuntimeState:
         self.machines = Executor()
         self.machines.start(ASSEMBLY_KEY, RUNTIME_ASSEMBLY)
         self.machines.run()
+        #: the job instances (DL-341). None keeps none, as the oracle does.
+        #: The second oracle sets it: every job row then has a `job` instance
+        #: on `machines` under its `job_key`, which follows the row at each
+        #: input's commit (`follow_job`).
+        self.job_instance: JobInstance | None = None
         self._timers: list[tuple[datetime, int, Event]] = []  # heap of (due, token, ev)
         self._timer_seq = 0
         #: which period this state machine is running (period-model ss3.5,
@@ -2101,7 +2117,9 @@ class RuntimeState:
         twin's executor is a copy of this one's (`Executor.fork`, DL-339): it
         shares the instance records until it writes one, so a dispatch on the
         fork never reaches this one's instances. Each host instance's data is
-        bound to the twin, so its guards read the twin's rows."""
+        bound to the twin, so its guards read the twin's rows. Job instances,
+        where the second oracle keeps them, hold value data and share it, and
+        `job_instance` is shared for that oracle to rebind (DL-341)."""
         twin = copy.copy(self)
         twin._jobs = dict(self._jobs)
         twin._globals = dict(self._globals)
@@ -2197,7 +2215,9 @@ class RuntimeState:
         entities with no catalog entry (pseudo-entries `name^INST`, and
         whatever a CHANGE_STATUS invents)."""
         if job not in self._jobs:
-            self._jobs[job] = JobRuntime()
+            row = self._jobs[job] = JobRuntime()
+            if self.job_instance is not None:
+                _restore_job(self.machines, self.job_instance, job, row)
         return self._jobs[job]
 
     def global_value(self, name: str) -> str | None:
@@ -2305,7 +2325,10 @@ class RuntimeState:
         """Close the transaction and increment each CHANGED entity exactly
         once. Returns the changed keys in a stable order -- S2's outbox and
         `ApplyResult` need the list, not just the effect. Committing with no
-        input open is refused: the chart has no such move."""
+        input open is refused: the chart has no such move. Where job instances
+        are kept, each job the input touched that has a row then has its
+        instance follow the row (`follow_job`, DL-341); the commit creates
+        no row."""
         self._assemble(COMMIT_INPUT)
         snapshots, self._snapshots = self._snapshots, {}
         self._check_capacity(snapshots)
@@ -2319,6 +2342,12 @@ class RuntimeState:
             else:
                 row = self._globals[name]
                 self._globals[name] = GlobalRuntime(value=row.value, state_rev=row.state_rev + 1)
+        if self.job_instance is not None:
+            for key in snapshots:
+                namespace, _, name = key.partition(":")
+                # a timer alone touches its job's key: no row, nothing to follow
+                if namespace == "job" and name in self._jobs:
+                    self.follow_job(name)
         return sorted(changed)
 
     def _check_capacity(self, snapshots: Mapping[str, object]) -> None:
@@ -2702,19 +2731,47 @@ class RuntimeState:
         self._hosts[host_id] = HostRuntime.model_validate({**dict(current), **fields})
         self.machines = self.rebuild_machines()
 
-    def rebuild_machines(self) -> Executor:
+    def rebuild_machines(self, *, jobs: bool = True) -> Executor:
         """A new executor holding the assembly instance in the phase the store
-        is in, and one `HOST` instance per host row, each in the configuration
-        its row's state projects (statechart-engine ss11). The phase and the
+        is in, one `HOST` instance per host row, each in the configuration its
+        row's state projects (statechart-engine ss11), and, with `job_instance`
+        set, one `job` instance per job row (DL-341). The phase and the
         rows are enough to rebuild it: an install, a test's witness and the
         gate's scratch read of the chart build theirs here, and no action runs.
-        A fork copies the executor instead (`fork`, DL-339)."""
+        A fork copies the executor instead (`fork`, DL-339). `jobs=False`
+        leaves the job instances out, for a read of the other charts whose cost
+        must not grow with the job count (the gate's `host_move`)."""
         machines = Executor()
         machines.restore(ASSEMBLY_KEY, RUNTIME_ASSEMBLY, self.machines.active(ASSEMBLY_KEY))
         for host_id, row in self._hosts.items():
             data = HostData(self, host_id)
             machines.restore(self.host_key(host_id), HOST, host_configuration(row.state), data)
+        if jobs and self.job_instance is not None:
+            for job, jrow in self._jobs.items():
+                _restore_job(machines, self.job_instance, job, jrow)
         return machines
+
+    def keep_job_instances(self, instance: JobInstance) -> None:
+        """From now on keep one `job` instance per job row, as `instance`
+        gives it (DL-341): the executor is rebuilt with one for every row
+        there is, and a row created later gets its own as it is created."""
+        self.job_instance = instance
+        self.machines = self.rebuild_machines()
+
+    def follow_job(self, job: str) -> None:
+        """Bring a job's instance to its row (DL-341): the configuration
+        the row projects and the data `job_instance` gives for it. While code
+        outside the `job` chart still moves rows, the row is the truth, and a
+        move no chart drove leaves the instance behind until this runs: before
+        the chart's dispatch and at each input's commit. A job with no row gets
+        one, and with it its instance."""
+        instance = self.job_instance
+        assert instance is not None, "follow_job: the state owner keeps no job instances"
+        row = self.runtime(job)
+        _chart, active, data = instance(job, row)
+        key = self.job_key(job)
+        if self.machines.active(key) != active or self.machines.data(key) != data:
+            self.machines.realign(key, active, data)
 
     def _require_host(self, host_id: str) -> HostRuntime:
         row = self._hosts.get(host_id)
