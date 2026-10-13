@@ -576,8 +576,8 @@ Semantics:
 - `src/dsl41/job_chart.py`: the composite `job` statechart: one job's status,
   flags and holding in one declaration, checked against the three job tables;
   the chart oracle drives it for STATUS, the starts, KILLJOB, the TIMER input,
-  the flags, RELEASE_RESOURCE and the readmission, the old rules the rest
-  until their families convert.
+  the flags, RELEASE_RESOURCE, the readmission and the box rules, the old
+  rules the rest until their families convert.
 - `src/dsl41/oracle.py`: the AutoSys discrete-event interpreter:
   script-driven completion, edge-triggered re-evaluation, and `InputBatch`,
   one admitted input as one store transaction.
@@ -587,6 +587,9 @@ Semantics:
 - `src/dsl41/oracle_chart_agreement.py`: the second oracle's agreement
   check: the chart's move recorded at its dispatch, and the old oracle's
   writes compared with it.
+- `src/dsl41/oracle_chart_cascade.py`: the second oracle's box rules and
+  period opening: each moment the chart declares between a box and its
+  members dispatched where the old cascade runs the rule.
 - `src/dsl41/oracle_chart_facts.py`: the payloads the second oracle gives the
   `job` chart, each oracle fact computed on its first read, and a job
   instance's data.

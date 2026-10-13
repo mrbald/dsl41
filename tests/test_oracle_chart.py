@@ -209,6 +209,30 @@ def test_a_terminator_loop_raises_the_cascade_error_on_both_oracles() -> None:
         sys.setrecursionlimit(limit)
 
 
+def test_a_recursion_error_in_an_outermost_attempts_decision_is_the_cascade_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The chart's selection is deeper than today's gates, so a cascade can
+    meet the recursion limit there, before any start converts it (DL-342):
+    the first attempt's decision names the cascade. The terminator loop above
+    met it there until the box rules were the chart's (DL-346); it now
+    meets it in a box rule, inside a start. A nested attempt's decision
+    leaves the error to its outermost start."""
+    oracle = ChartOracle(lower_source(_JIL))
+
+    def deep(*_args: object) -> None:
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr(oracle, "_decide_start", deep)
+    with pytest.raises(CascadeDepthError) as raised:
+        oracle.feed(ev("STARTJOB", 1, job="j"))
+    assert raised.value.job == "j"
+    oracle._starts_in_progress["k"] = 1
+    with pytest.raises(RecursionError) as nested:
+        oracle._attempt_start("j", force=False, scheduled=False, cause="a wake")
+    assert not isinstance(nested.value, CascadeDepthError)
+
+
 def test_a_status_input_fires_a_job_row_on_the_state_owners_executor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2547,7 +2571,12 @@ def test_a_move_whose_box_rules_readmit_a_waiter_still_has_its_holding_compared(
     assert [o.rows for o in seen if o.event.name == "readmit"] == [("job.109",)]
     assert paired.twin.store.job["nq"].status == "INACTIVE"
     kept = JobData(release_on_success="keep", release_otherwise="keep")
-    monkeypatch.setattr(oracle_chart, "job_data", lambda *_: kept)
+    # the member's data only: the box's own end is the chart's now (DL-346)
+    monkeypatch.setattr(
+        oracle_chart,
+        "job_data",
+        lambda oracle, job, row: kept if job == "nm" else job_data(oracle, job, row),
+    )
     with pytest.raises(StatechartError, match="'nm': the holding differs after the settlement"):
         oracle.feed(ev("STATUS", 3, job="nm", status="SUCCESS"))
     lines = [(t.job, t.transition) for t in oracle.trace()[-3:]]
@@ -2582,3 +2611,727 @@ def test_dl50_a_readmission_computes_only_the_facts_todays_scan_reads() -> None:
     lo = [o.event.payload for o in seen if o.key == "job:qu_lo"][-1]
     assert lo.known("admissible") is False and lo.known("recheck") is None
     assert lo.known("vector") is not None and "recheck" not in repr(lo)
+
+
+# ---- the box rules (DL-346)
+
+_BOX_ITEMS = (
+    "member ends FAILURE or TERMINATED",
+    "member moves",
+    "completion moment",
+    "box recompute",
+    "box start",
+    "box running",
+    "box run ends",
+    "box ends FAILURE or TERMINATED",
+    "box set INACTIVE",
+    "OFF_NOEXEC on its box",
+    "first input of a period",
+)
+
+
+def _job(name: str, box: str | None = None, extra: str = "") -> str:
+    inside = f"box_name: {box}\n" if box else ""
+    return f"insert_job: {name}\njob_type: c\ncommand: x\nmachine: m1\n{inside}{extra}\n"
+
+
+def _boxed(name: str, extra: str = "") -> str:
+    return f"insert_job: {name}\njob_type: b\n{extra}\n"
+
+
+_NEVER = "condition: s(never)\n"
+#: Boxes for the box rules' outcome classes: `tb` with a box_terminator and a
+#: job_terminator member; `fb` and `sb` that fold; `osb` and `ofb` with an
+#: override each, and a member that never runs; `ux` and `uy` whose override
+#: never holds; idle boxes `rb1` to `rb7` that re-derive their status; `ab`
+#: with an auto_hold member; `ib` set INACTIVE with a running, an ended and
+#: an INACTIVE member; `nb` taken OFF_NOEXEC; `lz` whose box_success names a
+#: job outside it.
+_BOX_JIL = (
+    _job("never")
+    + _boxed("tb")
+    + _job("tm", "tb", "box_terminator: 1\n")
+    + _job("tn", "tb", "job_terminator: 1\n")
+    + _boxed("fb")
+    + _job("fm", "fb")
+    + _job("fn", "fb")
+    + _boxed("sb")
+    + _job("sm", "sb")
+    + _boxed("osb", "box_success: s(osm)\n")
+    + _job("osm", "osb")
+    + _job("osn", "osb", _NEVER)
+    + _boxed("ofb", "box_failure: f(ofm)\n")
+    + _job("ofm", "ofb")
+    + _job("ofn", "ofb", _NEVER)
+    + _boxed("ux", "box_success: s(never)\n")
+    + _job("uxm", "ux")
+    + _boxed("uy", "box_failure: f(never)\n")
+    + _job("uym", "uy")
+    + _boxed("rb1", "box_success: s(r1m)\n")
+    + _job("r1m", "rb1")
+    + _boxed("rb2", "box_failure: f(r2m)\n")
+    + _job("r2m", "rb2")
+    + _boxed("rb3")
+    + _job("r3m", "rb3")
+    + _boxed("rb4")
+    + _job("r4m", "rb4")
+    + _boxed("rb5")
+    + _job("r5m", "rb5")
+    + _job("r5n", "rb5")
+    + _boxed("rb6")
+    + _job("r6m", "rb6", "status: ON_ICE\n")
+    + _boxed("rb7", "box_failure: f(r7n)\n")
+    + _job("r7m", "rb7")
+    + _job("r7n", "rb7")
+    + _boxed("ab")
+    + _job("am", "ab", "auto_hold: 1\n")
+    + _boxed("ib")
+    + _job("im", "ib")
+    + _job("in", "ib")
+    + _job("iz", "ib", _NEVER)
+    + _boxed("nb")
+    + _job("nm", "nb")
+    + _job("nn", "nb")
+    + _boxed("lz", "box_success: s(never)\n")
+    + _job("lzm", "lz")
+)
+
+
+def _box_ev(minutes: int, kind: EventKind, job: str, **payload: object) -> Event:
+    return ev(kind, minutes, job=job, **payload)
+
+
+def _box_steps(name: str, count: int) -> list[Event]:
+    """The first `count` inputs of a script of the harness's directed box
+    estate, its seal points left out."""
+    script = oracle_lockstep._box_scripts()[name]
+    return [s for s in script if isinstance(s, Event)][:count]
+
+
+def _queued_box_steps(count: int) -> list[Event]:
+    return _box_steps("queued boxes re-derive their status as a member ends", count)
+
+
+_TERMINATOR = [_box_ev(0, "FORCE_STARTJOB", "tb"), _box_ev(1, "STATUS", "tm", status="FAILURE")]
+_CASCADE = [
+    _box_ev(0, "FORCE_STARTJOB", "ib"),
+    _box_ev(1, "STATUS", "in", status="SUCCESS"),
+    _box_ev(2, "STATUS", "ib", status="INACTIVE"),
+]
+_OFF_NOEXEC = [
+    _box_ev(0, "ON_NOEXEC", "nb"),
+    _box_ev(1, "OFF_NOEXEC", "nm"),
+    _box_ev(2, "OFF_NOEXEC", "nb"),
+]
+_FOLD_FAILURE = [
+    _box_ev(0, "FORCE_STARTJOB", "fb"),
+    _box_ev(1, "STATUS", "fm", status="FAILURE"),
+    _box_ev(2, "STATUS", "fn", status="SUCCESS"),
+]
+#: Per outcome class: the estate, its script, the job, the rows the box
+#: rules fire on the job's instance in the script's last input, in order,
+#: and a trace line the old oracle writes for the job there ("" for none).
+_BOX_OUTCOMES: dict[str, tuple[str, list[Event], str, list[tuple[str, ...]], str]] = {
+    "a box_terminator member's FAILURE terminates its running box": (
+        _BOX_JIL,
+        _TERMINATOR,
+        "tb",
+        [("job.130",), ("job.189",)],
+        "RUNNING->TERMINATED",
+    ),
+    "a live job_terminator member of a box that ends TERMINATED terminates": (
+        _BOX_JIL,
+        _TERMINATOR,
+        "tn",
+        [("job.228",), ("job.116",)],
+        "RUNNING->TERMINATED",
+    ),
+    "a member that is not live stays as its box ends": (
+        _BOX_JIL,
+        _TERMINATOR,
+        "tm",
+        [("job.228",), ("job.197",)],
+        "RUNNING->FAILURE",
+    ),
+    "a member's FAILURE that fires no terminator, no override and no fold": (
+        _BOX_JIL,
+        _FOLD_FAILURE[:2],
+        "fb",
+        [("job.189",), ("job.185",), ("job.187",)],
+        "",
+    ),
+    "the default fold ends a box FAILURE": (
+        _BOX_JIL,
+        _FOLD_FAILURE,
+        "fb",
+        [("job.185",), ("job.129",)],
+        "RUNNING->FAILURE",
+    ),
+    "the default fold ends a box SUCCESS": (
+        _BOX_JIL,
+        [_box_ev(0, "FORCE_STARTJOB", "sb"), _box_ev(1, "STATUS", "sm", status="SUCCESS")],
+        "sb",
+        [("job.185",), ("job.128",)],
+        "RUNNING->SUCCESS",
+    ),
+    "an unmet box_success holds the default SUCCESS": (
+        _BOX_JIL,
+        [_box_ev(0, "FORCE_STARTJOB", "ux"), _box_ev(1, "STATUS", "uxm", status="SUCCESS")],
+        "ux",
+        [("job.185",), ("job.187",)],
+        "",
+    ),
+    "an unmet box_failure holds the default FAILURE": (
+        _BOX_JIL,
+        [_box_ev(0, "FORCE_STARTJOB", "uy"), _box_ev(1, "STATUS", "uym", status="FAILURE")],
+        "uy",
+        [("job.189",), ("job.185",), ("job.187",)],
+        "",
+    ),
+    "box_success ends a running box": (
+        _BOX_JIL,
+        [_box_ev(0, "FORCE_STARTJOB", "osb"), _box_ev(1, "STATUS", "osm", status="SUCCESS")],
+        "osb",
+        [("job.126",)],
+        "RUNNING->SUCCESS",
+    ),
+    "box_failure ends a running box": (
+        _BOX_JIL,
+        [_box_ev(0, "FORCE_STARTJOB", "ofb"), _box_ev(1, "STATUS", "ofm", status="FAILURE")],
+        "ofb",
+        [("job.189",), ("job.127",)],
+        "RUNNING->FAILURE",
+    ),
+    "a grandparent's box_success ends it when a member of its subbox ends": (
+        oracle_lockstep.BOX_JIL,
+        _box_steps("a grandparent's box_success names a member of its subbox", 2),
+        "bx_g",
+        [("job.126",)],
+        "RUNNING->SUCCESS",
+    ),
+    "the subbox whose member ended stays running": (
+        oracle_lockstep.BOX_JIL,
+        _box_steps("a grandparent's box_success names a member of its subbox", 2),
+        "bx_c",
+        [("job.185",), ("job.187",), ("job.228",)],
+        "",
+    ),
+    "an idle box's box_success": (
+        _BOX_JIL,
+        [_box_ev(0, "STATUS", "r1m", status="SUCCESS")],
+        "rb1",
+        [("job.131",)],
+        "INACTIVE->SUCCESS",
+    ),
+    "an idle box's box_failure": (
+        _BOX_JIL,
+        [_box_ev(0, "STATUS", "r2m", status="FAILURE")],
+        "rb2",
+        [("job.189",), ("job.132",)],
+        "INACTIVE->FAILURE",
+    ),
+    "an idle box derives SUCCESS": (
+        _BOX_JIL,
+        [_box_ev(0, "STATUS", "r3m", status="SUCCESS")],
+        "rb3",
+        [("job.133",)],
+        "INACTIVE->SUCCESS",
+    ),
+    "an idle box derives FAILURE": (
+        _BOX_JIL,
+        [_box_ev(0, "STATUS", "r4m", status="FAILURE")],
+        "rb4",
+        [("job.189",), ("job.134",)],
+        "INACTIVE->FAILURE",
+    ),
+    "a FAILURE box's box_success": (
+        _BOX_JIL,
+        [
+            _box_ev(0, "STATUS", "r1m", status="FAILURE"),
+            _box_ev(1, "STATUS", "r1m", status="SUCCESS"),
+        ],
+        "rb1",
+        [("job.162",)],
+        "FAILURE->SUCCESS",
+    ),
+    "a SUCCESS box's box_failure": (
+        _BOX_JIL,
+        [
+            _box_ev(0, "STATUS", "r2m", status="SUCCESS"),
+            _box_ev(1, "STATUS", "r2m", status="FAILURE"),
+        ],
+        "rb2",
+        [("job.189",), ("job.164",)],
+        "SUCCESS->FAILURE",
+    ),
+    "a FAILURE box derives SUCCESS": (
+        _BOX_JIL,
+        [
+            _box_ev(0, "STATUS", "r4m", status="FAILURE"),
+            _box_ev(1, "STATUS", "r4m", status="SUCCESS"),
+        ],
+        "rb4",
+        [("job.166",)],
+        "FAILURE->SUCCESS",
+    ),
+    "a SUCCESS box derives FAILURE": (
+        _BOX_JIL,
+        [
+            _box_ev(0, "STATUS", "r3m", status="SUCCESS"),
+            _box_ev(1, "STATUS", "r3m", status="FAILURE"),
+        ],
+        "rb3",
+        [("job.189",), ("job.168",)],
+        "SUCCESS->FAILURE",
+    ),
+    "a queued box's box_success": (
+        oracle_lockstep.BOX_JIL,
+        _queued_box_steps(5),
+        "bx_q1",
+        [("job.161",)],
+        "QUE_WAIT->SUCCESS",
+    ),
+    "a queued box's box_failure": (
+        oracle_lockstep.BOX_JIL,
+        _queued_box_steps(6),
+        "bx_q2",
+        [("job.189",), ("job.163",)],
+        "QUE_WAIT->FAILURE",
+    ),
+    "a queued box derives FAILURE": (
+        oracle_lockstep.BOX_JIL,
+        _queued_box_steps(7),
+        "bx_q3",
+        [("job.189",), ("job.167",)],
+        "QUE_WAIT->FAILURE",
+    ),
+    "a queued box derives SUCCESS": (
+        oracle_lockstep.QUEUE_JIL,
+        _queue_steps("a queued box's member ends it, and its parent's release meets it", 4),
+        "qu_q",
+        [("job.165",), ("job.228",)],
+        "QUE_WAIT->SUCCESS",
+    ),
+    "an idle box with a member still running derives nothing": (
+        _BOX_JIL,
+        [
+            _box_ev(0, "STATUS", "r5n", status="RUNNING"),
+            _box_ev(1, "STATUS", "r5m", status="SUCCESS"),
+        ],
+        "rb5",
+        [("job.191",)],
+        "",
+    ),
+    "an iced member's change is no verdict": (
+        _BOX_JIL,
+        [_box_ev(0, "STATUS", "r6m", status="SUCCESS")],
+        "rb6",
+        [("job.191",)],
+        "",
+    ),
+    "an unmet box_failure suppresses the derived FAILURE": (
+        _BOX_JIL,
+        [_box_ev(0, "STATUS", "r7m", status="FAILURE")],
+        "rb7",
+        [("job.189",), ("job.191",)],
+        "",
+    ),
+    "a box start resets a member that ended": (
+        _BOX_JIL,
+        [
+            _box_ev(0, "FORCE_STARTJOB", "sb"),
+            _box_ev(1, "STATUS", "sm", status="SUCCESS"),
+            _box_ev(2, "FORCE_STARTJOB", "sb"),
+        ],
+        "sm",
+        [("job.122",), ("job.227",)],
+        "SUCCESS->INACTIVE",
+    ),
+    "a box start leaves an INACTIVE member": (
+        _BOX_JIL,
+        [_box_ev(0, "FORCE_STARTJOB", "osb")],
+        "osn",
+        [("job.195",), ("job.227",)],
+        "",
+    ),
+    "a box start clears an INACTIVE member's exit code by a plain write": (
+        _BOX_JIL,
+        [
+            _box_ev(0, "STATUS", "osn", status="INACTIVE", exit_code=3),
+            _box_ev(1, "FORCE_STARTJOB", "osb"),
+        ],
+        "osn",
+        [("job.195",), ("job.227",)],
+        "",
+    ),
+    "a box's start holds its auto_hold member": (
+        _BOX_JIL,
+        [_box_ev(0, "FORCE_STARTJOB", "ab")],
+        "am",
+        [("job.195",), ("job.208",)],
+        "ON_HOLD",
+    ),
+    "a box run's end drops a member's arm": (
+        oracle_lockstep.BOX_JIL,
+        _box_steps("an auto_hold member armed, and its box's kill drops the arm", 3),
+        "bx_ah",
+        [("job.215",), ("job.197",)],
+        "SCHED_DISARM",
+    ),
+    "a box set INACTIVE takes its running member along": (
+        _BOX_JIL,
+        _CASCADE,
+        "im",
+        [("job.159",), ("job.228",)],
+        "RUNNING->INACTIVE",
+    ),
+    "a box set INACTIVE takes its ended member along": (
+        _BOX_JIL,
+        _CASCADE,
+        "in",
+        [("job.160",), ("job.228",)],
+        "SUCCESS->INACTIVE",
+    ),
+    "a box set INACTIVE leaves its INACTIVE member": (
+        _BOX_JIL,
+        _CASCADE,
+        "iz",
+        [("job.196",), ("job.228",)],
+        "",
+    ),
+    "a box set INACTIVE takes its queued member along": (
+        oracle_lockstep.BOX_JIL,
+        _box_steps("a queued member goes INACTIVE with its box", 3),
+        "bx_qm",
+        [("job.123",), ("job.228",)],
+        "QUE_WAIT->INACTIVE",
+    ),
+    "a box taken OFF_NOEXEC clears its ON_NOEXEC member": (
+        _BOX_JIL,
+        _OFF_NOEXEC,
+        "nn",
+        [("job.211",)],
+        "OFF_NOEXEC",
+    ),
+    "a box taken OFF_NOEXEC leaves a member already off": (
+        _BOX_JIL,
+        _OFF_NOEXEC,
+        "nm",
+        [("job.229",)],
+        "",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_BOX_OUTCOMES))
+def test_each_box_rule_outcome_fires_its_rows_and_writes_what_the_old_oracle_writes(
+    case: str,
+) -> None:
+    """Each box rule is dispatched to the instance it moves, where today's
+    cascade runs the rule: the rows the chart fires are the outcome today's
+    rule code reaches, and the chart oracle leaves the trace, the events,
+    the rows, the revisions and the seal the old oracle leaves."""
+    jil, steps, job, rows, line = _BOX_OUTCOMES[case]
+    paired = LockstepOracle(lower_source(jil), new=ChartOracle)
+    for step in steps[:-1]:
+        paired.feed(step)
+    seen = _spied(paired.twin)
+    traced = len(paired.twin.trace())
+    paired.feed(steps[-1])
+    paired.check_seal()
+    _agrees(paired.twin)
+    key = RuntimeState.job_key(job)
+    mine = [o for o in seen if o.key == key and o.event.name in _BOX_ITEMS and o.rows]
+    assert [o.rows for o in mine] == rows
+    lines = [t.transition for t in paired.twin.trace()[traced:] if t.job == job]
+    assert (line in lines) if line else lines == []
+
+
+def _opening(cls: type[Oracle] = ChartOracle) -> tuple[Oracle, CarriedRows]:
+    """A period whose catalog drops `k`, which holds its unit of KEPT
+    after a FAILURE, and the rows it carries."""
+    first = ChartOracle(lower_source(_JIL))
+    first.feed(ev("STARTJOB", 1, job="k"))
+    first.feed(ev("STATUS", 2, job="k", status="FAILURE"))
+    store = first.store
+    carried = CarriedRows(
+        jobs=dict(store.job),
+        globals_=dict(store.globals_),
+        timers=tuple(store.timers()),
+        timer_seq=store.timer_seq,
+        consumed=dict(store.consumed),
+        enqueue_counter=store.enqueue_counter,
+        now=T0 + timedelta(minutes=2),
+    )
+    k = "insert_job: k\njob_type: c\ncommand: x\nmachine: m1\n"
+    without_k = _JIL.replace(f"{k}resources: (KEPT, QUANTITY=1, FREE=N)\n\n", "")
+    assert without_k != _JIL
+    return cls(lower_source(without_k), carried=carried), carried
+
+
+def test_dl256_the_period_opening_gives_a_removed_jobs_units_back_through_the_chart() -> None:
+    """The period's first input gives back the units of a carried row whose
+    job the catalog no longer defines (`first input of a period`, job.308),
+    with today's line, on both oracles alike."""
+    oracle, carried = _opening()
+    paired = LockstepOracle(oracle.catalog, new=ChartOracle, carried=carried)
+    assert paired.twin.opening_release_owed
+    seen = _spied(paired.twin)
+    paired.feed(ev("STARTJOB", 3, job="j"))
+    paired.check_seal()
+    _agrees(paired.twin)
+    assert [o.rows for o in seen if o.key == "job:k" and o.event.name in _BOX_ITEMS] == [
+        ("job.308",)
+    ]
+    [line] = [t for t in paired.twin.trace() if t.job == "k"]
+    assert line.transition == "RELEASE_RESOURCE"
+    assert line.cause.startswith("job removed from the catalog")
+    assert paired.twin.store.job["k"].reservations == ()
+
+
+def test_an_opening_row_the_oracle_does_not_write_is_a_statechart_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Planted: the removed job's data says it is in the catalog, so the
+    opening fires the marked job.321, which the oracle has no write for,
+    before any write: `k` keeps its units and no trace line is written. Its
+    hit stays out of the session."""
+    monkeypatch.setenv(HITS_ENV, str(tmp_path))
+    planted = _planted(in_catalog=lambda ctx: True, left_catalog=lambda ctx: False)
+    oracle, _carried = _opening(planted)
+    row = oracle.store.job["k"]
+    assert row.reservations != ()
+    traced = len(oracle.trace())
+    with pytest.raises(
+        StatechartError, match="'k': first input of a period fired job.321, and no opening row"
+    ):
+        oracle.feed(ev("STARTJOB", 3, job="j"))
+    assert oracle.store.job["k"] == row
+    assert oracle.trace()[traced:] == []
+
+
+def _box_oracle(cls: type[ChartOracle] = ChartOracle) -> ChartOracle:
+    return cls(lower_source(_BOX_JIL))
+
+
+def _fed_boxes(oracle: ChartOracle, steps: list[Event]) -> ChartOracle:
+    for step in steps:
+        oracle.feed(step)
+    return oracle
+
+
+#: `hb` holds a unit of BR while it runs; its members hold nothing.
+_HELD_BOX_JIL = (
+    "insert_resource: BR\nres_type: R\namount: 1\n\n"
+    + _boxed("hb", "resources: (BR, QUANTITY=1, FREE=Y)\n")
+    + _job("hm", "hb")
+    + _job("hn", "hb")
+)
+#: `hm` holds a unit of BR while it runs, inside `hb`.
+_HELD_MEMBER_JIL = (
+    "insert_resource: BR\nres_type: R\namount: 1\n\n"
+    + _boxed("hb")
+    + _job("hm", "hb", "resources: (BR, QUANTITY=1, FREE=Y)\n")
+)
+
+
+def _released_for(name: str, release: Any) -> Callable[[Oracle, str, JobRuntime], JobData]:
+    """`job_data` with `name`'s units released by `release` after every end."""
+
+    def data(oracle: Oracle, job: str, row: JobRuntime) -> JobData:
+        real = job_data(oracle, job, row)
+        if job != name:
+            return real
+        return replace(real, release_on_success=release, release_otherwise=release)
+
+    return data
+
+
+def test_a_box_whose_end_the_chart_settles_otherwise_is_a_statechart_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Planted: the box's data keeps its unit after its end, today's
+    settlement frees it. The fold's move (job.128) is compared as a STATUS
+    move is, its holding at its settlement."""
+    oracle = ChartOracle(lower_source(_HELD_BOX_JIL))
+    oracle.feed(ev("FORCE_STARTJOB", 0, job="hb"))
+    oracle.feed(ev("STATUS", 1, job="hn", status="SUCCESS"))
+    monkeypatch.setattr(oracle_chart, "job_data", _released_for("hb", "keep"))
+    with pytest.raises(StatechartError, match="'hb': the holding differs after the settlement"):
+        oracle.feed(ev("STATUS", 2, job="hm", status="SUCCESS"))
+
+
+def test_a_batch_row_the_chart_settles_otherwise_is_a_statechart_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Planted: a running member's data frees its unit after an end that is
+    not SUCCESS; the box's INACTIVE takes it along (job.159), and today's
+    settlement keeps the renewable's unit held (DL-256). The row is compared
+    once the batch has written and settled it, before the batch's box rules
+    and wakes."""
+    oracle = ChartOracle(lower_source(_HELD_MEMBER_JIL))
+    oracle.feed(ev("FORCE_STARTJOB", 0, job="hb"))
+    assert oracle.store.job["hm"].status == "RUNNING"
+    assert job_data(oracle, "hm", oracle.store.job["hm"]).release_otherwise == "keep"
+    monkeypatch.setattr(oracle_chart, "job_data", _released_for("hm", "free"))
+    traced = len(oracle.trace())
+    with pytest.raises(StatechartError, match="'hm': the batch's writes differ from the chart's"):
+        oracle.feed(ev("STATUS", 1, job="hb", status="INACTIVE"))
+    assert [(t.job, t.transition) for t in oracle.trace()[traced:]] == [
+        ("hb", "RUNNING->INACTIVE"),
+        ("hm", "RUNNING->INACTIVE"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("steps", "box", "changes", "message"),
+    [
+        (
+            [_box_ev(0, "FORCE_STARTJOB", "sb"), _box_ev(1, "STATUS", "sm", status="SUCCESS")],
+            "sb",
+            {"job_128": {"target": "FAILURE"}, "job_129": {"target": "SUCCESS"}},
+            "'sb': completion moment reached FAILURE, and its facts derive SUCCESS",
+        ),
+        (
+            [_box_ev(0, "FORCE_STARTJOB", "osb"), _box_ev(1, "STATUS", "osm", status="SUCCESS")],
+            "osb",
+            {"job_126": {"target": "FAILURE"}, "job_127": {"target": "SUCCESS"}},
+            "'osb': member moves reached FAILURE, and its facts derive SUCCESS",
+        ),
+        (
+            [_box_ev(0, "STATUS", "r4m", status="FAILURE")],
+            "rb4",
+            {"job_133": {"target": "FAILURE"}, "job_134": {"target": "SUCCESS"}},
+            "'rb4': box recompute reached SUCCESS, and its facts derive FAILURE",
+        ),
+    ],
+    ids=["the fold", "an override", "an idle recompute"],
+)
+def test_a_box_rule_whose_target_is_swapped_fails_before_any_write(
+    steps: list[Event],
+    box: str,
+    changes: dict[str, dict[str, str]],
+    message: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Mutant: the targets of a SUCCESS row and its FAILURE twin swapped.
+    The box's target is the chart's choice, and a fact that derives the
+    other is a statechart error before the box's write. The mutant's hits
+    stay out of the session."""
+    monkeypatch.setenv(HITS_ENV, str(tmp_path))
+    oracle = _fed_boxes(_box_oracle(_rows_changed(**changes)), steps[:-1])
+    traced = len(oracle.trace())
+    with pytest.raises(StatechartError, match=message):
+        oracle.feed(steps[-1])
+    assert [t for t in oracle.trace()[traced:] if t.job == box] == []
+
+
+def test_an_idle_recompute_whose_override_row_is_swapped_fails_before_any_write(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Mutant: the guards of job.131 (box_success decides) and job.133 (the
+    default verdict) swapped. Whether an override decided the recompute is the
+    row's choice too, and a row that disagrees with the facts is a statechart
+    error before the box's write."""
+    monkeypatch.setenv(HITS_ENV, str(tmp_path))
+    swapped = _rows_changed(
+        job_131={"guard": "derives_success"}, job_133={"guard": "overrides_success"}
+    )
+    oracle = _box_oracle(swapped)
+    traced = len(oracle.trace())
+    with pytest.raises(
+        StatechartError, match="'rb3': job.131 fired, and the facts say override=False"
+    ):
+        oracle.feed(_box_ev(0, "STATUS", "r3m", status="SUCCESS"))
+    assert [t for t in oracle.trace()[traced:] if t.job == "rb3"] == []
+
+
+def test_a_box_rule_row_the_oracle_does_not_write_is_a_statechart_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Planted: a member's end reaches a box whose data says it is not one,
+    so `member ends FAILURE or TERMINATED` fires the marked job.190, which the
+    oracle has no write for, before any write of the box: its row is as it
+    was, and the box has no trace line. Its hit stays out of the session."""
+    monkeypatch.setenv(HITS_ENV, str(tmp_path))
+    ends = "member ends FAILURE or TERMINATED"
+    planted = _planted(
+        is_box=lambda ctx: ctx.data.box and ctx.event.name != ends,
+        is_job=lambda ctx: not ctx.data.box or ctx.event.name == ends,
+    )
+    oracle = _fed_boxes(_box_oracle(planted), _FOLD_FAILURE[:1])
+    row = oracle.store.job["fb"]
+    traced = len(oracle.trace())
+    with pytest.raises(StatechartError, match=f"'fb': {ends} fired job.190, and no box rule row"):
+        oracle.feed(_FOLD_FAILURE[1])
+    assert oracle.store.job["fb"] == row
+    assert [t for t in oracle.trace()[traced:] if t.job == "fb"] == []
+
+
+def test_a_row_that_moves_nothing_and_moves_the_instance_is_a_statechart_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Mutant: job.196 (a job already INACTIVE stays out of its box's
+    cascade) re-kinded to an external row into SUCCESS. The oracle writes
+    nothing for it, and the instance it moved is caught at once, at the
+    input, before the cascade's batch: not left for a later follow or the
+    commit's realign to heal. Its hits stay out of the session."""
+    monkeypatch.setenv(HITS_ENV, str(tmp_path))
+    drifted = _rows_changed(job_196={"kind": "external", "target": "SUCCESS"})
+    oracle = _fed_boxes(_box_oracle(drifted), _CASCADE[:2])
+    traced = len(oracle.trace())
+    with pytest.raises(
+        StatechartError, match="'iz': job.196 moves nothing, and the chart moved the job"
+    ) as raised:
+        oracle.feed(_CASCADE[2])
+    assert "SUCCESS" in str(raised.value)
+    assert oracle.store.job["iz"].status == "INACTIVE"
+    assert [t for t in oracle.trace()[traced:] if t.job in ("ib", "iz")] == []
+
+
+def test_a_batch_that_does_not_write_the_charts_move_is_a_statechart_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Planted: the batch INACTIVE path drops the last row the chart moved
+    with its box; the move the chart made is never written."""
+    oracle = _fed_boxes(_box_oracle(), _CASCADE[:2])
+    batch = oracle._set_inactive_batch
+
+    def dropped(rows: list[Any], **kwargs: Any) -> None:
+        batch(rows[:-1], **kwargs)
+
+    monkeypatch.setattr(oracle, "_set_inactive_batch", dropped)
+    with pytest.raises(StatechartError, match="'in': the batch never wrote the chart's move"):
+        oracle.feed(_CASCADE[2])
+    assert oracle._batch is None
+
+
+def test_sem12_a_box_rule_computes_only_the_facts_todays_rule_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A member's start is no completion moment and names nothing in the
+    box's box_success, so its door reads no override; its fold reads that a
+    member is not done, and no vote. The member's SUCCESS is a completion
+    moment: the override is read once, and unmet it holds the default."""
+    oracle = _box_oracle()
+    reads: list[str] = []
+    cond_true = oracle._cond_true
+
+    def counted(cond: Any, evaluator: str) -> bool:
+        reads.append(evaluator)
+        return cond_true(cond, evaluator)
+
+    monkeypatch.setattr(oracle, "_cond_true", counted)
+    seen = _spied(oracle)
+    oracle.feed(_box_ev(0, "FORCE_STARTJOB", "lz"))
+    assert "lz" not in reads
+    doors = [o.event.payload for o in seen if o.key == "job:lz" and o.event.name in _BOX_ITEMS]
+    assert [(type(p).__name__, p.known("done")) for p in doors] == [
+        ("FoldFacts", False),
+        ("OverrideFacts", None),
+        ("FoldFacts", False),
+    ]
+    oracle.feed(_box_ev(1, "STATUS", "lzm", status="SUCCESS"))
+    assert reads.count("lz") == 1
+    assert oracle.store.job["lz"].status == "RUNNING"

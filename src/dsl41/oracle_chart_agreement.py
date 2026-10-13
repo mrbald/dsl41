@@ -19,7 +19,9 @@ with the flags at the write, before the box rules can start the job again. A
 later move of the same job by the cascade, which the chart does not declare
 yet, is never taken for a difference. A move compared inside the cascade of
 another (a readmission in the wakes of the box rules) leaves the other waiting
-for its own settlement. A difference is a `StatechartError` naming both
+for its own settlement. A row that the batch INACTIVE path writes for a box
+rule (a box start's reset, a box's cascade) is compared whole once the batch
+has written and settled it. A difference is a `StatechartError` naming both
 configurations.
 
 `AgreeingOracle` is `Oracle` with that check at today's write points (the
@@ -92,6 +94,10 @@ class AgreeingOracle(Oracle):
         self._agreement: Agreement | None = None
         #: a start's status move, between its dispatch and its first status write
         self._start_move: Agreement | None = None
+        #: the moves a batch INACTIVE path writes for the jobs the box rules
+        #: address (a box start's reset, a box's cascade), each compared when
+        #: its row is written and settled; None outside a batch
+        self._batch: dict[str, Agreement] | None = None
 
     @contextmanager
     def _moving(self, job: str, key: str, event: ChartEvent, old: str) -> Iterator[Agreement]:
@@ -177,7 +183,13 @@ class AgreeingOracle(Oracle):
             raise self._differ("the RUNNING write differs", started)
 
     def _settle_row(self, job: str, old: str, new: str, *, run: int | None = None) -> bool:
+        """A move's own settlement compares its holding (`_moving`); a row of
+        a batch is compared whole once it is written and settled, before the
+        batch's box rules and wakes run."""
         released = super()._settle_row(job, old, new, run=run)
+        batched = None if self._batch is None else self._batch.pop(job, None)
+        if batched is not None:
+            self._agree_after(batched, "the batch's writes")
         agreement = self._agreement
         if agreement is not None and agreement.job == job and agreement.move == (old, new):
             self._agreement = agreement.outer

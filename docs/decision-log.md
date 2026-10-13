@@ -22391,3 +22391,81 @@ relitigate an entry; append a new one.
   planted guard caught at its first input, and the agreement's base module adding no frame.
   Smaller items, two test docstrings claiming more than the tests check and the facts' stale
   header, are fixed and confirmed by the reviewer that raised them.
+- DL-346 The box rules are decided by the job chart under today's cascade order: the member
+  moments, the box moments down, the period opening and the ancestors' overrides, each dispatched
+  where today's rule runs
+  (2026-10-13; src/dsl41/oracle_chart_cascade.py, src/dsl41/oracle_chart.py,
+  src/dsl41/oracle_chart_agreement.py, src/dsl41/oracle_chart_facts.py; tests/estate_gen.py,
+  tests/oracle_lockstep.py, tests/test_oracle_chart.py, tests/test_oracle_lockstep.py,
+  tests/test_cascade_depth.py, tests/fork_harness.py; docs/statechart-engine.md §11, §16;
+  docs/blocks/job-lifecycle.md; README.md; pyproject.toml)
+  THE FAMILY. The chart oracle (DL-341 to DL-345) now decides every box move the chart declares.
+  A base layer of its own module, between the agreement check and the input families, replaces
+  each of today's box-rule methods in place, same name, same caller, same depth, so the cascade's
+  order is today's recursion and its frames are today's. A member's status write dispatches the
+  terminator's test and the completion door's moments on its box's instance: the member's end in
+  FAILURE or TERMINATED, the member's move for the box_success and box_failure overrides, from the
+  door and from every running ancestor above it, and the completion moment for the fold; the
+  idle-box recompute dispatches its own event. The box's moments go down to each job it contains:
+  the reset at a box start, the auto-hold at a box running, the disarm at a box run's end, the
+  job terminators at a box's end in FAILURE or TERMINATED, the cascade of a box set INACTIVE, now
+  one event per contained job in place of the status filter, and the clearing of a box taken off
+  non-execution, one event per contained job in place of the inline loop. The period opening
+  dispatches the release of each removed holder's units. The facts the guards read, the override's
+  target, the fold's vote and the recompute's verdict, are computed on first read in today's
+  order; the terminator's test is eager, as today computes it first. Each fired row is performed
+  by today's method with today's marker, cause and line; any other fired row is a statechart
+  error; and the status written is the fired row's target, checked against the facts' derivation
+  before any write, as the recompute's override-ness is. The chart decides each box rule's row;
+  the oracle decides when a rule is posted. The chart's declaration leaves the cascade between
+  instances to the entries that drive it, so which jobs an event reaches and on which moves it is
+  sent are the sender's, code in this slice: a box start skips the subtree of a live subbox, the
+  completion door sends the member's move on the moves it sees and not on a move that ends no
+  run, the recompute's callers gate on run numbers and exclude a live or terminated box, and the
+  walk up and the parent's recompute gate on run numbers. The worklist slice declares each
+  audience in the sender's action, where a test reaches it. The rows a batch writes, the reset and
+  the cascade, are compared whole at their settlement inside the batch's first phase, through a
+  slot the agreement layer keeps and restores around a nested batch; a pending row the batch never
+  wrote is an error. After this slice the realign at commit covers three residues: the members'
+  non-execution flag a box's ON_NOEXEC sets, which the chart does not declare although it declares
+  the twin of the box taken off (job.211, job.229), the interim holding of a member whose
+  settlement waits behind its box rules, and the release fields a start's units refresh. The
+  twin event, `ON_NOEXEC on its box`, was a stop by the brief's rule; the top level accepted its
+  deferral to a slice of its own before the worklist, with the split of job_chart.py, since the
+  follow before each dispatch keeps a box rule from reading a member's stale flag meanwhile.
+  PROOF. The generator now gives a fifth of the boxes resources, drawn after the script so that
+  no seed's jobs or inputs moved; eighteen box cells the sample never reached before, a queued,
+  killed, readmitted, iced or non-executing box and a box holding units, showed no difference on
+  DL-345's oracles. The harness, old against chart, shows no difference: the corpus and two
+  hundred estates of up to fifty jobs, 23,249 inputs; twenty estates of 150 to 200 jobs, 7,999;
+  the corpus and forty estates under every switch, 102,102; a further thousand seeds, 94,353,
+  three inputs raising alike; the oracle's tests pass through the fourth arm. The generated sample
+  with a directed box estate of five scripts fires every row of the family but the opening's
+  release of a removed holder, which needs a carried row and is fired by a lockstep test; the
+  marked rows keep their marks, each reason checked against its dispatch point. The chart's frames
+  per nested start equal the old oracle's on nine cascade shapes, with a constant of at most
+  twelve within its bound. STATE_MACHINE_VERSION is unchanged (DL-235). Cost per input on the
+  corpus about 162 microseconds against 62, on the large estates 308 against 85; the switch-over's
+  optimisation remains the candidate.
+  NOT HERE. The cascade's order and the §8 worklist; `Executor.realign`'s removal; the per-job
+  start bound's replacement by the ancestry depth; `job` in the machine registry; the twin event
+  for a box's ON_NOEXEC; the split of job_chart.py, which this slice did not grow.
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass in place of the Codex pass.
+  Both found the chart deciding every row's target and source, the batch rows compared without a
+  false error or a hole, the pre-write checks unable to raise on a legitimate input, the frames
+  equal to the old oracle's, the generator seed-stable and the reach claims exact. The Opus
+  reviewer found the chart not the sole decider: three cells where the chart would fire a row but
+  today's code never posts the event, a box start inside a running subbox, the overrides on a
+  member's move that ends no run, and the recompute on an iced waiter of an idle box, with a
+  planted widening of the box start's audience that no run caught. The Fable pass reproduced the
+  same three as posting gates. Ruled as above: the audience is the sender's, which the chart's
+  declaration leaves to the entries that drive it, so this entry names the gates and the worklist
+  slice declares them in the sender's action; the reviewer's preferred form, a fact on the
+  recipient's row, is not taken, since §8 puts the audience in the action that reports the item.
+  The Fable pass found the row that moves nothing checked by its id alone, so an ignored row
+  re-kinded in the chart would have drifted the instance until the realign healed it; the check
+  now also requires the configuration unchanged, with a runtime test. It also asked that the twin
+  event be reviewed apart from the worklist change, accepted as the slice before it. Smaller
+  items, two planted tests asserting nothing was written before the error, the realign counts
+  reconciled by their counting rule and the facts' wording on what keeps the members' flags in
+  step, are fixed and confirmed by the reviewer that raised them.

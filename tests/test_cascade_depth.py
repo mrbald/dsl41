@@ -276,12 +276,25 @@ def _paren_chain(jobs: int) -> tuple[str, list[Event]]:
     return jil, []
 
 
+def _override_fold(jobs: int) -> tuple[str, list[Event]]:
+    """The running-box fold, each box's box_success 30 parentheses deep over
+    its member: the deepest read of a box rule's fact, the override of the
+    innermost completion door (DL-346)."""
+    jil, setup = _running_box_fold(jobs)
+    wrap = "(" * 30 + "s(p{0}) " + ")" * 30
+    for i in range(1, (jobs - 1) // 2 + 1):
+        box = f"insert_job: q{i}\njob_type: b\n"
+        jil = jil.replace(box, f"{box}box_success: {wrap.format(i)}\n")
+    return jil, setup
+
+
 def _frames_needed(shape: str, jobs: int, oracle: type[Oracle] = Oracle) -> int:
     """The fewest frames above the caller that a forced start of `q0` needs
     to run the shape's cascade over `jobs` jobs on `oracle`, by bisection."""
     shapes = {
         **SLOPE_SHAPES,
         "paren-chain": _paren_chain,
+        "override-fold": _override_fold,
         "off-hold-chain": _off_hold_chain,
         "noexec-box-chain": _noexec_box_chain,
     }
@@ -340,7 +353,8 @@ def test_sem10_frames_per_job_stay_within_the_fitted_budget(
 
 
 @pytest.mark.parametrize(
-    "shape", [*sorted(SLOPE_SHAPES), "paren-chain", "off-hold-chain", "noexec-box-chain"]
+    "shape",
+    [*sorted(SLOPE_SHAPES), "paren-chain", "override-fold", "off-hold-chain", "noexec-box-chain"],
 )
 def test_sem10_the_chart_oracle_adds_a_bounded_constant_at_the_innermost_attempt(
     shape: str,
@@ -350,10 +364,11 @@ def test_sem10_the_chart_oracle_adds_a_bounded_constant_at_the_innermost_attempt
     base of the fit absorbs, and one frame at the base for a kill and for an
     input the chart oracle inherits (`ChartOracle._dispatch` calls the old
     one). The flag inputs' retries sit at today's depth (DL-344), and so do
-    RELEASE_RESOURCE and the readmission (DL-345). The constant stays
-    within `SELECTION_FRAMES` (measured 0 to 12, the parenthesised conditions
-    the deepest; 5 for the OFF_HOLD and ON_NOEXEC retries and for a release
-    whose readmission starts the chain)."""
+    RELEASE_RESOURCE and the readmission (DL-345), and each box rule
+    (DL-346), whose dispatch at the innermost door adds its selection
+    once. The constant stays within `SELECTION_FRAMES` (measured 7 to 12:
+    the parenthesised conditions 12, a deep override 11, the ring and a
+    kill's terminator chain 10, the fold 8, the chains 7)."""
     extra = _frames_needed(shape, 41, ChartOracle) - _frames_needed(shape, 41)
     assert 0 <= extra <= SELECTION_FRAMES
 
