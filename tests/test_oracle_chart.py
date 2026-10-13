@@ -940,7 +940,7 @@ def test_a_start_whose_status_write_never_runs_is_a_statechart_error(
 
 def test_a_start_before_the_last_ones_status_write_is_a_statechart_error() -> None:
     oracle = ChartOracle(lower_source(_START_JIL))
-    oracle._start_move = oracle_chart._Agreement(
+    oracle._start_move = oracle_chart.Agreement(
         "q1",
         "job:q1",
         ChartEvent("start"),
@@ -2026,3 +2026,559 @@ def test_a_noexec_that_settles_nothing_where_today_settles_is_a_statechart_error
     with pytest.raises(StatechartError, match=message):
         oracle.feed(ev("ON_NOEXEC", 2, job=job))
     assert oracle.trace()[traced:] == []
+
+
+# ---- RELEASE_RESOURCE and the readmission (DL-345)
+
+_QUEUE_ITEMS = (
+    "RELEASE_RESOURCE",
+    "readmit",
+    "flag moved",
+    "admitted start",
+    "actual start",
+    "started",
+)
+
+
+def _queue_steps(name: str, count: int) -> list[Event]:
+    """The first `count` inputs of a script of the harness's directed queue
+    estate, its seal points left out (its one Advance is never among them)."""
+    script = oracle_lockstep._queue_scripts()[name]
+    return [s for s in script if isinstance(s, Event)][:count]
+
+
+def _queue_semantics(name: str) -> Any:
+    rechecks = {"queued-recheck": "1"} if name in oracle_lockstep.QUEUE_RECHECKS else {}
+    return resolve(rechecks)
+
+
+_ON_JOBS = "RELEASE_RESOURCE on live, idle and unknown jobs"
+_WAKES = "a held job's release wakes its waiter"
+_RANKS = "two waiters of different rank"
+_WAITERS_ = "held, iced and noexec waiters"
+_OWED = "a stopped box's owed scan keeps its member and admits what it blocked"
+_ADMITTED = [("job.108",), ("job.301",), ("job.224",), ("job.105",)]
+_LEAVES = [("job.230",), ("job.110",)]
+#: Per outcome class: the directed queue script and how many of its inputs
+#: to feed, the job, the rows the last input fires on the job's instance (the
+#: release row; or the readmission's rows, the `flag moved` it reports, the
+#: admitted start's holding and arm rows and the `started` that follows), and
+#: a trace line the old oracle writes for the job there ("" for none).
+_QUEUE_OUTCOMES: dict[str, tuple[str, int, str, list[tuple[str, ...]], str]] = {
+    "RELEASE_RESOURCE on a running job's units": (
+        _ON_JOBS,
+        2,
+        "qu_live",
+        [("job.316",)],
+        "RELEASE_RESOURCE",
+    ),
+    "RELEASE_RESOURCE on a running job holding nothing": (
+        _ON_JOBS,
+        4,
+        "qu_bare",
+        [("job.315",)],
+        "RELEASE_RESOURCE",
+    ),
+    "RELEASE_RESOURCE on an idle job holding nothing": (
+        _ON_JOBS,
+        5,
+        "qu_keep",
+        [("job.315",)],
+        "RELEASE_RESOURCE",
+    ),
+    "RELEASE_RESOURCE on a job outside the catalog": (
+        _ON_JOBS,
+        6,
+        "qu_ghost",
+        [("job.315",)],
+        "RELEASE_RESOURCE",
+    ),
+    "RELEASE_RESOURCE on a STARTING job's units": (
+        _ON_JOBS,
+        8,
+        "qu_live",
+        [("job.316",)],
+        "RELEASE_RESOURCE",
+    ),
+    "RELEASE_RESOURCE of held units": (_WAKES, 4, "qu_keep", [("job.307",)], "RELEASE_RESOURCE"),
+    "a waiter the release wakes is admitted": (
+        _WAKES,
+        4,
+        "qu_w",
+        _ADMITTED,
+        "QUE_WAIT->STARTING",
+    ),
+    "the higher rank is admitted first": (_RANKS, 5, "qu_hi", _ADMITTED, "QUE_WAIT->STARTING"),
+    "the lower rank stays queued": (_RANKS, 5, "qu_lo", [("job.181",)], ""),
+    "the lower rank is admitted at the next release": (
+        _RANKS,
+        6,
+        "qu_lo",
+        _ADMITTED,
+        "QUE_WAIT->STARTING",
+    ),
+    "a waiter is admitted on its held units": (
+        "a waiter readmitted on its held units",
+        5,
+        "qu_take",
+        [("job.108",), ("job.302",), ("job.224",), ("job.105",)],
+        "QUE_WAIT->STARTING",
+    ),
+    "an armed waiter is admitted and its arm consumed": (
+        "an armed waiter admitted",
+        6,
+        "qu_arm",
+        [("job.108",), ("job.301",), ("job.213",), ("job.105",)],
+        "QUE_WAIT->STARTING",
+    ),
+    "a held waiter stays queued": (_WAITERS_, 5, "qu_w", [("job.181",)], ""),
+    "a held waiter is admitted on OFF_HOLD": (
+        _WAITERS_,
+        6,
+        "qu_w",
+        [*_ADMITTED[:3], ("job.105",)],
+        "QUE_WAIT->STARTING",
+    ),
+    "a waiter whose condition is now false leaves the queue": (
+        "a waiter whose condition is now false",
+        4,
+        "qu_cond",
+        _LEAVES,
+        "QUE_WAIT->INACTIVE",
+    ),
+    "an armed waiter whose condition is now false loses its arm and leaves": (
+        "an armed waiter whose condition is now false",
+        5,
+        "qu_armc",
+        [("job.216",), ("job.110",)],
+        "SCHED_DISARM",
+    ),
+    "a waiter whose window shut nearer its close leaves and skips": (
+        "a waiter whose window shut nearer its close",
+        3,
+        "qu_win",
+        _LEAVES,
+        "RUN_WINDOW_SKIP",
+    ),
+    "a waiter whose window shut nearer its opening leaves and defers": (
+        "a waiter whose window shut nearer its opening",
+        3,
+        "qu_win",
+        _LEAVES,
+        "RUN_WINDOW_DEFER",
+    ),
+    "a queued box is admitted and starts its members": (
+        "a queued box is readmitted and starts its members",
+        3,
+        "qu_bx",
+        [("job.108",), ("job.301",), ("job.224",), ("job.125",)],
+        "QUE_WAIT->STARTING",
+    ),
+    "a member a STATUS took out of the queue is not readmitted": (
+        "a box's release meets the member a STATUS took out of the queue",
+        3,
+        "qu_sm",
+        [],
+        "QUE_WAIT->INACTIVE",
+    ),
+    "a queued box its member ended is not readmitted in its parent's release": (
+        "a queued box's member ends it, and its parent's release meets it",
+        4,
+        "qu_q",
+        [],
+        "QUE_WAIT->SUCCESS",
+    ),
+    "a box_terminator member set FAILURE in the queue is not readmitted": (
+        "a box's release meets its box_terminator member set FAILURE in the queue",
+        3,
+        "qu_tm",
+        [],
+        "QUE_WAIT->FAILURE",
+    ),
+    "a member of a box that ended is cancelled in its member's cascade": (
+        "a box's end cancels its queued member in its member's cascade",
+        3,
+        "qu_bq",
+        [("job.109",)],
+        "QUE_WAIT->INACTIVE",
+    ),
+    "an owed scan keeps a member of a stopped box": (
+        _OWED,
+        4,
+        "qu_lm",
+        [("job.181",), ("job.181",)],
+        "",
+    ),
+    "an owed scan admits the job the member blocked": (
+        _OWED,
+        4,
+        "qu_lx",
+        _ADMITTED,
+        "QUE_WAIT->STARTING",
+    ),
+    "a release cancels the member of the stopped box": (
+        _OWED,
+        5,
+        "qu_lm",
+        [("job.109",)],
+        "QUE_WAIT->INACTIVE",
+    ),
+    "a waiter with no units to reserve is admitted": (
+        "a job with no load is admitted behind the waiter that blocked it",
+        4,
+        "qu_nl",
+        [("job.108",), ("job.311",), ("job.224",), ("job.105",)],
+        "QUE_WAIT->STARTING",
+    ),
+}
+#: The cases whose readmission is the owed scan's, which keeps a member of
+#: a stopped box queued (DL-247, DL-255).
+_KEEPS_STOPPED: Final = frozenset(
+    {
+        "an owed scan keeps a member of a stopped box",
+        "an owed scan admits the job the member blocked",
+    }
+)
+
+
+@pytest.mark.parametrize("case", sorted(_QUEUE_OUTCOMES))
+def test_each_release_and_readmit_outcome_fires_its_rows_and_writes_what_the_old_oracle_writes(
+    case: str,
+) -> None:
+    """RELEASE_RESOURCE and each waiter's readmission are dispatched to the
+    job's instance: the rows the chart fires are the outcome today's rule code
+    reaches, and the chart oracle leaves the trace, the events, the rows, the
+    revisions and the seal the old oracle leaves."""
+    name, count, job, rows, line = _QUEUE_OUTCOMES[case]
+    steps = _queue_steps(name, count)
+    paired = LockstepOracle(
+        lower_source(oracle_lockstep.QUEUE_JIL), new=ChartOracle, semantics=_queue_semantics(name)
+    )
+    for step in steps[:-1]:
+        paired.feed(step)
+    seen = _spied(paired.twin)
+    traced = len(paired.twin.trace())
+    paired.feed(steps[-1])
+    paired.check_seal()
+    _agrees(paired.twin)
+    key = RuntimeState.job_key(job)
+    mine = [o for o in seen if o.key == key and o.event.name in _QUEUE_ITEMS and o.rows]
+    assert [o.rows for o in mine] == rows
+    readmits = [o.event.payload.keep_stopped for o in mine if o.event.name == "readmit"]
+    assert readmits == [case in _KEEPS_STOPPED] * len(readmits)
+    lines = [t.transition for t in paired.twin.trace()[traced:] if t.job == job]
+    assert (line in lines) if line else lines == []
+
+
+def test_dl50_the_waiter_order_is_todays_and_each_waiter_gets_its_own_readmit() -> None:
+    """The scan's order is read off the rows, as today (rank, then the
+    queue's order): the chart decides each waiter, one `readmit` on its own
+    instance, in that order. A move restarts the scan."""
+    name = _RANKS
+    paired = LockstepOracle(lower_source(oracle_lockstep.QUEUE_JIL), new=ChartOracle)
+    steps = _queue_steps(name, 5)
+    for step in steps[:-1]:
+        paired.feed(step)
+    seen = _spied(paired.twin)
+    paired.feed(steps[-1])
+    readmits = [(o.key, o.rows) for o in seen if o.event.name == "readmit"]
+    assert readmits == [("job:qu_hi", ("job.108",)), ("job:qu_lo", ("job.181",))]
+
+
+def _queue_oracle(cls: type[ChartOracle] = ChartOracle, name: str = _WAKES) -> ChartOracle:
+    return cls(lower_source(oracle_lockstep.QUEUE_JIL), semantics=_queue_semantics(name))
+
+
+def _fed(oracle: ChartOracle, name: str, count: int) -> ChartOracle:
+    for step in _queue_steps(name, count):
+        oracle.feed(step)
+    return oracle
+
+
+def test_a_release_whose_writes_differ_from_the_charts_is_a_statechart_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Planted: the holder's instance is held as well as holding units, and
+    no follow brings it back, so the chart's release keeps a hold that today's
+    release does not have: it is caught after the release's writes, before
+    the waiters wake."""
+    oracle = _fed(_queue_oracle(), _WAKES, 3)
+    store = oracle.store
+    monkeypatch.setattr(store, "follow_job", lambda job: None)
+    planted = configuration("SUCCESS", hold=True, holding="held")
+    store.machines.realign("job:qu_keep", planted, store.machines.data("job:qu_keep"))
+    with pytest.raises(
+        StatechartError, match="'qu_keep': the release's writes differ from the chart's"
+    ) as raised:
+        oracle.feed(ev("RELEASE_RESOURCE", 5, job="qu_keep"))
+    text = str(raised.value)
+    assert "hold_on" in text and "item: the event RELEASE_RESOURCE" in text
+    assert store.job["qu_w"].status == "QUE_WAIT"
+
+
+def test_a_readmission_whose_writes_differ_from_the_charts_is_a_statechart_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Planted: the waiter's instance is ON_NOEXEC and no follow brings it
+    back, so the STARTING its readmission reaches (job.108) keeps a flag
+    today's write does not have; it is caught at the status write."""
+    oracle = _fed(_queue_oracle(), _WAKES, 3)
+    store = oracle.store
+    monkeypatch.setattr(store, "follow_job", lambda job: None)
+    planted = configuration("QUE_WAIT", noexec=True)
+    store.machines.realign("job:qu_w", planted, store.machines.data("job:qu_w"))
+    with pytest.raises(StatechartError, match="'qu_w': the start's status write differs") as raised:
+        oracle.feed(ev("RELEASE_RESOURCE", 5, job="qu_keep"))
+    assert "noexec_on" in str(raised.value) and "item: the event readmit" in str(raised.value)
+
+
+def test_a_leave_whose_writes_differ_from_the_charts_is_a_statechart_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Planted: the waiter's instance is on ice, and no follow brings it
+    back, so the INACTIVE its `flag moved` reaches (job.110) keeps the ice;
+    it is caught at the status write, as a STATUS move is."""
+    name = "a waiter whose condition is now false"
+    oracle = _fed(_queue_oracle(name=name), name, 3)
+    store = oracle.store
+    monkeypatch.setattr(store, "follow_job", lambda job: None)
+    planted = configuration("QUE_WAIT", ice=True)
+    store.machines.realign("job:qu_cond", planted, store.machines.data("job:qu_cond"))
+    with pytest.raises(
+        StatechartError, match="'qu_cond': the configuration differs as written"
+    ) as raised:
+        oracle.feed(ev("STATUS", 5, job="qu_live", status="SUCCESS"))
+    assert "ice_on" in str(raised.value) and "item: the event readmit" in str(raised.value)
+
+
+def test_a_release_or_readmit_row_the_oracle_does_not_write_is_a_statechart_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Planted: the oracle forgets the no-effect release and the waiter that
+    stays queued; the rows fired are named."""
+    monkeypatch.setattr(oracle_chart, "_RELEASE_IGNORED", frozenset())
+    with pytest.raises(
+        StatechartError, match="'qu_keep': RELEASE_RESOURCE fired job.315, and no release row"
+    ):
+        _queue_oracle().feed(ev("RELEASE_RESOURCE", 1, job="qu_keep"))
+    monkeypatch.undo()
+    fired = {rows: what for rows, what in oracle_chart._READMIT_FIRED.items() if what != "keep"}
+    monkeypatch.setattr(oracle_chart, "_READMIT_FIRED", fired)
+    oracle = _fed(_queue_oracle(), _WAKES, 3)
+    with pytest.raises(StatechartError, match="'qu_w': readmit fired job.181, and no readmit row"):
+        oracle.feed(ev("ON_HOLD", 5, job="qu_w"))  # a hold on a waiter scans the queue
+
+
+@pytest.mark.parametrize(
+    ("count", "job", "message"),
+    [
+        (2, "qu_keep", "'qu_keep': job.315 fired for a SUCCESS job holding units"),
+        (0, "qu_keep", "'qu_keep': job.307 fired for a INACTIVE job holding nothing"),
+    ],
+    ids=["held units left held", "nothing held, released"],
+)
+def test_a_release_whose_holding_row_is_swapped_fails_before_any_write(
+    count: int, job: str, message: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Mutant: the sources of job.307 (held units go back) and job.315
+    (nothing held) swapped. Whether the job holds units it can give back is
+    the row's choice, and a row that disagrees is a statechart error before
+    any write. The mutant's hits stay out of the session."""
+    monkeypatch.setenv(HITS_ENV, str(tmp_path))
+    swapped = _rows_changed(job_307={"source": "none"}, job_315={"source": "held"})
+    oracle = _fed(_queue_oracle(swapped), _WAKES, count)
+    traced = len(oracle.trace())
+    with pytest.raises(StatechartError, match=message):
+        oracle.feed(ev("RELEASE_RESOURCE", 5, job=job))
+    assert oracle.trace()[traced:] == []
+
+
+def test_a_leave_whose_arm_row_is_swapped_fails_before_any_write(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Mutant: the sources of job.216 (a leaving waiter's arm goes) and
+    job.230 (it has none) swapped. The scan reaches the unarmed `qu_cond`
+    first, and it leaves through job.216: the arm the row drops is the row's,
+    and a waiter that disagrees is a statechart error before any write, not a
+    leave that drops an arm the row does not have. (The armed half of the
+    swap is the harness's: the armed script diverges.)"""
+    monkeypatch.setenv(HITS_ENV, str(tmp_path))
+    swapped = _rows_changed(job_216={"source": "arm_off"}, job_230={"source": "arm_on"})
+    name = "an armed waiter whose condition is now false"
+    oracle = _fed(_queue_oracle(swapped, name), name, 4)
+    traced = len(oracle.trace())
+    with pytest.raises(
+        StatechartError, match="'qu_cond': job.216 fired for a waiter with armed=False"
+    ):
+        oracle.feed(ev("STATUS", 5, job="qu_live", status="SUCCESS"))
+    assert oracle.trace()[traced:] == [oracle.trace()[traced]]  # qu_live's own line only
+    assert oracle.store.job["qu_cond"].status == "QUE_WAIT"
+
+
+@pytest.mark.parametrize(
+    ("name", "count", "last", "message"),
+    [
+        (
+            _WAKES,
+            3,
+            ev("RELEASE_RESOURCE", 5, job="qu_keep"),
+            "'qu_w': job.230 fired for a waiter whose queued recheck passed",
+        ),
+        (
+            "a waiter whose condition is now false",
+            3,
+            ev("STATUS", 5, job="qu_live", status="SUCCESS"),
+            "'qu_cond': job.108 fired for a waiter whose queued recheck failed",
+        ),
+    ],
+    ids=["a waiter that fits leaves", "a waiter that fails its recheck is admitted"],
+)
+def test_a_readmission_whose_admit_and_leave_rows_are_swapped_fails_before_any_write(
+    name: str,
+    count: int,
+    last: Event,
+    message: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Mutant: the guards of the admission (job.108) and the leave (job.216,
+    job.230) swapped. Whether the queued recheck failed is the rows' choice,
+    and a waiter whose recheck says otherwise is a statechart error before
+    any write. The mutant's hits stay out of the session."""
+    monkeypatch.setenv(HITS_ENV, str(tmp_path))
+    swapped = _planted(
+        readmit_admits=job_chart.readmit_leaves, readmit_leaves=job_chart.readmit_admits
+    )
+    oracle = _fed(_queue_oracle(swapped, name), name, count)
+    waiter = "qu_w" if name == _WAKES else "qu_cond"
+    traced = len(oracle.trace())
+    with pytest.raises(StatechartError, match=message):
+        oracle.feed(last)
+    assert [t for t in oracle.trace()[traced:] if t.job == waiter] == []
+    assert oracle.store.job[waiter].status == "QUE_WAIT"
+
+
+def test_a_readmission_whose_status_write_never_runs_is_a_statechart_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Planted: the admitted waiter's run is dropped, so the chart's
+    STARTING is never written."""
+    oracle = _fed(_queue_oracle(), _WAKES, 3)
+    monkeypatch.setattr(Oracle, "_run", lambda *args, **kwargs: None)
+    with pytest.raises(StatechartError, match="'qu_w': the readmission's status write never ran"):
+        oracle.feed(ev("RELEASE_RESOURCE", 5, job="qu_keep"))
+    assert oracle._start_move is None
+
+
+def test_a_failed_readmission_leaves_no_status_move_behind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A readmission that raises before its status write clears its move, so
+    the next input is not compared against it."""
+
+    def broken(*args: Any, **kwargs: Any) -> None:
+        raise OracleError("planted")
+
+    oracle = _fed(_queue_oracle(), _WAKES, 3)
+    monkeypatch.setattr(oracle.store, "dequeue_waiter", broken)
+    with pytest.raises(OracleError, match="planted"):
+        oracle.feed(ev("RELEASE_RESOURCE", 5, job="qu_keep"))
+    assert oracle._start_move is None
+
+
+def _start_move(job: str, *, moves: bool) -> Any:
+    return oracle_chart.Agreement(
+        job,
+        f"job:{job}",
+        ChartEvent("start"),
+        configuration("INACTIVE"),
+        ("INACTIVE", "INACTIVE"),
+        False,
+        moves=moves,
+    )
+
+
+def test_a_readmission_before_a_starts_status_write_is_a_statechart_error() -> None:
+    """A start whose status write is still owed when a waiter is admitted is
+    a statechart error; a window's start that moves nothing is done once the
+    cascade readmits, as once it attempts (DL-342)."""
+    oracle = _fed(_queue_oracle(), _WAKES, 3)
+    oracle._start_move = _start_move("qu_bare", moves=True)
+    with pytest.raises(
+        StatechartError, match="'qu_w': a readmission began before a start's status write"
+    ):
+        oracle.feed(ev("RELEASE_RESOURCE", 5, job="qu_keep"))
+    oracle = _fed(_queue_oracle(), _WAKES, 3)
+    oracle._start_move = _start_move("qu_bare", moves=False)
+    oracle.feed(ev("RELEASE_RESOURCE", 5, job="qu_keep"))
+    assert oracle.store.job["qu_w"].status == "RUNNING" and oracle._start_move is None
+
+
+_NESTED_JIL = (
+    "insert_resource: NB\nres_type: R\namount: 1\n\n"
+    "insert_resource: NM\nres_type: R\namount: 1\n\n"
+    "insert_resource: NR\nres_type: R\namount: 1\n\n"
+    "insert_job: nh\njob_type: c\ncommand: x\nmachine: m1\nresources: (NR, QUANTITY=1, FREE=Y)\n\n"
+    "insert_job: nb\njob_type: b\nbox_success: s(nm)\nresources: (NB, QUANTITY=1, FREE=Y)\n\n"
+    "insert_job: nm\njob_type: c\ncommand: x\nmachine: m1\nbox_name: nb\n"
+    "resources: (NM, QUANTITY=1, FREE=Y)\n\n"
+    "insert_job: nq\njob_type: c\ncommand: x\nmachine: m1\nbox_name: nb\n"
+    "resources: (NR, QUANTITY=1, FREE=Y)\n"
+)
+
+
+def test_a_move_whose_box_rules_readmit_a_waiter_still_has_its_holding_compared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A member's SUCCESS ends its box (box_success), whose release cancels
+    the box's queued member: that readmission's move is compared inside the
+    member's own move, which waits for its settlement after the box rules.
+    Planted: the member's data keeps its unit, today's settlement frees it;
+    the difference is still caught after the nested readmission."""
+    oracle = ChartOracle(lower_source(_NESTED_JIL))
+    oracle.feed(ev("STARTJOB", 1, job="nh"))
+    oracle.feed(ev("STARTJOB", 2, job="nb"))
+    assert oracle.store.job["nq"].status == "QUE_WAIT"
+    paired = LockstepOracle(lower_source(_NESTED_JIL), new=ChartOracle)
+    for event in (ev("STARTJOB", 1, job="nh"), ev("STARTJOB", 2, job="nb")):
+        paired.feed(event)
+    seen = _spied(paired.twin)
+    paired.feed(ev("STATUS", 3, job="nm", status="SUCCESS"))
+    assert [o.rows for o in seen if o.event.name == "readmit"] == [("job.109",)]
+    assert paired.twin.store.job["nq"].status == "INACTIVE"
+    kept = JobData(release_on_success="keep", release_otherwise="keep")
+    monkeypatch.setattr(oracle_chart, "job_data", lambda *_: kept)
+    with pytest.raises(StatechartError, match="'nm': the holding differs after the settlement"):
+        oracle.feed(ev("STATUS", 3, job="nm", status="SUCCESS"))
+    lines = [(t.job, t.transition) for t in oracle.trace()[-3:]]
+    assert lines == [
+        ("nm", "RUNNING->SUCCESS"),
+        ("nb", "RUNNING->SUCCESS"),
+        ("nq", "QUE_WAIT->INACTIVE"),
+    ]
+    assert oracle._agreement is None
+
+
+def test_dl50_a_readmission_computes_only_the_facts_todays_scan_reads() -> None:
+    """A held waiter is kept before its admission is read; a member of a
+    stopped box is cancelled before it; an inadmissible waiter's queued
+    recheck is not read. The payload computes a fact on its first read, in
+    `readmit_verdict`'s order."""
+    name = _WAITERS_
+    oracle = _fed(_queue_oracle(name=name), name, 4)
+    seen = _spied(oracle)
+    oracle.feed(_queue_steps(name, 5)[-1])
+    held = next(o.event.payload for o in seen if o.event.name == "readmit")
+    assert held.known("box") == "none" and held.known("admissible") is None
+    assert repr(held) == "ReadmitFacts('qu_w', keep_stopped=False, box='none')"
+    oracle = _fed(_queue_oracle(name=_OWED), _OWED, 4)
+    seen = _spied(oracle)
+    oracle.feed(_queue_steps(_OWED, 5)[-1])
+    stopped = next(o.event.payload for o in seen if o.event.name == "readmit")
+    assert stopped.known("box") == "idle" and stopped.known("admissible") is None
+    oracle = _fed(_queue_oracle(name=_RANKS), _RANKS, 4)
+    seen = _spied(oracle)
+    oracle.feed(_queue_steps(_RANKS, 5)[-1])
+    lo = [o.event.payload for o in seen if o.key == "job:qu_lo"][-1]
+    assert lo.known("admissible") is False and lo.known("recheck") is None
+    assert lo.known("vector") is not None and "recheck" not in repr(lo)

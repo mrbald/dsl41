@@ -1258,11 +1258,406 @@ def _flag_scripts() -> dict[str, tuple[Step, ...]]:
     }
 
 
+#: A directed estate for RELEASE_RESOURCE and the readmission (DL-345)
+#: that the seeded sample reaches rarely or never: the generator gives boxes
+#: no resources, keeps no units after a run (FREE=N), and names no machine
+#: load. `qu_keep` keeps its unit of QU_K after a run, so `qu_w`, `qu_hi`,
+#: `qu_lo` and `qu_arm` wait for its release; `qu_live` holds QU_R while it
+#: runs, so `qu_take`, `qu_cond`, `qu_armc`, `qu_win` and the box member
+#: `qu_bq` queue behind it. `qu_take` keeps a unit of QU_T, which it is
+#: readmitted on. `qu_bx` holds QU_B and ends when `qu_bm` succeeds, with
+#: `qu_bq` still queued; it waits for QU_B while `qu_bh` holds it. `qu_sb`
+#: holds QU_B too, and its one member `qu_sm` queues behind `qu_live`; so do
+#: `qu_tb` and its box_terminator member `qu_tm`, and `qu_p` (box_success:
+#: s(qu_q)) with its box `qu_q`, which queues on QU_R while `qu_x` inside it
+#: is forced to run; `qu_after` waits on s(qu_q). On
+#: `qu_mach`, `qu_lm` (a member of `qu_lb`) blocks `qu_lx`, and `qu_two`
+#: blocks `qu_nl`, which has no load (DL-247).
+QUEUE_JIL = """insert_machine: qu_mach
+type: a
+node_name: qu_mach
+max_load: 80
+
+insert_resource: QU_K
+res_type: R
+amount: 1
+
+insert_resource: QU_R
+res_type: R
+amount: 1
+
+insert_resource: QU_T
+res_type: R
+amount: 1
+
+insert_resource: QU_B
+res_type: R
+amount: 1
+
+insert_job: qu_keep
+job_type: c
+machine: m1
+command: x
+resources: (QU_K, QUANTITY=1, FREE=N)
+
+insert_job: qu_w
+job_type: c
+machine: m1
+command: x
+resources: (QU_K, QUANTITY=1, FREE=Y)
+
+insert_job: qu_hi
+job_type: c
+machine: m1
+command: x
+priority: 1
+resources: (QU_K, QUANTITY=1, FREE=Y)
+
+insert_job: qu_lo
+job_type: c
+machine: m1
+command: x
+priority: 2
+resources: (QU_K, QUANTITY=1, FREE=Y)
+
+insert_job: qu_arm
+job_type: c
+machine: m1
+command: x
+date_conditions: 1
+days_of_week: all
+start_times: "08:00"
+resources: (QU_K, QUANTITY=1, FREE=Y)
+
+insert_job: qu_live
+job_type: c
+machine: m1
+command: x
+resources: (QU_R, QUANTITY=1, FREE=Y)
+
+insert_job: qu_bare
+job_type: c
+machine: m1
+command: x
+
+insert_job: qu_take
+job_type: c
+machine: m1
+command: x
+resources: (QU_T, QUANTITY=1, FREE=N) AND (QU_R, QUANTITY=1, FREE=Y)
+
+insert_job: qu_flag
+job_type: c
+machine: m1
+command: x
+
+insert_job: qu_cond
+job_type: c
+machine: m1
+command: x
+condition: s(qu_flag)
+resources: (QU_R, QUANTITY=1, FREE=Y)
+
+insert_job: qu_armc
+job_type: c
+machine: m1
+command: x
+date_conditions: 1
+days_of_week: all
+start_times: "08:00"
+condition: s(qu_flag)
+resources: (QU_R, QUANTITY=1, FREE=Y)
+
+insert_job: qu_win
+job_type: c
+machine: m1
+command: x
+date_conditions: 1
+days_of_week: all
+run_window: "08:00-08:30"
+resources: (QU_R, QUANTITY=1, FREE=Y)
+
+insert_job: qu_bh
+job_type: c
+machine: m1
+command: x
+resources: (QU_B, QUANTITY=1, FREE=Y)
+
+insert_job: qu_bx
+job_type: b
+box_success: s(qu_bm)
+resources: (QU_B, QUANTITY=1, FREE=Y)
+
+insert_job: qu_bm
+job_type: c
+machine: m1
+command: x
+box_name: qu_bx
+
+insert_job: qu_bq
+job_type: c
+machine: m1
+command: x
+box_name: qu_bx
+resources: (QU_R, QUANTITY=1, FREE=Y)
+
+insert_job: qu_sb
+job_type: b
+resources: (QU_B, QUANTITY=1, FREE=Y)
+
+insert_job: qu_sm
+job_type: c
+machine: m1
+command: x
+box_name: qu_sb
+resources: (QU_R, QUANTITY=1, FREE=Y)
+
+insert_job: qu_p
+job_type: b
+box_success: s(qu_q)
+resources: (QU_B, QUANTITY=1, FREE=Y)
+
+insert_job: qu_q
+job_type: b
+box_name: qu_p
+resources: (QU_R, QUANTITY=1, FREE=Y)
+
+insert_job: qu_x
+job_type: c
+machine: m1
+command: x
+box_name: qu_q
+
+insert_job: qu_after
+job_type: c
+machine: m1
+command: x
+condition: s(qu_q)
+
+insert_job: qu_tb
+job_type: b
+resources: (QU_B, QUANTITY=1, FREE=Y)
+
+insert_job: qu_tm
+job_type: c
+machine: m1
+command: x
+box_name: qu_tb
+box_terminator: 1
+resources: (QU_R, QUANTITY=1, FREE=Y)
+
+insert_job: qu_lh
+job_type: c
+machine: qu_mach
+command: x
+job_load: 30
+priority: 1
+
+insert_job: qu_lb
+job_type: b
+
+insert_job: qu_lm
+job_type: c
+machine: qu_mach
+command: x
+box_name: qu_lb
+job_load: 60
+priority: 5
+
+insert_job: qu_lx
+job_type: c
+machine: qu_mach
+command: x
+job_load: 30
+priority: 9
+
+insert_job: qu_own
+job_type: c
+machine: qu_mach
+command: x
+job_load: 50
+priority: 1
+
+insert_job: qu_two
+job_type: c
+machine: qu_mach
+command: x
+job_load: 50
+priority: 5
+
+insert_job: qu_nl
+job_type: c
+machine: qu_mach
+command: x
+priority: 6
+"""
+#: The scripts of `QUEUE_JIL` whose waiter fails the queued recheck, and so
+#: need `queued-recheck` 1 or 2.
+QUEUE_RECHECKS = frozenset(
+    {
+        "a waiter whose condition is now false",
+        "an armed waiter whose condition is now false",
+        "a waiter whose window shut nearer its close",
+        "a waiter whose window shut nearer its opening",
+    }
+)
+
+
+def _queue_scripts() -> dict[str, tuple[Step, ...]]:
+    def event(at: datetime, kind: str, job: str, **payload: object) -> Event:
+        return Event.model_validate({"at": at, "kind": kind, "payload": {"job": job, **payload}})
+
+    t0 = EPOCH + timedelta(hours=8)
+    minute = timedelta(minutes=1)
+
+    def at(n: int) -> datetime:
+        return t0 + n * minute
+
+    kept = (
+        event(t0, "STARTJOB", "qu_keep"),
+        event(t0, "STATUS", "qu_keep", status="SUCCESS"),
+    )
+    live = event(t0, "STARTJOB", "qu_live")
+    return {
+        "RELEASE_RESOURCE on live, idle and unknown jobs": (
+            live,
+            event(at(1), "RELEASE_RESOURCE", "qu_live"),
+            event(at(1), "STARTJOB", "qu_bare"),
+            event(at(2), "RELEASE_RESOURCE", "qu_bare"),
+            event(at(2), "RELEASE_RESOURCE", "qu_keep"),
+            event(at(3), "RELEASE_RESOURCE", "qu_ghost"),
+            event(at(4), "STATUS", "qu_live", status="STARTING"),
+            event(at(5), "RELEASE_RESOURCE", "qu_live"),
+            SealPoint(),
+        ),
+        "a held job's release wakes its waiter": (
+            *kept,
+            event(at(1), "STARTJOB", "qu_w"),
+            event(at(2), "RELEASE_RESOURCE", "qu_keep"),
+            event(at(3), "RELEASE_RESOURCE", "qu_keep"),
+            SealPoint(),
+        ),
+        "two waiters of different rank": (
+            *kept,
+            event(at(1), "STARTJOB", "qu_lo"),
+            event(at(1), "STARTJOB", "qu_hi"),
+            event(at(2), "RELEASE_RESOURCE", "qu_keep"),
+            event(at(3), "STATUS", "qu_hi", status="SUCCESS"),
+            SealPoint(),
+        ),
+        "a waiter readmitted on its held units": (
+            event(t0, "STARTJOB", "qu_take"),
+            event(t0, "STATUS", "qu_take", status="SUCCESS"),
+            event(at(1), "STARTJOB", "qu_live"),
+            event(at(1), "STARTJOB", "qu_take"),
+            event(at(2), "STATUS", "qu_live", status="SUCCESS"),
+            SealPoint(),
+        ),
+        "an armed waiter admitted": (
+            *kept,
+            event(t0, "ON_HOLD", "qu_arm"),
+            event(t0, "STARTJOB", "qu_arm"),
+            event(at(1), "OFF_HOLD", "qu_arm"),
+            event(at(2), "RELEASE_RESOURCE", "qu_keep"),
+            SealPoint(),
+        ),
+        "held, iced and noexec waiters": (
+            *kept,
+            event(at(1), "STARTJOB", "qu_w"),
+            event(at(1), "ON_HOLD", "qu_w"),
+            event(at(2), "RELEASE_RESOURCE", "qu_keep"),
+            event(at(3), "OFF_HOLD", "qu_w"),
+            event(at(4), "STARTJOB", "qu_hi"),
+            event(at(4), "ON_ICE", "qu_hi"),
+            event(at(5), "STARTJOB", "qu_lo"),
+            event(at(5), "ON_NOEXEC", "qu_lo"),
+            event(at(6), "STATUS", "qu_w", status="SUCCESS"),
+            SealPoint(),
+        ),
+        "a waiter whose condition is now false": (
+            live,
+            event(at(1), "STATUS", "qu_flag", status="SUCCESS"),
+            event(at(2), "STATUS", "qu_flag", status="FAILURE"),
+            event(at(3), "STATUS", "qu_live", status="SUCCESS"),
+            SealPoint(),
+        ),
+        "an armed waiter whose condition is now false": (
+            live,
+            event(t0, "STARTJOB", "qu_armc"),
+            event(at(1), "STATUS", "qu_flag", status="SUCCESS"),
+            event(at(2), "STATUS", "qu_flag", status="FAILURE"),
+            event(at(3), "STATUS", "qu_live", status="SUCCESS"),
+            SealPoint(),
+        ),
+        "a waiter whose window shut nearer its close": (
+            live,
+            event(at(1), "STARTJOB", "qu_win"),
+            event(at(45), "STATUS", "qu_live", status="SUCCESS"),
+            SealPoint(),
+        ),
+        "a waiter whose window shut nearer its opening": (
+            live,
+            event(at(1), "STARTJOB", "qu_win"),
+            event(at(23 * 60 + 50), "STATUS", "qu_live", status="SUCCESS"),
+            Advance(at(24 * 60 + 1)),
+            SealPoint(),
+        ),
+        "a queued box is readmitted and starts its members": (
+            event(t0, "STARTJOB", "qu_bh"),
+            event(at(1), "STARTJOB", "qu_bx"),
+            event(at(2), "STATUS", "qu_bh", status="SUCCESS"),
+            event(at(3), "STATUS", "qu_bm", status="SUCCESS"),
+            SealPoint(),
+        ),
+        "a box's release meets the member a STATUS took out of the queue": (
+            live,
+            event(at(1), "FORCE_STARTJOB", "qu_sb"),
+            event(at(2), "STATUS", "qu_sm", status="INACTIVE"),
+            SealPoint(),
+        ),
+        "a queued box's member ends it, and its parent's release meets it": (
+            live,
+            event(at(1), "FORCE_STARTJOB", "qu_p"),
+            event(at(2), "FORCE_STARTJOB", "qu_x"),
+            event(at(3), "STATUS", "qu_x", exit_code=0),
+            SealPoint(),
+        ),
+        "a box's release meets its box_terminator member set FAILURE in the queue": (
+            live,
+            event(at(1), "FORCE_STARTJOB", "qu_tb"),
+            event(at(2), "STATUS", "qu_tm", status="FAILURE"),
+            SealPoint(),
+        ),
+        "a box's end cancels its queued member in its member's cascade": (
+            live,
+            event(at(1), "STARTJOB", "qu_bx"),
+            event(at(2), "STATUS", "qu_bm", status="SUCCESS"),
+            SealPoint(),
+        ),
+        "a stopped box's owed scan keeps its member and admits what it blocked": (
+            event(t0, "STARTJOB", "qu_lh"),
+            event(at(1), "STARTJOB", "qu_lb"),
+            event(at(2), "STARTJOB", "qu_lx"),
+            event(at(3), "KILLJOB", "qu_lb"),
+            event(at(4), "STATUS", "qu_lh", status="SUCCESS"),
+            SealPoint(),
+        ),
+        "a job with no load is admitted behind the waiter that blocked it": (
+            event(t0, "STARTJOB", "qu_own"),
+            event(at(1), "STARTJOB", "qu_two"),
+            event(at(2), "STARTJOB", "qu_nl"),
+            event(at(3), "STATUS", "qu_own", status="SUCCESS"),
+            SealPoint(),
+        ),
+    }
+
+
 def directed_jobs() -> list[Job]:
     """The directed estates the matrix runs besides the corpus."""
     restart = lower_source(RESTART_JIL)
     kill_timer = lower_source(KILL_TIMER_JIL)
     flags = lower_source(FLAG_JIL)
+    queue = lower_source(QUEUE_JIL)
     return (
         [Job("<directed wekr>", lower_source(WEKR_JIL), _wekr_script())]
         + [
@@ -1281,6 +1676,15 @@ def directed_jobs() -> list[Job]:
         + [
             Job(f"<directed flags: {name}>", flags, script)
             for name, script in _flag_scripts().items()
+        ]
+        + [
+            Job(
+                f"<directed queue: {name}>",
+                queue,
+                script,
+                {"queued-recheck": "1"} if name in QUEUE_RECHECKS else {},
+            )
+            for name, script in _queue_scripts().items()
         ]
     )
 

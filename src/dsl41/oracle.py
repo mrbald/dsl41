@@ -2412,6 +2412,15 @@ class Oracle:
         an admit-only one runs turns its next pass into a full one, so a
         release inside the scan still cancels what a release cancels.
 
+        The scan addresses a waiter: a row in QUE_WAIT. A job that leaves
+        QUE_WAIT without dequeuing (an injected STATUS, or a queued box's
+        idle-box recompute on a member's end) keeps its rank until its own
+        settlement, which runs after its box rules (`_after_transition`); a
+        scan in those rules, woken by a release, skips it rather than cancel
+        or admit it again from its new status. While ranked it still counts
+        as a waiter for priority blocking (`_counts_as_waiter`), as before
+        (DL-345).
+
         Every pass pays an owed scan, since every pass admits."""
         if self._in_wake:
             if not keep_stopped:  # pragma: no branch -- see below
@@ -2428,6 +2437,7 @@ class Oracle:
                 moved = any(
                     self._readmit(job, keep_stopped=keep_stopped) in ("admitted", "cancelled")
                     for job in self._pool.sorted_waiters(self.store.job)
+                    if self.store.job[job].status == "QUE_WAIT"
                 )
                 if self._full_scan_requested and keep_stopped:
                     keep_stopped = False

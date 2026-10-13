@@ -213,11 +213,29 @@ def _terminator_chain(jobs: int) -> tuple[str, list[Event]]:
     return jil, [_force_q0()]
 
 
+def _release_wake_chain(jobs: int) -> tuple[str, list[Event]]:
+    """The box chain, begun by a readmission: `h` keeps its unit after its
+    run, so `q0`, which needs it, waits in the queue; RELEASE_RESOURCE on `h`
+    wakes the queue, and `q0`'s readmission starts it and the chain
+    (DL-345)."""
+    jil = "insert_resource: R\nres_type: R\namount: 1\n\n"
+    jil += _cmd("h", extra="resources: (R, QUANTITY=1, FREE=N)\n")
+    jil += _box("q0", extra="resources: (R, QUANTITY=1, FREE=Y)\n")
+    jil += "".join(_box(f"q{i}", f"s(q{i - 1})") for i in range(1, jobs - 1))
+    setup = [
+        Event(at=T0, kind="STARTJOB", payload={"job": "h"}),
+        Event(at=T0, kind="STATUS", payload={"job": "h", "status": "SUCCESS"}),
+        Event(at=T0, kind="STARTJOB", payload={"job": "q0"}),
+    ]
+    return jil, setup
+
+
 SLOPE_SHAPES = {
     "box-chain": lambda jobs: (_box_chain(jobs)[0], []),
     "box-ring": lambda jobs: (_box_ring(jobs)[0], []),
     "running-box-fold": _running_box_fold,
     "terminator-chain": _terminator_chain,
+    "release-wake-chain": _release_wake_chain,
 }
 #: The input that runs a shape's cascade, and the status it leaves every job
 #: in; a forced start of `q0` and SUCCESS unless named here.
@@ -225,6 +243,10 @@ _LAST: dict[str, tuple[Event, str]] = {
     "terminator-chain": (Event(at=T0, kind="KILLJOB", payload={"job": "q0"}), "TERMINATED"),
     "off-hold-chain": (Event(at=T0, kind="OFF_HOLD", payload={"job": "q0"}), "SUCCESS"),
     "noexec-box-chain": (Event(at=T0, kind="ON_NOEXEC", payload={"job": "q0"}), "SUCCESS"),
+    "release-wake-chain": (
+        Event(at=T0, kind="RELEASE_RESOURCE", payload={"job": "h"}),
+        "SUCCESS",
+    ),
 }
 
 
@@ -304,8 +326,9 @@ def test_sem10_frames_per_job_stay_within_the_fitted_budget(
     needs grow by at most that much per job: a change to the oracle that
     makes a start deeper than the budget fails here, before an estate meets
     it. The ring nests two starts per job, the chain one; the fold shape
-    adds a completion of a run begun before the cascade to each bypass. The
-    chart oracle (DL-342) is held to its own constant."""
+    adds a completion of a run begun before the cascade to each bypass; a
+    release's readmission begins the chain once, at its base. The chart
+    oracle (DL-342) is held to its own constant."""
     # box nesting stops at 64 levels (the lowering's bound)
     small, large = (21, 61) if shape == "terminator-chain" else (41, 81)
     needed = (_frames_needed(shape, large, oracle) - _frames_needed(shape, small, oracle)) / (
@@ -326,10 +349,11 @@ def test_sem10_the_chart_oracle_adds_a_bounded_constant_at_the_innermost_attempt
     constant: the executor's selection at the innermost attempt, which the
     base of the fit absorbs, and one frame at the base for a kill and for an
     input the chart oracle inherits (`ChartOracle._dispatch` calls the old
-    one). The flag inputs' retries sit at today's depth (DL-344). The
-    constant stays within `SELECTION_FRAMES` (measured 0 to 12, the
-    parenthesised conditions the deepest; 5 for the OFF_HOLD and ON_NOEXEC
-    retries)."""
+    one). The flag inputs' retries sit at today's depth (DL-344), and so do
+    RELEASE_RESOURCE and the readmission (DL-345). The constant stays
+    within `SELECTION_FRAMES` (measured 0 to 12, the parenthesised conditions
+    the deepest; 5 for the OFF_HOLD and ON_NOEXEC retries and for a release
+    whose readmission starts the chain)."""
     extra = _frames_needed(shape, 41, ChartOracle) - _frames_needed(shape, 41)
     assert 0 <= extra <= SELECTION_FRAMES
 
