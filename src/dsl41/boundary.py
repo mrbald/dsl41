@@ -62,7 +62,7 @@ import subprocess
 import sys
 import uuid
 
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -102,6 +102,7 @@ from dsl41.period import (
     check_record_fields,
     disagreements,
     is_hash_address,
+    not_ours,
     own_or_refuse,
     period_dir,
     quarantine_dir,
@@ -154,7 +155,8 @@ from dsl41.seal import (
     close_runtime,
     open_from_seal,
 )
-from dsl41.state_machine import Executor, StatechartError, StateMachine, Transition
+from dsl41.state_machine import Event as ChartEvent
+from dsl41.state_machine import Executor, Region, Row, State, Statechart, StatechartError
 
 #: ss1.1's anchor directory, which is NOT inside any archivable root.
 ANCHOR_NAME: Final[str] = "anchor.json"
@@ -545,156 +547,287 @@ def check_local_filesystem(anchor_dir: Path) -> None:
 
 
 # ------------------------------------------------- the anchor's machines
+#
+# `ANCHOR_HEAD` and `PERIOD_ROW` are declarations (docs/statechart-engine.md).
+# Their state lives in `anchor.json`, which no process owns: the head's
+# `state` is the head instance's configuration, and a registry row's flags
+# (`row_tag`) are its row instance's. Every move is a read-compare-write under
+# the anchor lock, and its executor lives for that one move (`_Move`): built
+# from the file read under the lock, posted the method's event, head first and
+# row second, and read and settled before the method's one anchor write (a
+# claim writes its claim file first, then the head). No file or no row means
+# no instance: genesis creates the file, and a successor's opening
+# and a rowless close create the row, in the configuration the write records.
+#
+# A refusal row is a cell with no move. It carries a code, and the method
+# raises its `EngineError` for that code, with the text the method has always
+# used. The method keeps the checks that read its own facts (the period, the
+# seal digest, the claim file, the roots) and runs them before the post; an
+# idempotent repeat posts nothing. A gap in a chart is a `StatechartError`, and
+# so is a write whose tag is not where the chart rests (DL-336).
 
-#: The head's states are the tags of `Head`, plus `absent` before genesis.
-type HeadTag = Literal["absent", "open", "closed", "claimed"]
 #: A registry row's states. `provisional` is a row whose segment is not durable
-#: yet, `durable` one whose segment is, `attested` one `audit` has certified.
+#: yet, `durable` one whose segment is, `attested` one `audit` has certified;
+#: `absent` is no row, so no instance.
 type RowTag = Literal["absent", "provisional", "durable", "attested"]
 
-HEAD_CREATE_OPEN: Final = Transition[HeadTag](
-    "anchor_head.01",
-    frozenset({"absent"}),
-    "create_open",
-    "open",
-    guard="no anchor exists",
-    effect="write the anchor with a provisional registry row",
-    cite="period-model ss1.1, ss1.3",
-)
+#: The cite of most of the anchor's rows.
+_SS13: Final = "period-model ss1.3"
 
-HEAD_CLOSE_PERIOD: Final = Transition[HeadTag](
-    "anchor_head.02",
-    frozenset({"open"}),
-    "close_period",
-    "closed",
-    guard="the head is open at this period",
-    effect="write the head as closed at the seal digest",
-    cite="period-model ss1.3, ss3",
-)
-
-HEAD_CLAIM_SUCCESSOR: Final = Transition[HeadTag](
-    "anchor_head.03",
-    frozenset({"closed"}),
-    "claim_successor",
-    "claimed",
-    guard="the head is closed at this seal digest",
-    effect="write the claim file first, then the head",
-    cite="period-model ss1.3",
-)
-
-HEAD_OPEN_CLAIMED: Final = Transition[HeadTag](
-    "anchor_head.04",
-    frozenset({"claimed"}),
-    "open_claimed",
-    "open",
-    guard="the head names this claim",
-    effect="write the successor's durable registry row in the same write",
-    cite="period-model ss1.3, PR-02c",
-)
-
-HEAD_RECLAIM: Final = Transition[HeadTag](
-    "anchor_head.05",
-    frozenset({"claimed"}),
-    "reclaim",
-    "closed",
-    guard="the claim file binds its body, the estate and the head;"
-    " the registry holds the previous seal as committed",
-    effect="append a Reclaimed entry; return the head to the previous seal",
-    cite="period-model ss1.3",
-)
-
-HEAD_REWRITE_CLAIM: Final = Transition[HeadTag](
-    "anchor_head.06",
-    frozenset({"claimed"}),
-    "claim_successor",
-    "claimed",
-    guard="the head names this claim and the claim file is gone",
-    effect="write the claim file again; the head is written unchanged",
-    cite="period-model ss1.3",
-)
-
-ANCHOR_HEAD: Final[StateMachine[HeadTag]] = StateMachine(
+#: The lineage head, one instance per anchor directory. Its leaves are the
+#: tags of `Head`; `absent` is no file, so no instance.
+ANCHOR_HEAD: Final = Statechart(
     name="anchor_head",
-    states=frozenset({"absent", "open", "closed", "claimed"}),
-    initial="absent",
-    finals=frozenset(),
-    transitions=(
-        HEAD_CREATE_OPEN,
-        HEAD_CLOSE_PERIOD,
-        HEAD_CLAIM_SUCCESSOR,
-        HEAD_OPEN_CLAIMED,
-        HEAD_RECLAIM,
-        HEAD_REWRITE_CLAIM,
+    root=State(
+        "anchor_head",
+        regions=(Region("head", "open", (State("open"), State("closed"), State("claimed"))),),
     ),
+    rows=(
+        Row(
+            "anchor_head.02",
+            "open",
+            "close_period",
+            "closed",
+            cite=f"{_SS13}, ss3",
+            note=(
+                "The head is open at this period (the method's check). Write it closed at"
+                " the seal digest, with the period's row in the same write."
+            ),
+        ),
+        Row(
+            "anchor_head.03",
+            "closed",
+            "claim_successor",
+            "claimed",
+            cite=_SS13,
+            note=(
+                "The head is closed at this seal digest (the method's check). Write the"
+                " claim file first, then the head."
+            ),
+        ),
+        Row(
+            "anchor_head.04",
+            "claimed",
+            "open_claimed",
+            "open",
+            cite=f"{_SS13}, PR-02c",
+            note=(
+                "The head names this claim (the method's check). Write the successor's"
+                " durable registry row in the same write."
+            ),
+        ),
+        Row(
+            "anchor_head.05",
+            "claimed",
+            "reclaim",
+            "closed",
+            cite=_SS13,
+            note=(
+                "The claim file binds its body, the estate and the head, and the registry"
+                " holds the previous seal as committed (the method's checks). Append a"
+                " Reclaimed entry and return the head to the previous seal."
+            ),
+        ),
+        Row(
+            "anchor_head.06",
+            "claimed",
+            "claim_successor",
+            kind="internal",
+            cite=f"{_SS13}, DL-290",
+            note=(
+                "The head names this claim and the claim file is gone (the method's"
+                " checks). Write the claim file again; the head is written unchanged."
+                " DL-290 leaves open whether this is reachable: `reclaim` and the resume"
+                " step refuse the same state as unreachable."
+            ),
+        ),
+        Row(
+            "anchor_head.07",
+            "anchor_head",
+            "create_open",
+            kind="refusal",
+            code="anchor_exists",
+            cite="period-model ss1.1, PR-01b",
+            note="The method answers its own interrupted genesis before any post.",
+        ),
+        Row(
+            "anchor_head.08",
+            "anchor_head",
+            "close_period",
+            kind="refusal",
+            code="head_not_open",
+            cite=_SS13,
+            note="The method answers a repeat at this period's closed head before any post.",
+        ),
+        Row(
+            "anchor_head.09",
+            "anchor_head",
+            "claim_successor",
+            kind="refusal",
+            code="head_not_closed",
+            cite=_SS13,
+        ),
+        Row(
+            "anchor_head.10",
+            "anchor_head",
+            "open_claimed",
+            kind="refusal",
+            code="head_not_claimed",
+            cite=_SS13,
+            note="The method answers a repeat at this period's open head before any post.",
+        ),
+        Row(
+            "anchor_head.11",
+            "anchor_head",
+            "reclaim",
+            kind="refusal",
+            code="head_not_claimed",
+            cite=_SS13,
+        ),
+    ),
+    clock="logical",
 )
 
+#: A row reached only from `attested`: `unattested` takes the event first.
+_FROM_ATTESTED: Final = "Only `attested` reaches this row."
+#: What a refusal row of `attested` meets when the method posts to it.
+_FORGED: Final = "It meets a forged row only: attested without its durable flag."
 
-ROW_CREATE_OPEN: Final = Transition[RowTag](
-    "period_row.01",
-    frozenset({"absent"}),
-    "create_open",
-    "provisional",
-    guard="genesis writes the first anchor",
-    effect="insert the row before any segment exists",
-    cite="period-model ss1.3, PR-02c",
-)
-
-ROW_CLOSE_PERIOD: Final = Transition[RowTag](
-    "period_row.02",
-    frozenset({"absent", "provisional", "durable"}),
-    "close_period",
-    "durable",
-    guard="the head closes this period; `absent` and `provisional` are tolerated sources,"
-    " not reachable after a crash (the row is present and finalized before any run)",
-    effect="record the seal digest; mark the segment durable",
-    cite="period-model ss1.3, ss3",
-)
-
-ROW_OPEN_CLAIMED: Final = Transition[RowTag](
-    "period_row.03",
-    frozenset({"absent"}),
-    "open_claimed",
-    "durable",
-    guard="the head moves from claimed to open",
-    effect="insert the successor's row, durable, in the same write as the head",
-    cite="period-model ss1.3, PR-02c",
-)
-
-ROW_FINALIZE: Final = Transition[RowTag](
-    "period_row.04",
-    frozenset({"provisional"}),
-    "finalize",
-    "durable",
-    guard="the segment has landed; the row is not durable yet",
-    effect="mark the segment durable",
-    cite="period-model ss1.3",
-)
-
-ROW_ATTEST: Final = Transition[RowTag](
-    "period_row.05",
-    frozenset({"durable"}),
-    "attest",
-    "attested",
-    guard="the row is durable; its digest and root match the audit",
-    effect="mark the row attested",
-    cite="period-model ss1.3, ss11",
-)
-
-#: The registry row's flags, a second region of the anchor. A row is born
-#: `provisional` at genesis, or `durable` when a successor opens.
-PERIOD_ROW: Final[StateMachine[RowTag]] = StateMachine(
+#: One period's registry row, one instance per anchor directory and period id.
+#: A row is born provisional at genesis, or durable when a successor opens;
+#: `unattested` holds the two states the close moves a row from.
+PERIOD_ROW: Final = Statechart(
     name="period_row",
-    states=frozenset({"absent", "provisional", "durable", "attested"}),
-    initial="absent",
-    finals=frozenset({"attested"}),
-    transitions=(
-        ROW_CREATE_OPEN,
-        ROW_CLOSE_PERIOD,
-        ROW_OPEN_CLAIMED,
-        ROW_FINALIZE,
-        ROW_ATTEST,
+    root=State(
+        "period_row",
+        regions=(
+            Region(
+                "row",
+                "unattested",
+                (
+                    State(
+                        "unattested",
+                        regions=(
+                            Region(
+                                "segment", "provisional", (State("provisional"), State("durable"))
+                            ),
+                        ),
+                    ),
+                    State("attested", final=True),
+                ),
+            ),
+        ),
     ),
+    rows=(
+        Row(
+            "period_row.02",
+            "unattested",
+            "close_period",
+            "durable",
+            cite=f"{_SS13}, ss3",
+            note=(
+                "The head closes this period. Record the seal digest and mark the segment"
+                " durable. `provisional` is a tolerated source, not reachable after a crash:"
+                " the row is present and finalized before any run. With no row the close"
+                " writes one, durable, and no instance existed to move."
+            ),
+        ),
+        Row(
+            "period_row.04",
+            "provisional",
+            "finalize",
+            "durable",
+            cite=_SS13,
+            note="The segment has landed. Mark it durable.",
+        ),
+        Row(
+            "period_row.05",
+            "durable",
+            "attest",
+            "attested",
+            cite=f"{_SS13}, ss11",
+            note=(
+                "The row's seal digest and root match the audit (the method's checks). Mark"
+                " the row attested."
+            ),
+        ),
+        Row(
+            "period_row.06",
+            "period_row",
+            "create_open",
+            kind="refusal",
+            code="row_exists",
+            cite=f"{_SS13}, PR-02c",
+            note="The head refuses first: genesis meets an existing anchor.",
+        ),
+        Row(
+            "period_row.07",
+            "period_row",
+            "open_claimed",
+            kind="refusal",
+            code="row_exists",
+            cite=f"{_SS13}, PR-02c",
+            note="A successor's row is written only in the write that opens it.",
+        ),
+        Row(
+            "period_row.08",
+            "period_row",
+            "close_period",
+            kind="refusal",
+            code="row_attested",
+            cite=_SS13,
+            note=_FROM_ATTESTED,
+        ),
+        Row(
+            "period_row.09",
+            "durable",
+            "finalize",
+            kind="refusal",
+            code="row_durable",
+            cite=_SS13,
+            note="The method answers this repeat before any post.",
+        ),
+        Row(
+            "period_row.10",
+            "period_row",
+            "finalize",
+            kind="refusal",
+            code="row_attested",
+            cite=_SS13,
+            note=_FROM_ATTESTED + " The method answers a durable row before any post. " + _FORGED,
+        ),
+        Row(
+            "period_row.11",
+            "provisional",
+            "attest",
+            kind="refusal",
+            code="row_not_durable",
+            cite=_SS13,
+        ),
+        Row(
+            "period_row.12",
+            "period_row",
+            "attest",
+            kind="refusal",
+            code="row_attested",
+            cite=_SS13,
+            note=_FROM_ATTESTED + " The method answers a repeat before any post. " + _FORGED,
+        ),
+    ),
+    clock="logical",
 )
+
+
+def head_configuration(tag: str) -> frozenset[str]:
+    """The configuration a head tag projects from: what `_Move` restores."""
+    return frozenset({"anchor_head", tag})
+
+
+def row_configuration(tag: str) -> frozenset[str]:
+    """The configuration a registry row's tag projects from: what `_Move` restores."""
+    if tag == "attested":
+        return frozenset({"period_row", "attested"})
+    return frozenset({"period_row", "unattested", tag})
 
 
 def row_tag(row: PeriodRow | None) -> RowTag:
@@ -706,22 +839,73 @@ def row_tag(row: PeriodRow | None) -> RowTag:
     return "durable" if row.segment_durable else "provisional"
 
 
-def _take[S: str](path: Path, machine: StateMachine[S], t: Transition[S], old: S, new: S) -> None:
-    """Check a move against its declared transition; refuse it when it is not declared.
+class _Move:
+    """One move's executor (statechart-engine ss11): built from the anchor the
+    method read under the lock, and gone with the method.
 
-    Every anchor method calls this after its own guards and BEFORE its first write, so a
-    refusal leaves the anchor and the claims directory as they were. It holds with or
-    without the strict test variable. A refusal stops the operation before any write. At
-    resume (`act_on_head` calls `close_period`, `open_claimed` and `finalize`) it stops the
-    resume with an error naming the move: the boundary's refuse-on-inconsistent-anchor rule
-    (DL-224, DL-263) applied to a move the table does not declare. It can never become a
-    replayed fault, because head moves are not WAL inputs."""
-    violation = machine.take(t, old, new)
-    if violation is not None:
-        raise EngineError(
-            f"{path}: {violation.machine} {violation.transition}: {violation.old} ->"
-            f" {violation.new} is not a declared move ({violation.reason}) (period-model ss1.3)"
-        )
+    It holds the head's instance, keyed by the anchor directory, and the moved
+    period's row instance, keyed by the directory and the period id; no file
+    or no row means no instance. Every post of one move carries its one event."""
+
+    def __init__(
+        self, anchor_dir: Path, event: str, anchor: Anchor | None, period_id: int | None = None
+    ) -> None:
+        self.machines = Executor()
+        self.event = ChartEvent(event)
+        self.head: Path = anchor_dir
+        self.row: tuple[Path, int | None] = (anchor_dir, period_id)
+        self.period_id = period_id
+        self.held: dict[Hashable, Statechart] = {}
+        if anchor is not None:
+            self._restore(self.head, ANCHOR_HEAD, head_configuration(anchor.head.state))
+            row = None if period_id is None else anchor.row(period_id)
+            if row is not None:
+                self._restore(self.row, PERIOD_ROW, row_configuration(row_tag(row)))
+
+    def _restore(self, key: Hashable, chart: Statechart, active: frozenset[str]) -> None:
+        self.machines.restore(key, chart, active)
+        self.held[key] = chart
+
+    def post(self, key: Hashable, refusals: Mapping[str, str]) -> None:
+        """Post the move's event to one instance, when it exists. A refusal
+        raises the method's `EngineError` for its code; a code the method has
+        no text for is a `StatechartError`."""
+        if key not in self.held:
+            return
+        (outcome,) = self.machines.dispatch(key, self.event)
+        if not outcome.refusals:
+            return
+        (code,) = outcome.refusals
+        if code not in refusals:
+            error = StatechartError(
+                f"{self.held[key].name} {key!r}: the refusal {code} of {self.event.name}"
+                " has no text in the anchor's method",
+                candidates=outcome.rows,
+            )
+            raise self.machines.explain(error, key, self.event)
+        raise EngineError(refusals[code])
+
+    def settle(self, updated: Anchor) -> None:
+        """Before the write: every instance rests in the tag the write records,
+        and an instance the write creates is restored in it. A tag the chart
+        does not rest in is a `StatechartError`, and nothing is written."""
+        tags: list[tuple[Hashable, Statechart, frozenset[str]]] = [
+            (self.head, ANCHOR_HEAD, head_configuration(updated.head.state))
+        ]
+        if self.period_id is not None:
+            row = updated.row(self.period_id)
+            tags.append((self.row, PERIOD_ROW, row_configuration(row_tag(row))))
+        for key, chart, written in tags:
+            if key not in self.held:
+                self._restore(key, chart, written)
+                continue
+            active = self.machines.active(key)
+            if active != written:
+                error = StatechartError(
+                    f"{chart.name} {key!r}: the move writes {sorted(written)} and the chart"
+                    f" rests in {sorted(active)}"
+                )
+                raise self.machines.explain(error, key, self.event)
 
 
 class EstateAnchor:
@@ -828,7 +1012,10 @@ class EstateAnchor:
         committed segment, which is genesis interrupted. Once a segment
         exists, ordinary `--resume` owns recovery and this refuses. An
         existing anchor is an existing estate whose detached work may still
-        be alive, whatever its incumbent's liveness says (PR-01b)."""
+        be alive, whatever its incumbent's liveness says (PR-01b): every
+        head refuses `create_open` (anchor_head.07). No file means no
+        instance, so the write creates both, the head `open` and the row
+        `provisional`."""
         existing = self.read()
         ours = (
             existing is not None
@@ -838,15 +1025,14 @@ class EstateAnchor:
             and normalized_root(existing.head.root) == normalized_root(root)
             and not (existing.row(period_id) or PeriodRow(root="")).segment_durable
         )
-        action = own_or_refuse(
-            exists=existing is not None,
-            ours=ours,
-            what=str(self.path),
-            holder=_holder_of(existing),
-        )
-        if action == "resume":
+        if ours:
             assert existing is not None
             return existing
+        move = _Move(self.dir, "create_open", existing, period_id)
+        move.post(
+            move.head,
+            {"anchor_exists": not_ours(what=str(self.path), holder=_holder_of(existing))},
+        )
         anchor = Anchor(
             estate_id=estate_id,
             head=OpenHead(period_id=period_id, root=normalized_root(root)),
@@ -854,8 +1040,7 @@ class EstateAnchor:
             # reader ignores a row until it reads `segment_durable` (PR-02c)
             periods={str(period_id): PeriodRow(root=normalized_root(root))},
         )
-        _take(self.path, ANCHOR_HEAD, HEAD_CREATE_OPEN, "absent", "open")
-        _take(self.path, PERIOD_ROW, ROW_CREATE_OPEN, "absent", row_tag(anchor.row(period_id)))
+        move.settle(anchor)
         self.write(anchor)
         return anchor
 
@@ -886,25 +1071,31 @@ class EstateAnchor:
                 " this attestation was produced in another estate's root"
                 " (period-model ss1.3)"
             )
-        if row.seal_digest != seal_digest or not row.segment_durable:
-            # exact, null included, and DURABLE: a `seal` record can land
-            # before the close CAS, and marking that provisional row
-            # attested would certify a boundary the lineage has not
-            # committed (period-model ss1.3)
-            raise EngineError(
-                f"{self.path}: period {period_id} has seal {row.seal_digest!r}"
-                f" (segment_durable={row.segment_durable}) and the attestation names"
-                f" {seal_digest} -- only a committed, durable row is attested"
-                " (period-model ss1.3)"
-            )
-        if row.attested:
+        # exact, null included, and DURABLE: a `seal` record can land
+        # before the close CAS, and marking that provisional row attested
+        # would certify a boundary the lineage has not committed
+        # (period-model ss1.3). The digest is this method's check; the
+        # durability is the chart's (period_row.11)
+        uncommitted = (
+            f"{self.path}: period {period_id} has seal {row.seal_digest!r}"
+            f" (segment_durable={row.segment_durable}) and the attestation names"
+            f" {seal_digest} -- only a committed, durable row is attested"
+            " (period-model ss1.3)"
+        )
+        if row.seal_digest != seal_digest:
+            raise EngineError(uncommitted)
+        if row.attested and row.segment_durable:
             return anchor
+        # a row attested without its durable flag is a forged one, and it
+        # refuses as an uncommitted row does (period_row.12)
+        move = _Move(self.dir, "attest", anchor, period_id)
+        move.post(move.row, {"row_not_durable": uncommitted, "row_attested": uncommitted})
         updated = anchor.model_copy(
             update={
                 "periods": anchor.with_row(period_id, row.model_copy(update={"attested": True}))
             }
         )
-        _take(self.path, PERIOD_ROW, ROW_ATTEST, row_tag(row), row_tag(updated.row(period_id)))
+        move.settle(updated)
         self.write(updated)
         return updated
 
@@ -923,15 +1114,43 @@ class EstateAnchor:
         The seal the head goes back to is the claim's own
         `prev_seal_digest`, and the closing root is the registry's row for
         the closing period -- both READ, never supplied, so a reclaim
-        cannot invent a lineage the anchor never held."""
+        cannot invent a lineage the anchor never held.
+
+        The checks read the claim file and the registry, so they run only
+        for a claimed head, before the post; every other head refuses
+        (anchor_head.11)."""
         anchor = self.require(estate_id)
         head = anchor.head
-        if not isinstance(head, ClaimedHead):
-            raise EngineError(
-                f"{self.path}: the head is {_spell(head)}, not a claim -- there is"
-                " nothing to reclaim, and this verb never moves a head that is"
+        reclaimed = None
+        if isinstance(head, ClaimedHead):
+            reclaimed = self._reclaimed(anchor, head, estate_id, claimed_actor)
+        move = _Move(self.dir, "reclaim", anchor)
+        move.post(
+            move.head,
+            {
+                "head_not_claimed": f"{self.path}: the head is {_spell(head)}, not a claim --"
+                " there is nothing to reclaim, and this verb never moves a head that is"
                 " doing its job (period-model ss1.3)"
+            },
+        )
+        if reclaimed is None:
+            # anchor_head.11 refuses every other head: a chart that moves one
+            # disagrees with this method, which checked no claim
+            error = StatechartError(
+                f"anchor_head {move.head!r}: reclaim moved a head that is"
+                f" {head.state}, and the method checks only a claimed one"
             )
+            raise move.machines.explain(error, move.head, move.event)
+        updated, moved = reclaimed
+        move.settle(updated)
+        self.write(updated)
+        return updated, moved
+
+    def _reclaimed(
+        self, anchor: Anchor, head: ClaimedHead, estate_id: str, claimed_actor: str
+    ) -> tuple[Anchor, Reclaimed]:
+        """`reclaim`'s checks of the claim file and the registry, and the
+        anchor and the ledger entry it writes."""
         claim = self.read_claim(head.claim_id)
         if claim is None:
             raise EngineError(
@@ -1000,8 +1219,6 @@ class EstateAnchor:
                 "reclaimed": [*anchor.reclaimed, moved],
             }
         )
-        _take(self.path, ANCHOR_HEAD, HEAD_RECLAIM, head.state, updated.head.state)
-        self.write(updated)
         return updated, moved
 
     def finalize(self, period_id: int) -> Anchor:
@@ -1020,6 +1237,15 @@ class EstateAnchor:
             )
         if row.segment_durable:
             return anchor
+        move = _Move(self.dir, "finalize", anchor, period_id)
+        move.post(
+            move.row,
+            {
+                "row_attested": f"{self.path}: period {period_id}'s registry row is attested"
+                " and its segment is not durable -- an attested row was durable first"
+                " (period-model ss1.3)"
+            },
+        )
         updated = anchor.model_copy(
             update={
                 "periods": anchor.with_row(
@@ -1027,7 +1253,7 @@ class EstateAnchor:
                 )
             }
         )
-        _take(self.path, PERIOD_ROW, ROW_FINALIZE, row_tag(row), row_tag(updated.row(period_id)))
+        move.settle(updated)
         self.write(updated)
         return updated
 
@@ -1048,11 +1274,21 @@ class EstateAnchor:
                     f" {head.seal_digest} -- this seal says {seal_digest} (period-model ss1.3)"
                 )
             return anchor
-        if not isinstance(head, OpenHead) or head.period_id != period_id:
-            raise EngineError(
-                f"{self.path}: cannot close period {period_id}: the head is"
-                f" {_spell(head)} (period-model ss1.3)"
-            )
+        cannot = (
+            f"{self.path}: cannot close period {period_id}: the head is"
+            f" {_spell(head)} (period-model ss1.3)"
+        )
+        if isinstance(head, OpenHead) and head.period_id != period_id:
+            raise EngineError(cannot)
+        move = _Move(self.dir, "close_period", anchor, period_id)
+        move.post(move.head, {"head_not_open": cannot})
+        move.post(
+            move.row,
+            {
+                "row_attested": f"{self.path}: cannot close period {period_id}: its registry"
+                " row is already attested, and an attested row is closed (period-model ss1.3)"
+            },
+        )
         row = anchor.row(period_id) or PeriodRow(root=normalized_root(root))
         updated = anchor.model_copy(
             update={
@@ -1067,14 +1303,7 @@ class EstateAnchor:
                 ),
             }
         )
-        _take(self.path, ANCHOR_HEAD, HEAD_CLOSE_PERIOD, head.state, updated.head.state)
-        _take(
-            self.path,
-            PERIOD_ROW,
-            ROW_CLOSE_PERIOD,
-            row_tag(anchor.row(period_id)),
-            row_tag(updated.row(period_id)),
-        )
+        move.settle(updated)
         self.write(updated)
         return updated
 
@@ -1104,11 +1333,16 @@ class EstateAnchor:
             claim = self.read_claim(claim_id)
             if claim is not None:
                 return claim
-        elif not (isinstance(head, ClosedHead) and head.seal_digest == seal_digest):
-            raise EngineError(
-                f"{self.path}: cannot claim the successor of {seal_digest}: the head is"
-                f" {_spell(head)} (period-model ss1.3)"
-            )
+        cannot = (
+            f"{self.path}: cannot claim the successor of {seal_digest}: the head is"
+            f" {_spell(head)} (period-model ss1.3)"
+        )
+        if isinstance(head, ClosedHead) and head.seal_digest != seal_digest:
+            raise EngineError(cannot)
+        # checked before the claim file is written, so a refusal leaves both
+        # as they were: anchor_head.03 from `closed`, .06 from `claimed`
+        move = _Move(self.dir, "claim_successor", anchor)
+        move.post(move.head, {"head_not_closed": cannot})
         claim = Claim(
             claim_id=claim_id,
             estate_id=estate_id,
@@ -1125,14 +1359,7 @@ class EstateAnchor:
         claimed = anchor.model_copy(
             update={"head": ClaimedHead(claim_id=claim_id, target_root=claim.target_root)}
         )
-        # checked before the claim file is written, so a refusal leaves both as they were
-        _take(
-            self.path,
-            ANCHOR_HEAD,
-            HEAD_REWRITE_CLAIM if isinstance(head, ClaimedHead) else HEAD_CLAIM_SUCCESSOR,
-            head.state,
-            claimed.head.state,
-        )
+        move.settle(claimed)
         # the claim file first: the head may only name a claim that exists
         self.write_claim(claim)
         self.write(claimed)
@@ -1150,11 +1377,22 @@ class EstateAnchor:
         head = anchor.head
         if isinstance(head, OpenHead) and head.period_id == period_id:
             return anchor  # the crash was after this very write
-        if not isinstance(head, ClaimedHead) or head.claim_id != claim_id:
-            raise EngineError(
-                f"{self.path}: cannot open period {period_id} under claim {claim_id}:"
-                f" the head is {_spell(head)} (period-model ss1.3)"
-            )
+        cannot = (
+            f"{self.path}: cannot open period {period_id} under claim {claim_id}:"
+            f" the head is {_spell(head)} (period-model ss1.3)"
+        )
+        if isinstance(head, ClaimedHead) and head.claim_id != claim_id:
+            raise EngineError(cannot)
+        move = _Move(self.dir, "open_claimed", anchor, period_id)
+        move.post(move.head, {"head_not_claimed": cannot})
+        move.post(
+            move.row,
+            {
+                "row_exists": f"{self.path}: cannot open period {period_id} under claim"
+                f" {claim_id}: the registry already holds a row for it -- a successor's row"
+                " is written only in the write that opens it (period-model ss1.3, PR-02c)"
+            },
+        )
         updated = anchor.model_copy(
             update={
                 "head": OpenHead(period_id=period_id, root=normalized_root(root)),
@@ -1163,14 +1401,7 @@ class EstateAnchor:
                 ),
             }
         )
-        _take(self.path, ANCHOR_HEAD, HEAD_OPEN_CLAIMED, head.state, updated.head.state)
-        _take(
-            self.path,
-            PERIOD_ROW,
-            ROW_OPEN_CLAIMED,
-            row_tag(anchor.row(period_id)),
-            row_tag(updated.row(period_id)),
-        )
+        move.settle(updated)
         self.write(updated)
         return updated
 
@@ -2637,9 +2868,10 @@ def commit_boundary(
         )
         crash_point("after_close_cas")
     except StatechartError:
-        # the `seal` record's fan-out runs the subscription chart: a gap in
-        # it is an assertion failure, which stops the engine with exit 7 and
-        # the record durable; resume reads the lineage (statechart-engine ss5)
+        # the `seal` record's fan-out runs the subscription chart, and the
+        # anchor's close CAS runs the anchor's charts (DL-336): a gap in
+        # either is an assertion failure, which stops the engine with exit 7
+        # and the record durable; resume reads the lineage (statechart-engine ss5)
         raise
     except Exception as exc:
         raise BoundaryFailStop(

@@ -623,11 +623,19 @@ def _finish_genesis(
         estate_id=root_estate_id,
     )
     epoch = next_epoch([])  # the first term over a log that has none
-    journal.leader(epoch=epoch, at=at)
-    lock.note(epoch=epoch, at=at)
-    fsync_dir(journal.path.parent)  # the segment's directory entry is a record too
-    fsync_dir(run_root)
-    anchor.finalize(GENESIS_PERIOD_ID)  # step 6
+    try:
+        journal.leader(epoch=epoch, at=at)
+        lock.note(epoch=epoch, at=at)
+        fsync_dir(journal.path.parent)  # the segment's directory entry is a record too
+        fsync_dir(run_root)
+        anchor.finalize(GENESIS_PERIOD_ID)  # step 6
+    except BaseException:
+        # no engine will own the segment: close it, as a refused genesis
+        # releases both locks (a statechart error stops here too, DL-336).
+        # A failing close never masks the error that got us here
+        with contextlib.suppress(OSError, ValueError):
+            journal.close()
+        raise
     return Engine(
         catalog,
         clock=clock,

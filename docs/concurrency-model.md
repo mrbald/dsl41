@@ -367,9 +367,10 @@ profile. A violation of one of an input's moves never raises, live or on
 replay. Three machines refuse or raise by design instead (DL-297):
 
 - `anchor_head` and `period_row` refuse the boundary operation before
-  anything is written (DL-290). At resume, that stops the resume with an
-  error that names the move. It is never a replayed fault, because head
-  moves are not WAL inputs.
+  anything is written (DL-290). They are statecharts (DL-336): a refusal
+  row raises the anchor's own `EngineError`, which at resume stops the
+  resume, and a gap is a `StatechartError`, which stops it with exit 7.
+  Neither is a replayed fault, because head moves are not WAL inputs.
 - `runtime_assembly` refuses a misused verb (DL-293). The verb raises the refusal row's
   class: `ValueError` for a state-dependent guard, `OracleError` for a commit with no input
   open, the end of construction inside the genesis input, and an input opened twice

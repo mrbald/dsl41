@@ -1332,7 +1332,13 @@ def own_or_refuse(
         return "create"
     if ours:
         return "resume"
-    raise EngineError(
+    raise EngineError(not_ours(what=what, holder=holder))
+
+
+def not_ours(*, what: str, holder: str) -> str:
+    """`own_or_refuse`'s refusal text. The anchor raises it for its head
+    chart's `anchor_exists` code (DL-336), so the rule keeps one text."""
+    return (
         f"{what} already exists and is not ours ({holder}): absent creates,"
         " our own incomplete transaction resumes, anything else refuses"
         " (period-model ss1.1)"
