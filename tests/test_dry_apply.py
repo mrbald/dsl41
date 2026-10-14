@@ -185,19 +185,37 @@ def test_the_fork_copies_every_mutable_attribute_and_shares_only_fixed_ones() ->
 
 def test_the_chart_oracles_fork_pins_its_own_attribute_and_rebinds_its_job_source() -> None:
     """The chart oracle (DL-341) holds the oracle's attributes and its
-    own `_agreement`, None between inputs and on the fork; its store holds
-    the same attributes, and the fork's `job_instance` is rebound to the fork."""
+    own, false between inputs and on the fork (DL-350); its store
+    holds the same attributes, and the fork's `job_instance` and holding
+    listener are rebound to the fork."""
     oracle = ChartOracle(lower_source(_JIL))
     assert set(vars(oracle)) == ORACLE_COPIED | ORACLE_FRESH | ORACLE_SHARED | CHART_ORACLE_FRESH
     assert set(vars(oracle.store)) == STORE_COPIED | STORE_REBUILT | STORE_SHARED
     oracle.feed(_start())
     twin = oracle.fork()
     for name in CHART_ORACLE_FRESH:
-        assert getattr(oracle, name) is None and getattr(twin, name) is None, name
+        assert not getattr(oracle, name) and not getattr(twin, name), name
+        if isinstance(getattr(oracle, name), (set, dict, list)):
+            assert getattr(twin, name) is not getattr(oracle, name), name
+    assert twin._late_settlements is not oracle._late_settlements
     for name in STORE_SHARED:
         rebound = getattr(twin.store, name)
         assert rebound is not getattr(oracle.store, name), name
         assert getattr(rebound, "__self__", None) is twin, name
+
+
+def test_a_row_the_chart_oracle_s_fork_creates_never_reaches_the_parent() -> None:
+    """DL-350: the twin's macrostep reaches an instance only the twin
+    has (a STATUS for a job the catalog lacks creates its row); the parent's
+    next macrostep checks only the instances it reached itself."""
+    oracle = ChartOracle(lower_source(_JIL))
+    oracle.feed(_start())
+    twin = oracle.fork()
+    later = T0 + timedelta(minutes=1)
+    twin.feed(Event(at=later, kind="STATUS", payload={"job": "ghost", "status": "SUCCESS"}))
+    assert "ghost" in twin.store.job and "ghost" not in oracle.store.job
+    oracle.feed(Event(at=later, kind="STATUS", payload={"job": "j", "exit_code": 0}))
+    assert oracle.store.job["j"].status == "SUCCESS"
 
 
 def test_a_dry_host_command_on_a_fork_leaves_the_routing_table_alone() -> None:

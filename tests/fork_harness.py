@@ -77,14 +77,14 @@ STORE_REBUILT = frozenset({"machines"})
 #: RuntimeState attributes the store's fork shares: the source of the job
 #: instances (DL-341) and the listener of its holding moves (DL-349).
 #: Each is None on this oracle, so the twin's is the same None; the chart
-#: oracle's fork then rebinds its twin's to the twin (`ChartOracle.fork`,
-#: `AgreeingOracle.fork`), so there they are rebound, not shared.
+#: oracle's fork then rebinds its twin's to the twin (`ChartOracle.fork`),
+#: so there they are rebound, not shared.
 STORE_SHARED = frozenset({"job_instance", "holding_moved"})
-#: The chart oracle's own attributes, on top of the oracle's: the STATUS move
-#: being written, a start's status move before its write, the moves of a
-#: batch the box rules write (DL-346), and the holding rows owed today's move
-#: (DL-349), None between inputs, so its fork starts with None.
-CHART_ORACLE_FRESH = frozenset({"_agreement", "_start_move", "_batch", "_holding"})
+#: The chart oracle's own attributes, on top of the oracle's: whether the
+#: scan's last `readmit` moved its waiter, the settlement row its hook is
+#: writing, and the instances a macrostep reached (DL-350). Each is
+#: false or empty between inputs, so its fork starts with the same.
+CHART_ORACLE_FRESH = frozenset({"_readmitted", "_settling", "_reached"})
 
 
 def _when(at: datetime | None) -> str | None:

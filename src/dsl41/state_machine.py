@@ -541,7 +541,7 @@ class _Index:
     #: the initial entry, built on first use
     initial: tuple[str, ...] = ()
     #: the configurations already found legal (`_configuration_problem`), so a
-    #: restore or a realign into one costs a lookup
+    #: restore into one costs a lookup
     legal: set[frozenset[str]] = field(default_factory=set)
 
 
@@ -1062,10 +1062,11 @@ class Executor:
 
     `post` puts a root item in the pool and `run` drains everything, one
     macrostep per root item, released deferred events ahead of the pool (§5,
-    §6). `dispatch` does both. `fork` copies an idle executor, sharing its
-    instance records until either side writes one (DL-339). A call while
-    `run` is in flight raises `ReentrantDispatch`. An exception out of a guard
-    or an action ends the run and empties the worklist; the instance stays as
+    §6). `dispatch` does both, and both take the tier's hook, called with
+    each outcome before the next item pops. `fork` copies an idle executor,
+    sharing its instance records until either side writes one (DL-339). A
+    call while `run` is in flight raises `ReentrantDispatch`. An exception out
+    of a guard, an action or the hook ends the run and empties the worklist; the instance stays as
     the failing microstep left it. Its configuration stays readable, and the
     tier dispatches nothing more to that instance.
     """
@@ -1108,30 +1109,6 @@ class Executor:
             raise StatechartError(f"{chart.name} {key!r}: {problem}")
         self._add(key, _Instance(chart, data, active, generations=dict(generations or {})))
 
-    def realign(self, key: Hashable, active: Iterable[str], data: Any) -> None:
-        """Put an existing instance in a given configuration with the given data;
-        no action runs. It is for a tier whose rows code outside the chart still
-        moves: the instance follows the row (DL-341). The states active after
-        it have no entry yet, as after `restore`, and its generations stay. An
-        instance with a deferred event raises, since no configuration change of
-        its own would release it, and so does one with an item in the pool, as
-        for `forget`. Inside a macrostep it raises `ReentrantDispatch`. The
-        machine's history ring gets a line for it, so an error's report shows
-        the jump. It is transitional: the slice that converts the oracle's last
-        input family removes it."""
-        if self._running:
-            raise ReentrantDispatch("a realign while a macrostep of this executor is in flight")
-        inst = self._instance(key)
-        active = frozenset(active)
-        problem = _configuration_problem(_index(inst.chart), active)
-        if problem:
-            raise StatechartError(f"{inst.chart.name} {key!r}: {problem}")
-        if inst.deferred or any(item.key == key for item in self._pool):
-            raise StatechartError(f"{inst.chart.name} {key!r}: has events still to handle")
-        self._write(key, active=active, data=data, entered=_NOTHING)
-        ring = self._recent.setdefault(inst.chart.name, deque(maxlen=self._history))
-        ring.append(f"{key!r} realigned to {', '.join(sorted(active))}")
-
     def forget(self, key: Hashable) -> None:
         """Remove an instance that rests in a final configuration: every region of
         its root in a final state. Any other instance, one with a deferred event,
@@ -1153,13 +1130,22 @@ class Executor:
         _check_event(self._instance(key).chart, event)
         self._pool.append(_Item(key, "event", event))
 
-    def dispatch(self, key: Hashable, event: Event) -> list[Outcome]:
-        """Post one event and run."""
+    def dispatch(
+        self, key: Hashable, event: Event, after: Callable[[Outcome], None] | None = None
+    ) -> list[Outcome]:
+        """Post one event and run, with `run`'s hook."""
         self.post(key, event)
-        return self.run()
+        return self.run(after)
 
-    def run(self) -> list[Outcome]:
-        """Run every item to completion and return each microstep's outcome."""
+    def run(self, after: Callable[[Outcome], None] | None = None) -> list[Outcome]:
+        """Run every item to completion and return each microstep's outcome.
+
+        `after` is the tier's hook (§5 step 5): it is called with each
+        outcome once the microstep has recorded it, before the next item pops,
+        under the macrostep. It may read an instance; a post, dispatch,
+        resolve or fork from it raises `ReentrantDispatch`, and it reports no
+        item. An exception out of it ends the run as one out of an
+        action does, its facts naming the item."""
         self._idle()
         self._running = True
         outcomes: list[Outcome] = []
@@ -1172,6 +1158,8 @@ class Executor:
                     name = self._instances[outcome.key].chart.name
                     ring = self._recent.setdefault(name, deque(maxlen=self._history))
                     ring.append(_summary(outcome))
+                    if after is not None:
+                        after(outcome)
                 self._current = None
                 item = self._release() or (self._pool.popleft() if self._pool else None)
                 if item is None:

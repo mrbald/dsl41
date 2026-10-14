@@ -5,9 +5,9 @@ events' payloads (DL-337). The chart, its contract and its guards are in
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Final, Literal, Protocol
+from typing import Any, Final, Literal, Protocol
 
-from dsl41.state_machine import StatechartError
+from dsl41.state_machine import Context, Effects, StatechartError
 
 # ---- events
 
@@ -52,6 +52,50 @@ BOX_ENDS: Final = "box ends FAILURE or TERMINATED"
 BOX_OFF_NOEXEC: Final = "OFF_NOEXEC on its box"
 BOX_ON_NOEXEC: Final = "ON_NOEXEC on its box"
 PERIOD_OPENING: Final = "first input of a period"
+#: An admitted start leaves the transient `ADMITTED` for STARTING, once its
+#: units, its arm and, for a box, its resets are written (DL-350).
+STARTING: Final = "starting"
+
+#: The moments of a cascade (DL-350): self-events whose payload is the
+#: tier's step (`Moment`). A move's box rules, its settlement and its wakes.
+BOX_RULES: Final = "box rules"
+SETTLE: Final = "settle"
+WAKE: Final = "wake"
+#: The ancestors' overrides after a member's move, and the boxes an iced
+#: holder leaves the run of.
+WALK_UP: Final = "walk up"
+HOLDERS: Final = "holders may leave"
+#: The queue's scan, and the load an admitted start takes (DL-255).
+SCAN: Final = "scan"
+LOAD_TAKEN: Final = "load taken"
+#: A box's end reaches its job_terminators, one member at a time (DL-348).
+BOX_ENDS_STEP: Final = "box ends step"
+#: The batch INACTIVE path's second phase (DL-242).
+NOTIFY_STEP: Final = "notify step"
+#: The window decisions at a box start (DL-246).
+WINDOW_PASS: Final = "window pass"
+#: An idle parent's recompute after an operator's INACTIVE (SEM-15); a
+#: waiter's disposition after it leaves the queue unstarted (DL-257).
+AFTER_INJECT: Final = "after inject"
+AFTER_LEAVE: Final = "after leave"
+#: ON_NOEXEC's start retries (DL-254).
+RETRY_STEP: Final = "retry step"
+#: Every moment, in the order the chart declares their rows.
+MOMENTS: Final = (
+    BOX_RULES,
+    SETTLE,
+    WAKE,
+    WALK_UP,
+    HOLDERS,
+    SCAN,
+    LOAD_TAKEN,
+    BOX_ENDS_STEP,
+    NOTIFY_STEP,
+    WINDOW_PASS,
+    AFTER_INJECT,
+    AFTER_LEAVE,
+    RETRY_STEP,
+)
 
 # ---- data and payloads
 
@@ -83,13 +127,33 @@ class JobData:
 
 
 class Units(Protocol):
-    """A tier's handle on one job's units: what leaving its run does with the
-    units its row holds, after a SUCCESS (`success`) or after any other end,
-    as `RuntimeState.release_reservations` decides it with the pool's
+    """A tier's handle on one job, which its payloads carry.
+
+    `release`: what leaving its run does with the units its row holds, after
+    a SUCCESS (`success`) or after any other end, as
+    `RuntimeState.release_reservations` decides it with the pool's
     `keeps_held`. It reads the row when asked, so the policy is the one of the
-    units the row holds at that moment (DL-349)."""
+    units the row holds at that moment (DL-349).
+
+    `consequences`: what a row of `kind` sends and reports beyond its own
+    move, in today's order, read from the tier's facts when the row runs
+    (DL-350). The kinds are the chart's actions that delegate: a status
+    move's box rules, settlement and wakes, a box's end, a flag's wakes and
+    retries, an admitted start's extent. None sends nothing."""
 
     def release(self, success: bool) -> Release: ...
+
+    def consequences(self, ctx: Context, kind: str) -> Effects | None: ...
+
+
+class Moment(Protocol):
+    """A moment's payload: the tier's step, run when the moment pops
+    (DL-350). It reads the tier's facts then and reports the items of
+    this step, and itself again to take the next step after their cascade,
+    or nothing once it is done. It writes nothing: a write it needs is an
+    intent the tier's hook performs."""
+
+    def step(self, ctx: Context) -> Effects | None: ...
 
 
 @dataclass(frozen=True)
@@ -118,8 +182,11 @@ class Attempt(Payload):
     attempts nothing. `dated`: the job has date conditions (`schedule`).
     `box`: the member's gate on its box's run (SEM-10, SEM-20). `condition`:
     the job's condition holds, or it has none. `window`: `_window_side`.
-    `bounded`: the job already has `MAX_NESTED_STARTS` starts in progress
-    on the call stack (`_starts_in_progress`, the bound `_start` reads).
+    `decided`: the window alone decides the attempt, as `_run_window_permits`
+    does for a box start's pass and for a waiter that left the queue for its
+    window (DL-246, DL-257): no other gate is read, and inside the window
+    nothing moves. The start bound is no fact: job.100 counts the item's
+    ancestry (DL-350).
     `settlement_owed`: a run of the job ended inside a cascade still running
     its box rules, and its settlement waits (`_settle_ended_run`, DL-340).
     `box_noexec`: a box above the job is ON_NOEXEC (`_noexec_bypasses`).
@@ -140,7 +207,7 @@ class Attempt(Payload):
     box: BoxGate = "none"
     condition: bool = True
     window: WindowSide = "inside"
-    bounded: bool = False
+    decided: bool = False
     settlement_owed: bool = False
     box_noexec: bool = False
     admissible: bool = True
@@ -247,14 +314,22 @@ class Settlement:
     `StatechartError`, which the executor reports with the instance and the
     item, rather than free a unit the run may keep or spend."""
 
-    __slots__ = ("success", "_units", "_release")
+    __slots__ = ("success", "_units", "_release", "move")
 
     def __init__(
-        self, success: bool = False, release: Release | None = None, *, units: Units | None = None
+        self,
+        success: bool = False,
+        release: Release | None = None,
+        *,
+        units: Units | None = None,
+        move: Any = None,
     ) -> None:
         self.success = success
         self._units = units
         self._release = release
+        #: the tier's record of the move whose run settles, for its hook; it
+        #: takes no part in a comparison
+        self.move = move
 
     @property
     def release(self) -> Release:
@@ -300,11 +375,15 @@ type Admitting = Literal["bypass", "queue", "admit", "on_held"]
 
 
 @dataclass(frozen=True)
-class Admitted:
+class Admitted(Payload):
     """`start admitted`'s payload: the verdict of the start that the admitting
     row moved (`verdict`), and the units an admission or a start on held units
     reserves or takes over (`admission`, `Admission`). A bypass and a queue
-    reserve nothing."""
+    reserve nothing. `move` is the tier's record of a bypass's or a queue's
+    status move, whose box rules and wakes the extent sends, and `attempt` the
+    start's facts, which the extent's writes name (DL-350)."""
 
     verdict: Admitting
     admission: Admission = Admission()
+    move: Any = field(default=None, compare=False)
+    attempt: Any = field(default=None, compare=False)
