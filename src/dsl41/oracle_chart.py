@@ -18,18 +18,19 @@ the old tables keep validating inside the store's verbs.
 
 Instances. Each job row has one `job` instance on the state owner's executor
 (`RuntimeState.machines`), under the row's `job_key`, with `JobData` from the
-catalog and the row's units (`job_data`). The owner restores them from the rows
+catalog (`job_data`). The owner restores them from the rows
 in `rebuild_machines`, which the constructor has it run
 (`RuntimeState.keep_job_instances`) and an install and a witness run; a fork
 copies them (`Executor.fork`, DL-339); a row read into existence gets its
 instance as it is created. A move that code outside the chart makes leaves the
 instance behind its row, so the owner brings each instance its input touched
 back to its row at the input's commit, and each handler does so for its job
-before it dispatches (`follow_job`). That refresh is also where `JobData`'s
-release fields become the current run's. With that follow before the dispatch,
+before it dispatches (`follow_job`). With that follow before the dispatch,
 the chart decides each input from the row's projection: the harness proves the
 rows, not the chart's own evolution, which becomes the contract as the families
-convert and the follow and `Executor.realign` go.
+convert and the follow and `Executor.realign` go. Each payload that can end a
+run carries a handle on the job's units (`RowUnits`): the settlement its row
+sends reads its policy from the row when it pops (DL-349).
 
 STATUS. The handler checks the payload as today, builds the `Injection` from
 the same predicates (the exit code's verdict only when no status is given),
@@ -57,6 +58,10 @@ nothing, job.212 arms (`_arm`), a postponed start or a skip goes through
 `_defer_start` or `_window_skip_bypass`, and the bound (job.100), a bypass, a
 start on held units, a queue and an admission go through `_start` and
 `_start_admitted`, which keep the conversion of a cascade's RecursionError.
+An attempt whose run's settlement is owed takes job.401: the run settles
+(`_settle_ended_run`), and the attempt is dispatched again (DL-340,
+DL-349). An admitting row sends `start admitted` first; its row
+(job.402) sends the admission's moves, as its descendants.
 The attempt's first status write is compared with the chart's configuration;
 the RUNNING after an admission dispatches `started` and is compared; an
 attempt that moves no status is compared after its own writes. The
@@ -158,20 +163,22 @@ from dsl41.job_chart import (
     RELEASE_RESOURCE,
     RUN_WINDOW,
     START,
+    START_ADMITTED,
     STARTJOB,
     STATUS,
     TERM_RUN_TIME,
     Deadline,
     Injection,
+    Payload,
     StartVerdict,
     WindowSide,
     projection,
     row_configuration,
 )
 from dsl41.oracle import DEFERRED_RESCAN_KEY, DEFERRED_TIMER_KEY
-from dsl41.oracle_chart_agreement import Agreement, fired_rows, listed
+from dsl41.oracle_chart_agreement import Agreement, listed
 from dsl41.oracle_chart_cascade import CascadeOracle
-from dsl41.oracle_chart_facts import NoexecFacts, ReadmitFacts, StartFacts, job_data
+from dsl41.oracle_chart_facts import NoexecFacts, ReadmitFacts, RowUnits, StartFacts, job_data
 from dsl41.oracle_state import (
     BOX_NOEXEC,
     BOX_START,
@@ -271,8 +278,13 @@ _ADMIT_MOVES: Final[dict[str, Transition[JobStatus]]] = {
 SELECTION_FRAMES: Final = 16
 #: The skip of a job in a box, beside job.106's skip of a job in none.
 _SKIP_MEMBER: Final = "job.107"
-#: The verdicts that reach `_start_admitted`, which settles an ended run first (DL-340).
+#: The verdicts that reach `_start_admitted`; each admitting row sends `start
+#: admitted` first (job.402), and the admission's moves follow from it.
 _ADMITTING: Final = frozenset({"bypass", "on_held", "queue", "admit"})
+_EXTENT: Final = "job.402"
+#: An attempt past the bound whose run's settlement is owed (DL-340): the
+#: oracle settles the run and dispatches the attempt again.
+_SETTLE_FIRST: Final = "job.401"
 #: The relay rows of FORCE_STARTJOB that clear a flag before the attempt.
 _CLEARS_ICE: Final = "job.203"
 _CLEARS_HOLD: Final = "job.206"
@@ -413,7 +425,7 @@ class ChartOracle(CascadeOracle):
                 )
 
     def _job_instance(self, job: str, row: JobRuntime) -> tuple[Statechart, frozenset[str], object]:
-        return JOB, row_configuration(row), job_data(self, job, row)
+        return JOB, row_configuration(row), job_data(self, job)
 
     def fork(self) -> ChartOracle:
         """`Oracle.fork`, with the twin's store asking the twin for its job
@@ -439,9 +451,9 @@ class ChartOracle(CascadeOracle):
         store = self.store
         store.follow_job(job)
         key = store.job_key(job)
-        event = ChartEvent(STATUS, Injection(status, success))
+        event = ChartEvent(STATUS, Injection(status, success, units=RowUnits(self, job)))
         old = store.job[job].status
-        fired = store.machines.dispatch(key, event)[0].rows
+        fired = self._expect_holding(store.machines.dispatch(key, event))[0].rows
         row = next((r for r in fired if r.startswith(_STATUS_REGION)), "")
         if row not in _MOVES:
             raise self._unwritten(job, event, fired, "status row")
@@ -504,6 +516,13 @@ class ChartOracle(CascadeOracle):
         else:
             super()._dispatch(ev)
 
+    def _drain(self) -> None:
+        """`Oracle._drain` at its depth, its scans included, inside `_owing`."""
+        with self._owing():
+            while self._queue:
+                self._dispatch(self._queue.popleft())
+                self._run_owed_scan()
+
     def _handle_kill(self, job: str) -> None:
         """KILLJOB on the job's instance (DL-343), its fired row performed
         by today's writes: a live job terminates (job.114, `_terminate`, which
@@ -514,9 +533,9 @@ class ChartOracle(CascadeOracle):
         store = self.store
         store.follow_job(job)
         key = store.job_key(job)
-        event = ChartEvent(KILLJOB)
+        event = ChartEvent(KILLJOB, Payload(units=RowUnits(self, job)))
         old = store.job[job].status
-        fired = fired_rows(store.machines.dispatch(key, event))
+        fired = self._fired_rows(store.machines.dispatch(key, event))
         if fired == _KILL_LIVE:
             with self._moving(job, key, event, old):
                 self._terminate(job, JOB_KILL, cause="KILLJOB")
@@ -576,8 +595,8 @@ class ChartOracle(CascadeOracle):
         (job.180, `_defer_to_next_opening`). Nothing it writes moves the row."""
         job_ir = self.catalog.jobs.get(job)
         facts = StartFacts(self, job, job_ir, stale=stale is not None or superseded, rescan=rescan)
-        _relayed, start, (_status, active) = self._decide_start(job, facts, RUN_WINDOW)
-        verdict = self._start_verdict(job, start)
+        _relayed, start, after, (_status, active) = self._decide_start(job, facts, RUN_WINDOW)
+        verdict = self._start_verdict(job, start, after)
         key = self.store.job_key(job)
         status = self.store.job[job].status
         agreement = Agreement(job, key, start.event, active, (status, status), False, moves=False)
@@ -605,8 +624,9 @@ class ChartOracle(CascadeOracle):
         store.follow_job(job)
         key = store.job_key(job)
         row = store.job[job]
-        event = ChartEvent(TERM_RUN_TIME, Deadline(current=run == row.run_number))
-        fired = fired_rows(store.machines.dispatch(key, event))
+        deadline = Deadline(current=run == row.run_number, units=RowUnits(self, job))
+        event = ChartEvent(TERM_RUN_TIME, deadline)
+        fired = self._fired_rows(store.machines.dispatch(key, event))
         if fired == _TERM_RUN_TIME:
             with self._moving(job, key, event, row.status):
                 self._terminate(
@@ -636,7 +656,7 @@ class ChartOracle(CascadeOracle):
         key = store.job_key(job)
         old = store.job[job].status
         event = ChartEvent(kind, NoexecFacts(self, job) if kind == ON_NOEXEC else None)
-        fired = fired_rows(store.machines.dispatch(key, event))
+        fired = self._fired_rows(store.machines.dispatch(key, event))
         active = store.machines.active(key)
         move = (old, projection(active)[0])
         agreement = Agreement(job, key, event, active, move, False, moves=False)
@@ -808,7 +828,7 @@ class ChartOracle(CascadeOracle):
         key = store.job_key(job)
         row = store.job[job]
         event = ChartEvent(RELEASE_RESOURCE)
-        fired = fired_rows(store.machines.dispatch(key, event))
+        fired = self._fired_rows(store.machines.dispatch(key, event))
         if fired != _RELEASED and fired not in _RELEASE_IGNORED:
             raise self._unwritten(job, event, fired, "release row")
         active = store.machines.active(key)
@@ -851,7 +871,7 @@ class ChartOracle(CascadeOracle):
         job_ir = self.catalog.jobs[job]
         facts = ReadmitFacts(self, job, job_ir, keep_stopped=keep_stopped)
         event = ChartEvent(READMIT, facts)
-        fired = fired_rows(store.machines.dispatch(key, event))
+        fired = self._fired_rows(store.machines.dispatch(key, event))
         outcome = _READMIT_FIRED.get(fired)
         if outcome is None:
             raise self._unwritten(job, event, fired, "readmit row")
@@ -935,7 +955,7 @@ class ChartOracle(CascadeOracle):
             return None  # no row, no instance: the chart ignores a job outside the catalog
         facts = StartFacts(self, job, job_ir)
         try:
-            relayed, start, (status, active) = self._decide_start(job, facts, relay)
+            relayed, start, after, (status, active) = self._decide_start(job, facts, relay)
         except RecursionError as exc:
             if self._starts_in_progress:
                 raise
@@ -945,7 +965,7 @@ class ChartOracle(CascadeOracle):
             # can be met there before any start, and this attempt is named
             # as the cascade's first start
             raise CascadeDepthError(job, cause, sys.getrecursionlimit()) from exc
-        verdict = self._start_verdict(job, start)
+        verdict = self._start_verdict(job, start, after)
         attempt = cast(StartFacts, start.event.payload)
         side = attempt.known("window")
         outside = side not in (None, "inside")
@@ -1012,53 +1032,61 @@ class ChartOracle(CascadeOracle):
 
     def _decide_start(
         self, job: str, facts: StartFacts, relay: str | None
-    ) -> tuple[tuple[str, ...], Outcome, tuple[str, frozenset[str]]]:
+    ) -> tuple[tuple[str, ...], Outcome, list[Outcome], tuple[str, frozenset[str]]]:
         """Dispatch the attempt to the job's instance, brought to its row
-        first, and return the relay's rows, the `start` item's outcome and the
-        status and configuration the chart left.
+        first, and return the relay's rows, the `start` item's outcome, the
+        outcomes of the items that follow from it, and the status and
+        configuration the chart left.
 
-        DL-340: a start that reaches `_start_admitted` settles an ended run
-        whose settlement the box rules still hold back, and the admission is
-        read after that. When such a settlement is owed, a read of the same
-        attempt (`Executor.resolve`, the facts after the settlement taken as
-        admitting) says whether the attempt gets that far; if so the run
-        settles where today's code settles it, and the dispatch then reads the
-        admission it leaves."""
+        DL-340: past the bound, an attempt whose run's settlement the box
+        rules still hold back takes job.401 and moves nothing. The run settles
+        then, at the point in the verdict order where today's `_start_admitted`
+        settles it, and the same attempt is dispatched again
+        (`StartFacts.settled`), so it reads the admission the settlement
+        leaves. No settlement is owed at an input's own attempt."""
         store = self.store
         machines = store.machines
         key = store.job_key(job)
         store.follow_job(job)
-        owed = self._settlement_owed(job)
-        # no settlement is owed at an input's own attempt: the box rules that
-        # hold one back run inside the cascade, never between inputs
-        assert relay is None or not owed, "a settlement owed at an input's own attempt"
-        if owed:
-            read = machines.resolve(key, ChartEvent(START, facts.assuming()))
-            if _START_ROWS.get(read.rows[0] if read.rows else "") in _ADMITTING:
-                self._settle_ended_run(job)
-                store.follow_job(job)
-        outcomes = machines.dispatch(key, ChartEvent(relay or START, facts))
-        start = next(o for o in outcomes if o.event.name == START)
+        outcomes = self._expect_holding(machines.dispatch(key, ChartEvent(relay or START, facts)))
+        at = next(i for i, o in enumerate(outcomes) if o.event.name == START)
+        if outcomes[at].rows == (_SETTLE_FIRST,):
+            assert relay is None, "a settlement owed at an input's own attempt"
+            assert len(outcomes) == at + 1, "an item after job.401, before the settlement"
+            self._settle_ended_run(job)
+            store.follow_job(job)
+            outcomes = self._expect_holding(
+                machines.dispatch(key, ChartEvent(START, facts.settled()))
+            )
+            at = 0
         relayed = outcomes[0].rows if relay is not None else ()
         active = machines.active(key)
-        return relayed, start, (projection(active)[0], active)
+        return relayed, outcomes[at], outcomes[at + 1 :], (projection(active)[0], active)
 
-    def _start_verdict(self, job: str, start: Outcome) -> StartVerdict:
-        """The verdict the `start` item's row stands for."""
+    def _start_verdict(self, job: str, start: Outcome, after: list[Outcome]) -> StartVerdict:
+        """The verdict the `start` item's row stands for, and the items that
+        follow from it: an admitting verdict's `start admitted` comes next and
+        fires job.402, and every later item is one of its descendants, the
+        admission's moves; no other verdict sends it."""
         verdict = _START_ROWS.get(start.rows[0]) if len(start.rows) == 1 else None
         if verdict is None:
-            error = StatechartError(
-                f"job {job!r}: start fired {', '.join(start.rows) or 'no row'}, and no start"
-                " row the oracle writes"
-            )
-            raise self.store.machines.explain(error, self.store.job_key(job), start.event)
+            what = f"start fired {', '.join(start.rows) or 'no row'}, and no start row"
+            raise self._chart_error(job, start, f"{what} the oracle writes")
+        admitted = [o for o in after if o.event.name == START_ADMITTED]
+        extent = not admitted
+        if verdict in _ADMITTING:
+            first = after[0] if after else start
+            extent = len(admitted) == 1 and admitted[0] is first and first.rows == (_EXTENT,)
+            extent = extent and all(o.depth > first.depth for o in after[1:])
+        if not extent:
+            items = "; ".join(f"{o.event.name}: {', '.join(o.rows)}" for o in after) or "none"
+            what = f"start fired {start.rows[0]} ({verdict}), and the items after it are {items}"
+            raise self._chart_error(job, start, what)
         return verdict
 
-    def _settlement_owed(self, job: str) -> bool:
-        """A run of the job ended inside a cascade still running its box rules,
-        and its settlement waits (`_settle_ended_run`, DL-340)."""
-        run = self.store.job[job].run_number
-        return any(x.run == run and not x.done for x in self._late_settlements.get(job, ()))
+    def _chart_error(self, job: str, outcome: Outcome, what: str) -> StatechartError:
+        error = StatechartError(f"job {job!r}: {what}")
+        return self.store.machines.explain(error, self.store.job_key(job), outcome.event)
 
     def _refusal(self, job: str, rt: JobRuntime, attempt: StartFacts) -> str:
         """Today's START_REFUSED reason for a refused attempt: the job is live
@@ -1139,13 +1167,14 @@ class ChartOracle(CascadeOracle):
         vector: list[DemandEntry] | None = None,
         move: Transition[JobStatus] | None = None,
     ) -> None:
-        """`Oracle._start_admitted` writing the chart's verdict: the ended
-        run's settlement first (DL-340), then a bypass (job.101), a start on
-        held units (job.104), a queue (job.103) or an admission (job.102,
-        job.124) through today's methods. `force` is unread: the chart decided
-        it; the parameter keeps the old method's signature for its callers."""
+        """`Oracle._start_admitted` writing the chart's verdict: a bypass
+        (job.101), a start on held units (job.104), a queue (job.103) or an
+        admission (job.102, job.124) through today's methods. The ended run's
+        settlement that today's method makes first is the chart's job.401,
+        made before the attempt's second dispatch (`_decide_start`, DL-340).
+        `force` is unread: the chart decided it; the parameter keeps the old
+        method's signature for its callers."""
         job_ir = self.catalog.jobs[job]
-        self._settle_ended_run(job)
         if verdict == "bypass":
             self.store.start_run(
                 job,

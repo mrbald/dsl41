@@ -2071,6 +2071,10 @@ class RuntimeState:
         #: on `machines` under its `job_key`, which follows the row at each
         #: input's commit (`follow_job`).
         self.job_instance: JobInstance | None = None
+        #: told each `job_holding` move a verb writes, with its job (DL-349).
+        #: None tells no one, as the oracle has it; the second oracle sets it
+        #: to compare the move with the chart's holding row.
+        self.holding_moved: Callable[[str, Transition[HoldingState]], None] | None = None
         self._timers: list[tuple[datetime, int, Event]] = []  # heap of (due, token, ev)
         self._timer_seq = 0
         #: which period this state machine is running (period-model ss3.5,
@@ -2569,6 +2573,15 @@ class RuntimeState:
     # to address them, which for `consumed` is SEM-16 replenishment
     # (period-model ss5).
 
+    def _take_holding(
+        self, job: str, t: Transition[HoldingState], old: HoldingState, new: HoldingState
+    ) -> None:
+        """A `job_holding` move: checked against the table, then told to
+        `holding_moved`, before the row is written."""
+        self.note_violation(job, JOB_HOLDING.take(t, old, new))
+        if self.holding_moved is not None:
+            self.holding_moved(job, t)
+
     def reserve(self, job: str, reservations: Sequence[CapacityReservation]) -> None:
         """Record the capacity vector a start acquired (period-model ss5).
 
@@ -2581,7 +2594,7 @@ class RuntimeState:
         if self.runtime(job).reservations:
             raise OracleError(f"{job!r} already holds reservations: a start may not overwrite")
         if reservations:  # reserving nothing is no move
-            self.note_violation(job, JOB_HOLDING.take(RESERVE, "none", "reserved"))
+            self._take_holding(job, RESERVE, "none", "reserved")
         self._replace(job, reservations=tuple(reservations))
 
     def take_over_held(
@@ -2601,7 +2614,7 @@ class RuntimeState:
             raise OracleError(f"{job!r} is {row.status}: a start may not overwrite its run")
         old: HoldingState = "held" if row.reservations else "none"
         new: HoldingState = "reserved" if reservations else "none"
-        self.note_violation(job, JOB_HOLDING.take(t, old, new))
+        self._take_holding(job, t, old, new)
         self._replace(job, reservations=tuple(reservations))
 
     def release_reservations(
@@ -2645,7 +2658,7 @@ class RuntimeState:
                 spent[reservation.bucket] = spent.get(reservation.bucket, 0) + reservation.units
         move = RELEASE_KEEP_HELD if kept else RELEASE_SPEND if spent else RELEASE_ALL
         held: HoldingState = "reserved" if old_status in LIVE else "held"
-        self.note_violation(job, JOB_HOLDING.take(move, held, "held" if kept else "none"))
+        self._take_holding(job, move, held, "held" if kept else "none")
         self._replace(job, reservations=tuple(kept))  # validates first; the spend cannot raise
         for bucket, units in spent.items():
             self._consumed[bucket] = self._consumed.get(bucket, 0) + units
@@ -2663,7 +2676,7 @@ class RuntimeState:
         if row.status in LIVE:
             raise OracleError(f"{job!r} is {row.status}: its run's units release at its end")
         old: HoldingState = "held" if row.reservations else "none"
-        self.note_violation(job, JOB_HOLDING.take(t, old, "none"))
+        self._take_holding(job, t, old, "none")
         self._replace(job, reservations=())
         return row.reservations
 

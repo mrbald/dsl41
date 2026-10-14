@@ -23,9 +23,10 @@ from oracle_lockstep import EPOCH, LockstepDivergence, LockstepOracle
 from dsl41 import job_chart, oracle_chart, oracle_chart_cascade
 from dsl41.capacity import CapacityPool
 from dsl41.ir import lower_source
-from dsl41.job_chart import JobData, configuration, row_configuration
+from dsl41.job_chart import JobData, Release, configuration, row_configuration
 from dsl41.oracle import Oracle, fit_recursion_limit
 from dsl41.oracle_chart import ChartOracle, job_data
+from dsl41.oracle_chart_facts import RowUnits
 from dsl41.oracle_state import (
     CapacityReservation,
     CascadeDepthError,
@@ -43,6 +44,33 @@ from dsl41.state_machine import Event as ChartEvent
 from dsl41.state_machine import HITS_ENV, STRICT_ENV, Executor, Outcome, Statechart, StatechartError
 
 T0 = datetime(2026, 7, 1, 8, 0)
+
+
+def _moves_differ(
+    oracle: ChartOracle, step: Callable[[ChartOracle], object], job: str, row: str, move: str
+) -> None:
+    """A planted holding is caught first by the compare of the holding's move
+    (DL-349), run here on a fork: the chart's `row` against today's
+    `move`. The compare is then turned off on `oracle`, so that the caller's
+    step meets the compare of the holding's state behind it."""
+    twin = oracle.fork()
+    stands = f"job_holding.0{row[-1]}"
+    message = f"'{job}': the chart's {row} stands for {stands}, and today's holding move is {move}"
+    with pytest.raises(StatechartError, match=message):
+        step(twin)
+    oracle.store.holding_moved = None
+
+
+def _released_for(monkeypatch: pytest.MonkeyPatch, name: str | None, release: Release) -> None:
+    """Planted: the settlements of `name` (of every job, for None) read
+    `release` after every end, whatever its row holds."""
+    real = RowUnits.release
+
+    def planted(self: RowUnits, success: bool) -> Release:
+        return release if name in (None, self._job) else real(self, success)
+
+    monkeypatch.setattr(RowUnits, "release", planted)
+
 
 _JIL = (
     "insert_resource: FREE\nres_type: R\namount: 2\n\n"
@@ -301,17 +329,15 @@ def test_a_flag_the_chart_holds_and_the_row_does_not_is_a_statechart_error(
 def test_a_holding_the_chart_keeps_and_the_row_frees_is_a_statechart_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Planted: the data says the run's units are kept, today's settlement
-    frees them."""
+    """Planted: the settlement's handle says the run's units are kept, today's
+    settlement frees them."""
     oracle = ChartOracle(lower_source(_JIL))
     oracle.feed(ev("STARTJOB", 1, job="j"))
-    monkeypatch.setattr(
-        oracle_chart,
-        "job_data",
-        lambda *_: JobData(release_on_success="keep", release_otherwise="keep"),
-    )
+    _released_for(monkeypatch, None, "keep")
+    status = ev("STATUS", 2, job="j", exit_code=0)
+    _moves_differ(oracle, lambda o: o.feed(status), "j", "job.305", "job_holding.04")
     with pytest.raises(StatechartError, match="the holding differs after the settlement"):
-        oracle.feed(ev("STATUS", 2, job="j", exit_code=0))
+        oracle.feed(status)
 
 
 def test_a_move_whose_settlement_never_runs_is_a_statechart_error(
@@ -394,9 +420,7 @@ def test_every_row_has_its_instance_after_construction_an_input_and_a_read() -> 
     assert oracle.store.machines.data("job:n") == JobData(auto_hold=True)
     oracle.feed(ev("STARTJOB", 1, job="k"))
     assert oracle.store.machines.active("job:k") == configuration("RUNNING", holding="reserved")
-    assert oracle.store.machines.data("job:k") == JobData(
-        release_on_success="keep", release_otherwise="keep"
-    )
+    assert oracle.store.machines.data("job:k") == JobData()  # the units are the run's, not data
     oracle.store.runtime("ghost")
     assert oracle.store.machines.data("job:ghost") == JobData(catalog=False)
     _agrees(oracle)
@@ -444,9 +468,8 @@ def test_a_carried_install_and_a_witness_restore_the_instances_from_the_rows() -
     second.store.witness_host("h", state="passive")
     second.store.commit_input()
     _agrees(second)
-    assert second.store.machines.data("job:k") == JobData(
-        release_on_success="keep", release_otherwise="keep"
-    )
+    assert second.store.machines.data("job:k") == JobData()
+    assert RowUnits(second, "k").release(False) == "keep"
 
 
 def test_a_commit_follows_only_jobs_that_have_a_row() -> None:
@@ -464,13 +487,16 @@ def test_a_commit_follows_only_jobs_that_have_a_row() -> None:
         store.machines.active("job:rowless")
 
 
-# ---- the data
+# ---- the data and the units
 
 
-def test_job_data_reads_the_policy_of_each_unit_for_both_ends() -> None:
+def test_row_units_read_the_policy_of_each_unit_for_both_ends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """`release_reservations`' rules: a `completion` unit is freed by every
     end and a `success` unit by SUCCESS; what is not freed is kept on a
-    renewable and spent on a depletable, and one kept unit makes the end keep."""
+    renewable and spent on a depletable, and one kept unit makes the end keep.
+    The handle reads the row when asked (DL-349)."""
     oracle = ChartOracle(
         lower_source(
             "insert_resource: R\nres_type: R\namount: 2\n\n"
@@ -479,6 +505,9 @@ def test_job_data_reads_the_policy_of_each_unit_for_both_ends() -> None:
         )
     )
 
+    handle = RowUnits(oracle, "j")
+    assert repr(handle) == "RowUnits('j')"
+
     def data(*units: tuple[str, ReleasePolicy]) -> tuple[str, str]:
         row = JobRuntime(
             reservations=tuple(
@@ -486,8 +515,9 @@ def test_job_data_reads_the_policy_of_each_unit_for_both_ends() -> None:
                 for bucket, policy in units
             )
         )
-        found = job_data(oracle, "j", row)
-        return found.release_on_success, found.release_otherwise
+        monkeypatch.setattr(oracle, "_runtime", lambda job: row)
+        assert job_data(oracle, "j") == JobData()
+        return handle.release(True), handle.release(False)
 
     assert data() == ("free", "free")
     assert data(("m:m1", "completion")) == ("free", "free")
@@ -1047,14 +1077,496 @@ def test_sem16_a_restart_settles_the_ended_run_before_the_admission_it_reads(cas
     on. A member whose own condition holds it settles nothing at the attempt:
     the late settlement runs as today, after the box rules, so a sibling the
     restart attempts first finds the unit still taken and queues, to be
-    admitted when the settlement frees it (`Executor.resolve` reads whether
-    the attempt reaches the admission; settling whenever one is owed would
-    start the sibling at once)."""
+    admitted when the settlement frees it (the owed settlement is read past
+    the gates, job.401; settling whenever one is owed would start the
+    sibling at once)."""
     jil, script, statuses = _SETTLEMENTS[case]
     paired = _lockstep(jil, script)
     assert {job: paired.twin.store.job[job].status for job in statuses} == statuses
     if "rs" in statuses:
         assert "INACTIVE->QUE_WAIT" in [t.transition for t in paired.twin.trace() if t.job == "rs"]
+
+
+_OWED_SCRIPT = [
+    ev("FORCE_STARTJOB", 1, job="rb"),
+    ev("FORCE_STARTJOB", 2, job="rm"),
+    ev("STATUS", 3, job="rm", exit_code=0),
+]
+
+
+@pytest.mark.parametrize(
+    ("resource", "row", "status"),
+    [("R", "job.102", "RUNNING"), ("D", "job.103", "QUE_WAIT")],
+    ids=["admitted after the settlement", "queued after the settlement"],
+)
+def test_sem16_an_owed_settlement_settles_before_the_attempt_reads_its_admission(
+    resource: str, row: str, status: str
+) -> None:
+    """DL-340, DL-349: rm's SUCCESS completes rb, which restarts and
+    attempts rm before rm's own settlement. The attempt takes job.401, which
+    moves nothing; the oracle settles the run that ended, and the same
+    attempt is dispatched again and reads the admission the settlement left:
+    a freed renewable admits it (job.102), a spent depletable queues it
+    (job.103). No `Executor.resolve` is made."""
+    paired = LockstepOracle(lower_source(_member_restart_jil(resource, "")), new=ChartOracle)
+    for event in _OWED_SCRIPT[:-1]:
+        paired.feed(event)
+    oracle = paired.twin
+    seen = _spied(oracle)
+    log: list[str] = []
+    machines = oracle.store.machines
+    dispatch, settle = machines.dispatch, oracle._settle_ended_run
+
+    def logged(key: Any, event: Any) -> list[Outcome]:
+        outcomes = dispatch(key, event)
+        if key == "job:rm" and event.name == "start":
+            log.append(outcomes[0].rows[0])
+        return outcomes
+
+    def settled(job: str) -> None:
+        units = "units" if oracle.store.job[job].reservations else "none"
+        log.append(f"settle {job} {units}")
+        settle(job)
+
+    def unread(key: Any, event: Any) -> Outcome:
+        raise AssertionError("the chart oracle reads no attempt with `Executor.resolve`")
+
+    machines.dispatch = logged  # type: ignore[method-assign]
+    machines.resolve = unread  # type: ignore[method-assign]
+    oracle._settle_ended_run = settled  # type: ignore[method-assign]
+    paired.feed(_OWED_SCRIPT[-1])
+    paired.check_seal()
+    _agrees(oracle)
+    # the run's units were still on the row when the attempt took job.401
+    assert log == ["job.401", "settle rm units", row]
+    assert oracle.store.job["rm"].status == status
+    starts = [o.rows for o in seen if o.key == "job:rm" and o.event.name == "start"]
+    assert starts == [("job.401",), (row,)]
+
+
+def test_a_settle_first_at_an_inputs_own_attempt_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No settlement is owed at an input's own attempt; a chart that says
+    otherwise is caught before any write."""
+    monkeypatch.setattr(oracle_chart.StartFacts, "settlement_owed", property(lambda self: True))
+    oracle = ChartOracle(lower_source(_START_JIL))
+    with pytest.raises(AssertionError, match="a settlement owed at an input's own attempt"):
+        oracle.feed(ev("STARTJOB", 1, job="plain"))
+    assert oracle.store.job["plain"].status == "INACTIVE"
+
+
+def test_a_settle_first_that_the_settlement_leaves_owed_is_a_statechart_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Planted: the owed settlement is read as owed after the oracle settled
+    it (a settlement done still counts), so the second dispatch takes job.401
+    again: no start row is written."""
+    paired = LockstepOracle(lower_source(_member_restart_jil("R", "")), new=ChartOracle)
+    for event in _OWED_SCRIPT[:-1]:
+        paired.feed(event)
+    oracle = paired.twin
+
+    def owed(self: Any) -> bool:
+        run = oracle._runtime(self._job).run_number
+        return any(x.run == run for x in oracle._late_settlements.get(self._job, ()))
+
+    monkeypatch.setattr(oracle_chart.StartFacts, "settlement_owed", property(owed))
+    with pytest.raises(StatechartError, match="'rm': start fired job.401, and no start row"):
+        oracle.feed(_OWED_SCRIPT[-1])
+
+
+def test_sem16_an_attempt_that_skips_the_owed_settlement_is_caught(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mutant: the owed settlement is never read, so the attempt never takes
+    job.401 and its admission is read with the ended run's units still on
+    the row, where nothing settles them first. The chart oracle and the old
+    one part at the input, for both verdicts."""
+    monkeypatch.setattr(oracle_chart.StartFacts, "settlement_owed", property(lambda self: False))
+    for resource in ("R", "D"):
+        paired = LockstepOracle(lower_source(_member_restart_jil(resource, "")), new=ChartOracle)
+        for event in _OWED_SCRIPT[:-1]:
+            paired.feed(event)
+        with pytest.raises(LockstepDivergence, match="divergence at input 3"):
+            paired.feed(_OWED_SCRIPT[-1])
+
+
+_POLICY_JIL = (
+    "insert_resource: FR\nres_type: R\namount: 1\n\n"
+    "insert_resource: KR\nres_type: R\namount: 1\n\n"
+    "insert_resource: SD\nres_type: D\namount: 3\n\n"
+    "insert_job: free\njob_type: c\ncommand: x\nmachine: m1\nresources: (FR, QUANTITY=1, FREE=A)\n\n"
+    "insert_job: keep\njob_type: c\ncommand: x\nmachine: m1\nresources: (KR, QUANTITY=1, FREE=N)\n\n"
+    "insert_job: spend\njob_type: c\ncommand: x\nmachine: m1\nresources: (SD, QUANTITY=1)\n\n"
+    "insert_job: pb\njob_type: b\n\n"
+    "insert_job: pfree\njob_type: c\ncommand: x\nmachine: m1\nbox_name: pb\n"
+    "resources: (FR, QUANTITY=1, FREE=A)\n\n"
+    "insert_job: pkeep\njob_type: c\ncommand: x\nmachine: m1\nbox_name: pb\n"
+    "resources: (KR, QUANTITY=1, FREE=N)\n\n"
+    "insert_job: pspend\njob_type: c\ncommand: x\nmachine: m1\nbox_name: pb\n"
+    "resources: (SD, QUANTITY=1)\n"
+)
+#: The sender of each settlement: a status move's late settlement, a kill's,
+#: and a box's INACTIVE that takes a running member along (the batch path).
+_SENDERS: dict[str, tuple[list[Event], Callable[[str], Event]]] = {
+    "a status move": ([], lambda job: ev("STATUS", 2, job=job, exit_code=0)),
+    "a kill": ([], lambda job: ev("KILLJOB", 2, job=job)),
+    "the batch path": (
+        [ev("FORCE_STARTJOB", 0, job="pb")],
+        lambda job: ev("STATUS", 2, job="pb", status="INACTIVE"),
+    ),
+}
+#: The holding row of each policy.
+_POLICY_ROWS = {"free": "job.304", "keep": "job.305", "spend": "job.306"}
+
+
+@pytest.mark.parametrize("sender", sorted(_SENDERS))
+@pytest.mark.parametrize("policy", sorted(_POLICY_ROWS))
+def test_dl256_a_settlement_reads_its_policy_from_the_row_when_it_pops(
+    sender: str, policy: str
+) -> None:
+    """DL-349: the release policy is a fact of `leave STARTING or
+    RUNNING`'s payload, built by its sender with the handle its own payload
+    carries, and read when the settlement pops, from the units the row holds
+    then: free (job.304), keep (job.305) and spend (job.306), each written as
+    the old oracle writes it. The job's data carries no policy."""
+    setup, final = _SENDERS[sender]
+    job = policy if sender != "the batch path" else f"p{policy}"
+    script = setup if setup else [ev("STARTJOB", 1, job=job)]
+    paired = LockstepOracle(lower_source(_POLICY_JIL), new=ChartOracle)
+    for event in script:
+        paired.feed(event)
+    oracle = paired.twin
+    assert oracle.store.job[job].reservations
+    machines = oracle.store.machines
+    reads: list[str] = []
+    real = RowUnits.release
+
+    def read(self: RowUnits, success: bool) -> Release:
+        current = machines._current
+        assert current is not None
+        reads.append(f"{current.key} {current.event.name}")
+        return real(self, success)
+
+    seen = _spied(oracle)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(RowUnits, "release", read)
+        paired.feed(final(job))
+    paired.check_seal()
+    _agrees(oracle)
+    settled = [
+        o for o in seen if o.key == f"job:{job}" and o.event.name == "leave STARTING or RUNNING"
+    ]
+    assert [o.rows for o in settled] == [(_POLICY_ROWS[policy],)]
+    assert settled[0].event.payload.release == policy
+    # read once for the job, at its settlement's pop (the batch settles each member)
+    assert reads.count(f"job:{job} leave STARTING or RUNNING") == 1
+    assert all(entry.endswith(" leave STARTING or RUNNING") for entry in reads)
+    assert oracle.store.machines.data(f"job:{job}") == JobData()
+
+
+def test_dl256_a_settlement_whose_policy_is_read_from_stale_units_is_caught() -> None:
+    """Mutant: the handle reads the units the row held when the oracle was
+    built, as an instance's data held them before a refresh. A kept unit is
+    then read as freed and a spent one as freed: the compare of the holding's
+    move catches both at today's write (job.304 where today writes
+    job_holding.05 or .06), and the state's compare behind it the kept one."""
+    stale: dict[str, JobRuntime] = {}
+
+    class Stale(RowUnits):
+        def release(self, success: bool) -> Release:
+            row = stale.get(self._job, JobRuntime())
+            if not row.reservations:
+                return "free"
+            return super().release(success)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(oracle_chart, "RowUnits", Stale)
+        patch.setattr(oracle_chart_cascade, "RowUnits", Stale)
+        oracle = ChartOracle(lower_source(_POLICY_JIL))
+        stale.update(oracle.store.job)
+        oracle.feed(ev("STARTJOB", 1, job="keep"))
+        kept = ev("STATUS", 2, job="keep", exit_code=0)
+        _moves_differ(oracle, lambda o: o.feed(kept), "keep", "job.304", "job_holding.05")
+        with pytest.raises(StatechartError, match="'keep': the holding differs after the settle"):
+            oracle.feed(kept)
+        oracle = ChartOracle(lower_source(_POLICY_JIL))
+        stale.update(oracle.store.job)
+        oracle.feed(ev("STARTJOB", 1, job="spend"))
+        spent = ev("STATUS", 2, job="spend", exit_code=0)
+        _moves_differ(oracle, lambda o: o.feed(spent), "spend", "job.304", "job_holding.06")
+        seen = _spied(oracle)
+        oracle.feed(spent)  # the state's compare alone sees none: free and spend end alike
+    rows = [o.rows for o in seen if o.event.name == "leave STARTING or RUNNING"]
+    assert rows == [("job.304",)] != [(_POLICY_ROWS["spend"],)]
+
+
+def test_a_settlement_with_no_handle_is_a_statechart_error_before_any_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DL-349: a payload that carries no handle builds a settlement with
+    no policy. The guard's read raises, with the instance and the item, inside
+    the input's dispatch, so today's writes never run."""
+    oracle = ChartOracle(lower_source(_POLICY_JIL))
+    oracle.feed(ev("STARTJOB", 1, job="keep"))
+    traced = len(oracle.trace())
+    monkeypatch.setattr(oracle_chart, "RowUnits", lambda oracle, job: None)
+    with pytest.raises(StatechartError, match="no release and no handle") as raised:
+        oracle.feed(ev("STATUS", 2, job="keep", exit_code=0))
+    text = str(raised.value)
+    assert "instance: 'job:keep'" in text and "item: the event leave STARTING or RUNNING" in text
+    row = oracle.store.job["keep"]
+    assert (row.status, bool(row.reservations), oracle.trace()[traced:]) == ("RUNNING", True, [])
+
+
+def test_dl256_a_spend_read_as_free_diverges_in_the_harness() -> None:
+    """Mutant (Opus R1): every spend is read as free. Free and spend both end
+    in `none`, so only the compare of the holding's move sees it: the chart's
+    job.304 where today writes job_holding.06. The harness's corpus run parts
+    at the first spend."""
+    real = RowUnits.release
+
+    def free(self: RowUnits, success: bool) -> Release:
+        found = real(self, success)
+        return "free" if found == "spend" else found
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(RowUnits, "release", free)
+        jobs = oracle_lockstep.corpus_jobs() + oracle_lockstep.directed_jobs()
+        summary = oracle_lockstep.run_all(jobs, [{}], new=ChartOracle, stop_at_first=True)
+    (found,) = summary.divergences
+    report = found.report()
+    assert "the chart's job.304 stands for job_holding.04" in report
+    assert "today's holding move is job_holding.06" in report
+
+
+def _plant_actions(**actions: Callable[[Any], Any]) -> type[ChartOracle]:
+    class Planted(ChartOracle):
+        def _job_instance(
+            self, job: str, row: JobRuntime
+        ) -> tuple[Statechart, frozenset[str], object]:
+            chart, active, data = super()._job_instance(job, row)
+            return replace(chart, actions={**chart.actions, **actions}), active, data
+
+    return Planted
+
+
+def test_a_plain_admission_that_fires_the_forced_starts_holding_row_is_a_statechart_error() -> None:
+    """Mutant (the first build's defect): a plain admission of a job holding
+    kept units sends the admission of a forced start on them, so the chart
+    fires job.303 where today takes the units over (job_holding.02). The
+    configurations agree (both `reserved`); the compare of the holding's move
+    raises at today's write."""
+
+    def on_held(ctx: Any) -> Any:
+        effects = job_chart.extent_admit(ctx)
+        ((key, event),) = effects.send
+        admitted = replace(event.payload, admission=replace(event.payload.admission, on_held=True))
+        return replace(effects, send=((key, ChartEvent(event.name, admitted)),))
+
+    oracle = _plant_actions(extent_admit=on_held)(lower_source(_START_JIL))
+    oracle.store.holding_moved = None
+    for event in (ev("STARTJOB", 1, job="kh"), ev("STATUS", 2, job="kh", status="FAILURE")):
+        oracle.feed(event)
+    oracle.store.holding_moved = oracle._holding_moved
+    with pytest.raises(
+        StatechartError,
+        match="'kh': the chart's job.303 stands for job_holding.03, and today's holding move is"
+        " job_holding.02",
+    ):
+        oracle.feed(ev("STARTJOB", 3, job="kh"))
+    assert oracle.store.job["kh"].status == "FAILURE"
+
+
+def test_a_holding_move_the_chart_fired_no_row_for_is_a_statechart_error() -> None:
+    """Planted: an admission says it reserves nothing (job.311), and today's
+    admission reserves the job's unit."""
+
+    def nothing(ctx: Any) -> Any:
+        effects = job_chart.extent_admit(ctx)
+        ((key, event),) = effects.send
+        admitted = replace(event.payload, admission=replace(event.payload.admission, demand=False))
+        return replace(effects, send=((key, ChartEvent(event.name, admitted)),))
+
+    oracle = _plant_actions(extent_admit=nothing)(lower_source(_START_JIL))
+    with pytest.raises(StatechartError, match="'q1': today's job_holding.01 moves the holding"):
+        oracle.feed(ev("STARTJOB", 1, job="q1"))
+
+
+def test_an_input_that_ends_with_a_holding_row_owed_is_a_statechart_error() -> None:
+    """Planted: a holding row the chart fired is still owed when a drain
+    ends (here the input's time half, which drains nothing); the error names
+    the job and the row, and the next input starts with none owed."""
+    oracle = ChartOracle(lower_source(_START_JIL))
+    outcome = Outcome("job:q2", ChartEvent("leave STARTING or RUNNING"), "fired", ("job.304",))
+    oracle._holding = {"q2": [("job.304", outcome)]}
+    with pytest.raises(StatechartError, match="never wrote: q2: job.304"):
+        oracle.feed(ev("STARTJOB", 1, job="plain"))
+    assert oracle._holding is None
+    oracle.feed(ev("STARTJOB", 2, job="plain"))
+    assert oracle.store.job["plain"].status == "RUNNING"
+
+
+@pytest.mark.parametrize("raises", [False, True], ids=["unwritten", "the scan raises"])
+def test_a_holding_row_the_owed_scan_leaves_unwritten_is_caught_at_its_input(
+    monkeypatch: pytest.MonkeyPatch, raises: bool
+) -> None:
+    """R8 (DL-349): the DL-255 scan runs after the input's dispatch, in
+    `_drain`. Planted: the scan fires a holding row (job.304 for `q2`) that
+    today's code never writes; the error is this input's. A scan that raises
+    instead leaves nothing owed for the next input."""
+    oracle = ChartOracle(lower_source(_START_JIL))
+    outcome = Outcome("job:q2", ChartEvent("leave STARTING or RUNNING"), "fired", ("job.304",))
+    real = oracle._run_owed_scan
+
+    def scan() -> None:
+        real()
+        oracle._expect_holding([outcome])
+        if raises:
+            raise OracleError("planted")
+
+    monkeypatch.setattr(oracle, "_run_owed_scan", scan)
+    expected = (OracleError, "planted") if raises else (StatechartError, "never wrote: q2: job.304")
+    with pytest.raises(expected[0], match=expected[1]):
+        oracle.feed(ev("STARTJOB", 1, job="plain"))
+    assert oracle._holding is None
+    monkeypatch.setattr(oracle, "_run_owed_scan", real)
+    oracle.feed(ev("STARTJOB", 2, job="q1"))
+    assert oracle.store.job["q1"].status == "RUNNING" and oracle._holding is None
+
+
+#: The admitting verdicts and, after the attempt's `start` item, the items that
+#: follow from its `start admitted`: (event, rows).
+_EXTENTS: dict[str, list[tuple[str, tuple[str, ...]]]] = {
+    "admit a job": [("admitted start", ("job.311",)), ("actual start", ("job.224",))],
+    "admit a box": [("admitted start", ("job.311",)), ("actual start", ("job.224",))],
+    "queue": [],
+    "bypass": [("actual start", ("job.224",))],
+    "forced on held units": [("admitted start", ("job.303",)), ("actual start", ("job.224",))],
+}
+
+
+@pytest.mark.parametrize("case", sorted(_EXTENTS))
+def test_dl304_start_admitted_precedes_the_admissions_moves_for_every_admitting_verdict(
+    case: str,
+) -> None:
+    """DL-349: each admitting row (job.101 to job.104, job.124) sends
+    `start admitted` first; its row (job.402) sends what the admission does,
+    so the admission's moves are its descendants and pop after it. A queue
+    does nothing more."""
+    script, job, _relay, starts, _line = _OUTCOMES[case]
+    paired = LockstepOracle(lower_source(_START_JIL), new=ChartOracle)
+    for event in script[:-1]:
+        paired.feed(event)
+    seen = _spied(paired.twin)
+    paired.feed(script[-1])
+    paired.check_seal()
+    mine = [o for o in seen if o.key == RuntimeState.job_key(job)]
+    at = next(i for i, o in enumerate(mine) if o.event.name == "start")
+    assert mine[at].rows == starts[-1]
+    admitted, *moves = mine[at + 1 : at + 2 + len(_EXTENTS[case])]
+    assert (admitted.event.name, admitted.rows) == ("start admitted", ("job.402",))
+    assert admitted.event.payload.verdict == oracle_chart._START_ROWS[starts[-1][0]]
+    assert [(o.event.name, o.rows) for o in moves] == _EXTENTS[case]
+    assert all(o.depth == admitted.depth + 1 for o in moves)
+
+
+def test_a_start_admitted_sent_after_the_admission_is_a_statechart_error() -> None:
+    """Mutant: the admitting row sends the admission's moves itself and then
+    `start admitted`, whose row sends nothing. The oracle names the items
+    after the start, before any write."""
+
+    def late(ctx: Any) -> Any:
+        effects = job_chart.extent_admit(ctx)
+        ((key, admitted),) = effects.send
+        moves = job_chart.start_extent(replace(ctx, event=admitted))
+        assert moves is not None
+        return replace(effects, send=(*moves.send, (key, admitted)))
+
+    class Late(ChartOracle):
+        def _job_instance(
+            self, job: str, row: JobRuntime
+        ) -> tuple[Statechart, frozenset[str], object]:
+            chart, active, data = super()._job_instance(job, row)
+            actions = {**chart.actions, "extent_admit": late, "start_extent": lambda ctx: None}
+            return replace(chart, actions=actions), active, data
+
+    oracle = Late(lower_source(_START_JIL))
+    with pytest.raises(StatechartError, match=r"'plain': start fired job.102 \(admit\), and the"):
+        oracle.feed(ev("STARTJOB", 1, job="plain"))
+    assert oracle.store.job["plain"].status == "INACTIVE"
+
+
+def test_a_start_admitted_sent_by_a_verdict_that_does_not_admit_is_a_statechart_error() -> None:
+    """Planted: a refused start sends `start admitted` too."""
+
+    def refuse_and_send(ctx: Any) -> Any:
+        return job_chart.extent_queue(ctx)
+
+    class Planted(ChartOracle):
+        def _job_instance(
+            self, job: str, row: JobRuntime
+        ) -> tuple[Statechart, frozenset[str], object]:
+            chart, active, data = super()._job_instance(job, row)
+            rows = tuple(
+                replace(r, action="refuse_and_send") if r.id == "job.144" else r for r in chart.rows
+            )
+            actions = {**chart.actions, "refuse_and_send": refuse_and_send}
+            return replace(chart, rows=rows, actions=actions), active, data
+
+    oracle = Planted(lower_source(_START_JIL))
+    oracle.feed(ev("STARTJOB", 1, job="plain"))
+    with pytest.raises(StatechartError, match=r"start fired job.144 \(refused\), and the items"):
+        oracle.feed(ev("STARTJOB", 2, job="plain"))
+
+
+#: An empty box under `condition: d(RB)` that holds R, queued behind `rh`,
+#: which keeps R after its run (FREE=N) until RELEASE_RESOURCE.
+_READMITTED_JIL = (
+    "insert_resource: R\nres_type: R\namount: 1\n\n"
+    "insert_job: rh\njob_type: c\ncommand: x\nmachine: m1\nresources: (R, QUANTITY=1, FREE=N)\n\n"
+    "insert_job: RB\njob_type: b\ncondition: d(RB)\nresources: (R, QUANTITY=1, FREE=Y)\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("script", "runs"),
+    [
+        (
+            [
+                ev("STARTJOB", 1, job="rh"),
+                ev("STATUS", 2, job="rh", status="SUCCESS"),
+                ev("FORCE_STARTJOB", 3, job="RB"),
+                ev("RELEASE_RESOURCE", 4, job="rh"),
+            ],
+            3,
+        ),
+        ([ev("FORCE_STARTJOB", 1, job="RB")], 2),
+    ],
+    ids=["readmitted", "started directly"],
+)
+def test_dl304_a_readmitted_run_is_not_a_frame_of_the_start_bound(
+    script: list[Event], runs: int
+) -> None:
+    """DL-304, DL-349: `_readmit` never enters `_start`, so a readmitted
+    run is not counted by the start bound and a restart nested in it counts
+    from zero. RB, readmitted by rh's release, runs three times and is
+    refused once; started directly, it runs twice and is refused once. The
+    readmission (job.108) sends no `start admitted`; each nested start does."""
+    paired = _lockstep(_READMITTED_JIL, script[:-1]) if len(script) > 1 else None
+    paired = paired or LockstepOracle(lower_source(_READMITTED_JIL), new=ChartOracle)
+    seen = _spied(paired.twin)
+    paired.feed(script[-1])
+    paired.check_seal()
+    lines = [t.transition for t in paired.twin.trace() if t.job == "RB"]
+    assert sum(line.endswith("->STARTING") for line in lines) == runs
+    assert lines.count("START_REFUSED") == 1
+    mine = [o for o in seen if o.key == "job:RB"]
+    readmits = [o.rows for o in mine if o.event.name == "readmit"]
+    assert readmits == ([("job.108",)] if runs == 3 else [])
+    admitted = [o.rows for o in mine if o.event.name == "start admitted"]
+    assert len(admitted) == 2
 
 
 def _empty_box(name: str, condition: str = "") -> str:
@@ -1457,14 +1969,16 @@ def test_a_kill_whose_flags_differ_from_the_charts_is_a_statechart_error(
 def test_a_term_run_time_whose_holding_differs_from_the_charts_is_a_statechart_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Planted: the data says the run's units are freed, and today's
+    """Planted: the handle says the run's units are freed, and today's
     settlement after the term_run_time kill keeps them held (FREE=Y frees on
     SUCCESS only, DL-256)."""
     oracle = ChartOracle(lower_source(_KT_JIL))
     oracle.feed(ev("STARTJOB", 1, job="tk"))
-    monkeypatch.setattr(oracle_chart, "job_data", lambda *_: JobData())
+    _released_for(monkeypatch, None, "free")
+    later = T0 + timedelta(minutes=7)
+    _moves_differ(oracle, lambda o: o.advance(later), "tk", "job.304", "job_holding.05")
     with pytest.raises(StatechartError, match="the holding differs after the settlement"):
-        oracle.advance(T0 + timedelta(minutes=7))
+        oracle.advance(later)
 
 
 @pytest.mark.parametrize(
@@ -2563,7 +3077,7 @@ def test_a_move_whose_box_rules_readmit_a_waiter_still_has_its_holding_compared(
     """A member's SUCCESS ends its box (box_success), whose release cancels
     the box's queued member: that readmission's move is compared inside the
     member's own move, which waits for its settlement after the box rules.
-    Planted: the member's data keeps its unit, today's settlement frees it;
+    Planted: the member's handle keeps its unit, today's settlement frees it;
     the difference is still caught after the nested readmission."""
     oracle = ChartOracle(lower_source(_NESTED_JIL))
     oracle.feed(ev("STARTJOB", 1, job="nh"))
@@ -2576,15 +3090,12 @@ def test_a_move_whose_box_rules_readmit_a_waiter_still_has_its_holding_compared(
     paired.feed(ev("STATUS", 3, job="nm", status="SUCCESS"))
     assert [o.rows for o in seen if o.event.name == "readmit"] == [("job.109",)]
     assert paired.twin.store.job["nq"].status == "INACTIVE"
-    kept = JobData(release_on_success="keep", release_otherwise="keep")
-    # the member's data only: the box's own end is the chart's now (DL-346)
-    monkeypatch.setattr(
-        oracle_chart,
-        "job_data",
-        lambda oracle, job, row: kept if job == "nm" else job_data(oracle, job, row),
-    )
+    # the member's units only: the box's own end is the chart's now (DL-346)
+    _released_for(monkeypatch, "nm", "keep")
+    status = ev("STATUS", 3, job="nm", status="SUCCESS")
+    _moves_differ(oracle, lambda o: o.feed(status), "nm", "job.305", "job_holding.04")
     with pytest.raises(StatechartError, match="'nm': the holding differs after the settlement"):
-        oracle.feed(ev("STATUS", 3, job="nm", status="SUCCESS"))
+        oracle.feed(status)
     lines = [(t.job, t.transition) for t in oracle.trace()[-3:]]
     assert lines == [
         ("nm", "RUNNING->SUCCESS"),
@@ -3186,36 +3697,26 @@ _HELD_MEMBER_JIL = (
 )
 
 
-def _released_for(name: str, release: Any) -> Callable[[Oracle, str, JobRuntime], JobData]:
-    """`job_data` with `name`'s units released by `release` after every end."""
-
-    def data(oracle: Oracle, job: str, row: JobRuntime) -> JobData:
-        real = job_data(oracle, job, row)
-        if job != name:
-            return real
-        return replace(real, release_on_success=release, release_otherwise=release)
-
-    return data
-
-
 def test_a_box_whose_end_the_chart_settles_otherwise_is_a_statechart_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Planted: the box's data keeps its unit after its end, today's
+    """Planted: the box's handle keeps its unit after its end, today's
     settlement frees it. The fold's move (job.128) is compared as a STATUS
     move is, its holding at its settlement."""
     oracle = ChartOracle(lower_source(_HELD_BOX_JIL))
     oracle.feed(ev("FORCE_STARTJOB", 0, job="hb"))
     oracle.feed(ev("STATUS", 1, job="hn", status="SUCCESS"))
-    monkeypatch.setattr(oracle_chart, "job_data", _released_for("hb", "keep"))
+    _released_for(monkeypatch, "hb", "keep")
+    status = ev("STATUS", 2, job="hm", status="SUCCESS")
+    _moves_differ(oracle, lambda o: o.feed(status), "hb", "job.305", "job_holding.04")
     with pytest.raises(StatechartError, match="'hb': the holding differs after the settlement"):
-        oracle.feed(ev("STATUS", 2, job="hm", status="SUCCESS"))
+        oracle.feed(status)
 
 
 def test_a_batch_row_the_chart_settles_otherwise_is_a_statechart_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Planted: a running member's data frees its unit after an end that is
+    """Planted: a running member's handle frees its unit after an end that is
     not SUCCESS; the box's INACTIVE takes it along (job.159), and today's
     settlement keeps the renewable's unit held (DL-256). The row is compared
     once the batch has written and settled it, before the batch's box rules
@@ -3223,11 +3724,13 @@ def test_a_batch_row_the_chart_settles_otherwise_is_a_statechart_error(
     oracle = ChartOracle(lower_source(_HELD_MEMBER_JIL))
     oracle.feed(ev("FORCE_STARTJOB", 0, job="hb"))
     assert oracle.store.job["hm"].status == "RUNNING"
-    assert job_data(oracle, "hm", oracle.store.job["hm"]).release_otherwise == "keep"
-    monkeypatch.setattr(oracle_chart, "job_data", _released_for("hm", "free"))
+    assert RowUnits(oracle, "hm").release(False) == "keep"
+    _released_for(monkeypatch, "hm", "free")
     traced = len(oracle.trace())
+    status = ev("STATUS", 1, job="hb", status="INACTIVE")
+    _moves_differ(oracle, lambda o: o.feed(status), "hm", "job.304", "job_holding.05")
     with pytest.raises(StatechartError, match="'hm': the batch's writes differ from the chart's"):
-        oracle.feed(ev("STATUS", 1, job="hb", status="INACTIVE"))
+        oracle.feed(status)
     assert [(t.job, t.transition) for t in oracle.trace()[traced:]] == [
         ("hb", "RUNNING->INACTIVE"),
         ("hm", "RUNNING->INACTIVE"),

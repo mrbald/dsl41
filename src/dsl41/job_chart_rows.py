@@ -37,6 +37,7 @@ from dsl41.job_chart_events import (
     RELEASE_RESOURCE,
     RUN_WINDOW,
     START,
+    START_ADMITTED,
     STARTED,
     STARTJOB,
     STATUS,
@@ -167,10 +168,28 @@ _STATUS_ROWS: Final = (
             " MAX_NESTED_STARTS starts of the same job is refused with a START_REFUSED line."
         ),
     ),
-    Row("job.101", "IDLE", START, "SUCCESS", "start_bypasses", "consume_arm", cite="SEM-22, DL-54"),
-    Row("job.102", "IDLE", START, "STARTING", "start_admits_job", "admit", cite="SEM-10, DL-120"),
-    Row("job.103", "IDLE", START, "QUE_WAIT", "start_queues", cite="DL-50, DL-247, DL-255"),
-    Row("job.104", "FAILED", START, "STARTING", "start_on_held", "admit_on_held", cite=_DL256),
+    Row(
+        "job.101", "IDLE", START, "SUCCESS", "start_bypasses", "extent_bypass", cite="SEM-22, DL-54"
+    ),
+    Row(
+        "job.102",
+        "IDLE",
+        START,
+        "STARTING",
+        "start_admits_job",
+        "extent_admit",
+        cite="SEM-10, DL-120",
+    ),
+    Row(
+        "job.103",
+        "IDLE",
+        START,
+        "QUE_WAIT",
+        "start_queues",
+        "extent_queue",
+        cite="DL-50, DL-247, DL-255",
+    ),
+    Row("job.104", "FAILED", START, "STARTING", "start_on_held", "extent_on_held", cite=_DL256),
     Row("job.105", "STARTING", STARTED, "RUNNING", "is_job", cite=_SEM10),
     Row("job.106", "TERMINAL", START, "INACTIVE", "start_skips", cite="SEM-33, DL-246"),
     Row("job.107", "TERMINAL", START, "INACTIVE", "start_skips_member", cite="SEM-33, DL-154"),
@@ -210,7 +229,15 @@ _STATUS_ROWS: Final = (
     Row("job.121", "FAILED", FLAG_MOVED, "INACTIVE", "noexec_settles_job", cite="SEM-22, DL-243"),
     Row("job.122", "TERMINAL", BOX_START, "INACTIVE", cite="SEM-10, DL-242", note="reset"),
     Row("job.123", "QUE_WAIT", BOX_SET_INACTIVE, "INACTIVE", cite="SEM-18, DL-242", note="cascade"),
-    Row("job.124", "IDLE", START, "STARTING", "start_admits_box", "admit", cite="SEM-10, DL-242"),
+    Row(
+        "job.124",
+        "IDLE",
+        START,
+        "STARTING",
+        "start_admits_box",
+        "extent_admit",
+        cite="SEM-10, DL-242",
+    ),
     Row("job.125", "STARTING", STARTED, "RUNNING", "is_box", cite="SEM-10, SEM-33, DL-246"),
     Row(
         "job.126",
@@ -434,6 +461,36 @@ _STATUS_ROWS: Final = (
     ),
 )
 
+#: The status rows no table declared once 159 to 199 were taken, `job.4NN`:
+#: an attempt's owed settlement (DL-340) and the extent of an admitted start.
+_MOMENT_ROWS: Final = (
+    Row(
+        "job.401",
+        "IDLE",
+        START,
+        guard="start_settles_first",
+        kind="internal",
+        cite="DL-340, DL-349",
+        note=(
+            "Past the bound, the job's run ended inside a cascade whose box rules hold its"
+            " settlement back. The tier settles that run, by the end it made, and makes the"
+            " same attempt again, which reads the admission after the settlement."
+        ),
+    ),
+    Row(
+        "job.402",
+        "lifecycle",
+        START_ADMITTED,
+        action="start_extent",
+        kind="internal",
+        cite="DL-304, DL-349",
+        note=(
+            "Everything an admitted start does after its status move follows from this"
+            " item: the units it reserves or takes over, and the arm it consumes."
+        ),
+    ),
+)
+
 #: The flag rows, `job.2NN`: 201 to 217 are `job_flags.01` to `.17`.
 _FLAG_ROWS: Final = (
     Row(
@@ -597,7 +654,7 @@ _HOLDING_ROWS: Final = (
     ),
 )
 
-ROWS: Final = (*_STATUS_ROWS, *_FLAG_ROWS, *_HOLDING_ROWS)
+ROWS: Final = (*_STATUS_ROWS, *_FLAG_ROWS, *_HOLDING_ROWS, *_MOMENT_ROWS)
 #: The choices: job.119's injected status and job.302's take-over.
 CHOICES: Final = (
     Choice(

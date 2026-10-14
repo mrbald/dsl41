@@ -75,15 +75,16 @@ STORE_COPIED = frozenset(
 #: The phase is its assembly instance's configuration.
 STORE_REBUILT = frozenset({"machines"})
 #: RuntimeState attributes the store's fork shares: the source of the job
-#: instances (DL-341). It is None on this oracle, so the twin's is the
-#: same None; the chart oracle's fork then rebinds its twin's to the twin
-#: (`ChartOracle.fork`), so there it is rebound, not shared.
-STORE_SHARED = frozenset({"job_instance"})
+#: instances (DL-341) and the listener of its holding moves (DL-349).
+#: Each is None on this oracle, so the twin's is the same None; the chart
+#: oracle's fork then rebinds its twin's to the twin (`ChartOracle.fork`,
+#: `AgreeingOracle.fork`), so there they are rebound, not shared.
+STORE_SHARED = frozenset({"job_instance", "holding_moved"})
 #: The chart oracle's own attributes, on top of the oracle's: the STATUS move
-#: being written, a start's status move before its write, and the moves of a
-#: batch the box rules write (DL-346), None between inputs, so its fork
-#: starts with None.
-CHART_ORACLE_FRESH = frozenset({"_agreement", "_start_move", "_batch"})
+#: being written, a start's status move before its write, the moves of a
+#: batch the box rules write (DL-346), and the holding rows owed today's move
+#: (DL-349), None between inputs, so its fork starts with None.
+CHART_ORACLE_FRESH = frozenset({"_agreement", "_start_move", "_batch", "_holding"})
 
 
 def _when(at: datetime | None) -> str | None:

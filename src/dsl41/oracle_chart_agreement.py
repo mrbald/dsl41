@@ -24,6 +24,14 @@ that the batch INACTIVE path writes for a box rule (a box start's reset, a
 box's cascade) is compared whole once the batch has written and settled it. A
 difference is a `StatechartError` naming both configurations.
 
+The holding's move is compared too, not only the state it reaches (DL-349):
+free and spend both end in `none`, a reservation and a take-over both in
+`reserved`. Each holding row the chart fires (job.301 to job.308) is owed by
+the job until today's verb writes its `job_holding` move, which the store tells
+the oracle as it writes it (`RuntimeState.holding_moved`); the move must be the
+one the row stands for, in the order the rows fired, and a drain or a period
+opening's release that ends with a row still owed is a `StatechartError`.
+
 `AgreeingOracle` is `Oracle` with that check at today's write points (the
 trace line that follows every status write, the settlement of a run's
 units); `oracle_chart.ChartOracle` subclasses it, records the moves and
@@ -37,14 +45,19 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Final, cast
 
 from dsl41.ir import CatalogIR
 from dsl41.job_chart import LEAVE_LIVE, STARTED, projection, row_configuration
 from dsl41.oracle import Oracle
-from dsl41.oracle_state import LIVE, CarriedRows
+from dsl41.oracle_state import LIVE, CarriedRows, HoldingState, Transition
 from dsl41.semantics import SemanticSwitches
 from dsl41.state_machine import Event as ChartEvent
 from dsl41.state_machine import Outcome, StatechartError
+
+
+#: The `job_holding` move each holding row of the chart stands for.
+_HOLDING_MOVES: Final = {f"job.30{n}": f"job_holding.0{n}" for n in range(1, 9)}
 
 
 @dataclass
@@ -98,6 +111,76 @@ class AgreeingOracle(Oracle):
         #: address (a box start's reset, a box's cascade), each compared when
         #: its row is written and settled; None outside a batch
         self._batch: dict[str, Agreement] | None = None
+        #: the holding rows the chart fired, by job, each with its outcome,
+        #: until today's verb writes the move; None when none is owed
+        self._holding: dict[str, list[tuple[str, Outcome]]] | None = None
+        self.store.holding_moved = self._holding_moved
+
+    def fork(self) -> AgreeingOracle:
+        """`Oracle.fork`, with the twin's store telling the twin its holding moves."""
+        twin = cast(AgreeingOracle, super().fork())
+        twin.store.holding_moved = twin._holding_moved
+        return twin
+
+    def _expect_holding(self, outcomes: list[Outcome]) -> list[Outcome]:
+        """Record the holding rows the chart fired: the job owes each one's
+        move. A store that tells no one its moves owes none."""
+        if self.store.holding_moved is None:
+            return outcomes
+        for outcome in outcomes:
+            for row in outcome.rows:
+                if row in _HOLDING_MOVES:
+                    job = str(outcome.key).partition(":")[2]
+                    self._holding = self._holding or {}
+                    self._holding.setdefault(job, []).append((row, outcome))
+        return outcomes
+
+    def _fired_rows(self, outcomes: list[Outcome]) -> tuple[str, ...]:
+        """`fired_rows`, the holding rows recorded first."""
+        return fired_rows(self._expect_holding(outcomes))
+
+    def _holding_moved(self, job: str, t: Transition[HoldingState]) -> None:
+        """Today's verb writes `t` for `job`: it must be the move of the first
+        holding row the chart fired for the job and the job still owes."""
+        owed = None if self._holding is None else self._holding.get(job)
+        if not owed:
+            raise StatechartError(
+                f"job {job!r}: today's {t.id} moves the holding, and the chart fired no"
+                " holding row for it"
+            )
+        row, outcome = owed.pop(0)
+        if not owed:
+            assert self._holding is not None
+            del self._holding[job]
+            self._holding = self._holding or None
+        if _HOLDING_MOVES[row] != t.id:
+            error = StatechartError(
+                f"job {job!r}: the chart's {row} stands for {_HOLDING_MOVES[row]}, and"
+                f" today's holding move is {t.id}"
+            )
+            raise self.store.machines.explain(error, outcome.key, outcome.event)
+
+    @contextmanager
+    def _owing(self) -> Iterator[None]:
+        """A stretch of an input's work (its drain, the period opening's
+        release): every holding row the chart fires in it is written by its
+        end, and an exception leaves none owed. The block runs in the caller's
+        frame, so it adds no frame under the cascade."""
+        try:
+            yield
+        except BaseException:
+            self._holding = None
+            raise
+        self._holding_settled()
+
+    def _holding_settled(self) -> None:
+        """An input's end: no holding row the chart fired is still owed."""
+        owed, self._holding = self._holding, None
+        if owed:
+            rows = "; ".join(
+                f"{job}: {', '.join(r for r, _o in rows)}" for job, rows in owed.items()
+            )
+            raise StatechartError(f"the chart fired holding rows today's code never wrote: {rows}")
 
     @contextmanager
     def _moving(self, job: str, key: str, event: ChartEvent, old: str) -> Iterator[Agreement]:
