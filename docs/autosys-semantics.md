@@ -354,7 +354,7 @@ Members killed this way end with status TERMINATED, which `d()` and `t()` consum
 A box_terminator member killed by its own box's job_terminator cascade does not end the box again:
 the box has already ended, and the cascade stops where the box starts again. A box's end FAILURE or
 TERMINATED kills its live job_terminator members only while the run that ended is still the box's
-run. `_terminate` reads the box's run number before the status write, and the cascade compares it
+run. The sender reads the box's run number before the status write, and the cascade compares it
 before each member: once the write's wakes, or an earlier member's kill, started the box again, the
 cascade reaches no further member: not the members the new run started, and not a member carried
 live into it from the run that ended, as the fold and the overrides already leave them when the
@@ -648,7 +648,7 @@ DL-243: FORCE_STARTJOB on a non-live job that is `ON_ICE` or `ON_HOLD` clears th
 first, then starts the job through the normal FORCE path. Source: "sendevent -- Start Jobs" (AutoSys Workload Automation 24.2 documentation):
 "When you force start a job that is in a non-executable state (ON_HOLD, ON_ICE), it returns to
 an executable state, runs, and does not revert to the previous (non-executable) state." The
-clearing is recorded as `_handle_oob` records an OFF_ICE or OFF_HOLD sendevent, with a cause
+clearing is recorded as an OFF_ICE or OFF_HOLD sendevent is, with a cause
 naming FORCE_STARTJOB. The flag stays cleared after the run. It stays cleared even when a
 later gate (`run_window`) refuses the start: the return to an executable state is the
 event's own effect, and does not depend on the start. The vendor sentence does not name

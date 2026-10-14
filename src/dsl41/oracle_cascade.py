@@ -1,52 +1,50 @@
-"""The cascade of the second oracle on the executor's worklist
-(docs/statechart-engine.md §5, §8, §11; DL-350).
+"""The oracle's cascade on the executor's worklist (docs/statechart-engine.md
+§5, §8, §11; DL-350).
 
-A move's consequences are items on the state owner's executor, popped
-depth first, where today's recursion calls them. The rows' actions stay pure:
-what a row of a job sends beyond its own move is read here, from the tier's
-facts, when the row runs (`CascadeOracle._consequences`, which the payload's
-handle `RowUnits.consequences` reaches). What it writes is the hook's
-(`oracle_chart.ChartOracle._perform`), with an intent where the row cannot
-derive the write.
+A move's consequences are items on the state owner's executor, popped depth
+first. The rows' actions stay pure: what a row of a job sends beyond its own
+move is read here, from the tier's facts, when the row runs
+(`OracleCascade._consequences`, which the payload's handle
+`RowUnits.consequences` reaches). What it writes is the hook's
+(`oracle.Oracle._perform`), with an intent where the row cannot derive the
+write.
 
-The order is today's by one rule on the senders. A row's action reports one
-item per call site of today's method, in program order. A call site whose
-gate or audience reads state an earlier sibling's cascade can change is a
-moment: a self-event whose payload is the tier's step (`Program`), which
-reads the gate when it pops, sends the next item and itself again, and so
-takes its next step only after that item's whole cascade. A step that today
-runs after the calls return is a later-reported item. The moments:
+The order is set by one rule on the senders. A row's action reports one item
+per consequence, in order. A consequence whose gate or audience reads state an
+earlier sibling's cascade can change is a moment: a self-event whose payload
+is the tier's step (`Program`), which reads the gate when it pops, sends the
+next item and itself again, and so takes its next step only after that item's
+whole cascade. A step that follows a sibling's whole cascade is a
+later-reported item. The moments:
 
-- `box rules` (`_notify_boxes`): a member's moves at its box (`member ends
+- `box rules` (`_box_rules`): a member's moves at its box (`member ends
   FAILURE or TERMINATED`, the door's `member moves` and `completion
   moment`, `box recompute`), then `walk up` and `holders may leave`, then a
   box's `box run ends` to its members;
-- `settle` (`_settle_row`, late): the move's own `leave STARTING or
-  RUNNING`, unless the run settled early (job.401) or the job started again
-  (the LIVE cell);
-- `wake` (`_notify_wakes`): each referencer's `start`, then the queue's
-  `scan` when the settlement released units or the move lifted a block;
-- `walk up` (`_on_descendant_transition`) and `holders may leave`
-  (`_holders_may_leave_the_run`, and an ice's own completion moment,
-  `_ice_resolves_member`);
-- `scan` (`_wake_waiters`): one `readmit` per waiter of a pass, the pass's
-  list read when it starts and each waiter's status at its turn; a pass ends
-  at the first waiter that moved, which its `readmit` row reports as an
-  intent; the pass bookkeeping (`_in_wake`, `_scan_owed`,
-  `_full_scan_requested`) stays the oracle's, written by intents;
+- `settle` (`_settle`, late): the move's own `leave STARTING or RUNNING`,
+  unless the run settled early (job.401) or the job started again (the LIVE
+  cell);
+- `wake` (`_wake`): each referencer's `start`, then the queue's `scan` when
+  the settlement released units or the move lifted a block;
+- `walk up` (`_walk_up`) and `holders may leave` (`_holders`, and an ice's own
+  completion moment, `_ice_resolves`);
+- `scan` (`_scan`): one `readmit` per waiter of a pass, the pass's list read
+  when it starts and each waiter's status at its turn; a pass ends at the
+  first waiter that moved, which its `readmit` row reports as an intent; the
+  pass bookkeeping (`_in_wake`, `_scan_owed`, `_full_scan_requested`) stays
+  the oracle's, written by intents;
 - `load taken` (DL-255): the owed scan's mark, behind a freed excess's scan;
-- `box ends step` (`_cascade_job_terminators`): one member at a time, while
-  the run that ended is the box's run (DL-348);
-- `notify step` (`_set_inactive_batch`'s second phase): the runs read after
-  the batch's first phase, the box's STARTING or its disarms, then each row's
-  box rules and wakes;
-- `window pass` (`_decide_windows_at_box_start`,
-  `_complete_starts_with_no_member_in_the_run`): the pass of the box start
-  that found no pass pending, over every box run registered with it;
+- `box ends step` (`_box_ends`): one member at a time, while the run that
+  ended is the box's run (DL-348);
+- `notify step` (`_notify`, the batch INACTIVE path's second phase): the runs
+  read after the batch's first phase, the box's STARTING or its disarms, then
+  each row's box rules and wakes;
+- `window pass` (`_window_pass`): the pass of the box start that found no
+  pass pending, over every box run registered with it;
 - `after inject` and `after leave`: an idle parent's recompute after an
   operator's INACTIVE (SEM-15), a waiter's window or day disposition after it
   left the queue (DL-257);
-- `retry step` (`_retry_released`): ON_NOEXEC's start retries, after a box's
+- `retry step` (`_retries`): ON_NOEXEC's start retries, after a box's
   contained jobs took the flag and its own status settled.
 
 An admitted start's extent descends from its `start admitted`, which job.100
@@ -61,12 +59,11 @@ moment that sends the item, never on the recipient's row.
 
 from __future__ import annotations
 
-from collections.abc import Hashable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
-from typing import Any, Final, Protocol, cast
+from collections.abc import Iterator, Mapping, Sequence
+from typing import Any, Final, cast
 
 from dsl41.capacity import DemandEntry, takes_machine_load, to_reservations
-from dsl41.ir import JobIR
+from dsl41.ir import CatalogIR
 from dsl41.job_chart import (
     ACTUAL_START,
     ADMITTED_START,
@@ -104,14 +101,10 @@ from dsl41.job_chart import (
     Admission,
     Admitted,
     FlagMoved,
-    Injection,
     JobData,
-    Payload,
     Settlement,
-    Terminator,
 )
-from dsl41.oracle_chart_agreement import AgreeingOracle
-from dsl41.oracle_chart_facts import (
+from dsl41.oracle_facts import (
     FoldFacts,
     OverrideFacts,
     ReadmitFacts,
@@ -120,9 +113,36 @@ from dsl41.oracle_chart_facts import (
     StartFacts,
     Started,
 )
-from dsl41.oracle_state import (
-    BOX_START as BOX_START_MOVE,
+from dsl41.oracle_intents import (
+    AdmissionFacts,
+    Batch,
+    ClearCodes,
+    ClosePass,
+    DeferToOpening,
+    FlagFacts,
+    Intent,
+    MemberEnd,
+    Move,
+    Moved,
+    Notice,
+    Once,
+    OpenPass,
+    Program,
+    Readmitted,
+    Register,
+    Rule,
+    RunStart,
+    ScanState,
+    Send,
+    Settle,
+    SettledEarly,
+    Starting,
+    StatusInput,
+    Step,
+    WatchReadmit,
 )
+from dsl41.oracle_schedule import OracleSchedule
+from dsl41.oracle_state import BOX_START as BOX_START_MOVE
 from dsl41.oracle_state import (
     FAILED,
     JOB_FORCE_ON_HELD,
@@ -130,13 +150,13 @@ from dsl41.oracle_state import (
     JOB_START,
     LIVE,
     TERMINAL,
+    CarriedRows,
     JobStatus,
     Transition,
 )
+from dsl41.semantics import SemanticSwitches
 from dsl41.state_machine import Context, Effects, StatechartError
 from dsl41.state_machine import Event as ChartEvent
-
-type Send = tuple[Hashable, ChartEvent]
 
 _LIVE_OR_QUEUED: Final = LIVE | {"QUE_WAIT"}
 #: The kinds of a status move whose consequences are its box rules, its
@@ -146,322 +166,61 @@ _MOVES: Final = frozenset(
 )
 
 
-# ---- intents: what the hook performs for a row that cannot derive it
-
-
-class Intent(Protocol):
-    """A write the hook performs after the microstep's row writes."""
-
-    def apply(self, oracle: CascadeOracle) -> None: ...
-
-
-class Move:
-    """One status move's record (DL-350): the job, the status it leaves
-    and its run, which the row's action reads before the write; the status it
-    reaches (`new`), which the hook fills after the write; whether the run's
-    units settled early (`done`, job.401) and whether a settlement released
-    any (`released`). Its box rules, its settlement and its wakes share it.
-
-    As an intent it is the move's bookkeeping after the write. A move on its
-    own (`_after_transition`): a box leaving RUNNING owes the admit-only
-    scan, and a move that leaves STARTING or RUNNING registers its late
-    settlement for its box rules (DL-340). A row of a batch
-    (`_set_inactive_batch`, `batch`): its rank drops now, a box leaving
-    RUNNING owes the scan, and the batch's second phase reads it."""
-
-    __slots__ = ("job", "old", "run", "new", "done", "released", "batch")
-
-    def __init__(self, job: str, old: str, run: int, batch: Batch | None = None) -> None:
-        self.job = job
-        self.old = old
-        self.run = run
-        self.new = ""
-        self.done = False
-        self.released = False
-        self.batch = batch
-
-    @property
-    def releasing(self) -> bool:
-        """The move leaves STARTING or RUNNING."""
-        return self.old in LIVE and self.new not in LIVE
-
-    def apply(self, oracle: CascadeOracle) -> None:
-        self.new = oracle._runtime(self.job).status
-        if oracle._box_stopped(self.job, self.old, self.new):
-            oracle._scan_owed = True
-        if self.batch is not None:
-            oracle._drop_rank(self.job)
-            self.batch.rows.append(self)
-        elif self.releasing:
-            lates = cast(list[Move], oracle._late_settlements.setdefault(self.job, []))
-            lates.append(self)
-
-
-@dataclass(eq=False)
-class Batch:
-    """One batch INACTIVE path (DL-242): the box it begins at, the rows its
-    first phase wrote and settled, in order, and how they are written: a box
-    start's reset (`starting`, the box's own move to STARTING between the
-    phases) or a box set INACTIVE (`clear`, its exit codes; `code`, the
-    first row's)."""
-
-    box: str
-    starting: Starting | None = None
-    clear: bool = False
-    code: int | None = None
-    rows: list[Move] = field(default_factory=list)
-
-
-@dataclass(frozen=True)
-class Readmitted:
-    """A waiter's `readmit` moved it (admitted, cancelled, left): the scan's
-    pass ends there and starts again (`_wake_waiters`'s `any`)."""
-
-    def apply(self, oracle: CascadeOracle) -> None:
-        oracle._readmitted = True
-
-
-@dataclass(frozen=True)
-class WatchReadmit:
-    """The scan sends a `readmit`: whether it moves is read after its cascade."""
-
-    def apply(self, oracle: CascadeOracle) -> None:
-        oracle._readmitted = False
-
-
-@dataclass(frozen=True)
-class ScanState:
-    """The scan's bookkeeping (DL-247, DL-255): the fields given, set."""
-
-    in_wake: bool | None = None
-    owed: bool | None = None
-    full: bool | None = None
-
-    def apply(self, oracle: CascadeOracle) -> None:
-        if self.in_wake is not None:
-            oracle._in_wake = self.in_wake
-        if self.owed is not None:
-            oracle._scan_owed = self.owed
-        if self.full is not None:
-            oracle._full_scan_requested = self.full
-
-
-@dataclass(frozen=True)
-class OpenPass:
-    """A box's RUNNING found no window pass pending: its own pass collects
-    every box run its cascade starts (DL-246)."""
-
-    def apply(self, oracle: CascadeOracle) -> None:
-        oracle._window_starts = []
-
-
-@dataclass(frozen=True)
-class Register:
-    """A box run joins the pending window pass, after its members' attempts."""
-
-    box: str
-    run: int
-    cause: str
-
-    def apply(self, oracle: CascadeOracle) -> None:
-        starts = oracle._window_starts
-        assert starts is not None, "a box run registered with no window pass pending"
-        starts.append((self.box, self.run, self.cause))
-
-
-@dataclass(frozen=True)
-class ClosePass:
-    """The pass's list is read: a box started by its decisions begins its own."""
-
-    def apply(self, oracle: CascadeOracle) -> None:
-        oracle._window_starts = None
-
-
-@dataclass(frozen=True)
-class SettledEarly:
-    """job.401 settles the ended run now (`_settle_ended_run`): its late
-    settlement is done, and the row's rank drops, as `_settle_row` drops it."""
-
-    move: Move
-
-    def apply(self, oracle: CascadeOracle) -> None:
-        self.move.done = True
-        oracle._drop_rank(self.move.job)
-
-
-@dataclass(frozen=True)
-class ClearCodes:
-    """A box's ON_NOEXEC clears the exit code of every INACTIVE row it covers (DL-243)."""
-
-    jobs: tuple[str, ...]
-
-    def apply(self, oracle: CascadeOracle) -> None:
-        for job in self.jobs:
-            row = oracle._runtime(job)
-            if row.status == "INACTIVE" and row.exit_code is not None:
-                oracle.store.clear_exit_code(job)
-
-
-@dataclass(frozen=True)
-class DeferToOpening:
-    """A tickless waiter that failed the day check waits for its next eligible
-    day's opening (DL-257)."""
-
-    job_ir: JobIR
-    cause: str
-
-    def apply(self, oracle: CascadeOracle) -> None:
-        oracle._defer_to_next_opening(self.job_ir, self.cause)
-
-
-# ---- the payloads the cascade sends
-
-
-@dataclass(frozen=True)
-class StatusInput(Injection):
-    """An injected STATUS with the exit code its write records."""
-
-    code: int | None = field(default=None, compare=False)
-
-
-@dataclass(frozen=True)
-class MemberEnd(Terminator):
-    """`member ends FAILURE or TERMINATED`: the member and its end, which the
-    box's TERMINATED line names."""
-
-    member: str = field(default="", compare=False)
-    new: str = field(default="", compare=False)
-
-
-@dataclass(frozen=True)
-class Rule(Payload):
-    """A box's moment on a job it contains: the box, which the job's lines
-    name, and the batch its reset or its INACTIVE belongs to."""
-
-    box: str = field(default="", compare=False)
-    batch: Batch | None = field(default=None, compare=False)
-
-
-@dataclass(frozen=True)
-class AdmissionFacts(Admission):
-    """An admitted start's units: the demand vector it reserves or takes over."""
-
-    vector: tuple[DemandEntry, ...] = field(default=(), compare=False)
-
-
-@dataclass(frozen=True)
-class RunStart(Payload):
-    """`actual start`'s payload: the run's cause (`start_run`), and whether the
-    run arms its term_run_time first (a bypass does not)."""
-
-    cause: str = field(default="", compare=False)
-    arm: bool = field(default=True, compare=False)
-
-
-@dataclass(frozen=True)
-class Starting(Payload):
-    """`starting`'s payload: the declared move into STARTING and its cause."""
-
-    move: Transition[JobStatus] = field(default=JOB_START, compare=False)
-    cause: str = field(default="", compare=False)
-
-
-@dataclass(frozen=True)
-class FlagFacts(FlagMoved):
-    """`flag moved` after a waiter's failed recheck, with the scan's facts."""
-
-    facts: ReadmitFacts | None = field(default=None, compare=False)
-
-
-@dataclass(frozen=True)
-class Step:
-    """One step of a moment: the items it sends, and the intents its hook performs."""
-
-    send: tuple[Send, ...] = ()
-    intents: tuple[Intent, ...] = ()
-
-
-class Program:
-    """A moment of several steps (DL-350). Each pop takes one step of
-    `steps`, a generator of the oracle's that reads the store when it resumes
-    and never writes: the step's items, then the moment again, so its next
-    step reads the state their whole cascade left. A pop that finds the
-    generator done sends nothing."""
-
-    __slots__ = ("_name", "_steps")
-
-    def __init__(self, name: str, steps: Iterator[Step]) -> None:
-        self._name = name
-        self._steps = steps
-
-    def __repr__(self) -> str:
-        return f"<{self._name}>"
-
-    def step(self, ctx: Context) -> Effects | None:
-        step = next(self._steps, None)
-        if step is None:
-            return None
-        again = (ctx.key, ChartEvent(ctx.event.name, self))
-        return Effects(send=(*step.send, again), intents=step.intents)
-
-
-class Once:
-    """A moment of one step: `steps` gives it when it pops, and nothing follows."""
-
-    __slots__ = ("_name", "_step")
-
-    def __init__(self, name: str, step: Iterator[Step]) -> None:
-        self._name = name
-        self._step = step
-
-    def __repr__(self) -> str:
-        return f"<{self._name}>"
-
-    def step(self, ctx: Context) -> Effects | None:
-        step = next(self._step, None)
-        return None if step is None else Effects(send=step.send, intents=step.intents)
-
-
-class Settle(Once):
-    """`settle`'s payload: the move whose run settles, which its hook reads
-    on either row, and the step that sends the settlement."""
-
-    __slots__ = ("move",)
-
-    def __init__(self, move: Move, step: Iterator[Step]) -> None:
-        super().__init__(f"{SETTLE} of {move.job}", step)
-        self.move = move
-
-
-@dataclass(frozen=True)
-class Notice:
-    """A move whose box rules run with no move record: the batch's second
-    phase, and a window skip of a member already INACTIVE."""
-
-    job: str
-    old: str
-    new: str
-
-
-class Moved(Protocol):
-    """A move as its box rules read it: the job and its two statuses."""
-
-    @property
-    def job(self) -> str: ...
-
-    @property
-    def old(self) -> str: ...
-
-    @property
-    def new(self) -> str: ...
-
-
-class CascadeOracle(AgreeingOracle):
-    """`Oracle` whose cascade is the `job` chart's, on the executor's
-    worklist: the consequences a row's action reports, and the moments."""
-
-    #: the last `readmit` the scan sent moved its waiter (`Readmitted`)
-    _readmitted: bool = False
+class OracleCascade(OracleSchedule):
+    """`OracleSchedule` with the cascade on the executor's worklist: the
+    consequences a row's action reports, the moments, and their bookkeeping."""
+
+    def __init__(
+        self,
+        catalog: CatalogIR,
+        *,
+        carried: CarriedRows | None = None,
+        tz_aliases: Mapping[str, str] | None = None,
+        default_tz: str | None = None,
+        semantics: SemanticSwitches | None = None,
+    ) -> None:
+        super().__init__(
+            catalog,
+            carried=carried,
+            tz_aliases=tz_aliases,
+            default_tz=default_tz,
+            semantics=semantics,
+        )
+        #: DL-247: the queue scan is in a pass (`_scan`)
+        self._in_wake = False
+        #: DL-247: a full scan requested while a scan runs; the running loop
+        #: takes it up as its next pass, so an admit-only scan cannot swallow
+        #: a release's cancellations.
+        self._full_scan_requested = False
+        #: DL-247: a block may have lifted with no capacity freed, so the
+        #: admit-only scan is owed: a box left RUNNING, or (DL-255) a start
+        #: or a queued job took a machine's load and so may have sent a
+        #: resource waiter back to its load check. It runs at the waiter step
+        #: of the input (DL-50's order: release, referencers, waiters), once
+        #: every referencer the input woke has been visited; no nested
+        #: transition pays it (DL-255).
+        self._scan_owed = False
+        #: SEM-33 (DL-246): the box runs whose start is in progress, as (box,
+        #: run number, cause), collected from the outermost box's RUNNING
+        #: on, so the window decisions of a whole started subtree run after
+        #: every attempt in it (`_window_pass`). None when no box start is open.
+        self._window_starts: list[tuple[str, int, str]] | None = None
+        #: DL-340: per job, the moves that ended a run whose settlement waits
+        #: behind the move's box rules (`Move.apply`, `_w_settle`). Only a job
+        #: with a settlement in flight has an entry, so the dict is empty
+        #: between inputs.
+        self._late_settlements: dict[str, list[Move]] = {}
+        #: the last `readmit` the scan sent moved its waiter (`Readmitted`)
+        self._readmitted = False
+
+    def fork(self) -> OracleCascade:
+        """`OracleSchedule.fork` with the cascade's bookkeeping copied. Between
+        inputs no ended run waits for its settlement."""
+        assert not self._late_settlements, "a fork with a settlement still owed"
+        twin = cast(OracleCascade, super().fork())
+        twin._window_starts = None if self._window_starts is None else list(self._window_starts)
+        twin._late_settlements = {}
+        return twin
 
     # ---- small reads
 
@@ -480,7 +239,7 @@ class CascadeOracle(AgreeingOracle):
         return Move(job, row.status, row.run_number, batch)
 
     def _drop_rank(self, job: str) -> None:
-        """`_settle_row`'s first half: a row that left QUE_WAIT drops its rank (DL-120)."""
+        """A row that left QUE_WAIT drops its rank (DL-120)."""
         row = self._runtime(job)
         if row.status != "QUE_WAIT" and row.waiter_seq is not None:
             self.store.dequeue_waiter(job)
@@ -506,16 +265,16 @@ class CascadeOracle(AgreeingOracle):
         return result
 
     def _after(self, job: str, ctx: Context, kind: str) -> Effects:
-        """A status move on its own (`_set_status`, `_after_transition`): its box
+        """A status move on its own: its box
         rules, its settlement, its wakes, then what follows them by kind."""
         move = self._move(job)
         intents: list[Intent] = [move]
         tail: list[Send] = []
         if kind == "terminated" and self._is_box(job):
-            # the run that ended, read before the write (`_terminate`, DL-348)
+            # the run that ended, read before the write (DL-348)
             tail.append(self._program(job, BOX_ENDS_STEP, self._box_ends(job, move.run)))
         elif kind == "completed":
-            # `_on_box_completed`: the run is read after the end's wakes
+            # a box's completion: the run is read after the end's wakes
             tail.append(self._program(job, BOX_ENDS_STEP, self._box_ends(job, None)))
         elif kind == "injected":
             tail += self._after_inject(job)
@@ -536,7 +295,7 @@ class CascadeOracle(AgreeingOracle):
         )
 
     def _after_inject(self, job: str) -> list[Send]:
-        """`_inject_inactive`'s parent, read before the move: its recompute
+        """An operator's INACTIVE on a member: its parent, read before the move: its recompute
         follows the move's cascade (SEM-15)."""
         box = self.catalog.jobs[job].box.box_name
         if box is None:
@@ -549,7 +308,7 @@ class CascadeOracle(AgreeingOracle):
         ]
 
     def _after_leave(self, job: str, moved: FlagFacts) -> Send:
-        """`_leave_queue_unstarted`'s disposition, with the runs read before the move."""
+        """A waiter's disposition after it left the queue, with the runs read before the move."""
         facts = cast(ReadmitFacts, moved.facts)
         check, why = facts.known("recheck")
         mode = self.semantics.queued_recheck
@@ -560,7 +319,7 @@ class CascadeOracle(AgreeingOracle):
         return self._once(job, AFTER_LEAVE, self._leave_tail(job, check, cause, run, box_run))
 
     def _box_running(self, box: str, run: int, intents: list[Intent]) -> list[Send]:
-        """`_run` and `_on_box_started` after a box's RUNNING: its members'
+        """After a box's RUNNING: its members'
         auto_hold, their starts, then the window pass, opened here when none
         is pending (DL-246)."""
         owner = self._window_starts is None
@@ -610,8 +369,8 @@ class CascadeOracle(AgreeingOracle):
         return self._admitted(job, ctx, "on_held", admission)
 
     def _on_extent(self, job: str, ctx: Context) -> Effects:
-        """`start admitted` (job.402): today's `_start_admitted`, each call an
-        item of the extent, all of them descendants of this one."""
+        """`start admitted` (job.402): the admitted start's extent, each step an
+        item, all of them descendants of this one."""
         admitted = cast(Admitted, ctx.event.payload)
         attempt = cast(StartFacts, admitted.attempt)
         cause = attempt.cause
@@ -639,7 +398,7 @@ class CascadeOracle(AgreeingOracle):
         return Effects(send=(*sends, *scan, *load))
 
     def _frees_excess(self, job: str, vector: list[DemandEntry]) -> bool:
-        """`_acquire`'s answer, read before it writes: held units exceed the new
+        """Read before the units are written: held units exceed the new
         demand on some bucket, so the queue is owed a wake (DL-256)."""
         held = self._runtime(job).reservations
         if not held:
@@ -650,7 +409,7 @@ class CascadeOracle(AgreeingOracle):
         return any(h.units > demand.get(h.bucket, 0) for h in held)
 
     def _on_readmit(self, job: str, ctx: Context) -> Effects:
-        """job.108: `_readmit`'s admission, its extent sent from its own row."""
+        """job.108: a readmission, its extent sent from its own row."""
         facts = cast(ReadmitFacts, ctx.event.payload)
         vector = tuple(facts.vector())
         admission = AdmissionFacts(demand=facts.demand, vector=vector, units=self._units(job))
@@ -666,7 +425,7 @@ class CascadeOracle(AgreeingOracle):
         cause: str,
         had_demand: bool,
     ) -> tuple[Send, ...]:
-        """`_acquire` and `_run`: the units, the arm and the run, a box's
+        """An admitted start's steps: the units, the arm and the run, a box's
         resets around its STARTING or a job's STARTING, then `started`."""
         run = self._runtime(job).run_number
         starting = Starting(move=move, cause=cause, units=self._units(job))
@@ -707,7 +466,7 @@ class CascadeOracle(AgreeingOracle):
         )
 
     def _on_skips_in_box(self, job: str, ctx: Context) -> Effects:
-        """job.404: `_window_skip_bypass` on a member already INACTIVE: its box
+        """job.404: a window skip of a member already INACTIVE: its box
         rules, as an INACTIVE move's, with no settlement and no wake."""
         notice = Notice(job, "INACTIVE", "INACTIVE")
         return Effects(send=(self._program(job, BOX_RULES, self._box_rules(notice, None)),))
@@ -715,8 +474,8 @@ class CascadeOracle(AgreeingOracle):
     # ---- the batch INACTIVE path
 
     def _on_cascades(self, job: str, ctx: Context) -> Effects:
-        """A box set INACTIVE by an operator or by ON_NOEXEC (`_inject_inactive`,
-        SEM-18): its own row first, its settlement, then every job it contains,
+        """A box set INACTIVE by an operator or by ON_NOEXEC (the batch INACTIVE
+        path, SEM-18): its own row first, its settlement, then every job it contains,
         then the second phase, then the idle parent's recompute."""
         noexec = ctx.event.name == FLAG_MOVED
         if noexec:
@@ -747,7 +506,7 @@ class CascadeOracle(AgreeingOracle):
         return Effects(send=settle, intents=(move,))
 
     def _notify(self, batch: Batch) -> Iterator[Step]:
-        """`_set_inactive_batch` after its first phase: each row's ancestors'
+        """The batch INACTIVE path after its first phase: each row's ancestors'
         runs, read once now; the box's STARTING, or the disarms of every box run
         the cascade ends; then each row still INACTIVE in its run gets its box
         rules and its wakes, and a row a wake moved on owes the queue its wake."""
@@ -808,7 +567,7 @@ class CascadeOracle(AgreeingOracle):
     def _parent_recomputes(self, box: str, status: str, run: int) -> bool:
         """An operator's INACTIVE recomputes an idle parent that was not
         running, starting or TERMINATED, is not now, and whose run did not
-        move (`_inject_inactive`, SEM-15)."""
+        move (SEM-15)."""
         settled = ("RUNNING", "STARTING", "TERMINATED")
         now = self._runtime(box)
         return status not in settled and now.status not in settled and now.run_number == run
@@ -821,7 +580,7 @@ class CascadeOracle(AgreeingOracle):
     # ---- a move's box rules, settlement and wakes
 
     def _box_rules(self, moved: Moved, runs: Mapping[str, int] | None) -> Iterator[Step]:
-        """`_notify_boxes`: the parent's member rules, the walk up, the holders'
+        """A move's box rules: the parent's member rules, the walk up, the holders'
         check, and a terminal box's end of its members' arms (Q3c)."""
         job, old, new = moved.job, moved.old, moved.new
         job_ir = self.catalog.jobs.get(job)
@@ -848,7 +607,7 @@ class CascadeOracle(AgreeingOracle):
                 yield Step(send=disarms)
 
     def _member_rules(self, box: str, member: str, old: str, new: str) -> Iterator[Step]:
-        """`_on_member_transition`: a member that ends FAILURE or TERMINATED
+        """A member's move at its box: a member that ends FAILURE or TERMINATED
         meets the box's terminator (SEM-14), which ends a RUNNING box and the
         rules; a TERMINATED box is sticky (SEM-13); a RUNNING box runs its door
         on a terminal, RUNNING or resolving move, and its fold on any move; an
@@ -882,7 +641,7 @@ class CascadeOracle(AgreeingOracle):
         overrides: bool,
         at_start: bool = False,
     ) -> Iterator[Step]:
-        """`_completion_door` of a RUNNING box: its overrides, then, unless one
+        """The completion door of a RUNNING box: its overrides, then, unless one
         ended the box, its default fold (SEM-11, SEM-12)."""
         box_ir = self.catalog.jobs[box]
         if overrides:
@@ -898,7 +657,7 @@ class CascadeOracle(AgreeingOracle):
     def _walk_up(
         self, member: str, new: str, resolved: bool, runs: Mapping[str, int]
     ) -> Iterator[Step]:
-        """`_on_descendant_transition`: each box above the parent still in the
+        """The walk up: each box above the parent still in the
         run it was in before the moment reads its overrides on a terminal,
         RUNNING or resolving move; the walk ends at one that ended (SEM-12)."""
         for box in self._ancestor_boxes(member)[1:]:
@@ -915,7 +674,7 @@ class CascadeOracle(AgreeingOracle):
                     return
 
     def _holders(self, job: str, runs: Mapping[str, int]) -> Iterator[Step]:
-        """`_holders_may_leave_the_run`: each iced box above the job whose parent
+        """The holders' check: each iced box above the job whose parent
         is still in its run gets its completion moment (SEM-20, DL-304)."""
         chain = self._ancestor_boxes(job)
         for holder, parent in zip(chain, chain[1:], strict=False):
@@ -923,7 +682,7 @@ class CascadeOracle(AgreeingOracle):
                 yield from self._ice_resolves(holder, self._runtime(holder).status, runs)
 
     def _ice_resolves(self, job: str, status: str, runs: Mapping[str, int]) -> Iterator[Step]:
-        """`_ice_resolves_member`: an iced member out of its RUNNING box's run is
+        """An iced member out of its RUNNING box's run is
         a completion moment for the box (DL-285), and the walk up follows while
         the box is still in its run."""
         job_ir = self.catalog.jobs.get(job)
@@ -945,10 +704,10 @@ class CascadeOracle(AgreeingOracle):
             yield from self._walk_up(job, status, True, runs)
 
     def _settle(self, move: Move) -> Iterator[Step]:
-        """`_settle_row` after the box rules: the run's units settle by the
+        """The settlement after the box rules: the run's units settle by the
         policy of its end, unless they settled early (job.401) or the job holds
         a later run's; the LIVE cell takes a job started again."""
-        # the run compare is `_settle_row`'s defence: a job started again
+        # the run compare is the settlement's defence: a job started again
         # inside its own box rules settled its run first (job.401)
         later = self._runtime(move.job).run_number != move.run
         if not move.done and move.releasing and not later:
@@ -960,7 +719,7 @@ class CascadeOracle(AgreeingOracle):
         yield from self._wake(move.job, move.new, queue)
 
     def _wake(self, job: str, new: str, queue: bool) -> Iterator[Step]:
-        """`_notify_wakes`: each referencer's attempt, in catalog order (DL-13),
+        """A move's wakes: each referencer's attempt, in catalog order (DL-13),
         then the queue's scan when units were released or a block lifted."""
         yield from self._wakes(job, f"status of {job!r} changed to {new}", queue)
 
@@ -975,10 +734,10 @@ class CascadeOracle(AgreeingOracle):
             yield Step(send=tuple(sends))
 
     def _box_ends(self, box: str, run: int | None) -> Iterator[Step]:
-        """`_cascade_job_terminators`: each member of the run that ended gets
+        """A box's end at its job_terminators: each member of the run that ended gets
         `box ends FAILURE or TERMINATED`, while that run is still the box's
         (DL-348). With no run given, the box's own end after its wakes decides
-        it (`_on_box_completed`)."""
+        it (a completion)."""
         if run is None:
             row = self._runtime(box)
             if row.status not in FAILED:
@@ -990,7 +749,7 @@ class CascadeOracle(AgreeingOracle):
             yield Step(send=(self._to(member, BOX_ENDS, Rule(box=box, units=self._units(member))),))
 
     def _inject_tail(self, job: str, box: str, status: str, run: int) -> Iterator[Step]:
-        """`_inject_inactive`'s SEM-15 on an idle parent, unless the move's own
+        """An operator's INACTIVE: SEM-15 on an idle parent, unless the move's own
         wakes started it, or it was running, starting or sticky TERMINATED."""
         if self._parent_recomputes(box, status, run):
             facts = RecomputeFacts(
@@ -1001,7 +760,7 @@ class CascadeOracle(AgreeingOracle):
     def _leave_tail(
         self, job: str, check: str, cause: str, run: int, box_run: int | None
     ) -> Iterator[Step]:
-        """`_leave_queue_unstarted` after the move: unless a wake moved the job
+        """A waiter that left the queue, after the move: unless a wake moved the job
         on or ended its box's run, a window failure takes its window decision
         and a tickless day failure waits for its next eligible opening."""
         row = self._runtime(job)
@@ -1026,7 +785,7 @@ class CascadeOracle(AgreeingOracle):
     # ---- the queue
 
     def _scan(self, *, keep_stopped: bool) -> Iterator[Step]:
-        """`_wake_waiters`, to a fixpoint: a scan inside a pass asks a full pass
+        """The queue's scan, to a fixpoint: a scan inside a pass asks a full pass
         of an admit-only one and does nothing more; a pass reads the waiters'
         order when it starts and each waiter's status at its turn, and ends at
         the first `readmit` that moved its waiter, which starts the next pass."""
@@ -1133,14 +892,14 @@ class CascadeOracle(AgreeingOracle):
     def _noexec_tail(
         self, tree: tuple[str, ...], moved: Send, released: Sequence[str], runs: Mapping[str, int]
     ) -> Iterator[Step]:
-        """`_noexec_on_box` after the flags: the exit codes go, the box's status
+        """A box's ON_NOEXEC after the flags: the exit codes go, the box's status
         rule follows, then the retries."""
         yield Step(intents=(ClearCodes(tree),))
         yield Step(send=(moved,))
         yield from self._retries(released, runs)
 
     def _retries(self, released: Sequence[str], runs: Mapping[str, int]) -> Iterator[Step]:
-        """`_retry_released`: each job's start, unless a wake of the same input
+        """Each released job's start, unless a wake of the same input
         started it already (its run moved)."""
         for job in released:
             if self._runtime(job).run_number == runs[job]:
@@ -1161,7 +920,7 @@ class CascadeOracle(AgreeingOracle):
 
     def _window_pass(self, box: str, run: int, cause: str, owner: bool) -> Iterator[Step]:
         """A box run joins the pending pass; the box start that opened it runs
-        it (`_decide_windows_at_box_start`): every run_window member still
+        it: every run_window member still
         waiting in a run it began, deferrals before skips, each decided by its
         window alone while its box run lasts; then, under
         `box-start-all-members-out=complete`, each box run that left no member
@@ -1188,6 +947,7 @@ class CascadeOracle(AgreeingOracle):
             if row.status == "RUNNING" and row.run_number == each_run:
                 attempt = self._attempt(member, each_cause, decided=True)
                 yield Step(send=(self._to(member, START, attempt),))
+        # PENDING: Q15 -- no vendor sentence names a box with no member in the run
         if self.semantics.box_start_all_members_out != "complete":
             return
         for each, each_run, _cause in starts:

@@ -18,7 +18,8 @@ from datetime import date, datetime, timedelta
 import pytest
 
 from dsl41.ir import lower_source
-from dsl41.oracle import DEFERRED_TIMER_KEY, Oracle
+from dsl41.oracle import Oracle
+from dsl41.oracle_schedule import DEFERRED_TIMER_KEY
 from dsl41.oracle_state import Event, EventKind, OracleError
 from dsl41.semantics import resolve as resolve_switches
 
@@ -217,15 +218,12 @@ def test_dl246_a_box_start_skips_a_member_outside_its_window_and_completes_the_b
 # ------------------------------------------------- queued recheck (DL-257), the day
 
 
-def test_dl257_a_condition_recheck_overtaken_by_a_restart_reports_cancelled() -> None:
+def test_dl257_a_condition_recheck_overtaken_by_a_restart_starts_the_job_once() -> None:
     """`n(j, 00.01)` is true for a job whose status changed a minute ago or
     less. `j` sat queued for ten minutes, so the recheck finds the condition
     false and sends it INACTIVE. That transition is a fresh change, so the
-    wake of it starts `j` again before the readmission returns. The decision
-    to leave the queue unstarted is overtaken, and `_readmit` reports
-    "cancelled". Its one caller treats "cancelled" and "admitted" alike, so
-    the value pins the internal outcome only; the observable rule is that `j`
-    is RUNNING and no second start or timer follows.
+    wake of it starts `j` again before the readmission's pass goes on: `j` is
+    RUNNING and no second start or timer follows.
 
     Only an unscheduled job can be restarted by that wake, and an unscheduled
     job has only a condition check, so no window or day recheck reaches the
@@ -238,19 +236,10 @@ def test_dl257_a_condition_recheck_overtaken_by_a_restart_reports_cancelled() ->
         "condition: n(j, 00.01)\n"
     )
     o = Oracle(lower_source(text), semantics=resolve_switches({"queued-recheck": "1"}))
-    results: list[str] = []
-    readmit = o._readmit
-
-    def spy(job: str, *, keep_stopped: bool = False) -> str:
-        results.append(readmit(job, keep_stopped=keep_stopped))
-        return results[-1]
-
-    o._readmit = spy  # type: ignore[method-assign]
     o.feed(ev("STARTJOB", 0, job="h"))
     o.feed(ev("STARTJOB", 0, job="j"))
     assert statuses(o, "j") == {"j": "QUE_WAIT"}
     o.feed(ev("STATUS", 10, job="h", status="SUCCESS"))
-    assert results == ["cancelled"]
     assert transitions(o, "j") == [
         "INACTIVE->QUE_WAIT",
         "QUE_WAIT->INACTIVE",

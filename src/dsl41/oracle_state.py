@@ -93,7 +93,7 @@ class OracleError(ValueError):
 class CascadeDepthError(OracleError, RecursionError):
     """An instant cascade that did not end.
 
-    The chart oracle's cascade is the executor's worklist, so a cascade that
+    The oracle's cascade is the executor's worklist, so a cascade that
     never ends takes items, not frames: the hook counts a root dispatch's
     items and stops it at the item cap for the estate's job count
     (`jobs` given, DL-351). The message names the cap, the job count
@@ -101,8 +101,7 @@ class CascadeDepthError(OracleError, RecursionError):
     still pass the interpreter's recursion limit (`jobs` None); the message
     then names the RecursionError and the root's job. Either way the same
     input raises it again on every replay, so an operator can tell it from a
-    corrupt log. The old oracle's recursive cascade raised the second form at
-    its outermost start."""
+    corrupt log."""
 
     def __init__(self, job: str, cause: str, limit: int, *, jobs: int | None = None) -> None:
         if jobs is None:
@@ -2039,7 +2038,7 @@ class RuntimeState:
     needs one place where "this entity changed" is observable exactly once
     per applied input; assignment sites scattered across the interpreter are
     not that place, and a before/after property test cannot substitute for
-    it -- `_run` mutates armed, run_number and started_by and then sets
+    it -- a start writes armed, run_number and started_by and then sets
     status twice, so a single missed site stays invisible to any check that
     observes whole feeds rather than writes.
 
@@ -2075,15 +2074,11 @@ class RuntimeState:
         self.machines = Executor()
         self.machines.start(ASSEMBLY_KEY, RUNTIME_ASSEMBLY)
         self.machines.run()
-        #: the job instances (DL-341). None keeps none, as the oracle does.
-        #: The second oracle sets it: every job row then has a `job` instance
-        #: on `machines` under its `job_key`, which each input's commit checks
+        #: the job instances (DL-341). None keeps none, as a bare store does.
+        #: The oracle sets it: every job row then has a `job` instance on
+        #: `machines` under its `job_key`, which each input's commit checks
         #: against its row (`commit_input`, DL-350).
         self.job_instance: JobInstance | None = None
-        #: told each `job_holding` move a verb writes, with its job (DL-349).
-        #: None tells no one, as the oracle has it; the second oracle sets it
-        #: to compare the move with the chart's holding row.
-        self.holding_moved: Callable[[str, Transition[HoldingState]], None] | None = None
         self._timers: list[tuple[datetime, int, Event]] = []  # heap of (due, token, ev)
         self._timer_seq = 0
         #: which period this state machine is running (period-model ss3.5,
@@ -2130,9 +2125,9 @@ class RuntimeState:
         twin's executor is a copy of this one's (`Executor.fork`, DL-339): it
         shares the instance records until it writes one, so a dispatch on the
         fork never reaches this one's instances. Each host instance's data is
-        bound to the twin, so its guards read the twin's rows. Job instances,
-        where the second oracle keeps them, hold value data and share it, and
-        `job_instance` is shared for that oracle to rebind (DL-341)."""
+        bound to the twin, so its guards read the twin's rows. Job instances
+        hold value data and share it, and `job_instance` is shared for the
+        oracle's fork to rebind (DL-341)."""
         twin = copy.copy(self)
         twin._jobs = dict(self._jobs)
         twin._globals = dict(self._globals)
@@ -2598,11 +2593,9 @@ class RuntimeState:
     def _take_holding(
         self, job: str, t: Transition[HoldingState], old: HoldingState, new: HoldingState
     ) -> None:
-        """A `job_holding` move: checked against the table, then told to
-        `holding_moved`, before the row is written."""
+        """A `job_holding` move, checked against the table before the row is
+        written."""
         self.note_violation(job, JOB_HOLDING.take(t, old, new))
-        if self.holding_moved is not None:
-            self.holding_moved(job, t)
 
     def reserve(self, job: str, reservations: Sequence[CapacityReservation]) -> None:
         """Record the capacity vector a start acquired (period-model ss5).

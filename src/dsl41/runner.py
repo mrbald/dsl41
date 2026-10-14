@@ -152,7 +152,6 @@ from typing import Final
 
 from dsl41.ir import CatalogIR, JobIR
 from dsl41.oracle import Oracle
-from dsl41.oracle_chart import ChartOracle
 from dsl41.oracle_state import CarriedRows, Event, EventSource
 from dsl41.boundary import (
     CommittedBoundary,
@@ -503,7 +502,7 @@ class Engine:
                 tz_aliases=alias_table(scheduler.tz_aliases if scheduler is not None else None),
                 semantics=switches,
             )
-        self.oracle: Oracle = ChartOracle(catalog, carried=carried, **reading)
+        self.oracle: Oracle = Oracle(catalog, carried=carried, **reading)
         #: concurrency-model ss2/ss8: the execution host this engine dispatches
         #: to. One engine per run root owns one local executor; machine names
         #: resolve to a relay through the routing table (ss5) and there is no

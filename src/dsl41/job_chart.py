@@ -1,12 +1,11 @@
 """The composite `job` statechart: one job's status, flags and holding in one
 declaration (docs/statechart-engine.md §11, DL-337).
 
-The chart is declared and checked. The oracle moves a job through the three
-tables in `oracle_state` (`job_status`, `job_flags`, `job_holding`), and
-tests/test_job_chart.py checks this chart against them cell by cell. The second
-oracle (`oracle_chart`, DL-341) drives it for every input and its whole
-cascade (DL-350), and the chart joins `machines.MACHINES` when the three
-tables leave it.
+The chart is declared and checked. The oracle (`oracle`, DL-341) drives it
+for every input and its whole cascade (DL-350); its writes still take the
+three tables in `oracle_state` (`job_status`, `job_flags`, `job_holding`),
+and tests/test_job_chart.py checks this chart against them cell by cell. The
+chart joins `machines.MACHINES` when the three tables leave it.
 
 Shape. The root `job` has three orthogonal regions, in this order: `status`,
 `flags` and `holding`. `status` holds `lifecycle`, the superstate of every
@@ -42,7 +41,7 @@ the tier's handle on the job's units (`Payload.units`), from which an action
 builds the settlement it sends, so the policy is read when the settlement
 pops, from the units the row holds then (DL-349).
 
-One input can move several regions of one job. Today's order of those moves
+One input can move several regions of one job. The order of those moves
 is the contract, and the region order is not load-bearing. Two forms declare
 it:
 
@@ -62,12 +61,12 @@ it:
   the configuration before the input: a forced start clears ice and hold, a
   scheduled tick arms, an injected live status makes held units the run's.
 
-The settlement of a run's units keeps today's two orders. A move on its own
-(`Oracle._after_transition`) runs the box rules, then the settlement, then the
+The settlement of a run's units has two orders. A move on its own
+(`OracleCascade._after`) runs the box rules, then the settlement, then the
 wakes: the status row sends the moments `box rules`, `settle` and `wake`, in
 that order, and `settle` sends `leave STARTING or RUNNING`. A move of the
-batch INACTIVE path (`Oracle._set_inactive_batch`) settles first: its row
-sends `leave STARTING or RUNNING` ahead of anything else. As today, the
+batch INACTIVE path (`OracleCascade._on_cascades`) settles first: its row
+sends `leave STARTING or RUNNING` ahead of anything else. Either way the
 settlement carries the end the move made, not the status it finds. One case
 reads the status: a box restarted by its own completion can start the member
 again inside the member's box rules, before its `settle` (DL-340). Past the
@@ -190,9 +189,17 @@ from dsl41.job_chart_rows import (
     row_configuration as row_configuration,
     row_holding as row_holding,
 )
-from dsl41.oracle import MAX_NESTED_STARTS
 from dsl41.oracle_state import LIVE
 from dsl41.state_machine import Context, Effects, Event, Statechart, StatechartError
+
+#: DL-304: how many of a job's admitted starts the ancestry of an attempt of
+#: it may hold (job.100). A start's own cascade may start the job again once:
+#: a box start's window pass can skip-complete run one and its wakes start
+#: run two (DL-246). A start nested inside two starts of the same job is a
+#: re-trigger loop that closes in one instant (L010's pattern); it is refused
+#: with a START_REFUSED line. Starts that follow one another, such as a job
+#: that several predecessors start in turn, are never refused.
+MAX_NESTED_STARTS: Final = 2
 
 
 def _data(ctx: Context) -> JobData:
@@ -252,7 +259,7 @@ def start_verdict(ctx: Context) -> StartVerdict:
     item's ancestry, whose `start admitted` items on the job are its starts in
     progress (`MAX_NESTED_STARTS`, DL-304). A forced attempt arrives with ice
     and hold already cleared by FORCE_STARTJOB's own rows, so it reads neither
-    gate. A decided attempt reads the window alone (`_run_window_permits`).
+    gate. A decided attempt reads the window alone (`_window_side`).
     """
     attempt: Attempt = ctx.event.payload
     data: JobData = ctx.data
@@ -301,7 +308,7 @@ def _gated(attempt: Attempt, active: frozenset[str]) -> StartVerdict | None:
 
 def _latched(attempt: Attempt, active: frozenset[str]) -> StartVerdict:
     """A releasable gate blocks the attempt: a scheduled tick of a dated job
-    arms, unless armed already or its box is not RUNNING (`Oracle._arm`)."""
+    arms, unless armed already or its box is not RUNNING (`_w_arm`)."""
     if attempt.scheduled and attempt.dated and "arm_off" in active and attempt.box != "idle":
         return "arm"
     return "ignored"
@@ -310,7 +317,7 @@ def _latched(attempt: Attempt, active: frozenset[str]) -> StartVerdict:
 def _skipped(attempt: Attempt, active: frozenset[str]) -> StartVerdict:
     """Outside the run window: a postponed start moves nothing; a skip moves a
     completed job to INACTIVE, and a member only in a RUNNING box it has not
-    run in (`_window_skip_bypass`); a member of such a box that is INACTIVE
+    run in (job.107); a member of such a box that is INACTIVE
     already has no move to ride, and its box rules run without one."""
     if attempt.window == "defer":
         return "ignored"
@@ -398,12 +405,12 @@ type ReadmitVerdict = Literal["admit", "cancel", "leave", "keep", "none"]
 
 
 def readmit_verdict(ctx: Context) -> ReadmitVerdict:
-    """What one admission attempt does to a waiter, in `_readmit`'s order.
+    """What one admission attempt does to a waiter, in the rule's order.
 
     Reads the payload (`Readmission`) and the configuration: QUE_WAIT and
     hold. `none` for a job that is not queued, which no scan addresses. A
-    waiter is never iced, so `_readmit`'s unreachable ice branch has no
-    counterpart here.
+    waiter is never iced (ON_ICE takes it out of the queue, job.112), so no
+    verdict reads ice.
     """
     scan: Readmission = ctx.event.payload
     active = ctx.active
@@ -512,7 +519,7 @@ def not_live(ctx: Context) -> bool:
 
 def force_clears(ctx: Context) -> bool:
     """The data: a catalog job; the configuration's status is not live or
-    queued (`_attempt_start` refuses those first)."""
+    queued (`start_verdict` refuses those first)."""
     return _data(ctx).catalog and not (ctx.active & _LIVE_OR_QUEUED)
 
 
@@ -571,7 +578,7 @@ def left_waiter(ctx: Context) -> bool:
 
 def noexec_settles_job(ctx: Context) -> bool:
     """The payload: ON_NOEXEC; not `noexec_ignored`; the data: a catalog job,
-    not a box (`_noexec_job`)."""
+    not a box."""
     data = _data(ctx)
     return _cause(ctx) == "ON_NOEXEC" and noexec_applies(ctx) and data.catalog and not data.box
 
@@ -579,7 +586,7 @@ def noexec_settles_job(ctx: Context) -> bool:
 def noexec_settles_box(ctx: Context) -> bool:
     """The payload: ON_NOEXEC; not `noexec_ignored`; the data: a box; the
     configuration's status is not INACTIVE, or the payload's `change` holds
-    (`_noexec_box`)."""
+    (`NoexecFacts.change`)."""
     if _cause(ctx) != "ON_NOEXEC" or not noexec_applies(ctx) or not _data(ctx).box:
         return False
     return "INACTIVE" not in ctx.active or _noexec(ctx).change
@@ -638,12 +645,12 @@ def current_run(ctx: Context) -> bool:
 
 
 def started_job(ctx: Context) -> bool:
-    """The data: not a box; the payload: the admitted run is the row's run (`_run`)."""
+    """The data: not a box; the payload: the admitted run is the row's run (`Started`)."""
     return is_job(ctx) and current_run(ctx)
 
 
 def started_box(ctx: Context) -> bool:
-    """The data: a box; the payload: the admitted run is the row's run (`_run`)."""
+    """The data: a box; the payload: the admitted run is the row's run (`Started`)."""
     return is_box(ctx) and current_run(ctx)
 
 
@@ -870,7 +877,7 @@ def extent_on_held(ctx: Context) -> Effects:
 
 def start_extent(ctx: Context) -> Effects | None:
     """`start admitted`: what the admitted start does, in the order
-    `_start_admitted` writes it, as the tier's handle says (DL-350): a
+    `OracleCascade._on_extent` sends it, as the tier's handle says (DL-350): a
     bypass consumes the arm, then its move's box rules and wakes; a queue its
     move's box rules and wakes; an admission or a start on held units
     reserves or takes over its units, consumes the arm, resets a box's jobs,
@@ -890,7 +897,7 @@ def start_extent(ctx: Context) -> Effects | None:
 
 def admit(ctx: Context) -> Effects:
     """A readmitted waiter (job.108) reserves its units, then consumes the arm,
-    in the order `_readmit` writes them, and the tier's handle sends the rest
+    in the order `OracleCascade._extent` sends them, and the tier's handle sends the rest
     of its extent: no `start admitted`, since a readmission is no start the
     bound counts (DL-350)."""
     effects = _consequences(ctx, "readmit")
@@ -904,7 +911,7 @@ def admit(ctx: Context) -> Effects:
 
 def settle_ended_run(ctx: Context) -> Effects:
     """A start meets the units of a run whose settlement is still owed
-    (`_settle_ended_run`): that run settles first, by the end it made, then
+    (`OracleCascade._on_settle_first`): that run settles first, by the end it made, then
     the start is admitted again against what the settlement left. The
     settlement's policy is read from the admission's handle (DL-349)."""
     admission: Admission = ctx.event.payload
@@ -927,14 +934,14 @@ def settles_first(ctx: Context) -> Effects | None:
 
 
 def moved(ctx: Context) -> Effects | None:
-    """A status move on its own (`_set_status`, `_after_transition`): the
+    """A status move on its own (`OracleCascade._after`): the
     move's box rules, then its settlement, then its wakes, as the tier's
     handle says (DL-350)."""
     return _consequences(ctx, "moved")
 
 
 def terminated(ctx: Context) -> Effects | None:
-    """A kill (`_terminate`): as `moved`, then a box's job_terminators, for the
+    """A kill: as `moved`, then a box's job_terminators, for the
     run read before the move (DL-348)."""
     return _consequences(ctx, "terminated")
 
@@ -942,12 +949,12 @@ def terminated(ctx: Context) -> Effects | None:
 def completed(ctx: Context) -> Effects | None:
     """A RUNNING box's end by an override or the default fold: as `moved`,
     then its job_terminators if it ended FAILURE, for the run it has then
-    (`_on_box_completed`, DL-348)."""
+    (`OracleCascade._box_ends`, DL-348)."""
     return _consequences(ctx, "completed")
 
 
 def injected(ctx: Context) -> Effects | None:
-    """An operator's INACTIVE on a job that is not a box (`_inject_inactive`):
+    """An operator's INACTIVE on a job that is not a box (`_after_inject`):
     as `moved`, then the idle parent's recompute (SEM-15)."""
     return _consequences(ctx, "injected")
 
@@ -962,7 +969,7 @@ def cascades(ctx: Context) -> Effects | None:
 def batched(ctx: Context) -> Effects | None:
     """A row of the batch INACTIVE path (a box start's reset, a box's
     cascade): it settles first; its box rules and wakes are the batch's
-    second phase (`_set_inactive_batch`)."""
+    second phase (`OracleCascade._notify`)."""
     return _consequences(ctx, "batched")
 
 
@@ -981,7 +988,7 @@ def left_queue(ctx: Context) -> Effects | None:
 def runs_box(ctx: Context) -> Effects | None:
     """A box's RUNNING (job.125): as `moved`, then its members' auto_hold and
     their starts, then the window decisions of the box starts in progress
-    (`_run`, `_on_box_started`, DL-246)."""
+    (`OracleCascade._box_running`, DL-246)."""
     return _consequences(ctx, "runs box")
 
 

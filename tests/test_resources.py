@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
@@ -59,6 +60,7 @@ def _renewable_pool_catalog(capacity: int, demands: list[int]) -> str:
     return f"insert_resource: R\nres_type: R\namount: {capacity}\n\n{jobs}"
 
 
+@pytest.mark.usefixtures("oracle_recursion_limit")
 @settings(max_examples=250, deadline=None)
 @given(data=st.data())
 def test_dl50_admission_never_overcommits_and_is_deadlock_free(data: st.DataObject) -> None:
@@ -103,6 +105,7 @@ def test_dl50_admission_never_overcommits_and_is_deadlock_free(data: st.DataObje
     assert all(_used(o).get(k, 0) == 0 for k in o._pool._bucket_cap), "renewable units leaked"
 
 
+@pytest.mark.usefixtures("oracle_recursion_limit")
 @settings(max_examples=250, deadline=None)
 @given(data=st.data())
 def test_dl256_held_units_never_overcommit_under_force_and_release(data: st.DataObject) -> None:
@@ -141,6 +144,7 @@ def _machine_load_catalog(capacity: int, jobs: list[tuple[int, int]]) -> str:
     return f"insert_machine: lm\ntype: a\nnode_name: lm\nmax_load: {capacity}\n\n{body}"
 
 
+@pytest.mark.usefixtures("oracle_recursion_limit")
 @settings(max_examples=300, deadline=None)
 @given(data=st.data())
 def test_dl247_checked_starts_fit_and_respect_priority_blocking(data: st.DataObject) -> None:
@@ -229,6 +233,7 @@ def _resource_priority_catalog(
     return f"insert_machine: lm\ntype: a\nnode_name: lm\nmax_load: {capacity}\n\n{resources}{body}"
 
 
+@pytest.mark.usefixtures("oracle_recursion_limit")
 @settings(max_examples=300, deadline=None)
 @given(data=st.data())
 def test_dl255_starts_respect_resource_priority_blocking(data: st.DataObject) -> None:

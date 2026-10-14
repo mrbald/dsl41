@@ -622,7 +622,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             member="must_start_times",
             facet="dst",
             klass=SUPPORTED,
-            cite="SEM-34, DL-253, oracle._must_instant",
+            cite="SEM-34, DL-253, oracle_schedule._must_instant",
             effect="an absolute must time in a spring change's missing hour is due in the"
             " first minute of the next hour (2:05 is 3:00:05); in a fall change's repeated"
             " hour it takes the first pass, or the second when the start is in that hour"
@@ -640,7 +640,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             member="must_complete_times",
             facet="dst",
             klass=SUPPORTED,
-            cite="SEM-34, DL-253, oracle._must_instant",
+            cite="SEM-34, DL-253, oracle_schedule._must_instant",
             effect="an absolute must time in a spring change's missing hour is due in the"
             " first minute of the next hour (2:45 is 3:00:45), and at 3:00:59 when a start"
             " in the missing hour would run after it; in a fall change's repeated hour it"
@@ -964,7 +964,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             member="run_window",
             facet="equal-endpoints",
             klass=PROVISIONAL,
-            cite="SEM-33, oracle.Oracle._run_window_permits",
+            cite="SEM-33, oracle.Oracle._window_side",
             effect="a window whose endpoints are equal ADMITS that one instant --"
             " `lo <= now <= hi` is inclusive at both ends, so the window is not empty"
             " and not all day; the pin is undocumented and no label was opened for it",
@@ -976,7 +976,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             member="run_window",
             facet="midpoint-tie",
             klass=PROVISIONAL,
-            cite="SEM-33, oracle.Oracle._run_window_permits",
+            cite="SEM-33, oracle.Oracle._window_side",
             effect="a start exactly halfway between the previous close and the next"
             " opening DEFERS to the opening rather than dropping; the tie is"
             " undocumented and no label was opened for it",
@@ -988,7 +988,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             member="run_window",
             facet="box-start-defer",
             klass=PROVISIONAL,
-            cite="SEM-33, DL-246, oracle.Oracle._decide_windows_at_box_start",
+            cite="SEM-33, DL-246, oracle.Oracle._window_pass",
             effect="the STARTJOB a box start defers to the next window opening is a start"
             " attempt with a schedule tick's standing, through the normal gates; how it"
             " composes with the member's own start_times is undocumented, at most one start"
@@ -1007,7 +1007,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             member="run_window",
             facet="dst-change",
             klass=SUPPORTED,
-            cite="SEM-33, DL-249, oracle._window_span",
+            cite="SEM-33, DL-249, oracle_schedule._window_span",
             effect="near a one-hour DST change at 02:00 local the window's endpoints follow"
             " the vendor's rules: in spring an opening in the missing hour moves to 03:00"
             " and a close in it keeps the window's length; in fall an opening in the"
@@ -1028,7 +1028,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             member="run_window",
             facet="dst-both-in-hour",
             klass=PROVISIONAL,
-            cite="SEM-33, DL-249, oracle._window_span",
+            cite="SEM-33, DL-249, oracle_schedule._window_span",
             effect="when both endpoints fall in the hour a DST change touches, two readings"
             " are pinned: in fall the close follows the opening into the second,"
             " standard-time pass, and in spring the vendor's 'first minute after 3:00'"
@@ -1092,7 +1092,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             member="condition",
             facet="queued-no-recheck",
             klass=SUPPORTED,
-            cite="DL-50, DL-257, oracle.Oracle._readmit",
+            cite="DL-50, DL-257, oracle.Oracle._queued_recheck",
             effect="Qr6 decided: the owner's default with a switch. A job admitted out of"
             " QUE_WAIT does not re-evaluate its condition, the vendor's"
             " EvaluateQueuedJobStarts=0; the vendor default is 1, which re-evaluates the"
@@ -2877,9 +2877,9 @@ SCENARIO_ROWS: tuple[Row, ...] = (
             member="ON_ICE",
             facet="armed",
             klass=PROVISIONAL,
-            cite="SEM-20, oracle.Oracle._handle_oob",
+            cite="SEM-20, oracle.Oracle._w_ice_on",
             label="Q3d",
-            sites=("oracle.Oracle._handle_oob#1",),
+            sites=("oracle_writers.OracleWriters._w_ice_on#1",),
             protocol="Q3d",
             effect="a pre-existing arm survives the ice round trip untouched",
             trigger=_scn(BASE_JIL, "0 ON_ICE job=J0", "1 OFF_ICE job=J0"),
@@ -2918,7 +2918,7 @@ SCENARIO_ROWS: tuple[Row, ...] = (
             member="ON_ICE",
             facet="queued",
             klass=PROVISIONAL,
-            cite="DL-50, oracle.Oracle._handle_oob",
+            cite="DL-50, oracle.Oracle._w_iced_waiter",
             label="Qr5",
             effect="icing a queued job dequeues it and settles it INACTIVE now, rather than"
             " leaving it in QUE_WAIT",
@@ -2935,7 +2935,7 @@ SCENARIO_ROWS: tuple[Row, ...] = (
             member="KILLJOB",
             facet="queued",
             klass=PROVISIONAL,
-            cite="DL-50, oracle.Oracle._dispatch",
+            cite="DL-50, oracle.Oracle._w_kill_waiter",
             label="Qr5",
             effect="killing a queued job dequeues it, consumes its arm and TERMINATEs it",
             trigger=_scn(
@@ -4350,9 +4350,9 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         surface="runtime",
         member="member-arm-scope",
         klass=PROVISIONAL,
-        cite="oracle.Oracle._disarm_members",
+        cite="oracle.Oracle._w_box_disarms",
         label="Q3c",
-        sites=("oracle.<module>#1", "oracle.Oracle._disarm_members#1"),
+        sites=("oracle.<module>#1", "oracle_writers.OracleWriters._w_box_disarms#1"),
         protocol="Q3c",
         effect="a box member's latched tick is scoped to the box run it was latched in",
         trigger=_job(BOX_BLOCK, box_name="BOX0", condition="s(BOX0)"),
@@ -4362,9 +4362,9 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         surface="runtime",
         member="box-start-all-members-out",
         klass=PROVISIONAL,
-        cite="SEM-11, oracle.Oracle._complete_starts_with_no_member_in_the_run",
+        cite="SEM-11, oracle.Oracle._window_pass",
         label="Q15",
-        sites=("oracle.Oracle._complete_starts_with_no_member_in_the_run#1",),
+        sites=("oracle_cascade.OracleCascade._window_pass#1",),
         protocol="Q15",
         effect="a box whose start leaves no member in the run, every direct member on ice or"
         " no members, completes at its start; no vendor sentence names the case, and"
@@ -4376,9 +4376,9 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         surface="runtime",
         member="idle-box-iced-member",
         klass=PROVISIONAL,
-        cite="SEM-15, oracle.Oracle._idle_box_recompute",
+        cite="SEM-15, oracle_facts.RecomputeFacts",
         label="Q16",
-        sites=("oracle.Oracle._idle_box_recompute#1",),
+        sites=("oracle_facts.RecomputeFacts._recompute#1",),
         protocol="Q16",
         effect="a box that is not running re-derives its status without an iced member that"
         " is out of the run, as it does without an INACTIVE one; no vendor sentence names an"
@@ -4507,7 +4507,7 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         surface="runtime",
         member="start-loop-cap",
         klass=SUPPORTED,
-        cite="oracle.Oracle._start, DL-304",
+        cite="job_chart.start_verdict, DL-304",
         effect="at most 2 nested starts of one job: a re-trigger loop that closes inside one"
         " input, a job whose own completion satisfies its condition again or a cycle of such"
         " jobs, starts each job twice; a start nested inside two starts of the same job is"

@@ -20,7 +20,7 @@ Reservations and waiter ranks ride on the job rows in the in-memory `RuntimeStat
 - Helpers in `capacity.py`: `checks_load`, `job_priority`, `release_policy`, `to_reservations`.
 - Row fields: `JobRuntime.reservations`, a tuple of `CapacityReservation`, and `JobRuntime.waiter_seq`. Owner fields: `RuntimeState.consumed` and `enqueue_counter`.
 - Owner verbs: `reserve`, `take_over_held`, `release_reservations`, `release_held`, `enqueue_waiter`, `dequeue_waiter`, `seed_consumed`.
-- Oracle steps: `_start`, `_admissible`, `_acquire`, `_start_on_held`, `_enqueue_waiter`, `_wake_waiters`, `_readmit`, `_release_resource`, `_release_removed_holders`.
+- Oracle steps: `_admissible` and the start's facts (`oracle_facts.StartFacts`), the admitted start's extent (`OracleCascade._extent`, `_frees_excess`), the queue's scan (`OracleCascade._scan`, `ReadmitFacts`), the period opening's release (`Oracle._release_removed_holders`), and the writers `_w_reserve`, `_w_take_over`, `_w_on_held`, `_w_queue`, `_w_readmit`, `_w_released`, `_w_release_ignored` and `_w_opening`.
 - Operator verb: RELEASE_RESOURCE ([control-protocol §3](../control-protocol.md#3-mutating-verbs-sendevent-host-seal)).
 - Semantic switches: `renewable-free` and `queued-recheck` ([runner-design §8a](../runner-design.md#8a-semantic-switches)).
 

@@ -315,6 +315,7 @@ def _pool_invariants(o: Oracle) -> list[str]:
     return broken
 
 
+@pytest.mark.usefixtures("oracle_recursion_limit")
 @settings(max_examples=200, deadline=None)
 @given(data=st.data())
 def test_the_capacity_pool_never_changes_without_a_row_change(data: st.DataObject) -> None:
@@ -602,6 +603,7 @@ _WIDE_JIL = (
 _WIDE_JOBS = ["wbox", "wm1", "wm2", "wsolo"]
 
 
+@pytest.mark.usefixtures("oracle_recursion_limit")
 @settings(max_examples=250, deadline=None)
 @given(data=st.data())
 def test_cm03_every_projection_change_moves_exactly_one_revision(data: st.DataObject) -> None:
@@ -785,9 +787,9 @@ def test_a_timer_naming_a_job_with_no_row_yet_skips_the_capacity_check() -> None
 
 def test_release_reservations_on_a_row_holding_nothing_is_a_no_op() -> None:
     """The mirror of `enqueue_waiter`'s idempotence below: a row with no
-    reservations has nothing to release. `oracle.py` only calls this verb
-    after `_pool.holds()` says a row holds units, so the guard is never
-    reached through the full interpreter -- but the store's own contract
+    reservations has nothing to release. The oracle calls this verb only
+    from a settlement row, which fires for a row that holds units, so the
+    guard is never reached through the full interpreter -- but the store's own contract
     (docstring: "Clear a run's vector on the edge that leaves
     STARTING/RUNNING") must hold for a caller that reaches it directly."""
     store = RuntimeState()
@@ -800,7 +802,7 @@ def test_release_reservations_on_a_row_holding_nothing_is_a_no_op() -> None:
 def test_enqueue_waiter_is_idempotent_a_queued_job_keeps_its_rank() -> None:
     """Docstring's own claim: "a job already queued keeps the rank it was
     given, because its position was decided when it first failed admission."
-    `oracle.py` never re-enqueues a job already in QUE_WAIT (`_attempt_start`
+    `oracle.py` never re-enqueues a job already in QUE_WAIT (the start's verdict
     refuses before `_start` runs), so this is the store's own contract,
     exercised directly."""
     store = RuntimeState()

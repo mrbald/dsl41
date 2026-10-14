@@ -110,7 +110,7 @@ from dsl41.ir import (
     SlaSpec,
     Time,
 )
-from dsl41.oracle_chart import ChartOracle
+from dsl41.oracle import Oracle
 from dsl41.oracle_state import TERMINAL, Event, TraceEntry
 from dsl41.semantics import DEFAULTS, iced_atom_truth
 
@@ -934,8 +934,8 @@ def equivalent_tier_c(
     for index, script in enumerate(scripts):
         # the default switches: equiv is a static tool with no runtime
         # profile, and compares both catalogs under one reading
-        oracle_a = ChartOracle(a)
-        oracle_b = ChartOracle(b)
+        oracle_a = Oracle(a)
+        oracle_b = Oracle(b)
         mapped_script = [
             ev.model_copy(
                 update={

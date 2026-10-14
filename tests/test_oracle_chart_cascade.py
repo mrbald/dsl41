@@ -1,4 +1,4 @@
-"""The chart oracle's cascade on the executor's worklist (docs/statechart-engine.md
+"""The oracle's cascade on the executor's worklist (docs/statechart-engine.md
 §5, §8, §11; DL-350).
 
 An input is a root item on the job's instance; its cascade is the items the
@@ -8,12 +8,12 @@ microstep's rows reached before the next item pops. These cases pin:
 - the hook: every fired row has a write, and a call into the executor from
   the cascade is `ReentrantDispatch`; an exception leaves the instances
   rebuilt from the rows; the commit's invariant; `Executor.realign` is gone;
-- the order: each of the cases where the worklist could part from today's
-  recursion, run on both oracles in lockstep, with the chart's items pinned;
+- the order: each of the cases where the worklist could part from a
+  recursive cascade's order, with the chart's items pinned;
 - the bound: job.100 counts the job's `start admitted` items in the
-  ancestry, at the depth today's call frames reached;
+  ancestry (DL-304);
 - the audiences: each gate a sender reads, with a mutant that widens it and
-  that the lockstep catches;
+  that parts from the oracle on the input;
 - the settlement: an owed one before an attempt's admission (job.401), and
   the row's own move written by the verb that decides it.
 """
@@ -25,16 +25,14 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
 
-import oracle_lockstep
 import pytest
-from oracle_lockstep import LockstepDivergence, LockstepOracle  # noqa: F401
+from oracle_inputs import observations
 
 from dsl41.ir import lower_source
-from dsl41.job_chart import Release, configuration
-from dsl41.oracle import Oracle, fit_recursion_limit
-from dsl41.oracle_chart import ChartOracle
-from dsl41.oracle_chart_cascade import CascadeOracle
-from dsl41.oracle_chart_facts import RowUnits
+from dsl41.job_chart import configuration
+from dsl41.oracle import Oracle
+from dsl41.oracle_cascade import OracleCascade
+from dsl41.oracle_facts import RowUnits
 from dsl41.oracle_state import ICE_ON, CascadeDepthError, Event, EventKind, OracleError
 from dsl41.state_machine import Executor, Outcome, ReentrantDispatch, StatechartError
 from dsl41.semantics import resolve
@@ -46,15 +44,16 @@ def ev(kind: EventKind, minutes: float = 0.0, **payload: object) -> Event:
     return Event(at=T0 + timedelta(minutes=minutes), kind=kind, payload=payload)
 
 
-def _paired(jil: str, setup: list[Event], factory: Any = ChartOracle, **kw: Any) -> LockstepOracle:
-    paired = LockstepOracle(lower_source(jil), new=factory, **kw)
+def _paired(jil: str, setup: list[Event], factory: Any = Oracle, **kw: Any) -> Oracle:
+    """An oracle of `factory` over `jil`, fed `setup`."""
+    oracle: Oracle = factory(lower_source(jil), **kw)
     for event in setup:
-        paired.feed(event)
-    return paired
+        oracle.feed(event)
+    return oracle
 
 
 def _spied(oracle: Oracle) -> list[Outcome]:
-    """Every outcome the chart oracle's hook writes from now on, in order."""
+    """Every outcome the oracle's hook writes from now on, in order."""
     seen: list[Outcome] = []
     perform = oracle._perform  # type: ignore[attr-defined]
 
@@ -75,9 +74,9 @@ def _items(seen: list[Outcome], *names: str) -> list[tuple[str, str, tuple[str, 
     ]
 
 
-def _with(**methods: Callable[..., Any]) -> type[ChartOracle]:
-    """A chart oracle with some of its methods replaced: a mutant."""
-    return type("Mutant", (ChartOracle,), dict(methods))
+def _with(**methods: Callable[..., Any]) -> type[Oracle]:
+    """The oracle with some of its methods replaced: a mutant."""
+    return type("Mutant", (Oracle,), dict(methods))
 
 
 def _cmd(name: str, extra: str = "") -> str:
@@ -96,7 +95,7 @@ def test_a_call_into_the_executor_from_the_cascade_is_reentrant() -> None:
     the recursion made one for every nested attempt, raises
     `ReentrantDispatch`, with the item's facts."""
 
-    class Recursing(ChartOracle):
+    class Recursing(Oracle):
         def _w_kill(self, job: str, outcome: Outcome) -> None:
             self.store.machines.dispatch(self.store.job_key("n"), outcome.event)
 
@@ -114,14 +113,14 @@ def test_a_call_into_the_executor_from_the_cascade_is_reentrant() -> None:
 def test_a_fired_row_the_oracle_has_no_write_for_is_a_statechart_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every row the chart oracle can fire has a write in the hook; one with
-    none is a statechart error at its microstep, before the rows after it."""
-    from dsl41 import oracle_chart
+    """Every row the chart can fire has a write in the hook; one with none is
+    a statechart error at its microstep, before the rows after it."""
+    from dsl41 import oracle_writers
 
-    writers = dict(oracle_chart._WRITERS)
+    writers = dict(oracle_writers._WRITERS)
     del writers["job.117"]
-    monkeypatch.setattr(oracle_chart, "_WRITERS", writers)
-    oracle = ChartOracle(lower_source(_cmd("j")))
+    monkeypatch.setattr(oracle_writers, "_WRITERS", writers)
+    oracle = Oracle(lower_source(_cmd("j")))
     with pytest.raises(StatechartError, match="'j': STATUS fired job.117, and no row") as raised:
         oracle.feed(ev("STATUS", 1, job="j", exit_code=0))
     assert ("instance", "'job:j'") in raised.value.facts
@@ -143,7 +142,7 @@ def test_an_error_inside_the_cascade_names_the_item_s_payload(event: str, payloa
     its payload among them, cut to the executor's length: a moment names its
     step and the job it is for, and the facts a box's rows read their kind."""
 
-    class Failing(ChartOracle):
+    class Failing(Oracle):
         armed = False
 
         def _perform(self, outcome: Outcome) -> None:
@@ -173,38 +172,38 @@ def test_an_error_inside_the_cascade_names_the_item_s_payload(event: str, payloa
     ],
     ids=["a global with no name", "an alarm fed as an input"],
 )
-def test_an_input_the_oracle_cannot_take_is_refused_as_today(event: Event, message: str) -> None:
-    """The chart oracle refuses the inputs today's oracle refuses, with its
-    message, and moves no row."""
-    for factory in (Oracle, ChartOracle):
-        oracle = factory(lower_source(_cmd("j")))
-        with pytest.raises(OracleError, match=message):
-            oracle.feed(event)
-        assert oracle.store.job["j"].status == "INACTIVE"
+def test_an_input_the_oracle_cannot_take_is_refused(event: Event, message: str) -> None:
+    """The oracle refuses an input it cannot take, with its message, and
+    moves no row."""
+    oracle = Oracle(lower_source(_cmd("j")))
+    with pytest.raises(OracleError, match=message):
+        oracle.feed(event)
+    assert oracle.store.job["j"].status == "INACTIVE"
 
 
-def test_job_312_is_no_row_the_chart_oracle_writes() -> None:
+def test_job_312_is_no_row_the_oracle_writes() -> None:
     """job.401 settles an ended run before its job's next admission, so the
     admitted start never meets a run's unsettled units (job.312): the hook
     has no write for it, and a chart that fires it is caught."""
-    from dsl41 import oracle_chart
+    from dsl41 import oracle_writers
 
-    assert "job.312" not in oracle_chart._WRITERS
-    assert {"job.419", "job.420", "job.421", "job.422", "job.423"}.isdisjoint(oracle_chart._WRITERS)
+    assert "job.312" not in oracle_writers._WRITERS
+    unmarked = {"job.419", "job.420", "job.421", "job.422", "job.423"}
+    assert unmarked.isdisjoint(oracle_writers._WRITERS)
 
 
-def test_every_row_the_chart_can_fire_has_a_writer_on_the_chart_oracle() -> None:
+def test_every_row_the_chart_can_fire_has_a_writer_on_the_oracle() -> None:
     """The hook's table names one writer for each row not marked unreachable,
     and no other, less job.312, which job.401 keeps from firing; each names a
-    method of `ChartOracle`. A new row without a writer fails here, not at
-    its first fire in the harness."""
-    from dsl41 import oracle_chart
+    method of `Oracle`. A new row without a writer fails here, not at its
+    first fire."""
+    from dsl41 import oracle_writers
     from dsl41.job_chart import JOB
 
     reachable = {row.id for row in JOB.rows if not row.mark}
-    assert set(oracle_chart._WRITERS) == reachable - {"job.312"}
-    for row, name in oracle_chart._WRITERS.items():
-        assert callable(getattr(ChartOracle, name, None)), (row, name)
+    assert set(oracle_writers._WRITERS) == reachable - {"job.312"}
+    for row, name in oracle_writers._WRITERS.items():
+        assert callable(getattr(Oracle, name, None)), (row, name)
 
 
 def test_a_macrostep_checks_each_instance_it_reached_against_its_row() -> None:
@@ -212,7 +211,7 @@ def test_a_macrostep_checks_each_instance_it_reached_against_its_row() -> None:
     project to its instance's configuration: a hook that skipped a write is
     caught there, though the input touched no row of the job (DL-350)."""
 
-    class Unarmed(ChartOracle):
+    class Unarmed(Oracle):
         def _w_arm(self, job: str, outcome: Outcome) -> None:
             """Planted: the arm the chart reached is never written."""
 
@@ -228,7 +227,7 @@ def test_the_commit_checks_each_touched_row_against_its_instance() -> None:
     """At an input's commit every job the input touched has its row project
     to its instance's configuration (DL-350): here a row written with
     no microstep, which no macrostep reached."""
-    oracle = ChartOracle(lower_source(_cmd("j")))
+    oracle = Oracle(lower_source(_cmd("j")))
     store = oracle.store
     store.begin_input()
     store.move_flag("j", ICE_ON)
@@ -238,11 +237,11 @@ def test_the_commit_checks_each_touched_row_against_its_instance() -> None:
 
 
 def test_the_executor_has_no_realign() -> None:
-    """Nothing outside the chart moves a job row in the chart oracle, so no
+    """Nothing outside the chart moves a job row in the oracle, so no
     instance is brought back to its row: the transitional method is gone, and
     the store follows no job."""
     assert not hasattr(Executor, "realign")
-    oracle = ChartOracle(lower_source(_cmd("j")))
+    oracle = Oracle(lower_source(_cmd("j")))
     assert not hasattr(oracle.store, "follow_job")
 
 
@@ -253,15 +252,15 @@ def test_an_exception_out_of_a_macrostep_leaves_the_instances_the_rows(
     written, the instances are rebuilt from the rows and the cascade's
     bookkeeping is empty again, so the next input starts clean."""
 
-    def broken(self: ChartOracle, job: str, outcome: Outcome) -> None:
+    def broken(self: Oracle, job: str, outcome: Outcome) -> None:
         raise OracleError("planted")
 
     jil = "insert_resource: R\nres_type: R\namount: 1\n\n" + _cmd(
         "j", "resources: (R, QUANTITY=1, FREE=Y)\n"
     )
-    oracle = ChartOracle(lower_source(jil))
+    oracle = Oracle(lower_source(jil))
     with monkeypatch.context() as patch:
-        patch.setattr(ChartOracle, "_w_reserve", broken)
+        patch.setattr(Oracle, "_w_reserve", broken)
         with pytest.raises(OracleError, match="planted"):
             oracle.feed(ev("STARTJOB", 1, job="j"))
     assert oracle.store.machines.active("job:j") == configuration("INACTIVE")
@@ -277,11 +276,11 @@ def test_a_recursion_error_at_the_root_is_the_cascade_error_naming_it(
     deep condition) meets the limit, inside the root item's macrostep, and
     the root dispatch names it as the cascade's first start."""
 
-    def deep(self: ChartOracle, cond: Any, evaluator: str) -> bool:
+    def deep(self: Oracle, cond: Any, evaluator: str) -> bool:
         raise RecursionError("maximum recursion depth exceeded")
 
-    oracle = ChartOracle(lower_source(_cmd("p") + _cmd("c", "condition: s(p)\n")))
-    monkeypatch.setattr(ChartOracle, "_cond_true", deep)
+    oracle = Oracle(lower_source(_cmd("p") + _cmd("c", "condition: s(p)\n")))
+    monkeypatch.setattr(Oracle, "_cond_true", deep)
     with pytest.raises(CascadeDepthError) as raised:
         oracle.feed(ev("STARTJOB", 1, job="c"))
     assert raised.value.job == "c" and "STARTJOB event" in str(raised.value)
@@ -299,9 +298,8 @@ def test_a_status_move_sends_its_box_rules_then_its_settlement_then_its_wakes() 
         "j", "resources: (R, QUANTITY=1, FREE=Y)\n"
     )
     paired = _paired(jil, [ev("STARTJOB", 1, job="j")])
-    seen = _spied(paired.twin)
+    seen = _spied(paired)
     paired.feed(ev("STATUS", 2, job="j", exit_code=0))
-    paired.check_seal()
     assert _items(seen) == [
         ("j", "STATUS", ("job.117",)),
         ("j", "box rules", ("job.405",)),
@@ -310,7 +308,7 @@ def test_a_status_move_sends_its_box_rules_then_its_settlement_then_its_wakes() 
         ("j", "wake", ("job.407",)),
         *[("j", "scan", ("job.410",))] * 3,
     ]
-    assert paired.twin.store.machines.active("job:j") == configuration("SUCCESS")
+    assert paired.store.machines.active("job:j") == configuration("SUCCESS")
 
 
 # ---- the bound (DL-304)
@@ -318,19 +316,18 @@ def test_a_status_move_sends_its_box_rules_then_its_settlement_then_its_wakes() 
 _LOOP = _cmd("lp", "status: ON_NOEXEC\ncondition: s(lp)\n")
 
 
-def test_the_bound_refuses_the_third_nested_start_with_today_s_line() -> None:
+def test_the_bound_refuses_the_third_nested_start_with_the_l010_line() -> None:
     """An ON_NOEXEC job whose own SUCCESS starts it again: its first start
     bypasses and its SUCCESS starts it again, nested; the second's start
-    again is the job's third, refused at job.100 with today's line. The
+    again is the job's third, refused at job.100 with the L010 line. The
     attempt one below the bound is admitted."""
     paired = _paired(_LOOP, [])
-    seen = _spied(paired.twin)
+    seen = _spied(paired)
     paired.feed(ev("FORCE_STARTJOB", 1, job="lp"))
-    paired.check_seal()
     starts = [o.rows for o in seen if o.event.name == "start"]
     assert starts == [("job.101",), ("job.101",), ("job.100",)]
 
-    class Refusing(ChartOracle):
+    class Refusing(Oracle):
         """Stops at the refusal, whose error's facts name its ancestry."""
 
         def _perform(self, outcome: Outcome) -> None:
@@ -345,7 +342,7 @@ def test_the_bound_refuses_the_third_nested_start_with_today_s_line() -> None:
         "'job:lp' start admitted",
         "'job:lp' start admitted",
     ]
-    lines = [t.cause for t in paired.twin.trace() if t.transition == "START_REFUSED"]
+    lines = [t.cause for t in paired.trace() if t.transition == "START_REFUSED"]
     assert lines == [
         "re-trigger loop inside one instant: started twice in one nested cascade; refused"
         " (L010; status of 'lp' changed to SUCCESS)"
@@ -361,28 +358,24 @@ def test_the_bound_refuses_the_third_nested_start_with_today_s_line() -> None:
     ids=["a box completing at its start under s(B)", "a ring of two"],
 )
 def test_the_dl304_loop_shapes_end_with_the_refusal(jil: str, start: str) -> None:
-    """The loop shapes DL-304 names end with the L010 line on both oracles."""
+    """The loop shapes DL-304 names end with the L010 line."""
     paired = _paired(jil, [])
     paired.feed(ev("FORCE_STARTJOB", 1, job=start))
-    paired.check_seal()
-    assert [t.transition for t in paired.twin.trace()].count("START_REFUSED") == 1
+    assert [t.transition for t in paired.trace()].count("START_REFUSED") == 1
 
 
-def test_the_deepest_legal_shapes_run_on_the_chart_oracle_at_the_base_limit() -> None:
-    """At the base limit, which the chart oracle's fit is whatever the job
-    count, the deep legal shapes of test_cascade_depth run to their end; the
-    old oracle needs its own fit, and both write the same."""
+def test_the_deepest_legal_shapes_run_at_python_s_default_limit() -> None:
+    """At Python's default limit, set after the oracle raised it, the deep
+    legal shapes of test_cascade_depth run to their end: the cascade takes no
+    frame per nested start."""
     depth = 100
     chain = "".join(_box(f"q{i}", f"condition: s(q{i - 1})\n" if i else "") for i in range(depth))
     limit = sys.getrecursionlimit()
     try:
+        oracle = Oracle(lower_source(chain))
         sys.setrecursionlimit(1000)
-        chart = ChartOracle(lower_source(chain))
-        chart.feed(ev("FORCE_STARTJOB", 1, job="q0"))
-        assert {row.status for row in chart.store.job.values()} == {"SUCCESS"}
-        fit_recursion_limit(depth, Oracle)
-        paired = _paired(chain, [ev("FORCE_STARTJOB", 1, job="q0")])
-        paired.check_seal()
+        oracle.feed(ev("FORCE_STARTJOB", 1, job="q0"))
+        assert {row.status for row in oracle.store.job.values()} == {"SUCCESS"}
     finally:
         sys.setrecursionlimit(limit)
 
@@ -412,9 +405,8 @@ def test_an_owed_settlement_settles_before_the_attempt_reads_its_admission(
     then finds the run settled (job.418 or job.406), and settles nothing."""
     jil = _RESTART.format(kind=kind, free=free)
     paired = _paired(jil, [ev("FORCE_STARTJOB", 1, job="rb"), ev("FORCE_STARTJOB", 2, job="rm")])
-    seen = _spied(paired.twin)
+    seen = _spied(paired)
     paired.feed(ev("STATUS", 3, job="rm", exit_code=0))
-    paired.check_seal()
     mine = [(name, rows) for job, name, rows in _items(seen) if job == "rm"]
     at = mine.index(("start", ("job.401",)))
     settled = "job.304" if kind == "R" else "job.306"
@@ -422,51 +414,27 @@ def test_an_owed_settlement_settles_before_the_attempt_reads_its_admission(
         ("leave STARTING or RUNNING", (settled,)),
         ("start", (row,)),
     ]
-    assert paired.twin.store.job["rm"].status == status
+    assert paired.store.job["rm"].status == status
     late = [rows for name, rows in mine[at:] if name == "leave STARTING or RUNNING"]
     assert late == [(settled,)]
 
 
-def test_a_settlement_reads_its_policy_when_it_pops_and_the_verb_writes_that_move(
+def test_a_settlement_row_that_holds_another_state_than_the_verb_writes_is_caught(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The settlement row the chart fires is the move the store's verb writes:
-    the verb decides it from the units, and a row that stands for another
-    move is a statechart error before the write. Planted: every end reads
-    `keep`, where today frees."""
+    """The settlement row the chart fires reads the policy when it pops, and
+    the store's verb decides the move from the units. Planted: every end
+    reads `keep`, where the policy frees: the row holds the units, the verb frees
+    them, and the macrostep's end finds the instance off its row, a
+    statechart error."""
     jil = "insert_resource: R\nres_type: R\namount: 1\n\n" + _cmd(
         "j", "resources: (R, QUANTITY=1, FREE=Y)\n"
     )
-    oracle = ChartOracle(lower_source(jil))
+    oracle = Oracle(lower_source(jil))
     oracle.feed(ev("STARTJOB", 1, job="j"))
     monkeypatch.setattr(RowUnits, "release", lambda self, success: "keep")
-    with pytest.raises(
-        StatechartError,
-        match="'j': the chart's job.305 stands for job_holding.05, and the verb's holding move"
-        " is job_holding.04",
-    ):
+    with pytest.raises(StatechartError, match="'j': at the macrostep's end its instance is in"):
         oracle.feed(ev("STATUS", 2, job="j", exit_code=0))
-    assert oracle.store.job["j"].reservations
-
-
-def test_a_spend_read_as_free_is_caught_in_the_harness() -> None:
-    """Mutant (Opus R1, DL-349): every spend is read as free. Free and spend
-    both end in `none`, so the state alone would not show it; the verb's
-    move does, at the corpus's first spend."""
-    real = RowUnits.release
-
-    def free(self: RowUnits, success: bool) -> Release:
-        found = real(self, success)
-        return "free" if found == "spend" else found
-
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(RowUnits, "release", free)
-        jobs = oracle_lockstep.corpus_jobs() + oracle_lockstep.directed_jobs()
-        summary = oracle_lockstep.run_all(jobs, [{}], new=ChartOracle, stop_at_first=True)
-    (found,) = summary.divergences
-    report = found.report()
-    assert "the chart's job.304 stands for job_holding.04" in report
-    assert "the verb's holding move is job_holding.06" in report
 
 
 def test_a_settlement_with_no_handle_is_a_statechart_error_before_its_write(
@@ -478,9 +446,9 @@ def test_a_settlement_with_no_handle_is_a_statechart_error_before_its_write(
     jil = "insert_resource: K\nres_type: R\namount: 1\n\n" + _cmd(
         "keep", "resources: (K, QUANTITY=1, FREE=N)\n"
     )
-    oracle = ChartOracle(lower_source(jil))
+    oracle = Oracle(lower_source(jil))
     oracle.feed(ev("STARTJOB", 1, job="keep"))
-    monkeypatch.setattr(CascadeOracle, "_units", lambda self, job: None)
+    monkeypatch.setattr(OracleCascade, "_units", lambda self, job: None)
     with pytest.raises(StatechartError, match="no release and no handle") as raised:
         oracle.feed(ev("STATUS", 2, job="keep", exit_code=0))
     assert ("item", "the event leave STARTING or RUNNING") in raised.value.facts
@@ -491,7 +459,7 @@ def test_a_settlement_with_no_move_is_a_statechart_error_before_its_write() -> N
     """The verb that settles a run's units writes the move the settlement
     names; one that names none has no write, and the units stay held."""
 
-    class Moveless(ChartOracle):
+    class Moveless(Oracle):
         def _perform(self, outcome: Outcome) -> None:
             if outcome.event.name == "leave STARTING or RUNNING":
                 outcome.event.payload.move = None
@@ -511,10 +479,10 @@ def test_job_401_with_no_settlement_owed_is_a_statechart_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A chart that takes job.401 where nothing is owed is caught at once."""
-    from dsl41.oracle_chart_facts import StartFacts
+    from dsl41.oracle_facts import StartFacts
 
     monkeypatch.setattr(StartFacts, "settlement_owed", property(lambda self: True))
-    oracle = ChartOracle(lower_source(_cmd("j")))
+    oracle = Oracle(lower_source(_cmd("j")))
     with pytest.raises(StatechartError, match="'j': job.401 fired, and no settlement of run 0"):
         oracle.feed(ev("STARTJOB", 1, job="j"))
     assert oracle.store.job["j"].status == "INACTIVE"
@@ -548,7 +516,7 @@ def _children(seen: list[Outcome], name: str, job: str) -> list[tuple[str, str]]
 
 
 def test_the_batch_s_second_phase_skips_a_row_a_wake_started_again() -> None:
-    """`_set_inactive_batch`: B and its running member m1 are written and
+    """The batch INACTIVE path: B and its running member m1 are written and
     settled first (m1 keeps its renewable unit). B's own wake in the second
     phase starts B again (`n(B)`), and B's run starts m1: m1 has moved on, so
     the phase gives it no box rules and no wake, and the unit its first phase
@@ -559,9 +527,8 @@ def test_the_batch_s_second_phase_skips_a_row_a_wake_started_again() -> None:
         + _cmd("m1", "box_name: B\nresources: (R, QUANTITY=1, FREE=Y)\n")
     )
     paired = _paired(jil, [ev("FORCE_STARTJOB", 1, job="B")])
-    seen = _spied(paired.twin)
+    seen = _spied(paired)
     paired.feed(ev("STATUS", 2, job="B", status="INACTIVE"))
-    paired.check_seal()
     # B's own wake starts B, whose reset's second phase sends B's STARTING
     assert _children(seen, "notify step", "B") == [
         ("m1", "box run ends"),
@@ -570,12 +537,12 @@ def test_the_batch_s_second_phase_skips_a_row_a_wake_started_again() -> None:
         ("B", "starting"),
         ("B", "scan"),
     ]
-    rows = paired.twin.store.job
+    rows = paired.store.job
     assert (rows["B"].run_number, rows["m1"].status, rows["m1"].run_number) == (2, "RUNNING", 2)
 
 
 def test_a_scan_requested_inside_a_pass_asks_nothing_and_the_pass_goes_on() -> None:
-    """`_wake_waiters`: W1's readmission completes the empty box at its start,
+    """The queue's scan: W1's readmission completes the empty box at its start,
     and its release wakes the queue inside the running pass. That scan sends
     no readmission; W1 moved, so the outer pass starts again and admits W2
     with the unit W1 gave back."""
@@ -592,12 +559,11 @@ def test_a_scan_requested_inside_a_pass_asks_nothing_and_the_pass_goes_on() -> N
         ev("STARTJOB", 4, job="W2"),
     ]
     paired = _paired(jil, setup)
-    seen = _spied(paired.twin)
+    seen = _spied(paired)
     paired.feed(ev("RELEASE_RESOURCE", 5, job="h"))
-    paired.check_seal()
     assert _children(seen, "scan", "W1") == []
     assert [job for job, name in _children(seen, "scan", "h") if name == "readmit"] == ["W1", "W2"]
-    rows = paired.twin.store.job
+    rows = paired.store.job
     assert (rows["W1"].status, rows["W2"].status) == ("SUCCESS", "RUNNING")
 
 
@@ -611,21 +577,20 @@ _WALK_SETUP = [ev("STATUS", 1, job="x", status="SUCCESS"), ev("FORCE_STARTJOB", 
 
 
 def test_the_walk_up_skips_an_ancestor_restarted_inside_it() -> None:
-    """`_on_descendant_transition`: M's SUCCESS completes P, P's SUCCESS
+    """The walk up: M's SUCCESS completes P, P's SUCCESS
     completes G by its override, and G's wakes start it again, all inside M's
     box rules. M's walk up then finds G in a later run and reads none of its
     overrides: the run belongs to the earlier move (SEM-12)."""
     paired = _paired(_WALK, _WALK_SETUP)
-    seen = _spied(paired.twin)
+    seen = _spied(paired)
     paired.feed(ev("STATUS", 3, job="M", status="SUCCESS"))
-    paired.check_seal()
     # the SUCCESS's own walk pops last; M's moves in G's new run walk too
     assert _sent(seen, _steps(seen, "walk up", "M")[-1]) == []
-    assert paired.twin.store.job["G"].run_number == 2
+    assert paired.store.job["G"].run_number == 2
 
 
 def test_a_kill_inside_the_terminator_steps_ends_them_where_the_box_runs_again() -> None:
-    """`_cascade_job_terminators`: the kill of bx reaches `a`, whose
+    """The box's end (`box ends step`): the kill of bx reaches `a`, whose
     TERMINATED starts bx again (`t(a)`); the next step reads the new run and
     sends `b`, carried RUNNING from the run that ended, nothing (DL-348)."""
     jil = (
@@ -634,11 +599,10 @@ def test_a_kill_inside_the_terminator_steps_ends_them_where_the_box_runs_again()
         + _cmd("b", "box_name: bx\nbox_terminator: 1\njob_terminator: 1\n")
     )
     paired = _paired(jil, [ev("FORCE_STARTJOB", 1, job="bx")])
-    seen = _spied(paired.twin)
+    seen = _spied(paired)
     paired.feed(ev("KILLJOB", 2, job="bx"))
-    paired.check_seal()
     assert _children(seen, "box ends step", "bx") == [("a", "box ends FAILURE or TERMINATED")]
-    rows = paired.twin.store.job
+    rows = paired.store.job
     assert (rows["b"].status, rows["b"].run_number) == ("RUNNING", 1)
 
 
@@ -647,7 +611,7 @@ _SKIPPED = _DAILY + 'run_window: "06:00-07:00"\n'
 
 
 def test_a_box_started_inside_another_s_window_pass_runs_its_own() -> None:
-    """`_run`'s outermost pass: O's pass skips its member, which completes O,
+    """The outermost window pass: O's pass skips its member, which completes O,
     whose SUCCESS starts X inside the pass. The pass was closed when its list
     was read, so X's RUNNING opens a pass of its own and runs it there,
     before O's ends (DL-246)."""
@@ -658,20 +622,19 @@ def test_a_box_started_inside_another_s_window_pass_runs_its_own() -> None:
         + _cmd("xw", "box_name: X\n" + _SKIPPED)
     )
     paired = _paired(jil, [])
-    seen = _spied(paired.twin)
+    seen = _spied(paired)
     paired.feed(ev("FORCE_STARTJOB", 1, job="O"))
-    paired.check_seal()
     passes = [(str(o.key)[4:], o.depth) for o in seen if o.event.name == "window pass"]
     first_x = next(i for i, (job, _depth) in enumerate(passes) if job == "X")
     last_o = max(i for i, (job, _depth) in enumerate(passes) if job == "O")
     assert first_x < last_o
     assert _children(seen, "window pass", "X") == [("xw", "start")]
-    rows = paired.twin.store.job
+    rows = paired.store.job
     assert (rows["O"].status, rows["X"].status) == ("SUCCESS", "SUCCESS")
 
 
 def test_a_freed_excess_s_scan_comes_before_the_load_mark_and_the_owed_scan_runs() -> None:
-    """`_start_admitted`: an admission on held units the catalog no longer
+    """An admitted start's extent: an admission on held units the catalog no longer
     asks for frees the excess, whose scan admits the waiter, and only then is
     the input's admit-only scan owed for the load the start takes (DL-255):
     the input ends with that scan as a root item of its own."""
@@ -694,17 +657,16 @@ def test_a_freed_excess_s_scan_comes_before_the_load_mark_and_the_owed_scan_runs
     moved = lower_source(jil.replace("(OLD, QUANTITY=1, FREE=N)", "(NEW, QUANTITY=1, FREE=N)"))
     from dsl41.capacity import CapacityPool
 
-    for side in (paired, paired.twin):
+    for side in (paired,):
         side.catalog = moved
         side._pool = CapacityPool(moved)
-    seen = _spied(paired.twin)
+    seen = _spied(paired)
     paired.feed(ev("STARTJOB", 4, job="ha"))
-    paired.check_seal()
     extent = _children(seen, "start admitted", "ha")
     assert extent[-2:] == [("ha", "scan"), ("ha", "load taken")]
     roots = [(str(o.key)[4:], o.event.name) for o in seen if o.depth == 0]
     assert roots[-1] == ("wl", "scan")
-    rows = paired.twin.store.job
+    rows = paired.store.job
     assert (rows["wa"].status, rows["wl"].status) == ("RUNNING", "QUE_WAIT")
 
 
@@ -725,24 +687,23 @@ def test_a_freed_excess_s_scan_comes_before_the_load_mark_and_the_owed_scan_runs
 def test_the_fold_follows_a_member_s_every_move_unless_an_override_ended_the_box(
     first: str, door: list[tuple[str, str]]
 ) -> None:
-    """`_on_member_transition`'s door: m's STARTING is no move the overrides
+    """The completion door: m's STARTING is no move the overrides
     read, so the fold alone follows it; m's RUNNING reads the box_success,
     which names m, and the fold follows only if it did not end the box."""
     jil = _cmd("x") + _box("B", "box_success: s(m) | s(x)\n") + _cmd("m", "box_name: B\n")
     paired = _paired(jil, [ev("STATUS", 1, job="x", status=first)])
-    seen = _spied(paired.twin)
+    seen = _spied(paired)
     paired.feed(ev("FORCE_STARTJOB", 2, job="B"))
-    paired.check_seal()
     assert _children(seen, "box rules", "m") == door
-    assert paired.twin.store.job["B"].status == ("SUCCESS" if first == "SUCCESS" else "RUNNING")
+    assert paired.store.job["B"].status == ("SUCCESS" if first == "SUCCESS" else "RUNNING")
 
 
-def _moved(paired: LockstepOracle, traced: int) -> list[tuple[str, str]]:
-    return [(t.job, t.transition) for t in paired.twin.trace()[traced:]]
+def _moved(paired: Oracle, traced: int) -> list[tuple[str, str]]:
+    return [(t.job, t.transition) for t in paired.trace()[traced:]]
 
 
 def test_a_member_killed_while_starting_ignores_its_own_started() -> None:
-    """job.183 (`_run`'s RUNNING check): J's STARTING wakes X, which
+    """job.183 (`Started.current`): J's STARTING wakes X, which
     bypasses; X's SUCCESS meets B's box_failure, and B's end kills J, a
     job_terminator, while J is STARTING. J's `started` then pops on a
     TERMINATED job and is ignored."""
@@ -753,27 +714,25 @@ def test_a_member_killed_while_starting_ignores_its_own_started() -> None:
         + _cmd("Z")
     )
     paired = _paired(jil, [ev("FORCE_STARTJOB", 1, job="B"), ev("STARTJOB", 2, job="Z")])
-    seen = _spied(paired.twin)
+    seen = _spied(paired)
     paired.feed(ev("STATUS", 3, job="Z", exit_code=0))
-    paired.check_seal()
     assert ("J", "started", ("job.183",)) in _items(seen, "started")
-    statuses = {job: paired.twin.store.job[job].status for job in ("B", "J")}
+    statuses = {job: paired.store.job[job].status for job in ("B", "J")}
     assert statuses == {"B": "FAILURE", "J": "TERMINATED"}
 
 
 def test_an_empty_box_set_inactive_ends_no_member_s_run() -> None:
-    """`_set_inactive_batch` on a box with no member and no subbox: there is
+    """The batch INACTIVE path on a box with no member and no subbox: there is
     no run of a member to end, so the batch sends no disarm."""
     paired = _paired(_box("e"), [ev("STARTJOB", 1, job="e")])
-    seen = _spied(paired.twin)
+    seen = _spied(paired)
     paired.feed(ev("STATUS", 2, job="e", status="INACTIVE"))
-    paired.check_seal()
     assert not _items(seen, "box run ends")
-    assert paired.twin.store.job["e"].status == "INACTIVE"
+    assert paired.store.job["e"].status == "INACTIVE"
 
 
 def test_an_ice_in_a_subbox_walks_up_while_the_subbox_still_runs() -> None:
-    """`_ice_resolves_member`: the iced member is out of its box's run, a
+    """An ice's completion moment: the iced member is out of its box's run, a
     completion moment for the box (DL-285); the box still runs `m3`, so the
     walk up reaches the outer box, which the fold leaves RUNNING."""
     jil = (
@@ -785,12 +744,11 @@ def test_an_ice_in_a_subbox_walks_up_while_the_subbox_still_runs() -> None:
         + _cmd("x")
     )
     paired = _paired(jil, [ev("STARTJOB", 1, job="O"), ev("STATUS", 2, job="m1", exit_code=0)])
-    seen = _spied(paired.twin)
+    seen = _spied(paired)
     paired.feed(ev("ON_ICE", 3, job="m2"))
-    paired.check_seal()
     boxes = [item[:2] for item in _items(seen, "member moves", "completion moment")]
     assert boxes == [("I", "member moves"), ("I", "completion moment"), ("O", "member moves")]
-    assert (paired.twin.store.job["I"].status, paired.twin.store.job["O"].status) == (
+    assert (paired.store.job["I"].status, paired.store.job["O"].status) == (
         "RUNNING",
         "RUNNING",
     )
@@ -802,7 +760,7 @@ _LEAVING = "insert_resource: Q\nres_type: R\namount: 1\n\n" + _cmd(
 
 
 def test_a_waiter_its_own_leave_started_again_takes_nothing_more_from_it() -> None:
-    """`_leave_queue_unstarted` under `queued-recheck=1`: W's condition is
+    """A waiter's leave under `queued-recheck=1`: W's condition is
     false, so it leaves the queue INACTIVE; its own INACTIVE starts R, then
     x, whose SUCCESS starts W again. The leave's tail reads W moved on and
     does nothing more."""
@@ -819,11 +777,10 @@ def test_a_waiter_its_own_leave_started_again_takes_nothing_more_from_it() -> No
         ev("STATUS", 4, job="x", status="INACTIVE"),
     ]
     paired = _paired(jil, setup, semantics=resolve({"queued-recheck": "1"}))
-    assert paired.twin.store.job["W"].status == "QUE_WAIT"
-    traced = len(paired.twin.trace())
-    seen = _spied(paired.twin)
+    assert paired.store.job["W"].status == "QUE_WAIT"
+    traced = len(paired.trace())
+    seen = _spied(paired)
     paired.feed(ev("STATUS", 5, job="h", status="SUCCESS"))
-    paired.check_seal()
     moved = [move for job, move in _moved(paired, traced) if job == "W"]
     assert moved == ["QUE_WAIT->INACTIVE", "INACTIVE->STARTING", "STARTING->RUNNING"]
     leave = _steps(seen, "after leave", "W")
@@ -853,11 +810,10 @@ def test_a_member_whose_leave_ended_its_box_s_run_takes_nothing_more_from_it() -
         ev("STATUS", 6, job="k", status="SUCCESS"),
     ]
     paired = _paired(jil, setup, semantics=resolve({"queued-recheck": "1"}))
-    assert paired.twin.store.job["c"].status == "QUE_WAIT"
-    traced = len(paired.twin.trace())
-    seen = _spied(paired.twin)
+    assert paired.store.job["c"].status == "QUE_WAIT"
+    traced = len(paired.trace())
+    seen = _spied(paired)
     paired.feed(ev("STATUS", 7, job="h", status="SUCCESS"))
-    paired.check_seal()
     assert _moved(paired, traced)[-2:] == [("c", "QUE_WAIT->INACTIVE"), ("bx", "RUNNING->SUCCESS")]
     leave = _steps(seen, "after leave", "c")
     assert len(leave) == 1 and _sent(seen, leave[0]) == []
@@ -885,11 +841,10 @@ def test_a_release_inside_an_admit_only_scan_runs_a_full_pass_next() -> None:
         ev("SET_GLOBAL", 3, name="GO", value="1"),
     ]
     paired = _paired(jil, setup)
-    traced = len(paired.twin.trace())
+    traced = len(paired.trace())
     paired.feed(ev("KILLJOB", 4, job="B"))
-    paired.check_seal()
     assert _moved(paired, traced)[-1] == ("M", "QUE_WAIT->INACTIVE")
-    statuses = {job: paired.twin.store.job[job].status for job in ("Q", "X", "M")}
+    statuses = {job: paired.store.job[job].status for job in ("Q", "X", "M")}
     assert statuses == {"Q": "FAILURE", "X": "TERMINATED", "M": "INACTIVE"}
 
 
@@ -909,22 +864,25 @@ def test_a_window_skip_that_ends_an_outer_run_decides_nothing_more_in_it(mode: s
         + _cmd("mO", "box_name: O\n" + window)
     )
     paired = _paired(jil, [], semantics=resolve({"box-start-all-members-out": mode}))
-    seen = _spied(paired.twin)
+    seen = _spied(paired)
     paired.feed(ev("STARTJOB", 1, job="O"))
-    paired.check_seal()
     decided = [o for o in seen if o.event.name == "start" and o.depth > 0]
     assert [str(o.key) for o in decided if "job.404" in o.rows] == ["job:mI"]
     assert [job for job, _ in _moved(paired, 0) if job == "mO"] == []
-    assert paired.twin.store.job["O"].status == "SUCCESS"
+    assert paired.store.job["O"].status == "SUCCESS"
 
 
 # ---- the audiences (DL-346, DL-348): each gate, and a mutant that widens it
 
 
-def _diverges(factory: type[ChartOracle], jil: str, setup: list[Event], last: Event) -> None:
-    paired = _paired(jil, setup, factory)
-    with pytest.raises(LockstepDivergence):
-        paired.feed(last)
+def _diverges(factory: type[Oracle], jil: str, setup: list[Event], last: Event) -> None:
+    """The mutant leaves what the oracle leaves on `setup`, and parts from it
+    on `last`: the trace, the events, the rows, the revisions or the
+    timers it leaves differ (tests/oracle_inputs.py's renderings)."""
+    found = observations(factory(lower_source(jil)), [*setup, last])
+    expected = observations(Oracle(lower_source(jil)), [*setup, last])
+    assert found[:-1] == expected[:-1]
+    assert found[-1] != expected[-1]
 
 
 _CARRIED = (
@@ -942,12 +900,11 @@ def test_a_box_start_resets_no_job_of_a_live_subbox() -> None:
     """O's override ends it while its subbox S still runs s2; `s(O)` starts O
     again, and its reset leaves S's subtree alone: s1 keeps its SUCCESS."""
     paired = _paired(_CARRIED, _CARRIED_SETUP)
-    seen = _spied(paired.twin)
+    seen = _spied(paired)
     paired.feed(_CARRIED_LAST)
-    paired.check_seal()
     reset = [str(o.key)[4:] for o in seen if o.event.name == "box start"]
     assert reset == ["o1"]
-    rows = paired.twin.store.job
+    rows = paired.store.job
     assert (rows["S"].status, rows["s1"].status) == ("RUNNING", "SUCCESS")
 
 
@@ -969,11 +926,10 @@ def test_a_queue_move_reads_no_override_of_its_box() -> None:
     """q queues in B's run: QUE_WAIT is no move the door reads overrides on,
     so `n(q)` is not read and B keeps running; the fold alone follows."""
     paired = _paired(_QUEUED, [ev("STARTJOB", 1, job="h")])
-    seen = _spied(paired.twin)
+    seen = _spied(paired)
     paired.feed(ev("FORCE_STARTJOB", 2, job="B"))
-    paired.check_seal()
     assert ("B", "member moves") not in _children(seen, "box rules", "q")
-    assert paired.twin.store.job["B"].status == "RUNNING"
+    assert paired.store.job["B"].status == "RUNNING"
 
 
 def test_a_door_that_reads_overrides_on_every_move_diverges() -> None:
@@ -1002,11 +958,10 @@ def test_an_iced_waiter_s_move_recomputes_no_idle_box() -> None:
     q still waiting. The ice that takes q out of the queue is no terminal
     move, so B re-derives nothing (SEM-15)."""
     paired = _paired(_ICED_WAITER, _ICED_SETUP)
-    seen = _spied(paired.twin)
+    seen = _spied(paired)
     paired.feed(ev("ON_ICE", 5, job="q"))
-    paired.check_seal()
     assert _children(seen, "box rules", "q") == []
-    assert paired.twin.store.job["B"].status == "SUCCESS"
+    assert paired.store.job["B"].status == "SUCCESS"
 
 
 def test_a_recompute_sent_on_every_move_of_an_idle_box_s_member_diverges() -> None:
@@ -1033,15 +988,14 @@ def test_an_operator_s_inactive_recomputes_no_parent_its_wakes_started_again() -
     gate, the next one does."""
     setup = [ev("FORCE_STARTJOB", 1, job="P")]
     paired = _paired(_RESTARTED_PARENT, setup)
-    seen = _spied(paired.twin)
+    seen = _spied(paired)
     paired.feed(ev("STATUS", 2, job="m", status="INACTIVE"))
-    paired.check_seal()
     assert _children(seen, "after inject", "m") == []
-    rows = paired.twin.store.job
+    rows = paired.store.job
     assert rows["P"].status == "SUCCESS" and rows["P"].run_number > 1
     widened = _with(_parent_recomputes=lambda self, box, status, run: True)
     paired = _paired(_RESTARTED_PARENT, setup, widened)
-    seen = _spied(paired.twin)
+    seen = _spied(paired)
     paired.feed(ev("STATUS", 2, job="m", status="INACTIVE"))
     assert _children(seen, "after inject", "m") == [("P", "box recompute")]
     assert [o.rows for o in seen if o.event.name == "box recompute"] == [("job.191",)]
@@ -1065,7 +1019,7 @@ _MOVED_OVERRIDE_SETUP = [
 ]
 
 
-def _no_run_compare(self: ChartOracle, box: str, status: str, run: int) -> bool:
+def _no_run_compare(self: Oracle, box: str, status: str, run: int) -> bool:
     """Mutant: the parent's status gates kept, its run compare dropped."""
     settled = ("RUNNING", "STARTING", "TERMINATED")
     return status not in settled and self._runtime(box).status not in settled
@@ -1074,12 +1028,11 @@ def _no_run_compare(self: ChartOracle, box: str, status: str, run: int) -> bool:
 def test_a_parent_recompute_that_reads_no_run_diverges() -> None:
     """Gate 5's mutant: without the run compare, m's INACTIVE recomputes P in
     the run its wakes began; box_failure s(ext) is true by then, so the chart
-    writes P SUCCESS->FAILURE (job.164), where today's oracle writes nothing."""
+    writes P SUCCESS->FAILURE (job.164), where the oracle writes nothing."""
     last = ev("STATUS", 4, job="m", status="INACTIVE")
     paired = _paired(_MOVED_OVERRIDE, _MOVED_OVERRIDE_SETUP)
     paired.feed(last)
-    paired.check_seal()
-    assert paired.twin.store.job["P"].status == "SUCCESS"
+    assert paired.store.job["P"].status == "SUCCESS"
     _diverges(
         _with(_parent_recomputes=_no_run_compare), _MOVED_OVERRIDE, _MOVED_OVERRIDE_SETUP, last
     )
@@ -1097,11 +1050,11 @@ _MID = (
 _SELF_RESTART = _box("bx", "condition: t(bx)\n") + _cmd("k", "box_name: bx\njob_terminator: 1\n")
 
 
-def _ends_read_late(self: ChartOracle, box: str, run: int | None) -> Any:
+def _ends_read_late(self: Oracle, box: str, run: int | None) -> Any:
     """Mutant: the run the cascade compares is read at its first step, after
     the end's wakes, not before the write (Opus R1's shape, DL-348)."""
     run = self._runtime(box).run_number
-    yield from CascadeOracle._box_ends(self, box, run)
+    yield from OracleCascade._box_ends(self, box, run)
 
 
 @pytest.mark.parametrize(
@@ -1121,7 +1074,7 @@ def _ends_read_late(self: ChartOracle, box: str, run: int | None) -> Any:
     ids=["no per-member check", "the run read at the first step"],
 )
 def test_a_terminator_cascade_that_leaves_the_run_that_ended_diverges(
-    mutant: type[ChartOracle], jil: str, last: Event
+    mutant: type[Oracle], jil: str, last: Event
 ) -> None:
     """Mutants of DL-348's audience: the box's run not compared before each
     member, or read when the cascade begins rather than before the write."""

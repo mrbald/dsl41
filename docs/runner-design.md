@@ -63,7 +63,7 @@ control surface.
 The cut line follows the oracle's event contract:
 
 - **Oracle → shell**: the oracle emits every internal transition as a
-  STATUS event (`_set_status` → `_emit`). An emitted
+  STATUS event (`_write` → `_emit`). An emitted
   `STATUS(job, STARTING)` *is* the dispatch instruction, and only when its
   run number is past the last dispatched one (§4).
 - **Shell → oracle**: the shell injects a completion as

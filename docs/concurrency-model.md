@@ -212,8 +212,8 @@ consumed). `docs/period-model.md` §5 is normative.
 
 **Completeness is structural, not statistical.** One feed mutates several
 fields, so a missed site hides behind a sibling's write. For example,
-`_run` sets `armed`, `run_number` and `started_by` and then sets status
-twice. One touch inside `_set_status` would mask every missed site in
+a start sets `armed`, `run_number` and `started_by` and then sets status
+twice. One touch inside the status write would mask every missed site in
 that feed, and the property test would still pass. So the guard is the
 owner plus the blocking gate in `scripts/arch_check.py`. The gate derives
 its watched set from each model's AST, so it cannot narrow silently when

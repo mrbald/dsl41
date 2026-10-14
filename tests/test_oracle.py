@@ -32,7 +32,6 @@ import batch_harness
 import pytest
 from bisim_harness import EngineHarness
 from fork_harness import ForkCheckedOracle
-from oracle_lockstep import LockstepOracle, new_oracle_factory
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
@@ -52,12 +51,9 @@ _FREE_A = resolve_switches({"renewable-free": "A"})
 #: flipped by the autouse fixture below; oracle() consults them
 _ENGINE_PATH = False
 _FORK_PATH = False
-_LOCKSTEP_PATH = False
 _HARNESSES: list[EngineHarness] = []
-_LOCKSTEPS: list[LockstepOracle] = []
 
-#: the fourth path runs only when `DSL41_ORACLE_LOCKSTEP` names a new oracle
-_PATHS = ["direct", "engine", "fork", *(["lockstep"] if new_oracle_factory() else [])]
+_PATHS = ["direct", "engine", "fork"]
 
 
 @pytest.fixture(autouse=True, params=_PATHS)
@@ -74,28 +70,16 @@ def sem_path(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) ->
     The dry apply must leave the original byte-equal, and the fork must
     reach the real apply's result (fork_harness.ForkCheckedOracle).
 
-    The fourth run, only with `DSL41_ORACLE_LOCKSTEP` set, is the old-vs-new
-    harness (statechart-engine ss16, DL-338): every input also goes to
-    the new oracle the variable names, and the trace slice, the emitted
-    events, the store rows, the revisions, the violations and the pending
-    timers must agree after it, and the seal digests at the end
-    (oracle_lockstep.LockstepOracle).
-
     On every path, each move of the job's machines must be taken inside an
     InputBatch, and the violation channel must be empty at every
     `begin_input` (batch_harness)."""
-    global _ENGINE_PATH, _FORK_PATH, _LOCKSTEP_PATH
+    global _ENGINE_PATH, _FORK_PATH
     _ENGINE_PATH = request.param == "engine"
     _FORK_PATH = request.param == "fork"
-    _LOCKSTEP_PATH = request.param == "lockstep"
     misplaced = batch_harness.install(monkeypatch)
     yield request.param
-    _ENGINE_PATH = _FORK_PATH = _LOCKSTEP_PATH = False
+    _ENGINE_PATH = _FORK_PATH = False
     _close_harnesses()
-    # emptied first, so a divergence is never reported against the next test
-    pending, _LOCKSTEPS[:] = list(_LOCKSTEPS), []
-    for paired in pending:
-        paired.check_seal()
     assert misplaced == []
 
 
@@ -140,12 +124,6 @@ def oracle(
         return ForkCheckedOracle(
             catalog, default_tz=default_tz, tz_aliases=tz_aliases, semantics=semantics
         )
-    if _LOCKSTEP_PATH:
-        paired = LockstepOracle(
-            catalog, default_tz=default_tz, tz_aliases=tz_aliases, semantics=semantics
-        )
-        _LOCKSTEPS.append(paired)
-        return paired
     return Oracle(catalog, default_tz=default_tz, tz_aliases=tz_aliases, semantics=semantics)
 
 
@@ -785,7 +763,7 @@ def test_explicit_startjob_against_a_live_job_leaves_a_trace_record() -> None:
     (total order, then re-evaluation against current state) was right; only its
     visibility was missing.
 
-    The live-job guard sits ABOVE the force branch in _attempt_start, so a
+    The live-job guard sits ABOVE the force branch in the start's verdict, so a
     FORCE_STARTJOB against a running job records too -- that one matters more,
     because the operator explicitly forced and still got nothing. Internal
     probes stay silent: they discard the return value."""
@@ -3577,7 +3555,7 @@ def test_sem22_noexec_on_a_failed_job_transitions_to_inactive() -> None:
     evaluates the conditions of downstream dependent jobs as if the
     predecessor job is set to the INACTIVE status." A FAILURE job put
     ON_NOEXEC is moved to INACTIVE through DL-242's operator-INACTIVE path
-    (`_inject_inactive`), exit code cleared: the STORED row changes, not
+    (the operator-INACTIVE path), exit code cleared: the STORED row changes, not
     just the read. f()/t()/d()/exitcode() read false, n() reads true, s()
     stays false. Each watcher is held across the producer's real FAILURE
     transition so that edge's own wake does not settle anything before
@@ -3665,7 +3643,7 @@ def test_sem22_noexec_on_a_terminated_job_transitions_to_inactive() -> None:
 def test_sem22_noexec_keeps_a_success_visible() -> None:
     """DL-243 control: SUCCESS is the documented exception -- "the job
     retains its current status" -- so a SUCCESS job put ON_NOEXEC is left
-    alone (no `_inject_inactive` call): s() stays true, f() stays false."""
+    alone (no operator-INACTIVE path): s() stays true, f() stays false."""
     text = (
         "insert_job: prod_nx_s\njob_type: c\ncommand: x\nmachine: m1\n\n"
         "insert_job: watch_nx_s_s\njob_type: c\ncommand: a\nmachine: m1\ncondition: s(prod_nx_s)\n\n"
@@ -4235,7 +4213,7 @@ def test_sem23_force_start_on_a_live_job_is_still_refused() -> None:
     refused for FORCE_STARTJOB same as a plain STARTJOB -- "concurrent runs
     of [a] process are not supported" (sendevent Start Jobs page). The
     live-job guard sits above the ice/hold-clearing branch in
-    _attempt_start, so this is unaffected by DL-243."""
+    the start's verdict, so this is unaffected by DL-243."""
     text = "insert_job: force_live23\njob_type: c\ncommand: x\nmachine: m1\n"
     o = oracle(text)
     o.feed(ev("STARTJOB", 0, job="force_live23"))
@@ -4485,8 +4463,6 @@ def test_sem33_a_scan_for_the_next_opening_ends_when_the_job_has_left_the_catalo
     assert pending_timer_jobs(o) == {"j"}
 
     del oracle_of(o).catalog.jobs["j"]
-    if isinstance(o, LockstepOracle):  # the paired oracle has its own catalog
-        del o.twin.catalog.jobs["j"]
     assert pending_timer_jobs(o) == set()
     o.feed(Event(at=datetime(2028, 7, 3), kind="STATUS", payload={"job": "h", "status": "FAILURE"}))
     assert transitions(o, "j")[-2:] == ["RUN_WINDOW_DEFER", "START_REFUSED"]
@@ -4917,7 +4893,7 @@ def test_sem33_box_skip_on_an_inactive_member_reaches_ancestor_overrides(overrid
 def test_sem33_box_skip_transition_route_evaluates_the_override_too() -> None:
     """T33b box variant (SEM-33/SEM-12, DL-154): the completion door also
     rides the SUCCESS->INACTIVE transition of a skipped member -- the skip
-    mark is visible to _on_member_transition, which treats the edge as the
+    mark is visible to the cascade's member moment, which treats the edge as the
     member's resolution moment and evaluates the external override there.
     Since DL-242 a box start resets a rerun member to INACTIVE, so run two
     gives the member a SUCCESS by CHANGE_STATUS before its skip; the
@@ -6813,7 +6789,7 @@ def test_sem34_spring_must_time_before_a_missing_hour_start_moves_to_3_00_59() -
     from zoneinfo import ZoneInfo
 
     from dsl41.ir import MustTime, Time
-    from dsl41.oracle import _must_instant
+    from dsl41.oracle_schedule import _must_instant
 
     tz = ZoneInfo(_NY)
     day = datetime(2026, 3, 8).date()
@@ -7161,7 +7137,7 @@ _DIAMOND3_JOBS = ["dj_a", "dj_b", "dj_c"]
 #: (conditioned boxless jobs are excluded from re-auto-start once terminal,
 #: per _reevaluate_all, and this script never sends STARTJOB/FORCE_STARTJOB
 #: to manually restart one); injected STATUS is unconditional in
-#: _handle_status/_set_status, so ANY current status can be overwritten
+#: the STATUS writer, so ANY current status can be overwritten
 #: directly to SUCCESS or FAILURE regardless of what it was. Terminal ->
 #: STARTING is legal too: edge-triggered re-evaluation (DL-13) re-runs a
 #: completed consumer when its producer re-succeeds.
@@ -8888,12 +8864,9 @@ def _more_jil(quantity: int) -> str:
 
 def _rebaseline(o: Oracle, text: str) -> None:
     """Swap a bare Oracle's catalog in place: the re-baseline a holder's
-    restart can meet (PR-20's own technique). The lockstep path swaps the
-    new oracle's catalog too."""
+    restart can meet (PR-20's own technique)."""
     o.catalog = lower_source(text)
     o._pool = CapacityPool(o.catalog)
-    if isinstance(o, LockstepOracle):
-        _rebaseline(o.twin, text)
 
 
 def test_dl256_a_restart_asking_for_more_takes_the_difference_or_queues() -> None:
@@ -10332,11 +10305,10 @@ def _leap_257(o, monkeypatch: pytest.MonkeyPatch) -> int:
     release = datetime(2028, 3, 1, 8, 30)
     o.feed(Event(at=release, kind="STATUS", payload={"job": "hq257", "status": "SUCCESS"}))
     monkeypatch.setattr(CompiledCalendar, "days_between", expand)
-    if isinstance(o, (ForkCheckedOracle, EngineHarness, LockstepOracle)):
+    if isinstance(o, (ForkCheckedOracle, EngineHarness)):
         # the fork path applies every input twice, once on the fork, and so
         # does the engine path: it dry-applies every input (concurrency-model
-        # ss4), and a fork expands a calendar for itself. The lockstep path
-        # applies it to two oracles.
+        # ss4), and a fork expands a calendar for itself.
         assert len(calls) % 2 == 0
         return len(calls) // 2
     return len(calls)
@@ -10568,7 +10540,7 @@ def test_sem32_force_startjob_consumes_the_arm_blocking_a_later_condition_restar
 
 def test_sem32_repeated_false_condition_ticks_arm_exactly_once() -> None:
     """T32 (SEM-32/Q3, DL-54): a second scheduled tick while the condition is
-    still false does not re-arm or double-record -- `_arm` is a no-op once
+    still false does not re-arm or double-record -- the arm row is a no-op once
     `armed` is already set. Exactly one SCHED_ARM trace entry survives two
     ticks, and the eventual condition edge still produces exactly one start."""
     text = (
@@ -10712,7 +10684,7 @@ def test_sem04_zero_lookback_exact_tie_at_the_anchor_instant_is_satisfied() -> N
 def test_sem32_armed_survives_ice_off_ice_cycle_then_starts_on_fresh_edge() -> None:
     """T32/T20 (SEM-32/SEM-20, Q3, DL-54): an arm latched by a scheduled tick
     is untouched by a subsequent ON_ICE/OFF_ICE cycle -- ON_ICE's early
-    return in _attempt_start never reaches the arm, and OFF_ICE only clears
+    return in the start's verdict never reaches the arm, and OFF_ICE only clears
     on_ice, not armed. The job stays blocked (iced) throughout, then a fresh
     condition edge after OFF_ICE starts it THROUGH the still-latched arm --
     exactly the schedule-gate bypass a bare condition edge could not achieve
@@ -10978,8 +10950,8 @@ def test_dl158_disarm_wakes_no_referencer_and_starts_nothing() -> None:
 
 def test_dl158_disarm_wakes_no_waiter_where_a_wake_would_act() -> None:
     """DL-158 vacuous-pin closure (review finding 3): after the box dies,
-    its queued member is CANCELLABLE at the very next wake scan (_readmit:
-    box no longer RUNNING), so a stray _wake_waiters() in the DISARM branch
+    its queued member is CANCELLABLE at the very next wake scan (the readmission:
+    box no longer RUNNING), so a stray queue scan in the DISARM branch
     would be observable here as a QUE_WAIT -> INACTIVE cancellation. The
     disarm must leave the row queued; only the holder's release scans the
     queue (the SEM-32 que-wait-and-box-death shape with the disarm inserted
@@ -11048,7 +11020,7 @@ def test_sem32_member_arm_dies_with_its_box_run() -> None:
 
 
 def test_sem32_held_member_of_idle_box_does_not_arm() -> None:
-    """DL-54: the hold gate precedes the box gate, so _arm must
+    """DL-54: the hold gate precedes the box gate, so the arm must
     re-check box state -- a HELD member of a NOT-running box gets no arm from
     its tick, and off-hold inside a later box run cannot start it from that
     dead tick."""

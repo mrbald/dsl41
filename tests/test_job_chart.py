@@ -1,7 +1,7 @@
 """The composite `job` statechart, checked against the three job tables
 (docs/statechart-engine.md §11, §13, DL-337).
 
-These tests read the chart against the tables the old oracle still takes
+These tests read the chart against the tables the oracle's writes still take
 (`job_status`, `job_flags`, `job_holding`):
 
 - the declaration is well formed, draws no warning, and is not registered;
@@ -18,11 +18,11 @@ These tests read the chart against the tables the old oracle still takes
   in the old target;
 - the built states of three walks, test_exhaustive_engine's job walk and
   its period opening and test_job_machines' ignorable walk, replayed: the
-  old oracle's moves of the addressed job, and the chart's rows for the same
+  oracle's table moves of the addressed job, and a bare chart's rows for the same
   input and the moments that follow it, are the same rows; and one replay
   of a job with a run window and a true condition;
-- today's two orders of a run's settlement, against the old oracle and
-  through the chart, and a status rule that reads a flag running after the
+- the two orders of a run's settlement, in the tables' moves and the
+  chart's rows, and a status rule that reads a flag running after the
   flag's move;
 - the settlement's policy read from the handle its sender's payload carries,
   an owed settlement before an attempt's admission, and an admitted start's
@@ -108,7 +108,6 @@ from dsl41.job_chart import (
 )
 from dsl41.machines import MACHINES
 from dsl41.oracle import Oracle
-from dsl41.oracle_chart import ChartOracle
 from dsl41.oracle_state import (
     JOB_FLAGS,
     JOB_HOLDING,
@@ -284,7 +283,7 @@ def test_the_chart_is_well_formed_draws_no_warning_and_is_not_registered() -> No
     assert well_formed(CHART) == []
     assert chart_warnings(CHART) == []
     assert CHART.clock == "logical"
-    assert CHART not in MACHINES  # the second oracle registers it when it drives it
+    assert CHART not in MACHINES  # registered when the three tables leave the registry
     assert len(CHART.rows) == 169
     assert [b.id for c in CHART.choices for b in c.branches] == [
         *(f"job.{n}" for n in range(171, 177)),
@@ -442,7 +441,7 @@ def test_only_the_status_rows_of_a_start_report_items() -> None:
 
 #: Every holding a row can carry with its status: a live row's units are its
 #: run's. `reserved` beside a status that is not live is the moment between a
-#: run's end and its settlement, when the box rules run (`_after_transition`).
+#: run's end and its settlement, when the box rules run (`OracleCascade._after`).
 _HOLDINGS = {
     s: ("none", "reserved") if s in LIVE else ("none", "held", "reserved") for s in STATUSES
 }
@@ -804,11 +803,11 @@ def test_the_completeness_table_matches_the_declaration_in_every_cell() -> None:
     assert table[("job INACTIVE noexec", START, repr(Attempt(settlement_owed=True)))] == ("job.401")
     assert table[("job INACTIVE", START, repr(Attempt()))] == "job.102"
     assert table[("job SUCCESS", START_ADMITTED, repr(Admitted("bypass")))] == "job.402"
-    # ON_NOEXEC bypasses before held units are read (SEM-22, `_start_admitted`)
+    # ON_NOEXEC bypasses before held units are read (SEM-22, `start_verdict`)
     assert table[("job FAILURE every flag held", START, repr(Attempt(force=True)))] == "job.101"
     assert table[("job FAILURE every flag held", START, repr(Attempt()))] == "ignored job.180"
     assert table[("job FAILURE every flag held", ON_NOEXEC, repr(Noexec()))] == "job.156"
-    # `started` moves only the run the admission began (`_run`'s RUNNING check)
+    # `started` moves only the run the admission began (`Started.current`)
     assert table[("box RUNNING", STARTED, repr(Still(True)))] == "ignored job.183"
     assert table[("box STARTING", STARTED, repr(Still(True)))] == "job.125"
     assert table[("job STARTING", STARTED, repr(Still(True)))] == "job.105"
@@ -1017,7 +1016,7 @@ type Take = tuple[str, str, str, str, str]
 
 @pytest.fixture
 def takes(monkeypatch: pytest.MonkeyPatch) -> list[Take]:
-    """Every job take the old oracle makes, with its job: each verb notes what
+    """Every job take the oracle's writes make, with its job: each verb notes what
     `take` returned against the job on the very next call."""
     log: list[Take] = []
     pending: list[tuple[str, str, str, str]] = []
@@ -1112,7 +1111,7 @@ def _gate(oracle: Oracle, job: str) -> str:
 
 def _attempt(oracle: Oracle, job: str, *, force: bool, at: datetime) -> Attempt:
     """The facts of a start attempt at `at`, read off the oracle as
-    `_attempt_start` reads them."""
+    `start_verdict` reads them."""
     job_ir = oracle.catalog.jobs.get(job)
     if job_ir is None:
         return Attempt()
@@ -1458,7 +1457,7 @@ def test_a_late_settlement_at_a_restart_needs_its_end_s_policy(
 
 def test_an_injected_live_status_keeps_the_run_s_units_and_settles_them_at_its_end() -> None:
     """An injected STARTING on a run settles nothing (its choice branch has no
-    settlement, as `_settle_row` skips a move into a live status); held units
+    settlement, as the settlement skips a move into a live status); held units
     an injected live status meets become the run's (`job.319`) and are
     released by policy when it ends."""
     executor = Executor()
@@ -1476,7 +1475,7 @@ def test_an_injected_live_status_keeps_the_run_s_units_and_settles_them_at_its_e
     assert projection(executor.active("k"))[::5] == ("FAILURE", "held")
 
 
-# ---- today's orders (`_after_transition`, `_set_inactive_batch`)
+# ---- the two settlement orders (a move on its own, the batch INACTIVE path)
 
 T0 = datetime(2026, 7, 1, 8, 0)
 #: A box `ob` whose member `om` holds the only unit of R; `ox` needs R and
@@ -1506,9 +1505,9 @@ def _input_takes(
     rows: list[tuple[str, str]] | None = None,
 ) -> tuple[list[tuple[str, str]], Oracle]:
     """The old tables' takes of one input on an oracle of `factory`, its setup
-    fed first, one minute apart: the chart oracle writes through the same
-    verbs and the same transitions, so the two lists compare (DL-350).
-    `rows`, the hook's record, starts at the input."""
+    fed first, one minute apart: the hook writes through the store's verbs
+    and the tables' transitions (DL-350). `rows`, the hook's record, starts
+    at the input."""
     oracle = factory(lower_source(jil))
     for minute, step in enumerate(setup, 1):
         oracle.feed(Event(at=T0 + timedelta(minutes=minute), **step))
@@ -1520,15 +1519,15 @@ def _input_takes(
 
 
 def _chart_rows(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
-    """Every row the chart oracle's hook writes, as (job, row), in order."""
+    """Every row the oracle's hook writes, as (job, row), in order."""
     seen: list[tuple[str, str]] = []
-    perform = ChartOracle._perform
+    perform = Oracle._perform
 
-    def spy(self: ChartOracle, outcome: Any) -> None:
+    def spy(self: Oracle, outcome: Any) -> None:
         seen.extend((str(outcome.key).partition(":")[2], row) for row in outcome.rows)
         perform(self, outcome)
 
-    monkeypatch.setattr(ChartOracle, "_perform", spy)
+    monkeypatch.setattr(Oracle, "_perform", spy)
     return seen
 
 
@@ -1538,22 +1537,20 @@ _START_OB = [{"kind": "STARTJOB", "payload": {"job": "ob"}}]
 def test_a_move_on_its_own_settles_after_the_box_rules_and_before_its_wakes(
     takes: list[Take], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Today: om's SUCCESS folds ob, ob's SUCCESS wakes ox, which finds R still
-    held and queues; om's units go back only then, and the queue admits ox.
-    The chart oracle keeps that order: the move's `settle` follows its `box
-    rules`, and its `wake` the settlement (DL-350)."""
+    """om's SUCCESS folds ob, ob's SUCCESS wakes ox, which finds R still held
+    and queues; om's units go back only then, and the queue admits ox: the
+    move's `settle` follows its `box rules`, and its `wake` the settlement
+    (DL-350)."""
     event = {"kind": "STATUS", "payload": {"job": "om", "exit_code": 0}}
-    old, _ = _input_takes(takes, Oracle, _ORDER_JIL, _START_OB, event)
-    assert old[:4] == [
+    rows = _chart_rows(monkeypatch)
+    taken, _ = _input_takes(takes, Oracle, _ORDER_JIL, _START_OB, event, rows)
+    assert taken[:4] == [
         ("om", "job_status.17"),
         ("ob", "job_status.28"),
         ("ox", "job_status.03"),
         ("om", "job_holding.04"),
     ]
-    assert old.index(("ox", "job_status.08")) > 3
-    rows = _chart_rows(monkeypatch)
-    new, _ = _input_takes(takes, ChartOracle, _ORDER_JIL, _START_OB, event, rows)
-    assert new == old
+    assert taken.index(("ox", "job_status.08")) > 3
     order = [("om", "job.117"), ("ob", "job.128"), ("ox", "job.103"), ("om", "job.304")]
     assert [row for row in rows if row in order] == order
     assert rows.index(("ox", "job.108")) > rows.index(("om", "job.304"))
@@ -1562,20 +1559,17 @@ def test_a_move_on_its_own_settles_after_the_box_rules_and_before_its_wakes(
 def test_the_batch_inactive_path_settles_first(
     takes: list[Take], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Today: a box set INACTIVE releases its own units before its members'
-    rows move (`_set_inactive_batch` settles each row as it writes it). The
-    chart oracle's rows (`job.135`, `job.159`) send the settlement first."""
+    """A box set INACTIVE releases its own units before its members' rows
+    move: its rows (`job.135`, `job.159`) send the settlement first."""
     event = {"kind": "STATUS", "payload": {"job": "ob", "status": "INACTIVE"}}
-    old, _ = _input_takes(takes, Oracle, _BATCH_JIL, _START_OB, event)
-    assert old == [
+    rows = _chart_rows(monkeypatch)
+    taken, _ = _input_takes(takes, Oracle, _BATCH_JIL, _START_OB, event, rows)
+    assert taken == [
         ("ob", "job_status.35"),
         ("ob", "job_holding.05"),
         ("om", "job_status.23"),
         ("om", "job_holding.05"),
     ]
-    rows = _chart_rows(monkeypatch)
-    new, _ = _input_takes(takes, ChartOracle, _BATCH_JIL, _START_OB, event, rows)
-    assert new == old
     written = [row for row in rows if row[1] in ("job.135", "job.159", "job.305")]
     assert written == [("ob", "job.135"), ("ob", "job.305"), ("om", "job.159"), ("om", "job.305")]
 
@@ -1631,38 +1625,6 @@ def test_a_status_rule_that_reads_a_flag_sees_the_flag_moved(
     rows = _rows(executor.dispatch("j", event))
     assert ("j", row) in rows
     assert len(seen) == 1 and reads <= seen[0]
-
-
-# ---- the replay catches a chart that misses an input's own start
-
-
-def _built(*steps: tuple[str, str, dict[str, str]]) -> Oracle:
-    base = Oracle(lower_source(_JOB_JIL))
-    _feed_all(base, list(steps))
-    return base
-
-
-def test_the_replay_fails_a_chart_that_ignores_a_forced_start(
-    takes: list[Take], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A mutant that ignores every forced admit, queue, bypass or start on held
-    units: a FORCE_STARTJOB on an iced job and on one that holds units still
-    clears or moves something, and the replay must not serve the missing
-    start from a later moment."""
-    iced = _built(("ON_ICE", "fj", {}))
-    held = _built(("FORCE_STARTJOB", "fj", {}), ("STATUS", "fj", {"status": "FAILURE"}))
-    assert _replay(iced, "fj", FORCE_STARTJOB, {}, takes) == []
-    assert _replay(held, "fj", FORCE_STARTJOB, {}, takes) == []
-    verdict = job_chart.start_verdict
-
-    def mutant(ctx: Any) -> Any:
-        found = verdict(ctx)
-        moves = ("admit", "queue", "bypass", "on_held")
-        return "ignored" if ctx.event.payload.force and found in moves else found
-
-    monkeypatch.setattr(job_chart, "start_verdict", mutant)
-    assert _replay(iced, "fj", FORCE_STARTJOB, {}, takes) != []
-    assert _replay(held, "fj", FORCE_STARTJOB, {}, takes) != []
 
 
 # ---- one replay with a run window and a true condition
@@ -1738,8 +1700,9 @@ def test_a_box_restarted_by_its_own_completion_meets_the_member_before_its_late_
     (job.418, DL-340)."""
     setup = [{"kind": "FORCE_STARTJOB", "payload": {"job": "ob"}}]
     event = {"kind": "STATUS", "payload": {"job": "om", "exit_code": 0}}
-    old, _ = _input_takes(takes, Oracle, jil, setup, event)
-    assert [old_id for job, old_id in old if job == "om"] == [
+    rows = _chart_rows(monkeypatch)
+    taken, oracle = _input_takes(takes, Oracle, jil, setup, event, rows)
+    assert [old_id for job, old_id in taken if job == "om"] == [
         "job_status.17",
         "job_status.22",
         settling,
@@ -1748,9 +1711,6 @@ def test_a_box_restarted_by_its_own_completion_meets_the_member_before_its_late_
         "job_status.02",
         "job_status.05",
     ]
-    rows = _chart_rows(monkeypatch)
-    new, oracle = _input_takes(takes, ChartOracle, jil, setup, event, rows)
-    assert new == old
     row = oracle.store.job["om"]
     assert (row.status, row.run_number) == ("RUNNING", 2)
     assert [(r.bucket, r.units) for r in row.reservations] == [("r:Q", 1)]
@@ -1787,7 +1747,7 @@ _NOEXEC_JIL = "insert_job: nb\njob_type: b\n\n" + "".join(
 def test_a_boxs_noexec_on_the_jobs_it_contains_replays_through_the_chart(
     takes: list[Take],
 ) -> None:
-    """Today `_noexec_box` sets each contained job's flag, from either value
+    """A box's ON_NOEXEC sets each contained job's flag, from either value
     (job_flags.09), and clears its hold (job_flags.07), under the job's own
     ON_NOEXEC's rows. Replayed through `ON_NOEXEC on its box` from each
     job's row before the input, the chart fires the rows that stand for

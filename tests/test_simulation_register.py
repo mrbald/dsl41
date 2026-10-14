@@ -43,7 +43,7 @@ from dsl41 import (
     capacity,
     conditions,
     ir,
-    oracle,
+    oracle_schedule,
     runner_adapters,
     runner_preflight,
     runner_wrapper,
@@ -472,11 +472,17 @@ def _keyword_constants(keyword: str) -> set[str]:
 def _trace_markers() -> set[str]:
     """Every constant marker `Oracle._record` writes: a trace line that is
     not an `OLD->NEW` status transition. `Oracle._ignore` writes its marker,
-    the third argument, through `_record` beside an internal transition."""
-    tree = ast.parse((SRC / "oracle.py").read_text(encoding="utf-8"))
+    the third argument, through `_record` beside an internal transition, and
+    `Oracle._flag` its third beside a flag's move. Every module the oracle's
+    class is built from is read."""
+    modules = {cls.__module__ for cls in Oracle.__mro__ if cls.__module__.startswith("dsl41.")}
+    trees = [
+        ast.parse((SRC / f"{module.split('.')[1]}.py").read_text(encoding="utf-8"))
+        for module in sorted(modules)
+    ]
     out: set[str] = set()
-    position = {"_record": 1, "_ignore": 2}
-    for node in ast.walk(tree):
+    position = {"_record": 1, "_ignore": 2, "_flag": 2}
+    for node in (node for tree in trees for node in ast.walk(tree)):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
             index = position.get(node.func.attr)
             if index is not None and len(node.args) > index:
@@ -574,7 +580,7 @@ def surface_domains() -> dict[str, set[str]]:
         },
         "event": set(get_args(EventKind)),
         "status": set(get_args(JobStatus)),
-        "timer": set(oracle.TIMER_CHECKS) | {oracle.DEFERRED_TIMER_KEY},
+        "timer": set(oracle_schedule.TIMER_CHECKS) | {oracle_schedule.DEFERRED_TIMER_KEY},
         "profile_field": set(RuntimeProfile.model_fields),
         "profile_alt": _literal_alternatives(),
         "adapter_outcome": {kind.__name__ for kind in get_args(runner_adapters.AdapterResult)}
@@ -1353,7 +1359,10 @@ CITED_MODULES = (
     "capacity",
     "conditions",
     "ir",
+    "job_chart",
     "oracle",
+    "oracle_facts",
+    "oracle_schedule",
     "oracle_state",
     "period",
     "runner_adapters",

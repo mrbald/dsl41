@@ -36,7 +36,7 @@ from dsl41.autocal import (
 from dsl41.capacity import RES_TYPES, resource_type
 from dsl41.conditions import And, Cond, Paren, StatusAtom
 from dsl41.ir import CatalogIR, ExecSpec, JobIR, MachineIR, unquote_jil_value
-from dsl41.oracle_chart import ChartOracle
+from dsl41.oracle import Oracle
 from dsl41.period import MachinePolicy as _MachinePolicy
 from dsl41.oracle_state import OracleError
 from dsl41.runner_scheduler import _DAY_CODES
@@ -701,7 +701,7 @@ def _oracle_preflight(
         items.append(PreflightItem(severity="ERROR", code="oracle", message=message))
 
     try:
-        ChartOracle(catalog, semantics=semantics)
+        Oracle(catalog, semantics=semantics)
     except OracleError as exc:
         err(f"oracle construction failed: {exc}")
     return items
