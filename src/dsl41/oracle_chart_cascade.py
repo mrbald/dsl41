@@ -49,7 +49,14 @@ ends FAILURE or TERMINATED` reach the box's direct members; `box start`, `box
 set INACTIVE`, `ON_NOEXEC on its box` and `OFF_NOEXEC on its box` reach every
 job it contains. Where a code gate chooses the audience, the audience is the
 sender's, and the worklist slice declares it in the sender's action
-(statechart-engine §8, §11).
+(statechart-engine §8, §11). `box ends FAILURE or TERMINATED` goes only to
+the members of the run that ended: the sender reads that run (`_terminate`,
+inherited, before the status write; `_on_box_completed` with the status it
+reads after the end's wakes), and the box's run number is compared before
+each member's dispatch, so once the box starts again no further member gets
+the event (DL-348). A fold or an override may read a later run's own
+failed end, whose cascade already ran; the members it reaches again ignore
+the event (job.197).
 
 Not declared by the chart, so today's code: the moves of the box row's sets
 (the resolutions, the iced-out marks, the ran members); and the window
@@ -329,11 +336,16 @@ class CascadeOracle(AgreeingOracle):
 
     # ---- a box's moments, on its members' instances
 
-    def _cascade_job_terminators(self, box: str) -> None:
+    def _cascade_job_terminators(self, box: str, run: int) -> None:
         """`box ends FAILURE or TERMINATED` on each member (SEM-14): a live
         job_terminator member terminates (job.116); any other moves nothing
-        (job.197)."""
+        (job.197). The audience is the sender's: the members of `run`, the
+        box run that ended, so the box's run number is compared before each
+        member's dispatch, and once a kill or the end's wakes started the box
+        again no further member is sent the event (DL-348)."""
         for member in self._members(box):
+            if self._runtime(box).run_number != run:
+                return
             event = ChartEvent(BOX_ENDS)
             fired, key, old = self._box_rule(member, event)
             if fired == ("job.116",):

@@ -117,6 +117,7 @@ In both, the estate stays down until a fixed build ships, or the release rolls b
 
 The oracle evaluates the starts that follow one another in one instant by recursion. A box that completes at its start can start the next box in the same call.
 DL-304 refuses a start of a job that already has two starts in progress, which ends a loop.
+A box that its own end starts again loops without nesting a start; the one such loop the harness met, the job_terminator cascade reaching the new run, ends since DL-348.
 The depth of a chain that is not a loop is bounded by Python's recursion limit.
 DL-306 fits that limit to the estate's job count in the engine and in every replay, so a long chain no longer fails resume.
 Iterative cascade dispatch, which needs no recursion, is not built (DL-306).

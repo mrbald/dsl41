@@ -151,7 +151,22 @@ from dsl41.runner_clock import EngineError
 #: an input can derive a status, and so wakes and launches, that v21 did not.
 #: Where the box rules queue the job again (a box restarted by its own
 #: completion), the rank it keeps is the same under both versions.
-STATE_MACHINE_VERSION = 22
+#: 23 since DL-348 (SEM-14's job_terminator): a box's end FAILURE or
+#: TERMINATED kills its live job_terminator members only while the run that
+#: ended is still the box's run. `_terminate` reads the box's run number
+#: before the status write, and the cascade compares it before each member:
+#: once the write's wakes, or an earlier member's kill, started the box
+#: again, the cascade reaches no further member: not the members the new run
+#: started, and not a member carried live into it from the run that ended, as
+#: the fold and the overrides already leave them when the box's own run
+#: moves. v22 killed the members of the new run and the members carried into
+#: it. Where such a member carries box_terminator and a TERMINATED end
+#: terminates its box (the default), its kill ended the new run, which
+#: started again, without end, and the input raised a recursion error: a
+#: control input was refused, an engine-made one quarantined. A replay with
+#: such an input can derive a status, and so wakes and launches, that v22 did
+#: not.
+STATE_MACHINE_VERSION = 23
 
 LOCK_NAME = "leader.lock"
 

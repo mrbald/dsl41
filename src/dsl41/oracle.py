@@ -3253,19 +3253,39 @@ class Oracle:
     def _on_box_completed(self, box: str) -> None:
         # kill members still running? Only via job_terminator on TERMINATED/
         # FAILURE (SEM-14); SUCCESS completion leaves stragglers alone (they
-        # were bypassed or the fold would not have fired).
-        if self._runtime(box).status in FAILED:
-            self._cascade_job_terminators(box)
+        # were bypassed or the fold would not have fired). The run is read
+        # with the status, after the end's wakes: a box they started again
+        # reads RUNNING and kills no one (DL-348).
+        rt = self._runtime(box)
+        if rt.status in FAILED:
+            self._cascade_job_terminators(box, rt.run_number)
 
     def _terminate(self, job: str, move: Transition[JobStatus], cause: str) -> None:
+        """A kill of `job`. A box's end FAILURE or TERMINATED kills its live
+        job_terminator members (SEM-14) only while the run that ended is
+        still the box's run (DL-348). The run number is read here, before
+        the status write, and `_cascade_job_terminators` compares it before
+        each member's kill: when the write's wakes, or an earlier member's
+        kill, started the box again, the cascade reaches no further member:
+        not the members the new run started, and not a member carried live
+        into it from the run that ended. "Jobs in a box run only once for
+        each box execution" (Basic Box Job Concepts, AutoSys 12.0 and 24.2),
+        as the walk up and the holders' check gate (DL-304)."""
+        run = self._runtime(job).run_number
         self._set_status(job, move, cause=cause)
         job_ir = self.catalog.jobs.get(job)
         if job_ir is not None and job_ir.job_type == "BOX":
-            self._cascade_job_terminators(job)
+            self._cascade_job_terminators(job, run)
 
-    def _cascade_job_terminators(self, box: str) -> None:
-        # SEM-14: members with job_terminator die when their box fails/terminates
+    def _cascade_job_terminators(self, box: str, run: int) -> None:
+        """SEM-14: the live job_terminator members die when their box ends
+        FAILURE or TERMINATED. `run` is the box run that ended; the box's run
+        number is compared before each member, since a member's kill can
+        start the box again through its wakes, and the cascade stops there
+        (DL-348)."""
         for member in self._members(box):
+            if self._runtime(box).run_number != run:
+                return
             member_ir = self.catalog.jobs[member]
             rt = self._runtime(member)
             if member_ir.box.job_terminator and rt.status in LIVE:
