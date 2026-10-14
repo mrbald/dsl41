@@ -803,6 +803,7 @@ def _random_engine_script(draw: st.DrawFn) -> list[Event]:
     return events
 
 
+@pytest.mark.usefixtures("oracle_recursion_limit")
 @given(_random_engine_script())
 @settings(max_examples=50, deadline=None)
 def test_hypothesis_engine_bisimulation_startjob_and_term_run_time(script: list[Event]) -> None:

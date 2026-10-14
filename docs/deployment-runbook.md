@@ -1566,6 +1566,14 @@ engine. Then the supervisor exits, and its wrappers end their commands
 running supervisor's actual value through PING/LIST. The option is refused
 on `supervise list` and `supervise shutdown`. The upgrade rule for an old,
 lockless supervisor binary is stated in `supervisor-protocol.md` §5.
+The engine renews its lease from its event loop, and each input's dry
+apply runs on that loop. An input whose cascade runs longer than 40 s, the
+lease's TTL less its renewal interval, lets the lease lapse; with a
+deadman of N seconds the supervisor exits N seconds later and every
+running job on the host ends `parent lost`. The item cap (§7) keeps a
+cascade that does not end under half that lapse at every measured size.
+A cascade that loops across one input's root dispatches, or inside one
+condition, is not bounded by it, as for any hung engine.
 
 **Shape 2: supervisor started by the engine.** Keep `run --detached` and
 set `KillMode=process` on the engine unit. It limits service-stop signals
@@ -2233,14 +2241,27 @@ journaled by one
 release replays on any release with the same state-machine version, so
 it does not block a rollback to a release without the fault.
 
-One such fault has its own message: `RecursionError: an instant cascade
-passed the recursion limit of N; its first start was JOB (CAUSE)`. It
-appears after `engine failed:`, and after `CascadeDepthError:` when
-resume stops. It means a chain of instant starts in one input nested
-deeper than the engine's recursion limit. The log is not corrupt. JOB is
-the job whose start began the cascade. The engine fits the limit to the
-estate's job count, so this should not happen; if it does, report it
-with the message.
+One such fault has its own message: `an instant cascade reached the item
+cap of C for an estate of N jobs; its root item was EVENT (CAUSE) on JOB`.
+It appears in the quarantine line or the refusal, and after
+`CascadeDepthError:` when resume stops. It means one input's cascade did
+not end, or grew past what the engine can run. The oracle stops each root
+dispatch of a cascade before it takes four times the square of the
+estate's job count in items, never below 100,000 and never above 400,000
+(DL-351): the floor binds up to 158 jobs, the square up to 316, the
+ceiling above. The count is the same live and on replay. Up to 400 jobs
+the largest legitimate cascade measured takes under a third of the cap;
+near 720 jobs a dense one can reach it, and is then refused or quarantined
+where an older build accepted it. A log an older build wrote that holds
+such an input stops resume with a replay fault that names it. The dry
+apply runs on the engine's loop, so a long cascade also stops the lease's
+renewal (§3, the deadman). On an M-series laptop a cascade that does not
+end stops in about 4.5 s at 200 jobs and 15 to 17 s at 400 to 1,000 jobs,
+under half the lease's lapse; a legitimate dense cascade takes about 7 s
+at 400 jobs, 33 s at 700 and 90 s at 1,000. The log is not corrupt.
+Report it with the message. A deep condition can still pass
+Python's recursion limit, with the message `RecursionError: an instant
+cascade passed the recursion limit of N; its first start was JOB (CAUSE)`.
 
 **Pick one row (DL-266).** Read the release note: the annotated tag's
 message (README "Release"). Apply these questions in order, and stop at

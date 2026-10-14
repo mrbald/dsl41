@@ -91,22 +91,31 @@ class OracleError(ValueError):
 
 
 class CascadeDepthError(OracleError, RecursionError):
-    """An instant cascade nested past the interpreter's recursion limit.
+    """An instant cascade that did not end.
 
-    The oracle evaluates a cascade of instant starts recursively, one start
-    inside the next. `fit_recursion_limit` sizes the limit for the catalog,
-    so this means the fit fell short. The message names the RecursionError
-    and the cascade's first start, so an operator can tell it from a
-    corrupt log: the same input raises it again on every replay. The first
-    start is the outermost `_start`; for a cascade entered through a
-    QUE_WAIT readmission (DL-50) that is the first job it started, not the
-    readmitted job."""
+    The chart oracle's cascade is the executor's worklist, so a cascade that
+    never ends takes items, not frames: the hook counts a root dispatch's
+    items and stops it at the item cap for the estate's job count
+    (`jobs` given, DL-351). The message names the cap, the job count
+    and the root item. A fact's own recursion, such as a deep condition, can
+    still pass the interpreter's recursion limit (`jobs` None); the message
+    then names the RecursionError and the root's job. Either way the same
+    input raises it again on every replay, so an operator can tell it from a
+    corrupt log. The old oracle's recursive cascade raised the second form at
+    its outermost start."""
 
-    def __init__(self, job: str, cause: str, limit: int) -> None:
-        super().__init__(
-            f"RecursionError: an instant cascade passed the recursion limit of {limit};"
-            f" its first start was {job} ({cause})"
-        )
+    def __init__(self, job: str, cause: str, limit: int, *, jobs: int | None = None) -> None:
+        if jobs is None:
+            message = (
+                f"RecursionError: an instant cascade passed the recursion limit of {limit};"
+                f" its first start was {job} ({cause})"
+            )
+        else:
+            message = (
+                f"an instant cascade reached the item cap of {limit} for an estate of"
+                f" {jobs} jobs; its root item was {cause} on {job}"
+            )
+        super().__init__(message)
         self.job = job
 
 

@@ -82,9 +82,12 @@ STORE_REBUILT = frozenset({"machines"})
 STORE_SHARED = frozenset({"job_instance", "holding_moved"})
 #: The chart oracle's own attributes, on top of the oracle's: whether the
 #: scan's last `readmit` moved its waiter, the settlement row its hook is
-#: writing, and the instances a macrostep reached (DL-350). Each is
+#: writing, the instances a macrostep reached (DL-350), and the items and
+#: the root of the dispatch in flight (DL-351). Each is
 #: false or empty between inputs, so its fork starts with the same.
-CHART_ORACLE_FRESH = frozenset({"_readmitted", "_settling", "_reached"})
+CHART_ORACLE_FRESH = frozenset({"_readmitted", "_settling", "_reached", "_items", "_rooted"})
+#: The chart oracle's item cap, fixed by the catalog's job count (DL-351).
+CHART_ORACLE_SHARED = frozenset({"_cap"})
 
 
 def _when(at: datetime | None) -> str | None:

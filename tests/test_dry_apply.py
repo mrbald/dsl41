@@ -31,6 +31,7 @@ import pytest
 
 from fork_harness import (
     CHART_ORACLE_FRESH,
+    CHART_ORACLE_SHARED,
     ORACLE_COPIED,
     ORACLE_FRESH,
     ORACLE_SHARED,
@@ -189,7 +190,8 @@ def test_the_chart_oracles_fork_pins_its_own_attribute_and_rebinds_its_job_sourc
     holds the same attributes, and the fork's `job_instance` and holding
     listener are rebound to the fork."""
     oracle = ChartOracle(lower_source(_JIL))
-    assert set(vars(oracle)) == ORACLE_COPIED | ORACLE_FRESH | ORACLE_SHARED | CHART_ORACLE_FRESH
+    chart = CHART_ORACLE_FRESH | CHART_ORACLE_SHARED
+    assert set(vars(oracle)) == ORACLE_COPIED | ORACLE_FRESH | ORACLE_SHARED | chart
     assert set(vars(oracle.store)) == STORE_COPIED | STORE_REBUILT | STORE_SHARED
     oracle.feed(_start())
     twin = oracle.fork()

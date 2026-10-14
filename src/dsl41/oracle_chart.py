@@ -34,7 +34,9 @@ The start bound is job.100's: the attempt's ancestry holds two `start
 admitted` items of the job (DL-304). The cascade takes no Python frame per
 nested start, so the class's `FRAMES_PER_NESTED_START` is 0; a RecursionError
 can come only from a fact's own recursion (a deep condition), and the root
-dispatch names it as a `CascadeDepthError`.
+dispatch names it as a `CascadeDepthError`. A cascade that does not end
+takes items instead: the hook counts a root dispatch's items and stops it at
+the item cap (`item_cap`, DL-351) with a `CascadeDepthError`.
 
 At each input's commit, every job the input touched has its row project to
 its instance's configuration (`RuntimeState.commit_input`). An exception out
@@ -214,6 +216,51 @@ _BOX_ROWS: Final[dict[str, bool]] = {
 #: A skip's rows, and whether each is a member's (`_window_skip_bypass`).
 _MEMBER_ROWS: Final[dict[str, bool]] = {"job.106": False, "job.107": True, "job.404": True}
 
+#: The item cap (DL-351): a root dispatch takes fewer items than four
+#: times the square of the estate's job count, never fewer than `ITEM_FLOOR`
+#: and never more than `ITEM_CEILING`: the floor binds up to 158 jobs, the
+#: square up to 316, the ceiling above. A finite cascade moves each job a
+#: bounded number of times and each move wakes at most the other jobs, so its
+#: items grow with the square. The largest legitimate dispatches measured, at
+#: 41 to 1,000 jobs: a fan-in, where every move of a box chain wakes every job
+#: that waits on all of it (33,799 items at 200 jobs, 127,599 at 400); a queue
+#: scan readmitting the waiters blocked ahead of each freed one (81,991 at
+#: 400); DL-304's box ring (108 per job) and its nested terminator chain
+#: (7,632 at the lowering's 64 levels); the harness's sample peaks at 305.
+#: The cap's margin over the worst is 23x at 41 jobs, 4.7x at 200 and 3.1x at
+#: 400; it reaches 1x near 720 jobs (the fan-in) and 890 (the queue scan).
+ITEMS_PER_JOB_SQUARED: Final = 4
+#: The cap of an estate under 159 jobs: a loop there stops in a few seconds.
+ITEM_FLOOR: Final = 100_000
+#: The ceiling's rule: the largest round count of items whose DL-348 loop
+#: stops within half the lease lapse (the lease's TTL less its renewal
+#: interval, 40 s, so 20 s) at every measured size up to 1,000 jobs on the
+#: reference host. The dry apply runs on the engine's loop, so a longer
+#: cascade stops the lease's renewal; past the lapse the supervisor's deadman
+#: ends the host's running jobs. Measured on an M-series laptop: 4.5 s at 200
+#: jobs, 14.6 s at 400 and 17.0 s at 1,000. The loop's cost per item grows
+#: with the job's owed settlements and the catalog's size (`settlement_owed`,
+#: `_members`), so the ceiling is re-derived by this rule, from a new
+#: measurement, whenever that cost changes; it is never raised by hand.
+ITEM_CEILING: Final = 400_000
+
+
+#: The recursion limit the oracle runs under (DL-351): what lowers must
+#: evaluate. The deepest condition the lowering accepts at Python's default
+#: limit is grouped 985 levels deep (DL-20), and evaluating it takes about
+#: 1,004 frames above the caller; the engine's and the replays' call sites
+#: add their own stack. Each construction raises the process's limit to this
+#: and never lowers it. A run root stores no condition deeper than its catalog
+#: hash serializes (about 250 levels, `period.catalog_hash_v2`), so a logged
+#: input is far inside it; the headroom serves the paths that hash no catalog:
+#: equiv and a directly built oracle.
+RECURSION_LIMIT: Final = 3000
+
+
+def item_cap(jobs: int) -> int:
+    """The item cap of a root dispatch over an estate of `jobs` jobs."""
+    return min(max(ITEM_FLOOR, ITEMS_PER_JOB_SQUARED * jobs * jobs), ITEM_CEILING)
+
 
 class ChartOracle(CascadeOracle):
     """`Oracle` with every job move decided by the `job` chart, its cascade
@@ -231,6 +278,8 @@ class ChartOracle(CascadeOracle):
         default_tz: str | None = None,
         semantics: SemanticSwitches | None = None,
     ) -> None:
+        if sys.getrecursionlimit() < RECURSION_LIMIT:
+            sys.setrecursionlimit(RECURSION_LIMIT)
         super().__init__(
             catalog,
             carried=carried,
@@ -239,6 +288,10 @@ class ChartOracle(CascadeOracle):
             semantics=semantics,
         )
         self._readmitted = False
+        #: the items the root dispatch in flight has taken, and its cap
+        self._items = 0
+        self._cap = item_cap(len(catalog.jobs))
+        self._rooted: tuple[str, str] | None = None
         #: the settlement row being written, which the verb's move must match
         self._settling: tuple[str, str] | None = None
         #: the instances the macrostep's items reached, checked at its end
@@ -318,8 +371,11 @@ class ChartOracle(CascadeOracle):
 
     def _root(self, job: str, event: ChartEvent, cause: str = "") -> None:
         """One root item on the job's instance, its row read into existence
-        first, and its whole cascade, the hook writing as each item ends."""
+        first, and its whole cascade, the hook writing as each item ends and
+        counting it against the item cap."""
         self._runtime(job)
+        self._items = 0
+        self._rooted = (job, f"{event.name} ({cause})" if cause else event.name)
         try:
             self.store.machines.dispatch(self.store.job_key(job), event, self._perform)
             self._check_reached()
@@ -330,6 +386,8 @@ class ChartOracle(CascadeOracle):
                 # recursion (a deep condition) meets the limit
                 raise CascadeDepthError(job, cause or event.name, sys.getrecursionlimit()) from exc
             raise
+        finally:
+            self._items, self._rooted = 0, None
 
     def _check_reached(self) -> None:
         """At a macrostep's end, every job an item of it reached has its row
@@ -453,7 +511,13 @@ class ChartOracle(CascadeOracle):
     def _perform(self, outcome: Outcome) -> None:
         """The executor's hook (statechart-engine §5): each fired row's writes,
         in today's order within the microstep, then the intents its actions
-        reported. A fired row with no write here is a statechart error."""
+        reported. A fired row with no write here is a statechart error. The
+        item that reaches the cap ends the dispatch (`item_cap`)."""
+        self._items += 1
+        if self._items >= self._cap:
+            assert self._rooted is not None, "an item outside a root dispatch"
+            jobs = len(self.catalog.jobs)
+            raise CascadeDepthError(*self._rooted, self._cap, jobs=jobs)
         key = str(outcome.key)
         self._reached.add(key)
         job = key.partition(":")[2]

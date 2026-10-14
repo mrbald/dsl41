@@ -84,7 +84,7 @@ The idle re-derivation rows follow the vendor table in [SEM-15](../autosys-seman
 ## Open findings
 
 See the row "Box execution" in [the risk map](../risk-map.md).
-Its own findings are [open vendor readings](../risk-map.md#open-vendor-readings-for-a-box-and-its-members), [a completed box and an iced member](../risk-map.md#a-completed-box-and-an-iced-member) and [instant cascades recurse](../risk-map.md#instant-cascades-recurse).
+Its own findings are [open vendor readings](../risk-map.md#open-vendor-readings-for-a-box-and-its-members), [a completed box and an iced member](../risk-map.md#a-completed-box-and-an-iced-member) and [instant cascades that do not end](../risk-map.md#instant-cascades-that-do-not-end).
 
 ## Gaps found
 

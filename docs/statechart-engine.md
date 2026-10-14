@@ -223,9 +223,10 @@ A former call-then-continue site becomes a transient state whose completion tran
 continuation. Its guard reads the state after the chained items ran, because the completion is
 queued behind them.
 
-A machine that bounds re-triggering declares the bound as a row guarded on an item's ancestry
-depth. Items of one macrostep that are not ancestors of each other are never counted against each
-other; only a chain is.
+A machine that bounds re-triggering declares the bound as a row guarded on an item's ancestry depth,
+or on the count of one step in it, which a guard reads in constant time (`Context.count`). Items of
+one macrostep that are not ancestors of each other are never counted against each other; only a
+chain is.
 
 The oracle's cascade maps onto these rules as follows (DL-350). Each input is a root item on
 its job's instance. Each call-then-continue site of the old recursion is a chained self-event, a
@@ -239,9 +240,16 @@ transient state: an admitting row targets `ADMITTED`, and the `starting` self-ev
 STARTING, after a box's resets. The per-job start bound (DL-304) is `job.100`, guarded on the
 count of the job's own `start admitted` items in the item's ancestry. A readmission sends its
 extent without `start admitted`, so the bound does not count it. The chart oracle's cascade takes
-no Python frame per nested start, so DL-306's fitting is not needed for it: its frames per nested
-start are 0, and only a fact's own recursion, such as a deep condition, can meet the base limit.
-The old oracle keeps its fit.
+no Python frame per nested start, so it fits no recursion limit to the job count: only a fact's
+own recursion, such as a deep condition, needs the stack, and each construction raises the
+process's limit to a fixed 3,000, so the deepest condition the lowering accepts evaluates. A
+cascade that does not end takes items instead. The oracle's hook counts a root dispatch's items,
+and the item that reaches the cap for the estate's job count, four times its square, at least
+100,000 and at most 400,000, raises `CascadeDepthError`, an `OracleError`; the input is refused or
+quarantined as any input whose apply raises (DL-351). The ceiling keeps a cascade that does
+not end within half the engine's lease lapse at every measured size. The old oracle keeps its fit;
+no production path runs its cascade, and `classify._TruthOracle` builds one only to read
+conditions.
 
 ## 9. Wait states
 
@@ -591,7 +599,10 @@ start attempt (DL-342), then KILLJOB and the TIMER input (DL-343), then the flag
 (DL-344), then RELEASE_RESOURCE and the readmission (DL-345), then the box rules (DL-346), then a
 box's ON_NOEXEC on the jobs it contains (DL-347), then the cascade itself, on the executor's
 worklist (DL-350). The chart oracle now calls none of the old oracle's cascade methods; it
-keeps the old oracle's facts, its trace and its emissions.
+keeps the old oracle's facts, its trace and its emissions. The engine, every replay, preflight
+and equiv build the chart oracle (DL-351). The old oracle's answers over the harness's
+sample are kept as golden digests (`tests/oracle_goldens.py`), which the chart oracle
+reproduces; a golden that changes is a DL-235 decision.
 
 Each slice is a semantic-class change. Each has its own decision-log entry.
 

@@ -59,6 +59,21 @@ jobs:
       # branch support), for a gate this leg does not need to also pay for.
       - run: uv run pytest -q
 
+  # DL-351: the oracle the engine builds reproduces its golden digests
+  # over the whole harness sample, and records no transition violation. Its
+  # own job, beside the test legs, so their timeout does not carry it; the
+  # default suite replays the corpus part. About a minute locally.
+  goldens:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: "3.13"
+      - run: uv sync --locked --extra dev
+      - run: uv run python tests/oracle_goldens.py replay
+
   # DL-211: coverage is a property of the code, not of the interpreter running
   # it, so it is measured once, where measuring is free. On 3.14, `coverage`
   # picks its `sys.monitoring` core, which produced byte-identical line and

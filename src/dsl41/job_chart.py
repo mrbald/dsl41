@@ -222,7 +222,7 @@ def _consequences(ctx: Context, kind: str) -> Effects | None:
 def _nested_starts(ctx: Context) -> int:
     """The admitted starts of the job the item descends from: its ancestry's
     `start admitted` items on the job's own instance (DL-304, DL-350)."""
-    return sum(1 for key, event in ctx.ancestry if key == ctx.key and event == START_ADMITTED)
+    return ctx.count((ctx.key, START_ADMITTED))
 
 
 # ---- the start attempt (SEM-10, SEM-20 to SEM-23, SEM-32, SEM-33, DL-50)
