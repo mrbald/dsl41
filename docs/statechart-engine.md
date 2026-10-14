@@ -324,7 +324,8 @@ the same error, agrees in the harness on its attempt half, whose writes are not 
 input that raises is refused and commits nothing, and an engine-made one is quarantined with its
 rejection logged and its time half committed. So the harness applies that time half alone on both
 oracles, compares it and goes on; the engine stops only when the time half itself raises, and where
-it raises on both the harness stops there too.
+it raises on both the harness stops there too. The rule stays, but no input of the harness's sample
+raises alike since DL-348: the three that did were one terminator cascade that never ended.
 
 KILLJOB and the TIMER input are dispatched to the job's instance too (DL-343), and the input
 passes its own relay to the attempt, so no cause text is read. A live job's kill (`job.114`) and a
@@ -392,15 +393,22 @@ that moves nothing must leave the instance's configuration as it was.
 The chart decides each box rule's row; the oracle decides when a rule is posted, and to which
 instances. `box running`, `box run ends` and `box ends FAILURE or TERMINATED` reach the box's direct
 members; `box start`, `box set INACTIVE`, `ON_NOEXEC on its box` and `OFF_NOEXEC on its box` reach
-every job it contains. Five code gates choose an audience the chart does not see: `box start` skips
+every job it contains. Six code gates choose an audience the chart does not see: `box start` skips
 a live subbox's subtree (`_contained(skip_live=True)`, which also skips a live or queued job);
 `member moves` is sent by the completion door on the moves it sees, not on a non-terminal move (a
 terminal, RUNNING or resolving move only); `box recompute` is sent by its callers' gates, run
 numbers and the cascaded-subbox case, LIVE and TERMINATED excluded (a member's terminal move, or the
 direct target of an operator's INACTIVE, never a row the cascade took INACTIVE); the walk up skips
-an ancestor whose run number moved; and the parent recompute after an operator's INACTIVE needs the
-parent's run number unchanged. These audiences are the sender's: the worklist slice declares them in
-the action of the row that sends the event (§8).
+an ancestor whose run number moved; the parent recompute after an operator's INACTIVE needs the
+parent's run number unchanged; and `box ends FAILURE or TERMINATED` goes only to the members of the
+run that ended. Its sender reads that run, a kill before the status write (`_terminate`, which both
+oracles share) and a fold or an override with the FAILURE or TERMINATED it reads after the end's
+wakes (`_on_box_completed`), and the box's run number is compared before each member's dispatch:
+once the wakes, or an earlier member's kill, started the box again, no further member gets the
+event, not even one carried RUNNING from the run that ended (DL-348). A fold or an override may
+read a later run's own end, whose cascade already ran; the members it reaches again ignore the
+event. These audiences are the sender's: the worklist slice declares them in the action of the row
+that sends the event (§8).
 
 A box's ON_NOEXEC reaches each job it contains as `ON_NOEXEC on its box`: the flag on, from either
 value, then the hold it supersedes off, through the old method and its lines. Whether the hold goes

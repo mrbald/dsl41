@@ -1773,6 +1773,25 @@ machine: m1
 command: x
 box_name: bx_c
 condition: s(bx_never)
+
+insert_job: bx_r
+job_type: b
+condition: d(bx_r)
+
+insert_job: bx_rm
+job_type: c
+machine: m1
+command: x
+box_name: bx_r
+box_terminator: 1
+job_terminator: 1
+
+insert_job: bx_rk
+job_type: c
+machine: m1
+command: x
+box_name: bx_r
+job_terminator: 1
 """
 
 
@@ -1820,6 +1839,21 @@ def _box_scripts() -> dict[str, tuple[Step, ...]]:
         "a grandparent's box_success names a member of its subbox": (
             event(t0, "FORCE_STARTJOB", "bx_g"),
             event(at(1), "STATUS", "bx_gc", status="SUCCESS"),
+            SealPoint(),
+        ),
+        "a box that starts again on its own end meets its terminators": (
+            event(t0, "FORCE_STARTJOB", "bx_r"),
+            event(at(1), "STATUS", "bx_rm", status="FAILURE"),
+            SealPoint(),
+            event(at(2), "STATUS", "bx_rk", status="SUCCESS"),
+            event(at(3), "STATUS", "bx_rm", status="FAILURE"),
+            SealPoint(),
+        ),
+        "a box that starts again on its own end is killed": (
+            event(t0, "FORCE_STARTJOB", "bx_r"),
+            event(at(1), "KILLJOB", "bx_r"),
+            SealPoint(),
+            event(at(2), "KILLJOB", "bx_r"),
             SealPoint(),
         ),
     }

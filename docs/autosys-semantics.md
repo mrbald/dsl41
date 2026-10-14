@@ -351,8 +351,18 @@ Control flow, not alarms:
   (AutoSys 24.2): "The job_terminator attribute specifies whether to use a KILLJOB event to
   terminate the job if its containing box job completes with a FAILURE or TERMINATED status."
 Members killed this way end with status TERMINATED, which `d()` and `t()` consumers read.
-A box_terminator member killed by its own box's job_terminator cascade does not end the box
-again: the box has already ended. Whether an operator's CHANGE_STATUS FAILURE or TERMINATED on
+A box_terminator member killed by its own box's job_terminator cascade does not end the box again:
+the box has already ended, and the cascade stops where the box starts again. A box's end FAILURE or
+TERMINATED kills its live job_terminator members only while the run that ended is still the box's
+run. `_terminate` reads the box's run number before the status write, and the cascade compares it
+before each member: once the write's wakes, or an earlier member's kill, started the box again, the
+cascade reaches no further member: not the members the new run started, and not a member carried
+live into it from the run that ended, as the fold and the overrides already leave them when the
+box's own run moves **[C]** ("Jobs in a box run only once for each box execution", Basic Box Job
+Concepts, AutoSys 12.0 and 24.2; DL-348). A box starts again so when its end, or a member's
+kill, meets its own condition, `d(box)` or `t(member)` say. Before, the kill reached the new run,
+and a member with both terminators ended it again without end.
+Whether an operator's CHANGE_STATUS FAILURE or TERMINATED on
 a RUNNING box kills its job_terminator members is open (Q14, section 9); the oracle kills
 none.
 

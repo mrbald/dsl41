@@ -48,6 +48,7 @@ from test_seal_artifact import _seal
 
 from dsl41.ir import CatalogIR, lower_source
 from dsl41.oracle import InputBatch, Oracle
+from dsl41.oracle_chart import ChartOracle
 from dsl41.oracle_state import CascadeDepthError, Event, JobRuntime, OracleError
 from dsl41.runner import Engine
 from dsl41.seal import SealedState
@@ -121,6 +122,17 @@ def test_old_vs_old_under_every_switch_value() -> None:
     ]
     assert summary.runs == sum(len(merged) for merged in rows)
     assert summary.runs < len(jobs) * len(switch_matrix())
+
+
+def test_no_input_of_the_corpus_or_the_directed_scripts_raises_alike() -> None:
+    """The alike rule stays, but no input of the sample raises on both
+    oracles since DL-348 ended the terminator loop. The directed box
+    scripts hold that loop's estates, so a cascade that reaches a run its box
+    started again raises alike here and fails this test, where the harness
+    alone would exit 0 (statechart-engine §16)."""
+    summary = run_all(corpus_jobs() + directed_jobs(), [{}], new=ChartOracle)
+    assert summary.divergences == []
+    assert (summary.raised_alike, summary.time_half_stopped) == (0, 0)
 
 
 @given(cases(max_size=8))
@@ -651,8 +663,12 @@ def test_the_directed_estate_makes_the_wekr_rows_live(recheck: str) -> None:
     assert "wk_skip" in found.report()
 
 
-_TERMINATOR_LOOP = (
-    "insert_job: tb\njob_type: b\ncondition: t(tb)\n\n"
+#: A box and its member, and a job whose postponed start's timer falls due at
+#: 10:00. The STATUS on the member raises where an oracle plants it
+#: (`_RaisesOnStatus`): since DL-348 no cascade of the sample raises, the
+#: terminator loop this estate held before included.
+_TIMER_ESTATE = (
+    "insert_job: tb\njob_type: b\n\n"
     "insert_job: tm\njob_type: c\ncommand: x\nmachine: m1\nbox_name: tb\n"
     "box_terminator: 1\njob_terminator: 1\n\n"
     "insert_job: wd\njob_type: c\ncommand: x\nmachine: m1\n"
@@ -674,8 +690,9 @@ class _OtherText(_RaisesOnStatus):
     error = OracleError("planted")
 
 
-class _NoTimers(Oracle):
-    """An oracle whose time half fires no timer."""
+class _NoTimers(_RaisesOnStatus):
+    """An oracle that raises on every STATUS and whose time half fires no
+    timer."""
 
     def _fire_timers_due(self, at: datetime) -> None:
         return None
@@ -685,8 +702,8 @@ _T0 = datetime(2026, 7, 1, 8, 0)
 
 
 def _loop_script(at: datetime) -> list[Event]:
-    """The terminator loop's raising STATUS at `at`, after a postponed start
-    whose timer falls due at 10:00, and one more input after it."""
+    """The raising STATUS at `at`, after a postponed start whose timer falls
+    due at 10:00, and one more input after it."""
     return [
         Event(at=_T0, kind="FORCE_STARTJOB", payload={"job": "tb"}),
         Event(at=_T0 + timedelta(minutes=1), kind="STARTJOB", payload={"job": "wd"}),
@@ -696,17 +713,17 @@ def _loop_script(at: datetime) -> list[Event]:
 
 
 @pytest.mark.parametrize(
-    ("loop", "new", "expected"),
+    ("old", "new", "expected"),
     [
-        ("t(tb)", Oracle, None),
-        ("t(tb)", _NoTimers, "STATUS job=tm exit_code=2 (both raised CascadeDepthError"),
-        ("s(tb)", _RaisesOnStatus, "outcome"),
-        ("t(tb)", _OtherText, "outcome"),
+        (_RaisesOnStatus, _RaisesOnStatus, None),
+        (_RaisesOnStatus, _NoTimers, "STATUS job=tm exit_code=2 (both raised CascadeDepthError"),
+        (Oracle, _RaisesOnStatus, "outcome"),
+        (_RaisesOnStatus, _OtherText, "outcome"),
     ],
     ids=["alike", "time half differs", "one side", "different errors"],
 )
 def test_an_input_both_sides_raise_alike_compares_its_time_half_and_goes_on(
-    loop: str, new: Callable[..., Oracle], expected: str | None
+    old: Callable[..., Oracle], new: Callable[..., Oracle], expected: str | None
 ) -> None:
     """Both sides raising alike agree on the input's attempt half, whose
     partial writes the engine never commits. Its time half, which a
@@ -718,9 +735,7 @@ def test_an_input_both_sides_raise_alike_compares_its_time_half_and_goes_on(
     try:
         sys.setrecursionlimit(1000)
         result = run(
-            lower_source(_TERMINATOR_LOOP.replace("t(tb)", loop)),
-            _loop_script(_T0 + timedelta(hours=2)),
-            new=new,
+            lower_source(_TIMER_ESTATE), _loop_script(_T0 + timedelta(hours=2)), old=old, new=new
         )
     finally:
         sys.setrecursionlimit(limit)
@@ -746,7 +761,7 @@ class _TimeHalfFault(Oracle):
         super()._fire_timers_due(at)
 
 
-class _RetriedTimeHalfFault(Oracle):
+class _RetriedTimeHalfFault(_RaisesOnStatus):
     """An oracle whose time half raises only when applied alone, after the
     input's attempt half raised: the second application at one instant."""
 
@@ -762,7 +777,7 @@ class _RetriedTimeHalfFault(Oracle):
 
 @pytest.mark.parametrize(
     ("old", "new"),
-    [(_TimeHalfFault, _TimeHalfFault), (Oracle, _RetriedTimeHalfFault)],
+    [(_TimeHalfFault, _TimeHalfFault), (_RaisesOnStatus, _RetriedTimeHalfFault)],
     ids=["alike", "one side"],
 )
 def test_a_time_half_that_raises_alike_stops_the_pair_as_it_stops_the_engine(
@@ -777,7 +792,7 @@ def test_a_time_half_that_raises_alike_stops_the_pair_as_it_stops_the_engine(
     try:
         sys.setrecursionlimit(1000)
         result = run(
-            lower_source(_TERMINATOR_LOOP), _loop_script(_T0 + timedelta(hours=2)), old=old, new=new
+            lower_source(_TIMER_ESTATE), _loop_script(_T0 + timedelta(hours=2)), old=old, new=new
         )
     finally:
         sys.setrecursionlimit(limit)

@@ -1848,6 +1848,70 @@ def test_sem14_a_killed_queued_box_terminator_member_reads_the_switch(value: str
     assert _status(o, "bx14q", "bx14q_bt") == [box, "TERMINATED"]
 
 
+#: A box that starts again on its own end, with one member that carries both
+#: terminators, or the job_terminator alone
+def _self_restarting_terminator_box(box: str, *, box_terminator: bool) -> str:
+    member = "box_terminator: 1\njob_terminator: 1\n" if box_terminator else "job_terminator: 1\n"
+    return (
+        f"insert_job: {box}\njob_type: b\ncondition: d({box})\n\n"
+        f"insert_job: {box}_m\njob_type: c\ncommand: x\nmachine: m1\nbox_name: {box}\n{member}"
+    )
+
+
+def test_sem14_a_job_terminator_does_not_reach_the_run_its_box_started_again() -> None:
+    """SEM-14, DL-348: the member's FAILURE terminates the box, whose
+    TERMINATED meets `d(box)` and starts it again inside the write's wakes,
+    starting the member in the new run. The job_terminator cascade belongs to
+    the run that ended, so it kills no one. Before, it killed the new run's
+    member, whose box_terminator ended that run, which started again, until
+    the cascade passed the recursion limit and the input was refused."""
+    o = oracle(_self_restarting_terminator_box("bx14l", box_terminator=True))
+    o.feed(ev("FORCE_STARTJOB", 0, job="bx14l"))
+    traced = len(o.trace())
+    o.feed(ev("STATUS", 1, job="bx14l_m", status="FAILURE"))
+    assert [(t.job, t.transition) for t in o.trace()[traced:]] == [
+        ("bx14l_m", "RUNNING->FAILURE"),
+        ("bx14l", "RUNNING->TERMINATED"),
+        ("bx14l_m", "FAILURE->INACTIVE"),
+        ("bx14l", "TERMINATED->STARTING"),
+        ("bx14l", "STARTING->RUNNING"),
+        ("bx14l_m", "INACTIVE->STARTING"),
+        ("bx14l_m", "STARTING->RUNNING"),
+    ]
+    box, member = o.store.job["bx14l"], o.store.job["bx14l_m"]
+    assert (box.status, box.run_number, member.status, member.run_number) == (
+        "RUNNING",
+        2,
+        "RUNNING",
+        2,
+    )
+
+
+def test_sem14_a_member_carried_running_into_the_new_run_is_not_killed() -> None:
+    """SEM-14, DL-348: KILLJOB terminates the box, and `d(box)` starts it
+    again inside the write's wakes. The member is still RUNNING from the run
+    that ended, so the box start leaves it. The box's run moved, so the
+    job_terminator cascade reaches no one, and the member runs on, as the
+    fold and the overrides already leave a member running when the box
+    starts again on their end. Before, the kill's cascade killed it."""
+    o = oracle(_self_restarting_terminator_box("bx14c", box_terminator=False))
+    o.feed(ev("FORCE_STARTJOB", 0, job="bx14c"))
+    traced = len(o.trace())
+    o.feed(ev("KILLJOB", 1, job="bx14c"))
+    assert [(t.job, t.transition) for t in o.trace()[traced:]] == [
+        ("bx14c", "RUNNING->TERMINATED"),
+        ("bx14c", "TERMINATED->STARTING"),
+        ("bx14c", "STARTING->RUNNING"),
+    ]
+    box, member = o.store.job["bx14c"], o.store.job["bx14c_m"]
+    assert (box.status, box.run_number, member.status, member.run_number) == (
+        "RUNNING",
+        2,
+        "RUNNING",
+        1,
+    )
+
+
 # --------------------------------------------------------------------- 13. SEM-20 ON_ICE
 
 

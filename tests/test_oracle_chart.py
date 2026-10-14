@@ -186,12 +186,14 @@ def test_sem09_status_on_the_chart_oracle_writes_what_the_old_oracle_writes(case
     _lockstep(jil, script)
 
 
-def test_a_terminator_loop_raises_the_cascade_error_on_both_oracles() -> None:
+def test_a_terminator_loop_ends_on_both_oracles_at_the_box_restart() -> None:
     """A box that restarts on its own TERMINATED, and a member that is its
-    box_terminator and a job_terminator: a failed member ends and restarts the
-    box until the cascade passes the fitted recursion limit (DL-340 records
-    the loop). Both oracles raise `CascadeDepthError`; where in the cascade
-    each meets the limit is not compared (the harness's rule)."""
+    box_terminator and a job_terminator: a failed member ends the box, whose
+    end starts it again. Until DL-348 the job_terminator cascade then
+    killed the new run's member, which ended the box again, until the
+    cascade passed the recursion limit on both oracles. Now the cascade
+    reaches no run the box started again, and both oracles agree under the
+    limit the old test met."""
     jil = (
         "insert_job: tb\njob_type: b\ncondition: t(tb)\n\n"
         "insert_job: tm\njob_type: c\ncommand: x\nmachine: m1\nbox_name: tb\n"
@@ -201,12 +203,16 @@ def test_a_terminator_loop_raises_the_cascade_error_on_both_oracles() -> None:
     try:
         sys.setrecursionlimit(1000)
         fit_recursion_limit(2, ChartOracle)
-        paired = LockstepOracle(lower_source(jil), new=ChartOracle)
-        paired.feed(ev("FORCE_STARTJOB", 1, job="tb"))
-        with pytest.raises(CascadeDepthError):
-            paired.feed(ev("STATUS", 2, job="tm", exit_code=2))
+        paired = _lockstep(
+            jil, [ev("FORCE_STARTJOB", 1, job="tb"), ev("STATUS", 2, job="tm", exit_code=2)]
+        )
     finally:
         sys.setrecursionlimit(limit)
+    rows = paired.twin.store.job
+    assert [(rows[job].status, rows[job].run_number) for job in ("tb", "tm")] == [
+        ("RUNNING", 2),
+        ("RUNNING", 2),
+    ]
 
 
 def test_a_recursion_error_in_an_outermost_attempts_decision_is_the_cascade_error(
@@ -215,9 +221,9 @@ def test_a_recursion_error_in_an_outermost_attempts_decision_is_the_cascade_erro
     """The chart's selection is deeper than today's gates, so a cascade can
     meet the recursion limit there, before any start converts it (DL-342):
     the first attempt's decision names the cascade. The terminator loop above
-    met it there until the box rules were the chart's (DL-346); it now
-    meets it in a box rule, inside a start. A nested attempt's decision
-    leaves the error to its outermost start."""
+    met it there until the box rules were the chart's (DL-346), and ends
+    since DL-348. A nested attempt's decision leaves the error to its
+    outermost start."""
     oracle = ChartOracle(lower_source(_JIL))
 
     def deep(*_args: object) -> None:
@@ -3503,3 +3509,145 @@ def test_sem12_a_box_rule_computes_only_the_facts_todays_rule_reads(
     oracle.feed(_box_ev(1, "STATUS", "lzm", status="SUCCESS"))
     assert reads.count("lz") == 1
     assert oracle.store.job["lz"].status == "RUNNING"
+
+
+# ---- the job_terminator cascade's run (DL-348)
+
+#: `bx` starts again on its own end; `m` carries both terminators, `k` the
+#: job_terminator alone
+_SELF_RESTART_JIL = _boxed("bx", "condition: d(bx)") + _job(
+    "m", "bx", "box_terminator: 1\njob_terminator: 1"
+)
+_CARRIED_JIL = _SELF_RESTART_JIL + _job("k", "bx", "job_terminator: 1")
+
+#: the estate, the input after FORCE_STARTJOB bx, and each job's status and
+#: run number after it: the box's second run, the member it started, and the
+#: member carried RUNNING from the run that ended
+_SELF_RESTART_ENDS: Final = {
+    "the member's FAILURE ends the box": (
+        _SELF_RESTART_JIL,
+        ev("STATUS", 2, job="m", status="FAILURE"),
+        {"bx": ("RUNNING", 2), "m": ("RUNNING", 2)},
+    ),
+    "the member's FAILURE ends the box, another member carried": (
+        _CARRIED_JIL,
+        ev("STATUS", 2, job="m", status="FAILURE"),
+        {"bx": ("RUNNING", 2), "m": ("RUNNING", 2), "k": ("RUNNING", 1)},
+    ),
+    "a KILLJOB ends the box, both members carried": (
+        _CARRIED_JIL,
+        ev("KILLJOB", 2, job="bx"),
+        {"bx": ("RUNNING", 2), "m": ("RUNNING", 1), "k": ("RUNNING", 1)},
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_SELF_RESTART_ENDS))
+def test_sem14_the_job_terminator_cascade_reaches_no_run_the_box_started_again(
+    case: str,
+) -> None:
+    """The box's TERMINATED meets `d(bx)` and starts it again inside the
+    write's wakes. Its run moved, so `_terminate` sends `box ends FAILURE or
+    TERMINATED` to no member: not to the member the new run started, nor to
+    the one still RUNNING from the run that ended. Both oracles complete, and
+    agree, where both passed the recursion limit before (DL-348)."""
+    jil, end, final = _SELF_RESTART_ENDS[case]
+    paired = LockstepOracle(lower_source(jil), new=ChartOracle)
+    paired.feed(ev("FORCE_STARTJOB", 1, job="bx"))
+    seen = _spied(paired.twin)
+    traced = len(paired.twin.trace())
+    paired.feed(end)
+    paired.check_seal()
+    _agrees(paired.twin)
+    rows = paired.twin.store.job
+    assert {job: (rows[job].status, rows[job].run_number) for job in final} == final
+    assert not [o for o in seen if o.event.name == "box ends FAILURE or TERMINATED"]
+    assert all("job_terminator" not in t.cause for t in paired.twin.trace()[traced:])
+
+
+_KILLED_MEMBER = _job("a", "bx", "job_terminator: 1")
+_BOTH_TERMINATORS = _job("b", "bx", "box_terminator: 1\njob_terminator: 1")
+
+#: a box the kill of its member `a` starts again, and the estate's jobs'
+#: status and run number after FORCE_STARTJOB bx and KILLJOB bx: `a` killed in
+#: run 1 and started by run 2, `b` carried RUNNING from run 1
+_MID_CASCADE: Final = {
+    "the box waits on its member's TERMINATED; the other carries both terminators": (
+        _boxed("bx", "condition: t(a)") + _KILLED_MEMBER + _BOTH_TERMINATORS,
+        {"bx": ("RUNNING", 2), "a": ("RUNNING", 2), "b": ("RUNNING", 1)},
+    ),
+    "the box waits on its member's TERMINATED; the other carries the job_terminator": (
+        _boxed("bx", "condition: t(a)") + _KILLED_MEMBER + _job("b", "bx", "job_terminator: 1"),
+        {"bx": ("RUNNING", 2), "a": ("RUNNING", 2), "b": ("RUNNING", 1)},
+    ),
+    "an empty box the member's TERMINATED starts completes and starts the box": (
+        _boxed("z", "condition: t(a)")
+        + _boxed("bx", "condition: s(z)")
+        + _KILLED_MEMBER
+        + _BOTH_TERMINATORS,
+        {"z": ("SUCCESS", 1), "bx": ("RUNNING", 2), "a": ("RUNNING", 2), "b": ("RUNNING", 1)},
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_MID_CASCADE))
+def test_sem14_a_kill_that_starts_the_box_again_ends_the_job_terminator_cascade(
+    case: str,
+) -> None:
+    """The box's kill writes TERMINATED in run 1 and its job_terminator
+    cascade kills `a`, whose TERMINATED starts the box again (directly, or
+    through an empty box that completes at its start). The box's run number
+    is compared before each member, so the cascade stops there and `b`,
+    carried RUNNING into run 2, is not killed. Before, the cascade went on to
+    `b`: a wrong kill, or with b's box_terminator a loop to the recursion
+    limit on both oracles (DL-348)."""
+    jil, final = _MID_CASCADE[case]
+    paired = _lockstep(jil, [ev("FORCE_STARTJOB", 1, job="bx"), ev("KILLJOB", 2, job="bx")])
+    rows = paired.twin.store.job
+    assert {job: (rows[job].status, rows[job].run_number) for job in final} == final
+    killed = [t.job for t in paired.twin.trace() if t.cause.startswith("job_terminator")]
+    assert killed == ["a"]
+
+
+def test_sem14_a_fold_that_reads_a_later_runs_own_end_sends_it_to_members_that_ignore_it() -> None:
+    """The box_failure override ends run 1 (`f(m1)`), and `f(bx)` starts the
+    box again in that end's wakes. Run 2's empty subbox completes FAILURE at
+    its start, and its box_terminator ends run 2, whose cascade kills `k`,
+    carried RUNNING from run 1 into the run that ended. Run 1's
+    `_on_box_completed` then reads run 2's TERMINATED and sends `box ends` to
+    every member again; each ignores it (job.197), and nothing more moves."""
+    jil = (
+        _job("ext")
+        + _boxed("bx", "condition: f(bx)\nbox_failure: f(m1)")
+        + _job("m1", "bx")
+        + _job("k", "bx", "job_terminator: 1")
+        + _boxed("sb", "box_name: bx\nbox_terminator: 1\nbox_failure: f(ext)")
+    )
+    paired = LockstepOracle(lower_source(jil), new=ChartOracle)
+    paired.feed(ev("FORCE_STARTJOB", 1, job="bx"))
+    paired.feed(ev("STATUS", 2, job="ext", status="FAILURE"))
+    seen = _spied(paired.twin)
+    paired.feed(ev("STATUS", 3, job="m1", status="FAILURE"))
+    paired.check_seal()
+    _agrees(paired.twin)
+    rows = paired.twin.store.job
+    assert {job: (rows[job].status, rows[job].run_number) for job in ("bx", "m1", "k", "sb")} == {
+        "bx": ("TERMINATED", 2),
+        "m1": ("RUNNING", 2),
+        "k": ("TERMINATED", 1),
+        "sb": ("FAILURE", 2),
+    }
+    ends = [
+        (o.key[len("job:") :], o.rows[0])
+        for o in seen
+        if o.event.name == "box ends FAILURE or TERMINATED" and o.rows
+    ]
+    # run 2's own cascade, then run 1's read of run 2's end
+    assert ends == [
+        ("m1", "job.197"),
+        ("k", "job.116"),
+        ("sb", "job.197"),
+        ("m1", "job.197"),
+        ("k", "job.197"),
+        ("sb", "job.197"),
+    ]

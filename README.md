@@ -585,7 +585,9 @@ Semantics:
   configuration).
 - `src/dsl41/oracle.py`: the AutoSys discrete-event interpreter:
   script-driven completion, edge-triggered re-evaluation, and `InputBatch`,
-  one admitted input as one store transaction.
+  one admitted input as one store transaction. In both oracles a box's end
+  FAILURE or TERMINATED kills its live job_terminator members only while
+  the run that ended is still the box's run.
 - `src/dsl41/oracle_chart.py`: the second oracle, which drives the job rows
   through the `job` chart one input family at a time, compared with the
   first by the lockstep harness.

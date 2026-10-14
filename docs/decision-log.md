@@ -22522,3 +22522,80 @@ relitigate an entry; append a new one.
   row is a statechart error, as DL-344 rules. Smaller items, the per-entry lists in the lifecycle
   block and the README, a docstring naming one twin, and "before any write" where the box's own
   flag is already written, are fixed and confirmed by the reviewer that raised them.
+- DL-348 A box's end kills its job_terminator members only while the run that ended is still the
+  box's run, a defect the worklist's design exposed, and the state-machine version moves to 23
+  (2026-10-14; src/dsl41/oracle.py, src/dsl41/runner_ledger.py; tests/test_oracle.py,
+  tests/test_oracle_chart.py, tests/oracle_lockstep.py; docs/statechart-engine.md §11, §16;
+  docs/autosys-semantics.md; docs/blocks/job-lifecycle.md; README.md)
+  THE DEFECT. Preparing the cascade's move onto the executor's worklist (§5), the engineer found
+  three inputs on which both oracles had raised alike in every harness run since DL-342, and
+  found them one shape: a box whose condition is its own completion, holding a member with both
+  a box_terminator and a job_terminator. The member's end terminates the box; the box's
+  TERMINATED write wakes the condition and starts the box again, and the member still running is
+  carried into the new run, since a box start leaves a live member alone; only then does the
+  ended run's job_terminator cascade run, and it killed that carried member, whose box_terminator
+  ended the new run, and so on. No start nests inside the previous one, so the per-job start
+  bound (DL-304) never fired, and the old oracle ended the loop only where Python's recursion
+  limit turned into the cascade depth error, still at a limit of two hundred thousand. A worklist
+  that is iterative and never recursive, with the bound as the only stop, would never end.
+  THE RULE. A box's end FAILURE or TERMINATED kills its live job_terminator members only while the
+  run that ended is still the box's run. `_terminate` reads the box's run number before the status
+  write, and the cascade reads it again before each kill, since a kill of its own can start the
+  box again when a dependent's condition names the killed member; once the run moved, the cascade
+  reaches no member: not the members the new run started, and not a member carried live into it
+  from the run that ended, as the fold and the overrides already leave them when the box's own run
+  moves. The three run gates the oracle already had, the
+  walk up, the holders' leave and the ice moment, read DL-304's "jobs in a box run only once for
+  each box execution" the same way: an end in the earlier run is no moment of the later one, and
+  a carried member's kill would be such a moment. The rule restores SEM-14's own sentence, that
+  the box has already ended when its terminator's kills land, which the self-restarting case made
+  false. Rejected: killing the carried members whose own run did not move, which still loops with
+  two such members; killing them while keeping their box_terminator from the new run, which needs
+  a rule on the direct parent against SEM-14; and running the cascade before the wakes, which is
+  loop-free but reorders every box end with a live job_terminator member against the order
+  DL-337 and DL-346 fixed, where no vendor sentence orders the kills against the dependents'
+  starts. The ruling was escalated to the advisor after the brief's first wording proved
+  ambiguous on the carried member; the advisor confirmed it. The chart oracle inherits the gated
+  method, so its `box ends FAILURE or TERMINATED` reaches the ended run's members alone: a sixth
+  sender's gate, named with the five of DL-346, for the worklist slice to declare.
+  THE VERSION. The fixed oracle against DL-347's, over the harness's whole sample under
+  default and all switches, differs on thirty-two inputs, two under default switches, twenty-eight
+  under all switches and two in the further thousand seeds, every one of the defect's two shapes:
+  the new run's member killed, where the box_terminator's answer looped, and a carried member
+  killed. An accepted input derives differently, so STATE_MACHINE_VERSION moves from 22 to 23
+  (DL-235), with a note naming both shapes and tests pinning each that fail on the previous
+  oracle. The harness, the fixed oracle against the chart, shows no difference and, for the first
+  time since DL-342, no input raising alike: the corpus and two hundred estates of up to fifty
+  jobs, 23,259 inputs; twenty estates of 150 to 200 jobs, 7,999; the corpus and forty estates
+  under every switch, 102,242; a further thousand seeds, 94,353; the oracle's tests pass through
+  the fourth arm. A lockstep test holds the reproduction in three cases, the two-job case ending
+  with the box and its member running in the second run and a carried member running on in the
+  first; two directed scripts join the box estate; the tests that relied on the loop for a raise
+  plant a failure instead. The frames of a terminator chain are unchanged on both oracles.
+  RECORDED, NOT FIXED. A member carried live into a restarted run never joins that run's member
+  list, so the box stays RUNNING after every member has ended, where the vendor's box completes;
+  the same in both versions and unchanged by this entry. And a parent's restart resets a subbox
+  to INACTIVE without moving its run, so there the kill path still kills a live member where the
+  override path does not. Both for a slice of their own with its own version test, beside DL-345's
+  same-cascade re-queue. The completion door's status read after a fold or
+  an override was checked for the same confusion: where it finds the new run's end, the members
+  it reaches again ignore the event, and no fix is made.
+  NOT HERE. The worklist, the realign's removal, the bound as an ancestry-depth row and `job` in
+  the registry, which wait for a design note on how a fired row's writes run inside a microstep;
+  the switch-over.
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass in place of the Codex pass,
+  after the advisor's ruling on the rule itself.
+  Both reproduced the thirty-two differences and found each one the skipped cascade, the pins
+  failing on the previous oracle, the changed tests honest and the agreement check silent. The
+  Opus reviewer found the gate read once, before the cascade's loop, where a kill inside the loop
+  can itself start the box again when a dependent's condition names the killed member; the ended
+  run's cascade then reached the new run and looped, and with the second member's job_terminator
+  alone it killed a carried member on an accepted input. The rule is now applied before each kill,
+  with no difference on any sampled input, so the count and the version stand; the shape is a
+  test. It also asked for a harness test that no input raises alike, found the note naming one
+  looping shape where both loop, and recorded the parent's restart that resets a subbox without
+  moving its run. The Fable pass found the texts claiming the completion door never finds an
+  ended status after a moved run, where a directed input finds the new run's end and re-sends the
+  box's end to members that ignore it; the texts now say so. Smaller items, a wrong final status
+  in the facts and the rule sentence placed on the wrong module in the README, are fixed and
+  confirmed by the reviewer that raised them.
