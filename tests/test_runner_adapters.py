@@ -357,15 +357,21 @@ def test_failing_profile_fails_the_job_with_shs_exit_code(tmp_path: Path) -> Non
 
 
 def test_killjob_mid_run_terminates_and_no_completion_overwrites_it(tmp_path: Path) -> None:
-    """(runner-design ss4 "the oracle decides, the shell kills"): KILLJOB a
-    beat after STARTJOB terminates the real process; the store lands
-    TERMINATED and status.json records the signal. No late natural-exit
-    report ever arrives to overwrite it: a cancelled adapter's run() re-
-    raises CancelledError instead of reaching the completion enqueue
-    (runner.py module docstring), so drops stays empty even once real time
-    passes the point the sleep would have exited on its own."""
-    text = "insert_job: kj\njob_type: c\ncommand: sleep 2\nmachine: m1\n"
+    """(runner-design ss4 "the oracle decides, the shell kills"): KILLJOB
+    after the wrapper has spawned the command terminates the real process;
+    the store lands TERMINATED and status.json records the signal. No
+    natural-exit report arrives to overwrite it: a cancelled adapter's run()
+    re-raises CancelledError instead of reaching the completion enqueue
+    (runner.py module docstring), so drops stays empty.
+
+    The kill waits for spawn.json, not for a fixed offset. A KILLJOB stamped
+    a fixed beat after STARTJOB is admitted at once when the loop stalls
+    that long before the adapter task first runs; the cancel then lands on
+    a task that never spawned a wrapper, and no status.json is written. The
+    sleep is long so the kill always precedes the natural exit."""
+    text = "insert_job: kj\njob_type: c\ncommand: sleep 30\nmachine: m1\n"
     run_root = tmp_path / "run"
+    spawned = run_root / "runs" / "kj.1" / "spawn.json"
 
     async def scenario() -> Engine:
         catalog = lower_source(text)
@@ -373,12 +379,16 @@ def test_killjob_mid_run_terminates_and_no_completion_overwrites_it(tmp_path: Pa
         engine = start_run(
             catalog, run_root, clock=clock, adapters={"CMD": LocalCommandAdapter(grace_seconds=2.0)}
         )
-        now = clock.now()
-        engine.inject(Event(at=now, kind="STARTJOB", payload={"job": "kj"}))
-        engine.inject(
-            Event(at=now + timedelta(seconds=0.15), kind="KILLJOB", payload={"job": "kj"})
-        )
+        engine.inject(Event(at=clock.now(), kind="STARTJOB", payload={"job": "kj"}))
+
+        async def kill_once_spawned() -> None:
+            while not spawned.exists():
+                await asyncio.sleep(0.01)
+            engine.inject(Event(at=clock.now(), kind="KILLJOB", payload={"job": "kj"}))
+
+        injector = asyncio.create_task(asyncio.wait_for(kill_once_spawned(), timeout=20.0))
         await engine.run_until_quiescent(datetime.max)
+        await injector
         await engine.shutdown()
         assert engine.journal is not None
         engine.journal.close()
