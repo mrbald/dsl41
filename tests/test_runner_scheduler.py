@@ -646,7 +646,7 @@ def test_sourceless_startjob_keeps_the_bare_untagged_cause_format() -> None:
 
 
 def test_condition_edge_start_leaves_started_by_as_the_bare_edge_cause() -> None:
-    """(DL-68): a condition-edge start (SEM-01, Oracle._wake_referencers) is
+    """(DL-68): a condition-edge start (SEM-01, the move's `wake`) is
     never sourced -- only the explicit STARTJOB/FORCE_STARTJOB/TIMER event
     dispatch tags a source suffix. started_by carries the edge's own cause
     ("status of 'dep' changed to SUCCESS") verbatim, with no "(...)" tail."""
@@ -1801,7 +1801,7 @@ def test_preflight_oracle_rule_is_armor_pinned_by_injection(
     def refuse(_catalog: CatalogIR, **_switches: object) -> None:
         raise OracleError("injected construction refusal")
 
-    monkeypatch.setattr(runner_mod, "ChartOracle", refuse)
+    monkeypatch.setattr(runner_mod, "Oracle", refuse)
     text = "insert_job: ok_job\njob_type: c\ncommand: x\nmachine: m1\n"
     items = preflight(lower_source(text))
     oracle_items = [i for i in items if i.code == "oracle"]

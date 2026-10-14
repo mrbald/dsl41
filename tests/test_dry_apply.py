@@ -30,10 +30,9 @@ from typing import Any
 import pytest
 
 from fork_harness import (
-    CHART_ORACLE_FRESH,
-    CHART_ORACLE_SHARED,
     ORACLE_COPIED,
     ORACLE_FRESH,
+    ORACLE_IDLE,
     ORACLE_SHARED,
     STORE_COPIED,
     STORE_REBUILT,
@@ -43,7 +42,6 @@ from fork_harness import (
 )
 from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
-from dsl41.oracle_chart import ChartOracle
 from dsl41.oracle_state import VIOLATION_MARKER, Event, JobStatus, RuntimeState
 from dsl41.runner import Engine, _Pending
 from dsl41.runner_adapters import FakeAdapter
@@ -149,9 +147,11 @@ def test_the_fork_copies_every_mutable_attribute_and_shares_only_fixed_ones() ->
     """The attribute sets are pinned: a new field on either class fails here
     until `fork` and `fork_harness.state_bytes` both name it. The history
     starts empty on the fork, so a fork costs nothing in the period's
-    length."""
+    length; the cascade's bookkeeping is false or empty between inputs, on
+    the oracle and its fork (DL-350); and the fork's `job_instance` is
+    rebound to the fork."""
     oracle = Oracle(lower_source(_JIL))
-    assert set(vars(oracle)) == ORACLE_COPIED | ORACLE_FRESH | ORACLE_SHARED
+    assert set(vars(oracle)) == ORACLE_COPIED | ORACLE_FRESH | ORACLE_IDLE | ORACLE_SHARED
     assert set(vars(oracle.store)) == STORE_COPIED | STORE_REBUILT | STORE_SHARED
     oracle.feed(_start())
     assert oracle._trace and oracle._emitted  # history to leave behind
@@ -162,6 +162,10 @@ def test_the_fork_copies_every_mutable_attribute_and_shares_only_fixed_ones() ->
     for name in ORACLE_FRESH:
         assert getattr(twin, name) == [], name
         assert getattr(twin, name) is not getattr(oracle, name), name
+    for name in ORACLE_IDLE:
+        assert not getattr(oracle, name) and not getattr(twin, name), name
+        if isinstance(getattr(oracle, name), (set, dict, list)):
+            assert getattr(twin, name) is not getattr(oracle, name), name
     for name in ORACLE_COPIED:
         value = getattr(oracle, name)
         assert getattr(twin, name) == value or name == "store", name
@@ -175,7 +179,9 @@ def test_the_fork_copies_every_mutable_attribute_and_shares_only_fixed_ones() ->
     for name in STORE_REBUILT:  # the twin's own executor
         assert getattr(twin.store, name) is not getattr(oracle.store, name), name
     for name in STORE_SHARED:
-        assert getattr(twin.store, name) is getattr(oracle.store, name), name
+        rebound = getattr(twin.store, name)
+        assert rebound is not getattr(oracle.store, name), name
+        assert getattr(rebound, "__self__", None) is twin, name
     seed_local_executor(oracle.store, "local", at=T0)
     assert oracle.fork().store.machines.active("host:local") == frozenset(
         {"host", "routed", "active"}
@@ -184,33 +190,11 @@ def test_the_fork_copies_every_mutable_attribute_and_shares_only_fixed_ones() ->
     assert oracle.fork()._window_starts is None
 
 
-def test_the_chart_oracles_fork_pins_its_own_attribute_and_rebinds_its_job_source() -> None:
-    """The chart oracle (DL-341) holds the oracle's attributes and its
-    own, false between inputs and on the fork (DL-350); its store
-    holds the same attributes, and the fork's `job_instance` and holding
-    listener are rebound to the fork."""
-    oracle = ChartOracle(lower_source(_JIL))
-    chart = CHART_ORACLE_FRESH | CHART_ORACLE_SHARED
-    assert set(vars(oracle)) == ORACLE_COPIED | ORACLE_FRESH | ORACLE_SHARED | chart
-    assert set(vars(oracle.store)) == STORE_COPIED | STORE_REBUILT | STORE_SHARED
-    oracle.feed(_start())
-    twin = oracle.fork()
-    for name in CHART_ORACLE_FRESH:
-        assert not getattr(oracle, name) and not getattr(twin, name), name
-        if isinstance(getattr(oracle, name), (set, dict, list)):
-            assert getattr(twin, name) is not getattr(oracle, name), name
-    assert twin._late_settlements is not oracle._late_settlements
-    for name in STORE_SHARED:
-        rebound = getattr(twin.store, name)
-        assert rebound is not getattr(oracle.store, name), name
-        assert getattr(rebound, "__self__", None) is twin, name
-
-
-def test_a_row_the_chart_oracle_s_fork_creates_never_reaches_the_parent() -> None:
+def test_a_row_the_oracle_s_fork_creates_never_reaches_the_parent() -> None:
     """DL-350: the twin's macrostep reaches an instance only the twin
     has (a STATUS for a job the catalog lacks creates its row); the parent's
     next macrostep checks only the instances it reached itself."""
-    oracle = ChartOracle(lower_source(_JIL))
+    oracle = Oracle(lower_source(_JIL))
     oracle.feed(_start())
     twin = oracle.fork()
     later = T0 + timedelta(minutes=1)

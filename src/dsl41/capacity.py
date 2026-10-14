@@ -357,15 +357,6 @@ class CapacityPool:
                 return True
         return False
 
-    @staticmethod
-    def holds(row: JobRuntime) -> bool:
-        """True while this row still holds units. The Oracle releases on the
-        edge that LEAVES STARTING/RUNNING (period-model ss5) -- terminal for
-        every ordinary run -- before it wakes anything (the release-before-wake
-        gate). A row that is not live holds only what that release kept on a
-        renewable resource (DL-256)."""
-        return bool(row.reservations)
-
     def sorted_waiters(self, rows: Mapping[str, JobRuntime]) -> list[str]:
         """The QUE_WAIT jobs in admission order, read off the rows."""
 

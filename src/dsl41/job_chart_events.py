@@ -35,7 +35,7 @@ STARTED: Final = "started"
 READMIT: Final = "readmit"
 ACTUAL_START: Final = "actual start"
 ADMITTED_START: Final = "admitted start"
-#: A start past the gates and the bound: the extent of `Oracle._start`.
+#: A start past the gates and the bound: its extent (`OracleCascade._extent`).
 START_ADMITTED: Final = "start admitted"
 LEAVE_LIVE: Final = "leave STARTING or RUNNING"
 #: A flag move whose status rule reads the flag: it follows the move.
@@ -114,7 +114,7 @@ class JobData:
     `box`: the job type is BOX. `catalog`: the job has a catalog entry; a row
     can outlive its entry, and STATUS can create one (DL-264).
     `job_terminator` and `auto_hold`: the member's attributes the box's rules
-    test (SEM-14, `_cascade_job_terminators`; `_on_box_started`). All four are
+    test (SEM-14, `OracleCascade._box_ends`; `_box_running`). All four are
     the catalog's, so they change only when a catalog is installed. What
     leaving a run does with its units is the run's, a fact of the settlement
     (`Settlement`, DL-349).
@@ -136,7 +136,7 @@ class Units(Protocol):
     units the row holds at that moment (DL-349).
 
     `consequences`: what a row of `kind` sends and reports beyond its own
-    move, in today's order, read from the tier's facts when the row runs
+    move, in order, read from the tier's facts when the row runs
     (DL-350). The kinds are the chart's actions that delegate: a status
     move's box rules, settlement and wakes, a box's end, a flag's wakes and
     retries, an admitted start's extent. None sends nothing."""
@@ -171,7 +171,7 @@ class Payload:
 
 @dataclass(frozen=True)
 class Attempt(Payload):
-    """One start attempt: `Oracle._attempt_start`, `_start` and `_start_admitted`.
+    """One start attempt, decided by `start_verdict`.
 
     `force`, `explicit` and `scheduled` say who asks: a relay from STARTJOB,
     FORCE_STARTJOB or a window-postponed start sets all three as `_dispatch`
@@ -182,20 +182,20 @@ class Attempt(Payload):
     attempts nothing. `dated`: the job has date conditions (`schedule`).
     `box`: the member's gate on its box's run (SEM-10, SEM-20). `condition`:
     the job's condition holds, or it has none. `window`: `_window_side`.
-    `decided`: the window alone decides the attempt, as `_run_window_permits`
+    `decided`: the window alone decides the attempt, as `_window_side`
     does for a box start's pass and for a waiter that left the queue for its
     window (DL-246, DL-257): no other gate is read, and inside the window
     nothing moves. The start bound is no fact: job.100 counts the item's
     ancestry (DL-350).
     `settlement_owed`: a run of the job ended inside a cascade still running
-    its box rules, and its settlement waits (`_settle_ended_run`, DL-340).
-    `box_noexec`: a box above the job is ON_NOEXEC (`_noexec_bypasses`).
+    its box rules, and its settlement waits (job.401, DL-340).
+    `box_noexec`: a box above the job is ON_NOEXEC (`_noexec_above`).
     `admissible`: `_admissible`. `demand`: the demand vector reserves units
     (`to_reservations`; a gate entry reserves nothing, so `reserve` moves
     nothing for it).
     The guards read the fields in `start_verdict`'s order, so a tier that
-    computes each fact on its first read computes only those today's rule
-    code reads (`oracle_chart`).
+    computes each fact on its first read computes only those the rule reads
+    (`oracle_facts.StartFacts`).
     """
 
     force: bool = False
@@ -221,7 +221,7 @@ class Attempt(Payload):
 
 @dataclass(frozen=True)
 class Readmission:
-    """One queue scan's attempt for a waiter: `Oracle._readmit`.
+    """One queue scan's attempt for a waiter, decided by `readmit_verdict`.
 
     `box`: the member's box is RUNNING or not; `none` for a job in no box.
     `keep_stopped`: an admit-only scan keeps a member of a stopped box queued
@@ -249,8 +249,8 @@ class Injection(Payload):
 class Noexec(Payload):
     """ON_NOEXEC on a box (DL-254): `tree_busy`, a job it contains is on ice,
     live or queued (`_oob_ignored`); `change`, its parent is RUNNING or a job
-    it contains is not INACTIVE. `_noexec_box` also counts the box's own
-    status, which the configuration decides."""
+    it contains is not INACTIVE. `noexec_settles_box` also counts the box's
+    own status, which the configuration decides."""
 
     tree_busy: bool = False
     change: bool = True
@@ -267,15 +267,15 @@ class Deadline(Payload):
 class Verdict(Payload):
     """One step of a RUNNING box's completion door: `target`, the status it
     decides, or none. `member moves` reads the overrides
-    (`_apply_box_overrides`), `completion moment` the default fold
-    (`_all_members_done`, `_fold_box_default`)."""
+    (`OverrideFacts`), `completion moment` the default fold
+    (`_all_members_done`, `FoldFacts`)."""
 
     target: Literal["SUCCESS", "FAILURE"] | None = None
 
 
 @dataclass(frozen=True)
 class BoxVerdict:
-    """An idle box's recompute (`_idle_box_recompute`, SEM-15): `target`, the
+    """An idle box's recompute (`RecomputeFacts`, SEM-15): `target`, the
     status it decides, or none; `override`, a box_success or box_failure
     condition decided it rather than the default verdict."""
 
@@ -358,7 +358,7 @@ class Settlement:
 
 @dataclass(frozen=True)
 class Admission(Payload):
-    """The units of an admitted start (`_acquire`, `_start_on_held`):
+    """The units of an admitted start (`_w_reserve`, `_w_on_held`):
     `on_held`, a FORCE_STARTJOB starts on held units (DL-256); `demand` as
     for `Attempt`."""
 

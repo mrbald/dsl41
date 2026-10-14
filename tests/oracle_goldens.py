@@ -1,16 +1,16 @@
 """Golden digests of the oracle over the harness's sample (DL-351).
 
-The old-versus-new harness (DL-338) compared two oracles input by input. The
-old oracle is gone, so its answers are kept as digests: per input of the
-sample, the outcome, the trace lines, the emitted events, the store's rows,
-the revisions, the pending timers and the next timer due, and the seal digest
-at each seal point, rendered as the harness rendered them. The violation
-channel (DL-292) is not digested: its trace lines are left out of the trace
-component. The old oracle recorded no violation on the whole sample, and the
-oracle the engine builds still writes the channel, so a replay fails on any
-run that records one, naming its first entry.
+The goldens hold the answers of the oracle the engine ran before DL-351, as
+digests: per input of the sample, the outcome, the trace lines, the emitted
+events, the store's rows, the revisions, the pending timers and the next
+timer due, and the seal digest at each seal point, rendered as
+tests/oracle_inputs.py renders them. The violation channel (DL-292) is not
+digested: its trace lines are left out of the trace component. The goldens
+recorded no violation on the whole sample, and the oracle still writes the
+channel, so a replay fails on any run that records one, naming its first
+entry.
 
-The sample is the harness's three runs:
+The sample is three runs over tests/oracle_inputs.py's inputs:
 
 - `corpus-seeds`: the corpus and the directed estates, then seeds 0 to 199
   at up to 50 jobs, under the default switches;
@@ -52,26 +52,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from estate_gen import Advance, SealPoint, Step
-from oracle_lockstep import (
+from oracle_inputs import (
     EPOCH,
     Job,
-    _fork,
-    _own,
-    _Side,
-    _switch_label,
+    Side,
     corpus_jobs,
     describe,
     directed_jobs,
     generated_jobs,
+    own,
     seal_digest,
     seal_lines,
+    switch_label,
     switch_matrix,
 )
 
-import dsl41.oracle
 from dsl41.ir import CatalogIR
 from dsl41.oracle import Oracle
-from dsl41.oracle_chart import ChartOracle
 from dsl41.oracle_state import VIOLATION_MARKER, Event
 from dsl41.semantics import SemanticSwitches, resolve
 
@@ -80,7 +77,7 @@ GOLDENS = Path(__file__).parent / "oracle_goldens.txt"
 OracleFactory = Callable[..., Oracle]
 
 #: The oracle the engine and every replay build, which the goldens hold to.
-PRODUCTION: OracleFactory = ChartOracle
+PRODUCTION: OracleFactory = Oracle
 
 #: The compared components, in the order a difference names them.
 COMPONENTS = (
@@ -126,9 +123,9 @@ class Run:
 
 
 def sample_runs(name: str) -> Iterator[Run]:
-    """The runs of one sample in the harness's order: switch rows outer, jobs
+    """The runs of one sample in the goldens' order: switch rows outer, jobs
     inner; a job's own switches fill a row's gaps, and a merged row a job
-    already ran under runs once (`oracle_lockstep.run_all`)."""
+    already ran under runs once."""
     jobs, matrix = sample_jobs(name)
     ran: set[tuple[int, tuple[tuple[str, str], ...]]] = set()
     for row in matrix:
@@ -138,8 +135,8 @@ def sample_runs(name: str) -> Iterator[Run]:
             if merged in ran:
                 continue
             ran.add(merged)
-            label = f"{job.label}; switches {_switch_label(overrides)}"
-            yield Run(name, label, _switch_label(row), job.catalog, job.script, resolve(overrides))
+            label = f"{job.label}; switches {switch_label(overrides)}"
+            yield Run(name, label, switch_label(row), job.catalog, job.script, resolve(overrides))
 
 
 # ------------------------------------------------------------------ one run
@@ -172,8 +169,8 @@ class Digests:
         return hashlib.blake2b(b"".join(self.links), digest_size=LAST // 2).hexdigest()
 
 
-def _observe(side: _Side, applied_batch: object, error: Exception | None) -> dict[str, list[str]]:
-    """The harness's observation, the violation channel left out."""
+def _observe(side: Side, applied_batch: object, error: Exception | None) -> dict[str, list[str]]:
+    """What `Side.observe` reads, the violation channel left out."""
     observed = side.observe(applied_batch, error)  # type: ignore[arg-type]
     observed["trace"] = [line for line in observed["trace"] if f" {VIOLATION_MARKER} " not in line]
     observed.pop("violations", None)
@@ -181,20 +178,11 @@ def _observe(side: _Side, applied_batch: object, error: Exception | None) -> dic
     return observed
 
 
-def _fit(oracle: Oracle, jobs: int) -> None:
-    """The old oracle's recursion fit, while the build has one (DL-306)."""
-    fit = getattr(dsl41.oracle, "fit_recursion_limit", None)
-    if fit is not None:
-        fit(jobs, type(oracle))
-
-
 def digest_run(run: Run, factory: OracleFactory) -> Digests:
-    """Drive one oracle over the run's script as the harness drove each side:
-    an input that raises is put back and its time half applied alone, as the
-    engine quarantines it (`oracle_lockstep.Lockstep.step`)."""
-    oracle = factory(_own(run.catalog), semantics=run.semantics)
-    _fit(oracle, len(run.catalog.jobs))
-    side = _Side(oracle)
+    """Drive the oracle over the run's script: an input that raises is put
+    back and its time half applied alone, as the engine quarantines it."""
+    oracle = factory(own(run.catalog), semantics=run.semantics)
+    side = Side(oracle)
     found = Digests()
     found.add("<genesis>", _observe(side, None, None))
     now = None
@@ -203,8 +191,8 @@ def digest_run(run: Run, factory: OracleFactory) -> Digests:
             found.add("SEAL", {"seal": seal_lines(seal_digest(side.oracle, now or EPOCH))})
             continue
         now = step.at
-        fork, emitted = _fork(side.oracle), len(side.oracle._emitted)
-        applied = side.apply(_own(step))
+        fork, emitted = side.oracle.fork(), len(side.oracle._emitted)
+        applied = side.apply(own(step))
         described = describe(step)
         raised = applied.error
         if raised is not None and isinstance(step, Event):

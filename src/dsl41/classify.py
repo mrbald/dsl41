@@ -44,7 +44,7 @@ here and tested directly.
 
 **One authority for condition truth.** The readiness diff evaluates
 conditions through the interpreter itself (`_TruthOracle`, a throwaway
-`Oracle` seeded with the carried rows), never through a second evaluator
+`OracleReads` seeded with the carried rows), never through a second evaluator
 written here: SEM-05's iced-predecessor rule, SEM-06's undefined-is-false
 rule and the lookback ladder are semantics, and a classifier that
 re-implemented them would answer a question the engine does not ask.
@@ -65,6 +65,7 @@ from dsl41.derive import BoxTree, derive_graph
 from dsl41.equiv import canonical_cond
 from dsl41.ir import CatalogIR, CondAttr, JobIR, unquote_jil_value
 from dsl41.oracle import Oracle
+from dsl41.oracle_reads import OracleReads
 from dsl41.oracle_state import RESOURCE_BUCKET, TERMINAL, JobRuntime
 from dsl41.period import (
     RuntimeProfile,
@@ -885,15 +886,20 @@ def classify(
 # ---------------------------------------------------- the boundary-truth diff
 
 
-class _TruthOracle(Oracle):
-    """A throwaway interpreter used for one question: does this job's
-    `condition:` hold at the carried state?
+class _TruthOracle(OracleReads):
+    """A throwaway interpreter's reads, used for one question: does this
+    job's `condition:` hold at the carried state?
 
-    A subclass rather than a second evaluator, and rather than a public
-    query on the interpreter itself: the classifier is the only caller that
-    ever asks about a state it did not produce, and condition truth is
-    interpreter semantics (SEM-05's iced predecessor, SEM-06's undefined
-    atom, the lookback ladder). One authority, borrowed."""
+    A subclass of the oracle's reads rather than a second evaluator, and
+    rather than a public query on the interpreter itself: the classifier is
+    the only caller that ever asks about a state it did not produce, and
+    condition truth is interpreter semantics (SEM-05's iced predecessor,
+    SEM-06's undefined atom, the lookback ladder). One authority, borrowed.
+    It applies no input, so it builds no job instance."""
+
+    def at(self, now: datetime) -> None:
+        """Read the conditions at `now`, as a time observation would."""
+        self._now = now
 
     def condition_holds(self, job: str) -> bool:
         job_ir = self.catalog.jobs.get(job)
@@ -946,7 +952,7 @@ def _seeded(
     for name, value in sorted(carried.globals_.items()):
         store.set_global(name, value)
     store.commit_input()
-    oracle.advance(_eval_clock(carried))
+    oracle.at(_eval_clock(carried))
     return oracle
 
 

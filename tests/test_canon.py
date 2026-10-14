@@ -40,7 +40,8 @@ from dsl41.canon import (
 )
 from dsl41.ast_jil import JilParseError, parse
 from dsl41.ir import LoweringError, lower_catalog, lower_source
-from dsl41.oracle import TIMER_CHECKS, Oracle
+from dsl41.oracle import Oracle
+from dsl41.oracle_schedule import TIMER_CHECKS
 from dsl41.oracle_state import Event, JobRuntime
 from dsl41.runner_adapters import FakeAdapter, load_json
 from dsl41.runner_admission import PROTOCOL_VERSION, addressed_key
@@ -534,25 +535,31 @@ def test_pr09_every_timer_payload_canonicalizes() -> None:
         assert decode(canonical_bytes(event.payload)) == event.payload
 
 
-def test_pr09_covers_every_timer_call_site_in_oracle_py() -> None:
+def test_pr09_covers_every_timer_call_site_of_the_oracle() -> None:
     """The watched set is DERIVED, not listed (DL-83): the arming sites come
-    off oracle.py's own AST and the kinds come off the timers the test armed.
-    A new `_schedule_timer` call site makes the two counts disagree and this
-    test names it -- including one that arms an already-covered kind, which is
-    a cheap false positive next to a timer nobody proved canonicalizable.
+    off the AST of every module the oracle's class is built from, and the
+    kinds come off the timers the test armed. A new `_schedule_timer` call
+    site makes the two counts disagree and this test names it -- including one
+    that arms an already-covered kind, which is a cheap false positive next to
+    a timer nobody proved canonicalizable.
 
     The second half pins the funnel: `enqueue_timer` is reached only through
     `_schedule_timer`, so counting that wrapper counts everything."""
-    source = pathlib.Path(inspect.getsourcefile(Oracle) or "")
-    tree = ast.parse(source.read_text(encoding="utf-8"))
-    arming: list[int] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-            if node.func.attr == "_schedule_timer":
-                arming.append(node.lineno)
+    sources = {
+        pathlib.Path(inspect.getsourcefile(cls) or "")
+        for cls in Oracle.__mro__
+        if cls.__module__.startswith("dsl41.")
+    }
+    trees = {source.name: ast.parse(source.read_text(encoding="utf-8")) for source in sources}
+    arming: list[str] = []
+    for name, tree in sorted(trees.items()):
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                if node.func.attr == "_schedule_timer":
+                    arming.append(f"{name}:{node.lineno}")
     covered = _armed_timer_kinds(_oracle_with_every_timer_armed())
     assert len(arming) == len(covered), (
-        f"oracle.py arms timers at lines {arming}, and this test exercises"
+        f"the oracle arms timers at {arming}, and this test exercises"
         f" {sorted(covered)}: cover the new site (PR-09)"
     )
     # the registry is closed at the wrapper: an unregistered check is refused
@@ -579,15 +586,20 @@ def test_pr09_covers_every_timer_call_site_in_oracle_py() -> None:
             datetime(2026, 7, 1, 8, 0),
             _Event(at=datetime(2026, 7, 1, 8, 0), kind="TIMER", payload={"deferred_cause": 1.5}),
         )
-    wrapper = next(
-        node
+    wrappers = [
+        (name, node)
+        for name, tree in trees.items()
         for node in ast.walk(tree)
         if isinstance(node, ast.FunctionDef) and node.name == "_schedule_timer"
-    )
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-            inside = wrapper.lineno <= node.lineno <= (wrapper.end_lineno or wrapper.lineno)
-            assert node.func.attr != "enqueue_timer" or inside, (
-                f"oracle.py line {node.lineno} arms a timer around _schedule_timer;"
-                " route it through the wrapper so PR-09's guard can see it"
-            )
+    ]
+    [(home, wrapper)] = wrappers
+    for name, tree in trees.items():
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                inside = name == home and (
+                    wrapper.lineno <= node.lineno <= (wrapper.end_lineno or wrapper.lineno)
+                )
+                assert node.func.attr != "enqueue_timer" or inside, (
+                    f"{name} line {node.lineno} arms a timer around _schedule_timer;"
+                    " route it through the wrapper so PR-09's guard can see it"
+                )

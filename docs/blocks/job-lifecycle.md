@@ -31,7 +31,7 @@ One job row carries three orthogonal regions, each a declared machine:
 - [job_flags](../state-machines.md#job_flags): ON_ICE, ON_HOLD and ON_NOEXEC, and the schedule arm.
 - [job_holding](../state-machines.md#job_holding): the units a job reserves or keeps; the [capacity](capacity.md) card explains it.
 
-The three are also declared as one composite statechart, `job` in `src/dsl41/job_chart.py`, which is checked against these tables (DL-337). The second oracle drives it for the STATUS input (DL-341), for every start attempt (DL-342), for KILLJOB and the TIMER input (DL-343), for the flag inputs (DL-344), for RELEASE_RESOURCE and each waiter's readmission out of the queue (DL-345), and for the box rules between a box and its members and the period opening's release (DL-346), and for a box's ON_NOEXEC on the jobs it contains (DL-347), beside the oracle that takes the tables. Its whole cascade runs on the executor's worklist: each consequence of a move is a chained item, and the oracle's hook writes each item's moves before the next one pops (DL-350). In both oracles a box's end FAILURE or TERMINATED kills its live job_terminator members only while the run that ended is still the box's run (DL-348).
+The three are also declared as one composite statechart, `job` in `src/dsl41/job_chart.py`, which is checked against these tables (DL-337). The oracle (`Oracle` in `src/dsl41/oracle.py`) drives it for the STATUS input (DL-341), for every start attempt (DL-342), for KILLJOB and the TIMER input (DL-343), for the flag inputs (DL-344), for RELEASE_RESOURCE and each waiter's readmission out of the queue (DL-345), and for the box rules between a box and its members and the period opening's release (DL-346), and for a box's ON_NOEXEC on the jobs it contains (DL-347); its writes still take the tables. Its whole cascade runs on the executor's worklist: each consequence of a move is a chained item, and the oracle's hook writes each item's moves before the next one pops (DL-350). A box's end FAILURE or TERMINATED kills its live job_terminator members only while the run that ended is still the box's run (DL-348).
 
 [runtime_assembly](../state-machines.md#runtime_assembly) is the state owner's own life: carried rows or a genesis seed, then one input at a time. It is a statechart ([statechart-engine](../statechart-engine.md), DL-335). The state owner holds its instance from construction, and the configuration is the assembly phase. A verb the phase does not allow is a refusal row, which the verb raises as `OracleError` or `ValueError`.
 Each anchor holds the generated diagram and transition table.
@@ -88,7 +88,7 @@ The row lists no open finding. `conditions.py` is in the 100% gate ([DL-298](../
 
 ## Gaps found
 
-- An injected STATUS still moves a job that is ON_NOEXEC: `Oracle._handle_status` has no flag check.
+- An injected STATUS still moves a job that is ON_NOEXEC: the job chart's STATUS rows read no flag.
   The vendor says CHANGE_STATUS has no effect on an ON_NOEXEC job, and a box CHANGE_STATUS INACTIVE leaves ON_NOEXEC members' status alone.
   [SEM-22](../autosys-semantics.md#sem-22--on_noexec-v) records both rules in a not-modeled note that points at [DL-254](../decision-log.md).
   It also marks the inherited bypass, a member bypassing under a flagged box, as a project pin with no vendor source, and names the corners it decides.

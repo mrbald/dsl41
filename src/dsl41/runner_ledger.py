@@ -153,7 +153,7 @@ from dsl41.runner_clock import EngineError
 #: completion), the rank it keeps is the same under both versions.
 #: 23 since DL-348 (SEM-14's job_terminator): a box's end FAILURE or
 #: TERMINATED kills its live job_terminator members only while the run that
-#: ended is still the box's run. `_terminate` reads the box's run number
+#: ended is still the box's run. The kill reads the box's run number
 #: before the status write, and the cascade compares it before each member:
 #: once the write's wakes, or an earlier member's kill, started the box
 #: again, the cascade reaches no further member: not the members the new run

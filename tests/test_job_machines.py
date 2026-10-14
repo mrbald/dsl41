@@ -173,15 +173,6 @@ def test_an_internal_transition_is_one_row_per_status(recording: Path) -> None:
             assert JOB_STATUS.take(rows[verdict], verdict, verdict) is not None
 
 
-def test_a_set_target_needs_a_named_status() -> None:
-    """A transition whose payload chooses the target cannot be taken
-    without the status: the oracle refuses before any write."""
-    oracle = Oracle(lower_source(_JIL))
-    with pytest.raises(OracleError, match=r"job_status\.19 lets the payload choose"):
-        oracle._set_status("j", STATUS_INJECTED, cause="no status")
-    assert oracle.store.runtime("j").status == "INACTIVE"
-
-
 def test_a_flag_move_off_its_table_is_noted_and_still_written(recording: Path) -> None:
     store = RuntimeState()
     store.move_flag("j", FORCE_CLEARS_ICE)  # only an iced job can be cleared by a force
@@ -225,12 +216,14 @@ def test_the_harness_sees_a_move_outside_an_input_batch(
 ) -> None:
     """The proof in test_oracle.py's fixture is not vacuous: a move in a bare
     store transaction is caught, and so is a channel left full at
-    `begin_input`. An InputBatch's moves are not."""
+    `begin_input`. An InputBatch's moves are not. The bare transaction is a
+    store's of its own: the oracle's store checks its job instances at each
+    commit, which a bare move would fail first."""
     misplaced = batch_harness.install(monkeypatch)
     oracle = Oracle(lower_source(_JIL))
     oracle.feed(Event(at=T0, kind="STARTJOB", payload={"job": "j"}))
     assert misplaced == []
-    store = oracle.store
+    store = RuntimeState()
     store.begin_input()
     store.move_flag("j", ICE_ON)
     store.commit_input()
@@ -448,7 +441,7 @@ def test_every_ignorable_event_in_every_reachable_state_takes_a_declared_transit
     the test sets itself. Each verb either takes a declared transition or
     is refused by the oracle's own rule (OracleError); a TransitionError
     means a table row is missing. The ignore conditions are the code's own
-    (`_oob_ignored`, `_attempt_start`, the KILLJOB dispatch), met by building
+    (`_oob_ignored`, `job_chart.start_verdict`, the KILLJOB dispatch), met by building
     the states, not restated here."""
     monkeypatch.setenv(STRICT_ENV, "1")
     statuses = ("INACTIVE", "QUE_WAIT", "STARTING", "RUNNING", "SUCCESS", "FAILURE", "TERMINATED")

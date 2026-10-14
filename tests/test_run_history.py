@@ -332,7 +332,7 @@ def test_reconcile_completion_with_a_true_ended_at_gets_its_real_duration() -> N
 
 def test_a_killjob_terminated_run_closes_via_the_trace_not_a_status_input() -> None:
     """KILLJOB is decided by the oracle synchronously while processing the
-    KILLJOB input itself (oracle.py `_terminate`) -- no adapter completion
+    KILLJOB input itself (the job chart's kill row) -- no adapter completion
     is ever journaled for it. Reading only dispatch + STATUS records would
     misreport this run as still RUNNING; the trace shows the real close."""
     records = [_header(), _dispatch("j1", 1, run_dir=None, started_at=T0)]

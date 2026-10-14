@@ -161,7 +161,7 @@ ROOT: Final = State(
 
 #: The status rows, `job.1NN`. 101 to 158 are `job_status.01` to `.58`; 159
 #: and above are the rows a split source or a cell the table lacked adds; 100
-#: is the start bound, which no table declared (`_start` refused in code).
+#: is the start bound, which no table declared (DL-304).
 _STATUS_ROWS: Final = (
     Row(
         "job.100",
@@ -424,7 +424,7 @@ _STATUS_ROWS: Final = (
         cite="SEM-10, DL-350",
         note=(
             "The admitted run is no longer STARTING: a wake of its STARTING ended it, or"
-            " started the job again (`_run`'s RUNNING check)."
+            " started the job again (`Started.current`)."
         ),
     ),
     Row(

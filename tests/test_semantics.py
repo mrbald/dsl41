@@ -1818,7 +1818,7 @@ def test_a_staged_manifest_missing_semantics_is_refused_not_restored(tmp_path: P
 #: Production calls that may leave `semantics` to its default, each with its
 #: reason. Everything else in src passes the switches it runs under.
 _DEFAULT_SWITCHES_ALLOWED: dict[tuple[str, str], str] = {
-    ("equiv.py", "ChartOracle"): "equiv is a static tool with no runtime profile",
+    ("equiv.py", "Oracle"): "equiv is a static tool with no runtime profile",
     ("minify_rules.py", "compile_calendar"): "a parse-validity predicate; no switch changes"
     " what the calendar parser accepts",
     ("cli_run.py", "engine.journal.preflight"): "`Journal.preflight` journals WARN items;"

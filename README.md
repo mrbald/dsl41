@@ -575,32 +575,37 @@ Semantics:
   nothing from the interpreter.
 - `src/dsl41/job_chart.py`: the composite `job` statechart: one job's status,
   flags and holding in one declaration, checked against the three job tables;
-  the chart oracle drives it for STATUS, the starts, KILLJOB, the TIMER input,
+  the oracle drives it for STATUS, the starts, KILLJOB, the TIMER input,
   the flags, RELEASE_RESOURCE, the readmission, the box rules, a box's
   ON_NOEXEC on the jobs it contains and the cascade's moments. It holds the
   contract, the guards and the actions, and re-exports its two parts:
   `src/dsl41/job_chart_events.py` (the events, the data and the payloads) and
   `src/dsl41/job_chart_rows.py` (the states, the rows and a row's
   configuration).
-- `src/dsl41/oracle.py`: the AutoSys discrete-event interpreter:
+- `src/dsl41/oracle.py`: the AutoSys discrete-event interpreter, `Oracle`:
   script-driven completion, edge-triggered re-evaluation, and `InputBatch`,
-  one admitted input as one store transaction. In both oracles a box's end
-  FAILURE or TERMINATED kills its live job_terminator members only while
-  the run that ended is still the box's run.
-- `src/dsl41/oracle_chart.py`: the second oracle, which drives every job
-  row through the `job` chart: each input a root item, its cascade on the
-  executor's worklist, and a hook that writes each microstep's moves and
-  stops a cascade that does not end at an item cap. The engine, every
-  replay, preflight and equiv build it; it reproduces the first oracle's
-  golden digests.
-- `src/dsl41/oracle_chart_agreement.py`: the second oracle's error for a
-  fired row it has no write for.
-- `src/dsl41/oracle_chart_cascade.py`: the second oracle's cascade: what
-  each row sends beyond its own move, the moments that iterate, and the
-  gates that choose each rule's audience.
-- `src/dsl41/oracle_chart_facts.py`: the payloads the second oracle gives the
-  `job` chart, each oracle fact computed on its first read, and a job
-  instance's data.
+  one admitted input as one store transaction. Every job row moves through
+  the `job` chart: each input a root item, its cascade on the executor's
+  worklist, and a hook that writes each microstep's moves and stops a
+  cascade that does not end at an item cap. The engine, every replay,
+  preflight and equiv build it; it reproduces the golden digests. It is
+  built in layers, one module each:
+  - `src/dsl41/oracle_reads.py`: the store, the trace and the reads:
+    condition truth, box membership, admission, an ignored flag input.
+  - `src/dsl41/oracle_schedule.py`: the clock's reads and the timers:
+    run_window, deferrals, the queued recheck's calendars, the deadlines.
+  - `src/dsl41/oracle_cascade.py`: the cascade: what each row sends beyond
+    its own move, the moments that iterate, and the gates that choose each
+    rule's audience. A box's end FAILURE or TERMINATED kills its live
+    job_terminator members only while the run that ended is still the
+    box's run.
+  - `src/dsl41/oracle_writers.py`: the hook's write for each row the chart
+    can fire, and the error for a fired row it has no write for.
+- `src/dsl41/oracle_facts.py`: the payloads the oracle gives the `job`
+  chart, each oracle fact computed on its first read, and a job instance's
+  data.
+- `src/dsl41/oracle_intents.py`: the cascade's payloads, the moments'
+  steps, and the intents a row's action reports for the hook.
 - `src/dsl41/capacity.py`: sized buckets (machine `max_load`, resource
   amounts) and the QUE_WAIT queue with its admission order.
 - `src/dsl41/semantics.py`: the closed registry of semantic switches
@@ -819,8 +824,9 @@ Compiler:
 - `tests/test_oracle.py`: the AutoSys oracle trace tests against the SEM
   entries.
 - `tests/test_oracle_goldens.py`: the oracle reproduces the golden digests
-  of the old oracle's answers over the harness's sample
-  (`tests/oracle_goldens.py`; CI replays the whole sample).
+  recorded before DL-351 over the goldens' sample (`tests/oracle_goldens.py`,
+  its inputs and renderings in `tests/oracle_inputs.py`; CI replays the whole
+  sample).
 - `tests/test_resources.py`: resource-manager tests that need direct
   oracle access, including the cross-order safety and liveness property.
 - `tests/test_semantics.py`: the semantic-switch registry, the

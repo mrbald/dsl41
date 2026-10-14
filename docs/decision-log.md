@@ -22900,3 +22900,71 @@ relitigate an entry; append a new one.
   the full replay pushing CI's test legs toward their timeout, now a job of its own. Three rounds
   each. Findings confirmed by the reviewer that raised them; the Fable pass agreed to the stated
   limits' text.
+- DL-352 One oracle: the chart oracle takes the name `Oracle`, the old oracle's bodies and the
+  harness that paired the two leave, and the oracle is laid out as one chain of modules by concern
+  (2026-10-15; src/dsl41/oracle.py, src/dsl41/oracle_reads.py, src/dsl41/oracle_schedule.py,
+  src/dsl41/oracle_cascade.py, src/dsl41/oracle_intents.py, src/dsl41/oracle_writers.py,
+  src/dsl41/oracle_facts.py, src/dsl41/oracle_state.py, src/dsl41/job_chart.py,
+  src/dsl41/job_chart_events.py, src/dsl41/job_chart_rows.py, src/dsl41/capacity.py,
+  src/dsl41/classify.py, src/dsl41/runner.py, src/dsl41/runner_history.py,
+  src/dsl41/runner_preflight.py, src/dsl41/cli_run.py, src/dsl41/equiv.py, src/dsl41/attest.py,
+  src/dsl41/simulation_register_rows.py, src/dsl41/runner_ledger.py; tests/oracle_inputs.py,
+  tests/test_oracle_inputs.py,
+  tests/oracle_goldens.py, tests/test_oracle_goldens.py, tests/fork_harness.py, tests/conftest.py
+  and the oracle's tests; pyproject.toml; docs/statechart-engine.md §8, §11, §16;
+  docs/blocks/job-lifecycle.md; docs/blocks/capacity.md; docs/blocks/box-execution.md;
+  docs/runner-design.md; docs/autosys-semantics.md; docs/concurrency-model.md §3;
+  docs/citation-index.md; docs/simulation-coverage.md; docs/decision-index.md; README)
+  THE AIM. DL-351 made the chart oracle the engine's and recorded the goldens from the old oracle.
+  This entry is the second of the three switch-over entries (6.4): one oracle remains, under the
+  public name.
+  ONE ORACLE. `ChartOracle` is `Oracle`; `CascadeOracle` and `AgreeingOracle` are gone, and every
+  construction site follows. The old oracle's bodies that the chart oracle overrode or no longer
+  reached are deleted: 51 methods, DL-350's thirty-one uncalled cascade methods among them, the
+  old dispatch, status handler, owed scan, removed-holder release and SET_GLOBAL's old body, and
+  every body only they reached. A static call closure from the chart's methods found them, and the
+  coverage run confirmed it. `CapacityPool.holds` went with them, unused.
+  THE LAYOUT. One linear chain, one module per concern: `OracleReads` (the store's build, trace
+  and emit, conditions, box membership, admission), `OracleSchedule` (windows, calendars,
+  deadlines, timers), `OracleCascade` (consequences, moments, audiences, the scan), with its
+  payloads and intents in oracle_intents.py, `OracleWriters` (the write for each row the chart
+  fires, in row order), and `Oracle` (inputs as root items, the hook, the item cap, the checks).
+  The lazy payload facts are in oracle_facts.py. Each module is under 1,200 lines; oracle_state.py
+  is the store and stays at about 3,000 until the entry after this one removes its tables.
+  `MAX_NESTED_STARTS`, job.100's bound, moves to job_chart.py. Classify's truth oracle builds on
+  `OracleReads`: it reads conditions only, with the same answers.
+  THE SCAFFOLD. The agreement between the two oracles leaves: the agreement module, the store's
+  `holding_moved` listener and its handler, the settling check. The macrostep's and the commit's
+  projection checks stay, and so does the performer's statechart error for an unwritten row. The
+  recursion fit leaves too: `fit_recursion_limit`, `FRAMES_PER_NESTED_START`,
+  `RECURSION_LIMIT_BASE`. `RECURSION_LIMIT` (DL-351) and both messages of `CascadeDepthError` stay.
+  THE TESTS. The lockstep harness's pairing and its test file leave; the inputs, renderings and
+  estate scripts the goldens use move to tests/oracle_inputs.py. Every test that paired the two
+  oracles runs on the one, keeping each assertion on its own output; mutant tests assert the
+  mutated parts from the oracle with the goldens' renderings, and the eleven STATUS cases that only
+  the pairing checked now pin their end rows and trace. 27 tests go, each with its cover: the
+  old-against-old runs, the mutant machinery and the fourth arm by the goldens and their planted
+  one-line change, the fit's tests by the iterative cascade's tests.
+  A CHECK THAT GOES. The settlement's holding agreement leaves the oracle (DL-349): a settlement
+  row whose holding move differed from the store verb's was a statechart error at the verb, in the
+  engine since DL-351. A mismatch that ends in another holding state is now caught at the
+  macrostep's end by the projection check, after the write; its test plants a free read as keep. A
+  spend read as free ends in `none` either way, and the verb writes the right move, so no check
+  sees it and no output differs. The ignored-flag writer keeps its statechart error for ON_ICE and
+  ON_HOLD on a job that is not live, now with a planted test.
+  MOVED, NOT CHANGED. The PENDING markers of Q3c, Q3d, Q15 and Q16 sit at the code that now holds
+  each pin, and the register's sites follow. STARTJOB's two deadline timers are two calls, so the
+  PR-09 test counts one site per kind across every module of the oracle's chain.
+  BEHAVIOUR. Unchanged: the goldens replay with 0 differing over 4,060 runs and 152,213 entries,
+  and no golden changed. Two defect-path texts change: the ignored-flag error ends "(the rules
+  apply it)", and the holding mismatch reports as the macrostep's projection error.
+  STATE_MACHINE_VERSION stays 23 (DL-235).
+  NOT HERE. The three tables, the verbs' table validation and the violation channel, the
+  registration of `job` with `job.312`'s mark, DL-292's retirement, the cost round and the version
+  review for those (the entry after). Simplifying the chart's rows and guards is the owner's later
+  project.
+  REVIEW. A refactor that keeps behaviour: one Opus reviewer, two rounds, six minor findings, all
+  fixed and confirmed by it. It found the STATUS cases left checking only instance agreement, now
+  pinned against the old oracle's output, a defensive arm of the ignored-flag writer removed as
+  unreached, now restored, and stale names and citations. It re-ran the goldens and the old oracle
+  over the STATUS cases and found both equal.

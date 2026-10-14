@@ -1,10 +1,10 @@
-"""The payloads the chart oracle gives the `job` chart, and a job instance's
+"""The payloads the oracle gives the `job` chart, and a job instance's
 data (docs/statechart-engine.md §11, DL-342, DL-344, DL-345).
 
-`oracle_chart` dispatches each converted input to the job's instance with a
-payload whose fields are oracle facts. A fact is computed on the guards' first
-read and kept, in the order today's rules test it, so an input computes only
-the facts the old oracle computes. Every fact is a read: it writes nothing to
+The oracle dispatches each input to the job's instance with a payload whose
+fields are oracle facts. A fact is computed on the guards' first
+read and kept, in the order the rules test it, so an input computes only
+the facts its rules read. Every fact is a read: it writes nothing to
 the store, the trace, the timers or the resolutions.
 
 - `StartFacts`: a `start` attempt's payload, `Attempt`'s fields (DL-342).
@@ -28,12 +28,11 @@ from dsl41.capacity import DemandEntry, to_reservations
 from dsl41.conditions import Cond, GlobalAtom, iter_atoms
 from dsl41.ir import JobIR
 from dsl41.job_chart import BoxGate, JobData, Release, WindowSide
-from dsl41.oracle import Oracle
 from dsl41.oracle_state import FAILED, LIVE, TERMINAL, JobStatus
 from dsl41.state_machine import Context, Effects
 
 if TYPE_CHECKING:
-    from dsl41.oracle_chart_cascade import CascadeOracle
+    from dsl41.oracle_cascade import OracleCascade
 
 #: A box rule's verdict: the status it decides, or none.
 type Target = Literal["SUCCESS", "FAILURE"] | None
@@ -44,20 +43,18 @@ class StartFacts:
     first read and kept.
 
     `force`, `explicit`, `scheduled`, `stale`, `rescan`, `decided` and `dated`
-    are eager: who asks, the window timer's own facts (DL-343), which today's
-    code reads before any gate, and an attribute of the job. `box`,
+    are eager: who asks, the window timer's own facts (DL-343), which are read
+    before any gate, and an attribute of the job. `box`,
     `condition`, `window`, `settlement_owed`, `box_noexec`, `admissible` and
     `demand` are lazy. `cause` is the attempt's cause text, which its writes
     name; `refusal` the text a stale window timer's refusal writes in place of
-    today's reason (DL-343). The guards read them in `start_verdict`'s order, which
-    is the order today's `_attempt_start`, `_start` and `_start_admitted` test
-    them, so an attempt computes the facts the old oracle computes and no
-    other: an iced job's condition is never evaluated, nor the window of a
+    the rule's reason (DL-343). The guards read them in `start_verdict`'s
+    order, so an attempt computes the facts its verdict reads and no other: an iced job's condition is never evaluated, nor the window of a
     job whose condition is false. Every fact is a read: `_runtime` of the
     box, `_cond_true`, `_window_side`, `_late_settlements`,
-    `_noexec_bypasses`, the pool's `demand_vector` and `_admissible` write
+    `_noexec_above`, the pool's `demand_vector` and `_admissible` write
     nothing to the store, the trace, the timers or the resolutions
-    (`_window_side` fills the zone cache, as it does today). `units` is the
+    (`_window_side` fills the zone cache). `units` is the
     job's handle (`RowUnits`)."""
 
     __slots__ = (
@@ -79,7 +76,7 @@ class StartFacts:
 
     def __init__(
         self,
-        oracle: Oracle,
+        oracle: OracleCascade,
         job: str,
         job_ir: JobIR | None,
         *,
@@ -148,7 +145,7 @@ class StartFacts:
 
     @property
     def box(self) -> BoxGate:
-        """The member's gate on its box's run, as `_attempt_start` reads it."""
+        """The member's gate on its box's run (SEM-10, SEM-20)."""
         if "box" not in self._known:
             box = self._job_ir_known().box.box_name
             gate: BoxGate = "none"
@@ -173,7 +170,7 @@ class StartFacts:
 
     @property
     def window(self) -> WindowSide:
-        """`_window_side`, which `_run_window_permits` calls."""
+        """The SEM-33 closer-edge side of the job's window (`_window_side`)."""
         if "window" not in self._known:
             side, next_open = self._oracle._window_side(self._job_ir_known())
             self._known["window"] = side
@@ -183,7 +180,7 @@ class StartFacts:
     @property
     def settlement_owed(self) -> bool:
         """A run of the job ended inside a cascade still running its box rules,
-        and its settlement waits (`_settle_ended_run`, DL-340): the late
+        and its settlement waits (job.401, DL-340): the late
         settlement of the row's run is registered and not done."""
         if "settlement_owed" not in self._known:
             run = self._oracle._runtime(self._job).run_number
@@ -193,11 +190,11 @@ class StartFacts:
 
     @property
     def box_noexec(self) -> bool:
-        """`_noexec_bypasses`. The guard reads it only for a job that is not a
+        """`_noexec_above`. The guard reads it only for a job that is not a
         box and has no ON_NOEXEC of its own, where it is the boxes above."""
         if "box_noexec" not in self._known:
             job_ir = self._job_ir_known()
-            self._known["box_noexec"] = self._oracle._noexec_bypasses(job_ir)
+            self._known["box_noexec"] = self._oracle._noexec_above(job_ir)
         return cast(bool, self._known["box_noexec"])
 
     @property
@@ -217,7 +214,7 @@ class StartFacts:
         return bool(to_reservations(self.vector()))
 
     def vector(self) -> list[DemandEntry]:
-        """The pool's `demand_vector`, which `_start_admitted` reads."""
+        """The pool's `demand_vector`, which the admission reads."""
         if "vector" not in self._known:
             self._known["vector"] = self._oracle._pool.demand_vector(self._job_ir_known())
         return cast(list[DemandEntry], self._known["vector"])
@@ -225,18 +222,17 @@ class StartFacts:
 
 class RowUnits:
     """The tier's handle on one job (`Units`), which the oracle's payloads
-    carry. `release` reads the row's units when the settlement pops, as
-    `_settle_row` does, and decides as `RuntimeState.release_reservations`
+    carry. `release` reads the row's units when the settlement pops, and decides as `RuntimeState.release_reservations`
     does with the pool's `keeps_held`: a `completion` unit is freed by every
     end and a `success` unit by SUCCESS; what is not freed is kept on a
     renewable and spent on a depletable, and one kept unit makes the end keep.
     A row that holds nothing frees nothing (DL-349). `consequences` reads what
-    a row of the job sends beyond its own move from the chart oracle
-    (`CascadeOracle._consequences`, DL-350). Both are reads."""
+    a row of the job sends beyond its own move from the oracle
+    (`OracleCascade._consequences`, DL-350). Both are reads."""
 
     __slots__ = ("_oracle", "_job")
 
-    def __init__(self, oracle: Oracle, job: str) -> None:
+    def __init__(self, oracle: OracleCascade, job: str) -> None:
         self._oracle = oracle
         self._job = job
 
@@ -259,11 +255,10 @@ class RowUnits:
 
     def consequences(self, ctx: Context, kind: str) -> Effects | None:
         """What a row of `kind` of the job sends and reports beyond its move."""
-        oracle = cast("CascadeOracle", self._oracle)
-        return oracle._consequences(self._job, ctx, kind)
+        return self._oracle._consequences(self._job, ctx, kind)
 
 
-def job_data(oracle: Oracle, job: str) -> JobData:
+def job_data(oracle: OracleCascade, job: str) -> JobData:
     """A job instance's data: its catalog entry's facts, which change only
     when a catalog is installed. A row whose job the catalog does not define
     has `catalog=False`."""
@@ -283,17 +278,17 @@ class NoexecFacts:
 
     `tree_busy`: a job the box contains, at any depth, is on ice, STARTING,
     RUNNING or QUE_WAIT, as `_oob_ignored` reads its contained jobs. The guard
-    reads it only for a box that is neither on ice nor RUNNING, where today's
+    reads it only for a box that is neither on ice nor RUNNING, where the
     rule reaches that loop. `change`: the box's parent is RUNNING, or a job
-    the box contains is not INACTIVE, as `_noexec_box` decides whether the
-    box's INACTIVE runs; the guard reads it only for a box that is INACTIVE
+    the box contains is not INACTIVE, as `noexec_settles_box` decides whether
+    the box's INACTIVE runs; the guard reads it only for a box that is INACTIVE
     itself (any other status decides it). Neither is read for a job that is
     not a box. Both read rows that exist: a contained job is in the catalog.
     `units` is the box's or the job's handle (`RowUnits`)."""
 
     __slots__ = ("units", "_oracle", "_job", "_known", "_tree")
 
-    def __init__(self, oracle: Oracle, job: str) -> None:
+    def __init__(self, oracle: OracleCascade, job: str) -> None:
         self.units = RowUnits(oracle, job)
         self._oracle = oracle
         self._job = job
@@ -340,20 +335,22 @@ class ReadmitFacts:
 
     `keep_stopped` is eager: it is the scan's own mode, not a fact. `box`,
     `admissible`, `recheck_fails` and `demand` are lazy. `readmit_verdict`
-    reads them in `Oracle._readmit`'s order, so a readmission computes the
-    facts the old oracle computes and no other: the box's status for a member
+    reads them in the rule's order, so a readmission computes the facts its
+    verdict reads and no other: the box's status for a member
     only, the demand vector and `_admissible` only for a waiter that is not
     held and whose box runs, `_queued_recheck` only for one that fits, and the
     reservations only for one admitted. Every fact is a read: `_runtime` of
     the box, the pool's `demand_vector`, `_admissible` and `_queued_recheck`
     write nothing to the store, the trace, the timers or the resolutions
-    (`_queued_recheck` fills the calendar and zone caches, as it does today).
+    (`_queued_recheck` fills the calendar and zone caches).
     The order of the waiters is not a fact: the scan reads it off the rows
     (`CapacityPool.sorted_waiters`), and each waiter gets its own `readmit`."""
 
     __slots__ = ("keep_stopped", "units", "_oracle", "_job", "_job_ir", "_known")
 
-    def __init__(self, oracle: Oracle, job: str, job_ir: JobIR, *, keep_stopped: bool) -> None:
+    def __init__(
+        self, oracle: OracleCascade, job: str, job_ir: JobIR, *, keep_stopped: bool
+    ) -> None:
         self.keep_stopped = keep_stopped
         self.units = RowUnits(oracle, job)
         self._oracle = oracle
@@ -401,15 +398,15 @@ class ReadmitFacts:
         return bool(to_reservations(self.vector()))
 
     def vector(self) -> list[DemandEntry]:
-        """The pool's `demand_vector`, which `_readmit` reads."""
+        """The pool's `demand_vector`, which the readmission reads."""
         if "vector" not in self._known:
             self._known["vector"] = self._oracle._pool.demand_vector(self._job_ir)
         return cast(list[DemandEntry], self._known["vector"])
 
 
 def _named_jobs(cond: Cond) -> set[str]:
-    """The local jobs a condition names, as the old oracle's override rule
-    reads them (its module's `_cond_job_names`)."""
+    """The local jobs a condition names: an override reads its condition on
+    their moves (SEM-12)."""
     return {
         atom.job.name
         for atom in iter_atoms(cond)
@@ -420,8 +417,8 @@ def _named_jobs(cond: Cond) -> set[str]:
 class OverrideFacts:
     """`member moves`' payload (`Verdict`): the step of a RUNNING box's
     completion door that reads its overrides, for the direct parent and for
-    each box above it (`Oracle._apply_box_overrides`, SEM-12). `target` is
-    computed on the guards' first read, in today's order: box_success, then
+    each box above it (SEM-12). `target` is computed on the guards' first
+    read, in the rule's order: box_success, then
     box_failure, each only when the box declares it and the moment evaluates
     it (the condition names the member, or the moment completes the member),
     the second only when the first does not hold. Each is `_cond_true`, a
@@ -431,7 +428,7 @@ class OverrideFacts:
 
     def __init__(
         self,
-        oracle: Oracle,
+        oracle: OracleCascade,
         box_ir: JobIR,
         member: str | None,
         new: str | None,
@@ -477,9 +474,9 @@ class OverrideFacts:
 class FoldFacts:
     """`completion moment`'s payload (`Verdict`): the default fold of a
     RUNNING box's completion door (SEM-11), after no override fired. `target`
-    is computed on the guards' first read, in today's order: whether every
+    is computed on the guards' first read, in the rule's order: whether every
     member is done (`_all_members_done`), and only then the vote of the
-    members that ran (`_fold_box_default`): SUCCESS when none failed and no
+    members that ran: SUCCESS when none failed and no
     box_success is declared, FAILURE when one failed and no box_failure is
     declared, else None (an unmet override suppresses the default). `units`
     is the box's handle (`RowUnits`). `at_start`: the box start left no member
@@ -487,7 +484,7 @@ class FoldFacts:
 
     __slots__ = ("units", "at_start", "_oracle", "_box_ir", "_known")
 
-    def __init__(self, oracle: Oracle, box_ir: JobIR, *, at_start: bool = False) -> None:
+    def __init__(self, oracle: OracleCascade, box_ir: JobIR, *, at_start: bool = False) -> None:
         self.units = RowUnits(oracle, box_ir.name)
         self.at_start = at_start
         self._oracle = oracle
@@ -525,9 +522,8 @@ class FoldFacts:
 
 class RecomputeFacts:
     """`box recompute`'s payload (`BoxVerdict`): an idle box re-derives its
-    status from its members (`Oracle._idle_box_recompute`, SEM-15). `target`
-    and `override` are computed together on the guards' first read of either,
-    in today's order: the members that vote (INACTIVE ignored, and under
+    status from its members (SEM-15). `target` and `override` are computed
+    together on the guards' first read of either, in the rule's order: the members that vote (INACTIVE ignored, and under
     `idle-box-iced-member=ignore` a member out of the run on ice); no verdict
     when the trigger is out of the run and nothing else votes, or when a voter
     is not terminal; then box_success and box_failure (`_cond_true`, the
@@ -539,7 +535,7 @@ class RecomputeFacts:
 
     __slots__ = ("cause", "units", "_oracle", "_box_ir", "_trigger", "_known")
 
-    def __init__(self, oracle: Oracle, box_ir: JobIR, trigger: str, cause: str = "") -> None:
+    def __init__(self, oracle: OracleCascade, box_ir: JobIR, trigger: str, cause: str = "") -> None:
         self.cause = cause
         self.units = RowUnits(oracle, box_ir.name)
         self._oracle = oracle
@@ -569,6 +565,7 @@ class RecomputeFacts:
     def _recompute(self) -> tuple[Target, bool]:
         oracle = self._oracle
         box = self._box_ir.name
+        # PENDING: Q16 -- whether an iced member votes in an idle box's recompute
         ignore_iced = oracle.semantics.idle_box_iced_member == "ignore"
         statuses: list[JobStatus] = [
             status
@@ -591,13 +588,13 @@ class RecomputeFacts:
 
 class Started:
     """`started`'s payload (DL-350): whether the admitted run is still the
-    row's run when it pops (`current`, `_run`'s RUNNING check), and whether
+    row's run when it pops (`current`), and whether
     its admission had a demand, which the RUNNING line names. `units` is the
     job's handle (`RowUnits`)."""
 
     __slots__ = ("had_demand", "units", "_oracle", "_job", "_run")
 
-    def __init__(self, oracle: Oracle, job: str, run: int, *, had_demand: bool) -> None:
+    def __init__(self, oracle: OracleCascade, job: str, run: int, *, had_demand: bool) -> None:
         self.had_demand = had_demand
         self.units = RowUnits(oracle, job)
         self._oracle = oracle

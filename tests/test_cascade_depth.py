@@ -1,14 +1,12 @@
 """A long instant cascade runs, and one that never ends stops.
 
-The old oracle evaluated a cascade of instant starts recursively, one start
-inside the next, and fitted the interpreter's recursion limit to the job
-count (`oracle.fit_recursion_limit`); a cascade past it raised an error naming
-the RecursionError and the cascade's first start. The chart oracle's cascade
-is the executor's worklist, iterative: it takes no frame per nested start, so
-its constant is 0 and the frames it needs do not grow with the job count
-(DL-350). The engine, the replays and equiv build the chart oracle and fit
-nothing. Its hook counts a root dispatch's items and stops it at the item cap
-for the estate's job count (`oracle_chart.item_cap`, DL-351), with the
+The oracle's cascade is the executor's worklist, iterative: it takes no
+frame per nested start, so the frames it needs do not grow with the job count
+(DL-350). Only a fact's own recursion, such as a deep condition, can pass the
+recursion limit, which the oracle raises to a fixed headroom
+(`oracle.RECURSION_LIMIT`, DL-351); the error names the RecursionError and
+the root's job. The hook counts a root dispatch's items and stops it at the
+item cap for the estate's job count (`oracle.item_cap`, DL-351), with the
 same error class and the same operator outcome: an engine-made input is
 quarantined, a control input is refused `apply_faulted`.
 
@@ -31,23 +29,16 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from dsl41 import oracle_chart, runner
+from dsl41 import oracle, runner
 from dsl41.cli import app
 from dsl41.equiv import equivalent_tier_c
 from dsl41.ir import CatalogIR, lower_source
 from dsl41.oracle import (
-    FRAMES_PER_NESTED_START,
-    MAX_NESTED_STARTS,
-    RECURSION_LIMIT_BASE,
-    Oracle,
-    fit_recursion_limit,
-)
-from dsl41.oracle_chart import (
     ITEM_CEILING,
     ITEM_FLOOR,
     ITEMS_PER_JOB_SQUARED,
     RECURSION_LIMIT,
-    ChartOracle,
+    Oracle,
     item_cap,
 )
 from dsl41.oracle_state import CascadeDepthError, Event, OracleError
@@ -117,8 +108,8 @@ def test_sem10_a_300_job_instant_cascade_runs_and_replays_in_a_fresh_process(
 ) -> None:
     """DL-304: the three deepest shapes, 300 jobs each, started by an
     engine-made input (a scheduler tick, or a completion). At the default
-    limit of 1000 the old oracle's recursion raised at about 45, 91 and 142
-    jobs. The chart oracle's cascade takes no frame per start, so `rehearse`
+    limit of 1000 a recursive cascade raised at about 45, 91 and 142 jobs
+    (DL-306). The oracle's cascade takes no frame per start, so `rehearse`
     runs them and a fresh process replays them for `journal`, neither fitting
     the limit to the job count. Neither raises nor dies on a signal."""
     jil, events = SHAPES[shape](JOBS)
@@ -153,24 +144,6 @@ def test_sem10_a_300_job_instant_cascade_runs_and_replays_in_a_fresh_process(
     assert successes == set(jobs)
 
 
-def test_sem10_the_recursion_limit_fits_the_job_count_and_never_drops() -> None:
-    """Two nested starts per job at most, each at most the oracle class's
-    `FRAMES_PER_NESTED_START` frames, over a base. A limit already higher is
-    kept."""
-    sys.setrecursionlimit(1000)
-    fitted = fit_recursion_limit(JOBS)
-    assert fitted == RECURSION_LIMIT_BASE + FRAMES_PER_NESTED_START * MAX_NESTED_STARTS * JOBS
-    assert sys.getrecursionlimit() == fitted
-    assert fit_recursion_limit(1) == fitted
-    assert sys.getrecursionlimit() == fitted
-
-    class Deeper(Oracle):
-        FRAMES_PER_NESTED_START = FRAMES_PER_NESTED_START + 4
-
-    deeper = fit_recursion_limit(JOBS, Deeper)
-    assert deeper == fitted + 4 * MAX_NESTED_STARTS * JOBS
-
-
 def _depth() -> int:
     frame: FrameType | None = sys._getframe()
     depth = 0
@@ -180,22 +153,21 @@ def _depth() -> int:
 
 
 def test_sem10_a_cascade_past_the_limit_names_its_first_start() -> None:
-    """When a cascade does pass the limit, the error says RecursionError and
-    names the job whose start began the cascade, not the frame that broke.
-    It is still a RecursionError, and an OracleError, so a caller that
-    reports oracle errors reports it."""
-    jil, _ = _box_chain(100)
-    oracle = Oracle(lower_source(jil))
-    sys.setrecursionlimit(_depth() + 400)
+    """When a fact's own recursion, a deep condition, passes the limit, the
+    error says RecursionError and names the job whose input began the
+    cascade, not the frame that broke. It is still a RecursionError, and an
+    OracleError, so a caller that reports oracle errors reports it."""
+    built = Oracle(lower_source(_deep_jil(400)))
+    sys.setrecursionlimit(_depth() + 300)
     with pytest.raises(CascadeDepthError) as raised:
-        oracle.feed(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "q0"}))
+        built.feed(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "a"}))
     assert isinstance(raised.value, RecursionError)
     assert isinstance(raised.value, OracleError)
-    assert raised.value.job == "q0"
-    # wrapped once, at the outermost start: no inner start wrapped it first
+    assert raised.value.job == "a"
+    # wrapped once, at the root dispatch
     assert type(raised.value.__cause__) is RecursionError
     assert str(raised.value).startswith("RecursionError: an instant cascade passed")
-    assert "its first start was q0 (" in str(raised.value)
+    assert "its first start was a (FORCE_STARTJOB event)" in str(raised.value)
 
 
 def _force_q0() -> Event:
@@ -224,7 +196,7 @@ def _running_box_fold(jobs: int) -> tuple[str, list[Event]]:
 def _terminator_chain(jobs: int) -> tuple[str, list[Event]]:
     """Boxes nested one inside the next, each a job_terminator of the box
     around it, a command job innermost. All run; then the kill of `q0`
-    terminates them in today's cascade, one `_terminate` inside the next
+    terminates them in the box ends' cascade, one kill inside the next
     (SEM-14, DL-343). The kill nests no start: the slope is the
     terminator cascade's own."""
     jil = _box("q0") + "".join(
@@ -272,10 +244,8 @@ _LAST: dict[str, tuple[Event, str]] = {
 
 
 def _off_hold_chain(jobs: int) -> tuple[str, list[Event]]:
-    """The box chain, begun by OFF_HOLD's retry of a held `q0`. The chart
-    oracle inherited the input from `Oracle._dispatch` one frame deeper
-    (DL-343); since its flag handler (DL-344) the retry sits as deep as
-    the old oracle's."""
+    """The box chain, begun by OFF_HOLD's retry of a held `q0` (SEM-21,
+    DL-344)."""
     jil = _box("q0") + "".join(_box(f"q{i}", f"s(q{i - 1})") for i in range(1, jobs))
     return jil, [Event(at=T0, kind="ON_HOLD", payload={"job": "q0"})]
 
@@ -309,9 +279,13 @@ def _override_fold(jobs: int) -> tuple[str, list[Event]]:
     return jil, setup
 
 
-def _frames_needed(shape: str, jobs: int, oracle: type[Oracle] = Oracle) -> int:
+#: Python's default recursion limit.
+DEFAULT_LIMIT = 1000
+
+
+def _frames_needed(shape: str, jobs: int) -> int:
     """The fewest frames above the caller that a forced start of `q0` needs
-    to run the shape's cascade over `jobs` jobs on `oracle`, by bisection."""
+    to run the shape's cascade over `jobs` jobs, by bisection."""
     shapes = {
         **SLOPE_SHAPES,
         "paren-chain": _paren_chain,
@@ -326,7 +300,7 @@ def _frames_needed(shape: str, jobs: int, oracle: type[Oracle] = Oracle) -> int:
     last, status = _LAST.get(shape, (_force_q0(), "SUCCESS"))
 
     def fits(frames: int) -> bool:
-        built = oracle(catalog)
+        built = Oracle(catalog)
         sys.setrecursionlimit(100_000)
         for event in setup:
             built.feed(event)
@@ -340,7 +314,7 @@ def _frames_needed(shape: str, jobs: int, oracle: type[Oracle] = Oracle) -> int:
         assert {row.status for row in built.store.job.values()} == {status}
         return True
 
-    low, high = 1, 4 * max(oracle.FRAMES_PER_NESTED_START, FRAMES_PER_NESTED_START) * jobs
+    low, high = 1, DEFAULT_LIMIT
     while low < high:
         middle = (low + high) // 2
         if fits(middle):
@@ -350,30 +324,15 @@ def _frames_needed(shape: str, jobs: int, oracle: type[Oracle] = Oracle) -> int:
     return low
 
 
-def _slope(shape: str, oracle: type[Oracle]) -> float:
+def _slope(shape: str) -> float:
     """The frames a cascade of the shape needs per job, between two sizes."""
     # box nesting stops at 64 levels (the lowering's bound)
     small, large = (21, 61) if shape == "terminator-chain" else (41, 81)
-    needed = _frames_needed(shape, large, oracle) - _frames_needed(shape, small, oracle)
+    needed = _frames_needed(shape, large) - _frames_needed(shape, small)
     return needed / (large - small)
 
 
-@pytest.mark.parametrize("shape", sorted(SLOPE_SHAPES))
-def test_sem10_frames_per_job_stay_within_the_fitted_budget(shape: str) -> None:
-    """The fit budgets `MAX_NESTED_STARTS` x `FRAMES_PER_NESTED_START`
-    frames per job, the oracle class's own constant. The frames a cascade
-    needs grow by at most that much per job: a change to the oracle that
-    makes a start deeper than the budget fails here, before an estate meets
-    it. The ring nests two starts per job, the chain one; the fold shape
-    adds a completion of a run begun before the cascade to each bypass; a
-    release's readmission begins the chain once, at its base."""
-    needed = _slope(shape, Oracle)
-    frames = Oracle.FRAMES_PER_NESTED_START
-    assert needed <= MAX_NESTED_STARTS * frames
-    assert needed > (frames if shape == "box-ring" else 0)
-
-
-_CHART_SHAPES = [
+_FRAME_SHAPES = [
     *sorted(SLOPE_SHAPES),
     "paren-chain",
     "override-fold",
@@ -382,28 +341,19 @@ _CHART_SHAPES = [
 ]
 
 
-@pytest.mark.parametrize("shape", _CHART_SHAPES)
-def test_sem10_the_chart_oracle_needs_no_frame_per_job(shape: str) -> None:
-    """DL-350: the chart oracle's cascade is the executor's worklist,
-    popped in a loop, so a nested start, a box rule or a wake takes no Python
-    frame: the frames a cascade needs do not grow with the job count, on every
-    shape, and its `FRAMES_PER_NESTED_START` is 0. What it needs is a
-    constant, a deep condition's own recursion its largest part, which the
-    base of the fit holds."""
-    assert ChartOracle.FRAMES_PER_NESTED_START == 0
-    assert _slope(shape, ChartOracle) == 0
-    assert _frames_needed(shape, 41, ChartOracle) < RECURSION_LIMIT_BASE // 4
-
-
-def test_sem10_the_chart_oracle_fits_the_base_whatever_the_job_count() -> None:
-    """`fit_recursion_limit` for the chart oracle's class is the base: its
-    constant is 0."""
-    sys.setrecursionlimit(1000)
-    assert fit_recursion_limit(JOBS, ChartOracle) == RECURSION_LIMIT_BASE
+@pytest.mark.parametrize("shape", _FRAME_SHAPES)
+def test_sem10_the_oracle_needs_no_frame_per_job(shape: str) -> None:
+    """DL-350: the oracle's cascade is the executor's worklist, popped in a
+    loop, so a nested start, a box rule or a wake takes no Python frame: the
+    frames a cascade needs do not grow with the job count, on every shape.
+    What it needs is a constant, a deep condition's own recursion its largest
+    part, well inside Python's default limit."""
+    assert _slope(shape) == 0
+    assert _frames_needed(shape, 41) < DEFAULT_LIMIT // 4
 
 
 def test_sem10_equiv_tier_c_runs_a_long_cascade_without_a_fit() -> None:
-    """equiv's tier (c) runs scripts through the chart oracle, so a script can
+    """equiv's tier (c) runs scripts through the oracle, so a script can
     start a cascade as long as a live one; the limit is the oracle's fixed
     headroom, whatever the job count."""
     large = lower_source(_box_chain(JOBS)[0])
@@ -479,7 +429,7 @@ def test_sem10_without_the_headroom_the_deepest_condition_does_not_evaluate(
     """The control: at the default limit the same wake meets the depth
     error, so the headroom is what lets it evaluate."""
     catalog = _deepest_lowered()
-    monkeypatch.setattr(oracle_chart, "RECURSION_LIMIT", 1000)
+    monkeypatch.setattr(oracle, "RECURSION_LIMIT", 1000)
     sys.setrecursionlimit(1000)
     assert _engine_wakes_b(catalog) == "INACTIVE"
 
@@ -586,8 +536,8 @@ def test_sem10_the_item_cap_is_a_floor_a_square_then_a_ceiling() -> None:
     assert item_cap(317) == item_cap(400) == item_cap(1000) == ITEM_CEILING == 400_000
 
 
-class _Counting(ChartOracle):
-    """The chart oracle, keeping the most items any root dispatch took."""
+class _Counting(Oracle):
+    """The oracle, keeping the most items any root dispatch took."""
 
     peak = 0
 
@@ -696,7 +646,7 @@ def _loop_estate(jobs: int) -> CatalogIR:
     return lower_source(jil)
 
 
-class _BeforeDL348(ChartOracle):
+class _BeforeDL348(Oracle):
     """The box's end reaches every member, whatever run the box is in: the
     defect DL-348 fixed, which loops on `_loop_estate` with no nested start."""
 
@@ -726,7 +676,7 @@ def test_sem10_a_cascade_that_never_ends_stops_at_the_item_cap() -> None:
 
 
 def _capped(monkeypatch: pytest.MonkeyPatch, cap: int) -> None:
-    monkeypatch.setattr(oracle_chart, "item_cap", lambda _jobs: cap)
+    monkeypatch.setattr(oracle, "item_cap", lambda _jobs: cap)
 
 
 def _chain_items(jobs: int) -> int:
@@ -744,11 +694,11 @@ def test_sem10_a_dispatch_below_the_cap_runs_and_one_at_the_cap_raises(
     items = _chain_items(20)
     catalog = lower_source(_box_chain(20)[0])
     _capped(monkeypatch, items + 1)
-    below = ChartOracle(catalog)
+    below = Oracle(catalog)
     below.feed(_force_q0())
     assert {row.status for row in below.store.job.values()} == {"SUCCESS"}
     _capped(monkeypatch, items)
-    at = ChartOracle(catalog)
+    at = Oracle(catalog)
     with pytest.raises(CascadeDepthError, match=f"item cap of {items} for an estate of 20 jobs"):
         at.feed(_force_q0())
 

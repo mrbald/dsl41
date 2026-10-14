@@ -1,108 +1,36 @@
-"""The second oracle: `Oracle` with its job rows driven by the `job` statechart
-(docs/statechart-engine.md §5, §11, §16; DL-341, DL-350).
+"""The oracle's writes: what each fired row of the `job` chart reached
+(docs/statechart-engine.md ss5, ss11; DL-350).
 
-`ChartOracle` is built beside the old oracle under the old-versus-new
-harness (tests/oracle_lockstep.py, DL-338), which names it as
-`dsl41.oracle_chart:ChartOracle`. Every input that moves a job row is the
-chart's: STATUS (DL-341), STARTJOB, FORCE_STARTJOB and a window timer's
-replay (DL-342), KILLJOB and the TIMER input (DL-343), the flag inputs
-(DL-344), RELEASE_RESOURCE (DL-345), SET_GLOBAL's wakes and the period
-opening. The deadline alarms move no state and stay `Oracle`'s.
-
-Instances. Each job row has one `job` instance on the state owner's executor
-(`RuntimeState.machines`), under the row's `job_key`, with `JobData` from the
-catalog (`job_data`). The owner restores them from the rows in
-`rebuild_machines`, which the constructor has it run
-(`RuntimeState.keep_job_instances`) and an install and a witness run; a fork
-copies them (`Executor.fork`, DL-339); a row read into existence gets its
-instance as it is created, outside any macrostep.
-
-The cascade (DL-350). An input is one root item on the job's instance,
-or one per job where today's code loops over jobs outside any transition
-(SET_GLOBAL's referencers, the period opening's removed holders), and the
-input's owed scan is a root item of its own after them (DL-255). A macrostep
-runs the whole cascade on the executor's worklist, depth first, in today's
-order (`oracle_chart_cascade`). The rows' actions are pure; this oracle is
-the tier whose hook (`_perform`) the executor calls with each outcome, before
-the next item pops: it writes what the fired rows reached, with the store's
-verbs and the old tables' transitions, each status with today's trace line
-and STATUS emission, in today's order within the microstep, then applies the
-intents the actions reported. A fired row it has no write for is a
-statechart error. The chart oracle calls none of the old recursive bodies.
-
-The start bound is job.100's: the attempt's ancestry holds two `start
-admitted` items of the job (DL-304). The cascade takes no Python frame per
-nested start, so the class's `FRAMES_PER_NESTED_START` is 0; a RecursionError
-can come only from a fact's own recursion (a deep condition), and the root
-dispatch names it as a `CascadeDepthError`. A cascade that does not end
-takes items instead: the hook counts a root dispatch's items and stops it at
-the item cap (`item_cap`, DL-351) with a `CascadeDepthError`.
-
-At each input's commit, every job the input touched has its row project to
-its instance's configuration (`RuntimeState.commit_input`). An exception out
-of a macrostep leaves the instances rebuilt from the rows, as the oracle has
-no rollback: the input is refused, or quarantined with its time half kept.
+The executor calls the oracle's hook with each microstep's outcome, before
+the next item pops (`oracle.Oracle._perform`). The hook writes each fired
+row with the method `_WRITERS` names: the store's verb with the row's declared
+move, the status's trace line and its STATUS emission, in the order the rows
+fired within the microstep, then the intents the row's actions reported. A
+row's type is checked against the catalog before it writes (`_check_type`).
+A fired row with no write, or whose write needs a fact the payload does not
+carry, is a statechart error (`_unwritten`).
 """
 
 from __future__ import annotations
 
-import sys
 from collections.abc import Mapping
 from typing import Final, cast
 
 from dsl41.capacity import machine_load, to_reservations
-from dsl41.ir import CatalogIR, Semantics
-from dsl41.job_chart import (
-    DISARM,
-    FORCE_STARTJOB,
-    JOB,
-    KILLJOB,
-    OFF_HOLD,
-    OFF_ICE,
-    OFF_NOEXEC,
-    ON_HOLD,
-    ON_ICE,
-    ON_NOEXEC,
-    PERIOD_OPENING,
-    RELEASE_RESOURCE,
-    RUN_WINDOW,
-    SCAN,
-    START,
-    STARTJOB,
-    STATUS,
-    TERM_RUN_TIME,
-    Deadline,
-    Payload,
-    Settlement,
-    Statechart,
-    projection,
-    row_configuration,
-)
-from dsl41.oracle import DEFERRED_RESCAN_KEY, DEFERRED_TIMER_KEY
-from dsl41.oracle_chart_agreement import listed
-from dsl41.oracle_chart_cascade import (
+from dsl41.job_chart import ON_HOLD, ON_ICE, ON_NOEXEC, RELEASE_RESOURCE, Settlement, projection
+from dsl41.oracle_cascade import OracleCascade
+from dsl41.oracle_facts import FoldFacts, RecomputeFacts, StartFacts, Started
+from dsl41.oracle_intents import (
     AdmissionFacts,
     Batch,
-    CascadeOracle,
     FlagFacts,
-    Intent,
     MemberEnd,
     Move,
-    Program,
     Rule,
     RunStart,
     Settle,
     Starting,
     StatusInput,
-)
-from dsl41.oracle_chart_facts import (
-    FoldFacts,
-    NoexecFacts,
-    RecomputeFacts,
-    RowUnits,
-    StartFacts,
-    Started,
-    job_data,
 )
 from dsl41.oracle_state import (
     ARM,
@@ -132,7 +60,6 @@ from dsl41.oracle_state import (
     ICE_ON,
     IDLE_BOX_DERIVE,
     IDLE_BOX_OVERRIDE,
-    INJECTABLE_STATUSES,
     JOB_BYPASS,
     JOB_CANCEL_WAITER,
     JOB_ICE_QUEUED,
@@ -155,49 +82,31 @@ from dsl41.oracle_state import (
     NOEXEC_OFF,
     NOEXEC_ON,
     QUEUE_LEFT_DISARMS,
-    RELEASE_ALL,
-    RELEASE_KEEP_HELD,
-    RELEASE_SPEND,
     START_REFUSED,
     STATUS_EXIT_FAILURE,
     STATUS_EXIT_SUCCESS,
     STATUS_INACTIVE,
     STATUS_INJECTED,
     TAKE_OVER_HELD,
-    CarriedRows,
-    CascadeDepthError,
-    Event,
     EventKind,
     FlagState,
-    HoldingState,
-    JobRuntime,
     JobStatus,
-    OracleError,
     Transition,
 )
 from dsl41.oracle_state import DISARM as DISARM_MOVE
-from dsl41.semantics import SemanticSwitches
-from dsl41.state_machine import Event as ChartEvent
 from dsl41.state_machine import Outcome, StatechartError
 
-#: The flag inputs, dispatched to the job's instance (DL-344).
-_FLAG_INPUTS: Final = frozenset({ON_ICE, OFF_ICE, ON_HOLD, OFF_HOLD, ON_NOEXEC, OFF_NOEXEC, DISARM})
-#: The internal rows an ignored flag input takes in today's table.
+#: The internal rows an ignored flag input takes.
 _FLAG_IGNORED: Final[dict[str, Mapping[JobStatus, Transition[JobStatus]]]] = {
     ON_ICE: ICE_IGNORED,
     ON_HOLD: HOLD_IGNORED,
     ON_NOEXEC: NOEXEC_IGNORED,
 }
-#: The hold rows ON_NOEXEC fires beside its flag's: today's `_set_noexec`
-#: writes the flag and its line first, where the region order puts the hold.
+
+#: The hold rows ON_NOEXEC fires beside its flag's: the flag and its line are
+#: written first, where the region order puts the hold (DL-254).
 _NOEXEC_HOLDS: Final = frozenset({"job.207", "job.232"})
-#: The settlement rows and the move each stands for: the verb decides the
-#: move from the units, so the row's is checked against it as it writes.
-_RELEASES: Final[dict[str, Transition[HoldingState]]] = {
-    "job.304": RELEASE_ALL,
-    "job.305": RELEASE_KEEP_HELD,
-    "job.306": RELEASE_SPEND,
-}
+
 #: The rows whose path the job type decides, and whether each is a box's
 #: (6.3c F1): a catalog that disagrees with the fired row is a statechart error.
 _BOX_ROWS: Final[dict[str, bool]] = {
@@ -213,314 +122,18 @@ _BOX_ROWS: Final[dict[str, bool]] = {
     "job.169": True,
     "job.170": True,
 }
-#: A skip's rows, and whether each is a member's (`_window_skip_bypass`).
+
+#: A skip's rows, and whether each is a member's (SEM-33, DL-154).
 _MEMBER_ROWS: Final[dict[str, bool]] = {"job.106": False, "job.107": True, "job.404": True}
 
-#: The item cap (DL-351): a root dispatch takes fewer items than four
-#: times the square of the estate's job count, never fewer than `ITEM_FLOOR`
-#: and never more than `ITEM_CEILING`: the floor binds up to 158 jobs, the
-#: square up to 316, the ceiling above. A finite cascade moves each job a
-#: bounded number of times and each move wakes at most the other jobs, so its
-#: items grow with the square. The largest legitimate dispatches measured, at
-#: 41 to 1,000 jobs: a fan-in, where every move of a box chain wakes every job
-#: that waits on all of it (33,799 items at 200 jobs, 127,599 at 400); a queue
-#: scan readmitting the waiters blocked ahead of each freed one (81,991 at
-#: 400); DL-304's box ring (108 per job) and its nested terminator chain
-#: (7,632 at the lowering's 64 levels); the harness's sample peaks at 305.
-#: The cap's margin over the worst is 23x at 41 jobs, 4.7x at 200 and 3.1x at
-#: 400; it reaches 1x near 720 jobs (the fan-in) and 890 (the queue scan).
-ITEMS_PER_JOB_SQUARED: Final = 4
-#: The cap of an estate under 159 jobs: a loop there stops in a few seconds.
-ITEM_FLOOR: Final = 100_000
-#: The ceiling's rule: the largest round count of items whose DL-348 loop
-#: stops within half the lease lapse (the lease's TTL less its renewal
-#: interval, 40 s, so 20 s) at every measured size up to 1,000 jobs on the
-#: reference host. The dry apply runs on the engine's loop, so a longer
-#: cascade stops the lease's renewal; past the lapse the supervisor's deadman
-#: ends the host's running jobs. Measured on an M-series laptop: 4.5 s at 200
-#: jobs, 14.6 s at 400 and 17.0 s at 1,000. The loop's cost per item grows
-#: with the job's owed settlements and the catalog's size (`settlement_owed`,
-#: `_members`), so the ceiling is re-derived by this rule, from a new
-#: measurement, whenever that cost changes; it is never raised by hand.
-ITEM_CEILING: Final = 400_000
 
+class OracleWriters(OracleCascade):
+    """`OracleCascade` with a write for each row the chart can fire."""
 
-#: The recursion limit the oracle runs under (DL-351): what lowers must
-#: evaluate. The deepest condition the lowering accepts at Python's default
-#: limit is grouped 985 levels deep (DL-20), and evaluating it takes about
-#: 1,004 frames above the caller; the engine's and the replays' call sites
-#: add their own stack. Each construction raises the process's limit to this
-#: and never lowers it. A run root stores no condition deeper than its catalog
-#: hash serializes (about 250 levels, `period.catalog_hash_v2`), so a logged
-#: input is far inside it; the headroom serves the paths that hash no catalog:
-#: equiv and a directly built oracle.
-RECURSION_LIMIT: Final = 3000
-
-
-def item_cap(jobs: int) -> int:
-    """The item cap of a root dispatch over an estate of `jobs` jobs."""
-    return min(max(ITEM_FLOOR, ITEMS_PER_JOB_SQUARED * jobs * jobs), ITEM_CEILING)
-
-
-class ChartOracle(CascadeOracle):
-    """`Oracle` with every job move decided by the `job` chart, its cascade
-    on the executor's worklist, and its writes made by the hook (DL-350)."""
-
-    #: The cascade is iterative: no frame per nested start (`fit_recursion_limit`).
-    FRAMES_PER_NESTED_START = 0
-
-    def __init__(
-        self,
-        catalog: CatalogIR,
-        *,
-        carried: CarriedRows | None = None,
-        tz_aliases: Mapping[str, str] | None = None,
-        default_tz: str | None = None,
-        semantics: SemanticSwitches | None = None,
-    ) -> None:
-        if sys.getrecursionlimit() < RECURSION_LIMIT:
-            sys.setrecursionlimit(RECURSION_LIMIT)
-        super().__init__(
-            catalog,
-            carried=carried,
-            tz_aliases=tz_aliases,
-            default_tz=default_tz,
-            semantics=semantics,
-        )
-        self._readmitted = False
-        #: the items the root dispatch in flight has taken, and its cap
-        self._items = 0
-        self._cap = item_cap(len(catalog.jobs))
-        self._rooted: tuple[str, str] | None = None
-        #: the settlement row being written, which the verb's move must match
-        self._settling: tuple[str, str] | None = None
-        #: the instances the macrostep's items reached, checked at its end
-        self._reached: set[str] = set()
-        self.store.holding_moved = self._holding_moved
-        self.store.keep_job_instances(self._job_instance)
-        for job, row in self.store.job.items():
-            active = self.store.machines.active(self.store.job_key(job))
-            if active != row_configuration(row):
-                raise StatechartError(
-                    f"job {job!r}: the instance and the row differ at construction: the"
-                    f" instance's configuration is {listed(active)}, the row's"
-                    f" {listed(row_configuration(row))}"
-                )
-
-    def _job_instance(self, job: str, row: JobRuntime) -> tuple[Statechart, frozenset[str], object]:
-        return JOB, row_configuration(row), job_data(self, job)
-
-    def fork(self) -> ChartOracle:
-        """`Oracle.fork`, with the twin's store asking the twin for its job
-        instances' data, and the cascade's bookkeeping the twin's own: a
-        shallow copy would share the set of instances a macrostep reached, so
-        a row the twin creates would reach the parent's next check
-        (DL-350). Between inputs no ended run waits for its settlement."""
-        assert not self._late_settlements, "a fork with a settlement still owed"
-        twin = cast(ChartOracle, super().fork())
-        twin.store.job_instance = twin._job_instance
-        twin.store.holding_moved = twin._holding_moved
-        twin._reached = set()
-        twin._late_settlements = {}
-        return twin
-
-    # ---- the inputs: each a root item
-
-    def _dispatch(self, ev: Event) -> None:
-        """Every input that moves a job row is a root item on the job's
-        instance; SET_GLOBAL's referencers' attempts are one each. A start
-        input arms its deadlines first, as today (DL-248)."""
-        kind = ev.kind
-        if kind == STATUS:
-            self._handle_status(ev)
-        elif kind in (KILLJOB, RELEASE_RESOURCE):
-            job = self._required_job(ev)
-            self._root(job, ChartEvent(kind, Payload(units=RowUnits(self, job))))
-        elif kind == "TIMER" and self._handle_timer(ev):
-            return
-        elif kind in _FLAG_INPUTS:
-            job = self._required_job(ev)
-            payload = (
-                NoexecFacts(self, job) if kind == ON_NOEXEC else Payload(units=RowUnits(self, job))
-            )
-            self._root(job, ChartEvent(kind, payload))
-        elif kind in (STARTJOB, FORCE_STARTJOB, "TIMER"):
-            job = self._required_job(ev)
-            if kind == STARTJOB:
-                # SEM-34: the schedule tick arms both deadlines whether or not
-                # the start succeeds (DL-248), before the attempt, as today
-                for check in ("must_start", "must_complete"):
-                    if (timer := self._tick_deadline(job, check)) is not None:
-                        self._schedule_timer(timer.at, timer)
-            # DL-68: a sourced event names its trigger; a window-postponed
-            # start replays the original start's provenance (SEM-33)
-            cause = f"{kind} event ({ev.source})" if ev.source else f"{kind} event"
-            deferred = ev.payload.get(DEFERRED_TIMER_KEY)
-            if isinstance(deferred, str):
-                cause = f"run_window-deferred {deferred}"
-            self._attempt_root(job, RUN_WINDOW if kind == "TIMER" else kind, cause)
-        elif kind == "SET_GLOBAL":
-            name = ev.payload.get("name")
-            if not isinstance(name, str):
-                raise OracleError("SET_GLOBAL requires payload.name")
-            self.store.set_global(name, str(ev.payload.get("value")))
-            for referencer in self._referencers.get(f"g:{name}", ()):
-                self._attempt_root(referencer, START, f"SET_GLOBAL {name}")
-        else:
-            super()._dispatch(ev)
-
-    def _root(self, job: str, event: ChartEvent, cause: str = "") -> None:
-        """One root item on the job's instance, its row read into existence
-        first, and its whole cascade, the hook writing as each item ends and
-        counting it against the item cap."""
-        self._runtime(job)
-        self._items = 0
-        self._rooted = (job, f"{event.name} ({cause})" if cause else event.name)
-        try:
-            self.store.machines.dispatch(self.store.job_key(job), event, self._perform)
-            self._check_reached()
-        except BaseException as exc:
-            self._recover()
-            if isinstance(exc, RecursionError) and not isinstance(exc, CascadeDepthError):
-                # the cascade takes no frame per start: only a fact's own
-                # recursion (a deep condition) meets the limit
-                raise CascadeDepthError(job, cause or event.name, sys.getrecursionlimit()) from exc
-            raise
-        finally:
-            self._items, self._rooted = 0, None
-
-    def _check_reached(self) -> None:
-        """At a macrostep's end, every job an item of it reached has its row
-        project to its instance's configuration: an instance the hook moved
-        and never wrote is caught here, where the commit sees only the rows
-        the input touched."""
-        reached, self._reached = self._reached, set()
-        rows = self.store.job
-        for key in sorted(reached):
-            job = key.partition(":")[2]
-            active = self.store.machines.active(key)
-            if job in rows and active != row_configuration(rows[job]):
-                raise StatechartError(
-                    f"job {job!r}: at the macrostep's end its instance is in {listed(active)},"
-                    f" and its row projects to {listed(row_configuration(rows[job]))}"
-                )
-
-    def _recover(self) -> None:
-        """A macrostep that raised: no write is undone, so the instances are
-        rebuilt from the rows, and the cascade's bookkeeping, which today's
-        `finally` clauses empty, is empty again."""
-        self.store.restore_instances()
-        self._in_wake = False
-        self._full_scan_requested = False
-        self._window_starts = None
-        self._late_settlements = {}
-        self._readmitted = False
-        self._reached = set()
-
-    def _attempt_root(self, job: str, relay: str, cause: str) -> None:
-        """An attempt outside any macrostep: an input's own, relayed through
-        `relay`, or SET_GLOBAL's (`start` itself). A job with neither a
-        catalog entry nor a row is no instance, and nothing happens."""
-        job_ir = self.catalog.jobs.get(job)
-        if job_ir is None and job not in self.store.job:
-            return
-        self._root(job, ChartEvent(relay, StartFacts(self, job, job_ir, cause=cause)), cause)
-
-    def _handle_status(self, ev: Event) -> None:
-        job = self._required_job(ev)
-        status = ev.payload.get("status")
-        exit_code = ev.payload.get("exit_code")
-        success = False
-        if status is None:
-            if not isinstance(exit_code, int):
-                raise OracleError("STATUS requires payload.status or integer payload.exit_code")
-            # SEM-09 (DL-33), read only for a payload with no status
-            job_ir = self.catalog.jobs.get(job)
-            success = (job_ir.sem if job_ir is not None else Semantics()).exit_is_success(exit_code)
-        elif not isinstance(status, str) or status not in INJECTABLE_STATUSES:
-            raise OracleError(f"unknown status {status!r}")
-        code = exit_code if isinstance(exit_code, int) else None
-        payload = StatusInput(status, success, code=code, units=RowUnits(self, job))
-        self._root(job, ChartEvent(STATUS, payload))
-
-    def _handle_timer(self, ev: Event) -> bool:
-        """The TIMER input (DL-343); False for a window timer's replay of a
-        start, which `_dispatch` relays. A deadline alarm moves no state and
-        stays `_dispatch_timer_check`. term_run_time carries whether its run is
-        the row's. A window timer reads its own facts first, as today: a
-        deferral that no longer belongs to its box run, or a scan continuation
-        the job has moved on from, is refused with today's text, and a live
-        continuation resumes the scan."""
-        check = ev.payload.get("check")
-        if check == "term_run_time":
-            job = self._required_job(ev)
-            current = ev.payload.get("run") == self._runtime(job).run_number
-            self._root(job, ChartEvent(TERM_RUN_TIME, Deadline(current, units=RowUnits(self, job))))
-            return True
-        if check is not None:
-            return self._dispatch_timer_check(ev)
-        deferred = ev.payload.get(DEFERRED_TIMER_KEY)
-        if not isinstance(deferred, str):
-            return False
-        job = self._required_job(ev)
-        stale = self._deferral_is_stale(ev)
-        rescan = DEFERRED_RESCAN_KEY in ev.payload
-        if stale is None and not rescan:
-            return False
-        superseded = stale is None and self._rescan_superseded(job, ev.payload[DEFERRED_RESCAN_KEY])
-        if stale is None:
-            why = f"the job has moved on since the scan stopped -- no effect (DL-257; {deferred})"
-        else:
-            why = f"{stale} (run_window-deferred {deferred})"
-        facts = StartFacts(
-            self,
-            job,
-            self.catalog.jobs.get(job),
-            cause=deferred,
-            stale=stale is not None or superseded,
-            rescan=rescan,
-            refusal=why,
-        )
-        self._root(job, ChartEvent(RUN_WINDOW, facts))
-        return True
-
-    def _run_owed_scan(self) -> None:
-        """DL-247, DL-255: the input's owed admit-only scan, a root item of its
-        own once the input's macrosteps are done, while one is owed."""
-        while self._scan_owed and not self._in_wake:
-            self._scan_owed = False
-            if self._pool.has_priority_waiters(self.store.job):
-                waiters = self._pool.sorted_waiters(self.store.job)
-                job = waiters[0] if waiters else next(iter(self.store.job))
-                program = Program(f"{SCAN} owed by the input", self._scan(keep_stopped=True))
-                self._root(job, ChartEvent(SCAN, program))
-
-    def _release_removed_holders(self) -> None:
-        """DL-256: at the period's opening, each carried row whose job the
-        catalog no longer defines and that holds units gives them back
-        (job.308), each a root item; then the waiters wake."""
-        owed, self._opening_release = self._opening_release, []
-        for job in owed:
-            self._root(job, ChartEvent(PERIOD_OPENING))
-        if owed:
-            program = Program(f"{SCAN} after the opening", self._scan(keep_stopped=False))
-            self._root(owed[0], ChartEvent(SCAN, program))
-
-    # ---- the hook
-
-    def _perform(self, outcome: Outcome) -> None:
-        """The executor's hook (statechart-engine §5): each fired row's writes,
-        in today's order within the microstep, then the intents its actions
-        reported. A fired row with no write here is a statechart error. The
-        item that reaches the cap ends the dispatch (`item_cap`)."""
-        self._items += 1
-        if self._items >= self._cap:
-            assert self._rooted is not None, "an item outside a root dispatch"
-            jobs = len(self.catalog.jobs)
-            raise CascadeDepthError(*self._rooted, self._cap, jobs=jobs)
-        key = str(outcome.key)
-        self._reached.add(key)
-        job = key.partition(":")[2]
+    def _write_rows(self, job: str, outcome: Outcome) -> None:
+        """Each fired row's write, in the order the rows fired within the
+        microstep, ON_NOEXEC's hold rows after its flag's; a fired row with no
+        write here is a statechart error."""
         rows = outcome.rows
         if len(rows) > 1 and any(row in _NOEXEC_HOLDS for row in rows):
             rows = tuple(sorted(rows, key=lambda row: row in _NOEXEC_HOLDS))
@@ -530,8 +143,14 @@ class ChartOracle(CascadeOracle):
                 raise self._unwritten(job, outcome, "row")
             self._check_type(job, row)
             getattr(self, writer)(job, outcome)
-        for intent in outcome.intents:
-            cast(Intent, intent).apply(self)
+
+    def _unwritten(self, job: str, outcome: Outcome, what: str) -> StatechartError:
+        """The chart fired rows the oracle has no write for. Raised from the
+        hook, the executor gives it the item's facts."""
+        rows = ", ".join(outcome.rows) or "no row"
+        return StatechartError(
+            f"job {job!r}: {outcome.event.name} fired {rows}, and no {what} the oracle writes"
+        )
 
     def _check_type(self, job: str, row: str) -> None:
         """The row's job type, or its being a member, is the catalog's (6.3c F1)."""
@@ -545,17 +164,6 @@ class ChartOracle(CascadeOracle):
         if member is not None and member != (parent is not None):
             raise StatechartError(f"job {job!r}: {row} fired for a job in box {parent!r}")
 
-    def _holding_moved(self, job: str, move: Transition[HoldingState]) -> None:
-        """The store's verb writes `move` for `job`: a settlement row's verb
-        decides its move from the units, which must be the row's (DL-349)."""
-        if self._settling is not None and self._settling[0] == job:
-            row = self._settling[1]
-            if _RELEASES[row] is not move:
-                raise StatechartError(
-                    f"job {job!r}: the chart's {row} stands for {_RELEASES[row].id}, and the"
-                    f" verb's holding move is {move.id}"
-                )
-
     def _write(
         self,
         job: str,
@@ -565,8 +173,8 @@ class ChartOracle(CascadeOracle):
         code: int | None = None,
         clear: bool = False,
     ) -> None:
-        """A status write (`_set_status`'s first half): the status the chart
-        reached, by today's declared move, its trace line and its emission."""
+        """A status write: the status the chart reached, by the row's declared
+        move, its trace line and its emission."""
         old = self._runtime(job).status
         active = self.store.machines.active(self.store.job_key(job))
         new = cast(JobStatus, projection(active)[0])
@@ -593,7 +201,7 @@ class ChartOracle(CascadeOracle):
         )
 
     def _refusal(self, job: str, attempt: StartFacts) -> str:
-        """Today's START_REFUSED reason for a refused attempt: the job is live
+        """The START_REFUSED reason for a refused attempt: the job is live
         or queued, or its box gate refuses it (SEM-10, SEM-20)."""
         status = self._runtime(job).status
         if status in ("STARTING", "RUNNING", "QUE_WAIT"):
@@ -608,8 +216,6 @@ class ChartOracle(CascadeOracle):
             f"taken off ice during this {box!r} execution -- it waits for the"
             " box's next run; a start now needs FORCE_STARTJOB (SEM-20)"
         )
-
-    # ---- the writers, one per row
 
     def _w_nothing(self, job: str, outcome: Outcome) -> None:
         """A row that writes nothing: its move is the configuration's, or none."""
@@ -666,7 +272,7 @@ class ChartOracle(CascadeOracle):
     def _w_start_ignored(self, job: str, outcome: Outcome) -> None:
         """job.180: a gate holds the attempt silently; a scan continuation
         resumes; outside the window, a postponed start is queued, or a skip
-        that moves nothing writes its line (`_run_window_permits`)."""
+        that moves nothing writes its line (`_window_side`)."""
         attempt = cast(StartFacts, outcome.event.payload)
         if attempt.rescan:
             self._defer_to_next_opening(self.catalog.jobs[job], attempt.cause)
@@ -741,11 +347,7 @@ class ChartOracle(CascadeOracle):
         move = settlement.move
         if not isinstance(move, Move):
             raise self._unwritten(job, outcome, "settlement with no move")
-        self._settling = (job, outcome.rows[0])
-        try:
-            self.store.release_reservations(job, move.old, move.new, self._pool.keeps_held)
-        finally:
-            self._settling = None
+        self.store.release_reservations(job, move.old, move.new, self._pool.keeps_held)
         move.released = True
 
     def _w_settle(self, job: str, outcome: Outcome) -> None:
@@ -917,6 +519,12 @@ class ChartOracle(CascadeOracle):
         self._flag(job, AUTO_HOLD, "ON_HOLD", "auto_hold on box start (dossier ss5)")
 
     def _w_box_disarms(self, job: str, outcome: Outcome) -> None:
+        """A member's arm is scoped to the box run that armed it (DL-54
+        review MAJOR): an unconsumed arm dies with the run, before any wake
+        can ride it."""
+        # PENDING: Q3c -- one field aside (DL-58) hints the vendor latch may
+        # instead survive into the NEXT box run; the scoped pin stands until
+        # a live test.
         box = cast(Rule, outcome.event.payload).box
         self._flag(
             job,
@@ -939,6 +547,12 @@ class ChartOracle(CascadeOracle):
         self._flag(job, BOX_NOEXEC_OFF, "OFF_NOEXEC", f"box {box!r} taken OFF_NOEXEC (DL-254)")
 
     def _w_ice_on(self, job: str, outcome: Outcome) -> None:
+        # PENDING: Q3d (DL-69) -- a pre-existing arm survives the ice
+        # round-trip untouched (DL-54 pin, uncited), so a stale tick can
+        # still start this job on the next condition edge despite SEM-20's
+        # "reoccur" rule. If the vendor instead discards the queued start on
+        # ICE, the ON_ICE row disarms (SCHED_DISARM) and SEM-20/32 are
+        # amended -- protocol in docs/live-instance-runbook.md.
         self._flag(job, ICE_ON, "ON_ICE", "sendevent ON_ICE")
 
     def _w_ice_off(self, job: str, outcome: Outcome) -> None:
@@ -972,7 +586,7 @@ class ChartOracle(CascadeOracle):
         kind = cast(EventKind, outcome.event.name)
         why = self._oob_ignored(kind, job)
         if why is None:
-            raise self._unwritten(job, outcome, "ignored line (today's rules apply it)")
+            raise self._unwritten(job, outcome, "ignored line (the rules apply it)")
         self._ignore(job, _FLAG_IGNORED[kind], "EVENT_IGNORED", why)
 
     def _w_released(self, job: str, outcome: Outcome) -> None:
@@ -1001,8 +615,8 @@ class ChartOracle(CascadeOracle):
 #: The rows whose idle recompute an override decided (SEM-15).
 _OVERRIDE_RECOMPUTES: Final = frozenset(f"job.{n}" for n in (131, 132, 161, 162, 163, 164))
 
-#: The hook's write for each row the chart oracle can fire, by its method's
-#: name, so a subclass's method is the one called. A row missing here
+#: The hook's write for each row the chart can fire, by its method's name,
+#: so a subclass's method is the one called. A row missing here
 #: is one the oracle never writes: job.312 (a start on a run's unsettled
 #: units, which job.401 settles first) and the cells the chart marks
 #: unreachable.

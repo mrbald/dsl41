@@ -192,17 +192,19 @@ include = [
     "src/dsl41/cli_control.py",
     "src/dsl41/conditions.py",
     "src/dsl41/estate.py",
-    # the composite job chart, declared before the second oracle drives it
+    # the composite job chart, which the oracle drives
     "src/dsl41/job_chart.py",
     "src/dsl41/job_chart_events.py",
     "src/dsl41/job_chart_rows.py",
+    # the oracle, in its layers (oracle.py's structure note)
     "src/dsl41/oracle.py",
-    # the second oracle, converted family by family under the lockstep harness
-    "src/dsl41/oracle_chart.py",
-    "src/dsl41/oracle_chart_agreement.py",
-    "src/dsl41/oracle_chart_cascade.py",
-    "src/dsl41/oracle_chart_facts.py",
+    "src/dsl41/oracle_cascade.py",
+    "src/dsl41/oracle_facts.py",
+    "src/dsl41/oracle_intents.py",
+    "src/dsl41/oracle_reads.py",
+    "src/dsl41/oracle_schedule.py",
     "src/dsl41/oracle_state.py",
+    "src/dsl41/oracle_writers.py",
     "src/dsl41/period.py",
     "src/dsl41/retention.py",
     "src/dsl41/runner.py",

@@ -53,7 +53,7 @@ Five decisions, each with its reason here; the decision itself is
    The same trace fallback also catches the leaf-job completions that
    never produce a `STATUS` input at all: KILLJOB and a term_run_time
    auto-TERMINATE are decided by the oracle synchronously, while
-   processing the KILLJOB/timer input itself (`oracle.py` ``_terminate``),
+   processing the KILLJOB/timer input itself (the job chart's kill and term_run_time rows, ``oracle_writers``),
    so there is no separate adapter completion to match by run_number.
    Reading only `dispatch` + `input(kind=STATUS)` records would silently
    report such a run as still RUNNING; the trace shows what actually
@@ -129,7 +129,7 @@ from dsl41.ast_jil import JilParseError, parse
 from dsl41.boundary import read_seal
 from dsl41.canon import is_wire_int, naive_utc
 from dsl41.ir import CatalogIR, LoweringError, Semantics, lower_catalog
-from dsl41.oracle_chart import ChartOracle
+from dsl41.oracle import Oracle
 from dsl41.oracle_state import LIVE, TERMINAL, CarriedRows, JobStatus, OracleError, TraceEntry
 from dsl41.period import (
     Manifest,
@@ -1053,7 +1053,7 @@ def replay_trace(
     # the semantic switches come from the same pin (DL-252): a replay under
     # other switches would narrate conditions the engine never read
     profile = pinned_profile(run_root, records[0])
-    oracle = ChartOracle(catalog, carried=carried, **oracle_reading(profile))
+    oracle = Oracle(catalog, carried=carried, **oracle_reading(profile))
     try:
         replay = replay_period(oracle, records)
     except (OracleError, ReplayFault) as exc:

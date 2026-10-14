@@ -308,6 +308,7 @@ def _random_status_script(draw: st.DrawFn) -> tuple[list[Event], float]:
     return events, minute
 
 
+@pytest.mark.usefixtures("oracle_recursion_limit")
 @given(_random_status_script())
 @settings(max_examples=50, deadline=None)
 def test_hypothesis_feed_only_vs_advance_interleaved_traces_identical(

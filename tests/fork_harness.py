@@ -14,7 +14,8 @@ checks both on every feed of every SEM trace test in test_oracle.py (the
 
 `state_bytes` serializes every attribute the fork must copy, the host
 instances' configurations on the store's executor included. `COPIED`,
-`REBUILT` and `SHARED` name every attribute an `Oracle` and a `RuntimeState` hold,
+`FRESH`, `IDLE`, `REBUILT` and `SHARED` name every attribute an `Oracle` and a
+`RuntimeState` hold,
 and test_dry_apply.py pins the two sets against `vars()`, so a new
 attribute cannot escape the check by being added after it.
 """
@@ -41,16 +42,20 @@ ORACLE_COPIED = frozenset(
         "_tz_cache",
         "_calendars",
         "_window_starts",
-        "_starts_in_progress",
-        "_late_settlements",
     }
 )
 #: Oracle attributes the fork starts empty: the append-only history, which
 #: an apply reads only by slicing from a length it saved itself.
 ORACLE_FRESH = frozenset({"_trace", "_emitted"})
-#: Oracle attributes fixed once the constructor returns, so the fork shares them.
+#: Oracle attributes false or empty between inputs, so a fork starts with the
+#: same: the settlements owed inside a cascade (DL-340), whether the scan's
+#: last `readmit` moved its waiter, the instances a macrostep reached
+#: (DL-350), and the items and the root of the dispatch in flight (DL-351).
+ORACLE_IDLE = frozenset({"_late_settlements", "_readmitted", "_reached", "_items", "_rooted"})
+#: Oracle attributes fixed once the constructor returns, so the fork shares
+#: them; `_cap`, the item cap, is fixed by the catalog's job count (DL-351).
 ORACLE_SHARED = frozenset(
-    {"catalog", "semantics", "_referencers", "_pool", "_tz_aliases", "_default_tz"}
+    {"catalog", "semantics", "_referencers", "_pool", "_tz_aliases", "_default_tz", "_cap"}
 )
 #: RuntimeState attributes. The fork copies every one (scalars by value),
 #: except `_violations`: a fork's channel starts empty, since an orphan must
@@ -75,19 +80,9 @@ STORE_COPIED = frozenset(
 #: The phase is its assembly instance's configuration.
 STORE_REBUILT = frozenset({"machines"})
 #: RuntimeState attributes the store's fork shares: the source of the job
-#: instances (DL-341) and the listener of its holding moves (DL-349).
-#: Each is None on this oracle, so the twin's is the same None; the chart
-#: oracle's fork then rebinds its twin's to the twin (`ChartOracle.fork`),
-#: so there they are rebound, not shared.
-STORE_SHARED = frozenset({"job_instance", "holding_moved"})
-#: The chart oracle's own attributes, on top of the oracle's: whether the
-#: scan's last `readmit` moved its waiter, the settlement row its hook is
-#: writing, the instances a macrostep reached (DL-350), and the items and
-#: the root of the dispatch in flight (DL-351). Each is
-#: false or empty between inputs, so its fork starts with the same.
-CHART_ORACLE_FRESH = frozenset({"_readmitted", "_settling", "_reached", "_items", "_rooted"})
-#: The chart oracle's item cap, fixed by the catalog's job count (DL-351).
-CHART_ORACLE_SHARED = frozenset({"_cap"})
+#: instances (DL-341), which the oracle's fork then rebinds to its twin
+#: (`Oracle.fork`).
+STORE_SHARED = frozenset({"job_instance"})
 
 
 def _when(at: datetime | None) -> str | None:
@@ -146,7 +141,6 @@ def state_bytes(oracle: Oracle, since: tuple[int, int] = (0, 0)) -> bytes:
         "window_starts": (
             None if oracle._window_starts is None else [list(w) for w in oracle._window_starts]
         ),
-        "starts_in_progress": dict(sorted(oracle._starts_in_progress.items())),
         "late_settlements": sorted(
             [job, late.old, late.new, late.run, late.done, late.released]
             for job, lates in oracle._late_settlements.items()
