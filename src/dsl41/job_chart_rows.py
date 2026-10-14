@@ -26,6 +26,7 @@ from dsl41.job_chart_events import (
     LEAVE_LIVE,
     MEMBER_ENDS,
     MEMBER_MOVES,
+    MOMENTS,
     OFF_HOLD,
     OFF_ICE,
     OFF_NOEXEC,
@@ -36,9 +37,11 @@ from dsl41.job_chart_events import (
     READMIT,
     RELEASE_RESOURCE,
     RUN_WINDOW,
+    SETTLE,
     START,
     START_ADMITTED,
     STARTED,
+    STARTING,
     STARTJOB,
     STATUS,
     TERM_RUN_TIME,
@@ -139,9 +142,13 @@ _LIVE: Final = State(
     "LIVE",
     regions=(Region("live", "STARTING", (State("STARTING"), State("RUNNING"))),),
 )
+#: An admitted start between its admission and its STARTING (DL-350):
+#: transient, left by `starting` once its units, its arm and a box's resets
+#: are written. No row projects to it.
+_ADMITTED: Final = State("ADMITTED")
 #: Every status. Its rows are the ones whose old source was every status.
 _LIFECYCLE: Final = State(
-    "lifecycle", regions=(Region("status", "IDLE", (_IDLE, State("QUE_WAIT"), _LIVE)),)
+    "lifecycle", regions=(Region("status", "IDLE", (_IDLE, State("QUE_WAIT"), _LIVE, _ADMITTED)),)
 )
 ROOT: Final = State(
     "job",
@@ -164,8 +171,9 @@ _STATUS_ROWS: Final = (
         kind="internal",
         cite="DL-304",
         note=(
-            "L010: a re-trigger loop inside one instant. A start nested inside"
-            " MAX_NESTED_STARTS starts of the same job is refused with a START_REFUSED line."
+            "L010: a re-trigger loop inside one instant. A start that descends from"
+            " MAX_NESTED_STARTS admitted starts of the same job, its `start admitted` items"
+            " in the attempt's ancestry, is refused with a START_REFUSED line."
         ),
     ),
     Row(
@@ -175,7 +183,7 @@ _STATUS_ROWS: Final = (
         "job.102",
         "IDLE",
         START,
-        "STARTING",
+        "ADMITTED",
         "start_admits_job",
         "extent_admit",
         cite="SEM-10, DL-120",
@@ -189,33 +197,57 @@ _STATUS_ROWS: Final = (
         "extent_queue",
         cite="DL-50, DL-247, DL-255",
     ),
-    Row("job.104", "FAILED", START, "STARTING", "start_on_held", "extent_on_held", cite=_DL256),
-    Row("job.105", "STARTING", STARTED, "RUNNING", "is_job", cite=_SEM10),
-    Row("job.106", "TERMINAL", START, "INACTIVE", "start_skips", cite="SEM-33, DL-246"),
-    Row("job.107", "TERMINAL", START, "INACTIVE", "start_skips_member", cite="SEM-33, DL-154"),
+    Row("job.104", "FAILED", START, "ADMITTED", "start_on_held", "extent_on_held", cite=_DL256),
+    Row("job.105", "STARTING", STARTED, "RUNNING", "started_job", "moved", cite=_SEM10),
+    Row("job.106", "TERMINAL", START, "INACTIVE", "start_skips", "moved", cite="SEM-33, DL-246"),
     Row(
-        "job.108", "QUE_WAIT", READMIT, "STARTING", "readmit_admits", "admit", cite="DL-50, DL-257"
+        "job.107",
+        "TERMINAL",
+        START,
+        "INACTIVE",
+        "start_skips_member",
+        "moved",
+        cite="SEM-33, DL-154",
     ),
-    Row("job.109", "QUE_WAIT", READMIT, "INACTIVE", "readmit_cancels", cite="DL-50, DL-247"),
-    Row("job.110", "QUE_WAIT", FLAG_MOVED, "INACTIVE", "left_waiter", cite="DL-257"),
-    Row("job.111", "QUE_WAIT", FLAG_MOVED, "TERMINATED", "killed_waiter", cite="DL-50, DL-54"),
-    Row("job.112", "QUE_WAIT", FLAG_MOVED, "INACTIVE", "iced_waiter", cite="DL-50, DL-285"),
-    Row("job.113", "QUE_WAIT", FLAG_MOVED, "INACTIVE", "noexec_settles_job", cite=_DL254),
-    Row("job.114", "LIVE", KILLJOB, "TERMINATED", action="settle_after", cite="SEM-14"),
     Row(
-        "job.115", "RUNNING", TERM_RUN_TIME, "TERMINATED", "current_run", "settle_after", cite=_SS5
+        "job.108", "QUE_WAIT", READMIT, "ADMITTED", "readmit_admits", "admit", cite="DL-50, DL-257"
     ),
-    Row("job.116", "LIVE", BOX_ENDS, "TERMINATED", "is_terminator", "settle_after", cite="SEM-14"),
     Row(
-        "job.117",
-        "lifecycle",
-        STATUS,
-        "SUCCESS",
-        "exit_success",
-        "settle_after_success",
-        cite="SEM-09",
+        "job.109",
+        "QUE_WAIT",
+        READMIT,
+        "INACTIVE",
+        "readmit_cancels",
+        "cancelled",
+        cite="DL-50, DL-247",
     ),
-    Row("job.118", "lifecycle", STATUS, "FAILURE", "exit_failure", "settle_after", cite="SEM-09"),
+    Row("job.110", "QUE_WAIT", FLAG_MOVED, "INACTIVE", "left_waiter", "left_queue", cite="DL-257"),
+    Row(
+        "job.111",
+        "QUE_WAIT",
+        FLAG_MOVED,
+        "TERMINATED",
+        "killed_waiter",
+        "moved",
+        cite="DL-50, DL-54",
+    ),
+    Row(
+        "job.112", "QUE_WAIT", FLAG_MOVED, "INACTIVE", "iced_waiter", "moved", cite="DL-50, DL-285"
+    ),
+    Row(
+        "job.113",
+        "QUE_WAIT",
+        FLAG_MOVED,
+        "INACTIVE",
+        "noexec_settles_job",
+        "injected",
+        cite=_DL254,
+    ),
+    Row("job.114", "LIVE", KILLJOB, "TERMINATED", action="terminated", cite="SEM-14"),
+    Row("job.115", "RUNNING", TERM_RUN_TIME, "TERMINATED", "current_run", "terminated", cite=_SS5),
+    Row("job.116", "LIVE", BOX_ENDS, "TERMINATED", "is_terminator", "terminated", cite="SEM-14"),
+    Row("job.117", "lifecycle", STATUS, "SUCCESS", "exit_success", "moved", cite="SEM-09"),
+    Row("job.118", "lifecycle", STATUS, "FAILURE", "exit_failure", "moved", cite="SEM-09"),
     Row("job.119", "lifecycle", STATUS, "injected status", "injects", cite=_DL264),
     Row(
         "job.120",
@@ -223,29 +255,47 @@ _STATUS_ROWS: Final = (
         STATUS,
         "INACTIVE",
         "injects_inactive_job",
-        "settle_after",
+        "injected",
         cite=_DL242,
     ),
-    Row("job.121", "FAILED", FLAG_MOVED, "INACTIVE", "noexec_settles_job", cite="SEM-22, DL-243"),
-    Row("job.122", "TERMINAL", BOX_START, "INACTIVE", cite="SEM-10, DL-242", note="reset"),
-    Row("job.123", "QUE_WAIT", BOX_SET_INACTIVE, "INACTIVE", cite="SEM-18, DL-242", note="cascade"),
+    Row(
+        "job.121",
+        "FAILED",
+        FLAG_MOVED,
+        "INACTIVE",
+        "noexec_settles_job",
+        "injected",
+        cite="SEM-22, DL-243",
+    ),
+    Row("job.122", "TERMINAL", BOX_START, "INACTIVE", action="batched", cite="SEM-10, DL-242"),
+    Row(
+        "job.123", "QUE_WAIT", BOX_SET_INACTIVE, "INACTIVE", action="batched", cite="SEM-18, DL-242"
+    ),
     Row(
         "job.124",
         "IDLE",
         START,
-        "STARTING",
+        "ADMITTED",
         "start_admits_box",
         "extent_admit",
         cite="SEM-10, DL-242",
     ),
-    Row("job.125", "STARTING", STARTED, "RUNNING", "is_box", cite="SEM-10, SEM-33, DL-246"),
+    Row(
+        "job.125",
+        "STARTING",
+        STARTED,
+        "RUNNING",
+        "started_box",
+        "runs_box",
+        cite="SEM-10, SEM-33, DL-246",
+    ),
     Row(
         "job.126",
         "RUNNING",
         MEMBER_MOVES,
         "SUCCESS",
         "verdict_success",
-        "settle_after_success",
+        "completed",
         cite="SEM-12",
     ),
     Row(
@@ -254,7 +304,7 @@ _STATUS_ROWS: Final = (
         MEMBER_MOVES,
         "FAILURE",
         "verdict_failure",
-        "settle_after",
+        "completed",
         cite="SEM-12, SEM-14",
     ),
     Row(
@@ -263,7 +313,7 @@ _STATUS_ROWS: Final = (
         COMPLETION_MOMENT,
         "SUCCESS",
         "verdict_success",
-        "settle_after_success",
+        "completed",
         cite="SEM-11",
     ),
     Row(
@@ -272,7 +322,7 @@ _STATUS_ROWS: Final = (
         COMPLETION_MOMENT,
         "FAILURE",
         "verdict_failure",
-        "settle_after",
+        "completed",
         cite="SEM-11, SEM-14",
     ),
     Row(
@@ -281,17 +331,23 @@ _STATUS_ROWS: Final = (
         MEMBER_ENDS,
         "TERMINATED",
         "terminator_fires",
-        "settle_after",
+        "terminated",
         cite="SEM-14",
     ),
-    Row("job.131", "INACTIVE", BOX_RECOMPUTE, "SUCCESS", "overrides_success", cite=_SEM15),
-    Row("job.132", "INACTIVE", BOX_RECOMPUTE, "FAILURE", "overrides_failure", cite=_SEM15),
-    Row("job.133", "INACTIVE", BOX_RECOMPUTE, "SUCCESS", "derives_success", cite=_SEM15),
-    Row("job.134", "INACTIVE", BOX_RECOMPUTE, "FAILURE", "derives_failure", cite=_SEM15),
+    Row("job.131", "INACTIVE", BOX_RECOMPUTE, "SUCCESS", "overrides_success", "moved", cite=_SEM15),
+    Row("job.132", "INACTIVE", BOX_RECOMPUTE, "FAILURE", "overrides_failure", "moved", cite=_SEM15),
+    Row("job.133", "INACTIVE", BOX_RECOMPUTE, "SUCCESS", "derives_success", "moved", cite=_SEM15),
+    Row("job.134", "INACTIVE", BOX_RECOMPUTE, "FAILURE", "derives_failure", "moved", cite=_SEM15),
     Row(
-        "job.135", "lifecycle", STATUS, "INACTIVE", "injects_inactive_box", "settle", cite="SEM-18"
+        "job.135",
+        "lifecycle",
+        STATUS,
+        "INACTIVE",
+        "injects_inactive_box",
+        "cascades",
+        cite="SEM-18",
     ),
-    Row("job.136", "IDLE", FLAG_MOVED, "INACTIVE", "noexec_settles_box", cite=_DL254),
+    Row("job.136", "IDLE", FLAG_MOVED, "INACTIVE", "noexec_settles_box", "cascades", cite=_DL254),
     *(
         Row(
             f"job.{137 + i}", s, KILLJOB, kind="internal", cite="DL-64, DL-81", note="EVENT_IGNORED"
@@ -317,18 +373,22 @@ _STATUS_ROWS: Final = (
         )
     ),
     # a split source: job.123's, job.131 to job.134's and job.136's other sources
-    Row("job.159", "LIVE", BOX_SET_INACTIVE, "INACTIVE", action="settle", cite="SEM-18, DL-242"),
-    Row("job.160", "TERMINAL", BOX_SET_INACTIVE, "INACTIVE", cite="SEM-18", note="as job.123"),
-    Row("job.161", "QUE_WAIT", BOX_RECOMPUTE, "SUCCESS", "overrides_success", cite=_SEM15),
-    Row("job.162", "FAILURE", BOX_RECOMPUTE, "SUCCESS", "overrides_success", cite=_SEM15),
-    Row("job.163", "QUE_WAIT", BOX_RECOMPUTE, "FAILURE", "overrides_failure", cite=_SEM15),
-    Row("job.164", "SUCCESS", BOX_RECOMPUTE, "FAILURE", "overrides_failure", cite=_SEM15),
-    Row("job.165", "QUE_WAIT", BOX_RECOMPUTE, "SUCCESS", "derives_success", cite=_SEM15),
-    Row("job.166", "FAILURE", BOX_RECOMPUTE, "SUCCESS", "derives_success", cite=_SEM15),
-    Row("job.167", "QUE_WAIT", BOX_RECOMPUTE, "FAILURE", "derives_failure", cite=_SEM15),
-    Row("job.168", "SUCCESS", BOX_RECOMPUTE, "FAILURE", "derives_failure", cite=_SEM15),
-    Row("job.169", "QUE_WAIT", FLAG_MOVED, "INACTIVE", "noexec_settles_box", cite=_DL254),
-    Row("job.170", "STARTING", FLAG_MOVED, "INACTIVE", "noexec_settles_box", "settle", cite=_DL254),
+    Row("job.159", "LIVE", BOX_SET_INACTIVE, "INACTIVE", action="batched", cite="SEM-18, DL-242"),
+    Row("job.160", "TERMINAL", BOX_SET_INACTIVE, "INACTIVE", action="batched", cite="SEM-18"),
+    Row("job.161", "QUE_WAIT", BOX_RECOMPUTE, "SUCCESS", "overrides_success", "moved", cite=_SEM15),
+    Row("job.162", "FAILURE", BOX_RECOMPUTE, "SUCCESS", "overrides_success", "moved", cite=_SEM15),
+    Row("job.163", "QUE_WAIT", BOX_RECOMPUTE, "FAILURE", "overrides_failure", "moved", cite=_SEM15),
+    Row("job.164", "SUCCESS", BOX_RECOMPUTE, "FAILURE", "overrides_failure", "moved", cite=_SEM15),
+    Row("job.165", "QUE_WAIT", BOX_RECOMPUTE, "SUCCESS", "derives_success", "moved", cite=_SEM15),
+    Row("job.166", "FAILURE", BOX_RECOMPUTE, "SUCCESS", "derives_success", "moved", cite=_SEM15),
+    Row("job.167", "QUE_WAIT", BOX_RECOMPUTE, "FAILURE", "derives_failure", "moved", cite=_SEM15),
+    Row("job.168", "SUCCESS", BOX_RECOMPUTE, "FAILURE", "derives_failure", "moved", cite=_SEM15),
+    Row(
+        "job.169", "QUE_WAIT", FLAG_MOVED, "INACTIVE", "noexec_settles_box", "cascades", cite=_DL254
+    ),
+    Row(
+        "job.170", "STARTING", FLAG_MOVED, "INACTIVE", "noexec_settles_box", "cascades", cite=_DL254
+    ),
     # 171 to 176 are job.119's choice branches
     # the inputs that relay a start attempt (statechart-engine §8)
     Row("job.177", "lifecycle", STARTJOB, action="relay_start", kind="internal", cite=_SEM10),
@@ -356,8 +416,16 @@ _STATUS_ROWS: Final = (
         note="The waiter stays queued.",
     ),
     _never("job.182", "lifecycle", READMIT, "A queue scan addresses a waiter.", "not_queued"),
-    _never(
-        "job.183", "lifecycle", STARTED, "The rules post it only while the run is still STARTING."
+    Row(
+        "job.183",
+        "lifecycle",
+        STARTED,
+        kind="ignored",
+        cite="SEM-10, DL-350",
+        note=(
+            "The admitted run is no longer STARTING: a wake of its STARTING ended it, or"
+            " started the job again (`_run`'s RUNNING check)."
+        ),
     ),
     Row(
         "job.184",
@@ -462,19 +530,22 @@ _STATUS_ROWS: Final = (
 )
 
 #: The status rows no table declared once 159 to 199 were taken, `job.4NN`:
-#: an attempt's owed settlement (DL-340) and the extent of an admitted start.
+#: an attempt's owed settlement (DL-340), the extent of an admitted start, its
+#: move to STARTING, a window skip of an inactive member, the cascade's
+#: moments, and the cells no input reaches (DL-350).
 _MOMENT_ROWS: Final = (
     Row(
         "job.401",
         "IDLE",
         START,
         guard="start_settles_first",
+        action="settles_first",
         kind="internal",
         cite="DL-340, DL-349",
         note=(
             "Past the bound, the job's run ended inside a cascade whose box rules hold its"
-            " settlement back. The tier settles that run, by the end it made, and makes the"
-            " same attempt again, which reads the admission after the settlement."
+            " settlement back. The row sends that run's settlement, by the end it made, and"
+            " the same attempt again, which reads the admission after the settlement."
         ),
     ),
     Row(
@@ -485,27 +556,70 @@ _MOMENT_ROWS: Final = (
         kind="internal",
         cite="DL-304, DL-349",
         note=(
-            "Everything an admitted start does after its status move follows from this"
-            " item: the units it reserves or takes over, and the arm it consumes."
+            "Everything an admitted start does follows from this item: the units it reserves"
+            " or takes over, the arm it consumes, the run's start, a box's resets, its move"
+            " to STARTING and its RUNNING."
         ),
+    ),
+    Row(
+        "job.403",
+        "ADMITTED",
+        STARTING,
+        "STARTING",
+        action="moved",
+        cite="SEM-10, DL-242, DL-350",
+    ),
+    Row(
+        "job.404",
+        "INACTIVE",
+        START,
+        guard="start_skips_inactive_member",
+        action="skips_in_box",
+        kind="internal",
+        cite="SEM-33, DL-154",
+    ),
+    *(
+        Row(f"job.{405 + i}", "lifecycle", event, action="moment", kind="internal")
+        for i, event in enumerate(MOMENTS)
+    ),
+    Row(
+        f"job.{405 + len(MOMENTS)}",
+        "LIVE",
+        SETTLE,
+        kind="internal",
+        cite="DL-340, DL-350",
+        note=(
+            "The job is live when its move's settlement pops: the move entered STARTING or"
+            " RUNNING, or the job started again inside its move's cascade (DL-340). Nothing"
+            " settles; a rank the move left still drops."
+        ),
+    ),
+    _never(
+        f"job.{406 + len(MOMENTS)}",
+        "lifecycle",
+        STARTING,
+        "Only an admitted start sends it, to its own job, which is ADMITTED until it pops.",
+    ),
+    *(
+        _never(
+            f"job.{407 + len(MOMENTS) + i}",
+            "ADMITTED",
+            event,
+            "An admitted start leaves ADMITTED inside its own extent, before any cascade reaches it.",
+        )
+        for i, event in enumerate((BOX_SET_INACTIVE, START, KILLJOB, ON_NOEXEC))
     ),
 )
 
 #: The flag rows, `job.2NN`: 201 to 217 are `job_flags.01` to `.17`.
 _FLAG_ROWS: Final = (
-    Row(
-        "job.201",
-        "ice_off",
-        ON_ICE,
-        "ice_on",
-        "not_live",
-        "report_flag_move",
-        cite="SEM-20, DL-254, DL-285",
-    ),
+    Row("job.201", "ice_off", ON_ICE, "ice_on", "not_live", "iced", cite="SEM-20, DL-254, DL-285"),
     Row("job.202", "ice_on", OFF_ICE, "ice_off", cite="SEM-20", note="no re-evaluation"),
     Row("job.203", "ice_on", FORCE_STARTJOB, "ice_off", "force_clears", cite="SEM-23, DL-243"),
-    Row("job.204", "hold_off", ON_HOLD, "hold_on", "not_live", cite="SEM-21, DL-254, DL-247"),
-    Row("job.205", "hold_on", OFF_HOLD, "hold_off", cite="SEM-21, DL-50", note="attempt the start"),
+    Row(
+        "job.204", "hold_off", ON_HOLD, "hold_on", "not_live", "held", cite="SEM-21, DL-254, DL-247"
+    ),
+    Row("job.205", "hold_on", OFF_HOLD, "hold_off", action="released_hold", cite="SEM-21, DL-50"),
     Row("job.206", "hold_on", FORCE_STARTJOB, "hold_off", "force_clears", cite="SEM-23, DL-243"),
     Row("job.207", "hold_on", ON_NOEXEC, "hold_off", "noexec_applies", cite=_DL254),
     Row(
@@ -517,34 +631,32 @@ _FLAG_ROWS: Final = (
         ON_NOEXEC,
         "noexec_on",
         "noexec_applies",
-        "report_flag_move",
+        "noexec",
         cite="SEM-22, DL-254",
     ),
-    Row("job.210", "noexec_on", OFF_NOEXEC, "noexec_off", cite="DL-243"),
+    Row("job.210", "noexec_on", OFF_NOEXEC, "noexec_off", action="cleared_noexec", cite="DL-243"),
     Row("job.211", "noexec_on", BOX_OFF_NOEXEC, "noexec_off", cite=_DL254),
     Row("job.212", "arm_off", START, "arm_on", "start_arms", cite="SEM-32, DL-54"),
     Row("job.213", "arm_on", ACTUAL_START, "arm_off", cite="DL-54"),
     Row("job.214", "arm_on", DISARM, "arm_off", cite="DL-158"),
     Row("job.215", "arm_on", BOX_RUN_ENDS, "arm_off", cite="DL-54", note="SCHED_DISARM"),
-    Row(
-        "job.216", "arm_on", READMIT, "arm_off", "readmit_leaves", "report_flag_move", cite="DL-257"
-    ),
+    Row("job.216", "arm_on", READMIT, "arm_off", "readmit_leaves", "waiter_left", cite="DL-257"),
     Row("job.217", "arm_on", KILLJOB, "arm_off", "queued", "report_flag_move", cite="DL-54"),
     # a split source: the second source of job.201, .202, .204, .205, .209, .210, .213, .214, .217
-    Row("job.218", "ice_on", ON_ICE, "ice_on", "not_live", cite="SEM-20", note="as job.201"),
+    Row("job.218", "ice_on", ON_ICE, "ice_on", "not_live", "iced_again", cite="SEM-20"),
     Row("job.219", "ice_off", OFF_ICE, "ice_off", cite="SEM-20", note="as job.202"),
-    Row("job.220", "hold_on", ON_HOLD, "hold_on", "not_live", cite="SEM-21", note="as job.204"),
-    Row("job.221", "hold_off", OFF_HOLD, "hold_off", cite="SEM-21", note="as job.205"),
+    Row("job.220", "hold_on", ON_HOLD, "hold_on", "not_live", "held", cite="SEM-21"),
+    Row("job.221", "hold_off", OFF_HOLD, "hold_off", action="released_hold", cite="SEM-21"),
     Row(
         "job.222",
         "noexec_on",
         ON_NOEXEC,
         "noexec_on",
         "noexec_applies",
-        "report_flag_move",
+        "noexec",
         cite="SEM-22, DL-254",
     ),
-    Row("job.223", "noexec_off", OFF_NOEXEC, "noexec_off", cite="DL-243", note="as job.210"),
+    Row("job.223", "noexec_off", OFF_NOEXEC, "noexec_off", action="cleared_noexec", cite="DL-243"),
     Row("job.224", "arm_off", ACTUAL_START, "arm_off", cite="DL-54", note="as job.213"),
     Row("job.225", "arm_off", DISARM, "arm_off", cite="DL-158", note="as job.214"),
     Row("job.226", "arm_off", KILLJOB, "arm_off", "queued", "report_flag_move", cite="DL-54"),
@@ -557,7 +669,7 @@ _FLAG_ROWS: Final = (
         "arm_off",
         READMIT,
         guard="readmit_leaves",
-        action="report_flag_move",
+        action="waiter_left",
         kind="internal",
         cite="DL-257",
         note="No arm to drop: the status move follows.",
@@ -586,7 +698,7 @@ _HOLDING_ROWS: Final = (
     Row("job.304", "reserved", LEAVE_LIVE, "none", "frees_all", cite="DL-120"),
     Row("job.305", "reserved", LEAVE_LIVE, "held", "keeps_held", cite=_DL256),
     Row("job.306", "reserved", LEAVE_LIVE, "none", "spends", cite="SEM-16, DL-120"),
-    Row("job.307", "held", RELEASE_RESOURCE, "none", cite=_DL256, note="wake the waiters"),
+    Row("job.307", "held", RELEASE_RESOURCE, "none", action="released_held", cite=_DL256),
     Row("job.308", "held", PERIOD_OPENING, "none", "left_catalog", cite=_DL256),
     # 309 and 310 are job.302's choice branches; cells the table had no row for
     Row("job.311", "none", ADMITTED_START, guard="no_demand", kind="ignored", note="No units."),
@@ -660,12 +772,12 @@ CHOICES: Final = (
     Choice(
         "injected status",
         (
-            Branch("job.171", "INACTIVE", "injected_inactive", "settle_after"),
-            Branch("job.172", "STARTING", "injected_starting"),
-            Branch("job.173", "RUNNING", "injected_running"),
-            Branch("job.174", "SUCCESS", "injected_success", "settle_after_success"),
-            Branch("job.175", "FAILURE", "injected_failure", "settle_after"),
-            Branch("job.176", "TERMINATED", action="settle_after"),
+            Branch("job.171", "INACTIVE", "injected_inactive", "moved"),
+            Branch("job.172", "STARTING", "injected_starting", "moved"),
+            Branch("job.173", "RUNNING", "injected_running", "moved"),
+            Branch("job.174", "SUCCESS", "injected_success", "moved"),
+            Branch("job.175", "FAILURE", "injected_failure", "moved"),
+            Branch("job.176", "TERMINATED", action="moved"),
         ),
     ),
     Choice(

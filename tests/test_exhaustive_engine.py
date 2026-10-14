@@ -736,8 +736,8 @@ def _run_spied(outcomes: list[Outcome]) -> Executor:
     machines = Executor()
     run = machines.run
 
-    def spy() -> list[Outcome]:
-        taken = run()
+    def spy(after: Any = None) -> list[Outcome]:
+        taken = run(after)
         outcomes.extend(taken)
         return taken
 

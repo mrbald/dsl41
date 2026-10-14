@@ -852,6 +852,130 @@ def test_s5_a_reentrant_call_from_an_action_raises(call: str) -> None:
     assert kinds(executor.dispatch("l", Event("again"))) == [("again", "fired", ("loop.02",))]
 
 
+def _hooked() -> tuple[Executor, list[tuple[str, Any]]]:
+    """`_relay` with each action and the hook logging into one list."""
+    seen: list[tuple[str, Any]] = []
+
+    def go(ctx: Context) -> Effects:
+        seen.append(("action", "go"))
+        return Effects(send=(("dst", Event("ping")),), intents=("pinged",))
+
+    def completed(ctx: Context) -> None:
+        seen.append(("action", "completed"))
+
+    actions = {"go": go, "completed": completed, "note": lambda ctx: None}
+    executor = _relay(actions=actions, guards={"ready": lambda c: True})
+    return executor, seen
+
+
+def test_s5_the_hook_sees_every_outcome_in_order_before_the_next_item_pops() -> None:
+    """DL-350: the tier's hook is called with each outcome as its
+    microstep ends, before the next item's action runs, and reads the
+    configuration the microstep left."""
+    executor, seen = _hooked()
+
+    def after(outcome: sm.Outcome) -> None:
+        seen.append(("hook", (outcome.key, outcome.event.name or "completion", outcome.intents)))
+        seen.append(("active", sorted(executor.active(outcome.key))))
+
+    outcomes = executor.dispatch("src", Event("go"), after)
+    assert [(o.key, o.event.name or "completion") for o in outcomes] == [
+        ("src", "go"),
+        ("dst", "ping"),
+        ("dst", "completion"),
+        ("src", "completion"),
+    ]
+    assert seen == [
+        ("action", "go"),
+        ("hook", ("src", "go", ("pinged",))),
+        ("active", ["relay", "t"]),
+        ("hook", ("dst", "ping", ())),
+        ("active", ["relay", "t"]),
+        ("action", "completed"),
+        ("hook", ("dst", "completion", ())),
+        ("active", ["done", "relay"]),
+        ("action", "completed"),
+        ("hook", ("src", "completion", ())),
+        ("active", ["done", "relay"]),
+    ]
+
+
+def test_s5_run_takes_the_hook_for_every_item_of_the_pool() -> None:
+    executor, seen = _hooked()
+    executor.post("src", Event("note"))
+    executor.post("dst", Event("note"))
+    keys: list[Any] = []
+    executor.run(lambda outcome: keys.append(outcome.key))
+    assert keys == ["src", "dst"]
+
+
+@pytest.mark.parametrize("call", ["post", "dispatch", "resolve", "fork", "explain"])
+def test_s5_a_call_into_the_executor_from_the_hook_raises(call: str) -> None:
+    executor, _seen = _hooked()
+
+    def after(outcome: sm.Outcome) -> None:
+        if call == "post":
+            executor.post("dst", Event("note"))
+        elif call == "dispatch":
+            executor.dispatch("dst", Event("note"))
+        elif call == "resolve":
+            executor.resolve("dst", Event("note"))
+        elif call == "fork":
+            executor.fork()
+        else:
+            executor.explain(StatechartError("x"), "dst", Event("note"))
+
+    with pytest.raises(ReentrantDispatch):
+        executor.dispatch("src", Event("go"), after)
+    # the run ended and emptied the worklist: the executor is idle, the chain works
+    assert kinds(executor.dispatch("dst", Event("note"))) == [("note", "fired", ("relay.05",))]
+
+
+def test_s5_an_error_from_the_hook_carries_the_item_s_facts() -> None:
+    executor, _seen = _hooked()
+
+    def after(outcome: sm.Outcome) -> None:
+        if outcome.event.name == "ping":
+            raise StatechartError("planted in the hook")
+
+    with pytest.raises(StatechartError, match="planted in the hook") as raised:
+        executor.dispatch("src", Event("go"), after)
+    facts = dict(raised.value.facts)
+    assert facts["instance"] == "'dst'"
+    assert facts["item"] == "the event ping"
+    assert facts["ancestry"] == "'src' go"
+    # the completion of `t` never ran: the worklist was emptied
+    assert executor.active("dst") == {"relay", "t"}
+    assert executor.run() == []
+
+
+def test_s5_any_exception_from_the_hook_ends_the_run_and_empties_the_worklist() -> None:
+    executor, seen = _hooked()
+
+    def after(outcome: sm.Outcome) -> None:
+        raise RuntimeError("hook failed")
+
+    with pytest.raises(RuntimeError):
+        executor.dispatch("src", Event("go"), after)
+    assert seen == [("action", "go")]
+    assert executor.run() == []
+
+
+def test_s5_a_fork_takes_its_own_hook_and_the_parent_s_sees_nothing_of_it() -> None:
+    """A hook is a parameter of the call, not of the executor: a fork made
+    between runs carries none, and each side's dispatch takes its own."""
+    executor, _seen = _hooked()
+    parent: list[Any] = []
+    executor.dispatch("dst", Event("note"), lambda o: parent.append(o.key))
+    twin = executor.fork()
+    forked: list[Any] = []
+    twin.dispatch("src", Event("go"), lambda o: forked.append((o.key, o.event.name)))
+    assert parent == ["dst"]
+    assert forked == [("src", "go"), ("dst", "ping"), ("dst", ""), ("src", "")]
+    assert executor.active("src") == {"relay", "idle"}
+    assert twin.active("dst") == {"relay", "done"}
+
+
 def test_s5_an_exception_out_of_an_action_ends_the_run_and_empties_the_worklist() -> None:
     def boom(ctx: Context) -> Effects:
         if ctx.event.payload == "first":
@@ -996,6 +1120,30 @@ def test_s6_release_runs_in_order_when_the_macrostep_ends_and_ahead_of_the_pool(
         ("job", 3, False),
     ]
     assert executor.data("q") == [1, 2, 3]
+
+
+def test_s6_the_hook_sees_each_released_item_in_order_before_the_next_pops() -> None:
+    """DL-350: a released deferred event runs through the same loop as
+    any item, so the tier's hook gets its outcome, in release order, before
+    the next item's action runs."""
+    executor = _queue()
+    executor.dispatch("q", Event("job", 1))
+    executor.dispatch("q", Event("job", 2))
+    executor.post("q", Event("done"))
+    executor.post("q", Event("job", 3))
+    seen: list[tuple[str, Any, bool, list[Any]]] = []
+
+    def after(outcome: sm.Outcome) -> None:
+        data = list(executor.data(outcome.key))
+        seen.append((outcome.event.name, outcome.event.payload, outcome.released, data))
+
+    executor.run(after)
+    assert seen == [
+        ("done", None, False, []),
+        ("job", 1, True, [1]),
+        ("job", 2, True, [1, 2]),
+        ("job", 3, False, [1, 2, 3]),
+    ]
 
 
 def test_s6_each_released_item_is_its_own_macrostep() -> None:
@@ -1354,69 +1502,6 @@ def test_s11_forget_refuses_a_root_without_regions() -> None:
     executor.restore("s", chart("solo", leaf("solo"), []), {"solo"})
     with pytest.raises(StatechartError, match="not in a final configuration"):
         executor.forget("s")
-
-
-def test_s11_realign_sets_the_configuration_and_the_data_and_keeps_the_generations() -> None:
-    """DL-341: a tier whose rows move outside the chart brings the
-    instance to its row. No action runs, and a re-armed time event keeps its
-    generation."""
-    executor = _lease()
-    executor.dispatch("l", Event("renew"))
-    executor.realign("l", {"lease", "lost"}, ["realigned"])
-    assert executor.active("l") == {"lease", "lost"}
-    assert executor.data("l") == ["realigned"]
-    assert executor.generation("l", "expire") == 1
-    assert kinds(executor.dispatch("l", Event("expire", generation=1))) == [
-        ("expire", "fired", ("lease.04",))
-    ]
-    assert executor.data("l") == ["realigned"]
-
-
-def test_s11_realign_on_a_fork_leaves_the_parent_as_it_was() -> None:
-    executor = _lease()
-    twin = executor.fork()
-    twin.realign("l", {"lease", "lost"}, [])
-    assert executor.active("l") == {"lease", "held"}
-    assert twin.active("l") == {"lease", "lost"}
-
-
-def test_s11_realign_refuses_an_unknown_configuration_and_a_deferred_event() -> None:
-    executor = _lease()
-    with pytest.raises(StatechartError, match="lease 'l': nowhere is not a declared state"):
-        executor.realign("l", {"lease", "nowhere"}, [])
-    assert executor.active("l") == {"lease", "held"}
-    ending, _ = _ending()
-    ending.post("e", Event("stop"))
-    with pytest.raises(StatechartError, match="'e': has events still to handle"):
-        ending.realign("e", {"ending", "end"}, None)
-    ending.run()
-    ending.realign("e", {"ending", "s"}, None)
-    ending.dispatch("e", Event("late"))
-    with pytest.raises(StatechartError, match="'e': has events still to handle"):
-        ending.realign("e", {"ending", "end"}, None)
-    assert ending.active("e") == {"ending", "s"}
-
-
-def test_s11_realign_inside_a_macrostep_raises_and_leaves_a_line_in_the_ring() -> None:
-    """A realign is a tier's call between macrosteps, as a fork is; the ring
-    shows it, so a later error's report names the jump."""
-    executor = Executor()
-
-    def call(ctx: Context) -> None:
-        executor.realign("o", {"outer", "s"}, None)
-
-    machine = chart(
-        "outer",
-        composite("outer", region("main", "s", leaf("s"))),
-        [Row("outer.01", "s", "go", kind="internal", action="call")],
-        actions={"call": call},
-    )
-    executor.restore("o", machine, {"outer", "s"})
-    with pytest.raises(ReentrantDispatch, match="a realign while a macrostep"):
-        executor.dispatch("o", Event("go"))
-    executor.realign("o", {"outer", "s"}, ["new"])
-    error = executor.explain(StatechartError("planted"), "o", Event("go"))
-    assert ("microstep", "'o' realigned to outer, s") in error.facts
 
 
 def test_s11_start_enters_the_initial_configuration_and_runs_entry_actions() -> None:
@@ -1979,6 +2064,26 @@ def test_a_stale_generation_mutant_fails_the_suite(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(Executor, "_stale", staticmethod(lambda inst, event: False))
     with pytest.raises(AssertionError):
         test_s7_a_stale_generation_is_discarded_before_selection()
+
+
+def test_a_hook_called_after_the_run_fails_the_hook_order_test(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mutant that calls the tier's hook once the run is over, as a tier
+    reading the outcomes after `run` would: a chained item's action then runs
+    before the write of the item that chained it."""
+    original = Executor.run
+
+    def late(self: Executor, after: Callable[[sm.Outcome], None] | None = None) -> list[sm.Outcome]:
+        outcomes = original(self)
+        for outcome in outcomes:
+            if after is not None:
+                after(outcome)
+        return outcomes
+
+    monkeypatch.setattr(Executor, "run", late)
+    with pytest.raises(AssertionError):
+        test_s5_the_hook_sees_every_outcome_in_order_before_the_next_item_pops()
 
 
 # ---- a tier's own error about an instance (§5)

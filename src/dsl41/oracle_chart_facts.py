@@ -12,21 +12,28 @@ the store, the trace, the timers or the resolutions.
 - `ReadmitFacts`: a `readmit` payload, `Readmission`'s fields (DL-345).
 - `OverrideFacts`, `FoldFacts` and `RecomputeFacts`: the box rules' payloads,
   `Verdict`'s and `BoxVerdict`'s fields (DL-346).
-- `RowUnits`: the handle on a job's units (`Units`) that a payload carries,
-  from which a settlement reads its policy when it pops (DL-349).
+- `Started`: `started`'s payload, whether the admitted run is still the
+  row's run (DL-350).
+- `RowUnits`: the tier's handle on a job (`Units`) that a payload carries:
+  a settlement reads its policy from it when it pops (DL-349), and a row's
+  action reads from it what the row sends beyond its own move (DL-350).
 - `job_data`: a job instance's `JobData`, from its catalog entry.
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from dsl41.capacity import DemandEntry, to_reservations
 from dsl41.conditions import Cond, GlobalAtom, iter_atoms
 from dsl41.ir import JobIR
 from dsl41.job_chart import BoxGate, JobData, Release, WindowSide
-from dsl41.oracle import MAX_NESTED_STARTS, Oracle
+from dsl41.oracle import Oracle
 from dsl41.oracle_state import FAILED, LIVE, TERMINAL, JobStatus
+from dsl41.state_machine import Context, Effects
+
+if TYPE_CHECKING:
+    from dsl41.oracle_chart_cascade import CascadeOracle
 
 #: A box rule's verdict: the status it decides, or none.
 type Target = Literal["SUCCESS", "FAILURE"] | None
@@ -36,11 +43,13 @@ class StartFacts:
     """A `start` payload: `Attempt`'s fields, each oracle fact computed on its
     first read and kept.
 
-    `force`, `explicit`, `scheduled`, `stale`, `rescan` and `dated` are eager:
-    who asks, the window timer's own facts (DL-343), which today's code
-    reads before any gate, and an attribute of the job. `box`, `condition`,
-    `window`, `bounded`, `settlement_owed`, `box_noexec`, `admissible` and
-    `demand` are lazy. The guards read them in `start_verdict`'s order, which
+    `force`, `explicit`, `scheduled`, `stale`, `rescan`, `decided` and `dated`
+    are eager: who asks, the window timer's own facts (DL-343), which today's
+    code reads before any gate, and an attribute of the job. `box`,
+    `condition`, `window`, `settlement_owed`, `box_noexec`, `admissible` and
+    `demand` are lazy. `cause` is the attempt's cause text, which its writes
+    name; `refusal` the text a stale window timer's refusal writes in place of
+    today's reason (DL-343). The guards read them in `start_verdict`'s order, which
     is the order today's `_attempt_start`, `_start` and `_start_admitted` test
     them, so an attempt computes the facts the old oracle computes and no
     other: an iced job's condition is never evaluated, nor the window of a
@@ -57,7 +66,10 @@ class StartFacts:
         "scheduled",
         "stale",
         "rescan",
+        "decided",
         "dated",
+        "cause",
+        "refusal",
         "units",
         "_oracle",
         "_job",
@@ -71,11 +83,14 @@ class StartFacts:
         job: str,
         job_ir: JobIR | None,
         *,
+        cause: str = "",
         force: bool = False,
         explicit: bool = False,
         scheduled: bool = False,
         stale: bool = False,
         rescan: bool = False,
+        decided: bool = False,
+        refusal: str | None = None,
         known: dict[str, Any] | None = None,
     ) -> None:
         self.force = force
@@ -83,7 +98,10 @@ class StartFacts:
         self.scheduled = scheduled
         self.stale = stale
         self.rescan = rescan
+        self.decided = decided
         self.dated = job_ir is not None and job_ir.schedule is not None
+        self.cause = cause
+        self.refusal = refusal
         self.units = RowUnits(oracle, job)
         self._oracle = oracle
         self._job = job
@@ -94,36 +112,31 @@ class StartFacts:
         known = ", ".join(f"{name}={value!r}" for name, value in self._known.items())
         return f"StartFacts({self._job!r}, force={self.force}, explicit={self.explicit}, {known})"
 
+    def _again(self, **changes: Any) -> StartFacts:
+        fields: dict[str, Any] = {
+            "cause": self.cause,
+            "force": self.force,
+            "explicit": self.explicit,
+            "scheduled": self.scheduled,
+            "stale": self.stale,
+            "rescan": self.rescan,
+            "decided": self.decided,
+            "refusal": self.refusal,
+        }
+        fields.update(changes)
+        return StartFacts(self._oracle, self._job, self._job_ir, **fields)
+
     def relayed(self, *, force: bool) -> StartFacts:
         """`Attempt.relayed`: the attempt a relay passes on."""
-        return StartFacts(
-            self._oracle,
-            self._job,
-            self._job_ir,
-            force=force,
-            explicit=True,
-            scheduled=True,
-            stale=self.stale,
-            rescan=self.rescan,
-        )
+        return self._again(force=force, explicit=True, scheduled=True)
 
     def settled(self) -> StartFacts:
-        """The same attempt after the tier settled the run it found owed
-        (`start_settles_first`, DL-340): the facts read before the bound carry
-        over, since a settlement moves none of them, and the owed settlement
-        and everything after it are read again."""
+        """The same attempt after its run's owed settlement (`start_settles_first`,
+        DL-340): the facts read before it carry over, since a settlement moves
+        none of them, and the owed settlement and everything after it are read
+        again."""
         known = {name: value for name, value in self._known.items() if name != "settlement_owed"}
-        return StartFacts(
-            self._oracle,
-            self._job,
-            self._job_ir,
-            force=self.force,
-            explicit=self.explicit,
-            scheduled=self.scheduled,
-            stale=self.stale,
-            rescan=self.rescan,
-            known=known,
-        )
+        return self._again(known=known)
 
     def known(self, name: str) -> Any:
         """A fact if it was computed, else None."""
@@ -166,14 +179,6 @@ class StartFacts:
             self._known["window"] = side
             self._known["next_open"] = next_open
         return cast(WindowSide, self._known["window"])
-
-    @property
-    def bounded(self) -> bool:
-        """The job has `MAX_NESTED_STARTS` starts in progress (`_start`, DL-304)."""
-        if "bounded" not in self._known:
-            depth = self._oracle._starts_in_progress.get(self._job, 0)
-            self._known["bounded"] = depth >= MAX_NESTED_STARTS
-        return cast(bool, self._known["bounded"])
 
     @property
     def settlement_owed(self) -> bool:
@@ -219,14 +224,15 @@ class StartFacts:
 
 
 class RowUnits:
-    """A job's units as its row holds them: the handle (`Units`) the oracle's
-    payloads carry, from which a settlement reads its policy when it pops
-    (DL-349). `release` reads the row then, as `_settle_row` does, and
-    decides as `RuntimeState.release_reservations` does with the pool's
-    `keeps_held`: a `completion` unit is freed by every end and a `success`
-    unit by SUCCESS; what is not freed is kept on a renewable and spent on a
-    depletable, and one kept unit makes the end keep. A row that holds
-    nothing frees nothing. It is a read."""
+    """The tier's handle on one job (`Units`), which the oracle's payloads
+    carry. `release` reads the row's units when the settlement pops, as
+    `_settle_row` does, and decides as `RuntimeState.release_reservations`
+    does with the pool's `keeps_held`: a `completion` unit is freed by every
+    end and a `success` unit by SUCCESS; what is not freed is kept on a
+    renewable and spent on a depletable, and one kept unit makes the end keep.
+    A row that holds nothing frees nothing (DL-349). `consequences` reads what
+    a row of the job sends beyond its own move from the chart oracle
+    (`CascadeOracle._consequences`, DL-350). Both are reads."""
 
     __slots__ = ("_oracle", "_job")
 
@@ -250,6 +256,11 @@ class RowUnits:
             else:
                 spent = True
         return "keep" if kept else "spend" if spent else "free"
+
+    def consequences(self, ctx: Context, kind: str) -> Effects | None:
+        """What a row of `kind` of the job sends and reports beyond its move."""
+        oracle = cast("CascadeOracle", self._oracle)
+        return oracle._consequences(self._job, ctx, kind)
 
 
 def job_data(oracle: Oracle, job: str) -> JobData:
@@ -340,10 +351,11 @@ class ReadmitFacts:
     The order of the waiters is not a fact: the scan reads it off the rows
     (`CapacityPool.sorted_waiters`), and each waiter gets its own `readmit`."""
 
-    __slots__ = ("keep_stopped", "_oracle", "_job", "_job_ir", "_known")
+    __slots__ = ("keep_stopped", "units", "_oracle", "_job", "_job_ir", "_known")
 
     def __init__(self, oracle: Oracle, job: str, job_ir: JobIR, *, keep_stopped: bool) -> None:
         self.keep_stopped = keep_stopped
+        self.units = RowUnits(oracle, job)
         self._oracle = oracle
         self._job = job
         self._job_ir = job_ir
@@ -470,12 +482,14 @@ class FoldFacts:
     members that ran (`_fold_box_default`): SUCCESS when none failed and no
     box_success is declared, FAILURE when one failed and no box_failure is
     declared, else None (an unmet override suppresses the default). `units`
-    is the box's handle (`RowUnits`)."""
+    is the box's handle (`RowUnits`). `at_start`: the box start left no member
+    in the run, which the fold's cause names."""
 
-    __slots__ = ("units", "_oracle", "_box_ir", "_known")
+    __slots__ = ("units", "at_start", "_oracle", "_box_ir", "_known")
 
-    def __init__(self, oracle: Oracle, box_ir: JobIR) -> None:
+    def __init__(self, oracle: Oracle, box_ir: JobIR, *, at_start: bool = False) -> None:
         self.units = RowUnits(oracle, box_ir.name)
+        self.at_start = at_start
         self._oracle = oracle
         self._box_ir = box_ir
         self._known: dict[str, Any] = {}
@@ -519,11 +533,15 @@ class RecomputeFacts:
     is not terminal; then box_success and box_failure (`_cond_true`, the
     second only when the first does not hold), whose verdict stands whatever
     the box's status; then the default verdict, unless the override of its
-    kind is declared. The box's own status is the configuration's."""
+    kind is declared. The box's own status is the configuration's. `cause`
+    names the member's change, as the recompute's line does; `units` is the
+    box's handle (`RowUnits`)."""
 
-    __slots__ = ("_oracle", "_box_ir", "_trigger", "_known")
+    __slots__ = ("cause", "units", "_oracle", "_box_ir", "_trigger", "_known")
 
-    def __init__(self, oracle: Oracle, box_ir: JobIR, trigger: str) -> None:
+    def __init__(self, oracle: Oracle, box_ir: JobIR, trigger: str, cause: str = "") -> None:
+        self.cause = cause
+        self.units = RowUnits(oracle, box_ir.name)
         self._oracle = oracle
         self._box_ir = box_ir
         self._trigger = trigger
@@ -569,3 +587,27 @@ class RecomputeFacts:
         failed = any(s in FAILED for s in statuses)
         suppressed = sem.box_failure is not None if failed else sem.box_success is not None
         return (None if suppressed else "FAILURE" if failed else "SUCCESS"), False
+
+
+class Started:
+    """`started`'s payload (DL-350): whether the admitted run is still the
+    row's run when it pops (`current`, `_run`'s RUNNING check), and whether
+    its admission had a demand, which the RUNNING line names. `units` is the
+    job's handle (`RowUnits`)."""
+
+    __slots__ = ("had_demand", "units", "_oracle", "_job", "_run")
+
+    def __init__(self, oracle: Oracle, job: str, run: int, *, had_demand: bool) -> None:
+        self.had_demand = had_demand
+        self.units = RowUnits(oracle, job)
+        self._oracle = oracle
+        self._job = job
+        self._run = run
+
+    def __repr__(self) -> str:
+        return f"Started({self._job!r}, run={self._run})"
+
+    @property
+    def current(self) -> bool:
+        """The admitted run is the row's run."""
+        return self._oracle._runtime(self._job).run_number == self._run

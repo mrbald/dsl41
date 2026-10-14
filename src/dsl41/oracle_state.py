@@ -2068,8 +2068,8 @@ class RuntimeState:
         self.machines.run()
         #: the job instances (DL-341). None keeps none, as the oracle does.
         #: The second oracle sets it: every job row then has a `job` instance
-        #: on `machines` under its `job_key`, which follows the row at each
-        #: input's commit (`follow_job`).
+        #: on `machines` under its `job_key`, which each input's commit checks
+        #: against its row (`commit_input`, DL-350).
         self.job_instance: JobInstance | None = None
         #: told each `job_holding` move a verb writes, with its job (DL-349).
         #: None tells no one, as the oracle has it; the second oracle sets it
@@ -2330,9 +2330,10 @@ class RuntimeState:
         once. Returns the changed keys in a stable order -- S2's outbox and
         `ApplyResult` need the list, not just the effect. Committing with no
         input open is refused: the chart has no such move. Where job instances
-        are kept, each job the input touched that has a row then has its
-        instance follow the row (`follow_job`, DL-341); the commit creates
-        no row."""
+        are kept, each job the input touched that has a row must have its
+        row project to its instance's configuration, or the commit raises a
+        `StatechartError`: a hook that skipped a write, or wrote the wrong job
+        (DL-350). The commit creates no row."""
         self._assemble(COMMIT_INPUT)
         snapshots, self._snapshots = self._snapshots, {}
         self._check_capacity(snapshots)
@@ -2349,10 +2350,22 @@ class RuntimeState:
         if self.job_instance is not None:
             for key in snapshots:
                 namespace, _, name = key.partition(":")
-                # a timer alone touches its job's key: no row, nothing to follow
+                # a timer alone touches its job's key: no row, nothing to check
                 if namespace == "job" and name in self._jobs:
-                    self.follow_job(name)
+                    self._check_job_instance(name)
         return sorted(changed)
+
+    def _check_job_instance(self, job: str) -> None:
+        """The job's row projects to its instance's configuration (DL-350)."""
+        instance = cast(JobInstance, self.job_instance)
+        _chart, row_active, _data = instance(job, self._jobs[job])
+        active = self.machines.active(self.job_key(job))
+        if active != row_active:
+            raise StatechartError(
+                f"job {job!r}: at the input's commit its instance is in"
+                f" {', '.join(sorted(active))}, and its row projects to"
+                f" {', '.join(sorted(row_active))}"
+            )
 
     def _check_capacity(self, snapshots: Mapping[str, object]) -> None:
         """The DL-120 capacity invariants, checked at the CLOSE of an input.
@@ -2771,20 +2784,11 @@ class RuntimeState:
         self.job_instance = instance
         self.machines = self.rebuild_machines()
 
-    def follow_job(self, job: str) -> None:
-        """Bring a job's instance to its row (DL-341): the configuration
-        the row projects and the data `job_instance` gives for it. While code
-        outside the `job` chart still moves rows, the row is the truth, and a
-        move no chart drove leaves the instance behind until this runs: before
-        the chart's dispatch and at each input's commit. A job with no row gets
-        one, and with it its instance."""
-        instance = self.job_instance
-        assert instance is not None, "follow_job: the state owner keeps no job instances"
-        row = self.runtime(job)
-        _chart, active, data = instance(job, row)
-        key = self.job_key(job)
-        if self.machines.active(key) != active or self.machines.data(key) != data:
-            self.machines.realign(key, active, data)
+    def restore_instances(self) -> None:
+        """Rebuild the executor from the phase and the rows (`rebuild_machines`):
+        after a macrostep that raised, no write is undone, and every instance
+        is its row's again (DL-350)."""
+        self.machines = self.rebuild_machines()
 
     def _require_host(self, host_id: str) -> HostRuntime:
         row = self._hosts.get(host_id)

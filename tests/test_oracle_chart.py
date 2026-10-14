@@ -1,10 +1,11 @@
 """The second oracle, `ChartOracle` (DL-341): its job instances on the
-state owner's executor, the STATUS family through the `job` chart, and the
-check that the chart and today's writes agree.
+state owner's executor, and each input family through the `job` chart.
 
 The lockstep cases run each script on the old oracle and the chart oracle
 together (`LockstepOracle`), so a difference in the trace, the emitted events,
-the rows, the revisions or the violations fails the case at its input."""
+the rows, the revisions or the violations fails the case at its input. The
+cascade on the executor's worklist, its hook, its moments and its bound are
+tests/test_oracle_chart_cascade.py's (DL-350)."""
 
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ import pytest
 from estate_gen import SealPoint
 from oracle_lockstep import EPOCH, LockstepDivergence, LockstepOracle
 
-from dsl41 import job_chart, oracle_chart, oracle_chart_cascade
+from dsl41 import oracle_chart
 from dsl41.capacity import CapacityPool
 from dsl41.ir import lower_source
 from dsl41.job_chart import JobData, Release, configuration, row_configuration
@@ -29,7 +30,6 @@ from dsl41.oracle_chart import ChartOracle, job_data
 from dsl41.oracle_chart_facts import RowUnits
 from dsl41.oracle_state import (
     CapacityReservation,
-    CascadeDepthError,
     CarriedRows,
     Event,
     EventKind,
@@ -40,36 +40,9 @@ from dsl41.oracle_state import (
 )
 from dsl41.runner_hosts import HostCommand, host_move
 from dsl41.semantics import resolve
-from dsl41.state_machine import Event as ChartEvent
 from dsl41.state_machine import HITS_ENV, STRICT_ENV, Executor, Outcome, Statechart, StatechartError
 
 T0 = datetime(2026, 7, 1, 8, 0)
-
-
-def _moves_differ(
-    oracle: ChartOracle, step: Callable[[ChartOracle], object], job: str, row: str, move: str
-) -> None:
-    """A planted holding is caught first by the compare of the holding's move
-    (DL-349), run here on a fork: the chart's `row` against today's
-    `move`. The compare is then turned off on `oracle`, so that the caller's
-    step meets the compare of the holding's state behind it."""
-    twin = oracle.fork()
-    stands = f"job_holding.0{row[-1]}"
-    message = f"'{job}': the chart's {row} stands for {stands}, and today's holding move is {move}"
-    with pytest.raises(StatechartError, match=message):
-        step(twin)
-    oracle.store.holding_moved = None
-
-
-def _released_for(monkeypatch: pytest.MonkeyPatch, name: str | None, release: Release) -> None:
-    """Planted: the settlements of `name` (of every job, for None) read
-    `release` after every end, whatever its row holds."""
-    real = RowUnits.release
-
-    def planted(self: RowUnits, success: bool) -> Release:
-        return release if name in (None, self._job) else real(self, success)
-
-    monkeypatch.setattr(RowUnits, "release", planted)
 
 
 _JIL = (
@@ -89,7 +62,7 @@ def ev(kind: EventKind, minutes: float = 0.0, **payload: object) -> Event:
 
 def _agrees(oracle: Oracle) -> None:
     """Every row has an instance in the configuration the row projects. After
-    an input this pins the commit's realign and that no row lacks an instance;
+    an input this pins the commit's check and that no row lacks an instance;
     right after a fork or a construction it pins the copy and the restore."""
     for job, row in oracle.store.job.items():
         assert oracle.store.machines.active(RuntimeState.job_key(job)) == row_configuration(row)
@@ -243,58 +216,6 @@ def test_a_terminator_loop_ends_on_both_oracles_at_the_box_restart() -> None:
     ]
 
 
-def test_a_recursion_error_in_an_outermost_attempts_decision_is_the_cascade_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The chart's selection is deeper than today's gates, so a cascade can
-    meet the recursion limit there, before any start converts it (DL-342):
-    the first attempt's decision names the cascade. The terminator loop above
-    met it there until the box rules were the chart's (DL-346), and ends
-    since DL-348. A nested attempt's decision leaves the error to its
-    outermost start."""
-    oracle = ChartOracle(lower_source(_JIL))
-
-    def deep(*_args: object) -> None:
-        raise RecursionError("maximum recursion depth exceeded")
-
-    monkeypatch.setattr(oracle, "_decide_start", deep)
-    with pytest.raises(CascadeDepthError) as raised:
-        oracle.feed(ev("STARTJOB", 1, job="j"))
-    assert raised.value.job == "j"
-    oracle._starts_in_progress["k"] = 1
-    with pytest.raises(RecursionError) as nested:
-        oracle._attempt_start("j", force=False, scheduled=False, cause="a wake")
-    assert not isinstance(nested.value, CascadeDepthError)
-
-
-def test_a_status_input_fires_a_job_row_on_the_state_owners_executor(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """STATUS dispatches to the job's instance: the status row fires, its
-    continuation reports the run's leaving, the holding row of the units'
-    policy frees them, and the instance ends where the row ends."""
-    oracle = ChartOracle(lower_source(_JIL))
-    oracle.feed(ev("STARTJOB", 1, job="j"))
-    machines = oracle.store.machines
-    seen: list[Outcome] = []
-    dispatch = machines.dispatch
-
-    def spy(key: Any, event: Any) -> list[Outcome]:
-        outcomes = dispatch(key, event)
-        seen.extend(outcomes)
-        return outcomes
-
-    monkeypatch.setattr(machines, "dispatch", spy)
-    oracle.feed(ev("STATUS", 2, job="j", exit_code=0))
-    fired = [(o.key, o.kind, o.rows) for o in seen if o.key == "job:j"]
-    assert fired == [
-        ("job:j", "fired", ("job.117",)),
-        ("job:j", "continued", ()),
-        ("job:j", "fired", ("job.304",)),
-    ]
-    assert machines.active("job:j") == configuration("SUCCESS")
-
-
 def test_sem09_a_payload_the_oracle_refuses_is_refused_before_the_chart() -> None:
     oracle = LockstepOracle(lower_source(_JIL), new=ChartOracle)
     with pytest.raises(OracleError, match="STATUS requires payload.status or integer"):
@@ -306,50 +227,6 @@ def test_sem09_a_payload_the_oracle_refuses_is_refused_before_the_chart() -> Non
 
 
 # ---- the agreement check
-
-
-def test_a_flag_the_chart_holds_and_the_row_does_not_is_a_statechart_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Planted: the instance is iced and no follow brings it back, so the
-    chart's SUCCESS keeps the ice that today's write does not have."""
-    oracle = ChartOracle(lower_source(_JIL))
-    store = oracle.store
-    monkeypatch.setattr(store, "follow_job", lambda job: None)
-    store.machines.realign(
-        "job:j", configuration("INACTIVE", ice=True), store.machines.data("job:j")
-    )
-    with pytest.raises(StatechartError, match="the configuration differs as written") as raised:
-        oracle.feed(ev("STATUS", 1, job="j", status="SUCCESS"))
-    text = str(raised.value)
-    assert "ice_on" in text and "ice_off" in text
-    assert "instance: 'job:j'" in text
-
-
-def test_a_holding_the_chart_keeps_and_the_row_frees_is_a_statechart_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Planted: the settlement's handle says the run's units are kept, today's
-    settlement frees them."""
-    oracle = ChartOracle(lower_source(_JIL))
-    oracle.feed(ev("STARTJOB", 1, job="j"))
-    _released_for(monkeypatch, None, "keep")
-    status = ev("STATUS", 2, job="j", exit_code=0)
-    _moves_differ(oracle, lambda o: o.feed(status), "j", "job.305", "job_holding.04")
-    with pytest.raises(StatechartError, match="the holding differs after the settlement"):
-        oracle.feed(status)
-
-
-def test_a_move_whose_settlement_never_runs_is_a_statechart_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Planted: today's consequences of the move are dropped, so the chart's
-    holding is never compared."""
-    oracle = ChartOracle(lower_source(_JIL))
-    oracle.feed(ev("STARTJOB", 1, job="j"))
-    monkeypatch.setattr(Oracle, "_after_transition", lambda self, job, old, new: None)
-    with pytest.raises(StatechartError, match="the move's settlement never ran"):
-        oracle.feed(ev("STATUS", 2, job="j", exit_code=0))
 
 
 def test_an_instance_that_differs_from_its_row_at_construction_is_a_statechart_error() -> None:
@@ -386,17 +263,6 @@ def test_an_inactive_row_for_the_other_job_type_is_a_statechart_error(job: str, 
     oracle = Swapped(lower_source(_JIL))
     with pytest.raises(StatechartError, match=f"job '{job}': {row} fired for a"):
         oracle.feed(ev("STATUS", 1, job=job, status="INACTIVE"))
-
-
-def test_a_status_row_the_oracle_does_not_write_is_a_statechart_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Planted: the oracle forgets job.117's move; the row fired is named."""
-    moves = {row: move for row, move in oracle_chart._MOVES.items() if row != "job.117"}
-    monkeypatch.setattr(oracle_chart, "_MOVES", moves)
-    oracle = ChartOracle(lower_source(_JIL))
-    with pytest.raises(StatechartError, match="'j': STATUS fired job.117, and no status row"):
-        oracle.feed(ev("STATUS", 1, job="j", exit_code=0))
 
 
 # ---- where the instances are
@@ -715,7 +581,7 @@ _OUTCOMES: dict[str, tuple[list[Event], str, tuple[str, ...], list[tuple[str, ..
         ],
         "wx",
         ("job.177",),
-        [("job.180",)],
+        [("job.404",)],
         "RUN_WINDOW_SKIP",
     ),
     "the start bound": (
@@ -743,17 +609,15 @@ _OUTCOMES: dict[str, tuple[list[Event], str, tuple[str, ...], list[tuple[str, ..
 
 
 def _spied(oracle: Oracle) -> list[Outcome]:
-    """Every outcome the oracle's executor reports from now on."""
-    machines = oracle.store.machines
+    """Every outcome the chart oracle's hook writes from now on, in order."""
     seen: list[Outcome] = []
-    dispatch = machines.dispatch
+    perform = oracle._perform  # type: ignore[attr-defined]
 
-    def spy(key: Any, event: Any) -> list[Outcome]:
-        outcomes = dispatch(key, event)
-        seen.extend(outcomes)
-        return outcomes
+    def spy(outcome: Outcome) -> None:
+        seen.append(outcome)
+        perform(outcome)
 
-    machines.dispatch = spy  # type: ignore[method-assign]
+    oracle._perform = spy  # type: ignore[attr-defined]
     return seen
 
 
@@ -907,39 +771,22 @@ def _planted(**guards: Callable[..., bool]) -> type[ChartOracle]:
     return Planted
 
 
-def test_a_start_whose_units_the_chart_reserves_and_the_row_does_not_is_a_statechart_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Planted: the attempt's payload says the start reserves units, and
-    today's admission reserves none for a job with no resources: the chart's
-    `reserved` is caught at the STARTING write."""
-    monkeypatch.setattr(oracle_chart.StartFacts, "demand", property(lambda self: True))
-    oracle = ChartOracle(lower_source(_START_JIL))
-    with pytest.raises(StatechartError, match="the start's status write differs") as raised:
-        oracle.feed(ev("STARTJOB", 1, job="plain"))
-    assert "reserved" in str(raised.value) and "instance: 'job:plain'" in str(raised.value)
-
-
-def test_a_running_write_the_chart_does_not_follow_is_a_statechart_error() -> None:
-    """Planted: `started` finds no row for a job, so the instance stays
-    STARTING while today's code writes RUNNING."""
-    oracle = _planted(is_job=lambda ctx: False)(lower_source(_START_JIL))
-    with pytest.raises(StatechartError, match="started fired job.183 for a CMD job"):
-        oracle.feed(ev("STARTJOB", 1, job="plain"))
-
-
 _JOB_TYPE_PAIRS = {
     "admission": (
         ("start_admits_job", "start_admits_box"),
         [ev("STARTJOB", 1, job="plain")],
-        "job.124 fired for a CMD job",
+        "job.124 fired for a non-box job",
     ),
     "skip": (
         ("start_skips", "start_skips_member"),
         [ev("STATUS", 1, job="wskip", status="SUCCESS"), ev("STARTJOB", 2, job="wskip")],
         "job.107 fired for a job in box None",
     ),
-    "started": (("is_job", "is_box"), [ev("STARTJOB", 1, job="plain")], "started fired job.125"),
+    "started": (
+        ("started_job", "started_box"),
+        [ev("STARTJOB", 1, job="plain")],
+        "job.125 fired for a non-box job",
+    ),
 }
 
 
@@ -956,81 +803,6 @@ def test_a_start_row_for_the_other_job_type_is_a_statechart_error(pair: str) -> 
         oracle.feed(event)
     with pytest.raises(StatechartError, match=message):
         oracle.feed(script[-1])
-
-
-def test_a_running_write_whose_flags_differ_from_the_charts_is_a_statechart_error() -> None:
-    """Planted: after the STARTING write the instance is iced, so `started`
-    fires its row and the chart's RUNNING keeps an ice the row does not."""
-
-    class Iced(ChartOracle):
-        def _record(self, job: str, transition: str, cause: str) -> None:
-            super()._record(job, transition, cause)
-            if transition == "INACTIVE->STARTING":
-                key = self.store.job_key(job)
-                active = configuration("STARTING", ice=True)
-                self.store.machines.realign(key, active, self.store.machines.data(key))
-
-    oracle = Iced(lower_source(_START_JIL))
-    with pytest.raises(StatechartError, match="the RUNNING write differs"):
-        oracle.feed(ev("STARTJOB", 1, job="plain"))
-
-
-def test_an_arm_the_code_does_not_write_is_a_statechart_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Planted: today's arm is dropped, so the chart's arm_on differs from
-    the row after the attempt's writes."""
-    monkeypatch.setattr(Oracle, "_arm", lambda *args: None)
-    oracle = ChartOracle(lower_source(_START_JIL))
-    oracle.feed(ev("ON_HOLD", 1, job="dated"))
-    with pytest.raises(StatechartError, match="the start's writes differ"):
-        oracle.feed(ev("STARTJOB", 2, job="dated"))
-
-
-def test_a_start_whose_status_write_never_runs_is_a_statechart_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Planted: the admission is dropped, so the chart's STARTING is never written."""
-    monkeypatch.setattr(ChartOracle, "_start", lambda *args, **kwargs: None)
-    oracle = ChartOracle(lower_source(_START_JIL))
-    with pytest.raises(StatechartError, match="the start's status write never ran"):
-        oracle.feed(ev("STARTJOB", 1, job="plain"))
-    assert oracle._start_move is None
-
-
-def test_a_start_before_the_last_ones_status_write_is_a_statechart_error() -> None:
-    oracle = ChartOracle(lower_source(_START_JIL))
-    oracle._start_move = oracle_chart.Agreement(
-        "q1",
-        "job:q1",
-        ChartEvent("start"),
-        configuration("STARTING"),
-        ("INACTIVE", "STARTING"),
-        False,
-    )
-    with pytest.raises(StatechartError, match="a start began before the last one's status write"):
-        oracle.feed(ev("STARTJOB", 1, job="plain"))
-
-
-def test_a_start_that_fires_two_rows_is_a_statechart_error() -> None:
-    """Planted: a plain admission that also arms. The rows fired are named."""
-    oracle = _planted(start_arms=lambda ctx: True)(lower_source(_START_JIL))
-    with pytest.raises(StatechartError, match="start fired job.102, job.212, and no start row"):
-        oracle.feed(ev("STARTJOB", 1, job="plain"))
-
-
-def test_a_failed_start_leaves_no_status_move_behind(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An attempt that raises before its status write clears its move, so the
-    next input is not compared against it."""
-
-    def broken(*args: Any, **kwargs: Any) -> None:
-        raise OracleError("planted")
-
-    monkeypatch.setattr(Oracle, "_acquire", broken)
-    oracle = ChartOracle(lower_source(_START_JIL))
-    with pytest.raises(OracleError, match="planted"):
-        oracle.feed(ev("STARTJOB", 1, job="plain"))
-    assert oracle._start_move is None
 
 
 # ---- DL-340's settlement and the recursion bound
@@ -1092,88 +864,6 @@ _OWED_SCRIPT = [
     ev("FORCE_STARTJOB", 2, job="rm"),
     ev("STATUS", 3, job="rm", exit_code=0),
 ]
-
-
-@pytest.mark.parametrize(
-    ("resource", "row", "status"),
-    [("R", "job.102", "RUNNING"), ("D", "job.103", "QUE_WAIT")],
-    ids=["admitted after the settlement", "queued after the settlement"],
-)
-def test_sem16_an_owed_settlement_settles_before_the_attempt_reads_its_admission(
-    resource: str, row: str, status: str
-) -> None:
-    """DL-340, DL-349: rm's SUCCESS completes rb, which restarts and
-    attempts rm before rm's own settlement. The attempt takes job.401, which
-    moves nothing; the oracle settles the run that ended, and the same
-    attempt is dispatched again and reads the admission the settlement left:
-    a freed renewable admits it (job.102), a spent depletable queues it
-    (job.103). No `Executor.resolve` is made."""
-    paired = LockstepOracle(lower_source(_member_restart_jil(resource, "")), new=ChartOracle)
-    for event in _OWED_SCRIPT[:-1]:
-        paired.feed(event)
-    oracle = paired.twin
-    seen = _spied(oracle)
-    log: list[str] = []
-    machines = oracle.store.machines
-    dispatch, settle = machines.dispatch, oracle._settle_ended_run
-
-    def logged(key: Any, event: Any) -> list[Outcome]:
-        outcomes = dispatch(key, event)
-        if key == "job:rm" and event.name == "start":
-            log.append(outcomes[0].rows[0])
-        return outcomes
-
-    def settled(job: str) -> None:
-        units = "units" if oracle.store.job[job].reservations else "none"
-        log.append(f"settle {job} {units}")
-        settle(job)
-
-    def unread(key: Any, event: Any) -> Outcome:
-        raise AssertionError("the chart oracle reads no attempt with `Executor.resolve`")
-
-    machines.dispatch = logged  # type: ignore[method-assign]
-    machines.resolve = unread  # type: ignore[method-assign]
-    oracle._settle_ended_run = settled  # type: ignore[method-assign]
-    paired.feed(_OWED_SCRIPT[-1])
-    paired.check_seal()
-    _agrees(oracle)
-    # the run's units were still on the row when the attempt took job.401
-    assert log == ["job.401", "settle rm units", row]
-    assert oracle.store.job["rm"].status == status
-    starts = [o.rows for o in seen if o.key == "job:rm" and o.event.name == "start"]
-    assert starts == [("job.401",), (row,)]
-
-
-def test_a_settle_first_at_an_inputs_own_attempt_is_refused(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """No settlement is owed at an input's own attempt; a chart that says
-    otherwise is caught before any write."""
-    monkeypatch.setattr(oracle_chart.StartFacts, "settlement_owed", property(lambda self: True))
-    oracle = ChartOracle(lower_source(_START_JIL))
-    with pytest.raises(AssertionError, match="a settlement owed at an input's own attempt"):
-        oracle.feed(ev("STARTJOB", 1, job="plain"))
-    assert oracle.store.job["plain"].status == "INACTIVE"
-
-
-def test_a_settle_first_that_the_settlement_leaves_owed_is_a_statechart_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Planted: the owed settlement is read as owed after the oracle settled
-    it (a settlement done still counts), so the second dispatch takes job.401
-    again: no start row is written."""
-    paired = LockstepOracle(lower_source(_member_restart_jil("R", "")), new=ChartOracle)
-    for event in _OWED_SCRIPT[:-1]:
-        paired.feed(event)
-    oracle = paired.twin
-
-    def owed(self: Any) -> bool:
-        run = oracle._runtime(self._job).run_number
-        return any(x.run == run for x in oracle._late_settlements.get(self._job, ()))
-
-    monkeypatch.setattr(oracle_chart.StartFacts, "settlement_owed", property(owed))
-    with pytest.raises(StatechartError, match="'rm': start fired job.401, and no start row"):
-        oracle.feed(_OWED_SCRIPT[-1])
 
 
 def test_sem16_an_attempt_that_skips_the_owed_settlement_is_caught(
@@ -1266,184 +956,38 @@ def test_dl256_a_settlement_reads_its_policy_from_the_row_when_it_pops(
     assert oracle.store.machines.data(f"job:{job}") == JobData()
 
 
-def test_dl256_a_settlement_whose_policy_is_read_from_stale_units_is_caught() -> None:
-    """Mutant: the handle reads the units the row held when the oracle was
-    built, as an instance's data held them before a refresh. A kept unit is
-    then read as freed and a spent one as freed: the compare of the holding's
-    move catches both at today's write (job.304 where today writes
-    job_holding.05 or .06), and the state's compare behind it the kept one."""
-    stale: dict[str, JobRuntime] = {}
-
-    class Stale(RowUnits):
-        def release(self, success: bool) -> Release:
-            row = stale.get(self._job, JobRuntime())
-            if not row.reservations:
-                return "free"
-            return super().release(success)
-
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(oracle_chart, "RowUnits", Stale)
-        patch.setattr(oracle_chart_cascade, "RowUnits", Stale)
-        oracle = ChartOracle(lower_source(_POLICY_JIL))
-        stale.update(oracle.store.job)
-        oracle.feed(ev("STARTJOB", 1, job="keep"))
-        kept = ev("STATUS", 2, job="keep", exit_code=0)
-        _moves_differ(oracle, lambda o: o.feed(kept), "keep", "job.304", "job_holding.05")
-        with pytest.raises(StatechartError, match="'keep': the holding differs after the settle"):
-            oracle.feed(kept)
-        oracle = ChartOracle(lower_source(_POLICY_JIL))
-        stale.update(oracle.store.job)
-        oracle.feed(ev("STARTJOB", 1, job="spend"))
-        spent = ev("STATUS", 2, job="spend", exit_code=0)
-        _moves_differ(oracle, lambda o: o.feed(spent), "spend", "job.304", "job_holding.06")
-        seen = _spied(oracle)
-        oracle.feed(spent)  # the state's compare alone sees none: free and spend end alike
-    rows = [o.rows for o in seen if o.event.name == "leave STARTING or RUNNING"]
-    assert rows == [("job.304",)] != [(_POLICY_ROWS["spend"],)]
-
-
-def test_a_settlement_with_no_handle_is_a_statechart_error_before_any_write(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """DL-349: a payload that carries no handle builds a settlement with
-    no policy. The guard's read raises, with the instance and the item, inside
-    the input's dispatch, so today's writes never run."""
-    oracle = ChartOracle(lower_source(_POLICY_JIL))
-    oracle.feed(ev("STARTJOB", 1, job="keep"))
-    traced = len(oracle.trace())
-    monkeypatch.setattr(oracle_chart, "RowUnits", lambda oracle, job: None)
-    with pytest.raises(StatechartError, match="no release and no handle") as raised:
-        oracle.feed(ev("STATUS", 2, job="keep", exit_code=0))
-    text = str(raised.value)
-    assert "instance: 'job:keep'" in text and "item: the event leave STARTING or RUNNING" in text
-    row = oracle.store.job["keep"]
-    assert (row.status, bool(row.reservations), oracle.trace()[traced:]) == ("RUNNING", True, [])
-
-
-def test_dl256_a_spend_read_as_free_diverges_in_the_harness() -> None:
-    """Mutant (Opus R1): every spend is read as free. Free and spend both end
-    in `none`, so only the compare of the holding's move sees it: the chart's
-    job.304 where today writes job_holding.06. The harness's corpus run parts
-    at the first spend."""
-    real = RowUnits.release
-
-    def free(self: RowUnits, success: bool) -> Release:
-        found = real(self, success)
-        return "free" if found == "spend" else found
-
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(RowUnits, "release", free)
-        jobs = oracle_lockstep.corpus_jobs() + oracle_lockstep.directed_jobs()
-        summary = oracle_lockstep.run_all(jobs, [{}], new=ChartOracle, stop_at_first=True)
-    (found,) = summary.divergences
-    report = found.report()
-    assert "the chart's job.304 stands for job_holding.04" in report
-    assert "today's holding move is job_holding.06" in report
-
-
-def _plant_actions(**actions: Callable[[Any], Any]) -> type[ChartOracle]:
-    class Planted(ChartOracle):
-        def _job_instance(
-            self, job: str, row: JobRuntime
-        ) -> tuple[Statechart, frozenset[str], object]:
-            chart, active, data = super()._job_instance(job, row)
-            return replace(chart, actions={**chart.actions, **actions}), active, data
-
-    return Planted
-
-
-def test_a_plain_admission_that_fires_the_forced_starts_holding_row_is_a_statechart_error() -> None:
-    """Mutant (the first build's defect): a plain admission of a job holding
-    kept units sends the admission of a forced start on them, so the chart
-    fires job.303 where today takes the units over (job_holding.02). The
-    configurations agree (both `reserved`); the compare of the holding's move
-    raises at today's write."""
-
-    def on_held(ctx: Any) -> Any:
-        effects = job_chart.extent_admit(ctx)
-        ((key, event),) = effects.send
-        admitted = replace(event.payload, admission=replace(event.payload.admission, on_held=True))
-        return replace(effects, send=((key, ChartEvent(event.name, admitted)),))
-
-    oracle = _plant_actions(extent_admit=on_held)(lower_source(_START_JIL))
-    oracle.store.holding_moved = None
-    for event in (ev("STARTJOB", 1, job="kh"), ev("STATUS", 2, job="kh", status="FAILURE")):
-        oracle.feed(event)
-    oracle.store.holding_moved = oracle._holding_moved
-    with pytest.raises(
-        StatechartError,
-        match="'kh': the chart's job.303 stands for job_holding.03, and today's holding move is"
-        " job_holding.02",
-    ):
-        oracle.feed(ev("STARTJOB", 3, job="kh"))
-    assert oracle.store.job["kh"].status == "FAILURE"
-
-
-def test_a_holding_move_the_chart_fired_no_row_for_is_a_statechart_error() -> None:
-    """Planted: an admission says it reserves nothing (job.311), and today's
-    admission reserves the job's unit."""
-
-    def nothing(ctx: Any) -> Any:
-        effects = job_chart.extent_admit(ctx)
-        ((key, event),) = effects.send
-        admitted = replace(event.payload, admission=replace(event.payload.admission, demand=False))
-        return replace(effects, send=((key, ChartEvent(event.name, admitted)),))
-
-    oracle = _plant_actions(extent_admit=nothing)(lower_source(_START_JIL))
-    with pytest.raises(StatechartError, match="'q1': today's job_holding.01 moves the holding"):
-        oracle.feed(ev("STARTJOB", 1, job="q1"))
-
-
-def test_an_input_that_ends_with_a_holding_row_owed_is_a_statechart_error() -> None:
-    """Planted: a holding row the chart fired is still owed when a drain
-    ends (here the input's time half, which drains nothing); the error names
-    the job and the row, and the next input starts with none owed."""
-    oracle = ChartOracle(lower_source(_START_JIL))
-    outcome = Outcome("job:q2", ChartEvent("leave STARTING or RUNNING"), "fired", ("job.304",))
-    oracle._holding = {"q2": [("job.304", outcome)]}
-    with pytest.raises(StatechartError, match="never wrote: q2: job.304"):
-        oracle.feed(ev("STARTJOB", 1, job="plain"))
-    assert oracle._holding is None
-    oracle.feed(ev("STARTJOB", 2, job="plain"))
-    assert oracle.store.job["plain"].status == "RUNNING"
-
-
-@pytest.mark.parametrize("raises", [False, True], ids=["unwritten", "the scan raises"])
-def test_a_holding_row_the_owed_scan_leaves_unwritten_is_caught_at_its_input(
-    monkeypatch: pytest.MonkeyPatch, raises: bool
-) -> None:
-    """R8 (DL-349): the DL-255 scan runs after the input's dispatch, in
-    `_drain`. Planted: the scan fires a holding row (job.304 for `q2`) that
-    today's code never writes; the error is this input's. A scan that raises
-    instead leaves nothing owed for the next input."""
-    oracle = ChartOracle(lower_source(_START_JIL))
-    outcome = Outcome("job:q2", ChartEvent("leave STARTING or RUNNING"), "fired", ("job.304",))
-    real = oracle._run_owed_scan
-
-    def scan() -> None:
-        real()
-        oracle._expect_holding([outcome])
-        if raises:
-            raise OracleError("planted")
-
-    monkeypatch.setattr(oracle, "_run_owed_scan", scan)
-    expected = (OracleError, "planted") if raises else (StatechartError, "never wrote: q2: job.304")
-    with pytest.raises(expected[0], match=expected[1]):
-        oracle.feed(ev("STARTJOB", 1, job="plain"))
-    assert oracle._holding is None
-    monkeypatch.setattr(oracle, "_run_owed_scan", real)
-    oracle.feed(ev("STARTJOB", 2, job="q1"))
-    assert oracle.store.job["q1"].status == "RUNNING" and oracle._holding is None
-
-
-#: The admitting verdicts and, after the attempt's `start` item, the items that
-#: follow from its `start admitted`: (event, rows).
+_MOVED = [("box rules", ("job.405",)), ("settle", ("job.406",)), ("wake", ("job.407",))]
+#: The admitting verdicts and, after the attempt's `start` item, the items
+#: its `start admitted` sends to the job itself, its children: (event, rows).
+#: A box's resets go to its members, and its `notify step` sends `starting`.
 _EXTENTS: dict[str, list[tuple[str, tuple[str, ...]]]] = {
-    "admit a job": [("admitted start", ("job.311",)), ("actual start", ("job.224",))],
-    "admit a box": [("admitted start", ("job.311",)), ("actual start", ("job.224",))],
-    "queue": [],
-    "bypass": [("actual start", ("job.224",))],
-    "forced on held units": [("admitted start", ("job.303",)), ("actual start", ("job.224",))],
+    "admit a job": [
+        ("admitted start", ("job.311",)),
+        ("actual start", ("job.224",)),
+        ("starting", ("job.403",)),
+        ("started", ("job.105",)),
+    ],
+    "admit a box": [
+        ("admitted start", ("job.311",)),
+        ("actual start", ("job.224",)),
+        ("notify step", ("job.413",)),
+        ("started", ("job.125",)),
+    ],
+    "queue": _MOVED,
+    "bypass": [("actual start", ("job.224",)), *_MOVED],
+    "forced on held units": [
+        ("admitted start", ("job.303",)),
+        ("actual start", ("job.224",)),
+        ("starting", ("job.403",)),
+        ("started", ("job.105",)),
+    ],
+}
+_VERDICTS = {
+    "job.101": "bypass",
+    "job.102": "admit",
+    "job.103": "queue",
+    "job.104": "on_held",
+    "job.124": "admit",
 }
 
 
@@ -1451,10 +995,12 @@ _EXTENTS: dict[str, list[tuple[str, tuple[str, ...]]]] = {
 def test_dl304_start_admitted_precedes_the_admissions_moves_for_every_admitting_verdict(
     case: str,
 ) -> None:
-    """DL-349: each admitting row (job.101 to job.104, job.124) sends
-    `start admitted` first; its row (job.402) sends what the admission does,
-    so the admission's moves are its descendants and pop after it. A queue
-    does nothing more."""
+    """DL-349, DL-350: each admitting row (job.101 to job.104,
+    job.124) sends `start admitted` first; its row (job.402) sends what the
+    admission does, so the admission's moves are its descendants and pop
+    after it: the units, the arm, the move to STARTING and `started`; a
+    bypass's and a queue's status move, written at the attempt, has its box
+    rules, its settlement and its wakes sent from there."""
     script, job, _relay, starts, _line = _OUTCOMES[case]
     paired = LockstepOracle(lower_source(_START_JIL), new=ChartOracle)
     for event in script[:-1]:
@@ -1465,60 +1011,11 @@ def test_dl304_start_admitted_precedes_the_admissions_moves_for_every_admitting_
     mine = [o for o in seen if o.key == RuntimeState.job_key(job)]
     at = next(i for i, o in enumerate(mine) if o.event.name == "start")
     assert mine[at].rows == starts[-1]
-    admitted, *moves = mine[at + 1 : at + 2 + len(_EXTENTS[case])]
+    admitted = mine[at + 1]
     assert (admitted.event.name, admitted.rows) == ("start admitted", ("job.402",))
-    assert admitted.event.payload.verdict == oracle_chart._START_ROWS[starts[-1][0]]
-    assert [(o.event.name, o.rows) for o in moves] == _EXTENTS[case]
-    assert all(o.depth == admitted.depth + 1 for o in moves)
-
-
-def test_a_start_admitted_sent_after_the_admission_is_a_statechart_error() -> None:
-    """Mutant: the admitting row sends the admission's moves itself and then
-    `start admitted`, whose row sends nothing. The oracle names the items
-    after the start, before any write."""
-
-    def late(ctx: Any) -> Any:
-        effects = job_chart.extent_admit(ctx)
-        ((key, admitted),) = effects.send
-        moves = job_chart.start_extent(replace(ctx, event=admitted))
-        assert moves is not None
-        return replace(effects, send=(*moves.send, (key, admitted)))
-
-    class Late(ChartOracle):
-        def _job_instance(
-            self, job: str, row: JobRuntime
-        ) -> tuple[Statechart, frozenset[str], object]:
-            chart, active, data = super()._job_instance(job, row)
-            actions = {**chart.actions, "extent_admit": late, "start_extent": lambda ctx: None}
-            return replace(chart, actions=actions), active, data
-
-    oracle = Late(lower_source(_START_JIL))
-    with pytest.raises(StatechartError, match=r"'plain': start fired job.102 \(admit\), and the"):
-        oracle.feed(ev("STARTJOB", 1, job="plain"))
-    assert oracle.store.job["plain"].status == "INACTIVE"
-
-
-def test_a_start_admitted_sent_by_a_verdict_that_does_not_admit_is_a_statechart_error() -> None:
-    """Planted: a refused start sends `start admitted` too."""
-
-    def refuse_and_send(ctx: Any) -> Any:
-        return job_chart.extent_queue(ctx)
-
-    class Planted(ChartOracle):
-        def _job_instance(
-            self, job: str, row: JobRuntime
-        ) -> tuple[Statechart, frozenset[str], object]:
-            chart, active, data = super()._job_instance(job, row)
-            rows = tuple(
-                replace(r, action="refuse_and_send") if r.id == "job.144" else r for r in chart.rows
-            )
-            actions = {**chart.actions, "refuse_and_send": refuse_and_send}
-            return replace(chart, rows=rows, actions=actions), active, data
-
-    oracle = Planted(lower_source(_START_JIL))
-    oracle.feed(ev("STARTJOB", 1, job="plain"))
-    with pytest.raises(StatechartError, match=r"start fired job.144 \(refused\), and the items"):
-        oracle.feed(ev("STARTJOB", 2, job="plain"))
+    assert admitted.event.payload.verdict == _VERDICTS[starts[-1][0]]
+    children = [o for o in mine[at + 2 :] if o.depth == admitted.depth + 1]
+    assert [(o.event.name, o.rows) for o in children] == _EXTENTS[case]
 
 
 #: An empty box under `condition: d(RB)` that holds R, queued behind `rh`,
@@ -1567,56 +1064,6 @@ def test_dl304_a_readmitted_run_is_not_a_frame_of_the_start_bound(
     assert readmits == ([("job.108",)] if runs == 3 else [])
     admitted = [o.rows for o in mine if o.event.name == "start admitted"]
     assert len(admitted) == 2
-
-
-def _empty_box(name: str, condition: str = "") -> str:
-    return f"insert_job: {name}\njob_type: b\n" + (f"condition: {condition}\n" if condition else "")
-
-
-def _cmd(name: str, condition: str = "") -> str:
-    return f"insert_job: {name}\njob_type: c\ncommand: x\nmachine: m1\n" + (
-        f"condition: {condition}\n" if condition else ""
-    )
-
-
-_DEEP = 100
-#: The deepest legal shapes of tests/test_cascade_depth.py: empty boxes each
-#: started by the one before; a ring of them that goes round twice, nested,
-#: until the start bound refuses; ON_NOEXEC jobs bypassed one inside the next.
-_DEEP_SHAPES: dict[str, tuple[str, list[Event]]] = {
-    "box chain": (
-        "\n".join(_empty_box(f"q{i}", f"s(q{i - 1})" if i else "") for i in range(_DEEP)),
-        [ev("FORCE_STARTJOB", 1, job="q0")],
-    ),
-    "box ring": (
-        "\n".join(
-            [_empty_box("q0"), _empty_box("q1", f"s(q0) | s(q{_DEEP - 1})")]
-            + [_empty_box(f"q{i}", f"s(q{i - 1})") for i in range(2, _DEEP)]
-        ),
-        [ev("FORCE_STARTJOB", 1, job="q0")],
-    ),
-    "ON_NOEXEC chain": (
-        "\n".join(_cmd(f"q{i}", f"s(q{i - 1})" if i else "") for i in range(_DEEP)),
-        [ev("ON_NOEXEC", 0, job=f"q{i}") for i in range(1, _DEEP)]
-        + [ev("FORCE_STARTJOB", 1, job="q0"), ev("STATUS", 2, job="q0", exit_code=0)],
-    ),
-}
-
-
-@pytest.mark.parametrize("shape", sorted(_DEEP_SHAPES))
-def test_sem10_a_deep_legal_cascade_runs_on_the_chart_oracle_at_its_fit(shape: str) -> None:
-    """At the limit fitted for the chart oracle (its own
-    `FRAMES_PER_NESTED_START`), the deepest legal shapes run to the end
-    without a cascade error and write what the old oracle writes."""
-    jil, script = _DEEP_SHAPES[shape]
-    limit = sys.getrecursionlimit()
-    try:
-        sys.setrecursionlimit(1000)
-        fit_recursion_limit(_DEEP, ChartOracle)
-        paired = _lockstep(jil, script)
-    finally:
-        sys.setrecursionlimit(limit)
-    assert {row.status for row in paired.twin.store.job.values()} == {"SUCCESS"}
 
 
 # ---- KILLJOB and the TIMER input (DL-343)
@@ -1947,96 +1394,6 @@ def test_sem34_a_deadline_alarm_stays_code_and_dispatches_nothing() -> None:
     assert lines == ["MUST_START_ALARM", "MUST_COMPLETE_ALARM"]
 
 
-def test_a_kill_whose_flags_differ_from_the_charts_is_a_statechart_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Planted: the running job's instance is iced and no follow brings it
-    back, so the chart's TERMINATED keeps an ice today's kill does not."""
-    oracle = ChartOracle(lower_source(_KT_JIL))
-    oracle.feed(ev("STARTJOB", 1, job="t"))
-    store = oracle.store
-    monkeypatch.setattr(store, "follow_job", lambda job: None)
-    store.machines.realign(
-        "job:t", configuration("RUNNING", ice=True), store.machines.data("job:t")
-    )
-    with pytest.raises(
-        StatechartError, match="the status and the flags differ as written"
-    ) as raised:
-        oracle.feed(ev("KILLJOB", 2, job="t"))
-    assert "item: the event KILLJOB" in str(raised.value)
-
-
-def test_a_term_run_time_whose_holding_differs_from_the_charts_is_a_statechart_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Planted: the handle says the run's units are freed, and today's
-    settlement after the term_run_time kill keeps them held (FREE=Y frees on
-    SUCCESS only, DL-256)."""
-    oracle = ChartOracle(lower_source(_KT_JIL))
-    oracle.feed(ev("STARTJOB", 1, job="tk"))
-    _released_for(monkeypatch, None, "free")
-    later = T0 + timedelta(minutes=7)
-    _moves_differ(oracle, lambda o: o.advance(later), "tk", "job.304", "job_holding.05")
-    with pytest.raises(StatechartError, match="the holding differs after the settlement"):
-        oracle.advance(later)
-
-
-@pytest.mark.parametrize(
-    ("name", "value", "script", "message"),
-    [
-        (
-            "_KILL_IGNORED",
-            frozenset(),
-            [ev("KILLJOB", 1, job="t")],
-            "'t': KILLJOB fired job.137, and no kill row",
-        ),
-        (
-            "_KILL_WAITER",
-            frozenset(),
-            [ev("STARTJOB", 1, job="h"), ev("STARTJOB", 2, job="w"), ev("KILLJOB", 3, job="w")],
-            "'w': KILLJOB fired job.226, job.111, and no kill row",
-        ),
-        (
-            "_TERM_STALE",
-            ("job.115",),
-            [ev("TIMER", 1, job="t", check="term_run_time", run=7)],
-            "'t': TIMER term_run_time fired job.184, and no term_run_time row",
-        ),
-    ],
-)
-def test_a_kill_or_timer_row_the_oracle_does_not_write_is_a_statechart_error(
-    monkeypatch: pytest.MonkeyPatch, name: str, value: object, script: list[Event], message: str
-) -> None:
-    """Planted: the oracle forgets one of the rows; the rows fired are named."""
-    monkeypatch.setattr(oracle_chart, name, value)
-    oracle = ChartOracle(lower_source(_KT_JIL))
-    for event in script[:-1]:
-        oracle.feed(event)
-    with pytest.raises(StatechartError, match=message):
-        oracle.feed(script[-1])
-
-
-def test_a_window_timer_whose_own_facts_the_chart_ignores_is_a_statechart_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Planted: the chart's verdict reads a scan continuation as a plain
-    replay and admits it; the oracle performs only a refusal or the scan."""
-    verdict = job_chart.start_verdict
-    monkeypatch.setattr(
-        job_chart,
-        "start_verdict",
-        lambda ctx: "admit" if ctx.event.payload.rescan else verdict(ctx),
-    )
-    semantics = resolve({"queued-recheck": "1"})
-    oracle = ChartOracle(lower_source(oracle_lockstep.KILL_TIMER_JIL), semantics=semantics)
-    for event in _SCAN_SETUP:
-        oracle.feed(event)
-    with pytest.raises(
-        StatechartError, match="a stale or rescanning window timer's start is admit"
-    ):
-        oracle.advance(_SCAN_BOUND)
-
-
 def _rows_changed(**changes: dict[str, str]) -> type[ChartOracle]:
     """A chart whose named rows have the fields given changed."""
 
@@ -2105,40 +1462,6 @@ def test_a_live_kill_row_with_its_state_or_job_type_swapped_fails(
         paired.feed(event)
     with pytest.raises(LockstepDivergence, match=message):
         paired.feed(script[-1])
-
-
-@pytest.mark.parametrize(
-    ("row", "script", "message"),
-    [
-        (
-            "job_114",
-            [ev("STARTJOB", 1, job="t"), ev("KILLJOB", 2, job="t")],
-            "'t': KILLJOB fired job.114, job.199, and no kill row",
-        ),
-        (
-            "job_115",
-            [ev("STARTJOB", 1, job="t"), ev("TIMER", 2, job="t", check="term_run_time", run=1)],
-            "'t': TIMER term_run_time fired job.115, job.199, and no term_run_time row",
-        ),
-    ],
-)
-def test_a_row_beyond_the_ones_a_kill_or_timer_performs_is_a_statechart_error(
-    row: str,
-    script: list[Event],
-    message: str,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Planted: the terminating row reports a flag move as well, which fires
-    a further row (job.199). The handler checks every row the input fired, not
-    only the first, and names them all. The marked row's hit stays out of the
-    session."""
-    monkeypatch.setenv(HITS_ENV, str(tmp_path))
-    oracle = _rows_changed(**{row: {"action": "report_flag_move"}})(lower_source(_KT_JIL))
-    for event in script[:-1]:
-        oracle.feed(event)
-    with pytest.raises(StatechartError, match=message):
-        oracle.feed(script[-1])
 
 
 def test_sem34_a_startjob_arms_its_deadlines_before_its_attempt_as_today() -> None:
@@ -2375,91 +1698,6 @@ def _flag_oracle(cls: type[ChartOracle] = ChartOracle) -> ChartOracle:
     return cls(lower_source(oracle_lockstep.FLAG_JIL))
 
 
-def test_a_flag_whose_write_differs_from_the_charts_is_a_statechart_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Planted: the job's instance is held and no follow brings it back, so
-    the chart's ice keeps a hold that today's ON_ICE does not write."""
-    oracle = _flag_oracle()
-    store = oracle.store
-    monkeypatch.setattr(store, "follow_job", lambda job: None)
-    store.machines.realign(
-        "job:fl_job", configuration("INACTIVE", hold=True), store.machines.data("job:fl_job")
-    )
-    with pytest.raises(
-        StatechartError, match="the flag's writes differ from the chart's"
-    ) as raised:
-        oracle.feed(ev("ON_ICE", 1, job="fl_job"))
-    text = str(raised.value)
-    assert "hold_on" in text and "hold_off" in text and "item: the event ON_ICE" in text
-
-
-def test_a_flag_moved_status_whose_write_differs_from_the_charts_is_a_statechart_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Planted: the waiter's instance is ON_NOEXEC and no follow brings it
-    back, so the INACTIVE its `flag moved` reaches (job.112) keeps a flag that
-    today's write does not have; it is caught at the status write."""
-    oracle = _flag_oracle()
-    oracle.feed(ev("STARTJOB", 1, job="fl_hold"))
-    oracle.feed(ev("STARTJOB", 1, job="fl_wait"))
-    store = oracle.store
-    monkeypatch.setattr(store, "follow_job", lambda job: None)
-    store.machines.realign(
-        "job:fl_wait", configuration("QUE_WAIT", noexec=True), store.machines.data("job:fl_wait")
-    )
-    with pytest.raises(StatechartError, match="the configuration differs as written") as raised:
-        oracle.feed(ev("ON_ICE", 2, job="fl_wait"))
-    text = str(raised.value)
-    assert "noexec_on" in text and "noexec_off" in text
-
-
-def test_an_input_the_chart_ignores_and_today_applies_is_a_statechart_error(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Planted: ON_NOEXEC's ignored and applying guards swapped, so the chart
-    ignores it on a plain INACTIVE job; today's rules give no reason to."""
-    monkeypatch.setenv(HITS_ENV, str(tmp_path))
-
-    class Swapped(ChartOracle):
-        def _job_instance(
-            self, job: str, row: JobRuntime
-        ) -> tuple[Statechart, frozenset[str], object]:
-            chart, active, data = super()._job_instance(job, row)
-            return _swapped(chart, "noexec_ignored", "noexec_applies"), active, data
-
-    oracle = _flag_oracle(Swapped)
-    with pytest.raises(
-        StatechartError, match="'fl_job': job.152 ignores ON_NOEXEC, which today's rules apply"
-    ) as raised:
-        oracle.feed(ev("ON_NOEXEC", 1, job="fl_job"))
-    assert "NoexecFacts('fl_job')" in str(raised.value)
-
-
-def test_a_flag_row_the_oracle_does_not_write_is_a_statechart_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Planted: the oracle forgets DISARM's row for a job with no latch."""
-    fired = {**oracle_chart._FLAG_FIRED, "DISARM": {("job.214",): "moved"}}
-    monkeypatch.setattr(oracle_chart, "_FLAG_FIRED", fired)
-    with pytest.raises(StatechartError, match="'fl_job': DISARM fired job.225, and no flag row"):
-        _flag_oracle().feed(ev("DISARM", 1, job="fl_job"))
-
-
-def test_a_row_beyond_the_ones_a_flag_input_performs_is_a_statechart_error(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Planted: ON_HOLD's row reports a flag move as well, which fires a
-    further row (job.199). The handler checks every row the input fired. The
-    marked row's hit stays out of the session."""
-    monkeypatch.setenv(HITS_ENV, str(tmp_path))
-    oracle = _flag_oracle(_rows_changed(job_204={"action": "report_flag_move"}))
-    with pytest.raises(
-        StatechartError, match="'fl_job': ON_HOLD fired job.204, job.199, and no flag row"
-    ):
-        oracle.feed(ev("ON_HOLD", 1, job="fl_job"))
-
-
 @pytest.mark.parametrize(
     ("script", "message"),
     [
@@ -2494,82 +1732,43 @@ def test_a_noexec_settlement_for_the_other_job_type_is_a_statechart_error(
     traced = len(oracle.trace())
     with pytest.raises(StatechartError, match=message):
         oracle.feed(ev("ON_NOEXEC", 2, job=job))
-    assert oracle.trace()[traced:] == []
+    # the flag's microstep wrote its line; the status row's write never ran
+    assert not any("->" in t.transition for t in oracle.trace()[traced:])
 
 
-def test_an_ice_whose_waiter_row_is_moved_to_a_live_status_is_a_statechart_error(
+def test_an_input_the_chart_ignores_and_today_applies_is_a_statechart_error(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Mutant: job.112 (an iced waiter leaves the queue) declared on a live
-    status instead of QUE_WAIT. The waiter's ice then fires job.198, which
-    moves nothing, and the row says the job is queued: a statechart error
-    before any write, not a waiter left in the queue."""
+    """Mutant: ON_NOEXEC's ignored and applying guards swapped, so the chart
+    ignores it on a plain INACTIVE job. The hook writes an ignored line only
+    with today's reason for it, and there is none."""
     monkeypatch.setenv(HITS_ENV, str(tmp_path))
-    oracle = _flag_oracle(_rows_changed(job_112={"source": "LIVE"}))
-    oracle.feed(ev("STARTJOB", 1, job="fl_hold"))
-    oracle.feed(ev("STARTJOB", 1, job="fl_wait"))
-    traced = len(oracle.trace())
-    with pytest.raises(StatechartError, match="'fl_wait': job.198 fired for a QUE_WAIT job"):
-        oracle.feed(ev("ON_ICE", 2, job="fl_wait"))
-    assert oracle.trace()[traced:] == []
+
+    class Swapped(ChartOracle):
+        def _job_instance(
+            self, job: str, row: JobRuntime
+        ) -> tuple[Statechart, frozenset[str], object]:
+            chart, active, data = super()._job_instance(job, row)
+            return _swapped(chart, "noexec_ignored", "noexec_applies"), active, data
+
+    oracle = _flag_oracle(Swapped)
+    with pytest.raises(
+        StatechartError, match="'fl_job': ON_NOEXEC fired job.152, and no ignored line"
+    ):
+        oracle.feed(ev("ON_NOEXEC", 1, job="fl_job"))
+    assert oracle.store.job["fl_job"].status == "INACTIVE"
+    assert oracle.trace() == []
 
 
 def test_sem20_an_ice_on_the_last_member_completes_its_running_box_in_todays_cascade() -> None:
     """ON_ICE on a member that a RUNNING box still waits for fires the flag
-    row and job.198; the box's completion moment (DL-285) is today's code,
-    run after the flag is compared, and the box ends SUCCESS."""
+    row and job.198; the box's completion moment (DL-285) follows from the
+    flag row's `holders may leave`, and the box ends SUCCESS."""
     steps = _flag_steps("ON_ICE on the last member a running box waits for", 4)
     paired = _lockstep(oracle_lockstep.FLAG_JIL, steps)
     assert paired.twin.store.job["fl_run"].status == "SUCCESS"
     lines = [(t.job, t.transition) for t in paired.twin.trace()[-2:]]
     assert lines == [("fl_sub", "ON_ICE"), ("fl_run", "RUNNING->SUCCESS")]
-
-
-@pytest.mark.parametrize(
-    ("guard", "script", "job", "message"),
-    [
-        (
-            "noexec_settles_job",
-            [ev("STARTJOB", 1, job="fl_hold"), ev("STARTJOB", 1, job="fl_wait")],
-            "fl_wait",
-            "'fl_wait': job.198 fired for a QUE_WAIT job",
-        ),
-        (
-            "noexec_settles_job",
-            [ev("STATUS", 1, job="fl_job", exit_code=1)],
-            "fl_job",
-            "'fl_job': job.198 fired for a FAILURE job",
-        ),
-        (
-            "noexec_settles_box",
-            [ev("STATUS", 1, job="fl_q", exit_code=1)],
-            "fl_q",
-            "'fl_q': job.198 fired for a FAILURE job",
-        ),
-    ],
-    ids=["a waiter left queued", "a FAILED job left FAILED", "a FAILED box left FAILED"],
-)
-def test_a_noexec_that_settles_nothing_where_today_settles_is_a_statechart_error(
-    guard: str,
-    script: list[Event],
-    job: str,
-    message: str,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Mutant: ON_NOEXEC's settlement guard never holds, so `flag moved` fires
-    job.198 (no move) for a waiter, a FAILED job or a box that is not
-    INACTIVE. The status the row has disagrees with the chart's choice: a
-    statechart error before any write, not a waiter left queued with the flag
-    set. The mutant's hits stay out of the session."""
-    monkeypatch.setenv(HITS_ENV, str(tmp_path))
-    oracle = _flag_oracle(_planted(**{guard: lambda ctx: False}))
-    for event in script:
-        oracle.feed(event)
-    traced = len(oracle.trace())
-    with pytest.raises(StatechartError, match=message):
-        oracle.feed(ev("ON_NOEXEC", 2, job=job))
-    assert oracle.trace()[traced:] == []
 
 
 # ---- RELEASE_RESOURCE and the readmission (DL-345)
@@ -2837,272 +2036,6 @@ def _fed(oracle: ChartOracle, name: str, count: int) -> ChartOracle:
     for step in _queue_steps(name, count):
         oracle.feed(step)
     return oracle
-
-
-def test_a_release_whose_writes_differ_from_the_charts_is_a_statechart_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Planted: the holder's instance is held as well as holding units, and
-    no follow brings it back, so the chart's release keeps a hold that today's
-    release does not have: it is caught after the release's writes, before
-    the waiters wake."""
-    oracle = _fed(_queue_oracle(), _WAKES, 3)
-    store = oracle.store
-    monkeypatch.setattr(store, "follow_job", lambda job: None)
-    planted = configuration("SUCCESS", hold=True, holding="held")
-    store.machines.realign("job:qu_keep", planted, store.machines.data("job:qu_keep"))
-    with pytest.raises(
-        StatechartError, match="'qu_keep': the release's writes differ from the chart's"
-    ) as raised:
-        oracle.feed(ev("RELEASE_RESOURCE", 5, job="qu_keep"))
-    text = str(raised.value)
-    assert "hold_on" in text and "item: the event RELEASE_RESOURCE" in text
-    assert store.job["qu_w"].status == "QUE_WAIT"
-
-
-def test_a_readmission_whose_writes_differ_from_the_charts_is_a_statechart_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Planted: the waiter's instance is ON_NOEXEC and no follow brings it
-    back, so the STARTING its readmission reaches (job.108) keeps a flag
-    today's write does not have; it is caught at the status write."""
-    oracle = _fed(_queue_oracle(), _WAKES, 3)
-    store = oracle.store
-    monkeypatch.setattr(store, "follow_job", lambda job: None)
-    planted = configuration("QUE_WAIT", noexec=True)
-    store.machines.realign("job:qu_w", planted, store.machines.data("job:qu_w"))
-    with pytest.raises(StatechartError, match="'qu_w': the start's status write differs") as raised:
-        oracle.feed(ev("RELEASE_RESOURCE", 5, job="qu_keep"))
-    assert "noexec_on" in str(raised.value) and "item: the event readmit" in str(raised.value)
-
-
-def test_a_leave_whose_writes_differ_from_the_charts_is_a_statechart_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Planted: the waiter's instance is on ice, and no follow brings it
-    back, so the INACTIVE its `flag moved` reaches (job.110) keeps the ice;
-    it is caught at the status write, as a STATUS move is."""
-    name = "a waiter whose condition is now false"
-    oracle = _fed(_queue_oracle(name=name), name, 3)
-    store = oracle.store
-    monkeypatch.setattr(store, "follow_job", lambda job: None)
-    planted = configuration("QUE_WAIT", ice=True)
-    store.machines.realign("job:qu_cond", planted, store.machines.data("job:qu_cond"))
-    with pytest.raises(
-        StatechartError, match="'qu_cond': the configuration differs as written"
-    ) as raised:
-        oracle.feed(ev("STATUS", 5, job="qu_live", status="SUCCESS"))
-    assert "ice_on" in str(raised.value) and "item: the event readmit" in str(raised.value)
-
-
-def test_a_release_or_readmit_row_the_oracle_does_not_write_is_a_statechart_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Planted: the oracle forgets the no-effect release and the waiter that
-    stays queued; the rows fired are named."""
-    monkeypatch.setattr(oracle_chart, "_RELEASE_IGNORED", frozenset())
-    with pytest.raises(
-        StatechartError, match="'qu_keep': RELEASE_RESOURCE fired job.315, and no release row"
-    ):
-        _queue_oracle().feed(ev("RELEASE_RESOURCE", 1, job="qu_keep"))
-    monkeypatch.undo()
-    fired = {rows: what for rows, what in oracle_chart._READMIT_FIRED.items() if what != "keep"}
-    monkeypatch.setattr(oracle_chart, "_READMIT_FIRED", fired)
-    oracle = _fed(_queue_oracle(), _WAKES, 3)
-    with pytest.raises(StatechartError, match="'qu_w': readmit fired job.181, and no readmit row"):
-        oracle.feed(ev("ON_HOLD", 5, job="qu_w"))  # a hold on a waiter scans the queue
-
-
-@pytest.mark.parametrize(
-    ("count", "job", "message"),
-    [
-        (2, "qu_keep", "'qu_keep': job.315 fired for a SUCCESS job holding units"),
-        (0, "qu_keep", "'qu_keep': job.307 fired for a INACTIVE job holding nothing"),
-    ],
-    ids=["held units left held", "nothing held, released"],
-)
-def test_a_release_whose_holding_row_is_swapped_fails_before_any_write(
-    count: int, job: str, message: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Mutant: the sources of job.307 (held units go back) and job.315
-    (nothing held) swapped. Whether the job holds units it can give back is
-    the row's choice, and a row that disagrees is a statechart error before
-    any write. The mutant's hits stay out of the session."""
-    monkeypatch.setenv(HITS_ENV, str(tmp_path))
-    swapped = _rows_changed(job_307={"source": "none"}, job_315={"source": "held"})
-    oracle = _fed(_queue_oracle(swapped), _WAKES, count)
-    traced = len(oracle.trace())
-    with pytest.raises(StatechartError, match=message):
-        oracle.feed(ev("RELEASE_RESOURCE", 5, job=job))
-    assert oracle.trace()[traced:] == []
-
-
-def test_a_leave_whose_arm_row_is_swapped_fails_before_any_write(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Mutant: the sources of job.216 (a leaving waiter's arm goes) and
-    job.230 (it has none) swapped. The scan reaches the unarmed `qu_cond`
-    first, and it leaves through job.216: the arm the row drops is the row's,
-    and a waiter that disagrees is a statechart error before any write, not a
-    leave that drops an arm the row does not have. (The armed half of the
-    swap is the harness's: the armed script diverges.)"""
-    monkeypatch.setenv(HITS_ENV, str(tmp_path))
-    swapped = _rows_changed(job_216={"source": "arm_off"}, job_230={"source": "arm_on"})
-    name = "an armed waiter whose condition is now false"
-    oracle = _fed(_queue_oracle(swapped, name), name, 4)
-    traced = len(oracle.trace())
-    with pytest.raises(
-        StatechartError, match="'qu_cond': job.216 fired for a waiter with armed=False"
-    ):
-        oracle.feed(ev("STATUS", 5, job="qu_live", status="SUCCESS"))
-    assert oracle.trace()[traced:] == [oracle.trace()[traced]]  # qu_live's own line only
-    assert oracle.store.job["qu_cond"].status == "QUE_WAIT"
-
-
-@pytest.mark.parametrize(
-    ("name", "count", "last", "message"),
-    [
-        (
-            _WAKES,
-            3,
-            ev("RELEASE_RESOURCE", 5, job="qu_keep"),
-            "'qu_w': job.230 fired for a waiter whose queued recheck passed",
-        ),
-        (
-            "a waiter whose condition is now false",
-            3,
-            ev("STATUS", 5, job="qu_live", status="SUCCESS"),
-            "'qu_cond': job.108 fired for a waiter whose queued recheck failed",
-        ),
-    ],
-    ids=["a waiter that fits leaves", "a waiter that fails its recheck is admitted"],
-)
-def test_a_readmission_whose_admit_and_leave_rows_are_swapped_fails_before_any_write(
-    name: str,
-    count: int,
-    last: Event,
-    message: str,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Mutant: the guards of the admission (job.108) and the leave (job.216,
-    job.230) swapped. Whether the queued recheck failed is the rows' choice,
-    and a waiter whose recheck says otherwise is a statechart error before
-    any write. The mutant's hits stay out of the session."""
-    monkeypatch.setenv(HITS_ENV, str(tmp_path))
-    swapped = _planted(
-        readmit_admits=job_chart.readmit_leaves, readmit_leaves=job_chart.readmit_admits
-    )
-    oracle = _fed(_queue_oracle(swapped, name), name, count)
-    waiter = "qu_w" if name == _WAKES else "qu_cond"
-    traced = len(oracle.trace())
-    with pytest.raises(StatechartError, match=message):
-        oracle.feed(last)
-    assert [t for t in oracle.trace()[traced:] if t.job == waiter] == []
-    assert oracle.store.job[waiter].status == "QUE_WAIT"
-
-
-def test_a_readmission_whose_status_write_never_runs_is_a_statechart_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Planted: the admitted waiter's run is dropped, so the chart's
-    STARTING is never written."""
-    oracle = _fed(_queue_oracle(), _WAKES, 3)
-    monkeypatch.setattr(Oracle, "_run", lambda *args, **kwargs: None)
-    with pytest.raises(StatechartError, match="'qu_w': the readmission's status write never ran"):
-        oracle.feed(ev("RELEASE_RESOURCE", 5, job="qu_keep"))
-    assert oracle._start_move is None
-
-
-def test_a_failed_readmission_leaves_no_status_move_behind(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A readmission that raises before its status write clears its move, so
-    the next input is not compared against it."""
-
-    def broken(*args: Any, **kwargs: Any) -> None:
-        raise OracleError("planted")
-
-    oracle = _fed(_queue_oracle(), _WAKES, 3)
-    monkeypatch.setattr(oracle.store, "dequeue_waiter", broken)
-    with pytest.raises(OracleError, match="planted"):
-        oracle.feed(ev("RELEASE_RESOURCE", 5, job="qu_keep"))
-    assert oracle._start_move is None
-
-
-def _start_move(job: str, *, moves: bool) -> Any:
-    return oracle_chart.Agreement(
-        job,
-        f"job:{job}",
-        ChartEvent("start"),
-        configuration("INACTIVE"),
-        ("INACTIVE", "INACTIVE"),
-        False,
-        moves=moves,
-    )
-
-
-def test_a_readmission_before_a_starts_status_write_is_a_statechart_error() -> None:
-    """A start whose status write is still owed when a waiter is admitted is
-    a statechart error; a window's start that moves nothing is done once the
-    cascade readmits, as once it attempts (DL-342)."""
-    oracle = _fed(_queue_oracle(), _WAKES, 3)
-    oracle._start_move = _start_move("qu_bare", moves=True)
-    with pytest.raises(
-        StatechartError, match="'qu_w': a readmission began before a start's status write"
-    ):
-        oracle.feed(ev("RELEASE_RESOURCE", 5, job="qu_keep"))
-    oracle = _fed(_queue_oracle(), _WAKES, 3)
-    oracle._start_move = _start_move("qu_bare", moves=False)
-    oracle.feed(ev("RELEASE_RESOURCE", 5, job="qu_keep"))
-    assert oracle.store.job["qu_w"].status == "RUNNING" and oracle._start_move is None
-
-
-_NESTED_JIL = (
-    "insert_resource: NB\nres_type: R\namount: 1\n\n"
-    "insert_resource: NM\nres_type: R\namount: 1\n\n"
-    "insert_resource: NR\nres_type: R\namount: 1\n\n"
-    "insert_job: nh\njob_type: c\ncommand: x\nmachine: m1\nresources: (NR, QUANTITY=1, FREE=Y)\n\n"
-    "insert_job: nb\njob_type: b\nbox_success: s(nm)\nresources: (NB, QUANTITY=1, FREE=Y)\n\n"
-    "insert_job: nm\njob_type: c\ncommand: x\nmachine: m1\nbox_name: nb\n"
-    "resources: (NM, QUANTITY=1, FREE=Y)\n\n"
-    "insert_job: nq\njob_type: c\ncommand: x\nmachine: m1\nbox_name: nb\n"
-    "resources: (NR, QUANTITY=1, FREE=Y)\n"
-)
-
-
-def test_a_move_whose_box_rules_readmit_a_waiter_still_has_its_holding_compared(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A member's SUCCESS ends its box (box_success), whose release cancels
-    the box's queued member: that readmission's move is compared inside the
-    member's own move, which waits for its settlement after the box rules.
-    Planted: the member's handle keeps its unit, today's settlement frees it;
-    the difference is still caught after the nested readmission."""
-    oracle = ChartOracle(lower_source(_NESTED_JIL))
-    oracle.feed(ev("STARTJOB", 1, job="nh"))
-    oracle.feed(ev("STARTJOB", 2, job="nb"))
-    assert oracle.store.job["nq"].status == "QUE_WAIT"
-    paired = LockstepOracle(lower_source(_NESTED_JIL), new=ChartOracle)
-    for event in (ev("STARTJOB", 1, job="nh"), ev("STARTJOB", 2, job="nb")):
-        paired.feed(event)
-    seen = _spied(paired.twin)
-    paired.feed(ev("STATUS", 3, job="nm", status="SUCCESS"))
-    assert [o.rows for o in seen if o.event.name == "readmit"] == [("job.109",)]
-    assert paired.twin.store.job["nq"].status == "INACTIVE"
-    # the member's units only: the box's own end is the chart's now (DL-346)
-    _released_for(monkeypatch, "nm", "keep")
-    status = ev("STATUS", 3, job="nm", status="SUCCESS")
-    _moves_differ(oracle, lambda o: o.feed(status), "nm", "job.305", "job_holding.04")
-    with pytest.raises(StatechartError, match="'nm': the holding differs after the settlement"):
-        oracle.feed(status)
-    lines = [(t.job, t.transition) for t in oracle.trace()[-3:]]
-    assert lines == [
-        ("nm", "RUNNING->SUCCESS"),
-        ("nb", "RUNNING->SUCCESS"),
-        ("nq", "QUE_WAIT->INACTIVE"),
-    ]
-    assert oracle._agreement is None
 
 
 def test_dl50_a_readmission_computes_only_the_facts_todays_scan_reads() -> None:
@@ -3651,337 +2584,8 @@ def test_dl256_the_period_opening_gives_a_removed_jobs_units_back_through_the_ch
     assert paired.twin.store.job["k"].reservations == ()
 
 
-def test_an_opening_row_the_oracle_does_not_write_is_a_statechart_error(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Planted: the removed job's data says it is in the catalog, so the
-    opening fires the marked job.321, which the oracle has no write for,
-    before any write: `k` keeps its units and no trace line is written. Its
-    hit stays out of the session."""
-    monkeypatch.setenv(HITS_ENV, str(tmp_path))
-    planted = _planted(in_catalog=lambda ctx: True, left_catalog=lambda ctx: False)
-    oracle, _carried = _opening(planted)
-    row = oracle.store.job["k"]
-    assert row.reservations != ()
-    traced = len(oracle.trace())
-    with pytest.raises(
-        StatechartError, match="'k': first input of a period fired job.321, and no opening row"
-    ):
-        oracle.feed(ev("STARTJOB", 3, job="j"))
-    assert oracle.store.job["k"] == row
-    assert oracle.trace()[traced:] == []
-
-
 def _box_oracle(cls: type[ChartOracle] = ChartOracle) -> ChartOracle:
     return cls(lower_source(_BOX_JIL))
-
-
-def _fed_boxes(oracle: ChartOracle, steps: list[Event]) -> ChartOracle:
-    for step in steps:
-        oracle.feed(step)
-    return oracle
-
-
-#: `hb` holds a unit of BR while it runs; its members hold nothing.
-_HELD_BOX_JIL = (
-    "insert_resource: BR\nres_type: R\namount: 1\n\n"
-    + _boxed("hb", "resources: (BR, QUANTITY=1, FREE=Y)\n")
-    + _job("hm", "hb")
-    + _job("hn", "hb")
-)
-#: `hm` holds a unit of BR while it runs, inside `hb`.
-_HELD_MEMBER_JIL = (
-    "insert_resource: BR\nres_type: R\namount: 1\n\n"
-    + _boxed("hb")
-    + _job("hm", "hb", "resources: (BR, QUANTITY=1, FREE=Y)\n")
-)
-
-
-def test_a_box_whose_end_the_chart_settles_otherwise_is_a_statechart_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Planted: the box's handle keeps its unit after its end, today's
-    settlement frees it. The fold's move (job.128) is compared as a STATUS
-    move is, its holding at its settlement."""
-    oracle = ChartOracle(lower_source(_HELD_BOX_JIL))
-    oracle.feed(ev("FORCE_STARTJOB", 0, job="hb"))
-    oracle.feed(ev("STATUS", 1, job="hn", status="SUCCESS"))
-    _released_for(monkeypatch, "hb", "keep")
-    status = ev("STATUS", 2, job="hm", status="SUCCESS")
-    _moves_differ(oracle, lambda o: o.feed(status), "hb", "job.305", "job_holding.04")
-    with pytest.raises(StatechartError, match="'hb': the holding differs after the settlement"):
-        oracle.feed(status)
-
-
-def test_a_batch_row_the_chart_settles_otherwise_is_a_statechart_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Planted: a running member's handle frees its unit after an end that is
-    not SUCCESS; the box's INACTIVE takes it along (job.159), and today's
-    settlement keeps the renewable's unit held (DL-256). The row is compared
-    once the batch has written and settled it, before the batch's box rules
-    and wakes."""
-    oracle = ChartOracle(lower_source(_HELD_MEMBER_JIL))
-    oracle.feed(ev("FORCE_STARTJOB", 0, job="hb"))
-    assert oracle.store.job["hm"].status == "RUNNING"
-    assert RowUnits(oracle, "hm").release(False) == "keep"
-    _released_for(monkeypatch, "hm", "free")
-    traced = len(oracle.trace())
-    status = ev("STATUS", 1, job="hb", status="INACTIVE")
-    _moves_differ(oracle, lambda o: o.feed(status), "hm", "job.304", "job_holding.05")
-    with pytest.raises(StatechartError, match="'hm': the batch's writes differ from the chart's"):
-        oracle.feed(status)
-    assert [(t.job, t.transition) for t in oracle.trace()[traced:]] == [
-        ("hb", "RUNNING->INACTIVE"),
-        ("hm", "RUNNING->INACTIVE"),
-    ]
-
-
-@pytest.mark.parametrize(
-    ("steps", "box", "changes", "message"),
-    [
-        (
-            [_box_ev(0, "FORCE_STARTJOB", "sb"), _box_ev(1, "STATUS", "sm", status="SUCCESS")],
-            "sb",
-            {"job_128": {"target": "FAILURE"}, "job_129": {"target": "SUCCESS"}},
-            "'sb': completion moment reached FAILURE, and its facts derive SUCCESS",
-        ),
-        (
-            [_box_ev(0, "FORCE_STARTJOB", "osb"), _box_ev(1, "STATUS", "osm", status="SUCCESS")],
-            "osb",
-            {"job_126": {"target": "FAILURE"}, "job_127": {"target": "SUCCESS"}},
-            "'osb': member moves reached FAILURE, and its facts derive SUCCESS",
-        ),
-        (
-            [_box_ev(0, "STATUS", "r4m", status="FAILURE")],
-            "rb4",
-            {"job_133": {"target": "FAILURE"}, "job_134": {"target": "SUCCESS"}},
-            "'rb4': box recompute reached SUCCESS, and its facts derive FAILURE",
-        ),
-    ],
-    ids=["the fold", "an override", "an idle recompute"],
-)
-def test_a_box_rule_whose_target_is_swapped_fails_before_any_write(
-    steps: list[Event],
-    box: str,
-    changes: dict[str, dict[str, str]],
-    message: str,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Mutant: the targets of a SUCCESS row and its FAILURE twin swapped.
-    The box's target is the chart's choice, and a fact that derives the
-    other is a statechart error before the box's write. The mutant's hits
-    stay out of the session."""
-    monkeypatch.setenv(HITS_ENV, str(tmp_path))
-    oracle = _fed_boxes(_box_oracle(_rows_changed(**changes)), steps[:-1])
-    traced = len(oracle.trace())
-    with pytest.raises(StatechartError, match=message):
-        oracle.feed(steps[-1])
-    assert [t for t in oracle.trace()[traced:] if t.job == box] == []
-
-
-def test_an_idle_recompute_whose_override_row_is_swapped_fails_before_any_write(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Mutant: the guards of job.131 (box_success decides) and job.133 (the
-    default verdict) swapped. Whether an override decided the recompute is the
-    row's choice too, and a row that disagrees with the facts is a statechart
-    error before the box's write."""
-    monkeypatch.setenv(HITS_ENV, str(tmp_path))
-    swapped = _rows_changed(
-        job_131={"guard": "derives_success"}, job_133={"guard": "overrides_success"}
-    )
-    oracle = _box_oracle(swapped)
-    traced = len(oracle.trace())
-    with pytest.raises(
-        StatechartError, match="'rb3': job.131 fired, and the facts say override=False"
-    ):
-        oracle.feed(_box_ev(0, "STATUS", "r3m", status="SUCCESS"))
-    assert [t for t in oracle.trace()[traced:] if t.job == "rb3"] == []
-
-
-def test_a_box_rule_row_the_oracle_does_not_write_is_a_statechart_error(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Planted: a member's end reaches a box whose data says it is not one,
-    so `member ends FAILURE or TERMINATED` fires the marked job.190, which the
-    oracle has no write for, before any write of the box: its row is as it
-    was, and the box has no trace line. Its hit stays out of the session."""
-    monkeypatch.setenv(HITS_ENV, str(tmp_path))
-    ends = "member ends FAILURE or TERMINATED"
-    planted = _planted(
-        is_box=lambda ctx: ctx.data.box and ctx.event.name != ends,
-        is_job=lambda ctx: not ctx.data.box or ctx.event.name == ends,
-    )
-    oracle = _fed_boxes(_box_oracle(planted), _FOLD_FAILURE[:1])
-    row = oracle.store.job["fb"]
-    traced = len(oracle.trace())
-    with pytest.raises(StatechartError, match=f"'fb': {ends} fired job.190, and no box rule row"):
-        oracle.feed(_FOLD_FAILURE[1])
-    assert oracle.store.job["fb"] == row
-    assert [t for t in oracle.trace()[traced:] if t.job == "fb"] == []
-
-
-def test_a_row_that_moves_nothing_and_moves_the_instance_is_a_statechart_error(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Mutant: job.196 (a job already INACTIVE stays out of its box's
-    cascade) re-kinded to an external row into SUCCESS. The oracle writes
-    nothing for it, and the instance it moved is caught at once, at the
-    input, before the cascade's batch: not left for a later follow or the
-    commit's realign to heal. Its hits stay out of the session."""
-    monkeypatch.setenv(HITS_ENV, str(tmp_path))
-    drifted = _rows_changed(job_196={"kind": "external", "target": "SUCCESS"})
-    oracle = _fed_boxes(_box_oracle(drifted), _CASCADE[:2])
-    traced = len(oracle.trace())
-    with pytest.raises(
-        StatechartError, match="'iz': job.196 moves nothing, and the chart moved the job"
-    ) as raised:
-        oracle.feed(_CASCADE[2])
-    assert "SUCCESS" in str(raised.value)
-    assert oracle.store.job["iz"].status == "INACTIVE"
-    assert [t for t in oracle.trace()[traced:] if t.job in ("ib", "iz")] == []
-
-
-def test_a_batch_that_does_not_write_the_charts_move_is_a_statechart_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Planted: the batch INACTIVE path drops the last row the chart moved
-    with its box; the move the chart made is never written."""
-    oracle = _fed_boxes(_box_oracle(), _CASCADE[:2])
-    batch = oracle._set_inactive_batch
-
-    def dropped(rows: list[Any], **kwargs: Any) -> None:
-        batch(rows[:-1], **kwargs)
-
-    monkeypatch.setattr(oracle, "_set_inactive_batch", dropped)
-    with pytest.raises(StatechartError, match="'in': the batch never wrote the chart's move"):
-        oracle.feed(_CASCADE[2])
-    assert oracle._batch is None
-
-
-def test_a_box_noexec_flag_whose_write_differs_from_the_charts_is_a_statechart_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Planted: a job the box contains has an iced instance and no follow
-    brings it back, so the chart's `ON_NOEXEC on its box` keeps an ice that
-    today's flag writes do not have: caught after the job's flag writes."""
-    oracle = _box_oracle()
-    store = oracle.store
-    monkeypatch.setattr(store, "follow_job", lambda job: None)
-    store.machines.realign(
-        "job:nn", configuration("INACTIVE", ice=True), store.machines.data("job:nn")
-    )
-    with pytest.raises(StatechartError, match="'nn': the flags' writes differ") as raised:
-        oracle.feed(_ON_NOEXEC[-1])
-    text = str(raised.value)
-    assert "ice_on" in text and "ice_off" in text and "ON_NOEXEC on its box" in text
-
-
-@pytest.mark.parametrize(
-    ("row", "steps"),
-    [("job_231", _ON_NOEXEC[1:]), ("job_233", _ON_NOEXEC_FLAGGED[:1] + _ON_NOEXEC_FLAGGED[3:])],
-    ids=["a job not flagged", "a job already flagged"],
-)
-def test_a_box_noexec_row_the_chart_ignores_and_today_writes_is_a_statechart_error(
-    row: str, steps: list[Event], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Mutant: job.231 or job.233 re-kinded to ignored, so the chart ignores
-    `ON_NOEXEC on its box` for a contained job, not held, where today's
-    `_set_noexec` writes the flag and its line. Caught at the input, before
-    the job's write (DL-344's rule for the flag inputs). The mutant's hits
-    stay out of the session."""
-    monkeypatch.setenv(HITS_ENV, str(tmp_path))
-    oracle = _fed_boxes(_box_oracle(_rows_changed(**{row: {"kind": "ignored"}})), steps[:-1])
-    before = oracle.store.job["nm"]
-    traced = len(oracle.trace())
-    ident = row.replace("_", ".")
-    with pytest.raises(
-        StatechartError, match=f"'nm': {ident} ignores ON_NOEXEC on its box, which today's"
-    ):
-        oracle.feed(steps[-1])
-    assert oracle.store.job["nm"] == before
-    assert [t for t in oracle.trace()[traced:] if t.job == "nm"] == []
-
-
-@pytest.mark.parametrize(
-    ("steps", "released"),
-    [(_ON_NOEXEC, ["nm"]), (_ON_NOEXEC_FLAGGED, ["nn"]), (_ON_NOEXEC[1:], [])],
-    ids=["a held job", "a held job already flagged", "no job held"],
-)
-def test_a_box_noexec_releases_exactly_the_jobs_whose_hold_row_fired(
-    steps: list[Event], released: list[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`_box_on_noexec` returns the contained jobs whose hold row (job.232)
-    fired, in order: they retry their start. A retry is silent in every
-    run today (the box is not RUNNING), so this assertion is what pins the
-    list."""
-    oracle = _fed_boxes(_box_oracle(), steps[:-1])
-    seen = _spied(oracle)
-    returned: list[list[str]] = []
-    on_noexec = oracle._box_on_noexec
-
-    def spy(box: str, contained: list[str]) -> list[str]:
-        returned.append(on_noexec(box, contained))
-        return returned[-1]
-
-    monkeypatch.setattr(oracle, "_box_on_noexec", spy)
-    oracle.feed(steps[-1])
-    held = [
-        o.key[4:] for o in seen if o.event.name == "ON_NOEXEC on its box" and "job.232" in o.rows
-    ]
-    assert returned == [released] and held == released
-
-
-def test_a_box_noexec_flag_the_oracle_does_not_write_is_a_statechart_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Mutant: today's `_set_noexec` writes nothing for a job the box
-    contains, which the chart flags (job.231). Caught at the input."""
-    oracle = _box_oracle()
-    monkeypatch.setattr(oracle, "_set_noexec", lambda job, cause: False)
-    with pytest.raises(StatechartError, match="'nm': the flags' writes differ") as raised:
-        oracle.feed(_ON_NOEXEC[-1])
-    assert "noexec_on" in str(raised.value) and "noexec_off" in str(raised.value)
-
-
-@pytest.mark.parametrize(
-    ("steps", "message"),
-    [
-        (_ON_NOEXEC, "'nm': job.231 fired for a job held"),
-        (_ON_NOEXEC[1:], "'nm': job.232, job.231 fired for a job not held"),
-    ],
-    ids=["a held job keeps its hold", "a job not held loses one"],
-)
-def test_a_box_noexec_hold_the_chart_decides_otherwise_fails_before_any_write(
-    steps: list[Event], message: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Mutant: job.232's source moved to `hold_off`, so the chart takes the
-    hold off a job not held and leaves it on a held one. Whether the hold
-    goes is the row's choice, and the jobs released retry their start by it:
-    a statechart error before the job's writes. The mutant's hits stay out
-    of the session."""
-    monkeypatch.setenv(HITS_ENV, str(tmp_path))
-    oracle = _fed_boxes(_box_oracle(_rows_changed(job_232={"source": "hold_off"})), steps[:-1])
-    row = oracle.store.job["nm"]
-    traced = len(oracle.trace())
-    with pytest.raises(StatechartError, match=message):
-        oracle.feed(steps[-1])
-    assert oracle.store.job["nm"] == row
-    assert [t for t in oracle.trace()[traced:] if t.job == "nm"] == []
-
-
-def test_a_box_noexec_row_the_oracle_does_not_perform_is_a_statechart_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Planted: the oracle forgets job.231 alone; the row fired is named."""
-    rows = {k: v for k, v in oracle_chart_cascade._NOEXEC_HOLD.items() if k != ("job.231",)}
-    monkeypatch.setattr(oracle_chart_cascade, "_NOEXEC_HOLD", rows)
-    with pytest.raises(
-        StatechartError, match="'nm': ON_NOEXEC on its box fired job.231, and no box rule row"
-    ):
-        _box_oracle().feed(_ON_NOEXEC[-1])
 
 
 def test_sem12_a_box_rule_computes_only_the_facts_todays_rule_reads(

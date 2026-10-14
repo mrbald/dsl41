@@ -1,14 +1,15 @@
 """The composite `job` statechart, checked against the three job tables
 (docs/statechart-engine.md §11, §13, DL-337).
 
-The chart is declared and not driven, so these tests read it against the
-tables the oracle still takes (`job_status`, `job_flags`, `job_holding`):
+These tests read the chart against the tables the old oracle still takes
+(`job_status`, `job_flags`, `job_holding`):
 
 - the declaration is well formed, draws no warning, and is not registered;
 - every old row maps to rows of the chart, the mapping is total and
   injective over the 83 old ids, and each mapped row keeps its old sources
-  and targets; every other row moves nothing, relays an attempt, or is the
-  one holding move the tables left implicit (`job.319`);
+  and targets; every other row moves nothing, relays an attempt, is a
+  moment of the cascade or the admission's move to STARTING, or is the one
+  holding move the tables left implicit (`job.319`);
 - the generated completeness test (§13) over a declared abstraction;
 - a sweep of every configuration the rules can build, every event and the
   payload partitions, read with `Executor.resolve`: no cell falls through or
@@ -67,6 +68,7 @@ from dsl41.job_chart import (
     LEAVE_LIVE,
     MEMBER_ENDS,
     MEMBER_MOVES,
+    MOMENTS,
     OFF_HOLD,
     OFF_ICE,
     OFF_NOEXEC,
@@ -77,9 +79,11 @@ from dsl41.job_chart import (
     READMIT,
     RELEASE_RESOURCE,
     RUN_WINDOW,
+    SETTLE,
     START,
     START_ADMITTED,
     STARTED,
+    STARTING,
     STARTJOB,
     STATUS,
     TERM_RUN_TIME,
@@ -104,6 +108,7 @@ from dsl41.job_chart import (
 )
 from dsl41.machines import MACHINES
 from dsl41.oracle import Oracle
+from dsl41.oracle_chart import ChartOracle
 from dsl41.oracle_state import (
     JOB_FLAGS,
     JOB_HOLDING,
@@ -181,6 +186,9 @@ BOX_NOEXEC = {"job.231": "job_flags.09", "job.232": "job_flags.07", "job.233": "
 #: An attempt whose run's settlement is owed, and an admitted start's moves (DL-349).
 SETTLE_FIRST = "job.401"
 EXTENT = "job.402"
+STARTING_ROW = "job.403"
+SKIP_IN_BOX = "job.404"
+SETTLE_LIVE = "job.418"
 #: The rows that admit a start: each sends `start admitted` first.
 ADMITTING = ("job.101", "job.102", "job.103", "job.104", "job.124")
 
@@ -196,6 +204,21 @@ class Policy:
 
     def release(self, success: bool) -> Release:
         return self.on_success if success else self.otherwise
+
+    def consequences(self, ctx: Context, kind: str) -> None:
+        """A chart no tier drives: a row sends nothing beyond its own move."""
+
+
+@dataclass(frozen=True)
+class Still:
+    """A moment's payload, and `started`'s, for a chart no tier drives: its
+    step sends nothing, and its run is `current` or not (DL-350)."""
+
+    current: bool = True
+    units: Policy = Policy()
+
+    def step(self, ctx: Context) -> None:
+        return None
 
 
 def _tree() -> tuple[dict[str, tuple[str, ...]], dict[str, str]]:
@@ -228,8 +251,16 @@ def _leaf(active: frozenset[str], region: str) -> str:
     return next(s for s in active if REGION.get(s) == region)
 
 
+#: The admitting rows that end in the transient `ADMITTED`, which `starting`
+#: (job.403) leaves for STARTING once the admission's units and arm are written.
+ADMISSIONS = ("job.102", "job.104", "job.108", "job.124")
+
+
 def _targets(row: Row) -> set[str]:
-    """The leaves a row may end in; a row with no target stays where it is."""
+    """The leaves a row may end in; a row with no target stays where it is. An
+    admission's is STARTING, which it reaches through `ADMITTED` (job.403)."""
+    if row.target == "ADMITTED":
+        return {"STARTING"}
     choice = {c.name: c for c in CHART.choices}.get(row.target)
     if choice is not None:
         return {branch.target for branch in choice.branches}
@@ -254,7 +285,7 @@ def test_the_chart_is_well_formed_draws_no_warning_and_is_not_registered() -> No
     assert chart_warnings(CHART) == []
     assert CHART.clock == "logical"
     assert CHART not in MACHINES  # the second oracle registers it when it drives it
-    assert len(CHART.rows) == 148
+    assert len(CHART.rows) == 169
     assert [b.id for c in CHART.choices for b in c.branches] == [
         *(f"job.{n}" for n in range(171, 177)),
         "job.309",
@@ -268,7 +299,7 @@ def test_the_chart_is_well_formed_draws_no_warning_and_is_not_registered() -> No
             STARTED, READMIT, ACTUAL_START, ADMITTED_START, LEAVE_LIVE, MEMBER_MOVES,
             COMPLETION_MOMENT, MEMBER_ENDS, BOX_RECOMPUTE, BOX_START, BOX_RUNNING,
             BOX_SET_INACTIVE, BOX_RUN_ENDS, BOX_ENDS, BOX_OFF_NOEXEC, BOX_ON_NOEXEC, PERIOD_OPENING,
-            FLAG_MOVED, START_ADMITTED,
+            FLAG_MOVED, START_ADMITTED, STARTING, *MOMENTS,
         ]
     )  # fmt: skip
 
@@ -286,8 +317,7 @@ def test_every_guard_and_action_says_what_it_reads() -> None:
     actions = {row.action for row in CHART.rows} | {
         b.action for c in CHART.choices for b in c.branches
     }
-    # the two late settlements run as continuations, named by `then`
-    assert actions - {""} | {"settle_late", "settle_late_success"} == set(CHART.actions)
+    assert actions - {""} == set(CHART.actions)
     assert not any(state.entry or state.exit for state in _states(CHART.root))
     for name, function in (*CHART.guards.items(), *CHART.actions.items()):
         assert function.__doc__, name
@@ -296,8 +326,9 @@ def test_every_guard_and_action_says_what_it_reads() -> None:
 def test_every_marked_row_is_an_unreachable_cell_with_its_reason() -> None:
     marked = [row for row in CHART.rows if row.mark]
     assert [row.id for row in marked] == [
-        "job.182", "job.183", "job.186", "job.188", "job.190", "job.192", "job.193",
-        "job.194", "job.199", "job.317", "job.318", "job.320", "job.321",
+        "job.182", "job.186", "job.188", "job.190", "job.192", "job.193",
+        "job.194", "job.199", "job.317", "job.318", "job.320", "job.321", "job.419", "job.420",
+        "job.421", "job.422", "job.423",
     ]  # fmt: skip
     assert all(row.mark == "unreachable" and row.kind == "ignored" and row.note for row in marked)
 
@@ -312,7 +343,8 @@ def test_the_mapping_is_total_injective_and_keeps_sources_and_targets() -> None:
     assert set(news) <= set(ROWS)
     for old_id, group in MAPPING.items():
         old = OLD[old_id]
-        sources = [s for new in group for s in LEAVES[ROWS[new].source]]
+        # the transient ADMITTED is no status of the tables
+        sources = [s for new in group for s in LEAVES[ROWS[new].source] if s != "ADMITTED"]
         assert len(sources) == len(set(sources)), old_id  # one row per source
         assert set(sources) == {state_name(s) for s in old.source}, old_id
         old_targets = {state_name(s) for s in old.targets()}
@@ -329,12 +361,25 @@ def test_the_mapping_is_total_injective_and_keeps_sources_and_targets() -> None:
 
 def test_every_other_row_moves_nothing_relays_an_attempt_or_settles_held_units() -> None:
     others = [row for row in CHART.rows if row.id not in OLD_OF]
-    assert len(OLD_OF) == 83 + 21 and len(others) == 44
+    assert len(OLD_OF) == 83 + 21 and len(others) == 65
+    moments = {f"job.{405 + i}": event for i, event in enumerate(MOMENTS)}
     for row in others:
         if row.id in RELAYS:
             assert row.kind == "internal" and row.action == "relay_start"
         elif row.id == FLAG_REPORT:
-            assert row.kind == "internal" and row.action == "report_flag_move"
+            assert row.kind == "internal" and row.action == "waiter_left"
+        elif row.id == STARTING_ROW:
+            assert (row.source, row.event, row.target) == ("ADMITTED", STARTING, "STARTING")
+            assert row.action == "moved" and not row.guard
+        elif row.id == SKIP_IN_BOX:
+            assert (row.source, row.event, row.kind) == ("INACTIVE", START, "internal")
+            assert row.guard == "start_skips_inactive_member" and row.action == "skips_in_box"
+        elif row.id in moments:
+            assert (row.source, row.event, row.kind) == ("lifecycle", moments[row.id], "internal")
+            assert row.action == "moment" and not row.guard
+        elif row.id == SETTLE_LIVE:
+            assert (row.source, row.event, row.kind) == ("LIVE", SETTLE, "internal")
+            assert not (row.guard or row.action) and "started again" in row.note
         elif row.id == LATE_SETTLEMENT:
             assert (row.source, row.event, row.kind) == ("reserved", ADMITTED_START, "internal")
             assert row.action == "settle_ended_run" and "settles first" in row.note
@@ -345,7 +390,7 @@ def test_every_other_row_moves_nothing_relays_an_attempt_or_settles_held_units()
             assert row.guard == "start_bounded" and "L010" in row.note
         elif row.id == SETTLE_FIRST:
             assert (row.source, row.event, row.kind) == ("IDLE", START, "internal")
-            assert row.guard == "start_settles_first" and not row.action
+            assert row.guard == "start_settles_first" and row.action == "settles_first"
         elif row.id == EXTENT:
             assert (row.source, row.event, row.kind) == ("lifecycle", START_ADMITTED, "internal")
             assert row.action == "start_extent" and not row.guard
@@ -357,6 +402,16 @@ def test_every_other_row_moves_nothing_relays_an_attempt_or_settles_held_units()
             assert _targets(row) <= {state_name(s) for s in old.targets()}
         else:
             assert row.kind == "ignored" and row.note, row.id
+
+
+@pytest.mark.parametrize("moment", MOMENTS, ids=lambda event: event)
+def test_a_moment_with_no_step_of_the_tier_s_is_a_statechart_error(moment: str) -> None:
+    """A moment's row runs the step its payload carries; a payload with none
+    is a statechart error with the moment named, not a move."""
+    executor = Executor()
+    executor.restore("j", CHART, configuration("INACTIVE"), JOB_DATA)
+    with pytest.raises(StatechartError, match=f"{moment}: a moment with no step"):
+        executor.dispatch("j", ChartEvent(moment, Payload()))
 
 
 def test_only_the_status_rows_of_a_start_report_items() -> None:
@@ -374,7 +429,11 @@ def test_only_the_status_rows_of_a_start_report_items() -> None:
         "job.102": "extent_admit",
         "job.103": "extent_queue",
         "job.104": "extent_on_held",
+        "job.106": "moved",
+        "job.107": "moved",
         "job.124": "extent_admit",
+        SETTLE_FIRST: "settles_first",
+        SKIP_IN_BOX: "skips_in_box",
     }
     assert [row.id for row in CHART.rows if row.event == START_ADMITTED] == [EXTENT]
 
@@ -401,6 +460,13 @@ def _buildable() -> Iterator[frozenset[str]]:
                 yield configuration(
                     status, ice=ice, hold=hold, noexec=noexec, armed=armed, holding=holding
                 )
+
+
+def _admitted(holding: str = "none", *, armed: bool = False) -> frozenset[str]:
+    """An admitted start's transient configuration, between its admission and
+    its STARTING (DL-350); no row projects to it."""
+    flags = {"ice_off", "hold_off", "noexec_off", "arm_on" if armed else "arm_off"}
+    return frozenset({"job", "lifecycle", "ADMITTED", "flags", *flags, holding})
 
 
 JOB_DATA = JobData()
@@ -430,16 +496,22 @@ def _attempts() -> list[Attempt]:
         for window in ("inside", "defer", "skip")
         for fits in (True, False)
     ]
-    return found + [
-        variant
-        for who in _WHO
-        for variant in (
-            replace(who, box_noexec=True, demand=False),
-            replace(who, bounded=True),
-            replace(who, settlement_owed=True),
-            replace(who, settlement_owed=True, bounded=True),
-        )
-    ]
+    return (
+        found
+        + [
+            variant
+            for who in _WHO
+            for variant in (
+                replace(who, box_noexec=True, demand=False),
+                replace(who, settlement_owed=True),
+            )
+        ]
+        + [
+            Attempt(decided=True, window=window, box=box)
+            for window in ("inside", "defer", "skip")
+            for box in ("none", "running", "idle", "ran", "iced_out")
+        ]
+    )
 
 
 _NOEXECS = [Noexec(busy, change) for busy in (False, True) for change in (True, False)]
@@ -474,6 +546,9 @@ PARTITIONS: dict[str, list[Any]] = {
         Settlement(success, release) for success in (True, False) for release in _RELEASES
     ],
     START_ADMITTED: [Admitted(verdict) for verdict in ("bypass", "queue", "admit", "on_held")],
+    STARTED: [Still(True), Still(False)],
+    STARTING: [Still()],
+    **{moment: [Still()] for moment in MOMENTS},
 }
 
 
@@ -484,13 +559,28 @@ def test_the_sweep_of_every_buildable_cell_raises_no_selection_error_and_selects
     job_terminator and auto_hold, and a job with no catalog entry; every event
     and its partitions (a start's fewer for the last two). `Executor.resolve`
     raises no `StatechartError` in any cell: no cell falls through, and none
-    is ambiguous. Every row of the chart is selected in some cell. It does not
-    compare a cell with the rule code: the replays below do that."""
+    is ambiguous. Every row of the chart is selected in some cell, and no
+    cell selects two rows that both carry an action: an event acts in one
+    region only, so no region's items pop ahead of another's (the region
+    condition, DL-350). It does not compare a cell with the rule code:
+    the replays below do that."""
     executor = Executor()
     selected: set[str] = set()
+    acting: list[tuple[str, tuple[str, ...]]] = []
+    # a row whose target is a choice acts when any branch it may take does
+    branching = {choice.name for choice in CHART.choices if any(b.action for b in choice.branches)}
+
+    def acts(row: str) -> bool:
+        return bool(ROWS[row].action) or ROWS[row].target in branching
+
     cells = 0
     kinds = (("job", JOB_DATA), ("box", BOX_DATA), ("member", MEMBER_DATA), ("none", NO_CATALOG))
-    for index, active in enumerate(_buildable()):
+    admitted = [
+        _admitted(holding, armed=armed)
+        for holding in _HOLDINGS["INACTIVE"]
+        for armed in (False, True)
+    ]
+    for index, active in enumerate([*_buildable(), *admitted]):
         for kind, data in kinds:
             key = (index, kind)
             executor.restore(key, CHART, active, data)
@@ -499,9 +589,15 @@ def test_the_sweep_of_every_buildable_cell_raises_no_selection_error_and_selects
                 if kind in ("member", "none") and event == START:
                     payloads = list(_WHO)
                 for payload in payloads:
-                    selected.update(executor.resolve(key, ChartEvent(event, payload)).rows)
+                    rows = executor.resolve(key, ChartEvent(event, payload)).rows
+                    selected.update(rows)
+                    if sum(1 for row in rows if acts(row)) > 1:
+                        acting.append((event, rows))
                     cells += 1
-    assert selected == set(ROWS)
+    # the bound reads the item's ancestry, which a read never has: the
+    # ancestry test reaches it
+    assert selected == set(ROWS) - {START_BOUND}
+    assert acting == []
     assert cells > 250_000
 
 
@@ -529,14 +625,8 @@ def test_the_sweep_of_every_buildable_cell_raises_no_selection_error_and_selects
             ["job.104", EXTENT, "job.303", "job.224"],
         ),
         (configuration("INACTIVE"), JOB_DATA, Attempt(settlement_owed=True), [SETTLE_FIRST]),
-        (
-            configuration("INACTIVE"),
-            JOB_DATA,
-            Attempt(bounded=True, settlement_owed=True),
-            ["job.100"],
-        ),
     ],
-    ids=["bypass", "admit", "admit a box", "queue", "on held units", "settle first", "bound first"],
+    ids=["bypass", "admit", "admit a box", "queue", "on held units", "settle first"],
 )
 def test_an_admitting_row_sends_start_admitted_before_the_admissions_moves(
     active: frozenset[str], data: JobData, attempt: Attempt, rows: list[str]
@@ -550,6 +640,34 @@ def test_an_admitting_row_sends_start_admitted_before_the_admissions_moves(
     assert [ident for outcome in outcomes for ident in outcome.rows] == rows
     depths = [outcome.depth for outcome in outcomes]
     assert depths == [0, 1, *([2] * (len(rows) - 2))][: len(rows)]
+
+
+@pytest.mark.parametrize(
+    ("ancestry", "verdict"),
+    [
+        ((), "admit"),
+        ((("j", START_ADMITTED),), "admit"),
+        ((("j", START_ADMITTED), ("k", START_ADMITTED), ("j", START)), "admit"),
+        ((("j", START_ADMITTED), ("j", START), ("j", START_ADMITTED)), "bounded"),
+        ((("j", START_ADMITTED),) * 3, "bounded"),
+    ],
+    ids=["root", "one below", "another job's", "at the bound", "past it"],
+)
+def test_the_start_bound_counts_the_job_s_admitted_starts_in_the_ancestry(
+    ancestry: tuple[tuple[str, str], ...], verdict: str
+) -> None:
+    """job.100 (DL-304, DL-350): an attempt that descends from
+    `MAX_NESTED_STARTS` admitted starts of its own job is refused; another
+    job's admitted start, and the job's own attempts, do not count."""
+    ctx = Context(
+        key="j",
+        event=ChartEvent(START, Attempt()),
+        active=configuration("INACTIVE"),
+        data=JOB_DATA,
+        ancestry=ancestry,
+    )
+    assert job_chart.start_verdict(ctx) == verdict
+    assert job_chart.start_bounded(ctx) == (verdict == "bounded")
 
 
 # ---- the generated completeness test (§13)
@@ -600,6 +718,8 @@ def _witnesses() -> dict[str, sc.Builder]:
     found["no catalog FAILURE held"] = _witness(
         configuration("FAILURE", holding="held"), NO_CATALOG
     )
+    found["job ADMITTED"] = _witness(_admitted(), JOB_DATA)
+    found["box ADMITTED reserved"] = _witness(_admitted("reserved"), BOX_DATA)
     return found
 
 
@@ -607,10 +727,10 @@ def _handled(payload: Any) -> Any:
     """The payload with a handle on the job's units (`Policy()`, which frees):
     a settlement the cell's rows send must know its policy (DL-349). The
     handle is not printed, so the cell's label keeps."""
+    if isinstance(payload, Admitted):
+        return replace(payload, admission=_handled(payload.admission), units=Policy())
     if isinstance(payload, Payload):
         return replace(payload, units=Policy())
-    if isinstance(payload, Admitted):
-        return replace(payload, admission=_handled(payload.admission))
     return payload
 
 
@@ -638,10 +758,13 @@ ABSTRACTION = sc.Abstraction(
                 Attempt(window="skip"),
                 Attempt(window="skip", box="running"),
                 Attempt(box_noexec=True),
-                Attempt(bounded=True),
                 Attempt(settlement_owed=True),
                 Attempt(force=True),
                 Attempt(admissible=False),
+                Attempt(window="skip", box="iced_out"),
+                Attempt(decided=True, window="skip", box="running"),
+                Attempt(decided=True, window="defer", box="running"),
+                Attempt(decided=True),
             )
         }
     },
@@ -662,8 +785,19 @@ def test_the_completeness_table_matches_the_declaration_in_every_cell() -> None:
     assert table[("job QUE_WAIT hold", ON_ICE, sc.ANY)] == "job.201"
     assert table[("job INACTIVE ice", FORCE_STARTJOB, repr(Attempt()))] == "job.178 + job.203"
     assert table[("job INACTIVE", START, repr(Attempt(window="defer")))] == "ignored job.180"
-    assert table[("job INACTIVE", START, repr(Attempt(bounded=True)))] == "job.100"
-    assert table[("job RUNNING", START, repr(Attempt(bounded=True)))] == "ignored job.180"
+    # a skip of an INACTIVE member of a running box has no move to ride (DL-154)
+    assert table[("job INACTIVE", START, repr(Attempt(window="skip", box="running")))] == (
+        "job.404"
+    )
+    # a plain attempt meets the box gate before the window
+    assert table[("job SUCCESS", START, repr(Attempt(window="skip", box="iced_out")))] == (
+        "ignored job.180"
+    )
+    # a box start's window decision reads the window alone (DL-246)
+    decided = Attempt(decided=True, window="skip", box="running")
+    assert table[("job INACTIVE ice", START, repr(decided))] == "job.404"
+    assert table[("job SUCCESS", START, repr(decided))] == "job.107"
+    assert table[("job INACTIVE", START, repr(Attempt(decided=True)))] == "ignored job.180"
     # an owed settlement is read past the bound, before the bypass (DL-340)
     assert table[("job INACTIVE", START, repr(Attempt(settlement_owed=True)))] == "job.401"
     assert table[("job RUNNING", START, repr(Attempt(settlement_owed=True)))] == "ignored job.180"
@@ -674,7 +808,16 @@ def test_the_completeness_table_matches_the_declaration_in_every_cell() -> None:
     assert table[("job FAILURE every flag held", START, repr(Attempt(force=True)))] == "job.101"
     assert table[("job FAILURE every flag held", START, repr(Attempt()))] == "ignored job.180"
     assert table[("job FAILURE every flag held", ON_NOEXEC, repr(Noexec()))] == "job.156"
-    assert table[("box RUNNING", STARTED, sc.ANY)] == "ignored job.183"
+    # `started` moves only the run the admission began (`_run`'s RUNNING check)
+    assert table[("box RUNNING", STARTED, repr(Still(True)))] == "ignored job.183"
+    assert table[("box STARTING", STARTED, repr(Still(True)))] == "job.125"
+    assert table[("job STARTING", STARTED, repr(Still(True)))] == "job.105"
+    assert table[("job STARTING", STARTED, repr(Still(False)))] == "ignored job.183"
+    assert table[("job ADMITTED", STARTING, repr(Still()))] == "job.403"
+    assert table[("job INACTIVE", STARTING, repr(Still()))] == "ignored job.419"
+    # a job started again inside its move's cascade settles nothing (DL-340)
+    assert table[("job RUNNING", SETTLE, repr(Still()))] == "job.418"
+    assert table[("job TERMINATED reserved", SETTLE, repr(Still()))] == "job.406"
     assert table[("job FAILURE every flag held", STATUS, repr(Injection("STARTING")))] == (
         "job.119 + job.319"
     )
@@ -759,7 +902,7 @@ CELLS: dict[str, Cell] = {
     "job_status.02": _status(_start()),
     "job_status.03": _status(_start(admissible=False)),
     "job_status.04": _status(ChartEvent(FORCE_STARTJOB, Attempt()), holding="held"),
-    "job_status.05": _status(ChartEvent(STARTED)),
+    "job_status.05": _status(ChartEvent(STARTED, Still())),
     "job_status.06": _status(_start(window="skip")),
     "job_status.07": _status(_start(window="skip", box="running")),
     "job_status.08": _status(ChartEvent(READMIT, Readmission())),
@@ -779,7 +922,7 @@ CELLS: dict[str, Cell] = {
     "job_status.22": _status(ChartEvent(BOX_START)),
     "job_status.23": _status(ChartEvent(BOX_SET_INACTIVE)),
     "job_status.24": _status(_start(), BOX_DATA),
-    "job_status.25": _status(ChartEvent(STARTED), BOX_DATA),
+    "job_status.25": _status(ChartEvent(STARTED, Still()), BOX_DATA),
     "job_status.26": _status(ChartEvent(MEMBER_MOVES, _step("SUCCESS")), BOX_DATA),
     "job_status.27": _status(ChartEvent(MEMBER_MOVES, _step("FAILURE")), BOX_DATA),
     "job_status.28": _status(ChartEvent(COMPLETION_MOMENT, _step("SUCCESS")), BOX_DATA),
@@ -821,12 +964,13 @@ CELLS: dict[str, Cell] = {
     "job_holding.01": _holding(_start(), "INACTIVE"),
     "job_holding.02": _holding(_start(), "FAILURE"),
     "job_holding.03": _holding(ChartEvent(FORCE_STARTJOB, Attempt()), "FAILURE"),
-    "job_holding.04": _holding(ChartEvent(KILLJOB, Payload(units=Policy())), "RUNNING"),
+    # the tier sends a run's settlement after its move's box rules (DL-350)
+    "job_holding.04": _holding(ChartEvent(LEAVE_LIVE, Settlement(units=Policy())), "TERMINATED"),
     "job_holding.05": _holding(
-        ChartEvent(KILLJOB, Payload(units=Policy(otherwise="keep"))), "RUNNING"
+        ChartEvent(LEAVE_LIVE, Settlement(units=Policy(otherwise="keep"))), "TERMINATED"
     ),
     "job_holding.06": _holding(
-        ChartEvent(KILLJOB, Payload(units=Policy(otherwise="spend"))), "RUNNING"
+        ChartEvent(LEAVE_LIVE, Settlement(units=Policy(otherwise="spend"))), "TERMINATED"
     ),
     "job_holding.07": _holding(ChartEvent(RELEASE_RESOURCE), "FAILURE"),
     "job_holding.08": _holding(ChartEvent(PERIOD_OPENING), "FAILURE", NO_CATALOG),
@@ -847,12 +991,22 @@ def test_every_old_row_from_every_source_ends_in_its_old_target() -> None:
             new = next(n for n in MAPPING[old_id] if source in LEAVES[ROWS[n].source])
             executor = Executor()
             executor.restore("j", CHART, active, data)
-            fired = [ident for outcome in executor.dispatch("j", event) for ident in outcome.rows]
+            fired = [ident for outcome in _advance(executor, "j", event) for ident in outcome.rows]
             assert new in fired, (old_id, source, fired)
             after = _leaf(executor.active("j"), REGION[source])
             assert after in {state_name(s) for s in old.targets()}, (old_id, source, after)
             checked += 1
     assert checked == sum(len(t.source) for t in OLD.values())
+
+
+def _advance(executor: Executor, job: str, event: ChartEvent) -> list[Any]:
+    """Dispatch `event`; an admission then leaves `ADMITTED` for STARTING
+    (job.403), as the tier's extent sends `starting` once the admission's
+    units and arm are written."""
+    outcomes = executor.dispatch(job, event)
+    if "ADMITTED" in executor.active(job):
+        outcomes += executor.dispatch(job, ChartEvent(STARTING, Still()))
+    return outcomes
 
 
 # ---- the walks, replayed
@@ -937,7 +1091,7 @@ def test_the_replay_carries_a_handle_only_on_a_payload_that_holds_one() -> None:
     for old_id, moment in _MOMENTS.items():
         carried = _carrying(moment, units)
         assert carried.name == moment.name, old_id
-        if isinstance(moment.payload, (BoxVerdict, Readmission)):
+        if isinstance(moment.payload, (BoxVerdict, Readmission, Still)):
             assert carried is moment, old_id
         else:
             assert carried.payload.units is units, old_id
@@ -1014,8 +1168,8 @@ def _input(
 #: The moments that follow an input inside the oracle, by the old row that
 #: shows them. Their facts come from other jobs, so the row names the partition.
 _MOMENTS: dict[str, ChartEvent] = {
-    "job_status.05": ChartEvent(STARTED),
-    "job_status.25": ChartEvent(STARTED),
+    "job_status.05": ChartEvent(STARTED, Still()),
+    "job_status.25": ChartEvent(STARTED, Still()),
     "job_status.16": ChartEvent(BOX_ENDS),
     "job_status.22": ChartEvent(BOX_START),
     "job_status.23": ChartEvent(BOX_SET_INACTIVE),
@@ -1047,6 +1201,10 @@ _ATTEMPTS: dict[str, dict[str, Any]] = {
     "job_status.24": {},
     **{f"job_status.{n}": {"stale": True} for n in range(41, 48)},
 }
+#: The settlements of a run's units, which the tier sends after a move's box
+#: rules, or first on the batch INACTIVE path (DL-350): the replay serves
+#: them as moments, by the end the job's last status move made.
+_SETTLEMENTS = {"job_holding.04", "job_holding.05", "job_holding.06"}
 #: The old rows of the units and the arm a start or a queue exit writes before
 #: its status move: they belong to the moment of the status move after them.
 _BEFORE_STATUS = {
@@ -1059,12 +1217,21 @@ _BEFORE_STATUS = {
 
 
 def _moment(
-    oracle: Oracle, job: str, remaining: list[Take], units: Policy, *, attempts: bool
+    oracle: Oracle,
+    job: str,
+    remaining: list[Take],
+    units: Policy,
+    *,
+    attempts: bool,
+    ended: str = "",
 ) -> ChartEvent | None:
     """The chart's event for the moment the next old takes show, with the
     handle on the job's units, or None. An attempt is served only when
-    `attempts`: after an input's own start matched."""
+    `attempts`: after an input's own start matched. A settlement is the end
+    of the job's last status move, `ended`."""
     lead = remaining[0][2]
+    if lead in _SETTLEMENTS:
+        return ChartEvent(LEAVE_LIVE, Settlement(ended == "SUCCESS", units=units))
     if lead in _BEFORE_STATUS:
         lead = next((t[2] for t in remaining if t[1] == "job_status"), lead)
     if lead in _MOMENTS:
@@ -1113,25 +1280,29 @@ def _replay(
     event = None if kind == "SET_GLOBAL" else _input(base, job, kind, extra, at, units)
     problems: list[str] = []
     attempts = kind not in (STARTJOB, FORCE_STARTJOB)
+    taken: list[Take] = []
     if event is not None:
-        outcomes = executor.dispatch(job, event)
+        outcomes = _advance(executor, job, event)
         fired = [i for o in outcomes for i in o.rows if i in OLD_OF]
         expected = [_new_id(take) for take in remaining[: len(fired)]]
         if Counter(fired) != Counter(expected):
             problems.append(f"{kind}: chart {fired}, tables {expected}")
+        taken += remaining[: len(fired)]
         remaining = remaining[len(fired) :]
         attempts = attempts or any(
             i in OLD_OF for o in outcomes if o.event.name == START for i in o.rows
         )
     while remaining and not problems:
-        moment = _moment(twin, job, remaining, units, attempts=attempts)
+        ended = next((t[4] for t in reversed(taken) if t[1] == "job_status"), "")
+        moment = _moment(twin, job, remaining, units, attempts=attempts, ended=ended)
         if moment is None:
             problems.append(f"no moment shows {remaining}")
             break
-        fired = [i for o in executor.dispatch(job, moment) for i in o.rows if i in OLD_OF]
+        fired = [i for o in _advance(executor, job, moment) for i in o.rows if i in OLD_OF]
         expected = [_new_id(take) for take in remaining[: len(fired)]]
         if not fired or Counter(fired) != Counter(expected):
             problems.append(f"{moment.name}: chart {fired}, tables {remaining}")
+        taken += remaining[: len(fired)]
         remaining = remaining[len(fired) :]
     final = projection(row_configuration(twin.store.runtime(job)))
     if not problems and projection(executor.active(job)) != final:
@@ -1299,6 +1470,8 @@ def test_an_injected_live_status_keeps_the_run_s_units_and_settles_them_at_its_e
     assert projection(executor.active("k"))[-1] == "reserved"
     keep = Policy(otherwise="keep")
     outcomes = executor.dispatch("k", ChartEvent(STATUS, Injection(success=False, units=keep)))
+    # the settlement is the tier's, after the move's box rules (DL-350)
+    outcomes += executor.dispatch("k", ChartEvent(LEAVE_LIVE, Settlement(False, units=keep)))
     assert _rows(outcomes) == [("k", "job.118"), ("k", "job.305")]
     assert projection(executor.active("k"))[::5] == ("FAILURE", "held")
 
@@ -1324,30 +1497,53 @@ _BATCH_JIL = (
 )
 
 
-def _with(**actions: Callable[[Any], Any]) -> Any:
-    """The chart with some actions replaced: the cascade between instances,
-    which the entry that drives the chart declares, stood in for here."""
-    return replace(CHART, actions={**CHART.actions, **actions})
-
-
-def _old_order(takes: list[Take], jil: str, event: dict[str, Any]) -> list[tuple[str, str]]:
-    oracle = Oracle(lower_source(jil))
-    oracle.feed(Event(at=T0 + timedelta(minutes=1), kind="STARTJOB", payload={"job": "ob"}))
+def _input_takes(
+    takes: list[Take],
+    factory: Any,
+    jil: str,
+    setup: list[dict[str, Any]],
+    event: dict[str, Any],
+    rows: list[tuple[str, str]] | None = None,
+) -> tuple[list[tuple[str, str]], Oracle]:
+    """The old tables' takes of one input on an oracle of `factory`, its setup
+    fed first, one minute apart: the chart oracle writes through the same
+    verbs and the same transitions, so the two lists compare (DL-350).
+    `rows`, the hook's record, starts at the input."""
+    oracle = factory(lower_source(jil))
+    for minute, step in enumerate(setup, 1):
+        oracle.feed(Event(at=T0 + timedelta(minutes=minute), **step))
     del takes[:]
-    oracle.feed(Event(at=T0 + timedelta(minutes=2), **event))
-    return [(take[0], take[2]) for take in takes]
+    if rows is not None:
+        del rows[:]
+    oracle.feed(Event(at=T0 + timedelta(minutes=len(setup) + 1), **event))
+    return [(take[0], take[2]) for take in takes], oracle
+
+
+def _chart_rows(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    """Every row the chart oracle's hook writes, as (job, row), in order."""
+    seen: list[tuple[str, str]] = []
+    perform = ChartOracle._perform
+
+    def spy(self: ChartOracle, outcome: Any) -> None:
+        seen.extend((str(outcome.key).partition(":")[2], row) for row in outcome.rows)
+        perform(self, outcome)
+
+    monkeypatch.setattr(ChartOracle, "_perform", spy)
+    return seen
+
+
+_START_OB = [{"kind": "STARTJOB", "payload": {"job": "ob"}}]
 
 
 def test_a_move_on_its_own_settles_after_the_box_rules_and_before_its_wakes(
-    takes: list[Take],
+    takes: list[Take], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Today: om's SUCCESS folds ob, ob's SUCCESS wakes ox, which finds R still
     held and queues; om's units go back only then, and the queue admits ox.
-    The chart keeps that order: `settle_after` queues the settlement behind
-    every item the row reports, and the wakes ride the settlement."""
-    old = _old_order(
-        takes, _ORDER_JIL, {"kind": "STATUS", "payload": {"job": "om", "exit_code": 0}}
-    )
+    The chart oracle keeps that order: the move's `settle` follows its `box
+    rules`, and its `wake` the settlement (DL-350)."""
+    event = {"kind": "STATUS", "payload": {"job": "om", "exit_code": 0}}
+    old, _ = _input_takes(takes, Oracle, _ORDER_JIL, _START_OB, event)
     assert old[:4] == [
         ("om", "job_status.17"),
         ("ob", "job_status.28"),
@@ -1355,66 +1551,33 @@ def test_a_move_on_its_own_settles_after_the_box_rules_and_before_its_wakes(
         ("om", "job_holding.04"),
     ]
     assert old.index(("ox", "job_status.08")) > 3
-
-    def cascade_after(ctx: Any) -> Any:
-        """om's move runs ob's door; ob's SUCCESS wakes ox, which cannot get R."""
-        effects = CHART.actions["settle_after_success"](ctx)
-        after = {
-            "om": ("ob", ChartEvent(COMPLETION_MOMENT, Verdict("SUCCESS"))),
-            "ob": ("ox", ChartEvent(START, Attempt(admissible=False))),
-        }
-        return replace(effects, send=(after[ctx.key],)) if ctx.key in after else effects
-
-    def settle_then_wake(ctx: Any) -> Any:
-        """om's settlement frees R, and the queue scan follows it."""
-        effects = CHART.actions["settle_late_success"](ctx)
-        if ctx.key != "om":
-            return effects
-        return replace(effects, send=(*effects.send, ("ox", ChartEvent(READMIT, Readmission()))))
-
-    executor = Executor()
-    chart = _with(settle_after_success=cascade_after, settle_late_success=settle_then_wake)
-    executor.restore("om", chart, configuration("RUNNING", holding="reserved"), JOB_DATA)
-    executor.restore("ob", chart, configuration("RUNNING"), BOX_DATA)
-    executor.restore("ox", chart, configuration("INACTIVE"), JOB_DATA)
-    injection = Injection(success=True, units=Policy())
-    rows = _rows(executor.dispatch("om", ChartEvent(STATUS, injection)))
+    rows = _chart_rows(monkeypatch)
+    new, _ = _input_takes(takes, ChartOracle, _ORDER_JIL, _START_OB, event, rows)
+    assert new == old
     order = [("om", "job.117"), ("ob", "job.128"), ("ox", "job.103"), ("om", "job.304")]
-    assert [r for r in rows if r in order] == order
+    assert [row for row in rows if row in order] == order
     assert rows.index(("ox", "job.108")) > rows.index(("om", "job.304"))
 
 
-def test_the_batch_inactive_path_settles_first(takes: list[Take]) -> None:
+def test_the_batch_inactive_path_settles_first(
+    takes: list[Take], monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Today: a box set INACTIVE releases its own units before its members'
-    rows move (`_set_inactive_batch` settles each row as it writes it). Its
-    rows (`job.135`, `job.159`, `job.170`) report the settlement first."""
-    old = _old_order(
-        takes, _BATCH_JIL, {"kind": "STATUS", "payload": {"job": "ob", "status": "INACTIVE"}}
-    )
+    rows move (`_set_inactive_batch` settles each row as it writes it). The
+    chart oracle's rows (`job.135`, `job.159`) send the settlement first."""
+    event = {"kind": "STATUS", "payload": {"job": "ob", "status": "INACTIVE"}}
+    old, _ = _input_takes(takes, Oracle, _BATCH_JIL, _START_OB, event)
     assert old == [
         ("ob", "job_status.35"),
         ("ob", "job_holding.05"),
         ("om", "job_status.23"),
         ("om", "job_holding.05"),
     ]
-
-    keep = Payload(units=Policy(otherwise="keep"))
-
-    def settle_then_cascade(ctx: Any) -> Any:
-        """ob's settlement comes first; the cascade to its member follows."""
-        effects = CHART.actions["settle"](ctx)
-        if ctx.key != "ob" or ctx.event.name != STATUS:
-            return effects
-        cascade = ("om", ChartEvent(BOX_SET_INACTIVE, keep))
-        return replace(effects, send=(*effects.send, cascade))
-
-    executor = Executor()
-    chart = _with(settle=settle_then_cascade)
-    executor.restore("ob", chart, configuration("RUNNING", holding="reserved"), BOX_DATA)
-    executor.restore("om", chart, configuration("RUNNING", holding="reserved"), JOB_DATA)
-    injection = Injection("INACTIVE", units=keep.units)
-    rows = _rows(executor.dispatch("ob", ChartEvent(STATUS, injection)))
-    assert rows == [("ob", "job.135"), ("ob", "job.305"), ("om", "job.159"), ("om", "job.305")]
+    rows = _chart_rows(monkeypatch)
+    new, _ = _input_takes(takes, ChartOracle, _BATCH_JIL, _START_OB, event, rows)
+    assert new == old
+    written = [row for row in rows if row[1] in ("job.135", "job.159", "job.305")]
+    assert written == [("ob", "job.135"), ("ob", "job.305"), ("om", "job.159"), ("om", "job.305")]
 
 
 # ---- a read after a write across regions is its own item
@@ -1561,20 +1724,22 @@ def _restart_jil(res_type: str, free: str) -> str:
     ids=["free", "keep", "spend"],
 )
 def test_a_box_restarted_by_its_own_completion_meets_the_member_before_its_late_settlement(
-    takes: list[Take], jil: str, release: Release, settling: str, reserving: str
+    takes: list[Take],
+    monkeypatch: pytest.MonkeyPatch,
+    jil: str,
+    release: Release,
+    settling: str,
+    reserving: str,
 ) -> None:
     """om's SUCCESS completes ob, ob restarts, resets om and starts it again.
-    The start settles the run that ended first, by the policy of its end (free,
-    keep or spend), and then reserves or takes over what was kept. om's own
-    settlement runs last, finds a later run and does nothing."""
-    oracle = Oracle(lower_source(jil))
-    oracle.feed(Event(at=T0 + timedelta(minutes=1), kind="FORCE_STARTJOB", payload={"job": "ob"}))
-    del takes[:]
-    oracle.feed(
-        Event(at=T0 + timedelta(minutes=2), kind="STATUS", payload={"job": "om", "exit_code": 0})
-    )
-    old = [take[2] for take in takes if take[0] == "om"]
-    assert old == [
+    The start settles the run that ended first (job.401), by the policy of its
+    end (free, keep or spend), and then reserves or takes over what was kept.
+    om's own `settle` runs last, finds the job live again and settles nothing
+    (job.418, DL-340)."""
+    setup = [{"kind": "FORCE_STARTJOB", "payload": {"job": "ob"}}]
+    event = {"kind": "STATUS", "payload": {"job": "om", "exit_code": 0}}
+    old, _ = _input_takes(takes, Oracle, jil, setup, event)
+    assert [old_id for job, old_id in old if job == "om"] == [
         "job_status.17",
         "job_status.22",
         settling,
@@ -1583,82 +1748,29 @@ def test_a_box_restarted_by_its_own_completion_meets_the_member_before_its_late_
         "job_status.02",
         "job_status.05",
     ]
+    rows = _chart_rows(monkeypatch)
+    new, oracle = _input_takes(takes, ChartOracle, jil, setup, event, rows)
+    assert new == old
     row = oracle.store.job["om"]
     assert (row.status, row.run_number) == ("RUNNING", 2)
     assert [(r.bucket, r.units) for r in row.reservations] == [("r:Q", 1)]
     assert dict(oracle.store.consumed) == ({"r:Q": 1} if release == "spend" else {})
-
-    # a different policy for every other end: a settlement that lost its end's
-    # success would read it and fire another row
-    units = Policy(release, "free" if release == "spend" else "spend")
-
-    def cascade_after(ctx: Any) -> Any:
-        """om's SUCCESS completes ob; ob's SUCCESS restarts it, which resets om
-        and starts it, then om is RUNNING (the box's rules, stood in)."""
-        effects = CHART.actions["settle_after_success"](ctx)
-        if ctx.key != "om":
-            return effects
-        restart = (
-            ChartEvent(BOX_START),
-            ChartEvent(START, Attempt(box="running", units=units)),
-            ChartEvent(STARTED),
-        )
-        return replace(effects, send=tuple(("om", event) for event in restart))
-
-    def admit_after_success(ctx: Any) -> Any:
-        """The tier names the end whose units the start meets."""
-        effects = CHART.actions["start_extent"](ctx)
-        (key, started), *rest = effects.send
-        started = ChartEvent(
-            started.name, replace(started.payload, previous=Settlement(success=True))
-        )
-        return replace(effects, send=((key, started), *rest))
-
-    executor = Executor()
-    chart = _with(settle_after_success=cascade_after, start_extent=admit_after_success)
-    executor.restore("om", chart, configuration("RUNNING", holding="reserved"), JOB_DATA)
-    outcomes = executor.dispatch("om", ChartEvent(STATUS, Injection(success=True)))
-    rows = [ident for _key, ident in _rows(outcomes)]
     ids = {"job_holding.0%d" % n: "job.30%d" % n for n in range(1, 7)}
-    assert rows == [
+    om = [ident for job, ident in rows if job == "om"]
+    assert [ident for ident in om if ident in OLD_OF or ident == SETTLE_FIRST] == [
         "job.117",
         "job.122",
-        "job.102",
-        "job.402",
-        "job.312",
+        SETTLE_FIRST,
         ids[settling],
+        "job.102",
         ids[reserving],
         "job.224",
         "job.105",
     ]
-    # the settlement's policy is read from the admission's handle, by the end it made
-    (settled,) = [o.event.payload for o in outcomes if o.event.name == LEAVE_LIVE]
-    assert (settled.success, settled.release) == (True, release)
-    assert projection(executor.active("om")) == ("RUNNING", False, False, False, False, "reserved")
-
-
-def test_a_late_settlement_finds_the_member_live_and_settles_nothing() -> None:
-    """The two continuations settle an ended run unless the member has started
-    again since: a live configuration means the units are the new run's."""
-    for name, success in (("settle_late", False), ("settle_late_success", True)):
-        for status, holding, sends in (
-            ("TERMINATED" if not success else "SUCCESS", "reserved", 1),
-            ("INACTIVE", "reserved", 1),
-            ("RUNNING", "reserved", 0),
-            ("STARTING", "reserved", 0),
-        ):
-            ctx = Context(
-                key="j",
-                event=ChartEvent(STATUS, Injection(success=success, units=Policy())),
-                active=configuration(status, holding=holding),  # type: ignore[arg-type]
-                data=JOB_DATA,
-            )
-            effects = CHART.actions[name](ctx)
-            sent = [] if effects is None else list(effects.send)
-            assert len(sent) == sends, (name, status)
-            for key, event in sent:
-                expected = ("j", LEAVE_LIVE, Settlement(success, "free"))
-                assert (key, event.name, event.payload) == expected
+    # the SUCCESS move's own settlement pops last and finds om live again
+    settles = [ident for ident in om if ident in (SETTLE_LIVE, "job.406")]
+    assert settles[-1] == SETTLE_LIVE
+    assert not set(om[om.index("job.105") :]) & {"job.304", "job.305", "job.306"}
 
 
 # ---- a box's ON_NOEXEC on the jobs it contains (DL-347)

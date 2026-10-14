@@ -576,10 +576,9 @@ Semantics:
 - `src/dsl41/job_chart.py`: the composite `job` statechart: one job's status,
   flags and holding in one declaration, checked against the three job tables;
   the chart oracle drives it for STATUS, the starts, KILLJOB, the TIMER input,
-  the flags, RELEASE_RESOURCE, the readmission, the box rules and a box's
-  ON_NOEXEC on the jobs it contains, the old rules the rest until their
-  families convert. It holds the contract, the guards and the actions, and
-  re-exports its two parts:
+  the flags, RELEASE_RESOURCE, the readmission, the box rules, a box's
+  ON_NOEXEC on the jobs it contains and the cascade's moments. It holds the
+  contract, the guards and the actions, and re-exports its two parts:
   `src/dsl41/job_chart_events.py` (the events, the data and the payloads) and
   `src/dsl41/job_chart_rows.py` (the states, the rows and a row's
   configuration).
@@ -588,15 +587,15 @@ Semantics:
   one admitted input as one store transaction. In both oracles a box's end
   FAILURE or TERMINATED kills its live job_terminator members only while
   the run that ended is still the box's run.
-- `src/dsl41/oracle_chart.py`: the second oracle, which drives the job rows
-  through the `job` chart one input family at a time, compared with the
-  first by the lockstep harness.
-- `src/dsl41/oracle_chart_agreement.py`: the second oracle's agreement
-  check: the chart's move recorded at its dispatch, and the old oracle's
-  writes compared with it.
-- `src/dsl41/oracle_chart_cascade.py`: the second oracle's box rules and
-  period opening: each moment the chart declares between a box and its
-  members dispatched where the old cascade runs the rule.
+- `src/dsl41/oracle_chart.py`: the second oracle, which drives every job
+  row through the `job` chart: each input a root item, its cascade on the
+  executor's worklist, and a hook that writes each microstep's moves,
+  compared with the first oracle by the lockstep harness.
+- `src/dsl41/oracle_chart_agreement.py`: the second oracle's error for a
+  fired row it has no write for.
+- `src/dsl41/oracle_chart_cascade.py`: the second oracle's cascade: what
+  each row sends beyond its own move, the moments that iterate, and the
+  gates that choose each rule's audience.
 - `src/dsl41/oracle_chart_facts.py`: the payloads the second oracle gives the
   `job` chart, each oracle fact computed on its first read, and a job
   instance's data.

@@ -137,7 +137,12 @@ A macrostep is iterative on one executor worklist and never recursive.
    - the supervisor's go through its index, receipt, spawn and reply protocol;
    - the engine's go through the WAL decision.
 
-   The executor itself does no I/O.
+   The executor itself does no I/O. A tier whose later items read what an earlier item's intents
+   write passes `run` a hook. The executor calls it with each outcome as the microstep ends, before
+   the next item pops, under the macrostep: it may read, and a post, dispatch, resolve or fork from
+   it raises `ReentrantDispatch`; it reports no item. The oracle's hook writes the store the fired
+   rows' moves, since the guards of the items a row chains read the store; the engine and the
+   supervisor carry their intents out after the run, as before.
 
 A tier may read how an event would be selected without running it. `Executor.resolve` runs the
 selection of §3 for one instance and one event against the instance's present configuration:
@@ -157,14 +162,6 @@ new value, and every event payload, stay shared by design, so a tier treats them
 fork inside a macrostep raises
 `ReentrantDispatch`. A fork with a root item in the pool raises a `StatechartError`, because
 that item would run on one side only (DL-339).
-
-A tier whose rows code outside a chart still moves may bring an idle instance back to its row.
-`Executor.realign` sets an existing instance's configuration and data as `restore` sets a new
-one's: no action runs, its states have no entry yet, and its generations stay. An instance with a
-deferred event or an item in the pool raises, since no move of its own would handle it, and a
-realign inside a macrostep raises `ReentrantDispatch`. The machine's history ring gets a line for
-it, so an error's report shows the jump (DL-341). The method is transitional: the entry that
-converts the oracle's last input family removes it.
 
 The executor's errors, among them `AmbiguousTransition` (§3), `ReentrantDispatch` (step 4) and
 `UnhandledEvent` (§10), subclass one base, `StatechartError`. Each is an assertion failure, not
@@ -230,9 +227,21 @@ A machine that bounds re-triggering declares the bound as a row guarded on an it
 depth. Items of one macrostep that are not ancestors of each other are never counted against each
 other; only a chain is.
 
-How the oracle's cascade phases and its per-job start bound (DL-304), and whether DL-306's
-recursion-limit fitting is still needed, map onto these rules is ruled by the entry that converts
-the oracle (§16).
+The oracle's cascade maps onto these rules as follows (DL-350). Each input is a root item on
+its job's instance. Each call-then-continue site of the old recursion is a chained self-event, a
+moment, whose payload carries the step the oracle runs when it pops: `box rules`, `settle`,
+`wake`, `walk up`, `holders may leave`, `scan`, `load taken`, `box ends step`, `notify step`,
+`window pass`, `after inject`, `after leave` and `retry step`. Each is an internal row of the
+lifecycle that moves nothing. A loop whose gate reads state that an
+earlier step's cascade can change is a moment that sends its next item and then itself again; the
+gate is re-read at each pop. A row whose own write must follow its chained items targets a
+transient state: an admitting row targets `ADMITTED`, and the `starting` self-event moves it to
+STARTING, after a box's resets. The per-job start bound (DL-304) is `job.100`, guarded on the
+count of the job's own `start admitted` items in the item's ancestry. A readmission sends its
+extent without `start admitted`, so the bound does not count it. The chart oracle's cascade takes
+no Python frame per nested start, so DL-306's fitting is not needed for it: its frames per nested
+start are 0, and only a fact's own recursion, such as a deep condition, can meet the base limit.
+The old oracle keeps its fit.
 
 ## 9. Wait states
 
@@ -292,115 +301,113 @@ row by row and through replays of the old oracle's walks.
 
 The second oracle drives it (DL-341). Each job row has one `job` instance on the state owner's
 executor under the row's key; the owner restores them from the rows where it restores the host
-instances, and a fork copies them. While code outside the chart still moves rows, the owner
-realigns each instance an input touched with its row at the input's commit, and the second oracle
-does so for a job before it dispatches to it, so during the conversion the chart decides each
-input from the row's projection. A converted input is dispatched to the job's instance, and the
-fired row's writes are made by the old oracle's methods. The status written is the one the chart
-reached; the old-versus-new harness judges a wrong status row. The check covers what the old code
-still decides: the holding, the job type behind a row that takes a job's or a box's path, and the
-flags, which the converted inputs move (a flag input, a waiter's kill, a forced start's clears, a
-start's arm and its consumption, a leaving waiter's arm, a box's moves of its members' flags) and
-the other converted writes leave alone; no flag move is left to code the chart does not drive
-(DL-347). A move that leaves STARTING or RUNNING has its flags compared when its status is
-written and its holding when its own settlement has run; any other move has both compared when
-its status is written, before the box rules can start the job again. A difference is a
-statechart error. The chart is registered when the last input family converts.
+instances, and a fork copies them. Every input that moves a job row is a root item on the job's
+instance, and its whole cascade runs on the executor's worklist (§8, DL-350). The chart decides
+every move. A row's action takes the items it sends beyond its own move from the tier's handle on
+its payload (`Units.consequences`), as a guard takes its facts: the chart declares which rows send
+and when, and the oracle computes each send list and its audience as the row runs. The oracle's hook
+(§5 step 5) writes what each microstep's fired rows reached, with the store's verbs and the old
+tables' transitions, so the old tables keep validating each write, and the trace lines and emissions
+are the old oracle's, in its order. The status written is the one the chart reached; the
+old-versus-new harness judges a wrong row. A fired row the hook has no write for is a statechart
+error. Three checks stay, each a statechart error: the job type behind a row that takes a job's or a
+box's path, checked before the write; a settlement row whose holding move differs from the move the
+store's verb makes; and, at each macrostep's end and at the input's commit, every job the input
+reached has its row project to its instance's configuration. No code outside the chart moves a job
+row, so no instance is brought back to its row. The chart is registered when the old tables leave
+the registry.
 
 Every attempt to start a job is one `start` on its instance (DL-342): a wake, a box start and a
-retry post it, and STARTJOB, FORCE_STARTJOB and the window timer's replay relay it, through
+retry send it, and STARTJOB, FORCE_STARTJOB and the window timer's replay relay it, through
 `job.177` to `job.179`, FORCE_STARTJOB after its clears. Its payload computes each oracle fact on
 the guards' first read, in the order today's rules test them, so an attempt computes only the facts
-the old oracle computes. The per-job start bound is a refusal row, `job.100`, on a fact: the job's
-starts in progress. An attempt that reaches the admission settles a run whose settlement the box
-rules hold back first, and the admission is read after it (DL-340). Past the bound, an attempt
-whose run's settlement is owed takes the internal row `job.401`, which moves nothing; the oracle
-settles that run at the point in the verdict order where the old `_start_admitted` settles it, and
-dispatches the same attempt again, so it reads the admission the settlement left (DL-349). Each
-admitting row (`job.101` to `job.104`, `job.124`) sends `start admitted` first, and its row,
-`job.402`, sends what the start does after its status move: the units it reserves or takes over,
-then the arm it consumes. Those moves are its descendants, and the oracle checks that they are. A
-readmission sends its moves itself: it is not a start the bound counts. The chart decides; the old
-methods write the verdict. The first status write of the attempt is compared with the chart's
-configuration, and the RUNNING that follows an admission is the chart's `started`, dispatched and
-compared at that write; an attempt that moves no status is compared after its own writes. Until the
-cascade slice removes the recursion, the chart oracle's cascade is fitted by its own measured frames
-per nested start (`fit_recursion_limit` takes the oracle class). An input on which both oracles
-raise alike, a RecursionError of either kind or the same error, agrees in the harness on its attempt
-half, whose writes are not compared: a control input that raises is refused and commits nothing, and
-an engine-made one is quarantined with its rejection logged and its time half committed. So the
-harness applies that time half alone on both oracles, compares it and goes on; the engine stops only
-when the time half itself raises, and where it raises on both the harness stops there too. The rule
-stays, but no input of the harness's sample raises alike since DL-348: the three that did were one
-terminator cascade that never ended.
+the old oracle computes. The per-job start bound is a refusal row, `job.100`, on the job's own
+`start admitted` items in the attempt's ancestry (§8). An attempt whose run's settlement is owed,
+because the box rules held it back, takes the internal row `job.401` past the bound, where the old
+`_start_admitted` settles (DL-340): its action sends the ended run's `leave STARTING or RUNNING`,
+then the same attempt again, which reads the admission the settlement left (DL-349). An attempt
+whose window or leave already decided it carries that decision, and is not decided again. Each
+admitting row (`job.102`, `job.104`, `job.124`) targets the transient state `ADMITTED` and sends
+`start admitted`. Its row, `job.402`, sends the start's extent: the units it reserves or takes over,
+the arm it consumes, the run's start, a box's resets, then `starting`, which moves the job to
+STARTING (`job.403`), and `started`, the RUNNING move, guarded on the run it carries. The bypass
+(`job.101`) and the queue (`job.103`) send `start admitted` too, their extents the bypass's start
+and move and the queue's move. Those moves are the bound's descendants. A readmission (`job.108`)
+sends the same extent itself, without `start admitted`: it is not a start the bound counts. An input
+on which both oracles raise alike, a RecursionError of either kind or the same error, agrees in the
+harness on its attempt half, whose writes are not compared: a control input that raises is refused
+and commits nothing, and an engine-made one is quarantined with its rejection logged and its time
+half committed. So the harness applies that time half alone on both oracles, compares it and goes
+on; the engine stops only when the time half itself raises, and where it raises on both the harness
+stops there too. The rule stays, but no input of the harness's sample raises alike since DL-348: the
+three that did were one terminator cascade that never ended.
 
 KILLJOB and the TIMER input are dispatched to the job's instance too (DL-343), and the input
 passes its own relay to the attempt, so no cause text is read. A live job's kill (`job.114`) and a
-term_run_time on the running run it was armed for (`job.115`) terminate through the old method,
-whose terminator cascade for a box stays old code until the cascade slice. A waiter's kill drops
-its arm (`job.217`, `job.226`) and the flag move terminates it (`job.111`); a kill on any other
-status is ignored with a trace line, and a stale term_run_time writes nothing (`job.184`). Each
-move is compared as a STATUS move is. The deadline alarms move no state and stay code. A window
-timer reads its own facts before any gate, as the old oracle does: whether the postponed start
-still belongs to its box run, and whether a scan continuation is superseded. They are real facts
-of its relayed `start`: a stale one is refused with the old text, a live continuation resumes the
-scan, and any other is the attempt. Timers stay armed by code; the chart declares moves, not timer
-writes.
+term_run_time on the running run it was armed for (`job.115`) terminate the job; a box's
+terminator cascade is the chart's `box ends step`. A waiter's kill drops its arm (`job.217`,
+`job.226`) and the flag move terminates it (`job.111`); a kill on any other status is ignored
+with a trace line, and a stale term_run_time writes nothing (`job.184`). The deadline alarms move
+no state and stay code. A window timer reads its own facts before any gate, as the old oracle
+does: whether the postponed start still belongs to its box run, and whether a scan continuation
+is superseded. They are real facts of its relayed `start`: a stale one is refused with the old
+text, a live continuation resumes the scan, and any other is the attempt. Timers stay armed by
+code; the chart declares moves, not timer writes.
 
 The flag inputs are dispatched to the job's instance too (DL-344). The fired rows decide each
 dimension the old code read from the row or the catalog. Whether the flag was already set is the
-row's source state, which the follow before the dispatch makes the row's; a wrong flag target is
-caught by the compare after the flag's write. Three dimensions a guard decides are checked against
-the row or the catalog before any write, each a statechart error: whether ON_ICE meets a waiter,
-whether ON_NOEXEC settles a job or a box, and whether it settles at all (a job settles out of the
-queue or from FAILURE or TERMINATED; a box that is not INACTIVE settles; whether an INACTIVE box
-settles is a fact of the payload, left to the harness). An input the job ignores
-takes the status region's ignored row (`job.148` to `job.158`) and writes the old EVENT_IGNORED
-line. A flag row is written by the old flag move, with its marker and line, and the row is
-compared with the chart's configuration after it. A status that the `flag moved` fires is
-compared as a STATUS move is: an iced waiter leaves the queue (`job.112`), and ON_NOEXEC settles a
-waiter, a FAILED job or a box (`job.113`, `job.121`, `job.136`, `job.169`, `job.170`). ON_NOEXEC's
-payload reads a box's contained jobs only where the old rule reads them. The moves the chart does
-not declare stay old code, in the old order: an ice's box rules and wakes, the mark of a member
-taken off ice in its running box, the waiters' wake on a hold, and the start retries of OFF_HOLD
-and ON_NOEXEC (each one `start`). A box's ON_NOEXEC and OFF_NOEXEC on the jobs it contains are
-box rules (below).
+row's source state. An input the job ignores takes the status region's ignored row (`job.148` to
+`job.158`) and writes the old EVENT_IGNORED line, with the old rule's reason; a row the chart
+ignores where the old rule has no reason to is a statechart error. A flag row is written by the
+flag move, with its marker and line. A status that the `flag moved` fires is a status move: an
+iced waiter leaves the queue (`job.112`), and ON_NOEXEC settles a waiter, a FAILED job or a box
+(`job.113`, `job.121`, `job.136`, `job.169`, `job.170`). ON_NOEXEC's payload reads a box's
+contained jobs only where the old rule reads them. The flag rows' actions send or report what
+follows, in the old order: an ice's box rules and wakes (`holders may leave`, `wake`), the mark
+of a member taken off ice in its running box, the waiters' scan on a hold, and the start retries
+of OFF_HOLD and ON_NOEXEC (`retry step`, each one `start`). A box's ON_NOEXEC and OFF_NOEXEC on
+the jobs it contains are box rules (below).
 
 RELEASE_RESOURCE and each waiter's readmission are dispatched to the job's instance too
-(DL-345). Held units go back with the old line and the queue wakes (`job.307`); a job that
+(DL-345). Held units go back with the old line and the queue is scanned (`job.307`); a job that
 holds nothing (`job.315`), or a live run whose units go back when it ends (`job.316`), takes the
-old no-effect line. Whether the job holds units it can give back is the row's, checked before any
-write. The queue's scan and its order stay code: the chart has one instance per job, and the
-waiters' order (rank, then the queue's order) is the store's. Each waiter the scan reaches gets
-one `readmit`, whose payload computes each fact where the old scan reads it. An admission
-(`job.108`) is written by the old admission and run, its status writes compared as a start's; a
-member of a box that stopped running is cancelled (`job.109`); a waiter that fails the queued
-recheck drops its arm (`job.216`, or `job.230` with none, the row's choice, checked before any
-write) and its `flag moved` leaves the queue (`job.110`), the window or day disposition after it
-staying old code; any other waiter stays queued (`job.181`). A cancel and a leave are compared as
-a STATUS move is, and a move compared inside the cascade of another leaves the other waiting for
-its own settlement.
+old no-effect line. Whether the job holds units it can give back is the row's. The queue's scan
+is the `scan` moment. Its pass bookkeeping and its order stay oracle code: the chart has one
+instance per job, and the waiters' order (rank, then the queue's order) is the store's. A pass
+reads its waiters when it starts and each waiter's status at its turn; it ends at the first
+`readmit` whose row reports that it admitted or cancelled its waiter, which starts the next pass.
+A scan asked inside a pass sends nothing; an admit-only one asks the pass for a full pass next.
+The scan an admission owes the input (DL-255) is a root item after the input's macrosteps, marked
+by `load taken` behind a freed excess's scan. Each waiter the scan reaches gets one `readmit`,
+whose payload computes each fact where the old scan reads it. An admission (`job.108`) sends the
+start's extent; a member of a box that stopped running is cancelled (`job.109`); a waiter that
+fails the queued recheck drops its arm (`job.216`, or `job.230` with none) and its `flag moved`
+leaves the queue (`job.110`), with the window or day disposition after it in `after leave`; any
+other waiter stays queued (`job.181`).
 
-The box rules are dispatched to the instance each one moves (DL-346), where the old cascade
-runs the rule, so the cascade keeps the old recursion's order and depth. A member's status write
-reaches its box. A member that ends FAILURE or TERMINATED meets the box's terminator (`job.130`).
-A RUNNING box's completion door reads its overrides (`member moves`), then the default fold
-(`completion moment`). An idle box re-derives its status (`box recompute`). The walk up to the
-boxes above reads their overrides through `member moves`. A box's start, run and end reach its
-members: the reset (`box start`), auto_hold (`box running`), the end of the run's arms (`box run
-ends`), the job_terminators (`box ends FAILURE or TERMINATED`), the batch INACTIVE cascade (`box
-set INACTIVE`), ON_NOEXEC's flag and hold (`ON_NOEXEC on its box`, DL-347), and OFF_NOEXEC's
-clear (`OFF_NOEXEC on its box`). The period's first input gives a removed job's held units back
-(`job.308`). Each payload computes its facts where the old rule reads them. A box rule's target
-is the chart's choice: the status written is the one the chart reached, and a fact that derives
-another target is a statechart error before any write. A box's move is compared as a STATUS move
-is, a batch row once the batch has written and settled it, and a flag row after its write; a row
-that moves nothing must leave the instance's configuration as it was.
+The box rules are dispatched to the instance each one moves (DL-346). A status move's row sends,
+in order, its `box rules` (the moment that reaches the job's box and the boxes above), its
+`settle` and its `wake` (the referencers' starts, then a scan where the move freed units or lifts
+a block). A member that ends FAILURE or TERMINATED meets the box's terminator (`job.130`). A
+RUNNING box's completion door reads its overrides (`member moves`), then the default fold
+(`completion moment`), sent on every move of a member of a RUNNING box and after the overrides
+only when none fired. An idle box re-derives its status (`box recompute`). The walk up to the
+boxes above (`walk up`) reads their overrides through `member moves`, and an ice that takes a
+member out of its box's run is a completion moment there (`holders may leave`). A box's start,
+run and end reach its members: the reset (`box start`), auto_hold (`box running`), the end of the
+run's arms (`box run ends`), the job_terminators (`box ends FAILURE or TERMINATED`, one member per
+`box ends step`), the batch INACTIVE cascade (`box set INACTIVE`, then `notify step` per row),
+ON_NOEXEC's flag and hold (`ON_NOEXEC on its box`, DL-347), and OFF_NOEXEC's clear (`OFF_NOEXEC on
+its box`). The window decisions at a box start and the completion of a box run that left no member
+in the run are the `window pass`: a box started inside another's pass registers with it, and the
+outermost pass decides them all. The parent's recompute after an operator's INACTIVE is `after
+inject`. The period's first input gives a removed job's held units back (`job.308`). Each payload
+computes its facts where the old rule reads them. A box rule's target is the chart's choice.
 
-The chart decides each box rule's row; the oracle decides when a rule is posted, and to which
+The chart decides each box rule's row; the oracle decides when a rule is sent, and to which
 instances. `box running`, `box run ends` and `box ends FAILURE or TERMINATED` reach the box's direct
 members; `box start`, `box set INACTIVE`, `ON_NOEXEC on its box` and `OFF_NOEXEC on its box` reach
-every job it contains. Six code gates choose an audience the chart does not see: `box start` skips
+every job it contains. Six gates choose an audience the chart does not see: `box start` skips
 a live subbox's subtree (`_contained(skip_live=True)`, which also skips a live or queued job);
 `member moves` is sent by the completion door on the moves it sees, not on a non-terminal move (a
 terminal, RUNNING or resolving move only); `box recompute` is sent by its callers' gates, run
@@ -408,29 +415,27 @@ numbers and the cascaded-subbox case, LIVE and TERMINATED excluded (a member's t
 direct target of an operator's INACTIVE, never a row the cascade took INACTIVE); the walk up skips
 an ancestor whose run number moved; the parent recompute after an operator's INACTIVE needs the
 parent's run number unchanged; and `box ends FAILURE or TERMINATED` goes only to the members of the
-run that ended. Its sender reads that run, a kill before the status write (`_terminate`, which both
-oracles share) and a fold or an override with the FAILURE or TERMINATED it reads after the end's
-wakes (`_on_box_completed`), and the box's run number is compared before each member's dispatch:
-once the wakes, or an earlier member's kill, started the box again, no further member gets the
-event, not even one carried RUNNING from the run that ended (DL-348). A fold or an override may
-read a later run's own end, whose cascade already ran; the members it reaches again ignore the
-event. These audiences are the sender's: the worklist slice declares them in the action of the row
-that sends the event (§8).
+run that ended. Its sender reads that run, a kill before the status write and a fold or an
+override with the FAILURE or TERMINATED it reads after the end's wakes, and `box ends step`
+compares the box's run number before each member's send: once the wakes, or an earlier member's
+kill, started the box again, no further member gets the event, not even one carried RUNNING from
+the run that ended (DL-348). A fold or an override may read a later run's own end, whose cascade
+already ran; the members it reaches again ignore the event. These audiences are the sender's: each
+gate is read in the action of the row that sends the event, or in its iterating moment (§8), never
+as a fact of the recipient's row.
 
 A box's ON_NOEXEC reaches each job it contains as `ON_NOEXEC on its box`: the flag on, from either
-value, then the hold it supersedes off, through the old method and its lines. Whether the hold goes
-is the row's choice, and a row the chart ignores where the old rule writes is a statechart error;
-both are checked before the job's write, after the box's own flag. The jobs it releases retry their
-start (DL-347). The box row's sets of members and the window decisions at a box start, which
-move no status, stay old code.
+value, then the hold it supersedes off, with the old lines. Whether the hold goes is the row's
+choice. The jobs it releases retry their start (DL-347).
 
 An instance's data is its catalog entry's, and changes only when a catalog is installed. What
 leaving a run does with its units is a fact of `leave STARTING or RUNNING`'s payload: the action
-that sends the settlement builds it with the handle on the job's units that its own payload
-carries, and the holding rows read the policy when the settlement pops, from the units the row
-holds then (DL-349). The follow before each dispatch and the realign at commit now cover one
-thing: the holding of a member whose settlement waits behind its box rules, which the chart
-settles inside the member's own dispatch.
+that sends the settlement builds it with the handle on the job's units that its own payload carries,
+and the holding rows read the policy when the settlement pops, from the units the row holds then
+(DL-349). A move outside the batch INACTIVE path settles at its own `settle`, after its box rules.
+The job is still live when that settlement pops if the move entered STARTING or RUNNING, or if the
+job started again inside its move's cascade (DL-340); nothing settles then, and a rank the move left
+still drops (`job.418`).
 
 ## 12. Durability of deferred queues
 
@@ -584,15 +589,17 @@ old tables (DL-337). The second oracle, `ChartOracle` in `src/dsl41/oracle_chart
 the old one and overrides one input family's handlers per entry, STATUS first (DL-341), then the
 start attempt (DL-342), then KILLJOB and the TIMER input (DL-343), then the flag inputs
 (DL-344), then RELEASE_RESOURCE and the readmission (DL-345), then the box rules (DL-346), then a
-box's ON_NOEXEC on the jobs it contains (DL-347);
-the families not yet converted, and the cascade's order, run the old code in its order.
+box's ON_NOEXEC on the jobs it contains (DL-347), then the cascade itself, on the executor's
+worklist (DL-350). The chart oracle now calls none of the old oracle's cascade methods; it
+keeps the old oracle's facts, its trace and its emissions.
 
 Each slice is a semantic-class change. Each has its own decision-log entry.
 
 ## 17. Names
 
 - "Deferred event" is the UML term, used for the executor.
-- A transient state is left by a completion transition.
+- A transient state is left by a completion transition, or by a self-event the row sends after its
+  chained items (§8).
 - A wait state awaits a reply or a time event (§9). Deferral is optional.
 - SEM-33's `run_window` deferral is a "window-postponed start" in new prose. Its identifiers,
   its cause strings and the `RUN_WINDOW_DEFER` trace line stay, because they are the trace

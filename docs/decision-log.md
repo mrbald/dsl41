@@ -22678,3 +22678,126 @@ relitigate an entry; append a new one.
   found the admission's previous settlement a second silent default, now outside its equality.
   Three rounds: the fix's own two nits, the owed check's seam around the scan and the opening,
   and a reflow, confirmed in the third. Findings confirmed by the reviewer that raised them.
+- DL-350 The oracle's cascade runs on the executor's worklist: a per-microstep hook writes each
+  fired row's moves, every continuation site is a chained self-event, the start bound counts the
+  item's ancestry, and the realign is gone
+  (2026-10-14; src/dsl41/state_machine.py, src/dsl41/oracle_state.py, src/dsl41/oracle_chart.py,
+  src/dsl41/oracle_chart_cascade.py, src/dsl41/oracle_chart_agreement.py,
+  src/dsl41/oracle_chart_facts.py, src/dsl41/job_chart.py, src/dsl41/job_chart_events.py,
+  src/dsl41/job_chart_rows.py; tests/test_oracle_chart_cascade.py, tests/test_oracle_chart.py,
+  tests/test_job_chart.py, tests/test_statechart.py, tests/test_cascade_depth.py,
+  tests/fork_harness.py, tests/test_dry_apply.py, tests/test_exhaustive_engine.py;
+  docs/statechart-engine.md §5, §8, §11, §16, §17; docs/blocks/job-lifecycle.md;
+  docs/citation-index.md; README)
+  THE AIM. DL-337's chart decided each input family in turn, and from DL-346 the box rules, but
+  the cascade between them stayed the old oracle's recursion: the chart oracle dispatched where
+  the old rule ran, the old methods wrote, and an instance was brought back to its row before each
+  dispatch and at each commit. The design the DL-348 entry owed (the worklist note, with its
+  advisor pass) put the whole cascade on the executor's worklist (§5), so that a macrostep is one
+  root item and its chain, no executor call runs inside one, and the per-job start bound is a row
+  on the item's ancestry (DL-304, §8). DL-349 landed the three shapes that hold under the old
+  order; this entry lands the rest, the harness proving the order unchanged.
+  THE HOOK. A guard reads the store, and the executor queues every item an action reports before
+  the microstep ends, so a chained item would pop before the row it chains from had written. §5
+  gains one step: a tier passes `run` a hook, called with each outcome as the microstep ends,
+  before the next item pops, under the macrostep; it may read, and a post, dispatch, read or fork
+  from it raises `ReentrantDispatch`; it reports no item; an exception out of it ends the run as
+  one out of an action does, the facts naming the item. It is a parameter of `run` and
+  `dispatch`, not a subclass: a fork builds a plain executor and the oracle in hand passes its
+  hook per call. The engine and the supervisor pass none and carry their intents out after the
+  run, as before.
+  THE PERFORMER. The chart oracle's hook writes what each microstep's fired rows reached, with the
+  store's verbs and the old tables' transitions, so the old tables keep validating each write and
+  the trace lines, the emissions and the rows are the old oracle's in its order; a write that
+  leaves no line, no emission and no revision may sit one microstep from its old place, as a
+  bypass's SUCCESS now precedes its run's start. What a row cannot derive from its id and its
+  payload, the action reports as an intent the hook applies after the rows' writes. A fired row
+  the hook has no write for is a statechart error. The chart oracle calls none of the old
+  oracle's cascade methods: a spy over the harness's sample shows no call into any of the
+  thirty-one, and no realign before the method went. The chart's actions stay pure: a row whose
+  consequences the tier knows asks the tier's handle, carried on every payload since DL-349,
+  what it sends beyond its own move, and the handle reads the store when asked.
+  THE MOMENTS. Each call-then-continue site of the old recursion is a self-event whose payload
+  carries the step the oracle takes when it pops: `box rules`, `settle`, `wake`, `walk up`,
+  `holders may leave`, `scan`, `load taken`, `box ends step`, `notify step`, `window pass`,
+  `after inject`, `after leave` and `retry step`, each an internal row of the lifecycle that
+  moves nothing. A loop whose gate reads state an earlier step's cascade can change sends its
+  next item and then itself again, the gate re-read at each pop: the walk up, the holders, the
+  scan's passes, the terminator steps, the batch's second phase, the window passes and the
+  retries. A row whose own write must follow its chained items targets a transient state the
+  self-event `starting` leaves: each admitting row (`job.102`, `job.104`, `job.108`, `job.124`)
+  targets `ADMITTED`, since a take-over refuses a live row and under the hook the status write
+  would precede the extent's holding write, and `job.403` moves to STARTING after the units, the
+  arm and a box's resets, so a box's line follows its members' resets' lines. Nothing reaches an
+  instance in ADMITTED: four rows say so. The admitted start's extent is `job.402`'s whole: the
+  reservation, the run's start, the resets, `starting`, `started` guarded on its run, then a
+  freed excess's scan and the DL-255 mark behind it. The scan's pass bookkeeping stays oracle
+  code written by intents: a pass reads its waiters when it starts and each waiter's status at
+  its turn; it ends at the first `readmit` whose outcome reports a move, never a status read; a
+  scan asked inside a pass sends nothing; the owed scan is a root item after the input's
+  macrosteps. The audiences the old gates chose are the sender's: each of DL-346's six and
+  DL-348's per-member check is read in the action of the row that sends the event or in its
+  iterating moment, never as a fact of the recipient's row, each with a directed test and a
+  widening mutant a test or the harness parts; the parent's recompute after an operator's
+  INACTIVE needed a constructed input, an override whose condition comes true past the door of
+  the parent's new run. A row's action takes the items it sends beyond its own move from the
+  tier's handle on its payload, as a guard takes its facts: the chart declares which rows send
+  and when, and the oracle computes each send list and its audience as the row runs. §17's
+  transient state is left by a completion transition or by such a self-event.
+  THE ORDER. The worklist's pre-order equals the recursion's on every harness input: zero
+  differences on the four runs below, and each case the design named (the batch's two phases
+  with a wake restarting a row of the batch, a scan requested inside a pass, the held-back
+  settlement with a start inside the box rules, an ancestor restarted inside the walk up, a
+  kill inside the terminator steps, a subbox started inside an outer box's window pass, a freed
+  excess's scan before the owed scan, the fold with and without an override firing) has a
+  directed test. No old-oracle defect surfaced, so STATE_MACHINE_VERSION is unchanged (DL-235).
+  THE BOUND. `job.100` is guarded on the count of the job's own `start admitted` items in the
+  item's ancestry, and refuses at `MAX_NESTED_STARTS` with the L010 line; `Attempt.bounded`
+  and the frame counter leave the chart oracle. The refusals equal the old bound's on every
+  harness input. A readmission sends its extent without `start admitted` and is not counted
+  (DL-349). The chart oracle's cascade takes no Python frame per nested start: its frames per
+  nested start are 0 and the slope test asserts it on every shape; only a fact's own recursion
+  can meet the base limit, converted to `CascadeDepthError` at the root dispatch. The old oracle
+  keeps its fit.
+  THE CHECKS. The status agreement is vacuous once the hook writes what the chart reached, so it
+  goes with the follow and the realign: no code outside the chart moves a job row, and
+  `Executor.realign` is removed with its §5 paragraph. Three checks stay, each a statechart
+  error: the job type behind a row that takes a job's or a box's path, before the write; a
+  settlement row (`job.304` to `job.306`) whose holding move differs from the verb's, two
+  derivations of one move; and, at each macrostep's end and at the input's commit, every job the
+  input reached has its row project to its instance's configuration. A macrostep that raises
+  undoes no write, as today's; the instances are rebuilt from the rows and the cascade's
+  bookkeeping cleared.
+  PROOF. The harness, old against chart, shows no difference and no input raising alike: the
+  corpus and two hundred estates of up to fifty jobs, 23,268 inputs; twenty estates of 150 to 200
+  jobs, 7,999; the corpus and forty estates under every switch, 102,368; a further thousand seeds,
+  94,353; the oracle's tests pass through the fourth arm. The chart modules are at 100% of
+  statements and branches from their own tests. The chart costs 156 µs per corpus input against
+  the old oracle's 51 (131 before this entry) and 254 against 72 on the large estates; 6.4's cost
+  item. The largest root dispatch of the sample, corpus and seeds 0 to 499, is 287 items; of
+  the DL-304 shapes at 41 jobs, 4,295 (the box ring), the terminator chain 3,469, the other
+  chains about 1,100, the folds under 400.
+  RECORDED. A cascade today's recursion nests without end, which the old oracle stops with
+  `CascadeDepthError` at its fitted limit, would loop on the chart oracle, whose worklist has no
+  such backstop (a loop the recursion does not nest, the scan's fixpoint, loops on both); no
+  sample input does, a reproduction needs a DL-348 mutant, and the chart oracle is not the
+  production oracle until the registration entry, which owes a per-macrostep item cap in the
+  hook, a stated limit set from the number above. `job.312` is unreached on the worklist, and
+  `job.183`, the `started` of a run its own wakes ended, is reached by a directed shape and the
+  fourth arm only: both for that entry's mark.
+  NOT HERE. The registration, the old tables' and methods' deletion, the fit, DL-292, SET_GLOBAL,
+  the cost, the golden-digest obligation and the item cap (6.4).
+  REVIEW. Semantic class and a frozen-contract change: one Opus reviewer and one Fable advisor
+  pass. Both found the §5 text equal to the design's, every chart dispatch under the hook, the
+  writers' table complete, the order tests pinning the depth, the bound's refusals equal on
+  both oracles (27 over 50,039 inputs), a planted wrong write caught naming the job, and the
+  four harness runs reproduced. The Opus reviewer found the chart oracle's fork sharing the set
+  of instances a macrostep reached with its parent, so a row a dry apply created would have
+  failed the parent's next check; the twin now gets its own, with a test that fails without it.
+  The two differed on the parent recompute's widening mutant: a search over 1,220 runs found
+  it equivalent, and the Fable pass constructed the input that parts it, an override coming
+  true past the door of the parent's new run; the construction decides, and the sixth mutant
+  test carries it. The Fable pass also had the contract say where a row's sends are computed,
+  and found the cell for a run its own wakes ended reachable, which a directed shape now
+  witnesses. Three rounds Opus, two Fable; the last round's nits, a sweep's reach and two
+  texts. Findings confirmed by the reviewer that raised them.

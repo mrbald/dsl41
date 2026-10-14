@@ -5,7 +5,10 @@ inside the next. An engine-made input is in the WAL before it is applied, so
 a RecursionError there would stop every resume at the same input. The engine
 and the replay fit the limit to the catalog's job count
 (`oracle.fit_recursion_limit`); a cascade that still passes it raises an
-error that names the RecursionError and the cascade's first start.
+error that names the RecursionError and the cascade's first start. The chart
+oracle's cascade is the executor's worklist, iterative: it takes no frame per
+nested start, so its constant is 0 and the frames it needs do not grow with
+the job count (DL-350).
 
 The scale tests run the CLI in a subprocess: a C stack overflow would kill
 the process, and it must not take pytest down with it.
@@ -35,7 +38,7 @@ from dsl41.oracle import (
     Oracle,
     fit_recursion_limit,
 )
-from dsl41.oracle_chart import SELECTION_FRAMES, ChartOracle
+from dsl41.oracle_chart import ChartOracle
 from dsl41.oracle_state import CascadeDepthError, Event, OracleError
 
 START = "2026-01-05T09:00:00"
@@ -319,7 +322,7 @@ def _frames_needed(shape: str, jobs: int, oracle: type[Oracle] = Oracle) -> int:
         assert {row.status for row in built.store.job.values()} == {status}
         return True
 
-    low, high = 1, 4 * oracle.FRAMES_PER_NESTED_START * jobs
+    low, high = 1, 4 * max(oracle.FRAMES_PER_NESTED_START, FRAMES_PER_NESTED_START) * jobs
     while low < high:
         middle = (low + high) // 2
         if fits(middle):
@@ -329,48 +332,56 @@ def _frames_needed(shape: str, jobs: int, oracle: type[Oracle] = Oracle) -> int:
     return low
 
 
-@pytest.mark.parametrize("oracle", [Oracle, ChartOracle], ids=["oracle", "chart"])
+def _slope(shape: str, oracle: type[Oracle]) -> float:
+    """The frames a cascade of the shape needs per job, between two sizes."""
+    # box nesting stops at 64 levels (the lowering's bound)
+    small, large = (21, 61) if shape == "terminator-chain" else (41, 81)
+    needed = _frames_needed(shape, large, oracle) - _frames_needed(shape, small, oracle)
+    return needed / (large - small)
+
+
 @pytest.mark.parametrize("shape", sorted(SLOPE_SHAPES))
-def test_sem10_frames_per_job_stay_within_the_fitted_budget(
-    shape: str, oracle: type[Oracle]
-) -> None:
+def test_sem10_frames_per_job_stay_within_the_fitted_budget(shape: str) -> None:
     """The fit budgets `MAX_NESTED_STARTS` x `FRAMES_PER_NESTED_START`
     frames per job, the oracle class's own constant. The frames a cascade
     needs grow by at most that much per job: a change to the oracle that
     makes a start deeper than the budget fails here, before an estate meets
     it. The ring nests two starts per job, the chain one; the fold shape
     adds a completion of a run begun before the cascade to each bypass; a
-    release's readmission begins the chain once, at its base. The chart
-    oracle (DL-342) is held to its own constant."""
-    # box nesting stops at 64 levels (the lowering's bound)
-    small, large = (21, 61) if shape == "terminator-chain" else (41, 81)
-    needed = (_frames_needed(shape, large, oracle) - _frames_needed(shape, small, oracle)) / (
-        large - small
-    )
-    frames = oracle.FRAMES_PER_NESTED_START
+    release's readmission begins the chain once, at its base."""
+    needed = _slope(shape, Oracle)
+    frames = Oracle.FRAMES_PER_NESTED_START
     assert needed <= MAX_NESTED_STARTS * frames
     assert needed > (frames if shape == "box-ring" else 0)
 
 
-@pytest.mark.parametrize(
-    "shape",
-    [*sorted(SLOPE_SHAPES), "paren-chain", "override-fold", "off-hold-chain", "noexec-box-chain"],
-)
-def test_sem10_the_chart_oracle_adds_a_bounded_constant_at_the_innermost_attempt(
-    shape: str,
-) -> None:
-    """The chart oracle needs the old oracle's frames per job plus a
-    constant: the executor's selection at the innermost attempt, which the
-    base of the fit absorbs, and one frame at the base for a kill and for an
-    input the chart oracle inherits (`ChartOracle._dispatch` calls the old
-    one). The flag inputs' retries sit at today's depth (DL-344), and so do
-    RELEASE_RESOURCE and the readmission (DL-345), and each box rule
-    (DL-346), whose dispatch at the innermost door adds its selection
-    once. The constant stays within `SELECTION_FRAMES` (measured 7 to 12:
-    the parenthesised conditions 12, a deep override 11, the ring and a
-    kill's terminator chain 10, the fold 8, the chains 7)."""
-    extra = _frames_needed(shape, 41, ChartOracle) - _frames_needed(shape, 41)
-    assert 0 <= extra <= SELECTION_FRAMES
+_CHART_SHAPES = [
+    *sorted(SLOPE_SHAPES),
+    "paren-chain",
+    "override-fold",
+    "off-hold-chain",
+    "noexec-box-chain",
+]
+
+
+@pytest.mark.parametrize("shape", _CHART_SHAPES)
+def test_sem10_the_chart_oracle_needs_no_frame_per_job(shape: str) -> None:
+    """DL-350: the chart oracle's cascade is the executor's worklist,
+    popped in a loop, so a nested start, a box rule or a wake takes no Python
+    frame: the frames a cascade needs do not grow with the job count, on every
+    shape, and its `FRAMES_PER_NESTED_START` is 0. What it needs is a
+    constant, a deep condition's own recursion its largest part, which the
+    base of the fit holds."""
+    assert ChartOracle.FRAMES_PER_NESTED_START == 0
+    assert _slope(shape, ChartOracle) == 0
+    assert _frames_needed(shape, 41, ChartOracle) < RECURSION_LIMIT_BASE // 4
+
+
+def test_sem10_the_chart_oracle_fits_the_base_whatever_the_job_count() -> None:
+    """`fit_recursion_limit` for the chart oracle's class is the base: its
+    constant is 0."""
+    sys.setrecursionlimit(1000)
+    assert fit_recursion_limit(JOBS, ChartOracle) == RECURSION_LIMIT_BASE
 
 
 def test_sem10_equiv_tier_c_fits_the_limit_to_the_larger_catalog() -> None:
