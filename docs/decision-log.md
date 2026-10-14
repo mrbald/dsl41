@@ -22599,3 +22599,82 @@ relitigate an entry; append a new one.
   box's end to members that ignore it; the texts now say so. Smaller items, a wrong final status
   in the facts and the rule sentence placed on the wrong module in the README, are fixed and
   confirmed by the reviewer that raised them.
+- DL-349 Three shapes of the job chart's start under today's cascade order: the release policy
+  as a fact of the settlement, an owed settlement as a verdict row, and an admitted start's moves
+  as the descendants of one self-event
+  (2026-10-14; src/dsl41/job_chart.py, src/dsl41/job_chart_events.py, src/dsl41/job_chart_rows.py,
+  src/dsl41/oracle_chart.py, src/dsl41/oracle_chart_agreement.py, src/dsl41/oracle_chart_cascade.py,
+  src/dsl41/oracle_chart_facts.py, src/dsl41/oracle_state.py; tests/test_job_chart.py,
+  tests/test_oracle_chart.py, tests/oracle_lockstep.py, tests/fork_harness.py;
+  docs/statechart-engine.md §11; docs/citation-index.md)
+  THE AIM. The cascade's move onto the executor's worklist (§5; the design note the DL-348 entry
+  owed) needs the chart oracle to make no executor call inside a macrostep and to carry a start's
+  extent under one item. Three of its shapes hold under today's recursion, so they land first,
+  with the harness proving each one changes no order: a chart that writes for itself follows in
+  the next entry.
+  THE POLICY. What leaving a run does with its units was a field of the instance's data, refreshed
+  from the row before each dispatch and at the commit, the larger of the realign's two remaining
+  classes. It is the run's, not the job's (DL-337), so it is a fact of `leave STARTING or RUNNING`'s
+  payload: the action that sends the settlement builds it with a handle on the job's units that
+  its own payload carries, and the holding rows read the policy once, when the settlement pops,
+  from the units the row holds then, as `_settle_row` reads them. The instance's data is its
+  catalog entry's and changes only when a catalog is installed. A settlement built with neither a
+  policy nor a handle is an error on its first read, not a free: after the switch-over nothing
+  compares the holding against the old oracle, and a forgotten handle must not free a kept unit.
+  THE OWED SETTLEMENT. DL-340's early settlement was read through `Executor.resolve`, a dry
+  selection of the attempt that said whether it reached the admission; the worklist allows no such
+  call. The attempt's verdict gains `settle first`, read after the bound and before the bypass,
+  where today's `_start_admitted` settles: row `job.401`, internal on `start`, moving nothing.
+  The oracle settles the run and makes the same attempt again with the facts read before the
+  bound carried over, since a settlement moves none of them, and the owed settlement and
+  everything after it read again; the second attempt is the attempt. A second `settle first` is a
+  statechart error, and the oracle's own early settlement is gone, so a skipped row cannot hide.
+  THE EXTENT. Each admitting row (`job.101` to `job.104`, `job.124`) sends `start admitted` first,
+  carrying its verdict and its admission; its row, `job.402`, sends what the start does after its
+  status move, the units it reserves or takes over and then the arm it consumes, so every later
+  item is its descendant, which the oracle checks before any write. The worklist entry makes the
+  bound a count of this item in an item's ancestry; here the bound stays the start frames. A
+  readmission sends its moves itself: `_readmit` never enters `_start`, so a readmitted run is not
+  a frame of today's bound and a restart nested in it counts from zero, a difference the design's
+  advisor pass reproduced on both oracles (an empty box conditioned on its own completion, queued
+  behind a holder and readmitted by its release, runs three times and refuses once; started
+  directly, twice and once), and a lockstep test pins. The `job.4NN` range continues the status
+  rows no table declared once `job.199` is taken.
+  PROOF. The harness, old against chart, shows no difference and no input raising alike: the
+  corpus and two hundred estates of up to fifty jobs, 23,268 inputs; twenty estates of 150 to 200
+  jobs, 7,999; the corpus and forty estates under every switch, 102,368; a further thousand seeds,
+  94,353; the oracle's tests pass through the fourth arm. A spy over 50,039 inputs shows the data
+  class of the realign gone at both sites, the interim holding of a member settled behind its box
+  rules the only class left, and no `resolve` from the chart oracle. The frames of every measured
+  shape are unchanged on both oracles. A directed estate of three self-restarting boxes, one per
+  policy, joins the harness, since the seeded sample's owed settlements are all on renewables,
+  where a take-over equals a settlement and a reservation, and a mutant that skips the early
+  settlement survived it. The agreement check compared only the holding state a row reaches,
+  where a free and a spend both end in none and a reservation and a take-over both in reserved,
+  so a chart that read every spend as free survived the whole sample, and the first build fired
+  the forced start's take-over row for a plain admission unseen; now the store tells the chart
+  oracle each holding move as today's verb writes it, and the move must be the one of the first
+  holding row the chart fired for the job and still owes, in the order the rows fired, with a
+  row still owed at the input's end an error. The old oracle sets no listener, and the scaffold
+  goes with the agreement at the switch-over. Both mutants diverge in the harness at the
+  directed estates. STATE_MACHINE_VERSION is unchanged (DL-235).
+  RECORDED. `job.312`, the settlement of a run met at an admitted start, is no longer reached from
+  the chart oracle, since `job.401` settles first; the chart's own tests reach it, the admission
+  the oracle builds carries no previous end (its default is a non-success), and the worklist
+  entry says whether any path reaches it, for the registration entry's mark. The chart settles
+  the owed run before today's `_start_admitted` would, unobservable while that settlement wakes
+  nothing; the worklist keeps it so or stops.
+  NOT HERE. The worklist: the per-microstep hook, the chart oracle performing its rows' writes, the
+  moments of every continuation site, the audiences in the senders, the bound on the ancestry, the
+  realign's removal (the next entry); the switch-over (6.4).
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass. Both found every settling
+  payload carrying the settling job's handle, read once when its settlement pops and never
+  before, the verdict order equal to the old oracle's, the facts carried over the early
+  settlement ones a settlement cannot move, the readmitted chain's three runs on both oracles,
+  the four harness runs reproduced and the docs true. The Opus reviewer found the holding
+  agreement blind to a free against a spend and to a reservation against a take-over, with a
+  mutant surviving the whole sample, which the move compare answers; the Fable pass found the
+  same gap at the start rows and a replay helper that fails on a moment carrying no handle; both
+  found the admission's previous settlement a second silent default, now outside its equality.
+  Three rounds: the fix's own two nits, the owed check's seam around the scan and the opening,
+  and a reflow, confirmed in the third. Findings confirmed by the reviewer that raised them.

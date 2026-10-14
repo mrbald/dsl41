@@ -819,6 +819,55 @@ def _restart_scripts() -> list[tuple[Step, ...]]:
     return [never_run, after_a_failure]
 
 
+#: A directed estate for the settlement a restart owes first (DL-340,
+#: DL-349): each box restarts on its own success and attempts its member
+#: before the member's run settles, so the attempt takes job.401, the run
+#: settles, and the attempt reads its admission after the settlement. A unit
+#: freed on success admits the member again (`ow_free`), a kept one is taken
+#: over (`ow_keep`), a spent one leaves nothing and the member queues
+#: (`ow_spend`). The seeded sample reaches the shape only with renewables.
+OWED_JIL = "".join(
+    f"""insert_resource: OW_{name.upper()}
+res_type: {kind}
+amount: 1
+
+insert_job: ob_{name}
+job_type: b
+condition: s(ob_{name})
+
+insert_job: ow_{name}
+job_type: c
+machine: m1
+command: x
+box_name: ob_{name}
+resources: (OW_{name.upper()}, QUANTITY=1{free})
+
+"""
+    for name, kind, free in (
+        ("free", "R", ", FREE=Y"),
+        ("keep", "R", ", FREE=N"),
+        ("spend", "D", ""),
+    )
+)
+
+
+def _owed_scripts() -> dict[str, tuple[Step, ...]]:
+    def event(minutes: int, kind: str, job: str, **payload: object) -> Event:
+        at = EPOCH + timedelta(minutes=minutes)
+        return Event.model_validate({"at": at, "kind": kind, "payload": {"job": job, **payload}})
+
+    return {
+        name: (
+            event(1, "FORCE_STARTJOB", f"ob_{name}"),
+            event(2, "STATUS", f"ow_{name}", exit_code=0),
+            SealPoint(),
+            event(3, "STATUS", f"ow_{name}", exit_code=0),
+            SealPoint(),
+        )
+        for name in ("free", "keep", "spend")
+    }
+
+
 #: A directed estate for the kill and timer cells the seeded sample does
 #: not reach (DL-343). `kt_hold` holds the one unit.
 #: - `kt_wait` is armed on hold, then queued by OFF_HOLD's retry: a kill on a
@@ -1866,6 +1915,7 @@ def directed_jobs() -> list[Job]:
     flags = lower_source(FLAG_JIL)
     queue = lower_source(QUEUE_JIL)
     boxes = lower_source(BOX_JIL)
+    owed = lower_source(OWED_JIL)
     return (
         [Job("<directed wekr>", lower_source(WEKR_JIL), _wekr_script())]
         + [
@@ -1895,6 +1945,10 @@ def directed_jobs() -> list[Job]:
             for name, script in _queue_scripts().items()
         ]
         + [Job(f"<directed box: {name}>", boxes, script) for name, script in _box_scripts().items()]
+        + [
+            Job(f"<directed owed settlement: {name}>", owed, script)
+            for name, script in _owed_scripts().items()
+        ]
     )
 
 

@@ -4,8 +4,10 @@ events' payloads (DL-337). The chart, its contract and its guards are in
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
-from typing import Final, Literal
+from dataclasses import dataclass, field, replace
+from typing import Final, Literal, Protocol
+
+from dsl41.state_machine import StatechartError
 
 # ---- events
 
@@ -33,6 +35,8 @@ STARTED: Final = "started"
 READMIT: Final = "readmit"
 ACTUAL_START: Final = "actual start"
 ADMITTED_START: Final = "admitted start"
+#: A start past the gates and the bound: the extent of `Oracle._start`.
+START_ADMITTED: Final = "start admitted"
 LEAVE_LIVE: Final = "leave STARTING or RUNNING"
 #: A flag move whose status rule reads the flag: it follows the move.
 FLAG_MOVED: Final = "flag moved"
@@ -66,23 +70,43 @@ class JobData:
     `box`: the job type is BOX. `catalog`: the job has a catalog entry; a row
     can outlive its entry, and STATUS can create one (DL-264).
     `job_terminator` and `auto_hold`: the member's attributes the box's rules
-    test (SEM-14, `_cascade_job_terminators`; `_on_box_started`). The release
-    fields say what leaving the run does with the units the run holds, after a
-    SUCCESS and after any other end (`RuntimeState.release_reservations` with
-    the pool's `keeps_held`). They are the current run's: a start that takes
-    units, or held units an injected live status makes the run's, changes them.
+    test (SEM-14, `_cascade_job_terminators`; `_on_box_started`). All four are
+    the catalog's, so they change only when a catalog is installed. What
+    leaving a run does with its units is the run's, a fact of the settlement
+    (`Settlement`, DL-349).
     """
 
     box: bool = False
     catalog: bool = True
     job_terminator: bool = False
     auto_hold: bool = False
-    release_on_success: Release = "free"
-    release_otherwise: Release = "free"
+
+
+class Units(Protocol):
+    """A tier's handle on one job's units: what leaving its run does with the
+    units its row holds, after a SUCCESS (`success`) or after any other end,
+    as `RuntimeState.release_reservations` decides it with the pool's
+    `keeps_held`. It reads the row when asked, so the policy is the one of the
+    units the row holds at that moment (DL-349)."""
+
+    def release(self, success: bool) -> Release: ...
 
 
 @dataclass(frozen=True)
-class Attempt:
+class Payload:
+    """What a payload carries besides its facts: `units`, the tier's handle
+    on the job's units, from which an action builds the settlement it sends
+    (`Settlement`). None for a chart no tier drives: a settlement it sends
+    then has no policy, and reading one is a `StatechartError`, so such a
+    chart gives each settlement its release. An event whose rows read no fact
+    carries a bare `Payload` where the tier has a handle to give. The handle
+    is neither compared nor printed."""
+
+    units: Units | None = field(default=None, kw_only=True, compare=False, repr=False)
+
+
+@dataclass(frozen=True)
+class Attempt(Payload):
     """One start attempt: `Oracle._attempt_start`, `_start` and `_start_admitted`.
 
     `force`, `explicit` and `scheduled` say who asks: a relay from STARTJOB,
@@ -96,6 +120,8 @@ class Attempt:
     the job's condition holds, or it has none. `window`: `_window_side`.
     `bounded`: the job already has `MAX_NESTED_STARTS` starts in progress
     on the call stack (`_starts_in_progress`, the bound `_start` reads).
+    `settlement_owed`: a run of the job ended inside a cascade still running
+    its box rules, and its settlement waits (`_settle_ended_run`, DL-340).
     `box_noexec`: a box above the job is ON_NOEXEC (`_noexec_bypasses`).
     `admissible`: `_admissible`. `demand`: the demand vector reserves units
     (`to_reservations`; a gate entry reserves nothing, so `reserve` moves
@@ -115,6 +141,7 @@ class Attempt:
     condition: bool = True
     window: WindowSide = "inside"
     bounded: bool = False
+    settlement_owed: bool = False
     box_noexec: bool = False
     admissible: bool = True
     demand: bool = True
@@ -143,7 +170,7 @@ class Readmission:
 
 
 @dataclass(frozen=True)
-class Injection:
+class Injection(Payload):
     """An injected STATUS: a status, or with none an exit code, read by
     `Semantics.exit_is_success` as `success` (SEM-09)."""
 
@@ -152,7 +179,7 @@ class Injection:
 
 
 @dataclass(frozen=True)
-class Noexec:
+class Noexec(Payload):
     """ON_NOEXEC on a box (DL-254): `tree_busy`, a job it contains is on ice,
     live or queued (`_oob_ignored`); `change`, its parent is RUNNING or a job
     it contains is not INACTIVE. `_noexec_box` also counts the box's own
@@ -163,14 +190,14 @@ class Noexec:
 
 
 @dataclass(frozen=True)
-class Deadline:
+class Deadline(Payload):
     """A term_run_time timer: `current`, its run is the row's run."""
 
     current: bool = True
 
 
 @dataclass(frozen=True)
-class Verdict:
+class Verdict(Payload):
     """One step of a RUNNING box's completion door: `target`, the status it
     decides, or none. `member moves` reads the overrides
     (`_apply_box_overrides`), `completion moment` the default fold
@@ -190,32 +217,72 @@ class BoxVerdict:
 
 
 @dataclass(frozen=True)
-class FlagMoved:
+class FlagMoved(Payload):
     """The flag move a status rule follows: `cause` is the input that moved it,
-    and `noexec` ON_NOEXEC's payload, passed on."""
+    and `noexec` ON_NOEXEC's payload, passed on with its `units`."""
 
     cause: Literal["ON_ICE", "KILLJOB", "readmit", "ON_NOEXEC"]
     noexec: Noexec = Noexec()
 
 
 @dataclass(frozen=True)
-class Terminator:
+class Terminator(Payload):
     """A member's end at its box: `fires`, `_box_terminator_fires` (the
     member's box_terminator, its end, `box-terminator-on-terminated`)."""
 
     fires: bool = True
 
 
-@dataclass(frozen=True)
 class Settlement:
-    """The end of a run whose units settle: `success`, the move ended in
-    SUCCESS, which frees a `success` policy's units (`release_reservations`)."""
+    """`leave STARTING or RUNNING`'s payload, the end of a run whose units
+    settle: `success`, the move ended in SUCCESS, which frees a `success`
+    policy's units (`release_reservations`); `release`, what leaving the run
+    does with the units its row holds for that end.
 
-    success: bool = False
+    `success` is known when the payload is built. `release` is given, or
+    computed on its first read from the handle (`Units`) the action that
+    sends the settlement took from its own payload (DL-349), and kept: the
+    holding rows read it when the settlement pops, against the units the row
+    holds then. With neither, the policy is unknown: its first read raises a
+    `StatechartError`, which the executor reports with the instance and the
+    item, rather than free a unit the run may keep or spend."""
+
+    __slots__ = ("success", "_units", "_release")
+
+    def __init__(
+        self, success: bool = False, release: Release | None = None, *, units: Units | None = None
+    ) -> None:
+        self.success = success
+        self._units = units
+        self._release = release
+
+    @property
+    def release(self) -> Release:
+        """What leaving the run does with its units: free, keep or spend."""
+        if self._release is None:
+            if self._units is None:
+                raise StatechartError(
+                    "a settlement with no release and no handle on the job's units:"
+                    " its policy is unknown (DL-349)"
+                )
+            self._release = self._units.release(self.success)
+        return self._release
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Settlement):
+            return NotImplemented
+        return (self.success, self.release) == (other.success, other.release)
+
+    def __hash__(self) -> int:
+        return hash((self.success, self.release))
+
+    def __repr__(self) -> str:
+        known = "" if self._release is None else f", release={self._release!r}"
+        return f"Settlement(success={self.success}{known})"
 
 
 @dataclass(frozen=True)
-class Admission:
+class Admission(Payload):
     """The units of an admitted start (`_acquire`, `_start_on_held`):
     `on_held`, a FORCE_STARTJOB starts on held units (DL-256); `demand` as
     for `Attempt`."""
@@ -223,5 +290,21 @@ class Admission:
     on_held: bool = False
     demand: bool = True
     #: the end of the run whose units are still on the row when a box restarted
-    #: by its own completion starts the member again (job.312)
-    previous: Settlement = Settlement()
+    #: by its own completion starts the member again (job.312); not compared,
+    #: so comparing two admissions reads no settlement
+    previous: Settlement = field(default=Settlement(), compare=False)
+
+
+#: The verdicts of a start past the gates and the bound (`start_verdict`).
+type Admitting = Literal["bypass", "queue", "admit", "on_held"]
+
+
+@dataclass(frozen=True)
+class Admitted:
+    """`start admitted`'s payload: the verdict of the start that the admitting
+    row moved (`verdict`), and the units an admission or a start on held units
+    reserves or takes over (`admission`, `Admission`). A bypass and a queue
+    reserve nothing."""
+
+    verdict: Admitting
+    admission: Admission = Admission()

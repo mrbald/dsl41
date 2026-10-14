@@ -82,11 +82,12 @@ from dsl41.job_chart import (
     MEMBER_ENDS,
     MEMBER_MOVES,
     PERIOD_OPENING,
+    Payload,
     Terminator,
     row_configuration,
 )
 from dsl41.oracle_chart_agreement import AgreeingOracle, Agreement, fired_rows
-from dsl41.oracle_chart_facts import FoldFacts, OverrideFacts, RecomputeFacts
+from dsl41.oracle_chart_facts import FoldFacts, OverrideFacts, RecomputeFacts, RowUnits
 from dsl41.oracle_state import (
     AUTO_HOLD,
     BOX_CASCADE,
@@ -166,7 +167,7 @@ class CascadeOracle(AgreeingOracle):
         store.follow_job(job)
         key = store.job_key(job)
         old = store.job[job].status
-        return fired_rows(store.machines.dispatch(key, event)), key, old
+        return self._fired_rows(store.machines.dispatch(key, event)), key, old
 
     def _stays(self, job: str, key: str, event: ChartEvent, old: str) -> Agreement:
         """A rule's move that leaves the status alone, to compare after its writes."""
@@ -205,7 +206,8 @@ class CascadeOracle(AgreeingOracle):
         door reads the overrides only on a terminal, RUNNING or resolving
         move, and the recompute is sent only on a terminal move."""
         if new in FAILED:
-            event = ChartEvent(MEMBER_ENDS, Terminator(self._box_terminator_fires(member, new)))
+            fires = self._box_terminator_fires(member, new)
+            event = ChartEvent(MEMBER_ENDS, Terminator(fires, units=RowUnits(self, box)))
             fired, key, status = self._box_rule(box, event)
             if fired == _TERMINATES:
                 with self._moving(box, key, event, status):
@@ -346,7 +348,7 @@ class CascadeOracle(AgreeingOracle):
         for member in self._members(box):
             if self._runtime(box).run_number != run:
                 return
-            event = ChartEvent(BOX_ENDS)
+            event = ChartEvent(BOX_ENDS, Payload(units=RowUnits(self, member)))
             fired, key, old = self._box_rule(member, event)
             if fired == ("job.116",):
                 with self._moving(member, key, event, old):
@@ -455,7 +457,7 @@ class CascadeOracle(AgreeingOracle):
             event = ChartEvent(BOX_ON_NOEXEC)
             store.follow_job(job)
             key, old = store.job_key(job), store.job[job].status
-            outcomes = store.machines.dispatch(key, event)
+            outcomes = self._expect_holding(store.machines.dispatch(key, event))
             fired = fired_rows(outcomes)
             clears = _NOEXEC_HOLD.get(fired)
             if clears is None:
@@ -482,7 +484,7 @@ class CascadeOracle(AgreeingOracle):
         (job.196)."""
         pending: dict[str, Agreement] = {}
         for job in self._contained(box, skip_live=False):
-            event = ChartEvent(BOX_SET_INACTIVE)
+            event = ChartEvent(BOX_SET_INACTIVE, Payload(units=RowUnits(self, job)))
             fired, key, old = self._box_rule(job, event)
             if fired in _CASCADED:
                 pending[job] = self._batched(job, key, event, old)
@@ -573,21 +575,23 @@ class CascadeOracle(AgreeingOracle):
     def _release_removed_holders(self) -> None:
         """`first input of a period` on each carried row whose job the catalog
         no longer defines and that holds units while not live (DL-256): its
-        units go back (job.308), with today's line; then the waiters wake."""
+        units go back (job.308), with today's line; then the waiters wake. Every
+        holding row it fires is written by its end (`_owing`, DL-349)."""
         owed, self._opening_release = self._opening_release, []
-        for job in owed:
-            event = ChartEvent(PERIOD_OPENING)
-            fired, key, old = self._box_rule(job, event)
-            if fired != ("job.308",):
-                raise self._unwritten(job, event, fired, "opening row")
-            freed = self.store.release_held(job, HELD_RELEASED_AT_OPENING)
-            units = ", ".join(f"{held.units} of {held.bucket[2:]}" for held in freed)
-            self._record(
-                job,
-                "RELEASE_RESOURCE",
-                f"job removed from the catalog: its held units go back at the period"
-                f" opening (frees {units}; DL-256)",
-            )
-            self._agree_after(self._stays(job, key, event, old), "the opening's release")
-        if owed:
-            self._wake_waiters()
+        with self._owing():
+            for job in owed:
+                event = ChartEvent(PERIOD_OPENING)
+                fired, key, old = self._box_rule(job, event)
+                if fired != ("job.308",):
+                    raise self._unwritten(job, event, fired, "opening row")
+                freed = self.store.release_held(job, HELD_RELEASED_AT_OPENING)
+                units = ", ".join(f"{held.units} of {held.bucket[2:]}" for held in freed)
+                self._record(
+                    job,
+                    "RELEASE_RESOURCE",
+                    f"job removed from the catalog: its held units go back at the period"
+                    f" opening (frees {units}; DL-256)",
+                )
+                self._agree_after(self._stays(job, key, event, old), "the opening's release")
+            if owed:
+                self._wake_waiters()

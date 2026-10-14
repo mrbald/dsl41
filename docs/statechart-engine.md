@@ -313,19 +313,26 @@ retry post it, and STARTJOB, FORCE_STARTJOB and the window timer's replay relay 
 the guards' first read, in the order today's rules test them, so an attempt computes only the facts
 the old oracle computes. The per-job start bound is a refusal row, `job.100`, on a fact: the job's
 starts in progress. An attempt that reaches the admission settles a run whose settlement the box
-rules hold back first, and the admission is read after it (DL-340); a read of the attempt says
-whether it gets that far. The chart decides; the old methods write the verdict. The first status
-write of the attempt is compared with the chart's configuration, and the RUNNING that follows an
-admission is the chart's `started`, dispatched and compared at that write; an attempt that moves no
-status is compared after its own writes. Until the cascade slice removes the recursion, the chart
-oracle's cascade is fitted by its own measured frames per nested start (`fit_recursion_limit` takes
-the oracle class). An input on which both oracles raise alike, a RecursionError of either kind or
-the same error, agrees in the harness on its attempt half, whose writes are not compared: a control
-input that raises is refused and commits nothing, and an engine-made one is quarantined with its
-rejection logged and its time half committed. So the harness applies that time half alone on both
-oracles, compares it and goes on; the engine stops only when the time half itself raises, and where
-it raises on both the harness stops there too. The rule stays, but no input of the harness's sample
-raises alike since DL-348: the three that did were one terminator cascade that never ended.
+rules hold back first, and the admission is read after it (DL-340). Past the bound, an attempt
+whose run's settlement is owed takes the internal row `job.401`, which moves nothing; the oracle
+settles that run at the point in the verdict order where the old `_start_admitted` settles it, and
+dispatches the same attempt again, so it reads the admission the settlement left (DL-349). Each
+admitting row (`job.101` to `job.104`, `job.124`) sends `start admitted` first, and its row,
+`job.402`, sends what the start does after its status move: the units it reserves or takes over,
+then the arm it consumes. Those moves are its descendants, and the oracle checks that they are. A
+readmission sends its moves itself: it is not a start the bound counts. The chart decides; the old
+methods write the verdict. The first status write of the attempt is compared with the chart's
+configuration, and the RUNNING that follows an admission is the chart's `started`, dispatched and
+compared at that write; an attempt that moves no status is compared after its own writes. Until the
+cascade slice removes the recursion, the chart oracle's cascade is fitted by its own measured frames
+per nested start (`fit_recursion_limit` takes the oracle class). An input on which both oracles
+raise alike, a RecursionError of either kind or the same error, agrees in the harness on its attempt
+half, whose writes are not compared: a control input that raises is refused and commits nothing, and
+an engine-made one is quarantined with its rejection logged and its time half committed. So the
+harness applies that time half alone on both oracles, compares it and goes on; the engine stops only
+when the time half itself raises, and where it raises on both the harness stops there too. The rule
+stays, but no input of the harness's sample raises alike since DL-348: the three that did were one
+terminator cascade that never ended.
 
 KILLJOB and the TIMER input are dispatched to the job's instance too (DL-343), and the input
 passes its own relay to the attempt, so no cause text is read. A live job's kill (`job.114`) and a
@@ -415,10 +422,15 @@ value, then the hold it supersedes off, through the old method and its lines. Wh
 is the row's choice, and a row the chart ignores where the old rule writes is a statechart error;
 both are checked before the job's write, after the box's own flag. The jobs it releases retry their
 start (DL-347). The box row's sets of members and the window decisions at a box start, which
-move no status, stay old code. The follow before each dispatch and the realign at commit now cover
-two things: the refresh of an instance's data when its units change, and the holding of a member
-whose settlement waits behind its box rules, which the chart settles inside the member's own
-dispatch.
+move no status, stay old code.
+
+An instance's data is its catalog entry's, and changes only when a catalog is installed. What
+leaving a run does with its units is a fact of `leave STARTING or RUNNING`'s payload: the action
+that sends the settlement builds it with the handle on the job's units that its own payload
+carries, and the holding rows read the policy when the settlement pops, from the units the row
+holds then (DL-349). The follow before each dispatch and the realign at commit now cover one
+thing: the holding of a member whose settlement waits behind its box rules, which the chart
+settles inside the member's own dispatch.
 
 ## 12. Durability of deferred queues
 

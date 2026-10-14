@@ -29,13 +29,17 @@ others take new numbers in the same hundred. Internal rows stay internal. A
 box's ON_NOEXEC on the jobs it contains, which `job_flags.09` and `.07` take
 under the job's own ON_NOEXEC, is an event of its own, `ON_NOEXEC on its box`,
 as its OFF_NOEXEC twin is in the table (`job_flags.11`); its rows take new
-numbers (job.231 to job.233, DL-347).
+numbers (job.231 to job.233, DL-347). The status rows no table declared fill
+job.159 to job.199, and `job.4NN` continues them (DL-349).
 
 Guards read three things: the instance's configuration, its data (`JobData`),
 and the event's payload. The payload carries the facts the rule code reads
 outside the job's own row: its box's run, condition truth, the run window,
-admission, the members' verdicts. Each payload class names the oracle
-predicate behind each field.
+admission, the members' verdicts, the policy of a run's end. Each payload
+class names the oracle predicate behind each field. A payload also carries
+the tier's handle on the job's units (`Payload.units`), from which an action
+builds the settlement it sends, so the policy is read when the settlement
+pops, from the units the row holds then (DL-349).
 
 One input can move several regions of one job. Today's order of those moves
 is the contract, and the region order is not load-bearing. Two forms declare
@@ -47,10 +51,12 @@ it:
   time. A flag move reports `flag moved`, and the status rule that reads the
   flag follows it: ON_ICE dequeues a waiter, KILLJOB terminates one, a waiter
   that fails the queued recheck leaves the queue, ON_NOEXEC settles the
-  status. An actual start consumes the arm (`actual start`); an admitted start
-  reserves or takes over units first (`admitted start`). STARTJOB,
-  FORCE_STARTJOB and a window-postponed start relay the attempt to `start`,
-  after the forced clears.
+  status. An admitting verdict sends `start admitted` first, and everything
+  the start does after its status move follows from it: an actual start
+  consumes the arm (`actual start`); an admitted start reserves or takes
+  over units first (`admitted start`). STARTJOB, FORCE_STARTJOB and a
+  window-postponed start relay the attempt to `start`, after the forced
+  clears.
 - rows of a sibling region on the same event, only where every step reads
   the configuration before the input: a forced start clears ice and hold, a
   scheduled tick arms, an injected live status makes held units the run's.
@@ -67,8 +73,11 @@ case reads the status: a box restarted by its own completion can start the
 member again before the member's late settlement (job.312). That start settles
 the run that ended first, by the end it made (`Admission.previous`), and then
 reserves or takes over as any start does; the late settlement, finding the
-member live, does nothing (DL-340). `Attempt.admissible` for such a
-start is read after that settlement.
+member live, does nothing (DL-340). A tier that settles that run itself
+declares it on the attempt: past the bound, an attempt whose run's
+settlement is owed (`Attempt.settlement_owed`) takes the internal row job.401
+and moves nothing; the tier settles the run and makes the same attempt again,
+so `Attempt.admissible` is read after the settlement (DL-349).
 
 The per-job start bound (DL-304) is the refusal row job.100: an attempt past
 the gates and the window, for a job with `MAX_NESTED_STARTS` starts already in
@@ -80,9 +89,7 @@ defers (§12).
 
 The walks that check this chart carry no run window and no true condition;
 the facts of those paths are checked by synthesized cells and one windowed
-replay, and the old-vs-new harness is their proof. `JobData`'s release fields
-are the current run's: the tier refreshes them from the row's units when it
-brings the instance to its row (`RuntimeState.follow_job`).
+replay, and the old-vs-new harness is their proof.
 
 Modules. The declaration has three parts: the events, the data and the
 payloads (`job_chart_events`); the states, the rows and the configuration a
@@ -105,7 +112,9 @@ from dsl41.job_chart_events import (
     ON_NOEXEC,
     READMIT,
     START,
+    START_ADMITTED,
     Admission,
+    Admitted,
     Attempt,
     BoxVerdict,
     Deadline,
@@ -117,6 +126,7 @@ from dsl41.job_chart_events import (
     Release,
     Settlement,
     Terminator,
+    Units,
     Verdict,
 )
 
@@ -148,6 +158,7 @@ from dsl41.job_chart_events import (
     STATUS as STATUS,
     TERM_RUN_TIME as TERM_RUN_TIME,
     BoxGate as BoxGate,
+    Payload as Payload,
     WindowSide as WindowSide,
 )
 from dsl41.job_chart_rows import CHOICES, ROOT, ROWS
@@ -172,6 +183,13 @@ def _injected(ctx: Context) -> str | None:
     return injection.status
 
 
+def _units(ctx: Context) -> Units | None:
+    """The tier's handle on the job's units that the item's payload carries
+    (`Payload.units`), or None."""
+    units: Units | None = getattr(ctx.event.payload, "units", None)
+    return units
+
+
 # ---- the start attempt (SEM-10, SEM-20 to SEM-23, SEM-32, SEM-33, DL-50)
 
 type StartVerdict = Literal[
@@ -179,6 +197,7 @@ type StartVerdict = Literal[
     "ignored",
     "arm",
     "bounded",
+    "settle_first",
     "bypass",
     "on_held",
     "queue",
@@ -214,6 +233,8 @@ def start_verdict(ctx: Context) -> StartVerdict:
         return _skipped(attempt, active)
     if attempt.bounded:
         return "bounded"
+    if attempt.settlement_owed:
+        return "settle_first"
     if not data.box and ("noexec_on" in active or attempt.box_noexec):
         return "bypass"
     if attempt.force and "held" in active and "FAILED" in active:
@@ -274,6 +295,13 @@ def start_bounded(ctx: Context) -> bool:
     """`start_verdict` is `bounded`: the job has `MAX_NESTED_STARTS` starts in
     progress (DL-304), so a START_REFUSED line, whoever asked, and no move."""
     return start_verdict(ctx) == "bounded"
+
+
+def start_settles_first(ctx: Context) -> bool:
+    """`start_verdict` is `settle_first`: past the bound, a run of the job
+    ended and its settlement still waits behind the box rules (DL-340). The
+    tier settles it, and the same attempt is made again."""
+    return start_verdict(ctx) == "settle_first"
 
 
 def start_bypasses(ctx: Context) -> bool:
@@ -639,24 +667,24 @@ def on_held_units(ctx: Context) -> bool:
 
 
 def _release(ctx: Context) -> Release:
-    """The data's release for the end the payload names."""
+    """The settlement's release, read from the units the row holds when the
+    settlement pops (DL-349)."""
     settlement: Settlement = ctx.event.payload
-    data = _data(ctx)
-    return data.release_on_success if settlement.success else data.release_otherwise
+    return settlement.release
 
 
 def frees_all(ctx: Context) -> bool:
-    """The payload's end and the data: the policy frees every unit."""
+    """The payload: the policy of the run's end frees every unit."""
     return _release(ctx) == "free"
 
 
 def keeps_held(ctx: Context) -> bool:
-    """The payload's end and the data: a renewable's unit is kept."""
+    """The payload: the policy of the run's end keeps a renewable's unit."""
     return _release(ctx) == "keep"
 
 
 def spends(ctx: Context) -> bool:
-    """The payload's end and the data: a unit is spent, none kept."""
+    """The payload: the policy of the run's end spends a unit, and keeps none."""
     return _release(ctx) == "spend"
 
 
@@ -667,6 +695,7 @@ GUARDS: Final = {
         start_moves_nothing,
         start_arms,
         start_bounded,
+        start_settles_first,
         start_bypasses,
         start_admits_job,
         start_admits_box,
@@ -740,23 +769,54 @@ def relay_start(ctx: Context) -> Effects:
     )
 
 
-def consume_arm(ctx: Context) -> Effects:
-    """An actual start that takes no units (a bypass) consumes the arm."""
-    return Effects(send=((ctx.key, Event(ACTUAL_START)),))
+def _admitted(ctx: Context, admitted: Admitted) -> Effects:
+    return Effects(send=((ctx.key, Event(START_ADMITTED, admitted)),))
+
+
+def extent_bypass(ctx: Context) -> Effects:
+    """A bypass (job.101) sends `start admitted` first, and the rest of the
+    start follows from it (DL-349)."""
+    return _admitted(ctx, Admitted("bypass"))
+
+
+def extent_queue(ctx: Context) -> Effects:
+    """A queued start (job.103) sends `start admitted`, which does nothing
+    more: the waiter's units wait for its readmission."""
+    return _admitted(ctx, Admitted("queue"))
+
+
+def extent_admit(ctx: Context) -> Effects:
+    """An admission (job.102, job.124) sends `start admitted` first, with the
+    units it reserves (`demand`) and the payload's handle on the job's units."""
+    attempt: Attempt = ctx.event.payload
+    admission = Admission(demand=attempt.demand, units=_units(ctx))
+    return _admitted(ctx, Admitted("admit", admission))
+
+
+def extent_on_held(ctx: Context) -> Effects:
+    """A forced start on held units (job.104) sends `start admitted` first,
+    with the held units it takes over."""
+    return _admitted(ctx, Admitted("on_held", Admission(on_held=True, units=_units(ctx))))
+
+
+def start_extent(ctx: Context) -> Effects | None:
+    """`start admitted`: what the admitted start does, in the order
+    `_start_admitted` writes it. A bypass consumes the arm; an admission or a
+    start on held units reserves or takes over its units, then consumes the
+    arm; a queue does nothing more."""
+    admitted: Admitted = ctx.event.payload
+    if admitted.verdict == "queue":
+        return None
+    actual = (ctx.key, Event(ACTUAL_START))
+    if admitted.verdict == "bypass":
+        return Effects(send=(actual,))
+    return Effects(send=((ctx.key, Event(ADMITTED_START, admitted.admission)), actual))
 
 
 def admit(ctx: Context) -> Effects:
-    """An admitted start reserves its units, then consumes the arm, in the
-    order `_start_admitted` and `_readmit` write them."""
+    """A readmitted waiter reserves its units, then consumes the arm, in the
+    order `_readmit` writes them."""
     admission = Admission(demand=ctx.event.payload.demand)
-    return Effects(
-        send=((ctx.key, Event(ADMITTED_START, admission)), (ctx.key, Event(ACTUAL_START)))
-    )
-
-
-def admit_on_held(ctx: Context) -> Effects:
-    """A forced start on held units takes them over, then consumes the arm."""
-    admission = Admission(on_held=True)
     return Effects(
         send=((ctx.key, Event(ADMITTED_START, admission)), (ctx.key, Event(ACTUAL_START)))
     )
@@ -765,11 +825,15 @@ def admit_on_held(ctx: Context) -> Effects:
 def settle_ended_run(ctx: Context) -> Effects:
     """A start meets the units of a run whose settlement is still owed
     (`_settle_ended_run`): that run settles first, by the end it made, then
-    the start is admitted again against what the settlement left."""
+    the start is admitted again against what the settlement left. The
+    settlement's policy is read from the admission's handle (DL-349)."""
     admission: Admission = ctx.event.payload
+    previous = admission.previous
+    if admission.units is not None:
+        previous = Settlement(previous.success, units=admission.units)
     return Effects(
         send=(
-            (ctx.key, Event(LEAVE_LIVE, admission.previous)),
+            (ctx.key, Event(LEAVE_LIVE, previous)),
             (ctx.key, Event(ADMITTED_START, replace(admission, previous=Settlement()))),
         )
     )
@@ -789,9 +853,10 @@ def settle_after_success(ctx: Context) -> Effects:
 
 def settle(ctx: Context) -> Effects:
     """The run's units settle (`_settle_row`) for an end other than SUCCESS:
-    `leave STARTING or RUNNING`. A row of the batch INACTIVE path
+    `leave STARTING or RUNNING`, built with the handle the item's payload
+    carries (DL-349). A row of the batch INACTIVE path
     (`_set_inactive_batch`) reports it first."""
-    return Effects(send=((ctx.key, Event(LEAVE_LIVE, Settlement())),))
+    return Effects(send=((ctx.key, Event(LEAVE_LIVE, Settlement(units=_units(ctx)))),))
 
 
 def settle_late(ctx: Context) -> Effects | None:
@@ -809,16 +874,19 @@ def settle_late_success(ctx: Context) -> Effects | None:
     unless the member is live again (`settle_late`)."""
     if "LIVE" in ctx.active:
         return None
-    return Effects(send=((ctx.key, Event(LEAVE_LIVE, Settlement(success=True))),))
+    settlement = Settlement(True, units=_units(ctx))
+    return Effects(send=((ctx.key, Event(LEAVE_LIVE, settlement)),))
 
 
 def report_flag_move(ctx: Context) -> Effects:
-    """A flag moved, and the status rule that reads it follows as its own item."""
+    """A flag moved, and the status rule that reads it follows as its own
+    item, with the payload's handle on the units."""
     name = ctx.event.name
     if name == ON_NOEXEC:
-        moved = FlagMoved("ON_NOEXEC", ctx.event.payload)
+        moved = FlagMoved("ON_NOEXEC", ctx.event.payload, units=_units(ctx))
     else:
-        moved = FlagMoved("readmit" if name == READMIT else name)  # type: ignore[arg-type]
+        cause = "readmit" if name == READMIT else name
+        moved = FlagMoved(cause, units=_units(ctx))  # type: ignore[arg-type]
     return Effects(send=((ctx.key, Event(FLAG_MOVED, moved)),))
 
 
@@ -826,9 +894,12 @@ ACTIONS: Final = {
     action.__name__: action
     for action in (
         relay_start,
-        consume_arm,
+        extent_bypass,
+        extent_queue,
+        extent_admit,
+        extent_on_held,
+        start_extent,
         admit,
-        admit_on_held,
         settle_ended_run,
         settle_after,
         settle_after_success,
