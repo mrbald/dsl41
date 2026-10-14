@@ -22828,7 +22828,10 @@ relitigate an entry; append a new one.
   KB. The violation lines are left out of the trace, and the replay fails any run that records a
   violation: no input of the sample records one under any switch. A planted one-line change fails at
   the input it touches. The default suite replays the corpus part; a CI job of its own replays all
-  of it on every push. A golden changes only by a decision under DL-235, named in its entry.
+  of it on every push. A golden changes only by a decision under DL-235, named in its entry. The
+  engine's tests now run the chart oracle, about three times the old oracle's cost per input, and
+  the coverage leg passed in 14.5 minutes, past its 15-minute timeout; the test and coverage jobs
+  take 25 minutes until the cost round and the test-overlap slice win the time back.
   THE SWITCH. The engine builds the chart oracle, and so does every path that replays, rehearses,
   checks or compares what the engine logged: the history, the journal replay, the preflight, the
   equivalence check and the attestation, which replays the WAL. The recursion fit leaves those
