@@ -76,7 +76,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from dsl41.canon import is_wire_int
 from dsl41.ir import CatalogIR
-from dsl41.oracle import Oracle, fit_recursion_limit
+from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event
 from dsl41.runner_admission import (
     INERT_EPOCH,
@@ -1747,9 +1747,6 @@ def replay_inputs(
     A violation of a declared transition never raises here: the oracle
     traces it, as the live engine did. Any other input that raises stops
     the replay with a `ReplayFault` that names it."""
-    # the live engine fitted the limit to this catalog; a replay in another
-    # process must fit it too, or it raises where the engine did not
-    fit_recursion_limit(len(oracle.catalog.jobs), type(oracle))
     decisions = read_decisions(records, machines)
     # I2: indices are monotone across the ESTATE, not across the segment, so
     # a segment that opens at 5311 replays from 5310 -- the number its own

@@ -51,6 +51,7 @@ uv run coverage combine
 uv run coverage report
 uv run python scripts/branch_coverage.py
 uv run python scripts/transition_coverage.py
+uv run python tests/oracle_goldens.py replay
 ```
 
 The mypy line names `tests/uc_oracle.py` beside `src`: it is a fully
@@ -71,6 +72,10 @@ The transition gate reads `.transition-hits.json`, which the test run writes at
 the repository root. It exits 1 when a declared transition without a mark has
 no recorded hit, when a violation was recorded, or when a marked transition was hit
 (the mark is stale). It must run after the pytest step of the same session.
+The golden replay runs the oracle over the whole harness sample, about a minute,
+and names the first run, entry and component that differ from
+`tests/oracle_goldens.txt`, or a run that records a transition violation;
+CI runs it as its own `goldens` job (DL-351).
 Keep this list aligned with `.github/workflows/ci.yml`. The one CI check not in
 it is `systemd-analyze verify` over `examples/nightbank/deploy/*.service`
 (DL-218); it needs Linux.

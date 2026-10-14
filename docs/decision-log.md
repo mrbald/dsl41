@@ -22801,3 +22801,99 @@ relitigate an entry; append a new one.
   and found the cell for a run its own wakes ended reachable, which a directed shape now
   witnesses. Three rounds Opus, two Fable; the last round's nits, a sweep's reach and two
   texts. Findings confirmed by the reviewer that raised them.
+- DL-351 The engine runs the chart oracle: golden per-input digests recorded from the old oracle
+  prove it equal, a per-root item cap scaled by the estate's size stops a cascade that does not end,
+  and an item's ancestry extends and counts in constant time
+  (2026-10-14; src/dsl41/runner.py, src/dsl41/runner_history.py, src/dsl41/runner_journal.py,
+  src/dsl41/runner_preflight.py, src/dsl41/cli_run.py, src/dsl41/equiv.py, src/dsl41/attest.py,
+  src/dsl41/period.py, src/dsl41/oracle_chart.py, src/dsl41/oracle_state.py,
+  src/dsl41/state_machine.py, src/dsl41/job_chart.py; tests/oracle_goldens.py,
+  tests/oracle_goldens.txt, tests/test_oracle_goldens.py, tests/test_cascade_depth.py,
+  tests/test_statechart.py, tests/fork_harness.py, tests/test_dry_apply.py,
+  tests/test_runner_scheduler.py, tests/test_semantics.py, tests/test_oracle.py,
+  tests/test_runner.py, tests/conftest.py; .github/workflows/ci.yml; docs/statechart-engine.md §8,
+  §16; docs/runner-design.md §4; docs/deployment-runbook.md; docs/risk-map.md;
+  docs/blocks/admission.md; docs/blocks/box-execution.md; docs/agent-workflow.md; README)
+  THE AIM. From DL-341 to DL-350 the chart oracle took every input family and the whole cascade, and
+  the harness compared it with the old oracle on every input. The old oracle still ran the engine.
+  This entry makes the chart oracle the engine's, and the first of the three switch-over entries the
+  plan owed (6.4): the old oracle, its tables and the harness's pairing leave in the next two, so
+  the proof that outlives them is recorded first.
+  THE GOLDENS. Before any other change, the old oracle ran three samples: the corpus with the
+  directed estates and seeds 0 to 199 at up to 50 jobs, twenty estates of 150 to 200 jobs, and the
+  corpus with seeds 2000 to 2039 under every switch row. Each run's outcome, trace, emitted lines,
+  store bytes, revisions, pending timers, next timer due and seal digests are chained per component;
+  the file keeps a short link per input, which names the first input that differs, and a full digest
+  per run, which decides equality. 4,060 runs, 152,213 entries (each input and each seal point), 799
+  KB. The violation lines are left out of the trace, and the replay fails any run that records a
+  violation: no input of the sample records one under any switch. A planted one-line change fails at
+  the input it touches. The default suite replays the corpus part; a CI job of its own replays all
+  of it on every push. A golden changes only by a decision under DL-235, named in its entry.
+  THE SWITCH. The engine builds the chart oracle, and so does every path that replays, rehearses,
+  checks or compares what the engine logged: the history, the journal replay, the preflight, the
+  equivalence check and the attestation, which replays the WAL. The recursion fit leaves those
+  paths: the chart's cascade takes no frame per nested start (DL-350). Every chart oracle sets a
+  recursion limit of 3,000, so a condition as deep as the lowering accepts (985 levels) evaluates;
+  the catalog hash refuses nesting past about 250 levels with a named error
+  (`period.catalog_hash_v2`), and `rehearse` hashes through its scheduler, so only a path that
+  hashes no catalog, `equiv` or a directly built oracle, needs the headroom.
+  THE CAP. On the worklist a cascade that never ends takes items, not frames, and would never stop.
+  The hook counts the items of each root dispatch; the item that reaches the cap raises
+  `CascadeDepthError`, naming the cap, the job count and the root item. The operator sees what the
+  old fit's error gave: an engine-made input is quarantined, a control input is refused as
+  `apply_faulted`, and a logged decision replays as logged. The cap is `min(max(100_000, 4 *
+  jobs**2), 400_000)` over the catalog's job count: the floor up to 158 jobs, the square up to 316,
+  the ceiling above. A finite cascade moves each job a bounded number of times and each move wakes
+  at most the other jobs, so a dense legitimate cascade grows with the square of the estate: the
+  measured shapes are a fan-in (chain boxes that many referencers all name), DL-304's box ring and
+  nested terminator chain, and a queue of blocked waiters ahead of admissible ones. The cap is 23,
+  13, 9.4 and 4.7 times the worst of them at 41, 64, 100 and 200 jobs, and 3.1 times at 400; the
+  samples stay under 310 items. The ceiling comes from the lease: the dry apply runs on the engine's
+  loop, so a dispatch that runs past the lease's TTL less its renewal interval, 40 s, lapses the
+  lease, and a supervisor with a deadman then exits and every running job on its host ends `parent
+  lost`. The ceiling is the largest round count whose non-ending cascade (DL-348's shape with its
+  fix removed) stops within half that, 20 s, at every measured size; it is re-derived after any
+  change to the cascade's per-item cost, never raised by hand. Measured on the reference laptop: 4.5
+  s and 0.22 GiB at 200 jobs, 14.6 s and 0.45 GiB at 400, 17 s and 0.46 GiB at 1,000.
+  THE ANCESTRY. The loop's cost first grew with the square of its items: each item copied its
+  ancestry one step longer, and job.100's bound walked it on every start. An item's ancestry is now
+  a shared link to its parent's, and the executor keeps the count of each step along it, so
+  `Context.count` reads it in constant time and job.100 reads the count. §8 says the bound may read
+  the count of one step. The bound refuses the same 27 inputs over its 50,039-input sample.
+  STATED LIMITS. Above about 720 jobs for a fan-in and 890 for a queue, a legitimate dense cascade
+  passes the ceiling and is refused or quarantined where the old oracle accepted it; none is known.
+  Such a cascade would stall the engine anyway: a legitimate dense dispatch takes 7 s at 400 jobs,
+  33 s at 700 and 90 s at 1,000, so the engine's envelope for dense estates ends near 700 jobs
+  whatever the cap. The production target is 200 jobs and the stated envelope 400. On a host more
+  than about 2.3 times slower than the reference the lease lapses during a non-ending cascade at
+  1,000 jobs, 2.7 times at 400 and 8.9 times at 200; the half-lapse margin covers a host up to about
+  1.2 times slower at 1,000 jobs, 1.4 at 400 and 4.4 at 200. An old build's log holding an input the
+  new build refuses stops the resume with a named `ReplayFault`. The cap stops a loop inside one
+  root dispatch, the queue scan's fixpoint included, which the old oracle did not stop. It does not
+  stop a loop across root dispatches (none is known reachable) or a computation that does not end
+  inside one action, guard or fact; those stall without bound, and with a deadman the host's running
+  jobs end and the standby takes the host over (concurrency-model §8), the HA design's answer to a
+  hung controller. A stop time is wall-clock on a count, so no deterministic cap meets CLAUDE.md's
+  "no kill" clause in the letter; this entry bounds the per-root class under half the lease lapse at
+  every measured size and names the classes it does not bound. Two sites make a loop's items
+  costlier as it runs (a self-restarting box's owed settlements and the members' scan across the
+  catalog); the cost round of the entry after next measures them.
+  STATE_MACHINE_VERSION stays 23 (DL-235): the switched oracle reproduces every golden, and no input
+  of the sample records a violation.
+  NOT HERE. The rename and the old oracle's deletion, the fit's own code, the agreement scaffold and
+  the harness's pairing (the next entry); the three tables, the registration of `job` with
+  `job.312`'s mark, DL-292's retirement, the cost round and the version review for those (the entry
+  after).
+  REVIEW. Semantic class: one Opus reviewer and one Fable advisor pass, and one advisor ruling. Both
+  re-recorded the goldens from the old oracle's tree and found every line equal, and both found the
+  replay blind to the violation channel, a planted violation on every dispatch replaying equal; the
+  replay now fails a run that records one. Both found the first cap linear where a dense legitimate
+  cascade grows with the square, a fan-in and a queue reaching it near 1,000 jobs; the square term
+  followed. The Fable pass then found that a long dispatch lapses the lease and, under a deadman,
+  ends the host's running jobs, so a slow stop is not free; that reversed the reason the top level
+  gave for the square, and the advisor ruled the ceiling and its rule. The Fable pass found the
+  fit's removal leaving a condition the lowering accepts unable to evaluate, now the recursion
+  headroom, and a raw traceback past the hash's depth, now a named refusal; the Opus reviewer found
+  the full replay pushing CI's test legs toward their timeout, now a job of its own. Three rounds
+  each. Findings confirmed by the reviewer that raised them; the Fable pass agreed to the stated
+  limits' text.

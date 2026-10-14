@@ -41,11 +41,11 @@ import os
 import re
 import reprlib
 from collections import deque
-from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
-from typing import Any, ClassVar, Literal, NamedTuple, TypeGuard, cast
+from typing import Any, ClassVar, Literal, NamedTuple, TypeGuard, cast, overload
 
 HITS_ENV = "DSL41_TRANSITION_HITS"
 STRICT_ENV = "DSL41_TRANSITION_STRICT"
@@ -256,6 +256,73 @@ type Clock = Literal["", "logical", "monotonic"]
 type Step = tuple[Hashable, str]
 
 
+class Ancestry(Sequence[Step]):
+    """A chained item's ancestry, root first (§5): the ancestry of the
+    microstep that chained it, shared, and that microstep's own step. A chained
+    item extends its parent's in constant time, however deep the chain. It
+    reads as the tuple of its steps, and equals that tuple; a read walks the
+    links. A root item's ancestry is the empty tuple."""
+
+    __slots__ = ("_parent", "_step", "_depth")
+
+    def __init__(self, parent: Sequence[Step], step: Step) -> None:
+        if not isinstance(parent, Ancestry):
+            # a tier's own tuple of steps: its links, root first
+            link: Ancestry | None = None
+            for each in parent:
+                link = Ancestry(link or (), each)
+            parent = link or ()
+        self._parent: Ancestry | None = parent if isinstance(parent, Ancestry) else None
+        self._step = step
+        self._depth: int = 1 if self._parent is None else len(self._parent) + 1
+
+    def __len__(self) -> int:
+        return self._depth
+
+    @property
+    def parent(self) -> Ancestry | None:
+        """The ancestry this one extends; None for a root's child."""
+        return self._parent
+
+    @property
+    def step(self) -> Step:
+        """The last link: the microstep that chained the item."""
+        return self._step
+
+    def steps(self) -> tuple[Step, ...]:
+        """The steps, root first."""
+        steps: list[Step] = []
+        link: Ancestry | None = self
+        while link is not None:
+            steps.append(link._step)
+            link = link._parent
+        steps.reverse()
+        return tuple(steps)
+
+    def __iter__(self) -> Iterator[Step]:
+        return iter(self.steps())
+
+    @overload
+    def __getitem__(self, index: int) -> Step: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> tuple[Step, ...]: ...
+
+    def __getitem__(self, index: int | slice) -> Step | tuple[Step, ...]:
+        return self.steps()[index]
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, Ancestry | tuple):
+            return self.steps() == tuple(other)
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        return hash(self.steps())
+
+    def __repr__(self) -> str:
+        return repr(self.steps())
+
+
 #: The start of every stderr line of a `StatechartError` that stops a tier, so
 #: one journal pattern catches the whole report (deployment runbook, "What to
 #: watch").
@@ -346,14 +413,21 @@ class Context:
     event: Event
     active: frozenset[str]
     data: Any
-    ancestry: tuple[Step, ...] = ()
+    ancestry: Sequence[Step] = ()
     #: set by `Executor.resolve`: a read, which records no hit (§5)
     quiet: bool = False
+    #: the executor's count of a step in the ancestry (`count`)
+    counter: Callable[[Step], int] | None = field(default=None, compare=False, repr=False)
 
     @property
     def depth(self) -> int:
         """The item's ancestry depth; 0 for a root item (§8)."""
         return len(self.ancestry)
+
+    def count(self, step: Step) -> int:
+        """How many links of the item's ancestry are `step` (§8). Under the
+        executor it takes constant time, however deep the chain."""
+        return self.ancestry.count(step) if self.counter is None else self.counter(step)
 
 
 type Guard = Callable[[Context], bool]
@@ -955,7 +1029,7 @@ class _Item:
     key: Hashable
     kind: Literal["event", "completion", "continuation", "start"]
     event: Event
-    ancestry: tuple[Step, ...] = ()
+    ancestry: Sequence[Step] = ()
     name: str = ""
     released: bool = False
     #: a completion's entry serial of its state
@@ -972,10 +1046,14 @@ class _Microstep:
     entered: list[str] = field(default_factory=list)
     branches: list[str] = field(default_factory=list)
     intents: list[Any] = field(default_factory=list)
+    _chained: Ancestry | None = None
 
-    def chained(self) -> tuple[Step, ...]:
-        """The ancestry of the items this microstep produces."""
-        return (*self.item.ancestry, (self.item.key, self.item.event.name))
+    def chained(self) -> Ancestry:
+        """The ancestry of the items this microstep produces, one link on the
+        item's, built once and shared by all of them."""
+        if self._chained is None:
+            self._chained = Ancestry(self.item.ancestry, (self.item.key, self.item.event.name))
+        return self._chained
 
 
 #: The event of an initial entry (`INITIAL`).
@@ -1086,6 +1164,11 @@ class Executor:
         #: release scan visits; and the serial the next added instance takes
         self._deferring: set[Hashable] = set()
         self._added = 0
+        #: the ancestry of the item in hand, root first, and how many of its
+        #: links each step is: the worklist is depth first, so the next item's
+        #: parent is on this path, and keeping it costs constant time per item
+        self._path: list[Ancestry] = []
+        self._on_path: dict[Step, int] = {}
 
     # -- the tier's calls
 
@@ -1153,6 +1236,7 @@ class Executor:
             while True:
                 while self._worklist:
                     self._current = self._worklist.popleft()
+                    self._align(self._current.ancestry)
                     outcome = self._step(self._current)
                     outcomes.append(outcome)
                     name = self._instances[outcome.key].chart.name
@@ -1175,6 +1259,8 @@ class Executor:
         finally:
             self._running = False
             self._current = None
+            self._path.clear()
+            self._on_path.clear()
 
     def resolve(self, key: Hashable, event: Event) -> Outcome:
         """Read how `event` would be selected for `key` as it stands, and do none of it.
@@ -1327,9 +1413,37 @@ class Executor:
         facts += [("microstep", line) for line in recent]
         return facts
 
-    @staticmethod
-    def _context(inst: _Instance, item: _Item, quiet: bool = False) -> Context:
-        return Context(item.key, item.event, inst.active, inst.data, item.ancestry, quiet)
+    def _context(self, inst: _Instance, item: _Item, quiet: bool = False) -> Context:
+        counter = functools.partial(self._count, item.ancestry)
+        return Context(item.key, item.event, inst.active, inst.data, item.ancestry, quiet, counter)
+
+    def _align(self, ancestry: Sequence[Step]) -> None:
+        """Make the path the item's ancestry: drop the links past the part it
+        shares, then add its own."""
+        path, counts = self._path, self._on_path
+        missing: list[Ancestry] = []
+        link = ancestry if isinstance(ancestry, Ancestry) else None
+        while link is not None and not (len(path) >= len(link) and path[len(link) - 1] is link):
+            missing.append(link)
+            link = link.parent
+        keep = 0 if link is None else len(link)
+        while len(path) > keep:
+            step = path.pop().step
+            if counts[step] == 1:
+                del counts[step]
+            else:
+                counts[step] -= 1
+        for link in reversed(missing):
+            path.append(link)
+            counts[link.step] = counts.get(link.step, 0) + 1
+
+    def _count(self, ancestry: Sequence[Step], step: Step) -> int:
+        """`step`'s links in `ancestry`: read off the path when the ancestry is
+        the item in hand's, else counted link by link."""
+        top = self._path[-1] if self._path else ()
+        if top is ancestry or (not self._path and not ancestry):
+            return self._on_path.get(step, 0)
+        return sum(1 for link in ancestry if link == step)
 
     @staticmethod
     def _stale(inst: _Instance, event: Event) -> bool:

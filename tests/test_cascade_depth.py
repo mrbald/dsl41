@@ -1,14 +1,16 @@
-"""A long instant cascade fits the interpreter's recursion limit.
+"""A long instant cascade runs, and one that never ends stops.
 
-The oracle evaluates a cascade of instant starts recursively, one start
-inside the next. An engine-made input is in the WAL before it is applied, so
-a RecursionError there would stop every resume at the same input. The engine
-and the replay fit the limit to the catalog's job count
-(`oracle.fit_recursion_limit`); a cascade that still passes it raises an
-error that names the RecursionError and the cascade's first start. The chart
-oracle's cascade is the executor's worklist, iterative: it takes no frame per
-nested start, so its constant is 0 and the frames it needs do not grow with
-the job count (DL-350).
+The old oracle evaluated a cascade of instant starts recursively, one start
+inside the next, and fitted the interpreter's recursion limit to the job
+count (`oracle.fit_recursion_limit`); a cascade past it raised an error naming
+the RecursionError and the cascade's first start. The chart oracle's cascade
+is the executor's worklist, iterative: it takes no frame per nested start, so
+its constant is 0 and the frames it needs do not grow with the job count
+(DL-350). The engine, the replays and equiv build the chart oracle and fit
+nothing. Its hook counts a root dispatch's items and stops it at the item cap
+for the estate's job count (`oracle_chart.item_cap`, DL-351), with the
+same error class and the same operator outcome: an engine-made input is
+quarantined, a control input is refused `apply_faulted`.
 
 The scale tests run the CLI in a subprocess: a C stack overflow would kill
 the process, and it must not take pytest down with it.
@@ -16,10 +18,12 @@ the process, and it must not take pytest down with it.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 import sys
-from datetime import datetime
+import threading
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import FrameType
 from typing import Any
@@ -27,10 +31,10 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from dsl41 import runner, runner_journal
+from dsl41 import oracle_chart, runner
 from dsl41.cli import app
 from dsl41.equiv import equivalent_tier_c
-from dsl41.ir import lower_source
+from dsl41.ir import CatalogIR, lower_source
 from dsl41.oracle import (
     FRAMES_PER_NESTED_START,
     MAX_NESTED_STARTS,
@@ -38,8 +42,21 @@ from dsl41.oracle import (
     Oracle,
     fit_recursion_limit,
 )
-from dsl41.oracle_chart import ChartOracle
+from dsl41.oracle_chart import (
+    ITEM_CEILING,
+    ITEM_FLOOR,
+    ITEMS_PER_JOB_SQUARED,
+    RECURSION_LIMIT,
+    ChartOracle,
+    item_cap,
+)
 from dsl41.oracle_state import CascadeDepthError, Event, OracleError
+from dsl41.runner_adapters import FakeAdapter
+from dsl41.runner_admission import AdmissionRefused, Envelope
+from dsl41.runner_clock import EngineError, VirtualClock
+from dsl41.period import catalog_hash_v2
+from dsl41.runner import Engine
+from dsl41.runner_startup import start_run
 
 START = "2026-01-05T09:00:00"
 T0 = datetime.fromisoformat(START)
@@ -100,9 +117,10 @@ def test_sem10_a_300_job_instant_cascade_runs_and_replays_in_a_fresh_process(
 ) -> None:
     """DL-304: the three deepest shapes, 300 jobs each, started by an
     engine-made input (a scheduler tick, or a completion). At the default
-    limit of 1000 they raise at about 45, 91 and 142 jobs. The engine fits
-    the limit in `rehearse`; a fresh process fits it again for `journal`'s
-    replay. Neither raises nor dies on a signal."""
+    limit of 1000 the old oracle's recursion raised at about 45, 91 and 142
+    jobs. The chart oracle's cascade takes no frame per start, so `rehearse`
+    runs them and a fresh process replays them for `journal`, neither fitting
+    the limit to the job count. Neither raises nor dies on a signal."""
     jil, events = SHAPES[shape](JOBS)
     (tmp_path / "estate.jil").write_text(jil)
     (tmp_path / "scenario.json").write_text(json.dumps({"events": events}))
@@ -384,53 +402,416 @@ def test_sem10_the_chart_oracle_fits_the_base_whatever_the_job_count() -> None:
     assert fit_recursion_limit(JOBS, ChartOracle) == RECURSION_LIMIT_BASE
 
 
-def test_sem10_equiv_tier_c_fits_the_limit_to_the_larger_catalog() -> None:
-    """equiv's tier (c) runs scripts through the oracle, so a script can
-    start a cascade as deep as a live one. It fits the limit to the larger
-    of the two catalogs."""
-    small = lower_source(_box_chain(2)[0])
+def test_sem10_equiv_tier_c_runs_a_long_cascade_without_a_fit() -> None:
+    """equiv's tier (c) runs scripts through the chart oracle, so a script can
+    start a cascade as long as a live one; the limit is the oracle's fixed
+    headroom, whatever the job count."""
     large = lower_source(_box_chain(JOBS)[0])
     sys.setrecursionlimit(1000)
     result = equivalent_tier_c(large, large, [[_force_q0()]])
     assert result.equivalent
-    assert sys.getrecursionlimit() == fit_recursion_limit(JOBS)
+    assert sys.getrecursionlimit() == RECURSION_LIMIT
+
+
+# ------------------------------------------------------------- what lowers evaluates
+
+
+def _deep_jil(depth: int) -> str:
+    grouped = "(" * depth + "s(a)" + ")" * depth
+    return _cmd("a") + _cmd("b", grouped)
+
+
+def _deepest_lowered() -> CatalogIR:
+    """The catalog whose condition is the deepest the lowering accepts at
+    Python's default limit, found from a fresh thread's stack, where the
+    lowering reaches deepest (DL-20)."""
+    found: dict[str, Any] = {}
+
+    def search() -> None:
+        sys.setrecursionlimit(1000)
+        low, high = 1, 2000
+        while low < high:
+            middle = (low + high + 1) // 2
+            try:
+                lower_source(_deep_jil(middle))
+            except Exception:  # noqa: BLE001 -- the lowering's refusal, whatever its class
+                high = middle - 1
+            else:
+                low = middle
+        found["depth"] = low
+        found["catalog"] = lower_source(_deep_jil(low))
+
+    thread = threading.Thread(target=search)
+    thread.start()
+    thread.join()
+    assert 900 < found["depth"] < 1000
+    catalog: CatalogIR = found["catalog"]
+    return catalog
+
+
+def _engine_wakes_b(catalog: CatalogIR) -> str:
+    """`a`'s forced start through an engine with no run root, at the engine's
+    own call site: `b`'s status once the engine is quiet."""
+
+    async def scenario() -> str:
+        engine = Engine(catalog, clock=VirtualClock(start=T0), adapters={"CMD": FakeAdapter()})
+        engine.inject(_event("FORCE_STARTJOB", "a"))
+        await engine.run_until_quiescent(T0 + timedelta(seconds=1))
+        status = engine.oracle.store.job["b"].status
+        await engine.shutdown()
+        return status
+
+    return asyncio.run(scenario())
+
+
+def test_sem10_the_deepest_condition_that_lowers_evaluates_at_the_engine_s_call_site() -> None:
+    """What lowers must evaluate: at Python's default limit the engine's oracle
+    raises it to `RECURSION_LIMIT`, so `a`'s completion wakes `b`, whose
+    condition is grouped as deep as the lowering accepts."""
+    catalog = _deepest_lowered()
     sys.setrecursionlimit(1000)
-    equivalent_tier_c(small, large, [])
-    assert sys.getrecursionlimit() == fit_recursion_limit(JOBS)
+    assert _engine_wakes_b(catalog) in ("STARTING", "RUNNING", "SUCCESS")
 
 
-def test_sem10_a_log_written_past_the_limit_names_the_cascade_and_replays_once_fitted(
+def test_sem10_without_the_headroom_the_deepest_condition_does_not_evaluate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The control: at the default limit the same wake meets the depth
+    error, so the headroom is what lets it evaluate."""
+    catalog = _deepest_lowered()
+    monkeypatch.setattr(oracle_chart, "RECURSION_LIMIT", 1000)
+    sys.setrecursionlimit(1000)
+    assert _engine_wakes_b(catalog) == "INACTIVE"
+
+
+def _deepest_stored() -> int:
+    """The deepest grouping a run root can store: its catalog hash serializes
+    the conditions, and pydantic refuses a nesting deeper than its own bound,
+    whatever the recursion limit."""
+    low, high = 1, 1000
+    while low < high:
+        middle = (low + high + 1) // 2
+        try:
+            catalog_hash_v2(lower_source(_deep_jil(middle)))
+        except EngineError:
+            high = middle - 1
+        else:
+            low = middle
+    return low
+
+
+def test_sem10_a_run_root_stores_no_deeper_condition_than_its_replay_evaluates(
+    tmp_path: Path,
+) -> None:
+    """A run root holds only what its catalog hash serializes, far less deep
+    than the lowering accepts. The deepest it stores runs in the engine and
+    replays from the default limit, so no logged input carries a condition
+    its replay cannot evaluate."""
+    depth = _deepest_stored()
+    # pydantic's bound: 252 in a fresh process, one more after some suites
+    assert 240 <= depth <= 260
+    sys.setrecursionlimit(1000)
+
+    (tmp_path / "estate.jil").write_text(_deep_jil(depth))
+    scenario = {"events": [{"at": START, "kind": "FORCE_STARTJOB", "payload": {"job": "a"}}]}
+    (tmp_path / "scenario.json").write_text(json.dumps(scenario))
+    root = tmp_path / "run"
+    invoke = CliRunner().invoke
+    played = invoke(
+        app,
+        [
+            "rehearse",
+            str(tmp_path / "estate.jil"),
+            "--scenario",
+            str(tmp_path / "scenario.json"),
+            "--start",
+            START,
+            "--hours",
+            "1",
+            "--run-root",
+            str(root),
+        ],
+    )
+    assert played.exit_code == 0, played.output
+    sys.setrecursionlimit(1000)
+    replayed = invoke(app, ["journal", str(root)])
+    assert replayed.exit_code == 0, replayed.output
+    assert "b INACTIVE->STARTING" in replayed.output
+    assert "rejected input" not in replayed.output
+
+
+#: A grouping past the catalog hash's bound, whatever the process ran before.
+_PAST_THE_HASH = 300
+
+
+def test_sem10_a_condition_deeper_than_the_hash_serializes_is_refused_by_name(
+    tmp_path: Path,
+) -> None:
+    """A condition grouped past the serializer's bound (about 250 levels) lowers,
+    and the catalog hash refuses it with a named error, not the serializer's
+    traceback; rehearse prints the refusal and exits 2."""
+    catalog = lower_source(_deep_jil(_PAST_THE_HASH))
+    with pytest.raises(EngineError, match="deeper than its hash serializes \\(about 250 levels"):
+        catalog_hash_v2(catalog)
+    (tmp_path / "estate.jil").write_text(_deep_jil(_PAST_THE_HASH))
+    played = CliRunner().invoke(
+        app, ["rehearse", str(tmp_path / "estate.jil"), "--start", START, "--hours", "1"]
+    )
+    assert played.exit_code == 2, played.output
+    assert "deeper than its hash serializes" in played.output
+    assert isinstance(played.exception, SystemExit)
+
+
+def test_sem10_the_hash_names_only_the_depth_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Any other error out of the serializer leaves the hash as it was."""
+    catalog = lower_source(_deep_jil(1))
+
+    def broken(*_args: object, **_kwargs: object) -> object:
+        raise ValueError("some other serializer error")
+
+    monkeypatch.setattr(type(catalog), "model_dump", broken)
+    with pytest.raises(ValueError, match="some other serializer error"):
+        catalog_hash_v2(catalog)
+
+
+# ------------------------------------------------------------- the item cap
+
+
+def test_sem10_the_item_cap_is_a_floor_a_square_then_a_ceiling() -> None:
+    """The floor to 158 jobs, four times the square to 316, the ceiling above."""
+    assert item_cap(1) == item_cap(158) == ITEM_FLOOR == 100_000
+    assert item_cap(159) == ITEMS_PER_JOB_SQUARED * 159**2 == 101_124
+    assert item_cap(200) == 160_000
+    assert item_cap(316) == ITEMS_PER_JOB_SQUARED * 316**2 == 399_424
+    assert item_cap(317) == item_cap(400) == item_cap(1000) == ITEM_CEILING == 400_000
+
+
+class _Counting(ChartOracle):
+    """The chart oracle, keeping the most items any root dispatch took."""
+
+    peak = 0
+
+    def _check_reached(self) -> None:
+        self.peak = max(self.peak, self._items)
+        super()._check_reached()
+
+
+def _event(kind: str, job: str, **payload: object) -> Event:
+    return Event(at=T0, kind=kind, payload={"job": job, **payload})
+
+
+def _queue_scan(jobs: int) -> tuple[str, list[Event]]:
+    """Half the waiters queue on R2, which `h2` holds, ahead of the other half
+    on R1, all of whose units `h1` keeps after its run. RELEASE_RESOURCE on `h1`
+    frees them, and each of the scan's passes readmits every blocked waiter
+    before it admits one more: about half the square of the jobs in items."""
+    half = (jobs - 2) // 2
+    jil = f"insert_resource: R1\nres_type: R\namount: {half}\n\n"
+    jil += "insert_resource: R2\nres_type: R\namount: 1\n\n"
+    jil += _cmd("h1", extra=f"resources: (R1, QUANTITY={half}, FREE=N)\n")
+    jil += _cmd("h2", extra="resources: (R2, QUANTITY=1, FREE=Y)\n")
+    jil += "".join(
+        _cmd(f"w{i}", extra="resources: (R2, QUANTITY=1, FREE=Y)\n") for i in range(half)
+    )
+    jil += "".join(
+        _cmd(f"v{i}", extra="resources: (R1, QUANTITY=1, FREE=Y)\n") for i in range(half)
+    )
+    setup = [
+        _event("STARTJOB", "h1"),
+        _event("STATUS", "h1", status="SUCCESS"),
+        _event("STARTJOB", "h2"),
+        *(_event("STARTJOB", f"w{i}") for i in range(half)),
+        *(_event("STARTJOB", f"v{i}") for i in range(half)),
+    ]
+    return jil, setup
+
+
+def _fan_in(jobs: int) -> tuple[str, list[Event]]:
+    """A chain of empty boxes, and as many command jobs each waiting on all of
+    them: every box's completion wakes every waiter, about 0.8 times the
+    square of the jobs in items."""
+    half = jobs // 2
+    jil = _box("q0") + "".join(_box(f"q{i}", f"s(q{i - 1})") for i in range(1, half))
+    every = " & ".join(f"s(q{i})" for i in range(half))
+    return jil + "".join(_cmd(f"c{j}", every) for j in range(half)), []
+
+
+_CAP_SHAPES = {
+    **SLOPE_SHAPES,
+    "paren-chain": _paren_chain,
+    "override-fold": _override_fold,
+    "off-hold-chain": _off_hold_chain,
+    "noexec-box-chain": _noexec_box_chain,
+    "queue-scan": _queue_scan,
+    "fan-in": _fan_in,
+}
+_CAP_LAST = {"queue-scan": _event("RELEASE_RESOURCE", "h1")}
+
+
+def _peak(shape: str, jobs: int) -> tuple[int, int]:
+    """The most items a root dispatch of the shape took over `jobs` jobs,
+    its setup included, and the estate's job count."""
+    jil, setup = _CAP_SHAPES[shape](jobs)
+    catalog = lower_source(jil)
+    built = _Counting(catalog)
+    last = _CAP_LAST.get(shape) or _LAST.get(shape, (_force_q0(), "SUCCESS"))[0]
+    for event in [*setup, last]:
+        built.feed(event)
+    return built.peak, len(catalog.jobs)
+
+
+#: The least margin the cap keeps over a legitimate shape (4.7 measured, the
+#: fan-in at 200 jobs).
+MARGIN = 4.5
+
+
+@pytest.mark.parametrize(
+    ("shape", "jobs"),
+    [
+        *((shape, jobs) for shape in sorted(_CAP_SHAPES) for jobs in (41, 64, 100)),
+        ("box-ring", 200),
+        ("queue-scan", 200),
+        ("fan-in", 200),
+    ],
+)
+def test_sem10_the_item_cap_holds_the_largest_shapes_with_its_margin(shape: str, jobs: int) -> None:
+    """DL-304's shapes, a queue scan and a fan-in of wakes, the largest
+    legitimate cascades measured, take at most the cap's `MARGIN`th part, at
+    the floor and where the square binds; the nested terminator chain stops at
+    the lowering's 64 levels."""
+    if shape == "terminator-chain" and jobs > 64:
+        pytest.skip("box nesting stops at 64 levels")
+    peak, count = _peak(shape, jobs)
+    assert MARGIN * peak <= item_cap(count)
+    # the two square shapes take what their docstrings say, so the margin is not vacuous
+    assert peak > {"queue-scan": 0.5, "fan-in": 0.8}.get(shape, 0) * count**2
+
+
+def _loop_estate(jobs: int) -> CatalogIR:
+    """DL-348's shape: a box whose condition is its own end, holding a member
+    with both terminators, and idle jobs to make up the estate."""
+    jil = _box("bx", "t(bx)")
+    jil += _cmd("k", extra="box_name: bx\nbox_terminator: 1\njob_terminator: 1\n")
+    jil += "".join(_cmd(f"f{i}") for i in range(jobs - 2))
+    return lower_source(jil)
+
+
+class _BeforeDL348(ChartOracle):
+    """The box's end reaches every member, whatever run the box is in: the
+    defect DL-348 fixed, which loops on `_loop_estate` with no nested start."""
+
+    def _still_the_run(self, box: str, run: int) -> bool:
+        return True
+
+
+def test_sem10_a_cascade_that_never_ends_stops_at_the_item_cap() -> None:
+    """The kill of `bx` terminates it; its end starts it again, and the end's
+    kill of `k`, carried into the new run, ends that run, and so on, each
+    start a sibling of the last, so job.100 never fires. At 200 jobs the
+    hook stops it at the cap with the depth error, naming the cap, the job
+    count and the root item, and the oracle takes its next input."""
+    built = _BeforeDL348(_loop_estate(200))
+    built.feed(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "bx"}))
+    with pytest.raises(CascadeDepthError) as raised:
+        built.feed(Event(at=T0, kind="KILLJOB", payload={"job": "bx"}))
+    assert isinstance(raised.value, RecursionError)
+    assert isinstance(raised.value, OracleError)
+    assert raised.value.job == "bx"
+    assert str(raised.value) == (
+        "an instant cascade reached the item cap of 160000 for an estate of 200 jobs;"
+        " its root item was KILLJOB on bx"
+    )
+    built.feed(Event(at=T0, kind="STATUS", payload={"job": "f0", "status": "SUCCESS"}))
+    assert built.store.job["f0"].status == "SUCCESS"
+
+
+def _capped(monkeypatch: pytest.MonkeyPatch, cap: int) -> None:
+    monkeypatch.setattr(oracle_chart, "item_cap", lambda _jobs: cap)
+
+
+def _chain_items(jobs: int) -> int:
+    """The items of the forced start of a box chain over `jobs` jobs: one
+    root dispatch."""
+    built = _Counting(lower_source(_box_chain(jobs)[0]))
+    built.feed(_force_q0())
+    return built.peak
+
+
+def test_sem10_a_dispatch_below_the_cap_runs_and_one_at_the_cap_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cap is the first item count a root dispatch may not reach."""
+    items = _chain_items(20)
+    catalog = lower_source(_box_chain(20)[0])
+    _capped(monkeypatch, items + 1)
+    below = ChartOracle(catalog)
+    below.feed(_force_q0())
+    assert {row.status for row in below.store.job.values()} == {"SUCCESS"}
+    _capped(monkeypatch, items)
+    at = ChartOracle(catalog)
+    with pytest.raises(CascadeDepthError, match=f"item cap of {items} for an estate of 20 jobs"):
+        at.feed(_force_q0())
+
+
+def test_sem10_a_control_input_at_the_cap_is_refused_apply_faulted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An engine whose limit fell short meets the named error on the
-    engine-made tick's dry apply. The tick's time half applies alone, so the
-    tick is quarantined: logged with its rejection, and rehearse names it
-    and fails (concurrency-model ss4). A log an older build wrote holds the
-    tick with no decision. A replay that does not fit the limit quarantines
-    it the same way; a replay that fits it applies it, so a build with the
-    fit recovers such an estate."""
+    """A control input whose dry apply reaches the cap is refused before the
+    WAL, as any control input whose apply raises (DL-292)."""
+    _capped(monkeypatch, 50)
+
+    async def scenario() -> AdmissionRefused:
+        # the chain without `q0`'s tick: this engine wires no scheduler
+        jil = _box("q0") + "".join(_box(f"q{i}", f"s(q{i - 1})") for i in range(1, 20))
+        engine = start_run(
+            lower_source(jil),
+            tmp_path / "run",
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter()},
+        )
+        future = engine.submit(
+            _force_q0(), Envelope(request_id="r1", expect={}, epoch=engine.epoch)
+        )
+        assert isinstance(future, asyncio.Future)
+        await engine.run_until_quiescent(T0)
+        with pytest.raises(AdmissionRefused) as refused:
+            await future
+        assert engine.oracle.store.job["q0"].status == "INACTIVE"
+        await engine.shutdown()
+        assert engine.journal is not None
+        engine.journal.close()
+        return refused.value
+
+    refusal = asyncio.run(scenario())
+    assert refusal.code == "apply_faulted"
+    assert "an instant cascade reached the item cap of 50 for an estate of 20 jobs" in str(refusal)
+
+
+def test_sem10_an_engine_made_input_at_the_cap_is_quarantined_and_replays_alike(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An engine whose cap the scheduler's tick reaches meets the error on the
+    tick's dry apply. The tick's time half applies alone, so the tick is
+    quarantined: logged with its rejection, and rehearse names it and fails
+    (concurrency-model ss4). A replay under the same cap quarantines it the
+    same way; the cap is the catalog's, so the live engine and its replays
+    agree. A log an older build wrote holds the tick with no decision, and a
+    replay under the cap quarantines it too."""
     jil, _ = _box_chain(200)
     (tmp_path / "estate.jil").write_text(jil)
-    monkeypatch.setattr(runner, "fit_recursion_limit", lambda *_: sys.getrecursionlimit())
-    sys.setrecursionlimit(1000)
+    _capped(monkeypatch, 500)
     invoke = CliRunner().invoke
     rehearse = ["rehearse", str(tmp_path / "estate.jil"), "--start", START, "--hours", "1"]
-
-    def unfitted_journal(root: Path) -> Any:
-        with monkeypatch.context() as unfitted:
-            unfitted.setattr(
-                runner_journal, "fit_recursion_limit", lambda *_: sys.getrecursionlimit()
-            )
-            return invoke(app, ["journal", str(root)])
-
+    capped = "an instant cascade reached the item cap of 500 for an estate of 200 jobs"
     quarantined = "rejected input 1 (STARTJOB for job q0 from scheduler): engine_apply_faulted:"
     root = tmp_path / "run"
     played = invoke(app, [*rehearse, "--run-root", str(root)])
     assert played.exit_code == 1, played.output
     assert "quarantined input 1: quarantined: applying STARTJOB for job q0" in played.output
-    assert "RecursionError: an instant cascade passed" in played.output
-    assert "its first start was q0 (STARTJOB" in played.output
-    narrated = unfitted_journal(root)
+    assert f"{capped}; its root item was STARTJOB (STARTJOB event (scheduler)) on q0" in (
+        played.output
+    )
+    narrated = invoke(app, ["journal", str(root)])
     assert narrated.exit_code == 0, narrated.output
     assert quarantined in narrated.output
     assert "q199 RUNNING->SUCCESS" not in narrated.output
@@ -441,13 +822,8 @@ def test_sem10_a_log_written_past_the_limit_names_the_cascade_and_replays_once_f
         older.setattr(runner.Engine, "_dry_apply_engine_made", lambda _self, _attempt: None)
         died = invoke(app, [*rehearse, "--run-root", str(old)])
     assert died.exit_code == 1, died.output
-    assert "rehearse failed: RecursionError: an instant cascade passed" in died.output
-    assert "its first start was q0 (STARTJOB" in died.output
-    recovered = unfitted_journal(old)
+    assert f"rehearse failed: {capped}" in died.output
+    recovered = invoke(app, ["journal", str(old)])
     assert recovered.exit_code == 0, recovered.output
     assert quarantined in recovered.output
-    assert "CascadeDepthError: RecursionError:" in recovered.output
-    replayed = invoke(app, ["journal", str(old)])
-    assert replayed.exit_code == 0, replayed.output
-    assert "q199 RUNNING->SUCCESS" in replayed.output
-    assert "rejected input" not in replayed.output
+    assert f"CascadeDepthError: {capped}" in recovered.output

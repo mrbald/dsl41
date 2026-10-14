@@ -19,6 +19,7 @@ from hypothesis import strategies as st
 from dsl41 import state_machine as sm
 from dsl41.state_machine import (
     COMPLETION,
+    Ancestry,
     INITIAL,
     OVERFLOWED,
     START,
@@ -1411,6 +1412,119 @@ def test_s8_a_retrigger_bound_is_a_row_guarded_on_ancestry_depth() -> None:
         (2, ("bound.02",)),
         (2, ("bound.02",)),
     ]
+
+
+def test_s8_a_chained_item_s_ancestry_is_a_shared_link_that_reads_as_its_tuple() -> None:
+    """An item extends its parent's ancestry by one link, and the items one
+    microstep chains share it; the link reads, compares and hashes as the
+    tuple of its steps (DL-351)."""
+    seen: list[Any] = []
+
+    def go(ctx: Context) -> Effects:
+        seen.append(ctx.ancestry)
+        if ctx.depth < 2:
+            return Effects(send=((ctx.key, Event("go")), (ctx.key, Event("go"))))
+        return Effects()
+
+    machine = chart(
+        "links",
+        composite("links", region("main", "s", leaf("s"))),
+        [Row("links.01", "s", "go", kind="internal", action="go")],
+        actions={"go": go},
+    )
+    executor = Executor()
+    executor.restore("k", machine, {"links", "s"})
+    executor.dispatch("k", Event("go"))
+    root, first, deep, _, second = seen[:5]
+    assert root == ()
+    assert isinstance(first, Ancestry) and first is second
+    assert first == (("k", "go"),) and (("k", "go"),) == first
+    assert deep == (("k", "go"), ("k", "go")) and deep.parent is first and first.parent is None
+    assert deep.step == ("k", "go") and len(deep) == 2
+    assert deep[0] == ("k", "go") and deep[:1] == (("k", "go"),)
+    assert hash(deep) == hash(deep.steps()) and repr(deep) == repr(deep.steps())
+    assert deep != [("k", "go"), ("k", "go")]
+
+
+def test_s8_a_guard_counts_a_step_of_its_ancestry_in_constant_time() -> None:
+    """`Context.count` under the executor equals the count over the ancestry's
+    links, on every item of a tree whose branches repeat steps, siblings
+    included; a context kept past its item counts its own ancestry."""
+    counted: list[tuple[int, int]] = []
+    kept: list[Context] = []
+
+    def deep(ctx: Context) -> bool:
+        counted.append((ctx.count(("a", "ping")), sum(s == ("a", "ping") for s in ctx.ancestry)))
+        if kept:
+            counted.append((kept[0].count(("a", "ping")), kept[0].ancestry.count(("a", "ping"))))
+        kept.append(ctx)
+        return ctx.depth >= 4
+
+    def ping(ctx: Context) -> Effects:
+        other = "b" if ctx.key == "a" else "a"
+        return Effects(send=((other, Event("ping")), (ctx.key, Event("ping"))))
+
+    machine = chart(
+        "pings",
+        composite("pings", region("main", "s", leaf("s"))),
+        [
+            Row("pings.01", "s", "ping", kind="internal", guard="shallow", action="ping"),
+            Row("pings.02", "s", "ping", kind="ignored", guard="deep"),
+        ],
+        guards={"shallow": lambda ctx: not deep(ctx), "deep": lambda ctx: ctx.depth >= 4},
+        actions={"ping": ping},
+    )
+    executor = Executor()
+    for key in ("a", "b"):
+        executor.restore(key, machine, {"pings", "s"})
+    executor.dispatch("a", Event("ping"))
+    assert len(counted) > 40
+    assert all(fast == slow for fast, slow in counted)
+    assert max(fast for fast, _ in counted) == 4
+    plain = Context("a", Event("ping"), frozenset(), None, (("a", "ping"), ("b", "ping")))
+    assert plain.count(("a", "ping")) == 1
+
+
+def test_s8_the_count_of_the_item_in_hand_reads_no_link() -> None:
+    """Under the executor `Context.count` reads the path's counts: a guard's
+    count on the item in hand never walks the ancestry's links."""
+    counted: list[int] = []
+
+    def again(ctx: Context) -> Effects:
+        return Effects(send=((ctx.key, Event("poke")),))
+
+    def shallow(ctx: Context) -> bool:
+        counted.append(ctx.count(("k", "poke")))
+        return counted[-1] < 5
+
+    machine = chart(
+        "walkless",
+        composite("walkless", region("main", "s", leaf("s"))),
+        [
+            Row("walkless.01", "s", "poke", kind="internal", guard="shallow", action="again"),
+            Row("walkless.02", "s", "poke", kind="ignored", guard="deep"),
+        ],
+        guards={"shallow": shallow, "deep": lambda ctx: ctx.count(("k", "poke")) >= 5},
+        actions={"again": again},
+    )
+    executor = Executor()
+    executor.restore("k", machine, {"walkless", "s"})
+
+    def walked(self: Ancestry) -> Any:
+        raise AssertionError("a count walked the links")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Ancestry, "__iter__", walked)
+        patch.setattr(Ancestry, "steps", walked)
+        executor.dispatch("k", Event("poke"))
+    assert counted == [0, 1, 2, 3, 4, 5]
+
+
+def test_s8_an_ancestry_built_on_a_tuple_keeps_its_steps() -> None:
+    """A tier that extends its own tuple of steps gets their links first."""
+    built = Ancestry((("a", "x"), ("b", "y")), ("c", "z"))
+    assert built == (("a", "x"), ("b", "y"), ("c", "z"))
+    assert len(built) == 3 and built.parent == (("a", "x"), ("b", "y"))
 
 
 # ---- §10 completeness at run time

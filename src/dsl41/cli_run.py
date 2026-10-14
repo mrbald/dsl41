@@ -1544,13 +1544,16 @@ def rehearse(
             raise typer.Exit(refuse(exc)) from exc
         adapter, parked_fw, no_success = check_adapter(catalog, adapter)
     clock = VirtualClock(start_dt)
-    scheduler = Scheduler(
-        catalog,
-        start=start_dt,
-        default_tz=timezone,
-        tz_aliases=tz_aliases,
-        semantics=switches,
-    )
+    try:
+        scheduler = Scheduler(
+            catalog,
+            start=start_dt,
+            default_tz=timezone,
+            tz_aliases=tz_aliases,
+            semantics=switches,
+        )
+    except EngineError as exc:
+        raise typer.Exit(refuse(exc)) from exc
     adapters = {"CMD": adapter, "FW": adapter}
     try:
         if run_root is not None:
@@ -2105,7 +2108,7 @@ def _run_period(
     single-segment read and a lineage that crosses four boundaries differ
     in which segments they name, never in what replaying one of them
     means."""
-    from dsl41.oracle import Oracle
+    from dsl41.oracle_chart import ChartOracle
     from dsl41.oracle_state import OracleError
     from dsl41.period import oracle_reading
     from dsl41.runner_clock import EngineError
@@ -2119,7 +2122,7 @@ def _run_period(
     # The semantic switches come from the same pin (DL-252), or the replay
     # would read a condition differently from the engine that wrote the log.
     # The base zone comes from it too (DL-253).
-    oracle = Oracle(catalog, carried=carried, **oracle_reading(profile))
+    oracle = ChartOracle(catalog, carried=carried, **oracle_reading(profile))
     try:
         replay = replay_period(oracle, records)
     except (OracleError, EngineError) as exc:

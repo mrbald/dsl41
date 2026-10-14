@@ -589,8 +589,10 @@ Semantics:
   the run that ended is still the box's run.
 - `src/dsl41/oracle_chart.py`: the second oracle, which drives every job
   row through the `job` chart: each input a root item, its cascade on the
-  executor's worklist, and a hook that writes each microstep's moves,
-  compared with the first oracle by the lockstep harness.
+  executor's worklist, and a hook that writes each microstep's moves and
+  stops a cascade that does not end at an item cap. The engine, every
+  replay, preflight and equiv build it; it reproduces the first oracle's
+  golden digests.
 - `src/dsl41/oracle_chart_agreement.py`: the second oracle's error for a
   fired row it has no write for.
 - `src/dsl41/oracle_chart_cascade.py`: the second oracle's cascade: what
@@ -776,7 +778,7 @@ CLI and scripts:
 
 ### Tests
 
-The suite has 123 test files (`pytest --collect-only -q` shows the current
+The suite has 126 test files (`pytest --collect-only -q` shows the current
 count) and a 31-file synthetic or doc-derived JIL corpus under
 `tests/corpus/`. Every oracle trace test runs three times: against the
 oracle directly, through the engine under a virtual clock via
@@ -816,6 +818,9 @@ Compiler:
   and lock controls respond without throwing.
 - `tests/test_oracle.py`: the AutoSys oracle trace tests against the SEM
   entries.
+- `tests/test_oracle_goldens.py`: the oracle reproduces the golden digests
+  of the old oracle's answers over the harness's sample
+  (`tests/oracle_goldens.py`; CI replays the whole sample).
 - `tests/test_resources.py`: resource-manager tests that need direct
   oracle access, including the cross-order safety and liveness property.
 - `tests/test_semantics.py`: the semantic-switch registry, the

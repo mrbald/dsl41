@@ -1801,7 +1801,7 @@ def test_preflight_oracle_rule_is_armor_pinned_by_injection(
     def refuse(_catalog: CatalogIR, **_switches: object) -> None:
         raise OracleError("injected construction refusal")
 
-    monkeypatch.setattr(runner_mod, "Oracle", refuse)
+    monkeypatch.setattr(runner_mod, "ChartOracle", refuse)
     text = "insert_job: ok_job\njob_type: c\ncommand: x\nmachine: m1\n"
     items = preflight(lower_source(text))
     oracle_items = [i for i in items if i.code == "oracle"]

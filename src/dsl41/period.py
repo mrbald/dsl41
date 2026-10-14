@@ -144,8 +144,21 @@ def to_us(seconds: float) -> int:
 def catalog_hash_v2(catalog: CatalogIR) -> str:
     """ss1.1: sha256 over the ss3.2 canonical form of `catalog` with `meta`
     projected to `{source_files}` -- `tool_version` and `parsed_at` are
-    diagnostic and leave, spans stay. Spelled `"sha256:..."`."""
-    payload = catalog.model_dump(mode="json")
+    diagnostic and leave, spans stay. Spelled `"sha256:..."`.
+
+    Its serializer refuses a nesting deeper than its own bound, about 250
+    levels of a condition's grouping, whatever the recursion limit, so a run
+    root holds no deeper condition; the refusal is named here (DL-351)."""
+    try:
+        payload = catalog.model_dump(mode="json")
+    except ValueError as exc:
+        if "depth exceeded" not in str(exc):
+            raise
+        raise EngineError(
+            "the catalog nests a condition deeper than its hash serializes"
+            " (about 250 levels of grouping); flatten the grouping or split"
+            " the condition (period-model ss1.1)"
+        ) from exc
     payload["meta"] = {"source_files": list(catalog.meta.source_files)}
     return hash_over(payload)
 

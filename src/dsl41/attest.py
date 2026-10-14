@@ -72,7 +72,7 @@ from dsl41.canon import (
     with_digest,
 )
 from dsl41.classify import Baseline, carried_from_oracle, classify
-from dsl41.oracle import Oracle
+from dsl41.oracle_chart import ChartOracle
 from dsl41.oracle_state import CarriedRows
 from dsl41.period import (
     SENTINEL_NAME,
@@ -739,7 +739,7 @@ def rederive_seal(run_root: Path, period_id: int, *, stored: Seal | None = None)
     carried = carried_from_opening(run_root, opening, closing)
     # SEM-35: the period's own alias table, or a job whose `timezone:` only
     # that table resolves refuses the log this estate really wrote (DL-151)
-    oracle = Oracle(c1, carried=carried, **oracle_reading(closing.runtime_profile))
+    oracle = ChartOracle(c1, carried=carried, **oracle_reading(closing.runtime_profile))
     replay = replay_period(
         oracle,
         records,

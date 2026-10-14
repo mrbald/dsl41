@@ -7193,6 +7193,7 @@ def _random_diamond_script(draw: st.DrawFn) -> list[Event]:
     return events
 
 
+@pytest.mark.usefixtures("oracle_recursion_limit")
 @given(_random_diamond_script())
 @settings(
     max_examples=100,

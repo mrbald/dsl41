@@ -112,7 +112,7 @@ An id before its attempt line has no instance: deduplication and every refusal b
 
 ## Open findings
 
-The [risk map](../risk-map.md) row "Admission and idempotency" lists [a replayed oracle fault](../risk-map.md#a-replayed-oracle-fault-stops-every-resume) and [instant cascades recurse](../risk-map.md#instant-cascades-recurse).
+The [risk map](../risk-map.md) row "Admission and idempotency" lists [a replayed oracle fault](../risk-map.md#a-replayed-oracle-fault-stops-every-resume) and [instant cascades that do not end](../risk-map.md#instant-cascades-that-do-not-end).
 
 ## Gaps found
 
