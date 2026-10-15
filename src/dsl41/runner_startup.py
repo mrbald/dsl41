@@ -113,6 +113,7 @@ from dsl41.boundary import (
     CommittedBoundary,
     EstateAnchor,
     EstateHome,
+    Lineage,
     OpenedPeriod,
     act_on_head,
     carried_outbox,
@@ -787,21 +788,7 @@ async def _resume_under_lock(
     anchor -- are the CALLER's, because they are the other half of the
     acquire/release pairing."""
     fence = Fence(lock, anchor.lock) if anchor is not None else Fence(lock)
-    _drop_never_opened_segment(run_root)
-    records = read_journal(estate_wal(run_root))
-    lineage = select_seal(run_root, records)  # step 3
-    if lineage.seal is not None:
-        # the version FIRST (DL-253): the head action and the opening below
-        # write, and an older build's boundary must be refused for its
-        # version before either, not as a catalog that does not match
-        check_opening_version(lineage.seal.next_period, where=str(run_root))
-        # ss3.5's CMD-or-FW half, at the loader that holds C2 (DL-151). The
-        # sidecar half ran inside `select_seal`; this is the half that needs
-        # the OPENING catalog. Ahead of step 4, so a sidecar this catalog
-        # refuses moves no head and writes no segment -- and it runs at
-        # every resume of a period that opened from a seal, not only at the
-        # one that opened it.
-        check_executions_dispatchable(lineage.seal, catalog)
+    records, lineage = _select_lineage(run_root, catalog)
     if anchor is not None and sentinel is not None:
         act_on_head(  # step 4
             anchor,
@@ -846,63 +833,16 @@ async def _resume_under_lock(
         else _reopened(run_root, opening, lineage.seal)
     )
     carried: CarriedRows | None = None if opened is None else _carried_rows(opened)
-    check_leader_eligibility(opening, catalog=catalog)
-    # PR-22's U4 half: the committed manifest is the engine's own output,
-    # and a manifest that is not this segment's refuses rather than being
-    # read past. A MISSING artifact degrades where a WRONG one refuses
-    # (DL-113 decision 5) -- but not here: genesis installs the manifest
-    # BEFORE the log opens, so a root without one is a root that LOST it,
-    # pruned or damaged, and degrading would skip every profile gate below.
-    # The `header` root that once degraded here is a retired dialect and
-    # `read_journal` refused it above (DL-138).
-    # `read_journal` has run ss2.1's schema over the opening, so `period_id`
-    # is present and an int -- a fallback here would be a second authority
-    # for a field the reader already proved (DL-138)
-    manifest = read_period_manifest(run_root, int(opening["period_id"]))
-    if manifest is None:
-        raise EngineError(
-            f"{run_root}: a segment journal with no periods/000001/manifest.json --"
-            " the period's pin is missing (period-model ss2.1)"
-        )
-    check_manifest_against_segment(manifest, opening)
-    # the runtime half of the same gate, in CORE: the wired components
-    # must be what the period pinned, or shifted ticks and different
-    # kill windows run under an unchanged hash. Fields no wiring can report
-    # inherit the pin unless the launcher DECLARED them (`declared`), so a
-    # process that says nothing about its machine identity is held to the
-    # rest and one that does is held to all of it.
-    drift = _manifest_profile_drift(manifest, scheduler, adapters, deadman_s, declared)
-    if drift:
-        raise EngineError(
-            f"runtime-profile mismatch on {', '.join(drift)}: a runtime-profile"
-            " change is a new period (period-model ss2.1); re-baseline"
-            " explicitly with a fresh run root"
-        )
-    # the reconciliation windows have no wire flag, so the PIN is their
-    # default: a None param resolves from the manifest, and an explicit
-    # one is a caller's deliberate override (a harness affordance, like
-    # wiring a different adapter object)
-    if settle_seconds is None:
-        settle_seconds = manifest.runtime_profile.reconcile_settle_us / 1_000_000
-    if grace_seconds is None:
-        grace_seconds = manifest.runtime_profile.cmd_grace_us / 1_000_000
+    manifest = _pinned_manifest(
+        run_root, opening, catalog, scheduler, adapters, deadman_s, declared
+    )
+    settle_seconds, grace_seconds = _reconcile_windows(manifest, settle_seconds, grace_seconds)
     # unconditional (DL-137): the guard's docstring always said "run at
     # genesis and at resume", and a manifest-less root never reaches this
     # line -- the condition was a dead fork of the stated rule
     _require_adapters(catalog, adapters, "resume")
     _require_scheduler(catalog, scheduler, "resume")
-    domain = "virtual" if clock.virtual else "real"
-    if opening.get("clock_domain") != domain:
-        raise EngineError(
-            f"clock-domain mismatch: journal is {opening.get('clock_domain')!r},"
-            f" resume clock is {domain!r}"
-        )
-    last_at = last_journal_at(records)
-    if not clock.virtual and last_at > clock.now():
-        raise EngineError(
-            f"journal is from the future ({last_at.isoformat()} > now): the machine"
-            " clock moved backwards; refusing to feed non-decreasing time backwards"
-        )
+    last_at = _check_resume_clock(opening, records, clock)
     if journal is None:
         journal = Journal(
             estate_wal(run_root),
@@ -929,62 +869,14 @@ async def _resume_under_lock(
         deadman_s=deadman_s,
         epoch=epoch,
         carried=carried,
-        estate=(
-            EstateHome(
-                run_root=run_root,
-                anchor=anchor,
-                estate_id=sentinel.estate_id,
-                manifest=manifest,
-                prev_seal_digest=lineage.seal.digest if lineage.seal is not None else None,
-                prior_seal_record=(seal_record(lineage.seal) if lineage.seal is not None else None),
-            )
-            if anchor is not None and sentinel is not None and manifest is not None
-            else None
-        ),
+        estate=_estate_home(run_root, anchor, sentinel, manifest, lineage),
         fence=fence,
         # the pin even with no estate home, so the oracle reads what replay
         # reads (DL-252); with one, the engine checks the two agree
         semantics=switches_of(manifest.runtime_profile),
         machines=machines,
     )
-    # ss3.5: the carry is what this segment OPENED holding -- C1's
-    # undelivered intents and its applied bindings -- and it is seeded
-    # BEFORE the segment's own records are read, never patched in
-    # afterwards: an `effect_result` here for an effect born in C1 is an
-    # outcome the replay has to attach, and `Outbox.resolve` refuses an
-    # outcome for an effect it never saw. It runs its effects, and the
-    # rebuilt decision index its request ids in flight, on the engine's
-    # executor, the process's one (statechart-engine ss11).
-    try:
-        replay = replay_inputs(
-            engine.oracle,
-            records,
-            outbox=carried_outbox(opened, at=opening_at(opening), machines=engine.machines),
-            machines=engine.machines,
-        )
-    except ReplayFault as exc:
-        # period-model ss11: refuse, don't degrade. The same build raises at
-        # the same input on every resume, so the estate stays down until a
-        # build that replays it runs here (deployment runbook ss7)
-        raise EngineError(
-            f"{run_root}: resume stopped: {exc}. Deploy a build that fixes the"
-            " fault, or roll back to the release that wrote this log",
-            code=exc.code,
-        ) from exc
-    # the log's position comes back with its contents (concurrency-model
-    # ss2): the next admission continues the index, and a retry of anything
-    # this log already decided is still answered from that decision rather
-    # than applied a second time
-    engine.frontiers = replay.frontiers
-    engine.decisions = replay.decisions
-    # ss5: the effects the previous engine intended, and what became of them.
-    # An engine that forgot a kill it had decided would leave a detached run
-    # orphaned for the rest of its life -- its job is already TERMINAL, so
-    # reconciliation skips it, and nothing else would ever look again.
-    engine.outbox = replay.outbox
-    evidence = await _commit_recovered_after_identity_check(
-        engine, replay.recovered_attempts, records, supervisor
-    )
+    evidence = await _replay_into_engine(engine, records, opened, opening, run_root, supervisor)
     # seed the ghost-run gate: replayed starts are reconciliation's business,
     # never a fresh dispatch
     for job, rt in engine.oracle.store.job.items():
@@ -1067,6 +959,182 @@ async def _resume_under_lock(
         evidence=evidence,
     )
     return engine
+
+
+def _select_lineage(run_root: Path, catalog: CatalogIR) -> tuple[list[dict[str, Any]], Lineage]:
+    """The records of the estate WAL and the lineage ss11 step 3 selects from
+    them, with the opening-version and dispatchability gates that follow it."""
+    _drop_never_opened_segment(run_root)
+    records = read_journal(estate_wal(run_root))
+    lineage = select_seal(run_root, records)  # step 3
+    if lineage.seal is not None:
+        # the version FIRST (DL-253): the head action and the opening below
+        # write, and an older build's boundary must be refused for its
+        # version before either, not as a catalog that does not match
+        check_opening_version(lineage.seal.next_period, where=str(run_root))
+        # ss3.5's CMD-or-FW half, at the loader that holds C2 (DL-151). The
+        # sidecar half ran inside `select_seal`; this is the half that needs
+        # the OPENING catalog. Ahead of step 4, so a sidecar this catalog
+        # refuses moves no head and writes no segment -- and it runs at
+        # every resume of a period that opened from a seal, not only at the
+        # one that opened it.
+        check_executions_dispatchable(lineage.seal, catalog)
+    return records, lineage
+
+
+def _pinned_manifest(
+    run_root: Path,
+    opening: dict[str, Any],
+    catalog: CatalogIR,
+    scheduler: Scheduler | None,
+    adapters: Mapping[str, JobAdapter],
+    deadman_s: float | None,
+    declared: RuntimeProfile | None,
+) -> Manifest:
+    """The segment's committed manifest, once the leader-eligibility, segment
+    and runtime-profile gates have passed over it."""
+    check_leader_eligibility(opening, catalog=catalog)
+    # PR-22's U4 half: the committed manifest is the engine's own output,
+    # and a manifest that is not this segment's refuses rather than being
+    # read past. A MISSING artifact degrades where a WRONG one refuses
+    # (DL-113 decision 5) -- but not here: genesis installs the manifest
+    # BEFORE the log opens, so a root without one is a root that LOST it,
+    # pruned or damaged, and degrading would skip every profile gate below.
+    # The `header` root that once degraded here is a retired dialect and
+    # `read_journal` refuses it in `_select_lineage` (DL-138).
+    # `read_journal` has run ss2.1's schema over the opening, so `period_id`
+    # is present and an int -- a fallback here would be a second authority
+    # for a field the reader already proved (DL-138)
+    manifest = read_period_manifest(run_root, int(opening["period_id"]))
+    if manifest is None:
+        raise EngineError(
+            f"{run_root}: a segment journal with no periods/000001/manifest.json --"
+            " the period's pin is missing (period-model ss2.1)"
+        )
+    check_manifest_against_segment(manifest, opening)
+    # the runtime half of the same gate, in CORE: the wired components
+    # must be what the period pinned, or shifted ticks and different
+    # kill windows run under an unchanged hash. Fields no wiring can report
+    # inherit the pin unless the launcher DECLARED them (`declared`), so a
+    # process that says nothing about its machine identity is held to the
+    # rest and one that does is held to all of it.
+    drift = _manifest_profile_drift(manifest, scheduler, adapters, deadman_s, declared)
+    if drift:
+        raise EngineError(
+            f"runtime-profile mismatch on {', '.join(drift)}: a runtime-profile"
+            " change is a new period (period-model ss2.1); re-baseline"
+            " explicitly with a fresh run root"
+        )
+    return manifest
+
+
+def _reconcile_windows(
+    manifest: Manifest, settle_seconds: float | None, grace_seconds: float | None
+) -> tuple[float, float]:
+    """The settle and grace windows: the caller's, else the pin's."""
+    # the reconciliation windows have no wire flag, so the PIN is their
+    # default: a None param resolves from the manifest, and an explicit
+    # one is a caller's deliberate override (a harness affordance, like
+    # wiring a different adapter object)
+    if settle_seconds is None:
+        settle_seconds = manifest.runtime_profile.reconcile_settle_us / 1_000_000
+    if grace_seconds is None:
+        grace_seconds = manifest.runtime_profile.cmd_grace_us / 1_000_000
+    return settle_seconds, grace_seconds
+
+
+def _check_resume_clock(
+    opening: Mapping[str, Any], records: list[dict[str, Any]], clock: Clock
+) -> datetime:
+    """Refuse a resume clock of the wrong domain or behind the journal; answer
+    the journal's last instant."""
+    domain = "virtual" if clock.virtual else "real"
+    if opening.get("clock_domain") != domain:
+        raise EngineError(
+            f"clock-domain mismatch: journal is {opening.get('clock_domain')!r},"
+            f" resume clock is {domain!r}"
+        )
+    last_at = last_journal_at(records)
+    if not clock.virtual and last_at > clock.now():
+        raise EngineError(
+            f"journal is from the future ({last_at.isoformat()} > now): the machine"
+            " clock moved backwards; refusing to feed non-decreasing time backwards"
+        )
+    return last_at
+
+
+def _estate_home(
+    run_root: Path,
+    anchor: EstateAnchor | None,
+    sentinel: Sentinel | None,
+    manifest: Manifest,
+    lineage: Lineage,
+) -> EstateHome | None:
+    """What the engine leads besides its own run root, when it leads a lineage."""
+    return (
+        EstateHome(
+            run_root=run_root,
+            anchor=anchor,
+            estate_id=sentinel.estate_id,
+            manifest=manifest,
+            prev_seal_digest=lineage.seal.digest if lineage.seal is not None else None,
+            prior_seal_record=(seal_record(lineage.seal) if lineage.seal is not None else None),
+        )
+        if anchor is not None and sentinel is not None and manifest is not None
+        else None
+    )
+
+
+async def _replay_into_engine(
+    engine: Engine,
+    records: list[dict[str, Any]],
+    opened: OpenedRuntime | None,
+    opening: Mapping[str, Any],
+    run_root: Path,
+    supervisor: SupervisorClient | None,
+) -> tuple[dict[tuple[str, int], Path | None], dict[tuple[str, int], SupervisorRunRow]]:
+    """Replay the segment into `engine`, installing the log's position (frontiers
+    and decisions) and the outbox on it, and answer the evidence the recovered
+    attempts leave."""
+    # ss3.5: the carry is what this segment OPENED holding -- C1's
+    # undelivered intents and its applied bindings -- and it is seeded
+    # BEFORE the segment's own records are read, never patched in
+    # afterwards: an `effect_result` here for an effect born in C1 is an
+    # outcome the replay has to attach, and `Outbox.resolve` refuses an
+    # outcome for an effect it never saw. It runs its effects, and the
+    # rebuilt decision index its request ids in flight, on the engine's
+    # executor, the process's one (statechart-engine ss11).
+    try:
+        replay = replay_inputs(
+            engine.oracle,
+            records,
+            outbox=carried_outbox(opened, at=opening_at(opening), machines=engine.machines),
+            machines=engine.machines,
+        )
+    except ReplayFault as exc:
+        # period-model ss11: refuse, don't degrade. The same build raises at
+        # the same input on every resume, so the estate stays down until a
+        # build that replays it runs here (deployment runbook ss7)
+        raise EngineError(
+            f"{run_root}: resume stopped: {exc}. Deploy a build that fixes the"
+            " fault, or roll back to the release that wrote this log",
+            code=exc.code,
+        ) from exc
+    # the log's position comes back with its contents (concurrency-model
+    # ss2): the next admission continues the index, and a retry of anything
+    # this log already decided is still answered from that decision rather
+    # than applied a second time
+    engine.frontiers = replay.frontiers
+    engine.decisions = replay.decisions
+    # ss5: the effects the previous engine intended, and what became of them.
+    # An engine that forgot a kill it had decided would leave a detached run
+    # orphaned for the rest of its life -- its job is already TERMINAL, so
+    # reconciliation skips it, and nothing else would ever look again.
+    engine.outbox = replay.outbox
+    evidence = await _commit_recovered_after_identity_check(
+        engine, replay.recovered_attempts, records, supervisor
+    )
+    return evidence
 
 
 def _drop_never_opened_segment(run_root: Path) -> None:

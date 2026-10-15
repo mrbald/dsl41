@@ -35,11 +35,13 @@ from dsl41.cli_common import (
 from dsl41.period import ARCHIVE_CLASS
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from dsl41.boundary import EstateAnchor, EstateWalk, SealRequest
     from dsl41.attest import Attestation
     from dsl41.retention import Artifact, PruneReport, RetentionPlan
     from dsl41.ir import CatalogIR
-    from dsl41.period import RuntimeProfile, StagedManifest
+    from dsl41.period import Manifest, RuntimeProfile, StagedManifest
     from dsl41.runner import Engine
     from dsl41.runner_ledger import LeaderLock
     from dsl41.runner_startup import Wiring
@@ -429,6 +431,99 @@ def _live_seal(
     )
 
 
+def _closing_manifest(run_root: Path) -> "Manifest | int":
+    """The manifest `_offline_seal` closes against, or the exit code of the
+    refusal that stands in for it."""
+    from dsl41.period import read_period_manifest
+
+    try:
+        # the period this sealer will CLOSE, which on a root with a
+        # committed boundary is the one `resume_run` opens (DL-151):
+        # reading the newest segment's here loaded C1's bundle over a root
+        # whose next segment runs C2, and the resume refused on a catalog
+        # hash the operator never named
+        pinned = read_period_manifest(run_root, resume_target_period(run_root))
+    except Exception as exc:  # RunHistoryError or EngineError: both are refusals
+        return refuse(exc, prefix=str(run_root))
+    if pinned is None:
+        return refuse(
+            f"{run_root}: no period manifest -- an offline seal reads the CLOSING"
+            " period's identity from the root itself, and this root has none"
+            " (period-model ss7)"
+        )
+    return pinned
+
+
+def _load_closing_catalog(
+    run_root: Path, pinned: "Manifest"
+) -> "tuple[CatalogIR, datetime, str | None]":
+    """The CLOSING period's catalog, the clock reading its preflight used,
+    and the refusal text when that preflight fails. Raises `EngineError` as
+    the loader does."""
+    from datetime import UTC, datetime
+
+    from dsl41.boundary import load_bundle_catalog, preflight_errors
+
+    # the OWNER's loader (DL-145): the copy this replaced dropped the
+    # JilParseError/LoweringError -> EngineError wrap, so a bundle
+    # that no longer parses left `_offline_seal`'s `except EngineError` untouched
+    # and the verb exited 1 on a traceback.
+    #
+    # `permit_unknown` for `_period_catalog`'s reason: these are the
+    # exact bytes the CLOSING period ran, the gate that decided
+    # whether an unknown attribute was acceptable ran once at launch,
+    # and re-asking it here would make `dsl41 seal` refuse a root
+    # `dsl41 run` is serving.
+    catalog = load_bundle_catalog(run_root, pinned.source_bundle_hash, permit_unknown=True)
+    # DL-240: the live path's boundary check (`preflight_errors`) only
+    # ever sees the SUCCESSOR catalog (ss10.1); offline sealing resumes
+    # and dispatches the CLOSING period's own catalog first, so it is
+    # the one that needs this gate here, before any adapter is wired.
+    now = datetime.now(UTC).replace(tzinfo=None)
+    errors = preflight_errors(catalog, pinned.runtime_profile, at=now)
+    if errors:
+        return (
+            catalog,
+            now,
+            f"{run_root}: the closing period's catalog fails preflight under"
+            f" this build: {'; '.join(errors)}; drain and recreate"
+            " the estate (DL-240)",
+        )
+    return catalog, now, None
+
+
+def _offline_seal_request(
+    engine: "Engine",
+    retry: "Seal | None",
+    request_id: "str | None",
+    staged: "StagedNextPeriod",
+    *,
+    force_seal: bool,
+    actor: str,
+) -> "SealRequest":
+    """The `SealRequest` the offline sealer submits as its one boundary."""
+    import uuid
+
+    from dsl41.boundary import SealRequest
+
+    return SealRequest(
+        # ss2.2's retry route: a retry carries the envelope its ORIGINAL
+        # attempt carried, because the stored decision is fingerprinted over
+        # it. Composing from the engine's CURRENT header -- which `resume_run`
+        # in `_offline_seal` has just moved on to the next period -- names a different
+        # command, and offline that does not merely fail to deduplicate:
+        # nothing between here and the cutoff would recognise the retry, so
+        # it would close a SECOND period (DL-151).
+        baseline_id=retry.baseline_id if retry is not None else engine.baseline_id,
+        epoch=retry.epoch if retry is not None else engine.epoch,
+        request_id=request_id or str(uuid.uuid4()),
+        next_period=staged,
+        stage_digest=staged.stage_digest,
+        force_seal=force_seal,
+        claimed_actor=actor,
+    )
+
+
 async def _offline_seal(
     run_root: Path,
     estate_anchor: "Path | None",
@@ -455,18 +550,8 @@ async def _offline_seal(
     C1 is loaded from the ROOT's own bundle, never from the command line:
     the run root outlives the estate files it was launched from, and the
     closing period's identity is the manifest's."""
-    import uuid
-
-    from datetime import UTC, datetime
-
-    from dsl41.boundary import (
-        SealRequest,
-        load_bundle_catalog,
-        preflight_errors,
-    )
     from dsl41.runner_admission import refuse_reserved_request_id
     from dsl41.runner_clock import EngineError, RealClock
-    from dsl41.period import read_period_manifest
     from dsl41.runner_startup import resume_run, wire_from_profile
 
     # this path builds its `SealRequest` without an envelope, so the
@@ -482,21 +567,9 @@ async def _offline_seal(
     refusal = confirmed_resume_refusal(run_root, estate_anchor)
     if refusal is not None:
         return refuse(refusal)
-    try:
-        # the period this sealer will CLOSE, which on a root with a
-        # committed boundary is the one the resume below opens (DL-151):
-        # reading the newest segment's here loaded C1's bundle over a root
-        # whose next segment runs C2, and the resume refused on a catalog
-        # hash the operator never named
-        pinned = read_period_manifest(run_root, resume_target_period(run_root))
-    except Exception as exc:  # RunHistoryError or EngineError: both are refusals
-        return refuse(exc, prefix=str(run_root))
-    if pinned is None:
-        return refuse(
-            f"{run_root}: no period manifest -- an offline seal reads the CLOSING"
-            " period's identity from the root itself, and this root has none"
-            " (period-model ss7)"
-        )
+    pinned = _closing_manifest(run_root)
+    if isinstance(pinned, int):
+        return pinned
     staged, staged_manifest, _ = _stage_next(
         run_root, next_files, profile, permit_unknown, properties
     )
@@ -505,29 +578,9 @@ async def _offline_seal(
     failed: BaseException | None = None
     try:
         try:
-            # the OWNER's loader (DL-145): the copy this replaced dropped the
-            # JilParseError/LoweringError -> EngineError wrap, so a bundle
-            # that no longer parses left this `except EngineError` untouched
-            # and the verb exited 1 on a traceback.
-            #
-            # `permit_unknown` for `_period_catalog`'s reason: these are the
-            # exact bytes the CLOSING period ran, the gate that decided
-            # whether an unknown attribute was acceptable ran once at launch,
-            # and re-asking it here would make `dsl41 seal` refuse a root
-            # `dsl41 run` is serving.
-            catalog = load_bundle_catalog(run_root, pinned.source_bundle_hash, permit_unknown=True)
-            # DL-240: the live path's boundary check (`preflight_errors`) only
-            # ever sees the SUCCESSOR catalog (ss10.1); offline sealing resumes
-            # and dispatches the CLOSING period's own catalog first, so it is
-            # the one that needs this gate here, before any adapter is wired.
-            now = datetime.now(UTC).replace(tzinfo=None)
-            errors = preflight_errors(catalog, pinned.runtime_profile, at=now)
-            if errors:
-                return refuse(
-                    f"{run_root}: the closing period's catalog fails preflight under"
-                    f" this build: {'; '.join(errors)}; drain and recreate"
-                    " the estate (DL-240)"
-                )
+            catalog, now, preflight_refusal = _load_closing_catalog(run_root, pinned)
+            if preflight_refusal is not None:
+                return refuse(preflight_refusal)
             wiring = await wire_from_profile(
                 run_root,
                 catalog,
@@ -550,21 +603,8 @@ async def _offline_seal(
         except EngineError as exc:
             return refuse(exc)
         retry = _committed_boundary(run_root, request_id)
-        request = SealRequest(
-            # ss2.2's retry route: a retry carries the envelope its ORIGINAL
-            # attempt carried, because the stored decision is fingerprinted over
-            # it. Composing from the engine's CURRENT header -- which the resume
-            # above has just moved on to the next period -- names a different
-            # command, and offline that does not merely fail to deduplicate:
-            # nothing between here and the cutoff would recognise the retry, so
-            # it would close a SECOND period (DL-151).
-            baseline_id=retry.baseline_id if retry is not None else engine.baseline_id,
-            epoch=retry.epoch if retry is not None else engine.epoch,
-            request_id=request_id or str(uuid.uuid4()),
-            next_period=staged,
-            stage_digest=staged.stage_digest,
-            force_seal=force_seal,
-            claimed_actor=actor,
+        request = _offline_seal_request(
+            engine, retry, request_id, staged, force_seal=force_seal, actor=actor
         )
         answered = _answer_from_committed(retry, request, run_root, estate_anchor)
         if answered is not None:

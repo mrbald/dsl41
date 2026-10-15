@@ -449,6 +449,35 @@ def _engine_switches(
     return switches
 
 
+def _engine_oracle(
+    catalog: CatalogIR,
+    carried: CarriedRows | None,
+    estate: EstateHome | None,
+    semantics: SemanticSwitches | None,
+    scheduler: Scheduler | None,
+    adapters: Mapping[str, JobAdapter],
+) -> Oracle:
+    """The oracle an `Engine` reads its catalog through."""
+    # SEM-35: the base zone and alias table the oracle reads a job's time
+    # attributes in. The period's pinned profile when there is one, which
+    # is what every replay of this log reads (`oracle_reading`), else the
+    # scheduler's own: the two halves of one engine must read a job's
+    # zone the same way (DL-62, DL-253). Empty aliases read as absent.
+    switches = _engine_switches(estate, semantics, scheduler, adapters)
+    if estate is not None:
+        # the zone and aliases from the pin; the switches as checked above
+        reading = OracleReading(
+            **{**oracle_reading(estate.manifest.runtime_profile), "semantics": switches}
+        )
+    else:
+        reading = OracleReading(
+            default_tz=scheduler.default_tz if scheduler is not None else None,
+            tz_aliases=alias_table(scheduler.tz_aliases if scheduler is not None else None),
+            semantics=switches,
+        )
+    return Oracle(catalog, carried=carried, **reading)
+
+
 class Engine:
     """ss4 single-writer engine loop over one Oracle. 11a surface: inject()
     external events + run_until_quiescent(horizon). The WAL journal slots in
@@ -483,24 +512,9 @@ class Engine:
         semantics: SemanticSwitches | None = None,
         machines: Executor | None = None,
     ) -> None:
-        # SEM-35: the base zone and alias table the oracle reads a job's time
-        # attributes in. The period's pinned profile when there is one, which
-        # is what every replay of this log reads (`oracle_reading`), else the
-        # scheduler's own: the two halves of one engine must read a job's
-        # zone the same way (DL-62, DL-253). Empty aliases read as absent.
-        switches = _engine_switches(estate, semantics, scheduler, adapters)
-        if estate is not None:
-            # the zone and aliases from the pin; the switches as checked above
-            reading = OracleReading(
-                **{**oracle_reading(estate.manifest.runtime_profile), "semantics": switches}
-            )
-        else:
-            reading = OracleReading(
-                default_tz=scheduler.default_tz if scheduler is not None else None,
-                tz_aliases=alias_table(scheduler.tz_aliases if scheduler is not None else None),
-                semantics=switches,
-            )
-        self.oracle: Oracle = Oracle(catalog, carried=carried, **reading)
+        self.oracle: Oracle = _engine_oracle(
+            catalog, carried, estate, semantics, scheduler, adapters
+        )
         #: concurrency-model ss2/ss8: the execution host this engine dispatches
         #: to. One engine per run root owns one local executor; machine names
         #: resolve to a relay through the routing table (ss5) and there is no
@@ -550,29 +564,7 @@ class Engine:
         #: `engine_apply_faulted` decision, their time half applied
         #: (concurrency-model ss4). `rehearse` prints each one and fails
         self.quarantined: list[tuple[ApplyResult, Exception]] = []
-        #: time-ordered input queue: (at, arrival seq, pending); provenance
-        #: rides on Event.source (DL-68); see the module docstring for why
-        #: FIFO alone is wrong here
-        self._queue: list[tuple[datetime, int, _Pending]] = []
-        self._queue_seq = 0
-        #: real-domain wake signal: set on every enqueue and adapter-task
-        #: completion so a blocked wait_until() re-plans immediately
-        self._activity = asyncio.Event()
-        self._live: dict[str, _LiveRun] = {}
-        #: last run_number dispatched per job -- the ghost-run gate: an
-        #: injected CHANGE_STATUS STARTING overwrite re-emits STARTING
-        #: without bumping run_number, and (vendor parity) must not launch
-        #: a process; only an oracle-decided start advances the counter
-        self._dispatched: dict[str, int] = {}
-        #: cancelled tasks awaiting collection; _settle re-raises any
-        #: non-CancelledError they die with (fail loudly, never swallow)
-        self._reaping: list[asyncio.Task[None]] = []
-        #: task ids whose failure _settle has ALREADY raised: the corpse
-        #: stays in `_live`/`_reaping` so a catcher that treats the raise
-        #: as reversible (the seal's abort) cannot consume the only
-        #: observation -- but teardown must not raise the same failure a
-        #: second time to a caller who already saw it
-        self._corpses_raised: set[int] = set()
+        self._init_live_state()
         #: this engine's statechart executor (statechart-engine ss11): one
         #: worklist for every instance. Its machines are `ADMISSION`, one
         #: instance per request id in flight (DL-334), `EFFECT`, one
@@ -608,6 +600,36 @@ class Engine:
         #: the lineage's `anchor.lock` (PR-03). The journal holds the same
         #: object, so an append and a dispatch cannot prove different things.
         self.fence: Fence | None = fence
+        self._init_seal_state()
+
+    def _init_live_state(self) -> None:
+        """The queue and the live-run books `__init__` starts empty."""
+        #: time-ordered input queue: (at, arrival seq, pending); provenance
+        #: rides on Event.source (DL-68); see the module docstring for why
+        #: FIFO alone is wrong here
+        self._queue: list[tuple[datetime, int, _Pending]] = []
+        self._queue_seq = 0
+        #: real-domain wake signal: set on every enqueue and adapter-task
+        #: completion so a blocked wait_until() re-plans immediately
+        self._activity = asyncio.Event()
+        self._live: dict[str, _LiveRun] = {}
+        #: last run_number dispatched per job -- the ghost-run gate: an
+        #: injected CHANGE_STATUS STARTING overwrite re-emits STARTING
+        #: without bumping run_number, and (vendor parity) must not launch
+        #: a process; only an oracle-decided start advances the counter
+        self._dispatched: dict[str, int] = {}
+        #: cancelled tasks awaiting collection; _settle re-raises any
+        #: non-CancelledError they die with (fail loudly, never swallow)
+        self._reaping: list[asyncio.Task[None]] = []
+        #: task ids whose failure _settle has ALREADY raised: the corpse
+        #: stays in `_live`/`_reaping` so a catcher that treats the raise
+        #: as reversible (the seal's abort) cannot consume the only
+        #: observation -- but teardown must not raise the same failure a
+        #: second time to a caller who already saw it
+        self._corpses_raised: set[int] = set()
+
+    def _init_seal_state(self) -> None:
+        """The seal barrier and the flags a boundary sets and clears."""
         #: ss6 step 2's freeze, seen by an FW task at its poll boundary
         #: (ss3.5) and by admission (`sealing`). An ENGINE fact, not a row
         #: field: the barrier freezes ADMISSION and holds no job, so an
