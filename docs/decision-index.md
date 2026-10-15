@@ -368,3 +368,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-354 | The suite runs on four workers: test overlap measured and not cut, pytest-xdist adopted under DL-211's revisit clause, the transition hits recorded by the... | [docs/agent-workflow.md](agent-workflow.md) |
 | DL-355 | Each test is checked for leaked global process state: a test that leaves it changed fails at its own teardown, naming the state before and after, and this check... | [docs/agent-workflow.md](agent-workflow.md) |
 | DL-356 | The architecture review at dd8e774 lands: each rule the oracle wrote twice has one home, the job chart's handlers are named tables, the re-export layer and the... | [docs/statechart-engine.md](statechart-engine.md) |
+| DL-357 | The lifeline pipe is the wrapper's only parent-death guard | [docs/runner-design.md](runner-design.md) |
