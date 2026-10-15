@@ -73,7 +73,7 @@ def _answer_or_exit(response: dict[str, Any]) -> None:
 
 
 def _mutate(socket_path: Path, request: dict[str, Any]) -> None:
-    """`sendevent`'s and `host`'s exit: one ss6 command envelope, its
+    """`sendevent`'s and `host`'s exit: one concurrency-model ss6 command envelope, its
     outcome as this process's status.
 
     The ladder itself is `cli_common.command_outcome` -- one reading of an
@@ -104,7 +104,7 @@ _BASELINE_PIN_HELP = (
 def _pinned_read(
     socket_path: Path, key: str, expect: int | None, epoch: int | None, baseline: str | None
 ) -> tuple[str, int, int]:
-    """The ss6 read header (`baseline_id`, `epoch`) and the current revision
+    """The concurrency-model ss6 read header (`baseline_id`, `epoch`) and the current revision
     of `key`, with each pin replacing its own read value (DL-217).
 
     The fingerprint covers the revision, the epoch and the baseline, and the
