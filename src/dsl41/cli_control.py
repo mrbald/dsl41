@@ -647,8 +647,9 @@ def supervise(
 
     Exit codes: list and shutdown exit 0 on success and 2 when there is
     no supervisor or the lease could not be taken. start exits 0 on an
-    orderly exit, 1 when another owner holds the root, and 2 on a
-    configuration or usage error.
+    orderly exit, 1 when another owner holds the root, 2 on a
+    configuration or usage error, and 7 on a statechart error (a declared
+    machine hit an assertion failure).
     """
     # Design: runner-design ss6a, DL-42 item 4, DL-210
     import json as json_mod

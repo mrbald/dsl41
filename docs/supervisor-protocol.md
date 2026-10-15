@@ -3,7 +3,8 @@
 Status: frozen. DL-42 item 3 freezes the spool format and the wrapper
 input spec, and DL-48 freezes the supervisor socket protocol. Entries
 that amend it include DL-80, DL-129, DL-150, DL-151, DL-210, DL-229,
-DL-291, DL-300 and DL-326; each is cited where it applies. Each change to a frozen item needs a decision-log entry. This
+DL-291, DL-300, DL-325, DL-326 and DL-328; each is cited where it
+applies. Each change to a frozen item needs a decision-log entry. This
 document is the extraction boundary of the lifecycle tier (the five
 modules of §1). If a DL-42 trigger fires and the tier is extracted, this
 document is its public API.
@@ -31,7 +32,7 @@ orchestrator's UI (DL-42 item 6).
   boundary.
 - **supervisor** (`runner_supervisor.py`): keeps parenthood alive across
   engine restarts. It owns the wrapper lifelines, so an engine restart
-  REATTACHES to the jobs and does not kill them (E4 dissolved). It speaks
+  REATTACHES to the jobs and does not kill them. It speaks
   the §5 socket protocol: SPAWN, SIGNAL, LIST, SHUTDOWN, PING and the lease
   verbs. It imports only the standard library and the tier's own
   stdlib-only modules below, and runs by file path, under the same
@@ -380,6 +381,17 @@ exit 1 and the message `another supervisor owns this root`. A zombie
 and no socket. Runtime `OSError` failures also exit 1, so that the service
 can retry. Configuration refusals exit 2.
 
+A statechart error (`StatechartError`, an assertion failure of the process
+or lease chart) exits 7, `EXIT_STATECHART_ERROR` in `state_machine.py`
+(DL-325). This holds at any point of its life: startup, serving, the
+shutdown wait and teardown (DL-328). The supervisor prints the error's report on stderr, each line
+under the prefix `dsl41: statechart error`. The example units list 7 in
+`RestartPreventExitStatus`, so the service manager does not restart a
+supervisor stopped this way. The exit EOFs every lifeline the supervisor
+owns, and each wrapper then runs §4 step 5. A statechart error during
+teardown leaves the socket and pid files in place; the next start reclaims
+them by its probes, as after a kill (DL-328).
+
 `start_time` in the pid record is the opaque
 `runner_procid.proc_start_token` value, and PID reuse is checked against
 it. A failed token lookup alone does not prove absence. A live legacy pid
@@ -502,7 +514,10 @@ A blank or whitespace-only line is ignored and gets no answer at all.
 Every other line gets exactly one answer (DL-150). A handler that raises is
 answered `{"ok": false, "error": "internal: <type>: <message>"}`, and the
 supervisor keeps running. Its own death would EOF the lifeline of every
-wrapper on the host, so one request may never end it.
+wrapper on the host, so one request may never end it. A statechart error is
+the one exception: it is not one request's fault; it stops the
+supervisor with exit 7, and that request gets no answer (DL-325,
+DL-326).
 
 **Read-only verbs** (any connection, no lease):
 
@@ -530,7 +545,7 @@ wrapper on the host, so one request may never end it.
   controller is watching.
 - `PING` → `{ok, version: 1, incarnation, deadman_s}`.
 
-`deadman_s` (S5b, DL-95) is in both read verbs: the interval this
+`deadman_s` (DL-95) is in both read verbs: the interval this
 supervisor was started with, or `null`. A client reads it back rather than
 assume it, because a reattaching engine meets a supervisor it did not
 start. `docs/concurrency-model.md` §8's eviction bound has to describe the
@@ -655,7 +670,7 @@ first. Then a stale or expired token answers
   | equal fingerprint, no `spawn.json`, nothing alive | `indeterminate` — the crash landed between receipt and fork; nothing may re-spawn, and the engine's E7 policy decides the run |
   | index entry → a directory with no `receipt.json` | `indeterminate` |
   | index entry → a directory that does not exist | impossible by write order; `indeterminate` if ever seen |
-  | no index entry, no receipt, but a `spawn.json` or `status.json` | `indeterminate` — an engine-made, receiptless directory (a tethered run, or one from before this protocol); forking into it would overwrite the first run's records |
+  | no index entry, no receipt, but a `spawn.json` or `status.json` | `indeterminate` — an engine-made, receiptless directory (a tethered run); forking into it would overwrite the first run's records |
   | no index entry, no receipt, nothing else | first application — an orphan directory with neither is reused, because nothing durable names its run |
 
   The duplicate envelope is frozen: `{ok, run_id, wrapper_pid, spawned_at,
@@ -713,7 +728,7 @@ first. Then a stale or expired token answers
   answer is `{ok}`, or `{ok, "noop": true}` for a group that is already
   dead or cannot be verified.
 
-  There is a third answer (DL-150, recording DL-83):
+  There is a third answer (DL-83, DL-150):
   `{ok: false, error: "not_ready"}`. SPAWN answers as soon as the wrapper
   is forked, and the wrapper writes `spawn.json` a few syscalls later. A
   SIGNAL that lands in that window finds a live wrapper and no record.
@@ -748,15 +763,16 @@ first. Then a stale or expired token answers
   `terminated / parent lost` only if it has to kill the command. The
   promise above is bounded, not absolute.
 
-  If an error ends that wait, the supervisor logs one line,
-  `supervisor: the shutdown wait failed (<type>: <message>); running it
-  once more`, and the SHUTDOWN is answered `internal:`. No request is
-  dispatched after it. The supervisor writes its queued answers once,
-  without blocking, then runs the wait once more and exits. A client that
-  is not reading, or has a large backlog of pushes ahead of the answer,
-  may get the answer only in teardown's two-second flush, or not at all.
-  If that second run fails, or the cleanup before it fails, the supervisor
-  exits 1, and each wrapper still alive runs §4 step 5 on its own
+  If an error other than a statechart error ends that wait, the
+  supervisor logs one line, `supervisor: the shutdown wait failed
+  (<type>: <message>); running it once more`, and the SHUTDOWN is
+  answered `internal:`. No request is dispatched after it. The
+  supervisor writes its queued answers once, without blocking, then runs
+  the wait once more and exits. A client that is not reading, or has a
+  large backlog of pushes ahead of the answer, may get the answer only in
+  teardown's two-second flush, or not at all. If that second run fails, or
+  the cleanup before it fails, the supervisor exits 1 (7 for a statechart
+  error, DL-328), and each wrapper still alive runs §4 step 5 on its own
   (DL-300).
 
 **Pushes.** When the supervisor reaps a wrapper, the connection that holds
@@ -794,7 +810,7 @@ sendevent is multi-writer by AutoSys nature, and the single-writer engine
 loop serializes it. The lease guards the tier that spawns without
 semantics.
 
-**The deadman** (S5b, DL-95). A supervisor started with
+**The deadman** (DL-95). A supervisor started with
 `--deadman-seconds N` stops its loop and returns once it has had **no live
 leaseholder** for N seconds. N must be **finite and positive**; otherwise
 the supervisor exits 2 (DL-151). A positivity test alone would admit
