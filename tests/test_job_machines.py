@@ -23,7 +23,8 @@ import pytest
 from dsl41 import cli_control
 from dsl41.classify import CarriedJob, CarriedState, _seeded
 from dsl41.ir import lower_source
-from dsl41.job_chart import JOB, configuration
+from dsl41.job_chart import JOB
+from dsl41.job_chart_rows import configuration
 from dsl41.machines import MACHINES
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import (
@@ -40,7 +41,7 @@ from dsl41.oracle_state import (
     RuntimeState,
 )
 from dsl41.runner_hosts import seed_local_executor
-from dsl41.state_machine import HITS_ENV, STRICT_ENV
+from dsl41.state_machine import HITS_ENV
 
 T0 = datetime(2026, 7, 1, 8, 0)
 _JIL = "insert_job: j\njob_type: c\ncommand: x\n"
@@ -52,7 +53,6 @@ def recording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     directory = tmp_path / "hits"
     directory.mkdir()
     monkeypatch.setenv(HITS_ENV, str(directory))
-    monkeypatch.delenv(STRICT_ENV, raising=False)
     return directory
 
 
@@ -235,18 +235,6 @@ def test_an_assembly_move_off_its_table_raises_before_the_phase_moves(
     with pytest.raises(OracleError, match=message):
         getattr(store, move)()
     assert store._phase == phase
-
-
-def test_a_strict_session_raises_the_same_assembly_refusal(
-    monkeypatch: pytest.MonkeyPatch, recording: Path
-) -> None:
-    """A refusal row is a decision of the chart, not a violation of a table:
-    the strict variable changes nothing about it."""
-    monkeypatch.setenv(STRICT_ENV, "1")
-    store = RuntimeState()
-    with pytest.raises(OracleError, match="commit_input in assembly phase fresh"):
-        store.commit_input()
-    assert store._phase == "fresh"
 
 
 # ------------------------------------------- every ignorable event, every state

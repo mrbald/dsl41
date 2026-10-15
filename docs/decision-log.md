@@ -23144,3 +23144,53 @@ relitigate an entry; append a new one.
   undoing every change, which hid four tests' own recursion limits and any test's own signal
   handler, now narrowed to production's change. Two rounds; nine findings fixed and confirmed by
   the reviewer.
+- DL-356 The architecture review at dd8e774 lands: each rule the oracle wrote twice has one home,
+  the job chart's handlers are named tables, the re-export layer and the chart's second extent go,
+  the table core leaves the engine, and a box -> members index replaces the catalog scan
+  (2026-10-15; src/dsl41/oracle.py, src/dsl41/oracle_cascade.py, src/dsl41/oracle_facts.py,
+  src/dsl41/oracle_intents.py, src/dsl41/oracle_reads.py, src/dsl41/oracle_schedule.py,
+  src/dsl41/oracle_state.py, src/dsl41/oracle_writers.py, src/dsl41/job_chart.py,
+  src/dsl41/job_chart_events.py, src/dsl41/job_chart_rows.py, src/dsl41/machines.py,
+  src/dsl41/state_machine.py; scripts/render_state_machines.py, scripts/transition_coverage.py;
+  tests/transition_hits_plugin.py, tests/fork_harness.py and the charts' and oracle's tests;
+  docs/statechart-engine.md §5, §11, §13, §15; docs/state-machines.md; README)
+  THE
+  REVIEW. An Opus and a Fable reviewer read the code changed since the last stamp independently and
+  agreed on every shared finding. This entry records what was acted on, what was declined and what
+  waits for the owner.
+  ONE HOME EACH. The cascade's per-input fields have one reset list, which construction and recovery
+  both call; it includes the owed scan, which is always false between inputs, so only an oracle
+  reused after a raise sees a difference. Free, keep and spend are decided by one function,
+  `oracle_state.unreleased`, for both the store's verb and the payload's handle; this answers the
+  check DL-352 removed by leaving nothing to compare. One `LIVE_OR_QUEUED` set serves thirteen
+  sites. The five lazily computed payloads are Protocols, and the oracle's facts are their one
+  implementation; a cause that carries no ON_NOEXEC reading raises where it would have read one.
+  NAMED HANDLERS. Each action that asks the tier passes its own name, and the oracle answers from
+  two tables: one for the seven moves and one for the rest. A missing action fails a test. The job
+  chart no longer re-exports its two parts; importers name the defining module.
+  ONE EXTENT. The chart's code for a payload with no tier handle was a second model of the start
+  extent that only a test double reached. It is gone: a payload with no handle is a statechart
+  error, and the chart's hand-built test cells dispatch what the tier sends.
+  THE TABLE CORE. The generic transition table (`StateMachine`, `Transition`, `take`), its strict
+  variable, the hits plugin's violation reads and the scripts' table branches leave; every machine
+  is a statechart, checked by `well_formed`. The engine's contract (docs/statechart-engine.md §5,
+  §11, §13, §15) loses its table text and no rule. The construction check no production path could
+  fail is removed with its test.
+  THE INDEX. A box's members are indexed once from the catalog, beside the referencers, and shared
+  by a fork. DL-351's non-ending cascade stops at the cap in 4.2 s at 200 jobs, 13.0 s at 400 and
+  12.5 s at 1,000, against 4.5, 14.4 and 17.3 before; the ceiling stays 400,000.
+  BEHAVIOUR. The goldens replay with 0 differing; STATE_MACHINE_VERSION stays 23. About seventy
+  tests of the removed table core, strict mode and violation reads go or are rewritten, each with
+  its cover in the review's facts; the unwritable hits file's retry is covered by
+  test_statechart_tooling.py.
+  WAITING FOR THE OWNER. Structural simplification of the job chart (the writer table beside the
+  rows, the verdict guard families, the moment rows, the complement twins, runtime_assembly's 33
+  rows) is the owner's project. Four executor features no chart declares (deferral, generations,
+  `then`, entry and exit actions) are frozen by DL-324; narrowing that contract is the owner's call.
+  DECLINED. The effect and admission decision rows that re-encode a payload value stay: DL-324 §1
+  keeps every machine on the one engine.
+  OPEN DEFECT. A kill that cancels a start while its wrapper is being spawned skips the kill step,
+  so the spawned command may outlive a row the oracle wrote TERMINATED; recorded, unfixed.
+  REVIEW. Semantic class, a frozen contract's text: one Opus reviewer and one Fable pass; each
+  re-ran the cap's bench and found it as claimed. Their findings were text but one, a cast the Fable
+  pass turned into a raise. Two rounds; findings confirmed by the reviewer that raised them.

@@ -4,18 +4,16 @@ DL-293 found a missing row in the job machine with an exhaustive event x state
 test (tests/test_job_machines.py). These tests do the same for the supervisor's
 `supervisor_process` and `supervisor_lease`, the engine's `supervisor_client`,
 and the anchor's `anchor_head` and `period_row`. Each test builds states
-through the owner's own code, sends every event that code accepts under the
-strict variable, which the test sets itself, and passes only when each event
-takes a declared transition or is refused by the code's own rule.
+through the owner's own code, sends every event that code accepts, and
+passes only when each event takes a declared row or is refused by the code's
+own rule.
 
-None of these machines writes a trace line. A violation of a table would
-show as a `TransitionError` or as an entry in the violations file; each test
-checks both. Each test records into its own directory and asserts which declared (transition,
-source) pairs its builder took; each pair it does not take is named, with the
-reason. `supervisor_lease`, `supervisor_process`, `supervisor_client`,
-`anchor_head` and `period_row` are statecharts: their executor raises on an
-event no row takes, so their tests check the rows each event took, or that
-the run raised nothing, and the chart's coverage items instead. The fixture then hands the hits, never the violations, to the
+None of these machines writes a trace line. Each is a statechart, whose
+executor raises a `StatechartError` on an event no row takes, so each test
+checks the rows each event took, or that the run raised nothing, and the
+chart's coverage items. Each test records into its own directory and asserts
+which declared (row, source) pairs its builder took; each pair it does not
+take is named, with the reason. The fixture then hands the hits to the
 session's directory, so the coverage gate counts them.
 """
 
@@ -49,23 +47,17 @@ from dsl41.boundary import (
 from dsl41.runner_adapters import SUPERVISOR_CLIENT, SupervisorClient, SupervisorUnavailable
 from dsl41.state_machine import Executor, Outcome
 from dsl41.runner_clock import EngineError
-from dsl41.state_machine import (
-    HITS_ENV,
-    STRICT_ENV,
-    StatechartError,
-    coverage_items,
-)
+from dsl41.state_machine import HITS_ENV, StatechartError, coverage_items
 
 
 @pytest.fixture
-def strict(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
-    """The strict variable, and a private directory for hits and violations.
-    Afterwards the hits go on to the session's directory, if it has one."""
+def recorded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """A private directory for the hits. Afterwards they go on to the
+    session's directory, if it has one."""
     session = os.environ.get(HITS_ENV)
     directory = tmp_path / "hits"
     directory.mkdir()
     monkeypatch.setenv(HITS_ENV, str(directory))
-    monkeypatch.setenv(STRICT_ENV, "1")
     yield directory
     if session:
         for path in directory.glob("hits-*.jsonl"):
@@ -78,10 +70,6 @@ def _records(directory: Path, prefix: str) -> list[dict[str, str]]:
         for path in sorted(directory.glob(f"{prefix}-*.jsonl"))
         for line in path.read_text(encoding="utf-8").splitlines()
     ]
-
-
-def _assert_no_violation(directory: Path) -> None:
-    assert _records(directory, "violations") == []
 
 
 # ------------------------------------------------------------ supervisor_lease
@@ -261,7 +249,7 @@ def _lease_problem(
 
 def test_every_lease_verb_in_every_reached_lease_state_takes_a_declared_transition(
     short_root: Path,
-    strict: Path,
+    recorded: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """supervisor_lease. From a fresh supervisor, a breadth-first walk applies
@@ -341,7 +329,7 @@ def test_every_lease_verb_in_every_reached_lease_state_takes_a_declared_transiti
     assert applied == len(reached) * len(events)
     hits = {
         (r["kind"], r["id"], r["detail"])
-        for r in _records(strict, "hits")
+        for r in _records(recorded, "hits")
         if r["machine"] == "supervisor_lease"
     }
     required, forbidden = state_machine.coverage_items(runner_supervisor.SUPERVISOR_LEASE)
@@ -351,7 +339,6 @@ def test_every_lease_verb_in_every_reached_lease_state_takes_a_declared_transiti
     missed = [item for item in required if item not in hits]
     assert missed == [("row", "supervisor_lease.18", "")]
     assert forbidden == []
-    _assert_no_violation(strict)
 
 
 # ---------------------------------------------------------- supervisor_process
@@ -563,7 +550,7 @@ def _refusing_root(root: Path, kind: str) -> int | None:
 
 def test_every_process_event_at_every_reached_point_takes_a_declared_transition(
     short_root: Path,
-    strict: Path,
+    recorded: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """supervisor_process. Each case is one in-process `Supervisor.run()`
@@ -579,7 +566,7 @@ def test_every_process_event_at_every_reached_point_takes_a_declared_transition(
     deadman. `refused` is reached from a held lock and from a pid record
     that names a live process. A case passes when the run ends `closed`,
     having returned, refused (SystemExit) or raised the injected error, with
-    no StatechartError and no `internal: TransitionError` answer. Each point
+    no StatechartError and no `internal:` answer but the injected error's. Each point
     is reached right after the process chart takes a row that is not a fence
     refusal, as it was after each `_move` of the table. An error
     in a SHUTDOWN's wait is answered by the dispatch, and the end of that
@@ -615,7 +602,7 @@ def test_every_process_event_at_every_reached_point_takes_a_declared_transition(
         case = f"{stimulus} at {point} with {stopper or refusal}"
         try:
             ended = rig.run()
-        except Exception as exc:  # the supervisor's TransitionError is another module's
+        except Exception as exc:  # the supervisor's StatechartError is another module's
             problems.append(f"{case}: {type(exc).__name__}: {exc}")
             ended = "raised"
         finally:
@@ -630,7 +617,7 @@ def test_every_process_event_at_every_reached_point_takes_a_declared_transition(
         problems += [
             f"{case}: answered {a['error']}"
             for a in answers
-            if "TransitionError" in str(a.get("error", ""))
+            if str(a.get("error", "")).startswith("internal:") and "_Injected" not in a["error"]
         ]
     assert problems == [], "\n".join(problems)
     # a request needs a listening socket: none before `_bind` listens, none after a refusal
@@ -643,7 +630,7 @@ def test_every_process_event_at_every_reached_point_takes_a_declared_transition(
     assert _PROCESS_PAIRS <= taken, sorted(_PROCESS_PAIRS - taken)
     hits = {
         (r["kind"], r["id"], r["detail"])
-        for r in _records(strict, "hits")
+        for r in _records(recorded, "hits")
         if r["machine"] == "supervisor_process"
     }
     required, forbidden = state_machine.coverage_items(runner_supervisor.SUPERVISOR_PROCESS)
@@ -664,7 +651,6 @@ def test_every_process_event_at_every_reached_point_takes_a_declared_transition(
     }
     assert set(missed) == left
     assert [item for item in forbidden if item in hits] == []
-    _assert_no_violation(strict)
 
 
 # ----------------------------------------------------------- supervisor_client
@@ -753,7 +739,7 @@ class _SpiedExecutor(Executor):
 
 
 def test_every_client_event_in_every_reached_client_state_takes_a_declared_transition(
-    short_root: Path, strict: Path
+    short_root: Path, recorded: Path
 ) -> None:
     """supervisor_client. Against a peer on a real unix socket, a
     breadth-first walk applies every event to every state it reaches, keyed on
@@ -845,7 +831,7 @@ def test_every_client_event_in_every_reached_client_state_takes_a_declared_trans
     assert [c._fatal for c in clients if c._fatal is not None] == []
     hits = {
         (r["kind"], r["id"], r["detail"])
-        for r in _records(strict, "hits")
+        for r in _records(recorded, "hits")
         if r["machine"] == SUPERVISOR_CLIENT.name
     }
     required, forbidden = state_machine.coverage_items(SUPERVISOR_CLIENT)
@@ -862,7 +848,6 @@ def test_every_client_event_in_every_reached_client_state_takes_a_declared_trans
     left |= {("guard", f"supervisor_client.{n}", "false") for n in ("01", "05", "09", "10")}
     assert {item for item in required if item not in hits} == left
     assert [item for item in forbidden if item in hits] == []
-    _assert_no_violation(strict)
 
 
 # ------------------------------------------------------ anchor_head, period_row
@@ -1017,7 +1002,7 @@ class _AnchorRig:
 
 def test_every_anchor_verb_in_every_reached_anchor_state_takes_a_declared_transition(
     tmp_path: Path,
-    strict: Path,
+    recorded: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """anchor_head and period_row, which the anchor's verbs move together.
@@ -1115,7 +1100,7 @@ def test_every_anchor_verb_in_every_reached_anchor_state_takes_a_declared_transi
     assert applied == len(reached) * len(events)
     hits = {
         (r["kind"], r["id"], r["detail"])
-        for r in _records(strict, "hits")
+        for r in _records(recorded, "hits")
         if r["machine"] in (ANCHOR_HEAD.name, PERIOD_ROW.name)
     }
     required = [item for chart in (ANCHOR_HEAD, PERIOD_ROW) for item in coverage_items(chart)[0]]
@@ -1145,4 +1130,3 @@ def test_every_anchor_verb_in_every_reached_anchor_state_takes_a_declared_transi
         ("anchor_head", "open_claimed", "head_not_claimed"),
         ("anchor_head", "reclaim", "head_not_claimed"),
     }
-    _assert_no_violation(strict)

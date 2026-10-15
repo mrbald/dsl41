@@ -1,7 +1,7 @@
 """The `job` chart's states and rows, and the configuration a job row
 projects to (DL-337). The contract the rows declare and their ids are stated
 in `job_chart`, which builds the chart from these rows and its own guards and
-actions, and re-exports every name here."""
+actions."""
 
 from __future__ import annotations
 

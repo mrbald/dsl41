@@ -320,10 +320,10 @@ from datetime import datetime
 from typing import Final, cast
 
 from dsl41.ir import CatalogIR, Semantics
-from dsl41.job_chart import (
+from dsl41.job_chart import JOB
+from dsl41.job_chart_events import (
     DISARM,
     FORCE_STARTJOB,
-    JOB,
     KILLJOB,
     OFF_HOLD,
     OFF_ICE,
@@ -341,9 +341,8 @@ from dsl41.job_chart import (
     TERM_RUN_TIME,
     Deadline,
     Payload,
-    Statechart,
-    row_configuration,
 )
+from dsl41.job_chart_rows import row_configuration
 from dsl41.oracle_facts import NoexecFacts, RowUnits, StartFacts, job_data
 from dsl41.oracle_intents import Intent, Program, StatusInput
 from dsl41.oracle_schedule import DEFERRED_RESCAN_KEY, DEFERRED_TIMER_KEY
@@ -360,7 +359,7 @@ from dsl41.oracle_state import (
 from dsl41.oracle_writers import OracleWriters
 from dsl41.semantics import SemanticSwitches
 from dsl41.state_machine import Event as ChartEvent
-from dsl41.state_machine import Outcome, StatechartError
+from dsl41.state_machine import Outcome, Statechart, StatechartError
 
 
 def _note_cleanup(exc: StatechartError, cleanup: Exception) -> None:
@@ -551,14 +550,6 @@ class Oracle(OracleWriters):
         #: the instances the macrostep's items reached, checked at its end
         self._reached: set[str] = set()
         self.store.keep_job_instances(self._job_instance)
-        for job, row in self.store.job.items():
-            active = self.store.machines.active(self.store.job_key(job))
-            if active != row_configuration(row):
-                raise StatechartError(
-                    f"job {job!r}: the instance and the row differ at construction: the"
-                    f" instance's configuration is {listed(active)}, the row's"
-                    f" {listed(row_configuration(row))}"
-                )
 
     def fork(self) -> Oracle:
         """`OracleCascade.fork`, with the twin's store asking the twin for its
@@ -712,14 +703,11 @@ class Oracle(OracleWriters):
 
     def _recover(self) -> None:
         """A macrostep that raised: no write is undone, so the instances are
-        rebuilt from the rows, and the cascade's bookkeeping, empty between
-        inputs, is emptied."""
+        rebuilt from the rows, and the cascade's bookkeeping is set back to
+        what it is between inputs (`_cascade_idle`). An owed scan is dropped
+        with the rest: the input that owed it ends with the raise."""
         self.store.restore_instances()
-        self._in_wake = False
-        self._full_scan_requested = False
-        self._window_starts = None
-        self._late_settlements = {}
-        self._readmitted = False
+        self._cascade_idle()
         self._reached = set()
 
     def _attempt_root(self, job: str, relay: str, cause: str) -> None:

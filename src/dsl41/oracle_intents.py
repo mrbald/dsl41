@@ -18,14 +18,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 from dsl41.capacity import DemandEntry
 from dsl41.ir import JobIR
-from dsl41.job_chart import (
-    SETTLE,
-    Admission,
-    FlagMoved,
-    Injection,
-    Payload,
-    Terminator,
-)
+from dsl41.job_chart_events import SETTLE, Admission, FlagMoved, Injection, Payload, Terminator
 from dsl41.oracle_facts import ReadmitFacts
 from dsl41.oracle_state import LIVE
 from dsl41.state_machine import Context, Effects

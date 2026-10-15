@@ -64,7 +64,7 @@ from typing import Any, Final, cast
 
 from dsl41.capacity import DemandEntry, takes_machine_load, to_reservations
 from dsl41.ir import CatalogIR
-from dsl41.job_chart import (
+from dsl41.job_chart_events import (
     ACTUAL_START,
     ADMITTED_START,
     AFTER_INJECT,
@@ -142,17 +142,39 @@ from dsl41.oracle_intents import (
     WatchReadmit,
 )
 from dsl41.oracle_schedule import OracleSchedule
-from dsl41.oracle_state import FAILED, LIVE, TERMINAL, CarriedRows
+from dsl41.oracle_state import FAILED, LIVE, LIVE_OR_QUEUED, TERMINAL, CarriedRows
 from dsl41.semantics import SemanticSwitches
 from dsl41.state_machine import Context, Effects, StatechartError
 from dsl41.state_machine import Event as ChartEvent
 
-_LIVE_OR_QUEUED: Final = LIVE | {"QUE_WAIT"}
-#: The kinds of a status move whose consequences are its box rules, its
-#: settlement and its wakes, with what follows them.
+#: The job chart's actions that are a status move on its own: their
+#: consequences are its box rules, its settlement and its wakes, with what
+#: follows them by action (`OracleCascade._after`).
 _MOVES: Final = frozenset(
-    {"moved", "terminated", "completed", "injected", "cancelled", "left queue", "runs box"}
+    {"moved", "terminated", "completed", "injected", "cancelled", "left_queue", "runs_box"}
 )
+#: Every other job chart action that asks the tier for its consequences
+#: (`Units.consequences`), and the cascade's method that answers it.
+_HANDLERS: Final[Mapping[str, str]] = {
+    "extent_bypass": "_on_extent_bypass",
+    "extent_queue": "_on_extent_queue",
+    "extent_admit": "_on_extent_admit",
+    "extent_on_held": "_on_extent_on_held",
+    "start_extent": "_on_start_extent",
+    "admit": "_on_admit",
+    "settles_first": "_on_settles_first",
+    "skips_in_box": "_on_skips_in_box",
+    "cascades": "_on_cascades",
+    "batched": "_on_batched",
+    "held": "_on_held",
+    "released_hold": "_on_released_hold",
+    "released_held": "_on_released_held",
+    "waiter_left": "_on_waiter_left",
+    "iced": "_on_iced",
+    "iced_again": "_on_iced_again",
+    "noexec": "_on_noexec",
+    "cleared_noexec": "_on_cleared_noexec",
+}
 
 
 class OracleCascade(OracleSchedule):
@@ -175,6 +197,12 @@ class OracleCascade(OracleSchedule):
             default_tz=default_tz,
             semantics=semantics,
         )
+        self._cascade_idle()
+
+    def _cascade_idle(self) -> None:
+        """The cascade's bookkeeping as it is between inputs: every field the
+        cascade keeps for one input, so a construction and a macrostep that
+        raised (`Oracle._recover`) set the same list."""
         #: DL-247: the queue scan is in a pass (`_scan`)
         self._in_wake = False
         #: DL-247: a full scan requested while a scan runs; the running loop
@@ -244,34 +272,35 @@ class OracleCascade(OracleSchedule):
 
     # ---- what a row sends beyond its own move
 
-    def _consequences(self, job: str, ctx: Context, kind: str) -> Effects | None:
-        """What a row of `kind` of the job sends and reports beyond its own
-        move, read now: the row's action runs before the hook writes the move."""
-        if kind in _MOVES:
-            return self._after(job, ctx, kind)
-        handler = getattr(self, "_on_" + kind.replace(" ", "_"))
+    def _consequences(self, job: str, ctx: Context, action: str) -> Effects | None:
+        """What a row of the job whose action is `action` sends and reports
+        beyond its own move, read now: the row's action runs before the hook
+        writes the move."""
+        if action in _MOVES:
+            return self._after(job, ctx, action)
+        handler = getattr(self, _HANDLERS[action])
         result: Effects | None = handler(job, ctx)
         return result
 
-    def _after(self, job: str, ctx: Context, kind: str) -> Effects:
+    def _after(self, job: str, ctx: Context, action: str) -> Effects:
         """A status move on its own: its box
-        rules, its settlement, its wakes, then what follows them by kind."""
+        rules, its settlement, its wakes, then what follows them by action."""
         move = self._move(job)
         intents: list[Intent] = [move]
         tail: list[Send] = []
-        if kind == "terminated" and self._is_box(job):
+        if action == "terminated" and self._is_box(job):
             # the run that ended, read before the write (DL-348)
             tail.append(self._program(job, BOX_ENDS_STEP, self._box_ends(job, move.run)))
-        elif kind == "completed":
+        elif action == "completed":
             # a box's completion: the run is read after the end's wakes
             tail.append(self._program(job, BOX_ENDS_STEP, self._box_ends(job, None)))
-        elif kind == "injected":
+        elif action == "injected":
             tail += self._after_inject(job)
-        elif kind == "cancelled":
+        elif action == "cancelled":
             intents.append(Readmitted())
-        elif kind == "left queue":
+        elif action == "left_queue":
             tail.append(self._after_leave(job, cast(FlagFacts, ctx.event.payload)))
-        elif kind == "runs box":
+        elif action == "runs_box":
             tail += self._box_running(job, move.run, intents)
         return Effects(send=(*self._move_sends(move), *tail), intents=tuple(intents))
 
@@ -339,25 +368,25 @@ class OracleCascade(OracleSchedule):
             intents=() if move is None else (move,),
         )
 
-    def _on_bypass(self, job: str, ctx: Context) -> Effects:
+    def _on_extent_bypass(self, job: str, ctx: Context) -> Effects:
         return self._admitted(job, ctx, "bypass", Admission())
 
-    def _on_queue(self, job: str, ctx: Context) -> Effects:
+    def _on_extent_queue(self, job: str, ctx: Context) -> Effects:
         return self._admitted(job, ctx, "queue", Admission())
 
-    def _on_admit(self, job: str, ctx: Context) -> Effects:
+    def _on_extent_admit(self, job: str, ctx: Context) -> Effects:
         attempt = cast(StartFacts, ctx.event.payload)
         vector = tuple(attempt.vector())
         admission = AdmissionFacts(demand=attempt.demand, vector=vector, units=self._units(job))
         return self._admitted(job, ctx, "admit", admission)
 
-    def _on_on_held(self, job: str, ctx: Context) -> Effects:
+    def _on_extent_on_held(self, job: str, ctx: Context) -> Effects:
         attempt = cast(StartFacts, ctx.event.payload)
         vector = tuple(attempt.vector())
         admission = AdmissionFacts(on_held=True, vector=vector, units=self._units(job))
         return self._admitted(job, ctx, "on_held", admission)
 
-    def _on_extent(self, job: str, ctx: Context) -> Effects:
+    def _on_start_extent(self, job: str, ctx: Context) -> Effects:
         """`start admitted` (job.402): the admitted start's extent, each step an
         item, all of them descendants of this one."""
         admitted = cast(Admitted, ctx.event.payload)
@@ -394,7 +423,7 @@ class OracleCascade(OracleSchedule):
             demand[reservation.bucket] = demand.get(reservation.bucket, 0) + reservation.units
         return any(h.units > demand.get(h.bucket, 0) for h in held)
 
-    def _on_readmit(self, job: str, ctx: Context) -> Effects:
+    def _on_admit(self, job: str, ctx: Context) -> Effects:
         """job.108: a readmission, its extent sent from its own row."""
         facts = cast(ReadmitFacts, ctx.event.payload)
         vector = tuple(facts.vector())
@@ -433,7 +462,7 @@ class OracleCascade(OracleSchedule):
         sends.append(self._to(job, STARTED, started))
         return tuple(sends)
 
-    def _on_settle_first(self, job: str, ctx: Context) -> Effects:
+    def _on_settles_first(self, job: str, ctx: Context) -> Effects:
         """job.401 (DL-340): the ended run settles by the end it made, and the
         same attempt is made again, reading the admission it leaves."""
         run = self._runtime(job).run_number
@@ -581,7 +610,7 @@ class OracleCascade(OracleSchedule):
                 resolved = self._resolves(box, job, old, new)
                 walk = self._walk_up(job, new, resolved, runs)
                 yield Step(send=(self._program(job, WALK_UP, walk),))
-            if old in _LIVE_OR_QUEUED and new not in _LIVE_OR_QUEUED and len(chain) > 1:
+            if old in LIVE_OR_QUEUED and new not in LIVE_OR_QUEUED and len(chain) > 1:
                 yield Step(send=(self._program(job, HOLDERS, self._holders(job, runs)),))
         if job_ir.job_type == "BOX" and new in TERMINAL:
             disarms = tuple(

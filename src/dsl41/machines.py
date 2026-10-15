@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from dsl41.boundary import ANCHOR_HEAD, PERIOD_ROW
 from dsl41.job_chart import JOB
 from dsl41.oracle_state import HOST, RUNTIME_ASSEMBLY
@@ -13,10 +11,10 @@ from dsl41.runner_admission import ADMISSION
 from dsl41.runner_effects import EFFECT
 from dsl41.runner_journal import SUBSCRIPTION
 from dsl41.runner_supervisor import SUPERVISOR_LEASE, SUPERVISOR_PROCESS
-from dsl41.state_machine import StateMachine, Statechart
+from dsl41.state_machine import Statechart
 
-# Later slices add each machine here; a converted machine is a `Statechart`.
-MACHINES: tuple[StateMachine[Any] | Statechart, ...] = (
+#: Every declared machine, each a `Statechart`.
+MACHINES: tuple[Statechart, ...] = (
     JOB,
     RUNTIME_ASSEMBLY,
     ANCHOR_HEAD,

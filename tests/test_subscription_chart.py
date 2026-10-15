@@ -45,7 +45,6 @@ from dsl41.runner_journal import (
 from dsl41.state_machine import (
     HITS_ENV,
     STATECHART_LOG_PREFIX,
-    STRICT_ENV,
     Context,
     Executor,
     Outcome,
@@ -334,7 +333,6 @@ def _gap(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, number: str) -> None:
     directory = tmp_path / "hits"
     directory.mkdir()
     monkeypatch.setenv(HITS_ENV, str(directory))
-    monkeypatch.delenv(STRICT_ENV, raising=False)
     rows = tuple(row for row in CHART.rows if row.id != _row(number))
     monkeypatch.setattr(runner_journal, "SUBSCRIPTION", replace(CHART, rows=rows))
 
@@ -455,7 +453,6 @@ def test_a_statechart_error_in_a_control_handler_stops_the_run_with_exit_7(
     directory = tmp_path / "hits"
     directory.mkdir()
     monkeypatch.setenv(HITS_ENV, str(directory))
-    monkeypatch.delenv(STRICT_ENV, raising=False)
 
     def seal(engine: Engine) -> dict[str, Any]:
         return _seal_request_wire(engine, _stage(run_root, C2_JIL))

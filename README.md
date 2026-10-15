@@ -578,10 +578,10 @@ Semantics:
   the oracle drives it for STATUS, the starts, KILLJOB, the TIMER input,
   the flags, RELEASE_RESOURCE, the readmission, the box rules, a box's
   ON_NOEXEC on the jobs it contains and the cascade's moments. It holds the
-  contract, the guards and the actions, and re-exports its two parts:
+  contract, the guards and the actions; its two other parts are
   `src/dsl41/job_chart_events.py` (the events, the data and the payloads) and
   `src/dsl41/job_chart_rows.py` (the states, the rows and a row's
-  configuration).
+  configuration), and each name is imported from the module that defines it.
 - `src/dsl41/oracle.py`: the AutoSys discrete-event interpreter, `Oracle`:
   script-driven completion, edge-triggered re-evaluation, and `InputBatch`,
   one admitted input as one store transaction. Every job row moves through
@@ -724,12 +724,11 @@ Period boundary:
   RuntimeProfile and its hash, the staged and committed manifests, the
   `segment` record every log opens with, and the archive receipt.
 - `src/dsl41/canon.py`: the canonical serialization behind every digest.
-- `src/dsl41/state_machine.py`: the shared state-machine core: `Transition`,
-  `StateMachine` with its `take` check, `well_formed`, and the hit recording
-  the test suite turns on; and the statechart executor of
+- `src/dsl41/state_machine.py`: the statechart executor of
   `docs/statechart-engine.md`: `Statechart` declarations, the `Executor`,
-  its errors under `StatechartError`, and `chart_problems`. Standard library
-  only, so the supervisor can load it by path.
+  its errors under `StatechartError`, `well_formed`, and the hit recording
+  the test suite turns on. Standard library only, so the supervisor can load
+  it by path.
 - `src/dsl41/machines.py`: the registry of declared state machines.
 - `src/dsl41/seal.py`: the seal artifact a period ends by writing, and the
   two pure functions over it, `close_runtime` and `open_from_seal`. Every
@@ -775,11 +774,11 @@ CLI and scripts:
 - `scripts/render_decision_index.py`: writes `docs/decision-index.md` from
   the decision log and the tracked docs that cite each entry (DL-276).
 - `scripts/render_state_machines.py`: writes `docs/state-machines.md`, a
-  diagram and a transition table per registered machine, and regions,
-  choices and deferrals for a statechart.
-- `scripts/transition_coverage.py`: the gate that fails when a declared,
-  unmarked transition has no recorded hit, or a statechart's row, branch,
-  guard outcome, deferral or release has none.
+  diagram with regions, choices and deferrals, and the row, branch and state
+  tables, per registered statechart.
+- `scripts/transition_coverage.py`: the gate that fails when a statechart's
+  unmarked row, branch, guard outcome, deferral or release has no recorded
+  hit.
 
 ### Tests
 
@@ -875,11 +874,11 @@ Compiler:
 - `tests/test_decision_index.py`: the committed decision index is the
   rendering, and the generator's parsing, title and citation rules
   (DL-276).
-- `tests/test_state_machine.py`: the core's take check, hit recording and
-  well-formedness rules, over small invented machines, and that every
-  registered machine is well formed.
+- `tests/test_state_machine.py`: the executor's hit recording over a small
+  invented chart, the session plugin, the standard-library boundary, and
+  that every registered machine is well formed.
 - `tests/test_transition_coverage.py`: the transition coverage gate, passing
-  and failing, with marks, a missing file and the per-source view.
+  and failing, with marks and a missing file.
 - `tests/test_state_machines_doc.py`: the committed state-machine doc is the
   rendering, and the generator's diagram and table rules.
 - `tests/transition_hits_plugin.py`: the pytest plugin that turns hit

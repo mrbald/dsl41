@@ -16,7 +16,8 @@ from __future__ import annotations
 from typing import Final, cast
 
 from dsl41.capacity import machine_load, to_reservations
-from dsl41.job_chart import RELEASE_RESOURCE, Settlement, projection
+from dsl41.job_chart_events import RELEASE_RESOURCE, Settlement
+from dsl41.job_chart_rows import projection
 from dsl41.oracle_cascade import OracleCascade
 from dsl41.oracle_facts import FoldFacts, RecomputeFacts, StartFacts, Started
 from dsl41.oracle_intents import (
@@ -31,7 +32,7 @@ from dsl41.oracle_intents import (
     Starting,
     StatusInput,
 )
-from dsl41.oracle_state import LIVE, EventKind, FlagState, JobStatus
+from dsl41.oracle_state import LIVE, LIVE_OR_QUEUED, EventKind, FlagState, JobStatus
 from dsl41.state_machine import Outcome, StatechartError
 
 #: The hold rows ON_NOEXEC fires beside its flag's: the flag and its line are
@@ -130,7 +131,7 @@ class OracleWriters(OracleCascade):
         """The START_REFUSED reason for a refused attempt: the job is live
         or queued, or its box gate refuses it (SEM-10, SEM-20)."""
         status = self._runtime(job).status
-        if status in ("STARTING", "RUNNING", "QUE_WAIT"):
+        if status in LIVE_OR_QUEUED:
             return f"already {status} -- concurrent or repeated start request, no effect"
         box = self.catalog.jobs[job].box.box_name
         gate = attempt.known("box")

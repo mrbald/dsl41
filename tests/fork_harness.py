@@ -53,9 +53,19 @@ ORACLE_FRESH = frozenset({"_trace", "_emitted"})
 #: (DL-350), and the items and the root of the dispatch in flight (DL-351).
 ORACLE_IDLE = frozenset({"_late_settlements", "_readmitted", "_reached", "_items", "_rooted"})
 #: Oracle attributes fixed once the constructor returns, so the fork shares
-#: them; `_cap`, the item cap, is fixed by the catalog's job count (DL-351).
+#: them; `_cap`, the item cap, is fixed by the catalog's job count (DL-351),
+#: and `_members_of`, the box-to-members index, by the catalog.
 ORACLE_SHARED = frozenset(
-    {"catalog", "semantics", "_referencers", "_pool", "_tz_aliases", "_default_tz", "_cap"}
+    {
+        "catalog",
+        "semantics",
+        "_referencers",
+        "_members_of",
+        "_pool",
+        "_tz_aliases",
+        "_default_tz",
+        "_cap",
+    }
 )
 #: RuntimeState attributes. The fork copies every one (scalars by value).
 STORE_COPIED = frozenset(

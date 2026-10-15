@@ -140,6 +140,8 @@ FAILED: frozenset[JobStatus] = frozenset({"FAILURE", "TERMINATED"})
 # release edge (DL-120), the SPAWN edge (DL-232) and the completion gate
 # (DL-235) read it.
 LIVE: frozenset[JobStatus] = frozenset({"STARTING", "RUNNING"})
+#: A job with a run in progress or a place in the queue.
+LIVE_OR_QUEUED: frozenset[JobStatus] = LIVE | {"QUE_WAIT"}
 #: A job that may start: INACTIVE or terminal.
 IDLE: frozenset[JobStatus] = frozenset({"INACTIVE", "SUCCESS", "FAILURE", "TERMINATED"})
 
@@ -222,6 +224,31 @@ class CapacityReservation(BaseModel):
     #: two that do not free them: a depletable's are spent (SEM-16), and a
     #: renewable's stay held by the job (DL-256).
     release_policy: ReleasePolicy
+
+
+def unreleased(
+    reservations: Sequence[CapacityReservation],
+    success: bool,
+    keeps_held: Callable[[str], bool] | None,
+) -> tuple[tuple[CapacityReservation, ...], tuple[CapacityReservation, ...]]:
+    """The one rule of a run's end on its units (DL-120, DL-256): the units
+    it does not free, as (kept, spent). Every end frees a `completion`
+    unit, and a SUCCESS (`success`) a `success` unit. What is not freed
+    stays held by the job where `keeps_held(bucket)` says so, and is spent
+    otherwise; with no `keeps_held`, everything not freed is spent. The
+    store's verb (`RuntimeState.release_reservations`) applies it and the
+    payload's handle (`RowUnits.release`) reads it (DL-356)."""
+    kept: list[CapacityReservation] = []
+    spent: list[CapacityReservation] = []
+    for reservation in reservations:
+        policy = reservation.release_policy
+        if policy == "completion" or (policy == "success" and success):
+            continue
+        if keeps_held is not None and keeps_held(reservation.bucket):
+            kept.append(reservation)
+        else:
+            spent.append(reservation)
+    return tuple(kept), tuple(spent)
 
 
 #: The bucket prefix of a named resource; `m:` is a machine's load.
@@ -1805,19 +1832,11 @@ class RuntimeState:
         row = self.runtime(job)
         if not row.reservations:
             return
-        spent: dict[str, int] = {}
-        kept: list[CapacityReservation] = []
-        for reservation in row.reservations:
-            policy = reservation.release_policy
-            if policy == "completion" or (policy == "success" and new_status == "SUCCESS"):
-                continue
-            if keeps_held is not None and keeps_held(reservation.bucket):
-                kept.append(reservation)
-            else:
-                spent[reservation.bucket] = spent.get(reservation.bucket, 0) + reservation.units
-        self._replace(job, reservations=tuple(kept))  # validates first; the spend cannot raise
-        for bucket, units in spent.items():
-            self._consumed[bucket] = self._consumed.get(bucket, 0) + units
+        kept, spent = unreleased(row.reservations, new_status == "SUCCESS", keeps_held)
+        self._replace(job, reservations=kept)  # validates first; the spend cannot raise
+        for reservation in spent:
+            bucket = reservation.bucket
+            self._consumed[bucket] = self._consumed.get(bucket, 0) + reservation.units
 
     def release_held(self, job: str) -> tuple[CapacityReservation, ...]:
         """RELEASE_RESOURCE (DL-256): give back every unit a job that is not

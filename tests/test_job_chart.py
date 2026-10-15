@@ -31,14 +31,15 @@ import itertools
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 import statechart_completeness as sc
 
 from dsl41 import job_chart
 from dsl41.ir import lower_source
-from dsl41.job_chart import (
+from dsl41.job_chart import JOB
+from dsl41.job_chart_events import (
     ACTUAL_START,
     ADMITTED_START,
     BOX_ENDS,
@@ -53,7 +54,6 @@ from dsl41.job_chart import (
     DISARM,
     FLAG_MOVED,
     FORCE_STARTJOB,
-    JOB,
     KILLJOB,
     LEAVE_LIVE,
     MEMBER_ENDS,
@@ -79,23 +79,18 @@ from dsl41.job_chart import (
     TERM_RUN_TIME,
     Admission,
     Admitted,
-    Attempt,
-    BoxVerdict,
+    BoxGate,
     Deadline,
     FlagMoved,
     Injection,
     JobData,
-    Noexec,
     Payload,
-    Readmission,
     Release,
     Settlement,
     Terminator,
-    Verdict,
-    configuration,
-    projection,
-    row_configuration,
+    WindowSide,
 )
+from dsl41.job_chart_rows import configuration, projection, row_configuration
 from dsl41.machines import MACHINES
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import (
@@ -161,11 +156,72 @@ SETTLE_LIVE = "job.418"
 ADMITTING = ("job.101", "job.102", "job.103", "job.104", "job.124")
 
 
+# ---- the payloads the oracle computes lazily (`job_chart_events`' protocols), given whole
+
+
+@dataclass(frozen=True)
+class Attempt(Payload):
+    """A start attempt (`StartAttempt`), its facts given."""
+
+    force: bool = False
+    explicit: bool = False
+    scheduled: bool = False
+    stale: bool = False
+    rescan: bool = False
+    dated: bool = False
+    box: BoxGate = "none"
+    condition: bool = True
+    window: WindowSide = "inside"
+    decided: bool = False
+    settlement_owed: bool = False
+    box_noexec: bool = False
+    admissible: bool = True
+    demand: bool = True
+
+    def relayed(self, *, force: bool) -> Attempt:
+        return replace(self, force=force, explicit=True, scheduled=True)
+
+
+@dataclass(frozen=True)
+class Readmission(Payload):
+    """A queue scan's attempt for a waiter (`job_chart_events.Readmission`)."""
+
+    box: Literal["none", "running", "idle"] = "none"
+    keep_stopped: bool = False
+    admissible: bool = True
+    recheck_fails: bool = False
+    demand: bool = True
+
+
+@dataclass(frozen=True)
+class Noexec(Payload):
+    """ON_NOEXEC's facts (`job_chart_events.Noexec`)."""
+
+    tree_busy: bool = False
+    change: bool = True
+
+
+@dataclass(frozen=True)
+class Verdict(Payload):
+    """A step of a RUNNING box's completion door (`job_chart_events.Verdict`)."""
+
+    target: Literal["SUCCESS", "FAILURE"] | None = None
+
+
+@dataclass(frozen=True)
+class BoxVerdict(Payload):
+    """An idle box's recompute (`job_chart_events.BoxVerdict`)."""
+
+    target: Literal["SUCCESS", "FAILURE"] | None = None
+    override: bool = False
+
+
 @dataclass(frozen=True)
 class Policy:
     """A fixed release policy as a tier's handle on a job's units (`Units`),
     for a chart that no oracle drives: `on_success` after a SUCCESS,
-    `otherwise` after any other end."""
+    `otherwise` after any other end. It sends nothing beyond a row's own
+    move: what the oracle sends is the oracle's tests' (test_oracle_chart.py)."""
 
     on_success: Release = "free"
     otherwise: Release = "free"
@@ -173,8 +229,8 @@ class Policy:
     def release(self, success: bool) -> Release:
         return self.on_success if success else self.otherwise
 
-    def consequences(self, ctx: Context, kind: str) -> None:
-        """A chart no tier drives: a row sends nothing beyond its own move."""
+    def consequences(self, ctx: Context, action: str) -> None:
+        """A row sends nothing beyond its own move."""
 
 
 @dataclass(frozen=True)
@@ -563,47 +619,6 @@ def test_the_sweep_of_every_buildable_cell_raises_no_selection_error_and_selects
 
 
 @pytest.mark.parametrize(
-    ("active", "data", "attempt", "rows"),
-    [
-        (
-            configuration("INACTIVE", noexec=True),
-            JOB_DATA,
-            Attempt(),
-            ["job.101", EXTENT, "job.224"],
-        ),
-        (configuration("INACTIVE"), JOB_DATA, Attempt(), ["job.102", EXTENT, "job.301", "job.224"]),
-        (
-            configuration("INACTIVE"),
-            BOX_DATA,
-            Attempt(demand=False),
-            ["job.124", EXTENT, "job.311", "job.224"],
-        ),
-        (configuration("INACTIVE"), JOB_DATA, Attempt(admissible=False), ["job.103", EXTENT]),
-        (
-            configuration("FAILURE", holding="held"),
-            JOB_DATA,
-            Attempt(force=True),
-            ["job.104", EXTENT, "job.303", "job.224"],
-        ),
-        (configuration("INACTIVE"), JOB_DATA, Attempt(settlement_owed=True), [SETTLE_FIRST]),
-    ],
-    ids=["bypass", "admit", "admit a box", "queue", "on held units", "settle first"],
-)
-def test_an_admitting_row_sends_start_admitted_before_the_admissions_moves(
-    active: frozenset[str], data: JobData, attempt: Attempt, rows: list[str]
-) -> None:
-    """Each admitting row's status move comes first, then `start admitted`,
-    whose row sends the admission's moves: they are its descendants. An owed
-    settlement is read past the bound and moves nothing (job.401)."""
-    executor = Executor()
-    executor.restore("j", CHART, active, data)
-    outcomes = executor.dispatch("j", ChartEvent(START, attempt))
-    assert [ident for outcome in outcomes for ident in outcome.rows] == rows
-    depths = [outcome.depth for outcome in outcomes]
-    assert depths == [0, 1, *([2] * (len(rows) - 2))][: len(rows)]
-
-
-@pytest.mark.parametrize(
     ("ancestry", "verdict"),
     [
         ((), "admit"),
@@ -685,12 +700,16 @@ def _witnesses() -> dict[str, sc.Builder]:
 
 
 def _handled(payload: Any) -> Any:
-    """The payload with a handle on the job's units (`Policy()`, which frees):
-    a settlement the cell's rows send must know its policy (DL-349). The
-    handle is not printed, so the cell's label keeps."""
+    """The payload with a handle on the job's units (`Policy()`, which frees
+    and sends nothing beyond the row's own move): a row whose action asks the
+    tier needs one, and a settlement the cell's rows send must know its
+    policy (DL-349). No payload is a bare one. The handle is not printed, so
+    the cell's label keeps."""
+    if payload is None:
+        return Payload(units=Policy())
     if isinstance(payload, Admitted):
         return replace(payload, admission=_handled(payload.admission), units=Policy())
-    if isinstance(payload, Payload):
+    if isinstance(payload, Payload) and payload.units is None:
         return replace(payload, units=Policy())
     return payload
 
@@ -859,6 +878,12 @@ def _step(target: str | None) -> Verdict:
     return Verdict(target)  # type: ignore[arg-type]
 
 
+def _noexec_moved() -> ChartEvent:
+    """ON_NOEXEC's flag move, which the status rule reads: the tier sends it
+    once the flag is on (`OracleCascade._on_noexec`)."""
+    return ChartEvent(FLAG_MOVED, FlagMoved("ON_NOEXEC", Noexec()))
+
+
 CELLS: dict[str, Cell] = {
     "job.101": _status(_start(), noexec=True),
     "job.102": _status(_start()),
@@ -869,10 +894,10 @@ CELLS: dict[str, Cell] = {
     "job.107": _status(_start(window="skip", box="running")),
     "job.108": _status(ChartEvent(READMIT, Readmission())),
     "job.109": _status(ChartEvent(READMIT, Readmission(box="idle"))),
-    "job.110": _status(ChartEvent(READMIT, Readmission(recheck_fails=True))),
+    "job.110": _status(ChartEvent(FLAG_MOVED, FlagMoved("readmit"))),
     "job.111": _status(ChartEvent(KILLJOB)),
-    "job.112": _status(ChartEvent(ON_ICE)),
-    "job.113": _status(ChartEvent(ON_NOEXEC, Noexec())),
+    "job.112": _status(ChartEvent(FLAG_MOVED, FlagMoved("ON_ICE")), ice=True),
+    "job.113": _status(_noexec_moved(), noexec=True),
     "job.114": _status(ChartEvent(KILLJOB)),
     "job.115": _status(ChartEvent(TERM_RUN_TIME, Deadline())),
     "job.116": _status(ChartEvent(BOX_ENDS), MEMBER_DATA),
@@ -880,7 +905,7 @@ CELLS: dict[str, Cell] = {
     "job.118": _status(ChartEvent(STATUS, Injection(success=False))),
     "job.119": _status(ChartEvent(STATUS, Injection("RUNNING"))),
     "job.120": _status(ChartEvent(STATUS, Injection("INACTIVE"))),
-    "job.121": _status(ChartEvent(ON_NOEXEC, Noexec())),
+    "job.121": _status(_noexec_moved(), noexec=True),
     "job.122": _status(ChartEvent(BOX_START)),
     "job.123": _status(ChartEvent(BOX_SET_INACTIVE)),
     "job.124": _status(_start(), BOX_DATA),
@@ -895,7 +920,7 @@ CELLS: dict[str, Cell] = {
     "job.133": _status(ChartEvent(BOX_RECOMPUTE, _box("SUCCESS", False)), BOX_DATA),
     "job.134": _status(ChartEvent(BOX_RECOMPUTE, _box("FAILURE", False)), BOX_DATA),
     "job.135": _status(ChartEvent(STATUS, Injection("INACTIVE")), BOX_DATA),
-    "job.136": _status(ChartEvent(ON_NOEXEC, Noexec()), BOX_DATA),
+    "job.136": _status(_noexec_moved(), BOX_DATA, noexec=True),
     **{f"job.{100 + n}": _status(ChartEvent(KILLJOB)) for n in range(37, 41)},
     **{f"job.{100 + n}": _status(_start(stale=True)) for n in range(41, 48)},
     "job.148": _status(ChartEvent(ON_ICE)),
@@ -918,14 +943,14 @@ CELLS: dict[str, Cell] = {
     "job.210": _flag(ChartEvent(OFF_NOEXEC)),
     "job.211": _flag(ChartEvent(BOX_OFF_NOEXEC)),
     "job.212": _flag(_start(dated=True, condition=False)),
-    "job.213": _flag(_start()),
+    "job.213": _flag(ChartEvent(ACTUAL_START)),
     "job.214": _flag(ChartEvent(DISARM)),
     "job.215": _flag(ChartEvent(BOX_RUN_ENDS)),
     "job.216": _flag(ChartEvent(READMIT, Readmission(recheck_fails=True)), "QUE_WAIT"),
     "job.217": _flag(ChartEvent(KILLJOB), "QUE_WAIT"),
-    "job.301": _holding(_start(), "INACTIVE"),
-    "job.302": _holding(_start(), "FAILURE"),
-    "job.303": _holding(ChartEvent(FORCE_STARTJOB, Attempt()), "FAILURE"),
+    "job.301": _holding(ChartEvent(ADMITTED_START, Admission()), "INACTIVE"),
+    "job.302": _holding(ChartEvent(ADMITTED_START, Admission()), "FAILURE"),
+    "job.303": _holding(ChartEvent(ADMITTED_START, Admission(on_held=True)), "FAILURE"),
     # the tier sends a run's settlement after its move's box rules (DL-350)
     "job.304": _holding(ChartEvent(LEAVE_LIVE, Settlement(units=Policy())), "TERMINATED"),
     "job.305": _holding(
@@ -943,7 +968,10 @@ def test_every_move_from_every_source_ends_in_its_target() -> None:
     """For each status, flag and holding move and each of its sources, one
     cell dispatched with its chained items: the row of that source fires, and
     its region ends in one of the row's targets. A move with several sources
-    has a row per source, which take the same cell."""
+    has a row per source, which take the same cell. A row whose event is an
+    item the tier sends (`flag moved`, `actual start`, `admitted start`) is
+    dispatched that item: the handle here sends nothing beyond a row's own
+    move, and the oracle's tests pin who sends it (test_oracle_chart.py)."""
     assert len(CELLS) == 83
     checked = 0
     for primary, cell in CELLS.items():
@@ -967,7 +995,7 @@ def _advance(executor: Executor, job: str, event: ChartEvent) -> list[Any]:
     """Dispatch `event`; an admission then leaves `ADMITTED` for STARTING
     (job.403), as the tier's extent sends `starting` once the admission's
     units and arm are written."""
-    outcomes = executor.dispatch(job, event)
+    outcomes = executor.dispatch(job, ChartEvent(event.name, _handled(event.payload)))
     if "ADMITTED" in executor.active(job):
         outcomes += executor.dispatch(job, ChartEvent(STARTING, Still()))
     return outcomes
@@ -1033,20 +1061,18 @@ def test_a_settlement_reads_its_policy_once_from_its_handle() -> None:
 @pytest.mark.parametrize(
     ("admission", "row"),
     [
-        (Admission(previous=Settlement(True, "keep")), "job.305"),
         (Admission(previous=Settlement(True), units=Policy("spend", "free")), "job.306"),
-        (Admission(), None),
+        (Admission(previous=Settlement(False), units=Policy("free", "keep")), "job.305"),
     ],
-    ids=["previous given", "previous read from the handle", "neither"],
+    ids=["a SUCCESS that spends", "a FAILURE that keeps"],
 )
 def test_a_late_settlement_at_a_restart_needs_its_end_s_policy(
-    admission: Admission, row: str | None
+    admission: Admission, row: str
 ) -> None:
     """job.312's action settles the run that ended by the end it made, then
-    admits the start again: with the admission's handle the policy is read
-    for that end; without one, the previous settlement must carry it, and
-    with neither the read raises (DL-349). The row is marked unreachable, so
-    its action is called on its own and the chart never fires it here."""
+    admits the start again: the policy is read from the admission's handle
+    for that end (DL-349). The row is marked unreachable, so its action is
+    called on its own and the chart never fires it here."""
     active = configuration("INACTIVE", holding="reserved")
     ctx = Context("j", ChartEvent(ADMITTED_START, admission), active, JOB_DATA)
     effects = job_chart.settle_ended_run(ctx)
@@ -1056,13 +1082,44 @@ def test_a_late_settlement_at_a_restart_needs_its_end_s_policy(
     assert repr(again.payload.previous) == repr(Settlement())  # the ended run's is spent
     executor = Executor()
     executor.restore("j", CHART, active, JOB_DATA)
-    if row is None:
-        with pytest.raises(StatechartError, match="no release and no handle"):
-            executor.dispatch("j", settlement)
-        return
     assert [ident for outcome in executor.dispatch("j", settlement) for ident in outcome.rows] == [
         row
     ]
+
+
+@pytest.mark.parametrize(
+    ("status", "event"),
+    [
+        ("RUNNING", ChartEvent(STATUS, Injection("STARTING"))),
+        ("INACTIVE", ChartEvent(ON_ICE)),
+        ("INACTIVE", ChartEvent(START, Attempt())),
+    ],
+    ids=["a status move", "a flag move", "an admission"],
+)
+def test_a_payload_with_no_handle_on_the_job_s_units_is_a_statechart_error(
+    status: str, event: ChartEvent
+) -> None:
+    """A row whose action asks the tier what it sends, met by a payload with
+    no handle: the chart has no consequences of its own, so the action
+    raises rather than send nothing (DL-356); job.312's action as well."""
+    executor = Executor()
+    executor.restore("j", CHART, configuration(status), JOB_DATA)  # type: ignore[arg-type]
+    with pytest.raises(StatechartError, match="a payload with no handle on the job's units"):
+        executor.dispatch("j", event)
+    active = configuration("INACTIVE", holding="reserved")
+    ctx = Context("j", ChartEvent(ADMITTED_START, Admission()), active, JOB_DATA)
+    with pytest.raises(StatechartError, match="a payload with no handle on the job's units"):
+        job_chart.settle_ended_run(ctx)
+
+
+def test_a_flag_move_with_no_noexec_payload_read_for_one_is_a_statechart_error() -> None:
+    """Only ON_NOEXEC's flag move carries ON_NOEXEC's payload; a guard that
+    reads it from another cause's raises rather than read a missing fact."""
+    ctx = Context(
+        "j", ChartEvent(FLAG_MOVED, FlagMoved("ON_ICE")), configuration("SUCCESS"), BOX_DATA
+    )
+    with pytest.raises(StatechartError, match="a flag move of ON_ICE carries no ON_NOEXEC payload"):
+        job_chart.noexec_ignored(ctx)
 
 
 def test_an_injected_live_status_keeps_the_run_s_units_and_settles_them_at_its_end() -> None:
@@ -1072,10 +1129,10 @@ def test_an_injected_live_status_keeps_the_run_s_units_and_settles_them_at_its_e
     released by policy when it ends."""
     executor = Executor()
     executor.restore("j", CHART, configuration("RUNNING", holding="reserved"), JOB_DATA)
-    outcomes = executor.dispatch("j", ChartEvent(STATUS, Injection("STARTING")))
+    outcomes = executor.dispatch("j", ChartEvent(STATUS, Injection("STARTING", units=Policy())))
     assert _rows(outcomes) == [("j", "job.119")]
     executor.restore("k", CHART, configuration("FAILURE", holding="held"), JOB_DATA)
-    executor.dispatch("k", ChartEvent(STATUS, Injection("RUNNING")))
+    executor.dispatch("k", ChartEvent(STATUS, Injection("RUNNING", units=Policy())))
     assert projection(executor.active("k"))[-1] == "reserved"
     keep = Policy(otherwise="keep")
     outcomes = executor.dispatch("k", ChartEvent(STATUS, Injection(success=False, units=keep)))
@@ -1163,59 +1220,6 @@ def test_the_batch_inactive_path_settles_first(monkeypatch: pytest.MonkeyPatch) 
     assert moves == [("ob", "job.135"), ("ob", "job.305"), ("om", "job.159"), ("om", "job.305")]
     written = [row for row in rows if row[1] in ("job.135", "job.159", "job.305")]
     assert written == [("ob", "job.135"), ("ob", "job.305"), ("om", "job.159"), ("om", "job.305")]
-
-
-# ---- a read after a write across regions is its own item
-
-
-@pytest.mark.parametrize(
-    ("row", "active", "event", "reads"),
-    [
-        ("job.112", configuration("QUE_WAIT"), ChartEvent(ON_ICE), {"ice_on"}),
-        ("job.111", configuration("QUE_WAIT", armed=True), ChartEvent(KILLJOB), {"arm_off"}),
-        (
-            "job.110",
-            configuration("QUE_WAIT", armed=True),
-            ChartEvent(READMIT, Readmission(recheck_fails=True)),
-            {"arm_off"},
-        ),
-        (
-            "job.113",
-            configuration("QUE_WAIT", hold=True),
-            ChartEvent(ON_NOEXEC, Noexec()),
-            {"noexec_on", "hold_off"},
-        ),
-        (
-            "job.136",
-            configuration("SUCCESS", hold=True),
-            ChartEvent(ON_NOEXEC, Noexec(change=False)),
-            {"noexec_on", "hold_off"},
-        ),
-    ],
-)
-def test_a_status_rule_that_reads_a_flag_sees_the_flag_moved(
-    row: str, active: frozenset[str], event: ChartEvent, reads: set[str]
-) -> None:
-    """The flag is written first, then the status rule reads it
-    (`_resolves` and `_out_of_the_run` read `on_ice`; a wake's attempt reads
-    `armed`; the retry reads `on_hold` and `on_noexec`). The status row's
-    action sees the flag write, because it runs as the flag row's chained item."""
-    seen: list[frozenset[str]] = []
-
-    def spy(ctx: Any) -> None:
-        """Record the configuration the status row's action sees."""
-        seen.append(ctx.active)
-
-    chart = replace(
-        CHART,
-        rows=tuple(replace(r, action="spy") if r.id == row else r for r in CHART.rows),
-        actions={**CHART.actions, "spy": spy},
-    )
-    executor = Executor()
-    executor.restore("j", chart, active, BOX_DATA if row == "job.136" else JOB_DATA)
-    rows = _rows(executor.dispatch("j", event))
-    assert ("j", row) in rows
-    assert len(seen) == 1 and reads <= seen[0]
 
 
 #: A box `ob` whose condition reads its own SUCCESS, so its completion

@@ -55,7 +55,6 @@ from dsl41.runner_startup import resume_run, start_run
 from dsl41.state_machine import (
     HITS_ENV,
     STATECHART_LOG_PREFIX,
-    STRICT_ENV,
     Context,
     Executor,
     Outcome,
@@ -233,7 +232,6 @@ def private_hits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     directory = tmp_path / "hits"
     directory.mkdir()
     monkeypatch.setenv(HITS_ENV, str(directory))
-    monkeypatch.delenv(STRICT_ENV, raising=False)
     return directory
 
 
@@ -625,7 +623,6 @@ def _gap(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, number: str) -> None:
     directory = tmp_path / "hits"
     directory.mkdir(exist_ok=True)
     monkeypatch.setenv(HITS_ENV, str(directory))
-    monkeypatch.delenv(STRICT_ENV, raising=False)
     rows = tuple(row for row in CHART.rows if row.id != f"admission.{number}")
     monkeypatch.setattr(runner_admission, "ADMISSION", replace(CHART, rows=rows))
 
@@ -636,7 +633,6 @@ def _broken(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     directory = tmp_path / "hits"
     directory.mkdir(exist_ok=True)
     monkeypatch.setenv(HITS_ENV, str(directory))
-    monkeypatch.delenv(STRICT_ENV, raising=False)
     region = CHART.root.regions[0]
     states = tuple(replace(s, entry="enter") if s.name == "admitted" else s for s in region.states)
     root = replace(CHART.root, regions=(replace(region, states=states),))

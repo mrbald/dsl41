@@ -65,9 +65,9 @@ settlement carries the end the move made, not the status it finds. One case
 reads the status: a box restarted by its own completion can start the member
 again inside the member's box rules, before its `settle` (DL-340). Past the
 bound, that attempt finds its run's settlement owed
-(`Attempt.settlement_owed`) and takes the internal row job.401, which moves
+(`StartAttempt.settlement_owed`) and takes the internal row job.401, which moves
 nothing: its action sends the ended run's settlement, by the end it made,
-then the same attempt again, so `Attempt.admissible` is read after the
+then the same attempt again, so `StartAttempt.admissible` is read after the
 settlement (DL-349). The member's `settle`, finding it live, moves nothing
 (job.418). No start meets an unsettled run, so job.312 is never reached; it is
 marked unreachable.
@@ -93,28 +93,24 @@ replay, and the old-vs-new harness is their proof.
 Modules. The declaration has three parts: the events, the data and the
 payloads (`job_chart_events`); the states, the rows and the configuration a
 row projects to (`job_chart_rows`); and here the guards, the actions and the
-chart `JOB`. This module re-exports the other two's names, so `job_chart`
-stays the one import, and this docstring is the contract of all three.
+chart `JOB`. Each importer imports a name from the module that defines it
+(DL-74), and this docstring is the contract of all three.
 """
 
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Final, Literal
+from typing import Final, Literal, cast
 
 from dsl41.job_chart_events import (
-    ACTUAL_START,
     ADMITTED_START,
     FLAG_MOVED,
     FORCE_STARTJOB,
     LEAVE_LIVE,
-    ON_NOEXEC,
-    READMIT,
     START,
     START_ADMITTED,
     Admission,
-    Admitted,
-    Attempt,
+    StartAttempt,
     BoxVerdict,
     Deadline,
     FlagMoved,
@@ -129,62 +125,8 @@ from dsl41.job_chart_events import (
     Units,
     Verdict,
 )
-
-# the names `job_chart` re-exports for its importers (`X as X`)
-from dsl41.job_chart_events import (
-    AFTER_INJECT as AFTER_INJECT,
-    AFTER_LEAVE as AFTER_LEAVE,
-    BOX_ENDS as BOX_ENDS,
-    BOX_ENDS_STEP as BOX_ENDS_STEP,
-    BOX_OFF_NOEXEC as BOX_OFF_NOEXEC,
-    BOX_ON_NOEXEC as BOX_ON_NOEXEC,
-    BOX_RECOMPUTE as BOX_RECOMPUTE,
-    BOX_RULES as BOX_RULES,
-    BOX_RUNNING as BOX_RUNNING,
-    BOX_RUN_ENDS as BOX_RUN_ENDS,
-    BOX_SET_INACTIVE as BOX_SET_INACTIVE,
-    BOX_START as BOX_START,
-    COMPLETION_MOMENT as COMPLETION_MOMENT,
-    DISARM as DISARM,
-    HOLDERS as HOLDERS,
-    KILLJOB as KILLJOB,
-    LOAD_TAKEN as LOAD_TAKEN,
-    MEMBER_ENDS as MEMBER_ENDS,
-    MEMBER_MOVES as MEMBER_MOVES,
-    MOMENTS as MOMENTS,
-    NOTIFY_STEP as NOTIFY_STEP,
-    OFF_HOLD as OFF_HOLD,
-    OFF_ICE as OFF_ICE,
-    OFF_NOEXEC as OFF_NOEXEC,
-    ON_HOLD as ON_HOLD,
-    ON_ICE as ON_ICE,
-    PERIOD_OPENING as PERIOD_OPENING,
-    RELEASE_RESOURCE as RELEASE_RESOURCE,
-    RETRY_STEP as RETRY_STEP,
-    RUN_WINDOW as RUN_WINDOW,
-    SCAN as SCAN,
-    SETTLE as SETTLE,
-    STARTED as STARTED,
-    STARTING as STARTING,
-    STARTJOB as STARTJOB,
-    STATUS as STATUS,
-    TERM_RUN_TIME as TERM_RUN_TIME,
-    WAKE as WAKE,
-    WALK_UP as WALK_UP,
-    WINDOW_PASS as WINDOW_PASS,
-    BoxGate as BoxGate,
-    Payload as Payload,
-    WindowSide as WindowSide,
-)
 from dsl41.job_chart_rows import CHOICES, ROOT, ROWS
-from dsl41.job_chart_rows import (
-    HoldingState as HoldingState,
-    configuration as configuration,
-    projection as projection,
-    row_configuration as row_configuration,
-    row_holding as row_holding,
-)
-from dsl41.oracle_state import LIVE
+from dsl41.oracle_state import LIVE, LIVE_OR_QUEUED
 from dsl41.state_machine import Context, Effects, Event, Statechart, StatechartError
 
 #: DL-304: how many of a job's admitted starts the ancestry of an attempt of
@@ -207,18 +149,24 @@ def _injected(ctx: Context) -> str | None:
     return injection.status
 
 
-def _units(ctx: Context) -> Units | None:
+def _units(ctx: Context) -> Units:
     """The tier's handle on the job that the item's payload carries
-    (`Payload.units`), or None."""
+    (`Payload.units`). A payload with none is a statechart error: every
+    payload a tier sends carries it, and the chart has no consequences of
+    its own (DL-356)."""
     units: Units | None = getattr(ctx.event.payload, "units", None)
+    if units is None:
+        raise StatechartError(
+            f"{ctx.event.name}: a payload with no handle on the job's units, so what the"
+            " row sends is unknown"
+        )
     return units
 
 
-def _consequences(ctx: Context, kind: str) -> Effects | None:
-    """What the tier's handle says a row of `kind` sends and reports beyond
-    its own move (`Units.consequences`); None with no handle."""
-    units = _units(ctx)
-    return None if units is None else units.consequences(ctx, kind)
+def _consequences(ctx: Context, action: str) -> Effects | None:
+    """What the tier's handle says a row whose action is `action` sends and
+    reports beyond its own move (`Units.consequences`)."""
+    return _units(ctx).consequences(ctx, action)
 
 
 def _nested_starts(ctx: Context) -> int:
@@ -243,31 +191,30 @@ type StartVerdict = Literal[
     "skip_member",
     "skip_inactive_member",
 ]
-_LIVE_OR_QUEUED: Final = frozenset({"STARTING", "RUNNING", "QUE_WAIT"})
 
 
 def start_verdict(ctx: Context) -> StartVerdict:
     """What a start attempt comes to, in the order the rule code tests it.
 
-    Reads the payload (`Attempt`), the data (`box`, `catalog`), the
+    Reads the payload (`StartAttempt`), the data (`box`, `catalog`), the
     configuration (the status, ice, hold, noexec, the arm and `held`) and the
     item's ancestry, whose `start admitted` items on the job are its starts in
     progress (`MAX_NESTED_STARTS`, DL-304). A forced attempt arrives with ice
     and hold already cleared by FORCE_STARTJOB's own rows, so it reads neither
     gate. A decided attempt reads the window alone (`_window_side`).
     """
-    attempt: Attempt = ctx.event.payload
+    attempt: StartAttempt = ctx.event.payload
     data: JobData = ctx.data
     active = ctx.active
     if attempt.decided:
-        if attempt.window == "inside" or active & _LIVE_OR_QUEUED:
+        if attempt.window == "inside" or active & LIVE_OR_QUEUED:
             return "ignored"
         return _skipped(attempt, active)
     if attempt.stale or (attempt.rescan and "INACTIVE" not in active):
         return "refused"
     if attempt.rescan or not data.catalog:
         return "ignored"
-    if active & _LIVE_OR_QUEUED:
+    if active & LIVE_OR_QUEUED:
         return "refused" if attempt.explicit else "ignored"
     if not attempt.force:
         gated = _gated(attempt, active)
@@ -286,7 +233,7 @@ def start_verdict(ctx: Context) -> StartVerdict:
     return "admit" if attempt.admissible else "queue"
 
 
-def _gated(attempt: Attempt, active: frozenset[str]) -> StartVerdict | None:
+def _gated(attempt: StartAttempt, active: frozenset[str]) -> StartVerdict | None:
     """The gates a plain attempt meets, in order; None when all hold."""
     if "ice_on" in active:
         return "ignored"
@@ -301,7 +248,7 @@ def _gated(attempt: Attempt, active: frozenset[str]) -> StartVerdict | None:
     return None
 
 
-def _latched(attempt: Attempt, active: frozenset[str]) -> StartVerdict:
+def _latched(attempt: StartAttempt, active: frozenset[str]) -> StartVerdict:
     """A releasable gate blocks the attempt: a scheduled tick of a dated job
     arms, unless armed already or its box is not RUNNING (`_w_arm`)."""
     if attempt.scheduled and attempt.dated and "arm_off" in active and attempt.box != "idle":
@@ -309,7 +256,7 @@ def _latched(attempt: Attempt, active: frozenset[str]) -> StartVerdict:
     return "ignored"
 
 
-def _skipped(attempt: Attempt, active: frozenset[str]) -> StartVerdict:
+def _skipped(attempt: StartAttempt, active: frozenset[str]) -> StartVerdict:
     """Outside the run window: a postponed start moves nothing; a skip moves a
     completed job to INACTIVE, and a member only in a RUNNING box it has not
     run in (job.107); a member of such a box that is INACTIVE
@@ -515,7 +462,7 @@ def not_live(ctx: Context) -> bool:
 def force_clears(ctx: Context) -> bool:
     """The data: a catalog job; the configuration's status is not live or
     queued (`start_verdict` refuses those first)."""
-    return _data(ctx).catalog and not (ctx.active & _LIVE_OR_QUEUED)
+    return _data(ctx).catalog and not (ctx.active & LIVE_OR_QUEUED)
 
 
 def queued(ctx: Context) -> bool:
@@ -531,7 +478,13 @@ def not_queued(ctx: Context) -> bool:
 def _noexec(ctx: Context) -> Noexec:
     """ON_NOEXEC's payload, on the input or passed on by `flag moved`."""
     payload = ctx.event.payload
-    return payload.noexec if isinstance(payload, FlagMoved) else payload
+    if not isinstance(payload, FlagMoved):
+        return cast(Noexec, payload)
+    if payload.noexec is None:
+        raise StatechartError(
+            f"{ctx.event.name}: a flag move of {payload.cause} carries no ON_NOEXEC payload"
+        )
+    return payload.noexec
 
 
 def noexec_ignored(ctx: Context) -> bool:
@@ -831,90 +784,64 @@ def relay_start(ctx: Context) -> Effects:
     """STARTJOB, FORCE_STARTJOB or a fired run_window timer: the attempt
     itself, as `_dispatch` makes it: scheduled, its refusal traced, forced
     for FORCE_STARTJOB. The payload's facts pass on."""
-    attempt: Attempt = ctx.event.payload
+    attempt: StartAttempt = ctx.event.payload
     return Effects(
         send=((ctx.key, Event(START, attempt.relayed(force=ctx.event.name == FORCE_STARTJOB))),)
     )
 
 
-def _admitted(ctx: Context, admitted: Admitted) -> Effects:
-    return Effects(send=((ctx.key, Event(START_ADMITTED, admitted)),))
-
-
-def extent_bypass(ctx: Context) -> Effects:
+def extent_bypass(ctx: Context) -> Effects | None:
     """A bypass (job.101) sends `start admitted` first, and the rest of the
     start follows from it (DL-349); the tier's handle gives it the record of
     the move to SUCCESS, whose box rules and wakes the extent sends."""
-    return _consequences(ctx, "bypass") or _admitted(ctx, Admitted("bypass"))
+    return _consequences(ctx, "extent_bypass")
 
 
-def extent_queue(ctx: Context) -> Effects:
+def extent_queue(ctx: Context) -> Effects | None:
     """A queued start (job.103) sends `start admitted`, which sends the move to
     QUE_WAIT's box rules and wakes: the waiter's units wait for its
     readmission."""
-    return _consequences(ctx, "queue") or _admitted(ctx, Admitted("queue"))
+    return _consequences(ctx, "extent_queue")
 
 
-def extent_admit(ctx: Context) -> Effects:
+def extent_admit(ctx: Context) -> Effects | None:
     """An admission (job.102, job.124) sends `start admitted` first, with the
-    units it reserves (`demand`) and the payload's handle on the job's units."""
-    attempt: Attempt = ctx.event.payload
-    admission = Admission(demand=attempt.demand, units=_units(ctx))
-    return _consequences(ctx, "admit") or _admitted(ctx, Admitted("admit", admission))
+    units it reserves and the payload's handle on the job's units."""
+    return _consequences(ctx, "extent_admit")
 
 
-def extent_on_held(ctx: Context) -> Effects:
+def extent_on_held(ctx: Context) -> Effects | None:
     """A forced start on held units (job.104) sends `start admitted` first,
     with the held units it takes over."""
-    admission = Admission(on_held=True, units=_units(ctx))
-    return _consequences(ctx, "on held") or _admitted(ctx, Admitted("on_held", admission))
+    return _consequences(ctx, "extent_on_held")
 
 
 def start_extent(ctx: Context) -> Effects | None:
-    """`start admitted`: what the admitted start does, in the order
-    `OracleCascade._on_extent` sends it, as the tier's handle says (DL-350): a
-    bypass consumes the arm, then its move's box rules and wakes; a queue its
-    move's box rules and wakes; an admission or a start on held units
-    reserves or takes over its units, consumes the arm, resets a box's jobs,
-    moves to STARTING and on to RUNNING. With no handle: the units, then the
-    arm."""
-    effects = _consequences(ctx, "extent")
-    if effects is not None:
-        return effects
-    admitted: Admitted = ctx.event.payload
-    if admitted.verdict == "queue":
-        return None
-    actual = (ctx.key, Event(ACTUAL_START))
-    if admitted.verdict == "bypass":
-        return Effects(send=(actual,))
-    return Effects(send=((ctx.key, Event(ADMITTED_START, admitted.admission)), actual))
+    """`start admitted`: what the admitted start does, as the tier's handle
+    says (DL-350): a bypass consumes the arm, then its move's box rules and
+    wakes; a queue its move's box rules and wakes; an admission or a start
+    on held units reserves or takes over its units, consumes the arm, resets
+    a box's jobs, moves to STARTING and on to RUNNING."""
+    return _consequences(ctx, "start_extent")
 
 
-def admit(ctx: Context) -> Effects:
-    """A readmitted waiter (job.108) reserves its units, then consumes the arm,
-    in the order `OracleCascade._extent` sends them, and the tier's handle sends the rest
-    of its extent: no `start admitted`, since a readmission is no start the
-    bound counts (DL-350)."""
-    effects = _consequences(ctx, "readmit")
-    if effects is not None:
-        return effects
-    admission = Admission(demand=ctx.event.payload.demand)
-    return Effects(
-        send=((ctx.key, Event(ADMITTED_START, admission)), (ctx.key, Event(ACTUAL_START)))
-    )
+def admit(ctx: Context) -> Effects | None:
+    """A readmitted waiter (job.108) reserves its units, then consumes the
+    arm, and the rest of its extent follows, as the tier's handle says: no
+    `start admitted`, since a readmission is no start the bound counts
+    (DL-350)."""
+    return _consequences(ctx, "admit")
 
 
 def settle_ended_run(ctx: Context) -> Effects:
     """A start meets the units of a run whose settlement is still owed
-    (`OracleCascade._on_settle_first`): that run settles first, by the end it made, then
+    (`OracleCascade._on_settles_first`): that run settles first, by the end it made, then
     the start is admitted again against what the settlement left. The
     settlement's policy is read from the admission's handle (DL-349). Its
     row, job.312, is marked unreachable: job.401 settles the run before the
     start is admitted, so the oracle's admission carries no previous end."""
     admission: Admission = ctx.event.payload
-    previous = admission.previous
-    if admission.units is not None:
-        previous = Settlement(previous.success, units=admission.units)
+    previous = Settlement(admission.previous.success, units=_units(ctx))
     return Effects(
         send=(
             (ctx.key, Event(LEAVE_LIVE, previous)),
@@ -927,7 +854,7 @@ def settles_first(ctx: Context) -> Effects | None:
     """An attempt whose run's settlement is owed (job.401, DL-340): that run
     settles by the end it made, and the same attempt is made again, so it
     reads the admission the settlement leaves, as the tier's handle says."""
-    return _consequences(ctx, "settle first")
+    return _consequences(ctx, "settles_first")
 
 
 def moved(ctx: Context) -> Effects | None:
@@ -979,44 +906,40 @@ def cancelled(ctx: Context) -> Effects | None:
 def left_queue(ctx: Context) -> Effects | None:
     """A waiter that left the queue unstarted (job.110, DL-257): as `moved`,
     then its window or day disposition."""
-    return _consequences(ctx, "left queue")
+    return _consequences(ctx, "left_queue")
 
 
 def runs_box(ctx: Context) -> Effects | None:
     """A box's RUNNING (job.125): as `moved`, then its members' auto_hold and
     their starts, then the window decisions of the box starts in progress
     (`OracleCascade._box_running`, DL-246)."""
-    return _consequences(ctx, "runs box")
+    return _consequences(ctx, "runs_box")
 
 
 def skips_in_box(ctx: Context) -> Effects | None:
     """A window skip of an INACTIVE member (job.404, DL-154): no move to
     ride, so its box rules run for it, as an INACTIVE move's would."""
-    return _consequences(ctx, "skips in box")
+    return _consequences(ctx, "skips_in_box")
 
 
 def report_flag_move(ctx: Context) -> Effects:
-    """A flag moved, and the status rule that reads it follows as its own
-    item, with the payload's handle on the units."""
-    name = ctx.event.name
-    if name == ON_NOEXEC:
-        moved = FlagMoved("ON_NOEXEC", ctx.event.payload, units=_units(ctx))
-    else:
-        cause = "readmit" if name == READMIT else name
-        moved = FlagMoved(cause, units=_units(ctx))  # type: ignore[arg-type]
+    """KILLJOB moved a waiter's arm (job.217, job.226), and the status rule
+    that reads it follows as its own item, with the payload's handle on the
+    units."""
+    moved = FlagMoved("KILLJOB", units=_units(ctx))
     return Effects(send=((ctx.key, Event(FLAG_MOVED, moved)),))
 
 
-def iced(ctx: Context) -> Effects:
+def iced(ctx: Context) -> Effects | None:
     """ON_ICE moved the flag: the status rule that reads it follows; then,
     unless the job is a waiter, the box rules its ice may run and its
     referencers' wakes (SEM-20, DL-285), as the tier's handle says."""
-    return _consequences(ctx, "iced") or report_flag_move(ctx)
+    return _consequences(ctx, "iced")
 
 
 def iced_again(ctx: Context) -> Effects | None:
     """ON_ICE on a job already on ice: its referencers wake again (SEM-20)."""
-    return _consequences(ctx, "iced again")
+    return _consequences(ctx, "iced_again")
 
 
 def held(ctx: Context) -> Effects | None:
@@ -1027,30 +950,30 @@ def held(ctx: Context) -> Effects | None:
 def released_hold(ctx: Context) -> Effects | None:
     """OFF_HOLD: a waiter's queue is scanned (DL-50); any other job attempts
     its start (SEM-21)."""
-    return _consequences(ctx, "released hold")
+    return _consequences(ctx, "released_hold")
 
 
-def noexec(ctx: Context) -> Effects:
+def noexec(ctx: Context) -> Effects | None:
     """ON_NOEXEC moved the flag: on a box, every job it contains takes it
     first (DL-347); the status rule that reads it follows; then the jobs it
     released retry their start (DL-254), as the tier's handle says."""
-    return _consequences(ctx, "noexec") or report_flag_move(ctx)
+    return _consequences(ctx, "noexec")
 
 
 def cleared_noexec(ctx: Context) -> Effects | None:
     """OFF_NOEXEC on a box clears every job it contains (DL-254)."""
-    return _consequences(ctx, "cleared noexec")
+    return _consequences(ctx, "cleared_noexec")
 
 
-def waiter_left(ctx: Context) -> Effects:
+def waiter_left(ctx: Context) -> Effects | None:
     """The queued recheck failed (DL-257): the status move follows the arm,
     and the scan's pass hears that the waiter moved."""
-    return _consequences(ctx, "waiter left") or report_flag_move(ctx)
+    return _consequences(ctx, "waiter_left")
 
 
 def released_held(ctx: Context) -> Effects | None:
     """RELEASE_RESOURCE gave held units back: the queue is scanned (DL-256)."""
-    return _consequences(ctx, "released held")
+    return _consequences(ctx, "released_held")
 
 
 def moment(ctx: Context) -> Effects | None:

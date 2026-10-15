@@ -1,35 +1,19 @@
-"""The shared state-machine core: declared transitions, one check, hit recording, and the
-statechart executor.
+"""The statechart executor of docs/statechart-engine.md, and its hit recording.
 
 Standard library only. The supervisor tier reaches its helpers by path, as it
 reaches `canon.py` (DL-42, DL-72), so this module must not import anything from
 this package. tests/test_state_machine.py pins that.
 
-A machine declares its transition table as plain data. The code that moves a
-state calls `StateMachine.take(t, old, new)` with the declared transition it is
-taking. `take` only checks and records. It never changes what the caller does.
-
-Two environment variables turn on the test tooling. Both are read at call time.
-
-- `DSL41_TRANSITION_HITS=<dir>`: a successful take appends one JSON line to
-  `<dir>/hits-<pid>.jsonl` the first time this process sees that
-  (machine, id, old, new). A violation appends one line to
-  `<dir>/violations-<pid>.jsonl` every time. Each write opens, appends, flushes
-  and closes the file, so a process ended with SIGKILL loses nothing. A write
-  that fails with OSError is dropped, and a hit is retried on its next take:
-  recording never raises out of `take`.
-- `DSL41_TRANSITION_STRICT`: a violation raises `TransitionError`.
-
-With neither variable set, `take` returns the violation, or None, and writes
-nothing.
-
-The second half of this module is the statechart executor of
-docs/statechart-engine.md. A `Statechart` is a declaration in plain data: states
-with regions, rows, choices, deferrals and time events, plus a registry of named
-guards and actions. An `Executor` runs instances of declarations on one
-worklist. It reads no clock and does no I/O; the only file it writes is the
-hits file above, and only when `DSL41_TRANSITION_HITS` is set. Machines not yet
-converted keep `take`.
+A `Statechart` is a declaration in plain data: states with regions, rows,
+choices, deferrals and time events, plus a registry of named guards and
+actions. An `Executor` runs instances of declarations on one worklist. It
+reads no clock and does no I/O. The only file it writes is the hits file of
+the test tooling, and only when `DSL41_TRANSITION_HITS=<dir>` is set, read at
+call time: the first time this process records a coverage item (§13), it
+appends one JSON line to `<dir>/hits-<pid>.jsonl`. Each write opens, appends,
+flushes and closes the file, so a process ended with SIGKILL loses nothing. A
+write that fails with OSError is dropped, and the item is retried at its next
+hit: recording never raises.
 """
 
 from __future__ import annotations
@@ -43,66 +27,12 @@ import reprlib
 from collections import deque
 from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from enum import Enum
 from types import MappingProxyType
-from typing import Any, ClassVar, Literal, NamedTuple, TypeGuard, cast, overload
+from typing import Any, ClassVar, Literal, NamedTuple, TypeGuard, overload
 
 HITS_ENV = "DSL41_TRANSITION_HITS"
-STRICT_ENV = "DSL41_TRANSITION_STRICT"
 
 type Mark = Literal["spec-only", "unreachable"]
-
-
-class TransitionError(Exception):
-    """A violation, raised only when `DSL41_TRANSITION_STRICT` is set."""
-
-
-@dataclass(frozen=True)
-class Transition[S: str]:
-    """One declared transition.
-
-    `target` is a state, or the set of states a payload may choose (a UML
-    transition into a choice pseudostate with one branch per member).
-    `guard` and `effect` are prose for the generated docs; the code holds the
-    predicate.
-    `mark` is "spec-only" for a contract rule with no code yet, and
-    "unreachable" for a branch the code excludes from coverage.
-    """
-
-    id: str
-    source: frozenset[S]
-    trigger: str
-    target: S | frozenset[S]
-    guard: str = ""
-    effect: str = ""
-    cite: str = ""
-    mark: Mark | None = None
-
-    def targets(self) -> frozenset[S]:
-        """Every state this transition may end in."""
-        if isinstance(self.target, frozenset):
-            return self.target
-        return frozenset({self.target})
-
-
-@dataclass(frozen=True)
-class Violation:
-    """A transition that did not match its declaration."""
-
-    machine: str
-    transition: str
-    old: str
-    new: str
-    reason: str
-
-
-#: (directory, machine, id, old, new) already written by this process.
-_seen: set[tuple[str, str, str, str, str]] = set()
-
-
-def state_name(state: str) -> str:
-    """The recorded and rendered name of a state: `.value` for an Enum, `str()` otherwise."""
-    return str(state.value) if isinstance(state, Enum) else str(state)
 
 
 def _append(path: str, record: dict[str, str]) -> bool:
@@ -119,117 +49,10 @@ def _append(path: str, record: dict[str, str]) -> bool:
     return True
 
 
-@dataclass(frozen=True)
-class StateMachine[S: str]:
-    """A named machine. `transitions` is the transition table."""
-
-    name: str
-    states: frozenset[S]
-    initial: S | None
-    finals: frozenset[S]
-    transitions: tuple[Transition[S], ...]
-
-    def take(self, t: Transition[S], old: S, new: S) -> Violation | None:
-        """Check that `old -> new` is the declared transition `t`, and record it.
-
-        Returns the violation, or None. Raises `TransitionError` for a violation
-        only when `DSL41_TRANSITION_STRICT` is set. A failed recording write never
-        raises, and strict mode still raises for the violation itself.
-        """
-        violation = self._check(t, old, new)
-        directory = os.environ.get(HITS_ENV)
-        if violation is None:
-            if directory:
-                self._record_hit(directory, t, old, new)
-            return None
-        if directory:
-            _append(
-                os.path.join(directory, f"violations-{os.getpid()}.jsonl"),
-                {
-                    "machine": violation.machine,
-                    "id": violation.transition,
-                    "old": violation.old,
-                    "new": violation.new,
-                    "reason": violation.reason,
-                },
-            )
-        if os.environ.get(STRICT_ENV):
-            raise TransitionError(f"{violation.machine} {violation.transition}: {violation.reason}")
-        return violation
-
-    def _check(self, t: Transition[S], old: S, new: S) -> Violation | None:
-        reason = ""
-        if t not in self.transitions:
-            reason = f"transition {t.id} is not declared in machine {self.name}"
-        elif old not in t.source:
-            reason = f"{state_name(old)} is not a source of {t.id}"
-        elif isinstance(t.target, frozenset):
-            if new not in t.target:
-                reason = f"{state_name(new)} is not one of the targets of {t.id}"
-        elif new != t.target:
-            reason = f"{t.id} targets {state_name(t.target)}, not {state_name(new)}"
-        if not reason:
-            return None
-        return Violation(self.name, t.id, state_name(old), state_name(new), reason)
-
-    def _record_hit(self, directory: str, t: Transition[S], old: S, new: S) -> None:
-        key = (directory, self.name, t.id, state_name(old), state_name(new))
-        if key in _seen:
-            return
-        record = {"machine": self.name, "id": t.id, "old": key[3], "new": key[4]}
-        # remembered only after the write lands, so a failed write is retried
-        if _append(os.path.join(directory, f"hits-{os.getpid()}.jsonl"), record):
-            _seen.add(key)
-
-
 #: A machine name. Lowercase only, so it is not read as a citation namespace.
 NAME_PATTERN = re.compile(r"[a-z][a-z_]*")
 #: The digits of a transition id, which is `<machine name>.<digits>`.
 ID_DIGITS = re.compile(r"[0-9]{2,3}")
-
-
-def well_formed[S: str](machine: StateMachine[S] | Statechart) -> list[str]:
-    """The problems with a machine's declaration. An empty list means well formed.
-
-    The machine name matches `[a-z][a-z_]*`, and every transition id is
-    `<machine name>.<two or three digits>`, such as `host.05`. A
-    `Statechart` gets the checks of `chart_problems` instead.
-    """
-    if is_statechart(machine):
-        return chart_problems(machine)
-    machine = cast("StateMachine[S]", machine)
-    problems = _id_problems(machine.name, [t.id for t in machine.transitions], "transition id")
-    if machine.initial is not None and machine.initial not in machine.states:
-        problems.append(f"initial state {machine.initial} is not a declared state")
-    for state in sorted(machine.finals - machine.states):
-        problems.append(f"final state {state} is not a declared state")
-    for t in machine.transitions:
-        for state in sorted(t.source - machine.states):
-            problems.append(f"{t.id}: source {state} is not a declared state")
-        if not t.targets():
-            problems.append(f"{t.id}: the target set is empty")
-        for state in sorted(t.targets() - machine.states):
-            problems.append(f"{t.id}: target {state} is not a declared state")
-        for state in sorted(t.source & machine.finals):
-            problems.append(f"{t.id}: final state {state} has an outgoing transition")
-    if machine.initial is not None:
-        for state in sorted(machine.states - _reachable(machine, machine.initial)):
-            problems.append(f"state {state} is not reachable from {machine.initial}")
-    return problems
-
-
-def _reachable[S: str](machine: StateMachine[S], initial: S) -> set[S]:
-    """States reachable from the initial state. A set target reaches every member."""
-    seen = {initial}
-    frontier = [initial]
-    while frontier:
-        state = frontier.pop()
-        for t in machine.transitions:
-            if state in t.source:
-                for target in sorted(t.targets() - seen):
-                    seen.add(target)
-                    frontier.append(target)
-    return seen
 
 
 # ---- the statechart executor (docs/statechart-engine.md)
@@ -471,8 +294,8 @@ class Row:
     coverage gate then forbids that outcome instead of requiring it. `note` is
     the prose of a row with no guard or action, which has no docstring to
     carry it; the generated table shows it in the action column (§14).
-    `mark` is a table transition's mark on a row: "spec-only" for a contract
-    rule with no code yet. The coverage gate lists a marked row, never counts
+    `mark` is "spec-only" for a contract rule with no code yet, or
+    "unreachable" for a cell no input reaches. The coverage gate lists a marked row, never counts
     it, and fails when the row or its guard's true outcome is hit; the guard's
     false outcome is the cell another row takes, neither required nor
     forbidden (§13, DL-353).
@@ -1669,11 +1492,13 @@ def alphabet(chart: Statechart) -> list[str]:
     return sorted(events - {COMPLETION, OVERFLOWED})
 
 
-def chart_problems(chart: Statechart) -> list[str]:
+def well_formed(chart: Statechart) -> list[str]:
     """The problems with a statechart's declaration. An empty list means well formed.
 
-    Names, ids, the tree and the registry come first; the checks that walk the
-    tree (sibling regions, reachability, completeness) run only on a sound one.
+    The machine name matches `[a-z][a-z_]*`, and every row and branch id is
+    `<machine name>.<two or three digits>`, such as `host.05`. Names, ids,
+    the tree and the registry come first; the checks that walk the tree
+    (sibling regions, reachability, completeness) run only on a sound one.
     """
     ix = _index(chart)
     ids = [r.id for r in chart.rows] + [b.id for c in chart.choices for b in c.branches]

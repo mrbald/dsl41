@@ -36,6 +36,7 @@ from dsl41.conditions import (
 from dsl41.ir import CatalogIR, JobIR
 from dsl41.oracle_state import (
     LIVE,
+    LIVE_OR_QUEUED,
     TERMINAL,
     CarriedRows,
     Event,
@@ -121,6 +122,12 @@ class OracleReads:
                 continue
             for key in _entity_keys(attr.cond):
                 self._referencers.setdefault(key, []).append(name)
+        #: box -> the jobs it holds directly, in catalog order (`_members`)
+        members: dict[str, list[str]] = {}
+        for name, job_ir in catalog.jobs.items():
+            if job_ir.box.box_name is not None:
+                members.setdefault(job_ir.box.box_name, []).append(name)
+        self._members_of = {box: tuple(names) for box, names in members.items()}
         #: DL-50 capacity buckets + the QUE_WAIT queue (DL-74): it decides
         #: admission and its order, the transitions below are this class's.
         #: Since DL-120 it holds no state -- the reservations and the ranks are
@@ -162,9 +169,9 @@ class OracleReads:
         Not `deepcopy`, which would copy the catalog. The store forks itself;
         every other mutable container is copied, here and by each layer
         above, the memo caches included, so nothing a dry apply does reaches
-        this oracle. The catalog, the switches, the capacity pool and the
-        referencer index are shared: they are fixed once the constructor
-        returns. The trace and the emitted log start empty, so a fork costs
+        this oracle. The catalog, the switches, the capacity pool, the
+        referencer index and the members index are shared: they are fixed
+        once the constructor returns. The trace and the emitted log start empty, so a fork costs
         nothing in the period's length: both are append-only, and an apply
         reads them only by slicing from a length it saved itself. A fork's
         trace therefore holds only what was applied on the fork. A new
@@ -178,8 +185,9 @@ class OracleReads:
         twin._calendars = dict(self._calendars)
         return twin
 
-    def _members(self, box: str) -> list[str]:
-        return [n for n, j in self.catalog.jobs.items() if j.box.box_name == box]
+    def _members(self, box: str) -> tuple[str, ...]:
+        """The jobs the box holds directly, in catalog order."""
+        return self._members_of.get(box, ())
 
     def trace(self) -> list[TraceEntry]:
         return [entry.model_copy() for entry in self._trace]  # no aliasing out
@@ -256,7 +264,7 @@ class OracleReads:
                     # cycle, and each job has one box, so no member repeats.
                     continue
                 seen.add(member)
-                if skip_live and self._runtime(member).status in LIVE | {"QUE_WAIT"}:
+                if skip_live and self._runtime(member).status in LIVE_OR_QUEUED:
                     continue
                 out.append(member)
                 if self.catalog.jobs[member].job_type == "BOX":
@@ -309,7 +317,7 @@ class OracleReads:
             mrt = self._runtime(member)
             if mrt.on_ice:
                 return f"sendevent ON_NOEXEC ignored: contained job {member!r} is ON_ICE (DL-254)"
-            if mrt.status in LIVE | {"QUE_WAIT"}:
+            if mrt.status in LIVE_OR_QUEUED:
                 return (
                     f"sendevent ON_NOEXEC ignored: contained job {member!r} is"
                     f" {mrt.status} (DL-254)"
@@ -457,10 +465,10 @@ class OracleReads:
         terminal transition, or its subbox's idle recompute (SEM-15), runs
         the door again once the job inside ends."""
         rt = self._runtime(job)
-        if not rt.on_ice or rt.status in LIVE | {"QUE_WAIT"}:
+        if not rt.on_ice or rt.status in LIVE_OR_QUEUED:
             return False
         return not any(
-            self._runtime(inner).status in LIVE | {"QUE_WAIT"}
+            self._runtime(inner).status in LIVE_OR_QUEUED
             for inner in self._contained(job, skip_live=False)
         )
 
@@ -544,12 +552,12 @@ class OracleReads:
                 # nothing in it is live or queued; until then it is not yet
                 # run, below, and the box waits
                 continue
-            if member in box_rt.iced_out_members and rt.status not in LIVE | {"QUE_WAIT"}:
+            if member in box_rt.iced_out_members and rt.status not in LIVE_OR_QUEUED:
                 # SEM-20: taken off ice during this run, it sits the run
                 # out. A forced attempt that queued still keeps the box
                 # waiting, as for a resolved member below.
                 continue
-            if member in resolved and rt.status not in LIVE | {"QUE_WAIT"}:
+            if member in resolved and rt.status not in LIVE_OR_QUEUED:
                 # an explicit INACTIVE verdict this execution: a run_window
                 # skip (DL-154) or an operator's (DL-242), which counts "as
                 # if the INACTIVE job returned a status of SUCCESS". A later

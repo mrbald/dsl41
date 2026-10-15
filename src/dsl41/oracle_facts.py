@@ -7,7 +7,7 @@ read and kept, in the order the rules test it, so an input computes only
 the facts its rules read. Every fact is a read: it writes nothing to
 the store, the trace, the timers or the resolutions.
 
-- `StartFacts`: a `start` attempt's payload, `Attempt`'s fields (DL-342).
+- `StartFacts`: a `start` attempt's payload, `StartAttempt`'s fields (DL-342).
 - `NoexecFacts`: ON_NOEXEC's payload, `Noexec`'s fields (DL-344).
 - `ReadmitFacts`: a `readmit` payload, `Readmission`'s fields (DL-345).
 - `OverrideFacts`, `FoldFacts` and `RecomputeFacts`: the box rules' payloads,
@@ -27,8 +27,8 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from dsl41.capacity import DemandEntry, to_reservations
 from dsl41.conditions import Cond, GlobalAtom, iter_atoms
 from dsl41.ir import JobIR
-from dsl41.job_chart import BoxGate, JobData, Release, WindowSide
-from dsl41.oracle_state import FAILED, LIVE, TERMINAL, JobStatus
+from dsl41.job_chart_events import BoxGate, JobData, Release, WindowSide
+from dsl41.oracle_state import FAILED, LIVE_OR_QUEUED, TERMINAL, JobStatus, unreleased
 from dsl41.state_machine import Context, Effects
 
 if TYPE_CHECKING:
@@ -39,7 +39,7 @@ type Target = Literal["SUCCESS", "FAILURE"] | None
 
 
 class StartFacts:
-    """A `start` payload: `Attempt`'s fields, each oracle fact computed on its
+    """A `start` payload: `StartAttempt`'s fields, each oracle fact computed on its
     first read and kept.
 
     `force`, `explicit`, `scheduled`, `stale`, `rescan`, `decided` and `dated`
@@ -124,7 +124,7 @@ class StartFacts:
         return StartFacts(self._oracle, self._job, self._job_ir, **fields)
 
     def relayed(self, *, force: bool) -> StartFacts:
-        """`Attempt.relayed`: the attempt a relay passes on."""
+        """`StartAttempt.relayed`: the attempt a relay passes on."""
         return self._again(force=force, explicit=True, scheduled=True)
 
     def settled(self) -> StartFacts:
@@ -222,11 +222,11 @@ class StartFacts:
 
 class RowUnits:
     """The tier's handle on one job (`Units`), which the oracle's payloads
-    carry. `release` reads the row's units when the settlement pops, and decides as `RuntimeState.release_reservations`
-    does with the pool's `keeps_held`: a `completion` unit is freed by every
-    end and a `success` unit by SUCCESS; what is not freed is kept on a
-    renewable and spent on a depletable, and one kept unit makes the end keep.
-    A row that holds nothing frees nothing (DL-349). `consequences` reads what
+    carry. `release` reads the row's units when the settlement pops, by the
+    rule the store's verb applies (`unreleased`, with the pool's
+    `keeps_held`): one kept unit makes the end keep, else one spent unit
+    makes it spend, else it frees. A row that holds nothing frees nothing
+    (DL-349). `consequences` reads what
     a row of the job sends beyond its own move from the oracle
     (`OracleCascade._consequences`, DL-350). Both are reads."""
 
@@ -241,21 +241,14 @@ class RowUnits:
 
     def release(self, success: bool) -> Release:
         """What leaving the run does with the units the row holds now."""
-        kept = spent = False
-        for unit in self._oracle._runtime(self._job).reservations:
-            if unit.release_policy == "completion" or (
-                unit.release_policy == "success" and success
-            ):
-                continue
-            if self._oracle._pool.keeps_held(unit.bucket):
-                kept = True
-            else:
-                spent = True
+        units = self._oracle._runtime(self._job).reservations
+        kept, spent = unreleased(units, success, self._oracle._pool.keeps_held)
         return "keep" if kept else "spend" if spent else "free"
 
-    def consequences(self, ctx: Context, kind: str) -> Effects | None:
-        """What a row of `kind` of the job sends and reports beyond its move."""
-        return self._oracle._consequences(self._job, ctx, kind)
+    def consequences(self, ctx: Context, action: str) -> Effects | None:
+        """What a row of the job whose action is `action` sends and reports
+        beyond its move."""
+        return self._oracle._consequences(self._job, ctx, action)
 
 
 def job_data(oracle: OracleCascade, job: str) -> JobData:
@@ -311,7 +304,7 @@ class NoexecFacts:
         if "tree_busy" not in self._known:
             rows = (self._oracle._runtime(member) for member in self._contained())
             self._known["tree_busy"] = any(
-                row.on_ice or row.status in LIVE | {"QUE_WAIT"} for row in rows
+                row.on_ice or row.status in LIVE_OR_QUEUED for row in rows
             )
         return cast(bool, self._known["tree_busy"])
 

@@ -9,9 +9,8 @@ Each machine is registered and well formed, and each new rule has a test
 that triggers it and one that does not: the routing chart's rows and the
 gate's rejections, a decided host command the chart refuses, and a second
 outcome refused by the outbox. The anchor's machines are statecharts too
-(DL-336): test_anchor_machines.py. A test that breaks a transition on purpose
-records into its own directory without the strict variable, so the
-violation stays out of the session's gate."""
+(DL-336): test_anchor_machines.py. A test that builds a chart's cells by hand
+records into its own directory, so its hits stay out of the session's gate."""
 
 from __future__ import annotations
 
@@ -57,7 +56,6 @@ from dsl41.runner_journal import (
 from dsl41.runner_startup import resume_run, start_run
 from dsl41.state_machine import (
     HITS_ENV,
-    STRICT_ENV,
     Executor,
     Outcome,
     Row,
@@ -78,7 +76,6 @@ def recording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     directory = tmp_path / "hits"
     directory.mkdir()
     monkeypatch.setenv(HITS_ENV, str(directory))
-    monkeypatch.delenv(STRICT_ENV, raising=False)
     return directory
 
 
@@ -324,16 +321,10 @@ def test_a_second_outcome_is_refused_and_the_first_stands(
     )  # type: ignore[arg-type]
 
 
-def test_a_strict_session_refuses_a_second_outcome_from_the_outbox(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The refusal is the outbox's own EngineError under the strict variable
-    too: the effect's instance is gone once it is final, so no chart is asked
-    (DL-295)."""
-    directory = tmp_path / "hits"
-    directory.mkdir()
-    monkeypatch.setenv(HITS_ENV, str(directory))
-    monkeypatch.setenv(STRICT_ENV, "1")
+def test_a_second_outcome_s_refusal_is_the_outbox_s_own_error(recording: Path) -> None:
+    """The refusal is the outbox's own EngineError, which names the row an
+    outcome would need: the effect's instance is gone once it is final, so no
+    chart is asked (DL-295)."""
     outbox = Outbox()
     effect = _effect()
     outbox.record(effect)
