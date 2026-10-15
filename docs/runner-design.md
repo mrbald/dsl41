@@ -85,8 +85,8 @@ For the real-time shell, the runner adds two methods to the oracle:
   lazily inside the next `feed()` whose `at` reaches them. A wall-clock
   shell cannot be sure that an external event will arrive.
 - `advance(now: datetime) -> list[Event]` — fires the timers due `<= now`
-  without an external event (factored from `feed()`'s drain, same
-  non-decreasing time discipline).
+  without an external event. It runs the same timer drain as `feed()`,
+  under the same non-decreasing time discipline.
 
 Both are deterministic and pure-core-compatible. Bisimulation (§13) pins
 that `feed`-only and `advance`+`feed` schedules produce identical traces.
@@ -94,7 +94,9 @@ that `feed`-only and `advance`+`feed` schedules produce identical traces.
 The engine uses more of the oracle than these two methods. `fork` and
 `batch` (`InputBatch`) serve the admission order and the host table serves
 routing (`docs/concurrency-model.md` §4 and §8). `trace_since` serves the
-control `trace` verb (DL-310). The recursion-limit fit is §4's (DL-306).
+control `trace` verb (DL-310). The cascade's bound is §4's item cap
+(DL-351). Constructing an oracle raises the process's recursion limit to
+the fixed `RECURSION_LIMIT` and never lowers it (DL-351, DL-352).
 
 ## 4. Engine loop — single writer
 
@@ -252,7 +254,7 @@ A file that appears at a later poll waits for a steady size, as under
 `stable`. A job with a minimum size always needs the steady-size rule. The
 adapter completes with exit 0.
 
-**Its progress is evidence, not memory** (DL-129; period-model §2.2). Last
+**Its progress is evidence, not memory** (DL-129; period-model §3.5). Last
 observed size and stable-poll count decide when
 a watch completes, and a restart resets both. So the watch has a spool, and it
 is append-only: `runs/<job>.<run_number>/watch.jsonl`, a `start` line on
@@ -326,8 +328,12 @@ sendevent is multi-writer by AutoSys nature, and the single-writer engine
 loop serializes it. The lease guards the tier that spawns without
 semantics. When its trigger fires (DL-42), the supervisor tier is set for
 extraction as a standalone permissively-licensed package. Until then, it
-lives here under an enforced import boundary: wrapper and supervisor
-import nothing from dsl41, stdlib only, tested.
+lives here under an enforced import boundary. The wrapper and the
+supervisor import nothing third-party and nothing through the dsl41
+package. Their only imports outside the standard library are sibling
+stdlib-only modules, imported by top-level name from their own directory
+(DL-72): `runner_procid` for both, and also `canon` (DL-129) and
+`state_machine` (DL-289) for the supervisor. Tests pin both import sets.
 
 **Tier 0 — per-run wrapper** (the correctness tier, always present). This
 tier is a dumb stdlib-only shim (`runner_wrapper.py`, no
@@ -338,8 +344,8 @@ does not know whether the engine or the supervisor spawned it. So both
 tiers run the same shim.
 Duties:
 
-1. `setsid()` — its own session. The command child then does
-   `setpgid(0, 0)` into its **own pgid, separate from the wrapper's**.
+1. `setsid()` — its own session. The command is spawned into its **own
+   pgid, separate from the wrapper's** (`process_group=0` at spawn).
    This separation is load-bearing: `kill(-pgid, SIGKILL)` signals every
    member, and a wrapper inside the group dies *before it writes the
    record*. The wrapper stays outside the group that it (or the engine)
@@ -460,7 +466,8 @@ Record kinds:
   the state owner rather than fed. Under its own key rather than
   `payload`, so no record shape spells one field name two ways.
 - `decision` — `{index, request_id, decision, reason, code, revisions,
-  legacy_batch, effects}`: the whole §4 step-7 batch in one line (DL-118,
+  legacy_batch, effects}`: the whole concurrency-model §4 step-7 batch in
+  one line (DL-118,
   `docs/period-model.md` §2.3): the decision the attempt at `index` got,
   the revisions it moved, and every effect it planned. `index`, not `seq`,
   because it shares its attempt's number and `seq` is the §10 subscribe
@@ -509,7 +516,8 @@ Record kinds:
   once-per-log header cannot describe a log made of segments, DL-130), and
   `result` and standalone `effect` (the decision and its intents as
   separate records, each its own fsync, with the window between them the
-  atomicity violation §4 step 7 forbids; `decision` holds both, DL-118). A
+  atomicity violation concurrency-model §4 step 7 forbids; `decision`
+  holds both, DL-118). A
   `catalog_hash_version` of 1 is refused the same way. An **unknown** `rec`
   is refused too, naming the kind, as its own error: the version gate sits
   on the opening `segment`, so an unrecognised kind inside a version-matched
@@ -686,8 +694,8 @@ A `journal.jsonl` whose first record is a `header` is refused as a
 **retired dialect**, citing DL-138 (the refusal sits on `--resume`,
 DL-134), and there is no verb that lifts it. The
 question asked is narrow: the first record is a `header`. A `journal.jsonl`
-that opens with a `segment` is not legacy, and its own refusals are
-unchanged.
+that opens with a `segment` is not legacy and is held to its own
+refusals.
 
 1. On catalog-hash mismatch, refuse: no silent semantic drift. A changed
    estate re-baselines explicitly. A clock-domain mismatch refuses on the
@@ -796,7 +804,7 @@ hours and on one whose only remaining work was the lost run is forever.
 
 An FW watch leaves a run directory, its spool (§6), so the sweep finds
 watches too, and the ladder has two rules for them (DL-129; period-model
-§2.2 and §11a). A pending FW SPAWN whose run directory holds a `start` line
+§3.5). A pending FW SPAWN whose run directory holds a `start` line
 carrying the effect's `run_id` is **resolved applied by that line**: a
 watch spawns no process, so `spawn.json` is not the evidence that it was
 dispatched, and without the rule the barrier would re-launch a live watch
@@ -1226,7 +1234,7 @@ a distributed concern, DL-49).
 
 ## 14. Module layout and phasing
 
-The house layout is flat, with no `runner` subpackage: nineteen
+The house layout is flat, with no `runner` subpackage: twenty
 `runner*.py` sibling modules. Each module owns one seam (DL-74, DL-78);
 the entry that built a module documents it. Nothing is re-exported: every import site names the module that owns the symbol, so
 the split cannot decay into a second name for one file.
@@ -1266,6 +1274,8 @@ the split cannot decay into a second name for one file.
 - `runner_hosts.py`: the execution-host routing table (concurrency-model
   §8).
 - `runner_ledger.py`: leadership over one run root (concurrency-model §7).
+- `runner_seal.py`: the engine's seal boundary as a statechart
+  (period-model §6 and §7, DL-327).
 - `runner_history.py`: the offline `dsl41 runs` projection (DL-113).
 - `runner_access.py`: the control-socket access perimeter
   (`docs/access-model.md`).
@@ -1275,11 +1285,11 @@ Runner CLI verbs live in `cli_run.py` (`run`, `rehearse`, `journal`,
 `query`, `supervise`), the five-module CLI split of DL-137, assembled by `cli.py`.
 The period verbs are `cli_estate.py`'s.
 
-Module docstrings cite the runner's six build phases by label, 11a to 11f
-(DL-41; 11f by DL-41a). All six are built: 11a, the engine loop and the
-bisimulation suite; 11b, the wrapper, adapters, WAL and resume; 11c, the
-scheduler, preflight and control socket with the headless verbs
-(`rehearse` and a minimal `query` client ship with them, DL-45); 11d, the
+Module docstrings name the runner's six build phases by label, 11a to 11f
+(DL-41, DL-41a). All six are built. The labels map to these parts: 11a,
+the engine loop and the bisimulation suite; 11b, the wrapper, adapters,
+WAL and resume; 11c, the scheduler, preflight and control socket with the
+headless verbs, `rehearse` and a minimal `query` client (DL-45); 11d, the
 Textual TUI; 11e, `serve`; 11f, the supervisor tier (§6a Tier 1, frozen in
 `docs/supervisor-protocol.md`, the extraction boundary of DL-42).
 
@@ -1348,8 +1358,8 @@ code. None is guess-resolved.
   if the loop starts seconds later. Vendor behavior for an
   event-processor outage that spans a start_times tick is unverified [?].
   A live instance decides fire-late vs skip.
-- **E10** — schedule interpretation defaults (DL-45), split by DL-155 and
-  DL-260. The no-timezone clock half is [V]. Jobs without a per-job
+- **E10** — schedule interpretation defaults (DL-45, DL-155, DL-260). The
+  no-timezone clock half is [V]. Jobs without a per-job
   `timezone` read their times in the run-level `--timezone` base zone,
   with UTC as the default. The vendor uses the AutoSys server's zone, which
   a migrated estate must set explicitly: "The start event for jobs with

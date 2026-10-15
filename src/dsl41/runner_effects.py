@@ -44,7 +44,7 @@ What is deliberately NOT here, and why:
   step-7 decision transaction and rides in the durable effect, so the WAL,
   the wrapper spec and the spool name ONE key: an engine that dies between
   the durable effect and the spawn resumes knowing which identity the run
-  would have had, which is what ss11a's supervisor-index dedup keys on.
+  would have had, which is what period-model ss11a's supervisor-index dedup keys on.
   DL-96 deferred the binding "until the relay needs it"; the seal needed it
   first. The mint stays out of `effect_id`, which remains derived -- replay
   reconstructs the same outbox without trusting a uuid, and reads the
@@ -344,7 +344,7 @@ class Outbox:
         #: insertion order IS admission order, and ss5 makes per-run ordering
         #: mandatory: a KILL decided after a SPAWN must not overtake it.
         self._order: list[str] = []
-        #: the ss11a one-to-one ownership maps, both directions
+        #: the period-model ss11a one-to-one ownership maps, both directions
         self._run_ids: dict[tuple[str, int], str] = {}
         self._runs_by_id: dict[str, tuple[str, int]] = {}
         #: the run ids that SPAWN effects bound: what a KILL is planned from.

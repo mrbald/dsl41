@@ -2,7 +2,7 @@
 
 Status: frozen (DL-84). Entries that amend it include DL-86, DL-90,
 DL-94, DL-95, DL-96, DL-97, DL-100, DL-101, DL-102, DL-103, DL-109, DL-111, DL-112,
-DL-118, DL-120, DL-130, DL-138, DL-147, DL-150, DL-151, DL-210, DL-232,
+DL-118, DL-120, DL-130, DL-133, DL-138, DL-147, DL-150, DL-151, DL-210, DL-232,
 DL-234, DL-272, DL-274, DL-284, DL-292, DL-293, DL-297 and DL-353. Each is cited
 where it applies. Each change to a frozen item needs a decision-log entry.
 
@@ -29,6 +29,9 @@ clock does not.
 
 The rule is mandatory. There is no opt-out and no `"any"` escape. A caller
 that does not name a version is refused; it is not admitted unchecked.
+A command that addresses no row, such as a seal, reads no entity and
+mutates no row. It names no version, and an `expect` sent with it is
+refused (`docs/control-protocol.md` §3, DL-133, DL-151).
 Cascades and time observations are ordered *consequences* of applying an
 input. They are not independent writes, and the rule does not cover them.
 An operator cannot hold a revision on a state that only the semantics may
@@ -143,12 +146,13 @@ the WAL, the wrapper spec and the spool name one key
 **Owner.** `RuntimeState` owns the frozen `JobRuntime`, `GlobalRuntime`
 and `HostRuntime` rows and the private job, global, host, timer and
 capacity state. Every write goes through a typed operation, among them
-`transition`, `start_run`, `move_flag` for one flag or the arm, `stay` for a status
-move that writes nothing, `seed_job` to install a row, `set_global`,
-`enqueue_timer`, the §8 host verbs, and the capacity verbs (DL-120's
-five and DL-256's two). No mutable map escapes, and no generic `setattr`
-reaches a row. `model_copy(update=)` does **not** validate, so the owner
-builds each new row through validation.
+`transition`, `start_run`, `move_flag` for one flag or the arm,
+`seed_job` to install a row, `set_global`, `enqueue_timer`, the §8 host
+verbs, and the capacity verbs (DL-120's five and DL-256's two).
+`transition` and `move_flag` write the state the `job` chart reached
+(DL-353). No mutable map escapes, and no generic `setattr` reaches a
+row. `model_copy(update=)` does **not** validate, so the owner builds
+each new row through validation.
 
 There is no `cancel_timer` beside `enqueue_timer` (DL-86). It has no
 caller and cannot have one. The oracle discards a superseded timer at
@@ -459,9 +463,10 @@ effect has a third state.
 
 An effect is `pending` until it has an outcome. `EffectOutcome.state` is
 `applied` (with its result), `indeterminate` or `retired` (DL-111).
-`retired` is the recorded outcome of the supersession rule below. DL-98
-kept the name, because "safe to forget" and "must not be forgotten" are
-different facts.
+`retired` is the recorded outcome of the supersession rule below. It
+means the effect was never attempted, because the world moved past it. It
+stays apart from `indeterminate`: a retired effect is safe to forget, and
+an indeterminate one must not be forgotten (DL-98).
 
 An exact retry returns the original result only when that result is
 *known*. Otherwise it reconciles, or answers `outcome_unavailable`.
@@ -966,6 +971,13 @@ For a mistaken `--force` it is the detector: it cannot un-run the
 duplicate, but it stops it continuing and turns a silent divergence into
 a recorded incident.
 
+A returning host's re-registration at its new generation, and its
+self-fencing, are the relay's acts, and the relay is not built (DL-97,
+DL-103). The `host` chart's row for that re-registration is spec-only,
+and no code posts it. What is built is a different refusal (§7, CM-12):
+an evicted row refuses every operator verb and both of the leader's
+verbs, so reaching an evicted host again does not un-evict it.
+
 Re-driving an evicted host's held jobs issues **new runs with new effect
 ids**, never retries of the old ones (§5).
 
@@ -1122,8 +1134,9 @@ and a crash window is a window only if a process can die inside it.
 Neither tier can answer the other's question, so neither substitutes. The
 process tier must NOT re-derive arithmetic: waiting out §8's real bound
 would add a minute per run and prove a sum.
-`tests/test_runner_leadership.py` holds the S5 and S6 stages; the earlier
-stages live in the supervisor and lifecycle tiers.
+`tests/test_runner_leadership.py` tests S5's routing table and S6's
+election under real processes (stage S7c); the earlier stages live in the
+supervisor and lifecycle tiers.
 
 Obligations. Tests are named `test_cmNN_*`, after the house convention
 `test_semXX_*`.
@@ -1164,14 +1177,10 @@ H   the model harness — before the code it validates
 S1b RuntimeState: frozen rows, private maps, timers WITH ordering, inventory
 S1c state_rev + input transaction + read verbs
 S2  typed frontiers, atomic admission, decision index, two-pass replay
-S3  mandatory preconditions + protocol v2 (retired at DL-118; wire is v3)
-S4  CLI / TUI          ∥   S5  relay + host identity, effects, barrier,
-                              deadman, host states + evict
-                              (S5a-d landed; the relay and the barrier moved
-                               to S6 by DL-97 -- both rest on election or on
-                               a second host, and neither exists before it)
-S6  ledger + election (S6a-c landed, DL-99: election, the fence, the
-    barrier. The RELAY did not land here -- see below)
+S3  mandatory preconditions + protocol v2 (retired and refused; the wire is v3, DL-118)
+S4  CLI / TUI          ∥   S5  host identity, effects, deadman,
+                              host states + evict (S5a-d)
+S6  ledger + election (S6a-c, DL-99: election, the fence, the barrier)
 S7  failover / partition / double-run matrix over nightbank
 ```
 
@@ -1179,15 +1188,17 @@ The sub-stages, each named in code or tests: S5a, S5b, S5c and S5d
 (DL-93); S6a, S6b and S6c (DL-99); S7a, S7b and S7c (DL-108, DL-109,
 DL-112).
 
-The relay's trigger is a **second execution host** (DL-97, DL-103), not
-S6: nothing in election, the fence or the barrier produces a second
-machine or answers §7's open question of how mutually authenticated
-principals are named, issued and rotated. The barrier S6c built is the
-local half: it reconciles every host in the routing table, and that table
-has one row. What S6 hands the relay is an epoch that is allocated,
-monotone, and re-checked on every append, so "a relay rejects any dispatch
-carrying an epoch below the highest it has seen" names a value that moves
-rather than a constant.
+S5 holds neither the relay nor the barrier: both rest on election or on
+a second host (DL-97). The barrier is built in S6, and no stage builds
+the relay; S0 holds its contract. The relay's trigger is a **second
+execution host** (DL-97, DL-103), not S6: nothing in election, the fence
+or the barrier produces a second machine or answers §7's open question
+of how mutually authenticated principals are named, issued and rotated.
+The barrier S6c built is the local half: it reconciles every host in the
+routing table, and that table has one row. What S6 hands the relay is an
+epoch that is allocated, monotone, and re-checked on every append, so "a
+relay rejects any dispatch carrying an epoch below the highest it has
+seen" names a value that moves rather than a constant.
 
 Two dependencies are pinned here: S2
 persists `InputAttempt`, so the envelope and `ApplyResult` types must be

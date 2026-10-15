@@ -351,7 +351,7 @@ def host_rejection_reason(
 
     `grace_s` is the command grace the PERIOD runs, which is what the kill
     half of the bound is made of, and it is REQUIRED (DL-152): a default
-    here was the ss2.1 number, so a caller that forgot to pass the period's
+    here was the period-model ss2.1 number, so a caller that forgot to pass the period's
     grace got a bound for a different estate and nothing said so. `actor` is
     the attempt's `claimed_actor`, which force needs and the other verbs do
     not. Both are the input's own facts -- journaled with it -- so replay
