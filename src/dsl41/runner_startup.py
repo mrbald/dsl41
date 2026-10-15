@@ -1080,9 +1080,16 @@ def _estate_home(
             prev_seal_digest=lineage.seal.digest if lineage.seal is not None else None,
             prior_seal_record=(seal_record(lineage.seal) if lineage.seal is not None else None),
         )
-        if anchor is not None and sentinel is not None and manifest is not None
+        if anchor is not None and sentinel is not None
         else None
     )
+
+
+#: What the ss7 sweep reconciles against: each run's spool directory, and the
+#: runs the supervisor LISTs alive, both keyed by (job, run number).
+type ResumeEvidence = tuple[
+    dict[tuple[str, int], Path | None], dict[tuple[str, int], SupervisorRunRow]
+]
 
 
 async def _replay_into_engine(
@@ -1092,7 +1099,7 @@ async def _replay_into_engine(
     opening: Mapping[str, Any],
     run_root: Path,
     supervisor: SupervisorClient | None,
-) -> tuple[dict[tuple[str, int], Path | None], dict[tuple[str, int], SupervisorRunRow]]:
+) -> ResumeEvidence:
     """Replay the segment into `engine`, installing the log's position (frontiers
     and decisions) and the outbox on it, and answer the evidence the recovered
     attempts leave."""
@@ -1261,7 +1268,7 @@ async def _commit_recovered_after_identity_check(
     recovered: list[RecoveredAttempt],
     records: list[dict[str, Any]],
     supervisor: SupervisorClient | None,
-) -> tuple[dict[tuple[str, int], Path | None], dict[tuple[str, int], SupervisorRunRow]]:
+) -> ResumeEvidence:
     """ss4 step 7 for each attempt the previous engine admitted and never
     decided (DL-315): plan, check, then write.
 
@@ -1289,7 +1296,7 @@ async def _commit_recovered_after_identity_check(
 
 async def _resume_evidence(
     engine: Engine, records: list[dict[str, Any]], supervisor: SupervisorClient | None
-) -> tuple[dict[tuple[str, int], Path | None], dict[tuple[str, int], SupervisorRunRow]]:
+) -> ResumeEvidence:
     """The runs the ss7 sweep reconciles, with what the supervisor LISTs.
     Read only: nothing here appends or launches."""
     assert engine.run_root is not None
@@ -1340,8 +1347,7 @@ async def _reconcile(
     settle_seconds: float,
     grace_seconds: float,
     supervisor: SupervisorClient | None = None,
-    evidence: tuple[dict[tuple[str, int], Path | None], dict[tuple[str, int], SupervisorRunRow]]
-    | None = None,
+    evidence: ResumeEvidence | None = None,
 ) -> None:
     """The ss6a/ss7 reconciliation ladder (module docstring). Tethered
     semantics did the killing already (wrappers EOF'd when the engine

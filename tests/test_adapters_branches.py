@@ -1342,7 +1342,7 @@ def test_kill_stops_at_sigterm_when_the_exit_push_arrives_within_the_grace() -> 
 
 
 def test_kill_ends_at_sigterm_when_the_supervisor_holds_no_such_run() -> None:
-    """`unknown_run` means no push can come: no grace wait, no KILL (DL-356)."""
+    """`unknown_run` means no push can come: no grace wait, no KILL (DL-359)."""
     client = _SignalClient([{"ok": False, "error": "unknown_run"}])
     adapter = SupervisedCommandAdapter(client, grace_seconds=60.0)  # type: ignore[arg-type]
     asyncio.run(asyncio.wait_for(adapter.kill("rid"), 10))
@@ -1506,7 +1506,7 @@ def test_resolve_spool_cancelled_in_the_grace_still_sends_the_sigkill(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A cancel after the ladder's SIGTERM must not leave a group that ignores
-    TERM alive: the SIGKILL goes out on the way out (DL-356)."""
+    TERM alive: the SIGKILL goes out on the way out (DL-359)."""
     run_dir = tmp_path / "j.1"
     spawn = _spawn_doc()
     _spool(run_dir, "spawn.json", spawn)

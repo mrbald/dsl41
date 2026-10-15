@@ -431,10 +431,11 @@ def _live_seal(
     )
 
 
-def _closing_manifest(run_root: Path) -> "Manifest | int":
-    """The manifest `_offline_seal` closes against, or the exit code of the
-    refusal that stands in for it."""
+def _closing_manifest(run_root: Path) -> "Manifest":
+    """The manifest `_offline_seal` closes against. Raises `EngineError` with
+    the refusal text when the root cannot give one."""
     from dsl41.period import read_period_manifest
+    from dsl41.runner_clock import EngineError
 
     try:
         # the period this sealer will CLOSE, which on a root with a
@@ -444,9 +445,9 @@ def _closing_manifest(run_root: Path) -> "Manifest | int":
         # hash the operator never named
         pinned = read_period_manifest(run_root, resume_target_period(run_root))
     except Exception as exc:  # RunHistoryError or EngineError: both are refusals
-        return refuse(exc, prefix=str(run_root))
+        raise EngineError(f"{run_root}: {exc}") from exc
     if pinned is None:
-        return refuse(
+        raise EngineError(
             f"{run_root}: no period manifest -- an offline seal reads the CLOSING"
             " period's identity from the root itself, and this root has none"
             " (period-model ss7)"
@@ -454,13 +455,13 @@ def _closing_manifest(run_root: Path) -> "Manifest | int":
     return pinned
 
 
-def _load_closing_catalog(
-    run_root: Path, pinned: "Manifest"
-) -> "tuple[CatalogIR, datetime, str | None]":
-    """The CLOSING period's catalog, the clock reading its preflight used,
-    and the refusal text when that preflight fails. Raises `EngineError` as
-    the loader does."""
+def _load_closing_catalog(run_root: Path, pinned: "Manifest") -> "tuple[CatalogIR, datetime]":
+    """The CLOSING period's catalog and the clock reading its preflight used.
+    Raises `EngineError` as the loader does, and with the preflight's refusal
+    text when that fails."""
     from datetime import UTC, datetime
+
+    from dsl41.runner_clock import EngineError
 
     from dsl41.boundary import load_bundle_catalog, preflight_errors
 
@@ -482,14 +483,12 @@ def _load_closing_catalog(
     now = datetime.now(UTC).replace(tzinfo=None)
     errors = preflight_errors(catalog, pinned.runtime_profile, at=now)
     if errors:
-        return (
-            catalog,
-            now,
+        raise EngineError(
             f"{run_root}: the closing period's catalog fails preflight under"
             f" this build: {'; '.join(errors)}; drain and recreate"
-            " the estate (DL-240)",
+            " the estate (DL-240)"
         )
-    return catalog, now, None
+    return catalog, now
 
 
 def _offline_seal_request(
@@ -567,9 +566,10 @@ async def _offline_seal(
     refusal = confirmed_resume_refusal(run_root, estate_anchor)
     if refusal is not None:
         return refuse(refusal)
-    pinned = _closing_manifest(run_root)
-    if isinstance(pinned, int):
-        return pinned
+    try:
+        pinned = _closing_manifest(run_root)
+    except EngineError as exc:
+        return refuse(exc)
     staged, staged_manifest, _ = _stage_next(
         run_root, next_files, profile, permit_unknown, properties
     )
@@ -578,9 +578,7 @@ async def _offline_seal(
     failed: BaseException | None = None
     try:
         try:
-            catalog, now, preflight_refusal = _load_closing_catalog(run_root, pinned)
-            if preflight_refusal is not None:
-                return refuse(preflight_refusal)
+            catalog, now = _load_closing_catalog(run_root, pinned)
             wiring = await wire_from_profile(
                 run_root,
                 catalog,

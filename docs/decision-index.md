@@ -372,3 +372,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-358 | A roll that meets another root's claim names the claim's holder | [docs/period-model.md](period-model.md) |
 | DL-359 | A kill during a CMD adapter's spawn stops what the spawn started | [docs/runner-design.md](runner-design.md) |
 | DL-360 | Three box and queue defects the reviews recorded leave the oracle: a re-queue takes a new rank, an ancestor's reset stops the job_terminator cascade, and the... | [docs/autosys-semantics.md](autosys-semantics.md), [docs/blocks/box-execution.md](blocks/box-execution.md), [docs/blocks/job-lifecycle.md](blocks/job-lifecycle.md), [docs/runner-design.md](runner-design.md), [docs/statechart-engine.md](statechart-engine.md) |
+| DL-361 | The architecture review at 236c34d lands: one cancel helper, one refusal shape, a named seal exit, the box-run test in one place; the fold's single pass and the... |  |
