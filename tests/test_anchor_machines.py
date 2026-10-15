@@ -64,7 +64,6 @@ from dsl41.runner_journal import read_journal
 from dsl41.state_machine import (
     HITS_ENV,
     STATECHART_LOG_PREFIX,
-    STRICT_ENV,
     Executor,
     Outcome,
     Row,
@@ -124,7 +123,6 @@ def _private_hits(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     directory = tmp_path / "hits"
     directory.mkdir(exist_ok=True)
     monkeypatch.setenv(HITS_ENV, str(directory))
-    monkeypatch.delenv(STRICT_ENV, raising=False)
 
 
 def _without(chart: Statechart, keep: Callable[[Row], bool]) -> Statechart:

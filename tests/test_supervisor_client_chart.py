@@ -49,7 +49,6 @@ from dsl41.runner_ledger import acquire_run_root
 from dsl41.state_machine import (
     HITS_ENV,
     STATECHART_LOG_PREFIX,
-    STRICT_ENV,
     Context,
     Executor,
     StatechartError,
@@ -528,7 +527,6 @@ def _gapped(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **changes: Any) -> 
     directory = tmp_path / "hits"
     directory.mkdir()
     monkeypatch.setenv(HITS_ENV, str(directory))
-    monkeypatch.delenv(STRICT_ENV, raising=False)
     monkeypatch.setattr(runner_adapters, "SUPERVISOR_CLIENT", replace(CHART, **changes))
 
 

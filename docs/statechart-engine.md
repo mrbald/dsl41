@@ -166,7 +166,7 @@ that item would run on one side only (DL-339).
 The executor's errors, among them `AmbiguousTransition` (§3), `ReentrantDispatch` (step 4) and
 `UnhandledEvent` (§10), subclass one base, `StatechartError`. Each is an assertion failure, not
 a fault to contain. DL-320's classification never catches it: `trial_apply` and
-`classify_fault` re-raise it as they re-raise `TransitionError`, and nothing is appended. No tier
+`classify_fault` re-raise it, and nothing is appended. No tier
 may swallow it. The tier stops before any further durable write of its own; a record already
 durable, a seal record among them, stays.
 
@@ -311,7 +311,8 @@ root item on the job's instance, and its whole cascade runs on the executor's wo
 DL-350). The chart decides every move. A row's action takes the items it sends beyond its own move
 from the tier's handle on its payload (`Units.consequences`), as a guard takes its facts: the chart
 declares which rows send and when, and the oracle computes each send list and its audience as the
-row runs. The oracle's hook (§5 step 5) writes what each microstep's fired rows reached, with the
+row runs. The chart has no send list of its own: such a row that meets a payload with no handle is
+a statechart error (DL-356). The oracle's hook (§5 step 5) writes what each microstep's fired rows reached, with the
 store's verbs, in the order the rows fired (`oracle_writers`). The status written is the one the
 chart reached; the golden digests judge a wrong row (§16). A fired row the hook has no write for is
 a statechart error. Two checks are statechart errors: the job type behind a row that takes a job's
@@ -473,8 +474,7 @@ Hits are counted for:
 
 All of them are held at 100% in the gate. A row may carry a mark, `spec-only` (a contract rule
 with no code yet) or `unreachable`. The gate lists a marked row and never counts it, and a hit on
-it or on its guard's true outcome fails the gate, as for a marked table transition (DL-296,
-DL-333). Its guard's false outcome is the cell another row takes: neither required nor forbidden
+it or on its guard's true outcome fails the gate (DL-296, DL-333). Its guard's false outcome is the cell another row takes: neither required nor forbidden
 (DL-353).
 
 The completeness test is generated per machine from the declaration plus a declared finite
@@ -506,11 +506,11 @@ prose in its `note`, which the generated table shows in the action column.
 ## 15. The executor
 
 The executor is built here, not adopted. It is standard library only and one module.
-`state_machine.py` grows into it: `src/dsl41/state_machine.py` holds the table core and the
-executor. The module imports nothing from its package, so the supervisor tier loads it by path,
-with its own directory on `sys.path`, as it loads `canon.py`. It is deterministic and has no
-clock. It does no I/O in production; under the test variables it records hits as `take` does
-(DL-289).
+`src/dsl41/state_machine.py` holds the declarations, the executor and its hit recording
+(DL-356). The module imports nothing from its package, so the supervisor tier loads it by
+path, with its own directory on `sys.path`, as it loads `canon.py`. It is deterministic and has
+no clock. It does no I/O in production; under the test variable `DSL41_TRANSITION_HITS` it
+records the coverage items it hits (§13).
 
 The prior-art check covered python-statemachine, transitions, sismic, miros and pysm. In those
 libraries it found no deferral with override and no standard-library fit. Vocabulary and semantic

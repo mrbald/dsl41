@@ -25,9 +25,13 @@ from oracle_inputs import EPOCH, observations
 
 from dsl41.capacity import CapacityPool
 from dsl41.ir import lower_source
-from dsl41.job_chart import JOB, JobData, Release, configuration, row_configuration
+from dsl41.job_chart import JOB
+from dsl41.job_chart_events import JobData, Release
+from dsl41.job_chart_rows import configuration, row_configuration
 from dsl41.oracle import Oracle
+from dsl41.oracle_cascade import OracleCascade
 from dsl41.oracle_facts import RowUnits, StartFacts, job_data
+from dsl41.oracle_schedule import OracleSchedule
 from dsl41.oracle_state import (
     CapacityReservation,
     CarriedRows,
@@ -461,20 +465,6 @@ def test_sem09_a_payload_the_oracle_refuses_is_refused_before_the_chart() -> Non
 # ---- the agreement check
 
 
-def test_an_instance_that_differs_from_its_row_at_construction_is_a_statechart_error() -> None:
-    class Iced(Oracle):
-        def _job_instance(
-            self, job: str, row: JobRuntime
-        ) -> tuple[Statechart, frozenset[str], object]:
-            chart, _active, data = super()._job_instance(job, row)
-            return chart, configuration("INACTIVE", ice=True), data
-
-    with pytest.raises(
-        StatechartError, match="'j': the instance and the row differ at construction"
-    ):
-        Iced(lower_source(_JIL))
-
-
 def _swapped(chart: Statechart, a: str, b: str) -> Statechart:
     return replace(chart, guards={**chart.guards, a: chart.guards[b], b: chart.guards[a]})
 
@@ -495,6 +485,32 @@ def test_an_inactive_row_for_the_other_job_type_is_a_statechart_error(job: str, 
     oracle = Swapped(lower_source(_JIL))
     with pytest.raises(StatechartError, match=f"job '{job}': {row} fired for a"):
         oracle.feed(ev("STATUS", 1, job=job, status="INACTIVE"))
+
+
+def test_a_macrostep_that_raises_sets_every_cascade_field_back_to_between_inputs() -> None:
+    """`Oracle._recover` (DL-356): a macrostep raises with every field the
+    cascade keeps for one input set, the owed scan included; after the fault
+    each field holds what a fresh oracle's does, and the instances agree with
+    the rows."""
+    catalog = lower_source(_JIL)
+    fresh = OracleCascade(catalog)
+    fields = set(vars(fresh)) - set(vars(OracleSchedule(catalog)))
+    assert "_scan_owed" in fields and len(fields) == 6
+
+    class Faulting(Oracle):
+        def _perform(self, outcome: Outcome) -> None:
+            super()._perform(outcome)
+            for name in fields:
+                setattr(self, name, object())
+            raise RuntimeError("planted")
+
+    oracle = Faulting(catalog)
+    with pytest.raises(RuntimeError, match="planted"):
+        oracle.feed(ev("STARTJOB", 1, job="j"))
+    assert {name: getattr(oracle, name) for name in fields} == {
+        name: getattr(fresh, name) for name in fields
+    }
+    _agrees(oracle)
 
 
 # ---- where the instances are
@@ -2256,6 +2272,85 @@ def test_each_release_and_readmit_outcome_fires_its_rows_and_writes_its_line(
     assert readmits == [case in _KEEPS_STOPPED] * len(readmits)
     lines = [t.transition for t in paired.trace()[traced:] if t.job == job]
     assert (line in lines) if line else lines == []
+
+
+def _flag_read_setup(table: str, case: str) -> tuple[Oracle, list[Event | datetime], str]:
+    """An outcome case of a table above (`flag`, `kill` or `queue`): the
+    oracle it runs on, its inputs and its job."""
+    if table == "flag":
+        name, count, job, _rows, _line = _FLAG_OUTCOMES[case]
+        catalog, semantics = lower_source(oracle_inputs.FLAG_JIL), None
+        steps: list[Event | datetime] = [*_flag_steps(name, count)]
+    elif table == "kill":
+        jil, steps, job, _rows, _line = _KT_OUTCOMES[case]
+        catalog = lower_source(jil)
+        semantics = (
+            resolve({"queued-recheck": "1"}) if jil is oracle_inputs.KILL_TIMER_JIL else None
+        )
+    else:
+        name, count, job, _rows, _line = _QUEUE_OUTCOMES[case]
+        catalog, semantics = lower_source(oracle_inputs.QUEUE_JIL), _queue_semantics(name)
+        steps = [*_queue_steps(name, count)]
+    return Oracle(catalog, semantics=semantics), steps, job
+
+
+@pytest.mark.parametrize(
+    ("row", "table", "case", "reads"),
+    [
+        ("job.112", "flag", "ON_ICE on a waiter", {"ice_on"}),
+        ("job.111", "kill", "kill an armed waiter", {"arm_off"}),
+        (
+            "job.110",
+            "queue",
+            "an armed waiter whose condition is now false loses its arm and leaves",
+            {"arm_off"},
+        ),
+        ("job.113", "flag", "ON_NOEXEC on a held waiter", {"noexec_on", "hold_off"}),
+        ("job.136", "flag", "ON_NOEXEC on an idle box in a running box", {"noexec_on"}),
+    ],
+)
+def test_a_status_rule_that_reads_a_flag_sees_the_flag_moved(
+    row: str, table: str, case: str, reads: set[str]
+) -> None:
+    """The flag is written first, then the status rule reads it
+    (`_resolves` and `_out_of_the_run` read `on_ice`; a wake's attempt reads
+    `armed`; the retry reads `on_hold` and `on_noexec`). The status row's
+    action, run by the oracle, sees the flag write, because it runs as the
+    item the flag row's action sends."""
+    seen: list[frozenset[str]] = []
+
+    def spying(chart: Statechart) -> Statechart:
+        action = next(r.action for r in chart.rows if r.id == row)
+
+        def spy(ctx: Any) -> Any:
+            """Record the configuration the job's status row's action sees."""
+            if ctx.key == RuntimeState.job_key(job):
+                seen.append(ctx.active)
+            return chart.actions[action](ctx)
+
+        return replace(
+            chart,
+            rows=tuple(replace(r, action="spy") if r.id == row else r for r in chart.rows),
+            actions={**chart.actions, "spy": spy},
+        )
+
+    class Spied(Oracle):
+        def _job_instance(
+            self, name: str, runtime: JobRuntime
+        ) -> tuple[Statechart, frozenset[str], object]:
+            chart, active, data = super()._job_instance(name, runtime)
+            return spying(chart), active, data
+
+    plain, steps, job = _flag_read_setup(table, case)
+    oracle = Spied(plain.catalog, semantics=plain.semantics)
+    for step in steps:
+        del seen[:]
+        if isinstance(step, Event):
+            oracle.feed(step)
+        else:
+            oracle.advance(step)
+    _agrees(oracle)
+    assert len(seen) == 1 and reads <= seen[0]
 
 
 def test_dl50_the_higher_ranked_waiter_goes_first_and_each_gets_its_own_readmit() -> None:

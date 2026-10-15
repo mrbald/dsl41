@@ -1681,12 +1681,11 @@ def test_a_guard_gap_in_the_seal_chart_stops_the_engine_and_the_boundary_does_no
     from dataclasses import replace
 
     from dsl41 import runner
-    from dsl41.state_machine import HITS_ENV, STRICT_ENV, UnhandledEvent
+    from dsl41.state_machine import HITS_ENV, UnhandledEvent
 
     directory = tmp_path / "hits"
     directory.mkdir()
     monkeypatch.setenv(HITS_ENV, str(directory))  # the gap's hits stay here
-    monkeypatch.delenv(STRICT_ENV, raising=False)
     chart = runner.SEAL_BOUNDARY
     rows = tuple(row for row in chart.rows if row.id != "seal_boundary.04")
     monkeypatch.setattr(runner, "SEAL_BOUNDARY", replace(chart, rows=rows))

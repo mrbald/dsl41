@@ -18,7 +18,7 @@ from dsl41.autocal import CalendarRuleError, CompiledCalendar, compile_calendar,
 from dsl41.canon import CanonError, canonical_bytes
 from dsl41.ir import JobIR, MustTime, Time
 from dsl41.oracle_reads import OracleReads
-from dsl41.oracle_state import LIVE, Event, JobRuntime, OracleError
+from dsl41.oracle_state import LIVE, LIVE_OR_QUEUED, Event, JobRuntime, OracleError
 from dsl41.timezones import (
     must_instant,
     resolve_timezone,
@@ -213,7 +213,7 @@ class OracleSchedule(OracleReads):
         return not (
             rt.on_ice
             or rt.on_hold
-            or rt.status in LIVE | {"QUE_WAIT"}
+            or rt.status in LIVE_OR_QUEUED
             or member_ir.name in box_rt.ran_members
             or member_ir.name in box_rt.window_skipped_members
         )
@@ -561,7 +561,7 @@ class OracleSchedule(OracleReads):
         if timer is None:
             return None
         rt = self._runtime(job)
-        if rt.status in ("STARTING", "RUNNING", "QUE_WAIT") or self._pending_check(job, check, rt):
+        if rt.status in LIVE_OR_QUEUED or self._pending_check(job, check, rt):
             return None
         return timer
 

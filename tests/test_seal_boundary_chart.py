@@ -44,7 +44,6 @@ from dsl41.runner_seal import (
 from dsl41.state_machine import (
     HITS_ENV,
     STATECHART_LOG_PREFIX,
-    STRICT_ENV,
     Context,
     Executor,
     StatechartError,
@@ -428,7 +427,6 @@ def _gap(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, number: str = "04") ->
     directory = tmp_path / "hits"
     directory.mkdir()
     monkeypatch.setenv(HITS_ENV, str(directory))
-    monkeypatch.delenv(STRICT_ENV, raising=False)
     rows = tuple(row for row in CHART.rows if row.id != _row(number))
     monkeypatch.setattr(runner, "SEAL_BOUNDARY", replace(CHART, rows=rows))
 

@@ -56,7 +56,6 @@ from dsl41.runner_startup import resume_run, start_run
 from dsl41.state_machine import (
     HITS_ENV,
     STATECHART_LOG_PREFIX,
-    STRICT_ENV,
     Context,
     Executor,
     Row,
@@ -513,7 +512,6 @@ def _gap(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, number: str) -> None:
     directory = tmp_path / "hits"
     directory.mkdir(exist_ok=True)
     monkeypatch.setenv(HITS_ENV, str(directory))
-    monkeypatch.delenv(STRICT_ENV, raising=False)
     rows = tuple(row for row in CHART.rows if row.id != f"host.{number}")
     monkeypatch.setattr("dsl41.oracle_state.HOST", replace(CHART, rows=rows))
 

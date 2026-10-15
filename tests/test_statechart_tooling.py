@@ -37,7 +37,6 @@ from dsl41.state_machine import (
     TimeEvent,
     UnhandledEvent,
     alphabet,
-    chart_problems,
     chart_warnings,
     coverage_items,
     well_formed,
@@ -106,8 +105,7 @@ def _branches(*branches: Branch) -> tuple[Choice, ...]:
     return (Choice("which", branches),)
 
 
-def test_the_base_chart_is_well_formed_and_well_formed_dispatches_on_it() -> None:
-    assert chart_problems(BASE) == []
+def test_the_base_chart_is_well_formed() -> None:
     assert well_formed(BASE) == []
     assert chart_warnings(BASE) == []
     assert alphabet(BASE) == ["finish", "go", "pick", "poke", "tick"]
@@ -193,7 +191,7 @@ PROBLEMS: list[tuple[dict[str, Any], str]] = [
 
 @pytest.mark.parametrize(("change", "problem"), PROBLEMS, ids=[p for _, p in PROBLEMS])
 def test_well_formed_reports_each_problem(change: dict[str, Any], problem: str) -> None:
-    problems = chart_problems(replace(BASE, **change))
+    problems = well_formed(replace(BASE, **change))
     assert any(problem in line for line in problems), problems
 
 
@@ -201,7 +199,7 @@ def test_a_wait_state_with_a_reason_to_stay_is_well_formed() -> None:
     chart = replace(BASE, root=_with_state(State("lag", wait=frozenset({"tick"}), stays="why")))
     chart = replace(chart, rows=(*BASE_ROWS, Row("base.20", "idle", "lag_in", "lag")))
     chart = replace(chart, rows=(*chart.rows, Row("base.21", "base", "lag_in", kind="ignored")))
-    assert chart_problems(chart) == []
+    assert well_formed(chart) == []
 
 
 def test_completeness_is_judged_over_every_region_together() -> None:
@@ -216,14 +214,12 @@ def test_completeness_is_judged_over_every_region_together() -> None:
         return Statechart("duo", root, rows, clock="logical")
 
     # in l2 no state handles x, and nothing in the right region does either
-    assert "event x falls through in configuration {l2, r}" in chart_problems(
+    assert "event x falls through in configuration {l2, r}" in well_formed(
         chart(Row("duo.01", "l", "x", "l2"))
     )
     # a row in the right region covers every configuration of the left one
     assert (
-        chart_problems(
-            chart(Row("duo.01", "l", "x", "l2"), Row("duo.02", "r", "x", kind="internal"))
-        )
+        well_formed(chart(Row("duo.01", "l", "x", "l2"), Row("duo.02", "r", "x", kind="internal")))
         == []
     )
 
@@ -265,7 +261,7 @@ def test_the_warning_names_the_second_row_when_only_it_leaves() -> None:
 
 def test_the_initial_entry_name_is_reserved() -> None:
     chart = replace(BASE, rows=(*BASE_ROWS, Row("base.20", "base", sm.INITIAL, kind="ignored")))
-    assert "the event name <initial> is reserved for the initial entry" in chart_problems(chart)
+    assert "the event name <initial> is reserved for the initial entry" in well_formed(chart)
     executor = Executor()
     executor.restore("b", BASE, {"base", "idle"})
     with pytest.raises(StatechartError, match="is not an event to post"):
@@ -440,7 +436,7 @@ DOOR_TABLE = {
 
 
 def test_the_completeness_table_matches_the_hand_written_one() -> None:
-    assert chart_problems(DOOR) == []
+    assert well_formed(DOOR) == []
     assert sc.completeness_table(DOOR, _door()) == DOOR_TABLE
 
 

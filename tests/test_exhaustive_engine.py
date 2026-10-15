@@ -97,27 +97,26 @@ def _recording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, forward: bool
 
 
 @pytest.fixture
-def strict(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+def recorded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """`_recording`, with the hits forwarded."""
     yield from _recording(tmp_path, monkeypatch, forward=True)
 
 
 @pytest.fixture
-def strict_unforwarded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+def recorded_privately(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """`_recording`, with the hits kept private: the cells build states by
     verb orders no production path makes."""
     yield from _recording(tmp_path, monkeypatch, forward=False)
 
 
 def _hits(directory: Path) -> set[str]:
-    """The transition ids taken and recorded into `directory`: a table's hits,
-    and a statechart's row hits (its guard and branch records carry ids too,
-    and are not rows taken)."""
+    """The row ids taken and recorded into `directory` (a statechart's guard
+    and branch records carry ids too, and are not rows taken)."""
     return {
         record["id"]
         for path in directory.glob("hits-*.jsonl")
         for record in map(json.loads, path.read_text().splitlines())
-        if record.get("kind", "row") == "row"
+        if record["kind"] == "row"
     }
 
 
@@ -282,7 +281,7 @@ def _job_builds() -> Iterator[tuple[list[_Step], tuple[str, ...], SemanticSwitch
 
 
 def test_every_job_event_in_every_built_flag_and_holding_state_takes_a_declared_row(
-    strict: Path,
+    recorded: Path,
 ) -> None:
     """The `job` chart's flags and holding, over three scheduled resource
     holders and a box with an auto_hold member (`_job_builds`). Each distinct
@@ -340,14 +339,14 @@ def test_every_job_event_in_every_built_flag_and_holding_state_takes_a_declared_
     # not vacuous: the events took every flag and holding row but the
     # queued-recheck disarm and its report (job.216, job.230) and the opening
     # release (job.308, see above)
-    taken = _hits(strict)
+    taken = _hits(recorded)
     flags_and_holding = {row.id for row in JOB.rows if row.id[4] in "23" and not row.mark}
     assert flags_and_holding - taken == {"job.216", "job.230", "job.308"}
 
 
 @pytest.mark.parametrize("holds", [True, False])
 def test_a_period_opening_over_a_removed_job_takes_a_declared_holding_row(
-    strict: Path, holds: bool
+    recorded: Path, holds: bool
 ) -> None:
     """job.308's event: the period's first input gives back the
     units a removed job holds (DL-256). The carried row is built as the
@@ -363,7 +362,7 @@ def test_a_period_opening_over_a_removed_job_takes_a_declared_holding_row(
     oracle = Oracle(lower_source(_JOB_JIL), carried=carried)
     oracle.feed(Event(at=T0 + DAY, kind="SET_GLOBAL", payload={"name": "G", "value": "x"}))
     assert oracle.store.job["gone"].reservations == ()
-    assert ("job.308" in _hits(strict)) is holds
+    assert ("job.308" in _hits(recorded)) is holds
 
 
 # ---------------------------------------------------------- runtime_assembly
@@ -422,7 +421,7 @@ _ASSEMBLY_ALLOWED: frozenset[tuple[str, str]] = frozenset(
 
 
 def test_every_assembly_verb_in_every_phase_meets_a_row_or_a_refusal(
-    strict_unforwarded: Path, monkeypatch: pytest.MonkeyPatch
+    recorded_privately: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`runtime_assembly`: all eight phases, built on a `RuntimeState` by
     its own verbs (`_ASSEMBLY_BUILDS`), and each of its five verbs (and a
@@ -557,7 +556,7 @@ def _host_events(now: datetime) -> Iterator[tuple[str, Attempt, ApplyResult | No
 
 
 def test_every_host_command_in_every_built_routing_state_takes_a_declared_transition(
-    strict: Path,
+    recorded: Path,
 ) -> None:
     """`host`: the routing states the verbs build through `apply_attempt`,
     the path the engine and replay share (`_HOST_BUILDS`): active and
@@ -620,7 +619,7 @@ def test_every_host_command_in_every_built_routing_state_takes_a_declared_transi
     assert len(reached) == 11
     # by design: host.12 is spec-only, and host.22 is declaration-only, which the
     # chart's completeness test alone posts
-    assert {row.id for row in HOST.rows} - _hits(strict) == {"host.12", "host.22"}
+    assert {row.id for row in HOST.rows} - _hits(recorded) == {"host.12", "host.22"}
 
 
 # ----------------------------------------------------------------- effect
@@ -720,7 +719,7 @@ def _effect_cell(state: str, name: str) -> str:
 
 
 def test_every_outbox_call_in_every_effect_state_takes_a_declared_transition(
-    strict: Path,
+    recorded: Path,
 ) -> None:
     """`effect`: all five states, built on an `Outbox` by its own verbs, as
     the engine and `read_outbox` build it (`_EFFECT_BUILDS`), and every
@@ -837,7 +836,7 @@ def _feed_row(state: str, event: str, tight: bool) -> tuple[str, ...]:
 
 
 def test_every_feed_event_in_every_subscription_state_takes_a_declared_transition(
-    strict: Path, tmp_path: Path
+    recorded: Path, tmp_path: Path
 ) -> None:
     """`subscription`: every state a feed reaches through the journal and the
     handler (`_feeds`), and in each the events the journal applies to any
@@ -1063,7 +1062,7 @@ def _admission_cell(state: str, event: str) -> tuple[str, str, tuple[str, ...]]:
     return "refused request_id_reused", state, ()
 
 
-def test_every_input_in_every_request_id_state_takes_a_declared_transition(strict: Path) -> None:
+def test_every_input_in_every_request_id_state_takes_a_declared_transition(recorded: Path) -> None:
     """`admission`: one request id in each of its four states, built by a
     live engine (`unseen`, `applied`, `rejected`), and `admitted` as
     `read_decisions` leaves an attempt line with no decision (the engine
@@ -1155,7 +1154,7 @@ def test_a_client_request_id_in_the_engines_prefix_is_refused(
 
 
 def test_no_client_request_collides_with_an_engine_made_input_live_or_on_replay(
-    strict: Path, short_root: Path
+    recorded: Path, short_root: Path
 ) -> None:
     """The collision the prefix closes, end to end. An operator tries the
     name the engine would give index 2, on `sendevent` and on `host`: both
@@ -1229,7 +1228,7 @@ def test_no_client_request_collides_with_an_engine_made_input_live_or_on_replay(
     assert index.state("engine:2") == "applied"
 
 
-def test_a_seal_request_cannot_take_an_engine_name(strict: Path, short_root: Path) -> None:
+def test_a_seal_request_cannot_take_an_engine_name(recorded: Path, short_root: Path) -> None:
     """`seal` is a client request id too: the boundary refuses the prefix
     before it submits anything, and the engine stays open."""
     from test_boundary import C1_JIL, C2_JIL, _catalog, _seal_request_wire, _stage
@@ -1535,7 +1534,7 @@ async def _seal_cell(
 
 
 def test_every_exit_in_every_seal_phase_takes_a_declared_transition(
-    strict: Path, tmp_path: Path
+    recorded: Path, tmp_path: Path
 ) -> None:
     """`seal_boundary`: one boundary per cell, on a live engine leading a
     lineage, with the event put at the step of the boundary where its phase
@@ -1573,4 +1572,4 @@ def test_every_exit_in_every_seal_phase_takes_a_declared_transition(
             engine.journal.close()
     assert ended == _SEAL_CELLS
     assert second_in == {"requested", "frozen", "committing"}
-    assert {row.id for row in SEAL_BOUNDARY.rows if row.kind != "ignored"} <= _hits(strict)
+    assert {row.id for row in SEAL_BOUNDARY.rows if row.kind != "ignored"} <= _hits(recorded)

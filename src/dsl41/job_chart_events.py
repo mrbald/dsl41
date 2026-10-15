@@ -1,10 +1,16 @@
 """The `job` chart's vocabulary: its events, its instances' data and its
 events' payloads (DL-337). The chart, its contract and its guards are in
-`job_chart`, which re-exports every name here."""
+`job_chart`.
+
+A payload whose facts the oracle computes on a guard's first read is a
+`Protocol` here (`StartAttempt`, `Readmission`, `Noexec`, `Verdict`,
+`BoxVerdict`), and its one implementation is the oracle's
+(`oracle_facts`). A payload the tier builds whole is a dataclass
+(DL-356)."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any, Final, Literal, Protocol
 
 from dsl41.state_machine import Context, Effects, StatechartError
@@ -130,20 +136,20 @@ class Units(Protocol):
     """A tier's handle on one job, which its payloads carry.
 
     `release`: what leaving its run does with the units its row holds, after
-    a SUCCESS (`success`) or after any other end, as
-    `RuntimeState.release_reservations` decides it with the pool's
-    `keeps_held`. It reads the row when asked, so the policy is the one of the
-    units the row holds at that moment (DL-349).
+    a SUCCESS (`success`) or after any other end, by the rule the store's
+    verb applies (`oracle_state.unreleased`). It reads the row when asked, so
+    the policy is the one of the units the row holds at that moment (DL-349).
 
-    `consequences`: what a row of `kind` sends and reports beyond its own
-    move, in order, read from the tier's facts when the row runs
-    (DL-350). The kinds are the chart's actions that delegate: a status
-    move's box rules, settlement and wakes, a box's end, a flag's wakes and
-    retries, an admitted start's extent. None sends nothing."""
+    `consequences`: what a row whose action is `action` sends and reports
+    beyond its own move, in order, read from the tier's facts when the row
+    runs (DL-350). `action` is the name of the chart's action that
+    delegates: a status move's box rules, settlement and wakes, a box's end,
+    a flag's wakes and retries, an admitted start's extent. None sends
+    nothing."""
 
     def release(self, success: bool) -> Release: ...
 
-    def consequences(self, ctx: Context, kind: str) -> Effects | None: ...
+    def consequences(self, ctx: Context, action: str) -> Effects | None: ...
 
 
 class Moment(Protocol):
@@ -159,19 +165,20 @@ class Moment(Protocol):
 @dataclass(frozen=True)
 class Payload:
     """What a payload carries besides its facts: `units`, the tier's handle
-    on the job's units, from which an action builds the settlement it sends
-    (`Settlement`). None for a chart no tier drives: a settlement it sends
-    then has no policy, and reading one is a `StatechartError`, so such a
-    chart gives each settlement its release. An event whose rows read no fact
-    carries a bare `Payload` where the tier has a handle to give. The handle
+    on the job's units, which an action asks what its row sends
+    (`Units.consequences`) and from which it builds the settlement it sends
+    (`Settlement`). Every payload the tier sends to a row whose action asks
+    the handle carries one; a row whose action meets a payload with none
+    raises a `StatechartError`, since the chart has no consequences of its
+    own (DL-356). An event whose rows read no fact carries a bare `Payload`,
+    and `first input of a period` carries none: no row of it asks. The handle
     is neither compared nor printed."""
 
     units: Units | None = field(default=None, kw_only=True, compare=False, repr=False)
 
 
-@dataclass(frozen=True)
-class Attempt(Payload):
-    """One start attempt, decided by `start_verdict`.
+class StartAttempt(Protocol):
+    """One start attempt, decided by `start_verdict` (`oracle_facts.StartFacts`).
 
     `force`, `explicit` and `scheduled` say who asks: a relay from STARTJOB,
     FORCE_STARTJOB or a window-postponed start sets all three as `_dispatch`
@@ -198,42 +205,66 @@ class Attempt(Payload):
     (`oracle_facts.StartFacts`).
     """
 
-    force: bool = False
-    explicit: bool = False
-    scheduled: bool = False
-    stale: bool = False
-    rescan: bool = False
-    dated: bool = False
-    box: BoxGate = "none"
-    condition: bool = True
-    window: WindowSide = "inside"
-    decided: bool = False
-    settlement_owed: bool = False
-    box_noexec: bool = False
-    admissible: bool = True
-    demand: bool = True
+    @property
+    def force(self) -> bool: ...
+    @property
+    def explicit(self) -> bool: ...
+    @property
+    def scheduled(self) -> bool: ...
+    @property
+    def stale(self) -> bool: ...
+    @property
+    def rescan(self) -> bool: ...
+    @property
+    def dated(self) -> bool: ...
+    @property
+    def box(self) -> BoxGate: ...
+    @property
+    def condition(self) -> bool: ...
+    @property
+    def window(self) -> WindowSide: ...
+    @property
+    def decided(self) -> bool: ...
+    @property
+    def settlement_owed(self) -> bool: ...
+    @property
+    def box_noexec(self) -> bool: ...
+    @property
+    def admissible(self) -> bool: ...
+    @property
+    def demand(self) -> bool: ...
+    @property
+    def units(self) -> Units: ...
 
-    def relayed(self, *, force: bool) -> Attempt:
+    def relayed(self, *, force: bool) -> StartAttempt:
         """The attempt a relay passes on (`relay_start`): scheduled, its
         refusal traced, forced for FORCE_STARTJOB."""
-        return replace(self, force=force, explicit=True, scheduled=True)
+        ...
 
 
-@dataclass(frozen=True)
-class Readmission:
-    """One queue scan's attempt for a waiter, decided by `readmit_verdict`.
+class Readmission(Protocol):
+    """One queue scan's attempt for a waiter, decided by `readmit_verdict`
+    (`oracle_facts.ReadmitFacts`).
 
     `box`: the member's box is RUNNING or not; `none` for a job in no box.
     `keep_stopped`: an admit-only scan keeps a member of a stopped box queued
     (DL-247, DL-255). `admissible`: `_admissible`. `recheck_fails`:
-    `_queued_recheck` names a failed check (DL-257). `demand` as for `Attempt`.
+    `_queued_recheck` names a failed check (DL-257). `demand` as for
+    `StartAttempt`.
     """
 
-    box: Literal["none", "running", "idle"] = "none"
-    keep_stopped: bool = False
-    admissible: bool = True
-    recheck_fails: bool = False
-    demand: bool = True
+    @property
+    def box(self) -> Literal["none", "running", "idle"]: ...
+    @property
+    def keep_stopped(self) -> bool: ...
+    @property
+    def admissible(self) -> bool: ...
+    @property
+    def recheck_fails(self) -> bool: ...
+    @property
+    def demand(self) -> bool: ...
+    @property
+    def units(self) -> Units: ...
 
 
 @dataclass(frozen=True)
@@ -245,15 +276,19 @@ class Injection(Payload):
     success: bool = False
 
 
-@dataclass(frozen=True)
-class Noexec(Payload):
-    """ON_NOEXEC on a box (DL-254): `tree_busy`, a job it contains is on ice,
-    live or queued (`_oob_ignored`); `change`, its parent is RUNNING or a job
-    it contains is not INACTIVE. `noexec_settles_box` also counts the box's
-    own status, which the configuration decides."""
+class Noexec(Protocol):
+    """ON_NOEXEC on a box (DL-254, `oracle_facts.NoexecFacts`): `tree_busy`,
+    a job it contains is on ice, live or queued (`_oob_ignored`); `change`,
+    its parent is RUNNING or a job it contains is not INACTIVE.
+    `noexec_settles_box` also counts the box's own status, which the
+    configuration decides."""
 
-    tree_busy: bool = False
-    change: bool = True
+    @property
+    def tree_busy(self) -> bool: ...
+    @property
+    def change(self) -> bool: ...
+    @property
+    def units(self) -> Units: ...
 
 
 @dataclass(frozen=True)
@@ -263,33 +298,39 @@ class Deadline(Payload):
     current: bool = True
 
 
-@dataclass(frozen=True)
-class Verdict(Payload):
+class Verdict(Protocol):
     """One step of a RUNNING box's completion door: `target`, the status it
     decides, or none. `member moves` reads the overrides
-    (`OverrideFacts`), `completion moment` the default fold
-    (`_all_members_done`, `FoldFacts`)."""
+    (`oracle_facts.OverrideFacts`), `completion moment` the default fold
+    (`_all_members_done`, `oracle_facts.FoldFacts`)."""
 
-    target: Literal["SUCCESS", "FAILURE"] | None = None
+    @property
+    def target(self) -> Literal["SUCCESS", "FAILURE"] | None: ...
+    @property
+    def units(self) -> Units: ...
 
 
-@dataclass(frozen=True)
-class BoxVerdict:
-    """An idle box's recompute (`RecomputeFacts`, SEM-15): `target`, the
-    status it decides, or none; `override`, a box_success or box_failure
-    condition decided it rather than the default verdict."""
+class BoxVerdict(Protocol):
+    """An idle box's recompute (`oracle_facts.RecomputeFacts`, SEM-15):
+    `target`, the status it decides, or none; `override`, a box_success or
+    box_failure condition decided it rather than the default verdict."""
 
-    target: Literal["SUCCESS", "FAILURE"] | None = None
-    override: bool = False
+    @property
+    def target(self) -> Literal["SUCCESS", "FAILURE"] | None: ...
+    @property
+    def override(self) -> bool: ...
+    @property
+    def units(self) -> Units: ...
 
 
 @dataclass(frozen=True)
 class FlagMoved(Payload):
     """The flag move a status rule follows: `cause` is the input that moved it,
-    and `noexec` ON_NOEXEC's payload, passed on with its `units`."""
+    and `noexec` ON_NOEXEC's payload, passed on with its `units`; None for any
+    other cause."""
 
     cause: Literal["ON_ICE", "KILLJOB", "readmit", "ON_NOEXEC"]
-    noexec: Noexec = Noexec()
+    noexec: Noexec | None = None
 
 
 @dataclass(frozen=True)
@@ -360,7 +401,7 @@ class Settlement:
 class Admission(Payload):
     """The units of an admitted start (`_w_reserve`, `_w_on_held`):
     `on_held`, a FORCE_STARTJOB starts on held units (DL-256); `demand` as
-    for `Attempt`."""
+    for `StartAttempt`."""
 
     on_held: bool = False
     demand: bool = True

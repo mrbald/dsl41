@@ -29,7 +29,7 @@ import pytest
 from oracle_inputs import observations
 
 from dsl41.ir import lower_source
-from dsl41.job_chart import configuration
+from dsl41.job_chart_rows import configuration
 from dsl41.oracle import Oracle
 from dsl41.oracle_cascade import OracleCascade
 from dsl41.oracle_facts import RowUnits
@@ -206,6 +206,42 @@ def test_every_row_the_chart_can_fire_has_a_writer_on_the_oracle() -> None:
     assert set(oracle_writers._WRITERS) == reachable
     for row, name in oracle_writers._WRITERS.items():
         assert callable(getattr(Oracle, name, None)), (row, name)
+
+
+def test_every_action_that_asks_the_tier_names_itself_and_has_a_handler() -> None:
+    """Each job chart action that asks the tier what its row sends passes its
+    own name (`Units.consequences`), and the cascade answers each name with
+    one method: `_after` for a status move on its own, else the method
+    `_HANDLERS` names (DL-356). A grep for an action's name finds its
+    handler; a new action without one fails here, not at its first fire."""
+    from dsl41 import oracle_cascade
+    from dsl41.job_chart import JOB
+    from dsl41.job_chart_events import JobData, Payload
+    from dsl41.state_machine import Context
+    from dsl41.state_machine import Event as ChartEvent
+
+    asked: list[str] = []
+
+    class Recording:
+        def release(self, success: bool) -> str:
+            return "free"
+
+        def consequences(self, ctx: Context, action: str) -> None:
+            asked.append(action)
+
+    own = {"relay_start", "settle_ended_run", "report_flag_move", "moment"}
+    for name, action in JOB.actions.items():
+        if name in own:
+            continue
+        del asked[:]
+        payload = Payload(units=Recording())  # type: ignore[arg-type]
+        action(Context("job:j", ChartEvent("e", payload), configuration("INACTIVE"), JobData()))
+        assert asked == [name]
+    delegating = set(JOB.actions) - own
+    assert oracle_cascade._MOVES.isdisjoint(oracle_cascade._HANDLERS)
+    assert oracle_cascade._MOVES | set(oracle_cascade._HANDLERS) == delegating
+    for name, method in oracle_cascade._HANDLERS.items():
+        assert method == f"_on_{name}" and callable(getattr(OracleCascade, method, None))
 
 
 def test_a_macrostep_checks_each_instance_it_reached_against_its_row() -> None:

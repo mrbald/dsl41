@@ -52,7 +52,6 @@ from dsl41.seal import BoundRun, OpenedRuntime
 from dsl41.state_machine import (
     HITS_ENV,
     STATECHART_LOG_PREFIX,
-    STRICT_ENV,
     Context,
     Executor,
     Outcome as StepOutcome,
@@ -212,7 +211,6 @@ def private_hits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     directory = tmp_path / "hits"
     directory.mkdir()
     monkeypatch.setenv(HITS_ENV, str(directory))
-    monkeypatch.delenv(STRICT_ENV, raising=False)
     return directory
 
 
@@ -462,7 +460,6 @@ def _gap(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, number: str = "02") ->
     directory = tmp_path / "hits"
     directory.mkdir()
     monkeypatch.setenv(HITS_ENV, str(directory))
-    monkeypatch.delenv(STRICT_ENV, raising=False)
     rows = tuple(row for row in CHART.rows if row.id != f"effect.{number}")
     monkeypatch.setattr(runner_effects, "EFFECT", replace(CHART, rows=rows))
 
@@ -498,7 +495,6 @@ def _broken(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     directory = tmp_path / "hits"
     directory.mkdir(exist_ok=True)
     monkeypatch.setenv(HITS_ENV, str(directory))
-    monkeypatch.delenv(STRICT_ENV, raising=False)
     region = CHART.root.regions[0]
     states = tuple(replace(s, entry="enter") if s.name == "pending" else s for s in region.states)
     root = replace(CHART.root, regions=(replace(region, states=states),))

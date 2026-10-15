@@ -39,8 +39,8 @@ from dsl41.state_machine import (
     StatechartError,
     TimeEvent,
     UnhandledEvent,
-    chart_problems,
     chart_warnings,
+    well_formed,
 )
 
 
@@ -97,7 +97,7 @@ TASK_ROWS = [
 def _job(*extra: Row) -> Executor:
     executor = Executor()
     machine = chart("task", TASK_ROOT, [*TASK_ROWS, *extra], defer_bound=4, overflow="stop")
-    assert chart_problems(machine) == []
+    assert well_formed(machine) == []
     executor.restore("j", machine, {"task", "waiting", "clear"})
     return executor
 
@@ -347,7 +347,7 @@ def test_s3_a_sibling_region_target_is_refused() -> None:
         composite("sib", region("r1", "a", leaf("a")), region("r2", "b", leaf("b"))),
         [Row("sib.01", "a", "x", "b"), Row("sib.02", "sib", "x", kind="ignored")],
     )
-    assert "sib.01: target b is in a sibling region of a" in chart_problems(machine)
+    assert "sib.01: target b is in a sibling region of a" in well_formed(machine)
 
 
 def _leaving(order: str) -> Executor:
@@ -448,7 +448,7 @@ def test_s3_the_firing_set_is_final_before_any_action_runs() -> None:
 
 def test_s3_a_region_with_neither_row_nor_deferral_takes_no_part() -> None:
     executor = _two_regions([Row("duo.01", "l", "only", kind="internal")])
-    assert chart_problems(executor._instances["d"].chart) == []
+    assert well_formed(executor._instances["d"].chart) == []
     assert kinds(executor.dispatch("d", Event("only"))) == [("only", "fired", ("duo.01",))]
 
 
@@ -547,7 +547,7 @@ def test_s4_a_choice_with_no_enabled_branch_raises() -> None:
         choices=(Choice("c", (Branch("nochoice.02", "t", guard="no"),)),),
         guards={"no": lambda ctx: False},
     )
-    assert "choice c has no else branch" in chart_problems(machine)
+    assert "choice c has no else branch" in well_formed(machine)
     executor = Executor()
     executor.restore("x", machine, {"nochoice", "s"})
     with pytest.raises(UnhandledEvent, match="choice c has no enabled branch"):
@@ -667,7 +667,7 @@ def test_s4_a_composite_completion_is_discarded_after_its_state_was_left_and_ree
         ],
         actions={"kick": kick},
     )
-    assert chart_problems(machine) == []
+    assert well_formed(machine) == []
     executor = Executor()
     executor.restore("x", machine, {"again", "c", "a"})
     assert kinds(executor.dispatch("x", Event("go"))) == [
@@ -1178,7 +1178,7 @@ def _hold_queue() -> Executor:
         defer_bound=4,
         overflow="stop",
     )
-    assert chart_problems(machine) == []
+    assert well_formed(machine) == []
     executor = Executor()
     executor.restore("h", machine, {"hold", "busy"}, data=[])
     return executor
@@ -1225,7 +1225,7 @@ def test_s6_a_deferral_on_a_shared_ancestor_is_one_deferral() -> None:
         defer_bound=2,
         overflow="stop",
     )
-    assert chart_problems(machine) == []
+    assert well_formed(machine) == []
     executor = Executor()
     executor.restore("s", machine, {"share", "l", "r"})
     assert kinds(executor.dispatch("s", Event("x"))) == [("x", "deferred", ())]
@@ -1884,7 +1884,7 @@ def _records(executor: Executor) -> dict[Any, Any]:
 
 
 def test_fork_the_gate_is_well_formed() -> None:
-    assert chart_problems(GATE) == []
+    assert well_formed(GATE) == []
 
 
 def test_fork_a_dispatch_on_the_fork_leaves_every_parent_record_the_same_object() -> None:
@@ -1999,7 +1999,7 @@ def test_fork_exit_and_entry_effects_on_their_own_instance_stay_on_the_fork() ->
     """The writes that follow an exit or an entry action re-read the record the
     action's own effects left: none is lost on the fork, and none reaches the
     parent."""
-    assert chart_problems(PROBE) == []
+    assert well_formed(PROBE) == []
     parent = Executor()
     parent.restore("p", PROBE, {"probe", "a"})
     before = parent._instances["p"]
