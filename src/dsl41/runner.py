@@ -90,7 +90,7 @@ position in `frontiers` and the decisions it has already made in
 
 Stage S3 (concurrency-model ss0/ss6, DL-90) made preconditions MANDATORY
 for externally requested mutations, and split the engine's two input doors
-apart to say so. `submit` is the external door: it takes an ss6 envelope
+apart to say so. `submit` is the external door: it takes a concurrency-model ss6 envelope
 carrying the revision the caller read, and hands back the DECISION -- the
 loop resolves its future at step 7, because a precondition whose outcome
 the caller cannot see is not a precondition. `inject` is the engine's own

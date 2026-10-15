@@ -87,7 +87,7 @@ if TYPE_CHECKING:
 
 #: The one stderr line `run --on-transition-violation` prints, whatever its value.
 INERT_VIOLATION_OPTION = (
-    "dsl41 run: --on-transition-violation is inert since DL-353 and leaves at"
+    "dsl41 run: --on-transition-violation is inert and is removed at"
     " the next major release; remove it from the command line"
 )
 #: `run`'s exit code for a time-half stop (`TimeHalfStop`). Listed in the
@@ -172,7 +172,7 @@ def _spec_texts(parsed: "list[JilFile]", catalog: CatalogIR) -> "dict[str, str]"
 
 class OnViolation(str, Enum):
     """The values `run --on-transition-violation` still accepts. The option is
-    inert since DL-353 and leaves at the next major release."""
+    inert and is removed at the next major release (DL-353)."""
 
     refuse = "refuse"
     continue_ = "continue"
@@ -258,7 +258,7 @@ def run(
         None,
         "--on-transition-violation",
         metavar="POLICY",
-        help="Inert since DL-353; it leaves at the next major release. Every"
+        help="Inert; removed at the next major release. Every"
         " state machine is a declared statechart, and none reports a broken"
         " transition, so the option changes nothing. Given, it prints a"
         " deprecation line.",
@@ -280,7 +280,10 @@ def run(
     Exit codes: 0 stopped by the operator; 1 the engine or the estate
     failed while running; 2 the run never started (a preflight error, a
     refused resume, an unreadable input); 3 a seal committed, and the
-    next period is ready to open.
+    next period is ready to open; 6 a time-half stop (the time half of an
+    engine-made input raised, and the engine stopped before logging it);
+    7 a statechart error (a declared machine hit an assertion failure).
+    Exit 5 is retired and unused.
     """
     # Design: runner-design ss1, ss9, ss10, ss6a
     import asyncio
@@ -2315,7 +2318,7 @@ def runs(
     registry names a root the disk lacks.
     """
     # Design: DL-113, ss1.3, PR-02f; not a control-protocol verb, which stays
-    # frozen at v2
+    # frozen at v3
     from dsl41.boundary import is_anchor_dir
     from dsl41.runner_history import RunHistoryError, archived_coverage, read_run_roots
 

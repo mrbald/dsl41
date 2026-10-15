@@ -598,7 +598,7 @@ def job_log_paths(job_ir: JobIR, run_number: int, run_root: Path) -> tuple[str, 
     return (out or str(fallback_out), err or str(fallback_err))
 
 
-#: the FW adapter's append-only spool, one line per poll (period-model ss2.2)
+#: the FW adapter's append-only spool, one line per poll (period-model ss3.5)
 WATCH_LOG = "watch.jsonl"
 
 #: ss6's steady-size rule as a number: two consecutive qualifying polls at the
@@ -609,7 +609,7 @@ FW_STABLE_POLLS = 2
 
 @dataclass(frozen=True)
 class WatchLog:
-    """`watch.jsonl` folded (period-model ss2.2): what a watch has observed,
+    """`watch.jsonl` folded (period-model ss3.5): what a watch has observed,
     derived from the log rather than from a live adapter's memory.
 
     Draft 4 carried the same progress in a local variable fed by unjournaled
@@ -625,7 +625,7 @@ class WatchLog:
     size: int | None
     qualifying: bool
     stable_polls: int
-    #: the count of durable lines (ss2.2's `watch_seq`)
+    #: the count of durable lines (period-model ss3.5's `watch_seq`)
     watch_seq: int
 
     @property
@@ -635,7 +635,7 @@ class WatchLog:
         return self.stable_polls >= FW_STABLE_POLLS
 
     def next_poll_at(self, interval_s: int) -> datetime:
-        """ss2.2, exactly: after `start` and no poll line, `start.at` (the
+        """period-model ss3.5, exactly: after `start` and no poll line, `start.at` (the
         first poll is immediate); after a poll line, `poll.at + interval`."""
         if self.last_at is None:
             return self.start_at
@@ -697,7 +697,7 @@ def read_watch_log(run_dir: Path, *, prefix: int | None = None) -> WatchLog | No
     if prefix is not None and len(records) < prefix:
         raise EngineError(
             f"{path}: a prefix of {prefix} line(s) was claimed and the log holds"
-            f" {len(records)} -- the claimed evidence does not exist (ss2.2)"
+            f" {len(records)} -- the claimed evidence does not exist (period-model ss3.5)"
         )
     for position, record in enumerate(records, start=1):
         # required, not merely implemented-if-present: `decode` refuses a
@@ -711,7 +711,7 @@ def read_watch_log(run_dir: Path, *, prefix: int | None = None) -> WatchLog | No
     start = records[0]
     if start.get("kind") != "start":
         # a log whose first line is not `start` was not written by this
-        # adapter: the ss2.2 contract says a dispatched watch's first durable
+        # adapter: the period-model ss3.5 contract says a dispatched watch's first durable
         # act is the start line, so anything else is corruption or a foreign
         # writer -- loud, not None (None means "not dispatched", which would
         # re-dispatch over a stranger's log)
@@ -755,7 +755,7 @@ def read_watch_log(run_dir: Path, *, prefix: int | None = None) -> WatchLog | No
         # the completion state is DERIVED from the observations, and the
         # recorded count is checked against it: a forged line saying
         # `qualifying: false, stable_polls: 2` would otherwise inject a
-        # SUCCESS from an observation that observed nothing (ss2.2 -- the
+        # SUCCESS from an observation that observed nothing (period-model ss3.5 -- the
         # fold is a pure function of the log, so a count the observations
         # cannot produce is a log that disagrees with itself)
         derived_stable = (
@@ -805,7 +805,7 @@ def _watch_at(path: Path, record: dict[str, Any]) -> datetime:
 
 
 def append_watch_line(path: Path, record: dict[str, Any]) -> None:
-    """One ss3.2-canonical line, fsynced (period-model ss2.2). Append-only,
+    """One ss3.2-canonical line, fsynced (period-model ss3.5). Append-only,
     so there is no rename to make it atomic; a torn tail is truncated on the
     next open instead. 0600 at creation, like every other spool file
     (DL-66)."""
@@ -829,7 +829,7 @@ class FileWatcherAdapter:
     (ctx.clock.sleep_until), so the same code runs in both time domains; polling is an
     idempotent read, which is why resume may re-dispatch an incomplete watch (module docstring).
 
-    Its progress is EVIDENCE, not memory (period-model ss2.2, DL-129). The first durable
+    Its progress is EVIDENCE, not memory (period-model ss3.5, DL-129). The first durable
     record on dispatch is a `start` line in `runs/<job>.<run_number>/watch.jsonl`, then one
     line per poll, fsynced, INCLUDING polls that changed nothing -- appended before progress
     is updated or completion is emitted, so an observation that moved the watch is never one
@@ -874,7 +874,7 @@ class FileWatcherAdapter:
             run_dir.mkdir(parents=True, exist_ok=True)
             fsync_dir(run_dir.parent)
             log_path = run_dir / WATCH_LOG
-            # the watch log follows the WAL's own tail-repair rule (ss2.2):
+            # the watch log follows the WAL's own tail-repair rule (period-model ss3.5):
             # make it end on a line boundary before anything appends
             repair_tail(log_path)
             log = read_watch_log(run_dir)

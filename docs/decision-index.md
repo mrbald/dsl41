@@ -127,7 +127,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-114 | the period model is frozen | [docs/citation-index.md](citation-index.md), [docs/period-model.md](period-model.md) |
 | DL-115 | the directory is not the baseline |  |
 | DL-116 | the lineage fence |  |
-| DL-117 | `baseline_id` is the period's, and derived | [docs/period-model.md](period-model.md) |
+| DL-117 | `baseline_id` is the period's, and derived | [docs/control-protocol.md](control-protocol.md), [docs/period-model.md](period-model.md) |
 | DL-118 | the atomic `decision` record and control-protocol v3 | [docs/blocks/admission.md](blocks/admission.md), [docs/blocks/effect-outbox.md](blocks/effect-outbox.md), [docs/blocks/fw-observation.md](blocks/fw-observation.md), [docs/blocks/subscription.md](blocks/subscription.md), [docs/concurrency-model.md](concurrency-model.md), [docs/control-protocol.md](control-protocol.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md), [docs/state-machines.md](state-machines.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
 | DL-119 | the seal artifact and the canonical form |  |
 | DL-120 | capacity decomposed | [docs/blocks/capacity.md](blocks/capacity.md), [docs/concurrency-model.md](concurrency-model.md), [docs/state-machines.md](state-machines.md) |

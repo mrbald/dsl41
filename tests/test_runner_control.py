@@ -1552,7 +1552,7 @@ def test_cli_release_held_sweeps_every_held_job(short_root: Path) -> None:
 def test_status_pending_timers_visible_while_running_then_gone_after_completion(
     short_root: Path,
 ) -> None:
-    """(runner-design ss11, DL-46): the status response's `pending_timers`
+    """(control-protocol ss4, DL-46): the status response's `pending_timers`
     field mirrors Oracle.pending_timers()'s own liveness rule -- a
     term_run_time deadline shows up while the run is RUNNING (a slow
     FakeAdapter script holds it there) and is gone once the run completes
@@ -1590,7 +1590,7 @@ def test_status_pending_timers_visible_while_running_then_gone_after_completion(
 
 
 def test_status_log_paths_default_shape_for_a_ran_cmd_job(short_root: Path) -> None:
-    """(runner-design ss6/ss11, DL-46): with no std_out_file/std_err_file,
+    """(runner-design ss6, control-protocol ss4, DL-46): with no std_out_file/std_err_file,
     a ran CMD job's log_out/log_err resolve to
     <run_root>/logs/<job>.<run_number>.{out,err} -- job_log_paths()'s
     default shape, the same resolver the LocalCommandAdapter uses."""
@@ -1622,7 +1622,7 @@ def test_status_log_paths_default_shape_for_a_ran_cmd_job(short_root: Path) -> N
 def test_status_log_paths_explicit_std_out_file_honored_per_stream(
     short_root: Path, tmp_path: Path
 ) -> None:
-    """(runner-design ss6/ss11, DL-46): an explicit std_out_file is honored
+    """(runner-design ss6, control-protocol ss4, DL-46): an explicit std_out_file is honored
     verbatim; job_log_paths() resolves EACH stream independently, so an
     unset std_err_file still falls back to its own default path rather
     than going along with the explicit std_out_file."""
@@ -1652,7 +1652,7 @@ def test_status_log_paths_explicit_std_out_file_honored_per_stream(
 
 
 def test_status_log_paths_never_ran_cmd_without_std_files_is_null(short_root: Path) -> None:
-    """(runner-design ss11, DL-46): a never-started CMD job with no explicit
+    """(control-protocol ss4, DL-46): a never-started CMD job with no explicit
     std_out_file/std_err_file has nothing to tail -- both fields are null,
     never a guessed run_number-1 path."""
     text = "insert_job: plv_job\njob_type: c\ncommand: x\nmachine: m1\n"
@@ -1671,8 +1671,8 @@ def test_status_log_paths_never_ran_cmd_without_std_files_is_null(short_root: Pa
 
 
 def test_status_log_paths_non_cmd_jobs_are_null(short_root: Path, tmp_path: Path) -> None:
-    """(runner-design ss11, DL-46): log_out/log_err are CMD-only -- a BOX
-    (no exec spec at all) and an FW job (its own watch_file, not a ss6
+    """(control-protocol ss4, DL-46): log_out/log_err are CMD-only -- a BOX
+    (no exec spec at all) and an FW job (its own watch_file, not a runner-design ss6
     append target) both report null, running or not."""
     box_root = short_root / "run_box"
     box_text = (

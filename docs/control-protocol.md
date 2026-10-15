@@ -86,8 +86,9 @@ CLI's job.
   `ok`.
 - Responses carry the **read header**: `baseline_id`, `epoch` and
   `applied_index` (`docs/concurrency-model.md` §6). A revision means
-  nothing without the log it was read from. A client that cannot name the
-  log cannot be told it holds a stale one. The header is stamped in one
+  nothing without the period it was read from (`baseline_id` names the
+  period, DL-117). A client that cannot name the period cannot be told it
+  holds a stale one. The header is stamped in one
   place (DL-148): on the answer to a request that passed routing and the
   §4 lineage proof. Everything else is headerless: an answer sent before
   routing (the malformed line, the version refusal, the DL-146
@@ -176,7 +177,7 @@ The client action says what a client does next:
 | `unknown_verb` | refused | `verb` names no `sendevent` verb or no `host` verb | fix the request |
 | `unknown_status` | refused | `CHANGE_STATUS` names no status | fix the request |
 | `status_not_injectable` | refused | `CHANGE_STATUS` names a status an operator may not send (`QUE_WAIT`) | fix the request |
-| `baseline_mismatch` | refused | `baseline_id` is not this run's | re-read then decide |
+| `baseline_mismatch` | refused | `baseline_id` is not this period's (DL-117) | re-read then decide |
 | `expect_required` | refused | a mutation that addresses a row carries no `expect` | fix the request |
 | `request_id_reused` | refused | the `request_id` was admitted for a different command | fix the request |
 | `stale_epoch` | refused | `epoch` is not the current leader's | re-read then decide |
