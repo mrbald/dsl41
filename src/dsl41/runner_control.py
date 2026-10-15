@@ -71,7 +71,7 @@ them as two would break every client twice:
   option. The check sits in `_handle`, ahead of the subscribe branch, so no
   door is left unversioned. v3 is DL-118: `result` and standalone `effect` become one
   `decision`, and a v2 client on `rec == "effect"` goes blind.
-- **A mutation carries the ss6 envelope and is answered with its
+- **A mutation carries the concurrency-model ss6 envelope and is answered with its
   decision.** The flat `event`/`job`/`name` fields became `verb` +
   `payload`; `request_id` and `expect` joined them and are required. The
   handler now awaits: ss4 emits `command_committed` at step 4 and
@@ -202,14 +202,14 @@ class ControlServer:
     Every request names `"v": 3` (DL-90, DL-118). Queries: status [job], trace
     [since], explain job, spec job, deps job, timers, plan, global name,
     globals names; and subscribe [since]. An answer that passed routing and
-    the lineage proof carries the ss6 read header -- `baseline_id`, `epoch`,
+    the lineage proof carries the concurrency-model ss6 read header -- `baseline_id`, `epoch`,
     `applied_index` -- so a client can tell which log a revision it holds
     was read from. Everything sent BEFORE routing is headerless (DL-148):
     the bad-request and version refusals, the perimeter's credential
     refusal and denials, the lineage refusal, a raised handler's internal
     error, and every line `subscribe` writes on its own connection.
 
-    A mutation is `{"cmd": "sendevent"}` plus the ss6 envelope: `verb`,
+    A mutation is `{"cmd": "sendevent"}` plus the concurrency-model ss6 envelope: `verb`,
     `payload`, `request_id`, `expect`, optional `claimed_actor`. Job
     arguments are validated against the catalog -- vendor sendevent errors
     on an unknown job rather than queueing it -- and `expect` is MANDATORY
@@ -534,7 +534,7 @@ class ControlServer:
         await writer.drain()
 
     async def _respond(self, request: dict[str, Any]) -> dict[str, Any]:
-        """Route one already-versioned request and stamp the ss6 read
+        """Route one already-versioned request and stamp the concurrency-model ss6 read
         header onto its answer.
 
         *(Amended by DL-133, at build of period-model ss1.3.)* **The fence
@@ -557,10 +557,10 @@ class ControlServer:
         if lost is not None:
             return lost
         response = await self._dispatch(request)
-        # ss6: every read publishes where the log has reached and which log it
+        # concurrency-model ss6: every read publishes where the log has reached and which log it
         # is, so a client can tell a revision it may name from one it may not.
-        # Leader-only in v2 -- one engine per run root IS the leader (ss7's
-        # election arrives in S6), enforced by the socket probe in start().
+        # Leader-only: one engine per run root IS the leader, and the
+        # `leader.lock` flock enforces it (concurrency-model ss1, DL-100).
         return response | {
             "baseline_id": self.engine.baseline_id,
             "epoch": self.engine.epoch,
@@ -570,7 +570,7 @@ class ControlServer:
     def _lineage_lost(self) -> dict[str, Any] | None:
         """The refusal a displaced leader owes a reader, or None.
 
-        Deliberately WITHOUT the ss6 read header: the header publishes a
+        Deliberately WITHOUT the concurrency-model ss6 read header: the header publishes a
         baseline, an epoch and a log position, and those are exactly the
         coordinates this process may no longer speak for."""
         estate = self.engine.estate
@@ -1562,7 +1562,7 @@ def _frame(request: dict[str, Any]) -> bytes:
     return json.dumps(versioned(request)).encode("utf-8") + b"\n"
 
 
-# ------------------------------------------------ composing a command (ss6)
+# ------------------------------------------------ composing a command (concurrency-model ss6)
 #
 # The client half of the protocol lives here for the reason the server half
 # does (DL-78): the wire vocabulary gets exactly one definition. S3 gave a
@@ -1578,7 +1578,7 @@ def _frame(request: dict[str, Any]) -> bytes:
 
 
 def read_for(key: str) -> dict[str, Any]:
-    """The query that answers the revision of an ss6-namespaced `key`."""
+    """The query that answers the revision of a concurrency-model ss6-namespaced `key`."""
     namespace, _, name = key.partition(":")
     if namespace == "global":
         return {"cmd": "global", "name": name}
@@ -1679,7 +1679,7 @@ def command(
     claimed_actor: str | None = None,
     cmd: str = "sendevent",
 ) -> dict[str, Any]:
-    """One ss6 command envelope, complete. `request_id` defaults to a fresh
+    """One concurrency-model ss6 command envelope, complete. `request_id` defaults to a fresh
     uuid4 -- a caller that wants to RETRY passes the original's.
 
     `cmd` selects which verb set the request addresses -- `sendevent` for the
@@ -1890,7 +1890,7 @@ def roundtrip(
                     break
                 buf += chunk
                 if len(buf) > LINE_LIMIT:
-                    # ss6: every connection reads under an explicit ceiling.
+                    # control-protocol ss6: every connection reads under an explicit ceiling.
                     # A peer that never ends the line would otherwise grow
                     # this buffer until the caller died (DL-151)
                     raise ValueError(f"response line over the {LINE_LIMIT}-byte limit")
@@ -1953,7 +1953,7 @@ def _stream_refusal(line: bytes) -> str | None:
     try:
         parsed = json.loads(line)
     except (ValueError, RecursionError):
-        return None  # a torn record is skippable (ss6)
+        return None  # a torn record is skippable (control-protocol ss6)
     if not isinstance(parsed, dict) or parsed.get("ok") is not False:
         return None
     return str(parsed.get("error", "the engine ended the stream"))

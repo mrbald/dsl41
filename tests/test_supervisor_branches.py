@@ -8,14 +8,17 @@ runs in this process against real sockets and real directories. Platform arms
 (peer credentials, the Linux subreaper) are driven through stand-ins for the
 module and `ctypes`, so the numbers do not depend on the host. Time is a fake
 clock where a wait must run out. Each refusal has a twin that does not trigger
-it.
+it. One test spawns real wrappers to check where a lifeline's write end is held;
+it reads /proc on Linux and `lsof` on macOS, and skips where neither reads.
 """
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import json
 import os
+import shutil
 import signal
 import socket
 import struct
@@ -1006,3 +1009,131 @@ def test_sv_grace_seconds_past_float_range_is_bad_spec(queued_supervisor) -> Non
         reply = sup.spawn_run(_spec(sup, _run_id(), grace_seconds=grace))
         assert reply["ok"] is False and reply["error"] == "bad_spec", grace
     assert sup.runs == {}
+
+
+def _pipe_write_end_holders(write_fd: int, candidates: list[int]) -> set[int]:
+    """The pids that hold the write end of this process's pipe `write_fd`. On
+    Linux: every process whose /proc fd table links to the pipe's inode with a
+    writable open mode. Elsewhere: `lsof` reports each pipe end under its own
+    kernel address, so a process holds the end when one of its descriptors
+    shows that address. Only `candidates` (and this process) are searched."""
+    me = os.getpid()
+    if sys.platform.startswith("linux"):
+        link = f"pipe:[{os.fstat(write_fd).st_ino}]"
+        holders: set[int] = set()
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            fd_dir = f"/proc/{entry}/fd"
+            try:
+                names = os.listdir(fd_dir)
+            except OSError:
+                continue  # the process ended, or is not ours to read
+            for name in names:
+                try:
+                    if os.readlink(f"{fd_dir}/{name}") != link:
+                        continue
+                    with open(f"/proc/{entry}/fdinfo/{name}") as info:
+                        flags = next(
+                            int(line.split()[1], 8) for line in info if line.startswith("flags:")
+                        )
+                except (OSError, StopIteration):
+                    continue
+                if flags & os.O_ACCMODE in (os.O_WRONLY, os.O_RDWR):
+                    holders.add(int(entry))
+        return holders
+    if shutil.which("lsof") is None:
+        pytest.skip("no exact read of a pipe end's holders here: lsof is missing")
+
+    def pipe_addresses(pid: int) -> dict[int, str]:
+        out = subprocess.run(
+            ["lsof", "-n", "-P", "-F", "pftd", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout
+        found: dict[int, str] = {}
+        fd = -1
+        kind = ""
+        for line in out.splitlines():
+            if line[0] == "f":
+                fd = int(line[1:]) if line[1:].isdigit() else -1
+                kind = ""
+            elif line[0] == "t":
+                kind = line[1:]
+            elif line[0] == "d" and kind == "PIPE" and fd >= 0:
+                found[fd] = line[1:]
+        return found
+
+    mine = pipe_addresses(me)
+    if write_fd not in mine:
+        pytest.skip("lsof does not report the pipe's address here")
+    held = {me}
+    for pid in candidates:
+        if mine[write_fd] in pipe_addresses(pid).values():
+            held.add(pid)
+    return held
+
+
+def test_supervisor_spawn_keeps_each_lifeline_write_end_in_one_process(
+    queued_supervisor,
+) -> None:
+    """ss6a fd hygiene through the supervisor's own spawn path: after two
+    wrappers are spawned and have each started a command, the first wrapper's
+    lifeline write end is open in the supervisor and nowhere else, not in the
+    second wrapper, not in either command. Closing it gives the first wrapper
+    EOF, which it records as `parent lost`. A write end that a later spawn
+    inherited would hold the pipe open and silence that EOF."""
+    sup, _ = queued_supervisor
+    runs: list[dict[str, Any]] = []
+    try:
+        for job in ("a", "b"):
+            spec = _spec(sup, _run_id(), job=job, command="sleep 60")
+            os.makedirs(spec["run_dir"])
+            pid, lifeline_w = sup._spawn_wrapper(spec)
+            runs.append({"pid": pid, "w": lifeline_w, "dir": Path(spec["run_dir"])})
+        records = {}
+        for run in runs:
+            path = run["dir"] / "spawn.json"
+            deadline = time.monotonic() + 10
+            while not path.exists():
+                assert time.monotonic() < deadline, f"no spawn.json in {run['dir']}"
+                time.sleep(0.02)
+            records[run["pid"]] = json.loads(path.read_text())
+        candidates = [r["pid"] for r in runs] + [r["command_pid"] for r in records.values()]
+        assert candidates[0] != candidates[1]
+        for run in runs:
+            assert _pipe_write_end_holders(run["w"], candidates) == {os.getpid()}, run["dir"]
+        first = runs[0]
+        os.close(first["w"])
+        first["w"] = -1
+        status_path = first["dir"] / "status.json"
+        deadline = time.monotonic() + 10
+        while not status_path.exists():
+            assert time.monotonic() < deadline, "the first wrapper got no EOF"
+            time.sleep(0.02)
+        status = json.loads(status_path.read_text())
+        assert status["outcome"] == "terminated" and status["cause"] == "parent lost", status
+    finally:
+        for run in runs:
+            if run["w"] >= 0:
+                os.close(run["w"])
+        for run in runs:
+            deadline = time.monotonic() + 10
+            while True:
+                try:
+                    done, _ = os.waitpid(run["pid"], os.WNOHANG)
+                except ChildProcessError:
+                    break
+                if done:
+                    break
+                if time.monotonic() > deadline:
+                    # the wrapper did not end: take its command down first, since
+                    # a command outlives a killed wrapper
+                    with contextlib.suppress(OSError, ValueError, KeyError):
+                        record = json.loads((run["dir"] / "spawn.json").read_text())
+                        os.killpg(record["command_pgid"], signal.SIGKILL)
+                    os.kill(run["pid"], signal.SIGKILL)
+                    os.waitpid(run["pid"], 0)
+                    break
+                time.sleep(0.02)

@@ -391,16 +391,17 @@ Duties:
    the kernel closes fds regardless. SIGTERM the command pgid, grace,
    SIGKILL, write `status.json` {terminated, cause: parent lost}, exit.
    This behavior makes "engine death ⇒ jobs terminate AND are recorded"
-   hold with no polling and no Linux-only mechanism. Linux secondary
-   safeguard: `PR_SET_PDEATHSIG` + `getppid()` re-check (thread-tied and
-   exec-cleared, so never the primary tether).
+   hold with no polling and no Linux-only mechanism (DL-357).
 
 **Lifeline fd hygiene (invariant, tested):** the pipe's write end exists
 in exactly one process — the parent. One write end that leaks into any
 other process silently disables parent-loss detection for that wrapper.
-Python's default non-inheritable fds plus explicit `pass_fds` of only the
-read end enforce this rule. A leak test holds it (spawn two wrappers,
-kill parent, assert both EOF).
+Python's default non-inheritable fds enforce this rule: the engine's
+adapter passes only the read end by `pass_fds`, and the supervisor makes
+only the read end inheritable for `posix_spawn`. Tests hold it for each
+path (test_lifeline_write_end_leaks_nowhere,
+test_sigkill_engine_midrun_then_resume,
+test_supervisor_spawn_keeps_each_lifeline_write_end_in_one_process).
 
 **Containment honesty:** pgid kill does not catch `setsid`/double-fork
 escapees (`sh -c 'daemon & '`). Vendor agents share this limitation. The

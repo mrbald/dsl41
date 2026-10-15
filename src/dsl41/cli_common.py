@@ -257,7 +257,7 @@ def refuse(exc: BaseException | str, *, prefix: str = "") -> int:
 
 
 def read_header_of(response: dict[str, Any]) -> "tuple[str, int] | None":
-    """The ss6 read header off one control answer, or None after printing
+    """The concurrency-model ss6 read header off one control answer, or None after printing
     the refusal -- the ONE check (DL-137): two verbatim copies differed
     only in how they exited."""
     baseline, epoch = response.get("baseline_id"), response.get("epoch")
@@ -348,7 +348,7 @@ def command_outcome(
     seal_in_flight_by_id: bool = False,
     retry_command: str | None = None,
 ) -> int:
-    """Send one ss6 command envelope and answer with its outcome: DL-92's
+    """Send one concurrency-model ss6 command envelope and answer with its outcome: DL-92's
     four (0 applied / 2 refused / 3 rejected / 4 unknown).
 
     ONE implementation for `sendevent`/`host` and for the live seal,
