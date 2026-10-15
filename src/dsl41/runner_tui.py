@@ -27,7 +27,7 @@ Normative detail for DL-46, within DL-41's frame:
   dispatch truth) and per-run `log_out`/`log_err`. Alarm counts are counted
   off MUST_START_ALARM / MUST_COMPLETE_ALARM trace transitions -- the
   oracle's trace is the only alarm authority, the TUI just tallies it.
-- LOG TAIL is a byte tail of the CURRENT run's resolved ss6 append target
+- LOG TAIL is a byte tail of the CURRENT run's resolved runner-design ss6 append target
   (`log_out`/`log_err` from status; `o` toggles the stream), read from the
   local filesystem: the TUI runs on the engine host in both postures
   (terminal; textual-serve serves FROM the host, E3), so file reads need no
@@ -1177,7 +1177,7 @@ def parse_console_command(text: str, selected: str | None) -> dict[str, Any] | s
     omitted job targets the selected row. Pure function so the parser is
     testable without a terminal.
 
-    The ss6 envelope is NOT built here (DL-90). `expect` names the revision
+    The concurrency-model ss6 envelope is NOT built here (DL-90). `expect` names the revision
     the operator was looking at when they typed, which is a fact about the
     app's last refresh, not about the line; a pure parser cannot know it and
     should not pretend to."""
@@ -1350,7 +1350,7 @@ class RunnerApp(App[None]):
         self._table_share = 3  # jobs table vs side column (CSS default 3fr : 2fr)
         # DL-65 navigation state
         self._jobs_snapshot: dict[str, dict[str, Any]] = {}  # last status response
-        #: the ss6 read header from the last answer: which log the revisions in
+        #: the concurrency-model ss6 read header from the last answer: which log the revisions in
         #: `_jobs_snapshot` were read from, so an `expect` composed off the
         #: table cannot silently name a number from a re-baselined run root
         self._baseline = ""
@@ -1495,7 +1495,7 @@ class RunnerApp(App[None]):
                         self._dirty = True
                     self._consume_trace(trace.get("entries", []))
                 if status.get("ok"):
-                    # ss6 read header: the revisions below belong to THIS log
+                    # concurrency-model ss6 read header: the revisions below belong to THIS log
                     self._baseline = str(status.get("baseline_id") or "")
                     self._epoch = int(status.get("epoch") or 0)
                     self._set_drift(bool(status.get("spec_drift")))
@@ -2244,7 +2244,7 @@ class RunnerApp(App[None]):
     async def _do_sendevent(
         self, request: dict[str, Any], frozen: tuple[str, int, int] | None = None
     ) -> None:
-        """Complete the ss6 envelope and send it (DL-90).
+        """Complete the concurrency-model ss6 envelope and send it (DL-90).
 
         `expect` comes from `_jobs_snapshot` -- the revision this table was
         SHOWING when the operator acted. That is the honest reading of ss0
@@ -2288,7 +2288,7 @@ class RunnerApp(App[None]):
         await self._refresh()
 
     async def _precondition(self, key: str) -> tuple[str, int, int]:
-        """The ss6 read header and the revision to name for `key`.
+        """The concurrency-model ss6 read header and the revision to name for `key`.
 
         For a job the table is already showing, that revision is the one the
         OPERATOR was looking at -- which is the honest reading of ss0 and the
