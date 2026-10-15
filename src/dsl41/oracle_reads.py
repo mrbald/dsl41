@@ -530,7 +530,7 @@ class OracleReads:
         return box
 
     def _votes_as_it_stands(self, box: str, member: str) -> bool:
-        """SEM-11 (DL-SMALL1): a direct member that has not run in this box
+        """SEM-11 (DL-360): a direct member that has not run in this box
         run but holds a terminal status votes with it, unless it is out of
         the run on ice. Four sources give such a status: a member carried
         live from the run that ended and then ended; an operator's SUCCESS,
@@ -552,7 +552,7 @@ class OracleReads:
         member is terminal or has been bypassed (iced, or resolved to
         INACTIVE by a window skip, DL-154, or by an injected STATUS
         INACTIVE, DL-242). A member that has not run in this box run is
-        done when its status is terminal (DL-SMALL1). A member whose
+        done when its status is terminal (DL-360). A member whose
         condition never fires inside the run -- or whose run_window
         deferred it -- reads INACTIVE and keeps the box RUNNING: the
         hung-box pattern is real behavior, not a defect to smooth over.
@@ -580,12 +580,12 @@ class OracleReads:
                 # skip (DL-154) or an operator's (DL-242), which counts "as
                 # if the INACTIVE job returned a status of SUCCESS". A later
                 # terminal status on it is done too, and votes as it stands
-                # (DL-SMALL1). The member's own later start voids the mark.
+                # (DL-360). The member's own later start voids the mark.
                 continue
             if rt.status not in TERMINAL:
                 # live or queued, or INACTIVE: not yet run this box
                 # execution (incl. held); a terminal member is done, ran or
-                # not (DL-SMALL1)
+                # not (DL-360)
                 return False
         return True
 

@@ -23224,3 +23224,172 @@ relitigate an entry; append a new one.
   REVIEW. Semantic class: one Opus reviewer and one Fable pass, two rounds; the advisor's ruling on
   PR-01's reading came first, after the period-model §13 slice pinned the defect. The nightbank
   runbook's exercise shows the new refusal.
+- DL-359 A kill during a CMD adapter's spawn stops what the spawn started
+  (2026-10-15; src/dsl41/runner_adapters.py; tests/test_runner_adapters.py,
+  tests/test_adapters_branches.py; docs/runner-design.md §6)
+  DL-356 recorded an open defect: a kill that cancels a start while its wrapper is being spawned
+  skips the kill step. The two CMD adapters' spawn paths have eight cancel points, and four were
+  safe. A cancel before the adapter task's first step never enters `run`, so nothing is spawned.
+  A cancel inside `create_subprocess_exec` is handled by asyncio, which SIGKILLs the new wrapper
+  before it has a spec. A cancel in the tethered `proc.wait()` or the detached `_await_outcome`
+  already ran the kill step. Four were open.
+  Tethered, a cancel while the adapter writes the wrapper's spec left the wrapper waiting on stdin
+  past the cancelled start; it launched the command when the engine's end of the pipe closed. The
+  adapter now SIGKILLs the wrapper there and reaps it. The wrapper launches only after it reads
+  its spec to EOF, and EOF needs the stdin close that path has not reached, so the wrapper has
+  launched nothing and has nothing to record.
+  Detached, a cancel while the SPAWN reply was in flight, or during the LIST that checks a
+  duplicate SPAWN's run, left the command running under the supervisor, which holds its lifeline.
+  The adapter now sends the kill there, unless a detach-stop is under way (ss3 case b), which only
+  drops its exit wait. A late SPAWN cannot follow that kill. The cancelled request poisoned its
+  connection, and the kill's reconnect re-ACQUIREs, which mints a new token and fences the old one
+  (supervisor-protocol §5, the live lease), so the old SPAWN is refused `stale_token`. A SPAWN
+  dispatched before that ACQUIRE has registered its run, and the SIGNAL finds it. The one late
+  launch is engine death between the SPAWN write and the handler: nothing re-keys, and resume's
+  `_redrive_orphans` (PR-33) kills the run under its TERMINATED row. The supervised `kill` now ends
+  at TERM on `unknown_run`: the supervisor holds no such run, so no push can come, and the ladder
+  no longer waits out two graces for one. A cancel in the grace after `resolve_spool`'s SIGTERM
+  skipped its SIGKILL; the SIGKILL now runs on the way out.
+  Tests, each failing without its fix:
+  test_dl356_a_kill_before_the_spec_is_handed_over_prevents_the_launch (the wrapper outlived the
+  cancelled start);
+  test_dl356_a_kill_during_a_detached_spawn_kills_what_the_supervisor_spawned[oracle_kill] and
+  test_dl356_a_kill_during_a_duplicate_spawns_list_kills_the_live_run (the command outlived the
+  cancelled start); test_dl356_a_kill_before_the_spawn_left_ends_on_unknown_run and
+  test_kill_ends_at_sigterm_when_the_supervisor_holds_no_such_run (the ladder waited out its
+  graces; on the base the first fails on its leaked exit future);
+  test_resolve_spool_cancelled_in_the_grace_still_sends_the_sigkill (no SIGKILL).
+  test_dl356_a_kill_before_the_adapter_first_runs_spawns_nothing pins the first point. No frozen
+  contract changes. A kill whose reconnect fails before its ACQUIRE is dispatched ends on
+  `SupervisorUnavailable` with no re-key; a late SPAWN is then found by the next resume's
+  `_redrive_orphans`. A tethered cancel before the handover leaves a run directory with no spool
+  record. Under a TERMINATED row the resume sweep skips it; under a row still live, as after an
+  engine crash at the same point, resume reads it as E7.
+  REVIEW. Semantic class: one Opus reviewer and one Fable pass, two rounds each. Both found the
+  cancel during the duplicate-SPAWN LIST unguarded (Opus F1, Fable F1): fixed. Both found the
+  recorded open window closed by the token fence (Opus F2, Fable F2): the entry says so above.
+  Fable F3 removed the second grace wait: kill() ends on unknown_run. Opus F3 to F7 and Fable F4
+  (tests, the entry, runner-design ss6) fixed; each confirmed by the reviewer that raised it.
+- DL-360 Three box and queue defects the reviews recorded leave the oracle: a re-queue takes a
+  new rank, an ancestor's reset stops the job_terminator cascade, and the default fold reads
+  statuses; the state-machine version moves to 24
+  (2026-10-15; src/dsl41/oracle_writers.py, src/dsl41/oracle_cascade.py,
+  src/dsl41/oracle_reads.py, src/dsl41/oracle_facts.py, src/dsl41/runner_ledger.py,
+  src/dsl41/semantics.py;
+  tests/test_oracle.py, tests/test_oracle_chart_cascade.py, tests/oracle_goldens.txt;
+  docs/statechart-engine.md §11; docs/autosys-semantics.md SEM-11, SEM-14, §9 Q17;
+  docs/live-instance-runbook.md; docs/citation-index.md; docs/runner-design.md §8a;
+  docs/blocks/box-execution.md;
+  docs/blocks/job-lifecycle.md)
+  THE RANK. DL-345 left a member's rank stale on one path. An injected STATUS takes a queued member
+  out of the queue, and its rank stays until its settlement, after its box rules. Where those rules
+  restart its box (`s(box)`) and the new run queues it again, the member kept its first rank. It
+  was then admitted ahead of a waiter that queued between the two, against DL-120 ("the rank goes
+  with the status that owns it") and DL-340. Rule: a job that enters QUE_WAIT takes a new rank. A
+  start that queues (job.103) comes from an idle row, so a rank still on that row is the earlier
+  QUE_WAIT's, and the writer drops it before it allocates the new one. The late settlement then
+  finds QUE_WAIT and keeps the new rank. No row or guard changes.
+  THE RESET. DL-348 R3 recorded that the kill path and the fold path disagreed when an ancestor's
+  restart reset a subbox. The subbox ends, and its box_terminator ends the parent. The parent
+  starts again on `d(parent)` inside the subbox's box rules. Its start resets every job it
+  contains that is not live, the subbox included, to INACTIVE without moving the subbox's run
+  (SEM-10). The fold and override path reads the status after the end's wakes, finds INACTIVE,
+  and kills no member. The kill path compared the run number only, so it killed the subbox's live
+  job_terminator members. A member killed there ends on an idle subbox. The subbox re-derives
+  FAILURE (SEM-15), and its box_terminator ends the parent's new run: an end in the earlier run
+  moves the later one, which DL-348's rule forbids. Rule: a box's end FAILURE or TERMINATED kills
+  its live job_terminator members only while the run that ended is still the box's run and the box
+  was not reset to INACTIVE since. `box ends step` reads both before each member. This is DL-348's
+  rule applied to the ancestor's run. Within one input's cascade, an ancestor's SEM-10 reset is the
+  only move from FAILURE or TERMINATED to INACTIVE that leaves the run in place; an operator's
+  SEM-18 INACTIVE is another input. The stricter check, status FAILURE or TERMINATED, is equal on
+  every state a cascade reaches. But it makes DL-348's mutant "the run read at the first step"
+  equivalent on its input; the INACTIVE check keeps that test meaningful. §11 is amended by one
+  clause: `box ends FAILURE or TERMINATED` "goes only to the members of the run that ended, while
+  the box still stands at that end", and `box ends step` "compares the box's run number and its
+  status before each member's send: once the wakes, or an earlier member's kill, started the box
+  again, or an ancestor's restart reset the box to INACTIVE without moving its run (SEM-10), no
+  further member gets the event". No switch. No vendor sentence orders the job_terminator kills
+  against the dependents' starts. That is the [C] gap DL-348 accepted, and this fix adds no new
+  kind: both shapes are a kill whose box no longer stands at its end. If a probe shaped like Q14's
+  shows the scheduler kills first, the remedy is DL-348's rejected reorder, under one switch that
+  covers both shapes.
+  THE FOLD. This closes DL-348's RECORDED item. A member still RUNNING when its box starts again
+  keeps its run and is carried into the new one. It never joined the new run's ran set, so the
+  default fold waited for it as not yet run, and the box stayed RUNNING after every member ended.
+  The same mechanism hung a box on any member that held a terminal status without having run in
+  the box's run. Rule: a direct member that has not run in this box run but holds a terminal
+  status is done, and votes with that status; TERMINATED counts as failed. Four sources give such
+  a status. A member carried live from the run that ended, which then ends. An operator's SUCCESS,
+  FAILURE or TERMINATED on a member that waits. A KILLJOB on a member queued in this run, or on
+  one an injected STARTING made live, which ends it TERMINATED, so it votes FAILURE. And a
+  never-run subbox, still waiting on its condition, that SEM-15's idle recompute re-derived from
+  statuses given to the jobs inside it. A member on ice and out of the run is still taken out of
+  the fold first. A resolution or off-ice mark decides only while the member reads INACTIVE: a
+  marked member given a later terminal status votes it, as a member that ran does. The ran set,
+  the at-most-once gate and the box start are unchanged. So a carried member may start again in
+  the new run once it stops running, and it then joins the ran set. [V] Basic Box Job Concepts
+  (AutoSys 12.1 and 24.2) keeps a box RUNNING "as long as there are jobs in it with ACTIVATED or
+  RUNNING status". A box returns FAILURE "when all the jobs it contains have run and one or more
+  of the jobs has returned a status of FAILURE". And "using the sendevent command to change the
+  state of a job in a box to INACTIVE affects the box's completion status as if the INACTIVE job
+  returned a status of SUCCESS". [C] The composition is our reading. It reads a status given to a
+  waiting job as the end of its ACTIVATED state, counted as returned. For the re-derived subbox it
+  also reads SEM-15's derivation as applying to an ACTIVATED or held box, for which SEM-15's
+  table has no row. It is Q17, open with this default, and the runbook's Q17 protocol settles it.
+  No switch: no vendor sentence contradicts the default, and the hang it replaces is no
+  documented vendor rule either. [C] The restart: under "How the Status of a Job Changes When
+  Added Into a Box" (the same page), a member carries the box's run number. It starts only if "the
+  current run number of the job does not exceed the run number of the box". A carried member's
+  number is the previous run's, so it may start again. It has not run in this execution, as
+  DL-309's walk-up tests take it to.
+  This narrows two settled sentences. DL-309 THE RUN BINDING says "no reading lets one run's job
+  complete another". DL-348 THE RULE says "an end in the earlier run is no moment of the later
+  one". Both now bind starts and kills only. A carried member's end votes in the run it ends in, as
+  DL-348's RECORDED item said the vendor's box would complete. It also narrows two rules on marked
+  members. DL-154 says a window-skipped member "casts no vote in the SEM-11 fold". DL-242 says a
+  resolved member "stays settled if an operator later gives it a status that is not live; the fold
+  still votes over ran members only". Under `off-ice-in-running-box=next-run` the box "completes
+  without" a member taken off ice. Each now holds only while the member reads INACTIVE: a mark
+  decides only then, and a terminal status given to the member votes as it stands.
+  Recorded, not changed: an operator's ON_ICE on a carried member that ended takes it out of the
+  run, and its vote goes. A member that ran in this run keeps its vote through the ice (SEM-11).
+  So a box whose carried member ended FAILURE and was then iced ends SUCCESS when its other
+  members end. The ran member's path is unchanged. Q17's runbook protocol carries the probe that
+  shows which reading the vendor takes, and the probe for a resolved member given a later FAILURE.
+  Rejected: entering the carried members in the new run's ran set at the box start
+  (s63h3b-advisor.md's candidate). It refuses the vendor's eligible start: over the golden sample
+  it refused 2 STARTJOBs and 18 wake starts, and it reversed the premise of DL-309's walk-up
+  binding. Also rejected: a new box-row field for carried members. It records a fact the vendor
+  derives from status, changes every golden and the seal shape, and leaves the other sources'
+  hang in place. Evidence that would change the fold: a Q17 probe where CHANGE_STATUS SUCCESS on
+  an ACTIVATED member of a running box leaves the box RUNNING after every other member ended. That
+  gives the operator's vote a switch with the vendor's value. Or a vendor sentence that a job
+  RUNNING when its box starts again takes the box's new run number, which refuses the restart.
+  THE VERSION. The fixed oracle against DL-358's, over the goldens' whole sample (4,060 runs,
+  152,213 entries), differs on 201 runs: 26 of the corpus with the directed estates and seeds, 7
+  large, 168 under the switch rows. All 201 change through the fold, and every one changes the
+  trace; no ran set changes. At each run's first differing input, the members that newly vote have
+  these sources, and one run may have more than one: an operator's status or a completion in 121
+  runs, a carried member in 49, a kill in 19, a re-derived subbox in 17. In 16 more the box
+  completed and started again within the same input. 15 of those are the owed-settlement directed
+  script, where a completion lands on a member queued in the new run; the runner's DL-235 gate
+  rejects that completion, so the shape is the harness's. The 16th is a seed. The rank and the
+  reset change no sampled input; directed tests pin them. An accepted input derives differently,
+  so STATE_MACHINE_VERSION moves from 23 to 24 (DL-235), with a note naming the three shapes and
+  the four sources. The goldens are recorded again for the 201 runs: 201 lines of
+  tests/oracle_goldens.txt change, and none else. Tests pin each shape, and each fails on the
+  previous oracle: the re-queue's rank, the parent reset by KILLJOB (with its STATUS twin, which
+  passes on both), a carried member's SUCCESS and FAILURE, an operator's SUCCESS, FAILURE and
+  TERMINATED on a waiting member, a resolved member's later FAILURE, and a never-run subbox the
+  recompute completed, in the direct, engine and fork arms. A mutant that compares the run alone
+  parts from the oracle on the reset shape. DL-309's three walk-up tests pass unchanged.
+  REVIEW. Semantic class with a frozen-contract clause. The engineer stopped twice, on the carried
+  member's restart and on ss11's meaning; a Fable advisor ruled both (the clause above; the fold
+  reads statuses, not a ran set that gains the carried members). Then one Opus reviewer (three
+  rounds) and one Fable pass (two rounds). Opus F1: a never-run subbox re-derived by SEM-15 votes
+  and no ruling covered it; ruled kept, named as the fourth source, tagged [C] with its probe.
+  Opus F2 and Fable R2 agreed the operator vote is a composition: tagged [C], Q17 opened, no
+  switch. Fable R1: a mark decides only while the member reads INACTIVE. Opus G1: the narrowing of
+  DL-154, DL-242 and the next-run text is named above. Opus F6 is recorded with its probe. Every
+  finding was confirmed by the reviewer that raised it.

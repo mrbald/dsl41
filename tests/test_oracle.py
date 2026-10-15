@@ -1450,7 +1450,7 @@ _OPERATOR_FOLD_JIL = (
 def test_sem11_an_operator_s_terminal_status_on_a_waiting_member_votes(
     given: str, box: str
 ) -> None:
-    """SEM-11, DL-SMALL1: Basic Box Job Concepts keeps a box RUNNING "as long
+    """SEM-11, DL-360: Basic Box Job Concepts keeps a box RUNNING "as long
     as there are jobs in it with ACTIVATED or RUNNING status", and a box
     returns FAILURE "when all the jobs it contains have run and one or more
     of the jobs has returned a status of FAILURE". A member that never ran,
@@ -1467,7 +1467,7 @@ def test_sem11_an_operator_s_terminal_status_on_a_waiting_member_votes(
 
 
 def test_sem11_a_resolved_member_given_a_later_failure_votes_it() -> None:
-    """SEM-11 (DL-242, DL-SMALL1): an operator's INACTIVE resolves the
+    """SEM-11 (DL-242, DL-360): an operator's INACTIVE resolves the
     waiting member. The mark decides only while the member reads INACTIVE:
     a later FAILURE on it votes as it stands, as it would for a member that
     ran, so the box ends FAILURE at its sibling's end."""
@@ -1481,7 +1481,7 @@ def test_sem11_a_resolved_member_given_a_later_failure_votes_it() -> None:
 
 
 def test_sem11_a_never_run_subbox_its_recompute_completed_votes() -> None:
-    """SEM-11, SEM-15 (DL-SMALL1, Q17): the subbox `s11v` waits on `s(a11v)`,
+    """SEM-11, SEM-15 (DL-360, Q17): the subbox `s11v` waits on `s(a11v)`,
     a job that never runs, so it never starts in `o11v`'s run. The operator's
     SUCCESS on its member `m11v` re-derives it SUCCESS by the idle recompute.
     It holds a terminal status, so it votes as it stands, and `o11v`
@@ -1503,7 +1503,7 @@ def test_sem11_a_never_run_subbox_its_recompute_completed_votes() -> None:
 
 
 def test_sem11_a_member_carried_running_into_the_new_run_votes_in_its_fold() -> None:
-    """SEM-11, DL-SMALL1: a member still RUNNING when its box starts again
+    """SEM-11, DL-360: a member still RUNNING when its box starts again
     keeps its run and is carried into the new one. Basic Box Job Concepts
     keeps a box RUNNING "as long as there are jobs in it with ACTIVATED or
     RUNNING status", and the default fold reads statuses: so its end
@@ -1530,7 +1530,7 @@ def test_sem11_a_member_carried_running_into_the_new_run_votes_in_its_fold() -> 
 
 
 def test_sem11_a_carried_member_that_fails_fails_the_new_run() -> None:
-    """SEM-11, DL-SMALL1: the carried member's FAILURE votes in the new run's
+    """SEM-11, DL-360: the carried member's FAILURE votes in the new run's
     fold as it stands, so the box ends FAILURE, which `d(box)` meets."""
     o = oracle(_self_restarting_terminator_box("bx11f", box_terminator=False))
     o.feed(ev("FORCE_STARTJOB", 0, job="bx11f"))
@@ -4990,7 +4990,7 @@ def test_sem33_box_skip_member_later_set_by_the_operator_stays_settled(
     member is resolved. An operator status on it that is not live -- here
     SUCCESS or INACTIVE -- does not hold the box, so the box completes when
     its running sibling ends. INACTIVE keeps the mark deciding; SUCCESS votes
-    as it stands (DL-SMALL1)."""
+    as it stands (DL-360)."""
     o = oracle(_SKIP_BOX_JIL)
     at = datetime(2026, 7, 2, 4, 30)
     o.feed(Event(at=at, kind="FORCE_STARTJOB", payload={"job": "box_rw33c"}))
