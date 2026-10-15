@@ -234,7 +234,7 @@ after all members complete. A member that ended TERMINATED counts as failed in t
 kills land here.
 
 A member that has not run in this box run but holds a terminal status is done, and votes with
-that status (DL-SMALL1). Four sources give it one: a member carried live from the run that
+that status (DL-360). Four sources give it one: a member carried live from the run that
 ended, which then ends; an operator's SUCCESS, FAILURE or TERMINATED on a member that waits; a
 KILLJOB on a member queued in this run, or on one an injected STARTING made live, which ends it
 TERMINATED; and a never-run subbox that SEM-15's idle recompute re-derived from statuses given
@@ -310,7 +310,7 @@ member's own later start voids its mark. An iced member carries its own flag. A 
 off ice in the run carries a mark in `iced_out_members`. A forced start of it voids that
 mark, and the forced run votes. While a forced start of it is queued or live, the fold waits
 for it. A resolved member stays settled while it reads INACTIVE; an operator's later
-terminal status on it votes as it stands, as any terminal member's does (DL-SMALL1). A
+terminal status on it votes as it stands, as any terminal member's does (DL-360). A
 resolved or iced member is a
 completion moment for the overrides of every running ancestor too, since "inside" is
 transitive (SEM-12). A member whose condition never fires inside the run, and that nobody
@@ -383,7 +383,7 @@ Concepts, AutoSys 12.0 and 24.2; DL-348). A box starts again this way when its e
 member's kill, meets the box's own condition, for example `d(box)` or `t(member)`. The cascade
 also stops where an ancestor's restart reset the box to INACTIVE (SEM-10), which leaves the box's
 run number unmoved: the box no longer stands at its end, and a member still running from the run
-that ended runs on, as the fold and the overrides leave it (DL-SMALL1).
+that ended runs on, as the fold and the overrides leave it (DL-360).
 Whether an operator's CHANGE_STATUS FAILURE or TERMINATED on
 a RUNNING box kills its job_terminator members is open (Q14, section 9); the oracle kills
 none.
@@ -1768,7 +1768,7 @@ each open question.
   The default `idle-box-iced-member=ignore` drops an iced member that is out of the run, as
   SEM-11's fold does; `vote` reads its status (runner-design §8a).
   `# PENDING: Q16` marks the read in the oracle. The runbook's Q16 protocol settles it.
-- Q17 (SEM-11, DL-SMALL1): open, pinned default. Whether a member that has not run in a
+- Q17 (SEM-11, DL-360): open, pinned default. Whether a member that has not run in a
   RUNNING box's run, and that an operator gave SUCCESS, FAILURE or TERMINATED while it waited,
   counts as done for the box. Basic Box Job Concepts (AutoSys 12.1 and 24.2) keeps a box
   RUNNING "as long as there are jobs in it with ACTIVATED or RUNNING status", and a box returns

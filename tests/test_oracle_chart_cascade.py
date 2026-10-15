@@ -1132,7 +1132,7 @@ _PARENT_RESET = (
 
 
 def test_a_terminator_cascade_past_a_parent_s_reset_diverges() -> None:
-    """A mutant of the reset check (DL-SMALL1): the box's run compared alone.
+    """A mutant of the reset check (DL-360): the box's run compared alone.
     KILLJOB ends `pb`, whose box_terminator ends `po`, whose restart resets
     `pb` without moving its run; the mutant then kills `pm`, which the oracle
     leaves running."""

@@ -166,7 +166,7 @@ from dsl41.runner_clock import EngineError
 #: control input was refused, an engine-made one quarantined. A replay with
 #: such an input can derive a status, and so wakes and launches, that v22 did
 #: not.
-#: 24 since DL-SMALL1: a job that enters QUE_WAIT takes a new rank. A queued
+#: 24 since DL-360: a job that enters QUE_WAIT takes a new rank. A queued
 #: member taken out of the queue by an injected STATUS keeps its rank until
 #: its settlement, after its box rules; where those rules restart its box and
 #: the new run queues it again, v23 kept the old rank, and the member was
