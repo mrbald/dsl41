@@ -24,8 +24,8 @@ to a record.
 
 ## 0a. Revision history
 
-The git history holds the drafts before DL-114. Each change after the
-freeze is a decision-log entry, cited where it applies.
+Each change of meaning to a frozen item is a decision-log entry, cited where
+it applies (DL-225).
 
 ## 1. Identities
 
@@ -88,6 +88,10 @@ one thing for the life of the estate.
   claims/<claim_id>.json the durable successor claim
 ```
 
+A directory named by a digest uses the digest's hex half, without the
+`sha256:` prefix. A colon in an archived path reads as a remote host to
+`rsync` and `scp` (DL-130).
+
 **Every periodized root carries a permanent `journal.jsonl` sentinel.** It
 is one line: `{"rec": "period_root", "artifact_format_version": 1,
 "estate_id": …, "see": "wal/", "claim_id": null}`. Genesis writes it, and so
@@ -138,8 +142,8 @@ them before genesis: `catalogs/` is content-addressed bundle storage and
 
 For an **anchor**: creating it refuses an existing `anchor.json`, *even if
 its incumbent is dead*. An existing anchor is an existing estate whose
-detached work may still be alive. "Two geneses are two estates" never let two
-estates share one anchor (PR-01b). The sole recovery exception is
+detached work may still be alive. Two geneses are two estates, and two
+estates never share one anchor (PR-01b). The sole recovery exception is
 `open(1, this root, this estate_id)` with a matching sentinel and no
 committed segment: that is our own genesis, interrupted. Once a segment
 exists, ordinary `--resume` owns recovery.
@@ -391,8 +395,10 @@ and lifetime.
 
   **One walk reads it.** `audit`, `journal`, `runs` and `estate prune` each
   address the whole estate the same way: the operator names the lineage
-  ANCHOR where a run root would go. Each takes its roots from that one walk,
-  in period order. A row is
+  ANCHOR instead of a run root. `journal` and `runs` take the anchor
+  directory as their path argument. `audit` and `estate prune` take
+  `--estate-anchor` with `--run-root` omitted (DL-141). Each takes its roots
+  from that one walk, in period order. A row is
   passed over only while it is provisional, and the walk reports it. A root
   that the registry names is refused BY NAME when it is missing, holds no
   sentinel, holds one that cannot be read, belongs to another estate, or
@@ -681,8 +687,9 @@ The v3 request and answer:
 ```
 
 **The route wire is frozen with v3 and is not built (below).**
-`Attempt.host` becomes a discriminated union `HostCommand | RouteCommand`.
-On the wire it is the existing `host` cmd with a fourth verb:
+When it is built, `Attempt.host` is a discriminated union
+`HostCommand | RouteCommand`. On the wire it is the existing `host` cmd with
+a fourth verb:
 
 ```json
 {"cmd": "host", "v": 3, "baseline_id": "…", "epoch": 7, "request_id": "…",
@@ -742,10 +749,10 @@ added here is compared without extra work.
 ```
 
 `concurrency-model.md` §4 step 7 requires the decision, revisions, outbox
-entries and `applied_index` to commit **atomically**. Separate `_write`
-calls for `result` and for each `effect`, each with its own fsync, do not
-meet that (DL-118). This is the answer on a file substrate: one line, one
-fsync, on the same argument `Journal.admit` makes for the input side.
+entries and `applied_index` to commit **atomically**. A separate line for
+the result and for each effect, each with its own fsync, does not meet that
+(DL-118). This is the answer on a file substrate: one line, one fsync, on
+the same argument `Journal.admit` makes for the input side.
 Without it, a real window is invisible to every precondition. The result is
 fsynced, and the process dies before the KILL effect is written. Recovery
 then finds every attempt decided and an empty outbox, and the terminal row's
@@ -779,16 +786,18 @@ error. An absent flag is not a false one; a reader that defaulted it would
 accept a record no writer of this estate wrote. One validator decides the
 three cases, so every consumer that parses a `decision` inherits them.
 
-The record carries `index`, not `seq`, as the retired `result` did. `seq` is
-the subscribe cursor, and a decision shares its attempt's number (DL-89).
-`decision` is an unsequenced, at-least-once record on the subscribe stream.
+The record carries `index`, not `seq`. `seq` is the subscribe cursor, and a
+decision shares its attempt's number (DL-89). `decision` is an unsequenced,
+at-least-once record on the subscribe stream.
 
-**This is a wire break.** `control-protocol.md` §5 promises raw `result`,
-`effect` and `effect_result` records to subscribers. A v2 client waiting on
-`rec == "effect"` would silently stop seeing intents. That is not additive.
-So the protocol is **v3**, on the precedent DL-90 set (v1 was removed, not
-deprecated). There is no compatibility projection, because it would be a
-second record shape for one fact. `effect_result` is unchanged.
+**The record is a wire break, so the protocol is v3.** The subscribe stream
+(`control-protocol.md` §5) carries `decision` and `effect_result` records,
+and no `result` or standalone `effect` record. A client that waits for
+`rec == "effect"` sees no intents, so the change is not additive (DL-118).
+The engine refuses v2, on the precedent DL-90 set for v1: removed, not
+deprecated (DL-118). There is no
+compatibility projection, because it would be a second record shape for one
+fact.
 
 A decision carries `code` (DL-272). It is null on an application. On a
 rejection it is the code of the reason (`control-protocol.md` §2), written
@@ -798,8 +807,8 @@ codes a rejection may store are an append-only set
 reader treats a stored code as opaque: it never requires one and never
 checks it against the registry. A replay derives nothing from it, so it
 changes no state and needs no `state_machine_version` bump. An exact retry
-and `original_decision` answer the stored code. Unlike the wire break above,
-this field is additive. One stored code is not a gate's verdict:
+and `original_decision` answer the stored code. This field is additive.
+One stored code is not a gate's verdict:
 `engine_apply_faulted` quarantines an input whose apply raised while its
 time half applied alone (`concurrency-model.md` §4). Like every rejection,
 it replays as its time half alone on any build of the same
@@ -1149,7 +1158,7 @@ host row. A→B→A moves the revision twice, and the seal carries it (PR-16b).
 | `last_contact` | outside the semantic projection (DL-95). Replay re-seeds it, so a new leader **over-waits** and does not evict early. A stale one would let the new period conclude that a quarantined host's deadman expired: the one state that permits a double run |
 | `deadman_us` on a host row | DL-95's other half. See the note below |
 | the decision index | `_by_index` is local to the log; §9 handles retries |
-| `unresolved` / `outcome_unknown` | a projection. It derives from the bound executor's quarantine (`hosts`) plus the absence of evidence (`executions`), and both are carried |
+| whether a run's outcome is unresolved | a projection. It derives from the bound executor's quarantine (`hosts`) plus the absence of evidence (`executions`), and both are carried |
 | `_trace`, `_emitted`, `_queue`, `_in_wake` | transient or derived |
 | `_dispatched` | **derived, and its reconstruction is normative.** See the note below |
 | `_referencers`, `_bucket_cap` | derived from the catalog |
@@ -1370,10 +1379,10 @@ C2 opens under B. The change does not touch that row. The client submits
 `(baseline=B, expect=7)`, and it is accepted against C2 semantics. So every
 transition **derives** a fresh `baseline_id` (§3.4).
 
-`control-protocol.md`'s wire shape is the same. Its **definition** of
-`baseline_id` is "the period's identity", not "the log's identity". A
-superseded `baseline_id` is refused, naming the current one. The check
-refuses a stale *period*, not a stale *log*.
+In the control protocol, `baseline_id` keeps its wire shape and names the
+period, not the log (DL-117). A superseded `baseline_id` is refused,
+naming the current one. The check refuses a stale *period*, not a stale
+*log*.
 
 ## 5. Capacity, decomposed
 
@@ -1553,7 +1562,8 @@ dsl41 seal --run-root <root> [--estate-anchor <dir>] \
 rolled root's anchor is the lineage's and must be named. `--next` is
 repeatable, and its order is part of the bundle hash. `--claimed-actor`
 defaults to `<user>@<host>`. `--request-id` reuses an earlier attempt's id
-to retry it exactly. The lock decides the mode, not a flag:
+to retry it exactly. `dsl41 seal --help` lists the other options. The lock
+decides the mode, not a flag:
 
 - **Live mode**: a leading engine is running on `<root>`.
 
@@ -2028,7 +2038,7 @@ baseline, and never mis-applied.
 - **Soft**: the closing manifest's `retry_horizon_us`, measured from the
   last admitted externally requested **attempt with a durable decision**.
   That is applied, rejected, or an applied no-op, `host` commands included.
-  Below the horizon the seal warns and requires `--force-seal`. The force is
+  Below the horizon the seal requires `--force-seal`. The force is
   recorded as `force_seal: true` in the sidecar's `boundary_request` and on
   the `seal` record, with the gate's output in `forced_gate`. So the log
   alone shows a forced boundary. Below the horizon without the flag, the
@@ -2475,13 +2485,13 @@ from one into a lineage.
 
 `docs/protocol-evolution.md` is the contract for this retirement: the
 compatibility matrix per protocol, the lifecycle by which a new dialect
-enters service, the absence gate a retirement normally has to meet, and the
-pre-production reset clause that let this one meet it trivially.
+enters service, the absence gate a retirement has to meet, and the
+pre-production reset clause under which this retirement meets that gate.
 
 **Subscribers** (`control-protocol.md` §5, v3): a client that asks for an
 index below the earliest retained record receives an explicit gap marker.
-The seam between backfill and live is the same. `decision` replaces
-`result`+`effect` in the stream.
+The seam between backfill and live is the same across segments. The stream
+carries `decision` records and no `result` or standalone `effect` (§2.3).
 
 ## 11a. SPAWN idempotency that outlives the supervisor
 
@@ -2881,7 +2891,7 @@ the producer discharges it. Silence there would read as coverage.
 | PR-03 | the anchor directory is deleted under a live incumbent: it stops on its next append, its next dispatch, its next revision-bearing read — a `status` immediately after replacement is refused, not answered — **and its next FW `watch.jsonl` append**, with the replacement injected between the observation and the line |
 | PR-04 | an NFS anchor path is refused at startup |
 | PR-05 | `estate_id` mismatch refuses |
-| PR-05c | a staged request cannot choose `period_id`, `segment_no`, `baseline_id` or `clock_domain`: the opened period is `current + 1` with `segment_no == period_id`, a fresh `baseline_id`, and the current clock domain — and a `--next-clock-domain` differing from the current refuses |
+| PR-05c | a staged request cannot choose `period_id`, `segment_no`, `baseline_id` or `clock_domain`: `StagedNextPeriod` refuses each of them, and the opened period is `current + 1` with `segment_no == period_id`, a fresh `baseline_id`, and the current clock domain; no CLI option stages a clock domain (DL-117) |
 | PR-05b | staging → cutoff → opening: a tick admitted at T after the request was staged, then C2's first admission — its index is `closes_at_index + 1`, never a reuse; `stage_digest` is unchanged by `first_index` |
 | PR-05a | I2 directly: index, epoch, `segment_no` and per-job `run_number` are monotone across a transition in **both** opening modes; a physical roll that resets the epoch fails |
 | PR-06 | `baseline_id` rotates; a command composed under C1 is refused after C2 opens even when the row never moved |
@@ -3030,7 +3040,7 @@ and is active whole.
 | PR-55a | **one door, seven bindings.** Table-driven over a receipt whose integrity is intact and whose BINDING is not — a wrong `seal_digest`, a wrong `attestation_digest`, a wrong `chain_through_period`, a foreign `estate_id`, a **correlated foreign seal-and-attestation pair** with the receipt restamped onto it, and bytes that do not parse: each refuses in the walk, the plan, the tier, `audit`, `journal`, `runs` and `estate prune`, with the same reason, and **none of them answers shorter instead**. `audit_period` and the re-derivation refuse it as FUNCTIONS, with no CLI in front of them. A receipt naming a file it does not license excuses nothing. The cover, likewise: a registry row redirected to a **present** root of another estate, **or to a same-estate root holding a second valid pair for that period**, refuses the plan and the live re-check, and releases nothing |
 | PR-55 | **permanent floors and irreversibility.** The receipt, the archived period's attestation and its seal sidecar are unreachable by `prune` — one case each, `_remove` refused rather than merely not asked. Restoring the archived inputs beside the receipt leaves every reader at the **attestation-verified** tier. A receipt whose attestation or sidecar is absent refuses. Deleting a WAL over an older period whose deletion failed does not happen: the retained segments are a contiguous suffix after every partial sweep |
 | PR-56 | **no reader answers shorter in silence.** Over a multi-period archive, in place and across a physical roll: the estate walk resolves an archived registry row and refuses an unreceipted absence BY NAME; `audit` reports the archived period at the attestation-verified tier in wording it shares with no derivation-verified line, and still audits the rest; `journal` prints the unreplayable gap on STDOUT and crosses the next boundary by the predecessor's attestation; `runs` names the coverage it lacks; `estate prune` re-plans an archived root, including one whose every period is archived. The subscriber's backfill answers a cursor below the archive with §11's gap marker at the oldest RETAINED record — unchanged, and only because the archive is a prefix — and a live engine still resumes, because recovery selects its seal by the sidecar. Accidental loss with no receipt refuses in the walk, in `audit` and in `journal`, each naming the receipt it did not find |
-| PR-52 | `scripts/arch_check.py`'s ownership gate covers `RuntimeState`'s own state — the row models (`JobRuntime`, `HostRuntime`, `CapacityReservation`, so `start_period`, `reservations` and `waiter_seq` with them), the private maps, and the scalars `consumed`, `enqueue_counter` and `timer_seq`: a mutable one reachable outside its owner fails the build. `routes` joins the gate with its storage (§2.2); the seal's own frozen artifact models are not runtime state and are not in it |
+| PR-52 | `scripts/arch_check.py`'s ownership gate covers `RuntimeState`'s own state — the row models (`JobRuntime`, `HostRuntime`, `CapacityReservation` and `GlobalRuntime`, DL-150, DL-151; so `start_period`, `reservations` and `waiter_seq` with them), the private maps, and the scalars `consumed`, `enqueue_counter` and `timer_seq`: a mutable one reachable outside its owner fails the build. `routes` joins the gate with its storage (§2.2); the seal's own frozen artifact models are not runtime state and are not in it |
 
 ## 14. The worked estate
 
@@ -3127,11 +3137,11 @@ Where the period model lives outside this document:
 | `concurrency-model.md` §5 | `run_id` is bound before the attempt (DL-96's deviation does not apply) |
 | `runner-design.md` §7 | record kinds; resume from a seal; the ladder re-drives a live wrapper under a terminal row, whatever the KILL effect's state (PR-33) |
 | `deployment-runbook.md` §6/§7 | seal→swap→open in place; latches cross a seal; an upgrade keeps state |
-| the withdrawn HA plan (DL-189) | its requirements from this model: ACQUIRE gains a lineage-head predicate, the store replaces the anchor, and routes are carried state. The plan was withdrawn before it took them; the requirements stand wherever a shared store is built |
+| the withdrawn HA plan (DL-189) | its requirements from this model: ACQUIRE gains a lineage-head predicate, the store replaces the anchor, and routes are carried state. The requirements stand wherever a shared store is built |
 | `runner_ledger.py` | `LeaderLock` generalized to the anchor |
 | `capacity.py`, `oracle_state.py` | §5 |
 | `runner_supervisor.py` | completed-run tombstones (PR-36) |
-| `runner_history.py`, `cli.py journal` | period-aware |
+| `runner_history.py`, `cli_run.py`'s `journal` | period-aware |
 | `period.py` | `job_fingerprints`, §10.2's leaf test (DL-131); a pure analysis pass may not import a private name out of a runner module |
 | `protocol-evolution.md` | (DL-138) the compatibility matrix per protocol, the lifecycle by which a dialect enters service, the retirement gate, the pre-production reset clause, and the tombstone-registry rule |
 | `retention.py` | the `archive-inputs` class, the receipt, the permanent floors and the itemized eligibility (§12a, DL-144); `estate prune --archive-inputs` |
@@ -3143,8 +3153,8 @@ Where the period model lives outside this document:
 ## 16. Open questions
 
 - **PR-Q5** (open): the anchor in a paired-site deployment. It stays
-  single-site until a store replaces the anchor. The HA plan that would have
-  cited this question was withdrawn (DL-189).
+  single-site until a store replaces the anchor. No plan cites it: the HA
+  plan is withdrawn (DL-189).
 
 Closed, kept because the decision log and the code cite them:
 
