@@ -161,7 +161,12 @@ class OracleWriters(OracleCascade):
         self._write(job, f"ON_NOEXEC bypass ({attempt.cause})")
 
     def _w_queue(self, job: str, outcome: Outcome) -> None:
+        """job.103: an idle job enters QUE_WAIT with a new rank. A rank the row
+        still carries is an earlier QUE_WAIT's, whose settlement has not run
+        yet (DL-345); it drops first, since the rank goes with the status that
+        owns it (DL-120)."""
         attempt = cast(StartFacts, outcome.event.payload)
+        self._drop_rank(job)
         self.store.enqueue_waiter(job)
         self._write(job, f"waiting for resources ({attempt.cause})")
 

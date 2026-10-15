@@ -529,21 +529,39 @@ class OracleReads:
         self.store.record_iced_out(box, job)
         return box
 
+    def _votes_as_it_stands(self, box: str, member: str) -> bool:
+        """SEM-11 (DL-SMALL1): a direct member that has not run in this box
+        run but holds a terminal status votes with it, unless it is out of
+        the run on ice. Four sources give such a status: a member carried
+        live from the run that ended and then ended; an operator's SUCCESS,
+        FAILURE or TERMINATED on a member that waits; a KILLJOB on a member
+        queued in this run, or on one an injected STARTING made live, which
+        ends it TERMINATED; and a never-run subbox that the idle recompute
+        (SEM-15) re-derived from statuses given to its members, a [C]
+        reading, since SEM-15's table has no ACTIVATED or ON_HOLD row. A
+        resolution or off-ice mark decides only while the member reads
+        INACTIVE: a terminal status votes as it stands."""
+        return (
+            member not in self._runtime(box).ran_members
+            and self._runtime(member).status in TERMINAL
+            and not self._out_of_the_run(member)
+        )
+
     def _all_members_done(self, box: str) -> bool:
         """SEM-11, literal (DL-13): the box cannot complete until every
-        member has run (to a terminal state) or been bypassed (iced, or
-        resolved to INACTIVE by a window skip, DL-154, or by an injected
-        STATUS INACTIVE, DL-242). A member whose condition never fires
-        inside the run -- or whose run_window deferred it -- keeps the box
-        RUNNING: the hung-box pattern is real behavior, not a defect to
-        smooth over.
+        member is terminal or has been bypassed (iced, or resolved to
+        INACTIVE by a window skip, DL-154, or by an injected STATUS
+        INACTIVE, DL-242). A member that has not run in this box run is
+        done when its status is terminal (DL-SMALL1). A member whose
+        condition never fires inside the run -- or whose run_window
+        deferred it -- reads INACTIVE and keeps the box RUNNING: the
+        hung-box pattern is real behavior, not a defect to smooth over.
 
         An ON_NOEXEC member is NOT skipped here: SEM-22 bypasses it to
         SUCCESS "as [its] conditions are met", and that bypass joins the
         ran set like any start, so the fold waits for it exactly as it
         waits for a real run."""
         box_rt = self._runtime(box)
-        ran = box_rt.ran_members
         resolved = box_rt.window_skipped_members
         for member in self._members(box):
             rt = self._runtime(member)
@@ -561,14 +579,14 @@ class OracleReads:
                 # an explicit INACTIVE verdict this execution: a run_window
                 # skip (DL-154) or an operator's (DL-242), which counts "as
                 # if the INACTIVE job returned a status of SUCCESS". A later
-                # operator status on it that is not live keeps it settled;
-                # the fold still votes over ran members only. The member's
-                # own later start voids the mark.
+                # terminal status on it is done too, and votes as it stands
+                # (DL-SMALL1). The member's own later start voids the mark.
                 continue
-            if member not in ran:
-                return False  # not yet run this box execution (incl. held)
             if rt.status not in TERMINAL:
-                return False  # still STARTING/RUNNING
+                # live or queued, or INACTIVE: not yet run this box
+                # execution (incl. held); a terminal member is done, ran or
+                # not (DL-SMALL1)
+                return False
         return True
 
 

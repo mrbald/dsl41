@@ -36,7 +36,8 @@ Ground rules (corpus hygiene per CLAUDE.md and LICENSING.md):
   when or by whom the probe ran, or what access it needed.
 - A resolution retires the item's `# PENDING:` marker, if it has one
   (DL-06). The items with a marker are Q3c, Q3d, Q8b, Q8c, Q8d, Q15, Q16
-  and E8. Q6, Q12, Q13, Q14, the SEM-20 box clause and rule 5 carry none.
+  and E8. Q6, Q12, Q13, Q14, Q17, the SEM-20 box clause and rule 5 carry
+  none.
 - A semantic switch stays selectable after its question is settled
   (DL-252). The answer sets the switch's `autosys` value in the registry
   (`src/dsl41/semantics.py`). The default then follows DL-252's rule
@@ -692,6 +693,90 @@ dsl41 must clear the ice too. If `_m` does not show FAILURE, `_q16`
 decides nothing; record the refusal. The two boxes may differ; record
 each. Capture the scheduler log lines for both boxes. Cleanup: run
 `jil <<< "delete_box: dsl41_q16"` and `jil <<< "delete_box: dsl41_q16s"`.
+
+### Q17 — a terminal status given to a member that waits in a running box (~3 minutes, runs two short jobs)
+
+Basic Box Job Concepts keeps a box RUNNING "as long as there are jobs in
+it with ACTIVATED or RUNNING status". dsl41 treats a member that has not
+run in the box's run but holds a terminal status as done, and lets it
+vote with that status (dossier SEM-11, §9 Q17). Box `_q17` holds `_a`,
+which runs for a minute, and `_w`, which waits on a job that never runs.
+Box `_q17p` holds `_b`, which runs for a minute, and the subbox `_q17s`,
+which waits on the same job and holds `_n`.
+
+```
+jil <<'EOF'
+insert_job: dsl41_q17_never
+job_type: c
+machine: <M>
+command: /bin/true
+insert_job: dsl41_q17
+job_type: b
+insert_job: dsl41_q17_a
+job_type: c
+box_name: dsl41_q17
+machine: <M>
+command: sleep 60
+insert_job: dsl41_q17_w
+job_type: c
+box_name: dsl41_q17
+machine: <M>
+command: /bin/true
+condition: s(dsl41_q17_never)
+insert_job: dsl41_q17p
+job_type: b
+insert_job: dsl41_q17p_b
+job_type: c
+box_name: dsl41_q17p
+machine: <M>
+command: sleep 60
+insert_job: dsl41_q17s
+job_type: b
+box_name: dsl41_q17p
+condition: s(dsl41_q17_never)
+insert_job: dsl41_q17s_n
+job_type: c
+box_name: dsl41_q17s
+machine: <M>
+command: /bin/true
+EOF
+sendevent -E STARTJOB -J dsl41_q17
+sendevent -E STARTJOB -J dsl41_q17p
+sleep 10; autorep -J dsl41_q17% -d     # both boxes RUNNING, _w and _q17s ACTIVATED
+sendevent -E CHANGE_STATUS -s SUCCESS -J dsl41_q17_w
+sendevent -E CHANGE_STATUS -s SUCCESS -J dsl41_q17s_n
+sleep 90; autorep -J dsl41_q17% -d
+```
+
+Readings, once `_a` and `_b` have ended:
+
+- `_q17` is SUCCESS: the default holds for an operator's status on a
+  waiting member, and that half of Q17 closes as pinned. `_q17` is
+  RUNNING: the vendor keeps waiting for `_w`. dsl41 then needs a switch
+  whose vendor value keeps the box RUNNING. The carried member's vote
+  stands on its own.
+- For `_q17p`, first record `_q17s`'s status after `_n`'s change. dsl41
+  re-derives it SUCCESS (SEM-15) and lets it vote, so `_q17p` completes.
+  If `_q17s` stays ACTIVATED, or `_q17p` stays RUNNING, record the
+  divergence: the vote of a re-derived subbox is the second half of Q17.
+
+Repeat with `-s FAILURE` in place of `-s SUCCESS`: dsl41 ends both boxes
+FAILURE. Then run two more passes on `_q17` alone, each from a fresh
+`STARTJOB -J dsl41_q17` while `_a` runs:
+
+- A resolved member's later status: `CHANGE_STATUS -s INACTIVE` on `_w`,
+  then `CHANGE_STATUS -s FAILURE` on `_w`. dsl41 lets the FAILURE vote,
+  so `_q17` ends FAILURE at `_a`'s end. If `_q17` ends SUCCESS, the
+  vendor keeps the INACTIVE mark deciding; record it.
+- An ice on a member that ended without running in the box's run:
+  `CHANGE_STATUS -s FAILURE` on `_w`, then `JOB_ON_ICE` on `_w`. dsl41
+  drops the iced member's vote, so `_q17` ends SUCCESS at `_a`'s end. If
+  `_q17` ends FAILURE, the vendor keeps the vote through the ice; record
+  it. Send `JOB_OFF_ICE` on `_w` afterwards.
+
+Capture the scheduler log lines. Cleanup: run
+`jil <<< "delete_box: dsl41_q17"`, `jil <<< "delete_box: dsl41_q17p"`
+and `jil <<< "delete_job: dsl41_q17_never"`.
 
 ### Q3c — does a member's latched tick survive into the next box run
 

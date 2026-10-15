@@ -246,7 +246,7 @@ REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
                 autosys="next-run",
                 description="what a member taken off ice while its box runs does, if it has"
                 " not run in that run: it sits the run out and the box completes without it"
-                " (next-run), or it may start in that run (same-run)",
+                " while it reads INACTIVE (next-run), or it may start in that run (same-run)",
                 affects=_box_member,
             ),
             Switch(

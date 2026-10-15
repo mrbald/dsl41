@@ -1117,3 +1117,30 @@ def test_a_terminator_cascade_that_leaves_the_run_that_ended_diverges(
     """Mutants of DL-348's audience: the box's run not compared before each
     member, or read when the cascade begins rather than before the write."""
     _diverges(mutant, jil, [ev("FORCE_STARTJOB", 1, job="bx")], last)
+
+
+#: An outer box `po` that starts again on its own end, and its subbox `pb`
+#: with box_terminator, which starts on `s(pa)`, a job outside both; `pa`
+#: runs again before `pb` ends, so `po`'s restart resets `pb` to INACTIVE and
+#: does not start it. `pm`, with job_terminator, runs in `pb`.
+_PARENT_RESET = (
+    _cmd("pa")
+    + _box("po", "condition: d(po)\n")
+    + _box("pb", "box_name: po\nbox_terminator: 1\ncondition: s(pa)\n")
+    + _cmd("pm", "box_name: pb\njob_terminator: 1\n")
+)
+
+
+def test_a_terminator_cascade_past_a_parent_s_reset_diverges() -> None:
+    """A mutant of the reset check (DL-SMALL1): the box's run compared alone.
+    KILLJOB ends `pb`, whose box_terminator ends `po`, whose restart resets
+    `pb` without moving its run; the mutant then kills `pm`, which the oracle
+    leaves running."""
+    setup = [
+        ev("STARTJOB", 0, job="pa"),
+        ev("STATUS", 1, job="pa", status="SUCCESS"),
+        ev("FORCE_STARTJOB", 2, job="po"),
+        ev("STARTJOB", 3, job="pa"),
+    ]
+    run_only = _with(_still_the_run=lambda self, box, run: self._runtime(box).run_number == run)
+    _diverges(run_only, _PARENT_RESET, setup, ev("KILLJOB", 4, job="pb"))

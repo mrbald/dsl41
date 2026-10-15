@@ -228,9 +228,28 @@ there: the box is not set RUNNING and no member starts.
 
 ### SEM-11 · Box RUNNING/completion **[V]**
 The box stays RUNNING while any member is running. The box cannot complete before all members
-run or are bypassed. Default fold: the box is SUCCESS if and only if all members ended
-SUCCESS. The box is FAILURE if at least one member failed; the fold runs after all members
-complete. A member that ended TERMINATED counts as failed in the fold; SEM-14 kills land here.
+have run, are bypassed, or hold a terminal status. Default fold: the box is SUCCESS if and only
+if all members ended SUCCESS. The box is FAILURE if at least one member failed; the fold runs
+after all members complete. A member that ended TERMINATED counts as failed in the fold; SEM-14
+kills land here.
+
+A member that has not run in this box run but holds a terminal status is done, and votes with
+that status (DL-SMALL1). Four sources give it one: a member carried live from the run that
+ended, which then ends; an operator's SUCCESS, FAILURE or TERMINATED on a member that waits; a
+KILLJOB on a member queued in this run, or on one an injected STARTING made live, which ends it
+TERMINATED; and a never-run subbox that SEM-15's idle recompute re-derived from statuses given
+to its members. The quotes are **[V]**: Basic Box Job Concepts (AutoSys 12.1 and 24.2) keeps a
+box RUNNING "as long as there are jobs in it with ACTIVATED or RUNNING status", and a box returns
+FAILURE "when all the jobs it contains have run and one or more of the jobs has returned a
+status of FAILURE". Reading a status given to a waiting job as the end of its ACTIVATED state is
+**[C]**: no vendor sentence says so, and for the re-derived subbox SEM-15's table has no
+ACTIVATED or ON_HOLD row. This is Q17 (section 9), with no switch: no vendor sentence
+contradicts it, and the hang it replaces is no documented vendor rule either. A carried member
+may still start again in the new run **[C]**: under "How the Status of a Job Changes When Added
+Into a Box" a member carries the box's run number and starts only if its "current run number
+... does not exceed the run number of the box", and a carried member's number is the previous
+run's. The carve-outs below are read first; their marks decide only while the member reads
+INACTIVE.
 
 Three carve-outs take a member out of the literal fold. Each is a completion moment and runs
 the full completion door: overrides first, then the default fold. The first two resolve the
@@ -290,8 +309,9 @@ The box row records the first two kinds of resolution in `window_skipped_members
 member's own later start voids its mark. An iced member carries its own flag. A member taken
 off ice in the run carries a mark in `iced_out_members`. A forced start of it voids that
 mark, and the forced run votes. While a forced start of it is queued or live, the fold waits
-for it. A resolved member stays settled if an operator later gives it a status that is not
-live; the fold still votes over the members that ran. A resolved or iced member is a
+for it. A resolved member stays settled while it reads INACTIVE; an operator's later
+terminal status on it votes as it stands, as any terminal member's does (DL-SMALL1). A
+resolved or iced member is a
 completion moment for the overrides of every running ancestor too, since "inside" is
 transitive (SEM-12). A member whose condition never fires inside the run, and that nobody
 resolves or ices, still hangs the box: a waiting member reads INACTIVE without a mark.
@@ -360,7 +380,10 @@ cascade reaches no further member: not the members the new run started, and not 
 live into it from the run that ended, as the fold and the overrides already leave them when the
 box's own run moves **[C]** ("Jobs in a box run only once for each box execution", Basic Box Job
 Concepts, AutoSys 12.0 and 24.2; DL-348). A box starts again this way when its end, or a
-member's kill, meets the box's own condition, for example `d(box)` or `t(member)`.
+member's kill, meets the box's own condition, for example `d(box)` or `t(member)`. The cascade
+also stops where an ancestor's restart reset the box to INACTIVE (SEM-10), which leaves the box's
+run number unmoved: the box no longer stands at its end, and a member still running from the run
+that ended runs on, as the fold and the overrides leave it (DL-SMALL1).
 Whether an operator's CHANGE_STATUS FAILURE or TERMINATED on
 a RUNNING box kills its job_terminator members is open (Q14, section 9); the oracle kills
 none.
@@ -1745,6 +1768,21 @@ each open question.
   The default `idle-box-iced-member=ignore` drops an iced member that is out of the run, as
   SEM-11's fold does; `vote` reads its status (runner-design §8a).
   `# PENDING: Q16` marks the read in the oracle. The runbook's Q16 protocol settles it.
+- Q17 (SEM-11, DL-SMALL1): open, pinned default. Whether a member that has not run in a
+  RUNNING box's run, and that an operator gave SUCCESS, FAILURE or TERMINATED while it waited,
+  counts as done for the box. Basic Box Job Concepts (AutoSys 12.1 and 24.2) keeps a box
+  RUNNING "as long as there are jobs in it with ACTIVATED or RUNNING status", and a box returns
+  FAILURE "when all the jobs it contains have run and one or more of the jobs has returned a
+  status of FAILURE". No sentence says whether a status given to an ACTIVATED job ends its
+  ACTIVATED state or counts as returned. The default treats it as done, and it votes with its
+  status. A never-run subbox that SEM-15 re-derived from statuses given to its members votes
+  the same way, and SEM-15's table has no ACTIVATED or ON_HOLD row. No switch and no code
+  marker: no vendor sentence contradicts the default, and the alternative, a box that never
+  completes, is not a documented vendor rule either. Two shapes ride on the same reading. A
+  resolution mark decides only while the member reads INACTIVE, so a waiting member set INACTIVE
+  and then FAILURE votes FAILURE. And an ON_ICE on a member that has not run in the box's run but
+  ended FAILURE takes it out of the run and drops its vote, where a member that ran keeps its
+  vote through the ice. The runbook's Q17 protocol settles all three.
 
 ## Sources
 Primary: Broadcom TechDocs, AutoSys Workload Automation 12.0/12.0.01/12.1/12.1.01 (Basic Box

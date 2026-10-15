@@ -415,12 +415,13 @@ numbers and the cascaded-subbox case, LIVE and TERMINATED excluded (a member's t
 direct target of an operator's INACTIVE, never a row the cascade took INACTIVE); the walk up skips
 an ancestor whose run number moved; the parent recompute after an operator's INACTIVE needs the
 parent's run number unchanged; and `box ends FAILURE or TERMINATED` goes only to the members of the
-run that ended. Its sender reads that run, a kill before the status write and a fold or an
-override with the FAILURE or TERMINATED it reads after the end's wakes, and `box ends step`
-compares the box's run number before each member's send: once the wakes, or an earlier member's
-kill, started the box again, no further member gets the event, not even one carried RUNNING from
-the run that ended (DL-348). A fold or an override may read a later run's own end, whose cascade
-already ran; the members it reaches again ignore the event. These audiences are the sender's: each
+run that ended, while the box still stands at that end. Its sender reads that run, a kill before
+the status write and a fold or an override with the FAILURE or TERMINATED it reads after the end's
+wakes, and `box ends step` compares the box's run number and its status before each member's send:
+once the wakes, or an earlier member's kill, started the box again, or an ancestor's restart reset
+the box to INACTIVE without moving its run (SEM-10), no further member gets the event, not even one
+carried RUNNING from the run that ended (DL-348, DL-SMALL1). A fold or an override may read a
+later run's own end, whose cascade already ran; the members it reaches again ignore the event. These audiences are the sender's: each
 gate is read in the action of the row that sends the event, or in its iterating moment (§8), never
 as a fact of the recipient's row.
 

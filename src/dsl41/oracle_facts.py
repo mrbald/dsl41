@@ -502,7 +502,11 @@ class FoldFacts:
             self._known["done"] = done = oracle._all_members_done(box)
             if done:
                 ran = oracle._runtime(box).ran_members
-                statuses = [oracle._runtime(m).status for m in oracle._members(box) if m in ran]
+                statuses = [
+                    oracle._runtime(m).status
+                    for m in oracle._members(box)
+                    if m in ran or oracle._votes_as_it_stands(box, m)
+                ]
                 failed = any(s in FAILED for s in statuses)
                 sem = self._box_ir.sem
                 if not failed and sem.box_success is None:

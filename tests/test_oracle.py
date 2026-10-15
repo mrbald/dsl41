@@ -1432,6 +1432,117 @@ def test_sem11_waiting_member_still_hangs_the_box() -> None:
     assert o.store.job["box11h"].window_skipped_members == frozenset()
 
 
+#: Box `box11o` with `r11o`, which runs at the start, and `w11o`, which waits
+#: on a job that never runs.
+_OPERATOR_FOLD_JIL = (
+    "insert_job: box11o\njob_type: b\n\n"
+    "insert_job: r11o\njob_type: c\ncommand: x\nmachine: m1\nbox_name: box11o\n\n"
+    "insert_job: w11o\njob_type: c\ncommand: y\nmachine: m1\nbox_name: box11o\n"
+    "condition: s(never11o)\n\n"
+    "insert_job: never11o\njob_type: c\ncommand: z\nmachine: m1\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("given", "box"),
+    [("SUCCESS", "SUCCESS"), ("FAILURE", "FAILURE"), ("TERMINATED", "FAILURE")],
+)
+def test_sem11_an_operator_s_terminal_status_on_a_waiting_member_votes(
+    given: str, box: str
+) -> None:
+    """SEM-11, DL-SMALL1: Basic Box Job Concepts keeps a box RUNNING "as long
+    as there are jobs in it with ACTIVATED or RUNNING status", and a box
+    returns FAILURE "when all the jobs it contains have run and one or more
+    of the jobs has returned a status of FAILURE". A member that never ran,
+    given SUCCESS, FAILURE or TERMINATED by the operator, is neither waiting
+    nor running: it is done and votes with its status, TERMINATED as failed.
+    So the box completes at its sibling's end. Before, it hung there."""
+    o = oracle(_OPERATOR_FOLD_JIL)
+    o.feed(ev("STARTJOB", 0, job="box11o"))
+    o.feed(ev("STATUS", 1, job="w11o", status=given))
+    assert _status(o, "box11o", "r11o", "w11o") == ["RUNNING", "RUNNING", given]
+    o.feed(ev("STATUS", 2, job="r11o", status="SUCCESS"))
+    assert o.store.job["box11o"].status == box
+    assert "w11o" not in o.store.job["box11o"].ran_members
+
+
+def test_sem11_a_resolved_member_given_a_later_failure_votes_it() -> None:
+    """SEM-11 (DL-242, DL-SMALL1): an operator's INACTIVE resolves the
+    waiting member. The mark decides only while the member reads INACTIVE:
+    a later FAILURE on it votes as it stands, as it would for a member that
+    ran, so the box ends FAILURE at its sibling's end."""
+    o = oracle(_OPERATOR_FOLD_JIL)
+    o.feed(ev("STARTJOB", 0, job="box11o"))
+    o.feed(ev("STATUS", 1, job="w11o", status="INACTIVE"))
+    o.feed(ev("STATUS", 2, job="w11o", status="FAILURE"))
+    assert o.store.job["box11o"].status == "RUNNING"
+    o.feed(ev("STATUS", 3, job="r11o", status="SUCCESS"))
+    assert _status(o, "box11o", "w11o") == ["FAILURE", "FAILURE"]
+
+
+def test_sem11_a_never_run_subbox_its_recompute_completed_votes() -> None:
+    """SEM-11, SEM-15 (DL-SMALL1, Q17): the subbox `s11v` waits on `s(a11v)`,
+    a job that never runs, so it never starts in `o11v`'s run. The operator's
+    SUCCESS on its member `m11v` re-derives it SUCCESS by the idle recompute.
+    It holds a terminal status, so it votes as it stands, and `o11v`
+    completes at `k11v`'s end. Before, the parent waited for it."""
+    o = oracle(
+        "insert_job: o11v\njob_type: b\n\n"
+        "insert_job: s11v\njob_type: b\nbox_name: o11v\ncondition: s(a11v)\n\n"
+        "insert_job: m11v\njob_type: c\ncommand: m\nmachine: m1\nbox_name: s11v\n\n"
+        "insert_job: k11v\njob_type: c\ncommand: k\nmachine: m1\nbox_name: o11v\n\n"
+        "insert_job: a11v\njob_type: c\ncommand: a\nmachine: m1\n"
+    )
+    o.feed(ev("FORCE_STARTJOB", 0, job="o11v"))
+    assert _status(o, "o11v", "s11v", "k11v") == ["RUNNING", "INACTIVE", "RUNNING"]
+    o.feed(ev("STATUS", 1, job="m11v", status="SUCCESS"))
+    assert _status(o, "o11v", "s11v") == ["RUNNING", "SUCCESS"]
+    o.feed(ev("STATUS", 2, job="k11v", status="SUCCESS"))
+    assert o.store.job["o11v"].status == "SUCCESS"
+    assert "s11v" not in o.store.job["o11v"].ran_members
+
+
+def test_sem11_a_member_carried_running_into_the_new_run_votes_in_its_fold() -> None:
+    """SEM-11, DL-SMALL1: a member still RUNNING when its box starts again
+    keeps its run and is carried into the new one. Basic Box Job Concepts
+    keeps a box RUNNING "as long as there are jobs in it with ACTIVATED or
+    RUNNING status", and the default fold reads statuses: so its end
+    completes the box, and the box's SUCCESS meets `d(box)` and starts it a
+    third time, the member with it. Before, the member's end never counted,
+    since it did not start in that run, and the box stayed RUNNING after its
+    only member ended (DL-348's recorded hang)."""
+    o = oracle(_self_restarting_terminator_box("bx11c", box_terminator=False))
+    o.feed(ev("FORCE_STARTJOB", 0, job="bx11c"))
+    o.feed(ev("KILLJOB", 1, job="bx11c"))
+    traced = len(o.trace())
+    o.feed(ev("STATUS", 2, job="bx11c_m", status="SUCCESS"))
+    assert [(t.job, t.transition) for t in o.trace()[traced:]] == [
+        ("bx11c_m", "RUNNING->SUCCESS"),
+        ("bx11c", "RUNNING->SUCCESS"),
+        ("bx11c_m", "SUCCESS->INACTIVE"),
+        ("bx11c", "SUCCESS->STARTING"),
+        ("bx11c", "STARTING->RUNNING"),
+        ("bx11c_m", "INACTIVE->STARTING"),
+        ("bx11c_m", "STARTING->RUNNING"),
+    ]
+    box, member = o.store.job["bx11c"], o.store.job["bx11c_m"]
+    assert (box.run_number, member.run_number) == (3, 2)
+
+
+def test_sem11_a_carried_member_that_fails_fails_the_new_run() -> None:
+    """SEM-11, DL-SMALL1: the carried member's FAILURE votes in the new run's
+    fold as it stands, so the box ends FAILURE, which `d(box)` meets."""
+    o = oracle(_self_restarting_terminator_box("bx11f", box_terminator=False))
+    o.feed(ev("FORCE_STARTJOB", 0, job="bx11f"))
+    o.feed(ev("KILLJOB", 1, job="bx11f"))
+    assert o.store.job["bx11f"].ran_members == frozenset()
+    traced = len(o.trace())
+    o.feed(ev("STATUS", 2, job="bx11f_m", status="FAILURE"))
+    lines = [(t.job, t.transition) for t in o.trace()[traced:]]
+    assert lines[:2] == [("bx11f_m", "RUNNING->FAILURE"), ("bx11f", "RUNNING->FAILURE")]
+    assert o.store.job["bx11f"].run_number == 3
+
+
 # ------------------------------------------------------- 10. SEM-12 box_success/failure
 
 
@@ -1887,6 +1998,53 @@ def test_sem14_a_member_carried_running_into_the_new_run_is_not_killed() -> None
         "RUNNING",
         1,
     )
+
+
+#: An outer box that starts again on its own end. Its subbox `<p>_b` has
+#: box_terminator and starts on `s(<p>_a)`, a job outside both, which runs
+#: again before the subbox ends, so the outer box's restart resets the subbox
+#: to INACTIVE and does not start it: its run does not move. `<p>_m`, with
+#: job_terminator, and `<p>_f` run in the subbox; `f(<p>_f)` fails it.
+def _parent_reset_estate(p: str) -> str:
+    return (
+        f"insert_job: {p}_a\njob_type: c\ncommand: a\nmachine: m1\n\n"
+        f"insert_job: {p}_o\njob_type: b\ncondition: d({p}_o)\n\n"
+        f"insert_job: {p}_b\njob_type: b\nbox_name: {p}_o\nbox_terminator: 1\n"
+        f"condition: s({p}_a)\nbox_failure: f({p}_f)\n\n"
+        f"insert_job: {p}_m\njob_type: c\ncommand: m\nmachine: m1\nbox_name: {p}_b\n"
+        "job_terminator: 1\n\n"
+        f"insert_job: {p}_f\njob_type: c\ncommand: f\nmachine: m1\nbox_name: {p}_b\n"
+    )
+
+
+@pytest.mark.parametrize("end", ["KILLJOB", "STATUS"])
+def test_sem14_a_subbox_its_parent_reset_kills_no_job_terminator(end: str) -> None:
+    """SEM-14, DL-348: the subbox ends, TERMINATED by KILLJOB or FAILURE by its
+    box_failure override, and its box_terminator ends the outer box, which
+    starts again on `d(outer)` inside the subbox's box rules and resets the
+    subbox to INACTIVE. The subbox's run does not move, but the end no longer
+    stands: the subbox is waiting in its parent's new run. So the
+    job_terminator cascade of the end reaches no member, and `<p>_m` runs on
+    whichever path ended the subbox, as the fold path already left it. Before,
+    the kill path read only the run number and killed it."""
+    o = oracle(_parent_reset_estate("pr14"))
+    o.feed(ev("STARTJOB", 0, job="pr14_a"))
+    o.feed(ev("STATUS", 1, job="pr14_a", status="SUCCESS"))
+    o.feed(ev("FORCE_STARTJOB", 2, job="pr14_o"))
+    o.feed(ev("STARTJOB", 3, job="pr14_a"))
+    assert _status(o, "pr14_b", "pr14_m", "pr14_f") == ["RUNNING", "RUNNING", "RUNNING"]
+    if end == "KILLJOB":
+        o.feed(ev("KILLJOB", 4, job="pr14_b"))
+    else:
+        o.feed(ev("STATUS", 4, job="pr14_f", status="FAILURE"))
+    outer, sub = o.store.job["pr14_o"], o.store.job["pr14_b"]
+    assert (outer.status, outer.run_number, sub.status, sub.run_number) == (
+        "RUNNING",
+        2,
+        "INACTIVE",
+        1,
+    )
+    assert o.store.job["pr14_m"].status == "RUNNING"
 
 
 # --------------------------------------------------------------------- 13. SEM-20 ON_ICE
@@ -4830,8 +4988,9 @@ def test_sem33_box_skip_member_later_set_by_the_operator_stays_settled(
 ) -> None:
     """T33b box variant (SEM-33, DL-154; SEM-11, DL-242): a window-skipped
     member is resolved. An operator status on it that is not live -- here
-    SUCCESS or INACTIVE -- keeps it settled, so the box completes when its
-    running sibling ends. The fold still votes over ran members only."""
+    SUCCESS or INACTIVE -- does not hold the box, so the box completes when
+    its running sibling ends. INACTIVE keeps the mark deciding; SUCCESS votes
+    as it stands (DL-SMALL1)."""
     o = oracle(_SKIP_BOX_JIL)
     at = datetime(2026, 7, 2, 4, 30)
     o.feed(Event(at=at, kind="FORCE_STARTJOB", payload={"job": "box_rw33c"}))
@@ -9465,6 +9624,44 @@ def test_dl50_a_scan_in_the_box_rules_skips_a_queued_box_its_member_ended() -> N
     box = o.store.job["qq50"]
     assert (box.status, box.waiter_seq) == ("SUCCESS", None)
     assert _statuses(o, "qp50", "qa50") == {"qp50": "SUCCESS", "qa50": "RUNNING"}
+
+
+def test_dl50_a_member_queued_again_in_the_same_cascade_takes_a_new_rank() -> None:
+    """An injected STATUS INACTIVE takes a queued member out of the queue,
+    and its rank stays until its settlement, after its box rules. Those
+    rules fold the box SUCCESS, `s(box)` starts it again, and the new run
+    queues the member again before that settlement. The rank goes with the
+    status that owns it (DL-120): the new QUE_WAIT takes a new rank, behind
+    `rw50`, which queued between the two. So the release admits `rw50`.
+    Before, the member kept its first rank and was admitted ahead of it."""
+    text = (
+        "insert_resource: RQ50\nres_type: R\namount: 1\n\n"
+        "insert_job: rh50\njob_type: c\ncommand: h\nmachine: m1\n"
+        "resources: (RQ50, QUANTITY=1, FREE=Y)\n\n"
+        "insert_job: rb50\njob_type: b\ncondition: s(rb50)\n\n"
+        "insert_job: rm50\njob_type: c\ncommand: m\nmachine: m1\nbox_name: rb50\n"
+        "resources: (RQ50, QUANTITY=1, FREE=Y)\n\n"
+        "insert_job: rw50\njob_type: c\ncommand: w\nmachine: m1\n"
+        "resources: (RQ50, QUANTITY=1, FREE=Y)\n"
+    )
+    o = oracle(text)
+    o.feed(ev("STARTJOB", 0, job="rh50"))
+    o.feed(ev("FORCE_STARTJOB", 1, job="rb50"))
+    o.feed(ev("STARTJOB", 2, job="rw50"))
+    first = o.store.job["rm50"].waiter_seq
+    assert first is not None and first < o.store.job["rw50"].waiter_seq
+    traced = len(o.trace())
+    o.feed(ev("STATUS", 3, job="rm50", status="INACTIVE"))
+    assert [(t.job, t.transition) for t in o.trace()[traced:]] == [
+        ("rm50", "QUE_WAIT->INACTIVE"),
+        ("rb50", "RUNNING->SUCCESS"),
+        ("rb50", "SUCCESS->STARTING"),
+        ("rb50", "STARTING->RUNNING"),
+        ("rm50", "INACTIVE->QUE_WAIT"),
+    ]
+    assert o.store.job["rm50"].waiter_seq > o.store.job["rw50"].waiter_seq
+    o.feed(ev("STATUS", 4, job="rh50", status="SUCCESS"))
+    assert _statuses(o, "rm50", "rw50") == {"rm50": "QUE_WAIT", "rw50": "RUNNING"}
 
 
 def test_dl247_a_waiter_short_only_on_a_named_resource_does_not_block() -> None:
