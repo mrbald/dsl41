@@ -2958,6 +2958,13 @@ def _foreign_pair(run_root: Path, tmp_path: Path) -> None:
     )
 
 
+def _unparseable_receipt(run_root: Path, tmp_path: Path) -> None:
+    """Bytes that do not parse, under the receipt's name."""
+    from dsl41.period import archive_receipt_path
+
+    durable_write(str(archive_receipt_path(run_root, 1)), b"{not canonical json\n")
+
+
 #: every way one receipt can fail to be the proof it claims, and the
 #: fragment the shared door answers each with. Integrity is intact in all
 #: of them -- what is broken is the BINDING
@@ -2979,11 +2986,12 @@ B2_CORRUPTIONS: Any = [
         "a stranger's receipt excuses nothing",
     ),
     ("foreign-pair", _foreign_pair, "a foreign sidecar under this period's name"),
+    ("unparseable", _unparseable_receipt, "not ss3.2-canonical JSON"),
 ]
 
 
 @pytest.mark.parametrize("name,corrupt,fragment", B2_CORRUPTIONS)
-def test_b2_every_receipt_consumer_refuses_the_same_broken_binding(
+def test_pr55a_every_receipt_consumer_refuses_the_same_broken_binding(
     tmp_path: Path, name: str, corrupt: Any, fragment: str
 ) -> None:
     """B2: ONE door, and every reader that treats a receipt as authority
@@ -3026,7 +3034,7 @@ def test_b2_every_receipt_consumer_refuses_the_same_broken_binding(
         assert "attestation-verified" not in result.stdout, (name, args)
 
 
-def test_b2_an_unreadable_receipt_never_buys_a_shorter_answer(tmp_path: Path) -> None:
+def test_pr55a_an_unreadable_receipt_never_buys_a_shorter_answer(tmp_path: Path) -> None:
     """B2: `archived_periods` lists receipt FILES, which is what a lister
     owes -- and `dsl41 runs` used it to decide there were no rows.
 
@@ -3050,7 +3058,7 @@ def test_b2_an_unreadable_receipt_never_buys_a_shorter_answer(tmp_path: Path) ->
         plan_retention(run_root)
 
 
-def test_b3_a_registry_row_pointing_at_a_stranger_releases_nothing(tmp_path: Path) -> None:
+def test_pr55a_a_registry_row_pointing_at_a_stranger_releases_nothing(tmp_path: Path) -> None:
     """B3, the severe one: the cover came from a checkpoint found through
     an UNVALIDATED registry root.
 
@@ -3095,7 +3103,7 @@ def test_b3_a_registry_row_pointing_at_a_stranger_releases_nothing(tmp_path: Pat
     assert wal_path(run_root, 1).exists() and wal_path(run_root, 2).exists()
 
 
-def test_b3_the_live_recheck_asks_the_same_question_as_the_plan(tmp_path: Path) -> None:
+def test_pr55a_the_live_recheck_asks_the_same_question_as_the_plan(tmp_path: Path) -> None:
     """B3: the re-check is what stands between a plan and a deletion, so a
     row redirected AFTER planning must not supply the cover that licenses
     it.
@@ -3181,7 +3189,7 @@ def test_b4_a_half_deleted_candidate_pair_is_completed_from_the_receipt(
     assert not wal_path(run_root, 2).exists()
 
 
-def test_b6_audit_period_and_rederive_seal_refuse_a_receipt_themselves(
+def test_pr55a_audit_period_and_rederive_seal_refuse_a_receipt_themselves(
     tmp_path: Path,
 ) -> None:
     """B6: the two FUNCTIONS, not the CLI path in front of them.
