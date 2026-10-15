@@ -471,17 +471,16 @@ def _keyword_constants(keyword: str) -> set[str]:
 
 def _trace_markers() -> set[str]:
     """Every constant marker `Oracle._record` writes: a trace line that is
-    not an `OLD->NEW` status transition. `Oracle._ignore` writes its marker,
-    the third argument, through `_record` beside an internal transition, and
-    `Oracle._flag` its third beside a flag's move. Every module the oracle's
-    class is built from is read."""
+    not an `OLD->NEW` status transition. `Oracle._flag` writes its third
+    argument beside a flag's move. Every module the oracle's class is built
+    from is read."""
     modules = {cls.__module__ for cls in Oracle.__mro__ if cls.__module__.startswith("dsl41.")}
     trees = [
         ast.parse((SRC / f"{module.split('.')[1]}.py").read_text(encoding="utf-8"))
         for module in sorted(modules)
     ]
     out: set[str] = set()
-    position = {"_record": 1, "_ignore": 2, "_flag": 2}
+    position = {"_record": 1, "_flag": 2}
     for node in (node for tree in trees for node in ast.walk(tree)):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
             index = position.get(node.func.attr)

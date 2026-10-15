@@ -16,8 +16,8 @@
 # same-root restart, a detached job that survives an engine stop, a changed
 # estate refused without a restart loop, a sealed engine that stays
 # stopped until an operator opens the next period, the managed quiescence
-# and restore of deployment-runbook ss2b, the signals of "What to watch"
-# (with a violation injected into the engine unit), the configure recipe,
+# and restore of deployment-runbook ss2b, the signals of "What to watch",
+# the configure recipe,
 # the stop-and-recover recipe, a SIGKILL of the engine and of the
 # supervisor, every upgrade row of ss7 with its rollback, and ss0's
 # retirement. The install, the first start and the retirement run ss0's
@@ -261,18 +261,14 @@ step_reboot() { # a host reboot: the enabled units resume the same root at boot
 }
 
 # deployment-runbook ss0's "What to watch": each signal read with the command
-# the table prints, against the running estate. Two cases are not reached in
-# a live unit, and the runbook does not say they are drilled: exit 5 (the
-# engine stops on a violation) and a subscribe line over the budget. A
-# violation is injected into the engine unit (inject_faults), the way the
-# unit tests inject one; the drill proves the line reaches the journal with
-# the prefix the alert matches, not that a real engine violates.
+# the table prints, against the running estate. A subscribe line over the
+# budget is not reached in a live unit, and the runbook does not say it is
+# drilled.
 watch_cleanup() {
     sudo pkill -f '[d]sl41 query subscribe' 2>/dev/null || true
-    remove_faults 2>/dev/null || true
 }
-step_watch() { # "What to watch": every signal, and a violation in the journal
-    local out cursor baseline sub rc err mark before run lines leader
+step_watch() { # "What to watch": every signal
+    local out cursor baseline sub rc err run lines leader
     trap watch_cleanup EXIT
     # the engine unit
     out=$(systemctl show -p ActiveState -p ExecMainStatus -p NRestarts "$ENGINE")
@@ -351,22 +347,6 @@ step_watch() { # "What to watch": every signal, and a violation in the journal
     ! grep -q -- '--since' <<<"$err" || fail "a subscribe refused before its ack named a --since"
     ok "with no engine: status --brief and subscribe exit 2, and subscribe names no --since"
     start_engine
-    # violations off the trace: a journal line that begins with the prefix
-    inject_faults effect.01
-    mark=$(date +%s)
-    before=$(journal_count "$mark" 'dsl41: transition violation')
-    run=$(job_field "$SHORT_JOB" run_number)
-    force_start "$SHORT_JOB"
-    wait_for 30 "the journal gains a transition violation line" violation_lines_exceed "$mark" "$before"
-    engine_log_since "$mark" | grep -qE \
-        '^dsl41: transition violation: effect effect\.01 absent->pending: injected by the service drill$' ||
-        fail "no violation line begins the message as the runbook says"
-    wait_for 60 "$SHORT_JOB ended in SUCCESS: the engine goes on" \
-        ran_to_success "$SHORT_JOB" $((run + 1))
-    remove_faults
-    manual restart
-    wait_up
-    ok "a transition violation shows in the journal under the alert prefix, and the engine goes on"
 }
 
 # deployment-runbook ss0's "Recipe: configure an estate": the account that
@@ -580,7 +560,7 @@ kill_supervisor_cleanup() {
     restore_units 2>/dev/null || true
 }
 step_kill_supervisor() { # SIGKILL of the supervisor: restart, resume and lease renewal
-    local sup eng_inv eng_pid holder was mark run restarts cursor
+    local sup eng_inv eng_pid holder was mark run restarts
     trap kill_supervisor_cleanup EXIT
     # part 1: the shipped units
     force_start "$LONG_JOB"
@@ -616,13 +596,13 @@ step_kill_supervisor() { # SIGKILL of the supervisor: restart, resume and lease 
     sudo install -d "/etc/systemd/system/$SUPERVISOR.d"
     printf '[Service]\nRestartSec=40\n' | sudo tee "/etc/systemd/system/$SUPERVISOR.d/drill.conf" >/dev/null
     sudo systemctl daemon-reload
-    inject_faults host.07
+    manual restart
+    wait_up
     wait_for 60 "the engine holds the lease" lease_is_held
     sup=$(prop "$SUPERVISOR" MainPID)
     eng_pid=$(prop "$ENGINE" MainPID)
     eng_inv=$(prop "$ENGINE" InvocationID)
     holder=$(lease_field holder)
-    cursor=$(cli query trace --since 0 -S "$SOCK" | jq -r .last_seq)
     mark=$(date +%s)
     sudo kill -KILL "$sup"
     wait_for 60 "the engine reports the host unreachable" \
@@ -636,12 +616,6 @@ step_kill_supervisor() { # SIGKILL of the supervisor: restart, resume and lease 
     was=$(lease_field expires_at)
     wait_for 60 "the lease keeps renewing" lease_renewed_past "$was"
     ok "the engine outlived the outage: five failed renewals, then the lease renewed"
-    # the reinstatement ran through an undeclared move: a trace line, and the engine went on
-    cli query trace --since "$cursor" -S "$SOCK" | jq -e \
-        '[.entries[] | select(.transition == "TRANSITION_VIOLATION" and .job == "host:local"
-            and (.cause | startswith("host.07 ")))] | length >= 1' >/dev/null ||
-        fail "no TRANSITION_VIOLATION trace entry for host.07 on host:local since $cursor"
-    ok "an injected violation shows as a TRANSITION_VIOLATION trace entry for host:local"
     run=$(job_field "$SHORT_JOB" run_number)
     force_start "$SHORT_JOB"
     wait_for 60 "$SHORT_JOB ran after the outage" ran_to_success "$SHORT_JOB" $((run + 1))

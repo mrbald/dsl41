@@ -36,7 +36,6 @@ from dsl41.state_machine import (
     Row,
     StatechartError,
     UnhandledEvent,
-    Violation,
     alphabet,
     chart_warnings,
     well_formed,
@@ -329,19 +328,6 @@ def test_a_refusal_code_the_state_owner_has_no_sentence_for_raises(
     assert ("machine", "runtime_assembly") in raised.value.facts
     assert ("active", "fresh, runtime_assembly") in raised.value.facts
     assert store._phase == "fresh"
-
-
-def test_an_input_opened_twice_is_refused_and_leaves_the_pending_violations() -> None:
-    """The read comes before the orphans are dropped: an open input's own
-    violations are not drained by the refused begin."""
-    violation = Violation("job_flags", "x", "a", "b", "pending")
-    store = _built("live")
-    store.begin_input()
-    store.note_violation("j", violation)
-    with pytest.raises(OracleError, match="input already open"):
-        store.begin_input()
-    assert store.drain_violations() == [("j", violation)]
-    store.commit_input()
 
 
 def test_a_fork_keeps_the_source_s_phase_in_its_own_executor() -> None:

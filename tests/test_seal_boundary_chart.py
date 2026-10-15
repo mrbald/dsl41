@@ -29,7 +29,7 @@ from dsl41.machines import MACHINES
 from dsl41.oracle_state import Event, RuntimeState
 from dsl41.period import wal_path
 from dsl41.runner import Engine, _PendingSeal
-from dsl41.runner_admission import AdmissionRefused, TransitionStop
+from dsl41.runner_admission import AdmissionRefused
 from dsl41.runner_clock import EngineError
 from dsl41.runner_journal import read_journal
 from dsl41.runner_seal import (
@@ -83,11 +83,10 @@ def _witness(phase: str) -> sc.Builder:
     return build
 
 
-#: the exception's type: the two stops, a refusal, and an OSError (ss7: not just
+#: the exception's type: the stop, a refusal, and an OSError (ss7: not just
 #: EngineError is reversible)
 _ERRORS: dict[str, Callable[[], Exception]] = {
     "past_ponr": lambda: BoundaryFailStop("the seal append failed"),
-    "transition_stop": lambda: TransitionStop("a drained input broke a transition"),
     "refused": lambda: AdmissionRefused("stale epoch", code="stale_epoch"),
     "oserror": lambda: OSError(28, "No space left on device"),
 }
@@ -106,7 +105,7 @@ def _fault(error: str, fence: str, flags: tuple[str, ...]) -> SealFault:
 
 def _partitions() -> dict[str, dict[str, Any]]:
     """Every exception type, by fence, by every set of DL-274's flags: so a
-    lost fence with a flag set, a flag with each stop type, and two or three
+    lost fence with a flag set, a flag with the stop type, and two or three
     flags at once are cells of their own."""
     exception: dict[str, Any] = {}
     for error, fence in itertools.product(_ERRORS, ("intact", "lost")):
@@ -132,8 +131,7 @@ def _section_7(phase: str, event: str, label: str) -> str:
 
     The boundary freezes when the barrier parks, commits once quiesced, and is
     sealed when the commit returns. An exception is classified in one order:
-    a failure past the point of no return stops; the stop run option stops;
-    a lost fence stops; an attempt not fully applied, an input the drain
+    a failure past the point of no return stops; a lost fence stops; an attempt not fully applied, an input the drain
     could not admit or an unfinished append stops; anything else aborts and
     refuses. A finished boundary takes nothing."""
     if phase in FINALS:
@@ -144,8 +142,6 @@ def _section_7(phase: str, event: str, label: str) -> str:
     error, fence, flags = label.split("/")
     if error == "past_ponr":
         return _row("07")
-    if error == "transition_stop":
-        return _row("08")
     if fence == "lost":
         return _row("05")
     if flags != "none":

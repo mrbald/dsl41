@@ -3,8 +3,8 @@
 
 The executor calls the oracle's hook with each microstep's outcome, before
 the next item pops (`oracle.Oracle._perform`). The hook writes each fired
-row with the method `_WRITERS` names: the store's verb with the row's declared
-move, the status's trace line and its STATUS emission, in the order the rows
+row with the method `_WRITERS` names: the store's verb with what the row reached, the
+status's trace line and its STATUS emission, in the order the rows
 fired within the microstep, then the intents the row's actions reported. A
 row's type is checked against the catalog before it writes (`_check_type`).
 A fired row with no write, or whose write needs a fact the payload does not
@@ -13,11 +13,10 @@ carry, is a statechart error (`_unwritten`).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Final, cast
 
 from dsl41.capacity import machine_load, to_reservations
-from dsl41.job_chart import ON_HOLD, ON_ICE, ON_NOEXEC, RELEASE_RESOURCE, Settlement, projection
+from dsl41.job_chart import RELEASE_RESOURCE, Settlement, projection
 from dsl41.oracle_cascade import OracleCascade
 from dsl41.oracle_facts import FoldFacts, RecomputeFacts, StartFacts, Started
 from dsl41.oracle_intents import (
@@ -32,76 +31,8 @@ from dsl41.oracle_intents import (
     Starting,
     StatusInput,
 )
-from dsl41.oracle_state import (
-    ARM,
-    AUTO_HOLD,
-    BOX_CASCADE,
-    BOX_END_DISARMS,
-    BOX_FAILURE_OVERRIDE,
-    BOX_FOLD_FAILURE,
-    BOX_FOLD_SUCCESS,
-    BOX_NOEXEC,
-    BOX_NOEXEC_OFF,
-    BOX_RESET,
-    BOX_RUN,
-    BOX_STATUS_INACTIVE,
-    BOX_SUCCESS_OVERRIDE,
-    BOX_TERMINATOR,
-    FORCE_CLEARS_HOLD,
-    FORCE_CLEARS_ICE,
-    FORCE_ON_HELD_UNITS,
-    HELD_RELEASED,
-    HELD_RELEASED_AT_OPENING,
-    HOLD_IGNORED,
-    HOLD_OFF,
-    HOLD_ON,
-    ICE_IGNORED,
-    ICE_OFF,
-    ICE_ON,
-    IDLE_BOX_DERIVE,
-    IDLE_BOX_OVERRIDE,
-    JOB_BYPASS,
-    JOB_CANCEL_WAITER,
-    JOB_ICE_QUEUED,
-    JOB_KILL,
-    JOB_KILL_QUEUED,
-    JOB_LEAVE_QUEUE,
-    JOB_NOEXEC_QUEUED,
-    JOB_QUEUE,
-    JOB_RUN,
-    JOB_TERM_RUN_TIME,
-    JOB_TERMINATOR,
-    JOB_WINDOW_SKIP,
-    JOB_WINDOW_SKIP_MEMBER,
-    KILL_DISARMS,
-    KILL_IGNORED,
-    LIVE,
-    NOEXEC_CLEARS_HOLD,
-    NOEXEC_COMPLETED,
-    NOEXEC_IGNORED,
-    NOEXEC_OFF,
-    NOEXEC_ON,
-    QUEUE_LEFT_DISARMS,
-    START_REFUSED,
-    STATUS_EXIT_FAILURE,
-    STATUS_EXIT_SUCCESS,
-    STATUS_INACTIVE,
-    STATUS_INJECTED,
-    TAKE_OVER_HELD,
-    EventKind,
-    FlagState,
-    JobStatus,
-    Transition,
-)
-from dsl41.oracle_state import DISARM as DISARM_MOVE
+from dsl41.oracle_state import LIVE, EventKind, FlagState, JobStatus
 from dsl41.state_machine import Outcome, StatechartError
-
-#: The internal rows an ignored flag input takes.
-_FLAG_IGNORED: Final[dict[str, Mapping[JobStatus, Transition[JobStatus]]]] = {
-    ON_ICE: ICE_IGNORED,
-    ON_HOLD: HOLD_IGNORED,
-    ON_NOEXEC: NOEXEC_IGNORED,
-}
 
 #: The hold rows ON_NOEXEC fires beside its flag's: the flag and its line are
 #: written first, where the region order puts the hold (DL-254).
@@ -164,26 +95,21 @@ class OracleWriters(OracleCascade):
         if member is not None and member != (parent is not None):
             raise StatechartError(f"job {job!r}: {row} fired for a job in box {parent!r}")
 
-    def _write(
-        self,
-        job: str,
-        move: Transition[JobStatus],
-        cause: str,
-        *,
-        code: int | None = None,
-        clear: bool = False,
-    ) -> None:
-        """A status write: the status the chart reached, by the row's declared
-        move, its trace line and its emission."""
+    def _write(self, job: str, cause: str, *, code: int | None = None, clear: bool = False) -> None:
+        """A status write: the status the chart reached, its trace line and its
+        emission."""
         old = self._runtime(job).status
-        active = self.store.machines.active(self.store.job_key(job))
-        new = cast(JobStatus, projection(active)[0])
-        self.store.transition(job, move, new, self._now, code, clear_exit_code=clear)
+        new = self._status_reached(job)
+        self.store.transition(job, new, self._now, code, clear_exit_code=clear)
         self._record(job, f"{old}->{new}", cause)
         self._emit("STATUS", job=job, status=new)
 
-    def _flag(self, job: str, move: Transition[FlagState], marker: str, cause: str) -> None:
-        self.store.move_flag(job, move)
+    def _status_reached(self, job: str) -> JobStatus:
+        """The status the job's instance is in."""
+        return cast(JobStatus, projection(self.store.machines.active(self.store.job_key(job)))[0])
+
+    def _flag(self, job: str, target: FlagState, marker: str, cause: str) -> None:
+        self.store.move_flag(job, target)
         self._record(job, marker, cause)
 
     def _mark_resolved(self, job: str) -> None:
@@ -222,9 +148,8 @@ class OracleWriters(OracleCascade):
 
     def _w_bounded(self, job: str, outcome: Outcome) -> None:
         attempt = cast(StartFacts, outcome.event.payload)
-        self._ignore(
+        self._record(
             job,
-            START_REFUSED,
             "START_REFUSED",
             f"re-trigger loop inside one instant: started twice in one nested cascade;"
             f" refused (L010; {attempt.cause})",
@@ -232,30 +157,24 @@ class OracleWriters(OracleCascade):
 
     def _w_bypass(self, job: str, outcome: Outcome) -> None:
         attempt = cast(StartFacts, outcome.event.payload)
-        self._write(job, JOB_BYPASS, f"ON_NOEXEC bypass ({attempt.cause})")
+        self._write(job, f"ON_NOEXEC bypass ({attempt.cause})")
 
     def _w_queue(self, job: str, outcome: Outcome) -> None:
         attempt = cast(StartFacts, outcome.event.payload)
         self.store.enqueue_waiter(job)
-        self._write(job, JOB_QUEUE, f"waiting for resources ({attempt.cause})")
+        self._write(job, f"waiting for resources ({attempt.cause})")
 
     def _w_skip(self, job: str, outcome: Outcome) -> None:
         attempt = cast(StartFacts, outcome.event.payload)
         self._skip_line(job, attempt)
-        self._write(
-            job, JOB_WINDOW_SKIP, "run_window skip: closer to previous close (SEM-33, DL-246)"
-        )
+        self._write(job, "run_window skip: closer to previous close (SEM-33, DL-246)")
 
     def _w_skip_member(self, job: str, outcome: Outcome) -> None:
         attempt = cast(StartFacts, outcome.event.payload)
         box = cast(str, self.catalog.jobs[job].box.box_name)
         self._skip_line(job, attempt)
         self.store.record_resolution(box, job)
-        self._write(
-            job,
-            JOB_WINDOW_SKIP_MEMBER,
-            f"run_window skip bypasses inside box {box!r} (SEM-33, DL-154)",
-        )
+        self._write(job, f"run_window skip bypasses inside box {box!r} (SEM-33, DL-154)")
 
     def _w_skip_inactive_member(self, job: str, outcome: Outcome) -> None:
         attempt = cast(StartFacts, outcome.event.payload)
@@ -267,7 +186,7 @@ class OracleWriters(OracleCascade):
         # a refused attempt is an input's own: `start_verdict` ignores a
         # wake's or a retry's where an input's is refused (DL-81)
         reason = attempt.refusal or f"{self._refusal(job, attempt)} ({attempt.cause})"
-        self._ignore(job, START_REFUSED, "START_REFUSED", reason)
+        self._record(job, "START_REFUSED", reason)
 
     def _w_start_ignored(self, job: str, outcome: Outcome) -> None:
         """job.180: a gate holds the attempt silently; a scan continuation
@@ -285,13 +204,13 @@ class OracleWriters(OracleCascade):
 
     def _w_arm(self, job: str, outcome: Outcome) -> None:
         why = "blocked ON_HOLD" if self._runtime(job).on_hold else "condition false"
-        self._flag(job, ARM, "SCHED_ARM", f"scheduled tick {why}; armed (SEM-32, DL-54/58)")
+        self._flag(job, "arm_on", "SCHED_ARM", f"scheduled tick {why}; armed (SEM-32, DL-54/58)")
 
     def _w_force_ice(self, job: str, outcome: Outcome) -> None:
         cause = cast(StartFacts, outcome.event.payload).cause
         self._flag(
             job,
-            FORCE_CLEARS_ICE,
+            "ice_off",
             "OFF_ICE",
             f"FORCE_STARTJOB clears ON_ICE (SEM-23, DL-243; {cause})",
         )
@@ -300,14 +219,14 @@ class OracleWriters(OracleCascade):
         cause = cast(StartFacts, outcome.event.payload).cause
         self._flag(
             job,
-            FORCE_CLEARS_HOLD,
+            "hold_off",
             "OFF_HOLD",
             f"FORCE_STARTJOB clears ON_HOLD (SEM-23, DL-243; {cause})",
         )
 
     def _w_starting(self, job: str, outcome: Outcome) -> None:
         starting = cast(Starting, outcome.event.payload)
-        self._write(job, starting.move, starting.cause)
+        self._write(job, starting.cause)
 
     def _w_running(self, job: str, outcome: Outcome) -> None:
         started = cast(Started, outcome.event.payload)
@@ -315,7 +234,7 @@ class OracleWriters(OracleCascade):
             cause = "admitted: resources acquired (DL-50)"
         else:
             cause = "QUE_WAIT collapses to immediate (ss7 non-goal)"
-        self._write(job, BOX_RUN if self._is_box(job) else JOB_RUN, cause)
+        self._write(job, cause)
 
     def _w_actual_start(self, job: str, outcome: Outcome) -> None:
         """`actual start`: the run's term_run_time, then `start_run`, which
@@ -334,20 +253,20 @@ class OracleWriters(OracleCascade):
 
     def _w_take_over(self, job: str, outcome: Outcome) -> None:
         admission = cast(AdmissionFacts, outcome.event.payload)
-        self.store.take_over_held(job, TAKE_OVER_HELD, to_reservations(list(admission.vector)))
+        self.store.take_over_held(job, to_reservations(list(admission.vector)))
 
     def _w_on_held(self, job: str, outcome: Outcome) -> None:
         admission = cast(AdmissionFacts, outcome.event.payload)
         held = self._runtime(job).reservations
         load = to_reservations(machine_load(list(admission.vector)))
-        self.store.take_over_held(job, FORCE_ON_HELD_UNITS, held + load)
+        self.store.take_over_held(job, held + load)
 
     def _w_leave_live(self, job: str, outcome: Outcome) -> None:
         settlement = cast(Settlement, outcome.event.payload)
         move = settlement.move
         if not isinstance(move, Move):
             raise self._unwritten(job, outcome, "settlement with no move")
-        self.store.release_reservations(job, move.old, move.new, self._pool.keeps_held)
+        self.store.release_reservations(job, move.new, self._pool.keeps_held)
         move.released = True
 
     def _w_settle(self, job: str, outcome: Outcome) -> None:
@@ -365,15 +284,13 @@ class OracleWriters(OracleCascade):
     def _w_cancel(self, job: str, outcome: Outcome) -> None:
         box = self.catalog.jobs[job].box.box_name
         self.store.dequeue_waiter(job)
-        self._write(
-            job, JOB_CANCEL_WAITER, f"QUE_WAIT cancelled: box {box!r} no longer RUNNING (DL-50)"
-        )
+        self._write(job, f"QUE_WAIT cancelled: box {box!r} no longer RUNNING (DL-50)")
 
     def _w_left_armed(self, job: str, outcome: Outcome) -> None:
         mode = self.semantics.queued_recheck
         self._flag(
             job,
-            QUEUE_LEFT_DISARMS,
+            "arm_off",
             "SCHED_DISARM",
             f"left QUE_WAIT unstarted; waits for its next start time (queued-recheck={mode}, DL-257)",
         )
@@ -387,79 +304,62 @@ class OracleWriters(OracleCascade):
         if box is not None:
             self.store.void_resolution(box, job)
         cause = f"QUE_WAIT left unstarted: {why} (queued-recheck={mode}, DL-257)"
-        self._write(job, JOB_LEAVE_QUEUE, cause)
+        self._write(job, cause)
 
     def _w_killed_waiter(self, job: str, outcome: Outcome) -> None:
-        self._write(job, JOB_KILL_QUEUED, "KILLJOB (dequeued from QUE_WAIT, DL-50)")
+        self._write(job, "KILLJOB (dequeued from QUE_WAIT, DL-50)")
 
     def _w_kill_waiter(self, job: str, outcome: Outcome) -> None:
         self.store.dequeue_waiter(job)
-        self.store.move_flag(job, KILL_DISARMS)
+        self.store.move_flag(job, "arm_off")
 
     def _w_iced_waiter(self, job: str, outcome: Outcome) -> None:
         self.store.dequeue_waiter(job)
-        self._write(job, JOB_ICE_QUEUED, "iced while queued (DL-50)")
+        self._write(job, "iced while queued (DL-50)")
 
     def _w_noexec_waiter(self, job: str, outcome: Outcome) -> None:
         self.store.dequeue_waiter(job)
         self._mark_resolved(job)
-        self._write(
-            job,
-            JOB_NOEXEC_QUEUED,
-            "ON_NOEXEC takes a queued job out of the queue (DL-254)",
-            clear=True,
-        )
+        self._write(job, "ON_NOEXEC takes a queued job out of the queue (DL-254)", clear=True)
 
     def _w_noexec_failed(self, job: str, outcome: Outcome) -> None:
         self._mark_resolved(job)
-        self._write(
-            job,
-            NOEXEC_COMPLETED,
-            "ON_NOEXEC settles a completed job to INACTIVE (DL-243)",
-            clear=True,
-        )
+        self._write(job, "ON_NOEXEC settles a completed job to INACTIVE (DL-243)", clear=True)
 
     def _w_noexec_box(self, job: str, outcome: Outcome) -> None:
         self._mark_resolved(job)
-        self._write(
-            job, BOX_NOEXEC, "ON_NOEXEC on a box: CHANGE_STATUS INACTIVE (DL-254)", clear=True
-        )
+        self._write(job, "ON_NOEXEC on a box: CHANGE_STATUS INACTIVE (DL-254)", clear=True)
 
     def _w_kill(self, job: str, outcome: Outcome) -> None:
-        self._write(job, JOB_KILL, "KILLJOB")
+        self._write(job, "KILLJOB")
 
     def _w_kill_ignored(self, job: str, outcome: Outcome) -> None:
         status = self._runtime(job).status
-        self._ignore(
+        self._record(
             job,
-            KILL_IGNORED,
             "EVENT_IGNORED",
             f"KILLJOB ignored: the job is {status}, not running or queued",
         )
 
     def _w_term_run_time(self, job: str, outcome: Outcome) -> None:
-        self._write(job, JOB_TERM_RUN_TIME, "term_run_time exceeded (dossier ss5)")
+        self._write(job, "term_run_time exceeded (dossier ss5)")
 
     def _w_job_terminator(self, job: str, outcome: Outcome) -> None:
         box = cast(Rule, outcome.event.payload).box
-        self._write(job, JOB_TERMINATOR, f"job_terminator: box {box!r} ended")
+        self._write(job, f"job_terminator: box {box!r} ended")
 
     def _w_injected(self, job: str, outcome: Outcome) -> None:
-        moves = {"job.117": STATUS_EXIT_SUCCESS, "job.118": STATUS_EXIT_FAILURE}
-        move = moves.get(outcome.rows[0], STATUS_INJECTED)
-        self._write(
-            job, move, "injected STATUS", code=cast(StatusInput, outcome.event.payload).code
-        )
+        self._write(job, "injected STATUS", code=cast(StatusInput, outcome.event.payload).code)
 
     def _w_injected_inactive(self, job: str, outcome: Outcome) -> None:
         self._mark_resolved(job)
         code = cast(StatusInput, outcome.event.payload).code
-        self._write(job, STATUS_INACTIVE, "injected STATUS", code=code)
+        self._write(job, "injected STATUS", code=code)
 
     def _w_injected_box(self, job: str, outcome: Outcome) -> None:
         self._mark_resolved(job)
         code = cast(StatusInput, outcome.event.payload).code
-        self._write(job, BOX_STATUS_INACTIVE, "injected STATUS", code=code)
+        self._write(job, "injected STATUS", code=code)
 
     def _w_reset(self, job: str, outcome: Outcome) -> None:
         box = cast(Batch, cast(Rule, outcome.event.payload).batch).box
@@ -467,7 +367,7 @@ class OracleWriters(OracleCascade):
             f"box {box!r} started: statuses from the previous box cycle are not retained"
             " (SEM-10, DL-242)"
         )
-        self._write(job, BOX_RESET, cause, clear=True)
+        self._write(job, cause, clear=True)
 
     def _w_reset_inactive(self, job: str, outcome: Outcome) -> None:
         """job.195: a job already INACTIVE loses its exit code by a plain write."""
@@ -480,43 +380,35 @@ class OracleWriters(OracleCascade):
         cause = (
             f"box {batch.box!r} set INACTIVE: cascades to every job it contains (SEM-18, DL-242)"
         )
-        self._write(job, BOX_CASCADE, cause, clear=batch.clear)
+        self._write(job, cause, clear=batch.clear)
 
     def _w_override(self, job: str, outcome: Outcome) -> None:
-        target = projection(self.store.machines.active(self.store.job_key(job)))[0]
-        move = BOX_SUCCESS_OVERRIDE if target == "SUCCESS" else BOX_FAILURE_OVERRIDE
-        self._write(job, move, f"box_{target.lower()} override met (SEM-12)")
+        target = self._status_reached(job)
+        self._write(job, f"box_{target.lower()} override met (SEM-12)")
 
     def _w_fold(self, job: str, outcome: Outcome) -> None:
         fold = cast(FoldFacts, outcome.event.payload)
         if outcome.rows[0] == "job.129":
-            self._write(job, BOX_FOLD_FAILURE, "default box fold: a member failed (SEM-11)")
+            self._write(job, "default box fold: a member failed (SEM-11)")
         elif fold.at_start:
-            self._write(
-                job,
-                BOX_FOLD_SUCCESS,
-                "default box fold at box start: no member in the run (SEM-11)",
-            )
+            self._write(job, "default box fold at box start: no member in the run (SEM-11)")
         else:
-            self._write(job, BOX_FOLD_SUCCESS, "default box fold: all members SUCCESS (SEM-11)")
+            self._write(job, "default box fold: all members SUCCESS (SEM-11)")
 
     def _w_box_terminator(self, job: str, outcome: Outcome) -> None:
         end = cast(MemberEnd, outcome.event.payload)
-        self._write(
-            job, BOX_TERMINATOR, f"box_terminator member {end.member!r} ended {end.new} (SEM-14)"
-        )
+        self._write(job, f"box_terminator member {end.member!r} ended {end.new} (SEM-14)")
 
     def _w_recompute(self, job: str, outcome: Outcome) -> None:
         facts = cast(RecomputeFacts, outcome.event.payload)
-        target = cast(JobStatus, projection(self.store.machines.active(self.store.job_key(job)))[0])
         if outcome.rows[0] in _OVERRIDE_RECOMPUTES:
-            move, why = IDLE_BOX_OVERRIDE[target], "idle-box override recompute"
+            why = "idle-box override recompute"
         else:
-            move, why = IDLE_BOX_DERIVE[target], "idle-box recompute"
-        self._write(job, move, f"{why} (SEM-15): {facts.cause}")
+            why = "idle-box recompute"
+        self._write(job, f"{why} (SEM-15): {facts.cause}")
 
     def _w_auto_hold(self, job: str, outcome: Outcome) -> None:
-        self._flag(job, AUTO_HOLD, "ON_HOLD", "auto_hold on box start (dossier ss5)")
+        self._flag(job, "hold_on", "ON_HOLD", "auto_hold on box start (dossier ss5)")
 
     def _w_box_disarms(self, job: str, outcome: Outcome) -> None:
         """A member's arm is scoped to the box run that armed it (DL-54
@@ -528,23 +420,21 @@ class OracleWriters(OracleCascade):
         box = cast(Rule, outcome.event.payload).box
         self._flag(
             job,
-            BOX_END_DISARMS,
+            "arm_off",
             "SCHED_DISARM",
             f"unconsumed arm dies with box {box!r} run (Q3c pin, DL-54/58)",
         )
 
     def _w_box_noexec_flag(self, job: str, outcome: Outcome) -> None:
         box = cast(Rule, outcome.event.payload).box
-        self._flag(job, NOEXEC_ON, "ON_NOEXEC", f"box {box!r} put ON_NOEXEC (DL-254)")
+        self._flag(job, "noexec_on", "ON_NOEXEC", f"box {box!r} put ON_NOEXEC (DL-254)")
 
     def _w_noexec_hold(self, job: str, outcome: Outcome) -> None:
-        self._flag(
-            job, NOEXEC_CLEARS_HOLD, "OFF_HOLD", "ON_NOEXEC supersedes ON_HOLD (SEM-22, DL-254)"
-        )
+        self._flag(job, "hold_off", "OFF_HOLD", "ON_NOEXEC supersedes ON_HOLD (SEM-22, DL-254)")
 
     def _w_box_noexec_off(self, job: str, outcome: Outcome) -> None:
         box = cast(Rule, outcome.event.payload).box
-        self._flag(job, BOX_NOEXEC_OFF, "OFF_NOEXEC", f"box {box!r} taken OFF_NOEXEC (DL-254)")
+        self._flag(job, "noexec_off", "OFF_NOEXEC", f"box {box!r} taken OFF_NOEXEC (DL-254)")
 
     def _w_ice_on(self, job: str, outcome: Outcome) -> None:
         # PENDING: Q3d (DL-69) -- a pre-existing arm survives the ice
@@ -553,10 +443,10 @@ class OracleWriters(OracleCascade):
         # "reoccur" rule. If the vendor instead discards the queued start on
         # ICE, the ON_ICE row disarms (SCHED_DISARM) and SEM-20/32 are
         # amended -- protocol in docs/live-instance-runbook.md.
-        self._flag(job, ICE_ON, "ON_ICE", "sendevent ON_ICE")
+        self._flag(job, "ice_on", "ON_ICE", "sendevent ON_ICE")
 
     def _w_ice_off(self, job: str, outcome: Outcome) -> None:
-        self.store.move_flag(job, ICE_OFF)
+        self.store.move_flag(job, "ice_off")
         cause = "sendevent OFF_ICE"
         if outcome.rows[0] == "job.202":
             box = self._off_ice_in_running_box(job)
@@ -565,32 +455,32 @@ class OracleWriters(OracleCascade):
         self._record(job, "OFF_ICE", cause)
 
     def _w_hold_on(self, job: str, outcome: Outcome) -> None:
-        self._flag(job, HOLD_ON, "ON_HOLD", "sendevent ON_HOLD")
+        self._flag(job, "hold_on", "ON_HOLD", "sendevent ON_HOLD")
 
     def _w_hold_off(self, job: str, outcome: Outcome) -> None:
-        self._flag(job, HOLD_OFF, "OFF_HOLD", "sendevent OFF_HOLD")
+        self._flag(job, "hold_off", "OFF_HOLD", "sendevent OFF_HOLD")
 
     def _w_noexec_on(self, job: str, outcome: Outcome) -> None:
-        self._flag(job, NOEXEC_ON, "ON_NOEXEC", "sendevent ON_NOEXEC")
+        self._flag(job, "noexec_on", "ON_NOEXEC", "sendevent ON_NOEXEC")
 
     def _w_noexec_off(self, job: str, outcome: Outcome) -> None:
-        self._flag(job, NOEXEC_OFF, "OFF_NOEXEC", "sendevent OFF_NOEXEC")
+        self._flag(job, "noexec_off", "OFF_NOEXEC", "sendevent OFF_NOEXEC")
 
     def _w_disarm(self, job: str, outcome: Outcome) -> None:
         cause = (
             "sendevent DISARM" if outcome.rows[0] == "job.214" else "sendevent DISARM (no latch)"
         )
-        self._flag(job, DISARM_MOVE, "DISARM", cause)
+        self._flag(job, "arm_off", "DISARM", cause)
 
     def _w_flag_ignored(self, job: str, outcome: Outcome) -> None:
         kind = cast(EventKind, outcome.event.name)
         why = self._oob_ignored(kind, job)
         if why is None:
             raise self._unwritten(job, outcome, "ignored line (the rules apply it)")
-        self._ignore(job, _FLAG_IGNORED[kind], "EVENT_IGNORED", why)
+        self._record(job, "EVENT_IGNORED", why)
 
     def _w_released(self, job: str, outcome: Outcome) -> None:
-        freed = self.store.release_held(job, HELD_RELEASED)
+        freed = self.store.release_held(job)
         units = ", ".join(f"{held.units} of {held.bucket[2:]}" for held in freed)
         self._record(job, RELEASE_RESOURCE, f"sendevent RELEASE_RESOURCE (frees {units})")
 
@@ -602,7 +492,7 @@ class OracleWriters(OracleCascade):
         self._record(job, RELEASE_RESOURCE, f"sendevent RELEASE_RESOURCE ({why})")
 
     def _w_opening(self, job: str, outcome: Outcome) -> None:
-        freed = self.store.release_held(job, HELD_RELEASED_AT_OPENING)
+        freed = self.store.release_held(job)
         units = ", ".join(f"{held.units} of {held.bucket[2:]}" for held in freed)
         self._record(
             job,
@@ -616,10 +506,9 @@ class OracleWriters(OracleCascade):
 _OVERRIDE_RECOMPUTES: Final = frozenset(f"job.{n}" for n in (131, 132, 161, 162, 163, 164))
 
 #: The hook's write for each row the chart can fire, by its method's name,
-#: so a subclass's method is the one called. A row missing here
-#: is one the oracle never writes: job.312 (a start on a run's unsettled
-#: units, which job.401 settles first) and the cells the chart marks
-#: unreachable.
+#: so a subclass's method is the one called. A row missing here is one the
+#: chart marks unreachable, job.312 among them (a start on a run's unsettled
+#: units, which job.401 settles first).
 _WRITERS: Final[dict[str, str]] = {
     "job.100": "_w_bounded",
     "job.101": "_w_bypass",
@@ -705,7 +594,7 @@ _WRITERS: Final[dict[str, str]] = {
     "job.307": "_w_released",
     "job.308": "_w_opening",
     "job.311": "_w_reserve",
-    **{f"job.{n}": "_w_nothing" for n in (313, 314, 319)},
+    **{f"job.{n}": "_w_nothing" for n in (313, 319)},
     "job.315": "_w_release_ignored",
     "job.316": "_w_release_ignored",
     "job.401": "_w_nothing",

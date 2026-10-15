@@ -60,7 +60,6 @@ A repeat that writes nothing posts nothing.
 - A failure at or after the `seal` append raises `BoundaryFailStop`, and the outcome is unknown. Recovery commits a complete line and truncates a torn or absent one ([period-model §7](../period-model.md#7-the-seal-operation), PR-28d).
 - A crash between the `seal` record and the anchor CAS: resume performs the CAS (PR-45 in [period-model §13.8](../period-model.md#138-recovery-and-stream)).
 - A crashed claimant: the same claim resumes, and a different claim against the same seal is refused, naming the holder. `reclaim` is the attributed break-glass ([period-model §1.3](../period-model.md#13-the-successor-fence)).
-- `--on-transition-violation stop` in the drain stops the engine after the decision is durable ([DL-292](../decision-log.md)).
 - A statechart error anywhere in the seal stops the engine with exit 7. Nothing aborts, the request is not answered, and resume reads where the period stands ([period-model §7](../period-model.md#7-the-seal-operation)).
 - A gap in an anchor chart is a statechart error before the anchor write. At the seal's close CAS the `seal` record is durable and the head still open, and the next resume closes it. At resume, at genesis, in the roll and in `estate reclaim` it stops the verb with exit 7 ([DL-336](../decision-log.md)).
 

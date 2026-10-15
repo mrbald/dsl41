@@ -159,9 +159,9 @@ ROOT: Final = State(
     ),
 )
 
-#: The status rows, `job.1NN`. 101 to 158 are `job_status.01` to `.58`; 159
-#: and above are the rows a split source or a cell the table lacked adds; 100
-#: is the start bound, which no table declared (DL-304).
+#: The status rows, `job.1NN`. 101 to 158 are the status moves; 159 and above
+#: are a split source's further rows and the cells the rules move nothing in;
+#: 100 is the start bound (DL-304).
 _STATUS_ROWS: Final = (
     Row(
         "job.100",
@@ -367,7 +367,19 @@ _STATUS_ROWS: Final = (
     Row("job.150", "STARTING", ON_HOLD, kind="internal", cite=_DL254, note="EVENT_IGNORED"),
     Row("job.151", "RUNNING", ON_HOLD, kind="internal", cite=_DL254, note="EVENT_IGNORED"),
     *(
-        Row(f"job.{152 + i}", s, ON_NOEXEC, guard="noexec_ignored", kind="internal", cite=_DL254)
+        Row(
+            f"job.{152 + i}",
+            s,
+            ON_NOEXEC,
+            guard="noexec_ignored",
+            kind="internal",
+            cite=_DL254,
+            false_unreachable=(
+                "the vendor ignores ON_NOEXEC on every RUNNING job and box"
+                if s == "RUNNING"
+                else ""
+            ),
+        )
         for i, s in enumerate(
             ("INACTIVE", "STARTING", "RUNNING", "SUCCESS", "FAILURE", "TERMINATED", "QUE_WAIT")
         )
@@ -387,7 +399,17 @@ _STATUS_ROWS: Final = (
         "job.169", "QUE_WAIT", FLAG_MOVED, "INACTIVE", "noexec_settles_box", "cascades", cite=_DL254
     ),
     Row(
-        "job.170", "STARTING", FLAG_MOVED, "INACTIVE", "noexec_settles_box", "cascades", cite=_DL254
+        "job.170",
+        "STARTING",
+        FLAG_MOVED,
+        "INACTIVE",
+        "noexec_settles_box",
+        "cascades",
+        cite=_DL254,
+        false_unreachable=(
+            "at STARTING only a box's applied ON_NOEXEC reports a flag move, and the box is not"
+            " INACTIVE"
+        ),
     ),
     # 171 to 176 are job.119's choice branches
     # the inputs that relay a start attempt (statechart-engine §8)
@@ -396,7 +418,7 @@ _STATUS_ROWS: Final = (
         "job.178", "lifecycle", FORCE_STARTJOB, action="relay_start", kind="internal", cite="SEM-23"
     ),
     Row("job.179", "lifecycle", RUN_WINDOW, action="relay_start", kind="internal", cite="SEM-33"),
-    # cells the table had no row for: the rules move nothing there
+    # cells the rules move nothing in
     Row(
         "job.180",
         "lifecycle",
@@ -405,6 +427,8 @@ _STATUS_ROWS: Final = (
         kind="ignored",
         cite="SEM-20, SEM-21, SEM-32, SEM-33",
         note="A gate holds the attempt silently, a tick arms, or a postponed start waits.",
+        false_unreachable="the catch-all of `start`: an attempt that moves the status takes an"
+        " inner row, and no row is a gap (§10)",
     ),
     Row(
         "job.181",
@@ -468,6 +492,7 @@ _STATUS_ROWS: Final = (
         kind="ignored",
         cite="SEM-13, SEM-14",
         note="A terminator ends only a RUNNING box; the door or the recompute follows.",
+        false_unreachable="its complement is job.190's, a marked row: only a box has members",
     ),
     _never("job.190", "lifecycle", MEMBER_ENDS, "Only a box has members.", guard="is_job"),
     Row(
@@ -478,6 +503,7 @@ _STATUS_ROWS: Final = (
         kind="ignored",
         cite=_SEM15,
         note="No verdict, or the box already has it.",
+        false_unreachable="its complement is job.192's, a marked row: only a box has members",
     ),
     _never("job.192", "lifecycle", BOX_RECOMPUTE, "Only a box has members.", guard="is_job"),
     _never("job.193", "LIVE", BOX_RECOMPUTE, "A live box is not idle; its own end decides it."),
@@ -519,6 +545,7 @@ _STATUS_ROWS: Final = (
         kind="ignored",
         cite="SEM-20, DL-254",
         note="Not queued, or no status move: the member's completion moment and the wakes follow.",
+        false_unreachable="its complement is job.199's, a marked row",
     ),
     _never(
         "job.199",
@@ -529,7 +556,7 @@ _STATUS_ROWS: Final = (
     ),
 )
 
-#: The status rows no table declared once 159 to 199 were taken, `job.4NN`:
+#: The further status rows once 159 to 199 were taken, `job.4NN`:
 #: an attempt's owed settlement (DL-340), the extent of an admitted start, its
 #: move to STARTING, a window skip of an inactive member, the cascade's
 #: moments, and the cells no input reaches (DL-350).
@@ -611,7 +638,7 @@ _MOMENT_ROWS: Final = (
     ),
 )
 
-#: The flag rows, `job.2NN`: 201 to 217 are `job_flags.01` to `.17`.
+#: The flag rows, `job.2NN`: 201 to 217 are the flag moves.
 _FLAG_ROWS: Final = (
     Row("job.201", "ice_off", ON_ICE, "ice_on", "not_live", "iced", cite="SEM-20, DL-254, DL-285"),
     Row("job.202", "ice_on", OFF_ICE, "ice_off", cite="SEM-20", note="no re-evaluation"),
@@ -660,7 +687,7 @@ _FLAG_ROWS: Final = (
     Row("job.224", "arm_off", ACTUAL_START, "arm_off", cite="DL-54", note="as job.213"),
     Row("job.225", "arm_off", DISARM, "arm_off", cite="DL-158", note="as job.214"),
     Row("job.226", "arm_off", KILLJOB, "arm_off", "queued", "report_flag_move", cite="DL-54"),
-    # cells the table had no row for
+    # cells the rules move nothing in
     Row("job.227", "flags", BOX_RUNNING, kind="ignored", note="Not auto_hold, or already held."),
     Row("job.228", "arm_off", BOX_RUN_ENDS, kind="ignored", note="Only an armed member disarms."),
     Row("job.229", "noexec_off", BOX_OFF_NOEXEC, kind="ignored", note="Only a flagged job clears."),
@@ -674,7 +701,7 @@ _FLAG_ROWS: Final = (
         cite="DL-257",
         note="No arm to drop: the status move follows.",
     ),
-    # a box's ON_NOEXEC on each job it contains, which job_flags.09 and .07
+    # a box's ON_NOEXEC on each job it contains, which job.209 and job.207
     # fold into the job's own: the flag on, from either value as job.209 and
     # job.222, and the hold it supersedes off; the hold region of a job not
     # held takes no part (statechart-engine §3)
@@ -690,7 +717,7 @@ _FLAG_ROWS: Final = (
     Row("job.233", "noexec_on", BOX_ON_NOEXEC, "noexec_on", cite=_BOX_NOEXEC, note="as job.231"),
 )
 
-#: The holding rows, `job.3NN`: 301 to 308 are `job_holding.01` to `.08`.
+#: The holding rows, `job.3NN`: 301 to 308 are the holding moves.
 _HOLDING_ROWS: Final = (
     Row("job.301", "none", ADMITTED_START, "reserved", "has_demand", cite="DL-120"),
     Row("job.302", "held", ADMITTED_START, "taken over", "takes_over", cite=_DL256),
@@ -699,8 +726,17 @@ _HOLDING_ROWS: Final = (
     Row("job.305", "reserved", LEAVE_LIVE, "held", "keeps_held", cite=_DL256),
     Row("job.306", "reserved", LEAVE_LIVE, "none", "spends", cite="SEM-16, DL-120"),
     Row("job.307", "held", RELEASE_RESOURCE, "none", action="released_held", cite=_DL256),
-    Row("job.308", "held", PERIOD_OPENING, "none", "left_catalog", cite=_DL256),
-    # 309 and 310 are job.302's choice branches; cells the table had no row for
+    Row(
+        "job.308",
+        "held",
+        PERIOD_OPENING,
+        "none",
+        "left_catalog",
+        cite=_DL256,
+        false_unreachable="its complement is job.321's, a marked row: the opening addresses only"
+        " a removed job",
+    ),
+    # 309 and 310 are job.302's choice branches; then the cells the rules move nothing in
     Row("job.311", "none", ADMITTED_START, guard="no_demand", kind="ignored", note="No units."),
     Row(
         "job.312",
@@ -711,15 +747,29 @@ _HOLDING_ROWS: Final = (
         "settle_ended_run",
         kind="internal",
         cite=_DL256,
+        mark="unreachable",
         note=(
             "A box restarted by its own completion starts the member again before the"
             " member's late settlement. The run that ended settles first, by the end it"
             " made (frees, keeps, or spends); the start is then admitted again, to reserve"
-            " or to take over what was kept."
+            " or to take over what was kept. Unreachable: the admission the oracle builds"
+            " carries no previous end, since job.401 settles the ended run before the"
+            " start is admitted."
         ),
     ),
     Row("job.313", "none", LEAVE_LIVE, kind="ignored", note="The run held nothing."),
-    Row("job.314", "held", LEAVE_LIVE, kind="ignored", note="An earlier run's units stay held."),
+    Row(
+        "job.314",
+        "held",
+        LEAVE_LIVE,
+        kind="ignored",
+        mark="unreachable",
+        note=(
+            "An earlier run's units stay held. Unreachable: a live status never stands on held"
+            " units (an admission takes them over first, job.302 and job.303, and an injected"
+            " live status makes them the run's, job.319), and a run's settlement is sent once."
+        ),
+    ),
     Row("job.315", "none", RELEASE_RESOURCE, kind="ignored", cite=_DL256, note="Nothing held."),
     Row(
         "job.316",

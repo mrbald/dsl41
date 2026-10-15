@@ -57,7 +57,7 @@ if TYPE_CHECKING:
     from dsl41.period import Manifest, RuntimeProfile, StagedManifest
     from dsl41.runner import Engine
     from dsl41.runner_history import RunRow
-    from dsl41.runner_admission import DecisionIndex, ViolationPolicy
+    from dsl41.runner_admission import DecisionIndex
     from dsl41.runner_preflight import PreflightItem
     from dsl41.runner_startup import Wiring
     from dsl41.seal import CarriedRows
@@ -73,10 +73,10 @@ if TYPE_CHECKING:
 # same 0/1/2 and split 2 three ways on top; that half of the note went with
 # them, to cli_control.py. Exit 3 is per-verb (the house pattern, DL-184):
 # run's 3 is a committed seal boundary; rehearse's 3 is --check-cadence
-# finding deviations after a clean play. run's 5 is
-# `--on-transition-violation stop` (concurrency-model ss4): an applied input
-# broke a declared transition and its decision is durable. 4 is taken by the
-# control verbs' unknown outcome, so 5 collides with no verb's code. run's 6
+# finding deviations after a clean play. 4 is taken by the control verbs'
+# unknown outcome. 5 is retired: it was `--on-transition-violation stop` until
+# DL-353, and deployed units still list it in `RestartPreventExitStatus`,
+# so no new meaning takes it. run's 6
 # is a time-half stop (concurrency-model ss4): an engine-made input's time
 # half raised, and the engine stopped before it was logged. run's and
 # rehearse's 7 is a statechart error (docs/statechart-engine.md ss5): a declared machine hit an
@@ -85,10 +85,11 @@ if TYPE_CHECKING:
 # the units list it in `RestartPreventExitStatus`, because a restart would run
 # the same build into the same bug (deployment-runbook ss3).
 
-#: `run`'s exit code for `--on-transition-violation stop`. The engine units
-#: list it in `RestartPreventExitStatus`, so a stopped engine stays down
-#: until an operator acts (deployment-runbook ss3).
-EXIT_TRANSITION_STOP = 5
+#: The one stderr line `run --on-transition-violation` prints, whatever its value.
+INERT_VIOLATION_OPTION = (
+    "dsl41 run: --on-transition-violation is inert since DL-353 and leaves at"
+    " the next major release; remove it from the command line"
+)
 #: `run`'s exit code for a time-half stop (`TimeHalfStop`). Listed in the
 #: units' `RestartPreventExitStatus` too: every restart would meet the same
 #: timers and stop the same way, so the engine stays down until a build
@@ -170,8 +171,8 @@ def _spec_texts(parsed: "list[JilFile]", catalog: CatalogIR) -> "dict[str, str]"
 
 
 class OnViolation(str, Enum):
-    """`run --on-transition-violation` (concurrency-model ss4). The values
-    are `runner_admission.VIOLATION_POLICIES`; a test holds the two equal."""
+    """The values `run --on-transition-violation` still accepts. The option is
+    inert since DL-353 and leaves at the next major release."""
 
     refuse = "refuse"
     continue_ = "continue"
@@ -253,18 +254,15 @@ def run(
         " startup. Without it the socket is owner-only (mode 0600). SIGHUP"
         " reloads the file.",
     ),
-    on_violation: OnViolation = typer.Option(
-        OnViolation.refuse,
+    on_violation: OnViolation | None = typer.Option(
+        None,
         "--on-transition-violation",
         metavar="POLICY",
-        help="What to do when an input breaks a declared state-machine"
-        " transition. refuse: refuse such a command before it is journaled;"
-        " an engine-made input still applies and leaves a TRANSITION_VIOLATION"
-        " trace line. continue: apply every input and leave the trace line."
-        " stop: as refuse, and stop the engine with exit 5 once an applied"
-        " input that broke a transition has its decision journaled. Not part"
-        " of the runtime profile.",
-    ),  # concurrency-model ss4
+        help="Inert since DL-353; it leaves at the next major release. Every"
+        " state machine is a declared statechart, and none reports a broken"
+        " transition, so the option changes nothing. Given, it prints a"
+        " deprecation line.",
+    ),
 ) -> None:
     """Run an estate on this machine with real processes and a wall clock.
 
@@ -282,14 +280,15 @@ def run(
     Exit codes: 0 stopped by the operator; 1 the engine or the estate
     failed while running; 2 the run never started (a preflight error, a
     refused resume, an unreadable input); 3 a seal committed, and the
-    next period is ready to open; 5 --on-transition-violation stop halted
-    the engine after an input broke a declared transition.
+    next period is ready to open.
     """
     # Design: runner-design ss1, ss9, ss10, ss6a
     import asyncio
 
     from datetime import UTC, datetime
 
+    if on_violation is not None:
+        typer.echo(INERT_VIOLATION_OPTION, err=True)
     if ui:
         import_tui_or_exit_2()  # fail before the engine starts, not after
     if open_from is not None:
@@ -363,7 +362,6 @@ def run(
                     open_from=open_from,
                     access_map=access_map,
                     reattach=_reattach_line(sys.argv, _value_options(ctx.command.params)),
-                    on_violation=on_violation.value,
                 )
             )
         )
@@ -450,9 +448,8 @@ def _reattach_note(
     """The line a detached run prints on its way out, or None (DL-218).
 
     Only a detached run that can be resumed gets one: a clean stop (0), a
-    crash (1), a transition stop (5, whose decision resume replays), a
-    time-half stop (6, whose log is clean; it resumes on a fixed build) or a
-    statechart error (7, which resumes on a fixed build too). A
+    crash (1), a time-half stop (6, whose log is clean; it resumes on a fixed
+    build) or a statechart error (7, which resumes on a fixed build too). A
     sealed exit (3) does not -- its period is closed, and
     `say_next` has already named the opener of the next one. `reattach` is
     this process's own line; an embedding caller that has none gets the
@@ -460,7 +457,6 @@ def _reattach_note(
     if not detached or code not in (
         0,
         1,
-        EXIT_TRANSITION_STOP,
         EXIT_TIME_HALF_STOP,
         EXIT_STATECHART_ERROR,
     ):
@@ -646,7 +642,6 @@ async def _serve_run(
     open_from: "Path | None" = None,
     access_map: "Path | None" = None,
     reattach: "str | None" = None,
-    on_violation: "ViolationPolicy" = "refuse",
 ) -> int:
     """`dsl41 run`, from the acquire to the last teardown.
 
@@ -666,7 +661,7 @@ async def _serve_run(
     from dsl41.runner_startup import start_run, wire_from_profile
     from dsl41.runner_control import ControlServer
     from dsl41.runner_startup import resume_run as _resume_run
-    from dsl41.runner_admission import TimeHalfStop, TransitionStop
+    from dsl41.runner_admission import TimeHalfStop
     from dsl41.runner_clock import EngineError, RealClock
 
     from dsl41.runner_ledger import acquire_run_root
@@ -876,8 +871,6 @@ async def _serve_run(
             # a replayed input that meets one: the report names the WAL input,
             # and exit 7 keeps the unit down (docs/statechart-engine.md ss5)
             return statechart_report(exc)
-        # before the loop runs: neither opener admits an input itself
-        engine.on_violation = on_violation
         if client is not None:
             # ss8's supervisor clauses at the seal (PR-27): the boundary needs
             # the CLIENT to prove the LIST it reconciles came from the leased
@@ -999,11 +992,6 @@ async def _serve_run(
                 # after the teardown, below any report the server adds.
                 typer.echo(str(outcome))
                 code = 3
-            elif isinstance(outcome, TransitionStop):
-                # the operator's chosen halt, not a crash: its own code keeps
-                # the unit down until someone reads the trace (concurrency-model ss4)
-                typer.echo(f"engine stopped: {outcome}", err=True)
-                code = EXIT_TRANSITION_STOP
             elif isinstance(outcome, TimeHalfStop):
                 # not a crash: a restart meets the same timers, so its own code
                 # keeps the unit down until a fixed build runs (concurrency-model ss4)

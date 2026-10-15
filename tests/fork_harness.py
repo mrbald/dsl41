@@ -57,9 +57,7 @@ ORACLE_IDLE = frozenset({"_late_settlements", "_readmitted", "_reached", "_items
 ORACLE_SHARED = frozenset(
     {"catalog", "semantics", "_referencers", "_pool", "_tz_aliases", "_default_tz", "_cap"}
 )
-#: RuntimeState attributes. The fork copies every one (scalars by value),
-#: except `_violations`: a fork's channel starts empty, since an orphan must
-#: not refuse the input being dry-applied.
+#: RuntimeState attributes. The fork copies every one (scalars by value).
 STORE_COPIED = frozenset(
     {
         "_jobs",
@@ -71,7 +69,6 @@ STORE_COPIED = frozenset(
         "_consumed",
         "_enqueue_counter",
         "_snapshots",
-        "_violations",
     }
 )
 #: RuntimeState attributes the fork gives its own value rather than a
@@ -129,7 +126,6 @@ def state_bytes(oracle: Oracle, since: tuple[int, int] = (0, 0)) -> bytes:
         "consumed": dict(store.consumed),
         "enqueue_counter": store.enqueue_counter,
         "snapshots": sorted(store._snapshots),
-        "violations": [[subject, repr(v)] for subject, v in store._violations],
         "trace": [entry.model_dump(mode="json") for entry in oracle._trace[traced:]],
         "emitted": [_event(ev) for ev in oracle._emitted[emitted:]],
         "queue": [_event(ev) for ev in oracle._queue],

@@ -259,13 +259,15 @@ MARKED = replace(
 
 def test_a_marked_row_is_listed_never_counted_and_fails_when_hit() -> None:
     """A row's mark is a table transition's mark (DL-333): the row and its
-    guard's outcomes are listed, not counted, and a hit on any fails."""
+    guard's true outcome are listed, not counted, and a hit on either fails.
+    Its guard's false outcome is the cell another row takes: neither required
+    nor forbidden (DL-353)."""
     required, forbidden = coverage_items(MARKED)
     assert ("row", "lamp.04", "") not in required
+    assert ("guard", "lamp.04", "false") not in required
     assert forbidden == [
         ("row", "lamp.04", ""),
         ("guard", "lamp.04", "true"),
-        ("guard", "lamp.04", "false"),
         ("row", "lamp.05", ""),
         ("guard", "lamp.01", "false"),
     ]
@@ -281,3 +283,8 @@ def test_a_marked_row_is_listed_never_counted_and_fails_when_hit() -> None:
     assert status == 1
     heading = "Marked but hit (the mark is stale or wrong):"
     assert lines[lines.index(heading) + 1] == "lamp row lamp.04"
+    false = {"machine": "lamp", "kind": "guard", "id": "lamp.04", "detail": "false"}
+    assert tc.report([MARKED], [*ALL_CHART, false])[1] == 0
+    true = {**false, "detail": "true"}
+    lines, status = tc.report([MARKED], [*ALL_CHART, true])
+    assert status == 1 and lines[lines.index(heading) + 1] == "lamp guard lamp.04 true"

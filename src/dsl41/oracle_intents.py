@@ -27,7 +27,7 @@ from dsl41.job_chart import (
     Terminator,
 )
 from dsl41.oracle_facts import ReadmitFacts
-from dsl41.oracle_state import JOB_START, LIVE, JobStatus, Transition
+from dsl41.oracle_state import LIVE
 from dsl41.state_machine import Context, Effects
 from dsl41.state_machine import Event as ChartEvent
 
@@ -250,9 +250,8 @@ class RunStart(Payload):
 
 @dataclass(frozen=True)
 class Starting(Payload):
-    """`starting`'s payload: the declared move into STARTING and its cause."""
+    """`starting`'s payload: the cause of the move into STARTING."""
 
-    move: Transition[JobStatus] = field(default=JOB_START, compare=False)
     cause: str = field(default="", compare=False)
 
 

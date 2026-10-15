@@ -37,7 +37,7 @@ from hypothesis import strategies as st
 
 from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
-from dsl41.oracle_state import VIOLATION_MARKER, Event, EventKind, OracleError, TraceEntry
+from dsl41.oracle_state import Event, EventKind, OracleError, TraceEntry
 from dsl41.runner_clock import EngineError
 from dsl41.capacity import CapacityPool
 from dsl41.semantics import SemanticSwitches, resolve as resolve_switches
@@ -70,9 +70,8 @@ def sem_path(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) ->
     The dry apply must leave the original byte-equal, and the fork must
     reach the real apply's result (fork_harness.ForkCheckedOracle).
 
-    On every path, each move of the job's machines must be taken inside an
-    InputBatch, and the violation channel must be empty at every
-    `begin_input` (batch_harness)."""
+    On every path, each move of a job row must be written inside an
+    InputBatch (batch_harness)."""
     global _ENGINE_PATH, _FORK_PATH
     _ENGINE_PATH = request.param == "engine"
     _FORK_PATH = request.param == "fork"
@@ -3105,7 +3104,6 @@ def test_sem11_box_start_pass_leaves_a_terminated_subbox_alone() -> None:
     o.feed(ev("STARTJOB", 1, job="bx11t"))
     assert _status(o, "bx11t", "bx11t_x", "bx11t_b") == ["TERMINATED", "FAILURE", "TERMINATED"]
     assert transitions(o, "bx11t_b")[-1] == "RUNNING->TERMINATED"
-    assert not any(t.transition == VIOLATION_MARKER for t in o.trace())
 
 
 #: Re-trigger loops that close inside one instant (DL-304): a box whose own
@@ -7398,8 +7396,8 @@ def test_sem15_idle_box_ignores_inactive_members() -> None:
 
 def test_sem15_an_idle_box_takes_its_override_when_one_holds() -> None:
     """SEM-15 [C]: an idle box re-derives from its members, and a box
-    override that holds decides the verdict (job_status.31, .32); with none
-    holding, the default verdict stands (job_status.33, .34)."""
+    override that holds decides the verdict (job.131, job.132); with none
+    holding, the default verdict stands (job.133, job.134)."""
     text = (
         "insert_job: box15o\njob_type: b\nbox_failure: f(o15_a)\n\n"
         "insert_job: o15_a\njob_type: c\ncommand: x\nmachine: m1\nbox_name: box15o\n\n"
@@ -8734,7 +8732,7 @@ def test_dl256_killjob_on_a_holder_that_is_not_running_changes_nothing() -> None
 
 def test_killjob_on_a_job_that_is_not_running_or_queued_is_ignored_with_a_trace_line() -> None:
     """KILLJOB on a job that is not running or queued kills nothing. It is
-    an internal transition, one row per idle status (job_status.37-40): at
+    an internal transition, one row per idle status (job.137 to job.140): at
     every one of them the row and its revision stay, and one EVENT_IGNORED
     line says so, as START_REFUSED does for a start with no effect (DL-81).
     A kill that lands writes no such line."""
@@ -8815,7 +8813,7 @@ def test_an_event_with_no_effect_is_an_internal_transition_of_the_job(
 ) -> None:
     """KILLJOB on an idle job, a refused explicit start, and the ON_ICE,
     ON_HOLD and ON_NOEXEC the vendor ignores (DL-254) each take one internal
-    transition per status they meet (job_status.37-58). The row and its
+    transition per status they meet (job.137 to job.158). The row and its
     revision stay, and one trace line names the event. An idle job meets
     ON_NOEXEC ignored only while iced, and a queued box only while a job
     inside it is iced, live or queued; a member's start is refused while its
@@ -8836,7 +8834,7 @@ def test_an_event_with_no_effect_is_an_internal_transition_of_the_job(
 def test_dl54_killjob_on_a_queued_job_consumes_its_latched_arm() -> None:
     """A scheduled tick blocked by ON_HOLD arms the job; OFF_HOLD starts it
     into QUE_WAIT, which keeps the arm; KILLJOB dequeues it, terminates it
-    and consumes the arm (job_flags.17 from arm_on)."""
+    and consumes the arm (job.217 from arm_on)."""
     o = oracle(
         "insert_resource: L17\nres_type: R\namount: 1\n\n"
         "insert_job: h17\njob_type: c\ncommand: h\nmachine: m1\nresources: (L17, QUANTITY=1)\n\n"
@@ -9415,7 +9413,7 @@ def test_dl50_a_scan_in_the_box_rules_skips_a_member_a_status_took_out_of_the_qu
     own settlement, which runs after its box rules. Here those rules fold the
     box to SUCCESS, and the box's release wakes the queue first: the scan
     skips the member, now INACTIVE, rather than cancel it a second time
-    (INACTIVE->INACTIVE, a move the job_status table refuses). The member
+    (INACTIVE->INACTIVE, a readmission the job chart marks unreachable). The member
     moves once, the box ends, its unit goes back, and the member's settlement
     drops the rank (DL-345)."""
     text = (
@@ -9445,9 +9443,8 @@ def test_dl50_a_scan_in_the_box_rules_skips_a_queued_box_its_member_ended() -> N
     forced member ends (SEM-15), and keeps its rank until its own settlement.
     Its SUCCESS meets its parent's box_success, the parent's release wakes the
     queue first, and the scan skips the box rather than cancel it from
-    SUCCESS. So the box stays SUCCESS, the job waiting on it starts, and no
-    violation is written; the completion is an ordinary input the engine
-    admits (DL-345)."""
+    SUCCESS. So the box stays SUCCESS, the job waiting on it starts, and the
+    completion is an ordinary input the engine admits (DL-345)."""
     text = (
         "insert_resource: QP50\nres_type: R\namount: 1\n\n"
         "insert_resource: QQ50\nres_type: R\namount: 1\n\n"
@@ -9464,9 +9461,7 @@ def test_dl50_a_scan_in_the_box_rules_skips_a_queued_box_its_member_ended() -> N
     o.feed(ev("FORCE_STARTJOB", 1, job="qp50"))
     o.feed(ev("FORCE_STARTJOB", 2, job="qx50"))
     assert o.store.job["qq50"].status == "QUE_WAIT"
-    traced = len(o.trace())
     o.feed(ev("STATUS", 4, job="qx50", exit_code=0))
-    assert all(t.transition != "TRANSITION_VIOLATION" for t in o.trace()[traced:])
     box = o.store.job["qq50"]
     assert (box.status, box.waiter_seq) == ("SUCCESS", None)
     assert _statuses(o, "qp50", "qa50") == {"qp50": "SUCCESS", "qa50": "RUNNING"}

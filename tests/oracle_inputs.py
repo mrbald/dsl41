@@ -12,7 +12,6 @@ inputs and digest these renderings after every input:
   `enqueue_counter`;
 - `revisions`: the revisions the input moved, in the order the commit
   returned them (`InputBatch.revisions`);
-- `violations` and `command_violations`: what the input broke;
 - `pending_timers`: `Oracle.pending_timers()`, in its order;
 - `next_timer_due`: the engine's wake-up read.
 
@@ -267,8 +266,6 @@ class Side:
         if batch is not None:
             observed["emitted"] = [_canonical(ev.model_dump(by_alias=True)) for ev in batch.emitted]
             observed["revisions"] = [f"{key} {rev}" for key, rev in batch.revisions.items()]
-            observed["violations"] = [f"{s} {v!r}" for s, v in batch.violations]
-            observed["command_violations"] = [f"{s} {v!r}" for s, v in batch.command_violations]
         return observed
 
 

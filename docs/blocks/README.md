@@ -103,9 +103,7 @@ that explains it.
 
 | Machine | Card |
 | --- | --- |
-| [job_status](../state-machines.md#job_status) | [Job lifecycle](job-lifecycle.md); its box rows in [Box execution](box-execution.md); QUE_WAIT in [Capacity](capacity.md) |
-| [job_flags](../state-machines.md#job_flags) | [Job lifecycle](job-lifecycle.md) |
-| [job_holding](../state-machines.md#job_holding) | [Capacity](capacity.md); [Job lifecycle](job-lifecycle.md) |
+| [job](../state-machines.md#job) | [Job lifecycle](job-lifecycle.md); its box rows in [Box execution](box-execution.md); QUE_WAIT and the holding region in [Capacity](capacity.md) |
 | [runtime_assembly](../state-machines.md#runtime_assembly) | [Job lifecycle](job-lifecycle.md) |
 | [anchor_head](../state-machines.md#anchor_head) | [Seal and lineage](seal-and-lineage.md) |
 | [period_row](../state-machines.md#period_row) | [Seal and lineage](seal-and-lineage.md) |

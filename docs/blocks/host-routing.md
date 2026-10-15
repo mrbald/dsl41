@@ -47,7 +47,7 @@ A rejection moves nothing: the gate reads the chart on a scratch executor, and a
 
 - A rejected host command is a decision with a stored code, and it replays as the rejection it was ([concurrency-model §4](../concurrency-model.md#4-admission-and-application); [DL-272](../decision-log.md)).
 - A decided host command that the chart refuses, or one for a host with no instance, is a `StatechartError`. Live, the gate makes this unreachable. On replay the error names the WAL input, and `dsl41 run` exits 7 ([DL-295](../decision-log.md), DL-333; it was a replay fault, exit 2).
-- The chart records no transition violation, so `--on-transition-violation` does not cover it ([DL-292](../decision-log.md) keeps that channel for the table machines). A gap in the chart is a `StatechartError`: met in the loop, in a control input's dry apply or in replay, it stops the engine with exit 7 and nothing is logged for the input ([statechart-engine §5](../statechart-engine.md#5-the-step-and-the-worklist)).
+- A gap in the chart is a `StatechartError`: met in the loop, in a control input's dry apply or in replay, it stops the engine with exit 7 and nothing is logged for the input ([statechart-engine §5](../statechart-engine.md#5-the-step-and-the-worklist)).
 - A command naming a host that is not in the table is rejected.
 - A drain and a quarantine survive the engine that set them: resume replays the admitted inputs ([period-model §11](../period-model.md#11-resume-replay-and-recovery)).
 

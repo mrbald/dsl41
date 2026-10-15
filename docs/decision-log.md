@@ -22968,3 +22968,83 @@ relitigate an entry; append a new one.
   pinned against the old oracle's output, a defensive arm of the ignored-flag writer removed as
   unreached, now restored, and stale names and citations. It re-ran the goldens and the old oracle
   over the STATUS cases and found both equal.
+- DL-353 The job's transition tables leave and the chart is registered: the store's verbs write the
+  chart's moves unchecked, the transition gate covers the job chart with two rows marked
+  unreachable, §13 lets a marked row's guard be false, and DL-292's violation channel is retired
+  with its option inert and exit 5 reserved
+  (2026-10-15; src/dsl41/oracle_state.py, src/dsl41/oracle_writers.py, src/dsl41/oracle_reads.py,
+  src/dsl41/oracle_cascade.py, src/dsl41/oracle_intents.py, src/dsl41/oracle.py,
+  src/dsl41/job_chart.py, src/dsl41/job_chart_rows.py, src/dsl41/machines.py,
+  src/dsl41/state_machine.py, src/dsl41/cli_run.py, src/dsl41/runner.py,
+  src/dsl41/runner_admission.py, src/dsl41/runner_codes.py, src/dsl41/runner_journal.py,
+  src/dsl41/runner_seal.py, src/dsl41/runner_supervisor.py, src/dsl41/runner_tui.py,
+  src/dsl41/simulation_register_rows.py; scripts/transition_coverage.py; tests/test_job_chart.py,
+  tests/test_transition_coverage.py, tests/test_oracle_chart_cascade.py, tests/test_dry_apply.py,
+  tests/test_job_machines.py and the oracle's, the engine's and the harnesses' tests;
+  .github/workflows/ci.yml; examples/nightbank/RUNBOOK.md, examples/nightbank/deploy/drill-lib.sh,
+  examples/nightbank/deploy/drill-steps.sh, examples/nightbank/deploy/dsl41-engine.service;
+  docs/statechart-engine.md §13, §16; docs/control-protocol.md; docs/concurrency-model.md;
+  docs/period-model.md; docs/deployment-runbook.md; docs/state-machines.md; docs/risk-map.md;
+  docs/agent-workflow.md; docs/blocks; docs/citation-index.md; docs/simulation-coverage.md; README)
+  THE AIM. The third and last switch-over entry (6.4). DL-351 made the chart oracle the engine's,
+  DL-352 left one oracle. The job's three transition tables were a second source of truth beside the
+  chart; this entry removes them, registers the chart, and retires the channel that reported a move
+  the tables did not list.
+  THE TABLES. `JOB_STATUS`, `JOB_FLAGS` and `JOB_HOLDING` and their 83 transitions leave the store.
+  The store's verbs write the move the chart's row names, with no table check. The chart is the one
+  source of the job's transitions. A row the oracle has no writer for is a statechart error, exit 7,
+  as before; so is an instance that does not match its row at the commit. The goldens catch a kill
+  written to the wrong state, which the table check caught before.
+  THE REGISTRATION. `job` joins `machines.MACHINES`, so the transition gate covers the job chart:
+  345 required items, every one hit; the marked rows are listed, never counted. `job.312` is marked
+  unreachable (the admission the oracle builds carries no previous end). `job.314` is marked
+  unreachable too: a live status never stands on held units, since `held` is entered only after the
+  status left live and every way back to live leaves `held` first. A hit on either now stops with a
+  statechart error, exit 7, where the tables made job.314 a no-op; it fails closed, as every marked
+  row does. `job.183` needs no mark: test_a_member_killed_while_starting_ignores_its_own_started
+  reaches it on the oracle's path. The guard false of job.154, 170, 180, 189, 191, 198 and 308 is
+  marked `false_unreachable`, each with its reason; 189, 191, 198 and 308 are the complements of
+  marked rows. A directed test takes job.310, a start with no demand that takes over held units
+  after a catalog change at a period boundary. Test cells built by hand stay out of the record:
+  counted, they would fire eighteen of the nineteen marked rows, on cells the rules never post.
+  §13 NARROWED. DL-333's §13 forbade any outcome of a marked row's guard. A cell evaluates every
+  guard of its rows (§3), so a marked row's guard is false whenever a live sibling takes the cell:
+  that is the sibling's coverage, not a hit on the marked row. For a marked row, a hit and a true
+  guard stay forbidden; a false guard is neither required nor forbidden. This narrows DL-333 on an
+  advisor's ruling; the only marked chart row before `job`, host.12, has no guard, so the rule was
+  never exercised.
+  DL-292 RETIRED. The transition-violation channel goes: the drain, the TRANSITION_VIOLATION writer,
+  the dry apply's `transition_violation` refusal, and `stop`'s exit 5 with seal_boundary.08, which
+  classified that stop (its id stays a gap). The refusal code `transition_violation` is retired, and
+  exit 5 is retired and reserved (control-protocol: a retired code needs its entry).
+  `--on-transition-violation` stays accepted and inert: given, it prints one deprecation line to
+  stderr; it leaves at the next major release, since deployed units and scripts pass it. A unit that
+  still lists 5 in RestartPreventExitStatus is harmless. Q1's gap rule stands: a gap is a statechart
+  error, exit 7, the dry apply too.
+  STATE_MACHINE_VERSION stays 23 (DL-235): the goldens replay equal, and DL-351's sample recorded no
+  violation under any switch, `continue` included. STATED LIMIT: no trace is persisted; replay
+  derives it. A 1.9.0 ledger holding an input that recorded a violation (an engine-made input under
+  any setting, or a control input under `continue`) replays to the same state with a trace that
+  lacks the violation line, so later trace sequence numbers in the replayed period shift by one for
+  each omitted line. Seals, the attestation and the equivalence check do not compare a trace, so no
+  durable state differs; none such is known. The TUI still recognises the marker from an engine of
+  an older build it attaches to.
+  COST. One profile pass after the deletions: no function takes a quarter of the time, so nothing
+  changed. On DL-348's non-ending cascade at 1,000 jobs, the members' catalog scan takes 13% and the
+  owed-settlement check 16%; both are recorded, an index from box to members being the local
+  candidate. The table checks left the write path, so the ceiling was re-measured: 4.5 s at 200
+  jobs, 14.4 s at 400, 17.8 s at 1,000, all under 20 s; it stays 400,000.
+  NOT HERE. The generic table core in state_machine.py stays with no table declared; its removal,
+  with the coverage script's and the renderer's table branches, is a follow-up. The nightbank
+  drill's table-violation steps are removed but the drill was not run here (it needs systemd).
+  Simplifying the chart's rows and guards is the owner's later project.
+  REVIEW. Semantic class and frozen contracts: one Opus reviewer and one Fable advisor pass, and one
+  advisor ruling. The engineer stopped when the transition gate could not be full with `job`
+  registered; the advisor ruled the §13 narrowing and that hand-built cells stay out of the record,
+  and corrected the top level's premise that they covered the missing items. Both reviewers re-ran
+  the goldens and found them equal, checked job.314's mark and found it holds, and found no lost
+  safety. Their findings were text: job.314's new exit 7, the retired codes named under
+  control-protocol's rule, stale comments, and the nightbank drill still injecting table violations,
+  now removed. The Opus reviewer found the stated limit's first text wrong: no trace is persisted.
+  Three rounds each; findings confirmed by the reviewer that raised them, and both agreed to the
+  stated limit's text.

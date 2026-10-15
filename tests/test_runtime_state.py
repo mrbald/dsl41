@@ -43,13 +43,6 @@ from pydantic import ValidationError
 from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import (
-    ARM,
-    DISARM,
-    HOLD_OFF,
-    HOLD_ON,
-    ICE_ON,
-    NOEXEC_ON,
-    STATUS_INJECTED,
     Event,
     GlobalRuntime,
     JobRuntime,
@@ -91,7 +84,7 @@ def test_the_maps_do_not_escape() -> None:
     which is what "no mutable map escapes" has to mean at runtime, not just in
     a static check."""
     state = RuntimeState()
-    state.move_flag("j", ICE_ON)
+    state.move_flag("j", "ice_on")
     state.set_global("G", "go")
     assert state.job is not state._jobs
     with pytest.raises(TypeError):
@@ -128,14 +121,14 @@ def test_transition_latches_the_end_only_on_terminal() -> None:
     """`last_end_at` is the Q2 anchor -- the job's OWN last end (DL-54) -- so a
     non-terminal transition must not move it, and every terminal one must."""
     state = RuntimeState()
-    state.transition("j", STATUS_INJECTED, "RUNNING", T0)
+    state.transition("j", "RUNNING", T0)
     assert state.runtime("j").status_at == T0
     assert state.runtime("j").last_end_at is None
-    state.transition("j", STATUS_INJECTED, "SUCCESS", T0 + timedelta(minutes=5), exit_code=0)
+    state.transition("j", "SUCCESS", T0 + timedelta(minutes=5), exit_code=0)
     assert state.runtime("j").last_end_at == T0 + timedelta(minutes=5)
     assert state.runtime("j").exit_code == 0
     # a later non-terminal run does not clear the previous end
-    state.transition("j", STATUS_INJECTED, "RUNNING", T0 + timedelta(minutes=9))
+    state.transition("j", "RUNNING", T0 + timedelta(minutes=9))
     assert state.runtime("j").last_end_at == T0 + timedelta(minutes=5)
 
 
@@ -143,8 +136,8 @@ def test_transition_keeps_an_exit_code_it_was_not_given() -> None:
     """SEM-09: a status arriving with no exit code reports nothing about the
     code, so the recorded one stands. Passing None must not erase it."""
     state = RuntimeState()
-    state.transition("j", STATUS_INJECTED, "FAILURE", T0, exit_code=3)
-    state.transition("j", STATUS_INJECTED, "TERMINATED", T0 + timedelta(minutes=1))
+    state.transition("j", "FAILURE", T0, exit_code=3)
+    state.transition("j", "TERMINATED", T0 + timedelta(minutes=1))
     assert state.runtime("j").exit_code == 3
 
 
@@ -154,7 +147,7 @@ def test_start_run_is_one_act() -> None:
     box sets on both sides. They were four write sites; a missed one used to
     hide behind a sibling's write."""
     state = RuntimeState()
-    state.move_flag("m", ARM)
+    state.move_flag("m", "arm_on")
     state.start_run("bx", cause="tick", box=None, is_box=True)
     state.start_run("m", cause="box 'bx' started", box="bx", is_box=False)
     assert state.runtime("m").run_number == 1
@@ -182,9 +175,9 @@ def test_move_flag_leaves_the_flags_it_was_not_given() -> None:
     """The verb that replaced `update(**fields)` for SEM-20/21/22 must not turn
     "put this job on hold" into "and take it off ice while you are there"."""
     state = RuntimeState()
-    for move in (ICE_ON, HOLD_ON, NOEXEC_ON):
-        state.move_flag("j", move)
-    state.move_flag("j", HOLD_OFF)
+    for target in ("ice_on", "hold_on", "noexec_on"):
+        state.move_flag("j", target)
+    state.move_flag("j", "hold_off")
     row = state.runtime("j")
     assert (row.on_ice, row.on_hold, row.on_noexec) == (True, False, True)
 
@@ -193,10 +186,10 @@ def test_a_verb_changes_nothing_else() -> None:
     """The general form of the two tests above, over every verb: whatever a
     verb is for, everything else on the row survives it."""
     state = RuntimeState()
-    state.transition("j", STATUS_INJECTED, "RUNNING", T0, exit_code=7)
+    state.transition("j", "RUNNING", T0, exit_code=7)
     state.start_run("j", cause="tick", box=None, is_box=False)
-    state.move_flag("j", ICE_ON)
-    state.move_flag("j", ARM)
+    state.move_flag("j", "ice_on")
+    state.move_flag("j", "arm_on")
     row = state.runtime("j")
     assert (row.status, row.status_at, row.exit_code) == ("RUNNING", T0, 7)
     assert (row.run_number, row.started_by) == (1, "tick")
@@ -529,7 +522,7 @@ def test_cm02_the_revision_is_not_part_of_its_own_projection() -> None:
     for S2's ApplyResult, and a digest that moves for two semantically
     identical states is a false conflict wherever it is compared."""
     state = RuntimeState()
-    state.transition("j", STATUS_INJECTED, "RUNNING", T0)
+    state.transition("j", "RUNNING", T0)
     plain = state._projection("job:j")
     state._replace("j", state_rev=41)
     assert state.runtime("j").state_rev == 41  # the field moved...
@@ -581,10 +574,10 @@ def test_commit_names_the_changed_entities() -> None:
     record."""
     state = RuntimeState()
     state.begin_input()
-    state.transition("b", STATUS_INJECTED, "RUNNING", T0)
+    state.transition("b", "RUNNING", T0)
     state.set_global("G", "go")
-    state.move_flag("a", ARM)
-    state.move_flag("untouched", DISARM)  # already off: written, but not CHANGED
+    state.move_flag("a", "arm_on")
+    state.move_flag("untouched", "arm_off")  # already off: written, but not CHANGED
     assert state.commit_input() == ["global:G", "job:a", "job:b"]
 
 
@@ -741,12 +734,12 @@ def test_a_flag_move_that_changes_nothing_moves_no_revision() -> None:
     on (ss3's cardinality rule reaches the empty case too)."""
     store = RuntimeState()
     store.begin_input()
-    store.transition("j", STATUS_INJECTED, "INACTIVE", None)
+    store.transition("j", "INACTIVE", None)
     store.commit_input()
     before = store.revision("job:j")
 
     store.begin_input()
-    store.move_flag("j", HOLD_OFF)
+    store.move_flag("j", "hold_off")
     assert store.commit_input() == []
     assert store.revision("job:j") == before
 
@@ -793,9 +786,9 @@ def test_release_reservations_on_a_row_holding_nothing_is_a_no_op() -> None:
     (docstring: "Clear a run's vector on the edge that leaves
     STARTING/RUNNING") must hold for a caller that reaches it directly."""
     store = RuntimeState()
-    store.transition("j", STATUS_INJECTED, "RUNNING", T0)
+    store.transition("j", "RUNNING", T0)
     before = store.runtime("j")
-    store.release_reservations("j", "RUNNING", "SUCCESS")  # nothing held, nothing to do
+    store.release_reservations("j", "SUCCESS")  # nothing held, nothing to do
     assert store.runtime("j") is before  # untouched: no rebuild, not just no diff
 
 

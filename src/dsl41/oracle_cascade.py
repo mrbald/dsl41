@@ -142,18 +142,7 @@ from dsl41.oracle_intents import (
     WatchReadmit,
 )
 from dsl41.oracle_schedule import OracleSchedule
-from dsl41.oracle_state import BOX_START as BOX_START_MOVE
-from dsl41.oracle_state import (
-    FAILED,
-    JOB_FORCE_ON_HELD,
-    JOB_READMIT,
-    JOB_START,
-    LIVE,
-    TERMINAL,
-    CarriedRows,
-    JobStatus,
-    Transition,
-)
+from dsl41.oracle_state import FAILED, LIVE, TERMINAL, CarriedRows
 from dsl41.semantics import SemanticSwitches
 from dsl41.state_machine import Context, Effects, StatechartError
 from dsl41.state_machine import Event as ChartEvent
@@ -387,12 +376,9 @@ class OracleCascade(OracleSchedule):
         admission = cast(AdmissionFacts, admitted.admission)
         if admitted.verdict == "on_held":
             cause = f"{cause}; starts on its held units, other resources not re-evaluated (DL-256)"
-            sends = self._extent(job, admission, JOB_FORCE_ON_HELD, cause, had_demand=True)
+            sends = self._extent(job, admission, cause, had_demand=True)
             return Effects(send=(*sends, *load))
-        is_box = self._is_box(job)
-        sends = self._extent(
-            job, admission, BOX_START_MOVE if is_box else JOB_START, cause, bool(vector)
-        )
+        sends = self._extent(job, admission, cause, bool(vector))
         freed = self._frees_excess(job, list(vector))
         scan = (self._program(job, SCAN, self._scan(keep_stopped=False)),) if freed else ()
         return Effects(send=(*sends, *scan, *load))
@@ -414,21 +400,20 @@ class OracleCascade(OracleSchedule):
         vector = tuple(facts.vector())
         admission = AdmissionFacts(demand=facts.demand, vector=vector, units=self._units(job))
         cause = "resources freed (QUE_WAIT admitted, DL-50)"
-        sends = self._extent(job, admission, JOB_READMIT, cause, had_demand=True)
+        sends = self._extent(job, admission, cause, had_demand=True)
         return Effects(send=sends, intents=(Readmitted(),))
 
     def _extent(
         self,
         job: str,
         admission: Admission,
-        move: Transition[JobStatus],
         cause: str,
         had_demand: bool,
     ) -> tuple[Send, ...]:
         """An admitted start's steps: the units, the arm and the run, a box's
         resets around its STARTING or a job's STARTING, then `started`."""
         run = self._runtime(job).run_number
-        starting = Starting(move=move, cause=cause, units=self._units(job))
+        starting = Starting(cause=cause, units=self._units(job))
         sends: list[Send] = [
             self._to(job, ADMITTED_START, admission),
             self._to(job, ACTUAL_START, RunStart(cause=cause, units=self._units(job))),

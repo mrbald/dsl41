@@ -40,7 +40,7 @@ from dsl41.oracle_state import (
 )
 from dsl41.runner_hosts import HostCommand, host_move
 from dsl41.semantics import resolve
-from dsl41.state_machine import HITS_ENV, STRICT_ENV, Executor, Outcome, Statechart, StatechartError
+from dsl41.state_machine import HITS_ENV, Executor, Outcome, Statechart, StatechartError
 
 T0 = datetime(2026, 7, 1, 8, 0)
 
@@ -1099,16 +1099,18 @@ _OWED_SCRIPT = [
 
 
 def test_sem16_an_attempt_that_skips_the_owed_settlement_is_caught(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Mutant: the owed settlement is never read, so the attempt never takes
     job.401 and its admission is read with the ended run's units still on
-    the row, where nothing settles them first. The mutant parts from the
-    oracle at the input, for both verdicts."""
+    the row, where only job.312, marked unreachable, settles them. The
+    mutant parts from the oracle at the input, for both verdicts. The
+    mutant's hits stay out of the session."""
     for resource in ("R", "D"):
         catalog = lower_source(_member_restart_jil(resource, ""))
         expected = observations(Oracle(catalog), _OWED_SCRIPT)
         with monkeypatch.context() as patch:
+            patch.setenv(HITS_ENV, str(tmp_path))
             patch.setattr(StartFacts, "settlement_owed", property(lambda self: False))
             found = observations(Oracle(catalog), _OWED_SCRIPT)
         assert found[:-1] == expected[:-1]
@@ -1646,16 +1648,6 @@ _SWAPPED = {"job_114": {"source": "INACTIVE"}, "job_137": {"source": "LIVE"}}
     ("changes", "script", "message"),
     [
         (
-            _SWAPPED,
-            [ev("STARTJOB", 1, job="t"), ev("KILLJOB", 2, job="t")],
-            "TransitionError: .*RUNNING is not a source of job_status.37",
-        ),
-        (
-            _SWAPPED,
-            [ev("KILLJOB", 1, job="t")],
-            "TransitionError: .*INACTIVE is not a source of job_status.14",
-        ),
-        (
             {"job_114": {"guard": "is_job"}},
             [ev("FORCE_STARTJOB", 1, job="b"), ev("KILLJOB", 2, job="b")],
             "UnhandledEvent: .*'job:b'",
@@ -1666,29 +1658,45 @@ _SWAPPED = {"job_114": {"source": "INACTIVE"}, "job_137": {"source": "LIVE"}}
             "UnhandledEvent: .*'job:t'",
         ),
     ],
-    ids=["state swapped: a live kill", "state swapped: an idle kill", "jobs only", "boxes only"],
+    ids=["jobs only", "boxes only"],
 )
-def test_a_live_kill_row_with_its_state_or_job_type_swapped_fails(
+def test_a_live_kill_row_narrowed_to_one_job_type_fails(
     changes: dict[str, dict[str, str]],
     script: list[Event],
     message: str,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Mutants of job.114: its state dimension swapped with job.137's (a live
-    kill ignored, an idle kill terminating), which the tables refuse in the
-    oracle's write (strict under the suite); or the row narrowed to one job
-    type, so the other type's live kill meets a gap, a statechart error
-    (DL-292's Q1). Either way the kill's outcome names the error. The
-    mutant's hits stay out of the session."""
+    """Mutants of job.114: the row narrowed to one job type, so the other
+    type's live kill meets a gap, a statechart error (DL-292's Q1). The
+    kill's outcome names the error. The mutant's hits stay out of the
+    session."""
     monkeypatch.setenv(HITS_ENV, str(tmp_path))
-    monkeypatch.setenv(STRICT_ENV, "1")  # the table refuses the swapped move
     mutant = _rows_changed(**changes)(lower_source(_KT_JIL))
     for event in script[:-1]:
         mutant.feed(event)
     with pytest.raises(Exception) as raised:  # noqa: B017 -- the class is in `message`
         mutant.feed(script[-1])
     assert re.search(message, f"{type(raised.value).__name__}: {raised.value}")
+
+
+def test_a_live_kill_row_with_its_state_swapped_differs_from_the_goldens(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A mutant of job.114 with its state dimension swapped with job.137's: a
+    live kill ignored, an idle kill terminating. The chart is the one
+    declaration of a job's moves, so the oracle writes what the mutant
+    reached; the goldens catch it at the first kill their corpus makes. The
+    mutant's hits stay out of the session."""
+    from test_oracle_goldens import _directed_runs
+
+    from oracle_goldens import replay
+
+    monkeypatch.setenv(HITS_ENV, str(tmp_path))
+    mutant = _rows_changed(**_SWAPPED)
+    replayed = replay(mutant, ["corpus-seeds"], limit=_directed_runs(), stop_at_first=True)
+    assert len(replayed.differences) == 1
+    assert "KILLJOB" in replayed.differences[0].input
 
 
 def test_sem34_a_startjob_arms_its_deadlines_before_its_attempt() -> None:
@@ -2817,6 +2825,49 @@ def test_dl256_the_period_opening_gives_a_removed_jobs_units_back_through_the_ch
     assert line.transition == "RELEASE_RESOURCE"
     assert line.cause.startswith("job removed from the catalog")
     assert paired.store.job["k"].reservations == ()
+
+
+_KEPT_JIL = (
+    "insert_resource: LOCK\nres_type: R\namount: 1\n\n"
+    "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\nresources: (LOCK, QUANTITY=1, FREE=N)\n\n"
+    "insert_job: k\njob_type: c\ncommand: y\nmachine: m1\nresources: (LOCK, QUANTITY=1, FREE=Y)\n"
+)
+
+
+def test_dl256_a_start_with_no_demand_takes_over_held_units_and_holds_nothing() -> None:
+    """A period opens over `j`, which still holds the unit of LOCK its failed
+    run kept, and the new catalog keeps `j` but gives it no resources. `k`
+    waits for LOCK. `j`'s next start is admitted with an empty demand vector:
+    the takeover's `none` branch (job.302, then job.310, job.309's guard
+    false) gives the held unit back, `j` runs on nothing, and the scan the
+    freed unit owes admits `k` (DL-256)."""
+    first = Oracle(lower_source(_KEPT_JIL))
+    first.feed(ev("STARTJOB", 1, job="j"))
+    first.feed(ev("STATUS", 2, job="j", status="FAILURE"))
+    assert first.store.job["j"].reservations != ()
+    store = first.store
+    carried = CarriedRows(
+        jobs=dict(store.job),
+        timer_seq=store.timer_seq,
+        consumed=dict(store.consumed),
+        enqueue_counter=store.enqueue_counter,
+        now=T0 + timedelta(minutes=2),
+    )
+    without = _KEPT_JIL.replace(
+        "machine: m1\nresources: (LOCK, QUANTITY=1, FREE=N)\n", "machine: m1\n"
+    )
+    assert without != _KEPT_JIL
+    oracle = Oracle(lower_source(without), carried=carried)
+    oracle.feed(ev("STARTJOB", 3, job="k"))
+    assert oracle.store.job["k"].status == "QUE_WAIT"
+    seen = _spied(oracle)
+    oracle.feed(ev("STARTJOB", 4, job="j"))
+    _agrees(oracle)
+    assert ("job.302",) in [o.rows for o in seen if o.key == "job:j"]
+    assert ("job.310",) in [o.branches for o in seen if o.key == "job:j"]
+    j, k = oracle.store.job["j"], oracle.store.job["k"]
+    assert (j.status, j.reservations, k.status) == ("RUNNING", (), "RUNNING")
+    assert [(r.bucket, r.units) for r in k.reservations] == [("r:LOCK", 1)]
 
 
 def _box_oracle(cls: type[Oracle] = Oracle) -> Oracle:

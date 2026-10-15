@@ -27,7 +27,6 @@ from dsl41.state_machine import (
     EXIT_STATECHART_ERROR,
     STATECHART_LOG_PREFIX,
     StatechartError,
-    Transition,
     UnhandledEvent,
 )
 
@@ -190,7 +189,6 @@ def _raise_on_running(monkeypatch: pytest.MonkeyPatch) -> None:
     def transition(
         self: RuntimeState,
         job: str,
-        t: Transition[JobStatus],
         new: JobStatus,
         at: datetime | None,
         exit_code: int | None = None,
@@ -199,7 +197,7 @@ def _raise_on_running(monkeypatch: pytest.MonkeyPatch) -> None:
     ) -> None:
         if new in ("STARTING", "RUNNING"):
             raise _error()
-        real(self, job, t, new, at, exit_code, clear_exit_code=clear_exit_code)
+        real(self, job, new, at, exit_code, clear_exit_code=clear_exit_code)
 
     monkeypatch.setattr(RuntimeState, "transition", transition)
 

@@ -26,12 +26,12 @@ Reservations and waiter ranks ride on the job rows in the in-memory `RuntimeStat
 
 ## States
 
-Two declared machines hold this block's states:
+Two regions of the [job](../state-machines.md#job) chart hold this block's states:
 
-- [job_holding](../state-machines.md#job_holding): one job's units, reserved, held or none, and what a run's end does to them.
-- [job_status](../state-machines.md#job_status): the QUE_WAIT rows, where a waiter enters and leaves the queue.
+- `holding`: one job's units, reserved, held or none, and what a run's end does to them.
+- `status`: the QUE_WAIT rows, where a waiter enters and leaves the queue.
 
-Each anchor holds the generated diagram and transition table.
+The anchor holds the generated diagram and row table.
 A threshold request is checked at admission and never reserved.
 
 ## Invariants

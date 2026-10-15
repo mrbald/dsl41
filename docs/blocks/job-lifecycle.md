@@ -19,19 +19,19 @@ Its per-input [state_rev](../glossary.md#state_rev) is what a store's conditiona
 - Inputs: `Oracle.feed(event)`, `Oracle.batch(at)` for several events at one instant, and `Oracle.advance(now)` for a bare time observation. The alphabet is `EventKind` in `oracle_state.py`.
 - Outputs: emitted events, of which a STATUS STARTING is the shell's dispatch instruction; the trace of `TraceEntry` lines; `Oracle.next_timer_due()`.
 - State: one frozen `JobRuntime` row per job, written only by `RuntimeState` verbs such as `transition`, `start_run` and `move_flag`.
-- Transitions: each status, flag and capacity move names its declared transition (see States).
+- Transitions: each status, flag and capacity move is a row of the `job` chart (see States).
 - Status sets: `TERMINAL`, `FAILED`, `LIVE`, `IDLE` and `INJECTABLE_STATUSES` in `oracle_state.py`.
 - Condition truth: `Oracle._cond_true` over the tree that `conditions.py` parses.
 
 ## States
 
-One job row carries three orthogonal regions, each a declared machine:
+One job row is one instance of the composite statechart [job](../state-machines.md#job), `src/dsl41/job_chart.py` (DL-337), with three orthogonal regions:
 
-- [job_status](../state-machines.md#job_status): the status and its moves.
-- [job_flags](../state-machines.md#job_flags): ON_ICE, ON_HOLD and ON_NOEXEC, and the schedule arm.
-- [job_holding](../state-machines.md#job_holding): the units a job reserves or keeps; the [capacity](capacity.md) card explains it.
+- `status`: the status and its moves.
+- `flags`: ON_ICE, ON_HOLD and ON_NOEXEC, and the schedule arm.
+- `holding`: the units a job reserves or keeps; the [capacity](capacity.md) card explains it.
 
-The three are also declared as one composite statechart, `job` in `src/dsl41/job_chart.py`, which is checked against these tables (DL-337). The oracle (`Oracle` in `src/dsl41/oracle.py`) drives it for the STATUS input (DL-341), for every start attempt (DL-342), for KILLJOB and the TIMER input (DL-343), for the flag inputs (DL-344), for RELEASE_RESOURCE and each waiter's readmission out of the queue (DL-345), and for the box rules between a box and its members and the period opening's release (DL-346), and for a box's ON_NOEXEC on the jobs it contains (DL-347); its writes still take the tables. Its whole cascade runs on the executor's worklist: each consequence of a move is a chained item, and the oracle's hook writes each item's moves before the next one pops (DL-350). A box's end FAILURE or TERMINATED kills its live job_terminator members only while the run that ended is still the box's run (DL-348).
+The oracle (`Oracle` in `src/dsl41/oracle.py`) drives it for the STATUS input (DL-341), for every start attempt (DL-342), for KILLJOB and the TIMER input (DL-343), for the flag inputs (DL-344), for RELEASE_RESOURCE and each waiter's readmission out of the queue (DL-345), and for the box rules between a box and its members and the period opening's release (DL-346), and for a box's ON_NOEXEC on the jobs it contains (DL-347). The chart is the one declaration of a job's moves; the store's verbs write what it reached (DL-353). Its whole cascade runs on the executor's worklist: each consequence of a move is a chained item, and the oracle's hook writes each item's moves before the next one pops (DL-350). A box's end FAILURE or TERMINATED kills its live job_terminator members only while the run that ended is still the box's run (DL-348).
 
 [runtime_assembly](../state-machines.md#runtime_assembly) is the state owner's own life: carried rows or a genesis seed, then one input at a time. It is a statechart ([statechart-engine](../statechart-engine.md), DL-335). The state owner holds its instance from construction, and the configuration is the assembly phase. A verb the phase does not allow is a refusal row, which the verb raises as `OracleError` or `ValueError`.
 Each anchor holds the generated diagram and transition table.

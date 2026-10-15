@@ -1,18 +1,17 @@
 """The composite `job` statechart: one job's status, flags and holding in one
 declaration (docs/statechart-engine.md §11, DL-337).
 
-The chart is declared and checked. The oracle (`oracle`, DL-341) drives it
-for every input and its whole cascade (DL-350); its writes still take the
-three tables in `oracle_state` (`job_status`, `job_flags`, `job_holding`),
-and tests/test_job_chart.py checks this chart against them cell by cell. The
-chart joins `machines.MACHINES` when the three tables leave it.
+The oracle (`oracle`, DL-341) drives it for every input and its whole
+cascade (DL-350), and writes what each fired row reached. The chart is the
+one declaration of a job's moves, registered in `machines.MACHINES`.
 
 Shape. The root `job` has three orthogonal regions, in this order: `status`,
 `flags` and `holding`. `status` holds `lifecycle`, the superstate of every
 status, and inside it the status sets the rules name: `IDLE` (INACTIVE and
 `TERMINAL`), `TERMINAL` (SUCCESS and `FAILED`), `FAILED` (FAILURE and
 TERMINATED) and `LIVE` (STARTING and RUNNING), with QUE_WAIT beside them. A row
-whose old source was one of those sets keeps one source. `flags` holds one
+that applies to every status of one of those sets has that set as its one
+source. `flags` holds one
 composite state with four orthogonal regions, `ice`, `hold`, `noexec` and
 `arm`, each `off` or `on`. Each starts `off`: a flag seeded `on` (SEM-24) is a
 restore, not a move. `holding` is `none`, `reserved` (a run's units) or `held`
@@ -21,16 +20,11 @@ restore, not a move. `holding` is `none`, `reserved` (a run's units) or `held`
 The box is not a separate chart. A box is an instance of this chart whose data
 says so (`JobData.box`), and the box rules are rows guarded by it.
 
-Ids. Every id carries the chart's name, so each old table's id space is a
-hundred: `job.1NN` is `job_status.NN`, `job.2NN` is `job_flags.NN` and
-`job.3NN` is `job_holding.NN`, with the same number and meaning. A row that had
-several sources is one row per source: the first keeps the number, and the
-others take new numbers in the same hundred. Internal rows stay internal. A
-box's ON_NOEXEC on the jobs it contains, which `job_flags.09` and `.07` take
-under the job's own ON_NOEXEC, is an event of its own, `ON_NOEXEC on its box`,
-as its OFF_NOEXEC twin is in the table (`job_flags.11`); its rows take new
-numbers (job.231 to job.233, DL-347). The status rows no table declared fill
-job.159 to job.199, and `job.4NN` continues them (DL-349).
+Ids. Every id carries the chart's name, and its hundred names its region:
+`job.1NN` and `job.4NN` are status rows, `job.2NN` flag rows and `job.3NN`
+holding rows (DL-337, DL-349). A box's ON_NOEXEC on the jobs it contains is
+an event of its own, `ON_NOEXEC on its box`, beside its OFF_NOEXEC twin; its
+rows are job.231 to job.233 (DL-347).
 
 Guards read three things: the instance's configuration, its data (`JobData`),
 and the event's payload. The payload carries the facts the rule code reads
@@ -75,7 +69,8 @@ bound, that attempt finds its run's settlement owed
 nothing: its action sends the ended run's settlement, by the end it made,
 then the same attempt again, so `Attempt.admissible` is read after the
 settlement (DL-349). The member's `settle`, finding it live, moves nothing
-(job.418). No start meets an unsettled run, so job.312 is never reached.
+(job.418). No start meets an unsettled run, so job.312 is never reached; it is
+marked unreachable.
 
 The per-job start bound (DL-304) is the refusal row job.100: an attempt past
 the gates and the window that descends from `MAX_NESTED_STARTS` admitted
@@ -913,7 +908,9 @@ def settle_ended_run(ctx: Context) -> Effects:
     """A start meets the units of a run whose settlement is still owed
     (`OracleCascade._on_settle_first`): that run settles first, by the end it made, then
     the start is admitted again against what the settlement left. The
-    settlement's policy is read from the admission's handle (DL-349)."""
+    settlement's policy is read from the admission's handle (DL-349). Its
+    row, job.312, is marked unreachable: job.401 settles the run before the
+    start is admitted, so the oracle's admission carries no previous end."""
     admission: Admission = ctx.event.payload
     previous = admission.previous
     if admission.units is not None:

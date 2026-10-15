@@ -350,7 +350,6 @@ from dsl41.oracle_schedule import DEFERRED_RESCAN_KEY, DEFERRED_TIMER_KEY
 from dsl41.oracle_state import (
     INJECTABLE_STATUSES,
     LIVE,
-    VIOLATION_MARKER,
     CarriedRows,
     CascadeDepthError,
     Event,
@@ -361,7 +360,7 @@ from dsl41.oracle_state import (
 from dsl41.oracle_writers import OracleWriters
 from dsl41.semantics import SemanticSwitches
 from dsl41.state_machine import Event as ChartEvent
-from dsl41.state_machine import Outcome, StatechartError, Violation
+from dsl41.state_machine import Outcome, StatechartError
 
 
 def _note_cleanup(exc: StatechartError, cleanup: Exception) -> None:
@@ -395,14 +394,6 @@ class InputBatch:
 
     Hold one open only when a decision sits between the halves -- the
     engine's stale-completion gate does, and S3's preconditions will.
-
-    The commit also drains the store's violation channel. Each violation
-    the input's moves recorded becomes one `TRANSITION_VIOLATION` trace
-    line and lands on `violations`, where the engine reads it
-    (concurrency-model ss4). Recording it never raises: replay meets the
-    same line the live engine wrote. `command_violations` holds only those
-    the attempt half recorded: the time half's moves are the engine's own,
-    so only the attempt's own can refuse a command.
     """
 
     def __init__(self, oracle: Oracle, at: datetime) -> None:
@@ -414,13 +405,6 @@ class InputBatch:
         #: record of what the input moved, and the only place the changed set
         #: leaves the owner
         self.revisions: dict[str, int] = {}
-        #: (subject, violation) for every declared transition this input
-        #: broke; set at commit
-        self.violations: list[tuple[str, Violation]] = []
-        #: the subset the attempt half broke, after the time half
-        self.command_violations: list[tuple[str, Violation]] = []
-        #: what the time half broke, drained when it ends
-        self._time_violations: list[tuple[str, Violation]] = []
         self._emitted_start = 0
 
     def __enter__(self) -> InputBatch:
@@ -440,13 +424,12 @@ class InputBatch:
             oracle._drain()  # checks-then-drain adjacency
         except BaseException as exc:
             try:
-                self._commit(time_half=True)
+                self._commit()
             except Exception as cleanup:
                 if not isinstance(exc, StatechartError):
                     raise
                 _note_cleanup(exc, cleanup)
             raise
-        self._time_violations = oracle.store.drain_violations()
         return self
 
     def feed(self, ev: Event) -> None:
@@ -465,27 +448,8 @@ class InputBatch:
                 raise
             _note_cleanup(exc, cleanup)
 
-    def _commit(self, *, time_half: bool = False) -> None:
+    def _commit(self) -> None:
         oracle = self._oracle
-        # drained first: a commit that refuses the input's end state still
-        # reports what the input broke on the way there
-        drained = oracle.store.drain_violations()
-        if time_half:
-            self._time_violations, drained = self._time_violations + drained, []
-        self.command_violations = drained
-        self.violations = self._time_violations + drained
-        for subject, violation in self.violations:
-            oracle._trace.append(
-                TraceEntry(
-                    at=self._at,
-                    job=subject,
-                    transition=VIOLATION_MARKER,
-                    cause=(
-                        f"{violation.transition} {violation.old}->{violation.new}:"
-                        f" {violation.reason}"
-                    ),
-                )
-            )
         changed = oracle.store.commit_input()
         self.revisions = {key: oracle.store.revision(key) for key in changed}
         self.emitted = oracle._emitted[self._emitted_start :]

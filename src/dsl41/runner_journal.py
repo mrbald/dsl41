@@ -123,7 +123,6 @@ from dsl41.state_machine import (
     State,
     Statechart,
     StatechartError,
-    TransitionError,
 )
 from dsl41.state_machine import Event as ChartEvent
 
@@ -1744,9 +1743,8 @@ def replay_inputs(
     resurrect a killed job -- the case DL-44's amendment added the advance
     record for, now decided by record rather than by absence.
 
-    A violation of a declared transition never raises here: the oracle
-    traces it, as the live engine did. Any other input that raises stops
-    the replay with a `ReplayFault` that names it."""
+    An input that raises stops the replay with a `ReplayFault` that names
+    it; a `StatechartError` stops it as itself, naming the input."""
     decisions = read_decisions(records, machines)
     # I2: indices are monotone across the ESTATE, not across the segment, so
     # a segment that opens at 5311 replays from 5310 -- the number its own
@@ -1783,8 +1781,6 @@ def replay_inputs(
             forced = None if quarantine is None else quarantine[0]
         try:
             applied = apply_attempt(oracle, attempt, decided=durable, forced=forced)
-        except TransitionError:
-            raise  # a strict test run fails where the move was made
         except StatechartError as exc:
             # an assertion failure stops replay as itself, naming the input
             raise _at_input(exc, attempt)

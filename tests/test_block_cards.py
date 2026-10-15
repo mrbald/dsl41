@@ -104,7 +104,7 @@ def card_problems(blocks: Path, machines: set[str]) -> list[str]:
 
 
 def test_every_card_and_every_machine_is_indexed_and_linked() -> None:
-    assert len(MACHINES) >= 14
+    assert len(MACHINES) >= 12
     assert card_problems(BLOCKS, {m.name for m in MACHINES}) == []
 
 

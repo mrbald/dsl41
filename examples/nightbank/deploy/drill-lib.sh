@@ -382,68 +382,8 @@ lease_renewed_past() { # lease_renewed_past WAS
     now=$(lease_field expires_at)
     [[ -n $now && $now > $1 ]]
 }
-
-# The engine unit's journal lines since EPOCH that match the fixed string
-journal_count() { # journal_count EPOCH FRAGMENT
-    engine_log_since "$1" | { grep -cF -- "$2" || true; }
-}
 journal_has() { # journal_has UNIT EPOCH FRAGMENT
     sudo journalctl -u "$1" --since "@$2" -o cat --no-pager | grep -qF -- "$3"
-}
-
-# A fault injected into the engine unit, the way tests/test_engine_machines.py
-# injects one: a sitecustomize in a directory the unit's PYTHONPATH names
-# replaces one machine's transition with a violating one. effect.01 is the
-# outbox's record move (an engine-tier machine: the violation is one journal
-# line); host.07 is a host's reinstatement (an oracle-tier machine: the
-# violation is a trace line). No source file changes, and remove_faults
-# takes the drop-in and the directory away. Restarts the engine, which
-# resumes the same root.
-FAULT_DIR=/opt/dsl41/drill-inject
-FAULT_DROPIN=/etc/systemd/system/$ENGINE.d/drill-fault.conf
-inject_faults() { # inject_faults effect.01 host.07 ...
-    local names
-    names=$(IFS=,; echo "$*")
-    sudo install -d "$FAULT_DIR" "$(dirname "$FAULT_DROPIN")"
-    sudo tee "$FAULT_DIR/sitecustomize.py" >/dev/null <<'PY'
-import os
-
-from dsl41 import runner_effects, runner_hosts
-from dsl41.state_machine import StateMachine, Violation
-
-faults = set(os.environ["DRILL_FAULTS"].split(","))
-effect_real = runner_effects.EFFECT
-
-
-class BrokenEffect:
-    def __getattr__(self, name):
-        return getattr(effect_real, name)
-
-    def take(self, transition, old, new):
-        if transition.id in faults:
-            return Violation("effect", transition.id, old, new, "injected by the service drill")
-        return effect_real.take(transition, old, new)
-
-
-runner_effects.EFFECT = BrokenEffect()
-host = runner_hosts.HOST
-runner_hosts.HOST = StateMachine(
-    name=host.name,
-    states=host.states,
-    initial=host.initial,
-    finals=host.finals,
-    transitions=tuple(t for t in host.transitions if t.id not in faults),
-)
-PY
-    printf '[Service]\nEnvironment=PYTHONPATH=%s\nEnvironment=DRILL_FAULTS=%s\n' \
-        "$FAULT_DIR" "$names" | sudo tee "$FAULT_DROPIN" >/dev/null
-    sudo systemctl daemon-reload
-    manual restart
-    wait_up
-}
-remove_faults() {
-    sudo rm -rf "$FAULT_DIR" "$(dirname "$FAULT_DROPIN")"
-    sudo systemctl daemon-reload
 }
 
 # a client command run as another login, with the venv the launcher uses
@@ -507,7 +447,7 @@ stream_shows_failure() { # stream_shows_failure FILE JOB
 restore_units() {
     sudo sed -i 's/^Wants=dsl41-supervisor.service/Requires=dsl41-supervisor.service/' \
         "/etc/systemd/system/$ENGINE"
-    sudo rm -rf "$FAULT_DIR" "/etc/systemd/system/$ENGINE.d" "/etc/systemd/system/$SUPERVISOR.d"
+    sudo rm -rf "/etc/systemd/system/$ENGINE.d" "/etc/systemd/system/$SUPERVISOR.d"
     sudo systemctl daemon-reload
 }
 
@@ -516,10 +456,6 @@ list_shows_finished_run() { # list_shows_finished_run JOB
     cli supervise list --run-root "$ROOT" | jq -e --arg job "$1" \
         '.ok == true and ([.runs[] | select(.job == $job)] | length >= 1)
          and ([.runs[] | select(.job == $job)] | all(.wrapper_alive == false))' >/dev/null
-}
-# more transition violation lines since EPOCH than BEFORE
-violation_lines_exceed() { # violation_lines_exceed EPOCH BEFORE
-    [ "$(journal_count "$1" 'dsl41: transition violation')" -gt "$2" ]
 }
 # the run root's perimeter journal holds a record of this kind
 perimeter_has() { # perimeter_has REC

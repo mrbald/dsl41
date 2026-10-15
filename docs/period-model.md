@@ -1835,14 +1835,6 @@ an `ENOSPC` on the sidecar.
   refuses. The cutoff's own time observation belongs to the seal, so the
   seal refuses on it too.
 
-**The transition-violation stop also stops without an abort** (DL-292,
-DL-295). Under the run option `--on-transition-violation stop`, an input
-committed inside the interval that records a violation stops the engine
-after its decision is durable. Such an input is a drained attempt, a cutoff
-tick or the cutoff's own time observation. That
-stop is the operator's chosen halt. An abort would reopen C1 and carry on.
-The engine exits 5 (`concurrency-model.md` §4).
-
 **A time-half stop** (`concurrency-model.md` §4) raises before its input
 is admitted, so nothing is logged for it. On an engine-made input the seal
 drains, such as a cutoff tick, an adapter completion or a routing
@@ -2259,8 +2251,7 @@ crashed before its first seal would have no path back.
    just after it as current, and holds no live run. The decision lands in
    the active segment, after this incarnation's `leader` record; readers
    pair a decision with its attempt by `index`, never by position. The
-   verdict is not recorded in the decision index a second time, and
-   `--on-transition-violation stop` does not run for it. A second resume
+   verdict is not recorded in the decision index a second time. A second resume
    finds the attempt decided and commits nothing.
 
    Every recovered attempt is planned, and the identity preflight of the

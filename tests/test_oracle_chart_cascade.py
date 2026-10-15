@@ -33,7 +33,7 @@ from dsl41.job_chart import configuration
 from dsl41.oracle import Oracle
 from dsl41.oracle_cascade import OracleCascade
 from dsl41.oracle_facts import RowUnits
-from dsl41.oracle_state import ICE_ON, CascadeDepthError, Event, EventKind, OracleError
+from dsl41.oracle_state import CascadeDepthError, Event, EventKind, OracleError
 from dsl41.state_machine import Executor, Outcome, ReentrantDispatch, StatechartError
 from dsl41.semantics import resolve
 
@@ -183,10 +183,13 @@ def test_an_input_the_oracle_cannot_take_is_refused(event: Event, message: str) 
 
 def test_job_312_is_no_row_the_oracle_writes() -> None:
     """job.401 settles an ended run before its job's next admission, so the
-    admitted start never meets a run's unsettled units (job.312): the hook
-    has no write for it, and a chart that fires it is caught."""
+    admitted start never meets a run's unsettled units (job.312): the row is
+    marked unreachable, the hook has no write for it, and a chart that fires
+    it is caught."""
     from dsl41 import oracle_writers
+    from dsl41.job_chart import JOB
 
+    assert next(row for row in JOB.rows if row.id == "job.312").mark == "unreachable"
     assert "job.312" not in oracle_writers._WRITERS
     unmarked = {"job.419", "job.420", "job.421", "job.422", "job.423"}
     assert unmarked.isdisjoint(oracle_writers._WRITERS)
@@ -194,14 +197,13 @@ def test_job_312_is_no_row_the_oracle_writes() -> None:
 
 def test_every_row_the_chart_can_fire_has_a_writer_on_the_oracle() -> None:
     """The hook's table names one writer for each row not marked unreachable,
-    and no other, less job.312, which job.401 keeps from firing; each names a
-    method of `Oracle`. A new row without a writer fails here, not at its
-    first fire."""
+    and no other; each names a method of `Oracle`. A new row without a writer
+    fails here, not at its first fire."""
     from dsl41 import oracle_writers
     from dsl41.job_chart import JOB
 
     reachable = {row.id for row in JOB.rows if not row.mark}
-    assert set(oracle_writers._WRITERS) == reachable - {"job.312"}
+    assert set(oracle_writers._WRITERS) == reachable
     for row, name in oracle_writers._WRITERS.items():
         assert callable(getattr(Oracle, name, None)), (row, name)
 
@@ -230,7 +232,7 @@ def test_the_commit_checks_each_touched_row_against_its_instance() -> None:
     oracle = Oracle(lower_source(_cmd("j")))
     store = oracle.store
     store.begin_input()
-    store.move_flag("j", ICE_ON)
+    store.move_flag("j", "ice_on")
     with pytest.raises(StatechartError, match="'j': at the input's commit its instance") as e:
         store.commit_input()
     assert "ice_on" in str(e.value) and "ice_off" in str(e.value)

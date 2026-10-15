@@ -49,10 +49,6 @@ from typing import Any, ClassVar, Literal, NamedTuple, TypeGuard, cast, overload
 
 HITS_ENV = "DSL41_TRANSITION_HITS"
 STRICT_ENV = "DSL41_TRANSITION_STRICT"
-#: The start of every stderr line that reports a violation no trace line
-#: carries, so one journal pattern catches them all (deployment runbook,
-#: "What to watch").
-VIOLATION_LOG_PREFIX = "dsl41: transition violation"
 
 type Mark = Literal["spec-only", "unreachable"]
 
@@ -196,7 +192,7 @@ def well_formed[S: str](machine: StateMachine[S] | Statechart) -> list[str]:
     """The problems with a machine's declaration. An empty list means well formed.
 
     The machine name matches `[a-z][a-z_]*`, and every transition id is
-    `<machine name>.<two or three digits>`, such as `job_status.05`. A
+    `<machine name>.<two or three digits>`, such as `host.05`. A
     `Statechart` gets the checks of `chart_problems` instead.
     """
     if is_statechart(machine):
@@ -476,8 +472,10 @@ class Row:
     the prose of a row with no guard or action, which has no docstring to
     carry it; the generated table shows it in the action column (§14).
     `mark` is a table transition's mark on a row: "spec-only" for a contract
-    rule with no code yet. The coverage gate lists a marked row and its
-    guard's outcomes, never counts them, and fails when one is hit (§13).
+    rule with no code yet. The coverage gate lists a marked row, never counts
+    it, and fails when the row or its guard's true outcome is hit; the guard's
+    false outcome is the cell another row takes, neither required nor
+    forbidden (§13, DL-353).
     """
 
     id: str
@@ -843,7 +841,8 @@ def coverage_items(
 
     Required: every row and branch; both outcomes of every guard; a defer and a
     release for every state and event it defers. Forbidden: a false outcome
-    declared unreachable, and a marked row with its guard's outcomes.
+    declared unreachable, and a marked row with its guard's true outcome. A
+    marked row's false outcome is neither (DL-353).
     """
     required: list[tuple[str, str, str]] = []
     forbidden: list[tuple[str, str, str]] = []
@@ -852,7 +851,7 @@ def coverage_items(
         if row.mark is not None:
             forbidden.append(("row", row.id, ""))
             if row.guard:
-                forbidden += [("guard", row.id, "true"), ("guard", row.id, "false")]
+                forbidden.append(("guard", row.id, "true"))
     guarded = [(r.id, r.guard, r.false_unreachable) for r in rows]
     for choice in chart.choices:
         required += [("branch", b.id, "") for b in choice.branches]
