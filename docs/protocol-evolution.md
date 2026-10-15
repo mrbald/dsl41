@@ -123,13 +123,13 @@ of the document:
 
 - `period.py`'s `read_sentinel`;
 - `boundary.py`'s `EstateAnchor.read`, `EstateAnchor.read_claim`,
-  `read_candidate` and `read_staged_manifest`;
+  `read_candidate` and `read_staged_manifest`, whose `_read_artifact` also
+  applies `require_manifest_fields` to `staged_manifest.json` (DL-252);
 - `seal.py`'s `Seal.from_payload` (DL-227);
 - `period.py`'s `parse_sealed_preamble`, which the attestation and the
   archive receipt share;
 - `period.py`'s `read_period_manifest`, which requires every field of the
-  manifest, and `_read_artifact`, which applies the same check to
-  `staged_manifest.json` (`require_manifest_fields`, DL-252).
+  manifest (`require_manifest_fields`, DL-252).
 
 A third gate stands beside unknown and absent (DL-168): a field of the WRONG
 TYPE is refused, never coerced. **A closed artifact or staged identity is
@@ -360,8 +360,8 @@ find.
 **DL-138 is the first use of this clause. Once production exists, it is the
 last.** An entry that uses the clause must state the condition it claims, so
 a later reader can check the claim rather than infer it. DL-138 states both
-halves (§8): no dsl41 estate existed in production, so no instance of any of
-the seven retired dialects could exist anywhere.
+halves (§8): no dsl41 estate existed in production on 2026-08-21, so no
+instance of any of the seven retired dialects could exist anywhere.
 
 A reset makes pre-reset roots unreadable. That is its cost, and the entry
 that takes it states it.
@@ -393,7 +393,7 @@ The rules:
 A **registry** is the form a tombstone takes when the discriminator has many
 values (DL-150): a table beside the reader, one row per retired value. When
 the discriminator has two values, such as a boolean field whose one legal
-value is now `false`, the refusal lives in that field's validator and no
+value is `false`, the refusal lives in that field's validator and no
 table is built. A table with one row is a table nobody consults. The four
 rules above still apply: the message names the value and its entry, and the
 malformed case keeps its own distinct error.
@@ -420,18 +420,18 @@ is not a construction.
 
 ## 8. The first executed retirement
 
-DL-138 retired seven dialects at once, under the reset clause of §5
-(DL-150).
+DL-138 retires seven dialects, under the reset clause of §5 (DL-150).
+§5 records the condition DL-138 states.
 
 | dialect | row | replaced by |
 | --- | --- | --- |
 | the `header` journal record | WAL | `segment` (`docs/period-model.md` §2.1) |
 | the `result` record | WAL | `decision` (`docs/period-model.md` §2.3) |
 | the standalone `effect` record | WAL | the `effects` list nested in `decision` (`docs/period-model.md` §2.3) |
-| `legacy_batch: true` on a `decision` | WAL | nothing. It marked a batch folded from a legacy estate's separate fsyncs, and the folding path was removed with the estate-adoption path. The field stays, required and `false` (`docs/period-model.md` §2.3) |
+| `legacy_batch: true` on a `decision` | WAL | nothing. The value marks a batch folded from a legacy estate's separate fsyncs, and no path folds one. The field stays, required and `false` (`docs/period-model.md` §2.3) |
 | `catalog_hash` version 1 | WAL, and the closed artifacts that carry the field: the seal, the period manifest, `staged_manifest.json` and `candidate.json` | version 2 (`docs/concurrency-model.md` §7) |
 | the `manifest/` run-root layout | closed artifacts | `catalogs/<bundle>/` + `periods/<id>/` (`docs/period-model.md` §1.1) |
-| the `adopting` lineage head state | closed artifacts | nothing. The estate-adoption path was removed with it |
+| the `adopting` lineage head state | closed artifacts | nothing: no path adopts an estate |
 
 Each is refused by name, and each refusal names DL-138. Four sit in an
 owner-local registry: the retired record kinds, the retired `catalog_hash`
@@ -439,7 +439,3 @@ recipe, the retired head state and the retired layout. `legacy_batch: true`
 is refused in the same record validator as the kinds, with no registry of
 its own: it is one value of one field of one record, and a registry with a
 single row is a table nobody consults.
-
-DL-138 states the condition the clause requires: no dsl41 estate existed in
-production on 2026-08-21, so no instance of any of the seven could exist
-anywhere.
