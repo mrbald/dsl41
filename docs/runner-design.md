@@ -234,7 +234,11 @@ vendor corner, pinned here — E5). The command runs in its own pgid
 engine to read it. Cancel (the oracle said terminal, §4): the engine
 signals the command pgid SIGTERM, grace, then SIGKILL. The wrapper
 observes the deaths and durably records the outcome like any other
-completion. When `std_out_file` / `std_err_file` are set, stdout/stderr
+completion. A cancel before the spec is handed over SIGKILLs the
+wrapper, which has launched nothing. A cancel during a detached SPAWN,
+its duplicate check included, sends the supervisor kill unless a
+detach-stop is under way (DL-SMALL2).
+When `std_out_file` / `std_err_file` are set, stdout/stderr
 **append** to them (the vendor appends). Otherwise they append to
 `<run_root>/logs/<job>.<run_number>.{out,err}`. Whether the engine
 unescapes `\:` inside command/std_* values is the DL-39 [?]. Verbatim

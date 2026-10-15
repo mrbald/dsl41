@@ -34,11 +34,12 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 import pytest
 from supervisor_list_doubles import stub_listing, stub_row
-from test_runner_supervisor import wait_reaped
+from test_runner_supervisor import start_supervisor, teardown_supervisor, wait_for, wait_reaped
 
 from dsl41 import runner_procid as _procid
 from dsl41.ir import JobIR, lower_source
@@ -48,6 +49,7 @@ from dsl41.runner_startup import start_run
 from dsl41.runner_adapters import (
     AdapterContext,
     AdapterResult,
+    DetachSignal,
     Failed,
     FileWatcherAdapter,
     LocalCommandAdapter,
@@ -56,6 +58,7 @@ from dsl41.runner_adapters import (
     SupervisorListReply,
     SupervisorListSuccess,
     Terminated,
+    _build_run_spec,
     spool_names_run,
 )
 from dsl41.runner_clock import EngineError, RealClock, VirtualClock
@@ -422,6 +425,241 @@ def test_killjob_mid_run_terminates_and_no_completion_overwrites_it(tmp_path: Pa
     status = json.loads((run_root / "runs" / "kj.1" / "status.json").read_text())
     assert status["outcome"] == "signaled"
     assert status["signal"] == signal.SIGTERM
+
+
+def test_dl356_a_kill_before_the_adapter_first_runs_spawns_nothing(tmp_path: Path) -> None:
+    """A cancel that lands before the adapter task's first step never enters
+    `run`: no run directory, no wrapper, nothing for a kill step to stop.
+    This is the window a loop stall opens between STARTJOB's admission and
+    the task's first step (DL-356)."""
+    job = lower_source("insert_job: j\njob_type: c\ncommand: sleep 30\n").jobs["j"]
+    ctx = AdapterContext(clock=RealClock(), run_root=tmp_path, run_id="rid-early")
+
+    async def scenario() -> None:
+        task = asyncio.create_task(LocalCommandAdapter().run(job, 1, ctx))
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    assert not (tmp_path / "runs").exists()
+
+
+def test_dl356_a_kill_before_the_spec_is_handed_over_prevents_the_launch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A cancel that lands while the adapter writes the wrapper's spec must
+    stop the wrapper before it can launch the command. The wrapper launches
+    only after it reads its spec to EOF, and EOF comes only when the adapter
+    closes stdin, so a wrapper killed before that close never launches.
+    Left alone, the wrapper waits on stdin past the cancelled start, and it
+    launches the command whenever the engine's end of the pipe closes.
+
+    `drain` is the one await on this stretch. It suspends for real only when
+    the spec overfills the pipe buffer, so the test holds it open instead."""
+    job = lower_source("insert_job: j\njob_type: c\ncommand: sleep 30\n").jobs["j"]
+    ctx = AdapterContext(clock=RealClock(), run_root=tmp_path, run_id="rid-drain")
+    run_dir = tmp_path / "runs" / "j.1"
+    procs: list[asyncio.subprocess.Process] = []
+    real_exec = asyncio.create_subprocess_exec
+
+    async def recording_exec(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+        proc = await real_exec(*args, **kwargs)
+        procs.append(proc)
+        return proc
+
+    async def scenario() -> None:
+        in_drain = asyncio.Event()
+
+        async def held_drain(self: asyncio.StreamWriter) -> None:
+            in_drain.set()
+            await asyncio.get_running_loop().create_future()  # only a cancel ends it
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", recording_exec)
+        monkeypatch.setattr(asyncio.StreamWriter, "drain", held_drain)
+        task = asyncio.create_task(LocalCommandAdapter(grace_seconds=1.0).run(job, 1, ctx))
+        try:
+            await asyncio.wait_for(in_drain.wait(), timeout=20.0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=20.0)
+            (proc,) = procs
+            assert proc.returncode == -signal.SIGKILL, "the wrapper outlived the cancelled start"
+            # after the reap: killed before EOF, it never recorded a launch
+            assert not (run_dir / "spawn.json").exists()
+        finally:
+            # a red run leaves the wrapper waiting on stdin; reap it here
+            for proc in procs:
+                if proc.returncode is None:
+                    proc.kill()
+                    await proc.wait()
+
+    asyncio.run(scenario())
+
+
+def _cancel_in_a_detached_spawn(
+    run_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    run_id: str,
+    held: Callable[[dict[str, Any]], bool],
+    *,
+    stopping: bool = False,
+    respawn: bool = False,
+) -> bool:
+    """Run a detached CMD start against a real supervisor, hold the first
+    reply line `held` names on the client's reader, and cancel the adapter
+    while that reply is in flight. The cancel lands in the request's own wait,
+    so the cancelled request poisons its connection, as a real one does
+    (DL-48). `respawn` sends the same SPAWN once first, as a resume that
+    re-drives an applied SPAWN does, so the adapter's SPAWN is a duplicate.
+    Returns whether the run's exit future was left registered."""
+    job = lower_source("insert_job: j\njob_type: c\ncommand: sleep 30\n").jobs["j"]
+    real_readline = asyncio.StreamReader.readline
+    armed = False
+    reply_held = asyncio.Event()
+
+    async def holding_readline(self: asyncio.StreamReader) -> bytes:
+        line = await real_readline(self)
+        if armed and not reply_held.is_set() and line.strip() and held(json.loads(line)):
+            reply_held.set()
+            await asyncio.get_running_loop().create_future()  # the reply never lands
+        return line
+
+    async def scenario() -> bool:
+        nonlocal armed
+        # patched before the connection exists: its reader is already parked
+        # inside `readline` once connected
+        monkeypatch.setattr(asyncio.StreamReader, "readline", holding_readline)
+        client = SupervisorClient(run_root)
+        await client.ensure_running()
+        await client.acquire()
+        detach = DetachSignal()
+        ctx = AdapterContext(clock=RealClock(), run_root=run_root, run_id=run_id, detach=detach)
+        if respawn:
+            _, spec = _build_run_spec(job, 1, ctx, grace_seconds=1.0, create_run_dir=False)
+            await client.spawn(spec)
+        armed = True
+        adapter = SupervisedCommandAdapter(client, grace_seconds=1.0)
+        task = asyncio.create_task(adapter.run(job, 1, ctx))
+        try:
+            await asyncio.wait_for(reply_held.wait(), timeout=20.0)
+            detach.stopping = stopping
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=20.0)
+            return run_id in client._exit_futures
+        finally:
+            if not task.done():
+                task.cancel()
+            await client.close()
+
+    return asyncio.run(scenario())
+
+
+def _assert_killed_by_the_adapter(run_dir: Path) -> None:
+    # the supervisor did launch the command; its wrapper records that a
+    # moment after the fork, so a run with no kill can lag the task
+    wait_for(lambda: (run_dir / "spawn.json").exists())
+    # the kill returns on the exit push, which follows the status record
+    assert (run_dir / "status.json").exists(), "the command outlived the cancelled start"
+    status = json.loads((run_dir / "status.json").read_text())
+    assert status["outcome"] == "signaled", status
+    assert status["signal"] == signal.SIGTERM
+
+
+@pytest.mark.parametrize("stopping", [False, True], ids=["oracle_kill", "detach_stop"])
+def test_dl356_a_kill_during_a_detached_spawn_kills_what_the_supervisor_spawned(
+    short_root: Path, monkeypatch, stopping: bool
+) -> None:
+    """The detached analogue: the supervisor forks the wrapper and answers
+    SPAWN, and the kill lands while that reply is still in flight. The
+    adapter must still send the kill: the supervisor, not the engine, holds
+    this wrapper's lifeline, so nothing else would stop the command. A
+    detach-stop in the same window signals nothing (ss3 case b) and leaves no
+    exit wait behind."""
+    rid = str(uuid.uuid4())  # the supervisor admits a UUID run_id only
+    run_dir = short_root / "runs" / "j.1"
+
+    def spawn_reply(obj: dict[str, Any]) -> bool:
+        return obj.get("run_id") == rid and "spawned_at" in obj and not obj.get("push")
+
+    supervisor = start_supervisor(short_root)
+    try:
+        left = _cancel_in_a_detached_spawn(
+            short_root, monkeypatch, rid, spawn_reply, stopping=stopping
+        )
+        if stopping:
+            wait_for(lambda: (run_dir / "spawn.json").exists())
+            # the job runs on under the supervisor; teardown stops it
+            assert not (run_dir / "status.json").exists()
+        else:
+            _assert_killed_by_the_adapter(run_dir)
+        assert not left
+    finally:
+        teardown_supervisor(short_root, supervisor)
+
+
+def test_dl356_a_kill_during_a_duplicate_spawns_list_kills_the_live_run(
+    short_root: Path, monkeypatch
+) -> None:
+    """Resume re-drives a SPAWN whose wrapper the supervisor already forked:
+    ss11a answers `duplicate`, and the adapter asks LIST whether the run is
+    alive. A kill that lands during that LIST must still reach the run."""
+    rid = str(uuid.uuid4())
+    supervisor = start_supervisor(short_root)
+    try:
+        left = _cancel_in_a_detached_spawn(
+            short_root, monkeypatch, rid, lambda obj: "runs" in obj, respawn=True
+        )
+        _assert_killed_by_the_adapter(short_root / "runs" / "j.1")
+        assert not left
+    finally:
+        teardown_supervisor(short_root, supervisor)
+
+
+def test_dl356_a_kill_before_the_spawn_left_ends_on_unknown_run(
+    short_root: Path, monkeypatch
+) -> None:
+    """A kill that lands before the SPAWN request is written finds no run.
+    `unknown_run` is final in this window, so the kill ends there instead of
+    waiting out two graces (here 30 s each) for a push no run will send."""
+    rid = str(uuid.uuid4())
+    job = lower_source("insert_job: j\njob_type: c\ncommand: sleep 30\n").jobs["j"]
+    supervisor = start_supervisor(short_root)
+    try:
+
+        async def scenario() -> bool:
+            client = SupervisorClient(short_root)
+            await client.ensure_running()
+            await client.acquire()
+            real_ensure = client._ensure_connected
+            parked = asyncio.Event()
+
+            async def park_once() -> None:
+                if not parked.is_set():
+                    parked.set()  # the SPAWN's request stops before its write
+                    await asyncio.get_running_loop().create_future()
+                await real_ensure()
+
+            monkeypatch.setattr(client, "_ensure_connected", park_once)
+            adapter = SupervisedCommandAdapter(client, grace_seconds=30.0)
+            ctx = AdapterContext(clock=RealClock(), run_root=short_root, run_id=rid)
+            task = asyncio.create_task(adapter.run(job, 1, ctx))
+            try:
+                await asyncio.wait_for(parked.wait(), timeout=20.0)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, timeout=10.0)  # under one grace
+                return rid in client._exit_futures
+            finally:
+                if not task.done():
+                    task.cancel()
+                await client.close()
+
+        assert not asyncio.run(scenario())
+        assert not (short_root / "runs" / "j.1").exists()  # nothing reached the host
+    finally:
+        teardown_supervisor(short_root, supervisor)
 
 
 # --------------------------------------------- 3. FileWatcherAdapter (virtual)

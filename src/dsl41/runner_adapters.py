@@ -459,9 +459,10 @@ class LocalCommandAdapter:
     Cancellation (the oracle said terminal): verify the recorded command
     (pid, start-time), SIGTERM the command pgid, grace, SIGKILL; the
     wrapper observes the deaths and records the outcome durably; the
-    cancelled adapter never reports. The lifeline write end lives in this
-    process ONLY and is closed in a finally: engine death EOFs every
-    wrapper (tethered semantics, ss6a)."""
+    cancelled adapter never reports. A cancel before the spec reaches the
+    wrapper SIGKILLs the wrapper instead: it has launched nothing yet. The
+    lifeline write end lives in this process ONLY and is closed in a
+    finally: engine death EOFs every wrapper (tethered semantics, ss6a)."""
 
     def __init__(self, *, grace_seconds: float = CMD_GRACE_S) -> None:
         self.grace_seconds = grace_seconds
@@ -494,6 +495,9 @@ class LocalCommandAdapter:
                 # construction: it spawns only after the full spec parses)
                 await proc.wait()
                 return Failed(f"wrapper spawn failed: {exc}")
+            except asyncio.CancelledError:
+                await self._stop_unlaunched(proc)
+                raise
             try:
                 if ctx.journal is not None:
                     ctx.journal.dispatch(
@@ -521,6 +525,21 @@ class LocalCommandAdapter:
             return outcome_from_status(_named(status, str(spec["run_id"]), job_ir.name, run_number))
         finally:
             os.close(lifeline_w)
+
+    @staticmethod
+    async def _stop_unlaunched(proc: asyncio.subprocess.Process) -> None:
+        """A kill that lands before the spec reached the wrapper (DL-356):
+        SIGKILL the wrapper so it never launches the command. It launches
+        only after reading its spec to EOF, and EOF needs the stdin close
+        this path has not reached, so the wrapper has launched nothing and
+        has nothing to record. Left alone, it would wait on stdin past the
+        cancelled start and launch whenever this end of the pipe closed.
+        A cancel inside `create_subprocess_exec` gets the same treatment
+        from asyncio itself, and one before the task's first step spawns
+        nothing."""
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        await proc.wait()
 
     async def _kill(self, run_dir: Path, proc: asyncio.subprocess.Process, run_id: str) -> None:
         """The oracle decided terminal: signal the command pgid (never the
@@ -2251,8 +2270,11 @@ class SupervisedCommandAdapter:
             run_id = spec["run_id"]
             self.client.exit_future(run_id)  # register BEFORE spawn so no push is missed
             reply: dict[str, Any] = {}
+            listed_dead = False
             try:
                 reply = await self.client.spawn(spec)
+                recheck = bool(reply.get("duplicate"))
+                listed_dead = recheck and not await self._listed_alive(run_id)
             except SpawnInProgress:
                 # ss11a: the wrapper for THIS run_id is already forked. There is
                 # nothing to spawn and nothing to fail -- await its outcome like
@@ -2261,8 +2283,17 @@ class SupervisedCommandAdapter:
             except SupervisorUnavailable as exc:
                 self.client.forget_exit(run_id)
                 return Failed(f"wrapper spawn failed: {exc}")
-            recheck = bool(reply.get("duplicate"))
-            if recheck and not await self._listed_alive(run_id):
+            except asyncio.CancelledError:
+                # DL-356: the supervisor may have forked the wrapper, with its
+                # reply still in flight or a duplicate's LIST pending. It holds
+                # the lifeline, so no EOF stops the command: the kill must go
+                # out, or the command outlives the row.
+                if ctx.detach is not None and ctx.detach.stopping:
+                    self.client.forget_exit(run_id)
+                    raise  # ss3 case b: whatever was spawned continues
+                await self.kill(run_id)
+                raise
+            if listed_dead:
                 # ss11a answered from the DIRECTORY, and nothing is alive to
                 # push an exit or write a record: awaiting would poll forever
                 # for a file no process will produce (the reply survived a
@@ -2423,16 +2454,16 @@ class SupervisedCommandAdapter:
 
     async def _signal_when_addressable(
         self, run_id: str, sig: str, fut: "asyncio.Future[dict[str, Any]]"
-    ) -> None:
+    ) -> dict[str, Any]:
         """SIGNAL, retrying while the supervisor answers `not_ready`. Gives up
         the moment the run reports its exit -- a completed run needs no
         signal -- and after the spawn window, which is loud rather than a
-        silent drop."""
+        silent drop. Returns the last answer."""
         deadline = time.monotonic() + self._SPAWN_WINDOW_S
         while True:
             resp = await self.client.signal(run_id, sig)
             if resp.get("error") != "not_ready":
-                return
+                return resp
             if fut.done() or time.monotonic() >= deadline:
                 print(
                     f"dsl41: {sig} for run {run_id} never became addressable"
@@ -2440,7 +2471,7 @@ class SupervisedCommandAdapter:
                     " the backstop",
                     file=sys.stderr,
                 )
-                return
+                return resp
             await asyncio.sleep(self._SPAWN_POLL_S)
 
     async def kill(self, run_id: str) -> None:
@@ -2449,6 +2480,12 @@ class SupervisedCommandAdapter:
         the cancelled adapter itself never reports (the oracle already emitted
         the terminal).
 
+        An `unknown_run` answer to TERM ends the ladder: the supervisor holds
+        no such run, so no push can come. It is final even in the SPAWN
+        window. A SPAWN cancelled mid-request poisoned its connection, and the
+        reconnect's re-ACQUIRE minted a new token before this SIGNAL went out,
+        so a late SPAWN is refused `stale_token` (DL-356).
+
         Public because resume drives it directly (DL-96): a recorded kill met
         at resume has a live wrapper but no adapter task to cancel, and
         creating one only to cancel it would not work -- a task cancelled
@@ -2456,9 +2493,11 @@ class SupervisedCommandAdapter:
         fut = self.client.exit_future(run_id)
         try:
             try:
-                await self._signal_when_addressable(run_id, "TERM", fut)
+                answer = await self._signal_when_addressable(run_id, "TERM", fut)
             except SupervisorUnavailable:
                 return  # supervisor gone: the wrapper's own lifeline handles it
+            if answer.get("error") == "unknown_run":
+                return  # nothing this supervisor holds can push for it
             try:
                 await asyncio.wait_for(asyncio.shield(fut), timeout=self.grace_seconds)
             except (TimeoutError, asyncio.TimeoutError):
@@ -2617,11 +2656,14 @@ async def resolve_spool(
                 # must not outlive the record (DL-226).
                 _procid.killpg_quiet(command_pgid, signal.SIGTERM)
                 deadline = time.monotonic() + grace_seconds
-                while time.monotonic() < deadline:
-                    if not _procid.verify_alive(command_pid, command_token):
-                        break
-                    await asyncio.sleep(0.1)
-                _procid.killpg_quiet(command_pgid, signal.SIGKILL)
+                try:
+                    while time.monotonic() < deadline:
+                        if not _procid.verify_alive(command_pid, command_token):
+                            break
+                        await asyncio.sleep(0.1)
+                finally:
+                    # a cancel in the grace still ends the group (DL-356)
+                    _procid.killpg_quiet(command_pgid, signal.SIGKILL)
                 return Terminated("wrapper lost; killed at resume"), None
     if status is not None:
         ended_at = status.get("ended_at")
