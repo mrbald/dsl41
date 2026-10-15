@@ -23194,3 +23194,15 @@ relitigate an entry; append a new one.
   REVIEW. Semantic class, a frozen contract's text: one Opus reviewer and one Fable pass; each
   re-ran the cap's bench and found it as claimed. Their findings were text but one, a cast the Fable
   pass turned into a raise. Two rounds; findings confirmed by the reviewer that raised them.
+- DL-357 The lifeline pipe is the wrapper's only parent-death guard
+  (2026-10-15; docs/runner-design.md §6a; tests/test_supervisor_branches.py)
+  DL-41a item (3) named `PR_SET_PDEATHSIG` as a Linux second guard beside the lifeline; it was never
+  built. The lifeline covers every supported setup: the parent holds the pipe's only write end, any
+  parent death closes it, and the wrapper acts on the EOF. The second guard is dropped from the
+  design: it would cover only a leaked write end, at the cost of a handled signal, a `prctl` call
+  and the spawner's pid in the wrapper. Tests hold the write end in one process:
+  test_lifeline_write_end_leaks_nowhere (a test spawner), test_sigkill_engine_midrun_then_resume
+  (the engine's adapter) and test_supervisor_spawn_keeps_each_lifeline_write_end_in_one_process (the
+  supervisor, new; it fails when the write end is made inheritable). runner-design.md §6a states the
+  lifeline alone. The owner ruled it after the spec review of runner-design found the gap; one Opus
+  reviewer.
