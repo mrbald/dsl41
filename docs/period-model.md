@@ -3149,6 +3149,7 @@ Where the period model lives outside this document:
 | `deployment-runbook.md` §2a | the archive is an operator verb with an order in front of it: attest, prune tombstones, then archive; and it cannot be undone |
 | `citation-index.md` | the `PR-\d{2}[a-z]?` row, and a `PR-Q\d` row for §16's open questions (DL-135); the PR row states what a retired row cites (DL-138) |
 | `CLAUDE.md` | read-first list |
+| `estate.py`'s roll | (DL-358) PR-01's loser names the holder of the claim it met: a roll that meets another root's `claimed` head refuses with `claimed(claim_id, target_root)` |
 
 ## 16. Open questions
 

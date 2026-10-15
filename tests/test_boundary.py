@@ -561,13 +561,6 @@ def test_pr01_an_in_place_opener_meeting_a_roots_claim_names_it_and_appends_noth
     _assert_one_successor(anchor_dir, root_a, root_b)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="PR-01, period-model ss1.3: 'A different claim_id against the same seal_digest"
-    " refuses and names the holder.' A physical-roll loser's refusal names neither the"
-    " holder's root nor its claim; a src defect pending its own fix",
-)
 @pytest.mark.parametrize("loser", ["roll_meets_claim", "roll_meets_held_lock"])
 def test_pr01_a_roll_loser_names_the_holder(tmp_path: Path, loser: str) -> None:
     """PR-01's "names the holder" for a physical-roll loser the CAS does

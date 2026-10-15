@@ -803,9 +803,9 @@ uv run dsl41 run --open-from $R.anchor --run-root <run>/engine-p2b \
 ```
 
 ```
-the head is claimed and this root does not hold it: a physical roll opens the
-period a committed seal left unopened, or resumes its own claim, and nothing
-else (period-model ss7)
+the head is claimed and this root does not hold it (claimed(<claim_id>, <gone>)):
+a physical roll opens the period a committed seal left unopened, or resumes its
+own claim, and nothing else (period-model ss7)
 ```
 
 3. Prove the claimant is gone. Nothing in the tool can do this for you: a
