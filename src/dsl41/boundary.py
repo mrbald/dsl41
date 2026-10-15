@@ -1128,7 +1128,7 @@ class EstateAnchor:
         move.post(
             move.head,
             {
-                "head_not_claimed": f"{self.path}: the head is {_spell(head)}, not a claim --"
+                "head_not_claimed": f"{self.path}: the head is {spell_head(head)}, not a claim --"
                 " there is nothing to reclaim, and this verb never moves a head that is"
                 " doing its job (period-model ss1.3)"
             },
@@ -1276,7 +1276,7 @@ class EstateAnchor:
             return anchor
         cannot = (
             f"{self.path}: cannot close period {period_id}: the head is"
-            f" {_spell(head)} (period-model ss1.3)"
+            f" {spell_head(head)} (period-model ss1.3)"
         )
         if isinstance(head, OpenHead) and head.period_id != period_id:
             raise EngineError(cannot)
@@ -1335,7 +1335,7 @@ class EstateAnchor:
                 return claim
         cannot = (
             f"{self.path}: cannot claim the successor of {seal_digest}: the head is"
-            f" {_spell(head)} (period-model ss1.3)"
+            f" {spell_head(head)} (period-model ss1.3)"
         )
         if isinstance(head, ClosedHead) and head.seal_digest != seal_digest:
             raise EngineError(cannot)
@@ -1379,7 +1379,7 @@ class EstateAnchor:
             return anchor  # the crash was after this very write
         cannot = (
             f"{self.path}: cannot open period {period_id} under claim {claim_id}:"
-            f" the head is {_spell(head)} (period-model ss1.3)"
+            f" the head is {spell_head(head)} (period-model ss1.3)"
         )
         if isinstance(head, ClaimedHead) and head.claim_id != claim_id:
             raise EngineError(cannot)
@@ -1420,7 +1420,9 @@ class EstateAnchor:
         return anchor
 
 
-def _spell(head: OpenHead | ClosedHead | ClaimedHead) -> str:
+def spell_head(head: OpenHead | ClosedHead | ClaimedHead) -> str:
+    """A head as a refusal names it: its state and what it carries, so a
+    `claimed` head names the claim and the root that holds it (PR-01)."""
     if isinstance(head, OpenHead):
         return f"open(period {head.period_id}, {head.root})"
     if isinstance(head, ClosedHead):
@@ -1449,7 +1451,7 @@ def _check_head_state(path: Path, payload: Mapping[str, Any]) -> None:
 def _holder_of(anchor: Anchor | None) -> str:
     if anchor is None:
         return "nobody"
-    return f"estate {anchor.estate_id}, head {_spell(anchor.head)}"
+    return f"estate {anchor.estate_id}, head {spell_head(anchor.head)}"
 
 
 # --------------------------------------------------- the estate-wide walk
@@ -3481,7 +3483,7 @@ def require_resume_root(anchor: Anchor, *, anchor_path: Path, run_root: Path) ->
         return
     raise RootAuthorityError(
         f"{anchor_path}: this anchor does not hold period {period} for {here} -- no"
-        f" registry row names period {period}, and the head is {_spell(head)}, not a"
+        f" registry row names period {period}, and the head is {spell_head(head)}, not a"
         " claim by this root." + _ROOT_REFUSAL_TAIL
     )
 

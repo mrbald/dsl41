@@ -23206,3 +23206,21 @@ relitigate an entry; append a new one.
   supervisor, new; it fails when the write end is made inheritable). runner-design.md §6a states the
   lifeline alone. The owner ruled it after the spec review of runner-design found the gap; one Opus
   reviewer.
+- DL-358 A roll that meets another root's claim names the claim's holder
+  (2026-10-15; src/dsl41/estate.py, src/dsl41/boundary.py; tests/test_boundary.py;
+  docs/period-model.md §15; examples/nightbank/RUNBOOK.md)
+  PR-01 (period-model §13, from §1.3's "a different `claim_id` against the same `seal_digest`
+  refuses and names the holder", DL-114, DL-116) says the loser of two roots claiming one seal
+  refuses and names the holder. The holder is the holder of the claim, `claimed(claim_id,
+  target_root)`. A compare-and-swap race named it; a roll that met an already-held claim refused
+  with the head's state only, though it held the claim's id and target root. It now appends the
+  head as the boundary spells it, so the refusal names the holder; its class, code and opening
+  words are unchanged. A loser at the held lineage lock met no claim, so PR-01 does not bind it;
+  its test asserts the refusal and that nothing is appended or dispatched. The boundary's head
+  speller is public (`spell_head`), one wording for both modules. Goldens replay unchanged and
+  STATE_MACHINE_VERSION stays 23 (DL-235): only a refusal's text changes, and no accepted input's
+  state does. Two gaps stay open: the anchor lock names no holder, and the roll's pre-lock refusal
+  has no check under the lock.
+  REVIEW. Semantic class: one Opus reviewer and one Fable pass, two rounds; the advisor's ruling on
+  PR-01's reading came first, after the period-model §13 slice pinned the defect. The nightbank
+  runbook's exercise shows the new refusal.

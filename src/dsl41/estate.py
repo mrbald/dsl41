@@ -47,6 +47,7 @@ from dsl41.boundary import (
     open_next_period,
     read_seal,
     seal_path,
+    spell_head,
 )
 from dsl41.ir import CatalogIR
 from dsl41.period import (
@@ -279,9 +280,9 @@ def _roll_source(stored: Anchor, anchor: EstateAnchor, new_root: Path) -> tuple[
             )
         return Path(row.root), closing, claim.prev_seal_digest
     raise EngineError(
-        f"{anchor.path}: the head is {head.state} and this root does not hold it:"
-        " a physical roll opens the period a committed seal left unopened, or resumes"
-        " its own claim, and nothing else (period-model ss7)"
+        f"{anchor.path}: the head is {head.state} and this root does not hold it"
+        f" ({spell_head(head)}): a physical roll opens the period a committed seal"
+        " left unopened, or resumes its own claim, and nothing else (period-model ss7)"
     )
 
 
