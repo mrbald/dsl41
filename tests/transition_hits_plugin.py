@@ -1,10 +1,16 @@
 """Pytest plugin: record state-machine transition hits for the whole session.
 
-At session start it makes a temp directory and sets `DSL41_TRANSITION_HITS` to
-it and `DSL41_TRANSITION_STRICT=1`, so subprocesses inherit both. At session
+At configure time it makes a temp directory and sets `DSL41_TRANSITION_HITS`
+to it and `DSL41_TRANSITION_STRICT=1`, so subprocesses inherit both. At session
 finish it merges every per-pid file into `.transition-hits.json` at the
 repository root, and fails the session when a violation was recorded.
 `scripts/transition_coverage.py` reads that file.
+
+Under pytest-xdist the controller owns the directory and the report. Its
+`pytest_configure` runs before xdist starts the workers in its session start,
+so every worker inherits the directory and writes its per-pid files there.
+A worker does nothing in either hook: if it did, each worker would remove the
+report and the controller, which runs no tests, would write it last and empty.
 
 A test that triggers a violation on purpose points `DSL41_TRANSITION_HITS` at
 its own `tmp_path` with `monkeypatch`, so the violation stays out of the session.
@@ -83,8 +89,16 @@ def write_report(path: Path, hits: list[dict[str, str]], violations: list[dict[s
         raise
 
 
-def pytest_sessionstart(session: pytest.Session) -> None:
+def _is_worker(config: pytest.Config) -> bool:
+    """True in a pytest-xdist worker, which has `workerinput`; the controller
+    and a serial run do not."""
+    return getattr(config, "workerinput", None) is not None
+
+
+def pytest_configure(config: pytest.Config) -> None:
     global _directory
+    if _is_worker(config):
+        return
     # a file left by a killed run must never satisfy the gate
     HITS_FILE.unlink(missing_ok=True)
     _directory = tempfile.mkdtemp(prefix="dsl41-hits-")
@@ -92,8 +106,23 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     os.environ[STRICT_ENV] = "1"
 
 
+def pytest_unconfigure(config: pytest.Config) -> None:
+    """Undo a configure that no session finished: `pytest --help` and
+    `--markers` configure without a session, and a session that failed to
+    start never finishes. The directory goes and the env is cleared."""
+    global _directory
+    if _is_worker(config) or _directory is None:
+        return
+    directory, _directory = _directory, None
+    os.environ.pop(HITS_ENV, None)
+    os.environ.pop(STRICT_ENV, None)
+    shutil.rmtree(directory, ignore_errors=True)
+
+
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     global _directory
+    if _is_worker(session.config):
+        return
     directory, _directory = _directory, None
     os.environ.pop(HITS_ENV, None)
     os.environ.pop(STRICT_ENV, None)

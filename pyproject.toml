@@ -47,6 +47,10 @@ dev = [
     # pytest floor = 8.2, the release that took `reason=` on importorskip
     # (tests/test_viz_explore_browser.py explains its skip with one).
     "pytest>=8.2",
+    # the gate commands run the suite in four workers, one file per worker
+    # (`-n 4 --dist loadfile`, docs/agent-workflow.md); floor = the version
+    # the parallel suite was measured with
+    "pytest-xdist>=3.8",
     "hypothesis>=6",
     # branch coverage over the concurrency tier, enforced at 100% ([tool.
     # coverage.report] says which modules and why). `[toml]` extra so the

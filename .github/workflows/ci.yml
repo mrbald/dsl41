@@ -29,7 +29,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -57,7 +57,11 @@ jobs:
       # `coverage` job below, on 3.14 only, where it is nearly free; below
       # 3.14 the same measurement costs 2-3x on this suite (no sys.monitoring
       # branch support), for a gate this leg does not need to also pay for.
-      - run: uv run pytest -q
+      # DL-354: four pytest-xdist workers, one test file each at a time. The
+      # count is pinned, never `auto`, so the runs that accepted it describe
+      # the configuration that runs; the plugin's controller merges the
+      # workers' transition hits.
+      - run: uv run pytest -q -n 4 --dist loadfile
 
   # DL-351: the oracle the engine builds reproduces its golden digests
   # over the whole harness sample. Its own job, beside the test legs, so their timeout does not carry it; the
@@ -82,7 +86,7 @@ jobs:
   # what fails the build.
   coverage:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
@@ -115,7 +119,9 @@ jobs:
       # The erase mirrors docs/agent-workflow.md. A fresh checkout has no
       # data files, so here it does nothing.
       - run: uv run coverage erase
-      - run: uv run coverage run -m pytest -q
+      # DL-354: the same four workers as the test legs; `patch = ["subprocess"]`
+      # measures each worker, and `coverage combine` merges their data files.
+      - run: uv run coverage run -m pytest -q -n 4 --dist loadfile
       - run: uv run coverage combine
       - run: uv run coverage report
       - run: uv run python scripts/branch_coverage.py

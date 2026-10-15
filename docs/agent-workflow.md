@@ -46,7 +46,7 @@ uv run ruff format --check src tests scripts examples
 uv run mypy src tests/uc_oracle.py
 uv run python scripts/arch_check.py
 uv run coverage erase
-uv run coverage run -m pytest -q
+uv run coverage run -m pytest -q -n 4 --dist loadfile
 uv run coverage combine
 uv run coverage report
 uv run python scripts/branch_coverage.py
@@ -60,7 +60,10 @@ type gate (DL-193).
 
 The erase comes first because parallel data files from an earlier run would
 merge into the next combine and could hide a branch the last run missed.
-The coverage invocation runs the full suite once.
+The coverage invocation runs the full suite once, in four pytest-xdist
+workers that each take whole test files (DL-354). The worker count is pinned
+at 4, never `auto`, so the run is the configuration CI measured. The flags live
+in the commands, not in `addopts`, so a run of one test stays one process.
 It also measures every Python subprocess the suite starts, the supervisor and
 the wrapper included (DL-265). Each process writes its own data file, so
 `coverage combine` must run before `coverage report`. A process that a test
@@ -72,6 +75,7 @@ The transition gate reads `.transition-hits.json`, which the test run writes at
 the repository root. It exits 1 when a declared row without a mark has no
 recorded hit, or when a marked row or its guard's true outcome was hit (the
 mark is stale). It must run after the pytest step of the same session.
+Under xdist the controller writes that file from every worker's hits.
 The golden replay runs the oracle over the whole harness sample, about a minute,
 and names the first run, entry and component that differ from
 `tests/oracle_goldens.txt`; CI runs it as its own `goldens` job (DL-351).

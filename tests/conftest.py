@@ -15,6 +15,17 @@ import pytest
 # records state-machine transition hits for scripts/transition_coverage.py
 pytest_plugins = ["transition_hits_plugin"]
 
+# A pytest-xdist worker shares the box with three others, so an example can
+# stall past hypothesis's 200 ms deadline and fail as Flaky when its replay does
+# not stall. The deadline is a speed check, not a correctness one; under a
+# worker it is off, and every other setting is unchanged. xdist sets the
+# variable before the worker loads this file.
+if os.environ.get("PYTEST_XDIST_WORKER"):
+    from hypothesis import settings
+
+    settings.register_profile("xdist-worker", deadline=None)
+    settings.load_profile("xdist-worker")
+
 
 @pytest.fixture(autouse=True)
 def _restore_recursion_limit():

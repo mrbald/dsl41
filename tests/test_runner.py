@@ -1289,7 +1289,12 @@ def test_dl137_row_none_the_real_domain_waits_for_an_input_not_yet_due() -> None
     to work only once its instant is due, DL-45) and the loop is not
     quiescent (the queue is not empty), so it waits on that instant, takes
     the input when it arrives, takes the completion the adapter enqueues,
-    and only then QUIESCEs -- real quiescence is no work AND none possible."""
+    and only then QUIESCEs -- real quiescence is no work AND none possible.
+
+    The input is queued at the loop's first choice, stamped 0.4s after the
+    `now` that choice reads. Stamped before the loop started, a stall of
+    0.4s before its first choice would make the input due and the first
+    choice an EVENT."""
     text = "insert_job: nw_real\njob_type: c\ncommand: x\nmachine: m1\n"
 
     async def scenario() -> None:
@@ -1297,9 +1302,18 @@ def test_dl137_row_none_the_real_domain_waits_for_an_input_not_yet_due() -> None
         adapter = FakeAdapter({("nw_real", 1): (0.0, 0)})
         engine = Engine(lower_source(text), clock=clock, adapters={"CMD": adapter, "FW": adapter})
         seen = _choices(engine)
-        at = clock.now() + timedelta(seconds=0.4)
-        engine.inject(Event(at=at, kind="STARTJOB", payload={"job": "nw_real"}))
-        await engine.run_until_quiescent(at + timedelta(seconds=5))
+        spy = engine._next_work
+        stamped: list[datetime] = []
+
+        def queue_then_choose(horizon: datetime, now: datetime) -> _Work:
+            if not stamped:
+                stamped.append(now + timedelta(seconds=0.4))
+                engine.inject(Event(at=stamped[0], kind="STARTJOB", payload={"job": "nw_real"}))
+            return spy(horizon, now)
+
+        engine._next_work = queue_then_choose  # type: ignore[method-assign]
+        await engine.run_until_quiescent(clock.now() + timedelta(seconds=10))
+        (at,) = stamped
 
         assert seen[0] == ("WAIT", at)
         assert seen[-1] == ("QUIESCE", None)

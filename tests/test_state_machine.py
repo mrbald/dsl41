@@ -7,7 +7,7 @@ import os
 import signal
 import subprocess
 import sys
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -330,8 +330,16 @@ def test_registered_machine_names_are_unique() -> None:
 
 
 @dataclass
+class _Config:
+    """A stub `pytest.Config`; a pytest-xdist worker's carries `workerinput`."""
+
+    workerinput: dict[str, Any] | None = None
+
+
+@dataclass
 class _Session:
     exitstatus: int = 0
+    config: _Config = field(default_factory=_Config)
 
 
 def _run_session(
@@ -344,7 +352,7 @@ def _run_session(
     monkeypatch.setenv(HITS_ENV, "outer")
     monkeypatch.setenv(STRICT_ENV, "outer")
     session = _Session(status)
-    plugin.pytest_sessionstart(session)  # type: ignore[arg-type]
+    plugin.pytest_configure(session.config)  # type: ignore[arg-type]
     directory = os.environ[HITS_ENV]
     assert Path(directory).is_dir() and os.environ[STRICT_ENV] == "1"
     take()
@@ -405,6 +413,31 @@ def test_finishing_a_session_that_never_started_writes_nothing(
     monkeypatch.setenv(STRICT_ENV, "outer")
     plugin.pytest_sessionfinish(_Session(), 0)  # type: ignore[arg-type]
     assert not (tmp_path / "report.json").exists()
+
+
+def test_a_worker_neither_starts_nor_finishes_the_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Under pytest-xdist the controller owns the directory and the report. A
+    worker keeps the directory it inherited, leaves the controller's report in
+    place, writes none of its own and leaves the session's status alone."""
+    report = tmp_path / "report.json"
+    report.write_text('{"hits": [], "violations": []}', encoding="utf-8")
+    monkeypatch.setattr(plugin, "HITS_FILE", report)
+    monkeypatch.setattr(plugin, "_directory", str(tmp_path))
+    monkeypatch.setenv(HITS_ENV, str(tmp_path))
+    monkeypatch.setenv(STRICT_ENV, "1")
+    worker = _Session(config=_Config(workerinput={"workerid": "gw0"}))
+    plugin.pytest_configure(worker.config)  # type: ignore[arg-type]
+    assert os.environ[HITS_ENV] == str(tmp_path) and report.exists()
+    with pytest.raises(TransitionError):
+        MACHINE.take(T_AB, "b", "b")
+    plugin.pytest_sessionfinish(worker, 0)  # type: ignore[arg-type]
+    plugin.pytest_unconfigure(worker.config)  # type: ignore[arg-type]
+    assert os.environ[HITS_ENV] == str(tmp_path) and os.environ[STRICT_ENV] == "1"
+    assert report.read_text(encoding="utf-8") == '{"hits": [], "violations": []}'
+    assert plugin._directory == str(tmp_path) and tmp_path.is_dir()
+    assert worker.exitstatus == 0
 
 
 def test_merge_dedupes_sorts_and_skips_a_torn_line(tmp_path: Path) -> None:
@@ -554,20 +587,38 @@ def test_a_non_object_violation_line_counts_as_a_violation(tmp_path: Path) -> No
     assert len(plugin.merge(tmp_path)[1]) == 1
 
 
-def test_session_start_removes_a_stale_report(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_configure_removes_a_stale_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     report = tmp_path / "report.json"
     report.write_text('{"hits": [], "violations": []}', encoding="utf-8")
     monkeypatch.setattr(plugin, "HITS_FILE", report)
     monkeypatch.setattr(plugin, "_directory", None)
     monkeypatch.setenv(HITS_ENV, "outer")
     monkeypatch.setenv(STRICT_ENV, "outer")
-    plugin.pytest_sessionstart(_Session())  # type: ignore[arg-type]
+    plugin.pytest_configure(_Config())  # type: ignore[arg-type]
     try:
         assert not report.exists()
     finally:
         plugin.pytest_sessionfinish(_Session(), 0)  # type: ignore[arg-type]
+
+
+def test_unconfigure_after_no_session_removes_the_directory_and_the_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`pytest --help` configures and starts no session: unconfigure removes
+    the directory and clears the env. After a finished session it does nothing."""
+    monkeypatch.setattr(plugin, "HITS_FILE", tmp_path / "report.json")
+    monkeypatch.setattr(plugin, "_directory", None)
+    monkeypatch.setenv(HITS_ENV, "outer")
+    monkeypatch.setenv(STRICT_ENV, "outer")
+    plugin.pytest_configure(_Config())  # type: ignore[arg-type]
+    directory = os.environ[HITS_ENV]
+    assert Path(directory).is_dir()
+    plugin.pytest_unconfigure(_Config())  # type: ignore[arg-type]
+    assert not Path(directory).exists() and plugin._directory is None
+    assert HITS_ENV not in os.environ and STRICT_ENV not in os.environ
+    assert not (tmp_path / "report.json").exists()
+    plugin.pytest_unconfigure(_Config())  # type: ignore[arg-type]
+    assert HITS_ENV not in os.environ
 
 
 def test_the_report_is_written_whole_and_leaves_no_temp_file(tmp_path: Path) -> None:

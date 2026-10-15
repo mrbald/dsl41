@@ -1927,7 +1927,14 @@ def test_detach_stop_sigint_then_resume_reattaches(short_root: Path) -> None:
 def test_kill_supervisor_midrun_engine_resolves_via_spool(short_root: Path) -> None:
     """spec ss5 item 2: kill -9 the SUPERVISOR mid-run -> wrappers EOF ->
     status.json terminated/parent-lost -> the (still-alive) engine resolves via
-    the spool ladder to TERMINATED and survives the socket loss."""
+    the spool ladder to TERMINATED and survives the socket loss.
+
+    The test holds the event loop from the kill until the wrapper's
+    status.json exists, so the engine sees the socket loss only once the
+    record is there. The likely cause of a FAILURE seen once on a slow
+    runner, not reproduced: without the hold, the ladder's settle window
+    races the wrapper's kill and write, and a window that closes first reads
+    no record and resolves the run FAILURE (E7 unobservable)."""
 
     async def scenario() -> tuple[str, dict]:
         run_root = short_root / "run"
@@ -1953,6 +1960,8 @@ def test_kill_supervisor_midrun_engine_resolves_via_spool(short_root: Path) -> N
         spawn = await await_file()
         sup_pid = json.loads((run_root / "supervisor.pid").read_text())["pid"]
         os.kill(sup_pid, signal.SIGKILL)  # -9 the SUPERVISOR
+        # blocking on purpose: the engine's task cannot run until the record lands
+        wait_for(lambda: (spawn_path.parent / "status.json").exists(), timeout_s=30)
         deadline = time.monotonic() + 15
         while engine.oracle.store.job["slow"].status not in ("TERMINATED", "FAILURE", "SUCCESS"):
             if time.monotonic() > deadline:
