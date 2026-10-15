@@ -1341,6 +1341,15 @@ def test_kill_stops_at_sigterm_when_the_exit_push_arrives_within_the_grace() -> 
     assert client.forgotten == ["rid"]
 
 
+def test_kill_ends_at_sigterm_when_the_supervisor_holds_no_such_run() -> None:
+    """`unknown_run` means no push can come: no grace wait, no KILL (DL-356)."""
+    client = _SignalClient([{"ok": False, "error": "unknown_run"}])
+    adapter = SupervisedCommandAdapter(client, grace_seconds=60.0)  # type: ignore[arg-type]
+    asyncio.run(asyncio.wait_for(adapter.kill("rid"), 10))
+    assert client.signals == ["TERM"]
+    assert client.forgotten == ["rid"]
+
+
 # ----------------------------------------------------- _named, resolve_spool
 
 
@@ -1491,3 +1500,38 @@ def test_resolve_spool_kills_a_surviving_group_when_the_wrapper_never_records(
     assert ended_at is None
     pgid = spawn["command_pgid"]
     assert sent == [(pgid, signal.SIGTERM), (pgid, signal.SIGKILL)]
+
+
+def test_resolve_spool_cancelled_in_the_grace_still_sends_the_sigkill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancel after the ladder's SIGTERM must not leave a group that ignores
+    TERM alive: the SIGKILL goes out on the way out (DL-356)."""
+    run_dir = tmp_path / "j.1"
+    spawn = _spawn_doc()
+    _spool(run_dir, "spawn.json", spawn)
+    pgid = spawn["command_pgid"]
+
+    async def scenario() -> list:
+        termed = asyncio.Event()
+        sent = _record_signals(monkeypatch, on={signal.SIGTERM: termed})
+        # the wrapper is gone, the command lives on through the whole grace
+        monkeypatch.setattr(_procid, "verify_alive", lambda pid, token: pid == pgid)
+        task = asyncio.create_task(
+            resolve_spool(
+                "j",
+                1,
+                run_dir,
+                "boot-A",
+                settle_seconds=0.05,
+                grace_seconds=60.0,
+                expected_run_id="rid",
+            )
+        )
+        await asyncio.wait_for(termed.wait(), timeout=10.0)
+        task.cancel()  # the ladder is in its grace wait
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=10.0)
+        return sent
+
+    assert asyncio.run(scenario()) == [(pgid, signal.SIGTERM), (pgid, signal.SIGKILL)]
