@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import errno
+import gc
 import grp
 import hashlib
 import json
@@ -1504,11 +1505,25 @@ def test_access_map_parser_recursion_is_a_refusal(tmp_path: Path) -> None:
     """ss4/ss12.11: RecursionError is the second source named in the
     loader's parse arm (DL-149) and nothing reached it -- deeply nested
     TOML raises it, and the loader must answer AccessError like every other
-    parse failure, so reload receipts it instead of raising."""
+    parse failure, so reload receipts it instead of raising.
+
+    The parse runs to the interpreter's recursion limit, so the cyclic
+    collector must not run inside it: a collection there runs the finalisers
+    of earlier tests' garbage (an asyncio StreamWriter, under xdist) with no
+    stack left, and their RecursionError fails this test through pytest's
+    unraisable-exception check. The garbage is collected first, at a shallow
+    depth, and automatic collection is off for the parse."""
     body = "format_version = " + "[" * 20000 + "]" * 20000 + "\n"
     map_path = _write_map(tmp_path / "roles.toml", body)
-    with pytest.raises(AccessError, match="not valid TOML"):
-        load_policy(map_path, generation=1)
+    gc.collect()
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        with pytest.raises(AccessError, match="not valid TOML"):
+            load_policy(map_path, generation=1)
+    finally:
+        if enabled:
+            gc.enable()
 
 
 def test_access_peer_principal_refuses_when_the_group_lookup_fails(

@@ -23087,7 +23087,9 @@ relitigate an entry; append a new one.
   workers found an isolation defect the serial order hid: an in-process supervisor run makes the
   pytest process a Linux child subreaper, the flag outlived the test, and a command a later test
   orphaned stayed an unreaped zombie, so two death polls timed out. Each test now gets back the
-  flag it started with.
+  flag it started with. The second run found another: a test that parses to the recursion limit on
+  purpose ran an earlier test's finalisers inside an automatic collection with no stack left; it
+  now collects first and parses with automatic collection off.
   ACCEPTANCE. Ten consecutive green workflow runs on the branch, thirty leg executions, with zero
   test failures before the merge; a failure is diagnosed and fixed, and the count restarts. A load
   flake that passes at three workers pins three; a second flake of one test after its fix makes its
