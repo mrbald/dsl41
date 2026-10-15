@@ -127,7 +127,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-114 | the period model is frozen | [docs/citation-index.md](citation-index.md), [docs/period-model.md](period-model.md) |
 | DL-115 | the directory is not the baseline |  |
 | DL-116 | the lineage fence |  |
-| DL-117 | `baseline_id` is the period's, and derived |  |
+| DL-117 | `baseline_id` is the period's, and derived | [docs/period-model.md](period-model.md) |
 | DL-118 | the atomic `decision` record and control-protocol v3 | [docs/blocks/admission.md](blocks/admission.md), [docs/blocks/effect-outbox.md](blocks/effect-outbox.md), [docs/blocks/fw-observation.md](blocks/fw-observation.md), [docs/blocks/subscription.md](blocks/subscription.md), [docs/concurrency-model.md](concurrency-model.md), [docs/control-protocol.md](control-protocol.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md), [docs/state-machines.md](state-machines.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
 | DL-119 | the seal artifact and the canonical form |  |
 | DL-120 | capacity decomposed | [docs/blocks/capacity.md](blocks/capacity.md), [docs/concurrency-model.md](concurrency-model.md), [docs/state-machines.md](state-machines.md) |
@@ -151,7 +151,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-138 | the legacy read dialects retire, and the contract that governs the next retirement | [docs/citation-index.md](citation-index.md), [docs/concurrency-model.md](concurrency-model.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/period-model.md](period-model.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md) |
 | DL-139 | one decoder for a decision's effects: run history refuses what `read_outbox` refuses |  |
 | DL-140 | an empty map is not "no map": tz_aliases at the wiring boundary |  |
-| DL-141 | the estate answers as one: the cross-root walk lands for four verbs | [docs/deployment-runbook.md](deployment-runbook.md), [docs/runner-design.md](runner-design.md) |
+| DL-141 | the estate answers as one: the cross-root walk lands for four verbs | [docs/deployment-runbook.md](deployment-runbook.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md) |
 | DL-142 | the replay crosses the boundary: `dsl41 journal` walks a lineage | [docs/deployment-runbook.md](deployment-runbook.md), [docs/period-model.md](period-model.md) |
 | DL-143 | the night under the boundary: ss14's B1 and B2 are built | [docs/period-model.md](period-model.md) |
 | DL-144 | the archive: a seal-only period, by policy, with a receipt in front of it | [docs/deployment-runbook.md](deployment-runbook.md), [docs/period-model.md](period-model.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/risk-map.md](risk-map.md), [docs/runner-design.md](runner-design.md) |
@@ -236,7 +236,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-222 | Actions are pinned to commits and the `pypi` environment requires the owner's approval; a tag ruleset and `skip-existing` are declined |  |
 | DL-223 | The service drill and the release rehearsal ran and pass on main; DL-218's NOT RUN is retired |  |
 | DL-224 | `run --resume` refuses a root its anchor does not name; DL-219's open item closes | [docs/deployment-runbook.md](deployment-runbook.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md) |
-| DL-225 | Specification review: one document per pass, present state only, reconciled with the code; per-document stamps and an advisory gate line | [docs/agent-workflow.md](agent-workflow.md) |
+| DL-225 | Specification review: one document per pass, present state only, reconciled with the code; per-document stamps and an advisory gate line | [docs/agent-workflow.md](agent-workflow.md), [docs/period-model.md](period-model.md) |
 | DL-226 | Resume kill of a surviving command group is a verified-leader group kill, and E8's TERMINATED pin is vendor-cited | [docs/live-instance-runbook.md](live-instance-runbook.md), [docs/runner-design.md](runner-design.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
 | DL-227 | protocol-evolution reconciliation: the absent-version rule is restated per row, and three readers get the refusals the matrix promises | [docs/protocol-evolution.md](protocol-evolution.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
 | DL-228 | control-protocol reconciliation: the DISARM audit distinction reads the target's revision, the scalar-string rule covers the fields a verb reads, and a... | [docs/control-protocol.md](control-protocol.md) |
