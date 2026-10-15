@@ -618,7 +618,7 @@ endpoint; feed these into the site's monitoring.
 | supervisor log | `$RUN_ROOT/supervisor.log`; `journalctl -u dsl41-supervisor.service` | the supervisor's own output, and the unit's starts and stops |
 | leader | `$RUN_ROOT/leader.lock` holds the last leader's `pid`, `host`, `epoch` and `since`; compare `pid` with `systemctl show -p MainPID --value dsl41-engine.service` | the note stays after the engine exits, so it says who led, not who leads. Never probe the lock with `flock`: an engine that starts while a probe holds it refuses with exit 2. Never delete or replace the file: the engine re-checks it before every append and stops when it changed |
 | control socket | `dsl41 query status --brief -S "$S"` | exit 0: the leader answers. Exit 2: no engine, or a refusal |
-| failures and alarms | `dsl41 query subscribe -S "$S"` as the wake-up; then `dsl41 query trace --since N -S "$S"` with the last `last_seq` read. The trace is per period and its `seq` restarts at 1: set the cursor to 0 when the answer's `baseline_id` changes, or when `last_seq` is below the cursor, as the TUI does (DL-210) | the stream carries journal records: a run's end arrives as an `input` record of kind `STATUS` from the `adapter` source. The trace names what it did: a transition to `FAILURE` or `TERMINATED`, or a `MUST_START_ALARM` or `MUST_COMPLETE_ALARM` entry (SEM-34). A trace an older build wrote may carry a `TRANSITION_VIOLATION` entry, a move that broke a declared transition table; no build writes one since DL-353, and the TUI still shows an old one as an alert |
+| failures and alarms | `dsl41 query subscribe -S "$S"` as the wake-up; then `dsl41 query trace --since N -S "$S"` with the last `last_seq` read. The trace is per period and its `seq` restarts at 1: set the cursor to 0 when the answer's `baseline_id` changes, or when `last_seq` is below the cursor, as the TUI does (DL-210) | the stream carries journal records: a run's end arrives as an `input` record of kind `STATUS` from the `adapter` source. The trace names what it did: a transition to `FAILURE` or `TERMINATED`, or a `MUST_START_ALARM` or `MUST_COMPLETE_ALARM` entry (SEM-34). A trace an older build wrote may carry a `TRANSITION_VIOLATION` entry, a move that broke a declared transition table. The current build writes none (DL-353), and the TUI shows an old one as an alert |
 | quarantined inputs | `journalctl -u dsl41-engine.service`; `dsl41 query subscribe -S "$S"`; `dsl41 journal "$RUN_ROOT"` | alert on any journal line that begins `dsl41: input quarantined`, and on a `decision` record with `"code": "engine_apply_faulted"` on the stream. Applying an engine-made input raised, so the engine logged it rejected and applied only its time half. The line names the input's kind, job, run and the fault. The input's own effect is lost: a quarantined completion leaves its run RUNNING, and a quarantined tick is a missed start. `dsl41 journal` prints a `rejected input` line for it. Report the fault, then settle the row with `sendevent` (concurrency-model §4) |
 | statechart errors | `journalctl -u dsl41-engine.service -u dsl41-supervisor.service` | alert on any line that begins `dsl41: statechart error`. A declared state machine hit an assertion failure: two enabled rows, an event nobody handles, or a call into its executor from inside a step. The tier stopped at once and exits 7. A durable write already made stays, such as a `seal` record (period-model §7). The lines name the machine, the instance, its states, the item, its ancestry, the candidates, the deferred queue and the last microsteps; report them whole (docs/statechart-engine.md §5). A supervisor that exits 7 ends every command it ran, by lifeline EOF, as any stop of the supervisor unit does (§0), and stays down |
 | free space | `df -P "$RUN_ROOT" "$ESTATE_ANCHOR"`, and every file system a job's `std_out_file` or `std_err_file` writes to | see "when a write fails" below |
@@ -1445,7 +1445,7 @@ Decisions to make once, per site:
   holder is gone, so the lease is grantable at once.
 - **Faulting commands.** A command whose apply raises is refused with
   `apply_faulted` before it is journaled (concurrency-model §4).
-  `--on-transition-violation` is inert since DL-353 and leaves at the
+  `--on-transition-violation` is inert (DL-353) and is removed at the
   next major release: every state machine is a declared statechart, and a
   gap in one is a statechart error (exit 7). Given, the option prints one
   deprecation line and changes nothing; remove it from the launcher.
@@ -1470,9 +1470,9 @@ Decisions to make once, per site:
   refusal (below) that a retry cannot fix. Exit 3 is a sealed engine: the
   next period is opened by an operator, not by a restart loop (§6a;
   DL-134). A unit that lists 2 alone restart-loops at every boundary.
-  Exit 5 is retired: it was `--on-transition-violation stop` until
-  DL-353, and a unit that still lists it is harmless. Exit 6 is a time-half stop: the timers due at an engine-made input
-  raised, so every restart would stop the same way. Exit 7 is a
+  Exit 5 is retired and stays unused (DL-353), so a unit that still
+  lists it is harmless. Exit 6 is a time-half stop: the timers due at an
+  engine-made input raised, so every restart would stop the same way. Exit 7 is a
   statechart error: a bug in a declared state machine, which every
   restart of the same release may meet again. A
   crash restart must resume the same run root, and the first start of a
@@ -1653,12 +1653,12 @@ unprivileged user with passwordless sudo, as the runner runs them
 (DL-271). It runs the host's architecture, so on Apple silicon it is
 arm64, not the runner's x86_64.
 The drill passed every step on GitHub's Ubuntu 24.04 x86_64 runner at
-b6b8a55 (2026-10-09, DL-308). The steps DL-303 added (`watch`,
-`configure`, `kill-engine`, `kill-supervisor`, `stop-recover` and the
-three rollback steps) and the steps it changed (`sealed`,
-`upgrade-fresh-root`, `upgrade-coordinated`, `upgrade-old-release` and
-`upgrade-state-machine`) also passed in `drill-local.sh` on arm64 at
-a2db2ae (2026-10-09, Ubuntu 24.04, systemd 255). No other distribution or
+b6b8a55 (2026-10-09, DL-308). These steps also passed in
+`drill-local.sh` on arm64 at a2db2ae (2026-10-09, Ubuntu 24.04, systemd
+255): `watch`, `configure`, `kill-engine`, `kill-supervisor`,
+`stop-recover`, the three rollback steps, `sealed`, `upgrade-fresh-root`,
+`upgrade-coordinated`, `upgrade-old-release` and `upgrade-state-machine`
+(DL-303). No other distribution or
 systemd version has been observed. The drill is not part of the default
 gate: dispatch it again after a change to the units, the launcher or the
 drill.
@@ -1809,8 +1809,8 @@ Pass lint and rehearse the engine's `--timezone`, and its `--timezone-map`
 when it has one. Without `--timezone`, both work in UTC: rule L023 checks
 DST effects there (DL-316), and rehearse plays the schedules there. Pass
 rehearse the engine's `--semantics` too, once per switch the profile sets;
-lint takes no `--semantics`. Rehearse is cheap insurance: a full night in
-seconds, with the same oracle and scripted adapters. Fix everything here.
+lint takes no `--semantics`. Rehearse costs little: it plays a full night
+in seconds, with the same oracle and scripted adapters. Fix everything here.
 The production window is for swapping files, not for finding problems.
 
 **The window, in order:**
@@ -2118,10 +2118,11 @@ keeps refusing while the torn segment stays; follow
 [the torn-opening recipe](#recipe-recover-a-rolled-root-whose-opening-is-torn).
 
 *A command on a rolled root refuses, naming an anchor.* The anchor is the
-lineage's, not the root's, and four verbs take it:
-`--estate-anchor /srv/dsl41/runs/<first>.anchor` on `run --resume`,
-`seal`, `audit` and `estate prune` alike. The other readers are
-addressed by root or by socket and take no anchor. Put it in the unit
+lineage's, not the root's. Five verbs take it as
+`--estate-anchor /srv/dsl41/runs/<first>.anchor`: `run --resume`,
+`seal`, `audit`, `estate prune` and `estate reclaim`, which requires it.
+`run --open-from` takes it as its value. The other readers are
+addressed by root or by socket and take no anchor option. Put it in the unit
 file beside the run root. To read the estate rather than one of its
 roots, name that anchor and no root (§6a, "Reading the whole estate").
 
@@ -2228,9 +2229,9 @@ estate's job count in items, never below 100,000 and never above 400,000
 (DL-351): the floor binds up to 158 jobs, the square up to 316, the
 ceiling above. The count is the same live and on replay. Up to 400 jobs
 the largest legitimate cascade measured takes under a third of the cap;
-near 720 jobs a dense one can reach it, and is then refused or quarantined
-where an older build accepted it. A log an older build wrote that holds
-such an input stops resume with a replay fault that names it. The dry
+near 720 jobs a dense one can reach it, and is then refused or
+quarantined. A log that an older build wrote can hold such an input;
+resume then stops with a replay fault that names it. The dry
 apply runs on the engine's loop, so a long cascade also stops the lease's
 renewal (§3, the deadman). On an M-series laptop a cascade that does not
 end stops in about 4.5 s at 200 jobs and 15 to 17 s at 400 to 1,000 jobs,
