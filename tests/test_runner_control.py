@@ -2783,6 +2783,7 @@ class _RawServer:
         self._sock.bind(str(path))
         self._sock.listen(4)
         self._sock.settimeout(0.2)
+        self._served: list[tuple[threading.Thread, socket_mod.socket]] = []
         self._thread = threading.Thread(target=self._accept_loop, daemon=True)
         self._thread.start()
 
@@ -2792,7 +2793,9 @@ class _RawServer:
                 conn, _ = self._sock.accept()
             except OSError:
                 continue
-            threading.Thread(target=self._serve_one, args=(conn,), daemon=True).start()
+            served = threading.Thread(target=self._serve_one, args=(conn,), daemon=True)
+            self._served.append((served, conn))
+            served.start()
 
     def _serve_one(self, conn: socket_mod.socket) -> None:
         with conn:
@@ -2807,6 +2810,11 @@ class _RawServer:
     def close(self) -> None:
         self._stop.set()
         self._sock.close()
+        self._thread.join()  # its accept times out within 0.2 s and sees the stop
+        for served, conn in self._served:
+            with contextlib.suppress(OSError):
+                conn.shutdown(socket_mod.SHUT_RDWR)  # a recv waiting on a silent client returns
+            served.join()
         self.path.unlink(missing_ok=True)
 
 

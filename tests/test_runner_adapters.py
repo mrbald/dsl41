@@ -38,6 +38,7 @@ from typing import Any
 
 import pytest
 from supervisor_list_doubles import stub_listing, stub_row
+from test_runner_supervisor import wait_reaped
 
 from dsl41 import runner_procid as _procid
 from dsl41.ir import JobIR, lower_source
@@ -1717,6 +1718,7 @@ def test_dl210_ensure_running_respawns_a_supervisor_that_exits_before_publishing
         while (tmp_path / "supervisor.sock").exists() and time.monotonic() < deadline:
             time.sleep(0.05)
         shutil.rmtree(tmp_path, ignore_errors=True)
+        wait_reaped(int(record["pid"]))
 
 
 def test_dl220_a_malformed_list_reply_header_field_refuses_with_engine_error() -> None:

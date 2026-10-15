@@ -58,6 +58,19 @@ The mypy line names `tests/uc_oracle.py` beside `src`: it is a fully
 annotated executable spec under `tests/`, and nothing else holds it to the
 type gate (DL-193).
 
+Every test runs under a leak detector (`tests/leak_detector_plugin.py`,
+DL-355). A test that leaves global process state changed fails at teardown,
+naming the state before and after. The probes are listed in the plugin: among
+them an environment variable, the working directory, sys.path, a signal
+handler, a child process not yet reaped and a live non-daemon thread. A restore
+fixture puts back a production path's own change and nothing else: the
+oracle's recursion limit, the supervisor's subreaper flag and signal handlers,
+and the defaults `dsl41 run` leaves on SIGINT, SIGTERM and SIGHUP. The check
+compares each test with itself, so the order of the tests and the worker do not
+matter. Two limits: a child or thread that ends on its own a moment after the
+test is reported only when it is still there at the check, and a module- or
+session-scoped fixture is outside the check.
+
 The erase comes first because parallel data files from an earlier run would
 merge into the next combine and could hide a branch the last run missed.
 The coverage invocation runs the full suite once, in four pytest-xdist

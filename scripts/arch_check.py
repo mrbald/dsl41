@@ -939,6 +939,8 @@ def ir_schema_findings(pin: dict[str, str]) -> list[Finding]:
         from dsl41.ir import IR_VERSION, CatalogIR
     except ImportError as exc:  # not installed: say so, do not pretend to pass
         return [Finding("scripts/arch_check.py", 0, f"cannot import dsl41.ir: {exc}")]
+    finally:
+        sys.path.remove(str(ROOT / "src"))  # imported once; repeated calls must not grow it
     schema = json.dumps(CatalogIR.model_json_schema(), sort_keys=True)
     digest = hashlib.sha256(schema.encode("utf-8")).hexdigest()
     if digest == pin["sha256"]:
