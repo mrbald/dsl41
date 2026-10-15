@@ -25,7 +25,7 @@ Two rules follow from it:
 
 | Token shape | Namespace | Means | Defined in |
 | --- | --- | --- | --- |
-| `SEM-\d{2}` | AutoSys semantics | One observed/cited AutoSys behavior. §8 of the dossier records its trace coverage: one oracle test per entry unless that entry names another suite, and two recorded non-goals with no trace test at all. An entry never splits by letter — a `SEM-10c`-shaped token in prose names a lettered test subcase (`test_sem10c_*`), not an entry of its own. | `docs/autosys-semantics.md` |
+| `SEM-\d{2}` | AutoSys semantics | One observed/cited AutoSys behavior. §8 of the dossier records its trace coverage: one oracle test per entry unless that entry names another suite, and two recorded oracle non-goals with no trace test: SEM-16's definition-time mutation of a running box and SEM-17's ACTIVATED label. An entry never splits by letter — a `SEM-10c`-shaped token in prose names a lettered test subcase (`test_sem10c_*`), not an entry of its own. | `docs/autosys-semantics.md` |
 | `UCS-\d{1,2}` | UC semantics | One Stonebranch Universal Controller behavior. | `docs/stonebranch-semantics.md` Part I |
 | `M\d{2}` | Mapping row | One AutoSys→UC mapping row, M01–M36. Provenance on every compiled UC edge (`UcEdge.mapping_row`). NOT a review finding — see the note below. | `docs/stonebranch-semantics.md` Part II |
 | `P-M\d{2}` | Mapping trace pair | The oracle-pair test for one mapping row where migration can change behavior: same script, both interpreters. The expected result is a divergence for some rows and an alignment pin for others, and the row's class may be E, A, A/R or R — P-M27 pairs an R row, because absence is what that pair shows. Tests are named `test_pMxx_*`. | `docs/stonebranch-semantics.md` Part IV |

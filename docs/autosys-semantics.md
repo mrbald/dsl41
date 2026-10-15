@@ -13,7 +13,7 @@ against TechDocs and not re-verified, the weakest tier · **[?]** open question;
 that a live instance agrees.
 
 Vendor quotes in the entries are the evidence behind a **[V]** marker. The decision-log entry
-cited beside a rule is where the rule was settled. §9 lists every Q-series question and its
+cited beside a rule is the entry that rules it. §9 lists every Q-series question and its
 pinned default; a **[?]** inside an entry is a local corner pinned where it stands.
 
 ---
@@ -359,9 +359,8 @@ before each member: once the write's wakes, or an earlier member's kill, started
 cascade reaches no further member: not the members the new run started, and not a member carried
 live into it from the run that ended, as the fold and the overrides already leave them when the
 box's own run moves **[C]** ("Jobs in a box run only once for each box execution", Basic Box Job
-Concepts, AutoSys 12.0 and 24.2; DL-348). A box starts again so when its end, or a member's
-kill, meets its own condition, `d(box)` or `t(member)` say. Before, the kill reached the new run,
-and a member with both terminators ended it again without end.
+Concepts, AutoSys 12.0 and 24.2; DL-348). A box starts again this way when its end, or a
+member's kill, meets the box's own condition, for example `d(box)` or `t(member)`.
 Whether an operator's CHANGE_STATUS FAILURE or TERMINATED on
 a RUNNING box kills its job_terminator members is open (Q14, section 9); the oracle kills
 none.
@@ -428,8 +427,9 @@ job's run number is set to the box's. If the job is not STARTING, RUNNING or ON_
 run number does not exceed the box's, a STARTJOB is issued. This is a definition-time
 mutation and not migration-critical, but the AST layer must not assume static membership.
 It is an oracle non-goal. `SEM-16` also names the class of mid-run catalog-object mutations
-that are out of scope; a mid-run `update_resource` that replenishes a depletable is one
-(DL-50).
+that are out of scope. A depletable drains: its units are spent and never come back (DL-50).
+Refilling it is a mid-run `update_resource`, a mutation of this class, so the oracle never
+refills it.
 
 ### SEM-17 · Deep nesting **[C]**
 Boxes nest arbitrarily. Practical guidance is at most 1000 members, and no boxes for
@@ -566,8 +566,8 @@ MUST_START_ALARM. The vendor text states one box level; applying it per level is
 project's pin. **[?]**
 *Not modeled (DL-254):* the same vendor page says CHANGE_STATUS has no effect on an ON_NOEXEC
 job, and that a box CHANGE_STATUS INACTIVE leaves ON_NOEXEC members' status alone. The
-oracle's injected STATUS has no flag check, so it moves a flagged job. DL-254 leaves that
-behavior to a separate decision, which has not been taken.
+oracle's injected STATUS has no flag check, so it moves a flagged job. No entry rules this
+case; DL-254 leaves it open.
 
 DL-254: the scheduler ignores some ON_NOEXEC events. **[V]** Source: "sendevent Command --
 Change the Executable Status of a Job" (AutoSys 24.2): "The scheduler ignores the
@@ -627,9 +627,9 @@ is not hidden. A member of a RUNNING box resolves as DL-242 rules. A BOX target 
 box path described under DL-254 above. The vendor text also says dependent jobs are not
 "immediately" scheduled; this oracle wakes referencers at once, like any other transition.
 That gap is noted and not modeled. The transition updates `status_at`. An ordinary `n()`
-atom, with no lookback, was already true before it, since FAILURE and TERMINATED satisfy
-NOTRUNNING, and it stays true. Only a LOOKBACK-qualified `n()` atom can newly turn true by
-this transition, from the new timestamp.
+atom, with no lookback, is true on both sides of it: FAILURE and TERMINATED satisfy
+NOTRUNNING before it, and INACTIVE satisfies it after. Only a LOOKBACK-qualified `n()` atom can newly turn true by this transition, from
+the new timestamp.
 
 DL-281: lint's L020 projects a definition-time ON_NOEXEC predecessor onto its bypass, which
 ends in SUCCESS with no exit code, so a failure, terminated or exit-code atom reads false
@@ -766,12 +766,12 @@ Pins around the arm:
   box completion (`SCHED_DISARM` trace marker), so no member auto-starts a later box run
   from a stale tick. **[?]** Q3c: thread 801986's aside, "JobB would start immediately after
   the next time its parent box starts", hints that a MEMBER's latch can survive into the next
-  box run. The scoped pin stands until a live test (`# PENDING: Q3c`, oracle.py).
+  box run. The scoped pin stands until a live test (`# PENDING: Q3c`, oracle_writers.py).
 - A pre-existing arm survives ON_ICE/OFF_ICE untouched: ice neither arms nor disarms, because
   the latched tick predates the ice. **[?]** Q3d (DL-69): that pin is uncited, and its
   consequence is that a stale tick can start the job on a condition edge after OFF_ICE, in
   tension with the reoccurrence rule. The pin stands until the live discriminator runs
-  (`# PENDING: Q3d`, oracle.py; protocol in the live-instance runbook).
+  (`# PENDING: Q3d`, oracle_writers.py; protocol in the live-instance runbook).
 - The ACTUAL start consumes the arm. A DL-50 QUE_WAIT enqueue keeps it latched, so a
   canceled queue attempt does not use up the tick. KILLJOB on the queued job consumes it,
   because the kill happened. Under `queued-recheck` 1 or 2, a job that fails its recheck as it leaves the
@@ -1025,7 +1025,7 @@ Scope (DL-23): TechDocs' own `date_conditions` page lists `timezone`, with `run_
 only "the job's time settings". So timezone without truthy date_conditions is dead
 configuration (SEM-30, L005). The zero-lookback anchor is the dependent's own last end
 (SEM-04, Q2a). That is a comparison of two instants, which no timezone re-basing can affect.
-So timezone on a condition-only job is always dead, and L005 fires without a caveat. An
+So timezone on a condition-only job is always dead, and L005 fires on it. An
 estate that carries timezone by convention can run `dsl41 lint --suppress L005`.
 
 **Name resolution [V]** (DL-62; 12.1 `timezone` attribute page and the `autotimezone` command
@@ -1335,18 +1335,18 @@ the materialization horizon does not exist for it. Only cycle-bound calendars tr
 | `date_conditions` + time cluster | scheduling (§4) |
 | `max_exit_success`, `success_codes`, `fail_codes` | success-boundary shift (SEM-09); `fail_codes` decides alone, else `success_codes` replaces the rule, else the threshold |
 | `term_run_time` | auto-terminate after n minutes → TERMINATED **[V]**: 0 means no limit, the vendor default (DL-241) |
-| `n_retrys` | auto-restart on FAILURE only, for application failures (the vendor's examples: "cannot find a file or a command, permissions are not properly set"). A TERMINATED job "does not restart"; system and network failures restart under the scheduler's `MaxRestartTrys` config parameter instead **[V]** (Q4, DL-53). Neither the oracle nor the runner models retries; preflight WARNs on `n_retrys > 0` |
+| `n_retrys` | auto-restart on FAILURE only, for application failures (the vendor's examples: "cannot find a file or a command, permissions are not properly set"). A TERMINATED job "does not restart". "It does not apply to system or network failures" (TechDocs 12.0.01 n_retrys); those restart under the scheduler's `MaxRestartTrys` config parameter instead (12.1 MaxRestartTrys page: "governs retries due to system or network problems ... different from the n_retrys job definition attribute") **[V]** (Q4, DL-53). Neither the oracle nor the runner models retries; preflight WARNs on `n_retrys > 0` |
 | `auto_hold` | box member enters ON_HOLD automatically when box starts **[C/?]** |
 | `auto_delete` | definition lifecycle, not runtime; carried in IR-F `JobIR.passthrough` |
 | `status` (on insert) | definition-time out-of-band state (SEM-24) **[V]**. Support limit: the vendor allows seven values; dsl41 models INACTIVE, ON_HOLD, ON_ICE and ON_NOEXEC, and lowering refuses SUCCESS, FAILURE and TERMINATED |
 | `job_type` | selects the modeled job kind: CMD, BOX or FW (SEM-10); lowering refuses every other type. Support limit: the vendor default is CMD ("job_type Attribute", AutoSys 24.2: "If you do not specify the job_type attribute in your job definition, the job type is set to CMD (the default)"), but lowering requires the attribute and refuses its absence. That an exported definition always carries it is expected, not measured |
-| `job_load`/`priority`/`machine_method`/QUE_WAIT, `machine` lists | the pre-11.3 load-balancing model; the IR carries these in `passthrough` and reads `job_load` and `priority` from there. The oracle honors `job_load` vs machine `max_load` as a capacity bucket and `priority` as QUE_WAIT waiter ordering, lower number first (DL-50). **[V]** TechDocs 24.2 (DL-247): only a positive priority checks machine load. The priority page: "If you do not set the priority attribute or the priority is set to 0, the job is not queued behind other jobs and runs immediately on a machine if resource dependencies permit ... The scheduler ignores any load unit values defined for the job or machine when the job has a priority value of zero." The queueing page: "even when jobs have a priority of 0, AutoSys Workload Automation tracks job loads on each machine so that jobs with non-zero priorities can be queued." So an unset or zero priority skips the load check but its load still counts against the machine for every other job; its `resources:` still gate it. The job_load page: a forced job "runs even if its load exceeds the machine's max_load value"; a FORCE_STARTJOB likewise skips the check, holds its load, and is gated by named resources. The queueing page: "A job in the QUE_WAIT state for one machine attribute value automatically blocks all the lower priority jobs that specify the same machine attribute value. It does not automatically block higher or equal priority jobs that specify the same machine attribute value or a job that specifies a different machine attribute value." The oracle applies that to a fresh start and to the readmission scan, for a waiter whose own load does not fit. A blocked job needs a positive priority on that machine, with or without a `job_load`. The readmission scan admits no blocked job past the waiter that blocks it. By default a job leaving QUE_WAIT does not re-check its starting conditions, which is the vendor's EvaluateQueuedJobStarts 0; the vendor's default is 1. Qr6 is decided: dsl41's default stays 0, and the `queued-recheck` semantic switch selects 1 or 2 (DL-50, DL-257). Named-resource blocking, the RESWAIT-after-load corner and a forced job's reuse of the units it holds are in the `resources` row (DL-255, DL-256). Open: unset-priority order among resource waiters (Qr2), pools (Qr3); pool `machine:` lines are typed `MachineMember` rows (DL-49) and preflight resolves their locality; `machine_method`, member selection/routing and per-member `factor`/`max_load` are opaque placement |
+| `job_load`/`priority`/`machine_method`/QUE_WAIT, `machine` lists | the pre-11.3 load-balancing model; the IR carries these in `passthrough` and reads `job_load` and `priority` from there. The oracle honors `job_load` vs machine `max_load` as a capacity bucket and `priority` as QUE_WAIT waiter ordering, lower number first (DL-50). **[V]** TechDocs 24.2 (DL-247): only a positive priority checks machine load. The priority page: "If you do not set the priority attribute or the priority is set to 0, the job is not queued behind other jobs and runs immediately on a machine if resource dependencies permit ... The scheduler ignores any load unit values defined for the job or machine when the job has a priority value of zero." The queueing page: "even when jobs have a priority of 0, AutoSys Workload Automation tracks job loads on each machine so that jobs with non-zero priorities can be queued." So an unset or zero priority skips the load check but its load still counts against the machine for every other job; its `resources:` still gate it. The job_load page: a forced job "runs even if its load exceeds the machine's max_load value"; a FORCE_STARTJOB likewise skips the check, holds its load, and is gated by named resources. The queueing page: "A job in the QUE_WAIT state for one machine attribute value automatically blocks all the lower priority jobs that specify the same machine attribute value. It does not automatically block higher or equal priority jobs that specify the same machine attribute value or a job that specifies a different machine attribute value." The oracle applies that to a fresh start and to the readmission scan, for a waiter whose own load does not fit. A blocked job needs a positive priority on that machine, with or without a `job_load`. The readmission scan admits no blocked job past the waiter that blocks it. By default a job leaving QUE_WAIT does not re-check its starting conditions, which is the vendor's EvaluateQueuedJobStarts 0; the vendor's default is 1. dsl41's default is 0, and the `queued-recheck` semantic switch selects 1 or 2 (Qr6, DL-50, DL-257). Named-resource blocking, the RESWAIT-after-load corner and a forced job's reuse of the units it holds are in the `resources` row (DL-255, DL-256). Open: unset-priority order among resource waiters (Qr2), pools (Qr3); pool `machine:` lines are typed `MachineMember` rows (DL-49) and preflight resolves their locality; `machine_method`, member selection/routing and per-member `factor`/`max_load` are opaque placement |
 | `std_in_file`, `envvars` | CMD exec cluster (DL-32): stdin redirect (may reference a blob) + NAME=value environment list; typed carry on ExecSpec, `$$VAR` sites indexed (SEM-08); real execution refuses `envvars` at preflight outright, and refuses a `$$NAME` site in either field, since global substitution is not implemented (DL-240). Support limit: lowering refuses a repeated `envvars` line as a duplicate attribute. The vendor allows several ("envvars Attribute", AutoSys 24.2: "You can use multiple entries of envvars to define different sets of environment variables"). The workaround is one `envvars` line with a comma-separated list |
 | `ulimit`, `elevated`, `interactive`, `job_class` | OS/agent-side exec tuning **[V]** (TechDocs 12.x); inert carry (DL-32) |
 | `chk_files` | pre-start disk-space gate **[V]**: the agent checks required space; unmet → alarm and the job does NOT start; Resource-Wait class. Opaque carry, no oracle gate (a real disk level is out of a pure simulator's reach; distinct from `resources:`, which the oracle honors as capacity semaphores, DL-50); real execution refuses it at preflight (DL-240) |
 | `heartbeat_interval` | MISSING_HEARTBEAT alarm only **[V]**; observability (DL-32) |
 | `avg_runtime` | statistics seed at insert **[V]**; inert carry (DL-32) |
-| `resources` + `insert_resource`/`update_resource`/`delete_resource` | 11.3+ resource objects **[V]** (TechDocs 12.x): `resources: (name, QUANTITY=n[, FREE=Y\|N\|A]) AND (...)`; FREE: Y=free on success, N=never, A=unconditionally; `res_type: D\|R\|T` (depletable/renewable/threshold), `amount` required, optional agent-level `machine`. Typed carry (DL-21); the oracle honors these as capacity semaphores (DL-50): `amount` is the bucket size, QUANTITY the demand, res_type sets the default release (R free-on-success / D depletable-never / T level-gate) and FREE overrides it. FREE is "Optional for renewable virtual resources only" ("resources Attribute", AutoSys 24.2, quoted in DL-256); no vendor text says what FREE does on a depletable (Q12, descoped, DL-288). Preflight refuses FREE=Y and FREE=A on a depletable as unknown release semantics and accepts FREE=N, which matches the depletable default (DL-287); the oracle still applies the code to a direct caller (DL-50); UCS-09 → UC Virtual Resources. **[V]** TechDocs 24.2, How AutoSys Workload Automation Queues Jobs (DL-255): "A job in the RESWAIT state for one resource name automatically blocks all the lower priority jobs that specify the same resource name. It does not automatically block higher or equal priority jobs that specify the same resource name or a job that specifies a different resource name." dsl41 has no RESWAIT status; such a job is QUE_WAIT. The oracle applies the rule to a fresh start, forced or not, and to the readmission scan. The blocker has a positive priority, names a resource the blocked job names, and is short on any resource it names; the blocked job has a positive priority, since an unset or zero priority "is not queued behind other jobs". A blocker short on one resource blocks on every resource it names: "AutoSys jobs/resources issue: job stuck in RESWAIT" (Broadcom KB 240816, AutoSys 12.0) shows a job waiting for its second resource blocking lower-priority jobs that needed only its first, which was available, and gives the same queueing sentence as the cause. Resources are evaluated "after the load balancing attributes are evaluated and the machine has available load units", and jobs that "enter the QUE_WAIT state do not consume load units or resources. These jobs do not automatically block lower priority jobs that specify the same resource attribute and a different machine attribute value." So a waiter blocks on its resources only once its load fits and no higher-priority load waiter blocks it. Jobs "that enter the RESWAIT state after the load balancing attributes are successfully evaluated do not consume any load units" and do not block on the machine; a queued job holds no units for the run it waits to start (units held from an earlier run stay held, DL-256). Preflight refuses a QUANTITY above `amount` at every priority. A depletable or FREE=N resource can still leave a waiter that never fits, and it then blocks lower priorities naming that resource, as the vendor's rule implies. The vendor documents FREE's default as Y, free on success only ("resources Attribute", AutoSys 24.2: "Default: Y"). dsl41 follows it (Qr1 decided, DL-256); the `renewable-free=A` semantic switch selects free on every completion. A renewable's units that FREE does not free (N; Y after FAILURE or TERMINATED) stay held by the job until `sendevent -E RELEASE_RESOURCE -J job` ("resources Attribute": "To free the resources, issue the following command") or the job's next run, which re-uses them. A FORCE_STARTJOB of a FAILURE or TERMINATED job that still holds units "schedules the job using the held virtual resources" and "does not re-evaluate other resource dependencies" ("Define Virtual Resource Types", AutoSys 24.2). Support limits, each a loud lowering refusal: `QUANTITY=ALL`, "all the units of the resource" (workaround for a renewable resource: write its `amount` as the quantity; for a depletable resource this is not exact, since its free units fall below `amount` after use); a real-resource group with `VALUEOP`/`VALUE` (the page's `SYSTEM_OS_TYPE` example; no workaround); and one resource name defined on several machines, which the vendor allows ("insert_resource Subcommand", AutoSys 24.2: "You can define the same virtual resource on multiple machines") and dsl41 refuses as a duplicate `insert_resource` (no workaround) |
+| `resources` + `insert_resource`/`update_resource`/`delete_resource` | 11.3+ resource objects **[V]** (TechDocs 12.x): `resources: (name, QUANTITY=n[, FREE=Y\|N\|A]) AND (...)`; FREE: Y=free on success, N=never, A=unconditionally; `res_type: D\|R\|T` (depletable/renewable/threshold), `amount` required, optional agent-level `machine`. Typed carry (DL-21); the oracle honors these as capacity semaphores (DL-50): `amount` is the bucket size, QUANTITY the demand, res_type sets the default release (R free-on-success / D depletable-never / T level-gate) and FREE overrides it. FREE is "Optional for renewable virtual resources only" ("resources Attribute", AutoSys 24.2, quoted in DL-256); no vendor text says what FREE does on a depletable (Q12, descoped, DL-288). Preflight refuses FREE=Y and FREE=A on a depletable as unknown release semantics and accepts FREE=N, which matches the depletable default (DL-287); the oracle still applies the code to a direct caller (DL-50); UCS-09 → UC Virtual Resources. **[V]** TechDocs 24.2, How AutoSys Workload Automation Queues Jobs (DL-255): "A job in the RESWAIT state for one resource name automatically blocks all the lower priority jobs that specify the same resource name. It does not automatically block higher or equal priority jobs that specify the same resource name or a job that specifies a different resource name." dsl41 has no RESWAIT status; such a job is QUE_WAIT. The oracle applies the rule to a fresh start, forced or not, and to the readmission scan. The blocker has a positive priority, names a resource the blocked job names, and is short on any resource it names; the blocked job has a positive priority, since an unset or zero priority "is not queued behind other jobs". A blocker short on one resource blocks on every resource it names: "AutoSys jobs/resources issue: job stuck in RESWAIT" (Broadcom KB 240816, AutoSys 12.0) shows a job waiting for its second resource blocking lower-priority jobs that needed only its first, which was available, and gives the same queueing sentence as the cause. Resources are evaluated "after the load balancing attributes are evaluated and the machine has available load units", and jobs that "enter the QUE_WAIT state do not consume load units or resources. These jobs do not automatically block lower priority jobs that specify the same resource attribute and a different machine attribute value." So a waiter blocks on its resources only once its load fits and no higher-priority load waiter blocks it. Jobs "that enter the RESWAIT state after the load balancing attributes are successfully evaluated do not consume any load units" and do not block on the machine; a queued job holds no units for the run it waits to start (units held from an earlier run stay held, DL-256). Preflight refuses a QUANTITY above `amount` at every priority. A depletable or FREE=N resource can still leave a waiter that never fits, and it then blocks lower priorities naming that resource, as the vendor's rule implies. The vendor documents FREE's default as Y, free on success only ("resources Attribute", AutoSys 24.2: "Default: Y"). dsl41 follows it (Qr1, DL-256); the `renewable-free=A` semantic switch selects free on every completion. A renewable's units that FREE does not free (N; Y after FAILURE or TERMINATED) stay held by the job until `sendevent -E RELEASE_RESOURCE -J job` ("resources Attribute": "To free the resources, issue the following command") or the job's next run, which re-uses them. A FORCE_STARTJOB of a FAILURE or TERMINATED job that still holds units "schedules the job using the held virtual resources" and "does not re-evaluate other resource dependencies" ("Define Virtual Resource Types", AutoSys 24.2). Support limits, each a loud lowering refusal: `QUANTITY=ALL`, "all the units of the resource" (workaround for a renewable resource: write its `amount` as the quantity; for a depletable resource this is not exact, since its free units fall below `amount` after use); a real-resource group with `VALUEOP`/`VALUE` (the page's `SYSTEM_OS_TYPE` example; no workaround); and one resource name defined on several machines, which the vendor allows ("insert_resource Subcommand", AutoSys 24.2: "You can define the same virtual resource on multiple machines") and dsl41 refuses as a duplicate `insert_resource` (no workaround) |
 | `alarm_if_fail`, `alarm_if_terminated`, `min/max_run_alarm`, `send_notification` + `notification_*` family (msg, template, alarm_types, emailaddress[_on_alarm/_on_failure/_on_success/_on_terminated]), `must_*_times` | observability annotations, no control flow (family per 12.x notification services, DL-32) |
 | `std_out_file` etc. with `$$VAR` | string substitution sites (SEM-08); real execution refuses an unsubstituted site on an exec field at preflight (DL-240) |
 | `watch_file`, `watch_interval`, `watch_file_min_size` (FW jobs) | file-watcher job type: terminal SUCCESS when the file condition is met; a *source* node in derived graphs |
@@ -1447,7 +1447,14 @@ while a member that is not iced, taken off ice, forced, or iced but live still d
 `test_sem15_a_job_failing_in_an_iced_subbox_moves_no_box_that_never_ran`,
 `test_sem15_an_inactive_verdict_beside_an_iced_member_keeps_the_vacuous_success`,
 `test_sem15_a_failed_member_set_inactive_beside_an_iced_success_gives_success`,
-`test_sem15_an_iced_subbox_holding_a_live_job_keeps_its_vote`) · T18 box INACTIVE cascades to every contained job (SEM-18, DL-242:
+`test_sem15_an_iced_subbox_holding_a_live_job_keeps_its_vote`) ·
+a depletable drains and is never refilled, DL-50; a member its box restarts settles the ended
+run before it reads its admission, DL-340; a member that restart queues keeps its rank, DL-255
+(SEM-16: `test_sem16_a_depletable_is_spent_by_each_run_of_a_self_restarting_member`,
+`test_sem16_a_member_the_restart_queues_by_depletion_keeps_its_rank`, and in the oracle-chart
+suite `test_sem16_a_restart_settles_the_ended_run_before_the_admission_it_reads`,
+`test_sem16_an_attempt_that_skips_the_owed_settlement_is_caught`) ·
+T18 box INACTIVE cascades to every contained job (SEM-18, DL-242:
 `test_sem18_*`) ·
 T20a ice downstream fires, T20b off-ice does not immediately run (SEM-20) ·
 a member taken off ice in its running box sits the run out under
@@ -1471,15 +1478,15 @@ ordinary vs lookback atoms on an iced job follow different tables, DL-243
 (SEM-20/SEM-05, Q10 residue: `test_sem20_ordinary_atoms_on_an_iced_job_follow_the_vendor_table`,
 `test_sem20_lookback_atoms_on_an_iced_job_stay_true`,
 `test_sem20_ordinary_atom_on_an_undefined_iced_lookalike_stays_false`,
-`test_sem20_ordinary_atom_on_a_live_iced_job_reads_the_real_in_flight_status` (the name is
-historical; the test pins DL-254's ignore),
+`test_sem20_ordinary_atom_on_a_live_iced_job_reads_the_real_in_flight_status` (despite its
+name, the test pins DL-254's ignore),
 `test_sem20_off_ice_later_reads_the_real_status_not_the_vendor_table`) ·
 ON_ICE, ON_HOLD and ON_NOEXEC on a STARTING or RUNNING job, and ON_NOEXEC on an iced job, are
 ignored with one EVENT_IGNORED line and no planned effect, as is ON_NOEXEC on a box holding
 an iced, live or queued job; ON_NOEXEC dequeues a QUE_WAIT job to INACTIVE, clears a hold,
 and on a box cascades INACTIVE and flags every level, DL-254 (SEM-20/21/22:
 `test_sem20_on_ice_on_a_live_job_is_ignored`,
-`test_ice_on_a_running_job_takes_effect_at_completion` (the name is historical; the test pins
+`test_ice_on_a_running_job_takes_effect_at_completion` (despite its name, the test pins
 DL-254's ignore),
 `test_sem21_on_hold_on_a_live_job_is_ignored`,
 `test_sem21_events_on_a_completed_job_still_apply`,
@@ -1551,14 +1558,15 @@ Layer note: not every SEM entry lands in the oracle suite. SEM-07 (cross-instanc
 pinned by the condition, derive and control-plane suites, not by an oracle trace. SEM-15's
 oracle tests are listed as T15 above. SEM-30 and
 SEM-31 are lowering rules, pinned in the IR suite (`test_sem30_*`, `test_sem31_*`). SEM-35 is
-pinned by the scheduler suite's `test_resolve_timezone_*` and `test_preflight_timezone_*`
-families, which carry no `sem35` in their names, and by T33c in the oracle suite for the
-re-basing of `run_window`. SEM-36..39 are calendar rules, pinned in the autocal suite
+pinned by the timezone suite's `test_resolve_timezone_*` and the scheduler suite's
+`test_preflight_timezone_*` families, which carry no `sem35` in their names, and by T33c in
+the oracle suite for the re-basing of `run_window`. SEM-36..39 are calendar rules, pinned in the autocal suite
 (`test_sem36_*`..`test_sem39_*`). T34a/b's own `test_sem34a/b_*` cover must_complete only; the
 must_start half is pinned by `test_must_start_alarm_fires_when_no_run_began_by_deadline` and
-`test_must_start_alarm_quiet_when_the_run_began_in_time`. SEM-16 (definition-time mutation of a
-running box) and SEM-17's ACTIVATED label are oracle non-goals and have no trace test. The
-label's state effect is pinned under SEM-10 and SEM-11 (DL-242).
+`test_must_start_alarm_quiet_when_the_run_began_in_time`. Two oracle non-goals have no trace
+test: SEM-16's definition-time mutation of a running box, and SEM-17's ACTIVATED label.
+SEM-16's depletion rule has its tests above. The label's state effect is pinned under SEM-10
+and SEM-11 (DL-242).
 
 ## 9. Open questions and their pinned defaults
 
@@ -1568,36 +1576,28 @@ code holds a provisional default, it carries a `# PENDING: Qn` marker.
 [docs/live-instance-runbook.md](live-instance-runbook.md) holds the probe that would settle
 each open question.
 
-- Q1 (SEM-03): closed (DL-53). Flat left-to-right evaluation; the rule and its citation are
-  in SEM-03, pinned by the `test_sem03_*` tests.
-- Q2 (SEM-04): split into Q2a and Q2b, both closed. Q2a (DL-54): lookback `0` anchors to the
-  dependent job's own last end; `test_sem04_zero_lookback_*` pin the anchor in both
-  directions. Q2b (DL-58): a dependent that never ended has no anchor and the qualifier is
-  satisfied; `test_sem04_zero_lookback_first_run_*` keep the pin. Citations in SEM-04.
+- Q1 (SEM-03): closed (DL-53). Conditions evaluate flat, left to right (SEM-03).
+- Q2 (SEM-04): closed, in two parts. Q2a (DL-54): lookback `0` anchors to the dependent
+  job's own last end. Q2b (DL-58): a dependent that never ended has no anchor, and the
+  qualifier is satisfied. SEM-04 holds both rules and their citations.
 - Q3 (SEM-32): closed (DL-54, DL-58). Arm-and-wait with no expiry; the rule, its citations
   and its pins are in SEM-32. Two residues stay open:
   - **Q3c** (DL-58): does a member's latch survive into the next box run? Thread 801986's
     aside says it may. The pin is box-run scope (`SCHED_DISARM`; `# PENDING: Q3c`,
-    oracle.py). One live box test decides it.
+    oracle_writers.py). One live box test decides it.
   - **Q3d** (DL-69): does ON_ICE discard a latched tick? The pin is that a pre-existing arm
-    survives ice (`# PENDING: Q3d`, oracle.py). The runbook's discriminator decides it.
-- Q4 (§5 `n_retrys`): closed (DL-53). FAILURE only. TechDocs 12.0.01 n_retrys: "specifies
-  how many times to attempt to restart the job after it exits with a FAILURE status. If a job
-  exits with a TERMINATED status, it does not restart."; "This attribute applies to
-  application failures (for example, AutoSys Workload Automation cannot find a file or a
-  command, permissions are not properly set, and so on). It does not apply to system or
-  network failures", which restart under the scheduler's `MaxRestartTrys` configuration
-  parameter (12.1 MaxRestartTrys page: "governs retries due to system or network problems ...
-  different from the n_retrys job definition attribute"). Retries are out of scope for the
-  oracle and the runner; preflight WARNs on `n_retrys > 0`.
-- Q5 (do queued events survive a scheduler restart): closed (DL-53). Yes, because the
-  architecture implies it; no single "survives restart" sentence exists in TechDocs, and the
-  inference is deliberate. `ujo_event` "Records events that the scheduler has not yet processed" (Events
-  reference, 12.1); "The event server (database) stores all the objects", and on start the
-  scheduler "continually scans the database for events to process" (Architecture, 12.1).
-  There is no in-memory-only event queue to lose. KB 11013 corroborates operationally: queued
-  events run after a multi-hour outage on a plain restart. The oracle's event-queue model
-  needs no change.
+    survives ice (`# PENDING: Q3d`, oracle_writers.py). The runbook's discriminator decides it.
+- Q4 (§5 `n_retrys`): closed (DL-53). `n_retrys` restarts a job after FAILURE only, not after
+  TERMINATED, and only for application failures (TechDocs 12.0.01, quoted in §5). System and
+  network failures restart under the scheduler's `MaxRestartTrys` parameter. Neither the oracle
+  nor the runner models retries; preflight WARNs on `n_retrys > 0`.
+- Q5 (do queued events survive a scheduler restart): closed (DL-53). Yes. No TechDocs sentence
+  states it; the answer is a deliberate inference from the architecture. `ujo_event` "Records
+  events that the scheduler has not yet processed" (Events reference, 12.1). "The event server
+  (database) stores all the objects", and on start the scheduler "continually scans the
+  database for events to process" (Architecture, 12.1). So no queued event lives only in
+  memory. KB 11013 corroborates it: queued events run after a multi-hour outage on a plain
+  restart. The oracle's event-queue model needs no change.
 - Q6 (SEM-12): open, narrowed (DL-58). The question: box_success referencing a member that
   is ON_ICE; does the "not scheduled" clause apply ("condition not met if the specified job
   is not scheduled")? The `condition:`-atom half is cited (KB 438836: a local ON_ICE
@@ -1610,17 +1610,15 @@ each open question.
   and a box start that leaves no member in the run (SEM-11, Q15). Under a flip, a box whose
   box_success names a member that is iced at its start stays RUNNING, the literal "not
   scheduled" reading.
-- Q7 (SEM-09): closed (DL-58). KB 408778 states the composition; the rule is in SEM-09 and
-  `ir.exit_is_success` implements it, shared with the UC twin (M31). Pinned by
-  `test_dl33_exit_is_success_*` and `test_sem09*`.
+- Q7 (SEM-09): closed (DL-58). SEM-09 holds the composition rule (KB 408778).
+  `ir.exit_is_success` implements it, shared with the UC twin (M31); `test_dl33_exit_is_success_*`
+  and `test_sem09*` pin it.
 - Q8 (SEM-37/38/39, DL-57): extended-calendar generation corners. Every Q8 item closes
   mechanically on any live instance: define the calendar, let autocal materialize the
   schedule, and diff the vendor date set against `dsl41`'s generator.
-  - **Q8a**: closed (DL-58). A specified holiday action governs every holcal date outright;
-    holcal dates receive non-workday treatment only "when you do not specify an action at
-    the Holiday Action prompt" (Define Extended Calendars 12.1, quoted in SEM-38). **[?]**
-    residue: whether a replacement target re-enters the other stage (folded into Q8c's
-    re-entry corner).
+  - **Q8a**: closed (DL-58). A specified holiday action governs every holcal date (SEM-38).
+    **[?]** Whether a replacement target re-enters the other stage stays open, as Q8c's
+    re-entry corner.
   - **Q8b**: open, pinned default (DL-59). Nonzero `adjust` composed with an N/W/P
     replacement code is undocumented; the docs frame adjust as the alternative (the 12.1
     prompt: "enter 0 … if you specified replace days using non-workday action or holiday
@@ -1657,22 +1655,17 @@ each open question.
     mixed-polarity rules already use, which accepts that `xtue|xwed` reads near-universal
     (`# PENDING: Q8d`, pinned in `test_q8d_*`). An empty or whitespace `condition:` value
     reads as absent (the SEM-36 empty-value convention) and falls back to the DAILY default.
-  - **Q8e**: closed (DL-58). CWEEK anchors to consecutive 7-day chunks from each period's
-    first day (SEM-39). CWRK is the nth workday of a period, a count, not a week selector.
-    The ragged last chunk is the arithmetic consequence, not a new question.
+  - **Q8e**: closed (DL-58). CWEEK counts consecutive 7-day chunks from each period's first
+    day (SEM-39). CWRK is the nth workday of a period, a count, not a week selector. A
+    period's last chunk may be short.
   - The defective tokens (SEM-37: `WORKDXnn`, `CWEK#n`/`#L`/`Mn`/`Xn`) are refused outright
     with no default and no switch. There is nothing to implement until the doc text is fixed
     or a live instance defines them.
-- Q9 (SEM-36, DL-57): closed (DL-60) from one `autocal_asc` export sample. The verdicts are
-  folded into SEM-36/37 at **[F]**: the export writes `extended_calendar:`
-  (`ext_calendar:` accepted); fixed attribute order with empty-valued keys emitted; comma
-  day codes plus `workday: all`; braces as condition grouping; case preserved as authored;
-  `WORKD#L` in use; `holiday: S` without holcal; `mm/dd/yyyy 00:00:00` standard rows;
-  repeated-pair cycle records. A synthetic clone of these shapes is pinned end to end
-  (`test_q9_*`, including byte-identical F1). Caveats: one sample, AE version unpinned, not
-  re-verified, the weakest evidence tier in this dossier. On a live instance, KB 29387's
-  `autocal_asc -e ALL -E file` would re-verify the format byte for byte. Parens are accepted
-  alongside braces, so no behavior depends on the grouping read.
+- Q9 (SEM-36, DL-57): closed (DL-60) on one `autocal_asc` export sample, at **[F]**, the
+  weakest evidence tier in this dossier. SEM-36 and SEM-37 hold the format rules. A synthetic
+  clone of the sample's shapes is pinned end to end (`test_q9_*`, including byte-identical
+  F1). On a live instance, KB 29387's `autocal_asc -e ALL -E file` would re-verify the format
+  byte for byte.
 - Q10 (SEM-05/SEM-20, DL-243): open, pinned default. Two vendor pages read a
   LOOKBACK-qualified atom against an iced predecessor differently. The "condition Attribute"
   page (AutoSys 24.2) addresses it directly: "If the predecessor job being evaluated for the
@@ -1687,25 +1680,22 @@ each open question.
   selectable without a code change (DL-252): `--semantics ice-lookback=ordinary` drops the
   qualifier and applies the ordinary ON_ICE table to the lookback atom too. The register row
   `event:ON_ICE#lookback atom` names the switch.
-- Q11 (SEM-37, DL-250): closed (DL-259). A WEKR token selects a week of the year with weeks
-  starting on the anchor day, as "Date Condition Keywords" lists it beside `WEEK#nn`,
-  `WEEKXnn` and `WEEKMnn`. The numeric anchors run 1 = Monday to 7 = Sunday. How the days
-  before the first anchor day count is a chosen default, not a verified fact. The default
-  `first-full` puts them in no week, and `--semantics wekr-first-week=partial` makes them
-  week 1. SEM-37 states both readings. A live instance generating `WEKR1#02` for 2014
-  would settle the choice: January 13–19 under `first-full`, January 6–12 under `partial`.
-- Q12 (§5 `resources` row, DL-287): descoped (DL-288). What the vendor does with FREE on a
-  depletable resource. "resources Attribute" (AutoSys 24.2) documents FREE as "Optional for
-  renewable virtual resources only" and says nothing of FREE=Y or FREE=A on a depletable.
-  The page has the same text in every version from 11.3.6 to 24.2. No known vendor page, KB
-  article or community thread says more on the case. The vendor might reject the
-  definition, ignore the code, or free the units. No default is pinned: preflight refuses FREE=Y and FREE=A on a depletable and
-  accepts FREE=N, which matches the depletable default. The oracle applies the code to a
-  direct caller, as DL-50 states. Descoped: the refusal is loud, so no estate the runner
-  runs depends on the answer, and the case is not pursued. If it is ever needed, the
-  runbook's Q12 protocol settles it. The protocol checks whether jil accepts each FREE code,
-  and whether a QUANTITY=2 job runs after the FREE=A job ends and after the FREE=Y job
-  fails.
+- Q11 (SEM-37, DL-250): closed (DL-259). A WEKR token selects a week of the year, with weeks
+  that start on the anchor day; the digits run 1 = Monday to 7 = Sunday (SEM-37). How the
+  days before the first anchor day count is a chosen default, not a verified fact. The
+  default `first-full` puts them in no week, and `--semantics wekr-first-week=partial` makes
+  them week 1. A live instance generating `WEKR1#02` for 2014 would settle the choice:
+  January 13–19 under `first-full`, January 6–12 under `partial`.
+- Q12 (§5 `resources` row, DL-287): descoped (DL-288). The question: what the vendor does with
+  FREE=Y or FREE=A on a depletable resource. "resources Attribute" documents FREE as "Optional
+  for renewable virtual resources only", with the same text in every version from 11.3.6 to
+  24.2, and no known vendor source says more. The vendor might reject the definition, ignore
+  the code, or free the units. No default is pinned: preflight refuses FREE=Y and FREE=A on a
+  depletable and accepts FREE=N, which matches the depletable default. The oracle applies the
+  code to a direct caller (DL-50). The refusal is loud, so no estate the runner runs depends
+  on the answer. If the case is ever needed, the runbook's Q12 protocol settles it. It checks
+  whether jil accepts each FREE code, and whether a QUANTITY=2 job runs after the FREE=A job
+  ends and after the FREE=Y job fails.
 - Q13 (SEM-18): open. What CHANGE_STATUS RUNNING does to a box. "sendevent
   Command -- Change the Status of a Job" (AutoSys 24.2) states a permission check: "If you
   issue the sendevent command to change the status of a box to the RUNNING status, AutoSys
