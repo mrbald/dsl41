@@ -204,24 +204,44 @@ def test_real_clock_wait_until_returns_early_when_interrupted() -> None:
     assert elapsed < 1.0  # nowhere near the 10s deadline it was given
 
 
-def test_real_clock_sleep_until_sleeps_roughly_the_delta() -> None:
+def test_real_clock_sleep_until_sleeps_roughly_the_delta(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """(RealClock docstring): sleep_until is a plain sleep for the requested
     delta -- and a deadline already in the past returns immediately rather
-    than blocking."""
+    than blocking.
 
-    async def scenario() -> tuple[float, float]:
-        clock = RealClock()
+    The clock's `now` is held at one instant and the sleeps it asks for are
+    recorded, so neither check depends on how long a loaded box takes
+    between two reads of the clock or to wake the task: one sleep of exactly
+    the delta for the future deadline, none for the past one."""
+    real_sleep = asyncio.sleep
+    asked: list[float] = []
+
+    async def recording_sleep(seconds: float) -> None:
+        asked.append(seconds)
+        await real_sleep(seconds)
+
+    class HeldClock(RealClock):
+        instant = RealClock().now()
+
+        def now(self) -> datetime:
+            return self.instant
+
+    async def scenario() -> tuple[float, list[float]]:
+        clock = HeldClock()
         t0 = time.monotonic()
         await clock.sleep_until(clock.now() + timedelta(seconds=0.2))
         forward = time.monotonic() - t0
-        t1 = time.monotonic()
+        future = list(asked)
         await clock.sleep_until(clock.now() - timedelta(seconds=5))
-        past = time.monotonic() - t1
-        return forward, past
+        return forward, future
 
-    forward, past = asyncio.run(scenario())
-    assert 0.15 <= forward <= 1.0
-    assert past < 0.1
+    monkeypatch.setattr(asyncio, "sleep", recording_sleep)
+    forward, future = asyncio.run(scenario())
+    assert future == [0.2]
+    assert forward >= 0.15  # a real sleep happened
+    assert asked == future  # the past deadline asked for no sleep
 
 
 # --------------------------------------------- 2. end-to-end real domain (CMD)

@@ -777,6 +777,11 @@ def test_resume_never_signals_the_live_member_of_an_exited_unreaped_leader(
         leader.wait(timeout=10)
 
 
+@pytest.mark.skipif(
+    not hasattr(os, "waitid"),
+    reason="without os.waitid (macOS before Python 3.13) the wrapper reaps when it "
+    "observes the exit, so no zombie is left to resolve",
+)
 def test_a_silent_wrapper_whose_command_exited_resolves_unobservable(tmp_path: Path) -> None:
     """The wrapper is alive but frozen after it observed the exit and before
     it recorded it, so its command is a zombie it has not reaped yet. Past

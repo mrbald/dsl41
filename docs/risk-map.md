@@ -196,7 +196,7 @@ Run from the repository root, in this order:
 ```sh
 uv sync --frozen --extra dev
 uv run coverage erase
-uv run coverage run -m pytest -q
+uv run coverage run -m pytest -q -n 4 --dist loadfile
 uv run coverage combine
 uv run coverage report
 uv run python scripts/branch_coverage.py

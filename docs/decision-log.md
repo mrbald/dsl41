@@ -23048,3 +23048,48 @@ relitigate an entry; append a new one.
   now removed. The Opus reviewer found the stated limit's first text wrong: no trace is persisted.
   Three rounds each; findings confirmed by the reviewer that raised them, and both agreed to the
   stated limit's text.
+- DL-354 The suite runs on four workers: test overlap measured and not cut, pytest-xdist adopted
+  under DL-211's revisit clause, the transition hits recorded by the controller, four timing tests
+  fixed, and the CI timeouts back to 15 minutes
+  (2026-10-15; .github/workflows/ci.yml; pyproject.toml; uv.lock; tests/transition_hits_plugin.py,
+  tests/conftest.py, tests/test_state_machine.py, tests/test_runner.py,
+  tests/test_runner_adapters.py, tests/test_runner_lifecycle.py, tests/test_runner_supervisor.py;
+  docs/agent-workflow.md; docs/risk-map.md)
+  THE AIM. DL-351 raised the test and coverage legs' timeout from 15 to 25 minutes when the chart
+  oracle made the coverage leg take 14.5. DL-211 declined pytest-xdist and said to revisit it if a
+  leg ran long again; that clause fired. The owner asked for the low-hanging fruit and for an
+  analysis of overlapping tests that keeps branch and transition coverage.
+  OVERLAP. Each test's lines, arcs and transition hits were recorded. 5,355 tests, outside the
+  trace-named tests, the linter fixture pairs, the goldens and the only witnesses of a cell, are
+  covered by another test of their file or by one other test; a consistent set that could all go is
+  4,713 tests and 117 s. Coverage is necessary, not sufficient: a test also guards its assertions,
+  and almost every top candidate asserts what its covering test does not (shell lines coverage
+  cannot see, a negative check, a process's own exit). One merge survived, worth 2 s, and was
+  declined: a merged test fails less specifically. No test is cut.
+  FOUR WORKERS. `-n 4 --dist loadfile`, pinned, in both test legs and the coverage leg; a file's
+  tests share one worker. Locally the plain suite goes from about 437 s to 120 s and the coverage
+  leg's pytest from about 509 s to 154 s, with coverage at 100% and the transition gate full. The
+  flags sit in ci.yml and agent-workflow.md, not in the pytest options, so a local run stays serial
+  unless asked. DL-211's isolation risk split in two. Shared state: the only shared file was the
+  transition hits, which every worker rewrote; the controller now owns the directory and the merge,
+  workers write their own files, and serial and parallel runs record the same 797 hits. Every socket
+  is a Unix socket on a per-test path. Load: four workers on a four-core runner make real-clock
+  tests slower; the acceptance below measures it on the runner. Hypothesis's deadline, a speed check
+  and not a correctness check, is off under a local worker too; CI's profile had it off already. A
+  serial pass for the real-clock tests was rejected: it would hide the timing defects and give up
+  half the gain.
+  THE TIMING TESTS. Three tests raced a real clock and now construct their window (DL-83): the
+  STARTJOB in test_dl137 is queued at the loop's first choice; the sleep test checks the sleep it
+  asked for; the supervisor-spool test holds the kill until the wrapper's status.json exists (its
+  race is probable, not reproduced). A fourth, a zombie check, skips where `os.waitid` is missing
+  (macOS before Python 3.13), a platform gap and not a race. Two shorter deadman waits, worth 3.5 s,
+  were declined: they tighten real-clock ratios on slow runners.
+  ACCEPTANCE. Ten consecutive green workflow runs on the branch, thirty leg executions, with zero
+  test failures before the merge; a failure is diagnosed and fixed, and the count restarts. A load
+  flake that passes at three workers pins three; a second flake of one test after its fix makes its
+  file serial. The runs' result is recorded on the pull request.
+  The timeout goes back to 15 minutes on the test and coverage legs.
+  REVIEW. Tests and tooling: one Opus reviewer, and one advisor ruling on adopting xdist, which
+  found it follows DL-211's revisit clause and does not reverse it. Two rounds; seven findings and
+  two on this entry's text, all fixed and confirmed by the reviewer. The serial and parallel runs
+  record the same transition hits.
