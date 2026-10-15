@@ -52,8 +52,11 @@ if TYPE_CHECKING:
     from dsl41.boundary import EstateWalk
     from dsl41.oracle_state import Event, TraceEntry
     from dsl41.rehearse_check import CadencePolicy
-    from dsl41.runner_adapters import FakeAdapter
-    from dsl41.runner_clock import ZeroDelayCycleError
+    from dsl41.runner_access import AccessControl
+    from dsl41.runner_adapters import FakeAdapter, SupervisorClient
+    from dsl41.runner_control import ControlServer
+    from dsl41.runner_clock import VirtualClock, ZeroDelayCycleError
+    from dsl41.runner_scheduler import Scheduler
     from dsl41.period import Manifest, RuntimeProfile, StagedManifest
     from dsl41.runner import Engine
     from dsl41.runner_history import RunRow
@@ -630,6 +633,247 @@ def _tui_failure(
     return None
 
 
+def _preflight_launch(
+    run_root: Path,
+    profile: "RuntimeProfile",
+    open_from: "Path | None",
+    access_map: "Path | None",
+) -> "tuple[Callable[[Manifest], None] | None, int | None]":
+    """`run`'s read-only checks, before anything is created: the roll's
+    preflight, the access policy's load, and the roll's admission gate. Answers
+    that gate (None when there is no roll) and, when a check refused, the exit
+    code."""
+    from dsl41.runner_clock import EngineError
+
+    admit: "Callable[[Manifest], None] | None" = None
+    if open_from is not None:
+        # the roll's READ-ONLY preflight runs before anything is created:
+        # a refusal -- the unattested-closing refusal above all -- must
+        # write nothing, not even the target directory and its lock. Every
+        # gate re-runs authoritatively inside the roll under the locks.
+        from dsl41.estate import check_roll_ready
+
+        try:
+            successor = check_roll_ready(run_root, Path(open_from))
+        except EngineError as exc:
+            return None, refuse(exc)
+    if access_map is not None:
+        # the access-model ss4 refusal must write NOTHING (the check_roll_ready
+        # precedent above): the same load_policy that arming runs later is
+        # called here read-only, before the root is claimed or the WAL opened.
+        # `socket_group` resolution is the loader's own (DL-152), so an
+        # unknown group refuses here too, and in the loader's words
+        from dsl41.runner_access import AccessError, load_policy
+
+        try:
+            load_policy(access_map, generation=1)
+        except AccessError as exc:
+            return None, refuse(exc)
+    if open_from is not None:
+        # PR-22b: the options are held to the successor's pin before the
+        # roll writes. This early pass runs after every local check above,
+        # because it may PING a supervisor. It is the fast refusal that
+        # writes nothing; the roll runs the same gate again on the seal it
+        # selects.
+        admit = _roll_admission(run_root, profile)
+        try:
+            admit(successor)
+        except EngineError as exc:
+            return None, refuse(exc)
+    return admit, None
+
+
+def _install_signal_handlers(stop: "asyncio.Event", access: "AccessControl | None") -> None:
+    """Route SIGINT and SIGTERM to `stop`, and SIGHUP to the access reload."""
+    import asyncio
+    import signal as signal_mod
+
+    loop = asyncio.get_running_loop()
+    for sig in (signal_mod.SIGINT, signal_mod.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except (NotImplementedError, ValueError, RuntimeError):
+            # non-main-thread embedding (test harnesses): stoppable only by
+            # engine failure; the real CLI always has the main thread
+            pass
+    if access is not None:
+        # access-model ss7: explicit reload; a failed one keeps the old
+        # policy and writes the receipt, never kills the engine
+        try:
+            loop.add_signal_handler(signal_mod.SIGHUP, access.reload)
+        except (NotImplementedError, ValueError, RuntimeError):
+            pass
+
+
+async def _await_run_end(
+    engine: "Engine",
+    server: "ControlServer",
+    client: "SupervisorClient | None",
+    stop: "asyncio.Event",
+    ui: bool,
+) -> "tuple[asyncio.Task[Any], Any, asyncio.Task[Any] | None, set[asyncio.Task[Any]]]":
+    """Start the engine loop and wait for the first thing that ends the run:
+    the loop, a stop signal, the server's failure or the attached TUI. Answers
+    the loop task, the TUI and its task, and the tasks that finished."""
+    import asyncio
+    from datetime import datetime
+
+    loop_task = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
+    # a control handler's StatechartError stops the run as one from the
+    # loop does (statechart-engine ss5): the handler cancels the loop at
+    # once, so it takes no further step, and the run wakes on `failed`
+    server.on_statechart_error = loop_task.cancel
+    if client is not None:
+        # the same stop for one the supervisor client's background tasks
+        # meet: the reader, the renewal and the LIST net. One met before
+        # the loop began is handed over now
+        client.on_statechart_error = server.stop_on
+    stop_task = asyncio.ensure_future(stop.wait())
+    failed_task = asyncio.ensure_future(server.failed.wait())
+    ui_task: asyncio.Task[Any] | None = None
+    tui = None
+    if ui:
+        tui, ui_task = _attach_tui(server.path, owns_run=True)
+    waiters = {loop_task, stop_task, failed_task}
+    waiters |= {ui_task} if ui_task is not None else set()
+    done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+    stop_task.cancel()
+    failed_task.cancel()
+    return loop_task, tui, ui_task, done
+
+
+async def _stop_and_judge(
+    engine: "Engine",
+    server: "ControlServer",
+    loop_task: "asyncio.Task[Any]",
+    tui: Any,
+    ui_task: "asyncio.Task[Any] | None",
+    done: "set[asyncio.Task[Any]]",
+    *,
+    detached: bool,
+) -> tuple[int, bool]:
+    """How the run ended: tear down the TUI, the server and the engine, and
+    answer the exit code with whether a seal boundary committed."""
+    import asyncio
+    import contextlib
+
+    from dsl41.runner_admission import TimeHalfStop
+
+    code = 0
+    sealed = False
+    try:
+        tui_failure = _tui_failure(tui, ui_task, done)
+        if tui is not None and ui_task is not None and ui_task not in done:
+            tui.exit()  # engine crash or signal: detach the viewer first
+            with contextlib.suppress(Exception):
+                await ui_task
+        # detach-stop (spec ss3 case b): teardown must NOT kill jobs -- the
+        # flag makes the SupervisedCommandAdapter abandon its await instead
+        # of signaling. Set before any adapter-task cancel; in-run oracle
+        # kills already happened while the loop ran (stopping was False then).
+        if detached:
+            engine.detach.stopping = True
+        # how the loop ended, if it did on its own; a loop the server
+        # cancelled ended for the server's error, read below
+        ended = loop_task in done and not loop_task.cancelled()
+        outcome = loop_task.exception() if ended else None
+        sealed = isinstance(outcome, PeriodSealed)
+        if sealed:
+            # ss7: a committed boundary is a SUCCESSFUL terminal outcome,
+            # and its code is its own -- distinct from 0/1/2, so an init
+            # system does not restart-loop a sealed engine, and distinct
+            # from the crash branch below, which `hold_open` makes the only
+            # other way this loop can return. Detached work is NOT
+            # signalled: `detach.stopping` is already set above, so the
+            # supervised adapter abandons its await instead of killing a
+            # run the next period will reattach (PR-30b). `say_next` runs
+            # after the teardown, below any report the server adds.
+            typer.echo(str(outcome))
+            code = 3
+        elif isinstance(outcome, TimeHalfStop):
+            # not a crash: a restart meets the same timers, so its own code
+            # keeps the unit down until a fixed build runs (concurrency-model ss4)
+            typer.echo(f"engine stopped: {outcome}", err=True)
+            code = EXIT_TIME_HALF_STOP
+        elif isinstance(outcome, StatechartError):
+            # an assertion failure, not a crash: every line of its report
+            # goes out under one prefix, and its own code keeps the unit
+            # down until a fixed build runs (docs/statechart-engine.md ss5)
+            code = statechart_report(outcome)
+        elif server.statechart_error is not None:
+            # the same report and exit for one a control handler met; the
+            # handler sent no reply, hung up and cancelled the loop
+            code = statechart_report(server.statechart_error)
+            # never a raw await: a loop that crashed in the same instant
+            # must not skip the teardown or the report's precedence
+            loop_task.cancel()
+            await asyncio.wait({loop_task})
+            if not loop_task.cancelled() and loop_task.exception() is not None:
+                typer.echo(f"engine failed: {loop_task.exception()}", err=True)
+        elif ended:  # hold_open never quiesces: this is a crash
+            typer.echo(f"engine failed: {outcome}", err=True)
+            code = 1
+        else:
+            # operator stop: a signal, or quitting the attached TUI (ss11
+            # --ui tethers the run to this terminal; viewers that must not
+            # stop the run attach with `dsl41 ui` instead)
+            if tui_failure is not None:
+                typer.echo(f"TUI failed: {tui_failure}", err=True)
+                code = 1
+            if detached:
+                typer.echo("stopping: jobs continue under the supervisor (detached, ss6a)")
+            else:
+                typer.echo("stopping: cancelling live jobs (wrappers record the kills, ss6a)")
+        if not loop_task.done():
+            loop_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await loop_task
+    finally:
+        # whatever the branch above met, the server and the engine are
+        # torn down
+        try:
+            await server.close()
+        finally:
+            await engine.shutdown()
+    return code, sealed
+
+
+def _finish_run(
+    server: "ControlServer",
+    code: int,
+    sealed: bool,
+    run_root: Path,
+    anchor_dir: "Path | None",
+    reattach: "str | None",
+    *,
+    supervised: bool,
+) -> int:
+    """After the lease went back: judge the server's statechart error against
+    the exit code, name the next step of a sealed run and print the reattach
+    note. Answers the final exit code."""
+    if server.statechart_error is not None and code != EXIT_STATECHART_ERROR:
+        # recorded while a loop outcome took precedence, met while the
+        # server closed (a feed's last post, at shutdown), or met while
+        # the lease went back. A crash or a clean stop becomes 7; a halt
+        # the engine chose keeps its code
+        statechart_report(server.statechart_error)
+        if code in (0, 1):
+            code = EXIT_STATECHART_ERROR
+        else:
+            typer.echo(
+                f"{STATECHART_LOG_PREFIX}: the engine had already stopped with exit {code}",
+                err=True,
+            )
+    if sealed:
+        say_next(run_root, anchor_dir)
+    # a client exists exactly when the profile said detached; `_serve_run` gave
+    # the lease back before calling this
+    note = _reattach_note(reattach, run_root, detached=supervised, code=code)
+    if note is not None:
+        typer.echo(note)
+    return code
+
+
 async def _serve_run(
     catalog: CatalogIR,
     run_root: Path,
@@ -654,8 +898,6 @@ async def _serve_run(
     saying `tethered` would wire a supervised adapter and then tear down as
     if no supervisor existed -- DL-137's divergence, one level up."""
     import asyncio
-    import contextlib
-    import signal as signal_mod
 
     from datetime import UTC, datetime
 
@@ -664,7 +906,6 @@ async def _serve_run(
     from dsl41.runner_startup import start_run, wire_from_profile
     from dsl41.runner_control import ControlServer
     from dsl41.runner_startup import resume_run as _resume_run
-    from dsl41.runner_admission import TimeHalfStop
     from dsl41.runner_clock import EngineError, RealClock
 
     from dsl41.runner_ledger import acquire_run_root
@@ -673,41 +914,9 @@ async def _serve_run(
     detached = profile.execution_mode == "detached"
     # the ASKED deadman; `_running_deadman` reads back what the host runs
     deadman = None if profile.deadman_us is None else profile.deadman_us / 1_000_000
-    admit: "Callable[[Manifest], None] | None" = None
-    if open_from is not None:
-        # the roll's READ-ONLY preflight runs before anything is created:
-        # a refusal -- the unattested-closing refusal above all -- must
-        # write nothing, not even the target directory and its lock. Every
-        # gate re-runs authoritatively inside the roll under the locks.
-        from dsl41.estate import check_roll_ready
-
-        try:
-            successor = check_roll_ready(run_root, Path(open_from))
-        except EngineError as exc:
-            return refuse(exc)
-    if access_map is not None:
-        # the access-model ss4 refusal must write NOTHING (the check_roll_ready
-        # precedent above): the same load_policy that arming runs later is
-        # called here read-only, before the root is claimed or the WAL opened.
-        # `socket_group` resolution is the loader's own (DL-152), so an
-        # unknown group refuses here too, and in the loader's words
-        from dsl41.runner_access import AccessError, load_policy
-
-        try:
-            load_policy(access_map, generation=1)
-        except AccessError as exc:
-            return refuse(exc)
-    if open_from is not None:
-        # PR-22b: the options are held to the successor's pin before the
-        # roll writes. This early pass runs after every local check above,
-        # because it may PING a supervisor. It is the fast refusal that
-        # writes nothing; the roll runs the same gate again on the seal it
-        # selects.
-        admit = _roll_admission(run_root, profile)
-        try:
-            admit(successor)
-        except EngineError as exc:
-            return refuse(exc)
+    admit, refused = _preflight_launch(run_root, profile, open_from, access_map)
+    if refused is not None:
+        return refused
     # ACQUIRE first (S6a, concurrency-model ss7). Earlier than the engine's
     # own entry points would, because the next thing this function does is
     # START a supervisor and take its lease -- an act on an estate this
@@ -922,124 +1131,17 @@ async def _serve_run(
         # action. A signal that lands before the loop task exists only sets
         # `stop` or reloads.
         stop = asyncio.Event()
-        loop = asyncio.get_running_loop()
-        for sig in (signal_mod.SIGINT, signal_mod.SIGTERM):
-            try:
-                loop.add_signal_handler(sig, stop.set)
-            except (NotImplementedError, ValueError, RuntimeError):
-                # non-main-thread embedding (test harnesses): stoppable only by
-                # engine failure; the real CLI always has the main thread
-                pass
-        if access is not None:
-            # access-model ss7: explicit reload; a failed one keeps the old
-            # policy and writes the receipt, never kills the engine
-            try:
-                loop.add_signal_handler(signal_mod.SIGHUP, access.reload)
-            except (NotImplementedError, ValueError, RuntimeError):
-                pass
+        _install_signal_handlers(stop, access)
         try:
             await server.start()
         except EngineError as exc:
             # the handlers stay until `loop.close()`, as on the success path
             return refuse(exc)
         typer.echo(f"engine up; control socket: {server.path}")
-        loop_task = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
-        # a control handler's StatechartError stops the run as one from the
-        # loop does (statechart-engine ss5): the handler cancels the loop at
-        # once, so it takes no further step, and the run wakes on `failed`
-        server.on_statechart_error = loop_task.cancel
-        if client is not None:
-            # the same stop for one the supervisor client's background tasks
-            # meet: the reader, the renewal and the LIST net. One met before
-            # the loop began is handed over now
-            client.on_statechart_error = server.stop_on
-        stop_task = asyncio.ensure_future(stop.wait())
-        failed_task = asyncio.ensure_future(server.failed.wait())
-        ui_task: asyncio.Task[Any] | None = None
-        tui = None
-        if ui:
-            tui, ui_task = _attach_tui(server.path, owns_run=True)
-        waiters = {loop_task, stop_task, failed_task}
-        waiters |= {ui_task} if ui_task is not None else set()
-        done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
-        stop_task.cancel()
-        failed_task.cancel()
-        code = 0
-        sealed = False
-        try:
-            tui_failure = _tui_failure(tui, ui_task, done)
-            if tui is not None and ui_task is not None and ui_task not in done:
-                tui.exit()  # engine crash or signal: detach the viewer first
-                with contextlib.suppress(Exception):
-                    await ui_task
-            # detach-stop (spec ss3 case b): teardown must NOT kill jobs -- the
-            # flag makes the SupervisedCommandAdapter abandon its await instead
-            # of signaling. Set before any adapter-task cancel; in-run oracle
-            # kills already happened while the loop ran (stopping was False then).
-            if detached:
-                engine.detach.stopping = True
-            # how the loop ended, if it did on its own; a loop the server
-            # cancelled ended for the server's error, read below
-            ended = loop_task in done and not loop_task.cancelled()
-            outcome = loop_task.exception() if ended else None
-            sealed = isinstance(outcome, PeriodSealed)
-            if sealed:
-                # ss7: a committed boundary is a SUCCESSFUL terminal outcome,
-                # and its code is its own -- distinct from 0/1/2, so an init
-                # system does not restart-loop a sealed engine, and distinct
-                # from the crash branch below, which `hold_open` makes the only
-                # other way this loop can return. Detached work is NOT
-                # signalled: `detach.stopping` is already set above, so the
-                # supervised adapter abandons its await instead of killing a
-                # run the next period will reattach (PR-30b). `say_next` runs
-                # after the teardown, below any report the server adds.
-                typer.echo(str(outcome))
-                code = 3
-            elif isinstance(outcome, TimeHalfStop):
-                # not a crash: a restart meets the same timers, so its own code
-                # keeps the unit down until a fixed build runs (concurrency-model ss4)
-                typer.echo(f"engine stopped: {outcome}", err=True)
-                code = EXIT_TIME_HALF_STOP
-            elif isinstance(outcome, StatechartError):
-                # an assertion failure, not a crash: every line of its report
-                # goes out under one prefix, and its own code keeps the unit
-                # down until a fixed build runs (docs/statechart-engine.md ss5)
-                code = statechart_report(outcome)
-            elif server.statechart_error is not None:
-                # the same report and exit for one a control handler met; the
-                # handler sent no reply, hung up and cancelled the loop
-                code = statechart_report(server.statechart_error)
-                # never a raw await: a loop that crashed in the same instant
-                # must not skip the teardown or the report's precedence
-                loop_task.cancel()
-                await asyncio.wait({loop_task})
-                if not loop_task.cancelled() and loop_task.exception() is not None:
-                    typer.echo(f"engine failed: {loop_task.exception()}", err=True)
-            elif ended:  # hold_open never quiesces: this is a crash
-                typer.echo(f"engine failed: {outcome}", err=True)
-                code = 1
-            else:
-                # operator stop: a signal, or quitting the attached TUI (ss11
-                # --ui tethers the run to this terminal; viewers that must not
-                # stop the run attach with `dsl41 ui` instead)
-                if tui_failure is not None:
-                    typer.echo(f"TUI failed: {tui_failure}", err=True)
-                    code = 1
-                if detached:
-                    typer.echo("stopping: jobs continue under the supervisor (detached, ss6a)")
-                else:
-                    typer.echo("stopping: cancelling live jobs (wrappers record the kills, ss6a)")
-            if not loop_task.done():
-                loop_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await loop_task
-        finally:
-            # whatever the branch above met, the server and the engine are
-            # torn down
-            try:
-                await server.close()
-            finally:
-                await engine.shutdown()
+        loop_task, tui, ui_task, done = await _await_run_end(engine, server, client, stop, ui)
+        code, sealed = await _stop_and_judge(
+            engine, server, loop_task, tui, ui_task, done, detached=detached
+        )
         # the lease goes back before the run's error is judged: the client's
         # reader is still live during RELEASE and close, and a statechart
         # error it meets there reaches the server like any other. Taken off
@@ -1051,26 +1153,9 @@ async def _serve_run(
             # judged, and the next step named, whatever the return raised: a
             # raise from it still leaves afterwards, and the CLI wrapper reports
             # a statechart error as exit 7
-            if server.statechart_error is not None and code != EXIT_STATECHART_ERROR:
-                # recorded while a loop outcome took precedence, met while the
-                # server closed (a feed's last post, at shutdown), or met while
-                # the lease went back. A crash or a clean stop becomes 7; a halt
-                # the engine chose keeps its code
-                statechart_report(server.statechart_error)
-                if code in (0, 1):
-                    code = EXIT_STATECHART_ERROR
-                else:
-                    typer.echo(
-                        f"{STATECHART_LOG_PREFIX}: the engine had already stopped with exit {code}",
-                        err=True,
-                    )
-            if sealed:
-                say_next(run_root, anchor_dir)
-            # a client exists exactly when the profile said detached; the lease
-            # was given back above
-            note = _reattach_note(reattach, run_root, detached=client is not None, code=code)
-            if note is not None:
-                typer.echo(note)
+            code = _finish_run(
+                server, code, sealed, run_root, anchor_dir, reattach, supervised=client is not None
+            )
         return code
     finally:
         # EACH step guaranteed, whatever the one before it did (DL-145).
@@ -1371,6 +1456,67 @@ def _scenario_completion(raw: object, where: str) -> tuple[float, int]:
     )
 
 
+def _rehearsal_engine(
+    catalog: CatalogIR,
+    parsed: "list[JilFile]",
+    run_root: "Path | None",
+    clock: "VirtualClock",
+    adapters: "dict[str, FakeAdapter]",
+    scheduler: "Scheduler",
+    switches: "SemanticSwitches",
+    *,
+    timezone: "str | None",
+    tz_aliases: "dict[str, str] | None",
+    overrides: "dict[str, str]",
+) -> "Engine":
+    """The engine `rehearse` plays: the genesis of `run_root` when one was
+    named, else a bare in-memory engine. An `EngineError` is a refusal."""
+    from dsl41.boundary import stage_period
+    from dsl41.period import runtime_profile_from_cli
+    from dsl41.runner import Engine
+    from dsl41.runner_clock import EngineError
+    from dsl41.runner_startup import start_run
+
+    try:
+        if run_root is not None:
+            # a rehearsal's run root is a self-contained artifact like a
+            # real one: the profile it interpreted the estate under -- its
+            # timezone above all -- belongs in the manifest, or the log
+            # claims a period it did not run (ss2.1). Staged only for a
+            # FRESH root: an existing journal is start_run's refusal to
+            # make, and nothing is written on the way to it.
+            launched = runtime_profile_from_cli(
+                timezone=timezone, tz_aliases=tz_aliases, semantics=overrides
+            )
+            staged = (
+                stage_period(run_root, parsed, catalog, launched)
+                if root_is_unused(run_root)
+                else None
+            )
+            engine = start_run(
+                catalog,
+                run_root,
+                clock=clock,
+                adapters=adapters,
+                scheduler=scheduler,
+                staged=staged,
+                # a root holding only the sentinel stages nothing; genesis
+                # then pins the launch options, every switch included
+                launched=launched,
+            )
+        else:
+            engine = Engine(
+                catalog,
+                clock=clock,
+                adapters=adapters,
+                scheduler=scheduler,
+                semantics=switches,
+            )
+    except EngineError as exc:
+        raise typer.Exit(refuse(exc)) from exc
+    return engine
+
+
 def rehearse(
     files: list[Path] = typer.Argument(..., help="JIL files forming the estate."),
     scenario: Path = typer.Option(
@@ -1475,11 +1621,7 @@ def rehearse(
 
     from datetime import UTC, datetime, timedelta
 
-    from dsl41.boundary import stage_period
     from dsl41.oracle_state import OracleError
-    from dsl41.period import runtime_profile_from_cli
-    from dsl41.runner import Engine
-    from dsl41.runner_startup import start_run
     from dsl41.runner_clock import EngineError, VirtualClock, ZeroDelayCycleError
     from dsl41.runner_scheduler import Scheduler
     from dsl41.semantics import resolve as resolve_switches
@@ -1546,43 +1688,18 @@ def rehearse(
     except EngineError as exc:
         raise typer.Exit(refuse(exc)) from exc
     adapters = {"CMD": adapter, "FW": adapter}
-    try:
-        if run_root is not None:
-            # a rehearsal's run root is a self-contained artifact like a
-            # real one: the profile it interpreted the estate under -- its
-            # timezone above all -- belongs in the manifest, or the log
-            # claims a period it did not run (ss2.1). Staged only for a
-            # FRESH root: an existing journal is start_run's refusal to
-            # make, and nothing is written on the way to it.
-            launched = runtime_profile_from_cli(
-                timezone=timezone, tz_aliases=tz_aliases, semantics=overrides
-            )
-            staged = (
-                stage_period(run_root, parsed, catalog, launched)
-                if root_is_unused(run_root)
-                else None
-            )
-            engine = start_run(
-                catalog,
-                run_root,
-                clock=clock,
-                adapters=adapters,
-                scheduler=scheduler,
-                staged=staged,
-                # a root holding only the sentinel stages nothing; genesis
-                # then pins the launch options, every switch included
-                launched=launched,
-            )
-        else:
-            engine = Engine(
-                catalog,
-                clock=clock,
-                adapters=adapters,
-                scheduler=scheduler,
-                semantics=switches,
-            )
-    except EngineError as exc:
-        raise typer.Exit(refuse(exc)) from exc
+    engine = _rehearsal_engine(
+        catalog,
+        parsed,
+        run_root,
+        clock,
+        adapters,
+        scheduler,
+        switches,
+        timezone=timezone,
+        tz_aliases=tz_aliases,
+        overrides=overrides,
+    )
     if warns and engine.journal is not None:
         engine.journal.preflight(warns)
     runs_before = {name: engine.oracle.store.runtime(name).run_number for name in catalog.jobs}
