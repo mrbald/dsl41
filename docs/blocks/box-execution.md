@@ -23,7 +23,7 @@ A live box has no effect and no execution entry ([period-model §3.5](../period-
 ## States
 
 A box has no machine of its own.
-Its moves are the [job_status](../state-machines.md#job_status) transitions whose trigger or guard concerns a box or its members.
+Its moves are the rows of the [job](../state-machines.md#job) chart whose event or guard concerns a box or its members.
 That anchor holds the generated diagram and transition table.
 The idle re-derivation rows follow the vendor table in [SEM-15](../autosys-semantics.md#sem-15--member-status-changes-can-ripple-upward-vc).
 

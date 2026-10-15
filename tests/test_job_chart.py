@@ -1,38 +1,33 @@
-"""The composite `job` statechart, checked against the three job tables
-(docs/statechart-engine.md §11, §13, DL-337).
+"""The composite `job` statechart (docs/statechart-engine.md §11, §13, DL-337).
 
-These tests read the chart against the tables the oracle's writes still take
-(`job_status`, `job_flags`, `job_holding`):
+The chart is the one declaration of a job's moves; the oracle drives it and
+writes what each fired row reached. These tests read the chart:
 
-- the declaration is well formed, draws no warning, and is not registered;
-- every old row maps to rows of the chart, the mapping is total and
-  injective over the 83 old ids, and each mapped row keeps its old sources
-  and targets; every other row moves nothing, relays an attempt, is a
-  moment of the cascade or the admission's move to STARTING, or is the one
-  holding move the tables left implicit (`job.319`);
+- the declaration is well formed, draws no warning, and is registered; its
+  marked rows are unreachable cells, each with its reason;
+- the rows the cascade and the admission add beside the status, flag and
+  holding moves relay an attempt, are moments of the cascade, move an
+  admission to STARTING, or settle;
 - the generated completeness test (§13) over a declared abstraction;
 - a sweep of every configuration the rules can build, every event and the
   payload partitions, read with `Executor.resolve`: no cell falls through or
   is ambiguous, and every row is selected somewhere;
-- one cell per old row and source, dispatched with its chained items, ends
-  in the old target;
-- the built states of three walks, test_exhaustive_engine's job walk and
-  its period opening and test_job_machines' ignorable walk, replayed: the
-  oracle's table moves of the addressed job, and a bare chart's rows for the same
-  input and the moments that follow it, are the same rows; and one replay
-  of a job with a run window and a true condition;
-- the two orders of a run's settlement, in the tables' moves and the
-  chart's rows, and a status rule that reads a flag running after the
-  flag's move;
+- one cell per status, flag and holding row and each of its sources,
+  dispatched with its chained items, fires the row and ends in its target;
+- the two orders of a run's settlement in the rows the oracle writes, and
+  a status rule that reads a flag running after the flag's move;
 - the settlement's policy read from the handle its sender's payload carries,
   an owed settlement before an attempt's admission, and an admitted start's
-  moves following from its `start admitted` (DL-349).
+  moves following from its `start admitted` (DL-349);
+- a box's ON_NOEXEC on the jobs it contains, the rows the oracle writes.
+
+The oracle's behaviour over the harness's sample is the goldens'
+(tests/oracle_goldens.py); the chart's cells here are built by hand.
 """
 
 from __future__ import annotations
 
 import itertools
-from collections import Counter
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
@@ -40,13 +35,8 @@ from typing import Any
 
 import pytest
 import statechart_completeness as sc
-from test_exhaustive_engine import _JOB_EVENTS, _JOB_JIL, _feed_all, _job_builds, _row_state
-from test_exhaustive_engine import DAY as WALK_DAY
-from test_exhaustive_engine import T0 as WALK_T0
-from test_job_machines import _TARGETS, _VERBS, _build
 
 from dsl41 import job_chart
-from dsl41.capacity import to_reservations
 from dsl41.ir import lower_source
 from dsl41.job_chart import (
     ACTUAL_START,
@@ -109,28 +99,19 @@ from dsl41.job_chart import (
 from dsl41.machines import MACHINES
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import (
-    JOB_FLAGS,
-    JOB_HOLDING,
-    JOB_STATUS,
     LIVE,
     CapacityReservation,
-    CarriedRows,
     Event,
     JobRuntime,
-    OracleError,
-    RuntimeState,
 )
 from dsl41.state_machine import (
     HITS_ENV,
-    STRICT_ENV,
     Context,
     Executor,
     Row,
-    StateMachine,
     StatechartError,
     alphabet,
     chart_warnings,
-    state_name,
     well_formed,
 )
 from dsl41.state_machine import Event as ChartEvent
@@ -138,50 +119,38 @@ from dsl41.state_machine import Event as ChartEvent
 CHART = JOB
 STATUSES = ("INACTIVE", "QUE_WAIT", "STARTING", "RUNNING", "SUCCESS", "FAILURE", "TERMINATED")
 ROWS = {row.id: row for row in CHART.rows}
-OLD = {t.id: t for machine in (JOB_STATUS, JOB_FLAGS, JOB_HOLDING) for t in machine.transitions}
-_HUNDREDS = {"job_status": 100, "job_flags": 200, "job_holding": 300}
 
-#: An old row with several sources: its other sources' rows (the first source
-#: keeps the old number).
-SPLITS: dict[str, tuple[str, ...]] = {
-    "job_status.23": ("job.159", "job.160"),
-    "job_status.31": ("job.161", "job.162"),
-    "job_status.32": ("job.163", "job.164"),
-    "job_status.33": ("job.165", "job.166"),
-    "job_status.34": ("job.167", "job.168"),
-    "job_status.36": ("job.169", "job.170"),
-    "job_flags.01": ("job.218",),
-    "job_flags.02": ("job.219",),
-    "job_flags.04": ("job.220",),
-    "job_flags.05": ("job.221",),
-    "job_flags.09": ("job.222",),
-    "job_flags.10": ("job.223",),
-    "job_flags.13": ("job.224",),
-    "job_flags.14": ("job.225",),
-    "job_flags.17": ("job.226",),
+#: A move with several sources: the row of its first source, and the rows of
+#: its other sources, which take the same cell.
+SIBLINGS: dict[str, tuple[str, ...]] = {
+    "job.123": ("job.159", "job.160"),
+    "job.131": ("job.161", "job.162"),
+    "job.132": ("job.163", "job.164"),
+    "job.133": ("job.165", "job.166"),
+    "job.134": ("job.167", "job.168"),
+    "job.136": ("job.169", "job.170"),
+    "job.201": ("job.218",),
+    "job.202": ("job.219",),
+    "job.204": ("job.220",),
+    "job.205": ("job.221",),
+    "job.209": ("job.222",),
+    "job.210": ("job.223",),
+    "job.213": ("job.224",),
+    "job.214": ("job.225",),
+    "job.217": ("job.226",),
 }
-
-
-def _renumbered(old_id: str) -> str:
-    machine, number = old_id.split(".")
-    return f"job.{_HUNDREDS[machine] + int(number)}"
-
-
-#: Every old id and its rows.
-MAPPING: dict[str, tuple[str, ...]] = {old: (_renumbered(old), *SPLITS.get(old, ())) for old in OLD}
-OLD_OF: dict[str, str] = {new: old for old, news in MAPPING.items() for new in news}
-#: The rows no old row maps to, by why they exist.
+#: The rows the cascade and the admission add, by why they exist.
 RELAYS = ("job.177", "job.178", "job.179")
 RELABEL = "job.319"
 #: The start of a member that its box restarted before the member's late settlement.
 LATE_SETTLEMENT = "job.312"
 #: An arm the queued recheck finds already off reports the status move all the same.
 FLAG_REPORT = "job.230"
-#: The per-job start bound (DL-304), a refusal no table declared.
+#: The per-job start bound (DL-304).
 START_BOUND = "job.100"
-#: A box's ON_NOEXEC on each job it contains (DL-347): the old row each
-#: stands for, which takes it under the job's own ON_NOEXEC.
-BOX_NOEXEC = {"job.231": "job_flags.09", "job.232": "job_flags.07", "job.233": "job_flags.09"}
+#: A box's ON_NOEXEC on each job it contains (DL-347), and the flag row of
+#: the job's own ON_NOEXEC each moves as.
+BOX_NOEXEC = {"job.231": "job.209", "job.232": "job.207", "job.233": "job.209"}
 #: An attempt whose run's settlement is owed, and an admitted start's moves (DL-349).
 SETTLE_FIRST = "job.401"
 EXTENT = "job.402"
@@ -270,20 +239,20 @@ def _targets(row: Row) -> set[str]:
 
 @pytest.fixture(autouse=True)
 def _unrecorded(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The chart is not registered, so its hits would be noise in the session's
-    record; the old tables' takes these tests make are recorded by the walks
-    they replay."""
+    """The cells here are built by hand, by verb orders and payloads no
+    production path makes, so their hits stay out of the session's record:
+    the transition gate counts the rows the oracle's own tests fire."""
     monkeypatch.delenv(HITS_ENV, raising=False)
 
 
 # ---- the declaration
 
 
-def test_the_chart_is_well_formed_draws_no_warning_and_is_not_registered() -> None:
+def test_the_chart_is_well_formed_draws_no_warning_and_is_registered() -> None:
     assert well_formed(CHART) == []
     assert chart_warnings(CHART) == []
     assert CHART.clock == "logical"
-    assert CHART not in MACHINES  # registered when the three tables leave the registry
+    assert CHART in MACHINES
     assert len(CHART.rows) == 169
     assert [b.id for c in CHART.choices for b in c.branches] == [
         *(f"job.{n}" for n in range(171, 177)),
@@ -322,45 +291,38 @@ def test_every_guard_and_action_says_what_it_reads() -> None:
         assert function.__doc__, name
 
 
-def test_every_marked_row_is_an_unreachable_cell_with_its_reason() -> None:
+def test_every_marked_row_is_unreachable_with_its_reason() -> None:
+    """Each marked row but one is an ignored cell no input builds. job.314, a
+    settlement that meets held units, is one of them, marked by DL-353 with
+    its own reason: a live status never stands on held units, and a run's
+    settlement is sent once. The one that is not ignored is job.312, a start
+    on a run's unsettled units: the admission the oracle builds carries no
+    previous end, since job.401 settles first."""
     marked = [row for row in CHART.rows if row.mark]
     assert [row.id for row in marked] == [
         "job.182", "job.186", "job.188", "job.190", "job.192", "job.193",
-        "job.194", "job.199", "job.317", "job.318", "job.320", "job.321", "job.419", "job.420",
-        "job.421", "job.422", "job.423",
+        "job.194", "job.199", "job.312", "job.314", "job.317", "job.318", "job.320", "job.321",
+        "job.419", "job.420", "job.421", "job.422", "job.423",
     ]  # fmt: skip
-    assert all(row.mark == "unreachable" and row.kind == "ignored" and row.note for row in marked)
+    cells = [row for row in marked if row.id != LATE_SETTLEMENT]
+    assert all(row.mark == "unreachable" and row.kind == "ignored" and row.note for row in cells)
+    late = ROWS[LATE_SETTLEMENT]
+    assert (late.mark, late.kind, late.action) == ("unreachable", "internal", "settle_ended_run")
+    assert "carries no previous end" in late.note
 
 
-# ---- the mapping
+# ---- the rows beside the moves
 
 
-def test_the_mapping_is_total_injective_and_keeps_sources_and_targets() -> None:
-    assert len(OLD) == 83
-    news = [new for group in MAPPING.values() for new in group]
-    assert len(news) == len(set(news))  # injective: no row stands for two old rows
-    assert set(news) <= set(ROWS)
-    for old_id, group in MAPPING.items():
-        old = OLD[old_id]
-        # the transient ADMITTED is no status of the tables
-        sources = [s for new in group for s in LEAVES[ROWS[new].source] if s != "ADMITTED"]
-        assert len(sources) == len(set(sources)), old_id  # one row per source
-        assert set(sources) == {state_name(s) for s in old.source}, old_id
-        old_targets = {state_name(s) for s in old.targets()}
-        for new in group:
-            row = ROWS[new]
-            assert _targets(row) <= old_targets, new
-            stays = old.source == old.targets() and len(old.source) == 1
-            assert (row.kind == "internal") == stays, new
-            assert row.mark is None, new
-    # the choices keep the set targets of job_status.19 and job_holding.02
-    assert _targets(ROWS["job.119"]) == {state_name(s) for s in OLD["job_status.19"].targets()}
-    assert _targets(ROWS["job.302"]) == {"reserved", "none"}
+def _moves() -> set[str]:
+    """The status, flag and holding moves: each cell's row and its siblings."""
+    return {ident for primary in CELLS for ident in (primary, *SIBLINGS.get(primary, ()))}
 
 
 def test_every_other_row_moves_nothing_relays_an_attempt_or_settles_held_units() -> None:
-    others = [row for row in CHART.rows if row.id not in OLD_OF]
-    assert len(OLD_OF) == 83 + 21 and len(others) == 65
+    moves = _moves()
+    others = [row for row in CHART.rows if row.id not in moves]
+    assert len(moves) == 83 + 21 and len(others) == 65
     moments = {f"job.{405 + i}": event for i, event in enumerate(MOMENTS)}
     for row in others:
         if row.id in RELAYS:
@@ -394,11 +356,11 @@ def test_every_other_row_moves_nothing_relays_an_attempt_or_settles_held_units()
             assert (row.source, row.event, row.kind) == ("lifecycle", START_ADMITTED, "internal")
             assert row.action == "start_extent" and not row.guard
         elif row.id in BOX_NOEXEC:
-            old = OLD[BOX_NOEXEC[row.id]]
+            own = [ROWS[i] for i in (BOX_NOEXEC[row.id], *SIBLINGS.get(BOX_NOEXEC[row.id], ()))]
             assert (row.event, row.kind) == (BOX_ON_NOEXEC, "external")
             assert not (row.guard or row.action), row.id
-            assert row.source in {state_name(s) for s in old.source}
-            assert _targets(row) <= {state_name(s) for s in old.targets()}
+            assert row.source in {leaf for r in own for leaf in LEAVES[r.source]}
+            assert _targets(row) <= {leaf for r in own for leaf in _targets(r)}
         else:
             assert row.kind == "ignored" and row.note, row.id
 
@@ -773,7 +735,7 @@ ABSTRACTION = sc.Abstraction(
 def test_the_completeness_table_matches_the_declaration_in_every_cell() -> None:
     table = sc.completeness_table(CHART, ABSTRACTION)
     assert len(table) > 3000
-    # pinned from the three tables and the rule code, not from the rows; a
+    # pinned from the rule code, not from the rows; a
     # status move that reads a flag follows it as its own item, so a cell's
     # first outcome shows the flag move alone
     assert table[("job RUNNING reserved", KILLJOB, sc.ANY)] == "job.114"
@@ -827,7 +789,8 @@ def test_the_completeness_table_matches_the_declaration_in_every_cell() -> None:
     assert table[("job RUNNING reserved", LEAVE_LIVE, repr(Settlement(True, "spend")))] == (
         "job.306"
     )
-    # a box restart: the start settles the run that ended before it is admitted again
+    # the declaration's cell of job.312, which the oracle never builds (the row
+    # is marked unreachable): a start that meets a run's unsettled units
     assert table[("job INACTIVE reserved", ADMITTED_START, repr(Admission(False, True)))] == (
         "job.312"
     )
@@ -848,7 +811,7 @@ def test_the_completeness_table_matches_the_declaration_in_every_cell() -> None:
     assert table[("job INACTIVE", BOX_RUNNING, sc.ANY)] == "ignored job.227"
 
 
-# ---- one cell per old row and source
+# ---- one cell per move and source
 
 type Cell = Callable[[str], tuple[frozenset[str], JobData, ChartEvent]]
 
@@ -897,105 +860,107 @@ def _step(target: str | None) -> Verdict:
 
 
 CELLS: dict[str, Cell] = {
-    "job_status.01": _status(_start(), noexec=True),
-    "job_status.02": _status(_start()),
-    "job_status.03": _status(_start(admissible=False)),
-    "job_status.04": _status(ChartEvent(FORCE_STARTJOB, Attempt()), holding="held"),
-    "job_status.05": _status(ChartEvent(STARTED, Still())),
-    "job_status.06": _status(_start(window="skip")),
-    "job_status.07": _status(_start(window="skip", box="running")),
-    "job_status.08": _status(ChartEvent(READMIT, Readmission())),
-    "job_status.09": _status(ChartEvent(READMIT, Readmission(box="idle"))),
-    "job_status.10": _status(ChartEvent(READMIT, Readmission(recheck_fails=True))),
-    "job_status.11": _status(ChartEvent(KILLJOB)),
-    "job_status.12": _status(ChartEvent(ON_ICE)),
-    "job_status.13": _status(ChartEvent(ON_NOEXEC, Noexec())),
-    "job_status.14": _status(ChartEvent(KILLJOB)),
-    "job_status.15": _status(ChartEvent(TERM_RUN_TIME, Deadline())),
-    "job_status.16": _status(ChartEvent(BOX_ENDS), MEMBER_DATA),
-    "job_status.17": _status(ChartEvent(STATUS, Injection(success=True))),
-    "job_status.18": _status(ChartEvent(STATUS, Injection(success=False))),
-    "job_status.19": _status(ChartEvent(STATUS, Injection("RUNNING"))),
-    "job_status.20": _status(ChartEvent(STATUS, Injection("INACTIVE"))),
-    "job_status.21": _status(ChartEvent(ON_NOEXEC, Noexec())),
-    "job_status.22": _status(ChartEvent(BOX_START)),
-    "job_status.23": _status(ChartEvent(BOX_SET_INACTIVE)),
-    "job_status.24": _status(_start(), BOX_DATA),
-    "job_status.25": _status(ChartEvent(STARTED, Still()), BOX_DATA),
-    "job_status.26": _status(ChartEvent(MEMBER_MOVES, _step("SUCCESS")), BOX_DATA),
-    "job_status.27": _status(ChartEvent(MEMBER_MOVES, _step("FAILURE")), BOX_DATA),
-    "job_status.28": _status(ChartEvent(COMPLETION_MOMENT, _step("SUCCESS")), BOX_DATA),
-    "job_status.29": _status(ChartEvent(COMPLETION_MOMENT, _step("FAILURE")), BOX_DATA),
-    "job_status.30": _status(ChartEvent(MEMBER_ENDS, Terminator()), BOX_DATA),
-    "job_status.31": _status(ChartEvent(BOX_RECOMPUTE, _box("SUCCESS", True)), BOX_DATA),
-    "job_status.32": _status(ChartEvent(BOX_RECOMPUTE, _box("FAILURE", True)), BOX_DATA),
-    "job_status.33": _status(ChartEvent(BOX_RECOMPUTE, _box("SUCCESS", False)), BOX_DATA),
-    "job_status.34": _status(ChartEvent(BOX_RECOMPUTE, _box("FAILURE", False)), BOX_DATA),
-    "job_status.35": _status(ChartEvent(STATUS, Injection("INACTIVE")), BOX_DATA),
-    "job_status.36": _status(ChartEvent(ON_NOEXEC, Noexec()), BOX_DATA),
-    **{f"job_status.{n}": _status(ChartEvent(KILLJOB)) for n in range(37, 41)},
-    **{f"job_status.{n}": _status(_start(stale=True)) for n in range(41, 48)},
-    "job_status.48": _status(ChartEvent(ON_ICE)),
-    "job_status.49": _status(ChartEvent(ON_ICE)),
-    "job_status.50": _status(ChartEvent(ON_HOLD)),
-    "job_status.51": _status(ChartEvent(ON_HOLD)),
+    "job.101": _status(_start(), noexec=True),
+    "job.102": _status(_start()),
+    "job.103": _status(_start(admissible=False)),
+    "job.104": _status(ChartEvent(FORCE_STARTJOB, Attempt()), holding="held"),
+    "job.105": _status(ChartEvent(STARTED, Still())),
+    "job.106": _status(_start(window="skip")),
+    "job.107": _status(_start(window="skip", box="running")),
+    "job.108": _status(ChartEvent(READMIT, Readmission())),
+    "job.109": _status(ChartEvent(READMIT, Readmission(box="idle"))),
+    "job.110": _status(ChartEvent(READMIT, Readmission(recheck_fails=True))),
+    "job.111": _status(ChartEvent(KILLJOB)),
+    "job.112": _status(ChartEvent(ON_ICE)),
+    "job.113": _status(ChartEvent(ON_NOEXEC, Noexec())),
+    "job.114": _status(ChartEvent(KILLJOB)),
+    "job.115": _status(ChartEvent(TERM_RUN_TIME, Deadline())),
+    "job.116": _status(ChartEvent(BOX_ENDS), MEMBER_DATA),
+    "job.117": _status(ChartEvent(STATUS, Injection(success=True))),
+    "job.118": _status(ChartEvent(STATUS, Injection(success=False))),
+    "job.119": _status(ChartEvent(STATUS, Injection("RUNNING"))),
+    "job.120": _status(ChartEvent(STATUS, Injection("INACTIVE"))),
+    "job.121": _status(ChartEvent(ON_NOEXEC, Noexec())),
+    "job.122": _status(ChartEvent(BOX_START)),
+    "job.123": _status(ChartEvent(BOX_SET_INACTIVE)),
+    "job.124": _status(_start(), BOX_DATA),
+    "job.125": _status(ChartEvent(STARTED, Still()), BOX_DATA),
+    "job.126": _status(ChartEvent(MEMBER_MOVES, _step("SUCCESS")), BOX_DATA),
+    "job.127": _status(ChartEvent(MEMBER_MOVES, _step("FAILURE")), BOX_DATA),
+    "job.128": _status(ChartEvent(COMPLETION_MOMENT, _step("SUCCESS")), BOX_DATA),
+    "job.129": _status(ChartEvent(COMPLETION_MOMENT, _step("FAILURE")), BOX_DATA),
+    "job.130": _status(ChartEvent(MEMBER_ENDS, Terminator()), BOX_DATA),
+    "job.131": _status(ChartEvent(BOX_RECOMPUTE, _box("SUCCESS", True)), BOX_DATA),
+    "job.132": _status(ChartEvent(BOX_RECOMPUTE, _box("FAILURE", True)), BOX_DATA),
+    "job.133": _status(ChartEvent(BOX_RECOMPUTE, _box("SUCCESS", False)), BOX_DATA),
+    "job.134": _status(ChartEvent(BOX_RECOMPUTE, _box("FAILURE", False)), BOX_DATA),
+    "job.135": _status(ChartEvent(STATUS, Injection("INACTIVE")), BOX_DATA),
+    "job.136": _status(ChartEvent(ON_NOEXEC, Noexec()), BOX_DATA),
+    **{f"job.{100 + n}": _status(ChartEvent(KILLJOB)) for n in range(37, 41)},
+    **{f"job.{100 + n}": _status(_start(stale=True)) for n in range(41, 48)},
+    "job.148": _status(ChartEvent(ON_ICE)),
+    "job.149": _status(ChartEvent(ON_ICE)),
+    "job.150": _status(ChartEvent(ON_HOLD)),
+    "job.151": _status(ChartEvent(ON_HOLD)),
     **{
-        f"job_status.{n}": _status(ChartEvent(ON_NOEXEC, Noexec(tree_busy=True)), BOX_DATA)
+        f"job.{100 + n}": _status(ChartEvent(ON_NOEXEC, Noexec(tree_busy=True)), BOX_DATA)
         for n in range(52, 59)
     },
-    "job_flags.01": _flag(ChartEvent(ON_ICE)),
-    "job_flags.02": _flag(ChartEvent(OFF_ICE)),
-    "job_flags.03": _flag(ChartEvent(FORCE_STARTJOB, Attempt())),
-    "job_flags.04": _flag(ChartEvent(ON_HOLD)),
-    "job_flags.05": _flag(ChartEvent(OFF_HOLD)),
-    "job_flags.06": _flag(ChartEvent(FORCE_STARTJOB, Attempt())),
-    "job_flags.07": _flag(ChartEvent(ON_NOEXEC, Noexec())),
-    "job_flags.08": _flag(ChartEvent(BOX_RUNNING), data=MEMBER_DATA),
-    "job_flags.09": _flag(ChartEvent(ON_NOEXEC, Noexec())),
-    "job_flags.10": _flag(ChartEvent(OFF_NOEXEC)),
-    "job_flags.11": _flag(ChartEvent(BOX_OFF_NOEXEC)),
-    "job_flags.12": _flag(_start(dated=True, condition=False)),
-    "job_flags.13": _flag(_start()),
-    "job_flags.14": _flag(ChartEvent(DISARM)),
-    "job_flags.15": _flag(ChartEvent(BOX_RUN_ENDS)),
-    "job_flags.16": _flag(ChartEvent(READMIT, Readmission(recheck_fails=True)), "QUE_WAIT"),
-    "job_flags.17": _flag(ChartEvent(KILLJOB), "QUE_WAIT"),
-    "job_holding.01": _holding(_start(), "INACTIVE"),
-    "job_holding.02": _holding(_start(), "FAILURE"),
-    "job_holding.03": _holding(ChartEvent(FORCE_STARTJOB, Attempt()), "FAILURE"),
+    "job.201": _flag(ChartEvent(ON_ICE)),
+    "job.202": _flag(ChartEvent(OFF_ICE)),
+    "job.203": _flag(ChartEvent(FORCE_STARTJOB, Attempt())),
+    "job.204": _flag(ChartEvent(ON_HOLD)),
+    "job.205": _flag(ChartEvent(OFF_HOLD)),
+    "job.206": _flag(ChartEvent(FORCE_STARTJOB, Attempt())),
+    "job.207": _flag(ChartEvent(ON_NOEXEC, Noexec())),
+    "job.208": _flag(ChartEvent(BOX_RUNNING), data=MEMBER_DATA),
+    "job.209": _flag(ChartEvent(ON_NOEXEC, Noexec())),
+    "job.210": _flag(ChartEvent(OFF_NOEXEC)),
+    "job.211": _flag(ChartEvent(BOX_OFF_NOEXEC)),
+    "job.212": _flag(_start(dated=True, condition=False)),
+    "job.213": _flag(_start()),
+    "job.214": _flag(ChartEvent(DISARM)),
+    "job.215": _flag(ChartEvent(BOX_RUN_ENDS)),
+    "job.216": _flag(ChartEvent(READMIT, Readmission(recheck_fails=True)), "QUE_WAIT"),
+    "job.217": _flag(ChartEvent(KILLJOB), "QUE_WAIT"),
+    "job.301": _holding(_start(), "INACTIVE"),
+    "job.302": _holding(_start(), "FAILURE"),
+    "job.303": _holding(ChartEvent(FORCE_STARTJOB, Attempt()), "FAILURE"),
     # the tier sends a run's settlement after its move's box rules (DL-350)
-    "job_holding.04": _holding(ChartEvent(LEAVE_LIVE, Settlement(units=Policy())), "TERMINATED"),
-    "job_holding.05": _holding(
+    "job.304": _holding(ChartEvent(LEAVE_LIVE, Settlement(units=Policy())), "TERMINATED"),
+    "job.305": _holding(
         ChartEvent(LEAVE_LIVE, Settlement(units=Policy(otherwise="keep"))), "TERMINATED"
     ),
-    "job_holding.06": _holding(
+    "job.306": _holding(
         ChartEvent(LEAVE_LIVE, Settlement(units=Policy(otherwise="spend"))), "TERMINATED"
     ),
-    "job_holding.07": _holding(ChartEvent(RELEASE_RESOURCE), "FAILURE"),
-    "job_holding.08": _holding(ChartEvent(PERIOD_OPENING), "FAILURE", NO_CATALOG),
+    "job.307": _holding(ChartEvent(RELEASE_RESOURCE), "FAILURE"),
+    "job.308": _holding(ChartEvent(PERIOD_OPENING), "FAILURE", NO_CATALOG),
 }
 
 
-def test_every_old_row_from_every_source_ends_in_its_old_target() -> None:
-    """For each old row and each of its sources, one cell dispatched with its
-    chained items: the row that stands for it from that source fires, and its
-    region ends in the old target."""
-    assert set(CELLS) == set(OLD)
+def test_every_move_from_every_source_ends_in_its_target() -> None:
+    """For each status, flag and holding move and each of its sources, one
+    cell dispatched with its chained items: the row of that source fires, and
+    its region ends in one of the row's targets. A move with several sources
+    has a row per source, which take the same cell."""
+    assert len(CELLS) == 83
     checked = 0
-    for old_id, cell in CELLS.items():
-        old = OLD[old_id]
-        for source in sorted(state_name(s) for s in old.source):
-            active, data, event = cell(source)
-            assert _leaf(active, REGION[source]) == source, (old_id, source)
-            new = next(n for n in MAPPING[old_id] if source in LEAVES[ROWS[n].source])
-            executor = Executor()
-            executor.restore("j", CHART, active, data)
-            fired = [ident for outcome in _advance(executor, "j", event) for ident in outcome.rows]
-            assert new in fired, (old_id, source, fired)
-            after = _leaf(executor.active("j"), REGION[source])
-            assert after in {state_name(s) for s in old.targets()}, (old_id, source, after)
-            checked += 1
-    assert checked == sum(len(t.source) for t in OLD.values())
+    for primary, cell in CELLS.items():
+        for ident in (primary, *SIBLINGS.get(primary, ())):
+            row = ROWS[ident]
+            for source in sorted(leaf for leaf in LEAVES[row.source] if leaf != "ADMITTED"):
+                active, data, event = cell(source)
+                assert _leaf(active, REGION[source]) == source, (ident, source)
+                executor = Executor()
+                executor.restore("j", CHART, active, data)
+                outcomes = _advance(executor, "j", event)
+                fired = [fired for outcome in outcomes for fired in outcome.rows]
+                assert ident in fired, (ident, source, fired)
+                after = _leaf(executor.active("j"), REGION[source])
+                assert after in _targets(row), (ident, source, after)
+                checked += 1
+    assert checked == 162
 
 
 def _advance(executor: Executor, job: str, event: ChartEvent) -> list[Any]:
@@ -1006,369 +971,6 @@ def _advance(executor: Executor, job: str, event: ChartEvent) -> list[Any]:
     if "ADMITTED" in executor.active(job):
         outcomes += executor.dispatch(job, ChartEvent(STARTING, Still()))
     return outcomes
-
-
-# ---- the walks, replayed
-
-#: The old tables' takes, as (job, machine, id, old, new), in order.
-type Take = tuple[str, str, str, str, str]
-
-
-@pytest.fixture
-def takes(monkeypatch: pytest.MonkeyPatch) -> list[Take]:
-    """Every job take the oracle's writes make, with its job: each verb notes what
-    `take` returned against the job on the very next call."""
-    log: list[Take] = []
-    pending: list[tuple[str, str, str, str]] = []
-    take, note = StateMachine.take, RuntimeState.note_violation
-
-    def spied_take(self: StateMachine[Any], t: Any, old: Any, new: Any) -> Any:
-        pending.append((self.name, t.id, state_name(old), state_name(new)))
-        return take(self, t, old, new)
-
-    def spied_note(self: RuntimeState, subject: str, violation: Any) -> None:
-        if pending:
-            log.append((subject, *pending.pop()))
-        note(self, subject, violation)
-
-    monkeypatch.setattr(StateMachine, "take", spied_take)
-    monkeypatch.setattr(RuntimeState, "note_violation", spied_note)
-    monkeypatch.setenv(STRICT_ENV, "1")
-    return log
-
-
-def _data(oracle: Oracle, job: str) -> JobData:
-    """The job's data: its catalog entry's facts."""
-    job_ir = oracle.catalog.jobs.get(job)
-    return JobData(
-        box=job_ir is not None and job_ir.job_type == "BOX",
-        catalog=job_ir is not None,
-        job_terminator=job_ir is not None and job_ir.box.job_terminator,
-        auto_hold=job_ir is not None and job_ir.sem.auto_hold,
-    )
-
-
-def _policy(oracle: Oracle, job: str) -> Policy:
-    """What the job's units come to when its run ends, as the replay's
-    handle: the row's, or for a row that holds none the units a start would
-    reserve."""
-    job_ir = oracle.catalog.jobs.get(job)
-    units = oracle.store.runtime(job).reservations
-    if not units and job_ir is not None:
-        units = to_reservations(oracle._pool.demand_vector(job_ir))
-
-    def release(success: bool) -> Release:
-        kept = spent = False
-        for unit in units:
-            if unit.release_policy == "completion" or (
-                unit.release_policy == "success" and success
-            ):
-                continue
-            kept, spent = (True, spent) if oracle._pool.keeps_held(unit.bucket) else (kept, True)
-        return "keep" if kept else "spend" if spent else "free"
-
-    return Policy(release(True), release(False))
-
-
-def _carrying(event: ChartEvent, units: Policy) -> ChartEvent:
-    """The event with the handle on the job's units, as the oracle sends it:
-    on a `Payload`, or a bare one for an event with none. A payload of
-    another kind (an idle box's recompute, a readmission) carries no handle,
-    and no row it selects settles a run."""
-    payload = event.payload
-    if payload is None:
-        return ChartEvent(event.name, Payload(units=units))
-    if not isinstance(payload, Payload):
-        return event
-    return ChartEvent(event.name, replace(payload, units=units))
-
-
-def test_the_replay_carries_a_handle_only_on_a_payload_that_holds_one() -> None:
-    """Every moment the replay can serve gets the handle where its payload
-    holds one; a recompute's and a readmission's pass unchanged."""
-    units = Policy("keep", "spend")
-    for old_id, moment in _MOMENTS.items():
-        carried = _carrying(moment, units)
-        assert carried.name == moment.name, old_id
-        if isinstance(moment.payload, (BoxVerdict, Readmission, Still)):
-            assert carried is moment, old_id
-        else:
-            assert carried.payload.units is units, old_id
-
-
-def _gate(oracle: Oracle, job: str) -> str:
-    job_ir = oracle.catalog.jobs[job]
-    box = job_ir.box.box_name
-    if box is None:
-        return "none"
-    box_row = oracle.store.runtime(box)
-    if box_row.status != "RUNNING":
-        return "idle"
-    if job in box_row.ran_members:
-        return "ran"
-    return "iced_out" if job in box_row.iced_out_members else "running"
-
-
-def _attempt(oracle: Oracle, job: str, *, force: bool, at: datetime) -> Attempt:
-    """The facts of a start attempt at `at`, read off the oracle as
-    `start_verdict` reads them."""
-    job_ir = oracle.catalog.jobs.get(job)
-    if job_ir is None:
-        return Attempt()
-    gate = job_ir.sem.condition
-    vector = oracle._pool.demand_vector(job_ir)
-    schedule = job_ir.schedule
-    window = "inside"
-    if schedule is not None and schedule.run_window is not None:
-        before, oracle._now = oracle._now, at
-        window = oracle._window_side(job_ir)[0]
-        oracle._now = before
-    return Attempt(
-        window=window,  # type: ignore[arg-type]
-        dated=schedule is not None,
-        box=_gate(oracle, job),  # type: ignore[arg-type]
-        condition=gate is None or oracle._cond_true(gate.cond, job),
-        box_noexec=any(oracle.store.runtime(b).on_noexec for b in oracle._ancestor_boxes(job)),
-        admissible=oracle._admissible(job_ir, vector, force=force),
-        demand=bool(to_reservations(vector)),
-    )
-
-
-def _noexec(oracle: Oracle, job: str) -> Noexec:
-    job_ir = oracle.catalog.jobs.get(job)
-    if job_ir is None or job_ir.job_type != "BOX":
-        return Noexec()
-    inside = oracle._contained(job, skip_live=False)
-    rows = [oracle.store.runtime(j) for j in inside]
-    parent = job_ir.box.box_name
-    return Noexec(
-        tree_busy=any(r.on_ice or r.status in LIVE | {"QUE_WAIT"} for r in rows),
-        change=(parent is not None and oracle.store.runtime(parent).status == "RUNNING")
-        or any(r.status != "INACTIVE" for r in [oracle.store.runtime(job), *rows]),
-    )
-
-
-def _input(
-    oracle: Oracle, job: str, kind: str, extra: dict[str, str], at: datetime, units: Policy
-) -> ChartEvent:
-    """The chart's event for one oracle input to `job`, its facts read before
-    it, with the handle on the job's units."""
-    if kind in (STARTJOB, FORCE_STARTJOB):
-        event = ChartEvent(kind, _attempt(oracle, job, force=kind == FORCE_STARTJOB, at=at))
-    elif kind == STATUS:
-        event = ChartEvent(STATUS, Injection(status=extra["status"]))
-    elif kind == ON_NOEXEC:
-        event = ChartEvent(ON_NOEXEC, _noexec(oracle, job))
-    else:
-        event = ChartEvent(kind)
-    return _carrying(event, units)
-
-
-#: The moments that follow an input inside the oracle, by the old row that
-#: shows them. Their facts come from other jobs, so the row names the partition.
-_MOMENTS: dict[str, ChartEvent] = {
-    "job_status.05": ChartEvent(STARTED, Still()),
-    "job_status.25": ChartEvent(STARTED, Still()),
-    "job_status.16": ChartEvent(BOX_ENDS),
-    "job_status.22": ChartEvent(BOX_START),
-    "job_status.23": ChartEvent(BOX_SET_INACTIVE),
-    "job_status.26": ChartEvent(MEMBER_MOVES, _step("SUCCESS")),
-    "job_status.27": ChartEvent(MEMBER_MOVES, _step("FAILURE")),
-    "job_status.28": ChartEvent(COMPLETION_MOMENT, _step("SUCCESS")),
-    "job_status.29": ChartEvent(COMPLETION_MOMENT, _step("FAILURE")),
-    "job_status.30": ChartEvent(MEMBER_ENDS, Terminator()),
-    "job_status.31": ChartEvent(BOX_RECOMPUTE, _box("SUCCESS", True)),
-    "job_status.32": ChartEvent(BOX_RECOMPUTE, _box("FAILURE", True)),
-    "job_status.33": ChartEvent(BOX_RECOMPUTE, _box("SUCCESS", False)),
-    "job_status.34": ChartEvent(BOX_RECOMPUTE, _box("FAILURE", False)),
-    "job_status.09": ChartEvent(READMIT, Readmission(box="idle")),
-    "job_status.10": ChartEvent(READMIT, Readmission(recheck_fails=True)),
-    "job_flags.08": ChartEvent(BOX_RUNNING),
-    "job_flags.11": ChartEvent(BOX_OFF_NOEXEC),
-    "job_flags.15": ChartEvent(BOX_RUN_ENDS),
-    "job_holding.08": ChartEvent(PERIOD_OPENING),
-}
-#: The old rows a start attempt, a wake's or a retry's, shows, and its facts.
-_ATTEMPTS: dict[str, dict[str, Any]] = {
-    "job_status.01": {"box_noexec": True},
-    "job_status.02": {},
-    "job_status.03": {"admissible": False},
-    "job_status.04": {"force": True},
-    "job_status.06": {"window": "skip"},
-    "job_status.07": {"window": "skip", "box": "running"},
-    "job_status.08": {},
-    "job_status.24": {},
-    **{f"job_status.{n}": {"stale": True} for n in range(41, 48)},
-}
-#: The settlements of a run's units, which the tier sends after a move's box
-#: rules, or first on the batch INACTIVE path (DL-350): the replay serves
-#: them as moments, by the end the job's last status move made.
-_SETTLEMENTS = {"job_holding.04", "job_holding.05", "job_holding.06"}
-#: The old rows of the units and the arm a start or a queue exit writes before
-#: its status move: they belong to the moment of the status move after them.
-_BEFORE_STATUS = {
-    "job_flags.13",
-    "job_flags.16",
-    "job_holding.01",
-    "job_holding.02",
-    "job_holding.03",
-}
-
-
-def _moment(
-    oracle: Oracle,
-    job: str,
-    remaining: list[Take],
-    units: Policy,
-    *,
-    attempts: bool,
-    ended: str = "",
-) -> ChartEvent | None:
-    """The chart's event for the moment the next old takes show, with the
-    handle on the job's units, or None. An attempt is served only when
-    `attempts`: after an input's own start matched. A settlement is the end
-    of the job's last status move, `ended`."""
-    lead = remaining[0][2]
-    if lead in _SETTLEMENTS:
-        return ChartEvent(LEAVE_LIVE, Settlement(ended == "SUCCESS", units=units))
-    if lead in _BEFORE_STATUS:
-        lead = next((t[2] for t in remaining if t[1] == "job_status"), lead)
-    if lead in _MOMENTS:
-        return _carrying(_MOMENTS[lead], units)
-    if lead not in _ATTEMPTS or not attempts:
-        return None
-    job_ir = oracle.catalog.jobs[job]
-    vector = oracle._pool.demand_vector(job_ir)
-    member = "running" if job_ir.box.box_name is not None else "none"
-    if lead == "job_status.08":
-        reserves = bool(to_reservations(vector))
-        return ChartEvent(READMIT, Readmission(box=member, demand=reserves))  # type: ignore[arg-type]
-    facts: dict[str, Any] = {"box": member, "demand": bool(to_reservations(vector))}
-    facts |= _ATTEMPTS[lead]
-    return _carrying(ChartEvent(START, Attempt(**facts)), units)
-
-
-def _new_id(take: Take) -> str:
-    _job, _machine, old_id, old, _new = take
-    return next(n for n in MAPPING[old_id] if old in LEAVES[ROWS[n].source])
-
-
-def _replay(
-    base: Oracle,
-    job: str,
-    kind: str,
-    extra: dict[str, str],
-    log: list[Take],
-    at: datetime = WALK_T0 + WALK_DAY * 2,
-) -> list[str]:
-    """Feed one input to a fork of `base` and the same input to the chart; the
-    problems, or none. The chart then takes each moment the old takes show
-    after the input's own, until they are all accounted for. A STARTJOB or
-    FORCE_STARTJOB must match its own start inside its own dispatch: no
-    moment serves an attempt until it has."""
-    twin = base.fork()
-    del log[:]
-    try:
-        twin.feed(Event(at=at, kind=kind, payload={"job": job, **extra}))  # type: ignore[arg-type]
-    except OracleError:
-        return [] if (kind, extra.get("status")) == (STATUS, "QUE_WAIT") else [f"{kind} refused"]
-    remaining = [take for take in log if take[0] == job]
-    executor = Executor()
-    executor.restore(job, CHART, row_configuration(base.store.runtime(job)), _data(base, job))
-    units = _policy(base, job)
-    event = None if kind == "SET_GLOBAL" else _input(base, job, kind, extra, at, units)
-    problems: list[str] = []
-    attempts = kind not in (STARTJOB, FORCE_STARTJOB)
-    taken: list[Take] = []
-    if event is not None:
-        outcomes = _advance(executor, job, event)
-        fired = [i for o in outcomes for i in o.rows if i in OLD_OF]
-        expected = [_new_id(take) for take in remaining[: len(fired)]]
-        if Counter(fired) != Counter(expected):
-            problems.append(f"{kind}: chart {fired}, tables {expected}")
-        taken += remaining[: len(fired)]
-        remaining = remaining[len(fired) :]
-        attempts = attempts or any(
-            i in OLD_OF for o in outcomes if o.event.name == START for i in o.rows
-        )
-    while remaining and not problems:
-        ended = next((t[4] for t in reversed(taken) if t[1] == "job_status"), "")
-        moment = _moment(twin, job, remaining, units, attempts=attempts, ended=ended)
-        if moment is None:
-            problems.append(f"no moment shows {remaining}")
-            break
-        fired = [i for o in _advance(executor, job, moment) for i in o.rows if i in OLD_OF]
-        expected = [_new_id(take) for take in remaining[: len(fired)]]
-        if not fired or Counter(fired) != Counter(expected):
-            problems.append(f"{moment.name}: chart {fired}, tables {remaining}")
-        taken += remaining[: len(fired)]
-        remaining = remaining[len(fired) :]
-    final = projection(row_configuration(twin.store.runtime(job)))
-    if not problems and projection(executor.active(job)) != final:
-        problems.append(f"chart ends in {projection(executor.active(job))}, the row in {final}")
-    return problems
-
-
-def test_the_job_walk_replays_through_the_chart(takes: list[Take]) -> None:
-    """test_exhaustive_engine's job walk: its built states, every job event,
-    on each target."""
-    catalog = lower_source(_JOB_JIL)
-    reached: set[tuple[object, ...]] = set()
-    problems: list[str] = []
-    replayed = 0
-    for steps, targets, switches in _job_builds():
-        base = Oracle(catalog, semantics=switches)
-        _feed_all(base, steps)
-        state = tuple(_row_state(base, job) for job in targets)
-        if (state, switches) in reached:
-            continue
-        reached.add((state, switches))
-        for job in targets:
-            for kind, extra in _JOB_EVENTS:
-                found = _replay(base, job, kind, extra, takes)
-                problems += [f"{job} {kind} {extra} in {state}: {p}" for p in found]
-                replayed += 1
-    assert problems == []
-    assert replayed > 5_000
-
-
-def test_the_ignorable_walk_replays_through_the_chart(takes: list[Take]) -> None:
-    """test_job_machines' walk: a plain job, a resource-bearing job, a box and
-    a resource-bearing box, every status, ice or hold, a member's state."""
-    reached: set[tuple[object, ...]] = set()
-    problems: list[str] = []
-    for job, inner in _TARGETS.items():
-        members = (None,) if inner is None else (None, "ON_ICE", "RUNNING", "QUE_WAIT")
-        for status, flag, member in itertools.product(
-            STATUSES, (None, "ON_ICE", "ON_HOLD"), members
-        ):
-            base = _build(job, status, flag, member)
-            row = base.store.job[job]
-            state: tuple[object, ...] = (job, row.status, row.on_ice, row.on_hold)
-            if inner is not None:
-                state += (base.store.job[inner].status, base.store.job[inner].on_ice)
-            if state in reached:
-                continue
-            reached.add(state)
-            for verb in _VERBS:
-                problems += [f"{job} {verb}: {p}" for p in _replay(base, job, verb, {}, takes)]
-    assert problems == []
-    assert len(reached) >= 100
-
-
-@pytest.mark.parametrize("holds", [True, False])
-def test_the_period_opening_replays_through_the_chart(takes: list[Take], holds: bool) -> None:
-    """test_exhaustive_engine's opening: a removed job's held units go back at
-    the period's first input, an unrelated SET_GLOBAL."""
-    units = (CapacityReservation(bucket="r:XR", units=1, release_policy="never"),)
-    carried = CarriedRows(
-        jobs={"gone": JobRuntime(status="FAILURE", reservations=units if holds else ())},
-        period_id=2,
-        now=WALK_T0,
-    )
-    base = Oracle(lower_source(_JOB_JIL), carried=carried)
-    assert _replay(base, "gone", "SET_GLOBAL", {"name": "G", "value": "x"}, takes) == []
-    assert [t[2] for t in takes if t[0] == "gone"] == (["job_holding.08"] if holds else [])
 
 
 # ---- the projection
@@ -1440,19 +1042,27 @@ def test_a_settlement_reads_its_policy_once_from_its_handle() -> None:
 def test_a_late_settlement_at_a_restart_needs_its_end_s_policy(
     admission: Admission, row: str | None
 ) -> None:
-    """job.312 settles the run that ended by the end it made: with the
-    admission's handle the policy is read for that end; without one, the
-    previous settlement must carry it, and with neither the read raises
-    (DL-349)."""
+    """job.312's action settles the run that ended by the end it made, then
+    admits the start again: with the admission's handle the policy is read
+    for that end; without one, the previous settlement must carry it, and
+    with neither the read raises (DL-349). The row is marked unreachable, so
+    its action is called on its own and the chart never fires it here."""
+    active = configuration("INACTIVE", holding="reserved")
+    ctx = Context("j", ChartEvent(ADMITTED_START, admission), active, JOB_DATA)
+    effects = job_chart.settle_ended_run(ctx)
+    (key, settlement), (again_key, again) = effects.send
+    assert (key, again_key, settlement.name) == ("j", "j", LEAVE_LIVE)
+    assert again.name == ADMITTED_START and again.payload == admission
+    assert repr(again.payload.previous) == repr(Settlement())  # the ended run's is spent
     executor = Executor()
-    executor.restore("j", CHART, configuration("INACTIVE", holding="reserved"), JOB_DATA)
-    event = ChartEvent(ADMITTED_START, admission)
+    executor.restore("j", CHART, active, JOB_DATA)
     if row is None:
         with pytest.raises(StatechartError, match="no release and no handle"):
-            executor.dispatch("j", event)
+            executor.dispatch("j", settlement)
         return
-    rows = [ident for outcome in executor.dispatch("j", event) for ident in outcome.rows]
-    assert rows[:2] == ["job.312", row]
+    assert [ident for outcome in executor.dispatch("j", settlement) for ident in outcome.rows] == [
+        row
+    ]
 
 
 def test_an_injected_live_status_keeps_the_run_s_units_and_settles_them_at_its_end() -> None:
@@ -1496,26 +1106,20 @@ _BATCH_JIL = (
 )
 
 
-def _input_takes(
-    takes: list[Take],
-    factory: Any,
+def _input(
     jil: str,
     setup: list[dict[str, Any]],
     event: dict[str, Any],
-    rows: list[tuple[str, str]] | None = None,
-) -> tuple[list[tuple[str, str]], Oracle]:
-    """The old tables' takes of one input on an oracle of `factory`, its setup
-    fed first, one minute apart: the hook writes through the store's verbs
-    and the tables' transitions (DL-350). `rows`, the hook's record, starts
-    at the input."""
-    oracle = factory(lower_source(jil))
+    rows: list[tuple[str, str]],
+) -> Oracle:
+    """One input on an oracle, its setup fed first, one minute apart. `rows`,
+    the hook's record, starts at the input."""
+    oracle = Oracle(lower_source(jil))
     for minute, step in enumerate(setup, 1):
         oracle.feed(Event(at=T0 + timedelta(minutes=minute), **step))
-    del takes[:]
-    if rows is not None:
-        del rows[:]
+    del rows[:]
     oracle.feed(Event(at=T0 + timedelta(minutes=len(setup) + 1), **event))
-    return [(take[0], take[2]) for take in takes], oracle
+    return oracle
 
 
 def _chart_rows(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
@@ -1535,7 +1139,7 @@ _START_OB = [{"kind": "STARTJOB", "payload": {"job": "ob"}}]
 
 
 def test_a_move_on_its_own_settles_after_the_box_rules_and_before_its_wakes(
-    takes: list[Take], monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """om's SUCCESS folds ob, ob's SUCCESS wakes ox, which finds R still held
     and queues; om's units go back only then, and the queue admits ox: the
@@ -1543,33 +1147,20 @@ def test_a_move_on_its_own_settles_after_the_box_rules_and_before_its_wakes(
     (DL-350)."""
     event = {"kind": "STATUS", "payload": {"job": "om", "exit_code": 0}}
     rows = _chart_rows(monkeypatch)
-    taken, _ = _input_takes(takes, Oracle, _ORDER_JIL, _START_OB, event, rows)
-    assert taken[:4] == [
-        ("om", "job_status.17"),
-        ("ob", "job_status.28"),
-        ("ox", "job_status.03"),
-        ("om", "job_holding.04"),
-    ]
-    assert taken.index(("ox", "job_status.08")) > 3
+    _input(_ORDER_JIL, _START_OB, event, rows)
     order = [("om", "job.117"), ("ob", "job.128"), ("ox", "job.103"), ("om", "job.304")]
     assert [row for row in rows if row in order] == order
     assert rows.index(("ox", "job.108")) > rows.index(("om", "job.304"))
 
 
-def test_the_batch_inactive_path_settles_first(
-    takes: list[Take], monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_the_batch_inactive_path_settles_first(monkeypatch: pytest.MonkeyPatch) -> None:
     """A box set INACTIVE releases its own units before its members' rows
     move: its rows (`job.135`, `job.159`) send the settlement first."""
     event = {"kind": "STATUS", "payload": {"job": "ob", "status": "INACTIVE"}}
     rows = _chart_rows(monkeypatch)
-    taken, _ = _input_takes(takes, Oracle, _BATCH_JIL, _START_OB, event, rows)
-    assert taken == [
-        ("ob", "job_status.35"),
-        ("ob", "job_holding.05"),
-        ("om", "job_status.23"),
-        ("om", "job_holding.05"),
-    ]
+    _input(_BATCH_JIL, _START_OB, event, rows)
+    moves = [row for row in rows if row[1] in _moves()]
+    assert moves == [("ob", "job.135"), ("ob", "job.305"), ("om", "job.159"), ("om", "job.305")]
     written = [row for row in rows if row[1] in ("job.135", "job.159", "job.305")]
     assert written == [("ob", "job.135"), ("ob", "job.305"), ("om", "job.159"), ("om", "job.305")]
 
@@ -1605,7 +1196,7 @@ def test_the_batch_inactive_path_settles_first(
 def test_a_status_rule_that_reads_a_flag_sees_the_flag_moved(
     row: str, active: frozenset[str], event: ChartEvent, reads: set[str]
 ) -> None:
-    """Today the rule code writes the flag, then the status rule reads it
+    """The flag is written first, then the status rule reads it
     (`_resolves` and `_out_of_the_run` read `on_ice`; a wake's attempt reads
     `armed`; the retry reads `on_hold` and `on_noexec`). The status row's
     action sees the flag write, because it runs as the flag row's chained item."""
@@ -1627,44 +1218,6 @@ def test_a_status_rule_that_reads_a_flag_sees_the_flag_moved(
     assert len(seen) == 1 and reads <= seen[0]
 
 
-# ---- one replay with a run window and a true condition
-
-_WINDOW_JIL = (
-    "insert_job: fx\njob_type: c\ncommand: x\nmachine: m1\n\n"
-    "insert_job: wj\njob_type: c\ncommand: w\nmachine: m1\ndate_conditions: 1\n"
-    'days_of_week: all\nstart_times: "10:30"\nrun_window: "10:00 - 12:00"\ncondition: s(fx)\n'
-)
-
-
-def test_a_windowed_job_with_a_true_condition_replays_through_the_chart(
-    takes: list[Take],
-) -> None:
-    """The walks carry no run window and a false condition. Here: `wj` with a
-    run window 10:00-12:00 and a condition that holds or not, idle or done,
-    held or not; STARTJOB and FORCE_STARTJOB before the window (postponed),
-    inside it (started or armed) and after it (skipped)."""
-    catalog = lower_source(_WINDOW_JIL)
-    seen: set[str] = set()
-    problems: list[str] = []
-    for fx, status, flag in itertools.product(
-        ("SUCCESS", "FAILURE"), ("INACTIVE", "SUCCESS", "FAILURE"), (None, "ON_HOLD")
-    ):
-        base = Oracle(catalog)
-        steps: list[tuple[str, str, dict[str, str]]] = [("STATUS", "fx", {"status": fx})]
-        if status != "INACTIVE":
-            steps.append(("STATUS", "wj", {"status": status}))
-        if flag is not None:
-            steps.append((flag, "wj", {}))
-        _feed_all(base, steps)
-        for hour, kind in itertools.product((9, 11, 13), (STARTJOB, FORCE_STARTJOB)):
-            at = T0.replace(hour=hour, minute=30)
-            found = _replay(base, "wj", kind, {}, takes, at=at)
-            problems += [f"{fx} {status} {flag} {kind} {hour}h: {p}" for p in found]
-            seen.update(take[2] for take in takes if take[0] == "wj")
-    assert problems == []
-    assert {"job_status.02", "job_status.06", "job_flags.12", "job_flags.06"} <= seen
-
-
 #: A box `ob` whose condition reads its own SUCCESS, so its completion
 #: restarts it; its member `om` holds the only unit of `Q`.
 def _restart_jil(res_type: str, free: str) -> str:
@@ -1679,14 +1232,13 @@ def _restart_jil(res_type: str, free: str) -> str:
 @pytest.mark.parametrize(
     ("jil", "release", "settling", "reserving"),
     [
-        (_restart_jil("R", ", FREE=Y"), "free", "job_holding.04", "job_holding.01"),
-        (_restart_jil("R", ", FREE=N"), "keep", "job_holding.05", "job_holding.02"),
-        (_restart_jil("D", ""), "spend", "job_holding.06", "job_holding.01"),
+        (_restart_jil("R", ", FREE=Y"), "free", "job.304", "job.301"),
+        (_restart_jil("R", ", FREE=N"), "keep", "job.305", "job.302"),
+        (_restart_jil("D", ""), "spend", "job.306", "job.301"),
     ],
     ids=["free", "keep", "spend"],
 )
 def test_a_box_restarted_by_its_own_completion_meets_the_member_before_its_late_settlement(
-    takes: list[Take],
     monkeypatch: pytest.MonkeyPatch,
     jil: str,
     release: Release,
@@ -1701,29 +1253,19 @@ def test_a_box_restarted_by_its_own_completion_meets_the_member_before_its_late_
     setup = [{"kind": "FORCE_STARTJOB", "payload": {"job": "ob"}}]
     event = {"kind": "STATUS", "payload": {"job": "om", "exit_code": 0}}
     rows = _chart_rows(monkeypatch)
-    taken, oracle = _input_takes(takes, Oracle, jil, setup, event, rows)
-    assert [old_id for job, old_id in taken if job == "om"] == [
-        "job_status.17",
-        "job_status.22",
-        settling,
-        reserving,
-        "job_flags.13",
-        "job_status.02",
-        "job_status.05",
-    ]
+    oracle = _input(jil, setup, event, rows)
     row = oracle.store.job["om"]
     assert (row.status, row.run_number) == ("RUNNING", 2)
     assert [(r.bucket, r.units) for r in row.reservations] == [("r:Q", 1)]
     assert dict(oracle.store.consumed) == ({"r:Q": 1} if release == "spend" else {})
-    ids = {"job_holding.0%d" % n: "job.30%d" % n for n in range(1, 7)}
     om = [ident for job, ident in rows if job == "om"]
-    assert [ident for ident in om if ident in OLD_OF or ident == SETTLE_FIRST] == [
+    assert [ident for ident in om if ident in _moves() or ident == SETTLE_FIRST] == [
         "job.117",
         "job.122",
         SETTLE_FIRST,
-        ids[settling],
+        settling,
         "job.102",
-        ids[reserving],
+        reserving,
         "job.224",
         "job.105",
     ]
@@ -1745,30 +1287,30 @@ _NOEXEC_JIL = "insert_job: nb\njob_type: b\n\n" + "".join(
 
 
 def test_a_boxs_noexec_on_the_jobs_it_contains_replays_through_the_chart(
-    takes: list[Take],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A box's ON_NOEXEC sets each contained job's flag, from either value
-    (job_flags.09), and clears its hold (job_flags.07), under the job's own
-    ON_NOEXEC's rows. Replayed through `ON_NOEXEC on its box` from each
-    job's row before the input, the chart fires the rows that stand for
-    those takes (job.231 to job.233), and ends in the flags each row has
-    after it."""
+    """A box's ON_NOEXEC sets each contained job's flag, from either value,
+    and clears its hold, as the job's own ON_NOEXEC's flag rows do (job.209,
+    job.207). Replayed through `ON_NOEXEC on its box` from each job's row
+    before the input, a bare chart fires the rows the oracle wrote for that
+    job (job.231 to job.233), and ends in the flags its row has after it."""
+    rows = _chart_rows(monkeypatch)
     oracle = Oracle(lower_source(_NOEXEC_JIL))
     for minute, (kind, job) in enumerate(
         [("ON_HOLD", "nh"), ("ON_NOEXEC", "nx"), ("ON_NOEXEC", "nxh"), ("ON_HOLD", "nxh")], 1
     ):
         oracle.feed(Event(at=T0 + timedelta(minutes=minute), kind=kind, payload={"job": job}))  # type: ignore[arg-type]
     before = {job: row_configuration(oracle.store.runtime(job)) for job in _NOEXEC_MEMBERS}
-    del takes[:]
+    del rows[:]
     oracle.feed(Event(at=T0 + timedelta(minutes=5), kind="ON_NOEXEC", payload={"job": "nb"}))
     fired: dict[str, list[str]] = {}
     for job in _NOEXEC_MEMBERS:
-        old = [take[2] for take in takes if take[0] == job]
+        written = [ident for name, ident in rows if name == job and ident in BOX_NOEXEC]
         executor = Executor()
         executor.restore(job, CHART, before[job], JOB_DATA)
         outcomes = executor.dispatch(job, ChartEvent(BOX_ON_NOEXEC))
         fired[job] = [ident for outcome in outcomes for ident in outcome.rows]
-        assert sorted(BOX_NOEXEC[ident] for ident in fired[job]) == sorted(old), job
+        assert sorted(fired[job]) == sorted(written), job
         after = projection(row_configuration(oracle.store.runtime(job)))
         assert projection(executor.active(job)) == after, job
     assert fired == {

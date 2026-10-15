@@ -60,8 +60,7 @@ jobs:
       - run: uv run pytest -q
 
   # DL-351: the oracle the engine builds reproduces its golden digests
-  # over the whole harness sample, and records no transition violation. Its
-  # own job, beside the test legs, so their timeout does not carry it; the
+  # over the whole harness sample. Its own job, beside the test legs, so their timeout does not carry it; the
   # default suite replays the corpus part. About a minute locally.
   goldens:
     runs-on: ubuntu-latest

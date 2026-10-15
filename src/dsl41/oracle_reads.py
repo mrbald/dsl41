@@ -8,8 +8,8 @@ chart's guards and the cascade's moments ask: a condition's truth (SEM-01 to
 SEM-07), a box's members and ancestors, whether a member is out of its box's
 run, a box's terminator and resolution rules, an admission against the pool
 (DL-50), and why an operator's flag input is ignored (DL-254). A read writes
-nothing but the zone and calendar caches; `_record`, `_emit` and `_ignore`
-write the trace, the emitted events and an internal move.
+nothing but the zone and calendar caches; `_record` and `_emit` write the
+trace and the emitted events.
 """
 
 from __future__ import annotations
@@ -41,11 +41,9 @@ from dsl41.oracle_state import (
     Event,
     EventKind,
     JobRuntime,
-    JobStatus,
     OracleError,
     RuntimeState,
     TraceEntry,
-    Transition,
 )
 from dsl41.semantics import DEFAULTS as DEFAULT_SWITCHES
 from dsl41.semantics import SemanticSwitches, iced_atom_truth
@@ -201,14 +199,6 @@ class OracleReads:
     def _emit(self, kind: EventKind, **payload: object) -> None:
         assert self._now is not None
         self._emitted.append(Event(at=self._now, kind=kind, payload=dict(payload)))
-
-    def _ignore(
-        self, job: str, rows: Mapping[JobStatus, Transition[JobStatus]], marker: str, cause: str
-    ) -> None:
-        """An event that changes nothing: take its internal transition for
-        the job's status, and write its trace line."""
-        self.store.stay(job, rows)
-        self._record(job, marker, cause)
 
     def _record(self, job: str, transition: str, cause: str) -> None:
         assert self._now is not None

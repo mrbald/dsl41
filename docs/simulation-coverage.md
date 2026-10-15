@@ -696,7 +696,7 @@ nothing.
 | id | class | cite | label | marker | protocol | bound | detector | effect |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | trace_marker:DISARM | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | an explicit journaled disarm: the latched tick is dropped and nothing else moves |
-| trace_marker:EVENT_IGNORED | supported | ir-design ss7, DL-254, oracle.Oracle._oob_ignored, oracle.Oracle._ignore | - |  |  |  | generic | an ON_ICE, ON_HOLD or ON_NOEXEC the vendor ignores for the job's status, or a KILLJOB on a job that is not running or queued; nothing else moves |
+| trace_marker:EVENT_IGNORED | supported | ir-design ss7, DL-254, oracle.Oracle._oob_ignored, oracle.Oracle._w_flag_ignored, oracle.Oracle._w_kill_ignored | - |  |  |  | generic | an ON_ICE, ON_HOLD or ON_NOEXEC the vendor ignores for the job's status, or a KILLJOB on a job that is not running or queued; nothing else moves |
 | trace_marker:MUST_COMPLETE_ALARM | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | the must_complete deadline passed before the run its tick asked for completed; no status moved |
 | trace_marker:MUST_START_ALARM | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | the must_start deadline passed with no new run; no status moved |
 | trace_marker:OFF_HOLD | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | the hold is released and the start is re-attempted immediately |

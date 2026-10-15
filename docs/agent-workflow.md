@@ -69,13 +69,12 @@ The coverage report enforces the scoped branch-coverage requirement.
 The branch report prints branch-only numbers for every module of `src/dsl41`,
 most missed branches first, then the package total. It is a report, not a gate.
 The transition gate reads `.transition-hits.json`, which the test run writes at
-the repository root. It exits 1 when a declared transition without a mark has
-no recorded hit, when a violation was recorded, or when a marked transition was hit
-(the mark is stale). It must run after the pytest step of the same session.
+the repository root. It exits 1 when a declared row without a mark has no
+recorded hit, or when a marked row or its guard's true outcome was hit (the
+mark is stale). It must run after the pytest step of the same session.
 The golden replay runs the oracle over the whole harness sample, about a minute,
 and names the first run, entry and component that differ from
-`tests/oracle_goldens.txt`, or a run that records a transition violation;
-CI runs it as its own `goldens` job (DL-351).
+`tests/oracle_goldens.txt`; CI runs it as its own `goldens` job (DL-351).
 Keep this list aligned with `.github/workflows/ci.yml`. The one CI check not in
 it is `systemd-analyze verify` over `examples/nightbank/deploy/*.service`
 (DL-218); it needs Linux.

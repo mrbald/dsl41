@@ -44,7 +44,6 @@ from dsl41.semantics import resolve
 from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import VirtualClock
-from dsl41.state_machine import Transition, Violation
 
 #: The oracle the goldens hold to: the engine's.
 ORACLE: OracleFactory = Oracle
@@ -126,35 +125,6 @@ def test_the_command_line_replays_one_sample(capsys: pytest.CaptureFixture[str])
     out = capsys.readouterr().out
     assert out.startswith("1 runs, ")
     assert " entries, 0 differing; " in out
-
-
-class _Violating(Oracle):
-    """Writes every status as the oracle does, and notes a violation of the
-    declared tables on each: the trace and the store are the goldens'."""
-
-    def _write(
-        self,
-        job: str,
-        move: Transition[Any],
-        cause: str,
-        *,
-        code: int | None = None,
-        clear: bool = False,
-    ) -> None:
-        super()._write(job, move, cause, code=code, clear=clear)
-        self.store.note_violation(
-            job, Violation("job_status", "job_status.99", "STARTING", "RUNNING", "planted")
-        )
-
-
-def test_a_run_that_records_a_violation_fails_the_replay() -> None:
-    """The violation channel is not digested, and the goldens recorded none:
-    a run whose inputs record one differs at the first such entry."""
-    replayed = replay(_Violating, ["corpus-seeds"], limit=5, stop_at_first=True)
-    assert len(replayed.differences) == 1
-    found = replayed.differences[0]
-    assert found.component == "violations"
-    assert found.index is not None and found.index > 0
 
 
 # ------------------------------------------------------------- one run's digests

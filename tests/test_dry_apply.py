@@ -1,20 +1,16 @@
-"""The dry apply, the violation channel and the named replay fault
+"""The dry apply, the named replay fault and the inert violation option
 (concurrency-model ss4, period-model ss11).
 
 A control input is applied first on `Oracle.fork()`, before the frontier
-moves. An apply that raises refuses it with `apply_faulted`; an apply
-that records a violation refuses it with `transition_violation`, unless
-the engine runs `--on-transition-violation continue`. A refusal leaves
-nothing in the WAL. An engine-made input is never refused: its move is
-taken and the violation becomes a trace line, and under `stop` the
-engine halts once the decision is durable. An engine-made input whose
-apply raises is quarantined or stops the engine (test_engine_quarantine.py).
-A logged input with a durable decision that raises on replay stops replay
-with an error that names it.
+moves. An apply that raises refuses it with `apply_faulted`, and a refusal
+leaves nothing in the WAL. An engine-made input whose apply raises is
+quarantined or stops the engine (test_engine_quarantine.py). A logged input
+with a durable decision that raises on replay stops replay with an error
+that names it. `run --on-transition-violation` is inert since DL-353:
+given, it prints one deprecation line.
 
-Every violation here is a fake one, noted on the store's channel by a
-patched `transition`, so a test chooses which move breaks; the job's real
-transitions all match their tables. The fork leak test over the SEM corpus
+Every fault here is an injected one, raised after a patched `transition`,
+so a test chooses which move faults. The fork leak test over the SEM corpus
 is the `fork` param of test_oracle.py.
 """
 
@@ -42,30 +38,23 @@ from fork_harness import (
 )
 from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
-from dsl41.oracle_state import VIOLATION_MARKER, Event, JobStatus, RuntimeState
+from dsl41.oracle_state import Event, JobStatus, RuntimeState
 from dsl41.runner import Engine, _Pending
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import (
-    VIOLATION_POLICIES,
     AdmissionRefused,
     ApplyResult,
     Attempt,
     Envelope,
-    TransitionStop,
     apply_attempt,
 )
 from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.runner_hosts import HostCommand, seed_local_executor
 from dsl41.runner_journal import ReplayFault, read_journal, replay_inputs
 from dsl41.runner_startup import resume_run, start_run
-from dsl41.state_machine import Transition, TransitionError, Violation
 
 T0 = datetime(2026, 7, 1, 8, 0)
 _JIL = "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\n"
-
-#: a violation no machine declares; it reaches the channel without `take`,
-#: so the strict test plugin does not see it
-FAKE = Violation("job_status", "job_status.99", "STARTING", "RUNNING", "a fake violation")
 
 
 def _on_status(
@@ -77,30 +66,21 @@ def _on_status(
     def transition(
         self: RuntimeState,
         job: str,
-        t: Transition[JobStatus],
         new: JobStatus,
         at: datetime | None,
         exit_code: int | None = None,
         *,
         clear_exit_code: bool = False,
     ) -> None:
-        real(self, job, t, new, at, exit_code, clear_exit_code=clear_exit_code)
+        real(self, job, new, at, exit_code, clear_exit_code=clear_exit_code)
         if new == status:
             act(self, job)
 
     monkeypatch.setattr(RuntimeState, "transition", transition)
 
 
-def _violate(store: RuntimeState, job: str) -> None:
-    store.note_violation(job, FAKE)
-
-
 def _fault(store: RuntimeState, job: str) -> None:
     raise RuntimeError(f"an injected fault on {job}")
-
-
-def _strict(store: RuntimeState, job: str) -> None:
-    raise TransitionError("a strict check failed")
 
 
 def _start(at: datetime = T0) -> Event:
@@ -123,10 +103,6 @@ async def _close(engine: Engine) -> None:
     await engine.shutdown()
     if engine.journal is not None:
         engine.journal.close()
-
-
-def _markers(oracle: Oracle) -> list[tuple[str, str]]:
-    return [(t.job, t.cause) for t in oracle.trace() if t.transition == VIOLATION_MARKER]
 
 
 def _attempt(index: int, *, kind: str | None, **fields: Any) -> Attempt:
@@ -287,44 +263,6 @@ def test_a_dry_apply_that_raises_leaves_the_original_untouched(
     assert state_bytes(oracle) == before
 
 
-# ------------------------------------------------------ the violation channel
-
-
-def test_the_channel_collects_violations_and_ignores_a_matched_move() -> None:
-    store = RuntimeState()
-    store.note_violation("j", None)
-    assert store.drain_violations() == []
-    store.note_violation("j", FAKE)
-    store.note_violation("host:local", FAKE)
-    assert store.drain_violations() == [("j", FAKE), ("host:local", FAKE)]
-    assert store.drain_violations() == []
-
-
-def test_a_violation_is_a_trace_line_and_rides_on_the_apply(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _on_status(monkeypatch, "STARTING", _violate)
-    oracle = Oracle(lower_source(_JIL))
-    applied = apply_attempt(
-        oracle, _attempt(1, kind="STARTJOB", payload={"job": "j"}, source="control")
-    )
-    assert applied.violations == [("j", FAKE)]
-    assert _markers(oracle) == [
-        ("j", "job_status.99 STARTING->RUNNING: a fake violation"),
-    ]
-    assert oracle.store.job["j"].status == "RUNNING"  # the move is taken
-    assert oracle.store.drain_violations() == []  # the commit drained it
-
-
-def test_a_clean_apply_records_no_violation() -> None:
-    oracle = Oracle(lower_source(_JIL))
-    applied = apply_attempt(
-        oracle, _attempt(1, kind="STARTJOB", payload={"job": "j"}, source="control")
-    )
-    assert applied.violations == []
-    assert _markers(oracle) == []
-
-
 # ------------------------------------------------------- which inputs are control
 
 _ENVELOPE = Envelope(request_id="r", expect={"job:j": 0})
@@ -389,29 +327,14 @@ def _submit_start(engine: Engine, request_id: str = "r1") -> asyncio.Future[Appl
     return future
 
 
-@pytest.mark.parametrize(
-    ("act", "code", "policy"),
-    [
-        (_fault, "apply_faulted", "refuse"),
-        (_fault, "apply_faulted", "continue"),
-        (_fault, "apply_faulted", "stop"),
-        (_violate, "transition_violation", "refuse"),
-        (_violate, "transition_violation", "stop"),
-    ],
-)
 def test_a_control_input_whose_apply_fails_is_refused_before_the_wal(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    act: Callable[[RuntimeState, str], None],
-    code: str,
-    policy: Any,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A refusal leaves nothing: no input record, no index, no moved state."""
-    _on_status(monkeypatch, "STARTING", act)
+    _on_status(monkeypatch, "STARTING", _fault)
 
     async def scenario() -> AdmissionRefused:
         engine = _journaled(tmp_path / "run")
-        engine.on_violation = policy
         before = (engine.frontiers, state_bytes(engine.oracle))
         future = _submit_start(engine)
         await engine.run_until_quiescent(T0)
@@ -423,7 +346,7 @@ def test_a_control_input_whose_apply_fails_is_refused_before_the_wal(
         return refused.value
 
     refusal = asyncio.run(scenario())
-    assert refusal.code == code
+    assert refusal.code == "apply_faulted"
     assert str(refusal).startswith("refused before admission")
     records = read_journal(tmp_path / "run" / "journal.jsonl")
     assert not [r for r in records if r.get("rec") in ("input", "decision")]
@@ -446,7 +369,7 @@ def test_a_clean_control_input_is_admitted_after_its_dry_apply(tmp_path: Path) -
 
 
 def test_a_gate_rejection_is_still_a_logged_decision(tmp_path: Path) -> None:
-    """The dry apply refuses on a fault or a violation only. A stale
+    """The dry apply refuses on a fault only. A stale
     `expect` passes it and is rejected at step 6, at an index."""
 
     async def scenario() -> ApplyResult:
@@ -464,156 +387,6 @@ def test_a_gate_rejection_is_still_a_logged_decision(tmp_path: Path) -> None:
     records = read_journal(tmp_path / "run" / "journal.jsonl")
     assert [r["request_id"] for r in records if r.get("rec") == "input"] == ["stale"]
     assert [r["code"] for r in records if r.get("rec") == "decision"] == ["precondition_failed"]
-
-
-def test_continue_admits_a_violating_control_input_with_its_trace_line(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _on_status(monkeypatch, "STARTING", _violate)
-
-    async def scenario() -> Engine:
-        engine = _engine()
-        engine.on_violation = "continue"
-        engine.inject(_start())  # an in-process script's command
-        await engine.run_until_quiescent(T0)
-        await engine.shutdown()
-        return engine
-
-    engine = asyncio.run(scenario())
-    assert engine.refused_inputs == []
-    assert engine.oracle.store.job["j"].run_number == 1  # the command applied
-    assert _markers(engine.oracle) == [("j", "job_status.99 STARTING->RUNNING: a fake violation")]
-
-
-def test_a_strict_check_raises_through_the_dry_apply(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The test plugin's `TransitionError` is not a fault to refuse: the
-    test fails where the move was made."""
-    _on_status(monkeypatch, "STARTING", _strict)
-
-    async def scenario() -> None:
-        engine = _engine()
-        engine.inject(_start())
-        try:
-            with pytest.raises(TransitionError):
-                await engine.run_until_quiescent(T0)
-            assert engine.refused_inputs == []
-        finally:
-            await engine.shutdown()
-
-    asyncio.run(scenario())
-
-
-# --------------------------------------------------------- engine-made facts
-
-
-def test_an_engine_made_violation_is_taken_and_traced(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The adapter's SUCCESS breaks a (fake) transition. It cannot be
-    refused, so it applies, leaves its trace line, and the engine goes on."""
-    _on_status(monkeypatch, "SUCCESS", _violate)
-
-    async def scenario() -> Engine:
-        engine = _engine()
-        engine.inject(_start())
-        await engine.run_until_quiescent(T0 + timedelta(seconds=1))
-        await engine.shutdown()
-        return engine
-
-    engine = asyncio.run(scenario())
-    assert engine.oracle.store.job["j"].status == "SUCCESS"
-    assert engine.refused_inputs == []
-    assert [job for job, _ in _markers(engine.oracle)] == ["j"]
-
-
-def test_stop_halts_after_the_decision_is_durable_and_resume_replays_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    run_root = tmp_path / "run"
-    _on_status(monkeypatch, "SUCCESS", _violate)
-
-    async def scenario() -> tuple[list[tuple[str, str]], Engine]:
-        engine = _journaled(run_root)
-        engine.on_violation = "stop"
-        engine.inject(_start())
-        try:
-            with pytest.raises(TransitionStop, match="decision is") as stopped:
-                await engine.run_until_quiescent(T0 + timedelta(seconds=1))
-            assert stopped.value.code == "transition_violation"
-            live = _markers(engine.oracle)
-        finally:
-            await _close(engine)
-        resumed = await resume_run(
-            lower_source(_JIL),
-            run_root,
-            clock=VirtualClock(start=T0),
-            adapters={"CMD": FakeAdapter()},
-        )
-        await _close(resumed)
-        return live, resumed
-
-    live, resumed = asyncio.run(scenario())
-    records = read_journal(run_root / "journal.jsonl")
-    completions = [r for r in records if r.get("rec") == "input" and r.get("source") == "adapter"]
-    assert completions and completions[-1]["payload"].get("exit_code") == 0
-    decided = {r["index"] for r in records if r.get("rec") == "decision"}
-    assert completions[-1]["seq"] in decided  # the stop came after the decision
-    # replay met the same violation and wrote the same line, without a raise
-    assert resumed.oracle.store.job["j"].status == "SUCCESS"
-    assert live and _markers(resumed.oracle) == live
-
-
-def test_refuse_does_not_stop_on_an_engine_made_violation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The contrast to `stop`: the same violation under the default leaves
-    the engine running to quiescence."""
-    _on_status(monkeypatch, "SUCCESS", _violate)
-
-    async def scenario() -> Engine:
-        engine = _journaled(tmp_path / "run")
-        engine.inject(_start())
-        await engine.run_until_quiescent(T0 + timedelta(seconds=1))
-        await _close(engine)
-        return engine
-
-    assert asyncio.run(scenario()).oracle.store.job["j"].status == "SUCCESS"
-
-
-def test_stop_in_a_seal_drain_is_not_turned_into_a_refusal(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The cutoff's own time observation is engine-made. A violation on it
-    under `stop` halts the engine: no abort reopens C1, the seal is not
-    answered and no `seal` record exists."""
-    import dsl41.runner as runner_mod
-    from test_boundary import C2_JIL, _genesis, _request, _stage
-
-    run_root = tmp_path / "run"
-    engine = _genesis(run_root)
-    staged = _stage(run_root, C2_JIL)
-    engine.on_violation = "stop"
-    real_apply = runner_mod.apply_attempt
-
-    def violating(oracle: Oracle, attempt: Attempt, **kwargs: Any) -> Any:
-        applied = real_apply(oracle, attempt, **kwargs)
-        if attempt.kind is None and attempt.host is None:
-            applied.violations.append(("cutoff", FAKE))
-        return applied
-
-    monkeypatch.setattr(runner_mod, "apply_attempt", violating)
-
-    async def scenario() -> None:
-        sealed = engine.submit_seal(_request(engine, staged))
-        try:
-            with pytest.raises(TransitionStop):
-                await engine.run_until_quiescent(T0)
-            assert not sealed.done()
-            assert engine.sealing is True  # no abort ran
-        finally:
-            await _close(engine)
-
-    asyncio.run(scenario())
-    assert engine.journal is not None
-    assert not [r for r in read_journal(engine.journal.path) if r["rec"] == "seal"]
 
 
 # ------------------------------------------------------------- replay
@@ -671,15 +444,6 @@ def test_a_clean_log_replays_without_a_fault(tmp_path: Path) -> None:
     assert oracle.store.job["j"].status == "SUCCESS"
 
 
-def test_a_strict_check_raises_through_replay_unwrapped(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    records = _completed_run(tmp_path / "run")
-    _on_status(monkeypatch, "SUCCESS", _strict)
-    with pytest.raises(TransitionError):
-        replay_inputs(Oracle(lower_source(_JIL)), records)
-
-
 @pytest.mark.parametrize(
     ("attempt", "what"),
     [
@@ -704,44 +468,14 @@ def test_the_replay_fault_names_the_input(attempt: Attempt, what: str) -> None:
     assert ReplayFault(attempt, KeyError("k")).code is None
 
 
-def test_the_policies_are_the_cli_choices() -> None:
-    from dsl41.cli_run import OnViolation
-
-    assert tuple(choice.value for choice in OnViolation) == VIOLATION_POLICIES
-
-
-@pytest.mark.parametrize("policy", VIOLATION_POLICIES)
-def test_serve_sets_the_policy_before_the_loop_runs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, policy: Any
+@pytest.mark.parametrize("value", ["refuse", "continue", "stop"])
+def test_the_violation_option_is_inert_and_says_so_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str
 ) -> None:
-    """`_serve_run` hands the option to the engine before the control
-    socket binds, so no input is admitted under another policy."""
-    from dsl41 import cli_run, runner_control
-    from dsl41.period import runtime_profile_from_cli
-
-    seen: list[str] = []
-
-    async def bind(self: Any) -> None:
-        seen.append(self.engine.on_violation)
-        raise EngineError("test: stop at the bind")
-
-    monkeypatch.setattr(runner_control.ControlServer, "start", bind)
-    code = asyncio.run(
-        cli_run._serve_run(
-            lower_source(_JIL),
-            tmp_path / "root",
-            False,
-            [],
-            profile=runtime_profile_from_cli(),
-            on_violation=policy,
-        )
-    )
-    assert code == 2 and seen == [policy]
-
-
-def test_run_passes_the_option_and_defaults_to_refuse(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+    """`--on-transition-violation` is accepted and inert since DL-353:
+    given any of its values, `run` prints one deprecation line to stderr and
+    serves exactly as without it. Without it, nothing is printed. A value it
+    never accepted is still a usage error."""
     from typer.testing import CliRunner
 
     from dsl41 import cli_run
@@ -749,39 +483,37 @@ def test_run_passes_the_option_and_defaults_to_refuse(
 
     jil = tmp_path / "estate.jil"
     jil.write_text(_JIL)
-    seen: list[str] = []
+    seen: list[dict[str, Any]] = []
 
-    async def serve(*args: Any, on_violation: str, **kwargs: Any) -> int:
-        seen.append(on_violation)
+    async def serve(*args: Any, **kwargs: Any) -> int:
+        seen.append({k: v for k, v in kwargs.items() if k != "reattach"})
         return 0
 
     monkeypatch.setattr(cli_run, "_serve_run", serve)
     base = ["run", str(jil), "--run-root", str(tmp_path / "root"), "--as-machine", "m1"]
-    for flags in ([], ["--on-transition-violation", "continue"]):
-        result = CliRunner().invoke(app, [*base, *flags])
-        assert result.exit_code == 0, result.output
+    plain = CliRunner().invoke(app, base)
+    given = CliRunner().invoke(app, [*base, "--on-transition-violation", value])
+    assert plain.exit_code == given.exit_code == 0, given.output
+    assert cli_run.INERT_VIOLATION_OPTION not in plain.stderr
+    assert given.stderr.count(cli_run.INERT_VIOLATION_OPTION) == 1
+    assert seen[0] == seen[1] and "on_violation" not in seen[0]
     bad = CliRunner().invoke(app, [*base, "--on-transition-violation", "ignore"])
     assert bad.exit_code == 2
-    assert seen == ["refuse", "continue"]
 
 
-@pytest.mark.parametrize(
-    ("raised", "code"),
-    [(TransitionStop("test: a stop"), 5), (EngineError("test: a crash"), 1)],
-)
-def test_a_transition_stop_exits_5_and_a_crash_exits_1(
-    short_root: Path, monkeypatch: pytest.MonkeyPatch, raised: EngineError, code: int
+def test_a_crash_exits_1_and_5_is_retired(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`--on-transition-violation stop` has its own exit code, so the engine
-    units' `RestartPreventExitStatus=2 3 5` keeps a stopped engine down. 4 is
-    the control verbs' unknown outcome; 5 collides with no verb's code."""
+    """An engine that fails while running exits 1. Exit 5 was
+    `--on-transition-violation stop` until DL-353; deployed units still
+    list it in `RestartPreventExitStatus`, so no exit code of `run` takes it."""
     from dsl41 import cli_run
     from dsl41.period import runtime_profile_from_cli
 
-    assert cli_run.EXIT_TRANSITION_STOP == 5
+    assert 5 not in {value for name, value in vars(cli_run).items() if name.startswith("EXIT_")}
 
     async def halt(self: Engine, horizon: datetime) -> list[Event]:
-        raise raised
+        raise EngineError("test: a crash")
 
     monkeypatch.setattr(Engine, "run_until_quiescent", halt)
     exit_code = asyncio.run(
@@ -791,10 +523,9 @@ def test_a_transition_stop_exits_5_and_a_crash_exits_1(
             False,
             [],
             profile=runtime_profile_from_cli(),
-            on_violation="stop",
         )
     )
-    assert exit_code == code
+    assert exit_code == 1
 
 
 # ------------------------------------------------------- review round 1
@@ -833,125 +564,6 @@ def test_rehearse_names_the_refused_event_and_its_code(tmp_path: Path) -> None:
     assert ": apply_faulted: refused before admission" in err
 
 
-_TERM_JIL = "insert_job: t\njob_type: c\ncommand: x\nmachine: m1\nterm_run_time: 1\n"
-
-
-def _set_global(at: datetime) -> Event:
-    return Event(at=at, kind="SET_GLOBAL", payload={"name": "G", "value": "1"})
-
-
-@pytest.mark.parametrize("policy", ["refuse", "stop"])
-def test_a_violation_in_the_time_half_does_not_refuse_the_command(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, policy: Any
-) -> None:
-    """`t`'s term_run_time kill is due at the SET_GLOBAL's stamp and fires
-    in the command's batch. The kill's (fake) violation is the engine's
-    own: the command applies, the line is traced, and under `stop` the
-    engine stops once THIS batch commits."""
-    _on_status(monkeypatch, "TERMINATED", _violate)
-    later = T0 + timedelta(minutes=1)
-
-    async def scenario() -> tuple[Engine, BaseException | None]:
-        engine = start_run(
-            lower_source(_TERM_JIL),
-            tmp_path / "run",
-            clock=VirtualClock(start=T0),
-            adapters={"CMD": FakeAdapter(default=None)},
-        )
-        engine.on_violation = policy
-        engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "t"}), source=None)
-        await engine.run_until_quiescent(T0)
-        engine.inject(_set_global(later))
-        stopped: BaseException | None = None
-        try:
-            await engine.run_until_quiescent(later)
-        except TransitionStop as exc:
-            stopped = exc
-        await _close(engine)
-        return engine, stopped
-
-    engine, stopped = asyncio.run(scenario())
-    assert engine.refused_inputs == []
-    assert engine.oracle.store.global_value("G") == "1"
-    assert engine.oracle.store.job["t"].status == "TERMINATED"
-    assert [job for job, _ in _markers(engine.oracle)] == ["t"]
-    assert (stopped is not None) is (policy == "stop")
-    records = read_journal(tmp_path / "run" / "journal.jsonl")
-    command = next(r for r in records if r.get("kind") == "SET_GLOBAL")
-    assert command["seq"] in {r["index"] for r in records if r.get("rec") == "decision"}
-
-
-def test_the_batch_tells_the_time_half_from_the_command(monkeypatch: pytest.MonkeyPatch) -> None:
-    _on_status(monkeypatch, "TERMINATED", _violate)
-    oracle = Oracle(lower_source(_TERM_JIL))
-    oracle.feed(Event(at=T0, kind="STARTJOB", payload={"job": "t"}))
-    applied = apply_attempt(
-        oracle,
-        _attempt(
-            2,
-            kind="SET_GLOBAL",
-            at=T0 + timedelta(minutes=1),
-            payload={"name": "G", "value": "1"},
-            source="control",
-        ),
-    )
-    assert applied.violations == [("t", FAKE)]
-    assert applied.command_violations == []
-
-
-def test_a_time_half_that_raises_reports_its_violations_as_the_engines(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def violate_then_fail(store: RuntimeState, job: str) -> None:
-        store.note_violation(job, FAKE)
-        raise RuntimeError("the time half failed")
-
-    _on_status(monkeypatch, "TERMINATED", violate_then_fail)
-    oracle = Oracle(lower_source(_TERM_JIL))
-    oracle.feed(Event(at=T0, kind="STARTJOB", payload={"job": "t"}))
-    batch = oracle.batch(T0 + timedelta(minutes=1))
-    with pytest.raises(RuntimeError, match="time half failed"):
-        batch.__enter__()
-    assert batch.violations == [("t", FAKE)]
-    assert batch.command_violations == []
-    assert [job for job, _ in _markers(oracle)] == ["t"]
-
-
-def test_a_fork_does_not_carry_a_pending_violation() -> None:
-    oracle = Oracle(lower_source(_JIL))
-    oracle.store.note_violation("j", FAKE)
-    assert oracle.fork().store.drain_violations() == []
-    assert oracle.store.drain_violations() == [("j", FAKE)]
-
-
-def test_strict_mode_refuses_a_violation_noted_outside_an_input() -> None:
-    """The test plugin sets the strict variable for the whole suite, so any
-    `take` site outside an input fails the suite at the next input."""
-    store = RuntimeState()
-    store.note_violation("host:local", FAKE)
-    with pytest.raises(TransitionError, match="noted outside an InputBatch"):
-        store.begin_input()
-    store.begin_input()  # the orphan was dropped, not kept
-    store.commit_input()
-
-
-def test_production_drops_an_orphan_violation_to_stderr_with_no_trace_line(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    from dsl41.state_machine import STRICT_ENV
-
-    monkeypatch.delenv(STRICT_ENV, raising=False)
-    oracle = Oracle(lower_source(_JIL))
-    oracle.store.note_violation("host:local", FAKE)
-    oracle.feed(_start())
-    assert _markers(oracle) == []
-    err = capsys.readouterr().err
-    assert err.count("dsl41: transition violation noted outside an InputBatch, dropped:") == 1
-    assert "host:local job_status.99 STARTING->RUNNING: a fake violation" in err
-    oracle.feed(_start(T0 + timedelta(minutes=1)))
-    assert capsys.readouterr().err == ""  # written once
-
-
 def test_runs_refuses_a_root_whose_replay_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -988,7 +600,7 @@ def test_an_exact_retry_of_a_refused_request_is_refused_again(
 ) -> None:
     """A refusal is never noted in the decision index, so the retry is
     dry-applied again: the same code, and still nothing in the log."""
-    _on_status(monkeypatch, "STARTING", _violate)
+    _on_status(monkeypatch, "STARTING", _fault)
 
     async def scenario() -> list[str | None]:
         engine = _journaled(tmp_path / "run")
@@ -1003,7 +615,7 @@ def test_an_exact_retry_of_a_refused_request_is_refused_again(
         await _close(engine)
         return codes
 
-    assert asyncio.run(scenario()) == ["transition_violation", "transition_violation"]
+    assert asyncio.run(scenario()) == ["apply_faulted", "apply_faulted"]
     records = read_journal(tmp_path / "run" / "journal.jsonl")
     assert not [r for r in records if r.get("rec") in ("input", "decision")]
 

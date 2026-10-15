@@ -108,7 +108,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 # today (the supervisor answers its own canon errors), and a future in-process
 # caller must catch by the name it imported. The same holds for `state_machine`:
 # the machines declared here are instances of the top-level module's classes,
-# and under the test plugin their `TransitionError` is that module's.
+# and the `StatechartError` they raise is that module's.
 #
 # The TYPE_CHECKING branch names the same file under the name mypy maps it to
 # (it cannot see one file under two names), which is what keeps verify_alive

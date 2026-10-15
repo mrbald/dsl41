@@ -2,7 +2,7 @@
 
 Status: frozen at **v3** (DL-118). Amended by DL-133, DL-135, DL-146,
 DL-147, DL-148, DL-150, DL-151, DL-158, DL-189, DL-216, DL-217, DL-256,
-DL-264, DL-267, DL-272, DL-292, DL-295 and DL-297. This document is
+DL-264, DL-267, DL-272, DL-292, DL-295, DL-297 and DL-353. This document is
 normative for the control plane of `docs/runner-design.md` §10, as
 `docs/supervisor-protocol.md` is normative for the lifecycle tier of
 runner-design §6a. A change to a frozen item requires a decision-log
@@ -183,7 +183,6 @@ The client action says what a client does next:
 | `engine_shutting_down` | refused | the engine shut down before the input was admitted | wait |
 | `decision_timeout` | unknown | no decision arrived within the window | re-read; retry a mutation only under the same request_id |
 | `apply_faulted` | refused | applying the command on a fork of the engine's state raised, so it was refused before it was logged (`docs/concurrency-model.md` §4, DL-292) | operator |
-| `transition_violation` | refused | applying the command on a fork of the engine's state broke a declared state-machine transition, so it was refused before it was logged (`docs/concurrency-model.md` §4, DL-292). An engine that runs with `--on-transition-violation continue` admits it instead | operator |
 | `precondition_failed` | rejected | the addressed entity is not at the revision `expect` names | re-read then decide |
 | `unknown_host` | rejected | no host with this id is in the routing table | fix the request |
 | `host_quarantined` | rejected | the host is quarantined, which the leader sets and clears | wait |

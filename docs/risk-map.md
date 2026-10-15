@@ -10,7 +10,7 @@ The last column lists the open findings of each machine.
 
 | Machine | Owning modules | Contract | Branch coverage per module | Open findings |
 | --- | --- | --- | --- | --- |
-| Job lifecycle and flags | `oracle_state.py`, `oracle.py`, `conditions.py` | [autosys-semantics §0](autosys-semantics.md#0-execution-model-the-frame-everything-else-hangs-on); [runner-design §3](runner-design.md#3-architecture--functional-core-imperative-shell) | `oracle_state.py` 112/112 (100.00%); `oracle.py` 638/638 (100.00%); `conditions.py` 46/46 (100.00%) | [RELEASE_RESOURCE no-op trace lines](#release_resource-no-op-trace-lines); [unbounded trace and counters](#unbounded-trace-and-counters) |
+| Job lifecycle and flags | `oracle_state.py`, `oracle.py`, `conditions.py` | [autosys-semantics §0](autosys-semantics.md#0-execution-model-the-frame-everything-else-hangs-on); [runner-design §3](runner-design.md#3-architecture--functional-core-imperative-shell) | `oracle_state.py` 112/112 (100.00%); `oracle.py` 638/638 (100.00%); `conditions.py` 46/46 (100.00%) | [unbounded trace and counters](#unbounded-trace-and-counters) |
 | Box execution | `oracle.py`, `oracle_state.py` | [autosys-semantics §2](autosys-semantics.md#2-boxes); [period-model §3.5](period-model.md#35-executions--a-discriminated-lifecycle-not-one-row) | `oracle.py` 638/638 (100.00%); `oracle_state.py` 112/112 (100.00%) | [open vendor readings](#open-vendor-readings-for-a-box-and-its-members); [a completed box and an iced member](#a-completed-box-and-an-iced-member); [instant cascades that do not end](#instant-cascades-that-do-not-end) |
 | Capacity waiter and reservation | `capacity.py`, `oracle.py`, `oracle_state.py` | [period-model §5](period-model.md#5-capacity-decomposed); DL-50, DL-255, DL-256 | `capacity.py` 84/84 (100.00%); `oracle.py` 638/638 (100.00%); `oracle_state.py` 112/112 (100.00%) | [held-unit circular wait](#held-unit-circular-wait) |
 | Scheduler and timer frontier | `runner_scheduler.py`, `runner.py`, `runner_clock.py`, `runner_startup.py`, `runner_journal.py`, `autocal.py` | [runner-design §5](runner-design.md#5-scheduler--the-calendar-the-oracle-deliberately-lacks); [period-model §6](period-model.md#6-the-cutoff-barrier) | `runner_scheduler.py` 66/66 (100.00%); `runner.py` 216/216 (100.00%); `runner_clock.py` 16/16 (100.00%); `runner_startup.py` 188/188 (100.00%); `runner_journal.py` 152/152 (100.00%); `autocal.py` 216/216 (100.00%) | none |
@@ -63,12 +63,16 @@ A rank returns when a module falls below 100.00%.
 
 ## Closed by DL-289..DL-306
 
-- DL-289, DL-290, DL-291, DL-293, DL-295: the runner's state machines have transition tables, 14 in all, registered in `src/dsl41/machines.py`. The generated [state-machines page](state-machines.md) lists each one's source state, trigger, guard, effect and target. An event the oracle ignores is a declared internal transition, except the two no-op trace lines of `RELEASE_RESOURCE` (see [RELEASE_RESOURCE no-op trace lines](#release_resource-no-op-trace-lines)) (DL-293). `scripts/transition_coverage.py` fails when an unmarked transition has no hit from a test. One transition is marked `spec-only`: `host.12`, the relay's re-registration, which has no code yet.
+- DL-289, DL-290, DL-291, DL-293, DL-295: the runner's state machines have transition tables, 14 in all, registered in `src/dsl41/machines.py`. The generated [state-machines page](state-machines.md) lists each one's source state, trigger, guard, effect and target. An event the oracle ignores is a declared internal transition, except the two no-op trace lines of `RELEASE_RESOURCE` (DL-293), declared since ([closed by DL-353](#closed-by-dl-353)). `scripts/transition_coverage.py` fails when an unmarked transition has no hit from a test. One transition is marked `spec-only`: `host.12`, the relay's re-registration, which has no code yet.
 - DL-296: every machine has a test that builds each state its builder reaches and applies every event the code accepts. It asserts a declared transition or the code's own refusal. This closes the old finding "no transition inventory". The runner parts that are policies or calculations have no table, and [the policies page](blocks/policies.md) says why (DL-302).
 - DL-295: the outbox refuses a second outcome for a resolved effect, before anything is written. The old finding "outbox outcome overwrite" is closed. No live writer resolves a resolved effect. A log that holds two outcomes for one effect stops resume with an error that names the effect.
 - DL-294, DL-298, DL-299: every owning module that has branches is in the 100% branch gate (`[tool.coverage.report] include` in `pyproject.toml`). The three steps added the supervisor, the wrapper and process identity, then seven more modules, then the engine-side adapters. DL-299 closes DL-269's list of modules still outside. `runner_codes.py` has no branches and is not listed. `state_machine.py` and `machines.py` (DL-289) are in the gate and are not owning modules of a row in the table. A branch that only forged state reaches carries a pragma that names the invariant.
 - DL-303: the service drill runs the rollbacks of upgrade rows 2, 3 and 4, the stop and recover bullets, the configure recipe, the command of every row in the runbook's watch table, and a SIGKILL of the engine unit and of the supervisor unit. What it does not reach stays open under [operator procedures not exercised](#operator-procedures-not-exercised).
 - DL-292, DL-297, DL-304, DL-306: part of the old finding "a replayed oracle fault" is closed. The engine dry-applies each control input on a fork before it admits it, so a faulting operator input is refused and never reaches the log (DL-292). Nothing raises on replay for an oracle transition violation, and a replay that faults names its input. A client request id that starts with `engine:` is refused, so it cannot overwrite an engine-made input's decision (DL-297). A start of a job whose own cascade already holds two of its starts is refused, so a nested re-trigger loop ends (DL-304). A long instant cascade no longer fails every resume: since DL-351 the oracle's cascade is iterative and needs no recursion limit fitted to the job count (DL-306 fitted one before). What stays open is under [a replayed oracle fault](#a-replayed-oracle-fault-stops-every-resume).
+
+## Closed by DL-353
+
+- DL-353: the three job tables leave and the `job` chart is registered, so every event the oracle ignores is a declared row: `RELEASE_RESOURCE`'s two no-op trace lines are the chart's ignored rows `job.315` and `job.316`. The old finding "RELEASE_RESOURCE no-op trace lines" is closed. No machine records a transition violation any more; `--on-transition-violation` is inert.
 
 ## Open findings
 
@@ -150,11 +154,6 @@ A member that is not iced still flips a completed box, and its failure consumers
 `start_run` does not close the journal when a step after `Journal.create` raises (DL-305).
 Every caller exits on that error, the file holds no lock, and its bytes were flushed.
 A later fix detaches the journal as DL-305 does in `open_next_period`.
-
-### RELEASE_RESOURCE no-op trace lines
-
-`RELEASE_RESOURCE` writes two no-op trace lines that are not yet internal transitions of `job_holding` (DL-293).
-Every other event the oracle ignores is a declared internal transition.
 
 ### Anchor machine items
 

@@ -149,7 +149,7 @@ def test_each_routing_verb_takes_its_declared_transition(
     cmd = HostCommand(verb=verb, host_id=LOCAL_EXECUTOR_ID, force=force)  # type: ignore[arg-type]
     assert host_move(oracle.store, cmd).rows == (taken,)
     applied = _host(oracle, len(setup) + 1, verb, force=force, claimed_actor="alice@ops")
-    assert applied.result.decision == "applied" and applied.violations == []
+    assert applied.result.decision == "applied"
     assert oracle.store.hosts[LOCAL_EXECUTOR_ID].state == after
     # an internal transition moves no revision; every other one moves it once
     moved = "host:local" in applied.result.revisions
@@ -213,7 +213,6 @@ def test_a_rejected_verb_takes_no_transition_and_moves_nothing(
     assert rejected.result.decision == "rejected" and rejected.result.code == code
     assert oracle.store.hosts[LOCAL_EXECUTOR_ID] == before
     assert oracle.store.machines.active("host:local") == configuration
-    assert rejected.violations == []
     recorded = [
         json.loads(line)
         for path in directory.glob("*.jsonl")

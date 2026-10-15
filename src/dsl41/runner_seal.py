@@ -27,7 +27,6 @@ from dataclasses import dataclass
 from typing import Final, Literal
 
 from dsl41.boundary import BoundaryFailStop
-from dsl41.runner_admission import TransitionStop
 from dsl41.state_machine import Context, Effects, Exclusion, Region, Row, State, Statechart
 
 #: The barrier parked (row .01's note).
@@ -55,8 +54,8 @@ class SealFault:
     """An exception inside a seal, with the facts the exception rows read.
 
     The engine reads them once, before the post. `fence_lost` is read only
-    for an exception of neither stop type, as before: no row that classifies
-    a stop reads it. The other three are DL-274's flags: the index of an
+    for an exception that is not `BoundaryFailStop`, as before: the row that
+    classifies that stop does not read it. The other three are DL-274's flags: the index of an
     attempt admitted during the seal and not fully applied, the kind of an
     engine-made input the drain could not admit, and an unfinished WAL
     append."""
@@ -88,9 +87,8 @@ class SealExit:
 
 
 def stops_by_type(error: Exception) -> bool:
-    """`BoundaryFailStop` or `TransitionStop`: an exception whose type alone
-    decides the exit."""
-    return isinstance(error, (BoundaryFailStop, TransitionStop))
+    """`BoundaryFailStop`: the exception whose type alone decides the exit."""
+    return isinstance(error, BoundaryFailStop)
 
 
 def _flagged(fault: SealFault) -> bool:
@@ -107,16 +105,8 @@ def _past_ponr(ctx: Context) -> bool:
     return isinstance(ctx.event.payload.error, BoundaryFailStop)
 
 
-def _transition_stop(ctx: Context) -> bool:
-    """The exception is `TransitionStop`: under `--on-transition-violation
-    stop`, an input committed inside the interval recorded a violation, and
-    its decision is durable. That stop is the operator's chosen halt. The
-    engine exits 5 (DL-292, DL-295)."""
-    return isinstance(ctx.event.payload.error, TransitionStop)
-
-
 def _fence_lost(ctx: Context) -> bool:
-    """Neither stop type, and the fence is lost: a leader that cannot prove it
+    """Not `BoundaryFailStop`, and the fence is lost: a leader that cannot prove it
     leads does not reopen admission (DL-101, PR-28b). Checked before DL-274's
     flags."""
     fault: SealFault = ctx.event.payload
@@ -124,7 +114,7 @@ def _fence_lost(ctx: Context) -> bool:
 
 
 def _in_doubt(ctx: Context) -> bool:
-    """Neither stop type, the fence intact, and memory or the WAL in doubt: an
+    """Not `BoundaryFailStop`, the fence intact, and memory or the WAL in doubt: an
     attempt admitted during the seal is not fully applied, an engine-made input
     the drain could not admit would be lost, or a WAL append is unfinished
     (DL-274)."""
@@ -133,7 +123,7 @@ def _in_doubt(ctx: Context) -> bool:
 
 
 def _reversible(ctx: Context) -> bool:
-    """Neither stop type, the fence intact, and nothing in doubt: every other
+    """Not `BoundaryFailStop`, the fence intact, and nothing in doubt: every other
     exception before the `seal` append. A refusal before the freeze, a phase-2
     refusal, the drain's timeout, a late input (`seal_input_after_cutoff`) and
     a failed sidecar write are among them (PR-28b)."""
@@ -202,9 +192,10 @@ _OUT_OF_ORDER = (
 
 #: The engine's seal boundary (ss6-7), one instance per seal request. A request
 #: while another boundary is in flight is refused `seal_in_flight`
-#: (`SealInFlight`) and never becomes an instance. The five exception rows
-#: partition every exception in this order of precedence: the two stop types,
-#: then the fence, then DL-274's flags, else the abort.
+#: (`SealInFlight`) and never becomes an instance. The four exception rows
+#: partition every exception in this order of precedence: `BoundaryFailStop`,
+#: then the fence, then DL-274's flags, else the abort. Row .08, the stop of
+#: `--on-transition-violation stop`, left with that policy (DL-353).
 SEAL_BOUNDARY: Final = Statechart(
     name="seal_boundary",
     root=State(
@@ -300,15 +291,6 @@ SEAL_BOUNDARY: Final = Statechart(
             cite="period-model ss7",
         ),
         Row(
-            "seal_boundary.08",
-            "in_flight",
-            EXCEPTION,
-            "stopped",
-            guard="transition_stop",
-            action="stop",
-            cite="concurrency-model ss4, DL-292",
-        ),
-        Row(
             "seal_boundary.09",
             "boundary",
             PARKED,
@@ -340,14 +322,13 @@ SEAL_BOUNDARY: Final = Statechart(
             kind="ignored",
             cite="statechart-engine ss10",
             false_unreachable=(
-                "rows .04 to .08 partition every exception, so the walk reaches"
+                "rows .04 to .07 partition every exception, so the walk reaches"
                 " the root only from a final state"
             ),
         ),
     ),
     guards={
         "past_ponr": _past_ponr,
-        "transition_stop": _transition_stop,
         "fence_lost": _fence_lost,
         "in_doubt": _in_doubt,
         "reversible": _reversible,

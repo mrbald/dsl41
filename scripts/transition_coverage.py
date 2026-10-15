@@ -16,8 +16,9 @@ A statechart (docs/statechart-engine.md §13) is gated on every class of its
 coverage items at once: rows, choice branches, both outcomes of each guard,
 and a defer and a release for each deferred event. All are held at 100%. A
 guard outcome declared unreachable is listed as forbidden and fails the gate
-when hit, and so is a marked row: it is listed with the marked transitions,
-never counted.
+when hit, and so is a marked row and its guard's true outcome: the row is
+listed with the marked transitions, never counted. A marked row's guard false
+is the cell another row takes, neither required nor forbidden (DL-353).
 
 Exit 0 when every unmarked transition and every statechart item was hit, 1 on
 any miss, on any recorded violation, or when a marked transition (`spec-only`

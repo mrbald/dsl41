@@ -8,10 +8,9 @@ through the owner's own code, sends every event that code accepts under the
 strict variable, which the test sets itself, and passes only when each event
 takes a declared transition or is refused by the code's own rule.
 
-None of these machines writes a trace line. A violation shows as a
-`TransitionError`, as an entry in the violations file, or as a stderr line
-that starts with `VIOLATION_LOG_PREFIX`; each test checks all three. Each
-test records into its own directory and asserts which declared (transition,
+None of these machines writes a trace line. A violation of a table would
+show as a `TransitionError` or as an entry in the violations file; each test
+checks both. Each test records into its own directory and asserts which declared (transition,
 source) pairs its builder took; each pair it does not take is named, with the
 reason. `supervisor_lease`, `supervisor_process`, `supervisor_client`,
 `anchor_head` and `period_row` are statecharts: their executor raises on an
@@ -53,7 +52,6 @@ from dsl41.runner_clock import EngineError
 from dsl41.state_machine import (
     HITS_ENV,
     STRICT_ENV,
-    VIOLATION_LOG_PREFIX,
     StatechartError,
     coverage_items,
 )
@@ -82,9 +80,8 @@ def _records(directory: Path, prefix: str) -> list[dict[str, str]]:
     ]
 
 
-def _assert_no_violation(directory: Path, stderr: str) -> None:
+def _assert_no_violation(directory: Path) -> None:
     assert _records(directory, "violations") == []
-    assert VIOLATION_LOG_PREFIX not in stderr
 
 
 # ------------------------------------------------------------ supervisor_lease
@@ -266,7 +263,6 @@ def test_every_lease_verb_in_every_reached_lease_state_takes_a_declared_transiti
     short_root: Path,
     strict: Path,
     monkeypatch: pytest.MonkeyPatch,
-    capfd: pytest.CaptureFixture[str],
 ) -> None:
     """supervisor_lease. From a fresh supervisor, a breadth-first walk applies
     every event to every state it reaches, keyed on (phase, which connection
@@ -355,7 +351,7 @@ def test_every_lease_verb_in_every_reached_lease_state_takes_a_declared_transiti
     missed = [item for item in required if item not in hits]
     assert missed == [("row", "supervisor_lease.18", "")]
     assert forbidden == []
-    _assert_no_violation(strict, capfd.readouterr().err)
+    _assert_no_violation(strict)
 
 
 # ---------------------------------------------------------- supervisor_process
@@ -569,7 +565,6 @@ def test_every_process_event_at_every_reached_point_takes_a_declared_transition(
     short_root: Path,
     strict: Path,
     monkeypatch: pytest.MonkeyPatch,
-    capfd: pytest.CaptureFixture[str],
 ) -> None:
     """supervisor_process. Each case is one in-process `Supervisor.run()`
     that delivers one event at one point of the run. The points: on entering
@@ -669,7 +664,7 @@ def test_every_process_event_at_every_reached_point_takes_a_declared_transition(
     }
     assert set(missed) == left
     assert [item for item in forbidden if item in hits] == []
-    _assert_no_violation(strict, capfd.readouterr().err)
+    _assert_no_violation(strict)
 
 
 # ----------------------------------------------------------- supervisor_client
@@ -758,7 +753,7 @@ class _SpiedExecutor(Executor):
 
 
 def test_every_client_event_in_every_reached_client_state_takes_a_declared_transition(
-    short_root: Path, strict: Path, capfd: pytest.CaptureFixture[str]
+    short_root: Path, strict: Path
 ) -> None:
     """supervisor_client. Against a peer on a real unix socket, a
     breadth-first walk applies every event to every state it reaches, keyed on
@@ -867,7 +862,7 @@ def test_every_client_event_in_every_reached_client_state_takes_a_declared_trans
     left |= {("guard", f"supervisor_client.{n}", "false") for n in ("01", "05", "09", "10")}
     assert {item for item in required if item not in hits} == left
     assert [item for item in forbidden if item in hits] == []
-    _assert_no_violation(strict, capfd.readouterr().err)
+    _assert_no_violation(strict)
 
 
 # ------------------------------------------------------ anchor_head, period_row
@@ -1024,7 +1019,6 @@ def test_every_anchor_verb_in_every_reached_anchor_state_takes_a_declared_transi
     tmp_path: Path,
     strict: Path,
     monkeypatch: pytest.MonkeyPatch,
-    capfd: pytest.CaptureFixture[str],
 ) -> None:
     """anchor_head and period_row, which the anchor's verbs move together.
     From an empty anchor directory, a breadth-first walk applies every event
@@ -1151,4 +1145,4 @@ def test_every_anchor_verb_in_every_reached_anchor_state_takes_a_declared_transi
         ("anchor_head", "open_claimed", "head_not_claimed"),
         ("anchor_head", "reclaim", "head_not_claimed"),
     }
-    _assert_no_violation(strict, capfd.readouterr().err)
+    _assert_no_violation(strict)

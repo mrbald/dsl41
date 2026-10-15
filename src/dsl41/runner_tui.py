@@ -167,7 +167,6 @@ except ModuleNotFoundError as exc:  # pragma: no cover -- exercised via CLI guar
         "the dsl41 TUI needs the optional [ui] extra: pip install 'dsl41[ui]'"
     ) from exc
 
-from dsl41.oracle_state import VIOLATION_MARKER
 from dsl41.runner_admission import addressed_key
 from dsl41.runner_clock import EngineError
 from dsl41.runner_control import (
@@ -189,6 +188,10 @@ from dsl41.runner_control import (
 
 
 _ALARM_TRANSITIONS = frozenset({"MUST_START_ALARM", "MUST_COMPLETE_ALARM"})
+#: The trace marker of a move that broke a declared transition table. No
+#: build writes it since DL-353, but an engine of an older build this console
+#: attaches to may still send it, and its lines still show as alerts.
+VIOLATION_MARKER = "TRANSITION_VIOLATION"
 _STATUS_STYLE = {
     "INACTIVE": "dim",
     "STARTING": "cyan",
@@ -1572,8 +1575,8 @@ class RunnerApp(App[None]):
                     continue  # idempotent consumption: never render twice
                 self._trace_seq = seq
             transition = str(entry.get("transition", ""))
-            # the entry's subject: a job, or for a TRANSITION_VIOLATION a
-            # namespaced key such as `host:local` (concurrency-model ss4).
+            # the entry's subject: a job, or for an older build's
+            # TRANSITION_VIOLATION a namespaced key such as `host:local`.
             # Only an alarm counts against a job, so such a key never
             # reaches the jobs table or the problems view
             job = str(entry.get("job", ""))
@@ -1582,8 +1585,8 @@ class RunnerApp(App[None]):
             at = str(entry.get("at", ""))
             clock = clock_of(at)
             if transition in _ALARM_TRANSITIONS or transition == VIOLATION_MARKER:
-                # a broken declared transition is an alert like an alarm
-                # (the runbook's "What to watch"), whatever its subject
+                # an older build's broken declared transition is an alert
+                # like an alarm, whatever its subject
                 style = "bold red"
             elif transition == "START_REFUSED":
                 # DL-64: a refused operator start must not blend into the

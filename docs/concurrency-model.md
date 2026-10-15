@@ -3,7 +3,7 @@
 Status: frozen (DL-84). Entries that amend it include DL-86, DL-90,
 DL-94, DL-95, DL-96, DL-97, DL-100, DL-101, DL-102, DL-103, DL-109, DL-111, DL-112,
 DL-118, DL-120, DL-130, DL-138, DL-147, DL-150, DL-151, DL-210, DL-232,
-DL-234, DL-272, DL-274, DL-284, DL-292, DL-293 and DL-297. Each is cited
+DL-234, DL-272, DL-274, DL-284, DL-292, DL-293, DL-297 and DL-353. Each is cited
 where it applies. Each change to a frozen item needs a decision-log entry.
 
 This document is normative for every input that reaches the oracle and
@@ -239,8 +239,7 @@ For every input, in log order:
 3. Assign the leader timestamp, monotone across inputs already admitted
    but not yet applied. After this step's clock check and before the
    frontier moves, **dry-apply** every input on a fork of the state.
-   Refuse a control input when that apply raises or the command breaks a
-   declared transition (below, DL-292). Quarantine an engine-made input
+   Refuse a control input when that apply raises (below, DL-292). Quarantine an engine-made input
    whose apply raises when its time half applies alone, and stop the
    engine when it does not (below).
 4. Atomically append one ordered batch: `TimeAdvanced(at)` +
@@ -270,8 +269,7 @@ the verdict implies, and a SPAWN mints its `run_id` in that record
 and just after it.
 A recovered start is then a pending SPAWN, which dispatch applies or a
 drained or quarantined host holds. The commit does not record the verdict
-in the decision index a second time, and `--on-transition-violation stop`
-does not run for it. A
+in the decision index a second time. A
 seal does not turn such an exception into a refusal (`period-model.md`
 §7, DL-274). In a seal, step 3's `clock_regressed` refuses a request. For
 an engine-made input it stops the engine, because nobody would hear the
@@ -295,24 +293,13 @@ reaches the result the real apply will, with one stated exception. The
 dry apply runs before step 4 and the real apply after it. A lease contact
 in between may move a host's `last_contact`, which an eviction's gate
 reads. Only a gate verdict can differ, and the real apply's verdict is the
-one logged. If the real apply of a control input then records a violation
-that the dry apply did not, the input is not refused. It is recorded like
-an engine-made violation (below), with its trace line, and `stop` halts
-the engine. A real apply that raises after a passing dry apply stops the
+one logged. A real apply that raises after a passing dry apply stops the
 engine with the input logged and undecided, and replay classifies it
 (below).
 
-Two outcomes refuse a control input:
-
-- An apply that raises refuses it with `apply_faulted`.
-- A violation of a declared state-machine transition that the command's
-  own half records refuses it with `transition_violation`.
-
-A violation that the batch's time half records belongs to an engine-made
-move, such as a timer due at the command's stamp. It does not refuse the
-command. It is taken with the real apply, like any engine-made violation.
-A refusal leaves nothing in the log and takes no index, so a faulting
-command never reaches replay. A gate rejection is not a refusal. The
+An apply that raises refuses a control input with `apply_faulted`, in
+either half of its batch. A refusal leaves nothing in the log and takes no
+index, so a faulting command never reaches replay. A gate rejection is not a refusal. The
 fork's verdict is discarded, and step 6 decides again and logs the
 rejection.
 
@@ -344,27 +331,11 @@ No dry apply classifies it: the engine stops before the frontier moves and
 before the append, with `dsl41 run` exit 7 beside exit 6, and a control
 input under it is not refused.
 
-Otherwise an engine-made input's move is taken, with its violations.
-Only an input's batch (`InputBatch`) drains the violation channel. Some violations are noted outside a batch: by a
-move with no transaction open, or by a writer that opens its own (the
-oracle's genesis seed, classification's seeding, the executor seed). Such
-a violation never reaches a dry apply. The next batch drops it, with a
-line on stderr and no trace line, so the live and the replayed traces stay
-equal. Every violation that an applied input records becomes a
-`TRANSITION_VIOLATION` trace line when its batch commits, so replay writes
-the same line.
-
-The engine run option `--on-transition-violation` sets the response:
-
-- `refuse`, the default, refuses a control input as above.
-- `continue` admits the control input too, with its trace line.
-- `stop` refuses like `refuse`. It also stops the engine, with
-  `dsl41 run` exit 5, after step 7 commits an input that recorded a
-  violation. The next resume replays that decision.
-
-The option changes no derived state and is not part of the runtime
-profile. A violation of one of an input's moves never raises, live or on
-replay. Three machines refuse or raise by design instead (DL-297):
+Otherwise an engine-made input's move is taken. Every machine is a
+declared statechart, so a move no row declares is a gap, a
+`StatechartError`, never a move recorded and taken (DL-353).
+`dsl41 run --on-transition-violation` is accepted and inert until the next
+major release. Three machines refuse by design (DL-297):
 
 - `anchor_head` and `period_row` refuse the boundary operation before
   anything is written (DL-290). They are statecharts (DL-336): a refusal
@@ -376,10 +347,9 @@ replay. Three machines refuse or raise by design instead (DL-297):
   open, the end of construction inside the genesis input, and an input opened twice
   (DL-335). A gap in the chart is a `StatechartError`.
 
-The `host` and `admission` machines record no violations: they are
-statecharts (DL-333, DL-334), and a gap in either is a `StatechartError`
-that stops the engine, so the option does not cover them. For `host` that
-is as above. A gap in `admission` stops the engine with exit 7 at one of
+The `host` and `admission` machines are statecharts (DL-333, DL-334), and
+a gap in either is a `StatechartError` that stops the engine. For `host`
+that is as above. A gap in `admission` stops the engine with exit 7 at one of
 two points. At dedup or at the seal's readiness lookup it comes before any
 index is taken, and nothing is logged. At the attempt's note or its
 decision it comes after the frontier moved and the attempt line is

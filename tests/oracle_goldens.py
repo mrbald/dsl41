@@ -4,11 +4,9 @@ The goldens hold the answers of the oracle the engine ran before DL-351, as
 digests: per input of the sample, the outcome, the trace lines, the emitted
 events, the store's rows, the revisions, the pending timers and the next
 timer due, and the seal digest at each seal point, rendered as
-tests/oracle_inputs.py renders them. The violation channel (DL-292) is not
-digested: its trace lines are left out of the trace component. The goldens
-recorded no violation on the whole sample, and the oracle still writes the
-channel, so a replay fails on any run that records one, naming its first
-entry.
+tests/oracle_inputs.py renders them. The old oracle's violation channel
+(DL-292) was left out of the trace component; it recorded no violation on the
+whole sample, and the channel is gone (DL-353).
 
 The sample is three runs over tests/oracle_inputs.py's inputs:
 
@@ -69,7 +67,7 @@ from oracle_inputs import (
 
 from dsl41.ir import CatalogIR
 from dsl41.oracle import Oracle
-from dsl41.oracle_state import VIOLATION_MARKER, Event
+from dsl41.oracle_state import Event
 from dsl41.semantics import SemanticSwitches, resolve
 
 GOLDENS = Path(__file__).parent / "oracle_goldens.txt"
@@ -148,15 +146,12 @@ def _link(previous: bytes, lines: Sequence[str]) -> bytes:
 
 @dataclass
 class Digests:
-    """A run's chains: the inputs' descriptions, each input's codes, the last
-    links, and the inputs that recorded a violation."""
+    """A run's chains: the inputs' descriptions, each input's codes and the
+    last links."""
 
     described: list[str] = field(default_factory=list)
     codes: list[str] = field(default_factory=list)
     links: list[bytes] = field(default_factory=lambda: [b""] * len(COMPONENTS))
-    violations: int = 0
-    #: the first entry whose input recorded a violation, if any
-    first_violation: int | None = None
 
     def add(self, described: str, observed: Mapping[str, Sequence[str]]) -> None:
         self.links = [
@@ -169,22 +164,13 @@ class Digests:
         return hashlib.blake2b(b"".join(self.links), digest_size=LAST // 2).hexdigest()
 
 
-def _observe(side: Side, applied_batch: object, error: Exception | None) -> dict[str, list[str]]:
-    """What `Side.observe` reads, the violation channel left out."""
-    observed = side.observe(applied_batch, error)  # type: ignore[arg-type]
-    observed["trace"] = [line for line in observed["trace"] if f" {VIOLATION_MARKER} " not in line]
-    observed.pop("violations", None)
-    observed.pop("command_violations", None)
-    return observed
-
-
 def digest_run(run: Run, factory: OracleFactory) -> Digests:
     """Drive the oracle over the run's script: an input that raises is put
     back and its time half applied alone, as the engine quarantines it."""
     oracle = factory(own(run.catalog), semantics=run.semantics)
     side = Side(oracle)
     found = Digests()
-    found.add("<genesis>", _observe(side, None, None))
+    found.add("<genesis>", side.observe(None, None))
     now = None
     for step in run.script:
         if isinstance(step, SealPoint):
@@ -199,13 +185,9 @@ def digest_run(run: Run, factory: OracleFactory) -> Digests:
             side.restore(fork, emitted)
             applied = side.apply(Advance(step.at))
             described += f" (raised {type(raised).__name__}; its time half alone)"
-        observed = _observe(side, applied.batch, applied.error)
+        observed = side.observe(applied.batch, applied.error)
         if raised is not None:
             observed["outcome"] = [f"{type(raised).__name__}: {raised}"]
-        if applied.batch.violations:
-            found.violations += 1
-            if found.first_violation is None:
-                found.first_violation = len(found.codes)
         found.add(described, observed)
         if raised is not None and applied.error is not None:
             break  # the time half raised too: the engine stops here
@@ -268,13 +250,11 @@ _HEADER = """\
 class Recorded:
     runs: int = 0
     inputs: int = 0
-    violations: dict[str, int] = field(default_factory=dict)
     seconds: float = 0.0
 
 
 def record(factory: OracleFactory, path: Path = GOLDENS) -> Recorded:
-    """Write the goldens of every sample from `factory`'s oracle, and count,
-    per sample and switch row, the inputs that recorded a violation."""
+    """Write the goldens of every sample from `factory`'s oracle."""
     started = time.perf_counter()
     lines = [_HEADER.format(components=", ".join(COMPONENTS), code=CODE)]
     seen: dict[tuple[int, str], int] = {}
@@ -286,8 +266,6 @@ def record(factory: OracleFactory, path: Path = GOLDENS) -> Recorded:
             lines.append(_line(run, found, seen, summary.runs) + "\n")
             summary.runs += 1
             summary.inputs += len(found.codes)
-            key = f"{sample}; {run.row}"
-            summary.violations[key] = summary.violations.get(key, 0) + found.violations
     path.write_text("".join(lines), encoding="utf-8")
     summary.seconds = time.perf_counter() - started
     return summary
@@ -312,13 +290,9 @@ class Difference:
 
 
 def compare(run: Run, golden: Golden, found: Digests) -> Difference | None:
-    """The first input and component where `found` leaves `golden`, if any.
-    A run that records a violation differs: the goldens recorded none."""
+    """The first input and component where `found` leaves `golden`, if any."""
     if golden.label != label_digest(run.label):
         return Difference(run.sample, run.label, None, "the golden is another run's", "run")
-    if found.first_violation is not None:
-        index = found.first_violation
-        return Difference(run.sample, run.label, index, found.described[index], "violations")
     if found.last() == golden.last and len(found.codes) == golden.entries:
         return None
     for index, (codes, expected) in enumerate(zip(found.codes, golden.codes)):
@@ -408,9 +382,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "record":
         recorded = record(factory)
         print(f"{recorded.runs} runs, {recorded.inputs} entries; {recorded.seconds:.1f} s")
-        for key, count in recorded.violations.items():
-            if count:
-                print(f"violations: {key}: {count} inputs")
         return 0
     replayed = replay(factory, args.sample or SAMPLES, limit=args.limit)
     print(

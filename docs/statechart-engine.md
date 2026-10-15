@@ -28,9 +28,9 @@ revision per committed input" is a transaction guarantee, not a row.
 This reverses one rule of DL-289 for a converted machine: `take` never raised in production, and
 concurrency-model §4 says so, and the executor now raises three hard errors (§3
 `AmbiguousTransition`, §5 `ReentrantDispatch`, §10 `UnhandledEvent`). Each is a bug that would
-corrupt state, not a check to note. DL-292's violation channel (`transition_violation`, its trace
-line, `--on-transition-violation`) stays for the machines not yet converted. The entry that
-converts the last one retires it.
+corrupt state, not a check to note. Every runner state machine is converted, so no machine
+reports a broken transition: DL-292's violation channel is retired (DL-353), and `dsl41 run
+--on-transition-violation` is accepted and inert until the next major release.
 
 ## 2. Elements
 
@@ -300,9 +300,9 @@ The oracle runs one composite `job` machine per job, with named regions for its 
 and its holding, its box variant as rows and its writes through `RuntimeState` (§16).
 
 DL-337 declares that machine in `src/dsl41/job_chart.py`: one chart `job` with the regions
-`status`, `flags` and `holding`, the box as rows guarded by the job type, and the three tables' id
-spaces kept as `job.1NN`, `job.2NN` and `job.3NN`. It is checked against the three tables, row by
-row and through replays of the oracle's walks (tests/test_job_chart.py).
+`status`, `flags` and `holding`, the box as rows guarded by the job type, and ids whose hundred
+names the region: `job.1NN` and `job.4NN` status, `job.2NN` flags, `job.3NN` holding. It is
+registered in `machines.MACHINES`, and is the one declaration of a job's moves (DL-353).
 
 The oracle, `Oracle` in `src/dsl41/oracle.py`, drives it (DL-341). Each job row has one `job`
 instance on the state owner's executor under the row's key; the owner restores them from the rows
@@ -312,15 +312,14 @@ DL-350). The chart decides every move. A row's action takes the items it sends b
 from the tier's handle on its payload (`Units.consequences`), as a guard takes its facts: the chart
 declares which rows send and when, and the oracle computes each send list and its audience as the
 row runs. The oracle's hook (§5 step 5) writes what each microstep's fired rows reached, with the
-store's verbs and the three tables' transitions, so the tables validate each write, in the order
-the rows fired (`oracle_writers`). The status written is the one the chart reached; the golden
-digests judge a wrong row (§16). A fired row the hook has no write for is a statechart error. Two
-checks are statechart errors: the job type behind a row that takes a job's or a box's path, checked
-before the write; and, at each macrostep's end and at the input's commit, every job the input
-reached has its row project to its instance's configuration. The store's verb decides a
-settlement's holding move from the units; a settlement row that holds another state than the verb
-wrote fails the second check. No code outside the chart moves a job row, so no instance is brought
-back to its row. The chart is registered when the three tables leave the registry.
+store's verbs, in the order the rows fired (`oracle_writers`). The status written is the one the
+chart reached; the golden digests judge a wrong row (§16). A fired row the hook has no write for is
+a statechart error. Two checks are statechart errors: the job type behind a row that takes a job's
+or a box's path, checked before the write; and, at each macrostep's end and at the input's commit,
+every job the input reached has its row project to its instance's configuration. The store's verb
+decides a settlement's holding move from the units; a settlement row that holds another state than
+the verb wrote fails the second check. No code outside the chart moves a job row, so no instance is
+brought back to its row.
 
 Every attempt to start a job is one `start` on its instance (DL-342): a wake, a box start and a
 retry send it, and STARTJOB, FORCE_STARTJOB and the window timer's replay relay it, through
@@ -474,7 +473,9 @@ Hits are counted for:
 
 All of them are held at 100% in the gate. A row may carry a mark, `spec-only` (a contract rule
 with no code yet) or `unreachable`. The gate lists a marked row and never counts it, and a hit on
-it or on its guard's outcomes fails the gate, as for a marked table transition (DL-296, DL-333).
+it or on its guard's true outcome fails the gate, as for a marked table transition (DL-296,
+DL-333). Its guard's false outcome is the cell another row takes: neither required nor forbidden
+(DL-353).
 
 The completeness test is generated per machine from the declaration plus a declared finite
 abstraction. The abstraction has three parts:
@@ -580,20 +581,24 @@ After the pilot, `seal_boundary` (DL-327), `supervisor_process` (DL-328), `super
 (DL-330), `effect` (DL-331), `host` (DL-333), `admission` (DL-334), `runtime_assembly` (DL-335),
 and `anchor_head` and `period_row` (DL-336); the rest is the oracle.
 
-The oracle comes last. Its composite `job` chart is declared and checked against the three tables
-(DL-337), then drives the job rows family by family: STATUS (DL-341), the start attempt (DL-342),
-KILLJOB and the TIMER input (DL-343), the flag inputs (DL-344), RELEASE_RESOURCE and the
-readmission (DL-345), the box rules (DL-346), a box's ON_NOEXEC on the jobs it contains (DL-347),
-and the cascade itself, on the executor's worklist (DL-350). An old-versus-new harness proved each
-family against the decision code it replaced, input by input (DL-338); that code is deleted
-(DL-352). `Oracle` in `src/dsl41/oracle.py` is the one oracle, built in layers, one module
-each: `oracle_reads.py` (the store, the trace and the reads), `oracle_schedule.py` (the clock's
-reads and the timers), `oracle_cascade.py` (the cascade's moments), `oracle_writers.py` (each fired
-row's writes) and `oracle.py` (the inputs, the hook and the checks), with the payloads in
-`oracle_facts.py` and `oracle_intents.py`. The engine, every replay, preflight and equiv build it
-(DL-351). The decision code's answers over the harness's sample are kept as golden digests
-(`tests/oracle_goldens.py`, over the inputs in `tests/oracle_inputs.py`), which the oracle
-reproduces; a golden that changes is a DL-235 decision.
+The oracle comes last. Its composite `job` chart is declared and checked against the three
+transition tables it replaced (DL-337), then drives the job rows family by family: STATUS (DL-341),
+the start attempt (DL-342), KILLJOB and the TIMER input (DL-343), the flag inputs (DL-344),
+RELEASE_RESOURCE and the readmission (DL-345), the box rules (DL-346), a box's ON_NOEXEC on the
+jobs it contains (DL-347), and the cascade itself, on the executor's worklist (DL-350). An
+old-versus-new harness proved each family against the decision code it replaced, input by input
+(DL-338); that code is deleted (DL-352). `Oracle` in `src/dsl41/oracle.py` is the one oracle, built
+in layers, one module each: `oracle_reads.py` (the store, the trace and the reads),
+`oracle_schedule.py` (the clock's reads and the timers), `oracle_cascade.py` (the cascade's
+moments), `oracle_writers.py` (each fired row's writes) and `oracle.py` (the inputs, the hook and
+the checks), with the payloads in `oracle_facts.py` and `oracle_intents.py`. The engine, every
+replay, preflight and equiv build it (DL-351). The decision code's answers over the harness's
+sample are kept as golden digests (`tests/oracle_goldens.py`, over the inputs in
+`tests/oracle_inputs.py`), which the oracle reproduces; a golden that changes is a DL-235 decision.
+The three tables, the store's validation of each write against them and the violation channel
+leave, the chart is registered, and two rows gain the `unreachable` mark (§13): job.312, since the
+admission the oracle builds carries no previous end, and job.314, since a live status never stands
+on held units (DL-353).
 
 Each slice is a semantic-class change. Each has its own decision-log entry.
 

@@ -574,7 +574,7 @@ Semantics:
   its typed verbs, the timer heap, and the input transaction. It imports
   nothing from the interpreter.
 - `src/dsl41/job_chart.py`: the composite `job` statechart: one job's status,
-  flags and holding in one declaration, checked against the three job tables;
+  flags and holding in one declaration, the one source of a job's moves;
   the oracle drives it for STATUS, the starts, KILLJOB, the TIMER input,
   the flags, RELEASE_RESOURCE, the readmission, the box rules, a box's
   ON_NOEXEC on the jobs it contains and the cascade's moments. It holds the

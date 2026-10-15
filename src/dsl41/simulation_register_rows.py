@@ -3722,7 +3722,10 @@ TRACE_MARKER_ROWS: tuple[Row, ...] = (
         surface="trace_marker",
         member="EVENT_IGNORED",
         klass=SUPPORTED,
-        cite="ir-design ss7, DL-254, oracle.Oracle._oob_ignored, oracle.Oracle._ignore",
+        cite=(
+            "ir-design ss7, DL-254, oracle.Oracle._oob_ignored, oracle.Oracle._w_flag_ignored,"
+            " oracle.Oracle._w_kill_ignored"
+        ),
         effect="an ON_ICE, ON_HOLD or ON_NOEXEC the vendor ignores for the job's status, or a"
         " KILLJOB on a job that is not running or queued; nothing else moves",
         trigger=_scn(BASE_JIL, "0 STARTJOB job=J0", "1 ON_HOLD job=J0"),

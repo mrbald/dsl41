@@ -43,7 +43,6 @@ from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.runner_hosts import HostCommand
 from dsl41.runner_journal import read_journal, replay_inputs
 from dsl41.runner_startup import resume_run, start_run
-from dsl41.state_machine import Transition
 
 T0 = datetime(2026, 7, 1, 8, 0)
 LATER = T0 + timedelta(minutes=1)
@@ -61,14 +60,13 @@ def _on_status(monkeypatch: pytest.MonkeyPatch, status: str) -> None:
     def transition(
         self: RuntimeState,
         job: str,
-        t: Transition[JobStatus],
         new: JobStatus,
         at: datetime | None,
         exit_code: int | None = None,
         *,
         clear_exit_code: bool = False,
     ) -> None:
-        real(self, job, t, new, at, exit_code, clear_exit_code=clear_exit_code)
+        real(self, job, new, at, exit_code, clear_exit_code=clear_exit_code)
         if new == status:
             raise RuntimeError(f"an injected fault on {job}")
 
@@ -666,7 +664,7 @@ def test_a_time_half_stop_exits_6_and_a_crash_exits_1(
     short_root: Path, monkeypatch: pytest.MonkeyPatch, raised: Any, code: int
 ) -> None:
     """Exit 6 is the time-half stop's own, so the engine units'
-    `RestartPreventExitStatus=2 3 5 6` keeps it down: every restart would
+    `RestartPreventExitStatus=2 3 6 7` keeps it down: every restart would
     meet the same timers."""
     from dsl41 import cli_run
     from dsl41.period import runtime_profile_from_cli
@@ -889,17 +887,17 @@ def _fork_only_commit_fault(mp: pytest.MonkeyPatch) -> None:
 
     real_transition = RuntimeState.transition
 
-    def transition(self: RuntimeState, job: str, t: Any, new: Any, *args: Any, **kw: Any) -> None:
-        real_transition(self, job, t, new, *args, **kw)
+    def transition(self: RuntimeState, job: str, new: Any, *args: Any, **kw: Any) -> None:
+        real_transition(self, job, new, *args, **kw)
         if new == "SUCCESS":
             raise KeyError("an attempt-half fault")
 
     real_commit = InputBatch._commit
 
-    def commit(self: InputBatch, *, time_half: bool = False) -> None:
+    def commit(self: InputBatch) -> None:
         if not self._oracle._trace and self._oracle.store.job["j"].status == "RUNNING":
             raise RuntimeError("a time-half commit fault")
-        real_commit(self, time_half=time_half)
+        real_commit(self)
 
     mp.setattr(RuntimeState, "transition", transition)
     mp.setattr(InputBatch, "_commit", commit)
@@ -979,8 +977,8 @@ def test_a_quarantine_met_only_in_a_sweep_fails_rehearse_naming_its_case(
     jil.write_text(_GATED_JIL)
     real = RuntimeState.transition
 
-    def transition(self: RuntimeState, job: str, t: Any, new: Any, *args: Any, **kw: Any) -> None:
-        real(self, job, t, new, *args, **kw)
+    def transition(self: RuntimeState, job: str, new: Any, *args: Any, **kw: Any) -> None:
+        real(self, job, new, *args, **kw)
         if job == "gate" and new == "SUCCESS":
             raise RuntimeError("an injected fault on gate")
 

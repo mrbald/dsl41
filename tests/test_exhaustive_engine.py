@@ -1,19 +1,14 @@
 """Every event in every built state, for the engine tier's machines and the
 job's flags, holding and assembly (DL-289, DL-293, DL-295).
 
-Transition coverage proves that each declared transition is taken
-somewhere. It does not prove that a table is complete: a move in a state
-the suite never builds would go unseen until production, where the
-default `refuse` policy refuses a legitimate control input. So each test
-here builds the states its machine's code reaches, applies every event
-that code accepts in each of them, under the strict variable the test
-sets itself, and records into its own directory. An event either takes a
-declared transition or is refused by the code's own rule. A
-`TransitionError` outside the refusals a test lists means a row is
-missing. Each test then checks that no violation was recorded: no
-`TRANSITION_VIOLATION` trace line, no stderr line under
-`VIOLATION_LOG_PREFIX`, and no violations file entry beyond the listed
-refusals. Each docstring says what its builder leaves out.
+Transition coverage proves that each declared row is taken somewhere. It
+does not prove that a chart is complete: a cell the suite never builds
+would go unseen until production, where a cell with no row is a
+`StatechartError` that stops the tier. So each test here builds the states
+its machine's code reaches, applies every event that code accepts in each
+of them, and records into its own directory. An event either takes a
+declared row or is refused by the code's own rule. Each docstring says what
+its builder leaves out.
 """
 
 from __future__ import annotations
@@ -31,13 +26,11 @@ import pytest
 from dsl41.ast_jil import parse, render_preserve
 from dsl41.boundary import SealRequest, default_anchor_dir, stage_next_period
 from dsl41.ir import lower_catalog, lower_source
+from dsl41.job_chart import JOB
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import (
     HOST,
-    JOB_FLAGS,
-    JOB_HOLDING,
     LIVE,
-    VIOLATION_MARKER,
     CapacityReservation,
     CarriedRows,
     Event,
@@ -56,7 +49,6 @@ from dsl41.runner_admission import (
     Attempt,
     Envelope,
     EnvelopeError,
-    TransitionStop,
     apply_attempt,
     fingerprint,
     parse_envelope,
@@ -73,12 +65,9 @@ from dsl41.runner_startup import start_run
 from dsl41.seal import StagedNextPeriod
 from dsl41.state_machine import (
     HITS_ENV,
-    STRICT_ENV,
-    VIOLATION_LOG_PREFIX,
     Executor,
     Outcome,
     StatechartError,
-    TransitionError,
 )
 from dsl41.state_machine import Event as ChartEvent
 
@@ -87,20 +76,17 @@ DAY = timedelta(days=1)
 
 
 def _recording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, forward: bool) -> Iterator[Path]:
-    """The strict variable, set here, and a private record directory, so a
-    refusal the table makes by design stays out of the session's gate.
+    """A private record directory, so a row a test takes by a verb order no
+    production path makes stays out of the session's gate.
 
     With `forward`, the hits are handed to the session's directory
-    afterwards, when there is one, so the gate's per-source report sees the
-    states built here. Forward only from a test whose cells take declared
-    transitions the production code can take: a hit from a verb order no
-    production path makes would hide, in that report, a table source wider
-    than production uses. Violations are never forwarded."""
+    afterwards, when there is one, so the gate sees the states built here.
+    Forward only from a test whose cells take declared rows the production
+    code can take."""
     session = os.environ.get(HITS_ENV)
     directory = tmp_path / "hits"
     directory.mkdir()
     monkeypatch.setenv(HITS_ENV, str(directory))
-    monkeypatch.setenv(STRICT_ENV, "1")
     yield directory
     hits = [
         line for path in directory.glob("hits-*.jsonl") for line in path.read_text().splitlines()
@@ -123,15 +109,6 @@ def strict_unforwarded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Itera
     yield from _recording(tmp_path, monkeypatch, forward=False)
 
 
-def _violations(directory: Path) -> set[tuple[str, str, str, str]]:
-    """Every violation recorded into `directory`: (machine, id, old, new)."""
-    return {
-        (record["machine"], record["id"], record["old"], record["new"])
-        for path in directory.glob("violations-*.jsonl")
-        for record in map(json.loads, path.read_text().splitlines())
-    }
-
-
 def _hits(directory: Path) -> set[str]:
     """The transition ids taken and recorded into `directory`: a table's hits,
     and a statechart's row hits (its guard and branch records carry ids too,
@@ -144,11 +121,7 @@ def _hits(directory: Path) -> set[str]:
     }
 
 
-def _no_violation_line(err: str) -> None:
-    assert [line for line in err.splitlines() if line.startswith(VIOLATION_LOG_PREFIX)] == []
-
-
-# --------------------------------------------- job_flags and job_holding
+# ------------------------------------------------- the job's flags and holding
 
 _SCHEDULED = 'date_conditions: 1\ndays_of_week: all\nstart_times: "23:00"\ncondition: s(fx)\n'
 _JOB_JIL = (
@@ -226,7 +199,7 @@ def _feed_all(oracle: Oracle, steps: tuple[_Step, ...] | list[_Step]) -> None:
 
 
 def _row_state(oracle: Oracle, job: str) -> tuple[object, ...]:
-    """A job's status, its four flags and its `job_holding` state, and for
+    """A job's status, its four flags and its holding state, and for
     a box the members taken off ice in its run (SEM-20), which a plain
     start of such a member meets."""
     row = oracle.store.job[job]
@@ -308,43 +281,42 @@ def _job_builds() -> Iterator[tuple[list[_Step], tuple[str, ...], SemanticSwitch
             yield steps, ("fb", "fbm"), switches
 
 
-def test_every_job_event_in_every_built_flag_and_holding_state_takes_a_declared_transition(
-    strict: Path, capsys: pytest.CaptureFixture[str]
+def test_every_job_event_in_every_built_flag_and_holding_state_takes_a_declared_row(
+    strict: Path,
 ) -> None:
-    """`job_flags` and `job_holding`, over three scheduled resource holders
-    and a box with an auto_hold member (`_job_builds`). Each distinct state the
-    builder reaches (status, the four flags, the holding state; for a box,
-    the member's too) gets every operator verb and an injected status of
-    each kind, on the job and, for a box, on the member. The strict run
-    also checks `job_status` on every move these events make.
+    """The `job` chart's flags and holding, over three scheduled resource
+    holders and a box with an auto_hold member (`_job_builds`). Each distinct
+    state the builder reaches (status, the four flags, the holding state; for
+    a box, the member's too) gets every operator verb and an injected status
+    of each kind, on the job and, for a box, on the member. The chart's
+    status rows meet every move these events make.
 
     Left out: TIMER firings (term_run_time, must_start alarms) and the
     run_window deferrals, whose flag and holding moves are the start's and
     the end's, met here through STARTJOB and the injected statuses; the
-    `queued-recheck` switch's path out of the queue (job_flags.16; the
+    `queued-recheck` switch's path out of the queue (job.216; the
     default re-checks nothing); a queued box or member, which DL-293's
     test builds; a nested box; the period opening, which has its own test
     below; and events addressed to another job that move the target: the
     condition predecessor's status or a SET_GLOBAL waking an armed target
     through the unscheduled start, a holder's end waking a queued one. A
     review probe sent 7254 such events over the 403 states the builder
-    reached then, under the strict variable, and found no gap. The holding
+    reached then and found no gap. The holding
     state `reserved` is only ever a live run's. The builder runs under the
     default switches, `off-ice-in-running-box=next-run` and
     `box-terminator-on-terminated=true`. Their other values add no state
-    or move: `same-run` sets no mark, and `false` takes job_status.30 on
+    or move: `same-run` sets no mark, and `false` takes job.130 on
     FAILURE only, a move the default takes too. One build also runs under
     `box-start-all-members-out=wait` (see `_job_builds`); `complete` reaches
     no state of its own, since a box that completes at its start reads as
     one given SUCCESS. `idle-box-iced-member` adds no state or move: it
     decides whether an idle box re-derives through an iced member. Under
     `ignore`, the default these builds run, the moves that follow,
-    job_status.31 to .34, are taken through a member that is not iced, or
+    job.131 to job.134, are taken through a member that is not iced, or
     the end of an iced member whose live status had blocked the re-derive.
     Under `vote` an iced member's own end can take them too, by design."""
     catalog = lower_source(_JOB_JIL)
     reached: set[tuple[object, ...]] = set()
-    missing: list[str] = []
     applied = 0
     for steps, targets, switches in _job_builds():
         base = Oracle(catalog, semantics=switches)
@@ -361,29 +333,23 @@ def test_every_job_event_in_every_built_flag_and_holding_state_takes_a_declared_
                     twin.feed(Event(at=T0 + DAY, kind=kind, payload={"job": job, **extra}))  # type: ignore[arg-type]
                 except OracleError:
                     pass  # the oracle's own refusal
-                except TransitionError as exc:
-                    missing.append(f"{kind} {extra} on {job} in {state}: {exc}")
-                if any(e.transition == VIOLATION_MARKER for e in twin.trace()):
-                    missing.append(f"{kind} {extra} on {job} in {state}: a violation line")
-    assert missing == []
-    assert _violations(strict) == set()
-    _no_violation_line(capsys.readouterr().err)
     assert len(reached) == 405 and applied >= 10_000
     # not vacuous: two states hold a member taken off ice in its running box
     # (the box started by a force, so the member is auto-held, or by a status)
     assert sum(1 for state in reached if state[0][-1]) == 2
-    # not vacuous: the events took every flag and holding move but the
-    # queued-recheck disarm and the opening release (see above)
+    # not vacuous: the events took every flag and holding row but the
+    # queued-recheck disarm and its report (job.216, job.230) and the opening
+    # release (job.308, see above)
     taken = _hits(strict)
-    assert {t.id for t in JOB_FLAGS.transitions} - taken == {"job_flags.16"}
-    assert {t.id for t in JOB_HOLDING.transitions} - taken == {"job_holding.08"}
+    flags_and_holding = {row.id for row in JOB.rows if row.id[4] in "23" and not row.mark}
+    assert flags_and_holding - taken == {"job.216", "job.230", "job.308"}
 
 
 @pytest.mark.parametrize("holds", [True, False])
-def test_a_period_opening_over_a_removed_job_takes_a_declared_holding_move(
+def test_a_period_opening_over_a_removed_job_takes_a_declared_holding_row(
     strict: Path, holds: bool
 ) -> None:
-    """`job_holding.08`'s event: the period's first input gives back the
+    """job.308's event: the period's first input gives back the
     units a removed job holds (DL-256). The carried row is built as the
     opening builds it; a removed job that holds nothing is owed nothing and
     takes no move. A live removed job is refused at the boundary
@@ -397,9 +363,7 @@ def test_a_period_opening_over_a_removed_job_takes_a_declared_holding_move(
     oracle = Oracle(lower_source(_JOB_JIL), carried=carried)
     oracle.feed(Event(at=T0 + DAY, kind="SET_GLOBAL", payload={"name": "G", "value": "x"}))
     assert oracle.store.job["gone"].reservations == ()
-    assert not any(e.transition == VIOLATION_MARKER for e in oracle.trace())
-    assert _violations(strict) == set()
-    assert ("job_holding.08" in _hits(strict)) is holds
+    assert ("job.308" in _hits(strict)) is holds
 
 
 # ---------------------------------------------------------- runtime_assembly
@@ -521,7 +485,6 @@ def test_every_assembly_verb_in_every_phase_meets_a_row_or_a_refusal(
         }
         - _ASSEMBLY_ALLOWED
     )
-    assert _violations(strict_unforwarded) == set()
 
 
 # ------------------------------------------------------------------- host
@@ -616,7 +579,6 @@ def test_every_host_command_in_every_built_routing_state_takes_a_declared_transi
     `evicted`, which only the chart's completeness test posts."""
     catalog = lower_source(_HOST_JIL)
     reached: set[tuple[object, ...]] = set()
-    missing: list[str] = []
     for deadman in (None, 60.0):
         for build in _HOST_BUILDS:
             base = Oracle(catalog)
@@ -653,14 +615,7 @@ def test_every_host_command_in_every_built_routing_state_takes_a_declared_transi
                 except EngineError as exc:
                     assert "replay diverged" in str(exc)
                     continue
-                except TransitionError as exc:
-                    missing.append(f"{name} on {state}: {exc}")
-                    continue
-                assert applied.violations == []
-                if any(e.transition == VIOLATION_MARKER for e in twin.trace()):
-                    missing.append(f"{name} on {state}: a violation line")
-    assert missing == []
-    assert _violations(strict) == set()
+                assert applied.result.decision in ("applied", "rejected"), name
     assert {state[0] for state in reached} == {"active", "passive", "quarantined", "evicted"}
     assert len(reached) == 11
     # by design: host.12 is spec-only, and host.22 is declaration-only, which the
@@ -820,7 +775,6 @@ def test_every_outbox_call_in_every_effect_state_takes_a_declared_transition(
     assert {value for value in cells.values() if value.startswith("effect.")} == set(
         _OUTCOME_ROWS.values()
     )
-    assert _violations(strict) == set()
 
 
 # ----------------------------------------------------------- subscription
@@ -883,7 +837,7 @@ def _feed_row(state: str, event: str, tight: bool) -> tuple[str, ...]:
 
 
 def test_every_feed_event_in_every_subscription_state_takes_a_declared_transition(
-    strict: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    strict: Path, tmp_path: Path
 ) -> None:
     """`subscription`: every state a feed reaches through the journal and the
     handler (`_feeds`), and in each the events the journal applies to any
@@ -924,7 +878,6 @@ def test_every_feed_event_in_every_subscription_state_takes_a_declared_transitio
             rows = tuple(row for outcome in cell for row in outcome.rows)
             assert rows == _feed_row(state, event, tight), (state, event, tight)
             taken |= set(rows)
-    _no_violation_line(capsys.readouterr().err)
     assert taken == {row.id for row in SUBSCRIPTION.rows if row.kind != "ignored"}
 
 
@@ -1110,9 +1063,7 @@ def _admission_cell(state: str, event: str) -> tuple[str, str, tuple[str, ...]]:
     return "refused request_id_reused", state, ()
 
 
-def test_every_input_in_every_request_id_state_takes_a_declared_transition(
-    strict: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_every_input_in_every_request_id_state_takes_a_declared_transition(strict: Path) -> None:
     """`admission`: one request id in each of its four states, built by a
     live engine (`unseen`, `applied`, `rejected`), and `admitted` as
     `read_decisions` leaves an attempt line with no decision (the engine
@@ -1142,8 +1093,6 @@ def test_every_input_in_every_request_id_state_takes_a_declared_transition(
                 missing.add((state, event))
     assert missing == set()
     assert _wire_refuses_an_engine_name()
-    assert _violations(strict) == set()
-    _no_violation_line(capsys.readouterr().err)
     for state in ("unseen", "applied", "rejected", "admitted"):
         # an engine-made input has a name of its own and leaves the id alone
         assert outcomes[(state, "an engine-made input")] == ("made", state, ())
@@ -1206,14 +1155,14 @@ def test_a_client_request_id_in_the_engines_prefix_is_refused(
 
 
 def test_no_client_request_collides_with_an_engine_made_input_live_or_on_replay(
-    strict: Path, capsys: pytest.CaptureFixture[str], short_root: Path
+    strict: Path, short_root: Path
 ) -> None:
     """The collision the prefix closes, end to end. An operator tries the
     name the engine would give index 2, on `sendevent` and on `host`: both
     are refused on the wire and nothing reaches the log. A legal request
     takes index 1, the engine then makes input 2 and names it
     `engine:2`, and the client's decision stands: its retry is answered
-    from it. Replay of the log notes every attempt without a violation."""
+    from it. Replay of the log notes every attempt."""
     from test_runner_control import _control_call, _read_revision, _serve, _teardown
 
     async def scenario() -> tuple[list[dict[str, Any]], bytes, list[dict[str, Any]]]:
@@ -1278,8 +1227,6 @@ def test_no_client_request_collides_with_an_engine_made_input_live_or_on_replay(
     index = read_decisions(records)
     assert index.state("r-1") == "applied"
     assert index.state("engine:2") == "applied"
-    assert _violations(strict) == set()
-    _no_violation_line(capsys.readouterr().err)
 
 
 def test_a_seal_request_cannot_take_an_engine_name(strict: Path, short_root: Path) -> None:
@@ -1458,9 +1405,6 @@ def _arrange(
             engine.inject(queued, source="scheduler")
             assert engine.journal is not None
             mp.setattr(engine.journal, "_f", _FailingEffectWrite(engine.journal._f))
-        case "frozen: TransitionStop":
-            engine.inject(queued, source="scheduler")
-            mp.setattr(engine, "_stop_on_violation", _raise(TransitionStop("stop")))
         case "committing: the commit returns" | "committing: refused" | "committing: fence lost":
 
             def hook(stage: str) -> None:
@@ -1500,7 +1444,6 @@ _SEAL_CELLS: dict[str, tuple[tuple[str, ...], str, str]] = {
     "frozen: an attempt applying": ((*_FROZEN, "seal_boundary.06"), "stopped", "not fully applied"),
     "frozen: an input unadmitted": ((*_FROZEN, "seal_boundary.06"), "stopped", "unadmitted"),
     "frozen: a WAL append unfinished": ((*_FROZEN, "seal_boundary.06"), "stopped", "WAL append"),
-    "frozen: TransitionStop": ((*_FROZEN, "seal_boundary.08"), "stopped", ""),
     "frozen: cancelled": (_FROZEN, "frozen", ""),
     "committing: the commit returns": ((*_COMMITTING, "seal_boundary.03"), "sealed", ""),
     "committing: refused": ((*_COMMITTING, "seal_boundary.04"), "aborted", ""),
@@ -1575,8 +1518,6 @@ async def _seal_cell(
     notes = ""
     try:
         await loop
-    except TransitionError:
-        raise
     except asyncio.CancelledError:
         pass
     except Exception as exc:  # noqa: BLE001 -- each exit is checked by its moves
@@ -1594,7 +1535,7 @@ async def _seal_cell(
 
 
 def test_every_exit_in_every_seal_phase_takes_a_declared_transition(
-    strict: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    strict: Path, tmp_path: Path
 ) -> None:
     """`seal_boundary`: one boundary per cell, on a live engine leading a
     lineage, with the event put at the step of the boundary where its phase
@@ -1632,6 +1573,4 @@ def test_every_exit_in_every_seal_phase_takes_a_declared_transition(
             engine.journal.close()
     assert ended == _SEAL_CELLS
     assert second_in == {"requested", "frozen", "committing"}
-    assert _violations(strict) == set()
-    _no_violation_line(capsys.readouterr().err)
     assert {row.id for row in SEAL_BOUNDARY.rows if row.kind != "ignored"} <= _hits(strict)

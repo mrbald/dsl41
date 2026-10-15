@@ -195,8 +195,6 @@ from dsl41.runner_admission import (
     Applied,
     TimeHalfFault,
     TimeHalfStop,
-    TransitionStop,
-    ViolationPolicy,
     apply_attempt,
     classify_fault,
     fingerprint,
@@ -630,9 +628,6 @@ class Engine:
         #: drain could not admit (`clock_regressed`). Refusing it would lose
         #: it while C1 reopens, so the seal fail-stops instead (DL-274).
         self._unadmitted: str | None = None
-        #: `--on-transition-violation` (concurrency-model ss4). An engine run
-        #: option, set before the loop runs; replay never reads it.
-        self.on_violation: ViolationPolicy = "refuse"
 
     @property
     def machines(self) -> Executor:
@@ -1839,7 +1834,6 @@ class Engine:
             self.drops.append((ev, applied.result.reason))
         self._answer(pending, applied.result)
         self._applying = None
-        self._stop_on_violation(applied, index)
         return applied.emitted
 
     def _mark_unadmitted(self, pending: _Pending) -> None:
@@ -1855,19 +1849,6 @@ class Engine:
         elif pending.host is not None:
             self._unadmitted = "host"
 
-    def _stop_on_violation(self, applied: Applied, index: int) -> None:
-        """`--on-transition-violation stop`, AFTER step 7: the decision is
-        durable, so the next resume replays it and never meets a raise."""
-        if not applied.violations or self.on_violation != "stop":
-            return
-        subject, first = applied.violations[0]
-        raise TransitionStop(
-            f"--on-transition-violation stop: input {index} broke"
-            f" {len(applied.violations)} declared transition(s), first"
-            f" {first.transition} on {subject}: {first.reason}. Its decision is"
-            " durable; resume replays it"
-        )
-
     def _dry_apply(self, attempt: Attempt) -> AdmissionRefused | None:
         """Apply a control input on a fork of the oracle, and say why it
         must be refused, or None (concurrency-model ss4).
@@ -1876,23 +1857,12 @@ class Engine:
         nothing outside the oracle, and steps 5-7 do not yield to another
         writer. A gate rejection is not a refusal; the real apply decides it
         again and logs it. Every fault refuses, in either half, and none is
-        logged. Only a violation the command itself recorded refuses it: the
-        batch's time half is the engine's own, and its violations are taken
-        with the real apply. A strict test run's `TransitionError`
-        propagates, so the test fails where the move was made."""
+        logged."""
         dry = trial_apply(self.oracle, attempt, grace_s=self.cmd_grace_s)
         if isinstance(dry, Exception):
             return AdmissionRefused(
                 f"refused before admission: applying the input raised {type(dry).__name__}: {dry}",
                 code="apply_faulted",
-            )
-        if dry.command_violations and self.on_violation != "continue":
-            subject, first = dry.command_violations[0]
-            return AdmissionRefused(
-                f"refused before admission: the input breaks"
-                f" {len(dry.command_violations)} declared transition(s), first"
-                f" {first.transition} on {subject}: {first.reason}",
-                code="transition_violation",
             )
         return None
 
@@ -1995,9 +1965,7 @@ class Engine:
         the decision record, so a missing record means no SPAWN of that
         attempt was ever recorded or applied. This record is therefore the
         attempt's decision transaction, and its SPAWN's `run_id` the run's
-        one identity. The decision index already holds the verdict, and no
-        `--on-transition-violation stop` runs: the oracle traced every
-        violation at replay, and a stop here would stop every resume."""
+        one identity. The decision index already holds the verdict."""
         assert self.journal is not None  # resume always holds its root's journal
         self.journal.decision(recovered.result, effects)
         for effect in effects:

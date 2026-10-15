@@ -1065,9 +1065,10 @@ def _line_style(line: Any) -> str:
 def test_a_transition_violation_line_is_an_alert_and_a_host_subject_is_no_job(
     short_root: Path,
 ) -> None:
-    """concurrency-model ss4: a TRANSITION_VIOLATION entry names its subject in
-    `job`, and a host's subject is its `host:` key. The console shows every
-    such line as an alert, whatever the subject. A host subject makes no
+    """A TRANSITION_VIOLATION entry, which no build writes since DL-353
+    but an older build's engine may still send, names its subject in `job`,
+    and a host's subject is its `host:` key. The console shows every such
+    line as an alert, whatever the subject. A host subject makes no
     jobs-table row and no alarm count; an ordinary transition stays dim."""
 
     async def scenario() -> None:

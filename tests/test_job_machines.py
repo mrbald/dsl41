@@ -1,15 +1,13 @@
-"""The job's machines and the RuntimeState assembly, declared with `state_machine.py`.
+"""The job's flag states and the RuntimeState assembly.
 
-`oracle_state` declares `job_status`, `job_flags` and `job_holding` as tables
-and `runtime_assembly` as a statechart (tests/test_assembly_chart.py);
-docs/state-machines.md renders them. The rule code in `oracle.py` names the
-transition of every move, and the store's verbs check it. A job move off its
-table is noted on the violation channel and the write still happens; an
-assembly verb the chart refuses raises before the phase changes. The SEM
-corpus runs every job move under the suite's strict variable (test_oracle.py),
-and its autouse fixture proves each one is taken inside an InputBatch
-(batch_harness). These tests pin the declarations, both sides of each check,
-and the writers that seed rows without taking a transition.
+The `job` chart (tests/test_job_chart.py) decides every move of a job row,
+and the oracle writes what it reached through the store's move verbs;
+`runtime_assembly` is a statechart (tests/test_assembly_chart.py).
+docs/state-machines.md renders both. The SEM corpus runs every move inside
+an InputBatch, and its autouse fixture proves it (batch_harness). These tests
+pin the flag states' names, the harness, the writers that seed rows without
+a move, the assembly's walk and its refusals, and every operator verb in
+every state a builder reaches.
 """
 
 from __future__ import annotations
@@ -25,49 +23,32 @@ import pytest
 from dsl41 import cli_control
 from dsl41.classify import CarriedJob, CarriedState, _seeded
 from dsl41.ir import lower_source
+from dsl41.job_chart import JOB, configuration
 from dsl41.machines import MACHINES
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import (
     FAILED,
     FLAG_FIELDS,
-    FORCE_CLEARS_ICE,
-    HELD_RELEASED,
-    IDLE_BOX_DERIVE,
-    IDLE_BOX_OVERRIDE,
-    ICE_ON,
-    JOB_FLAGS,
-    JOB_HOLDING,
-    JOB_RUN,
-    JOB_STATUS,
-    KILL_IGNORED,
-    RESERVE,
+    JOB_STATUSES,
     RUNTIME_ASSEMBLY,
-    STATUS_INJECTED,
-    TAKE_OVER_HELD,
     TERMINAL,
-    CapacityReservation,
     CarriedRows,
     Event,
     FlagState,
-    HoldingState,
     JobRuntime,
-    JobStatus,
     OracleError,
-    VIOLATION_MARKER,
     RuntimeState,
 )
 from dsl41.runner_hosts import seed_local_executor
-from dsl41.state_machine import HITS_ENV, STRICT_ENV, TransitionError, Violation, well_formed
+from dsl41.state_machine import HITS_ENV, STRICT_ENV
 
 T0 = datetime(2026, 7, 1, 8, 0)
 _JIL = "insert_job: j\njob_type: c\ncommand: x\n"
-_LOCK = CapacityReservation(bucket="r:LOCK", units=1, release_policy="success")
 
 
 @pytest.fixture
 def recording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Record into a private directory, not strict, so a deliberate violation stays out of
-    the session."""
+    """Record into a private directory, so a test's own hits stay out of the session."""
     directory = tmp_path / "hits"
     directory.mkdir()
     monkeypatch.setenv(HITS_ENV, str(directory))
@@ -86,126 +67,29 @@ def _hits(directory: Path) -> set[tuple[str, str]]:
 # ------------------------------------------------------------------- declarations
 
 
-def test_the_machines_are_registered_and_well_formed() -> None:
-    machines = (JOB_STATUS, JOB_FLAGS, JOB_HOLDING)
-    assert all(machine in MACHINES for machine in (*machines, RUNTIME_ASSEMBLY))
-    assert {m.name: len(m.transitions) for m in machines} == {
-        "job_status": 58,
-        "job_flags": 17,
-        "job_holding": 8,
+def test_the_job_chart_and_the_assembly_are_registered() -> None:
+    assert JOB in MACHINES and RUNTIME_ASSEMBLY in MACHINES
+    assert not {"job_status", "job_flags", "job_holding"} & {m.name for m in MACHINES}
+
+
+def test_the_flag_states_are_the_chart_s_and_name_the_row_s_fields() -> None:
+    """Each flag state is a state of the chart's `flags` region and names one
+    boolean field of the row and its value; each status is a state of the
+    chart's `status` region."""
+    assert set(get_args(FlagState.__value__)) == set(FLAG_FIELDS)
+    every_flag_on = configuration("INACTIVE", ice=True, hold=True, noexec=True, armed=True)
+    assert set(FLAG_FIELDS) == {
+        state for state in configuration("INACTIVE") | every_flag_on if "_" in state
     }
-    assert all(well_formed(machine) == [] for machine in machines)
-    assert all(t.mark is None for machine in machines for t in machine.transitions)
-
-
-def test_the_state_sets_are_the_code_s_own_names() -> None:
-    """The status machine's states are `JobStatus`; each flag state names one
-    boolean field of the row; the other two are their own Literal types."""
-    assert JOB_STATUS.states == set(get_args(JobStatus))
-    assert JOB_FLAGS.states == set(get_args(FlagState.__value__)) == set(FLAG_FIELDS)
-    assert JOB_HOLDING.states == set(get_args(HoldingState.__value__))
     fields = {field for field, _ in FLAG_FIELDS.values()}
     assert fields == {"on_ice", "on_hold", "on_noexec", "armed"}
     assert all(JobRuntime.model_fields[field].annotation is bool for field in fields)
+    assert all(status in configuration(status) for status in JOB_STATUSES)
 
 
 def test_failed_is_named_once() -> None:
     assert FAILED == TERMINAL - {"SUCCESS"}
     assert cli_control._QUERY_PREDICATES["is-failed"] is FAILED
-
-
-# ------------------------------------------------------- a job move off its table
-
-
-def test_a_status_move_off_its_table_is_noted_and_still_written(recording: Path) -> None:
-    store = RuntimeState()
-    store.transition("j", STATUS_INJECTED, "RUNNING", T0)  # any source, a payload target
-    assert store.drain_violations() == []
-    store.transition("j", JOB_RUN, "RUNNING", T0)  # RUNNING is not STARTING
-    store.transition("j", STATUS_INJECTED, "QUE_WAIT", T0)  # not an injectable status
-    assert store.drain_violations() == [
-        (
-            "j",
-            Violation(
-                "job_status",
-                "job_status.05",
-                "RUNNING",
-                "RUNNING",
-                "RUNNING is not a source of job_status.05",
-            ),
-        ),
-        (
-            "j",
-            Violation(
-                "job_status",
-                "job_status.19",
-                "RUNNING",
-                "QUE_WAIT",
-                "QUE_WAIT is not one of the targets of job_status.19",
-            ),
-        ),
-    ]
-    assert store.runtime("j").status == "QUE_WAIT"  # the check never refuses
-
-
-def test_an_internal_transition_moves_nothing(recording: Path) -> None:
-    store = RuntimeState()
-    before = store.runtime("j")
-    store.stay("j", KILL_IGNORED)
-    assert store.runtime("j") is before
-    assert store.drain_violations() == []
-    store.transition("j", STATUS_INJECTED, "RUNNING", T0)
-    store.stay("j", KILL_IGNORED)
-    [(subject, violation)] = store.drain_violations()
-    assert (subject, violation.reason) == ("j", "RUNNING is not a source of job_status.37")
-
-
-def test_an_internal_transition_is_one_row_per_status(recording: Path) -> None:
-    """An internal transition's source is its target (design: source ==
-    {target}), so the table itself refuses a move that changes the status;
-    the idle-box rows likewise refuse a re-derive to the status it has."""
-    internal = [t for t in JOB_STATUS.transitions if int(t.id.split(".")[1]) >= 37]
-    assert len(internal) == 22
-    assert all(t.source == {t.target} for t in internal)
-    assert JOB_STATUS.take(KILL_IGNORED["INACTIVE"], "INACTIVE", "TERMINATED") is not None
-    for verdict in ("SUCCESS", "FAILURE"):
-        for rows in (IDLE_BOX_OVERRIDE, IDLE_BOX_DERIVE):
-            assert JOB_STATUS.take(rows[verdict], verdict, verdict) is not None
-
-
-def test_a_flag_move_off_its_table_is_noted_and_still_written(recording: Path) -> None:
-    store = RuntimeState()
-    store.move_flag("j", FORCE_CLEARS_ICE)  # only an iced job can be cleared by a force
-    [(_, violation)] = store.drain_violations()
-    assert violation.reason == "ice_off is not a source of job_flags.03"
-    store.move_flag("j", ICE_ON)
-    store.move_flag("j", FORCE_CLEARS_ICE)
-    assert store.drain_violations() == []
-    assert store.runtime("j").on_ice is False
-
-
-def test_a_holding_move_off_its_table_is_noted_and_still_written(recording: Path) -> None:
-    store = RuntimeState()
-    store.take_over_held("j", TAKE_OVER_HELD, [_LOCK])  # nothing held to take over
-    store.release_held("k", HELD_RELEASED)  # nothing held to release
-    assert [(s, v.reason) for s, v in store.drain_violations()] == [
-        ("j", "none is not a source of job_holding.02"),
-        ("k", "none is not a source of job_holding.07"),
-    ]
-    assert store.runtime("j").reservations == (_LOCK,)
-    store.reserve("m", [_LOCK])
-    store.transition("m", STATUS_INJECTED, "FAILURE", T0)
-    store.release_reservations("m", "RUNNING", "FAILURE", lambda bucket: True)
-    store.take_over_held("m", TAKE_OVER_HELD, [])
-    assert store.drain_violations() == []
-    assert store.runtime("m").reservations == ()
-
-
-def test_reserving_nothing_is_no_move(recording: Path) -> None:
-    store = RuntimeState()
-    store.reserve("j", [])
-    store.reserve("k", [_LOCK])
-    assert _hits(recording) == {("job_holding", RESERVE.id)}
 
 
 # ------------------------------------------------- the writers that take nothing
@@ -215,33 +99,28 @@ def test_the_harness_sees_a_move_outside_an_input_batch(
     monkeypatch: pytest.MonkeyPatch, recording: Path
 ) -> None:
     """The proof in test_oracle.py's fixture is not vacuous: a move in a bare
-    store transaction is caught, and so is a channel left full at
-    `begin_input`. An InputBatch's moves are not. The bare transaction is a
-    store's of its own: the oracle's store checks its job instances at each
-    commit, which a bare move would fail first."""
+    store transaction is caught. An InputBatch's moves are not. The bare
+    transaction is a store's of its own: the oracle's store checks its job
+    instances at each commit, which a bare move would fail first."""
     misplaced = batch_harness.install(monkeypatch)
     oracle = Oracle(lower_source(_JIL))
     oracle.feed(Event(at=T0, kind="STARTJOB", payload={"job": "j"}))
     assert misplaced == []
     store = RuntimeState()
     store.begin_input()
-    store.move_flag("j", ICE_ON)
+    store.move_flag("j", "ice_on")
     store.commit_input()
-    store.note_violation("j", Violation("job_flags", "x", "a", "b", "orphan"))
-    store.begin_input()
-    store.commit_input()
+    store.transition("j", "RUNNING", T0)
     assert misplaced == [
-        "a move of j was taken outside an InputBatch",
-        "a move of j was taken outside an InputBatch",
-        "the channel held [('j', Violation(machine='job_flags', transition='x', old='a',"
-        " new='b', reason='orphan'))] at begin_input",
+        "a move of j was written outside an InputBatch",
+        "a move of j was written outside an InputBatch",
     ]
 
 
 def test_the_seeds_take_no_job_transition(monkeypatch: pytest.MonkeyPatch, recording: Path) -> None:
     """The constructor's genesis seed, the carried-row install, classify's
     seeding and the executor seed open their own store transaction, so none
-    may take a job transition. Only the assembly moves are recorded."""
+    may write a job move. Only the assembly moves are recorded."""
     misplaced = batch_harness.install(monkeypatch)
     catalog = lower_source(_JIL + "status: ON_HOLD\n\ninsert_job: gone\njob_type: c\ncommand: y\n")
     carried = CarriedRows(jobs={"gone": JobRuntime(status="SUCCESS")}, period_id=2)
@@ -431,22 +310,18 @@ def _build(job: str, status: str, flag: str | None, member: str | None) -> Oracl
     return oracle
 
 
-def test_every_ignorable_event_in_every_reachable_state_takes_a_declared_transition(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_every_ignorable_event_in_every_reachable_state_takes_a_declared_row() -> None:
     """For a plain job, a resource-bearing job, a box and a resource-bearing
     box, every status, ice or hold, and a box's member idle, iced, running
     or queued: build each state this builder reaches (not every reachable
-    state), then send every operator verb under the strict variable, which
-    the test sets itself. Each verb either takes a declared transition or
-    is refused by the oracle's own rule (OracleError); a TransitionError
-    means a table row is missing. The ignore conditions are the code's own
-    (`_oob_ignored`, `job_chart.start_verdict`, the KILLJOB dispatch), met by building
-    the states, not restated here."""
-    monkeypatch.setenv(STRICT_ENV, "1")
+    state), then send every operator verb. Each verb either takes a declared
+    row of the `job` chart or is refused by the oracle's own rule
+    (OracleError); a cell the chart has no row for raises a
+    `StatechartError`, which fails the test. The ignore conditions are the
+    code's own (`_oob_ignored`, `job_chart.start_verdict`, the KILLJOB
+    dispatch), met by building the states, not restated here."""
     statuses = ("INACTIVE", "QUE_WAIT", "STARTING", "RUNNING", "SUCCESS", "FAILURE", "TERMINATED")
     reached: set[tuple[object, ...]] = set()
-    missing: list[str] = []
     applied = 0
     for job, inner in _TARGETS.items():
         members = (None,) if inner is None else (None, "ON_ICE", "RUNNING", "QUE_WAIT")
@@ -471,9 +346,4 @@ def test_every_ignorable_event_in_every_reachable_state_takes_a_declared_transit
                             )  # type: ignore[arg-type]
                         except OracleError:
                             pass  # the oracle's own refusal
-                        except TransitionError as exc:
-                            missing.append(f"{verb} on {state}: {exc}")
-                        if any(e.transition == VIOLATION_MARKER for e in twin.trace()):
-                            missing.append(f"{verb} on {state}: a violation line was traced")
-    assert missing == []
     assert len(reached) >= 100 and applied == len(reached) * len(_VERBS)

@@ -82,7 +82,7 @@ systemd
 │           └── one wrapper per detached run, and the run's command, in this unit's cgroup;
 │               they write RUN_ROOT/runs/ and the job's output
 │
-└── dsl41-engine.service        User=dsl41  Restart=on-failure  RestartPreventExitStatus=2 3 5 6 7
+└── dsl41-engine.service        User=dsl41  Restart=on-failure  RestartPreventExitStatus=2 3 6 7
       Requires=dsl41-supervisor.service  After=dsl41-supervisor.service
       ExecStart=/opt/dsl41/bin/dsl41-launch engine
       └── dsl41 run ... --run-root RUN_ROOT --estate-anchor ESTATE_ANCHOR --detached   the engine
@@ -137,10 +137,6 @@ What has to happen?
 │     the period is sealed and the next one waits; nothing runs until it opens
 │     open it in place (start the engine unit) or in a fresh root (§7 row 2)
 │     an enabled engine unit opens it in place at the next boot
-│
-├── the engine unit failed with exit 5                               TRANSITION STOP
-│     --on-transition-violation stop halted it after a journaled decision (§3)
-│     read the TRANSITION_VIOLATION line with dsl41 journal, then start the unit
 │
 ├── the engine unit failed with exit 6                               TIME-HALF STOP
 │     the timers due at an engine-made input raised; nothing was journaled (§3)
@@ -616,35 +612,29 @@ endpoint; feed these into the site's monitoring.
 
 | Signal | Read it with | What it means |
 | --- | --- | --- |
-| engine unit | `systemctl show -p ActiveState -p ExecMainStatus -p NRestarts dsl41-engine.service` | `active` runs. `failed` with status 2 is a configuration refusal; the journal names it. `failed` with status 3 is a sealed period (next row); it lasts until the next start, and an enabled unit starts at boot. `failed` with status 5 is `--on-transition-violation stop` (§3); the journal says `engine stopped:` and names the transition. `failed` with status 6 is a time-half stop (§3); the journal says `engine stopped:` and names the input and the fault. `failed` with status 7 is a statechart error (§3; next rows). A rising `NRestarts` is crash restarts (exit 1); the journal says `engine failed:` and why |
+| engine unit | `systemctl show -p ActiveState -p ExecMainStatus -p NRestarts dsl41-engine.service` | `active` runs. `failed` with status 2 is a configuration refusal; the journal names it. `failed` with status 3 is a sealed period (next row); it lasts until the next start, and an enabled unit starts at boot. `failed` with status 6 is a time-half stop (§3); the journal says `engine stopped:` and names the input and the fault. `failed` with status 7 is a statechart error (§3; next rows). A rising `NRestarts` is crash restarts (exit 1); the journal says `engine failed:` and why |
 | sealed, not opened | the check below, on `ESTATE_ANCHOR/anchor.json` | `closed`: a period is sealed and the next is not open, so nothing runs. Alert when it stays `closed` past the window. `open` is normal. `claimed` is an opener at work, or one that crashed (§6a, Day 2) |
 | supervisor unit | `systemctl show -p ActiveState -p NRestarts dsl41-supervisor.service`; `dsl41 supervise list --run-root "$RUN_ROOT"` | the list answers `"ok": true` while the supervisor is up, and shows each run's `wrapper_alive`. A restart of this unit ended the commands it ran. `failed` with status 7 is a statechart error (§3) |
 | supervisor log | `$RUN_ROOT/supervisor.log`; `journalctl -u dsl41-supervisor.service` | the supervisor's own output, and the unit's starts and stops |
 | leader | `$RUN_ROOT/leader.lock` holds the last leader's `pid`, `host`, `epoch` and `since`; compare `pid` with `systemctl show -p MainPID --value dsl41-engine.service` | the note stays after the engine exits, so it says who led, not who leads. Never probe the lock with `flock`: an engine that starts while a probe holds it refuses with exit 2. Never delete or replace the file: the engine re-checks it before every append and stops when it changed |
 | control socket | `dsl41 query status --brief -S "$S"` | exit 0: the leader answers. Exit 2: no engine, or a refusal |
-| failures and alarms | `dsl41 query subscribe -S "$S"` as the wake-up; then `dsl41 query trace --since N -S "$S"` with the last `last_seq` read. The trace is per period and its `seq` restarts at 1: set the cursor to 0 when the answer's `baseline_id` changes, or when `last_seq` is below the cursor, as the TUI does (DL-210) | the stream carries journal records: a run's end arrives as an `input` record of kind `STATUS` from the `adapter` source. The trace names what it did: a transition to `FAILURE` or `TERMINATED`, or a `MUST_START_ALARM` or `MUST_COMPLETE_ALARM` entry (SEM-34). Alert on any `TRANSITION_VIOLATION` entry: an applied input broke a declared state-machine transition, and its `cause` names the transition (concurrency-model §4) |
+| failures and alarms | `dsl41 query subscribe -S "$S"` as the wake-up; then `dsl41 query trace --since N -S "$S"` with the last `last_seq` read. The trace is per period and its `seq` restarts at 1: set the cursor to 0 when the answer's `baseline_id` changes, or when `last_seq` is below the cursor, as the TUI does (DL-210) | the stream carries journal records: a run's end arrives as an `input` record of kind `STATUS` from the `adapter` source. The trace names what it did: a transition to `FAILURE` or `TERMINATED`, or a `MUST_START_ALARM` or `MUST_COMPLETE_ALARM` entry (SEM-34). A trace an older build wrote may carry a `TRANSITION_VIOLATION` entry, a move that broke a declared transition table; no build writes one since DL-353, and the TUI still shows an old one as an alert |
 | quarantined inputs | `journalctl -u dsl41-engine.service`; `dsl41 query subscribe -S "$S"`; `dsl41 journal "$RUN_ROOT"` | alert on any journal line that begins `dsl41: input quarantined`, and on a `decision` record with `"code": "engine_apply_faulted"` on the stream. Applying an engine-made input raised, so the engine logged it rejected and applied only its time half. The line names the input's kind, job, run and the fault. The input's own effect is lost: a quarantined completion leaves its run RUNNING, and a quarantined tick is a missed start. `dsl41 journal` prints a `rejected input` line for it. Report the fault, then settle the row with `sendevent` (concurrency-model §4) |
 | statechart errors | `journalctl -u dsl41-engine.service -u dsl41-supervisor.service` | alert on any line that begins `dsl41: statechart error`. A declared state machine hit an assertion failure: two enabled rows, an event nobody handles, or a call into its executor from inside a step. The tier stopped at once and exits 7. A durable write already made stays, such as a `seal` record (period-model §7). The lines name the machine, the instance, its states, the item, its ancestry, the candidates, the deferred queue and the last microsteps; report them whole (docs/statechart-engine.md §5). A supervisor that exits 7 ends every command it ran, by lifeline EOF, as any stop of the supervisor unit does (§0), and stays down |
-| violations off the trace | `journalctl -u dsl41-engine.service` | alert on any line that begins `dsl41: transition violation`. It covers the violation the trace cannot carry: one noted outside an input, which is dropped. The line names the entity, the transition and the reason; the engine goes on (concurrency-model §4). Host routing and admission record no violations: a gap in either chart is a statechart error (row above) |
 | free space | `df -P "$RUN_ROOT" "$ESTATE_ANCHOR"`, and every file system a job's `std_out_file` or `std_err_file` writes to | see "when a write fails" below |
 | perimeter receipts | `$RUN_ROOT/perimeter.jsonl`, when the access map is armed | alert on `access_denied` and `policy_reload_failed` records. `stream_revoked` marks a stream that a reload closed (access-model §6, §7) |
 
 The service drill (`watch`) runs the command of every row above and
 checks the output against the row. `configure` reads the perimeter's
 receipts, `sealed` the `closed` state, and `kill-supervisor` the
-supervisor unit's journal. It does not reach these meanings: exit 5;
+supervisor unit's journal. It does not reach these meanings:
 exit 6; exit 7; a quarantined input; a
 rising `NRestarts` from exit 1 with the `engine failed:` line (the drill's
 crash is a signal, status 9); the `claimed` state; the
 `MUST_START_ALARM` and `MUST_COMPLETE_ALARM` entries; a `TERMINATED` run
 read from the trace; `stream_revoked`; the trace cursor reset when
 `baseline_id` changes; the free space of a job's output file systems; and
-a subscribe line over the budget. A real
-engine does not break a declared transition, so the drill injects a
-violation into the engine unit the way the unit tests do: the journal
-line begins with the prefix, and a host's reinstatement shows as a
-`TRANSITION_VIOLATION` trace entry (`kill-supervisor`). That shows the
-alert pattern matches; it does not show that an engine violates.
+a subscribe line over the budget.
 
 **A row left live with nothing behind it.** After a restart, a job can
 stand RUNNING or STARTING with no live run and nothing held: `dsl41 query
@@ -1453,21 +1443,12 @@ Decisions to make once, per site:
   names the holder. Stop or kill the engine first. There is no TTL to
   wait out: the supervisor reads the closed connection as proof that the
   holder is gone, so the lease is grantable at once.
-- **Transition violations.** `--on-transition-violation` says what the
-  engine does when an input breaks a declared state-machine transition
-  (concurrency-model §4). `refuse`, the default, refuses such a command
-  before it is journaled, with the code `transition_violation`. A command
-  whose apply raises is refused with `apply_faulted` under every value.
-  An input the engine made itself, a tick or a completion, is applied and
-  leaves a `TRANSITION_VIOLATION` trace line (§0's "What to watch").
-  `continue` also applies such a command, with its trace line. `stop`
-  refuses like `refuse`, and exits 5 once an input that broke a
-  transition has its decision journaled. The unit does not restart exit
-  5 (below). Read the `TRANSITION_VIOLATION` line with `dsl41 journal`,
-  then start the unit: resume replays that decision and the engine runs
-  on until the next violation. Keep the default unless
-  a refused command blocks work you need: `continue` is that escape until
-  a release fixes the table.
+- **Faulting commands.** A command whose apply raises is refused with
+  `apply_faulted` before it is journaled (concurrency-model §4).
+  `--on-transition-violation` is inert since DL-353 and leaves at the
+  next major release: every state machine is a declared statechart, and a
+  gap in one is a statechart error (exit 7). Given, the option prints one
+  deprecation line and changes nothing; remove it from the launcher.
 - **Faults in engine-made inputs.** The engine applies each input it made
   itself on a copy of its state first (concurrency-model §4). If a tick, a
   completion or a routing observation raises there and the timers due at
@@ -1483,15 +1464,14 @@ Decisions to make once, per site:
   keep it).
 - **Init system.** The engine runs until SIGINT or SIGTERM and stops
   cleanly on both. Under systemd, use `Type=simple`,
-  `Restart=on-failure`, `RestartPreventExitStatus=2 3 5 6 7`, a sane
+  `Restart=on-failure`, `RestartPreventExitStatus=2 3 6 7`, a sane
   `RestartSec`, and an `ExecStart` wrapper that passes `--resume` if and
   only if `<root>/journal.jsonl` exists. Exit 2 is a configuration
   refusal (below) that a retry cannot fix. Exit 3 is a sealed engine: the
   next period is opened by an operator, not by a restart loop (§6a;
   DL-134). A unit that lists 2 alone restart-loops at every boundary.
-  Exit 5 is a transition stop, listed so that `--on-transition-violation
-  stop` keeps the engine down until an operator has read the violation.
-  Exit 6 is a time-half stop: the timers due at an engine-made input
+  Exit 5 is retired: it was `--on-transition-violation stop` until
+  DL-353, and a unit that still lists it is harmless. Exit 6 is a time-half stop: the timers due at an engine-made input
   raised, so every restart would stop the same way. Exit 7 is a
   statechart error: a bug in a declared state machine, which every
   restart of the same release may meet again. A
@@ -1598,8 +1578,6 @@ Exit codes:
   clock domain or runtime profile), a preflight ERROR, or a root another
   engine already leads.
 - 3: sealed; period N+1 is ready to open (§6a).
-- 5: stopped by `--on-transition-violation stop` after a journaled
-  decision.
 - 6: stopped before journaling an engine-made input whose time half
   raised: a timer due at its stamp, the release of a removed job's units,
   or a clock check. The journal stays clean. Every later input would meet
@@ -1616,7 +1594,7 @@ Exit codes:
   supervisor unit ends every command it still runs" (§0).
 
 Exit 2 means a person misconfigured something, and a restart will not
-help; hence `RestartPreventExitStatus=2 3 5 6 7` above. A second engine on a
+help; hence `RestartPreventExitStatus=2 3 6 7` above. A second engine on a
 live run root is refused by `leader.lock`, an `flock` the leader holds for
 its whole process life. The kernel releases it when that process dies,
 `kill -9` included. So a misconfigured restart loop cannot start a second
@@ -1784,8 +1762,7 @@ silently. The runtime profile is `--timezone`, `--timezone-map`,
 `--as-machine`, `--machine-policy`, `--detached`, `--deadman` and
 `--semantics` (DL-252). `--access-map` is not in the profile and is not
 gated: omit it and the run comes back with no perimeter (§4).
-`--on-transition-violation` is not in the profile either: omit it and the
-run comes back with the default, `refuse` (§3). Keep the whole line in
+`--on-transition-violation` is inert (§3). Keep the whole line in
 the launcher (§3's worked example); the unit calls the launcher. A
 detached engine prints that line on its way out (DL-218): its own argv,
 shell-quoted, with `--resume` and `--detached` once each, and
@@ -1911,7 +1888,7 @@ with.
 engine that holds `leader.lock` is a live engine. The CLI stages C2 and
 asks that engine over the control socket, and the engine then exits with
 code 3 ("sealed; period N+1 is ready to open"). Set
-`RestartPreventExitStatus=2 3 5 6 7` under systemd, or the init system
+`RestartPreventExitStatus=2 3 6 7` under systemd, or the init system
 restart-loops a sealed engine. With no engine running, the same command
 takes the lock itself, replays and reconciles, and performs the boundary
 as an offline leader. In both modes C1 comes from the run root's own
@@ -2107,7 +2084,7 @@ in flight exits 2: this request did nothing.
 
 *The engine exited 3 and the init system restarted it.* It will loop.
 Exit 3 is "sealed; period N+1 is ready to open", and the opening is an
-operator action. Put `RestartPreventExitStatus=2 3 5 6 7` in the unit file.
+operator action. Put `RestartPreventExitStatus=2 3 6 7` in the unit file.
 
 *`audit` printed "the registry row could not be set".* The checkpoint is
 written and durable, and the checkpoint is what `verify` and
