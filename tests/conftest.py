@@ -38,6 +38,43 @@ def _restore_recursion_limit():
     sys.setrecursionlimit(limit)
 
 
+def _subreaper_prctl():
+    """Linux's libc `prctl`, or None elsewhere."""
+    if not sys.platform.startswith("linux"):
+        return None
+    import ctypes
+
+    try:
+        return ctypes.CDLL("libc.so.6", use_errno=True).prctl
+    except (OSError, AttributeError):
+        return None
+
+
+_PRCTL = _subreaper_prctl()
+
+
+@pytest.fixture(autouse=True)
+def _restore_child_subreaper():
+    """An in-process `Supervisor.run()` and the subreaper test make this
+    pytest process a child subreaper (Linux), and the flag outlives the test.
+    Left set, a command that a later test orphans by killing its wrapper
+    reparents to this process, which never reaps it: it stays a zombie,
+    `kill(pid, 0)` keeps succeeding, and a poll for its death times out. Under
+    pytest-xdist a worker that ran test_runner_supervisor.py before
+    test_runner_lifecycle.py failed two tests that way. Each test gets back
+    the flag it started with."""
+    if _PRCTL is None:
+        yield
+        return
+    import ctypes
+
+    flag = ctypes.c_int(0)
+    read = _PRCTL(37, ctypes.byref(flag), 0, 0, 0) == 0  # PR_GET_CHILD_SUBREAPER
+    yield
+    if read:
+        _PRCTL(36, flag.value, 0, 0, 0)  # PR_SET_CHILD_SUBREAPER
+
+
 @pytest.fixture
 def oracle_recursion_limit():
     """The oracle's limit from the start of the test: hypothesis warns when a

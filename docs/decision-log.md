@@ -23083,7 +23083,11 @@ relitigate an entry; append a new one.
   asked for; the supervisor-spool test holds the kill until the wrapper's status.json exists (its
   race is probable, not reproduced). A fourth, a zombie check, skips where `os.waitid` is missing
   (macOS before Python 3.13), a platform gap and not a race. Two shorter deadman waits, worth 3.5 s,
-  were declined: they tighten real-clock ratios on slow runners.
+  were declined: they tighten real-clock ratios on slow runners. The first CI run under four
+  workers found an isolation defect the serial order hid: an in-process supervisor run makes the
+  pytest process a Linux child subreaper, the flag outlived the test, and a command a later test
+  orphaned stayed an unreaped zombie, so two death polls timed out. Each test now gets back the
+  flag it started with.
   ACCEPTANCE. Ten consecutive green workflow runs on the branch, thirty leg executions, with zero
   test failures before the merge; a failure is diagnosed and fixed, and the count restarts. A load
   flake that passes at three workers pins three; a second flake of one test after its fix makes its
