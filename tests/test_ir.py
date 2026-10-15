@@ -84,8 +84,8 @@ def test_time_parse_rejects_garbage() -> None:
 
 
 def test_time_parse_unescapes_backslash_colon() -> None:
-    # JIL syntax rule 2/6: `\:` is a literal colon in a value lane, applied to
-    # every hh:mm lane (DL-251).
+    # jil-statement-syntax rule 2 (the vendor's JIL syntax rule 6): `\:` is a
+    # literal colon in a value lane, applied to every hh:mm lane (DL-251).
     assert Time.parse(r"10\:00") == Time(hour=10, minute=0)
 
 

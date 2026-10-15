@@ -1089,7 +1089,7 @@ def test_f3_soup_preserve_identity(text: str) -> None:
 F4_CASES = [
     ("escaped-colon-in-value", "insert_job: j\ncommand: echo C\\:\\\\TEMP\n"),
     # DL-251: the vendor's own start_times example escapes every colon
-    # instead of quoting the whole value (jil-statement-syntax rule 6).
+    # instead of quoting the whole value (jil-statement-syntax rule 2).
     ("escaped-colon-time-value", "insert_job: j\nstart_times: 10\\:00, 14\\:00\n"),
     ("quoted-and-escaped-colons", 'insert_job: j\ncommand: echo "a : b" and \\: bare\n'),
     ("hash-inside-quotes", 'insert_job: j\ndescription: "hash # inside quotes"\n'),

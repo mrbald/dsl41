@@ -33,8 +33,8 @@ default there.
    stay verbatim in IR. [?] Whether the engine unescapes `\:` inside general values (command,
    std_*_file) is not known; value lanes stay escaped until a live instance gives the answer.
 3. **Statement boundary**: a line whose key is a subcommand starts a new statement. The
-   recognized set tracks the TechDocs 12.1 JIL subcommand pages (DL-29), each added as it was
-   found: `insert_job`, `update_job`, `delete_job`, `rename_job`, `delete_box`,
+   recognized set follows the TechDocs 12.1 JIL subcommand pages (DL-29): `insert_job`,
+   `update_job`, `delete_job`, `rename_job`, `delete_box`,
    `insert_machine`, `update_machine`, `delete_machine`, `insert_global`, `delete_global`
    (dsl41 input forms; no vendor page documents them, SEM-08 [?]),
    `override_job`, `insert_xinst`, `update_xinst`, `delete_xinst`, `insert_blob`,
@@ -43,10 +43,9 @@ default there.
    `delete_monbro`, `insert_job_type`, `update_job_type`, `delete_job_type`,
    `insert_connectionprofile`, `update_connectionprofile`, `delete_connectionprofile`; plus
    the autocal_asc calendar-export statements `calendar`, `cycle`, `extended_calendar` (rule
-   11, DL-36) and the accepted `ext_calendar` spelling (DL-57). This set was once claimed
-   complete against TechDocs 12.1 (DL-29); `update_blob` and `update_glob` were missing from
-   it (DL-245), so the claim is retracted -- treat the list above as the verbs found so
-   far, not a proof of completeness. All attribute lines that follow belong to this statement
+   11, DL-36) and the accepted `ext_calendar` spelling (DL-57). The list holds the verbs
+   found so far; it is not a proof of completeness (DL-29, DL-245). All attribute lines that
+   follow belong to this statement
    until the next subcommand or EOF. An attribute line before the first statement is a
    scanner error. Unknown keys are attributes, never boundaries (forward compatibility).
    There is one exception: a key that matches the subcommand shape
@@ -224,12 +223,14 @@ default there.
     must not trim the lines strictly inside the region (the vendor's "every character...
     literally" covers trailing whitespace and tabs mid-payload too); only the merged last
     line, where a tail (if any) lives, gets the ordinary per-line trim rule 6's own continuation
-    values get. The corpus fixture that pins the structural half of this rule (a `blob_input`
-    value whose literal text contains a complete `insert_job:` fragment at column 0, scanning
-    into exactly one statement rather than a phantom second one) is synthetic, hand-written for
-    this rule -- the vendor's own insert_blob examples use plain prose and a JSON payload, never
-    a JIL fragment; the fixture exists to demonstrate that the region cannot start a statement,
-    not to reproduce a vendor example.
+    values get. Two inline tests in `tests/test_ast_fidelity.py` pin the structural half of
+    this rule: `test_insert_blob_literal_region_scans_as_exactly_two_statements` and
+    `test_blob_literal_region_key_shaped_line_does_not_start_a_statement`. In each, a
+    `blob_input` value whose literal text holds an `insert_job:` line at column 0 adds no
+    statement. No corpus fixture holds the rule. The test text is synthetic, hand-written for
+    this rule: the vendor's own insert_blob examples use plain prose and a JSON payload, never
+    a JIL fragment. It shows that the region cannot start a statement; it reproduces no vendor
+    example.
 
 ## Corpus policy
 

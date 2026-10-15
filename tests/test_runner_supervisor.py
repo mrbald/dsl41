@@ -264,7 +264,7 @@ def test_supervisor_serves_under_pythonsafepath(short_root: Path) -> None:
 
 
 def test_peer_uid_same_uid_on_socketpair() -> None:
-    """The same-uid gate input (spec ss1): a local peer's uid is our uid."""
+    """The same-uid gate input (supervisor-protocol ss5): a local peer's uid is our uid."""
     a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         assert runner_supervisor.peer_uid(a) == os.getuid()

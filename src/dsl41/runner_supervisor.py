@@ -554,7 +554,7 @@ def _incumbent(ctx: Context) -> bool:
     """Grantable, with this incarnation and the current token: the incumbent
     re-keys, and its old token dies (DL-79, DL-80). controller_id is a label, not
     a credential. The token proves incumbency, not authenticity. Authentication
-    is the same-uid peer-cred gate on accept (ss1)."""
+    is the same-uid peer-cred gate on accept (supervisor-protocol ss5)."""
     return _grantable(ctx) and _credentials(ctx)
 
 
@@ -1686,7 +1686,7 @@ class Supervisor:
             conn_sock.close()
             return
         if uid is not None and uid != os.getuid():
-            conn_sock.close()  # same-uid gate (ss1)
+            conn_sock.close()  # same-uid gate (supervisor-protocol ss5)
             return
         conn_sock.setblocking(False)
         conn = _Conn(conn_sock)

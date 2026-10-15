@@ -560,7 +560,7 @@ class AccessControl:
             self.policy.socket_group,
             self.policy.socket_gid,
         ):
-            # ss8: the group and the modes are applied at arming; a reload
+            # ss7: the group and the modes are applied at arming; a reload
             # that named a different group would change the map and not the
             # kernel -- refuse it whole rather than half-apply it. The GID
             # is part of "the group" (DL-152): the name resolves at load, so

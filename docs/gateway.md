@@ -57,9 +57,11 @@ One route per control `cmd`. The set is the `cmd` column of the verb table
   identity belongs to the gateway's layer (§6). Every other field passes
   through unchanged, `request_id`, `expect`, `epoch` and `baseline_id`
   included. Validation stays with the engine.
-- `request_id` must be a canonical UUID version 4. Every human of a tier
-  shares one principal, so a guessable id could collide with another
-  person's command (control-protocol §3). Other forms are refused.
+- `request_id` must be a canonical UUID version 4; other forms are
+  refused. Every human of a tier shares the tier's one OS principal
+  ([access-model §3](access-model.md#3-local-authentication-kernel-peer-credentials),
+  [§9](access-model.md#9-the-web-tier)), so a guessable id could collide
+  with another person's command.
 - `routes`, specified and not built (control-protocol §3), gets
   `GET /api/v1/routes` when built.
 - `POST /api/v1/seal` commits an existing stage. Staging writes under the
@@ -99,8 +101,9 @@ unknown. The code picks the status inside the class:
 
 1. A known `code` maps by the table below.
 2. An answer with no `code` maps from its marker alone: refused to `400`,
-   rejected to `409`, unknown to `500`. A decision recorded before codes
-   existed is replayed without one.
+   rejected to `409`, unknown to `500`. A `decision` written before
+   DL-272 stores no code, and its replayed answer has none
+   (control-protocol §2).
 3. An unknown outcome always maps to a 5xx. If its code maps below `500`,
    the gateway answers `502`. An unknown outcome may have applied.
 4. A collision's nested `original_decision` belongs to the earlier
@@ -124,16 +127,24 @@ the control protocol stays transport-neutral:
 | 412 | `precondition_failed` |
 | 422 | `plan_cycle`, `status_not_injectable`, `force_needs_actor`, `stage_digest_mismatch` |
 | 428 | `expect_required` |
-| 500 | `internal_error`, `engine_error` |
+| 500 | `internal_error`, `engine_error`, `apply_faulted`, `engine_apply_faulted` |
 | 502 | `peer_unauthenticated`, `malformed_request`, `unsupported_version`, `unknown_cmd` |
 | 503 | `lineage_lost`, `period_sealing`, `engine_shutting_down`, `seal_not_settling`, `seal_supervisor_unproven` |
 | 504 | `decision_timeout`, `seal_timeout` |
 
 An unknown code on a mutation maps by rules 2 and 3. `no_journal` and
-`backfill_refused` arrive only as stream frames (§5); `stale_completion` is
-stored only. `eviction_bound_pending` carries no `Retry-After`: the engine
-states the wait in prose only. The four `502` codes are the gateway's own
-identity or framing, which a browser cannot cause.
+`backfill_refused` arrive only as stream frames (§5). Every rejected code is
+stored with its decision, and an exact retry is answered from that record
+(control-protocol §2). Some stored answers never reach a first request:
+`stale_completion` answers no request; `host_evicted`, when stored for the
+leader's own reachability observation, answers no client; and
+`engine_apply_faulted` answers only an exact retry of the control input it
+was stored for. `apply_faulted` and `engine_apply_faulted` are engine
+faults a browser cannot fix, so they map to `500` beside `engine_error`;
+the markers still decide the class. `eviction_bound_pending` carries no
+`Retry-After`: the engine states the wait in prose only. The four `502`
+codes are the gateway's own identity or framing, which a browser cannot
+cause.
 
 **Gateway codes** use the same member, with a `gateway_` prefix.
 
@@ -291,7 +302,9 @@ seam `web-session-principal-v2`
 ## 8. Out of scope
 
 The web application and its seal flow, several engines per gateway, HA,
-and log file serving, which access-model §9 grants to the TUI only.
+and log file serving. Access-model §9 makes log visibility an explicit
+per-tier deployment grant to the web tier's service account, read by the
+TUI child; the gateway serves no log file.
 
 ## 9. Acceptance tests
 

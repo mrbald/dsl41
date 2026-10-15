@@ -737,7 +737,7 @@ schedule ticks daily: `jil <<< "delete_box: dsl41_q3c_box"` and
 
 The pin "a pre-existing arm survives ON_ICE/OFF_ICE untouched" (SEM-32,
 DL-54) is uncited. Q3d (DL-69) is the open question (`# PENDING: Q3d`,
-oracle.py), and the pin is the deterministic default until this probe
+oracle_writers.py), and the pin is the deterministic default until this probe
 runs. If the vendor instead discards the queued start on ice, ON_ICE is
 the vendor's latch-*discharge* verb. The vendor sendevent set has no
 other, and dsl41's own `DISARM` control (DL-158) has no vendor

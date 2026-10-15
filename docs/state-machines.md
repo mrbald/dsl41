@@ -811,7 +811,7 @@ stateDiagram-v2
 | Name | Kind | Prose |
 | --- | --- | --- |
 | grantable | guard | controller_id is a non-empty string, and ttl_s gives a representable expiry. A zero or negative ttl_s gives one too: the lease it grants is due at once, and the next sample expires it (ss5). |
-| incumbent | guard | Grantable, with this incarnation and the current token: the incumbent re-keys, and its old token dies (DL-79, DL-80). controller_id is a label, not a credential. The token proves incumbency, not authenticity. Authentication is the same-uid peer-cred gate on accept (ss1). |
+| incumbent | guard | Grantable, with this incarnation and the current token: the incumbent re-keys, and its old token dies (DL-79, DL-80). controller_id is a label, not a credential. The token proves incumbency, not authenticity. Authentication is the same-uid peer-cred gate on accept (supervisor-protocol ss5). |
 | challenger | guard | controller_id is a non-empty string and ttl_s is a number, without this incarnation and the current token: a live lease yields only to its incumbent (DL-79). The expiry is not computed. |
 | unnamed | guard | controller_id is not a non-empty string, checked before ttl_s and before any lease state (DL-150). |
 | untimed | guard | controller_id is a non-empty string, and ttl_s gives no representable expiry (not a number, inf, nan, 1e20). Nothing changes, not even the token counter (DL-300). |
