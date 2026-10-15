@@ -14,7 +14,7 @@ import shlex
 import sys
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 import typer
 
@@ -98,6 +98,10 @@ INERT_VIOLATION_OPTION = (
 #: timers and stop the same way, so the engine stays down until a build
 #: that fixes the fault is deployed (deployment-runbook ss3).
 EXIT_TIME_HALF_STOP = 6
+#: `run`'s exit code for a committed seal boundary (period-model ss7, PR-30b): a
+#: successful terminal outcome, distinct from 0/1/2 so an init system does not
+#: restart-loop a sealed engine.
+EXIT_SEALED = 3
 
 
 def _preflight_or_exit(
@@ -456,7 +460,7 @@ def _reattach_note(
     Only a detached run that can be resumed gets one: a clean stop (0), a
     crash (1), a time-half stop (6, whose log is clean; it resumes on a fixed
     build) or a statechart error (7, which resumes on a fixed build too). A
-    sealed exit (3) does not -- its period is closed, and
+    sealed exit (`EXIT_SEALED`) does not -- its period is closed, and
     `say_next` has already named the opener of the next one. `reattach` is
     this process's own line; an embedding caller that has none gets the
     schematic."""
@@ -638,13 +642,11 @@ def _preflight_launch(
     profile: "RuntimeProfile",
     open_from: "Path | None",
     access_map: "Path | None",
-) -> "tuple[Callable[[Manifest], None] | None, int | None]":
+) -> "Callable[[Manifest], None] | None":
     """`run`'s read-only checks, before anything is created: the roll's
     preflight, the access policy's load, and the roll's admission gate. Answers
-    that gate (None when there is no roll) and, when a check refused, the exit
-    code."""
-    from dsl41.runner_clock import EngineError
-
+    that gate (None when there is no roll). A check that refuses raises the
+    `EngineError` or `AccessError` it met; the caller refuses."""
     admit: "Callable[[Manifest], None] | None" = None
     if open_from is not None:
         # the roll's READ-ONLY preflight runs before anything is created:
@@ -653,22 +655,16 @@ def _preflight_launch(
         # gate re-runs authoritatively inside the roll under the locks.
         from dsl41.estate import check_roll_ready
 
-        try:
-            successor = check_roll_ready(run_root, Path(open_from))
-        except EngineError as exc:
-            return None, refuse(exc)
+        successor = check_roll_ready(run_root, Path(open_from))
     if access_map is not None:
         # the access-model ss4 refusal must write NOTHING (the check_roll_ready
         # precedent above): the same load_policy that arming runs later is
         # called here read-only, before the root is claimed or the WAL opened.
         # `socket_group` resolution is the loader's own (DL-152), so an
         # unknown group refuses here too, and in the loader's words
-        from dsl41.runner_access import AccessError, load_policy
+        from dsl41.runner_access import load_policy
 
-        try:
-            load_policy(access_map, generation=1)
-        except AccessError as exc:
-            return None, refuse(exc)
+        load_policy(access_map, generation=1)
     if open_from is not None:
         # PR-22b: the options are held to the successor's pin before the
         # roll writes. This early pass runs after every local check above,
@@ -676,11 +672,8 @@ def _preflight_launch(
         # writes nothing; the roll runs the same gate again on the seal it
         # selects.
         admit = _roll_admission(run_root, profile)
-        try:
-            admit(successor)
-        except EngineError as exc:
-            return None, refuse(exc)
-    return admit, None
+        admit(successor)
+    return admit
 
 
 def _install_signal_handlers(stop: "asyncio.Event", access: "AccessControl | None") -> None:
@@ -705,13 +698,23 @@ def _install_signal_handlers(stop: "asyncio.Event", access: "AccessControl | Non
             pass
 
 
+class _RunEnd(NamedTuple):
+    """What `_await_run_end` hands `_stop_and_judge`: the engine loop task, the
+    attached TUI and its task, and the tasks that finished."""
+
+    loop_task: "asyncio.Task[Any]"
+    tui: Any
+    ui_task: "asyncio.Task[Any] | None"
+    done: "set[asyncio.Task[Any]]"
+
+
 async def _await_run_end(
     engine: "Engine",
     server: "ControlServer",
     client: "SupervisorClient | None",
     stop: "asyncio.Event",
     ui: bool,
-) -> "tuple[asyncio.Task[Any], Any, asyncio.Task[Any] | None, set[asyncio.Task[Any]]]":
+) -> _RunEnd:
     """Start the engine loop and wait for the first thing that ends the run:
     the loop, a stop signal, the server's failure or the attached TUI. Answers
     the loop task, the TUI and its task, and the tasks that finished."""
@@ -739,28 +742,25 @@ async def _await_run_end(
     done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
     stop_task.cancel()
     failed_task.cancel()
-    return loop_task, tui, ui_task, done
+    return _RunEnd(loop_task, tui, ui_task, done)
 
 
 async def _stop_and_judge(
     engine: "Engine",
     server: "ControlServer",
-    loop_task: "asyncio.Task[Any]",
-    tui: Any,
-    ui_task: "asyncio.Task[Any] | None",
-    done: "set[asyncio.Task[Any]]",
+    end: _RunEnd,
     *,
     detached: bool,
-) -> tuple[int, bool]:
+) -> int:
     """How the run ended: tear down the TUI, the server and the engine, and
-    answer the exit code with whether a seal boundary committed."""
+    answer the exit code (`EXIT_SEALED` when a seal boundary committed)."""
     import asyncio
     import contextlib
 
     from dsl41.runner_admission import TimeHalfStop
 
+    loop_task, tui, ui_task, done = end
     code = 0
-    sealed = False
     try:
         tui_failure = _tui_failure(tui, ui_task, done)
         if tui is not None and ui_task is not None and ui_task not in done:
@@ -777,8 +777,7 @@ async def _stop_and_judge(
         # cancelled ended for the server's error, read below
         ended = loop_task in done and not loop_task.cancelled()
         outcome = loop_task.exception() if ended else None
-        sealed = isinstance(outcome, PeriodSealed)
-        if sealed:
+        if isinstance(outcome, PeriodSealed):
             # ss7: a committed boundary is a SUCCESSFUL terminal outcome,
             # and its code is its own -- distinct from 0/1/2, so an init
             # system does not restart-loop a sealed engine, and distinct
@@ -789,7 +788,7 @@ async def _stop_and_judge(
             # run the next period will reattach (PR-30b). `say_next` runs
             # after the teardown, below any report the server adds.
             typer.echo(str(outcome))
-            code = 3
+            code = EXIT_SEALED
         elif isinstance(outcome, TimeHalfStop):
             # not a crash: a restart meets the same timers, so its own code
             # keeps the unit down until a fixed build runs (concurrency-model ss4)
@@ -835,13 +834,12 @@ async def _stop_and_judge(
             await server.close()
         finally:
             await engine.shutdown()
-    return code, sealed
+    return code
 
 
 def _finish_run(
     server: "ControlServer",
     code: int,
-    sealed: bool,
     run_root: Path,
     anchor_dir: "Path | None",
     reattach: "str | None",
@@ -864,7 +862,7 @@ def _finish_run(
                 f"{STATECHART_LOG_PREFIX}: the engine had already stopped with exit {code}",
                 err=True,
             )
-    if sealed:
+    if code == EXIT_SEALED:
         say_next(run_root, anchor_dir)
     # a client exists exactly when the profile said detached; `_serve_run` gave
     # the lease back before calling this
@@ -906,6 +904,7 @@ async def _serve_run(
     from dsl41.runner_startup import start_run, wire_from_profile
     from dsl41.runner_control import ControlServer
     from dsl41.runner_startup import resume_run as _resume_run
+    from dsl41.runner_access import AccessError
     from dsl41.runner_clock import EngineError, RealClock
 
     from dsl41.runner_ledger import acquire_run_root
@@ -914,9 +913,10 @@ async def _serve_run(
     detached = profile.execution_mode == "detached"
     # the ASKED deadman; `_running_deadman` reads back what the host runs
     deadman = None if profile.deadman_us is None else profile.deadman_us / 1_000_000
-    admit, refused = _preflight_launch(run_root, profile, open_from, access_map)
-    if refused is not None:
-        return refused
+    try:
+        admit = _preflight_launch(run_root, profile, open_from, access_map)
+    except (EngineError, AccessError) as exc:
+        return refuse(exc)
     # ACQUIRE first (S6a, concurrency-model ss7). Earlier than the engine's
     # own entry points would, because the next thing this function does is
     # START a supervisor and take its lease -- an act on an estate this
@@ -1138,10 +1138,8 @@ async def _serve_run(
             # the handlers stay until `loop.close()`, as on the success path
             return refuse(exc)
         typer.echo(f"engine up; control socket: {server.path}")
-        loop_task, tui, ui_task, done = await _await_run_end(engine, server, client, stop, ui)
-        code, sealed = await _stop_and_judge(
-            engine, server, loop_task, tui, ui_task, done, detached=detached
-        )
+        end = await _await_run_end(engine, server, client, stop, ui)
+        code = await _stop_and_judge(engine, server, end, detached=detached)
         # the lease goes back before the run's error is judged: the client's
         # reader is still live during RELEASE and close, and a statechart
         # error it meets there reaches the server like any other. Taken off
@@ -1154,7 +1152,7 @@ async def _serve_run(
             # raise from it still leaves afterwards, and the CLI wrapper reports
             # a statechart error as exit 7
             code = _finish_run(
-                server, code, sealed, run_root, anchor_dir, reattach, supervised=client is not None
+                server, code, run_root, anchor_dir, reattach, supervised=client is not None
             )
         return code
     finally:

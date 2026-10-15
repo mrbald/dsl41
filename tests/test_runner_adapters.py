@@ -431,7 +431,7 @@ def test_dl356_a_kill_before_the_adapter_first_runs_spawns_nothing(tmp_path: Pat
     """A cancel that lands before the adapter task's first step never enters
     `run`: no run directory, no wrapper, nothing for a kill step to stop.
     This is the window a loop stall opens between STARTJOB's admission and
-    the task's first step (DL-356)."""
+    the task's first step (DL-359)."""
     job = lower_source("insert_job: j\njob_type: c\ncommand: sleep 30\n").jobs["j"]
     ctx = AdapterContext(clock=RealClock(), run_root=tmp_path, run_id="rid-early")
 

@@ -528,7 +528,7 @@ class LocalCommandAdapter:
 
     @staticmethod
     async def _stop_unlaunched(proc: asyncio.subprocess.Process) -> None:
-        """A kill that lands before the spec reached the wrapper (DL-356):
+        """A kill that lands before the spec reached the wrapper (DL-359):
         SIGKILL the wrapper so it never launches the command. It launches
         only after reading its spec to EOF, and EOF needs the stdin close
         this path has not reached, so the wrapper has launched nothing and
@@ -2284,14 +2284,12 @@ class SupervisedCommandAdapter:
                 self.client.forget_exit(run_id)
                 return Failed(f"wrapper spawn failed: {exc}")
             except asyncio.CancelledError:
-                # DL-356: the supervisor may have forked the wrapper, with its
+                # DL-359: the supervisor may have forked the wrapper, with its
                 # reply still in flight or a duplicate's LIST pending. It holds
                 # the lifeline, so no EOF stops the command: the kill must go
-                # out, or the command outlives the row.
-                if ctx.detach is not None and ctx.detach.stopping:
-                    self.client.forget_exit(run_id)
-                    raise  # ss3 case b: whatever was spawned continues
-                await self.kill(run_id)
+                # out, or the command outlives the row. Case b (detach-stop)
+                # continues whatever was spawned.
+                await self._on_cancel(run_id, ctx, forget_exit=True)
                 raise
             if listed_dead:
                 # ss11a answered from the DIRECTORY, and nothing is alive to
@@ -2332,10 +2330,21 @@ class SupervisedCommandAdapter:
                 run_id, run_dir, job_ir.name, run_number, recheck_listing=recheck
             )
         except asyncio.CancelledError:
-            if ctx.detach is not None and ctx.detach.stopping:
-                raise  # ss3 case b: the job continues under the supervisor
-            await self.kill(run_id)  # ss3 case a: the oracle decided terminal
+            await self._on_cancel(run_id, ctx, forget_exit=False)
             raise
+
+    async def _on_cancel(self, run_id: str, ctx: AdapterContext, *, forget_exit: bool) -> None:
+        """The ss3 cancel split, written once (DL-96). Case b (detach-stop):
+        the job continues under the supervisor and nothing is killed. Case a
+        (the oracle decided terminal): kill the run. The caller re-raises.
+        `forget_exit` is the one difference: the spawn phase registered the
+        run's exit future itself, so on case b it drops that future; the
+        await phase leaves it to `_await_outcome`."""
+        if ctx.detach is not None and ctx.detach.stopping:
+            if forget_exit:
+                self.client.forget_exit(run_id)
+            return
+        await self.kill(run_id)
 
     async def _listed_alive(self, run_id: str) -> bool:
         """Whether the supervisor currently LISTs this run's wrapper as
@@ -2484,7 +2493,7 @@ class SupervisedCommandAdapter:
         no such run, so no push can come. It is final even in the SPAWN
         window. A SPAWN cancelled mid-request poisoned its connection, and the
         reconnect's re-ACQUIRE minted a new token before this SIGNAL went out,
-        so a late SPAWN is refused `stale_token` (DL-356).
+        so a late SPAWN is refused `stale_token` (DL-359).
 
         Public because resume drives it directly (DL-96): a recorded kill met
         at resume has a live wrapper but no adapter task to cancel, and
@@ -2662,7 +2671,7 @@ async def resolve_spool(
                             break
                         await asyncio.sleep(0.1)
                 finally:
-                    # a cancel in the grace still ends the group (DL-356)
+                    # a cancel in the grace still ends the group (DL-359)
                     _procid.killpg_quiet(command_pgid, signal.SIGKILL)
                 return Terminated("wrapper lost; killed at resume"), None
     if status is not None:

@@ -666,8 +666,7 @@ class OracleCascade(OracleSchedule):
             run = self._runtime(box).run_number
             facts = OverrideFacts(self, box_ir, member, new, completion_moment=completion)
             yield Step(send=(self._to(box, MEMBER_MOVES, facts),))
-            row = self._runtime(box)
-            if row.status != "RUNNING" or row.run_number != run:
+            if not self._in_run(box, run):
                 return
         fold = FoldFacts(self, box_ir, at_start=at_start)
         yield Step(send=(self._to(box, COMPLETION_MOMENT, fold),))
@@ -687,8 +686,7 @@ class OracleCascade(OracleSchedule):
                     self, self.catalog.jobs[box], member, new, completion_moment=resolved
                 )
                 yield Step(send=(self._to(box, MEMBER_MOVES, facts),))
-                after = self._runtime(box)
-                if after.status != "RUNNING" or after.run_number != row.run_number:
+                if not self._in_run(box, row.run_number):
                     return
 
     def _holders(self, job: str, runs: Mapping[str, int]) -> Iterator[Step]:
@@ -717,8 +715,7 @@ class OracleCascade(OracleSchedule):
         ):
             return
         yield from self._door(box, job, status, completion=True, overrides=True)
-        row = self._runtime(box)
-        if row.status == "RUNNING" and row.run_number == runs[box]:
+        if self._in_run(box, runs[box]):
             yield from self._walk_up(job, status, True, runs)
 
     def _settle(self, move: Move) -> Iterator[Step]:
@@ -950,8 +947,7 @@ class OracleCascade(OracleSchedule):
         yield Step(intents=(ClosePass(),))
         waiting: dict[str, list[tuple[str, int, str, str]]] = {"defer": [], "skip": []}
         for each, each_run, each_cause in starts:
-            row = self._runtime(each)
-            if row.status != "RUNNING" or row.run_number != each_run:
+            if not self._in_run(each, each_run):
                 continue
             for member in self._members(each):
                 member_ir = self.catalog.jobs[member]
@@ -961,16 +957,14 @@ class OracleCascade(OracleSchedule):
                 if side != "inside":
                     waiting[side].append((each, each_run, member, each_cause))
         for each, each_run, member, each_cause in waiting["defer"] + waiting["skip"]:
-            row = self._runtime(each)
-            if row.status == "RUNNING" and row.run_number == each_run:
+            if self._in_run(each, each_run):
                 attempt = self._attempt(member, each_cause, decided=True)
                 yield Step(send=(self._to(member, START, attempt),))
         # PENDING: Q15 -- no vendor sentence names a box with no member in the run
         if self.semantics.box_start_all_members_out != "complete":
             return
         for each, each_run, _cause in starts:
-            row = self._runtime(each)
-            if row.status != "RUNNING" or row.run_number != each_run:
+            if not self._in_run(each, each_run):
                 continue
             if all(self._out_of_the_run(member) for member in self._members(each)):
                 yield from self._door(

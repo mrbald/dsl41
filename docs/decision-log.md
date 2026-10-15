@@ -23393,3 +23393,33 @@ relitigate an entry; append a new one.
   switch. Fable R1: a mark decides only while the member reads INACTIVE. Opus G1: the narrowing of
   DL-154, DL-242 and the next-run text is named above. Opus F6 is recorded with its probe. Every
   finding was confirmed by the reviewer that raised it.
+- DL-361 The architecture review at 236c34d lands: one cancel helper, one refusal shape, a named
+  seal exit, the box-run test in one place; the fold's single pass and the forwarding actions
+  wait for the owner's simplification
+  (2026-10-16; src/dsl41/runner_adapters.py, src/dsl41/cli_estate.py, src/dsl41/cli_run.py,
+  src/dsl41/runner_startup.py, src/dsl41/oracle_cascade.py)
+  The review (DL-75's skill, one Opus pass over arch-review/2026-10-15T120109Z..236c34d: the spec
+  rounds, the period-model ss13 tests, DL-357 to DL-360, the function-size refactor) found ten
+  things and no defect. ACTED, behaviour kept and the goldens the proof (4,060 runs, 0 differing):
+  the two cancel handlers of the CMD adapter's spawn path (DL-359) are one helper, `_on_cancel`,
+  parameterised by whether the spawn phase still owns the exit future it registered; the helpers
+  the function-size refactor extracted raise `EngineError` as `cli_common.refuse` prescribes
+  instead of returning a refusal in three shapes, and `_serve_run` catches once, texts and exit
+  codes unchanged; the four values between `_await_run_end` and `_stop_and_judge` are a NamedTuple,
+  and the seal's exit code has a name, `EXIT_SEALED = 3` (period-model ss7, PR-30b), where a bool
+  repeated it; the rules DL-359 holds cite DL-359 (their tests keep the `test_dl356_*` names the
+  entry quotes); the resume-evidence tuple has one type alias and a dead `manifest is not None`
+  check is gone; `_in_run` replaces its open-coded body at six sites of oracle_cascade.py (the
+  `_leave_tail` site keeps its own test: its run may be None). DEFERRED to the owner's structural
+  simplification of the machines (DL-356): the SEM-11 fold spans three single-caller methods and
+  two passes where one `_fold(box)` pass would do, the goldens as the check; and 25 job-chart
+  actions that only forward their own name to the oracle's `_MOVES` and `_HANDLERS`, the same
+  shape the Codex design review names as the fragmented binding between a row and its effects.
+  DECLINED: two tests that each build their own roll-stopping seam (test_boundary.py,
+  test_estate.py), a seam each test reads locally; and the split of `Engine.__init__` into
+  `_init_live_state` and `_init_seal_state`, which keeps the size gate at a low reading cost.
+  RECORDED: the offline seal's two closing-manifest refusals (cli_estate.py `_closing_manifest`)
+  have no test; a direct probe shows their text unchanged by the refactor.
+  REVIEW. Behaviour-keeping multi-file change: one Opus reviewer, two rounds; R1 (a seventh
+  open-coded `_in_run` in `_ice_resolves`) and three nits fixed and confirmed; R2 is the recorded
+  gap above.
