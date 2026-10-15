@@ -3,14 +3,14 @@
 Status: frozen (DL-324). Each change to a frozen item needs a decision-log entry.
 
 This document fixes the executor semantics that every declared runner state machine runs under.
-DL-289 made each machine declare its transition table. DL-324 makes the declaration the only
-spec, and this document says how the executor reads it. Cross-machine invariants and vendor
-requirements stay in the other normative documents (§1).
+Each machine declares its transitions, and the declaration is the only spec (DL-289, DL-324).
+This document says how the executor reads it. Cross-machine invariants and vendor requirements
+stay in the other normative documents (§1).
 
 `docs/state-machines.md` is generated from the declarations. It lists the rows. This document
 says how a row is chosen and run.
 
-No machine is converted by DL-324. The executor lands with the pilot (§16).
+Every machine in `machines.MACHINES` is a statechart on this executor (§16).
 
 ## 1. Principle
 
@@ -18,19 +18,19 @@ Every runner state machine is a declared, executable statechart. The declaration
 transition. Its guard and its action are named callables beside the row. No other code decides
 a move.
 
-A converted machine's old decision code and its `take` checking are deleted.
+No machine keeps decision code or a transition table beside its declaration (DL-352, DL-353,
+DL-356).
 
 Docs are generated from the declaration. Semantics prose cites row anchors (§14).
 
 Cross-machine invariants and vendor requirements stay in the normative documents (§14). "One
 revision per committed input" is a transaction guarantee, not a row.
 
-This reverses one rule of DL-289 for a converted machine: `take` never raised in production, and
-concurrency-model §4 says so, and the executor now raises three hard errors (§3
-`AmbiguousTransition`, §5 `ReentrantDispatch`, §10 `UnhandledEvent`). Each is a bug that would
-corrupt state, not a check to note. Every runner state machine is converted, so no machine
-reports a broken transition: DL-292's violation channel is retired (DL-353), and `dsl41 run
---on-transition-violation` is accepted and inert until the next major release.
+The executor raises hard errors, in production too, among them `AmbiguousTransition` (§3),
+`ReentrantDispatch` (§5) and `UnhandledEvent` (§10). Each is a bug that would corrupt state, not
+a check to note. No machine reports a broken transition: DL-292's violation channel is retired
+(DL-353), and `dsl41 run --on-transition-violation` is accepted and inert until the next major
+release.
 
 ## 2. Elements
 
@@ -69,7 +69,7 @@ deeper, the executor raises `AmbiguousTransition`: a machine that needs both dec
 the shared ancestor instead. Conflicts are resolved from the deepest candidate outward: a
 candidate beaten by a deeper one is dropped before pairs of equal depth are judged. A candidate
 whose source state another surviving candidate exits is dropped, internal rows included;
-`well_formed` warns where that can happen. `well_formed` warns where two regions declare rows for
+`chart_warnings` warns where that can happen. It also warns where two regions declare rows for
 one event of which one leaves the shared ancestor. A row of a state that several regions share
 (their common ancestor) is not a candidate when any region below it ended its walk in a deferral
 of the event: the inner deferral wins over the outer row, as within one region. A sibling
@@ -81,7 +81,7 @@ The outcome for the whole instance is decided from all its regions together. If 
 produced a candidate, including an internal `ignored` row, the event is consumed and the firing
 set runs. An `ignored` row is a candidate only when no other region produced a candidate that is
 not `ignored`; otherwise it yields and writes no trace line. A refusal row beside another region's
-candidate raises `AmbiguousTransition`; `well_formed` warns where a refusal row and another
+candidate raises `AmbiguousTransition`; `chart_warnings` warns where a refusal row and another
 region's row share an event. Otherwise, if any region's walk ended in a deferral, the event is
 deferred. Otherwise the event is unhandled (§10). A region whose walk found neither a row nor a
 deferral takes no part; it needs no rows for another region's events.
@@ -142,7 +142,7 @@ A macrostep is iterative on one executor worklist and never recursive.
    the next item pops, under the macrostep: it may read, and a post, dispatch, resolve or fork from
    it raises `ReentrantDispatch`; it reports no item. The oracle's hook writes the store the fired
    rows' moves, since the guards of the items a row chains read the store; the engine and the
-   supervisor carry their intents out after the run, as before.
+   supervisor carry their intents out after the run.
 
 A tier may read how an event would be selected without running it. `Executor.resolve` runs the
 selection of §3 for one instance and one event against the instance's present configuration:
@@ -151,31 +151,30 @@ the release of deferred events nor the pool ahead of the event, so it refuses an
 deferred event, and a full deferred queue is outside it. Inside a macrostep it raises
 `ReentrantDispatch` (DL-335).
 
-A tier may copy an idle executor. `Executor.fork` returns a new executor that holds every
-instance as it stands: its configuration, its deferred queue, its generations and its entry
-serials, and the history rings. The two share each instance's record until a dispatch on either
-side writes it. A write stores a new record on its own side, so neither side sees the other's
-moves. A fork costs one reference copy per instance, a copy of each history ring, and one new
-record per instance the tier gives new data; the state owner gives every host instance new data,
-bound to the fork's rows, so the rest of its fork's cost is one record per host. Data not given a
-new value, and every event payload, stay shared by design, so a tier treats them as immutable. A
-fork inside a macrostep raises
-`ReentrantDispatch`. A fork with a root item in the pool raises a `StatechartError`, because
-that item would run on one side only (DL-339).
+A tier may copy an idle executor. `Executor.fork` returns a new executor that holds every instance
+as it stands: its configuration, its deferred queue, its generations and its entry serials, and the
+history rings. The two share each instance's record until a dispatch on either side writes it. A
+write stores a new record on its own side, so neither side sees the other's moves. A fork costs one
+reference copy per instance, a copy of each history ring, and one new record per instance the tier
+gives new data; the state owner gives every host instance new data, bound to the fork's rows, so the
+rest of its fork's cost is one record per host. Data not given a new value, and every event payload,
+stay shared by design, so a tier treats them as immutable. A fork inside a macrostep raises
+`ReentrantDispatch`. A fork with a root item in the pool raises a `StatechartError`, because that
+item would run on one side only (DL-339).
 
 The executor's errors, among them `AmbiguousTransition` (§3), `ReentrantDispatch` (step 4) and
-`UnhandledEvent` (§10), subclass one base, `StatechartError`. Each is an assertion failure, not
-a fault to contain. DL-320's classification never catches it: `trial_apply` and
-`classify_fault` re-raise it, and nothing is appended. No tier
-may swallow it. The tier stops before any further durable write of its own; a record already
-durable, a seal record among them, stays.
+`UnhandledEvent` (§10), subclass one base, `StatechartError`. Each is an assertion failure, not a
+fault to contain. DL-320's classification never catches it: `trial_apply` and `classify_fault`
+re-raise it, and nothing is appended. No tier may swallow it. The tier stops before any further
+durable write of its own; a record already durable, a seal record among them, stays.
 
 The error is structured. It carries the machine, the instance key, the active configuration, the
 item and a summary of its payload, the item's ancestry, the candidates found, the deferred queue,
 and a ring of the last microsteps of the machine that raised. The executor keeps one ring per
-machine, of a declared size; the default is 64. `str()` of the error renders all of it, one fact
-per line. The engine and the supervisor print it on stderr, each line under the prefix
-`dsl41: statechart error`, and exit 7. The units list 7 in `RestartPreventExitStatus`.
+machine. Its size is the executor's `history` argument; the default is 64. `str()` of the error
+renders all of it, one fact per line. The engine and the supervisor print it on stderr, each line
+under the prefix `dsl41: statechart error`, and exit 7. The units list 7 in
+`RestartPreventExitStatus`.
 
 ## 6. Deferred events
 
@@ -211,7 +210,7 @@ whose generation is stale before selection. A time event without a generation is
 by rows; a stale one takes its declared row.
 
 Ties between a time event and another item at the same instant are pinned by the machine's
-declaration, in the entry that converts it.
+declaration, in the entry that converted it (§16).
 
 ## 8. Chaining and continuations
 
@@ -219,9 +218,9 @@ An action never calls the executor. It returns the events it raises, to any inst
 executor, and the continuation it requests. An event for another tier is an intent (§5 step 5),
 carried by that tier's protocol. The executor queues them (§5 step 3).
 
-A former call-then-continue site becomes a transient state whose completion transition is the
-continuation. Its guard reads the state after the chained items ran, because the completion is
-queued behind them.
+A step that must continue after the items it raises have run is a transient state whose completion
+transition is the continuation. Its guard reads the state after the chained items ran, because the
+completion is queued behind them.
 
 A machine that bounds re-triggering declares the bound as a row guarded on an item's ancestry depth,
 or on the count of one step in it, which a guard reads in constant time (`Context.count`). Items of
@@ -271,11 +270,10 @@ Absence is a well-formedness error.
 Completeness is judged per instance, over all its regions together (§3). At run time, an event that
 no region consumes and no active state defers raises `UnhandledEvent`, in production too: the
 guards of a state's rows for one event partition the cases by contract. Like every
-`StatechartError`, it stops the tier (§5). This reverses DL-293's
-rule of one ignore row per state it occurs in: an ignored event is declared once, on a
-superstate.
+`StatechartError`, it stops the tier (§5).
 
-Ignored events are declared once, on a superstate.
+An ignored event is declared once, on a superstate. DL-293's rule of one ignore row per state
+it occurs in does not apply.
 
 The generated test is in §13.
 
@@ -307,27 +305,28 @@ registered in `machines.MACHINES`, and is the one declaration of a job's moves (
 The oracle, `Oracle` in `src/dsl41/oracle.py`, drives it (DL-341). Each job row has one `job`
 instance on the state owner's executor under the row's key; the owner restores them from the rows
 where it restores the host instances, and a fork copies them. Every input that moves a job row is a
-root item on the job's instance, and its whole cascade runs on the executor's worklist (§8,
-DL-350). The chart decides every move. A row's action takes the items it sends beyond its own move
-from the tier's handle on its payload (`Units.consequences`), as a guard takes its facts: the chart
-declares which rows send and when, and the oracle computes each send list and its audience as the
-row runs. The chart has no send list of its own: such a row that meets a payload with no handle is
-a statechart error (DL-356). The oracle's hook (§5 step 5) writes what each microstep's fired rows reached, with the
-store's verbs, in the order the rows fired (`oracle_writers`). The status written is the one the
-chart reached; the golden digests judge a wrong row (§16). A fired row the hook has no write for is
-a statechart error. Two checks are statechart errors: the job type behind a row that takes a job's
-or a box's path, checked before the write; and, at each macrostep's end and at the input's commit,
-every job the input reached has its row project to its instance's configuration. The store's verb
-decides a settlement's holding move from the units; a settlement row that holds another state than
-the verb wrote fails the second check. No code outside the chart moves a job row, so no instance is
-brought back to its row.
+root item on the job's instance, and its whole cascade runs on the executor's worklist (§8, DL-350).
+The chart decides every move. A row's action takes the items it sends beyond its own move from the
+tier's handle on its payload (`Units.consequences`), as a guard takes its facts: the chart declares
+which rows send and when, and the oracle computes each send list and its audience as the row runs.
+The chart has no send list of its own: such a row that meets a payload with no handle is a
+statechart error (DL-356). The oracle's hook (§5 step 5) writes what each microstep's fired rows
+reached, with the store's verbs, in the order the rows fired (`oracle_writers`). The status written
+is the one the chart reached; the golden digests judge a wrong row (§16). A fired row the hook has
+no write for is a statechart error. Two checks are statechart errors: the job type behind a row that
+takes a job's or a box's path, checked before the write; and, at each macrostep's end and at the
+input's commit, every job the input reached has its row project to its instance's configuration. The
+store's verb decides a settlement's holding move from the units; a settlement row that holds another
+state than the verb wrote fails the second check. No code outside the chart moves a job row, so no
+instance is brought back to its row.
 
 Every attempt to start a job is one `start` on its instance (DL-342): a wake, a box start and a
 retry send it, and STARTJOB, FORCE_STARTJOB and the window timer's replay relay it, through
 `job.177` to `job.179`, FORCE_STARTJOB after its clears. Its payload computes each oracle fact on
 the guards' first read, in the order `start_verdict` tests them, so an attempt computes only the
-facts its verdict reads. The per-job start bound is a refusal row, `job.100`, on the job's own
-`start admitted` items in the attempt's ancestry (§8). An attempt whose run's settlement is owed,
+facts its verdict reads. The per-job start bound is the internal row `job.100`, guarded on the
+job's own `start admitted` items in the attempt's ancestry (§8); it refuses the start with a
+START_REFUSED line. An attempt whose run's settlement is owed,
 because the box rules held it back, takes the internal row `job.401` past the bound (DL-340): its
 action sends the ended run's `leave STARTING or RUNNING`, then the same attempt again, which reads
 the admission the settlement left (DL-349). An attempt whose window or leave already decided it
@@ -343,7 +342,7 @@ attempt half's writes: a control input that raises is refused and commits nothin
 engine-made one is quarantined with its rejection logged and its time half committed; the engine
 stops only when the time half itself raises. The golden digests replay such an input the same way:
 put back, then its time half applied alone (`tests/oracle_goldens.py`). No input of the goldens'
-sample raises: the three that did before DL-348 were one terminator cascade that never ended.
+sample raises (DL-348).
 
 KILLJOB and the TIMER input are dispatched to the job's instance too (DL-343), and the input passes
 its own relay to the attempt, so no cause text is read. A live job's kill (`job.114`) and a
@@ -358,8 +357,8 @@ any other is the attempt. Timers stay armed by code; the chart declares moves, n
 
 The flag inputs are dispatched to the job's instance too (DL-344). The fired rows decide each
 dimension a rule reads from the row or the catalog. Whether the flag was already set is the row's
-source state. An input the job ignores takes the status region's ignored row (`job.148` to
-`job.158`) and writes the EVENT_IGNORED line with the rule's reason (`_oob_ignored`); a row the
+source state. An input the job ignores takes one of the status region's internal rows `job.148`
+to `job.158` and writes the EVENT_IGNORED line with the rule's reason (`_oob_ignored`); a row the
 chart ignores where no rule gives a reason is a statechart error. A flag row is written by the flag
 move, with its marker and line. A status that the `flag moved` fires is a status move: an iced
 waiter leaves the queue (`job.112`), and ON_NOEXEC settles a waiter, a FAILED job or a box
@@ -440,15 +439,15 @@ still drops (`job.418`).
 
 ## 12. Durability of deferred queues
 
-A deferred input is admitted and applied. The apply's effect is the enqueue. There is no new
-admission outcome: applied and rejected stay, and the WAL format stays.
+A deferred input is admitted and applied. The apply's effect is the enqueue. Deferral adds no
+admission outcome and no WAL format change: the outcomes are applied and rejected.
 
 A deferred queue is durable state of its tier, or the tier's protocol provably recovers its
 loss. Release runs inside the transaction of the input that moves the configuration, each
 released item as its own macrostep.
 
-The admission decision is final at the gate: `expect` and the preconditions run there, as today,
-and release does not re-check them. That narrows concurrency-model §4 step 6 for a released control
+The admission decision is final at the gate: `expect` and the preconditions run there, and
+release does not re-check them. That narrows concurrency-model §4 step 6 for a released control
 input; the entry that first makes a machine defer a control input amends concurrency-model §4 and
 control-protocol.md's meaning of `applied` for that input, and says so. A released event that no
 longer fits takes its declared row.
@@ -456,9 +455,10 @@ longer fits takes its declared row.
 The representation of a deferred queue inside the oracle (its place in the store's inventory and
 projection, concurrency-model §3; the seal format), its dry apply, and the handling of a fault at
 release under DL-292 and DL-320 are ruled by the entry that first makes an oracle machine defer.
-That entry narrows concurrency-model §4, DL-292 and DL-320 and says so. Until then no oracle
-machine defers. A fork of the state owner carries its deferred queues into DL-320's dry apply, so
-an event the trial releases is released on the twin only (DL-339).
+That entry narrows concurrency-model §4, DL-292 and DL-320 and says so. DL-292's violation channel
+is retired (DL-353). Until that entry, no oracle machine defers. A fork of the state owner carries
+its deferred queues into DL-320's dry apply, so an event the trial releases is released on the twin
+only (DL-339).
 
 `STATE_MACHINE_VERSION` and the artifact formats are reviewed on every slice that changes a
 derivation (the VERSIONS paragraph of DL-320).
@@ -474,8 +474,8 @@ Hits are counted for:
 
 All of them are held at 100% in the gate. A row may carry a mark, `spec-only` (a contract rule
 with no code yet) or `unreachable`. The gate lists a marked row and never counts it, and a hit on
-it or on its guard's true outcome fails the gate (DL-296, DL-333). Its guard's false outcome is the cell another row takes: neither required nor forbidden
-(DL-353).
+it or on its guard's true outcome fails the gate (DL-296, DL-333). Its guard's false outcome is
+the cell another row takes: neither required nor forbidden (DL-353).
 
 The completeness test is generated per machine from the declaration plus a declared finite
 abstraction. The abstraction has three parts:
@@ -517,17 +517,22 @@ libraries it found no deferral with override and no standard-library fit. Vocabu
 tests are borrowed from sismic and python-statemachine v3's SCXML conformance suite as references
 only.
 
-## 16. Migration order and acceptance
+## 16. Machines and acceptance
 
-Pilot: `supervisor_lease` (token guards, monotonic clock, time events) and `subscription`.
+Each machine has its decision-log entry: `supervisor_lease` (DL-326), `seal_boundary` (DL-327),
+`supervisor_process` (DL-328), `subscription` (DL-329), `supervisor_client` (DL-330), `effect`
+(DL-331), `host` (DL-333), `admission` (DL-334), `runtime_assembly` (DL-335), `anchor_head` and
+`period_row` (DL-336), and the oracle's `job` (DL-337).
+
+`supervisor_lease` has token guards, a monotonic clock and time events.
 
 Subscription's declared contract is the one its own document states
 ([docs/blocks/subscription.md](blocks/subscription.md)): a bounded buffer in both phases, not a
 deferral. It runs on the engine's executor, one instance per feed from its join to its end, and
 a statechart error that a control handler meets stops the engine as one from the loop does.
 
-`seal_boundary` comes third. `seal_boundary` defers nothing: an input after the cutoff refuses
-the boundary (`period-model.md` §6, DL-327).
+`seal_boundary` defers nothing: an input after the cutoff refuses the boundary (`period-model.md`
+§6, DL-327).
 
 `supervisor_client` (DL-330) runs on the process's one executor, which the wiring builds before
 the engine and hands to both; the client posts nothing once closed, and a statechart error that
@@ -538,7 +543,7 @@ its outcome; the outbox refuses a second outcome before any post, and a statecha
 record or an outcome stops the engine as one from the loop does, and in replay names the WAL
 record.
 
-`host` (DL-333) is the first oracle-tier machine. It runs on the state owner's executor, one
+`host` (DL-333) is an oracle-tier machine. It runs on the state owner's executor, one
 instance per host row; the row's state is the instance's configuration, written from its leaf. The
 gate reads the chart on a scratch executor rebuilt from the rows and keeps only the checks that
 read the input's own facts. The chart is dispatched on the store's executor only for an applied
@@ -555,8 +560,9 @@ readiness lookup stops the engine as one from the loop does, and in replay names
 executor from construction, and the configuration is the assembly phase. An install and a test's
 witness rebuild the executor from the phase and the rows; a fork copies it (DL-339). A verb the
 phase does not allow is a refusal row with a code, read before any work of the verb; the verb raises
-the class and text it always raised. A cell with no row is a statechart error that stops the tier at
-the verb that meets it; the constructor meets the genesis cells.
+the class and text it raised before its conversion, an `OracleError` or a `ValueError` (DL-335). A
+cell with no row is a statechart error that stops the tier at the verb that meets it; the
+constructor meets the genesis cells.
 
 `anchor_head` and `period_row` (DL-336) run on an executor per move, built from `anchor.json` read
 under the anchor lock; the head's tag and each row's flags are the instances' configurations, and
@@ -566,7 +572,7 @@ come before the post. A gap is a statechart error, also before any write: at the
 it stops the engine with the `seal` record durable and the head open, and at resume, at genesis,
 in the roll and in `estate reclaim` it reaches the CLI's stop, exit 7.
 
-Acceptance per machine:
+A machine is accepted when:
 
 - the old decision code is deleted;
 - `well_formed` and §10 pass;
@@ -577,30 +583,24 @@ Acceptance per machine:
 - for oracle-tier machines also: fork isolation, replay, seal and reopen, and per-input
   revision equality against the old implementation.
 
-After the pilot, `seal_boundary` (DL-327), `supervisor_process` (DL-328), `supervisor_client`
-(DL-330), `effect` (DL-331), `host` (DL-333), `admission` (DL-334), `runtime_assembly` (DL-335),
-and `anchor_head` and `period_row` (DL-336); the rest is the oracle.
-
-The oracle comes last. Its composite `job` chart is declared and checked against the three
-transition tables it replaced (DL-337), then drives the job rows family by family: STATUS (DL-341),
-the start attempt (DL-342), KILLJOB and the TIMER input (DL-343), the flag inputs (DL-344),
-RELEASE_RESOURCE and the readmission (DL-345), the box rules (DL-346), a box's ON_NOEXEC on the
-jobs it contains (DL-347), and the cascade itself, on the executor's worklist (DL-350). An
-old-versus-new harness proved each family against the decision code it replaced, input by input
-(DL-338); that code is deleted (DL-352). `Oracle` in `src/dsl41/oracle.py` is the one oracle, built
-in layers, one module each: `oracle_reads.py` (the store, the trace and the reads),
-`oracle_schedule.py` (the clock's reads and the timers), `oracle_cascade.py` (the cascade's
-moments), `oracle_writers.py` (each fired row's writes) and `oracle.py` (the inputs, the hook and
-the checks), with the payloads in `oracle_facts.py` and `oracle_intents.py`. The engine, every
-replay, preflight and equiv build it (DL-351). The decision code's answers over the harness's
-sample are kept as golden digests (`tests/oracle_goldens.py`, over the inputs in
-`tests/oracle_inputs.py`), which the oracle reproduces; a golden that changes is a DL-235 decision.
-The three tables, the store's validation of each write against them and the violation channel
-leave, the chart is registered, and two rows gain the `unreachable` mark (§13): job.312, since the
-admission the oracle builds carries no previous end, and job.314, since a live status never stands
-on held units (DL-353).
-
 Each slice is a semantic-class change. Each has its own decision-log entry.
+
+The oracle's composite `job` chart (DL-337) drives the job rows. Its families each have an entry:
+STATUS (DL-341), the start attempt (DL-342), KILLJOB and the TIMER input (DL-343), the flag inputs
+(DL-344), RELEASE_RESOURCE and the readmission (DL-345), the box rules (DL-346), a box's ON_NOEXEC
+on the jobs it contains (DL-347), and the cascade itself, on the executor's worklist (DL-350).
+`Oracle` in `src/dsl41/oracle.py` is the one oracle, built in layers, one module each:
+`oracle_reads.py` (the store, the trace and the reads), `oracle_schedule.py` (the clock's reads and
+the timers), `oracle_cascade.py` (the cascade's moments), `oracle_writers.py` (each fired row's
+writes) and `oracle.py` (the inputs, the hook and the checks), with the payloads in
+`oracle_facts.py` and `oracle_intents.py`. The engine, every replay, preflight and equiv build it
+(DL-351). The golden digests (`tests/oracle_goldens.py`, over the inputs in
+`tests/oracle_inputs.py`) hold the answers of the decision code the chart replaced, over the sample
+of the old-versus-new harness (DL-338). The code and the harness are deleted (DL-352). The oracle
+reproduces the digests; a golden that changes is a DL-235 decision. The job has no transition table,
+the store checks no write against one, and the chart is registered (DL-353). Two rows carry the
+`unreachable` mark (§13): job.312, since the admission the oracle builds carries no previous end,
+and job.314, since a live status never stands on held units (DL-353).
 
 ## 17. Names
 

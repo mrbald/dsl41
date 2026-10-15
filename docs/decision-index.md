@@ -337,10 +337,10 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-323 | The architecture review of 2026-10-11 is closed: the quarantine rule has one copy, and the engine keeps one list per kind of lost input |  |
 | DL-324 | Runner state machines become declared, executable statecharts under one engine contract | [docs/statechart-engine.md](statechart-engine.md) |
 | DL-325 | The statechart executor, its gate and its generated completeness test; a statechart error stops the tier with exit 7 |  |
-| DL-326 | The supervisor's lease is the first machine the statechart executor runs | [docs/supervisor-protocol.md](supervisor-protocol.md) |
+| DL-326 | The supervisor's lease is the first machine the statechart executor runs | [docs/statechart-engine.md](statechart-engine.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
 | DL-327 | The seal boundary runs on the statechart executor; a statechart error in a seal stops the engine with exit 7 | [docs/blocks/seal-and-lineage.md](blocks/seal-and-lineage.md), [docs/runner-design.md](runner-design.md), [docs/statechart-engine.md](statechart-engine.md) |
 | DL-328 | The supervisor's lifecycle runs on the statechart executor; the fence rule has one copy | [docs/statechart-engine.md](statechart-engine.md) |
-| DL-329 | The subscribe feed runs on the statechart executor; a statechart error in a control handler stops the engine with exit 7 |  |
+| DL-329 | The subscribe feed runs on the statechart executor; a statechart error in a control handler stops the engine with exit 7 | [docs/statechart-engine.md](statechart-engine.md) |
 | DL-330 | The supervisor client runs on the statechart executor; a statechart error on its path stops the engine with exit 7 | [docs/statechart-engine.md](statechart-engine.md) |
 | DL-331 | The effect runs on the statechart executor: one instance per open effect, forgotten at its outcome | [docs/statechart-engine.md](statechart-engine.md) |
 | DL-332 | The statechart executor plans each external row once per chart |  |
