@@ -23099,3 +23099,48 @@ relitigate an entry; append a new one.
   found it follows DL-211's revisit clause and does not reverse it. Two rounds; seven findings and
   two on this entry's text, all fixed and confirmed by the reviewer. The serial and parallel runs
   record the same transition hits.
+- DL-355 Each test is checked for leaked global process state: a test that leaves it changed fails
+  at its own teardown, naming the state before and after, and this check replaces counting green
+  runs as the gate for order-dependent failures
+  (2026-10-15; tests/leak_detector_plugin.py, tests/test_leak_detector.py, tests/conftest.py,
+  tests/test_cascade_depth.py, tests/test_runner_supervisor.py, tests/test_runner_adapters.py,
+  tests/test_runner_leadership.py, tests/test_runner_control.py,
+  tests/test_supervisor_idempotency.py; scripts/arch_check.py; README; docs/agent-workflow.md)
+  THE AIM. DL-354's two isolation defects, a child-subreaper flag and a finaliser at the recursion
+  limit, hid behind the serial order and showed under four workers only when the order happened to
+  expose them. DL-354 gated the change on ten consecutive green runs. The owner ruled that gate out:
+  a sampled order is evidence, not proof. A test that leaks state now fails itself, in any order,
+  on the first run.
+  THE CHECK. One fixture, set up first and torn down last among a test's fixtures, snapshots the
+  process's global state before the test and compares it after: the recursion limit, the Linux
+  child-subreaper flag, the cyclic collector's switch and thresholds, signal handlers and the
+  wakeup descriptor, the environment, the working directory, the umask, `sys.path`, child processes
+  and non-daemon threads that are new, the event-loop policy and an open current loop, and the
+  root logger's handlers, level and disable. A change fails the test with the state named. Each
+  probe has a self-test that leaks it on purpose. A probe whose API is gone (the loop policy
+  functions leave in Python 3.16) stops the session with an error instead of reading nothing.
+  LEFT OUT. Daemon threads (asyncio's waitpid threads and the supervisor's reaper end a moment
+  after the wait they serve), open descriptors and loops not set as current: none has an exact
+  read. A wider-scoped fixture's leak is outside the window, and a child or thread that ends on its
+  own just after a test may go unreported; none of either is known. A test that leaves exactly the
+  state a production path leaves (the oracle's limit, a default signal handler) is restored, not
+  reported.
+  RESTORES. A production path that changes process state on purpose gets a restore that undoes
+  only that change, so the check still sees a test's own: the oracle's recursion limit (DL-351),
+  a supervisor run's subreaper flag (DL-354), the handlers closing `dsl41 run`'s loop leaves on
+  SIGINT, SIGTERM and SIGHUP, and the supervisor tests' file-wide restore of a Supervisor method or
+  an ignored SIGHUP. Tests that set the recursion limit themselves say so with a fixture. The one
+  allow-listed name is `PYTEST_CURRENT_TEST`, which pytest rewrites each phase.
+  LEAKS FIXED. The architecture check added `src` to `sys.path` on every call (twelve tests); two
+  tests left a crashed supervisor's wrapper a zombie; ten tests left a supervisor to its daemon
+  reaper, one failing and nine passing by winning the race, and now wait for the reap; a test
+  server now shuts its sockets down and joins its threads. With a forced collection after every
+  test, no test leaves an unclosed resource on macOS or Linux; the forced collection costs about
+  120 ms a test and is not kept.
+  COST. About 120 microseconds a test on macOS and 240 on Linux, under two seconds on the parallel
+  suite.
+  REVIEW. Tests and tooling: one Opus reviewer. It delayed every reaper thread by up to a second
+  over 52 spawning files and found no test still winning a reap race; it found the first restores
+  undoing every change, which hid four tests' own recursion limits and any test's own signal
+  handler, now narrowed to production's change. Two rounds; nine findings fixed and confirmed by
+  the reviewer.

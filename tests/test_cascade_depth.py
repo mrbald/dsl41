@@ -152,6 +152,7 @@ def _depth() -> int:
     return depth
 
 
+@pytest.mark.usefixtures("own_recursion_limit")
 def test_sem10_a_cascade_past_the_limit_names_its_first_start() -> None:
     """When a fact's own recursion, a deep condition, passes the limit, the
     error says RecursionError and names the job whose input began the
@@ -341,6 +342,7 @@ _FRAME_SHAPES = [
 ]
 
 
+@pytest.mark.usefixtures("own_recursion_limit")
 @pytest.mark.parametrize("shape", _FRAME_SHAPES)
 def test_sem10_the_oracle_needs_no_frame_per_job(shape: str) -> None:
     """DL-350: the oracle's cascade is the executor's worklist, popped in a
@@ -352,6 +354,7 @@ def test_sem10_the_oracle_needs_no_frame_per_job(shape: str) -> None:
     assert _frames_needed(shape, 41) < DEFAULT_LIMIT // 4
 
 
+@pytest.mark.usefixtures("own_recursion_limit")
 def test_sem10_equiv_tier_c_runs_a_long_cascade_without_a_fit() -> None:
     """equiv's tier (c) runs scripts through the oracle, so a script can
     start a cascade as long as a live one; the limit is the oracle's fixed
@@ -414,6 +417,7 @@ def _engine_wakes_b(catalog: CatalogIR) -> str:
     return asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("own_recursion_limit")
 def test_sem10_the_deepest_condition_that_lowers_evaluates_at_the_engine_s_call_site() -> None:
     """What lowers must evaluate: at Python's default limit the engine's oracle
     raises it to `RECURSION_LIMIT`, so `a`'s completion wakes `b`, whose
@@ -423,6 +427,7 @@ def test_sem10_the_deepest_condition_that_lowers_evaluates_at_the_engine_s_call_
     assert _engine_wakes_b(catalog) in ("STARTING", "RUNNING", "SUCCESS")
 
 
+@pytest.mark.usefixtures("own_recursion_limit")
 def test_sem10_without_the_headroom_the_deepest_condition_does_not_evaluate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -450,6 +455,7 @@ def _deepest_stored() -> int:
     return low
 
 
+@pytest.mark.usefixtures("own_recursion_limit")
 def test_sem10_a_run_root_stores_no_deeper_condition_than_its_replay_evaluates(
     tmp_path: Path,
 ) -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import selectors
 import shutil
+import signal
 import socket
 import sys
 import tempfile
@@ -13,7 +14,7 @@ from pathlib import Path
 import pytest
 
 # records state-machine transition hits for scripts/transition_coverage.py
-pytest_plugins = ["transition_hits_plugin"]
+pytest_plugins = ["transition_hits_plugin", "leak_detector_plugin"]
 
 # A pytest-xdist worker shares the box with three others, so an example can
 # stall past hypothesis's 200 ms deadline and fail as Flaky when its replay does
@@ -32,10 +33,15 @@ def _restore_recursion_limit():
     """The oracle the engine and every replay build raises the interpreter's
     recursion limit (`oracle.RECURSION_LIMIT`), for the whole process.
     Each test gets back the limit it started with, so a test that relies on
-    the default limit does not depend on which tests ran before it."""
+    the default limit does not depend on which tests ran before it. Only the
+    oracle's raise is put back: a test that sets the limit itself restores it,
+    or the leak detector names it (DL-355)."""
+    from dsl41.oracle import RECURSION_LIMIT
+
     limit = sys.getrecursionlimit()
     yield
-    sys.setrecursionlimit(limit)
+    if sys.getrecursionlimit() == max(limit, RECURSION_LIMIT):
+        sys.setrecursionlimit(limit)
 
 
 def _subreaper_prctl():
@@ -73,6 +79,36 @@ def _restore_child_subreaper():
     yield
     if read:
         _PRCTL(36, flag.value, 0, 0, 0)  # PR_SET_CHILD_SUBREAPER
+
+
+_RUN_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+
+@pytest.fixture(autouse=True)
+def _restore_run_signal_handlers():
+    """`dsl41 run` installs asyncio handlers for SIGINT, SIGTERM and SIGHUP,
+    and closing its loop sets each to the default rather than back to the
+    handler it found. Tests run it in-process, and under coverage the handler
+    it found is coverage's SIGTERM handler, which saves the worker's data.
+    Each test gets back the handlers it started with, where the handler now is
+    what closing the loop leaves (`SIG_DFL`, or `default_int_handler` for
+    SIGINT). Any other change is the leak detector's to name (DL-355)."""
+    handlers = [signal.getsignal(sig) for sig in _RUN_SIGNALS]
+    yield
+    for sig, handler in zip(_RUN_SIGNALS, handlers, strict=True):
+        now = signal.getsignal(sig)
+        left = now is signal.SIG_DFL or now is signal.default_int_handler
+        if handler is not None and now is not handler and left:
+            signal.signal(sig, handler)
+
+
+@pytest.fixture
+def own_recursion_limit():
+    """For a test that sets the interpreter's recursion limit itself: it gets
+    back the limit it started with."""
+    limit = sys.getrecursionlimit()
+    yield
+    sys.setrecursionlimit(limit)
 
 
 @pytest.fixture

@@ -884,6 +884,12 @@ Compiler:
   rendering, and the generator's diagram and table rules.
 - `tests/transition_hits_plugin.py`: the pytest plugin that turns hit
   recording on and writes `.transition-hits.json`.
+- `tests/leak_detector_plugin.py`: the pytest plugin that fails a test which
+  leaves global process state changed: signal handlers, the environment, a
+  child process not yet reaped, a live non-daemon thread, and the rest it
+  lists.
+- `tests/test_leak_detector.py`: each of the leak detector's probes names a
+  leak made on purpose, and the plugin fails a leaking test in a real run.
 - `tests/test_statechart.py`: the executor's conformance to
   `docs/statechart-engine.md`, one test per rule, named by section, with a
   mutant check that breaks one rule at a time.

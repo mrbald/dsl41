@@ -74,6 +74,26 @@ def pid_alive(pid: int) -> bool:
         return False
 
 
+def wait_reaped(pid: int, *, reap: bool = False) -> None:
+    """Wait until `pid` has left the process table; a test reaps its children
+    before it ends (DL-355). A supervisor the client spawned is this process's
+    child, and the client's daemon thread reaps it a moment after it ends.
+    `reap` reaps it here, for a child of this process nothing else waits for."""
+
+    def gone() -> bool:
+        if not reap:
+            return not pid_alive(pid)
+        try:
+            return os.waitpid(pid, os.WNOHANG)[0] == pid
+        except ChildProcessError:
+            return True
+
+    try:
+        wait_for(gone)
+    except AssertionError:
+        raise AssertionError(f"process {pid} was not reaped within 10 s") from None
+
+
 def proc_state(pid: int) -> str:
     """First letter of the process state ('T' = stopped), '' if gone."""
     out = subprocess.run(
@@ -1936,7 +1956,7 @@ def test_kill_supervisor_midrun_engine_resolves_via_spool(short_root: Path) -> N
     races the wrapper's kill and write, and a window that closes first reads
     no record and resolves the run FAILURE (E7 unobservable)."""
 
-    async def scenario() -> tuple[str, dict]:
+    async def scenario() -> tuple[str, dict, int]:
         run_root = short_root / "run"
         run_root.mkdir(parents=True)
         client = SupervisorClient(run_root)
@@ -1977,24 +1997,26 @@ def test_kill_supervisor_midrun_engine_resolves_via_spool(short_root: Path) -> N
         if engine.journal is not None:
             engine.journal.close()
         await client.close()
-        return status, spawn
+        return status, spawn, sup_pid
 
-    status, spawn = asyncio.run(scenario())
+    status, spawn, sup_pid = asyncio.run(scenario())
     assert status == "TERMINATED"  # spool ladder read terminated/parent-lost
     # status.json is written BEFORE the wrapper reaps, so the command may
     # still be a zombie (kill(pid, 0) succeeds) for an instant on a slow box
     wait_for(lambda: not pid_alive(spawn["command_pid"]))  # the wrapper killed it on EOF
+    wait_reaped(sup_pid)
 
 
 def test_oracle_kill_detached_terminates(short_root: Path) -> None:
     """spec ss5 item 5: an oracle KILLJOB in detached mode drives TERM->KILL
     through the supervisor -> STATUS TERMINATED, the tethered KILLJOB shape."""
 
-    async def scenario() -> tuple[str, dict]:
+    async def scenario() -> tuple[str, dict, int]:
         run_root = short_root / "run"
         run_root.mkdir(parents=True)
         client = SupervisorClient(run_root)
         await client.ensure_running()
+        sup_pid = json.loads((run_root / "supervisor.pid").read_text())["pid"]
         await client.acquire()
         catalog = lower_source("insert_job: slow\njob_type: c\ncommand: sleep 60\n")
         from dsl41.oracle_state import Event
@@ -2025,11 +2047,12 @@ def test_oracle_kill_detached_terminates(short_root: Path) -> None:
         with contextlib.suppress(Exception):
             await client.shutdown()
         await client.close()
-        return status, spawn
+        return status, spawn, sup_pid
 
-    status, spawn = asyncio.run(scenario())
+    status, spawn, sup_pid = asyncio.run(scenario())
     assert status == "TERMINATED"
     wait_for(lambda: not pid_alive(spawn["command_pid"]))  # zombie until the wrapper reaps
+    wait_reaped(sup_pid)  # SHUTDOWN ends it; the client's thread reaps it
 
 
 def _kill_group(run_root: Path, *, supervisor: bool = True) -> None:
@@ -2046,8 +2069,12 @@ def _kill_group(run_root: Path, *, supervisor: bool = True) -> None:
                         os.killpg(pgid, signal.SIGKILL)
     sup = run_root / "supervisor.pid"
     if supervisor and sup.exists():
-        with contextlib.suppress(Exception):
-            os.kill(json.loads(sup.read_text())["pid"], signal.SIGKILL)
+        try:
+            pid = json.loads(sup.read_text())["pid"]
+            os.kill(pid, signal.SIGKILL)
+        except Exception:
+            return
+        wait_reaped(pid)
 
 
 def _flush_reply(sup, conn, peer):
@@ -2770,12 +2797,19 @@ def test_dl210_failed_private_publish_cleans_up_and_releases_lock(short_root, mo
 def _restore_signal_handlers():
     """`Supervisor.run()` installs process-wide handlers before it binds, so an
     in-process run that fails at the bind leaves them behind. Put back what
-    each test found."""
+    each test found, where the handler now is the supervisor's: one of its
+    bound methods, or SIGHUP ignored. Any other change is the leak detector's
+    to name (DL-355)."""
     sigs = (signal.SIGCHLD, signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
     saved = {sig: signal.getsignal(sig) for sig in sigs}
     yield
     for sig, handler in saved.items():
-        signal.signal(sig, handler)
+        now = signal.getsignal(sig)
+        installed = isinstance(getattr(now, "__self__", None), runner_supervisor.Supervisor) or (
+            sig == signal.SIGHUP and now == signal.SIG_IGN
+        )
+        if handler is not None and now is not handler and installed:
+            signal.signal(sig, handler)
 
 
 def test_supervisor_signal_handlers_are_installed_before_the_socket_is_published(

@@ -62,6 +62,7 @@ if not sys.platform.startswith(("linux", "darwin")):  # pragma: no cover
     pytest.skip("leadership tier is POSIX-only", allow_module_level=True)
 
 from runner_redrive_driver import CRASH_CODE, REDRIVE_JIL
+from test_runner_supervisor import wait_reaped
 
 from dsl41.ir import lower_source
 from dsl41.oracle_state import Event
@@ -434,6 +435,7 @@ def test_cm09_five_failed_renewals_quarantine_the_host_and_new_work_is_held(
         run_root.mkdir(parents=True)
         client = SupervisorClient(run_root, deadman_s=deadman)
         await client.ensure_running()
+        sup_pid = json.loads((run_root / "supervisor.pid").read_text())["pid"]
         await client.acquire()
         engine = start_run(
             lower_source(HELD_JIL),
@@ -507,6 +509,7 @@ def test_cm09_five_failed_renewals_quarantine_the_host_and_new_work_is_held(
             with contextlib.suppress(Exception):
                 await client.shutdown()
             await client.close()
+            wait_reaped(sup_pid)
 
     row, status, published, remaining = asyncio.run(scenario())
     assert row["state"] == "quarantined"

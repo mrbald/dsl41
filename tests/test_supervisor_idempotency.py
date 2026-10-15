@@ -34,7 +34,13 @@ if not sys.platform.startswith(("linux", "darwin")):  # pragma: no cover
     pytest.skip("supervisor tier is POSIX-only", allow_module_level=True)
 
 from supervisor_list_doubles import stub_listing, stub_row
-from test_runner_supervisor import RawClient, start_supervisor, teardown_supervisor, wait_for
+from test_runner_supervisor import (
+    RawClient,
+    start_supervisor,
+    teardown_supervisor,
+    wait_for,
+    wait_reaped,
+)
 
 from dsl41 import runner_supervisor
 from dsl41.canon import ARTIFACT_FORMAT_VERSION, canonical_bytes, decode
@@ -287,6 +293,7 @@ def test_pr36_crash_before_the_reply_answers_from_the_wrappers_own_record(
         "duplicate": True,
     }
     os.kill(spawned["command_pid"], signal.SIGKILL)
+    wait_reaped(spawned["wrapper_pid"], reap=True)  # forked before the crash; no run row reaps it
 
 
 def test_pr36_receipt_with_no_record_and_a_live_wrapper_is_in_progress(
@@ -591,6 +598,7 @@ def test_pr36_a_spawn_record_naming_another_run_is_never_the_answer(sup_root: Pa
     reply = sups().spawn_run(spec)
     assert reply["ok"] is False and reply["error"] == "indeterminate"
     os.kill(honest["command_pid"], signal.SIGKILL)
+    wait_reaped(honest["wrapper_pid"], reap=True)  # forked before the crash; no run row reaps it
 
 
 # ------------------------------------------------------------- over the wire
