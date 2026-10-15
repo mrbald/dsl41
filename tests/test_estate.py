@@ -769,14 +769,19 @@ def test_pr47b_audit_derives_source_and_never_reads_it(tmp_path: Path) -> None:
 # ------------------------------------------------- ss7 the physical roll
 
 
-def test_a_physical_roll_opens_the_next_period_in_a_fresh_root(short_root: Path) -> None:  # noqa: F811
+def test_pr02a_a_physical_roll_opens_the_next_period_in_a_fresh_root(
+    short_root: Path,  # noqa: F811
+) -> None:
     """ss7's second opener, end to end between real processes: A seals, A
-    is audited, B opens period 2 from the seal, and B is resumable on its
-    own imported artifacts (PR-02a).
+    is audited, B opens period 2 from the seal, B is killed, A is made
+    unavailable, and B resumes on its own imported artifacts (PR-02a).
 
     The registry keeps BOTH roots (PR-02f), the new root's sentinel names
     the claim that first opened it (ss1.1), and `verify` of period 1 passes
-    in B -- a full `audit` there is impossible and is not asked for."""
+    in B with A gone -- a full `audit` there is impossible and is not asked
+    for. A, restored, refuses to open the same seal."""
+    import signal
+
     _, c2, _ = _estate(short_root)
     with engine(short_root) as running:
         assert cli("seal", "--run-root", str(running.run_root), "--next", str(c2)).returncode == 0
@@ -793,7 +798,10 @@ def test_a_physical_roll_opens_the_next_period_in_a_fresh_root(short_root: Path)
         extra=["--open-from", str(anchor_dir)],
     ) as opened:
         assert opened.proc.poll() is None
+        opened.stop(signum=signal.SIGKILL)  # B crashes: nothing runs on the way out
     assert wal_path(root_b, 2).exists()
+    away = short_root / "a-unavailable"
+    Path(root_a).rename(away)  # A is unavailable from here until it is restored
 
     sentinel = read_sentinel(root_b)
     assert sentinel is not None and sentinel.claim_id is not None
@@ -816,6 +824,8 @@ def test_a_physical_roll_opens_the_next_period_in_a_fresh_root(short_root: Path)
         extra=["--estate-anchor", str(anchor_dir)],
     ) as resumed:
         assert resumed.proc.poll() is None
+    assert not Path(root_a).exists()
+    away.rename(root_a)  # A restored
     refused = cli(
         "run",
         "--resume",

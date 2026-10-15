@@ -1109,7 +1109,7 @@ def _forge_branch(run_root: Path, period_id: int) -> str:
     return forged.digest
 
 
-def test_b7_a_wrong_branch_pair_in_a_registered_root_releases_nothing(
+def test_pr55a_a_wrong_branch_pair_in_a_registered_root_releases_nothing(
     tmp_path: Path,
 ) -> None:
     """B7: §1.3's registry row does not only say WHERE -- its committed

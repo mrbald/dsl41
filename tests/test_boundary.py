@@ -1,11 +1,12 @@
 """Boundary tests: the anchor, the genesis transaction, the cutoff barrier
 and the seal operation (period-model ss1.1, ss1.3, ss6-ss9, ss11; DL-133).
 
-Obligations in ss13 exercised here: PR-01a/b/c, PR-02, PR-02b, PR-03,
-PR-04, PR-05b, PR-07's operational half, PR-17, PR-25, PR-25a, PR-26,
-PR-27, PR-28, PR-28a, PR-28b, PR-28e, PR-29, PR-30, PR-30c, PR-30d,
-PR-30f, PR-30g, PR-32, PR-33, PR-34's barrier half and PR-45's in-place
-rows.
+Obligations in ss13 exercised here: PR-01, PR-01a/b/c, PR-02, PR-02b,
+PR-03, PR-04, PR-05a, PR-05b, PR-06, PR-07's operational half, PR-16a's
+audit half, PR-17, PR-18, PR-23, PR-24, PR-24b, PR-24c, PR-25, PR-25a,
+PR-26, PR-27, PR-28, PR-28a, PR-28b, PR-28c, PR-28e, PR-29, PR-30,
+PR-30c, PR-30d, PR-30f, PR-30g, PR-32, PR-33, PR-33a, PR-34's barrier
+half, PR-39b, PR-45's in-place rows, PR-47c and PR-47e.
 
 House style follows test_seal_artifact.py and test_fw_spool.py: the crash
 matrix drives the operation's OWN seam (`Engine.crash_point`) rather than
@@ -55,7 +56,7 @@ from dsl41.boundary import (
     stage_next_period,
 )
 from dsl41.ir import CatalogIR, lower_catalog
-from dsl41.oracle_state import Event
+from dsl41.oracle_state import Event, RuntimeState
 from dsl41.attest import Attestation, audit_period
 from dsl41.period import (
     RETRY_HORIZON_S,
@@ -66,6 +67,7 @@ from dsl41.period import (
     period_dir,
     read_period_manifest,
     read_sentinel,
+    runtime_hash,
     seal_path,
     stage_manifest,
     staging_dir,
@@ -133,9 +135,10 @@ def _genesis(
     text: str = C1_JIL,
     clock: VirtualClock | None = None,
     profile: RuntimeProfile | None = None,
+    adapter: FakeAdapter | None = None,
 ):
     """A periodized root with period 1 open, staged exactly as `dsl41 run`
-    stages it."""
+    stages it. The default adapter parks every run."""
     catalog, sources = _catalog(text)
     staged = stage_manifest(
         catalog,
@@ -147,7 +150,7 @@ def _genesis(
         catalog,
         run_root,
         clock=clock or VirtualClock(start=T0),
-        adapters={"CMD": FakeAdapter(default=None)},
+        adapters={"CMD": adapter or FakeAdapter(default=None)},
         staged=staged,
     )
 
@@ -454,6 +457,176 @@ def test_pr02_the_claim_is_the_identity_not_the_process(tmp_path: Path) -> None:
             estate_id="e1", seal_digest=digest, next_period=2, target_root=tmp_path / "other"
         )
     anchor.release()
+
+
+class _Interrupted(Exception):
+    """A roll stopped at one of its own named steps, as a crash leaves it."""
+
+
+def _sealed_and_attested(tmp_path: Path) -> tuple[Path, Path]:
+    """Root A with period 1 sealed in place and attested: the state two
+    successors race from. Returns `(root_a, anchor_dir)`."""
+    root_a = tmp_path / "a"
+    engine = _genesis(root_a)
+    asyncio.run(_seal(engine, _request(engine, _stage(root_a, C2_JIL))))
+    _close(engine)
+    anchor_dir = default_anchor_dir(root_a)
+    audit_period(root_a, 1, anchor=EstateAnchor(anchor_dir))
+    return root_a, anchor_dir
+
+
+def _roll_to(root: Path, anchor_dir: Path, crash_point: Any = None) -> None:
+    from dsl41.boundary import no_crash
+    from dsl41.estate import roll_into_root
+
+    catalog, _ = _catalog(C2_JIL)
+    roll_into_root(
+        root,
+        anchor_dir=anchor_dir,
+        catalog_of=lambda _r, _m: catalog,
+        crash_point=crash_point or no_crash,
+    )
+
+
+def _wal_bytes(run_root: Path) -> dict[int, bytes]:
+    return {n: wal_path(run_root, n).read_bytes() for n in wal_segments(run_root)}
+
+
+def _assert_one_successor(anchor_dir: Path, root_a: Path, winner: Path) -> None:
+    """Exactly one estate continues: the head, the registry and the claims
+    directory name the winner and nobody else."""
+    stored = EstateAnchor(anchor_dir).read()
+    assert stored is not None and isinstance(stored.head, OpenHead)
+    assert (stored.head.period_id, stored.head.root) == (2, str(winner.resolve()))
+    assert {key: row.root for key, row in stored.periods.items()} == {
+        "1": str(root_a.resolve()),
+        "2": str(winner.resolve()),
+    }
+    from dsl41.boundary import CLAIMS_DIR
+
+    claims = sorted((anchor_dir / CLAIMS_DIR).iterdir())
+    assert len(claims) == 1
+    assert json.loads(claims[0].read_text())["target_root"] == str(winner.resolve())
+
+
+def test_pr01_a_stale_reader_loses_the_claim_cas_and_names_the_winner(tmp_path: Path) -> None:
+    """PR-01, the race the CAS decides: C reads the head `closed` and
+    writes its sentinel, B then claims and opens period 2, and only then
+    does C reach its claim. C's read is stale, so only the compare under
+    the lineage lock can stop it.
+
+    A claim that wrote `claimed` without comparing the head would open a
+    second period 2 in C and fork the lineage."""
+    root_a, anchor_dir = _sealed_and_attested(tmp_path)
+    root_b, root_c = tmp_path / "b", tmp_path / "c"
+    sealed = _wal_bytes(root_a)
+
+    def b_wins_meanwhile(stage: str) -> None:
+        if stage == "after_roll_sentinel":
+            _roll_to(root_b, anchor_dir)
+
+    with pytest.raises(EngineError, match="cannot claim the successor") as lost:
+        _roll_to(root_c, anchor_dir, b_wins_meanwhile)
+    assert str(root_b.resolve()) in str(lost.value)  # the holder, by name
+    _assert_one_successor(anchor_dir, root_a, root_b)
+    assert wal_segments(root_c) == []  # the loser appended nothing
+    assert wal_segments(root_b) == [2]
+    assert _wal_bytes(root_a) == sealed
+
+
+def test_pr01_an_in_place_opener_meeting_a_roots_claim_names_it_and_appends_nothing(
+    tmp_path: Path,
+) -> None:
+    """PR-01 from the in-place side: B claimed the seal and died before its
+    segment. A resumes in place to open the same seal, is refused with B
+    named, and leaves its WAL byte-identical and its spool empty. B then
+    resumes its own claim and is the one estate that continues."""
+    root_a, anchor_dir = _sealed_and_attested(tmp_path)
+    root_b = tmp_path / "b"
+
+    def died(stage: str) -> None:
+        if stage == "after_claim":
+            raise _Interrupted(stage)
+
+    with pytest.raises(_Interrupted):
+        _roll_to(root_b, anchor_dir, died)
+    sealed = _wal_bytes(root_a)
+    spool = sorted(path.name for path in (root_a / "runs").iterdir())
+    with pytest.raises(EngineError, match="forks the lineage") as lost:
+        _resume(root_a, C2_JIL)
+    assert str(root_b.resolve()) in str(lost.value)
+    assert _wal_bytes(root_a) == sealed  # nothing appended, no segment 2
+    assert sorted(path.name for path in (root_a / "runs").iterdir()) == spool  # no dispatch
+    _roll_to(root_b, anchor_dir)  # the claim resumes on its own claim_id
+    _assert_one_successor(anchor_dir, root_a, root_b)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="PR-01, period-model ss1.3: 'A different claim_id against the same seal_digest"
+    " refuses and names the holder.' A physical-roll loser's refusal names neither the"
+    " holder's root nor its claim; a src defect pending its own fix",
+)
+@pytest.mark.parametrize("loser", ["roll_meets_claim", "roll_meets_held_lock"])
+def test_pr01_a_roll_loser_names_the_holder(tmp_path: Path, loser: str) -> None:
+    """PR-01's "names the holder" for a physical-roll loser the CAS does
+    not see: C rolls after B claimed and died, or while B holds the lineage
+    lock mid-claim. C's refusal must name B's root or B's claim."""
+    root_a, anchor_dir = _sealed_and_attested(tmp_path)
+    root_b, root_c = tmp_path / "b", tmp_path / "c"
+    refusals: list[str] = []
+
+    def lose() -> None:
+        with pytest.raises(EngineError) as lost:
+            _roll_to(root_c, anchor_dir)
+        refusals.append(str(lost.value))
+
+    def claimed(stage: str) -> None:
+        if stage != "after_claim":
+            return
+        if loser == "roll_meets_claim":
+            raise _Interrupted(stage)
+        lose()
+
+    if loser == "roll_meets_claim":
+        with pytest.raises(_Interrupted):
+            _roll_to(root_b, anchor_dir, claimed)
+        lose()
+    else:
+        _roll_to(root_b, anchor_dir, claimed)
+    assert len(refusals) == 1
+    assert wal_segments(root_c) == []  # the loser appended nothing
+    claim = claim_id_for(
+        prev_seal_digest=read_seal(root_a, 1).digest, next_period=2, target_root=root_b
+    )
+    assert str(root_b.resolve()) in refusals[0] or claim in refusals[0], refusals[0]
+
+
+def test_pr01_an_in_place_opener_at_the_held_lineage_lock_appends_nothing(
+    tmp_path: Path,
+) -> None:
+    """PR-01 from the in-place side, while B holds the lineage lock
+    mid-claim: A's resume refuses at the lock, appends nothing to its WAL
+    and dispatches nothing. B then completes and is the one successor."""
+    root_a, anchor_dir = _sealed_and_attested(tmp_path)
+    root_b = tmp_path / "b"
+    sealed = _wal_bytes(root_a)
+    spool = sorted(path.name for path in (root_a / "runs").iterdir())
+    refusals: list[str] = []
+
+    def claimed(stage: str) -> None:
+        if stage != "after_claim":
+            return
+        with pytest.raises(EngineError, match="one leader per estate lineage") as lost:
+            _resume(root_a, C2_JIL)
+        refusals.append(str(lost.value))
+
+    _roll_to(root_b, anchor_dir, claimed)
+    assert len(refusals) == 1
+    assert _wal_bytes(root_a) == sealed  # nothing appended, no segment 2
+    assert sorted(path.name for path in (root_a / "runs").iterdir()) == spool  # no dispatch
+    _assert_one_successor(anchor_dir, root_a, root_b)
 
 
 def test_a_claim_missing_its_version_refuses_by_name(tmp_path: Path) -> None:
@@ -825,7 +998,13 @@ def _crash_at(stage: str):
     return hook
 
 
-def _resume(run_root: Path, text: str, *, clock: VirtualClock | None = None):
+def _resume(
+    run_root: Path,
+    text: str,
+    *,
+    clock: VirtualClock | None = None,
+    anchor_dir: Path | None = None,
+):
     catalog, _ = _catalog(text)
     return asyncio.run(
         resume_run(
@@ -833,11 +1012,12 @@ def _resume(run_root: Path, text: str, *, clock: VirtualClock | None = None):
             run_root,
             clock=clock or VirtualClock(start=T0),
             adapters={"CMD": FakeAdapter(default=None)},
+            anchor_dir=anchor_dir,
         )
     )
 
 
-def test_the_boundary_opens_in_place_and_the_carry_survives(tmp_path: Path) -> None:
+def test_pr23_the_boundary_opens_in_place_and_the_carry_survives(tmp_path: Path) -> None:
     """ss11 steps 3-5, in place: the seal is selected by lineage, the
     successor is claimed, the opening segment is written at T, and the
     carried rows install VERBATIM -- revisions included."""
@@ -874,6 +1054,533 @@ def test_the_boundary_opens_in_place_and_the_carry_survives(tmp_path: Path) -> N
     assert stored is not None and isinstance(stored.head, OpenHead)
     assert stored.head.period_id == 2 and stored.periods["2"].segment_durable is True
     _close(opened)
+
+
+#: PR-18's estate: one of each carried item. A spent depletable (`burn`), a
+#: QUE_WAIT waiter on what is left of it (`big`), an operator hold
+#: (`held`), a run-window deferral (`late`) whose timer fires after the
+#: boundary, and a start held by a drained host (`pend`)
+CARRY_JIL = (
+    "insert_resource: FUEL\nres_type: D\namount: 10\n\n"
+    "insert_job: burn\njob_type: c\ncommand: x\nresources: (FUEL, QUANTITY=3)\n\n"
+    "insert_job: big\njob_type: c\ncommand: x\nresources: (FUEL, QUANTITY=8)\n\n"
+    "insert_job: held\njob_type: c\ncommand: x\n\n"
+    "insert_job: pend\njob_type: c\ncommand: x\n\n"
+    "insert_job: late\njob_type: c\ncommand: x\n"
+    'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\nrun_window: "10:00-11:00"\n'
+)
+
+
+def _carry_inputs_c1(engine) -> None:
+    from dsl41.runner_hosts import HostCommand
+
+    async def inputs() -> None:
+        for kind, payload in (
+            ("SET_GLOBAL", {"name": "G", "value": "1"}),
+            ("ON_HOLD", {"job": "held"}),
+            ("STARTJOB", {"job": "burn"}),
+            ("STARTJOB", {"job": "big"}),
+            ("STARTJOB", {"job": "late"}),
+        ):
+            engine.inject(Event(at=T0, kind=kind, payload=payload))
+        await engine.run_until_quiescent(T0)
+        engine.inject(Event(at=T0, kind="STATUS", payload={"job": "burn", "status": "SUCCESS"}))
+        await engine.run_until_quiescent(T0)
+        engine.inject_host(HostCommand(verb="drain", host_id=engine.executor_id))
+        await engine.run_until_quiescent(T0)
+        engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "pend"}))
+        await engine.run_until_quiescent(T0)
+
+    asyncio.run(inputs())
+
+
+def _carry_inputs_c2(engine, at: datetime) -> None:
+    from dsl41.runner_hosts import HostCommand
+
+    async def inputs() -> None:
+        engine.inject_host(HostCommand(verb="activate", host_id=engine.executor_id))
+        await engine.run_until_quiescent(at)
+        for kind, payload in (
+            ("SET_GLOBAL", {"name": "G", "value": "2"}),
+            ("OFF_HOLD", {"job": "held"}),
+        ):
+            engine.inject(Event(at=at, kind=kind, payload=payload))
+        await engine.run_until_quiescent(at)
+        await engine.run_until_quiescent(LATE_FIRED)
+
+    asyncio.run(inputs())
+
+
+#: past `late`'s 10:00 window opening, so the carried deferral has fired
+LATE_FIRED = datetime(2026, 7, 1, 10, 30)
+
+
+def _carried_projection(engine) -> dict[str, Any]:
+    """Every item the seal carries, read off the engine. `start_period`
+    names the period a run began in, the one field the two histories
+    number differently; host contact is outside the semantic projection
+    (ss3.3)."""
+    store = engine.oracle.store
+    return {
+        "jobs": {
+            name: row.model_copy(update={"start_period": None}) for name, row in store.job.items()
+        },
+        "globals": dict(store.globals_),
+        "hosts": {key: (row.state, row.state_rev) for key, row in store.hosts.items()},
+        "timers": list(store.timers()),
+        "timer_seq": store.timer_seq,
+        "consumed": dict(store.consumed),
+        "enqueue_counter": store.enqueue_counter,
+        "pending": sorted(
+            (effect.kind, effect.job, effect.run_number) for effect in engine.outbox.pending()
+        ),
+        "live": sorted(engine.live_jobs()),
+    }
+
+
+def test_pr18_replay_from_a_seal_equals_replay_from_genesis(tmp_path: Path) -> None:
+    """PR-18: the same inputs, once across a boundary and once without one,
+    replay to the same state. Root S seals after C1's inputs and opens
+    period 2 in place; root G never seals. Each is then resumed, so S
+    replays period 2 over the seal and G replays from genesis.
+
+    C1's inputs leave one of every carried item that a quiescent seal can
+    hold: spent units, a QUE_WAIT waiter and the allocator behind it, a
+    hold, a global's revision, a pending deferral timer, a drained host
+    and the start it holds as a pending intent. C2's inputs then use them:
+    the host is activated and the intent dispatched, the hold lifts and
+    the carried timer fires. A loader that dropped or re-seeded any one of
+    them diverges here. A bound run is not in the estate: reattaching one
+    at resume needs a supervisor (PR-31, PR-32)."""
+    sealed_root, genesis_root = tmp_path / "s", tmp_path / "g"
+    sealing = _genesis_scheduled(sealed_root, CARRY_JIL, clock_at=T0)
+    plain = _genesis_scheduled(genesis_root, CARRY_JIL, clock_at=T0)
+    for engine in (sealing, plain):
+        _carry_inputs_c1(engine)
+    store = sealing.oracle.store
+    assert store.runtime("big").status == "QUE_WAIT"
+    assert store.consumed == {"r:FUEL": 3}
+    assert [job for _, job, _ in sealing.oracle.pending_timers()] == ["late"]
+    seal = asyncio.run(_seal(sealing, _request(sealing, _stage(sealed_root, CARRY_JIL)))).seal
+    _close(sealing)
+    assert [entry.kind for entry in seal.executions] == ["pending_spawn"]
+    assert seal.state.timers and seal.state.consumed and seal.outbox_pending
+
+    opened = _resume_scheduled(sealed_root, CARRY_JIL, clock_at=seal.closed_at)
+    assert _carried_projection(opened) == _carried_projection(plain)  # at the boundary
+    _carry_inputs_c2(opened, seal.closed_at)
+    _carry_inputs_c2(plain, seal.closed_at)
+    _close(opened)
+    _close(plain)
+    used = opened.oracle.store
+    assert {job: used.runtime(job).status for job in ("pend", "held", "late")} == dict.fromkeys(
+        ("pend", "held", "late"), "RUNNING"
+    )  # C2's inputs did use what was carried
+
+    from_seal = _resume_scheduled(sealed_root, CARRY_JIL, clock_at=LATE_FIRED)
+    from_genesis = _resume_scheduled(genesis_root, CARRY_JIL, clock_at=LATE_FIRED)
+    try:
+        assert (from_seal.oracle.store.period_id, from_genesis.oracle.store.period_id) == (2, 1)
+        assert _carried_projection(from_seal) == _carried_projection(from_genesis)
+    finally:
+        _close(from_seal)
+        _close(from_genesis)
+
+
+def test_pr24_the_deadman_bound_counts_from_the_new_periods_takeover(tmp_path: Path) -> None:
+    """PR-24: the seal carries no `last_contact` (ss3.3), so period 2's
+    eviction bound starts at its own takeover. C1 last heard from the host
+    a day before C2 takes over; an eviction asked at the takeover is
+    refused with the whole bound still to wait, and the same eviction once
+    the bound has passed from the takeover applies.
+
+    A bound counted from C1's contact would pass at once and evict a host
+    whose wrappers may still be running."""
+    from dsl41.runner_admission import Envelope
+    from dsl41.runner_hosts import HostCommand, kill_allowance, skew_allowance
+
+    deadman = 60.0
+    profile = RuntimeProfile(deadman_us=int(deadman * 1_000_000))
+    run_root = tmp_path / "run"
+    catalog, sources = _catalog(C1_JIL)
+    engine = start_run(
+        catalog,
+        run_root,
+        clock=VirtualClock(start=T0),
+        adapters={"CMD": FakeAdapter(default=None)},
+        staged=stage_manifest(
+            catalog,
+            source_bundle_hash=write_bundle(run_root, sources),
+            profile=profile,
+            state_machine_version=STATE_MACHINE_VERSION,
+        ),
+        deadman_s=deadman,
+    )
+    assert engine.oracle.store.hosts["local"].last_contact == T0
+    seal = asyncio.run(_seal(engine, _request(engine, _stage(run_root, C2_JIL, profile=profile))))
+    _close(engine)
+    assert "last_contact" not in seal.seal.state.hosts["local"].model_fields_set
+
+    takeover = T0 + timedelta(days=1)
+    clock = VirtualClock(start=takeover)
+    c2, _ = _catalog(C2_JIL)
+    opened = asyncio.run(
+        resume_run(
+            c2,
+            run_root,
+            clock=clock,
+            adapters={"CMD": FakeAdapter(default=None)},
+            deadman_s=deadman,
+        )
+    )
+    bound = deadman + kill_allowance(opened.cmd_grace_s)
+    bound += skew_allowance(bound)
+
+    async def evict(request_id: str) -> Any:
+        store = opened.oracle.store
+        decided = opened.submit_host(
+            HostCommand(verb="evict", host_id="local"),
+            Envelope(
+                request_id=request_id,
+                expect={"host:local": store.revision("host:local")},
+                epoch=opened.epoch,
+            ),
+        )
+        await opened.run_until_quiescent(clock.now())
+        return await decided
+
+    async def scenario() -> None:
+        assert opened.oracle.store.hosts["local"].last_contact == takeover
+        opened.note_executor_unreachable()
+        await opened.run_until_quiescent(takeover)
+        assert opened.oracle.store.hosts["local"].state == "quarantined"
+        early = await evict("r-evict-early")
+        assert early.decision == "rejected" and early.code == "eviction_bound_pending"
+        assert f"in contact 0.0s ago and the ss8 bound is {bound:.1f}s" in str(early.reason)
+        await clock.wait_until(takeover + timedelta(seconds=bound + 1))  # time passes, idle
+        late = await evict("r-evict-late")
+        assert late.decision == "applied"
+        assert opened.oracle.store.hosts["local"].state == "evicted"
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        _close(opened)
+
+
+def test_pr06_a_command_composed_under_c1_is_refused_after_c2_opens(tmp_path: Path) -> None:
+    """PR-06: `baseline_id` rotates at every boundary. An operator composes
+    a command on `a` under C1 and sends it after C2 opens. C2 leaves `a`
+    alone, so the row and its revision are exactly what the operator read;
+    the command is refused all the same, because the baseline it names is
+    gone. The same command composed under C2 is admitted."""
+    from dsl41.runner_admission import PROTOCOL_VERSION, EnvelopeError, parse_envelope
+
+    run_root = tmp_path / "run"
+    engine = _genesis(run_root)
+    c1_baseline = engine.baseline_id
+    read = engine.oracle.store.revision("job:a")
+    command = {
+        "v": PROTOCOL_VERSION,
+        "baseline_id": c1_baseline,
+        "epoch": engine.epoch,
+        "request_id": "r-hold-a",
+        "expect": {"job:a": read},
+    }
+    parse_envelope(command, addressed="job:a", baseline_id=c1_baseline)  # good under C1
+    asyncio.run(_seal(engine, _request(engine, _stage(run_root, C2_JIL))))
+    _close(engine)
+
+    opened = _resume(run_root, C2_JIL)
+    try:
+        assert opened.baseline_id != c1_baseline
+        assert opened.oracle.store.revision("job:a") == read  # the row never moved
+        with pytest.raises(EnvelopeError, match="is not this run's") as refused:
+            parse_envelope(command, addressed="job:a", baseline_id=opened.baseline_id)
+        assert refused.value.code == "baseline_mismatch"
+        recomposed = {**command, "baseline_id": opened.baseline_id, "epoch": opened.epoch}
+        envelope = parse_envelope(recomposed, addressed="job:a", baseline_id=opened.baseline_id)
+
+        async def hold() -> Any:
+            decided = opened.submit(Event(at=T0, kind="ON_HOLD", payload={"job": "a"}), envelope)
+            await opened.run_until_quiescent(T0)
+            return await decided
+
+        assert asyncio.run(hold()).decision == "applied"
+    finally:
+        _close(opened)
+
+
+def test_pr24b_offline_audit_reproduces_the_host_revision_without_the_supervisor(
+    tmp_path: Path,
+) -> None:
+    """PR-24b: the deadman is what the supervisor reports, and audit never
+    asks it. Every engine here runs a 90 s deadman. Period 2 opens from the
+    seal, whose host row carries no deadman (ss3.3), so each engine of
+    period 2 registers its host over a carried row: once at the opening and
+    once more at a restart. Period 2 then seals, and audit -- no supervisor,
+    no deadman -- reproduces both periods, the host's `state_rev` included.
+    A deadman that moved the host's revision would put the live row one
+    revision above what audit derives."""
+    from dsl41.attest import rederive_seal
+    from dsl41.runner_hosts import HostCommand
+
+    deadman = 90.0
+    profile = RuntimeProfile(deadman_us=int(deadman * 1_000_000))
+    run_root = tmp_path / "run"
+    catalog, sources = _catalog(C1_JIL)
+    c2, _ = _catalog(C2_JIL)
+    engine = start_run(
+        catalog,
+        run_root,
+        clock=VirtualClock(start=T0),
+        adapters={"CMD": FakeAdapter(default=None)},
+        staged=stage_manifest(
+            catalog,
+            source_bundle_hash=write_bundle(run_root, sources),
+            profile=profile,
+            state_machine_version=STATE_MACHINE_VERSION,
+        ),
+        deadman_s=deadman,
+    )
+
+    def resumed(at: datetime) -> Any:
+        return asyncio.run(
+            resume_run(
+                c2,
+                run_root,
+                clock=VirtualClock(start=at),
+                adapters={"CMD": FakeAdapter(default=None)},
+                deadman_s=deadman,
+            )
+        )
+
+    async def host(running: Any, verb: str) -> None:
+        running.inject_host(HostCommand(verb=verb, host_id=running.executor_id))
+        await running.run_until_quiescent(running.clock.now())
+
+    asyncio.run(host(engine, "drain"))
+    first = asyncio.run(_seal(engine, _request(engine, _stage(run_root, C2_JIL, profile=profile))))
+    _close(engine)
+    assert first.seal.state.hosts["local"].deadman_us is None  # never carried (ss3.3)
+
+    opened = resumed(first.seal.closed_at)  # registers over the carried row
+    assert opened.oracle.store.hosts["local"].deadman_s == deadman
+    asyncio.run(host(opened, "activate"))
+    _close(opened)
+    restarted = resumed(first.seal.closed_at)  # and again, over the replayed one
+    assert restarted.oracle.store.hosts["local"].deadman_s == deadman
+    live_rev = restarted.oracle.store.hosts["local"].state_rev
+    staged = _stage(run_root, C2_JIL, profile=profile, name="again.jil")
+    second = asyncio.run(_seal(restarted, _request(restarted, staged, request_id="r-seal-2")))
+    _close(restarted)
+    assert second.seal.period_id == 2
+    assert second.seal.state.hosts["local"].state_rev == live_rev
+
+    anchor = EstateAnchor(default_anchor_dir(run_root))
+    assert audit_period(run_root, 1, anchor=anchor).seal_digest == first.seal.digest
+    rederived = rederive_seal(run_root, 2, stored=read_seal(run_root, 2))
+    assert rederived.state.hosts["local"].state_rev == live_rev
+    assert audit_period(run_root, 2, anchor=anchor).seal_digest == second.seal.digest
+
+
+def test_pr24c_an_evicted_host_crosses_the_seal_evicted_and_stays_so(tmp_path: Path) -> None:
+    """PR-24c's first half: eviction is the one routing state that can
+    cause a double run, and nothing at the boundary undoes it. The host is
+    force-evicted under C1; the seal carries it evicted, the opening keeps
+    it evicted at the same revision, and so does a later restart -- the
+    opener's own registration of its executor keeps the routing state."""
+    from dsl41.runner_admission import Envelope
+    from dsl41.runner_hosts import HostCommand
+
+    run_root = tmp_path / "run"
+    engine = _genesis(run_root)
+
+    async def evict() -> Any:
+        decided = engine.submit_host(
+            HostCommand(verb="evict", host_id=engine.executor_id, force=True),
+            Envelope(
+                request_id="r-evict",
+                expect={"host:local": engine.oracle.store.revision("host:local")},
+                epoch=engine.epoch,
+                claimed_actor="ops@estate",
+            ),
+        )
+        await engine.run_until_quiescent(T0)
+        return await decided
+
+    assert asyncio.run(evict()).decision == "applied"
+    evicted = engine.oracle.store.hosts["local"]
+    assert evicted.state == "evicted"
+    staged = _stage(run_root, C2_JIL)
+    seal = asyncio.run(_seal(engine, _request(engine, staged, force_seal=True))).seal  # ss9
+    _close(engine)
+    sealed = seal.state.hosts["local"]
+    assert (sealed.state, sealed.state_rev, sealed.forced_by) == (
+        "evicted",
+        evicted.state_rev,
+        evicted.forced_by,
+    )
+    for _restart in range(2):  # the opening, then an ordinary resume of period 2
+        opened = _resume(run_root, C2_JIL)
+        _close(opened)
+        row = opened.oracle.store.hosts["local"]
+        assert (row.state, row.state_rev, row.generation) == (
+            "evicted",
+            evicted.state_rev,
+            evicted.generation,
+        )
+
+
+def test_pr24c_a_re_registration_or_a_lease_contact_moves_no_revision(
+    tmp_path: Path,
+) -> None:
+    """PR-24c's second half: liveness is not state. On the store, a
+    re-registration of a host that is not evicted, changing only its
+    deadman and its contact, moves no revision. Through the engine, a
+    lease contact writes no WAL record and moves no revision. The engine's
+    own re-registration, over a carried row at a period's opening, is
+    driven by the PR-24b test."""
+    store = RuntimeState()
+    store.begin_input()
+    store.register_host("h", deadman_s=60.0, at=T0)
+    store.commit_input()
+    revision = store.revision("host:h")
+    store.begin_input()
+    store.register_host("h", deadman_s=90.0, at=T0 + timedelta(minutes=5))
+    store.commit_input()
+    row = store.hosts["h"]
+    assert (row.deadman_s, row.last_contact) == (90.0, T0 + timedelta(minutes=5))
+    assert store.revision("host:h") == revision
+
+    run_root = tmp_path / "run"
+    clock = VirtualClock(start=T0)
+    engine = _genesis(run_root, clock=clock)
+    before = (wal_path(run_root, 1).read_bytes(), engine.oracle.store.revision("host:local"))
+    asyncio.run(clock.wait_until(T0 + timedelta(minutes=5)))
+    engine.note_executor_contact()  # a lease exchange: contact, nothing else
+    asyncio.run(engine.run_until_quiescent(clock.now()))
+    assert engine.oracle.store.hosts["local"].last_contact == T0 + timedelta(minutes=5)
+    after = (wal_path(run_root, 1).read_bytes(), engine.oracle.store.revision("host:local"))
+    _close(engine)
+    assert after == before
+
+
+@pytest.mark.parametrize("mode", ["in_place", "physical_roll"])
+def test_pr05a_index_epoch_segment_and_run_number_are_monotone_across_a_transition(
+    tmp_path: Path, mode: str
+) -> None:
+    """PR-05a, I2 directly, in both opening modes. A rolled root holds no
+    earlier `leader` record, so an epoch counted from the root's own log
+    restarts at 1 there; the epoch must come from the seal. The index, the
+    segment number and the job's run number continue the same way."""
+    root_a = tmp_path / "a"
+    engine = _genesis(root_a, adapter=FakeAdapter())
+
+    async def one_run() -> None:
+        engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "a"}))
+        await engine.run_until_quiescent(T0)
+
+    asyncio.run(one_run())
+    assert engine.oracle.store.runtime("a").run_number == 1
+    c1_epoch = engine.epoch
+    seal = asyncio.run(_seal(engine, _request(engine, _stage(root_a, C2_JIL)))).seal
+    _close(engine)
+    assert seal.epoch >= c1_epoch
+
+    if mode == "in_place":
+        root = root_a
+        opened = _resume(root, C2_JIL)
+    else:
+        anchor_dir = default_anchor_dir(root_a)
+        audit_period(root_a, 1, anchor=EstateAnchor(anchor_dir))
+        root = tmp_path / "b"
+        _roll_to(root, anchor_dir)
+        opened = _resume(root, C2_JIL, anchor_dir=anchor_dir)
+    try:
+        opening = read_journal(wal_path(root, 2))[0]
+        assert opening["segment_no"] == 2 > read_journal(wal_path(root_a, 1))[0]["segment_no"]
+        assert opening["first_index"] == seal.closes_at_index + 1
+        assert opened.frontiers.committed_index == seal.closes_at_index
+        assert opened.epoch == seal.epoch + 1
+        leaders = [r["epoch"] for r in read_journal(wal_path(root, 2)) if r["rec"] == "leader"]
+        assert leaders and min(leaders) > seal.epoch
+        assert opened.oracle.store.runtime("a").run_number == 1  # carried, not reset
+
+        async def next_run() -> None:
+            at = seal.closed_at
+            opened.inject(Event(at=at, kind="STARTJOB", payload={"job": "a"}))
+            await opened.run_until_quiescent(at)
+
+        asyncio.run(next_run())
+        assert opened.oracle.store.runtime("a").run_number == 2
+        assert [effect["run_number"] for effect in _spawns(root, 2, "a")] == [2]
+        decided = [r["index"] for r in read_journal(wal_path(root, 2)) if r["rec"] == "decision"]
+        assert decided and min(decided) > seal.closes_at_index
+    finally:
+        _close(opened)
+
+
+def _forge_routes(run_root: Path, period_id: int) -> None:
+    """Move the sealed route table and repair every artifact that names
+    the seal -- the sidecar's digest, the `seal` record, the anchor head
+    and the registry row -- so only the derivation can tell."""
+    from dsl41.boundary import seal_record
+    from dsl41.canon import canonical_bytes
+    from dsl41.seal import Seal
+
+    seal = read_seal(run_root, period_id)
+    payload = seal.to_payload()
+    (route,) = payload["state"]["routes"].values()
+    payload["state"]["routes"]["batch"] = {**route, "state_rev": route["state_rev"] + 1}
+    forged = Seal(**payload)
+    seal_path(run_root, period_id).write_bytes(forged.to_bytes())
+    records = read_journal(wal_path(run_root, period_id))
+    records[-1] = seal_record(forged)
+    wal_path(run_root, period_id).write_bytes(
+        b"".join(canonical_bytes(record) + b"\n" for record in records)
+    )
+    anchor = EstateAnchor(default_anchor_dir(run_root))
+    anchor.acquire()
+    stored = anchor.require()
+    assert isinstance(stored.head, ClosedHead)
+    row = stored.periods[str(period_id)].model_copy(update={"seal_digest": forged.digest})
+    anchor.write(
+        stored.model_copy(
+            update={
+                "head": stored.head.model_copy(update={"seal_digest": forged.digest}),
+                "periods": stored.with_row(period_id, row),
+            }
+        )
+    )
+    anchor.release()
+
+
+def test_pr16a_audit_derives_the_route_table_and_refuses_a_forged_one(tmp_path: Path) -> None:
+    """PR-16a's audit half: the seal's `routes` is derived, never copied.
+    A sealed route table rewritten consistently -- digest re-stamped, the
+    `seal` record and the head repointed -- still refuses at audit.
+
+    The remap half (remap, crash, resume from the `host{verb: route}`
+    record) needs the route storage and is not discharged here (ss13.3)."""
+    from dsl41.attest import rederive_seal
+    from dsl41.period import attestation_path
+    from dsl41.seal import implicit_routes
+
+    run_root = tmp_path / "run"
+    engine = _genesis(run_root)
+    asyncio.run(_seal(engine, _request(engine, _stage(run_root, C2_JIL))))
+    _close(engine)
+    sealed = read_seal(run_root, 1)
+    assert rederive_seal(run_root, 1).digest == sealed.digest  # honest: it derives
+    _forge_routes(run_root, 1)
+    forged = read_seal(run_root, 1)
+    assert set(forged.state.routes) == {"batch", *sealed.state.routes}
+    with pytest.raises(EngineError, match="does not re-derive") as refused:
+        audit_period(run_root, 1, anchor=EstateAnchor(default_anchor_dir(run_root)))
+    assert "batch" in str(refused.value)
+    assert rederive_seal(run_root, 1).state.routes == implicit_routes("local")
+    assert not attestation_path(run_root, 1).exists()  # no checkpoint over a forgery
 
 
 def test_pr07_two_openings_of_one_seal_are_byte_identical(tmp_path: Path) -> None:
@@ -1189,6 +1896,97 @@ def test_pr26_one_held_tick_under_c1_starts_exactly_once_after_c2(tmp_path: Path
     starts = _spawns(run_root, 2, "a")
     assert len(starts) == 1  # exactly one, and it belongs to C2
     _close(opened)
+
+
+#: PR-28c: `pre` ticks at 09:30 and is armed before the seal; `late`
+#: ticks at 10:00, the cutoff instant, so the cutoff itself arms it
+HELD_C1 = (
+    "insert_job: pre\njob_type: c\ncommand: x\n"
+    'date_conditions: 1\ndays_of_week: all\nstart_times: "09:30"\n\n'
+    "insert_job: late\njob_type: c\ncommand: x\n"
+    'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n'
+)
+HELD_C2 = HELD_C1 + "\ninsert_job: z\njob_type: c\ncommand: new\n"
+
+
+def test_pr28c_the_barrier_never_touches_a_hold_in_either_outcome(tmp_path: Path) -> None:
+    """PR-28c: holds are the operator's, and the barrier holds no job.
+    `pre` is held and armed before the seal; `late` is held and unarmed
+    until its tick at T, which the cutoff admits. A boundary refused after
+    its cutoff and then a committed one both leave `pre` exactly as the
+    operator left it, and `late` armed with exactly the one revision the
+    tick caused. An abort that restored a pre-freeze snapshot would put
+    `late` back unarmed. In C2 the operator's `OFF_HOLD` then starts each
+    job exactly once."""
+    from dsl41.runner_admission import Envelope
+
+    run_root = tmp_path / "run"
+    start = datetime(2026, 7, 1, 9, 0)
+    cutoff = datetime(2026, 7, 1, 10, 0)
+    engine = _genesis_scheduled(run_root, HELD_C1, clock_at=start)
+    staged = _stage(run_root, HELD_C2)
+
+    async def under_c1() -> EngineError:
+        engine.inject(Event(at=start, kind="ON_HOLD", payload={"job": "pre"}))
+        await engine.run_until_quiescent(datetime(2026, 7, 1, 9, 45))  # `pre` ticks
+        # the operator's own hold, seconds before the seal: an externally
+        # requested attempt, so an unforced seal refuses at ss9's gate --
+        # which reads the WAL after the cutoff has admitted T's tick
+        await engine.clock.wait_until(cutoff - timedelta(seconds=2))
+        held = engine.submit(
+            Event(at=engine.clock.now(), kind="ON_HOLD", payload={"job": "late"}),
+            Envelope(
+                request_id="r-hold",
+                expect={"job:late": engine.oracle.store.revision("job:late")},
+                epoch=engine.epoch,
+            ),
+        )
+        await engine.run_until_quiescent(engine.clock.now())
+        assert (await held).decision == "applied"
+        before["late"] = engine.oracle.store.runtime("late")
+        before["pre"] = engine.oracle.store.runtime("pre")  # as the operator left it
+        await engine.clock.wait_until(cutoff)
+        future = engine.submit_seal(_request(engine, staged))
+        await engine.run_until_quiescent(cutoff)
+        assert future.done()
+        with pytest.raises(EngineError) as refused:
+            future.result()
+        return refused.value
+
+    store = engine.oracle.store
+    before: dict[str, Any] = {}  # each row as the operator's hold left it, before T
+    refusal = asyncio.run(under_c1())
+    assert refusal.code == "seal_retry_horizon"
+    assert [t["payload"]["job"] for t in _scheduler_ticks(run_root, 1)] == ["pre", "late"]
+    pre = store.runtime("pre")
+    assert (pre.on_hold, pre.armed) == (True, True)
+    assert pre == before["pre"]  # the refused boundary left every field, state_rev too
+    late = store.runtime("late")
+    assert (late.on_hold, late.armed) == (True, True)  # the cutoff's own tick
+    assert before["late"].armed is False
+    assert late.state_rev == before["late"].state_rev + 1  # exactly the tick's increment
+    assert [r for r in read_journal(wal_path(run_root, 1)) if r.get("rec") == "seal"] == []
+
+    boundary = asyncio.run(_seal(engine, _request(engine, staged, force_seal=True)))
+    _close(engine)
+    sealed = boundary.seal.state.jobs
+    assert sealed["pre"] == before["pre"]  # exactly as the operator left it
+    assert sealed["late"] == late  # armed, one increment, in this outcome too
+
+    opened = _resume_scheduled(run_root, HELD_C2, clock_at=boundary.seal.closed_at)
+
+    async def under_c2() -> None:
+        at = boundary.seal.closed_at
+        for job in ("pre", "late"):
+            opened.inject(Event(at=at, kind="OFF_HOLD", payload={"job": job}))
+        await opened.run_until_quiescent(at)
+
+    try:
+        asyncio.run(under_c2())
+        assert [len(_spawns(run_root, 2, job)) for job in ("pre", "late")] == [1, 1]
+        assert _spawns(run_root, 1, "pre") == _spawns(run_root, 1, "late") == []
+    finally:
+        _close(opened)
 
 
 def test_dl158_disarm_before_the_seal_yields_no_start_after_c2(tmp_path: Path) -> None:
@@ -1606,6 +2404,67 @@ def test_pr32_the_seal_names_the_executor_run_id_and_generation_of_every_live_ru
         manifest=_manifest(run_root, 2),  # type: ignore[arg-type]
     )
     assert [e.run_id for e in opened.executions] == [effect.run_id]
+
+
+def test_pr47c_a_run_live_at_t_that_ends_at_t_in_c2_audits_as_live_in_c1(tmp_path: Path) -> None:
+    """PR-47c: period ownership of spool evidence comes from the WAL. `a`
+    is live at T, so the seal carries it `bound`; its `status.json` then
+    lands with `ended_at == T`, and C2 admits the completion. Audit of C1
+    re-derives `a` as live, because C1's WAL holds no completion for it.
+
+    A rule that read the timestamp would call the run terminal at T,
+    re-derive a seal without it, and refuse an honest period."""
+    from dsl41.attest import rederive_seal
+
+    run_root = tmp_path / "run"
+    engine = _genesis(run_root, profile=DETACHED)
+    effect = _bind_a(engine, run_root)
+    engine.supervisor = _StubSupervisor(
+        listing=stub_listing(
+            incarnation="inc-1",
+            runs=[stub_row(run_id=effect.run_id, job="a", run_number=1, wrapper_alive=True)],
+        )
+    )  # type: ignore[assignment]
+    seal = asyncio.run(
+        _seal(engine, _request(engine, _stage(run_root, C2_JIL, profile=DETACHED)))
+    ).seal
+    _close(engine)
+    assert [(entry.job, entry.kind) for entry in seal.executions] == [("a", "bound")]
+
+    (run_root / "runs" / "a.1" / "status.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "run_id": effect.run_id,
+                "job": "a",
+                "run_number": 1,
+                "outcome": "exited",
+                "exit_code": 0,
+                "ended_at": seal.closed_at.isoformat() + "+00:00",
+            }
+        )
+    )
+    opened = _resume(run_root, C2_JIL)
+    asyncio.run(opened.run_until_quiescent(seal.closed_at))  # C2 reads the status.json
+    _close(opened)
+    assert opened.oracle.store.runtime("a").status == "SUCCESS"
+    completions = [
+        r["payload"]
+        for r in read_journal(wal_path(run_root, 2))
+        if r.get("rec") == "input" and r.get("kind") == "STATUS" and r["payload"]["job"] == "a"
+    ]
+    # the completion is C2's input, stamped at T itself
+    assert completions == [
+        {"ended_at": seal.closed_at.isoformat(), "exit_code": 0, "job": "a", "run_number": 1}
+    ]
+    assert not any(
+        r.get("kind") == "STATUS" for r in read_journal(wal_path(run_root, 1)) if "kind" in r
+    )
+
+    rederived = rederive_seal(run_root, 1, stored=read_seal(run_root, 1))
+    assert [(entry.job, entry.kind) for entry in rederived.executions] == [("a", "bound")]
+    attestation = audit_period(run_root, 1, anchor=EstateAnchor(default_anchor_dir(run_root)))
+    assert attestation.seal_digest == seal.digest
 
 
 def test_a_second_seal_is_refused_for_the_whole_boundary_and_accepted_after_an_abort(
@@ -2755,6 +3614,49 @@ def test_every_quiescence_refusal_names_its_own_reason(tmp_path: Path) -> None:
     _close(engine)
 
 
+def test_pr33a_the_seal_waits_out_a_kill_ladder_and_never_snapshots_one(
+    tmp_path: Path,
+) -> None:
+    """PR-33a: a KILL ladder that has not resolved is waited out, never
+    snapshotted -- its grace deadline is a promise the next period could
+    not keep. With a ladder in flight the boundary parks and writes no
+    `seal`; once the ladder resolves, the same boundary commits. The
+    refusal a ladder that outlives the wait meets is pinned by
+    `test_every_quiescence_refusal_names_its_own_reason`."""
+    run_root = tmp_path / "run"
+    engine = _genesis(run_root)
+
+    async def waits_then_commits() -> Any:
+        release = asyncio.Event()
+        park = engine.barrier.park
+
+        def park_with_a_ladder_in_flight() -> None:
+            # as B1 arranges it: the barrier's own drain applies a KILL, so
+            # the sealer meets a ladder that started inside the freeze
+            park()
+            engine._reaping.append(asyncio.create_task(release.wait()))  # type: ignore[arg-type]
+
+        engine.barrier.park = park_with_a_ladder_in_flight  # type: ignore[method-assign]
+        future = engine.submit_seal(_request(engine, _stage(run_root, C2_JIL)))
+        sealer = asyncio.create_task(engine.run_until_quiescent(engine.clock.now()))
+        for _ in range(10_000):  # until the boundary is parked on the ladder
+            await asyncio.sleep(0)
+            if engine.barrier.parked:
+                break
+        for _ in range(100):  # and it stays there while the ladder runs
+            await asyncio.sleep(0)
+        assert engine.barrier.parked and not future.done() and not sealer.done()
+        assert not [r for r in read_journal(wal_path(run_root, 1)) if r["rec"] == "seal"]
+        release.set()
+        with pytest.raises(PeriodSealed) as sealed:
+            await sealer
+        return sealed.value.boundary
+
+    boundary = asyncio.run(waits_then_commits())
+    _close(engine)
+    assert boundary.seal.digest == read_seal(run_root, 1).digest  # committed after the wait
+
+
 def _never_done() -> Any:
     """A stand-in for a KILL ladder that has not resolved."""
 
@@ -3329,6 +4231,112 @@ def test_pr30b_a_live_seal_exits_the_engine_with_code_three(short_root: Path) ->
     assert stored is not None and isinstance(stored.head, ClosedHead)
 
 
+def _external_attempt_then(engine, *, age_s: float) -> None:
+    """One externally requested attempt at T0, then the clock moved on
+    `age_s` seconds: the attempt ss9's gate measures."""
+    from dsl41.runner_admission import Envelope
+
+    async def scenario() -> None:
+        decided = engine.submit(
+            Event(at=T0, kind="ON_HOLD", payload={"job": "b"}),
+            Envelope(
+                request_id="r-ext",
+                expect={"job:b": engine.oracle.store.revision("job:b")},
+                epoch=engine.epoch,
+            ),
+        )
+        await engine.run_until_quiescent(T0)
+        assert (await decided).decision == "applied"
+        await engine.clock.wait_until(T0 + timedelta(seconds=age_s))
+
+    asyncio.run(scenario())
+
+
+def _horizon(seconds: float) -> RuntimeProfile:
+    return RuntimeProfile(retry_horizon_us=round(seconds * 1_000_000))
+
+
+def test_pr47e_audit_derives_the_forced_gate_from_the_closing_manifests_horizon(
+    tmp_path: Path,
+) -> None:
+    """PR-47e's first clause: C1 runs a 120 s horizon, above the 60 s
+    default. A 90 s old attempt therefore holds the gate, so the seal is
+    forced and records the gate. Audit re-derives `forced_gate` from the
+    horizon in C1's own manifest. An audit that read the default instead
+    would find the gate passed, re-derive a null `forced_gate`, and refuse
+    an honest seal."""
+    run_root = tmp_path / "run"
+    engine = _genesis(run_root, profile=_horizon(120))
+    _external_attempt_then(engine, age_s=90)
+    staged = _stage(run_root, C2_JIL)
+    refusal = asyncio.run(_refusal(engine, _request(engine, staged)))
+    assert refusal.code == "seal_retry_horizon"
+    seal = asyncio.run(_seal(engine, _request(engine, staged, force_seal=True))).seal
+    _close(engine)
+    gate = seal.forced_gate
+    assert gate is not None
+    assert (gate.horizon_us, gate.observed_age_us) == (120_000_000, 90_000_000)
+    assert RETRY_HORIZON_S * 1_000_000 < gate.observed_age_us < gate.horizon_us
+    attestation = audit_period(run_root, 1, anchor=EstateAnchor(default_anchor_dir(run_root)))
+    assert attestation.seal_digest == seal.digest
+
+
+@pytest.mark.parametrize(("c1_s", "c2_s", "commits"), [(60, 1, False), (1, 60, True)])
+def test_pr47e_the_closing_periods_horizon_decides_never_the_staged_one(
+    tmp_path: Path, c1_s: float, c2_s: float, commits: bool
+) -> None:
+    """PR-47e's second clause: the gate protects retries composed under C1,
+    so C1's horizon decides. With a 10 s old attempt, C1 = 60 s and staged
+    C2 = 1 s refuses unforced; the reverse commits."""
+    run_root = tmp_path / "run"
+    engine = _genesis(run_root, profile=_horizon(c1_s))
+    _external_attempt_then(engine, age_s=10)
+    request = _request(engine, _stage(run_root, C2_JIL, profile=_horizon(c2_s)))
+    if commits:
+        seal = asyncio.run(_seal(engine, request)).seal
+        assert seal.forced_gate is None
+        assert seal.next_period.runtime_hash == runtime_hash(_horizon(c2_s))
+    else:
+        refusal = asyncio.run(_refusal(engine, request))
+        assert refusal.code == "seal_retry_horizon"
+        assert "retry_horizon_us is 60000000" in str(refusal)
+    _close(engine)
+
+
+def test_pr47e_only_an_effect_with_no_result_is_carried_pending(tmp_path: Path) -> None:
+    """PR-47e's third clause, for the two outcomes this tier can produce:
+    a SPAWN with an `applied` result is not in `outbox_pending`, and one
+    with no result is. Audit re-derives both from the WAL, so the
+    attestation stands. The `indeterminate` and `retired` cases need an
+    adapter that can lose an outcome, and are not driven here."""
+    from dsl41.runner_hosts import HostCommand
+
+    run_root = tmp_path / "run"
+    engine = _genesis(run_root, adapter=FakeAdapter())
+
+    async def under_c1() -> None:
+        engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "b"}))
+        await engine.run_until_quiescent(T0)
+        engine.inject_host(HostCommand(verb="drain", host_id=engine.executor_id))
+        await engine.run_until_quiescent(T0)
+        engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "a"}))
+        await engine.run_until_quiescent(T0)
+
+    asyncio.run(under_c1())
+    seal = asyncio.run(_seal(engine, _request(engine, _stage(run_root, C2_JIL)))).seal
+    _close(engine)
+    results = {
+        r["effect_id"]: r["state"]
+        for r in read_journal(wal_path(run_root, 1))
+        if r.get("rec") == "effect_result"
+    }
+    spawns = {e["job"]: e["effect_id"] for job in "ab" for e in _spawns(run_root, 1, job)}
+    assert results.get(spawns["b"]) == "applied" and spawns["a"] not in results
+    assert [effect.job for effect in seal.outbox_pending] == ["a"]  # C2 leaves `a` alone
+    attestation = audit_period(run_root, 1, anchor=EstateAnchor(default_anchor_dir(run_root)))
+    assert attestation.seal_digest == seal.digest
+
+
 def test_pr30_the_gate_reads_a_real_wal_not_a_synthetic_one(tmp_path: Path) -> None:
     """ss9 against the bytes the journal actually writes.
 
@@ -3650,6 +4658,44 @@ def test_dl253_phase_one_names_the_version_before_it_compares_the_hash(tmp_path:
             )
         )
     _close(engine)
+
+
+def test_pr39b_a_state_machine_bump_is_refused_before_the_classifier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR-39b: a `next_period` naming another `state_machine_version` never
+    reaches the classifier; readiness refuses it first (ss2.1). The
+    classifier would read C1's rows under C2's semantics and could answer
+    anything. A same-version candidate staged beside it does reach it, so
+    the recorder is known to be on the path."""
+    import dsl41.boundary
+
+    seen: list[str] = []
+    classify = dsl41.boundary.classify
+
+    def recording(**kwargs: Any) -> Any:
+        seen.append("classify")
+        return classify(**kwargs)
+
+    monkeypatch.setattr(dsl41.boundary, "classify", recording)
+    run_root = tmp_path / "run"
+    engine = _genesis(run_root)
+    catalog, sources = _catalog(C2_JIL, name="v2.jil")
+    bumped = stage_next_period(
+        run_root,
+        staged_manifest=stage_manifest(
+            catalog,
+            source_bundle_hash=write_bundle(run_root, sources),
+            profile=RuntimeProfile(),
+            state_machine_version=STATE_MACHINE_VERSION + 1,
+        ),
+    )
+    refusal = asyncio.run(_refusal(engine, _request(engine, bumped)))
+    assert "one executable implements one version" in str(refusal)
+    assert seen == []
+    asyncio.run(_seal(engine, _request(engine, _stage(run_root, C2_JIL), request_id="r-same")))
+    _close(engine)
+    assert seen != []
 
 
 def test_pr17_a_profile_change_and_a_no_change_seal_are_both_transitions(
