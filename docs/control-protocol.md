@@ -143,7 +143,8 @@ omits the field. A client must tolerate a missing `code`.
 `code` is an additive field: consumers ignore what they do not know
 (above), so a client that does not read it keeps working. A code is
 never renamed in place; a new code, or a retired one, is a decision-log
-entry.
+entry. One code is retired, and this engine never answers it:
+`transition_violation` (DL-353).
 
 The client action says what a client does next:
 
@@ -639,7 +640,8 @@ Per job: `status`, `status_at`, `run_number`, `exit_code`, `on_ice`,
 `on_hold`, `on_noexec`, `armed` (the SEM-32 latch: an armed job looks
 INACTIVE, but the next condition edge starts it, DL-54), `started_by` (the
 trace cause of the most recent start; null = never started, DL-68),
-`pending_timers` (a list of `{due, kind}`), `log_out` / `log_err` (the runner-design §6
+`state_rev` (the revision an `expect` names for the job, DL-87), `held`
+(below), `pending_timers` (a list of `{due, kind}`), `log_out` / `log_err` (the runner-design §6
 append targets of the CURRENT run, resolved by the same `job_log_paths`
 the wrapper spec uses, so the tail and the writer can never diverge; CMD
 only), `job_type` and `box_name` (catalog placement, so a tree renders
@@ -916,7 +918,11 @@ what it missed.
   it cannot parse. `dsl41 query subscribe` instead treats a torn line as
   the end of the stream and exits 2, as below (DL-267).
 - A `subscribe` stream can end at the engine: EOF, a torn last line, or
-  an `{"ok": false}` line (§5). A client that must not miss records
+  an `{"ok": false}` line (§5). `subscribe_lines` raises
+  `ControlClientError` with that line's `error`, or a fallback text when
+  the line has none. `ControlClient.subscribe`
+  yields the line to its caller as it yields a record, and then ends at
+  the hangup. A client that must not miss records
   reconnects with a cursor (DL-267): the last `seq` it read or, when it
   read none, the ack's `since`. `seq`'d records then arrive exactly once
   across the two connections. Records without a `seq` after that cursor
@@ -929,8 +935,8 @@ what it missed.
 ## 7. Known gaps (recorded, not fixed — DL-78)
 
 These are limits of the frozen protocol. Items 1 and 4 are not gaps and
-keep their numbers for citations. The multihost track
-(`docs/decision-log.md` DL-78) has to address each open one.
+keep their numbers for citations. Adding a second host or a non-local
+controller has to address each open one (`docs/decision-log.md` DL-78).
 
 1. **Version handshake.** Not a gap: every request names its version
    (§2; DL-90, DL-118).

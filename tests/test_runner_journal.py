@@ -266,8 +266,9 @@ def test_dispatch_record_carries_job_run_number_wrapper_pid_run_dir_started_at(
 
 
 def test_drop_record_carries_at_kind_payload_reason_and_no_seq(tmp_path: Path) -> None:
-    """(runner-design ss4/ss7): drop records a gate rejection; unlike input
-    it consumes no WAL seq number -- it never fed the oracle."""
+    """(runner-design ss7): drop records an input refused before admission,
+    a scheduler tick missed across downtime (E9); unlike input it consumes
+    no WAL seq number -- it never fed the oracle."""
     journal = Journal.create(
         tmp_path / "journal.jsonl",
         catalog=lower_source(_SOLO_JIL),

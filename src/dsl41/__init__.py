@@ -2,7 +2,7 @@
 
 Module map (implementation order per CLAUDE.md; all ten compiler phases
 built, and all six phase-11 runner tiers 11a-11f with them -- the runner is
-six sibling modules since DL-74, docs/runner-design.md ss14):
+twenty sibling modules, docs/runner-design.md ss14):
   ast_jil    - JIL statement scanner + AST + preserve/canonical renderers (docs/jil-statement-syntax.md)
   conditions - condition-expression parsing via grammars/condition.lark -> Cond models
   ir         - IR-F Pydantic models + AST->IR-F lowering (docs/ir-design.md ss3-4)
