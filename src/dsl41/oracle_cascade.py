@@ -588,8 +588,12 @@ class OracleCascade(OracleSchedule):
 
     def _still_the_run(self, box: str, run: int) -> bool:
         """A box's end reaches its next job_terminator only while the run that
-        ended is still the box's run, read before each member (DL-348)."""
-        return self._runtime(box).run_number == run
+        ended is still the box's run and the box was not reset since, read
+        before each member (DL-348). An ancestor's restart resets the box to
+        INACTIVE without moving its run: the end is then no longer the box's,
+        and the fold path, which reads the status, finds no end either."""
+        row = self._runtime(box)
+        return row.run_number == run and row.status != "INACTIVE"
 
     # ---- a move's box rules, settlement and wakes
 

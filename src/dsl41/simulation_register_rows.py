@@ -3321,7 +3321,8 @@ PROFILE_ROWS: tuple[Row, ...] = (
             cite="runner-design ss8a, SEM-20, SEM-11",
             effect="the default and the vendor's: a member taken off ice while its box runs,"
             " before it ran there, sits that run out; a plain start of it is refused, the"
-            " box completes without it, and FORCE_STARTJOB still starts it",
+            " box completes without it while it reads INACTIVE, and FORCE_STARTJOB still"
+            " starts it",
             trigger='{"semantics": {"off-ice-in-running-box": "next-run"}}',
         ),
         _row(

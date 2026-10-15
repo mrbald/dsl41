@@ -166,7 +166,25 @@ from dsl41.runner_clock import EngineError
 #: control input was refused, an engine-made one quarantined. A replay with
 #: such an input can derive a status, and so wakes and launches, that v22 did
 #: not.
-STATE_MACHINE_VERSION = 23
+#: 24 since DL-SMALL1: a job that enters QUE_WAIT takes a new rank. A queued
+#: member taken out of the queue by an injected STATUS keeps its rank until
+#: its settlement, after its box rules; where those rules restart its box and
+#: the new run queues it again, v23 kept the old rank, and the member was
+#: admitted ahead of a waiter that queued between the two. And a box's end
+#: kills its job_terminator members only while the box was not reset since:
+#: an ancestor's restart resets a subbox to INACTIVE without moving its run,
+#: and v23 then killed a live member that the fold path left running. And
+#: the default fold reads statuses: a member that has not run in the box's
+#: run but holds a terminal status is done and votes with it, where v23 kept
+#: the box RUNNING. The status comes from a member carried live into the run
+#: that then ended; an operator's SUCCESS, FAILURE or TERMINATED on a member
+#: that waits; a KILLJOB on a member queued in the run, or made live by an
+#: injected STARTING; or the idle recompute of a never-run subbox from
+#: statuses given to its members (SEM-15). A resolution or off-ice mark
+#: decides only while the member reads INACTIVE. A replay with such an input
+#: can derive an admission order, or a status and so wakes and launches, that
+#: v23 did not.
+STATE_MACHINE_VERSION = 24
 
 LOCK_NAME = "leader.lock"
 
