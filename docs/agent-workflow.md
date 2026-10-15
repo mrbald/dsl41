@@ -17,7 +17,7 @@ a stale lock passes `--frozen` locally and fails in CI.
 
 Project model defaults live in `.codex/config.toml` and
 `.claude/settings.json`. A Claude boss runs at the Claude defaults: Opus at
-`high` since DL-262. A Codex boss runs at the Codex setting.
+`high` (DL-262). A Codex boss runs at the Codex setting.
 Codex loads project configuration only in trusted projects.
 Check effective model and effort after a CLI or model upgrade.
 Launch flags, environment, user settings, and managed settings may affect them.
@@ -85,9 +85,14 @@ The coverage report enforces the scoped branch-coverage requirement.
 The branch report prints branch-only numbers for every module of `src/dsl41`,
 most missed branches first, then the package total. It is a report, not a gate.
 The transition gate reads `.transition-hits.json`, which the test run writes at
-the repository root. It exits 1 when a declared row without a mark has no
-recorded hit, or when a marked row or its guard's true outcome was hit (the
-mark is stale). It must run after the pytest step of the same session.
+the repository root. It exits 1 when a required item has no recorded hit: a row
+without a mark, a choice branch, each outcome of an unmarked row's or a
+branch's guard, or the defer or the release of a deferred event. A false
+outcome declared unreachable is not required. It also exits 1 when a forbidden
+item was hit: a false outcome declared unreachable, or a marked row or its
+guard's true outcome (the mark is stale or wrong), or when the hits file is not JSON or
+has no `hits` key. It exits 2 when the hits file is missing. It must run after the pytest step
+of the same session.
 Under xdist the controller writes that file from every worker's hits.
 The golden replay runs the oracle over the whole harness sample, about a minute,
 and names the first run, entry and component that differ from
@@ -135,10 +140,9 @@ claude --print --effort xhigh --permission-mode manual \
 ```
 
 Run from the repository root and verify the returned model.
-Use the configured model explicitly when launching from another directory: a
-probe of the installed CLI from a nested directory selected a different model,
-and the cause is not established (the harness review of 2026-09-07, now in
-the git history before DL-230).
+Use the configured model explicitly when launching from another directory:
+from a nested directory the installed CLI can select a different model, and
+the cause is not established.
 Do not infer settings loading from memory loading.
 The restricted tool list excludes skill invocation; add `Skill` only when needed.
 If the brief names evidence outside the checkout, grant that specific directory

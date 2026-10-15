@@ -1,6 +1,6 @@
 """Markdown/Mermaid rendering of the derived graph (phase 6, CLAUDE.md / DL-03).
 
-Spec (ir-design ss1 pipeline + phase list, amended DL-35/DL-73): IR-G -> a Markdown
+Spec (ir-design ss1 pipeline, amended DL-35/DL-73): IR-G -> a Markdown
 report of per-component Mermaid charts, plus appendices that materialize
 everything the charts thin out or drop. Pure function of (catalog, graph) --
 IR-G for the analysis, IR-F for the per-node display facts (DL-73);

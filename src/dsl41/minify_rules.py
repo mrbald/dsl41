@@ -299,8 +299,9 @@ def _v_calendar_condition(value: str) -> bool:
 #: verbatim. Every KEEP key has one. A value that does not match is a refusal.
 _INT_RE = re.compile(r"[+-]?\d+")
 _NUM_RE = re.compile(r"[+-]?\d+(?:\.\d+)?")
-#: JIL syntax rule 2/6: a colon inside an unquoted value may be escaped
-#: (`10\:00`) instead of quoting the whole value; dsl41 applies that rule to
+#: jil-statement-syntax rule 2 (the vendor's JIL syntax rule 6): a colon
+#: inside an unquoted value may be escaped (`10\:00`) instead of quoting the
+#: whole value; dsl41 applies that rule to
 #: every `hh:mm` lane, so the escaped spelling is in the closed value space
 #: too (DL-251), not just the bare one.
 _TIME_RE = re.compile(r"\d{1,2}\\?:\d{2}")

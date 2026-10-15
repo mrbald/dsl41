@@ -39,8 +39,8 @@ Decisions pinned here (each with a test):
   latch like s() does, so a same-stream edge carries the staleness
   assumption and a cross-stream one the Task-Monitor assumption -- never
   a silent plain edge (UCS-13).
-- Box-override refs derive edges too (ir-design D1, resolved per its own
-  "probably yes"): ref TRANSITIVELY inside the box (SEM-12 "inside") ->
+- Box-override refs derive edges too (ir-design D1): ref TRANSITIVELY
+  inside the box (SEM-12 "inside") ->
   M15 assumed; non-member, global, or cross-instance ref -> M16 redesign
   (SEM-12 hung-RUNNING).
 - DerivedEdge.source_atom is Optional (spans are Optional codebase-wide;

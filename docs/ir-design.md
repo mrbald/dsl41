@@ -57,7 +57,7 @@ class Comment(BaseModel):
 
 class RawAttr(BaseModel):
     key: str                   # exactly as written (case preserved)
-    raw_value: str             # verbatim, unstripped semantics-neutral trim only
+    raw_value: str             # verbatim; continuation lines joined with '\n'
     span: SourceSpan
     comments: list[Comment] = []
 
@@ -439,8 +439,8 @@ in `oracle.py` imports them and `oracle_state.py` imports nothing from it (DL-91
 - IR-F serializes as JSON: `json.dumps(catalog.model_dump(mode="json"), sort_keys=True,
   indent=2)` plus a trailing newline, with an explicit version field `ir_version: "0.3"`. One
   catalog is one file. The output is deterministic (diff-able in git). A change to the IR-F
-  shape bumps the version; `scripts/arch_check.py` pins the schema hash to it. 0.3 (DL-253):
-  an absolute must time is a `MustTime`, whose hour runs to 71.
+  shape bumps the version; `scripts/arch_check.py` pins the schema hash to it. In 0.3 an
+  absolute must time is a `MustTime`, whose hour runs to 71 (DL-253).
 - `ir.dump_catalog` / `ir.load_catalog` are the REFERENCE SPELLING of that sentence, and the
   round-trip test in `tests/test_ir.py` holds them to it (DL-193). No CLI verb reads or
   writes an IR-F file: `dsl41 run` consumes JIL bytes only,
@@ -494,22 +494,23 @@ The numbers are cited in the sources and stay.
 - D1: `Cond` is shared between `condition` and `box_success/box_failure`. Layer-G derives
   edges from box-override refs, classed M15 for a reference transitively inside the box and
   M16 for a non-member, global, or cross-instance one (§5 pass 5).
-- D2: the DSL surface, phase 10 of the DL-03 build order and last by design. `dsl41
-  decompile` emits a runnable builder module over IR-F. The flow
-  verbs are `job()`, `box()`, `sequence()`, `parallel()`, `mutex()` and `contend()`, beside
+- D2: the DSL surface, the last of the DL-03 phases. `dsl41 decompile` emits a
+  runnable builder module over IR-F. The flow verbs are `job()`, `box()`, `sequence()`,
+  `parallel()`, `mutex()` and `contend()`, beside
   the declaration verbs (`global_()`, `machine()`, `resource()`, `xinst()`, the calendar
   family). The fold registry is closed at T-001–T-007 (DL-38). The surface is extracted from
   corpus patterns, never designed ahead of them.
 - D3: UC record emission. The base subset is emitted (U3a, DL-55: CREATE-ONLY records per
-  docs/uc-edge-schema.md). Rich condition forms wait on U3b (a live controller's
-  openapi.json). D3 is open on U3b alone, not on a decision.
+  docs/uc-edge-schema.md). Rich condition forms need U3b (a live controller's
+  openapi.json). D3 is open on U3b alone, not on a design decision. U3b is open and
+  descoped with the UC backend (DL-288).
 - D4: the UC twin shares `Event` and `TraceEntry` with the AutoSys oracle, so one comparator
   reads both traces.
 
 ## 11. Impact ledger: where Q1/Q2/Q3 live
 
 - Q1 (precedence): one lark rule, left-associative at equal precedence, and canonical sort
-  stability (DL-53); §3. No model change.
+  stability (DL-53); §3. The IR models carry nothing for it.
 - Q2 (lookback-0 anchor): a zero lookback anchors to the dependent job's own last end,
   `JobRuntime.last_end_at`, threaded through the evaluator (Q2a, DL-54). When the dependent
   has never ended, the zero-lookback qualifier is satisfied; the producer's status must still

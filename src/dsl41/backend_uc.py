@@ -35,9 +35,10 @@ Decisions pinned here (each with a test; recorded as DL-15 + DL-55):
 - CREATE-ONLY hygiene (uc-edge-schema.md): records pin retainSysIds=false
   and omit sysId/version/exportTable/exportReleaseLevel; vertexIds are
   explicit strings; layout coordinates are deterministic.
-- The report pins catalog_hash (ir-design ss8: "pin what was verified") and
-  the tool version; it is deterministic for identical input -- no
-  timestamps (callers stamp their own).
+- The report pins catalog_hash (ir-design ss8: the migration report "uses
+  it to pin the verified content") and the tool version; it is
+  deterministic for identical input -- no timestamps (callers stamp their
+  own).
 - Beyond R/A edges, the report carries every construct Part II routes to a
   human: M27 run_window flags (pass 6), M07 mutex groups (edge-less
   constructs), M12 OR shapes with their suggested lowering, M33 external

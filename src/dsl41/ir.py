@@ -174,9 +174,10 @@ IR_VERSION: Literal["0.3"] = "0.3"
 
 
 def _parse_hhmm(text: str) -> tuple[int, int]:
-    """Lexical HH:MM. JIL syntax rule 2/6: a colon inside an unquoted value
-    may be escaped (`10\\:00`) instead of quoting the whole value; dsl41
-    applies that general rule to every `hh:mm` lane (DL-251), so `\\:`
+    """Lexical HH:MM. jil-statement-syntax rule 2 (the vendor's JIL syntax
+    rule 6): a colon inside an unquoted value may be escaped (`10\\:00`)
+    instead of quoting the whole value; dsl41 applies that general rule to
+    every `hh:mm` lane (DL-251), so `\\:`
     unescapes here regardless of lane. Per-token quoting of a single list
     item (`"10:00", "14:00"`) is not a documented spelling and is not
     unwrapped -- only a whole-value quote (handled upstream by
