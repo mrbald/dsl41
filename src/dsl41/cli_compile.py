@@ -1,10 +1,8 @@
-"""The compiler verbs: a catalog in, an artifact out (DL-137's split).
+"""The compiler verbs (DL-137): every verb that reads JIL and writes a finding, report, bundle,
+module, chart or de-identified estate, and touches no run root and no socket.
 
-`lint`, `equiv`, `report`, `uc`, `decompile`, `minify`, `folds`, `resolve`
-and `viz` -- every verb that reads JIL and writes a finding, a report, a
-bundle, a module, a chart or a de-identified estate, and touches no run root
-and no socket. Registered on
-the app in `cli.py`; the exit-code contract is stated there.
+The verbs are `lint`, `equiv`, `report`, `uc`, `decompile`, `minify`, `folds`, `resolve` and
+`viz`. The exit-code contract is stated in `cli.py`.
 """
 
 from __future__ import annotations
@@ -30,21 +28,17 @@ from dsl41.ir import CatalogIR
 from dsl41.lint import lint_catalog
 from dsl41.placeholders import PlaceholderError, load_properties, substitute
 
-if TYPE_CHECKING:  # type-only: equiv's runtime import stays deferred (below)
+if TYPE_CHECKING:  # type-only: equiv's runtime import stays deferred
     from dsl41.minify import MinifyRefusal
     from dsl41.equiv import TierAResult, TierBCatalogResult, TierCResult
     from dsl41.viz import Direction
 
 
 def _emit(body: str, out: "Path | None") -> None:
-    """Write BODY to --out, or echo it to stdout -- one spelling of the five
-    emitters `report`/`uc`/`decompile`/`resolve`/`viz` used to write by hand
-    (DL-178g). Always writes bytes to the file: line endings survive exact,
-    which is what the three callers that used to `write_text` needed too --
-    `write_text` newline-translates on Windows, `write_bytes` never does, and
-    on POSIX the two are the same bytes. The caller supplies BODY exactly as
-    it should read in both places, including any trailing newline (`uc`
-    wants one; the rest do not)."""
+    """Write BODY to --out as bytes, or echo it to stdout (DL-178g).
+
+    Bytes keep line endings exact: `write_text` newline-translates on Windows. The caller supplies
+    BODY exactly as it should read in both places, including any trailing newline."""
     if out is None:
         typer.echo(body, nl=False)
     else:
@@ -215,10 +209,9 @@ def equiv(
                 equivalent_tier_b(catalog_a, catalog_b, rename=rename_map, case_fold=case_fold)
             )
             if tier is EquivTier.b:
-                # tier b reads set(A.jobs) & set(B.jobs) and compares edges,
-                # not the node list: two disjoint catalogs can both come back
-                # equivalent. Tier (a) owns the job-set question (ir-design
-                # ss6), so say so rather than let "equivalent" over-read.
+                # tier b compares edges over set(A.jobs) & set(B.jobs), not the node list, so two
+                # disjoint catalogs can both come back equivalent; tier (a) owns the job-set
+                # question (ir-design ss6)
                 typer.echo(
                     "  note: tier b compares only the jobs both catalogs define;"
                     " a job present in one catalog alone is tier (a)'s question"
@@ -291,8 +284,7 @@ def uc(
 
     catalog = load_catalog_or_exit_2(files, permit_unknown, properties)
     bundle = compile_to_uc(catalog)
-    # +"\n": the one emitter that wants its body to end in one, in both
-    # places (`_emit` writes and echoes BODY as given, never adding its own)
+    # +"\n": `uc` is the one emitter whose body ends in a newline; `_emit` adds none
     _emit(bundle.model_dump_json(indent=2) + "\n", out)
     typer.echo(
         f"{len(bundle.records)} record(s); {len(bundle.quarantined)} quarantined",
@@ -351,12 +343,10 @@ def decompile(
             report=fold_report,
         )
     except DslError as exc:
-        # a decompiler refusal (nothing emittable, unknown fold code) is the
-        # same class as a lowering refusal: the input never became output
-        # (DL-37a)
+        # a decompiler refusal is the same class as a lowering refusal: the input never became
+        # output (DL-37a)
         raise typer.Exit(refuse(exc, prefix="decompile refused")) from exc
-    # Emit BEFORE checking (DL-37a): the module must survive for inspection
-    # even when the check finds a decompiler gap.
+    # Emit BEFORE checking (DL-37a): the module survives for inspection if the check fails.
     _emit(source, out)
     for line in fold_report:
         typer.echo(f"fold: {line}", err=True)
@@ -464,8 +454,7 @@ def resolve(
 
 
 class VizDirection(str, Enum):
-    """`viz --direction`: the chart directions plus auto, which picks one per
-    component. The values are `viz.Direction` and "auto"."""
+    """`viz --direction`: the chart directions plus auto, which picks one per component."""
 
     auto = "auto"
     LR = "LR"
@@ -473,11 +462,7 @@ class VizDirection(str, Enum):
 
 
 class VizFormat(str, Enum):
-    """The five viz outputs, exclusive by construction (DL-75). They used to
-    be three booleans -- eight combinations for five modes, plus a precedence
-    rule (--explore beat --html) and per-flag prose about what each nullified.
-    html-chart is the mode DL-75 miscounted away and DL-76 brought back; it
-    returns as a value here, never as a flag combination."""
+    """The five viz outputs, exclusive by construction (DL-75); html-chart is a value (DL-76)."""
 
     report = "report"
     chart = "chart"
@@ -487,12 +472,10 @@ class VizFormat(str, Enum):
 
 
 def _refuse_removed_viz_flags(whole_graph: bool, html: bool, explore: bool) -> None:
-    """DL-75: the three mode booleans are gone. Naming the replacement beats
-    a bare "no such option" for anyone with the old command in a script --
-    and the one COMBINATION that named a mode of its own (DL-70(4)'s
-    --html --whole-graph single-chart page) gets its own line, because the
-    generic loop below would send its user to two formats that emit
-    something else."""
+    """DL-75: refuse the three removed mode booleans and name the replacement format.
+
+    The --html --whole-graph combination (DL-70(4)) gets its own line, since the generic loop
+    would send its user to two formats that emit something else."""
     if whole_graph and html:
         raise typer.Exit(
             refuse(
@@ -516,20 +499,14 @@ def _refuse_removed_viz_flags(whole_graph: bool, html: bool, explore: bool) -> N
 
 
 def _refuse_undeliverable_viz_flags(*, fixed_scale: bool) -> None:
-    """DL-75: refuse a shaping flag only where the chosen format cannot
-    deliver its effect -- refusing one the user is getting anyway teaches
-    nothing except to distrust the refusals. --elk/--fixed-scale stay silent
-    under --format html, which already lays its charts out with ELK at
-    natural scale; --format html-chart clears all five (same page defaults,
-    and its one chart is to_mermaid's whole graph, so --collapse-threshold
-    shapes it and every standalone job is on it already -- DL-76);
-    --format explore passes that same test for --elk and
-    --include-singletons (it always lays out with ELK, and always carries
-    every standalone job -- search must find them), and since DL-190 for
-    --collapse-threshold too: the page folds the over-threshold boxes before
-    its first layout, the report's own rule. That leaves ONE, so it is
-    stated once rather than kept as a table of one row (DL-193);
-    `_refuse_removed_viz_flags` above earns its table with three."""
+    """DL-75: refuse a shaping flag only where the chosen format cannot deliver its effect.
+
+    --elk/--fixed-scale are silent under --format html, which already lays out with ELK at natural
+    scale. --format html-chart clears all five: its one chart is to_mermaid's whole graph, so
+    --collapse-threshold shapes it and every standalone job is on it (DL-76). --format explore
+    clears --elk and --include-singletons (it always lays out with ELK and carries every
+    standalone job) and --collapse-threshold (DL-190; the page folds over-threshold boxes
+    before its first layout). One flag is left, stated once (DL-193)."""
     if not fixed_scale:
         return
     typer.echo(
@@ -592,8 +569,7 @@ def viz(
     ),
     permit_unknown: bool = PERMIT_UNKNOWN,
     properties: list[Path] = PROPERTIES,
-    # Removed booleans (DL-75), kept hidden only so passing one names its
-    # replacement instead of dying with a bare "no such option".
+    # Removed booleans (DL-75), hidden so passing one names its replacement.
     whole_graph: bool = typer.Option(False, "--whole-graph", hidden=True),
     html: bool = typer.Option(False, "--html", hidden=True),
     explore: bool = typer.Option(False, "--explore", hidden=True),
@@ -618,9 +594,8 @@ def viz(
     if output_format is VizFormat.explore:
         _refuse_undeliverable_viz_flags(fixed_scale=fixed_scale)
     catalog = load_catalog_or_exit_2(files, permit_unknown, properties)
-    # One name for the option all the way down. The report's default of 12 is
-    # the four Mermaid formats'; `--format explore` keeps None, which means
-    # "fold nothing" -- the page opens on the whole graph (DL-71, DL-190).
+    # One name for the option all the way down. The report's default of 12 is the four Mermaid
+    # formats'; `--format explore` keeps None, "fold nothing" (DL-71, DL-190).
     if output_format is not VizFormat.explore and collapse_threshold is None:
         collapse_threshold = DEFAULT_COLLAPSE_THRESHOLD
     title = ", ".join(f.name for f in files)
@@ -674,12 +649,9 @@ def viz(
 
 
 def _print_refusal(exc: "MinifyRefusal") -> None:
-    """One refusal block on stderr, led by what it is made of.
+    """One refusal block on stderr, led by the warning that the quoted estate text must not travel.
 
-    A refusal has to quote the value and the file:line or the owner cannot act
-    on it -- but that quote is estate text, and the whole point of the command
-    is that estate text does not travel. So the block says so before it says
-    anything else. Printed once, not per line.
+    The block quotes the value and file:line so the owner can act. Printed once, not per line.
     """
     typer.echo(
         "minify refused. The lines below QUOTE THE ESTATE (values, file names,"
@@ -762,8 +734,7 @@ def minify(
                 )
         result = minify_files(parsed, verify=verify, scrub_timezones=scrub_timezones)
         if out is not None:
-            # A --out that names a FILE, or a path under one, is an OSError from
-            # mkdir; without this it left the surface as an exit-1 traceback.
+            # a --out naming a FILE, or a path under one, is an OSError from mkdir
             out.mkdir(parents=True, exist_ok=True)
     except MinifyRefusal as exc:
         _print_refusal(exc)

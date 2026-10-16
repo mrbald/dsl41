@@ -1,15 +1,8 @@
-"""What more than one CLI verb group needs (DL-137's split).
+"""Options, the catalog door and exit-code readings shared by more than one verb group (DL-137).
 
-Three things live here and nothing else does: the options several verb
-groups declare, the door every catalog-consuming verb loads through, and
-the readings that turn an answer -- an exception, a control-socket
-response -- into this surface's exit code.
-
-The layering rule is one-directional and is the whole point: `cli.py`
-imports the verb modules, the verb modules import this one, and this one
-imports no CLI module at all. Names here are public because a private name
-crossing a module boundary is a coupling neither module promised (DL-74,
-DL-78; scripts/arch_check.py gate 2).
+`cli.py` imports the verb modules, the verb modules import this one, and this one imports no CLI
+module. Names here are public because a private name crossing a module boundary is a coupling
+neither module promised (DL-74, DL-78; scripts/arch_check.py gate 2).
 """
 
 from __future__ import annotations
@@ -88,8 +81,7 @@ SEMANTICS_OPT = typer.Option(
 
 
 def load_semantics(items: "list[str] | None", *, option: str = "--semantics") -> dict[str, str]:
-    """Parse repeated NAME=VALUE switches; an unknown name or value exits 2
-    with the allowed names or values (DL-252)."""
+    """Parse repeated NAME=VALUE switches; an unknown name or value exits 2 (DL-252)."""
     try:
         return parse_assignments(items or ())
     except ValueError as exc:
@@ -107,10 +99,8 @@ def load_catalog_or_exit_2(
     return load_catalog_and_ast_or_exit_2(files, permit_unknown, properties)[0]
 
 
-#: The exit-2 class: every way an input can fail to reach the tool, in one
-#: place. Two spellings of it decided that question before (DL-75 review
-#: 2026-09-19); `LoweringError` is in the tuple because the door below lowers,
-#: and the read/parse half cannot raise it.
+#: The exit-2 class: every way an input can fail to reach the tool (DL-75). `LoweringError` is
+#: in the tuple because the catalog door lowers; the read and parse half cannot raise it.
 _EXIT_2_ERRORS = (JilParseError, LoweringError, PlaceholderError, OSError, UnicodeDecodeError)
 
 
@@ -120,13 +110,9 @@ def parse_files_or_exit_2(
 ) -> tuple[list[JilFile], dict[str, str]]:
     """Read, substitute and parse; returns (parsed ASTs, input fingerprint).
 
-    The door's body minus lowering, so a verb that wants the AST and not the
-    catalog -- `minify` -- asks the same question in the same words. The
-    fingerprint -- path -> sha256 -- is the ss10 spec_drift baseline (DL-65)
-    and hashes the SAME bytes this load parsed (review: a separate re-read
-    could baseline bytes the run never loaded, inverting the drift hint's one
-    job), inside the same guarded try so an unreadable input stays an exit-2
-    refusal."""
+    The fingerprint (path -> sha256) is the ss10 spec_drift baseline (DL-65). It hashes the bytes
+    this load parsed, and an unreadable input stays an exit-2 refusal.
+    """
     try:
         parsed: list[JilFile] = []
         fingerprint: dict[str, str] = {}
@@ -142,8 +128,7 @@ def parse_files_or_exit_2(
             parsed.append(parse(text, file=str(path)))
         return parsed, fingerprint
     except _EXIT_2_ERRORS as exc:
-        # OSError/UnicodeDecodeError: unreadable input (missing file, directory,
-        # non-UTF-8) never reached the tool -- same exit-2 class as a refusal.
+        # unreadable input (missing, a directory, non-UTF-8) never reached the tool: exit 2
         raise typer.Exit(refuse(exc)) from exc
 
 
@@ -152,9 +137,7 @@ def load_catalog_and_ast_or_exit_2(
     permit_unknown: bool,
     properties: list[Path] | None = None,
 ) -> tuple[CatalogIR, list[JilFile], dict[str, str]]:
-    """Returns (catalog, parsed ASTs, input fingerprint): the door every
-    catalog-consuming verb loads through. Parsing is `parse_files_or_exit_2`;
-    lowering is guarded here, under the same exit-2 class."""
+    """Returns (catalog, parsed ASTs, input fingerprint); lowering failures exit 2."""
     parsed, fingerprint = parse_files_or_exit_2(files, properties)
     try:
         return lower_catalog(parsed, permit_unknown=permit_unknown), parsed, fingerprint
@@ -173,9 +156,7 @@ def load_tz_aliases(path: "Path | None") -> "dict[str, str] | None":
 
 
 def check_base_tz(timezone: str | None, tz_aliases: "dict[str, str] | None" = None) -> None:
-    """Preflight the run-level base zone: per-job zones gate in ss8, but the
-    --timezone flag would otherwise surface as a raw traceback from the
-    Scheduler with the wrong exit code (DL-45)."""
+    """Preflight the run-level base zone (per-job zones gate in ss8) so --timezone exits 2 (DL-45)."""
     if timezone is None:
         return
     if resolve_timezone(timezone, tz_aliases) is None:
@@ -188,8 +169,7 @@ def check_base_tz(timezone: str | None, tz_aliases: "dict[str, str] | None" = No
 
 
 def import_tui_or_exit_2():
-    """Guarded textual import (runner-design ss14): the core package keeps
-    its three runtime deps; the TUI is the optional [ui] extra."""
+    """Guarded textual import (runner-design ss14): the TUI is the optional [ui] extra."""
     try:
         from dsl41 import runner_tui
     except ModuleNotFoundError as exc:
@@ -205,17 +185,9 @@ def import_tui_or_exit_2():
 def walk_estate_or_exit_2(anchor_dir: Path) -> "EstateWalk":
     """ss1.3's archive registry, resolved for a verb, or exit 2.
 
-    `audit`, `journal`, `runs` and `estate prune` each gained an
-    estate-wide mode (PR-02f) and all four enter it the same way: the
-    lineage ANCHOR stands where a run root would. This is the one door --
-    the walk's refusal becomes this surface's exit 2, and the note about
-    a PROVISIONAL registry row is said once here rather than four times.
-
-    A provisional row is not a refusal: ss1.3 marks genesis's row
-    `segment_durable: false` until its first segment lands and tells every
-    cross-period reader to ignore it until then. It is still said out
-    loud, because "the estate has three periods and this total covers two"
-    is a fact an operator needs and cannot otherwise see.
+    `audit`, `journal`, `runs` and `estate prune` enter their estate-wide mode through this door
+    (PR-02f): the lineage ANCHOR stands where a run root would. A provisional registry row
+    (`segment_durable: false`, ss1.3) is not a refusal; it is reported once here.
     """
     from dsl41.boundary import walk_estate
     from dsl41.runner_clock import EngineError
@@ -239,18 +211,11 @@ def walk_estate_or_exit_2(anchor_dir: Path) -> "EstateWalk":
 
 
 def refuse(exc: BaseException | str, *, prefix: str = "") -> int:
-    """Print one refusal on stderr and answer with the exit code it earns.
+    """Print one refusal on stderr and return the exit code it earns (DL-137).
 
-    ONE spelling of the rule the CLI's exit-code contract states (DL-137;
-    the copies this replaced said it once per verb): an input that never
-    reached the tool, or a gate that would not let a run start, is exit 2.
-    `prefix` is what the caller puts before the colon -- the option, the
-    socket, the root -- and an empty one prints the refusal alone.
-
-    It RETURNS the code rather than raising it because the surfaces
-    legitimately differ and only there: a verb raises
-    `typer.Exit(refuse(exc))`, an async body that still owes a lock or a
-    supervisor its teardown does `return refuse(exc)`.
+    An input that never reached the tool, or a gate that refused a run, is exit 2. `prefix` goes
+    before the colon. It returns the code so an async body can `return refuse(exc)` after its
+    teardown, where a verb raises `typer.Exit(refuse(exc))`.
     """
     typer.echo(f"{prefix}: {exc}" if prefix else str(exc), err=True)
     return 2
@@ -258,8 +223,7 @@ def refuse(exc: BaseException | str, *, prefix: str = "") -> int:
 
 def read_header_of(response: dict[str, Any]) -> "tuple[str, int] | None":
     """The concurrency-model ss6 read header off one control answer, or None after printing
-    the refusal -- the ONE check (DL-137): two verbatim copies differed
-    only in how they exited."""
+    the refusal (DL-137)."""
     baseline, epoch = response.get("baseline_id"), response.get("epoch")
     if not isinstance(baseline, str) or not isinstance(epoch, int):
         typer.echo(str(response.get("error", "the engine answered no read header")), err=True)
@@ -268,12 +232,11 @@ def read_header_of(response: dict[str, Any]) -> "tuple[str, int] | None":
 
 
 def _pins(request: dict[str, Any]) -> str:
-    """The flags that rebuild this envelope's read-header half: `--expect`,
-    `--epoch` and `--baseline`, as they were PLACED in it (DL-217).
+    """The `--expect`, `--epoch` and `--baseline` flags as placed in this envelope (DL-217).
 
-    Empty for an envelope that names no `expect` -- the seal, whose retry
-    route restores its own baseline and epoch from the committed record
-    (cli_estate), and so needs, and has, no such flags."""
+    Empty for an envelope with no `expect`, such as the seal, whose retry restores its own baseline
+    and epoch from the committed record (cli_estate).
+    """
     import shlex
 
     expect = request.get("expect")
@@ -287,8 +250,7 @@ def _pins(request: dict[str, Any]) -> str:
 
 
 def _retry_as(request: dict[str, Any], retry_command: str | None) -> str:
-    """The exact retry: the id plus the pins, prefixed by the command that
-    carries it when that is not the one the operator typed."""
+    """The exact retry: the id plus the pins, prefixed by the command when it differs."""
     import shlex
 
     flags = f"--request-id {shlex.quote(str(request['request_id']))}{_pins(request)}"
@@ -296,28 +258,21 @@ def _retry_as(request: dict[str, Any], retry_command: str | None) -> str:
 
 
 def _sending(request: dict[str, Any], retry_command: str | None) -> None:
-    """The pre-send line (DL-217): printed and flushed BEFORE the first
-    write, so it survives a client that dies mid-exchange -- killed,
-    interrupted, or reporting a transport failure. It is the exact-retry
-    flags themselves, quoted for a shell: the id and the values actually
-    placed in the envelope, which is everything an exact retry needs beside
-    the original arguments. Never the payload: the arguments already hold
-    it, and stderr is often a shared log.
+    """The pre-send line (DL-217): the exact-retry flags, quoted for a shell.
 
-    A RECORD, printed before every mutation whatever its outcome. The
-    ADVICE to use it is the exit-4 line, which is the only one that says
-    "retry ONLY as"."""
+    It is printed and flushed before the first write, so it survives a client that dies
+    mid-exchange. It never carries the payload. It is a record, printed for every mutation; the
+    exit-4 line is the only one that advises "retry ONLY as".
+    """
     typer.echo(f"sending: {_retry_as(request, retry_command)}", err=True)  # echo flushes
 
 
 def _no_decision(request: dict[str, Any], retry_command: str | None = None) -> None:
-    """DL-92's fourth outcome, said out loud. The id is on stderr because it
-    is the only thing that makes the retry safe, and a caller that lost the
-    round trip has nowhere else to get it: the answer that would have
-    carried it never came. The pins ride with it (DL-217): the verb re-reads
-    the revision, the epoch and the baseline when it is not given them, and
-    the fingerprint covers all three, so an id carried back alone is a
-    collision rather than a retry once any of them has moved."""
+    """DL-92's fourth outcome. The id goes to stderr because it is what makes the retry safe.
+
+    The pins ride with it (DL-217): the fingerprint covers revision, epoch and baseline, so an id
+    carried back alone is a collision once any of them has moved.
+    """
     typer.echo(
         f"no decision: this command may still apply. Re-read, then retry ONLY as"
         f" {_retry_as(request, retry_command)}",
@@ -326,10 +281,8 @@ def _no_decision(request: dict[str, Any], retry_command: str | None = None) -> N
 
 
 def _collision(response: dict[str, Any]) -> None:
-    """Both facts of a collision refusal (DL-217): this request was
-    refused, and the id it carried already holds an earlier decision. The
-    nested decision is the earlier command's, never this one's -- the exit
-    stays the refusal's 2."""
+    """Both facts of a collision refusal (DL-217): this request was refused, and its id already
+    holds an earlier decision. The exit stays the refusal's 2."""
     from dsl41.runner_control import original_decision_text
 
     original = original_decision_text(response)
@@ -348,49 +301,27 @@ def command_outcome(
     seal_in_flight_by_id: bool = False,
     retry_command: str | None = None,
 ) -> int:
-    """Send one concurrency-model ss6 command envelope and answer with its outcome: DL-92's
-    four (0 applied / 2 refused / 3 rejected / 4 unknown).
+    """Send one concurrency-model ss6 command envelope; return DL-92's outcome (0 applied, 2
+    refused, 3 rejected, 4 unknown).
 
-    ONE implementation for `sendevent`/`host` and for the live seal,
-    because reading an answer is the PROTOCOL's business, not the verb's
-    -- and because the transport half has to read the same way at every
-    one of them, which is the half that was wrong. A dropped connection
-    used to land on exit 2 wherever it happened, and 2 promises the log
-    says nothing about the command and it is safe to send again unchanged.
-    That promise holds for a request that never left; for one that left and
-    got no answer it is exactly backwards, because the engine fsyncs an
-    attempt before it feeds it. Delivered-and-unanswered is the case
-    `unknown` exists for.
+    One implementation serves `sendevent`/`host` and the live seal (DL-137). A dropped connection
+    after the request left is `unknown` (4), not 2: the engine fsyncs an attempt before it feeds
+    it, so 2's "safe to send again unchanged" would be false.
 
-    `on_applied` is the one thing a caller may add to the ladder: the
-    boundary has a sentence to print when it committed and a mutation does
-    not (DL-137 -- the seal's copy of this ladder classified its answer by
-    hand, which is how the classifier's `rejected` reading went missing
-    from one of the two).
+    `on_applied` adds the sentence a boundary prints when it committed.
 
-    `rejected_as_unknown` is for a surface whose PUBLISHED table has no 3.
-    `dsl41 seal` is the one: period-model ss7 states 0/2/4/7 for it, and 3 is
-    taken in that same feature area -- a live ENGINE exits 3 when its
-    period sealed, and init units read that number
-    (deployment-runbook ss6a). It is a DEFENCE, and the live seal's ladder
-    test in `tests/test_runner_control.py` already drives a synthetic
-    `rejected` reply through it and exits 4. What stood here instead was an
-    ARGUMENT that nothing reaches the fold today, read off what the
-    engine's `seal` handler happens to answer -- an argument that goes
-    stale the day that handler grows a decision, while the test does not
-    (DL-145). Widening ss7's table is ss7's call, not this slice's.
+    `rejected_as_unknown` is for a surface whose published table has no 3. `dsl41 seal` is one:
+    period-model ss7 states 0/2/4/7 for it, and a live engine exits 3 when its period sealed
+    (deployment-runbook ss6a). The ladder test in `tests/test_runner_control.py` drives a
+    synthetic `rejected` reply through it and exits 4 (DL-145).
 
-    `seal_in_flight_by_id` is the live seal's other per-code reading. A
-    `seal_in_flight` refusal names the boundary in flight
-    (`in_flight_request_id`, control-protocol ss3). When that is THIS
-    request's own id, its boundary is still running and the outcome is
-    unknown: exit 4. When it is another's, this request did nothing: exit 2,
-    without the promise that the period is still open, because the other
-    boundary may yet commit it.
+    `seal_in_flight_by_id`: a `seal_in_flight` refusal names the boundary in flight
+    (`in_flight_request_id`, control-protocol ss3). If that is this request's own id the outcome
+    is unknown (4). If it is another's, this request did nothing (2), with no promise that the
+    period is still open.
 
-    `retry_command` names the command an exact retry has to be sent as when
-    it is not the one the operator typed: `release-held` sends one OFF_HOLD
-    per job, and its retry is the one-job `sendevent` (DL-217).
+    `retry_command` names the command an exact retry is sent as when it is not the one typed:
+    `release-held` sends one OFF_HOLD per job, and its retry is the one-job `sendevent` (DL-217).
     """
     import json as json_mod
 
@@ -441,9 +372,7 @@ def command_outcome(
 
 
 def active_period(run_root: Path) -> int:
-    """Which period this root's ACTIVE segment holds, or 1 where the root
-    cannot say -- `runner_history.active_period_id` states the rule and why
-    it is a function; this is the CLI's degrade over it."""
+    """The period this root's ACTIVE segment holds, or 1 where the root cannot say."""
     from dsl41.runner_history import RunHistoryError, active_period_id
 
     try:
@@ -455,23 +384,14 @@ def active_period(run_root: Path) -> int:
 
 
 def lineage_of(run_root: Path) -> "Lineage | None":
-    """ss11 step 3's answer for this root's CURRENT active segment --
-    `boundary.select_seal` over `estate_wal(run_root)` -- or `None` when the
-    root cannot be read.
+    """ss11 step 3's answer for this root's active segment (`boundary.select_seal` over
+    `estate_wal(run_root)`), or `None` when the root cannot be read.
 
-    Shared by every CLI reader that needs the one question `select_seal`
-    answers: which seal, if any, this root's lineage proves committed right
-    now. `resume_target_period` asks it to find which period a resume opens
-    into; `cli_estate._committed_boundary` asks it to find which seal, if
-    any, a `--request-id` retry may match. Two copies of this read had
-    already drifted -- one carried the DL-149 reasoning below and the other
-    did not -- before this function existed to hold it once (DL-169).
-
-    `None` on any read failure, not `EngineError` alone: `select_seal` reads
-    its period numbers with a bare `int()`, so a hand-built record can raise
-    `ValueError` or `KeyError` here, and a caller that let anything but a
-    refusal escape turned a damaged lineage into an exit-1 traceback (the
-    DL-149 rule)."""
+    `None` on any read failure, not `EngineError` alone: `select_seal` reads its period numbers
+    with a bare `int()`, so a hand-built record can raise `ValueError` or `KeyError`, and a damaged
+    lineage must not become an exit-1 traceback (DL-149). Both `resume_target_period` and
+    `cli_estate._committed_boundary` read it here (DL-169).
+    """
     from dsl41.boundary import select_seal
     from dsl41.period import estate_wal
     from dsl41.runner_clock import EngineError
@@ -486,23 +406,12 @@ def lineage_of(run_root: Path) -> "Lineage | None":
 def resume_target_period(run_root: Path) -> int:
     """The period a resume of this root OPENS INTO (period-model ss11 step 5).
 
-    The newest segment's period, unless this root holds a COMMITTED boundary
-    no engine has opened yet: the seal commits period N+1, its manifest is
-    installed before the record that names it, and the resume that follows
-    opens N+1 and runs under N+1's pin.
-
-    Which is the period every CLI act on such a root is ABOUT: the profile
-    gate holds the launch options to it, a missing supervisor is started
-    with the deadman it pins, and an offline sealer closes it. Reading the
-    newest SEGMENT's number instead is what let one in-place profile change
-    refuse the options it was committed with and accept the ones it
-    replaced (DL-151).
-
-    A root this cannot read falls back to the active period -- these are
-    composition questions, and a damaged lineage is the resume's own refusal
-    to make, in its own words (`lineage_of`'s `None`, DL-169). The
-    opens_next-vs-seal half of the answer is `Lineage.target_period`'s own
-    (DL-171): it is the one place that invariant is spelled."""
+    The newest segment's period, unless the root holds a committed boundary no engine has opened
+    yet: then the resume opens N+1 under N+1's pin. Every CLI act on such a root is about that
+    period (DL-151). An unreadable root falls back to the active period; the resume makes its own
+    refusal (`lineage_of`'s `None`, DL-169). `Lineage.target_period` owns the opens_next-vs-seal
+    rule (DL-171).
+    """
     lineage = lineage_of(run_root)
     if lineage is not None:
         return lineage.target_period(active_period(run_root))
@@ -510,17 +419,13 @@ def resume_target_period(run_root: Path) -> int:
 
 
 def confirmed_resume_refusal(run_root: Path, anchor_dir: "Path | None") -> "EngineError | None":
-    """ss1.3's resume rule (DL-224) for a CLI route that resumes, before it
-    stages anything or wires a supervisor: the refusal, or None. The caller
-    holds `leader.lock`.
+    """ss1.3's resume rule (DL-224) for a CLI route that resumes: the refusal, or None.
 
-    It reads first without the anchor lock, writing nothing. A refusal read
-    that way can be stale, so it stands only once a second read under the
-    anchor lock confirms it (`boundary.resume_root_refusal`, `locked=True`);
-    a root that then passes resumes as any other does. Under the locks every
-    refusal counts, a busy anchor lock included, since `resume_run` would
-    raise it after the caller had staged and wired. `resume_run` repeats the
-    check under both locks either way."""
+    Call it before staging anything or wiring a supervisor, holding `leader.lock`. A refusal read
+    without the anchor lock can be stale, so it stands only once a second read under that lock
+    confirms it (`boundary.resume_root_refusal`, `locked=True`). Under the locks every refusal
+    counts, a busy anchor lock included. `resume_run` repeats the check under both locks.
+    """
     from dsl41.boundary import resume_root_refusal
 
     if resume_root_refusal(run_root, anchor_dir) is None:
@@ -538,8 +443,8 @@ def say_next(run_root: Path, estate_anchor: "Path | None") -> None:
 
 
 def statechart_report(exc: StatechartError) -> int:
-    """Print a `StatechartError`'s report on stderr, every line under its prefix, and
-    return its exit code, 7 (docs/statechart-engine.md ss5)."""
+    """Print a `StatechartError`'s report on stderr under its prefix; return exit code 7
+    (docs/statechart-engine.md ss5)."""
     typer.echo(exc.report(), err=True)
     return EXIT_STATECHART_ERROR
 
@@ -550,10 +455,9 @@ def statechart_exit(exc: StatechartError) -> NoReturn:
 
 
 def stops_on_statechart_error[**P, R](verb: Callable[P, R]) -> Callable[P, R]:
-    """Wrap a verb so that a `StatechartError` from anything it runs or replays
-    stops it with the report and exit 7, never a traceback and exit 1. A replay
-    names the WAL input in the report. cli.py wraps every verb that runs,
-    replays or reads back an estate."""
+    """Wrap a verb so a `StatechartError` from anything it runs or replays prints the report and
+    exits 7, naming the WAL input for a replay. cli.py wraps every verb that runs, replays or reads
+    back an estate."""
 
     @functools.wraps(verb)
     def guarded(*args: P.args, **kwargs: P.kwargs) -> R:

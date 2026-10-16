@@ -1,12 +1,9 @@
-"""The estate verbs: the period boundary and what lives around it
-(DL-137's split).
+"""The estate verbs: the period boundary and what lives around it (DL-137).
 
-`seal` closes the running period and commits the next one, live or
-offline (period-model ss7); `audit` re-derives a closed period and writes
-its attestation, `verify` validates one; `estate reclaim` moves a stale
-successor claim out of the way and `estate prune` deletes what retention
-allows. Registered on the app in `cli.py`, where the `estate` sub-app is
-assembled.
+`seal` closes the running period and commits the next, live or offline (period-model ss7);
+`audit` re-derives a closed period and writes its attestation, `verify` validates one;
+`estate reclaim` moves a stale successor claim out of the way and `estate prune` deletes what
+retention allows. `cli.py` assembles the `estate` sub-app.
 """
 
 from __future__ import annotations
@@ -52,9 +49,8 @@ if TYPE_CHECKING:
 
 _RUN_ROOT_OPT = typer.Option(..., "--run-root", help="The estate root.")  # period-model ss1.1
 
-#: the same option where the verb ALSO has an estate-wide mode: omitting it
-#: and naming the anchor alone is how a caller points at the lineage rather
-#: than at one of its roots (PR-02f)
+#: the same option where the verb ALSO has an estate-wide mode: naming the anchor alone points at
+#: the lineage rather than at one root (PR-02f)
 _ESTATE_ROOT_OPT = typer.Option(
     None,
     "--run-root",
@@ -89,26 +85,17 @@ def _next_profile(
 ) -> "RuntimeProfile":
     """C2's `RuntimeProfile` from the `--next-*` flags (period-model ss2.1).
 
-    Prefixed because a boundary names TWO periods and the CLI would
-    otherwise read as if it were describing the one that is running. What
-    it describes is the one about to open.
-
-    ONE gate for every `--next-*` flag (DL-145). The bounds are
-    `RuntimeProfile`'s -- the machine-policy literal and the positive
-    deadman -- and this catches the model's refusal instead of hand-copying
-    it: the copy that stood here checked the policy and not the deadman, so
-    `--next-deadman 0` was an uncaught ValidationError and exit 1 while
-    `run --deadman 0` was a clean exit 2. The one rule the model cannot
-    hold is the PAIRING below, which is about two flags and not about a
-    field."""
+    Prefixed because a boundary names two periods and these flags describe the one about to open.
+    One gate for every `--next-*` flag (DL-145): it catches `RuntimeProfile`'s own refusal
+    (machine-policy literal, positive deadman) rather than copying it, so `--next-deadman 0` is a
+    clean exit 2. The model cannot hold the PAIRING below, which spans two flags."""
     from pydantic import ValidationError
 
     from dsl41.period import runtime_profile_from_cli
 
     if deadman is not None and not detached:
-        # loud, not silent: without a supervisor there is nothing to hold
-        # the lifelines, so nothing a deadman could bound
-        # (concurrency-model ss8). `run` says the same of its own flags.
+        # loud, not silent: without a supervisor nothing holds the lifelines a deadman could
+        # bound (concurrency-model ss8); `run` says the same of its own flags
         raise typer.Exit(
             refuse("--next-deadman needs --next-detached: a tethered run has no supervisor")
         )
@@ -136,13 +123,11 @@ def _stage_next(
     permit_unknown: bool,
     properties: "list[Path] | None",
 ) -> "tuple[StagedNextPeriod, StagedManifest, CatalogIR]":
-    """ss7's staging, both modes: the immutable bundle, then
-    `staged_manifest.json` and `candidate.json` under
-    `periods/.staging/<stage_digest>/`.
+    """ss7's staging, both modes: the immutable bundle, then `staged_manifest.json` and
+    `candidate.json` under `periods/.staging/<stage_digest>/`.
 
-    Content-addressed, so a repeat is idempotent and a concurrent client
-    writing the same bytes is harmless -- which is what makes it safe to do
-    this against a LIVE engine's root without holding its lock."""
+    Content-addressed, so a repeat is idempotent and a concurrent client writing the same bytes is
+    harmless, which makes it safe against a LIVE engine's root without its lock."""
     from dsl41.boundary import stage_next_period, stage_period
 
     catalog, parsed, _ = load_catalog_and_ast_or_exit_2(files, permit_unknown, properties)
@@ -256,9 +241,8 @@ def seal(
     try:
         lock = acquire_run_root(run_root)
     except EngineError:
-        # the lock IS the discriminator: an engine that holds it is a live
-        # engine, and probing a socket would answer a different question
-        # (a socket file outlives the process that made it)
+        # the lock IS the discriminator: probing a socket answers a different question (a socket
+        # file outlives the process that made it)
         raise typer.Exit(
             _live_seal(
                 run_root,
@@ -294,47 +278,25 @@ def seal(
 
 
 def _committed_boundary(run_root: Path, request_id: "str | None") -> "Seal | None":
-    """The committed boundary `--request-id` names, if this root's LINEAGE
-    holds one (period-model ss2.2, DL-169).
+    """The committed boundary `--request-id` names, if this root's LINEAGE holds one
+    (period-model ss2.2, DL-169).
 
-    ss2.2 promises that an exact retry of a committed boundary is answered
-    from the next period, and the engine keys that answer on the request
-    FINGERPRINT -- which covers the `baseline_id` and the `epoch` the
-    original attempt carried. A retry composed from TODAY's header carries
-    the NEW period's baseline and term, so it names a different command and
-    is refused as a collision: the promised route was unreachable from this
-    CLI until DL-151. The seal is where the boundary-time envelope survives.
+    ss2.2 promises that an exact retry of a committed boundary is answered from the next period.
+    The engine keys that answer on the request fingerprint, which covers the `baseline_id` and
+    `epoch` of the original attempt (DL-151), so the seal recovers the boundary-time envelope here.
 
-    Proved by `cli_common.lineage_of` (`boundary.select_seal`), never by
-    which sidecar FILES happen to exist. `period.sealed_periods` lists every
-    file under `seals/`, "whether or not it also holds the segment that
-    re-derives it" (its own docstring) -- so its newest entry can be an
-    ORPHAN, a sidecar a crash wrote between that write and the `seal`
-    record's WAL append. ss2.2 is explicit that "an orphan sidecar is
-    ignored by rule" and "only a committed seal is ever deduplicated": a
-    glob answered a retry from exactly the evidence the rule refuses, and a
-    retry aimed at an orphan read back "already closed" for a period that
-    never closed (DL-169). `select_seal` is the same lineage proof the live
-    route's engine carries in `EstateHome.prior_seal_record`
-    (`ControlServer._committed_seal`) -- either the `seal` record branch, or
-    the `opens_from_seal` digest-link branch that keeps a rolled root
-    answerable once its predecessor WAL is lawfully pruned (PR-02a/PR-30e).
+    The proof is `cli_common.lineage_of` (`boundary.select_seal`), never which sidecar files exist:
+    `period.sealed_periods` can list an ORPHAN sidecar written between a crash and the `seal`
+    record's WAL append, and ss2.2 says "an orphan sidecar is ignored by rule" and "only a
+    committed seal is ever deduplicated" (DL-169). `select_seal` is the lineage proof the live
+    engine carries in `EstateHome.prior_seal_record` (`ControlServer._committed_seal`), through
+    the `seal` record branch or the `opens_from_seal` digest-link branch (PR-02a/PR-30e).
 
-    Called fresh here rather than threading an engine's `prior_seal_record`
-    through: `_offline_seal` has just resumed one and could pass it along,
-    but review found that path strictly weaker -- it skips `select_seal`'s
-    own digest re-verification, and it turns a MISSING sidecar's ss11
-    refusal into a silent `None`, which would let a second boundary be
-    driven against one that is durably committed but briefly unreadable.
-    `_live_seal` has no resume to draw from at all, so one shared fresh
-    read here -- rather than two designs, one per caller -- is also the
-    simpler shape (DL-169).
-
-    `_live_seal`'s call reads a WAL a live engine may be appending to right
-    now, which the glob never did. Safe by the same rule `read_journal`
-    already states for a crash: the WAL is append-only, so a read racing a
-    write can only ever tear the LAST line, and a torn final line is
-    dropped, not raised (`runner_journal.read_journal`)."""
+    It is read fresh rather than taken from `_offline_seal`'s resumed engine, which would skip
+    `select_seal`'s digest re-verification and turn a missing sidecar's ss11 refusal into a
+    silent `None`. `_live_seal` reads a WAL a live engine may be appending to; the WAL is
+    append-only, so a racing read can only tear the last line, which is dropped
+    (`runner_journal.read_journal`)."""
     if request_id is None:
         return None
     from dsl41.cli_common import lineage_of
@@ -357,21 +319,13 @@ def _live_seal(
     actor: str,
     request_id: "str | None",
 ) -> int:
-    """ss7 live mode: stage C2, then ask the leading engine for the
-    boundary over the control socket.
+    """ss7 live mode: stage C2, then ask the leading engine for the boundary over the control
+    socket.
 
-    The CLI stages FIRST and names the staged bytes by `stage_digest`; the
-    engine validates exactly those bytes. Two clients racing on one root
-    stage under two fingerprints and the engine commits exactly the one its
-    request names.
-
-    The ANSWER is read by `cli_common.command_outcome`, the same ladder
-    `sendevent` and `host` exit on: a boundary asked for over the socket is
-    a mutation, and DL-92's four outcomes are the protocol's reading of one,
-    not the verb's (DL-137 -- the copy this replaced classified by hand).
-    What this SURFACE does with that reading is still its own, and ss7's
-    table is 0/2/4: an answer it cannot classify stays `unknown`, as it was
-    before the ladder was shared."""
+    The CLI stages first and names the staged bytes by `stage_digest`; the engine validates exactly
+    those bytes, so two clients racing on one root stage under two fingerprints and the engine
+    commits the one its request names. The answer is read by `cli_common.command_outcome`
+    (DL-92, DL-137); ss7's table is 0/2/4, and an answer it cannot classify stays `unknown`."""
     import uuid
 
     from dsl41.runner_control import ControlClientError, roundtrip
@@ -393,12 +347,11 @@ def _live_seal(
     baseline, epoch = parsed_header
     retry = _committed_boundary(run_root, request_id)
     if retry is not None:
-        # ss2.2's retry route: the envelope the ORIGINAL attempt carried,
-        # which is the only one the engine's stored decision answers to
+        # ss2.2's retry route: the envelope the ORIGINAL attempt carried, the only one the
+        # engine's stored decision answers to
         baseline, epoch = retry.baseline_id, retry.epoch
-    # `staged` is the OWNER's projection (stage_next_period's return,
-    # DL-137) -- the reflection rebuild it replaces was the third spelling
-    # of which fields cross from launcher-pin to client-proposal
+    # `staged` is the OWNER's projection (stage_next_period's return, DL-137): which fields cross
+    # from launcher-pin to client-proposal
     staged, staged_manifest, _ = _stage_next(
         run_root, next_files, profile, permit_unknown, properties
     )
@@ -416,11 +369,8 @@ def _live_seal(
     return command_outcome(
         socket_path,
         request,
-        # the anchor the caller named rides into the printed resume command
-        # (DL-145): a ROLLED root's anchor is the LINEAGE's and must be
-        # spelled explicitly, so a hard-coded None handed the operator a
-        # command that opens the wrong lineage -- and the offline sealer,
-        # which does pass it, printed the right one for the same estate
+        # the anchor the caller named rides into the printed resume command (DL-145): a ROLLED
+        # root's anchor is the LINEAGE's and must be spelled explicitly
         on_applied=lambda: say_next(run_root, estate_anchor),
         # ss7 publishes 0/2/4 for this verb and 3 means something else here
         # (a sealed ENGINE exits 3); see `command_outcome`
@@ -432,17 +382,14 @@ def _live_seal(
 
 
 def _closing_manifest(run_root: Path) -> "Manifest":
-    """The manifest `_offline_seal` closes against. Raises `EngineError` with
-    the refusal text when the root cannot give one."""
+    """The manifest `_offline_seal` closes against; raises `EngineError` when the root cannot
+    give one."""
     from dsl41.period import read_period_manifest
     from dsl41.runner_clock import EngineError
 
     try:
-        # the period this sealer will CLOSE, which on a root with a
-        # committed boundary is the one `resume_run` opens (DL-151):
-        # reading the newest segment's here loaded C1's bundle over a root
-        # whose next segment runs C2, and the resume refused on a catalog
-        # hash the operator never named
+        # the period this sealer will CLOSE; on a root with a committed boundary that is the one
+        # `resume_run` opens (DL-151)
         pinned = read_period_manifest(run_root, resume_target_period(run_root))
     except Exception as exc:  # RunHistoryError or EngineError: both are refusals
         raise EngineError(f"{run_root}: {exc}") from exc
@@ -456,30 +403,24 @@ def _closing_manifest(run_root: Path) -> "Manifest":
 
 
 def _load_closing_catalog(run_root: Path, pinned: "Manifest") -> "tuple[CatalogIR, datetime]":
-    """The CLOSING period's catalog and the clock reading its preflight used.
-    Raises `EngineError` as the loader does, and with the preflight's refusal
-    text when that fails."""
+    """The CLOSING period's catalog and the clock reading its preflight used; raises
+    `EngineError` as the loader does, with the preflight's refusal text on failure."""
     from datetime import UTC, datetime
 
     from dsl41.runner_clock import EngineError
 
     from dsl41.boundary import load_bundle_catalog, preflight_errors
 
-    # the OWNER's loader (DL-145): the copy this replaced dropped the
-    # JilParseError/LoweringError -> EngineError wrap, so a bundle
-    # that no longer parses left `_offline_seal`'s `except EngineError` untouched
-    # and the verb exited 1 on a traceback.
+    # the OWNER's loader (DL-145) wraps JilParseError/LoweringError as EngineError, which
+    # `_offline_seal`'s `except EngineError` handles.
     #
-    # `permit_unknown` for `_period_catalog`'s reason: these are the
-    # exact bytes the CLOSING period ran, the gate that decided
-    # whether an unknown attribute was acceptable ran once at launch,
-    # and re-asking it here would make `dsl41 seal` refuse a root
-    # `dsl41 run` is serving.
+    # `permit_unknown`: these are the exact bytes the CLOSING period ran, the unknown-attribute
+    # gate ran once at launch, and re-asking it would make `dsl41 seal` refuse a root `dsl41 run`
+    # is serving.
     catalog = load_bundle_catalog(run_root, pinned.source_bundle_hash, permit_unknown=True)
-    # DL-240: the live path's boundary check (`preflight_errors`) only
-    # ever sees the SUCCESSOR catalog (ss10.1); offline sealing resumes
-    # and dispatches the CLOSING period's own catalog first, so it is
-    # the one that needs this gate here, before any adapter is wired.
+    # DL-240: the live path's boundary check (`preflight_errors`) sees only the SUCCESSOR catalog
+    # (ss10.1); offline sealing dispatches the CLOSING period's own catalog first, so it needs
+    # this gate before any adapter is wired.
     now = datetime.now(UTC).replace(tzinfo=None)
     errors = preflight_errors(catalog, pinned.runtime_profile, at=now)
     if errors:
@@ -506,13 +447,10 @@ def _offline_seal_request(
     from dsl41.boundary import SealRequest
 
     return SealRequest(
-        # ss2.2's retry route: a retry carries the envelope its ORIGINAL
-        # attempt carried, because the stored decision is fingerprinted over
-        # it. Composing from the engine's CURRENT header -- which `resume_run`
-        # in `_offline_seal` has just moved on to the next period -- names a different
-        # command, and offline that does not merely fail to deduplicate:
-        # nothing between here and the cutoff would recognise the retry, so
-        # it would close a SECOND period (DL-151).
+        # ss2.2's retry route: a retry carries the envelope its ORIGINAL attempt carried, because
+        # the stored decision is fingerprinted over it. The engine's CURRENT header, which
+        # `resume_run` has moved to the next period, names a different command, and offline
+        # nothing would recognise the retry before it closed a SECOND period (DL-151).
         baseline_id=retry.baseline_id if retry is not None else engine.baseline_id,
         epoch=retry.epoch if retry is not None else engine.epoch,
         request_id=request_id or str(uuid.uuid4()),
@@ -535,33 +473,25 @@ async def _offline_seal(
     request_id: "str | None",
     lock: "LeaderLock",
 ) -> int:
-    """ss7 offline mode: no engine, so this process becomes the leader for
-    exactly one boundary.
+    """ss7 offline mode: no engine, so this process leads exactly one boundary.
 
-    `leader.lock` is already held (the caller took it, which is how the two
-    modes are told apart). `resume_run` is the same-root recovery barrier
-    in full -- it takes `anchor.lock`, appends a `leader` record at
-    epoch+1, replays, reconciles and re-drives recorded kills -- and the
-    boundary that follows is the SAME `submit_seal` a live engine serves.
-    Two entry modes, one body; the alternative is two implementations of
-    the one thing this model exists to have exactly one of.
-
-    C1 is loaded from the ROOT's own bundle, never from the command line:
-    the run root outlives the estate files it was launched from, and the
-    closing period's identity is the manifest's."""
+    The caller holds `leader.lock`, which tells the two modes apart. `resume_run` is the same-root
+    recovery barrier (`anchor.lock`, a `leader` record at epoch+1, replay, reconcile, recorded
+    kills), and the boundary is the same `submit_seal` a live engine serves. C1 is loaded from the
+    ROOT's own bundle, never the command line: the root outlives the estate files, and the closing
+    period's identity is the manifest's."""
     from dsl41.runner_admission import refuse_reserved_request_id
     from dsl41.runner_clock import EngineError, RealClock
     from dsl41.runner_startup import resume_run, wire_from_profile
 
-    # this path builds its `SealRequest` without an envelope, so the
-    # reserved prefix is refused here, as `parse_envelope` does on the socket
+    # this path builds its `SealRequest` without an envelope, so the reserved prefix is refused
+    # here, as `parse_envelope` does on the socket
     if request_id is not None:
         try:
             refuse_reserved_request_id(request_id)
         except EngineError as exc:
             return refuse(exc)
-    # ss1.3's resume rule (DL-224), before anything below stages C2 into the
-    # root or wires a supervisor: this sealer resumes the root, and
+    # ss1.3's resume rule (DL-224), before anything stages C2 into the root or wires a supervisor;
     # `leader.lock` is already held
     refusal = confirmed_resume_refusal(run_root, estate_anchor)
     if refusal is not None:
@@ -613,16 +543,15 @@ async def _offline_seal(
         failed = error
         raise
     finally:
-        # the lease goes back on every way out after the wiring (DL-145),
-        # a statechart error from the resume included
+        # the lease goes back on every way out after the wiring (DL-145), a statechart error from
+        # the resume included
         if wiring is not None:
             await _give_back(wiring, failed)
 
 
 async def _give_back(wiring: "Wiring", failed: BaseException | None) -> None:
-    """Return the supervisor lease and close the client. On the way out of a
-    failure the first error is the one reported: an error of the teardown's
-    own is printed once and does not replace it."""
+    """Return the supervisor lease and close the client; the first error is the one reported, and
+    the teardown's own is printed once."""
     from dsl41.state_machine import StatechartError
 
     if failed is None:
@@ -643,16 +572,12 @@ def _answer_from_committed(
     run_root: Path,
     estate_anchor: "Path | None",
 ) -> int | None:
-    """ss2.2's retry route offline: answer from the boundary that already
-    committed, or None when there is nothing to answer from.
+    """ss2.2's retry route offline: answer from the boundary that already committed, or None.
 
-    The live path gets this from the engine of period N+1, which keeps the
-    `seal` record it opened from (`ControlServer._committed_seal`). An
-    offline sealer submits to its own engine and passes no such door, so the
-    same rule (`runner_control.committed_retry`) is applied here to the
-    same evidence -- the sidecar -- with the same two outcomes: an EXACT
-    retry is the original answer, and the same id under a different
-    envelope is a collision (PR-30c, PR-30e)."""
+    The live path gets this from the period N+1 engine's `seal` record
+    (`ControlServer._committed_seal`). Offline, `runner_control.committed_retry` is applied to the
+    sidecar: an EXACT retry is the original answer, and the same id under a different envelope is
+    a collision (PR-30c, PR-30e)."""
     from dsl41.runner_control import RETRY_SWAP_REASON, committed_retry
 
     if seal is None:
@@ -681,9 +606,8 @@ def _answer_from_committed(
 
 
 async def _close_engine(engine: "Engine") -> None:
-    """Give back what an offline sealer took, whatever became of the
-    boundary: the engine's loop and its journal. One spelling, so an answer
-    that returns early cannot leave a live engine behind."""
+    """Give back what an offline sealer took, whatever became of the boundary: the engine's loop
+    and its journal."""
     import contextlib
 
     with contextlib.suppress(Exception):
@@ -695,20 +619,13 @@ async def _close_engine(engine: "Engine") -> None:
 async def _drive_boundary(
     engine: "Engine", request: "SealRequest", run_root: Path, estate_anchor: "Path | None"
 ) -> int:
-    """One queued boundary, driven to its outcome by this process's own
-    loop -- the offline sealer's tail.
+    """One queued boundary, driven to its outcome by this process's own loop.
 
-    Two things can finish first and they mean different things. The LOOP
-    ending is a committed boundary (`PeriodSealed`), a fail-stop, or a
-    crash. The REQUEST's future ending while the loop runs on is a refusal:
-    `abort_boundary` reopened admission and the period is still open, which
-    is exactly what ss7's exit code 2 is for -- so waiting on the loop
-    alone would wait forever for an engine that is correctly still
-    serving C1.
-
-    The four exits are ss7's: 0 committed, 2 refused with C1 still open,
-    4 an unknown outcome whose only safe retry is the printed
-    `request_id`, and 7 a statechart error (DL-327)."""
+    The LOOP ending is a committed boundary (`PeriodSealed`), a fail-stop, or a crash. The
+    REQUEST's future ending while the loop runs on is a refusal: `abort_boundary` reopened
+    admission and the period is still open, which is ss7's exit 2. Exits are ss7's: 0 committed,
+    2 refused with C1 still open, 4 unknown (retry only with the printed `request_id`), 7 a
+    statechart error (DL-327)."""
     import asyncio
     import contextlib
 
@@ -717,25 +634,20 @@ async def _drive_boundary(
     from dsl41.boundary import BoundaryFailStop, PeriodSealed
     from dsl41.state_machine import StatechartError
 
-    # `ensure_future` over the engine's own future: it hands the same
-    # object back and gives this function the `done`/`exception`/`result`
-    # surface its three-way classification is written against
+    # `ensure_future` hands back the engine's own future and gives the three-way classification
+    # its `done`/`exception`/`result` surface
     future = asyncio.ensure_future(engine.submit_seal(request))
     loop_task = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
     await asyncio.wait({future, loop_task}, return_when=asyncio.FIRST_COMPLETED)
     code = 2
     outcome: BaseException | None = None
     if future.done() and future.exception() is None:
-        # **The FUTURE decides, not the loop.** It is the boundary's own
-        # answer, and once it holds a committed boundary the boundary
-        # committed -- whatever the loop does afterwards. Reading the loop
-        # first would let an unrelated engine failure during teardown
-        # report exit 2, which ss7 defines as "it did NOT commit and the
-        # period is still open": the one lie about the estate this
-        # function could tell. The loop is still awaited, because it is a
-        # bounded number of turns from its own `PeriodSealed` and that
-        # object is the single authority for the sentence an operator
-        # reads; anything else it raises is printed as diagnostics.
+        # The FUTURE decides, not the loop: once it holds a committed boundary the boundary
+        # committed, whatever the loop does afterwards. Reading the loop first would report exit 2
+        # (ss7: "it did NOT commit and the period is still open") for an unrelated teardown
+        # failure. The loop is still awaited, because it is a bounded number of turns from its
+        # own `PeriodSealed`, the single authority for the operator's sentence; anything else it
+        # raises is printed as diagnostics.
         outcome = PeriodSealed(future.result())
         try:
             await loop_task
@@ -761,12 +673,8 @@ async def _drive_boundary(
         # (statechart-engine ss5, DL-327)
         code = statechart_report(outcome)
     elif outcome is not None:
-        # ss7 publishes 0/2/4/7 for this verb and nothing else (DL-145): the
-        # boundary did NOT commit and C1 is still open, whatever kind of
-        # exception said so. The exit-1 fork this replaced left the
-        # published table for anything that was not an `EngineError` and
-        # reported "the estate failed while running" for a period that is
-        # still serving.
+        # ss7 publishes 0/2/4/7 for this verb and nothing else (DL-145): whatever exception said
+        # so, the boundary did NOT commit and C1 is still open
         code = refuse(outcome)
     else:
         typer.echo("the engine loop returned without a boundary", err=True)
@@ -820,9 +728,9 @@ def audit(
                 " registry names (period-model ss1.3, PR-02f)"
             )
         )
-    # the anchor below is taken by `audit_period` for the ONE write that
-    # needs it and released again, so auditing a closed period while a later
-    # one is live is possible: a leader holds the lineage lock for its life
+    # the anchor is taken by `audit_period` for the ONE write that needs it and released, so
+    # auditing a closed period while a later one is live is possible: a leader holds the lineage
+    # lock for its life
     skipped: list[str] = []
     if run_root is None:
         walk = walk_estate_or_exit_2(estate_anchor)
@@ -831,10 +739,9 @@ def audit(
         where = f"{walk.anchor_dir} (estate {walk.estate_id})"
     else:
         anchor = EstateAnchor(estate_anchor or default_anchor_dir(run_root))
-        # ARCHIVED periods are named too: `closed_periods` asks for a
-        # sidecar AND the segment that re-derives it, which an archived
-        # period no longer has. Dropping it here would answer with a
-        # smaller estate than the one on disk (DL-144)
+        # ARCHIVED periods are named too: `closed_periods` asks for a sidecar AND the segment that
+        # re-derives it, which an archived period lacks; dropping it would answer with a smaller
+        # estate than the one on disk (DL-144)
         chosen = [period] if period is not None else _root_periods(run_root)
         targets = [(period_id, run_root) for period_id in chosen]
         where = str(run_root)
@@ -845,27 +752,21 @@ def audit(
     try:
         _attest_each(targets, anchor, name_root=run_root is None)
     finally:
-        # in a `finally` because a refusal partway through the walk is
-        # exactly when "and here is what was not audited" is worth having
+        # in a `finally` so a refusal partway through the walk still reports what was not audited
         for line in skipped:
             typer.echo(line)
 
 
 def _root_periods(run_root: Path) -> list[int]:
-    """Which periods a SINGLE-ROOT audit is about.
+    """The periods a SINGLE-ROOT audit is about (DL-144).
 
-    Three sets, because "closed" alone answers with a smaller estate than
-    the one on disk. `closed_periods` wants a sidecar and the segment that
-    re-derives it; an ARCHIVED period has the sidecar and no segment on
-    purpose; and a period this root WROTE whose segment is gone with no
-    receipt is loss, which has to be met and refused rather than dropped
-    from the list (DL-144)."""
+    Three sets: `closed_periods` wants a sidecar and its re-deriving segment; an ARCHIVED period
+    has the sidecar and no segment on purpose; a period this root WROTE whose segment is gone with
+    no receipt is loss, to be met and refused rather than dropped."""
     from dsl41.period import archived_periods, closed_periods, sealed_periods, wrote_period
 
-    # the bound comes from the SIDECARS this root holds, never from
-    # `closed_periods`: that list is empty exactly when every closed period
-    # has lost its segment, so a range taken from it would collapse
-    # precisely in the case this set exists to catch (DL-144 review)
+    # the bound comes from the SIDECARS this root holds, never from `closed_periods`, which is
+    # empty exactly when every closed period lost its segment (DL-144)
     lost = {
         period_id for period_id in sealed_periods(run_root) if wrote_period(run_root, period_id)
     }
@@ -875,15 +776,11 @@ def _root_periods(run_root: Path) -> list[int]:
 def _closed_across_roots(
     walk: "EstateWalk", period: "int | None"
 ) -> tuple[list[tuple[int, Path]], list[str]]:
-    """The registry's periods that are CLOSED, each with its own root --
-    and a line for each period that is not.
+    """The registry's periods that are CLOSED, each with its own root, and a line for each period
+    that is not.
 
-    An OPEN period is not audit's to re-derive and never was: the
-    single-root verb reads `closed_periods` for the same reason. But a
-    total that dropped one without a word would leave an operator counting
-    periods and finding one missing, so what was not audited is reported
-    with what was. The lines come back rather than being printed here, so
-    they land AFTER the attestations instead of ahead of them."""
+    An OPEN period is not audit's to re-derive. The lines come back rather than printing here so
+    they land after the attestations."""
     from dsl41.period import closed_periods
 
     if period is not None and not any(entry.period_id == period for entry in walk.periods):
@@ -899,9 +796,9 @@ def _closed_across_roots(
     for entry in walk.periods:
         if period is not None and entry.period_id != period:
             continue
-        # an ARCHIVED period is closed and is not re-derivable, so it is a
-        # target rather than a skip: `_attest_each` verifies its checkpoint
-        # and reports the attestation-verified tier (DL-144)
+        # an ARCHIVED period is closed and not re-derivable, so it is a target, not a skip:
+        # `_attest_each` verifies its checkpoint and reports the attestation-verified tier
+        # (DL-144)
         if entry.archived is not None or entry.period_id in closed_periods(entry.root):
             targets.append((entry.period_id, entry.root))
         else:
@@ -914,12 +811,7 @@ def _closed_across_roots(
 def _attest_each(
     targets: list[tuple[int, Path]], anchor: "EstateAnchor", *, name_root: bool
 ) -> None:
-    """Re-derive each (period, root) in turn and report it.
-
-    ONE loop for both modes: the estate-wide read differs from the
-    single-root one in where its pairs come from and in nothing else, and
-    a second copy of this would be the second place the `Unattested`
-    bookkeeping case has to be remembered."""
+    """Re-derive each (period, root) in turn and report it; both audit modes share this loop."""
     from dsl41.attest import (
         ATTESTATION_VERIFIED,
         DERIVATION_VERIFIED,
@@ -935,23 +827,16 @@ def _attest_each(
             at = f" in {root}" if name_root else ""
             tier = verified_tier(root, period_id)
             try:
-                # SEAL-ONLY or not, this is the same call: `audit_period`
-                # re-derives when the inputs are there and consumes the
-                # stored checkpoint when they are not (PR-02e), and only
-                # ONE of the two paths may report itself as a derivation.
-                # Skipping it for an archived period would also skip the
-                # `attested` row a busy lineage lock left unflipped, and
-                # "the audit is idempotent and finishes the row" would
-                # stop being true for exactly those periods
+                # SEAL-ONLY or not, this is the same call: `audit_period` re-derives when the
+                # inputs are there and consumes the stored checkpoint when not (PR-02e), and only
+                # one of the two paths may report itself as a derivation. Skipping an archived
+                # period would also skip the `attested` row a busy lineage lock left unflipped.
                 attestation = audit_period(root, period_id, anchor=anchor)
             except Unattested as exc:
-                # the checkpoint IS written and durable; only the registry
-                # row is not, and the row is bookkeeping. `Unattested` means
-                # the lineage lock was busy, which is the ORDINARY state of
-                # an estate with a live engine in it -- so it is this
-                # period's note and never the walk's reason to stop. It used
-                # to end the loop, which on an estate-wide audit meant one
-                # busy lock left every later period unaudited under exit 0
+                # the checkpoint IS written and durable; only the registry row, which is
+                # bookkeeping, is not. `Unattested` means the lineage lock was busy, the ordinary
+                # state of an estate with a live engine, so it is this period's note and never the
+                # walk's reason to stop
                 typer.echo(str(exc), err=True)
                 outstanding += 1
                 continue
@@ -974,14 +859,10 @@ def _attest_each(
 
 
 def _archived_line(root: Path, period_id: int, at: str, attestation: "Attestation") -> str:
-    """One archived period, verified and reported at ss11's OTHER tier
-    (DL-144).
+    """One archived period, verified and reported at ss11's OTHER tier (DL-144).
 
-    The wording shares no phrase with the derivation-verified line beside
-    it. An operator scanning a hundred rows must be able to see which
-    periods this estate can still re-derive and which ones it has traded
-    for a checkpoint, and two lines that differed by one adjective would
-    not carry that."""
+    The wording shares no phrase with the derivation-verified line, so an operator scanning rows
+    sees which periods can still be re-derived."""
     from dsl41.attest import ATTESTATION_VERIFIED
     from dsl41.period import archive_receipt_path
 
@@ -1152,7 +1033,7 @@ def estate_prune(
     deletion. After it, the period can only be attestation-verified,
     never re-derived. Restoring the files does not undo it.
 
-    Pruning a tombstone is also irreversible: the period can no longer
+    Pruning a tombstone is also irreversible: the period cannot
     be re-derived from its own evidence, and its attestation stands for
     it. Attest first, then prune.
 
@@ -1161,7 +1042,7 @@ def estate_prune(
     refusals are per root, and --keep-runs counts per job and per root,
     which keeps more than asked and never less.
 
-    Exit codes: 0 every selected artifact was removed, or listed under
+    Exit codes: 0 every selected artifact is removed, or listed under
     --dry-run; 2 a refusal, or the filesystem refused a removal. The
     report says which ones went.
     """
@@ -1177,16 +1058,13 @@ def estate_prune(
                 " registry names (period-model ss1.3, PR-02f)"
             )
         )
-    # the PAIRING derives from retention.CLASSES, the canon of which classes
-    # exist (DL-152's fix pattern: cli_control._QUERY_VERBS off
-    # runner_access.REQUIRED_TIER) -- a class added to CLASSES without a
-    # flag here is a KeyError, not a silent gap that reaches the --dry-run
-    # survey below and not this table (DL-178h).
+    # the PAIRING derives from retention.CLASSES, the canon of which classes exist (DL-152's
+    # pattern, as cli_control._QUERY_VERBS off runner_access.REQUIRED_TIER): a class added without
+    # a flag here is a KeyError, not a silent gap (DL-178h).
     flag_of = {"tombstones": tombstones, "quarantine": quarantine, ARCHIVE_CLASS: archive_inputs}
     classes = [name for name in CLASSES if flag_of[name]]
     if not classes and dry_run:
-        # a listing with no class named is a survey: it shows every
-        # licensed deletion, so the operator can pick from what is there
+        # a listing with no class named is a survey of every licensed deletion
         classes = sorted(CLASSES)
     if not classes and not dry_run:
         raise typer.Exit(
@@ -1204,11 +1082,8 @@ def estate_prune(
     done: list[tuple[RetentionPlan, PruneReport]] = []
     stopped: str | None = None
     for root in roots:
-        # the try is INSIDE the loop, so a refusal on the third root still
-        # reports what the first two deleted. Deletion is irreversible and
-        # this verb's whole promise is that the report says which artifacts
-        # went and which did not -- a refusal that discarded that would be
-        # the one moment the promise is worth something
+        # the try is INSIDE the loop, so a refusal on the third root still reports what the
+        # first two deleted; the report of which artifacts went is this verb's promise
         try:
             plan = plan_retention(root, anchor_dir=estate_anchor)
             report = prune(
@@ -1223,12 +1098,10 @@ def estate_prune(
             break
         done.append((plan, report))
     if not done:
-        # nothing was planned, so there is no report to keep: the refusal
-        # alone, exactly as a single root has always answered it
+        # nothing was planned, so there is no report to keep: the refusal alone
         if stopped is None:
-            # `roots` is never empty -- the walk refuses a registry with no
-            # durable period, and the single-root form has its one root --
-            # so an empty `done` is a break, and a break sets `stopped`
+            # `roots` is never empty (the walk refuses a registry with no durable period), so an
+            # empty `done` is a break, and a break sets `stopped`
             raise AssertionError("a prune that planned no root and refused nothing")
         raise typer.Exit(refuse(stopped))
     failed = _print_prune(done, dry_run=dry_run, estate_wide=run_root is None, stopped=stopped)
@@ -1243,8 +1116,8 @@ def _print_prune(
     estate_wide: bool,
     stopped: str | None,
 ) -> bool:
-    """One report over every root that was planned. Answers whether the
-    filesystem refused anything."""
+    """One report over every root that was planned; answers whether the filesystem refused
+    anything."""
 
     def _lines(title: str, items: "tuple[Artifact, ...]") -> None:
         typer.echo(f"{title} ({len(items)}):")
@@ -1253,10 +1126,9 @@ def _print_prune(
 
     reports = [report for _, report in done]
     verb = "would remove" if dry_run else "removed"
-    # `removed` cannot collide across roots -- every prunable artifact is
-    # under the root that planned it -- so the merge is a no-op there and
-    # the byte total below is over the same set. The lists that DO collide
-    # are the floored ones: two roots of one lineage floor one anchor
+    # `removed` cannot collide across roots (each artifact is under the root that planned it), so
+    # the merge is a no-op there. The floored lists do collide: two roots of one lineage floor one
+    # anchor
     removed = _merged(*(report.removed for report in reports))
     held = _merged(*(report.held for report in reports))
     floored = _merged(*(report.floored for report in reports))
@@ -1267,9 +1139,8 @@ def _print_prune(
     _lines("held (floor lifted, no class licenses it)", held)
     _lines("floored (the model refuses)", floored)
     if refused:
-        # NOT the filesystem: nothing was attempted and nothing is broken.
-        # The archive asked for a period whose eligibility changed between
-        # the plan and the receipt, and the operator has an order to follow
+        # NOT the filesystem: nothing was attempted. The archive asked for a period whose
+        # eligibility changed between the plan and the receipt; the operator has an order to follow
         typer.echo(f"the archive refused ({len(refused)}):", err=True)
         for item, reason in refused:
             typer.echo(f"  {item.path}: {reason}", err=True)
@@ -1298,22 +1169,16 @@ def _print_prune(
         f" {sum(report.bytes_removed for report in reports)} byte(s);"
         f" {len(floored)} floored, {len(held)} held{tail}"
     )
-    # an archive refusal exits 2 for the same reason a filesystem one does:
-    # the operator asked for something that did not happen, and a zero exit
-    # would say it did. A DRY RUN did not ask -- it surveyed -- so its
-    # refusals print and its exit stays 0
+    # an archive refusal exits 2 like a filesystem one: the operator asked for something that
+    # did not happen. A DRY RUN only surveyed, so its refusals print and its exit stays 0
     return bool(failed) or (bool(refused) and not dry_run)
 
 
 def _merged(*verdicts: "tuple[Artifact, ...]") -> "tuple[Artifact, ...]":
-    """One verdict list across every root that was planned, in walk order
-    and without a repeat.
+    """One verdict list across every root planned, in walk order without repeats.
 
-    The anchor is a SIBLING of every root it fences, so two roots of one
-    lineage each floor the same `anchor.json` and the same `anchor.lock`.
-    Concatenating would report one estate's two floored anchors, and a
-    count an operator cannot reconcile with the disk is a report that
-    lies."""
+    The anchor is a SIBLING of every root it fences, so two roots of one lineage each floor the
+    same `anchor.json` and `anchor.lock`; concatenating would double-count them."""
     seen: set[tuple[str, str]] = set()
     out: list[Artifact] = []
     for verdict in verdicts:
