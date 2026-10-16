@@ -1080,3 +1080,71 @@ def test_main_exits_1_when_a_doc_cites_a_missing_module(
     assert arch_check.main([]) == 1
     out = capsys.readouterr().out
     assert "cites `src/dsl41/no_such_module_anywhere.py`, which does not exist" in out
+
+
+# ------------------------------------------------------------ changelog phrases
+
+
+def test_changelog_phrase_in_comment_trips(tmp_path: Path) -> None:
+    path = _write(tmp_path / "m.py", "x = 1  # the old path is no longer used\n")
+    found = arch_check.changelog_phrases([path])
+    assert [(f.line, f.message) for f in found] == [(1, "no longer")]
+
+
+def test_changelog_phrase_in_docstring_trips(tmp_path: Path) -> None:
+    path = _write(tmp_path / "m.py", 'def f():\n    """Do it.\n\n    Formerly slow.\n    """\n')
+    found = arch_check.changelog_phrases([path])
+    assert [(f.line, f.message) for f in found] == [(4, "formerly")]
+
+
+def test_changelog_phrase_in_string_literal_or_present_tense_is_silent(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path / "m.py",
+        'MSG = "this is no longer allowed"\n'
+        "# DL-348: a cancelled start ends what the spawn started.\n"
+        "y = 2\n",
+    )
+    assert arch_check.changelog_phrases([path]) == []
+
+
+def test_changelog_phrase_ratchet(tmp_path: Path) -> None:
+    path = _write(tmp_path / "m.py", "# no longer\n# previously\n")
+    counts = arch_check.changelog_counts(arch_check.changelog_phrases([path]))
+    key = next(iter(counts))
+    assert counts[key] == 2
+    assert arch_check.changelog_advisories(counts, {"changelog_phrases": {key: 2}}) == []
+    assert arch_check.changelog_advisories(counts, {"changelog_phrases": {key: 1}}) != []
+    assert arch_check.changelog_advisories(counts, {}) != []
+
+
+def test_changelog_phrase_in_nested_function_docstring_trips(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path / "m.py",
+        'def f():\n    def g():\n        """It was removed."""\n\n    return g\n',
+    )
+    found = arch_check.changelog_phrases([path])
+    assert [(f.line, f.message) for f in found] == [(3, "was removed")]
+
+
+def test_changelog_phrase_needs_word_boundaries(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path / "m.py",
+        "# it refused to open\n# the helper refused too\n# an unused to-do\n# _rescan_superseded\n",
+    )
+    assert arch_check.changelog_phrases([path]) == []
+
+
+def test_changelog_phrase_used_to_and_since_dl_trip(tmp_path: Path) -> None:
+    path = _write(tmp_path / "m.py", "# it used to retry\n# since DL-12 it stops\n")
+    found = arch_check.changelog_phrases([path])
+    assert [f.message for f in found] == ["used to", "since dl-"]
+
+
+def test_main_changelog_phrases_prints_each_hit_and_exits_0(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _write(tmp_path / "m.py", "x = 1\n# it is no longer used\n")
+    monkeypatch.setattr(arch_check, "SRC", tmp_path)
+    monkeypatch.setattr(arch_check, "ROOT", tmp_path)
+    assert arch_check.main(["--changelog-phrases"]) == 0
+    assert capsys.readouterr().out == "m.py:2: no longer\n"

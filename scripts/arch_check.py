@@ -43,6 +43,10 @@ not a structure-detector: two bodies that do the same thing through a
 different shape (if/else where the other uses try/except) are invisible to
 it and stay the architecture review's subject, not this gate's.
 
+A third advisory scans comments and docstrings in src/dsl41/*.py for changelog
+phrases ("no longer", "previously", "since DL-", ...). The count per module is
+baselined under `changelog_phrases`; only a module that grew prints.
+
 Either way the script prints "architecture review due -- run /arch-review"
 when a check trips, or when the diff since the most recent arch-review/*
 tag (branch point if there is no such tag) exceeds 800 changed lines. That
@@ -57,6 +61,7 @@ lines changed under src/ since its newest one, is due. Advisory only;
 Usage:
     python scripts/arch_check.py                 # gate
     python scripts/arch_check.py --update-baseline
+    python scripts/arch_check.py --changelog-phrases   # print every hit
 """
 
 from __future__ import annotations
@@ -1043,6 +1048,93 @@ def size_advisories(measured: dict[str, dict[str, int]], baseline: dict[str, obj
     return notes
 
 
+# ------------------------------------------------------------ changelog phrases
+
+CHANGELOG_PHRASES = (
+    "since DL-",
+    "before DL-",
+    "after DL-",
+    "no longer",
+    "used to",
+    "formerly",
+    "previously",
+    "superseded",
+    "retired by",
+    "was renamed",
+    "was removed",
+    "moved from",
+    "replaced by",
+)
+
+
+def _phrase_pattern(phrase: str) -> str:
+    tail = r"\b" if phrase[-1].isalpha() else ""
+    return rf"\b{re.escape(phrase)}{tail}"
+
+
+_CHANGELOG_RE = re.compile("|".join(_phrase_pattern(p) for p in CHANGELOG_PHRASES), re.IGNORECASE)
+
+
+def _docstring_nodes(tree: ast.AST) -> Iterator[ast.Constant]:
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        first = node.body[0] if node.body else None
+        if (
+            isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+        ):
+            yield first.value
+
+
+def _phrase_hits(text: str, first_line: int) -> Iterator[tuple[int, str]]:
+    for offset, line in enumerate(text.splitlines()):
+        for match in _CHANGELOG_RE.finditer(line):
+            yield first_line + offset, match.group(0).lower()
+
+
+def changelog_phrases(paths: Iterable[Path]) -> list[Finding]:
+    """Advisory: changelog prose in a comment or docstring. Other string
+    literals are never scanned."""
+    found: list[Finding] = []
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8")
+            tree = ast.parse(text)
+            tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
+        except (OSError, SyntaxError, UnicodeDecodeError, tokenize.TokenError):
+            continue
+        rel = _rel(path)
+        hits: list[tuple[int, str]] = []
+        for tok in tokens:
+            if tok.type == tokenize.COMMENT:
+                hits += _phrase_hits(tok.string, tok.start[0])
+        for doc in _docstring_nodes(tree):
+            hits += _phrase_hits(str(doc.value), doc.lineno)
+        found += [Finding(rel, line, phrase) for line, phrase in sorted(hits)]
+    return found
+
+
+def changelog_counts(findings: Iterable[Finding]) -> dict[str, int]:
+    counts: dict[str, int] = defaultdict(int)
+    for finding in findings:
+        counts[finding.path] += 1
+    return dict(counts)
+
+
+def changelog_advisories(counts: dict[str, int], baseline: dict[str, object]) -> list[str]:
+    """Advisory: a module whose phrase count grew over its baseline entry."""
+    recorded = baseline.get("changelog_phrases") or {}
+    previous = recorded if isinstance(recorded, dict) else {}
+    notes: list[str] = []
+    for module, count in sorted(counts.items()):
+        was = int(previous.get(module, 0))
+        if count > was:
+            notes.append(f"{module}: {count} changelog phrases (was {was})")
+    return notes
+
+
 # ------------------------------------------------------------------ escalation
 
 
@@ -1144,7 +1236,17 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="print per-document spec review status and exit",
     )
+    group.add_argument(
+        "--changelog-phrases",
+        action="store_true",
+        help="print every changelog phrase in a comment or docstring and exit",
+    )
     args = parser.parse_args(argv)
+
+    if args.changelog_phrases:
+        for hit in changelog_phrases(sorted(SRC.glob("*.py"))):
+            print(hit.render())
+        return 0
 
     if args.spec_status:
         statuses = spec_review_status()
@@ -1176,6 +1278,7 @@ def main(argv: list[str] | None = None) -> int:
             ),
             "private_cross_module_imports": private_import_keys(src_files),
             "near_miss_duplicate_bodies": near_miss_duplicate_bodies(src_files),
+            "changelog_phrases": changelog_counts(changelog_phrases(src_files)),
             **measure_sizes(src_files),
         }
         BASELINE_PATH.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
@@ -1206,6 +1309,8 @@ def main(argv: list[str] | None = None) -> int:
 
     advisories = size_advisories(measure_sizes(src_files), baseline)
     advisories += near_miss_advisories(near_miss_duplicate_bodies(src_files), baseline)
+    changelog_found = changelog_phrases(src_files)
+    advisories += changelog_advisories(changelog_counts(changelog_found), baseline)
 
     for finding in blocking:
         print(f"BLOCK {finding.render()}")
