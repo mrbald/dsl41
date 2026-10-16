@@ -1,62 +1,42 @@
-"""Runner journal (ss7): the inputs-only write-ahead log and its replay.
+"""Runner journal (ss7): the inputs-only write-ahead log and its replay (DL-74).
 
-Split out of runner.py by DL-74, with the paragraph it owns, verbatim.
+Lifecycle semantics: DL-41a, DL-42; ss6-ss7.
 
-Phase 11b (ss6-ss7; DL-41a/DL-42 pin the lifecycle semantics):
+- Journal (ss7): inputs-only JSONL WAL, journal-first. Every injected event is WAL-appended
+  (+fsync in the real domain) before feed(); emitted events and the trace replay from oracle
+  determinism and are never stored. The input alphabet has two halves (DL-44): external events
+  (input records) and time observations (advance records, written before every Oracle.advance
+  the engine performs). Without the advance records an advance-fired term_run_time kill would
+  vanish from replay and a late natural-exit record could resurrect the job at resume. Dispatch
+  records are audit and ordering only (DL-41a): spawn.json, written by the process that spawned,
+  is the authoritative spawn record, so dispatch carries wrapper_pid and run_dir, not a pgid the
+  engine never observes.
 
-- Journal (ss7): inputs-only JSONL WAL, journal-first -- every injected
-  event is WAL-appended (+fsync in the real domain) BEFORE feed(); emitted
-  events and the trace replay from oracle determinism, never stored. The
-  input alphabet has TWO halves (DL-44 amendment): external
-  events (input records) and time observations (advance records, written
-  before every Oracle.advance the engine performs) -- without the latter,
-  an advance-fired term_run_time kill would vanish from replay and a late
-  natural-exit record could resurrect the job at resume. Dispatch records
-  are audit/ordering only (DL-41a): spawn.json, written by the process
-  that spawned, is the authoritative spawn record, so dispatch carries
-  wrapper_pid + run_dir rather than a pgid the engine never observes.
+- Two-record ledger (S2, concurrency-model ss4): an `input`/`advance` record is the
+  `InputAttempt`, one line, so a crash cannot tear its batch, and it names its `request_id`
+  and `fingerprint`. A `decision` record carries the decision that attempt got, appended after
+  it, so replay is two-pass: pass one indexes the decisions, pass two applies. An attempt whose
+  decision never landed is applied through the gate the live engine used (concurrency-model ss4,
+  runner_admission).
 
-Stage S2 (concurrency-model ss4) made this log a two-record ledger without
-changing what an input record means. An `input`/`advance` record IS the
-`InputAttempt` -- one line, so the batch it carries cannot be torn in half
-by a crash -- and it now names its `request_id` and `fingerprint`. A
-`decision` record carries the decision that attempt got, appended after it,
-which is what makes replay two-pass: pass one indexes the decisions, pass
-two applies. An attempt whose decision never landed is applied, through the
-same gate the live engine used (concurrency-model ss4, runner_admission).
+- One-line decision (DL-118, period-model ss2.3): a `decision` record carries the decision, the
+  revisions it moved and the effects it planned, in admission order, in one write. Separate
+  records would leave a window between the decision and its KILL effect, which ss4 step 7
+  forbids. `result` and standalone `effect` records are refused by name (DL-138).
 
-DL-118 (period-model ss2.3) made the second half of that pair ONE line too.
-It used to be a `result` record plus one standalone `effect` record per
-intent, each its own `_write` and its own fsync, and the window between
-them was the atomicity violation ss4 step 7 forbids: the decision durable,
-the process dead before the KILL effect was written, recovery finding every
-attempt decided and an empty outbox. A `decision` record now carries the
-decision, the revisions it moved and the effects it planned, in admission
-order, in one write. `result` and standalone `effect` are RETIRED, and
-since DL-138 they are REFUSED BY NAME rather than read: no root written
-under them exists, and a reader kept for a producer that cannot exist is
-not compatibility, it is unexercised code.
+- Ledger (S6a, concurrency-model ss1/ss7): a `leader` record allocates this incarnation's epoch
+  by being appended, so allocation and the log's account of it are one write, under a lock on
+  the run root that this object releases (runner_ledger). The opening record carries ss7's
+  second pin, the state-machine version, beside the catalog hash.
 
-Stage S6a (concurrency-model ss1/ss7) makes it a LEDGER rather than only a
-log. A `leader` record allocates this incarnation's epoch by being
-appended -- allocation and the log's account of it are one write, so they
-cannot disagree -- under a lock on the run root that this object owns the
-release of (runner_ledger). The opening record gains ss7's second pin, the
-state-machine version, beside the catalog hash it already carried.
+- Opening record (DL-130, period-model ss2.1): `segment` is self-describing (period, estate,
+  catalog, runtime profile and semantics) without reading an earlier file. `header` is a
+  retired dialect (DL-138).
 
-DL-130 (period-model ss2.1) replaced `header` with `segment` as that
-opening record. A once-per-log header cannot describe a log made of
-segments, and a segment is self-describing: period, estate, catalog,
-runtime profile and semantics, without reading an earlier file. `header`
-is a retired dialect since DL-138.
-
-**Every record passes ONE validator** (`check_record`, D1). It reads two
-things and no more: the `rec` kind -- current, retired, or unknown, three
-outcomes and three messages -- and, on a `decision`, `legacy_batch`. Per
-record key strictness stays whatever each record's own schema declares;
-this is not that gate. It sits at `read_journal` so `runner_history` and
-`retention`, which parse decision effects without `read_outbox`, inherit
-it rather than each growing a copy.
+Every record passes one validator (`check_record`, D1). It reads the `rec` kind (current,
+retired or unknown: three outcomes, three messages) and, on a `decision`, `legacy_batch`. Per-key
+strictness stays with each record's own schema. It sits at `read_journal` so `runner_history`
+and `retention`, which parse decision effects without `read_outbox`, inherit it.
 """
 
 from __future__ import annotations
@@ -132,23 +112,20 @@ if TYPE_CHECKING:  # annotation only: the WAL stays a leaf of the DL-74 DAG
 
 # ---- one `subscribe` feed as a statechart (control-protocol ss5, DL-267)
 #
-# `SUBSCRIPTION` is the declaration (docs/statechart-engine.md). The engine
-# owns the one `Executor`; the control server hands it to `Journal.subscribe`,
-# and the instance starts there, in `backfill`, as the feed joins the fan-out.
-# Its key and its data are the `Subscription`, which keeps the tier's record:
-# the queue, the backlog bytes, the budget and the overflow reason.
+# `SUBSCRIPTION` is the declaration (docs/statechart-engine.md). The engine owns the one
+# `Executor`; the control server hands it to `Journal.subscribe`, and the instance starts there,
+# in `backfill`, as the feed joins the fan-out. Its key and data are the `Subscription`, which
+# keeps the tier's record: the queue, the backlog bytes, the budget and the overflow reason.
 #
-# The posters are the journal's fan-out (`append`, from `_publish`) and the
-# subscribe handler (`backfill_sent` after a backfill without refusal, and
-# `stream_ends` from its `finally`, through `Journal.unsubscribe`). Rows
-# `subscription.02` and `.04` have no guard and no action; their notes say
-# when the handler posts. The buffer is bounded in both phases: `append`
-# reads the same rows in `backfill` and `live`, and nothing is deferred.
+# The posters are the journal's fan-out (`append`, from `_publish`) and the subscribe handler
+# (`backfill_sent` after a backfill without refusal, and `stream_ends` from its `finally`,
+# through `Journal.unsubscribe`). Rows `subscription.02` and `.04` have no guard and no action;
+# their notes say when the handler posts. The buffer is bounded in both phases: `append` reads
+# the same rows in `backfill` and `live`, and nothing is deferred.
 #
-# `removed` and `closed` are final, and the tier forgets the instance in the
-# same call that made it final, so nothing posts to it there. The root's
-# ignore rows exist because the completeness check is syntactic
-# (statechart-engine ss10). A gap in the chart is a `StatechartError`, which
+# `removed` and `closed` are final, and the tier forgets the instance in the call that made it
+# final, so nothing posts to it there. The root's ignore rows exist because the completeness
+# check is syntactic (statechart-engine ss10). A gap in the chart is a `StatechartError`, which
 # stops the engine with exit 7 (statechart-engine ss5).
 
 #: A record was appended and fanned out. Its payload is an `Offer`.
@@ -334,21 +311,19 @@ SUBSCRIPTION: Final = Statechart(
 
 
 class Subscription:
-    """One live feed of ss10 `subscribe`: the records appended since it
-    began, in append order, under a byte budget (control-protocol ss5,
-    DL-267). The budget is the owner's; the journal only enforces it.
+    """One live feed of ss10 `subscribe`: the records appended since it began, in append order,
+    under a byte budget (control-protocol ss5, DL-267). The owner sets the budget; the journal
+    enforces it.
 
-    It is the tier's record of one `SUBSCRIPTION` instance, and the
-    instance's key. `offer`, `go_live` and `close` post the chart's events,
-    and the rows decide: a record enters an empty backlog, otherwise only
-    if the backlog plus the record stays within the budget, so the backlog
-    never holds more than the budget or one record, whichever is larger. A
-    refused record removes the feed: the journal drops the backlog and
-    then tells the owner why. The append it came from has already
-    succeeded, and nothing here raises into it but a `StatechartError`.
+    It is the tier's record of one `SUBSCRIPTION` instance, and the instance's key. `offer`,
+    `go_live` and `close` post the chart's events and the rows decide: a record enters an empty
+    backlog, otherwise only if the backlog plus the record stays within the budget, so the
+    backlog never holds more than the budget or one record, whichever is larger. A refused
+    record removes the feed: the journal drops the backlog, then tells the owner why. The append
+    it came from has already succeeded, and only a `StatechartError` can raise into it.
 
-    `state` is the instance's active leaf. Once the instance is final the
-    tier forgets it, and `state` keeps the final state it rested in."""
+    `state` is the instance's active leaf; once the instance is final the tier forgets it and
+    `state` keeps the final state it rested in."""
 
     def __init__(
         self, machines: Executor, budget: int, on_overflow: Callable[[str], None] | None
@@ -392,18 +367,16 @@ class Subscription:
         self._post(STREAM_ENDS)
 
     def offer(self, record: dict[str, Any], size: int) -> bool:
-        """Offer one record of `size` encoded bytes: True when the feed took
-        it, False when the record removed the feed. Never blocks and never
-        raises QueueFull: the queue has no count limit, and the rows check
-        the budget."""
+        """Offer one record of `size` encoded bytes: True when the feed took it, False when the
+        record removed the feed. Never blocks and never raises QueueFull; the rows check the
+        budget."""
         return LEAVE_FAN_OUT not in self._post(APPEND, Offer(record, size)).intents
 
     def tell_owner(self) -> None:
-        """Hand an overflowed feed's reason to its owner. Best effort: the
-        append behind it is durable and the other feeds have their record,
-        so an owner that raises, or a stderr that cannot take the report,
-        changes nothing. A `StatechartError` is not contained: it stops the
-        engine (statechart-engine ss5)."""
+        """Hand an overflowed feed's reason to its owner. Best effort: the append behind it is
+        durable and the other feeds have their record, so an owner that raises, or a stderr that
+        cannot take the report, changes nothing. A `StatechartError` is not contained: it stops
+        the engine (statechart-engine ss5)."""
         if self._on_overflow is None or self.overflow is None:
             return
         try:
@@ -447,16 +420,14 @@ def dsl41_version() -> str:
 
 
 class Journal:
-    """ss7 append-only JSONL WAL, one file per run. Inputs-only principle:
-    emitted events and the trace are pure functions of the input sequence
-    (oracle determinism), so only injected inputs are stored; `journal
-    render` replays them through a fresh Oracle. Record kinds: segment /
-    input / advance / dispatch / drop / preflight (module docstring covers
-    why dispatch is audit-only and why advances are inputs; preflight keeps
-    the ss8 WARN caveats next to the run). fsync per record in the
-    real domain (write-ahead: append + fsync BEFORE feed); buffered in
-    rehearse, fsync on close. macOS caveat, accepted: os.fsync does not
-    force the drive cache (F_FULLFSYNC would, at a large cost)."""
+    """ss7 append-only JSONL WAL, one file per run. Inputs-only: emitted events and the trace are
+    pure functions of the input sequence (oracle determinism), so only injected inputs are
+    stored, and `journal render` replays them through a fresh Oracle. Record kinds: segment /
+    input / advance / dispatch / drop / preflight (the module docstring covers why dispatch is
+    audit-only and advances are inputs; preflight keeps the ss8 WARN caveats next to the run).
+    fsync per record in the real domain (append + fsync before feed); buffered in rehearse,
+    fsync on close. macOS: os.fsync does not force the drive cache (F_FULLFSYNC would, at a
+    large cost); this is accepted."""
 
     def __init__(
         self,
@@ -471,25 +442,22 @@ class Journal:
         self._f = self.path.open("ab")
         os.chmod(self.path, 0o600)  # owner-only: the WAL carries globals + every input
         self._fsync_each = fsync_each
-        #: concurrency-model ss2: this log's identity, part of every
-        #: fingerprint. Empty for a journal written before S2, and for the
-        #: journal-less engines the bisimulation harness runs.
+        #: concurrency-model ss2: this log's identity, part of every fingerprint. Empty for a
+        #: journal written before S2 and for the journal-less engines of the bisimulation
+        #: harness.
         self.baseline_id = baseline_id
-        #: S6a: the run root's mutex, acquired before this file was opened
-        #: and released when it is closed. The ledger is the log plus the
-        #: lock that says who may append to it, so closing one closes both --
-        #: an engine that dropped the file and kept the lock would exclude
-        #: its own successor. None for the journal-less and lock-less
-        #: engines the bisimulation harness runs.
+        #: S6a: the run root's mutex, acquired before this file was opened and released when it
+        #: is closed. Closing the log closes the lock, so an engine that dropped the file and
+        #: kept the lock would exclude its own successor. None for the journal-less and
+        #: lock-less engines of the bisimulation harness.
         self._lock = lock
-        #: live feeds for ss10 subscribe: every appended record is fanned out
-        #: post-write. The WAL never blocks on one, and a feed whose backlog
-        #: would pass its budget is removed rather than grown (DL-267)
+        #: live feeds for ss10 subscribe: every appended record is fanned out post-write. The WAL
+        #: never blocks on one, and a feed whose backlog would pass its budget is removed
+        #: (DL-267)
         self._subscribers: list[Subscription] = []
-        #: True from the start of an append's bytes until the append
-        #: returns. An exception leaves it set, because a failed append
-        #: does not prove its line absent or whole. A seal that meets an
-        #: exception while it is set fail-stops instead of refusing (DL-274).
+        #: True from the start of an append's bytes until the append returns. An exception leaves
+        #: it set, because a failed append does not prove its line absent or whole. A seal that
+        #: meets an exception while it is set fail-stops instead of refusing (DL-274).
         self.append_unfinished = False
 
     @classmethod
@@ -506,53 +474,39 @@ class Journal:
         opens_from_seal: Mapping[str, Any] | None = None,
         reclaimed: Mapping[str, Any] | None = None,
     ) -> Journal:
-        """Open a NEW log with its `segment` record (period-model ss2.1,
-        DL-130). `segment` replaces `header`: a once-per-log header cannot
-        describe a log made of segments, and every segment is
-        self-describing -- period, catalog and semantics without reading an
-        earlier file.
+        """Open a new log with its `segment` record (period-model ss2.1, DL-130). Every segment is
+        self-describing: period, catalog and semantics, without reading an earlier file.
 
-        A caller that has installed `periods/000001/manifest.json` passes
-        the `manifest` it committed, so the file and the record cannot say
-        two different things (PR-22); one that only has a catalog -- a
-        rehearsal, an embedder, the bisimulation harness -- gets a default
-        over the empty bundle and the default runtime profile, installed
-        beside the log the way genesis installs one (DL-252). The
-        `estate_id` is the SENTINEL's since DL-133 -- genesis mints it
-        into `journal.jsonl` before this file exists and reads it back on
-        every retry (PR-01a) -- and is minted here only for the journal-only
-        callers that have no root to carry one. `opens_from_seal` is the
-        boundary's: null on segment 1, `{period_id, digest}` on every later
-        segment, copied verbatim from the seal the period opened from so the
-        two openings of one seal are byte-identical (PR-07). `reclaimed`
-        is null unless a `dsl41 estate reclaim --force` cleared this
-        opener's way, and then it names the claim that was moved and the
-        actor who claimed to authorize it (ss1.3) -- loud, durable and
-        attributable in the log the period opens with."""
+        A caller that has installed `periods/000001/manifest.json` passes the `manifest` it
+        committed, so the file and the record say the same thing (PR-22). One that only has a
+        catalog (a rehearsal, an embedder, the bisimulation harness) gets a default over the empty
+        bundle and the default runtime profile, installed beside the log as genesis installs one
+        (DL-252). The `estate_id` is the sentinel's (DL-133): genesis mints it into `journal.jsonl`
+        before this file exists and reads it back on every retry (PR-01a); it is minted here only
+        for journal-only callers with no root. `opens_from_seal` is the boundary's: null on segment
+        1, `{period_id, digest}` on every later segment, copied verbatim from the seal the period
+        opened from so the two openings of one seal are byte-identical (PR-07). `reclaimed` is
+        null unless a `dsl41 estate reclaim --force` cleared this opener's way; then it names the
+        claim that was moved and the actor who claimed to authorize it (ss1.3)."""
         if manifest is None:
             manifest = genesis_manifest(
                 catalog,
                 clock_domain=clock_domain,
-                # ss7's other pin, gated where catalog_hash is (S6a,
-                # runner_ledger): what leader eligibility means is that
-                # these two match, and a pin nothing reads is not a pin
+                # ss7's other pin, gated where catalog_hash is (S6a, runner_ledger): leader
+                # eligibility means the two match, and an unread pin is not a pin
                 state_machine_version=STATE_MACHINE_VERSION,
             )
-            # installed BEFORE the record that names it, exactly as genesis
-            # does: replay reads the period's profile -- its semantic
-            # switches above all -- from a manifest bound to the segment and
-            # refuses without one (DL-252), so a synthesized pin that was
-            # never written would leave a log nothing can replay
+            # installed before the record that names it, as genesis does: replay reads the
+            # period's profile (its semantic switches above all) from a manifest bound to the
+            # segment and refuses without one (DL-252)
             write_period_manifest(root_of_wal(Path(path)), manifest)
         else:
-            # a NATIVE log pins the current recipe, always -- through the ONE
-            # dispatcher (D4, DL-138), so this gate and `check_segment_record`
-            # and `catalog_hash_at` cannot answer the same question three ways
+            # a native log pins the current recipe through the one dispatcher (D4, DL-138), so
+            # this gate, `check_segment_record` and `catalog_hash_at` answer one way
             check_catalog_hash_version(
                 manifest.catalog_hash_version, where=f"{path}: a new log's manifest"
             )
-            # under the recipe the manifest itself names, so this gate can
-            # never be the one place that assumes a version
+            # under the recipe the manifest itself names, so no gate assumes a version
             expected = catalog_hash_at(manifest.catalog_hash_version, catalog)
             if manifest.catalog_hash != expected:
                 raise EngineError(
@@ -567,9 +521,8 @@ class Journal:
         journal = cls(
             path, fsync_each=clock_domain == "real", baseline_id=manifest.baseline_id, lock=lock
         )
-        # the identity lives in the record, and nowhere else on this object:
-        # a second copy here would be a second authority, and a pin nothing
-        # reads is not a pin
+        # the identity lives in the record and nowhere else on this object; a second copy would
+        # be a second authority
         journal._write(
             segment_record(
                 manifest,
@@ -579,24 +532,18 @@ class Journal:
                 reclaimed=reclaimed,
             )
         )
-        # the opening record NAMES the segment, so it is durable before any
-        # head action -- genesis finalize, a claim's open -- can rely on the
-        # file's existence: a virtual-domain journal buffers everything
-        # else, and "the directory entry is durable" says nothing about the
-        # record inside it
+        # the opening record names the segment, so it is durable before any head action
+        # (genesis finalize, a claim's open) relies on the file's existence: a virtual-domain
+        # journal buffers everything else
         journal._f.flush()
         os.fsync(journal._f.fileno())
         return journal
 
     def leader(self, *, epoch: int, at: datetime) -> None:
-        """One term of leadership over this run root (ss1's leader record,
-        S6a). Appended under the lock, immediately after acquiring it, which
-        is what makes the epoch MONOTONE: it is allocated by being written,
-        so no two terms can read the same log and choose the same number.
-
-        It is also what makes a failover reconstructible after the fact --
-        every input between two of these records was admitted by the
-        incarnation the earlier one names."""
+        """One term of leadership over this run root (ss1's leader record, S6a). Appended under
+        the lock right after acquiring it, so the epoch is monotone: it is allocated by being
+        written, and no two terms read the same log and choose the same number. Every input
+        between two of these records was admitted by the incarnation the earlier one names."""
         self._write(
             {
                 "rec": "leader",
@@ -609,26 +556,20 @@ class Journal:
         )
 
     def admit(self, attempt: Attempt) -> None:
-        """Append one admitted input -- the concurrency-model ss4 step-4
-        batch -- as ONE line, so no crash can leave its time observation
-        without its attempt or the reverse.
+        """Append one admitted input (the concurrency-model ss4 step-4 batch) as one line, so a
+        crash cannot leave its time observation without its attempt or the reverse.
 
-        The three record names are the three shapes of an attempt, not three
-        paths: `input` has an oracle verb, `host` carries a routing-table
-        command (S5a, concurrency-model ss8), `advance` is the standalone
-        time observation (DL-44's other half of the input alphabet), and all
-        three carry the same admission fields. `source` in {scheduler,
-        adapter, control, reconcile} (ss7); None marks an unattributed
-        script injection and never occurs in a real run. It is persisted
-        because replay must re-derive the same causes and the same gate
-        verdict from it (DL-68).
+        The three record names are the three shapes of an attempt: `input` has an oracle verb,
+        `host` carries a routing-table command (S5a, concurrency-model ss8), `advance` is the
+        standalone time observation (DL-44). All three carry the same admission fields. `source`
+        in {scheduler, adapter, control, reconcile} (ss7); None marks an unattributed script
+        injection and never occurs in a real run. It is persisted because replay must re-derive
+        the same causes and gate verdict from it (DL-68).
 
-        S3 adds the rest of the ss6 envelope. `epoch` rides on every record
-        because it is the leader's, not the caller's, and S6 fences on it.
-        `expect` and `claimed_actor` ride only where they exist: an input
-        the ENGINE raised has neither, and writing nulls for them would blur
-        the one distinction the log has to keep -- which inputs were
-        externally requested and therefore had to name a revision."""
+        S3 adds the rest of the ss6 envelope. `epoch` rides on every record because it is the
+        leader's, and S6 fences on it. `expect` and `claimed_actor` ride only where they exist:
+        an input the engine raised has neither, and nulls would blur which inputs were
+        externally requested and so had to name a revision."""
         record: dict[str, Any] = {
             "rec": "input"
             if attempt.kind is not None
@@ -642,8 +583,7 @@ class Journal:
         if attempt.kind is not None:
             record |= {"kind": attempt.kind, "payload": attempt.payload, "source": attempt.source}
         elif attempt.host is not None:
-            # under its own key, not `payload`: two record shapes that spell
-            # one field name two ways is how a reader learns to guess
+            # under its own key, not `payload`: one field name is spelled one way
             record |= {"host": attempt.host.wire(), "source": attempt.source}
         if attempt.expect is not None:
             record["expect"] = attempt.expect
@@ -652,47 +592,33 @@ class Journal:
         self._write(record)
 
     def decision(self, result: ApplyResult, effects: Sequence[Effect]) -> None:
-        """Append the whole ss4 step-7 batch as ONE line (period-model ss2.3,
-        DL-118): the decision an admitted attempt got, the revisions it
-        moved, and every effect it planned.
+        """Append the whole ss4 step-7 batch as one line (period-model ss2.3, DL-118): the
+        decision an admitted attempt got, the revisions it moved, and every effect it planned.
 
-        One line, one fsync -- the same argument `admit` already makes for
-        the input side. Each effect lands here before anything ATTEMPTS it,
-        which is the whole content of an outbox: an engine that dies between
-        deciding and acting leaves the record that it meant to act, and a
-        recorded kill is re-driven at resume rather than lost with the task
-        that would have delivered it. Writing the decision and the intents
-        separately left a window in which the first was durable and the
-        second was not, and no precondition anywhere could see it (CM-17).
+        One line, one fsync, as `admit`. Each effect lands here before anything attempts it, which
+        is what an outbox is: an engine that dies between deciding and acting leaves the record
+        that it meant to act, and a recorded kill is re-driven at resume. Separate records leave
+        a window in which the decision is durable and its intents are not (CM-17).
 
-        Written unconditionally, including for an application that moved
-        nothing and planned nothing: the ABSENCE of a decision is how replay
-        recognises the crash window, so an absence that also meant "nothing
-        happened" would make that window unreadable.
+        Written unconditionally, including for an application that moved nothing and planned
+        nothing: the absence of a decision is how replay recognises the crash window.
 
-        `effects` is in ADMISSION ORDER -- the order `Outbox` receives them,
-        so a SPAWN precedes its run's later KILL.
+        `effects` is in admission order, the order `Outbox` receives them, so a SPAWN precedes its
+        run's later KILL.
 
-        The index rides under `index`, not `seq`: `seq` is the ss10
-        subscribe cursor, and a decision shares its attempt's number, so two
-        records under one cursor value would leave the second undeliverable
-        to a resuming subscriber (DL-89).
+        The index rides under `index`, not `seq`: `seq` is the ss10 subscribe cursor, and a
+        decision shares its attempt's number, so a second record under one cursor value would be
+        undeliverable to a resuming subscriber (DL-89).
 
-        `legacy_batch` is on every decision and `false` from this writer,
-        and it STAYS on the record (D2, DL-138): the reads are
-        `check_record`'s -- false proceeds, true is a retired dialect,
-        anything else is malformed -- and removing the field would be a
-        wire break for a fact the schema still states.
+        `legacy_batch` is on every decision, `false` from this writer, and stays on the record
+        (D2, DL-138): false proceeds, true is a retired dialect, anything else is malformed
+        (`check_record`).
 
-        A NATIVE decision names its identity at birth, and this writer
-        refuses one that does not: `generation` on every effect, `run_id`
-        on every SPAWN (DL-118, PR-16/PR-36a). The model's None defaults
-        exist so a hand-built record validates before this gate reads it --
-        a fresh effect reaching this method without them is a planner bug.
-        The same holds for a rejection's `code` (period-model ss2.3): a
-        native rejection names one of the append-only `STORED_CODES`, and a
-        reader never requires one, because a record written before codes
-        existed has none."""
+        A native decision names its identity at birth: `generation` on every effect, `run_id` on
+        every SPAWN (DL-118, PR-16/PR-36a); this writer refuses one without. The model's None
+        defaults let a hand-built record validate before this gate reads it. A native rejection
+        names one of the append-only `STORED_CODES` (period-model ss2.3); a reader never requires
+        one."""
         if result.decision == "rejected" and result.code not in STORED_CODES:
             raise EngineError(
                 f"decision {result.index}: a native rejection names its stored code"
@@ -725,52 +651,40 @@ class Journal:
         )
 
     def seal(self, record: Mapping[str, Any]) -> None:
-        """ss2.2's `seal`: the LAST record of a period's last segment, and
-        the boundary's COMMIT POINT.
+        """ss2.2's `seal`: the last record of a period's last segment, and the boundary's commit
+        point.
 
-        It is a record and not a decision because a `seal` request cannot
-        be decided by an ordinary `decision`: before the seal, a crash
-        leaves a durable "applied" for a boundary that never happened;
-        after it, records after a seal are forbidden. The shape is
-        `boundary.check_seal_record`'s and is validated there, where the
-        boundary builds it; what this owes the caller is that nothing else
-        can be written through this door.
+        It is a record and not a decision because a `seal` cannot be decided by an ordinary
+        `decision`: a crash before it would leave a durable "applied" for a boundary that never
+        happened, and records after a seal are forbidden. `boundary.check_seal_record` owns and
+        validates the shape; nothing else can be written through this door.
 
-        **Appending it is the point of no return** (ss7). The writer
-        flushes the whole line before `fsync`, and an `fsync` error does
-        not prove the line absent or non-durable -- so a failure here is an
-        UNKNOWN outcome that fail-stops, never an abort that would reopen
-        admission behind a seal line that then survives."""
+        Appending it is the point of no return (ss7). The writer flushes the whole line before
+        `fsync`, and an `fsync` error does not prove the line absent or non-durable, so a failure
+        here is an unknown outcome that fail-stops; an abort would reopen admission behind a seal
+        line that then survives."""
         if record.get("rec") != "seal":
             raise EngineError(f"Journal.seal writes `seal` records, not {record.get('rec')!r}")
         rec = dict(record)
         if self._lock is not None:
             self._lock.check()  # the same ss1 fence every append passes
-        # Plain json.dumps(sort_keys=True), not canon.canonical_bytes (same
-        # non-canonical spelling as `_write` below): nothing ever digests a
-        # WAL line's own bytes -- a seal record's digest is computed over
-        # canon bytes in `boundary` and re-derived on read -- and the
-        # control door already refuses a lone surrogate before it can reach
-        # dispatch, so canon's extra guarantees buy this writer nothing.
+        # plain json.dumps, not canon.canonical_bytes (as `_write`): nothing digests a WAL
+        # line's own bytes (a seal record's digest is computed over canon bytes in `boundary`
+        # and re-derived on read), and the control door refuses a lone surrogate before dispatch
         line = json.dumps(rec, sort_keys=True).encode("utf-8") + b"\n"
         self._f.write(line)
-        # UNCONDITIONALLY durable, whatever the journal's per-record policy:
-        # a virtual-domain journal buffers and fsyncs on close, and a seal
-        # made durable only at close would let the anchor's open->closed CAS
-        # land BEFORE the record that justifies it -- a successor named by a
-        # head whose naming line a power cut then removes. Durability comes
-        # BEFORE subscriber publication -- not `_write` -- because a
-        # subscriber handed a commit record whose fsync then fails has been
-        # told about a boundary recovery may discard.
+        # unconditionally durable, whatever the per-record policy: a seal durable only at close
+        # would let the anchor's open->closed CAS land before the record that justifies it, naming
+        # a successor by a head whose naming line a power cut then removes. Durability precedes
+        # subscriber publication (not `_write`), because a subscriber told of a commit record
+        # whose fsync then fails has heard of a boundary recovery may discard
         self._f.flush()
         os.fsync(self._f.fileno())
         self._publish(rec, len(line))
 
     def effect_result(self, outcome: EffectOutcome) -> None:
-        """What came of one attempt (concurrency-model ss5). Absent means
-        `pending` -- the crash window -- which is exactly the distinction
-        `indeterminate` exists to keep separate from it: nothing was tried
-        vs something was tried and cannot be reported on."""
+        """What came of one attempt (concurrency-model ss5). Absent means `pending`, the crash
+        window; `indeterminate` is kept apart: something was tried and cannot be reported on."""
         self._write({"rec": "effect_result", **outcome.model_dump(mode="json")})
 
     def dispatch(
@@ -805,9 +719,8 @@ class Journal:
         )
 
     def preflight(self, items: list[PreflightItem]) -> None:
-        """ss8: WARN prints, JOURNALS, and runs -- the record keeps the run's
-        stated caveats next to its inputs. Replay ignores it (not an input);
-        read_journal carries it like any other record."""
+        """ss8: WARN prints, journals, and runs; the record keeps the run's stated caveats next to
+        its inputs. Replay ignores it (not an input); read_journal carries it."""
         self._write(
             {
                 "rec": "preflight",
@@ -822,30 +735,26 @@ class Journal:
         *,
         budget: int = sys.maxsize,
     ) -> Subscription:
-        """A live feed of every record appended from now on, held to
-        `budget` bytes; the control server passes ss5's. `machines` is the
-        engine's executor, which runs the feed's `SUBSCRIPTION` instance; the
-        journal creates none. `on_overflow` is called once, synchronously
-        inside the append that overflowed the feed, after the feed is
-        removed and every other feed has the record (control-protocol ss5,
-        DL-267)."""
+        """A live feed of every record appended from now on, held to `budget` bytes (the control
+        server passes ss5's). `machines` is the engine's executor, which runs the feed's
+        `SUBSCRIPTION` instance. `on_overflow` is called once, synchronously inside the append
+        that overflowed the feed, after the feed is removed and every other feed has the record
+        (control-protocol ss5, DL-267)."""
         feed = Subscription(machines, budget, on_overflow)
         self._subscribers.append(feed)
         return feed
 
     def unsubscribe(self, feed: Subscription) -> None:
-        """The feed's stream ended. A feed the journal already removed on
-        overflow is not in the fan-out, posts nothing, and stays `removed`."""
+        """The feed's stream ended. A feed removed on overflow is not in the fan-out, posts
+        nothing, and stays `removed`."""
         if feed in self._subscribers:
             self._subscribers.remove(feed)
             feed.close()
 
     def _publish(self, record: dict[str, Any], size: int) -> None:
-        """Fan one durable record out to the live feeds. A feed it does
-        not fit is removed, never grown and never left open with a hole in
-        it (control-protocol ss5, DL-267): the overflow row reports it, and
-        this carries the removal out once every feed has been offered the
-        record."""
+        """Fan one durable record out to the live feeds. A feed it does not fit is removed, never
+        grown and never left open with a hole in it (control-protocol ss5, DL-267); the removal
+        is carried out once every feed has been offered the record."""
         overflowed = [feed for feed in self._subscribers if not feed.offer(record, size)]
         for feed in overflowed:
             self._subscribers.remove(feed)
@@ -854,30 +763,20 @@ class Journal:
 
     def _write(self, record: dict[str, Any]) -> None:
         if record.get("rec") not in CURRENT_RECS:
-            # the WRITE side of DL-138's registry, so the hand-listed set
-            # closes structurally: a new record kind that never reached
-            # `CURRENT_RECS` is refused here rather than written and then
-            # refused by every reader of the segment it landed in. The
-            # `seal` record is the one kind that does not come through
-            # here -- it is appended by the boundary under its own schema
-            # check -- and it is in the set for the readers' sake.
+            # the write side of DL-138's registry: a record kind absent from `CURRENT_RECS` is
+            # refused here, not written and then refused by every reader. The `seal` record is
+            # appended by the boundary under its own schema check; it is in the set for readers
             raise EngineError(
                 f"{self.path}: refusing to append record kind"
                 f" {record.get('rec')!r} -- this binary writes"
                 f" {', '.join(sorted(CURRENT_RECS))} (period-model ss2)"
             )
         if self._lock is not None:
-            # ss1's epoch-conditional append, and ss7's "losing proof stops
-            # dispatch, not merely renewal" (S6b). BEFORE the write, so a
-            # leader that cannot prove it leads admits nothing rather than
-            # admitting and then discovering it had no right to.
-            #
-            # An append is also what precedes every effect -- the outbox
-            # records intent before the attempt -- so fencing appends fences
-            # dispatch without a second mechanism to keep in step with this
-            # one. An engine with nothing to append dispatches nothing, which
-            # is why there is no background prober: the only proof that goes
-            # unchecked is proof nothing was about to rely on.
+            # ss1's epoch-conditional append, and ss7's "losing proof stops dispatch, not merely
+            # renewal" (S6b). Before the write, so a leader that cannot prove it leads admits
+            # nothing. An append precedes every effect (the outbox records intent first), so
+            # fencing appends fences dispatch. No background prober is needed: an engine with
+            # nothing to append dispatches nothing.
             self._lock.check()
         line = json.dumps(record, sort_keys=True).encode("utf-8") + b"\n"
         self.append_unfinished = True
@@ -894,16 +793,13 @@ class Journal:
             self._lock.release()  # the term ends where the log does (S6a)
 
     def detach(self) -> None:
-        """Flush and close the FILE, leaving the term where it is.
+        """Flush and close the file, leaving the term where it is.
 
-        `close` ends both, because for an engine the log and the lock end
-        together (S6a). A PHYSICAL ROLL is the one caller that ends
-        neither: it writes the opening `segment` and hands the ROOT to the
-        ordinary resume path, which opens its own journal over the same
-        file and holds the same proofs. Two descriptors on one WAL in one
-        process is one too many, and closing this one the ordinary way
-        would release the proofs its successor is about to append under
-        (period-model ss7, DL-134)."""
+        `close` ends both, because for an engine the log and the lock end together (S6a). A
+        physical roll ends neither: it writes the opening `segment` and hands the root to the
+        ordinary resume path, which opens its own journal over the same file and holds the same
+        proofs. Closing this one the ordinary way would release the proofs its successor appends
+        under (period-model ss7, DL-134)."""
         self._f.flush()
         os.fsync(self._f.fileno())
         self._f.close()
@@ -912,16 +808,12 @@ class Journal:
 def repair_tail(path: Path) -> None:
     """Make an existing WAL end on a line boundary before anything appends.
 
-    `_write` puts `json + "\\n"` in one call, and a crash mid-write leaves a
-    prefix of it. `read_journal` drops a torn final line (the feed it
-    preceded never ran), and the bytes must agree with that reading before
-    the next record lands: appended straight after the fragment, the
-    successor's `leader` makes one corrupt interior line out of the two,
-    and every later read raises. Two shapes, both fixed under the caller's
-    lock and fsynced: a tail that parses lost only its newline and gets one
-    back; any other tail is cut at the last newline. What `read_journal`
-    returns is the same before and after -- this changes bytes, never
-    records."""
+    `_write` puts `json + "\\n"` in one call, and a crash mid-write leaves a prefix.
+    `read_journal` drops a torn final line, and the bytes must agree with that before the next
+    record lands: appended after the fragment, the successor's `leader` would make one corrupt
+    interior line of the two. Under the caller's lock, with fsync: a tail that parses lost only
+    its newline and gets one; any other tail is cut at the last newline. `read_journal` returns
+    the same records before and after."""
     if not path.exists():
         return
     with path.open("r+b") as f:
@@ -939,10 +831,9 @@ def repair_tail(path: Path) -> None:
         os.fsync(f.fileno())
 
 
-#: ss2's record kinds this binary reads, pinned from the writers above and
-#: from every read site in the tree (period-model ss2, runner-design ss7).
-#: `host` is current: a host command is admitted like an input and replays
-#: like one.
+#: ss2's record kinds this binary reads, pinned from the writers above and every read site in
+#: the tree (period-model ss2, runner-design ss7). `host` is current: a host command is admitted
+#: and replays like an input.
 CURRENT_RECS: Final[frozenset[str]] = frozenset(
     {
         "segment",
@@ -959,10 +850,9 @@ CURRENT_RECS: Final[frozenset[str]] = frozenset(
     }
 )
 
-#: Retired record dialects: the kind, and the entry that retired it.
-#: APPEND-ONLY (docs/protocol-evolution.md ss6). A row is never removed and
-#: never re-used -- the point of a tombstone is that a root written before
-#: the retirement gets told what it holds instead of a generic parse error.
+#: Retired record dialects: the kind, and the entry that retired it. Append-only
+#: (docs/protocol-evolution.md ss6): a row is never removed or re-used, so a root written before
+#: the retirement is told what it holds, not given a generic parse error.
 RETIRED_RECS: Final[dict[str, str]] = {
     "header": "DL-138",
     "result": "DL-138",
@@ -971,26 +861,19 @@ RETIRED_RECS: Final[dict[str, str]] = {
 
 
 def check_record(record: Mapping[str, Any], *, where: str) -> None:
-    """D1's ONE record validator (DL-138). Two fields, three outcomes.
+    """D1's one record validator (DL-138): `rec` and `legacy_batch`, three outcomes each.
 
-    `rec`: a CURRENT kind proceeds; a RETIRED kind refuses naming the kind
-    and the entry that retired it; anything else refuses naming the kind as
-    an UNKNOWN. The three are distinct on purpose -- "this used to be
+    `rec`: a current kind proceeds; a retired kind refuses naming the kind and the entry that
+    retired it; anything else refuses as unknown. The two refusals differ because "this was
     legal" and "this was never legal" send an operator to different places
-    (docs/protocol-evolution.md ss6).
+    (docs/protocol-evolution.md ss6). An unrecognised kind inside a version-matched segment is
+    corruption.
 
-    Refusing the unknown is a deliberate behavior change: `read_journal`
-    used to IGNORE a `rec` it did not recognise. Version gating sits on the
-    opening `segment`, so an unrecognised kind INSIDE a version-matched
-    segment is corruption, not tolerance.
+    `legacy_batch` on a `decision`: exactly `False` proceeds, `True` is the retired fold dialect
+    and refuses by name, missing or non-boolean is malformed, because a record that cannot say
+    what it is is not an old record.
 
-    `legacy_batch` on a `decision`, pinned three ways: exactly `False`
-    proceeds, `True` is the retired fold dialect and refuses by name, and
-    missing or non-boolean is MALFORMED -- a distinct error, because a
-    record that cannot say what it is is not an old record.
-
-    This reads `rec` and `legacy_batch` and NOTHING else. Per-record key
-    strictness is whatever each record's own schema declares."""
+    Per-record key strictness is whatever each record's own schema declares."""
     kind = record.get("rec")
     retired = RETIRED_RECS.get(kind) if isinstance(kind, str) else None
     if retired is not None:
@@ -999,11 +882,9 @@ def check_record(record: Mapping[str, Any], *, where: str) -> None:
             f" {retired} -- nothing has written one since DL-118/DL-130 and no root"
             " holding one exists (docs/protocol-evolution.md ss6, ss8)"
         )
-    # `kind` may be any JSON value, including an unhashable array or object
-    # (DL-227): `isinstance` first keeps `in CURRENT_RECS` from raising a
-    # TypeError, so every non-current kind -- string or not -- takes the
-    # same unknown-kind refusal by name (ss1: "an unknown kind refuses by
-    # name").
+    # `kind` may be any JSON value, including an unhashable array or object (DL-227):
+    # `isinstance` first keeps `in CURRENT_RECS` from raising a TypeError, so every non-current
+    # kind takes the unknown-kind refusal by name (ss1)
     if not isinstance(kind, str) or kind not in CURRENT_RECS:
         raise EngineError(
             f"{where}: unknown record kind {kind!r} -- this binary reads"
@@ -1030,23 +911,17 @@ def check_record(record: Mapping[str, Any], *, where: str) -> None:
 
 
 def opens_with_rec(path: Path) -> str | None:
-    """The `rec` kind this file's first line declares, or None when the
-    first line is not a JSON object with a string `rec`.
+    """The `rec` kind this file's first line declares, or None when the first line is not a
+    JSON object with a string `rec`.
 
-    The narrow question, and the ONE place the first line is sniffed for
-    it. Two owners ask it -- `boundary.claim_root` and
-    `retention.plan_retention`, neither of which routes through
-    `read_journal` -- and each writes its OWN refusal, because the tombstone
-    an operator reads should name the operation they ran (D5, DL-138).
+    The one place the first line is sniffed. Two owners ask, `boundary.claim_root` and
+    `retention.plan_retention`, neither routing through `read_journal`; each writes its own
+    refusal so the tombstone names the operation the operator ran (D5, DL-138).
 
-    It reports the kind RAW and judges nothing. Both owners' tombstones are
-    HEADER-ONLY, and that is a narrower question than "a retired record":
-    `header` was a legal journal opening once, so a file that opens with one
-    is a recognised pre-period root. `result` and `effect` are retired
-    records but were never openings, so a file opening with one was never a
-    legal journal at all -- it is unknown residue, and it gets each owner's
-    generic refusal rather than a tombstone that would tell an operator
-    their root predates a retirement it never took part in (D5, DL-138)."""
+    It reports the kind raw and judges nothing. Both tombstones are header-only: `header` was a
+    legal opening, so a file that opens with one is a recognised pre-period root. `result` and
+    `effect` were never openings, so a file opening with one is unknown residue and gets each
+    owner's generic refusal (D5, DL-138)."""
     try:
         with Path(path).open("rb") as handle:
             first = handle.readline()
@@ -1063,24 +938,17 @@ def opens_with_rec(path: Path) -> str | None:
 
 
 def read_journal(path: Path | str) -> list[dict[str, Any]]:
-    """Parse a run journal. A torn FINAL line (crash mid-append) is dropped
-    -- write-ahead means the corresponding feed never happened; torn or
-    invalid INTERIOR lines are corruption and raise loudly.
+    """Parse a run journal. A torn final line (crash mid-append) is dropped, because write-ahead
+    means its feed never ran; a torn or invalid interior line is corruption and raises.
 
-    The opening's `catalog_hash_version` is dispatched FIRST of all, before
-    any record is validated: a segment names the dialect the whole file is
-    written in, and a file this build cannot read is owed that verdict and
-    not a complaint about one of its records (DL-138, D4).
+    The opening's `catalog_hash_version` is dispatched first, before any record is validated: a
+    segment names the dialect of the whole file, and a file this build cannot read is owed that
+    verdict (DL-138, D4). Every record then passes `check_record`, still before the opening
+    check, so a journal that opens with a retired `header` is told what it holds (DL-138). The
+    first record must be a `segment` (DL-130).
 
-    Every record then passes `check_record` -- still before the opening
-    check -- so a journal that opens with a retired `header` is told what it
-    holds rather than told it is missing a segment (DL-138). The first
-    record must then be a `segment` (DL-130).
-
-    `path` may be an estate root, that root's sentinel, or a segment file:
-    `resolve_wal` follows the sentinel's `see` once, so a caller that holds
-    a run root and a caller that holds `wal/000002.jsonl` read the same
-    records and neither has to know which layout it met (period-model
+    `path` may be an estate root, its sentinel, or a segment file: `resolve_wal` follows the
+    sentinel's `see` once, so callers holding either read the same records (period-model
     ss1.1)."""
     records: list[dict[str, Any]] = []
     path = resolve_wal(path)
@@ -1096,23 +964,15 @@ def read_journal(path: Path | str) -> list[dict[str, Any]]:
             if index == len(lines) - 1 and trailing is None:
                 break  # torn final append: the feed it preceded never ran
             raise EngineError(f"journal {path}: corrupt line {index + 1}: {exc}") from exc
-    # D4 before D1: the OPENING's version verdict owns the file's fate. A
-    # segment says which dialect the whole file is written in, so a reader
-    # that validated the records first would answer a question about a
-    # dialect it cannot read -- a retired opening followed by a record kind
-    # this build never heard of would be reported as an unknown kind, and
-    # the operator would go looking for corruption instead of for the
-    # retirement their root predates (DL-138, D4). The dispatch is on the
-    # opening only; a version-matched file's later records are D1's.
+    # D4 before D1: the opening's version verdict owns the file's fate. A reader that validated
+    # records first would answer for a dialect it cannot read, and report a retired opening
+    # followed by an unknown kind as corruption (DL-138, D4). The dispatch is on the opening
+    # only; a version-matched file's later records are D1's.
     if records and isinstance(records[0], dict) and is_opening(records[0]):
         check_segment_version(records[0])
-    # D1's pass, and it is its own loop for two reasons. It runs AFTER the
-    # parse loop, so a file whose bytes are corrupt is called corrupt rather
-    # than called a retired dialect -- structural integrity is the more
-    # fundamental fact and an operator needs it first. It runs BEFORE the
-    # opening check below, so a journal that OPENS with a retired `header`
-    # is told what it holds rather than told it is missing a segment
-    # (DL-138).
+    # D1's pass is its own loop, after the parse loop so corrupt bytes are called corrupt, not a
+    # retired dialect, and before the opening check so a journal that opens with a retired
+    # `header` is told what it holds, not that it lacks a segment (DL-138)
     for position, record in enumerate(records):
         if not isinstance(record, dict):
             # a line that is not a JSON object has no `rec` to dispatch on
@@ -1125,19 +985,18 @@ def read_journal(path: Path | str) -> list[dict[str, Any]]:
     check_segment_record(records[0])  # exact ss2.1 shape, unconditional (DL-138)
     for position, record in enumerate(records):
         if position > 0 and is_opening(record):
-            # I1: one segment record per file, and it is line 1. An
-            # embedded `segment` mid-file is a splice -- a reader that
-            # split on it would treat forged records as a validated file
-            # boundary and admit an unchained period
+            # I1: one segment record per file, and it is line 1. An embedded `segment` mid-file
+            # is a splice: a reader that split on it would treat forged records as a validated
+            # file boundary and admit an unchained period
             raise EngineError(
                 f"journal {path}: an opening record at line {position + 1} -- a"
                 " segment opens a FILE, and a second opening inside one is a splice"
                 " (period-model ss2.1, I1)"
             )
         if record.get("rec") == "seal" and position != len(records) - 1:
-            # ss11's recovery matrix: a `seal` is the last record of its
-            # segment, so anything after one is a period that admitted work
-            # after its own boundary -- interior corruption, not a torn tail
+            # ss11's recovery matrix: a `seal` is the last record of its segment, so a record
+            # after one is a period that admitted work after its own boundary: interior
+            # corruption, not a torn tail
             raise EngineError(
                 f"journal {path}: {len(records) - position - 1} record(s) after the `seal`"
                 f" at line {position + 1}: the old period admits nothing after its"
@@ -1147,20 +1006,16 @@ def read_journal(path: Path | str) -> list[dict[str, Any]]:
 
 
 def check_segment_tail(segment: Path, records: Sequence[Mapping[str, Any]]) -> None:
-    """A CLOSED segment ends in its `seal` (ss11).
+    """A closed segment ends in its `seal` (ss11).
 
-    `read_journal` tolerates a torn FINAL line, which is right for the file
-    an appender is still appending to and wrong for a closed one: there a
-    tolerated tail is a hole in the MIDDLE of the concatenation, and a
-    reader would be handed a stream that skips records without being told.
+    `read_journal` tolerates a torn final line, which is right for the file an appender still
+    appends to and wrong for a closed one: there the tolerated tail is a hole in the middle of
+    the concatenation.
 
-    ONE helper and ONE text, POSITIONED PER CALLER (DL-139, DL-142): each
-    reader knows a segment is closed at a different point -- the
-    subscriber's backfill when it has already read a newer one, the
-    cross-period replay when the segment it is about to read is not the
-    last it was given -- and the check belongs at each of those points, not
-    at whichever one happens to be shared. The refusal is the same sentence
-    either way, because it is the same corruption."""
+    One helper and one text, positioned per caller (DL-139, DL-142): each reader knows a segment
+    is closed at a different point (the subscriber's backfill when it has read a newer one, the
+    cross-period replay when the segment is not the last it was given), and the check belongs
+    at each of them. The refusal is one sentence because it is one corruption."""
     if records[-1].get("rec") != "seal":
         raise EngineError(
             f"journal {segment}: a closed segment ends in a `seal` and this one"
@@ -1170,23 +1025,18 @@ def check_segment_tail(segment: Path, records: Sequence[Mapping[str, Any]]) -> N
 
 
 def check_segment_identity(segment: Path, opening: Mapping[str, Any]) -> int | None:
-    """One segment file, checked against WHERE IT SITS: the estate its
-    root's sentinel names, and the period its own filename claims.
+    """One segment file, checked against where it sits: the estate its root's sentinel names and
+    the period its own filename claims.
 
-    ONE implementation, because this is a fact about a file and not about
-    a reader (DL-139, the discipline `check_segment_adjacency` beside it
-    follows). The subscriber's backfill needs it because its early stop can
-    read a SINGLE segment, where no adjacency check ever runs -- and
-    `dsl41 journal`'s cross-period replay needs it for the same reason plus
-    one more: a whole root whose segments were ALL rewritten to a
-    stranger's `estate_id` agrees with itself at every boundary, so the
-    sentinel is the only thing left that says whose lineage this is.
+    One implementation, because it is a fact about a file and not a reader (DL-139, as
+    `check_segment_adjacency`). The subscriber's backfill needs it because its early stop can
+    read a single segment, where no adjacency check runs. `dsl41 journal`'s cross-period replay
+    needs it too: a root whose segments were all rewritten to a stranger's `estate_id` agrees
+    with itself at every boundary, so the sentinel alone says whose lineage this is.
 
-    Returns the period the filename names, or None for a file whose name is
-    not a number -- a sentinel-less root's `journal.jsonl`, which no
-    boundary-era layout produces and its owner refuses by name (DL-138).
-    Callers that number segments read it from here rather than parsing the
-    stem a second time."""
+    Returns the period the filename names, or None for a file whose name is not a number (a
+    sentinel-less root's `journal.jsonl`, which its owner refuses by name, DL-138). Callers that
+    number segments read it from here."""
     from dsl41.period import read_sentinel, root_of_wal
 
     try:
@@ -1202,8 +1052,8 @@ def check_segment_identity(segment: Path, opening: Mapping[str, Any]) -> int | N
         )
     claimed = opening.get("segment_no", opening.get("period_id"))
     if claimed != named:
-        # a foreign segment renamed into place parses and even seals;
-        # its own opening is what says which period it is
+        # a foreign segment renamed into place parses and even seals; its own opening says which
+        # period it is
         raise EngineError(
             f"journal {segment}: names segment {named} and its opening says"
             f" {claimed!r} -- a stranger's file under this estate's name"
@@ -1215,31 +1065,25 @@ def check_segment_identity(segment: Path, opening: Mapping[str, Any]) -> int | N
 def check_segment_adjacency(
     older: Sequence[Mapping[str, Any]], newer: Sequence[Mapping[str, Any]], *, where: str
 ) -> None:
-    """Two consecutive segments of one lineage, checked BOTH ways: the
-    older's closing seal must be the one the newer opened from, the two
-    must name one estate, and the index frontier must be continuous.
+    """Two consecutive segments of one lineage, checked both ways: the older's closing seal must
+    be the one the newer opened from, the two must name one estate, and the index frontier must
+    be continuous.
 
-    ONE implementation, because a boundary is one fact and two readers
-    that answered differently about it would disagree about the same
-    corruption (DL-139). The subscriber's backfill meets it inside a run
-    root, where the roll never happened; `dsl41 journal`'s cross-period
-    replay meets it ACROSS roots, where the older segment is in the root
-    the lineage rolled out of. Neither adjacency is more trusted than the
-    other: a rolled boundary is the same record pair in two files.
+    One implementation, because a boundary is one fact and two readers must not disagree about
+    the same corruption (DL-139). The subscriber's backfill meets it inside a run root;
+    `dsl41 journal`'s cross-period replay meets it across roots, where the older segment is in the
+    root the lineage rolled out of. A rolled boundary is the same record pair in two files.
 
-    The older segment must already have been through `check_segment_tail`:
-    a closed segment whose tail was torn has no seal record to be adjacent
-    TO, and each caller runs that check at the point in its own read where
-    it first knows the segment is closed.
+    The older segment must already have passed `check_segment_tail`: a closed segment with a torn
+    tail has no seal to be adjacent to, and each caller runs that check where it first knows the
+    segment is closed.
 
-    `where` names the stream the caller is reading -- the refusal has to
-    say WHOSE chain broke, and a reader that spans roots cannot answer
-    that from the records alone."""
+    `where` names the stream being read, since a reader that spans roots cannot say whose chain
+    broke from the records alone."""
     seal_record = older[-1]
     opening = newer[0]
-    # the FULL ss2.2 schema first: a `closes_at_index` rewritten to a
-    # bool or a string would otherwise skip the exact-int continuity
-    # comparison below instead of refusing
+    # the full ss2.2 schema first: a `closes_at_index` rewritten to a bool or a string would
+    # otherwise skip the exact-int continuity comparison below
     from dsl41.boundary import check_seal_record
 
     check_seal_record(seal_record)
@@ -1272,36 +1116,31 @@ def check_segment_adjacency(
 
 @dataclass(frozen=True)
 class Backfill:
-    """What one resuming subscriber is owed, and what this root retains
-    (DL-135, period-model ss11).
+    """What one resuming subscriber is owed, and what this root retains (DL-135, period-model
+    ss11). Both halves come out of one read, so "is there a gap" is about the records that
+    follow it."""
 
-    Both halves come out of ONE read. Two calls could see two directory
-    listings and answer about two estates -- and the answer to "is there a
-    gap" has to be about the very records that follow it."""
-
-    #: the lowest index this root can still serve, when the cursor is
-    #: BELOW it -- and None when it is not. The answer is the gap, not the
-    #: number: a caller handed a number has to re-derive the comparison,
-    #: and the comparison is what the marker is for (period-model ss11)
+    #: the lowest index this root can still serve, when the cursor is below it; None when it is
+    #: not. The gap is the answer, not the number, so a caller need not re-derive the comparison
+    #: (period-model ss11)
     gap_from: int | None
     #: every retained record that could sit after the cursor, oldest first
     records: list[dict[str, Any]]
 
 
 class BackfillRefused(EngineError):
-    """A refusal on the backfill read; the control code is `backfill_refused`
-    (control-protocol ss2)."""
+    """A refusal on the backfill read; the control code is `backfill_refused` (control-protocol
+    ss2)."""
 
     def __init__(self, message: str) -> None:
         super().__init__(message, code="backfill_refused")
 
 
 def read_backfill(path: Path | str, *, since: int) -> Backfill:
-    """The records a subscriber resuming at `since` may still be owed
-    (DL-135). A refusal from any check below reaches the subscriber as
-    `backfill_refused` (control-protocol ss2). The checks are shared with
-    replay and audit, which read no code, so the refusal is re-raised as a
-    `BackfillRefused` here, at the one door the stream reads through."""
+    """The records a subscriber resuming at `since` may still be owed (DL-135). A refusal from
+    any check below reaches the subscriber as `backfill_refused` (control-protocol ss2). The
+    checks are shared with replay and audit, which read no code, so the refusal is re-raised as
+    a `BackfillRefused` at the one door the stream reads through."""
     try:
         return _read_backfill(path, since=since)
     except EngineError as exc:
@@ -1311,35 +1150,26 @@ def read_backfill(path: Path | str, *, since: int) -> Backfill:
 def _read_backfill(path: Path | str, *, since: int) -> Backfill:
     """`read_backfill`'s body.
 
-    `read_journal` reads ONE segment, which is what an appender, a replay
-    and an audit each want: I1 makes a segment a period. A subscriber
-    spans periods -- its cursor is an estate-wide index (I2) and may name
-    a segment the appender has moved on from -- and reading only the
-    active segment silently handed it a stream with the gap left out.
+    `read_journal` reads one segment, which is what an appender, a replay and an audit want
+    (I1: a segment is a period). A subscriber spans periods: its cursor is an estate-wide index
+    (I2) and may name a segment the appender has moved on from.
 
-    It reads BACKWARDS and stops, rather than reading the whole estate. A
-    segment is needed only until one is found that holds a record at or
-    below the cursor: everything older than that record sits before the
-    caller's positional cut, so reading it would be work whose entire
-    result is discarded. A cursor inside the live period therefore costs
-    one segment, and only `since` at the very beginning costs the estate.
+    It reads backwards and stops at the first segment holding a record at or below the cursor,
+    because everything older sits before the caller's positional cut. A cursor in the live
+    period costs one segment; only `since` at the very beginning costs the estate. Stopping early
+    also says there is no gap: a segment holding the cursor is a root that retains it, so the gap
+    question is asked only when every segment has been read.
 
-    Stopping early is also what says there is NO gap: a segment holding
-    the cursor is a root that retains it. The gap question is therefore
-    only ever asked when every segment has been read, and no segment this
-    root does not need is opened even to ask it.
-
-    Every segment before the last must END in a `seal` -- asked here, of
-    each segment as it is read and before any other check touches it, so a
-    doubly-faulted segment names the fault that makes the stream a lie."""
+    Every segment before the last must end in a `seal`, asked of each segment as it is read and
+    before any other check, so a doubly-faulted segment names the fault that makes the stream a
+    lie."""
     segments = estate_segments(path)
     chunks: list[list[dict[str, Any]]] = []
     holds_cursor = False
     numbers: list[int] = []
     for position, segment in enumerate(reversed(segments)):
         records = read_journal(segment)
-        # the OLD precedence, restored (DL-142 review): a torn tail is
-        # decided BEFORE identity, sequence and contiguity, so a segment
+        # a torn tail is decided before identity, sequence and contiguity (DL-142), so a segment
         # with two faults reports the one that makes the stream a lie
         if position > 0:
             check_segment_tail(segment, records)
@@ -1351,19 +1181,18 @@ def _read_backfill(path: Path | str, *, since: int) -> Backfill:
         for record in records:
             seq = record.get("seq")
             if is_wire_int(seq) and seq < first:
-                # I2: a segment allocates from its own first_index upward.
-                # A forged low seq would make the containment test below
-                # claim this segment holds an old cursor, and every older
-                # segment -- and its chain checks -- would be skipped
+                # I2: a segment allocates from its own first_index upward. A forged low seq
+                # would make the containment test below claim this segment holds an old cursor
+                # and skip every older segment and its chain checks
                 raise EngineError(
                     f"journal {segment}: seq {seq} below this segment's first_index"
                     f" {first} -- a record this period could not have admitted (I2)"
                 )
         chunks.append(records)
         if first <= since:
-            # POSITIONAL containment from the validated opening, never from
-            # a record scan a forged seq could satisfy: the cursor sits in
-            # the first segment whose index range begins at or before it
+            # positional containment from the validated opening, never from a record scan a
+            # forged seq could satisfy: the cursor sits in the first segment whose index range
+            # begins at or before it
             holds_cursor = True
             break
     if numbers and numbers != list(range(numbers[0], numbers[0] - len(numbers), -1)):
@@ -1375,8 +1204,7 @@ def _read_backfill(path: Path | str, *, since: int) -> Backfill:
     for newer, older in zip(chunks, chunks[1:]):
         check_segment_adjacency(older, newer, where=f"journal {path}")
     first = _first_index(chunks[-1][0])
-    # index 1 is the first index there ever is, so no cursor below it can
-    # name a record this root lost
+    # index 1 is the first index there is, so no cursor below it names a lost record
     gap = not holds_cursor and max(since, 0) < first - 1
     return Backfill(
         gap_from=first if gap else None,
@@ -1385,14 +1213,12 @@ def _read_backfill(path: Path | str, *, since: int) -> Backfill:
 
 
 def _first_index(opening: Mapping[str, Any]) -> int:
-    """A segment's own `first_index` -- the first index it may allocate,
-    and NOT the lowest `seq` in it: a period that admitted no input still
-    covers its whole index range, and I2 makes the number estate-wide, so
-    the two answers differ exactly where it matters.
+    """A segment's own `first_index`: the first index it may allocate, not the lowest `seq` in
+    it. A period that admitted no input still covers its index range, and I2 makes the number
+    estate-wide.
 
-    The `else 1` is DEFENSIVE and describes nothing on disk: every segment
-    `read_journal` returns carries `first_index` as an int >= 1, checked by
-    `check_segment_record`. It was the `header`'s answer until DL-138."""
+    The `else 1` is defensive and describes nothing on disk: `check_segment_record` requires an
+    int >= 1 on every segment `read_journal` returns (DL-138)."""
     first = opening.get("first_index")
     return first if is_wire_int(first) else 1
 
@@ -1409,14 +1235,12 @@ def read_attempts(records: list[dict[str, Any]]) -> list[Attempt]:
 
 
 def _attempt_of(record: dict[str, Any], base: str) -> Attempt | None:
-    """The attempt one WAL record admitted, or None for a record that is not
-    an attempt. `base` is the log's `baseline_id`.
+    """The attempt one WAL record admitted, or None for a record that is not an attempt. `base` is
+    the log's `baseline_id`.
 
-    A record written before S2 carries no `request_id` and no
-    `fingerprint`; it gets the ones it would have been admitted under, so
-    the rest of the pipeline sees one kind of attempt rather than two. The
-    synthesized id names its position in this log, which is the only thing
-    that could ever have identified it."""
+    A record written before S2 carries no `request_id` or `fingerprint`; it gets the ones it
+    would have been admitted under, so the pipeline sees one kind of attempt. The synthesized id
+    names its position in this log."""
     rec = record.get("rec")
     if rec not in ("input", "advance", "host"):
         return None
@@ -1448,9 +1272,9 @@ def _attempt_of(record: dict[str, Any], base: str) -> Attempt | None:
         payload=payload,
         host=host,
         source=source,
-        # the precondition replays with the attempt: an input admitted
-        # without a result is re-decided through the same gate, and the
-        # revision it named is half of what that gate reads
+        # the precondition replays with the attempt: an input admitted without a result is
+        # re-decided through the same gate, and the revision it named is half of what the gate
+        # reads
         expect=expect,
         epoch=epoch,
         claimed_actor=actor,
@@ -1460,23 +1284,20 @@ def _attempt_of(record: dict[str, Any], base: str) -> Attempt | None:
 def read_decisions(
     records: list[dict[str, Any]], machines: Executor | None = None
 ) -> DecisionIndex:
-    """Pass one: the durable decisions, indexed. Built from the whole log
-    before anything is applied, because an attempt says nothing about its
-    own fate -- its decision is a LATER record, and the gap between them is
-    the crash window (concurrency-model ss4).
+    """Pass one: the durable decisions, indexed. Built from the whole log before anything is
+    applied, because an attempt says nothing about its own fate: its decision is a later record,
+    and the gap between them is the crash window (concurrency-model ss4).
 
-    One read in WAL order: an attempt opens its request id's `ADMISSION`
-    instance and its decision closes it, so only the attempts still in the
-    crash window are open when the read ends, and replay's second pass
-    decides them. `machines` is the executor the index runs on: a resuming
-    engine's, or the index's own.
+    One read in WAL order: an attempt opens its request id's `ADMISSION` instance and its
+    decision closes it, so only attempts in the crash window are open at the end, and replay's
+    second pass decides them. `machines` is the executor the index runs on: a resuming engine's,
+    or the index's own.
 
-    A `StatechartError` out of the index stops replay as itself, its report
-    naming the WAL record it met, as `_at_input` names an input
-    (statechart-engine ss5).
+    A `StatechartError` stops replay as itself, its report naming the WAL record, as `_at_input`
+    names an input (statechart-engine ss5).
 
-    One kind, not two: `result` was the pre-DL-118 spelling of the same
-    fact and is refused by name at `check_record` (DL-138)."""
+    `decision` is the one kind; `result` is a retired dialect refused by name at `check_record`
+    (DL-118, DL-138)."""
     index = DecisionIndex(machines)
     base = baseline_id(records)
     for record in records:
@@ -1492,8 +1313,8 @@ def read_decisions(
                 request_id=str(record["request_id"]),
                 decision=record["decision"],
                 reason=record.get("reason"),
-                # absent on a record written before codes existed: null,
-                # never required, never checked against the registry
+                # absent on a record written before codes existed: null, never required or
+                # checked against the registry
                 code=record.get("code"),
                 revisions=record.get("revisions") or {},
             )
@@ -1508,23 +1329,17 @@ def read_decisions(
 def decision_effects(record: Mapping[str, Any]) -> list[Effect]:
     """The typed effects one `decision` planned (period-model ss2.3).
 
-    ONE decoder for one question. "Is this decision's effect list valid" has
-    exactly one answer, and every reader of a `decision` gets it here:
-    `read_outbox` rebuilds the outbox from it, `runner_history` reads the
-    executor and the bound run_id out of the same list. History walked it
-    raw until DL-139 and skipped whatever did not look right, so a corrupt
-    log came out as a run with no executor rather than as a refusal.
+    The one decoder for "is this decision's effect list valid": `read_outbox` rebuilds the
+    outbox from it, and `runner_history` reads the executor and the bound run_id from the same
+    list (DL-139).
 
-    It REFUSES, never degrades, because a decision is durable evidence. A
-    `decision` record has exactly one shape: a LIST `effects`. `.get(...) or
-    []` would read a corrupt or foreign record as an empty native decision
-    -- intents silently lost, provenance silently invented -- so the shape
-    is checked, not defaulted around.
+    It refuses and never degrades, because a decision is durable evidence. A `decision` has one
+    shape, a list `effects`; `.get(...) or []` would read a corrupt or foreign record as an empty
+    native decision, losing intents and inventing provenance.
 
-    No `where` argument: the record names itself by `index`, so the same
-    corrupt record gets the SAME refusal whichever reader met it. `rec` and
-    `legacy_batch` are `check_record`'s, upstream of every caller
-    (DL-138)."""
+    No `where` argument: the record names itself by `index`, so the same corrupt record gets the
+    same refusal from every reader. `rec` and `legacy_batch` are `check_record`'s, upstream of
+    every caller (DL-138)."""
     effects_field = record.get("effects")
     if not isinstance(effects_field, list):
         raise EngineError(
@@ -1536,8 +1351,8 @@ def decision_effects(record: Mapping[str, Any]) -> list[Effect]:
         try:
             parsed = Effect.model_validate(effect)
         except ValidationError as exc:
-            # strict fields surface here: `generation: false` or "0"
-            # must not coerce past the fold's exact-0 gate
+            # strict fields surface here: `generation: false` or "0" must not coerce past the
+            # fold's exact-0 gate
             raise EngineError(
                 f"decision at index {record.get('index')}: malformed effect: {exc}"
             ) from exc
@@ -1549,11 +1364,9 @@ def decision_effects(record: Mapping[str, Any]) -> list[Effect]:
                 " the ss11a grammar (DL-118)"
             )
         if parsed.generation is None or (parsed.kind == "SPAWN" and parsed.run_id is None):
-            # the writer refuses these shapes (Journal.decision), so
-            # a native decision carrying one was not written by this
-            # code: corruption or a foreign writer. Accepting it
-            # would let resume mint an identity AFTER the
-            # transaction -- the exact hole DL-118 closed.
+            # the writer refuses these shapes (Journal.decision), so a native decision carrying
+            # one is corruption or a foreign writer; accepting it would let resume mint an
+            # identity after the transaction (DL-118)
             raise EngineError(
                 f"decision at index {record.get('index')}: native effect"
                 f" {parsed.effect_id} carries no birth identity (DL-118)"
@@ -1565,28 +1378,22 @@ def decision_effects(record: Mapping[str, Any]) -> list[Effect]:
 def read_outbox(records: list[dict[str, Any]], outbox: Outbox | None = None) -> Outbox:
     """The effects this log intended, and what became of them (ss5).
 
-    `outbox` is what the segment OPENED holding -- a period opened from a
-    seal carries C1's undelivered intents and its applied bindings
-    (period-model ss3.5), and an `effect_result` in this segment for one of
-    them is an outcome this pass has to attach. Seeded rather than patched
-    in afterwards, because `resolve` refuses an outcome for an effect it
-    never saw, which is the right rule and the wrong order.
+    `outbox` is what the segment opened holding: a period opened from a seal carries C1's
+    undelivered intents and applied bindings (period-model ss3.5), and an `effect_result` here
+    for one of them is an outcome to attach. It is seeded, not patched in afterwards, because
+    `resolve` refuses an outcome for an effect it never saw.
 
-    One pass, in file order, because an outcome always follows the effect it
-    resolves -- the two are written by the same engine in that order, and an
-    outcome for an unknown effect would mean the log lost the record that
-    said what was meant. Inside one `decision` the nested list is already in
-    admission order, so reading it in order is all per-run ordering takes.
+    One pass, in file order, because an outcome follows the effect it resolves; an outcome for
+    an unknown effect means the log lost the record that said what was meant. A `decision`'s
+    nested list is in admission order, which is all per-run ordering takes.
 
-    One decision shape, not two: the standalone `effect` record and the
-    `legacy_batch: true` fold that read it are retired dialects, refused by
-    name at `check_record` before anything reaches here (DL-138). The
-    per-effect shape is `decision_effects`, shared with run history since
-    DL-139.
+    The standalone `effect` record and `legacy_batch: true` are retired dialects, refused at
+    `check_record` (DL-138). The per-effect shape is `decision_effects`, shared with run history
+    (DL-139).
 
-    A `StatechartError` out of the outbox's effect chart is not a replay
-    fault: it stops replay as itself, its report naming the WAL record it
-    met, as `_at_input` names an input (statechart-engine ss5)."""
+    A `StatechartError` from the outbox's effect chart is not a replay fault: it stops replay as
+    itself, its report naming the WAL record, as `_at_input` names an input (statechart-engine
+    ss5)."""
     outbox = outbox if outbox is not None else Outbox()
     for record in records:
         try:
@@ -1608,10 +1415,8 @@ def _read_effect_record(outbox: Outbox, record: dict[str, Any]) -> None:
         try:
             outbox.resolve(outcome)
         except EngineError as exc:
-            # an outcome the outbox refuses -- for an unknown effect, a
-            # stranger's run_id, or a second outcome -- stops replay
-            # naming the effect, as a raising input does (period-model
-            # ss11)
+            # an outcome the outbox refuses (an unknown effect, a stranger's run_id, a second
+            # outcome) stops replay naming the effect, as a raising input does (period-model ss11)
             raise OutcomeReplayFault(outcome, exc) from exc
 
 
@@ -1623,20 +1428,17 @@ def _effect_record_name(record: dict[str, Any]) -> str:
 
 
 class ReplayFault(EngineError):
-    """A logged input raised when this build replayed it (period-model
-    ss11). Replay stops there, naming the input, and so does every resume
-    of the period: the same build raises at the same input every time. The
-    deployment runbook gives the two ways out: deploy a fix, or roll back to
-    the release that wrote the log.
+    """A logged input raised when this build replayed it (period-model ss11). Replay stops there,
+    naming the input, and so does every resume of the period: the same build raises at the same
+    input. The deployment runbook gives the two ways out: deploy a fix, or roll back to the
+    release that wrote the log.
 
-    It stops on an input with a durable decision, and on an undecided one
-    whose time half raises on its own. An undecided attempt whose time half
-    applies alone is quarantined instead (`classify_fault`), and resume
-    writes that decision.
+    It stops on an input with a durable decision, and on an undecided one whose time half raises
+    on its own. An undecided attempt whose time half applies alone is quarantined instead
+    (`classify_fault`), and resume writes that decision.
 
-    The cause's `code`, if it has one, rides on; the cause is chained.
-    `index` is the input's, or None when the fault is in a record that is
-    not an input (`OutcomeReplayFault`)."""
+    The cause's `code`, if it has one, rides on; the cause is chained. `index` is the input's, or
+    None when the fault is in a record that is not an input (`OutcomeReplayFault`)."""
 
     index: int | None
 
@@ -1657,11 +1459,9 @@ class ReplayFault(EngineError):
 
 
 class OutcomeReplayFault(ReplayFault):
-    """A logged `effect_result` the outbox refused when this build replayed
-    it: an outcome for an effect it never saw, one naming another run_id,
-    or a second outcome for one effect (concurrency-model ss5). A
-    `ReplayFault`, so resume stops with the same advice: deploy a fix, or
-    roll back to the release that wrote the log."""
+    """A logged `effect_result` the outbox refused when this build replayed it: an outcome for an
+    effect it never saw, one naming another run_id, or a second outcome for one effect
+    (concurrency-model ss5). A `ReplayFault`, so resume stops with the same advice."""
 
     def __init__(self, outcome: EffectOutcome, cause: EngineError) -> None:
         EngineError.__init__(
@@ -1675,12 +1475,11 @@ class OutcomeReplayFault(ReplayFault):
 
 @dataclass(frozen=True)
 class RecoveredAttempt:
-    """One attempt admitted with no durable decision, as replay decided it
-    through the gate (DL-156), with what a resuming engine needs to commit
-    that verdict (DL-315): the events the batch emitted, and every
-    job's run number just before and just after the attempt. The commit
-    plans against these rows, never against the rows the whole replay ends
-    on: the ghost-run gate compares a run with the run before the attempt."""
+    """One attempt admitted with no durable decision, as replay decided it through the gate
+    (DL-156), with what a resuming engine needs to commit that verdict (DL-315): the events the
+    batch emitted, and every job's run number just before and just after the attempt. The commit
+    plans against these rows, not the rows the whole replay ends on: the ghost-run gate compares a
+    run with the run before the attempt."""
 
     result: ApplyResult
     emitted: list[Event]
@@ -1694,13 +1493,12 @@ class Replay:
 
     frontiers: Frontiers = field(default_factory=Frontiers)
     decisions: DecisionIndex = field(default_factory=DecisionIndex)
-    #: attempts admitted with no durable result -- the crash window, decided
-    #: here by re-running the gate rather than guessed at
+    #: attempts admitted with no durable result (the crash window), decided by re-running the
+    #: gate
     recovered_attempts: list[RecoveredAttempt] = field(default_factory=list)
-    #: the effects this log intended and what became of them (ss5). Read from
-    #: the records rather than re-planned: an effect the previous engine
-    #: decided is a fact, and re-deriving it would let a changed planner
-    #: silently disagree with the log about what was meant to happen.
+    #: the effects this log intended and what became of them (ss5), read from the records: an
+    #: effect the previous engine decided is a fact, and re-planning it would let a changed
+    #: planner disagree with the log about what was meant to happen
     outbox: Outbox = field(default_factory=Outbox)
 
     @property
@@ -1718,41 +1516,32 @@ def replay_inputs(
 ) -> Replay:
     """Apply the journal through `oracle`, two-pass (concurrency-model ss4).
 
-    `outbox` is the carry: a segment opened from a seal starts with C1's
-    undelivered intents and applied bindings already in it (`read_outbox`).
-    `machines` is the executor the decision index runs on: a resuming
-    engine's, or the index's own (`read_decisions`).
+    `outbox` is the carry: a segment opened from a seal starts with C1's undelivered intents and
+    applied bindings (`read_outbox`). `machines` is the executor the decision index runs on: a
+    resuming engine's, or the index's own (`read_decisions`).
 
-    Pass one indexes the decisions; pass two applies each attempt in
-    admission order. A durable decision is authoritative -- a rejected
-    attempt is NOT fed, and an applied one is fed without re-deciding, so
-    this build reproduces the log's history rather than the one its current
-    gate would write. An attempt with no result is applied, because
-    admission is the commit point; it goes through the gate on the way,
-    since a decision is exactly what it is missing. It is applied on a fork
-    first, as the live engine applies an engine-made input. If that raises
-    and its time half applies alone, the verdict is the quarantine the live
-    engine would have logged: rejected, `engine_apply_faulted`
-    (concurrency-model ss4). Replay writes nothing: it reports each such
-    attempt in `recovered_attempts`, and a resuming engine writes the
-    missing decision (DL-315).
+    Pass one indexes the decisions; pass two applies each attempt in admission order. A durable
+    decision is authoritative: a rejected attempt is not fed, and an applied one is fed without
+    re-deciding, so this build reproduces the log's history and not the one its current gate would
+    write. An attempt with no result is applied, because admission is the commit point, and goes
+    through the gate on the way, since a decision is what it lacks. It is applied on a fork
+    first, as the live engine applies an engine-made input. If that raises and its time half
+    applies alone, the verdict is the quarantine the live engine would have logged: rejected,
+    `engine_apply_faulted` (concurrency-model ss4). Replay writes nothing: it reports each such
+    attempt in `recovered_attempts`, and a resuming engine writes the missing decision (DL-315).
 
-    The time half of every batch applies either way. A rejected completion
-    still observed the clock, and the kill that observation let fire is a
-    decision the estate already acted on -- skipping it wholesale would
-    resurrect a killed job -- the case DL-44's amendment added the advance
-    record for, now decided by record rather than by absence.
+    The time half of every batch applies either way. A rejected completion still observed the
+    clock, and the kill that observation let fire is a decision the estate already acted on;
+    skipping it would resurrect a killed job (DL-44's advance record).
 
-    An input that raises stops the replay with a `ReplayFault` that names
-    it; a `StatechartError` stops it as itself, naming the input."""
+    An input that raises stops the replay with a `ReplayFault` that names it; a `StatechartError`
+    stops it as itself, naming the input."""
     decisions = read_decisions(records, machines)
-    # I2: indices are monotone across the ESTATE, not across the segment, so
-    # a segment that opens at 5311 replays from 5310 -- the number its own
-    # opening record carries. Derived from the record rather than passed in:
-    # a caller-supplied base would be a second authority for `first_index`.
-    # The `else 0` is DEFENSIVE and describes no segment on disk -- every one
-    # carries `first_index` >= 1 -- but this function is public and harnesses
-    # hand it record lists the reader never validated.
+    # I2: indices are monotone across the estate, not the segment, so a segment that opens at
+    # 5311 replays from 5310, the number its own opening record carries. It is derived from the
+    # record, since a caller-supplied base would be a second authority for `first_index`. The
+    # `else 0` is defensive: every segment on disk carries `first_index` >= 1, but this function
+    # is public and harnesses hand it unvalidated records.
     first = records[0].get("first_index")
     base = int(first) - 1 if is_wire_int(first) else 0
     replay = Replay(
@@ -1765,15 +1554,15 @@ def replay_inputs(
         runs_before = _run_numbers(oracle) if durable is None else {}
         forced = None
         if durable is None:
-            # the crash window: on forks first, so a fault leaves this
-            # oracle as the input found it, and is classified (ss4)
+            # the crash window: on forks first, so a fault leaves this oracle as the input found
+            # it, and is classified (ss4)
             try:
                 quarantine = classify_fault(oracle, attempt)
             except StatechartError as exc:
                 raise _at_input(exc, attempt)
             except TimeHalfFault as fault:
-                # the time half's own fault, which may not be the first
-                # one: the whole apply's rides on as a note
+                # the time half's own fault, which may not be the first: the whole apply's rides
+                # on as a note
                 stop = ReplayFault(attempt, fault.cause)
                 if fault.note is not None:
                     stop.add_note(fault.note)
@@ -1785,8 +1574,8 @@ def replay_inputs(
             # an assertion failure stops replay as itself, naming the input
             raise _at_input(exc, attempt)
         except Exception as exc:
-            # never skipped: an oracle bug raises again on the input the
-            # recovery ladder would re-derive, so the error names the input
+            # never skipped: an oracle bug raises again on the input the recovery ladder would
+            # re-derive, so the error names the input
             raise ReplayFault(attempt, exc) from exc
         if durable is None:
             try:
@@ -1821,30 +1610,25 @@ def replay_period(
     oracle: Oracle, records: list[dict[str, Any]], *, outbox: Outbox | None = None
 ) -> Replay:
     """Replay one period's log offline onto `oracle`, built for the period
-    (`period.oracle_reading`) with the rows it opened with: this engine's
-    own executor is seeded at the opening instant, then `replay_inputs`.
+    (`period.oracle_reading`) with the rows it opened with: this engine's executor is seeded at
+    the opening instant, then `replay_inputs` runs.
 
-    Reproducing a log means reproducing the genesis the engine replayed it
-    onto, not only the catalog: a routing-table input lands on a table that
-    already holds this engine's own executor (concurrency-model ss8), and a
-    replay without it would decide "no such host" where the run decided
-    otherwise. The stamp only reaches `last_contact`, which no input reads."""
+    Reproducing a log reproduces the genesis it was replayed onto, not only the catalog: a
+    routing-table input lands on a table that already holds this engine's executor
+    (concurrency-model ss8), and a replay without it would decide "no such host" where the run
+    decided otherwise. The stamp reaches only `last_contact`, which no input reads."""
     seed_local_executor(oracle.store, LOCAL_EXECUTOR_ID, at=opening_at(records[0]))
     return replay_inputs(oracle, records, outbox=outbox)
 
 
 def scheduler_frontier(records: list[dict[str, Any]]) -> datetime:
-    """ss6: the scheduler's durable frontier is SEMANTIC, not "the newest
-    timestamp in the file".
+    """ss6: the scheduler's durable frontier is semantic, not the newest timestamp in the file.
 
-    `last_journal_at` takes the maximum `at` over every record, `leader`
-    and `dispatch` included. So: T is 02:00, C2 opens at 02:10 and appends
-    `leader.at = 02:10`, the process dies before the missed-tick sweep, and
-    the next resume anchors at 02:10 -- a 02:05 tick is neither admitted nor
-    recorded as dropped. That is latent in every root written before
-    DL-133, and the watermark must not inherit it. The frontier is the
-    opening watermark, the admitted scheduler ticks, the `drop` records and
-    the `advance` records, and NOTHING ELSE (PR-25a)."""
+    `last_journal_at` takes the maximum `at` over every record, `leader` and `dispatch` included.
+    If T is 02:00, C2 opens at 02:10 and appends `leader.at = 02:10`, and the process dies before
+    the missed-tick sweep, the next resume would anchor at 02:10 and neither admit nor drop a
+    02:05 tick. The frontier is the opening watermark, the admitted scheduler ticks, the `drop`
+    records and the `advance` records, and nothing else (PR-25a)."""
     stamps = [opening_at(records[0])]
     for record in records:
         rec = record.get("rec")
