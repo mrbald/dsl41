@@ -1,25 +1,20 @@
-"""The simulation coverage register (DL-209): the row model, the closed
-surface list, and the markdown renderer.
+"""The simulation coverage register (DL-209): the row model, the closed surface list and the
+markdown renderer.
 
-Normative prose: `docs/simulation-coverage.md`. The rows themselves are
-literal data in `simulation_register_rows.py`; this module gives them a
-type, an order, and one rendering. `tests/test_simulation_register.py`
-derives every surface's domain from the code's own inventories and fails
-when a row is missing, stale, or disagrees with the doc.
+Normative prose: `docs/simulation-coverage.md`. The rows are literal data in
+`simulation_register_rows.py`. `tests/test_simulation_register.py` derives every surface's
+domain from the code's own inventories and fails on a missing or stale row, or one that
+disagrees with the doc.
 
-The register states EXPOSURE, not application: a row says what the
-simulation does with a behaviour it can meet, never that a particular run
-met it. Collectors that record applications arrive in later slices, which
-is why `render_markdown` prints `none` in the detector column for a
-reachable row that is not a plain member of a derived surface: it has scope
-fixtures and no collector yet. A plain member of a derived surface prints
-`generic`, and a member no input can reach prints `unreachable`
-(`detector_of`).
+The register states exposure, not application: a row says what the simulation does with a
+behaviour it can meet, never that a particular run met it. `render_markdown` prints `none` in
+the detector column for a reachable row that is not a plain member of a derived surface (it
+has scope fixtures and no collector), `generic` for a plain member of a derived surface, and
+`unreachable` for a member no input can reach (`detector_of`).
 
-Rows are data, so they carry no code: a row's `trigger`/`quiet` fixtures are
-strings the test interprets against the surface's fixture kind. Keeping the
-interpretation in the test is deliberate -- the register must not grow a
-second, drifting copy of the scanner, the oracle or the calendar parser.
+A row's `trigger` and `quiet` fixtures are strings the test interprets against the surface's
+fixture kind, so the register holds no second copy of the scanner, the oracle or the calendar
+parser.
 """
 
 from __future__ import annotations
@@ -44,12 +39,11 @@ class Klass(Enum):
     PASSTHROUGH = "passthrough"
 
 
-#: Every surface the register covers, in rendering order. CLOSED: a surface
-#: that is not here has no rows, and the test refuses a row naming one.
-#: Most are DERIVED -- the test computes the member set from a code object
-#: (an inventory, a Literal, a grammar file) and fails on a missing OR a
-#: stale member. `runtime` and `adapter_policy` are free: they name
-#: behaviours no inventory enumerates, so their rows are hand-listed.
+#: Every surface the register covers, in rendering order. The list is closed: the test refuses
+#: a row naming another surface. Most surfaces are derived: the test computes the member set
+#: from a code object (an inventory, a Literal, a grammar file) and fails on a missing or
+#: stale member. `runtime` and `adapter_policy` are free: no inventory enumerates their
+#: behaviours, so their rows are hand-listed.
 SURFACES: tuple[str, ...] = (
     "statement",
     "job_attr",
@@ -118,22 +112,15 @@ class Behaviour(BaseModel):
     protocol: str | None = None
     #: a bounded search states its bound ("731 days", "60 years")
     bound: str | None = None
-    #: the exact regex this row's member is recognised by, pinned verbatim.
-    #: A row carrying one is held to the code's pattern, so an edit to the
-    #: regex fails until somebody re-reads what it now admits.
+    #: the exact regex this row's member is recognised by, pinned verbatim; an edit to the
+    #: code's regex fails until the row is re-read
     pattern: str | None = None
-    #: `<module>.<qualname>#<n>` for each `PENDING` marker this row claims;
-    #: the label is the row's, so a site never spells it twice. The marker
-    #: SITES are a derived domain of their own, checked by claim rather than
-    #: by a fixture -- every site the sources carry must be claimed by
-    #: exactly one row, so a SECOND default pinned under an already-used
-    #: label needs its own row instead of riding the first.
+    #: `<module>.<qualname>#<n>` for each `PENDING` marker this row claims; the label is the
+    #: row's. Every marker site in the sources is claimed by exactly one row, so a second
+    #: default under a used label needs its own row.
     sites: tuple[str, ...] = ()
-    #: False for a member no input can reach: the code can still emit it --
-    #: a defensive second gate standing behind a refusal that fires earlier
-    #: -- so it is a row, but no fixture can make it fire, so it has no
-    #: detector and the doc says so rather than claiming one. Setting it is
-    #: a claim the test holds you to.
+    #: False for a member no input can reach, such as a defensive second gate behind an
+    #: earlier refusal: it has a row but no detector, and the test holds the claim.
     reachable: bool = True
     #: one sentence: what is modelled, or what is not
     effect: str
@@ -148,8 +135,7 @@ class Behaviour(BaseModel):
 
     @property
     def marker(self) -> bool:
-        """True when `src/dsl41` carries a `PENDING: <label>` marker for this
-        row -- which is exactly "this row claims marker sites"."""
+        """True when the row claims `PENDING: <label>` marker sites in `src/dsl41`."""
         return bool(self.sites)
 
 
@@ -170,10 +156,9 @@ def rows_for(surface: str) -> tuple[Behaviour, ...]:
 
 
 def detector_of(row: Behaviour) -> str:
-    """What reads this row at runtime today. A member row on a derived
-    surface has the surface's generic detector; a member no input can reach
-    has none and never will; everything else waits for a collector, and
-    until one lands no run output may claim the row was assessed."""
+    """What reads this row at runtime: the surface's generic detector for a plain member of a
+    derived surface, `unreachable` for a member no input reaches, else `none`; no run output
+    may claim a `none` row was assessed."""
     if not row.reachable:
         return "unreachable"
     if row.facet == "" and row.surface not in FREE_SURFACES:
@@ -186,10 +171,8 @@ def _cell(text: str | None, empty: str = "-") -> str:
 
 
 def render_markdown() -> str:
-    """The register as one markdown table per surface, in SURFACES order.
-    Pure and deterministic: same rows in, same bytes out. The generated
-    block of `docs/simulation-coverage.md` is exactly this string, and the
-    test fails when the two differ."""
+    """The register as one markdown table per surface, in SURFACES order; deterministic. The
+    generated block of `docs/simulation-coverage.md` is exactly this string."""
     out: list[str] = []
     for surface in SURFACES:
         rows = rows_for(surface)

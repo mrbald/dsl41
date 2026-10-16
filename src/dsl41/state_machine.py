@@ -1,19 +1,14 @@
 """The statechart executor of docs/statechart-engine.md, and its hit recording.
 
-Standard library only. The supervisor tier reaches its helpers by path, as it
-reaches `canon.py` (DL-42, DL-72), so this module must not import anything from
-this package. tests/test_state_machine.py pins that.
+Standard library only; it imports nothing from this package, because the supervisor tier
+loads it by path (DL-42, DL-72; tests/test_state_machine.py pins that).
 
-A `Statechart` is a declaration in plain data: states with regions, rows,
-choices, deferrals and time events, plus a registry of named guards and
-actions. An `Executor` runs instances of declarations on one worklist. It
-reads no clock and does no I/O. The only file it writes is the hits file of
-the test tooling, and only when `DSL41_TRANSITION_HITS=<dir>` is set, read at
-call time: the first time this process records a coverage item (§13), it
-appends one JSON line to `<dir>/hits-<pid>.jsonl`. Each write opens, appends,
-flushes and closes the file, so a process ended with SIGKILL loses nothing. A
-write that fails with OSError is dropped, and the item is retried at its next
-hit: recording never raises.
+A `Statechart` is plain data: states with regions, rows, choices, deferrals, time events and
+a registry of named guards and actions. An `Executor` runs instances on one worklist. It reads
+no clock and does no I/O, except the test tooling's hits file: with `DSL41_TRANSITION_HITS=<dir>`
+set (read at call time), the first hit of a coverage item (§13) appends one JSON line to
+`<dir>/hits-<pid>.jsonl`, opened and closed per write so SIGKILL loses nothing. A failed write
+is dropped and retried at the item's next hit; recording never raises.
 """
 
 from __future__ import annotations
@@ -36,10 +31,7 @@ type Mark = Literal["spec-only", "unreachable"]
 
 
 def _append(path: str, record: dict[str, str]) -> bool:
-    """Append one JSON line and close the file, so nothing is buffered across a kill.
-
-    Returns False when the write failed. Recording must not break the code under test.
-    """
+    """Append one JSON line and close the file; False when the write failed."""
     try:
         with open(path, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, sort_keys=True) + "\n")
@@ -57,14 +49,11 @@ ID_DIGITS = re.compile(r"[0-9]{2,3}")
 
 # ---- the statechart executor (docs/statechart-engine.md)
 
-#: The event of a completion transition (§4). A posted or sent event never has it.
-#: A completion item's payload is the name of the completing state.
+#: The event of a completion transition (§4); its payload is the completing state.
 COMPLETION = ""
-#: The event an initial entry's actions see. No declaration may use the name;
-#: `well_formed` refuses it, and it is never posted.
+#: The event an initial entry's actions see; `well_formed` refuses it in a declaration.
 INITIAL = "<initial>"
-#: The event of the internal row that records an event a full deferred queue
-#: dropped under the `drop` policy (§6).
+#: The event of the internal row that records an event the `drop` policy dropped (§6).
 OVERFLOWED = "overflowed"
 
 type RowKind = Literal["external", "internal", "ignored", "refusal"]
@@ -76,11 +65,9 @@ type Step = tuple[Hashable, str]
 
 
 class Ancestry(Sequence[Step]):
-    """A chained item's ancestry, root first (§5): the ancestry of the
-    microstep that chained it, shared, and that microstep's own step. A chained
-    item extends its parent's in constant time, however deep the chain. It
-    reads as the tuple of its steps, and equals that tuple; a read walks the
-    links. A root item's ancestry is the empty tuple."""
+    """A chained item's ancestry, root first (§5): its parent's ancestry, shared, plus the
+    microstep's own step. Extending takes constant time; it reads as, and equals, the tuple
+    of its steps. A root item's ancestry is the empty tuple."""
 
     __slots__ = ("_parent", "_step", "_depth")
 
@@ -142,27 +129,22 @@ class Ancestry(Sequence[Step]):
         return repr(self.steps())
 
 
-#: The start of every stderr line of a `StatechartError` that stops a tier, so
-#: one journal pattern catches the whole report (deployment runbook, "What to
-#: watch").
+#: The start of every stderr line of a `StatechartError` that stops a tier (deployment
+#: runbook, "What to watch").
 STATECHART_LOG_PREFIX = "dsl41: statechart error"
-#: The exit code of a tier stopped by a `StatechartError`: `dsl41 run`'s and the
-#: supervisor's. The units list it in `RestartPreventExitStatus`.
+#: The exit code of a tier stopped by a `StatechartError`; the units list it in
+#: `RestartPreventExitStatus`.
 EXIT_STATECHART_ERROR = 7
-#: How many recent microsteps an executor keeps per machine for its errors' reports.
+#: How many recent microsteps an executor keeps per machine for error reports.
 HISTORY = 64
 
 
 class StatechartError(Exception):
     """An assertion failure of a statechart: a bug, never a fault to contain.
 
-    Every tier lets it through to a stop, before any further durable write of
-    its own: DL-320's classification re-raises it, and the engine and the
-    supervisor exit with `EXIT_STATECHART_ERROR`. An executor fills `facts`
-    when the error leaves a run: the machine, the instance, its configuration,
-    the item, its ancestry, the candidates, the deferred queue and its
-    machine's last microsteps. `str()` renders the message and then one fact
-    per line.
+    Every tier lets it through to a stop before any further durable write of its own (DL-320);
+    the engine and the supervisor exit with `EXIT_STATECHART_ERROR`. An executor fills `facts`
+    when the error leaves a run; `str()` renders the message, then one fact per line.
     """
 
     def __init__(self, message: str, candidates: Iterable[str] = ()) -> None:
@@ -210,12 +192,11 @@ class Event:
 class Effects:
     """What an action reports (§8).
 
-    `send` lists the events it raises, each for an instance of the same executor.
-    `then` names a continuation: an action of the same declaration. It is
-    queued behind every item any action of this microstep reported, so it runs
-    once their whole cascade is done, and ahead of the microstep's completions. `intents` go back to the tier in the
-    outcome. `rearm` names time events whose generation moves on, so that a
-    fired event of an older generation is discarded.
+    `send` lists the events it raises, each for an instance of the same executor. `then`
+    names a continuation, an action of the same declaration, queued behind every item the
+    microstep's actions reported and ahead of its completions. `intents` go back to the tier
+    in the outcome. `rearm` names time events whose generation moves on, so a fired event of
+    an older generation is discarded.
     """
 
     send: tuple[tuple[Hashable, Event], ...] = ()
@@ -244,8 +225,7 @@ class Context:
         return len(self.ancestry)
 
     def count(self, step: Step) -> int:
-        """How many links of the item's ancestry are `step` (§8). Under the
-        executor it takes constant time, however deep the chain."""
+        """How many links of the item's ancestry are `step` (§8); constant time under the executor."""
         return self.ancestry.count(step) if self.counter is None else self.counter(step)
 
 
@@ -257,9 +237,9 @@ type Action = Callable[[Context], Effects | None]
 class State:
     """A state; with regions it is composite.
 
-    `entry` and `exit` name actions. `defer` lists the events it defers (§6).
-    `wait` lists the replies or time events a wait state awaits; `stays` is the
-    reason a wait state may have no way out on them (§9).
+    `entry` and `exit` name actions. `defer` lists the events it defers (§6). `wait` lists
+    the replies or time events a wait state awaits; `stays` is the reason it may have no
+    way out on them (§9).
     """
 
     name: str
@@ -285,20 +265,16 @@ class Region:
 class Row:
     """One declared transition of a statechart.
 
-    `kind` is `external` (exit, action, entry), `internal` (the action only),
-    `ignored` (consumes the event; the tier writes a trace line) or `refusal`
-    (consumes the event and reports `code`). `target` is a state or a choice for
-    an external row and empty otherwise. `guard` and `action` name registry
-    entries. A row on `COMPLETION` is a completion transition.
-    `false_unreachable` is the reason no test can make the guard false: the
-    coverage gate then forbids that outcome instead of requiring it. `note` is
-    the prose of a row with no guard or action, which has no docstring to
-    carry it; the generated table shows it in the action column (§14).
-    `mark` is "spec-only" for a contract rule with no code yet, or
-    "unreachable" for a cell no input reaches. The coverage gate lists a marked row, never counts
-    it, and fails when the row or its guard's true outcome is hit; the guard's
-    false outcome is the cell another row takes, neither required nor
-    forbidden (§13, DL-353).
+    `kind` is `external` (exit, action, entry), `internal` (the action only), `ignored`
+    (consumes the event; the tier writes a trace line) or `refusal` (consumes the event and
+    reports `code`). `target` is a state or a choice for an external row, else empty. `guard`
+    and `action` name registry entries. A row on `COMPLETION` is a completion transition.
+    `false_unreachable` is the reason no test can make the guard false; the coverage gate
+    then forbids that outcome. `note` is the prose of a row with no guard or action, shown
+    in the action column of the generated table (§14). `mark` is "spec-only" (a contract
+    rule with no code yet) or "unreachable" (a cell no input reaches): the coverage gate
+    lists a marked row, never counts it, and fails when the row or its guard's true outcome
+    is hit; the guard's false outcome is neither required nor forbidden (§13, DL-353).
     """
 
     id: str
@@ -392,10 +368,9 @@ def is_statechart(machine: object) -> TypeGuard[Statechart]:
 class Outcome:
     """The result of one microstep.
 
-    `kind` is `started`, `fired`, `deferred`, `overflowed`, `discarded` or
-    `continued`. `rows` lists the rows run, in execution order; `ignored` and
-    `refusals` pick out its ignored rows and its refusal codes. `action` names
-    the continuation of a `continued` item.
+    `kind` is `started`, `fired`, `deferred`, `overflowed`, `discarded` or `continued`.
+    `rows` lists the rows run in order; `ignored` and `refusals` pick out its ignored rows and
+    refusal codes. `action` names the continuation of a `continued` item.
     """
 
     key: Hashable
@@ -427,16 +402,13 @@ class _Index:
     rows: dict[tuple[str, str], list[Row]] = field(default_factory=dict)
     choices: dict[str, Choice] = field(default_factory=dict)
     generational: frozenset[str] = frozenset()
-    #: the states of each region, by name: (owning state, region index), where
-    #: `(None, 0)` is the region that holds the root
+    #: the states of each region: (owning state, region index); `(None, 0)` holds the root
     members: dict[tuple[str | None, int], tuple[str, ...]] = field(default_factory=dict)
-    #: what the declaration alone fixes about an external row's run, built on
-    #: the row's first run and keyed by the row object's identity (see `_plan`)
+    #: external-row plans, built on a row's first run, keyed by the row object's identity
     plans: dict[int, _Plan] = field(default_factory=dict)
     #: the initial entry, built on first use
     initial: tuple[str, ...] = ()
-    #: the configurations already found legal (`_configuration_problem`), so a
-    #: restore into one costs a lookup
+    #: the configurations `_configuration_problem` found legal
     legal: set[frozenset[str]] = field(default_factory=set)
 
 
@@ -515,16 +487,14 @@ def _targets(ix: _Index, row: Row) -> tuple[str, ...]:
     return tuple(branch.target for branch in choice.branches)
 
 
-#: The region a transition runs in: (owning state, region index); `(None, 0)`
-#: is the region that holds the root.
+#: The region a transition runs in: (owning state, region index); `(None, 0)` holds the root.
 type _Domain = tuple[str | None, int]
 
 
 def _domain(ix: _Index, source: str, targets: Iterable[str]) -> _Domain:
     """The innermost region that holds the source and every target (§4).
 
-    When one endpoint contains the others, that state is left too, so the
-    region is the one that holds it. A choice is placed in this region.
+    When one endpoint contains the others, that state is left too, so the region holds it.
     """
     paths = [_path(ix, state)[::-1] for state in (source, *targets)]
     common = 0
@@ -591,11 +561,9 @@ def _entry_path(ix: _Index, domain: _Domain, target: str) -> list[str]:
 class _Plan:
     """What the declaration alone fixes about one external row's run (§4).
 
-    `top` is the outermost state the row leaves: the one active state of its
-    domain's region, since the row's source is active. A `top` without regions
-    leaves nothing but itself, so `leaving` is then its whole exit, inner to
-    outer; otherwise the exit follows the live configuration. `entries` holds
-    the entry order of each target the row has ended in, built on first use.
+    `top` is the outermost state the row leaves. When `top` has no regions, `leaving` is its
+    whole exit, inner to outer; otherwise the exit follows the live configuration. `entries`
+    holds the entry order of each target the row has ended in.
     """
 
     row: Row
@@ -612,11 +580,8 @@ def _build_plan(ix: _Index, row: Row) -> _Plan:
 
 
 def _plan(ix: _Index, row: Row) -> _Plan:
-    """The plan of an external row of the chart, built once per chart.
-
-    The key is the row's identity. The plan holds its row, so the row lives
-    as long as its plan and the identity cannot be taken by another object.
-    """
+    """The plan of an external row, built once per chart; the plan holds its row, so the
+    identity key stays unique."""
     plan = ix.plans.get(id(row))
     if plan is None:
         plan = ix.plans[id(row)] = _build_plan(ix, row)
@@ -640,7 +605,7 @@ def _initial_entry(ix: _Index) -> tuple[str, ...]:
 
 # -- hits (test tooling; off in production)
 
-#: (directory, machine, kind, id, detail) already written by this process.
+#: The (directory, machine, kind, id, detail) items this process has written.
 _chart_seen: set[tuple[str, str, str, str, str]] = set()
 
 
@@ -662,10 +627,10 @@ def coverage_items(
 ) -> tuple[list[tuple[str, str, str]], list[tuple[str, str, str]]]:
     """The (kind, id, detail) items the gate requires of `chart`, and the ones it forbids.
 
-    Required: every row and branch; both outcomes of every guard; a defer and a
-    release for every state and event it defers. Forbidden: a false outcome
-    declared unreachable, and a marked row with its guard's true outcome. A
-    marked row's false outcome is neither (DL-353).
+    Required: every row and branch, both outcomes of every guard, and a defer and a release
+    for every deferred state and event. Forbidden: a false outcome declared unreachable, and
+    a marked row with its guard's true outcome. A marked row's false outcome is neither
+    (DL-353).
     """
     required: list[tuple[str, str, str]] = []
     forbidden: list[tuple[str, str, str]] = []
@@ -744,15 +709,15 @@ def _select(
                     deferring.append(state)
                 break
             state = ix.parent[state]
-    # an inner deferral beats the row of a state that regions share
+    # an inner deferral beats the row of a state the regions share
     kept = [r for r in candidates if not any(_below(ix, d, r.source) for d in deferring)]
     firing = _without_conflicts(chart, ix, active, _yielded(chart, kept))
     return _without_exited_sources(ix, active, firing), deferring
 
 
 def _without_exited_sources(ix: _Index, active: frozenset[str], candidates: list[Row]) -> list[Row]:
-    """A candidate whose source another surviving candidate exits is dropped, internal
-    rows included (§3): its action would run on a state already left."""
+    """Drop a candidate whose source another surviving candidate exits, internal rows
+    included (§3)."""
     exits = [(row, _exit_set(ix, active, row)) for row in candidates]
     return [
         row
@@ -824,23 +789,19 @@ class _Deferred:
 
 
 class _Instance(NamedTuple):
-    """One instance's record. A stored record is never changed: a write stores a
-    new one (`Executor._write`), so a fork shares the records until it writes
-    (DL-339). The mappings are never written in place either. A named tuple,
-    because its `_replace` is the cheapest copy with changes."""
+    """One instance's record. A write stores a new record (`Executor._write`) and never
+    changes a stored one or its mappings, so a fork shares records until it writes (DL-339)."""
 
     chart: Statechart
     data: Any
     active: frozenset[str]
     deferred: tuple[_Deferred, ...] = ()
     generations: Mapping[str, int] = _NOTHING
-    #: each state's latest entry, by a serial of this instance's entries: a
-    #: completion belongs to one occurrence of its state (§4). A state active
-    #: since `restore` has no entry yet and reads as serial 0
+    #: each state's latest entry serial: a completion belongs to one occurrence of its state
+    #: (§4); a state active since `restore` reads as serial 0
     entered: Mapping[str, int] = _NOTHING
     entries: int = 0
-    #: the executor's serial of this instance's addition: the release scan
-    #: visits deferring instances in this order (§6)
+    #: the serial of the instance's addition: the release scan visits in this order (§6)
     added: int = 0
 
 
@@ -871,8 +832,7 @@ class _Microstep:
     _chained: Ancestry | None = None
 
     def chained(self) -> Ancestry:
-        """The ancestry of the items this microstep produces, one link on the
-        item's, built once and shared by all of them."""
+        """The ancestry of the items this microstep produces, built once and shared."""
         if self._chained is None:
             self._chained = Ancestry(self.item.ancestry, (self.item.key, self.item.event.name))
         return self._chained
@@ -890,8 +850,7 @@ def _check_event(chart: Statechart, event: Event) -> None:
 
 
 def _configuration_problem(ix: _Index, active: frozenset[str]) -> str:
-    """Why `active` is not a configuration of the chart; empty when it is. A
-    legal one is remembered, and found again by a lookup."""
+    """Why `active` is not a configuration of the chart; empty when it is."""
     if active in ix.legal:
         return ""
     states = set(active)
@@ -915,10 +874,8 @@ def _configuration_problem(ix: _Index, active: frozenset[str]) -> str:
 def _completions(ix: _Index, inst: _Instance, step: _Microstep) -> list[_Item]:
     """The completion items of what this microstep entered, in entry order (§4).
 
-    A simple state completes when entered; a composite completes when every
-    region rests in a final state. Only a state with a completion row queues one.
-    Each item carries its state's entry serial, so it is discarded if the state
-    was left and entered again before it pops.
+    A simple state completes when entered; a composite when every region rests in a final
+    state. Only a state with a completion row queues one, with its entry serial.
     """
     states: list[str] = []
     for state in step.entered:
@@ -946,29 +903,26 @@ def _completions(ix: _Index, inst: _Instance, step: _Microstep) -> list[_Item]:
 
 
 def _occurrence_gone(inst: _Instance, item: _Item) -> bool:
-    """A completion's state was left, or left and entered again, since the
-    completion was queued: a completion belongs to one occurrence of its state (§4)."""
+    """True when a completion's state was left, or left and re-entered, since it was queued (§4)."""
     return item.name not in inst.active or inst.entered.get(item.name, 0) != item.serial
 
 
 def _queue_order(step: _Microstep, completions: list[_Item]) -> list[_Item]:
-    """What a microstep puts at the front of the worklist (§5 step 3): the items its
-    actions reported, then its continuations, then its completions."""
+    """What a microstep puts at the worklist front (§5 step 3): reported items, continuations,
+    then completions."""
     return [*step.reported, *step.continuations, *completions]
 
 
 class Executor:
     """One executor per tier object: one worklist and one pool for all its instances.
 
-    `post` puts a root item in the pool and `run` drains everything, one
-    macrostep per root item, released deferred events ahead of the pool (§5,
-    §6). `dispatch` does both, and both take the tier's hook, called with
-    each outcome before the next item pops. `fork` copies an idle executor,
-    sharing its instance records until either side writes one (DL-339). A
-    call while `run` is in flight raises `ReentrantDispatch`. An exception out
-    of a guard, an action or the hook ends the run and empties the worklist; the instance stays as
-    the failing microstep left it. Its configuration stays readable, and the
-    tier dispatches nothing more to that instance.
+    `post` puts a root item in the pool and `run` drains it, one macrostep per root item,
+    released deferred events ahead of the pool (§5, §6). `dispatch` does both; `run` and
+    `dispatch` take the tier's hook, called with each outcome before the next item pops.
+    `fork` copies an idle executor, sharing instance records until either side writes (DL-339).
+    A call while `run` is in flight raises `ReentrantDispatch`. An exception out of a guard,
+    an action or the hook ends the run and empties the worklist; the instance stays as the
+    failing microstep left it, readable, and the tier dispatches nothing more to it.
     """
 
     def __init__(self, history: int = HISTORY) -> None:
@@ -976,19 +930,16 @@ class Executor:
         self._pool: deque[_Item] = deque()
         self._worklist: deque[_Item] = deque()
         self._running = False
-        #: the item in hand, for an error's report
+        #: the item in hand, for error reports
         self._current: _Item | None = None
-        #: each machine's last `history` microsteps, one line each, for an
-        #: error's report: another machine's steps never evict them
+        #: each machine's last `history` microsteps, one line each, for error reports
         self._history = history
         self._recent: dict[str, deque[str]] = {}
-        #: the instances with a non-empty deferred queue, the only ones the
-        #: release scan visits; and the serial the next added instance takes
+        #: the instances with a deferred queue, which the release scan visits; the next serial
         self._deferring: set[Hashable] = set()
         self._added = 0
-        #: the ancestry of the item in hand, root first, and how many of its
-        #: links each step is: the worklist is depth first, so the next item's
-        #: parent is on this path, and keeping it costs constant time per item
+        #: the item in hand's ancestry, root first, and the count of each step in it; the
+        #: worklist is depth first, so the next item's parent is on this path
         self._path: list[Ancestry] = []
         self._on_path: dict[Step, int] = {}
 
@@ -1015,9 +966,8 @@ class Executor:
         self._add(key, _Instance(chart, data, active, generations=dict(generations or {})))
 
     def forget(self, key: Hashable) -> None:
-        """Remove an instance that rests in a final configuration: every region of
-        its root in a final state. Any other instance, one with a deferred event,
-        or one with an item still in the pool raises, so no event is lost."""
+        """Remove an instance resting in a final configuration; any other, or one with a
+        deferred event or a pooled item, raises, so no event is lost."""
         self._idle()
         inst = self._instance(key)
         ix = _index(inst.chart)
@@ -1045,12 +995,10 @@ class Executor:
     def run(self, after: Callable[[Outcome], None] | None = None) -> list[Outcome]:
         """Run every item to completion and return each microstep's outcome.
 
-        `after` is the tier's hook (§5 step 5): it is called with each
-        outcome once the microstep has recorded it, before the next item pops,
-        under the macrostep. It may read an instance; a post, dispatch,
-        resolve or fork from it raises `ReentrantDispatch`, and it reports no
-        item. An exception out of it ends the run as one out of an
-        action does, its facts naming the item."""
+        `after` is the tier's hook (§5 step 5), called with each outcome before the next item
+        pops, under the macrostep. It may read an instance; a post, dispatch, resolve or fork
+        from it raises `ReentrantDispatch`. An exception out of it ends the run as one out of
+        an action does."""
         self._idle()
         self._running = True
         outcomes: list[Outcome] = []
@@ -1087,19 +1035,14 @@ class Executor:
     def resolve(self, key: Hashable, event: Event) -> Outcome:
         """Read how `event` would be selected for `key` as it stands, and do none of it.
 
-        The selection of §3 runs for this instance and event alone, against the
-        instance's present configuration: guards are evaluated, no action runs, the
-        configuration, the deferred queue and the history ring stay as they are, and
-        no hit is recorded. A guard that reaches into the executor meets
-        `ReentrantDispatch`, as under a dispatch. The outcome is the `kind`
-        (`fired`, `deferred` or `discarded`) with its `rows`, `ignored` and
-        `refusals`; it names no `branches` (a choice resolves as the row runs). A
-        selection error (unhandled, ambiguous) is raised with a dispatch's facts.
+        Guards are evaluated; no action runs, no state, queue or history changes, and no hit
+        is recorded. A guard that reaches into the executor meets `ReentrantDispatch`. The
+        outcome is the `kind` (`fired`, `deferred` or `discarded`) with its `rows`, `ignored`
+        and `refusals`, and no `branches`. A selection error is raised with a dispatch's facts.
 
-        The read is not a forecast of a dispatch. A dispatch first releases deferred
-        events and runs the pool ahead of the event, and a full deferred queue meets
-        its overflow policy; the read answers none of that. An instance with a
-        deferred event is therefore refused, and the pool is outside the read.
+        The read is not a forecast of a dispatch, which first releases deferred events, runs
+        the pool and applies the overflow policy. An instance with a deferred event is
+        refused, and the pool is outside the read.
         """
         self._idle()
         inst = self._instance(key)
@@ -1131,18 +1074,13 @@ class Executor:
     def fork(self, data: Mapping[Hashable, Any] | None = None) -> Executor:
         """A copy of this idle executor that shares its instance records (DL-339).
 
-        The copy holds every instance, each in its configuration with its
-        deferred queue, generations and entry serials, and the history rings as
-        they stand. A record is shared until a dispatch on either side writes
-        it, and a write stores a new record on that side only, so neither side
-        sees the other's moves. `data` gives the copy new data for the instances
-        it names; every other instance shares its data object with this one.
-        Event payloads and data that get no new value stay shared by design, so
-        a tier treats them as immutable.
+        The copy holds every instance and the history rings as they stand. A write on either
+        side stores a new record on that side only. `data` gives the copy new data for the
+        instances it names; all other data and event payloads stay shared, so a tier treats
+        them as immutable.
 
-        A fork inside a macrostep raises `ReentrantDispatch`; a fork with a root
-        item still in the pool raises a `StatechartError`, because the item
-        would run on one side only.
+        A fork inside a macrostep raises `ReentrantDispatch`; a fork with a root item in the
+        pool raises a `StatechartError`, because the item would run on one side only.
         """
         if self._running:
             raise ReentrantDispatch("a fork while a macrostep of this executor is in flight")
@@ -1177,11 +1115,9 @@ class Executor:
         return self._instance(key).data
 
     def explain(self, error: StatechartError, key: Hashable, event: Event) -> StatechartError:
-        """Give an error the tier raises about an instance's last outcome the
-        facts an error out of a run carries (§5): the machine, the instance,
-        its configuration, `event` as the item, the candidates the error
-        names, the deferred queue and the machine's recent microsteps. An
-        unknown instance raises; facts the error already carries stay."""
+        """Give an error the tier raises about an instance's last outcome the facts an error
+        out of a run carries (§5), with `event` as the item. An unknown instance raises; facts
+        the error already carries stay."""
         self._idle()
         self._instance(key)
         if not error.facts:
@@ -1202,9 +1138,7 @@ class Executor:
         self._instances[key] = instance._replace(added=self._added)
 
     def _write(self, key: Hashable, **changes: Any) -> _Instance:
-        """The one write of an instance: store a new record with `changes`. The
-        record it replaces may be shared with a fork, so it stays as it was
-        (DL-339)."""
+        """The one write of an instance: store a new record with `changes` (DL-339)."""
         record = self._instances[key]._replace(**changes)
         self._instances[key] = record
         return record
@@ -1240,8 +1174,7 @@ class Executor:
         return Context(item.key, item.event, inst.active, inst.data, item.ancestry, quiet, counter)
 
     def _align(self, ancestry: Sequence[Step]) -> None:
-        """Make the path the item's ancestry: drop the links past the part it
-        shares, then add its own."""
+        """Make the path the item's ancestry: drop the links past the shared part, add its own."""
         path, counts = self._path, self._on_path
         missing: list[Ancestry] = []
         link = ancestry if isinstance(ancestry, Ancestry) else None
@@ -1260,8 +1193,7 @@ class Executor:
             counts[link.step] = counts.get(link.step, 0) + 1
 
     def _count(self, ancestry: Sequence[Step], step: Step) -> int:
-        """`step`'s links in `ancestry`: read off the path when the ancestry is
-        the item in hand's, else counted link by link."""
+        """`step`'s links in `ancestry`: read off the path for the item in hand's ancestry."""
         top = self._path[-1] if self._path else ()
         if top is ancestry or (not self._path and not ancestry):
             return self._on_path.get(step, 0)
@@ -1300,9 +1232,8 @@ class Executor:
     def _decide(
         self, inst: _Instance, item: _Item, ctx: Context
     ) -> tuple[str, list[Row], list[str]]:
-        """What an event item comes to: `discarded`, `fired` with its firing set, or
-        `deferred` with the states that defer it; or an unhandled event raises. It
-        reads and changes nothing (§3, §5)."""
+        """What an event item comes to: `discarded`, `fired` with its firing set, or `deferred`
+        with the states that defer it; an unhandled event raises. Changes nothing (§3, §5)."""
         if self._stale(inst, item.event):
             return "discarded", [], []
         firing, deferring = _select(inst.chart, _index(inst.chart), inst.active, ctx)
@@ -1337,10 +1268,9 @@ class Executor:
         return self._fire(item, [row], "overflowed")
 
     def _release(self) -> _Item | None:
-        """The first deferred head its configuration no longer defers, as a root item (§6).
+        """The first deferred head its configuration does not defer, as a root item (§6).
 
-        A head deferred again holds its place, and its queue waits for a later
-        macrostep.
+        A head that is deferred again holds its place; its queue waits for a later macrostep.
         """
         for key in sorted(self._deferring, key=lambda k: self._instances[k].added):
             inst = self._instances[key]
@@ -1359,10 +1289,7 @@ class Executor:
         return None
 
     def _fire(self, item: _Item, rows: list[Row], kind: str) -> Outcome:
-        """Execute a firing set in region order and queue what it reported (§4, §5 step 3).
-
-        Each write stores a new record (`_write`), so every read of the instance
-        here and below takes the record in `_instances` as it stands."""
+        """Execute a firing set in region order and queue what it reported (§4, §5 step 3)."""
         ix = _index(self._instances[item.key].chart)
         step = _Microstep(item)
         if kind == "continued":
@@ -1493,12 +1420,10 @@ def alphabet(chart: Statechart) -> list[str]:
 
 
 def well_formed(chart: Statechart) -> list[str]:
-    """The problems with a statechart's declaration. An empty list means well formed.
+    """The problems with a statechart's declaration; an empty list means well formed.
 
-    The machine name matches `[a-z][a-z_]*`, and every row and branch id is
-    `<machine name>.<two or three digits>`, such as `host.05`. Names, ids,
-    the tree and the registry come first; the checks that walk the tree
-    (sibling regions, reachability, completeness) run only on a sound one.
+    The machine name matches `[a-z][a-z_]*`; every row and branch id is `<machine
+    name>.<two or three digits>`, such as `host.05`. The checks that walk the tree run only on a sound one.
     """
     ix = _index(chart)
     ids = [r.id for r in chart.rows] + [b.id for c in chart.choices for b in c.branches]
@@ -1676,8 +1601,8 @@ def _reach_problems(chart: Statechart, ix: _Index) -> list[str]:
 
 
 def _fall_through(ix: _Index, state: str, event: str) -> list[str] | None:
-    """A configuration below `state` where no active state has a row or a deferral for
-    `event`, as its innermost states; None when there is none (§10)."""
+    """The innermost states of a configuration below `state` where no active state has a row
+    or deferral for `event`; None when there is none (§10)."""
     node = ix.states[state]
     if (state, event) in ix.rows or event in node.defer:
         return None
@@ -1691,11 +1616,8 @@ def _fall_through(ix: _Index, state: str, event: str) -> list[str] | None:
 
 
 def _beside(ix: _Index, a: str, b: str) -> bool:
-    """True when two regions' walks can reach `a` and `b` in one configuration (§3).
-
-    Either they lie in sibling regions, or one is an ancestor of the other with
-    an orthogonal state on the way down, whose other regions reach the ancestor.
-    """
+    """True when two regions' walks can reach `a` and `b` in one configuration (§3): they lie
+    in sibling regions, or one is an ancestor of the other with an orthogonal state between."""
     if _crosses_regions(ix, a, b):
         return True
     for upper, lower in ((a, b), (b, a)):
@@ -1708,8 +1630,8 @@ def _beside(ix: _Index, a: str, b: str) -> bool:
 
 
 def _leaving_warnings(ix: _Index, a: Row, b: Row) -> list[str]:
-    """An external row that leaves the source of a non-external row that another
-    region's walk reaches (§3): that row is dropped when both are enabled."""
+    """Warn where an external row leaves the source of a non-external row that another
+    region's walk reaches (§3); that row is dropped when both are enabled."""
     found: list[str] = []
     for inner, outer in ((a, b), (b, a)):
         if (
@@ -1728,11 +1650,9 @@ def _leaving_warnings(ix: _Index, a: Row, b: Row) -> list[str]:
 def chart_warnings(chart: Statechart) -> list[str]:
     """Where two regions' rows for one event can meet badly (§3).
 
-    One of two regions' rows leaves the regions' shared ancestor; an external row
-    leaves the source of an internal row on a shared ancestor, which is then
-    dropped when both are enabled; or a refusal row and another region's
-    consuming row share an event, which raises `AmbiguousTransition` when both
-    are enabled.
+    A row leaves the regions' shared ancestor; an external row leaves the source of an
+    internal row and drops it when both are enabled; or a refusal row and another region's
+    consuming row share an event and raise `AmbiguousTransition` when both are enabled.
     """
     ix = _index(chart)
     warnings: list[str] = []
