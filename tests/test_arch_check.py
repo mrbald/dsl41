@@ -397,6 +397,12 @@ def test_spec_documents_excludes_logs_and_sorts(tmp_path: Path) -> None:
     } <= set(arch_check.SPEC_EXCLUDED)
 
 
+def test_the_generated_job_chart_lifecycle_is_no_specification() -> None:
+    """scripts/render_job_lifecycle.py writes it; a spec review would only list it."""
+    assert "job-chart-lifecycle.md" in arch_check.SPEC_EXCLUDED
+    assert "job-chart-lifecycle.md" not in {p.name for p in arch_check.spec_documents()}
+
+
 def test_spec_review_status_reports_per_document_due_states(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
