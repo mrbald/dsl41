@@ -1,28 +1,21 @@
 """Runner scheduler (ss5): the calendar the oracle deliberately lacks.
 
-SEM-35 name resolution and the naive-UTC <-> local conversion moved to
-`dsl41.timezones` with DL-163; this module is one of its callers, not its
-home. `_scheduler_tz` below stays: the REFUSAL is the scheduler's own.
+The runner modules form an import DAG with runner_clock at the bottom, and this module sits
+above it (DL-74). Time-zone name
+resolution (SEM-35) and the naive-UTC <-> local conversion live in `dsl41.timezones`
+(DL-163); the refusal for an unresolvable zone is this module's own.
 
-Split out of runner.py by DL-74, with the paragraph it owns, verbatim.
-
-Phase 11c (ss5, ss8, ss10; DL-45 pins the decisions):
-
-- Scheduler (ss5): the calendar the oracle deliberately lacks. Per
-  date_conditions job it computes the next occurrence from days_of_week +
-  start_times/start_mins (absent days_of_week = every day, PENDING: E10;
-  per-job timezone, else the run-level base zone, else UTC -- the
-  base-zone default is the vendor's own rule since DL-155 -- with names
-  resolved per SEM-35: zoneinfo, then the
-  --timezone-map ujo_timezones listing, then the DL-62 unique-city
-  default), or -- run_calendar with neither -- from the
-  calendar rows' own times (E11 resolved, DL-58), and hands the engine
-  STARTJOB events at the tick, timestamped at the tick and journaled like
-  any input (source=scheduler). It fires UNCONDITIONALLY: SEM-32
-  arm-and-wait (Q3 resolved, DL-58) and SEM-33 run_window stay
-  oracle-side. While the engine is up a late tick still fires (event
-  stamped at the tick); across downtime missed ticks are dropped AND
-  journaled at resume, never fired late (PENDING: E9).
+Scheduler (ss5, ss8, ss10; DL-45): per date_conditions job it computes the next
+occurrence from days_of_week + start_times/start_mins (absent days_of_week = every day,
+PENDING: E10). The zone is the per-job timezone, else the run-level base zone, else
+UTC; the base-zone default is the vendor's own rule (DL-155). Names resolve per SEM-35:
+zoneinfo, then the --timezone-map ujo_timezones listing, then the DL-62 unique-city
+default. A run_calendar job with neither start_times nor start_mins fires from the
+calendar rows' own times (E11, DL-58). The engine receives STARTJOB events stamped at
+the tick and journaled like any input (source=scheduler). The scheduler fires
+UNCONDITIONALLY: SEM-32 arm-and-wait (Q3, DL-58) and SEM-33 run_window stay oracle-side.
+While the engine is up a late tick still fires, stamped at the tick; across downtime
+missed ticks are dropped AND journaled at resume, never fired late (PENDING: E9).
 """
 
 from __future__ import annotations
@@ -58,15 +51,16 @@ from dsl41.timezones import (
 #: Python date.weekday() (Monday=0) -> JIL day token (ir._DAY_TOKENS)
 _DAY_CODES = ("mo", "tu", "we", "th", "fr", "sa", "su")
 
-#: Occurrence-scan ceiling for UNBOUNDED extended-calendar rules (DL-57);
-#: mirrors autocal's dormancy ceiling.
+#: occurrence-scan ceiling for UNBOUNDED extended-calendar rules; equals autocal's dormancy
+#: ceiling (DL-57)
 _EXTENDED_SCAN_DAYS = 60 * 366
 
 
 class _CalCache:
-    """Windowed membership over a CompiledCalendar (DL-57). Generation is
-    window-priced, so per-day queries fill 366-day blocks once; a
-    generation-time refusal (Q8a) surfaces as EngineError."""
+    """Windowed membership over a CompiledCalendar (DL-57).
+
+    Per-day queries fill 366-day blocks once; a generation-time refusal (Q8a) surfaces as
+    EngineError."""
 
     def __init__(self, compiled: CompiledCalendar) -> None:
         self.compiled = compiled
@@ -85,21 +79,20 @@ class _CalCache:
 
 @dataclass(frozen=True)
 class _SchedulePlan:
-    """One job's compiled trigger: eligible day tokens OR an explicit
-    run_calendar day source (SEM-31 XOR) -- a standard date set or an
-    extended-calendar generator (DL-57) -- an exclude_calendar source to
-    subtract, sorted (hour, minute) ticks per eligible day, where they come
-    from, and the resolved zone (None = the engine's naive UTC basis
-    directly). `last_date` bounds the occurrence scan past the last explicit
-    date (DL-56); an unbounded extended run source scans to the autocal
-    dormancy ceiling instead."""
+    """One job's compiled trigger.
+
+    It holds the eligible day tokens OR a run_calendar day source (SEM-31 XOR: a standard
+    date set or an extended-calendar generator, DL-57), an exclude_calendar source to
+    subtract, sorted (hour, minute) ticks per eligible day, their source, and the resolved
+    zone (None = the engine's naive UTC basis). `last_date` bounds the occurrence scan past
+    the last explicit date (DL-56); an unbounded extended run source scans to the autocal
+    dormancy ceiling."""
 
     days: frozenset[str]
     times: tuple[tuple[int, int], ...]
     tz: tzinfo | None
-    #: where `times` come from: start_times and start_mins follow the
-    #: `dst-start-times` switch on a DST change day (DL-260); calendar row
-    #: times keep the fold=0 conversion
+    #: where `times` come from: start_times and start_mins follow the `dst-start-times`
+    #: switch on a DST change day (DL-260); calendar row times use the fold=0 conversion
     source: Literal["start_times", "start_mins", "calendar"] = "calendar"
     #: the `dst-start-times` switch
     dst_start_times: DstStartTimes = "vendor"
@@ -108,9 +101,8 @@ class _SchedulePlan:
     run_gen: _CalCache | None = None
     exclude_gen: _CalCache | None = None
     last_date: date | None = None
-    #: E11 (DL-58): a run_calendar job with no start_times/start_mins fires
-    #: at each row's own time (bare rows at 00:00); set only in that shape,
-    #: where it REPLACES `times` per eligible day.
+    #: E11 (DL-58): a run_calendar job with no start_times/start_mins fires at each row's own
+    #: time (bare rows at 00:00); set only in that shape, where it replaces `times` per day.
     row_times: dict[date, frozenset[tuple[int, int]]] | None = None
 
     def day_eligible(self, day: date) -> bool:
@@ -125,9 +117,8 @@ class _SchedulePlan:
         return _DAY_CODES[day.weekday()] in self.days
 
     def utc_ticks_on(self, day: date) -> list[datetime]:
-        """This local day's ticks as naive-UTC instants (the engine basis).
-        start_times and start_mins convert through the one definition the
-        oracle's slot matching reads too (DL-260)."""
+        """This local day's ticks as naive-UTC instants; start_times and start_mins convert
+        through the definition the oracle's slot matching shares (DL-260)."""
         if self.source == "start_times":
             instants = start_time_instants(day, self.times, self.tz, dst=self.dst_start_times)
             return [at for _, at in instants]
@@ -144,12 +135,12 @@ class _SchedulePlan:
 def _scheduler_calendar(
     catalog: CatalogIR, job: str, role: str, ref: str, semantics: SemanticSwitches
 ) -> dict[date, frozenset[tuple[int, int]]] | CompiledCalendar:
-    """Resolve a run_calendar/exclude_calendar reference for the Scheduler:
-    a standard calendar's day -> row-tick map (row times fire E11 jobs,
-    DL-58; exclusion consumes only the day keys), or an extended calendar
-    compiled by the autocal interpreter (DL-57). Preflight ERROR territory
-    (ss8) -- a hand-built catalog that bypassed it refuses comprehensibly
-    here, never guesses (DL-56)."""
+    """Resolve a run_calendar/exclude_calendar reference.
+
+    Returns a standard calendar's day -> row-tick map (row times fire E11 jobs, DL-58;
+    exclusion reads only the day keys) or an extended calendar compiled by the autocal
+    interpreter (DL-57). Preflight gates a bad reference (ss8); a catalog that bypassed it
+    is refused here, never guessed (DL-56)."""
     cal = catalog.calendars.get(ref)
     if cal is None:
         raise EngineError(f"{job}: {role} {ref!r} has no calendar definition in the loaded set")
@@ -162,8 +153,7 @@ def _scheduler_calendar(
 
 
 def _scheduler_tz(name: str, owner: str, aliases: Mapping[str, str] | None) -> tzinfo:
-    """Resolve or refuse comprehensibly -- preflight gates this first (ss8);
-    the EngineError is the backstop for direct Scheduler construction."""
+    """Resolve a zone name or raise EngineError; preflight gates it first (ss8)."""
     resolved = resolve_timezone(name, aliases)
     if resolved is None:
         raise EngineError(
@@ -174,44 +164,35 @@ def _scheduler_tz(name: str, owner: str, aliases: Mapping[str, str] | None) -> t
 
 
 class Scheduler:
-    """ss5: the calendar the oracle deliberately lacks. Computes per-job next
-    occurrences from the ScheduleBlock and yields STARTJOB events at the
-    tick; it fires unconditionally (SEM-32 arm-and-wait and SEM-33
-    run_window stay oracle-side, exactly as in simulation). Ticks are naive-UTC instants
-    (the engine's time basis): per-job `timezone` -- else `default_tz`, else
-    UTC -- is applied via resolve_timezone's SEM-35 ladder (zoneinfo, the
-    `tz_aliases` ujo_timezones map, the DL-62 city default, POSIX fixed
-    offsets), so rehearse under the virtual clock exercises real calendar
-    arithmetic (ss5).
+    """ss5: yields STARTJOB events at each job's tick; it fires unconditionally (SEM-32
+    arm-and-wait and SEM-33 run_window stay oracle-side).
 
-    Pinned interpretation defaults (E10): absent days_of_week means every
-    day (the module docstring carries its marker). Jobs without `timezone`
-    read their times in `default_tz` (run-level --timezone), defaulting to
-    UTC; that half is cited since
-    DL-155 -- no-timezone start events are "scheduled based on the time
-    zone under which the scheduler is running" (TechDocs 12.0.01, timezone
-    attribute), so a migrated estate sets the server's zone explicitly.
-    DST corners follow the `dst-start-times` switch (DL-260). Its default,
-    `vendor`, applies the documented rules on a one-hour change at 02:00
-    local: a start time in the repeated 01:00-01:59 fires once, in the
-    second pass; start_mins fire in both passes; a start time in the
-    missing 02:00-02:59 fires in the first minute of 03:00 with its minute
-    as seconds, and only the first such start time fires; start_mins ticks
-    in the missing hour do not exist. `fold0`, and every other change
-    shape, use PEP 495 fold=0: a repeated time is its first occurrence, a
-    missing one maps past the gap. Calendar row times always use fold=0.
-    Schedule blocks with neither start_times nor start_mins trigger
-    nothing (run_window/SLA are gates/alarms, not triggers).
+    Ticks are naive-UTC instants (the engine's time basis). The zone is the per-job
+    `timezone`, else `default_tz`, else UTC, resolved by resolve_timezone's SEM-35 ladder
+    (zoneinfo, the `tz_aliases` ujo_timezones map, the DL-62 city default, POSIX fixed
+    offsets), so rehearse under the virtual clock exercises real calendar arithmetic.
 
-    Standard calendars are honored (DL-56): `run_calendar` day membership
-    (SEM-31: XOR days_of_week) minus `exclude_calendar` days, both evaluated
-    on the job's LOCAL day. Ticks are start_times/start_mins when present;
-    a run_calendar job with NEITHER fires at each calendar row's own HH:MM
-    tail, bare rows at 00:00 (E11 resolved, DL-58: CA support worked
-    examples -- job-level times override row times; an extended calendar
-    has no rows, so that shape ticks at 00:00). An exhausted calendar
-    leaves the job dormant: no next occurrence, never an error. Extended
-    calendars compile through the autocal interpreter (DL-57) and scan
+    Absent days_of_week means every day (E10; the module docstring carries its marker).
+    A job without `timezone` reads its times in `default_tz` (run-level --timezone),
+    else UTC (DL-155): no-timezone start events are "scheduled based on the time zone
+    under which the scheduler is running" (TechDocs 12.0.01, timezone attribute).
+
+    DST corners follow the `dst-start-times` switch (DL-260). Its default, `vendor`,
+    applies these rules on a one-hour change at 02:00 local: a start time in the repeated
+    01:00-01:59 fires once, in the second pass; start_mins fire in both passes; a start
+    time in the missing 02:00-02:59 fires in the first minute of 03:00 with its minute as
+    seconds, and only the first such start time fires; start_mins ticks in the missing
+    hour do not exist. `fold0`, and every other change shape, use PEP 495 fold=0: a
+    repeated time is its first occurrence, a missing one maps past the gap. Calendar row
+    times always use fold=0. A schedule block with neither start_times nor start_mins
+    triggers nothing (run_window/SLA are gates and alarms).
+
+    `run_calendar` day membership (SEM-31: XOR days_of_week) minus `exclude_calendar`
+    days, both on the job's LOCAL day, apply (DL-56). A run_calendar job with neither
+    start_times nor start_mins fires at each calendar row's own HH:MM tail, bare rows at
+    00:00 (E11, DL-58); job-level times override row times; an extended calendar has no
+    rows, so that shape ticks at 00:00. An exhausted calendar leaves the job dormant, never
+    an error. Extended calendars compile through the autocal interpreter (DL-57) and scan
     windowed, out to the dormancy ceiling for unbounded rules."""
 
     def __init__(
@@ -224,20 +205,16 @@ class Scheduler:
         semantics: SemanticSwitches | None = None,
     ) -> None:
         base_tz = _scheduler_tz(default_tz, "--timezone", tz_aliases) if default_tz else None
-        # what this scheduler was WIRED with, kept READ-ONLY (properties
-        # below) so the runtime profile the period pins is derived from the
-        # compile-time inputs the plans actually use -- a mutable attribute
-        # here would let a post-compile edit pin one timezone while `_plans`
-        # execute under another (period-model ss2.1, DL-130)
+        # the wiring inputs stay read-only properties, so the runtime profile the period pins
+        # comes from the inputs the plans use; a mutable attribute would let an edit pin
+        # one timezone while `_plans` run under another (period-model ss2.1, DL-130)
         self._default_tz = default_tz
         self._tz_aliases: dict[str, str] = dict(tz_aliases or {})
-        #: the semantic switches the extended calendars compile under (DL-252);
-        #: an engine refuses a scheduler whose switches are not its own
+        #: the switches the extended calendars compile under; an engine refuses a scheduler
+        #: whose switches are not its own (DL-252)
         self._semantics = semantics or DEFAULT_SWITCHES
-        # the catalog these plans were COMPILED from, pinned as its v2 hash
-        # at compile time -- an object reference could be mutated after the
-        # plans were built, and the gate would then bless stale plans under
-        # the changed catalog's own identity
+        # the catalog the plans compiled from is pinned as its v2 hash; an object reference
+        # could mutate and the gate would then bless stale plans under the new identity
         from dsl41.period import catalog_hash_v2
 
         self._catalog_hash = catalog_hash_v2(catalog)
@@ -261,8 +238,7 @@ class Scheduler:
                 else:
                     run_dates = frozenset(source)
                     if not own_ticks:
-                        # E11 (DL-58): no job-level times -- fire at each
-                        # row's own time; job start_times override row times
+                        # E11 (DL-58): without job-level times each row's own time fires
                         row_times = source
             exclude_dates: frozenset[date] = frozenset()
             exclude_gen: _CalCache | None = None
@@ -275,11 +251,9 @@ class Scheduler:
                 else:
                     exclude_dates = frozenset(source)
             if sched.days_of_week is not None and not sched.days_of_week:  # pragma: no cover
-                # Unreachable: lowering rejects an empty days_of_week ("empty
-                # value"), and a runner catalog is always re-lowered from its
-                # bundle's JIL (boundary.load_bundle_catalog). A hand-built IR
-                # carrying one would exhaust _occurrence's scan, so it is
-                # refused comprehensibly here.
+                # unreachable: lowering rejects an empty days_of_week and a runner catalog is
+                # re-lowered from its bundle's JIL (boundary.load_bundle_catalog); a
+                # hand-built IR carrying one is refused here
                 raise EngineError(f"{name}: days_of_week is empty; nothing to schedule")
             explicit = (run_dates or frozenset()) | exclude_dates
             last_date = max(explicit) if explicit else None
@@ -295,8 +269,7 @@ class Scheduler:
                     if (sched.days_of_week is None or "all" in sched.days_of_week)
                     else sched.days_of_week
                 ),
-                # E11 (DL-58): a generated (extended) day has no row time --
-                # neither the calendar nor the job supplies one -> 00:00
+                # E11 (DL-58): a generated (extended) day has no row time, so 00:00
                 times=self._ticks(sched) if own_ticks else ((0, 0),),
                 tz=_scheduler_tz(sched.timezone, name, tz_aliases) if sched.timezone else base_tz,
                 source=tick_source,
@@ -334,15 +307,12 @@ class Scheduler:
         return tuple(sorted((h, m) for h in range(24) for m in sched.start_mins or []))
 
     def reset(self, start: datetime) -> None:
-        """Re-anchor every job's next tick at or after `start`. A tick exactly
-        at `start` counts, and construction and resume both take that one
-        form: a crash between same-instant siblings leaves one of them
-        unjournaled, and an exclusive re-anchor would drop it with no record
-        (period-model ss6: the cutoff barrier). A tick the engine has already
-        admitted is skipped by the RESUME sweep, which knows both what this
-        segment journaled and what the previous segment's cutoff owned --
-        the scheduler is not asked to encode either (DL-166).
-        Jobs whose calendar is already exhausted get no entry (DL-56)."""
+        """Re-anchor every job's next tick at or after `start`; a tick exactly at `start` counts.
+
+        A crash between same-instant siblings leaves one unjournaled, and an exclusive
+        re-anchor would drop it unrecorded (period-model ss6: the cutoff barrier). The
+        RESUME sweep skips a tick the engine already admitted; the scheduler does not
+        encode that (DL-166). A job whose calendar is exhausted gets no entry (DL-56)."""
         self._next = {}
         for job, plan in self._plans.items():
             occ = self._occurrence(plan, start, inclusive=True)
@@ -354,18 +324,17 @@ class Scheduler:
         return min(self._next.values(), default=None)
 
     def upcoming(self) -> list[tuple[datetime, str]]:
-        """Read-only snapshot of every scheduled job's NEXT tick, due-ordered
-        (the ss10 `timers` verb; the list-timers analog, DL-65). One entry
-        per job -- the estate's near future, not the full tick expansion."""
+        """Each scheduled job's NEXT tick, due-ordered, one entry per job (ss10 `timers` verb,
+        DL-65)."""
         return sorted((tick, job) for job, tick in self._next.items())
 
     def pop_due(self, upto: datetime) -> list[Event]:
-        """Consume every tick due at or before `upto` and return its STARTJOB
-        event, stamped at the tick and ordered by (tick, job). A stalled-but-
-        alive engine therefore fires its backlog late but truthfully stamped.
-        Ticks missed across DOWNTIME come through here too: resume's sweep
-        derives them with this call, then drops and journals them rather
-        than admitting them (PENDING: E9)."""
+        """Consume every tick due at or before `upto`; return its STARTJOB event, stamped at
+        the tick and ordered by (tick, job).
+
+        A stalled engine fires its backlog late but truthfully stamped. Resume's sweep
+        derives ticks missed across DOWNTIME with this call, then drops and journals them
+        (PENDING: E9)."""
         due: list[tuple[datetime, str]] = []
         exhausted: list[str] = []
         for job, tick in self._next.items():
@@ -384,25 +353,21 @@ class Scheduler:
 
     @staticmethod
     def _occurrence(plan: _SchedulePlan, t: datetime, *, inclusive: bool) -> datetime | None:
-        # calendar-date iteration (never aware-datetime + timedelta: absolute
-        # arithmetic can skip a 25h fall-back local date); per-day ticks are
-        # sorted AFTER conversion because a missing-hour time can land past
-        # a later tick's UTC instant on a spring-forward day: fold=0 maps
-        # 02:30 past 03:00, and the vendor's 02:05 runs at 03:00:05 (DL-260)
+        # iterates calendar dates, since aware-datetime + timedelta can skip a 25h fall-back
+        # date; per-day ticks sort AFTER conversion because a missing-hour time can land
+        # past a later tick on a spring-forward day: fold=0 maps 02:30 past 03:00, and the
+        # vendor's 02:05 runs at 03:00:05 (DL-260)
         anchor_date = to_local(t, plan.tz).date()
-        # a non-empty weekly day set always hits within 7; explicit dates
-        # push the bound past the last one, after which weekly recurrence
-        # (if any) is unobstructed again; unbounded extended rules scan to
-        # the autocal dormancy ceiling (a leap-day-weekday conjunction can
-        # legally gap ~40 years, DL-57)
+        # a non-empty weekly day set hits within 7 days; explicit dates push the bound past
+        # the last one; unbounded extended rules scan to the autocal dormancy ceiling,
+        # since a leap-day-weekday conjunction can gap ~40 years (DL-57)
         span = 371
         if plan.last_date is not None:
             span = max(span, (plan.last_date - anchor_date).days + 8)
         if plan.run_gen is not None and plan.run_gen.compiled.bound is None:
             span = max(span, _EXTENDED_SCAN_DAYS)
         if plan.exclude_gen is not None:
-            # an extended exclusion can outlast the weekly scan; a bounded
-            # one scans past its bound, an unbounded one to the ceiling
+            # an extended exclusion can outlast the weekly scan: past its bound, or to the ceiling
             ex_bound = plan.exclude_gen.compiled.bound
             span = max(
                 span,
@@ -417,9 +382,8 @@ class Scheduler:
                     return utc_tick
         if plan.run_dates is not None or plan.run_gen is not None or plan.exclude_gen is not None:
             return None  # calendar exhausted/fully excluded: dormant, not an error (DL-56/57)
-        # Unreachable: lowering refuses an unknown day token and an empty list,
-        # so a plan without a calendar holds a weekday that recurs within 7 days
-        # of any start, and a runner catalog is re-lowered from bundle JIL.
+        # unreachable: lowering refuses an unknown day token and an empty list, so a plan
+        # without a calendar holds a weekday that recurs within 7 days
         raise EngineError(  # pragma: no cover
             "no scheduler occurrence within a year (unreachable: validated block)"
         )

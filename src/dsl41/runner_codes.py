@@ -1,20 +1,18 @@
 """The stable codes of the control protocol's `ok: false` answers
 (docs/control-protocol.md §2, the code table).
 
-A code names the reason, never the outcome: `refused` and `decision` stay
-the outcome markers, and a code rides beside them and beside the prose
-`error`. The table in control-protocol.md and `CODES` hold the same set,
-and a test compares them.
+A code names the reason, never the outcome: `refused` and `decision` are
+the outcome markers, and a code rides beside them and the prose `error`.
+The table in control-protocol.md and `CODES` hold the same set; a test
+compares them.
 
 Codes that a rejected `decision` record stores are WAL facts (period-model
-§2.3), and `STORED_CODES` names them. That set is append-only: a reader
-treats a stored code as opaque and never checks it against this registry,
-so renaming or retiring one is an evolution event with its own
-decision-log entry.
+§2.3), named by `STORED_CODES`. That set is append-only: a reader treats a
+stored code as opaque, so renaming or retiring one is an evolution event
+with its own decision-log entry.
 
-This module imports nothing from dsl41. It sits at the bottom of the
-import graph so the exceptions that carry a code, and the gates that mint
-one, can all name `Code`.
+This module imports nothing from dsl41, so every exception and gate that
+carries a code can name `Code`.
 """
 
 from __future__ import annotations
@@ -79,9 +77,9 @@ Code = Literal[
     "seal_timeout",
     # stored on a rejected decision only; never answered on the wire
     "stale_completion",
-    # stored on a rejected decision: the input's apply raised and its time
-    # half did not, so the input is quarantined (concurrency-model ss4). An
-    # exact retry of a control input that replay quarantined answers it
+    # stored on a rejected decision when the input's apply raised and its time
+    # half did not: the input is quarantined (concurrency-model ss4); an exact
+    # retry of a quarantined control input answers it
     "engine_apply_faulted",
     # an engine refusal that carries no code of its own
     "engine_error",
@@ -90,10 +88,9 @@ Code = Literal[
 #: every code, for the table test and the decision writer
 CODES: frozenset[str] = frozenset(get_args(Code))
 
-#: the codes a rejected `decision` record may store: the gates' verdicts,
-#: and the quarantine of an input whose apply raised.
-#: APPEND-ONLY -- each one may sit in a retained WAL for the life of the
-#: root, and the writer refuses a rejection whose code is not here
+#: the codes a rejected `decision` record may store: the gates' verdicts and
+#: the quarantine of an input whose apply raised. Append-only: a retained WAL
+#: keeps each for the life of the root, and the writer refuses any other code
 STORED_CODES: frozenset[str] = frozenset(
     {
         "precondition_failed",
