@@ -78,7 +78,7 @@ def test_the_lifecycle_blocks_follow_the_reading_order() -> None:
 def test_the_ways_into_a_target_are_sorted_by_source_then_event_then_guard() -> None:
     view = rjl.sort_rows(JOB)
     inactive = [e for e in view.shown["status"] if e.target == "INACTIVE"]
-    order = ["lifecycle", "IDLE", "TERMINAL", "FAILED", "QUE_WAIT", "STARTING"]
+    order = ["lifecycle", "TERMINAL", "FAILED", "QUE_WAIT"]
     sources = list(dict.fromkeys(e.source for e in inactive))
     assert sources == order
     keys = [(order.index(e.source), e.event, e.guard) for e in inactive]

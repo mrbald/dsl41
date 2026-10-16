@@ -395,14 +395,15 @@ it was before the writes; any other value is a statechart error. An input the jo
 takes one of the status region's internal rows `job.442` to `job.444` and writes the
 EVENT_IGNORED line with the rule's reason (`_oob_ignored`); a row the chart ignores where no
 rule gives a reason is a statechart error. A flag row is written by the flag
-move, with its marker and line. A status that the `flag moved` fires is a status move: an iced
-waiter leaves the queue (`job.112`), and ON_NOEXEC settles a waiter, a FAILED job or a box
-(`job.113`, `job.121`, `job.136`, `job.169`, `job.170`). ON_NOEXEC's payload reads a box's
-contained jobs only where the rule reads them. The flag rows' actions send or report what follows,
-in order: an ice's box rules and wakes (`holders may leave`, `wake`), the mark of a member taken
-off ice in its running box, the waiters' scan on a hold, and the start retries of OFF_HOLD and
-ON_NOEXEC (`retry step`, each one `start`). A box's ON_NOEXEC and OFF_NOEXEC on the jobs it
-contains are box rules (below).
+move, with its marker and line. A flag move whose status rule reads the flag reports an event of
+its own, and a status that event fires is a status move: ON_ICE's `ice moved` takes an iced
+waiter out of the queue (`job.112`), and ON_NOEXEC's `noexec moved`, which carries ON_NOEXEC's
+payload, settles a waiter, a FAILED job or a box (`job.113`, `job.121`, `job.452`). ON_NOEXEC's
+payload reads a box's contained jobs only where the rule reads them. The flag rows' actions send
+or report what follows, in order: an ice's box rules and wakes (`holders may leave`, `wake`), the
+mark of a member taken off ice in its running box, the waiters' scan on a hold, and the start
+retries of OFF_HOLD and ON_NOEXEC (`retry step`, each one `start`). A box's ON_NOEXEC and
+OFF_NOEXEC on the jobs it contains are box rules (below).
 
 RELEASE_RESOURCE and each waiter's readmission are dispatched to the job's instance too (DL-345).
 Held units go back with their line and the queue is scanned (`job.307`); a job that holds nothing

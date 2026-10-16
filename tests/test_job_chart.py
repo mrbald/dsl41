@@ -52,13 +52,14 @@ from dsl41.job_chart_events import (
     BOX_START,
     COMPLETION_MOMENT,
     DISARM,
-    FLAG_MOVED,
     FORCE_STARTJOB,
+    ICE_MOVED,
     KILLJOB,
     LEAVE_LIVE,
     MEMBER_ENDS,
     MEMBER_MOVES,
     MOMENTS,
+    NOEXEC_MOVED,
     OFF_HOLD,
     OFF_ICE,
     OFF_NOEXEC,
@@ -80,7 +81,6 @@ from dsl41.job_chart_events import (
     Admitted,
     BoxGate,
     Deadline,
-    FlagMoved,
     Injection,
     JobData,
     Payload,
@@ -124,7 +124,6 @@ ROWS = {row.id: row for row in CHART.rows}
 #: A move with several sources: the row of its first source, and the rows of
 #: its other sources, which take the same cell.
 SIBLINGS: dict[str, tuple[str, ...]] = {
-    "job.136": ("job.169", "job.170"),
     "job.201": ("job.218",),
     "job.202": ("job.219",),
     "job.204": ("job.220",),
@@ -139,6 +138,7 @@ SIBLINGS: dict[str, tuple[str, ...]] = {
 _NOT_RECOMPUTED = ("STARTING", "RUNNING", "TERMINATED")
 ELSEWHERE: dict[str, dict[str, str]] = {
     "job.445": {"INACTIVE": "job.196"},
+    "job.452": {"RUNNING": "job.199"},
     "job.446": {"SUCCESS": "job.191", **dict.fromkeys(_NOT_RECOMPUTED, "job.450")},
     "job.447": {"FAILURE": "job.191", **dict.fromkeys(_NOT_RECOMPUTED, "job.450")},
     "job.448": {"SUCCESS": "job.191", **dict.fromkeys(_NOT_RECOMPUTED, "job.450")},
@@ -362,7 +362,7 @@ def test_the_chart_is_well_formed_draws_no_warning_and_is_registered() -> None:
             STARTED, READMIT, ACTUAL_START, ADMITTED_START, LEAVE_LIVE, MEMBER_MOVES,
             COMPLETION_MOMENT, MEMBER_ENDS, BOX_RECOMPUTE, BOX_START, BOX_RUNNING,
             BOX_SET_INACTIVE, BOX_RUN_ENDS, BOX_ENDS, BOX_OFF_NOEXEC, BOX_ON_NOEXEC, PERIOD_OPENING,
-            FLAG_MOVED, START_ADMITTED, *MOMENTS,
+            ICE_MOVED, NOEXEC_MOVED, START_ADMITTED, *MOMENTS,
         ]
     )  # fmt: skip
 
@@ -409,7 +409,8 @@ def test_every_marked_row_is_unreachable_with_its_reason() -> None:
     previous end, since job.401 settles first."""
     marked = [row for row in CHART.rows if row.mark]
     assert [row.id for row in marked] == [
-        "job.182", "job.186", "job.188", "job.190", "job.192", "job.450", "job.199", "job.312",
+        "job.182", "job.186", "job.188", "job.190", "job.192", "job.450", "job.199", "job.453",
+        "job.312",
         "job.314", "job.317", "job.318", "job.320", "job.321",
         "job.420", "job.421", "job.422", "job.423",
     ]  # fmt: skip
@@ -433,6 +434,7 @@ ONCE = {
     "job.447": ("lifecycle", BOX_RECOMPUTE),
     "job.448": ("lifecycle", BOX_RECOMPUTE),
     "job.449": ("lifecycle", BOX_RECOMPUTE),
+    "job.452": ("lifecycle", NOEXEC_MOVED),
 }
 
 
@@ -471,7 +473,7 @@ def _moves() -> set[str]:
 def test_every_other_row_moves_nothing_relays_an_attempt_or_settles_held_units() -> None:
     moves = _moves()
     others = [row for row in CHART.rows if row.id not in moves]
-    assert len(moves) == 62 + 8 + 5 and len(others) == 72
+    assert len(moves) == 62 + 6 + 5 and len(others) == 74
     moments = {f"job.{405 + i}": event for i, event in enumerate(MOMENTS)}
     for row in others:
         if row.id in RELAYS:
@@ -658,7 +660,7 @@ PARTITIONS: dict[str, list[Any]] = {
         for armed in (False, True)
     ],
     ON_NOEXEC: _NOEXECS,
-    FLAG_MOVED: [FlagMoved("ON_ICE")] + [FlagMoved("ON_NOEXEC", noexec) for noexec in _NOEXECS],
+    NOEXEC_MOVED: _NOEXECS,
     **{event: [Arm(False), Arm(True)] for event in (ACTUAL_START, DISARM, BOX_RUN_ENDS, KILLJOB)},
     TERM_RUN_TIME: [Deadline(True), Deadline(False)],
     MEMBER_MOVES: _STEPS,
@@ -1013,8 +1015,8 @@ def _step(target: str | None) -> Verdict:
 
 def _noexec_moved() -> ChartEvent:
     """ON_NOEXEC's flag move, which the status rule reads: the tier sends it
-    once the flag is on (`OracleCascade._on_noexec`)."""
-    return ChartEvent(FLAG_MOVED, FlagMoved("ON_NOEXEC", Noexec()))
+    once the flag is on, with ON_NOEXEC's payload (`OracleCascade._on_noexec`)."""
+    return ChartEvent(NOEXEC_MOVED, Noexec())
 
 
 CELLS: dict[str, Cell] = {
@@ -1027,7 +1029,7 @@ CELLS: dict[str, Cell] = {
     "job.107": _status(_start(window="skip", box="running")),
     "job.108": _status(ChartEvent(READMIT, Readmission())),
     "job.109": _status(ChartEvent(READMIT, Readmission(box="idle"))),
-    "job.112": _status(ChartEvent(FLAG_MOVED, FlagMoved("ON_ICE")), ice=True),
+    "job.112": _status(ChartEvent(ICE_MOVED), ice=True),
     "job.113": _status(_noexec_moved(), noexec=True),
     "job.114": _status(ChartEvent(KILLJOB)),
     "job.115": _status(ChartEvent(TERM_RUN_TIME, Deadline())),
@@ -1051,7 +1053,7 @@ CELLS: dict[str, Cell] = {
     "job.448": _status(ChartEvent(BOX_RECOMPUTE, _box("SUCCESS", False)), BOX_DATA),
     "job.449": _status(ChartEvent(BOX_RECOMPUTE, _box("FAILURE", False)), BOX_DATA),
     "job.135": _status(ChartEvent(STATUS, Injection("INACTIVE")), BOX_DATA),
-    "job.136": _status(_noexec_moved(), BOX_DATA, noexec=True),
+    "job.452": _status(_noexec_moved(), BOX_DATA, noexec=True),
     "job.440": _status(ChartEvent(KILLJOB)),
     "job.441": _status(_start(stale=True)),
     "job.442": _status(ChartEvent(ON_ICE)),
@@ -1101,8 +1103,8 @@ def test_every_move_from_every_source_ends_in_its_target() -> None:
     cell dispatched with its chained items: the row of that source fires, and
     its region ends in one of the row's targets. A move with several sources
     has a row per source, which take the same cell. A row whose event is an
-    item the tier sends (`flag moved`, `actual start`, `admitted start`) is
-    dispatched that item: the handle here sends nothing beyond a row's own
+    item the tier sends (`ice moved`, `noexec moved`, `actual start`, `admitted
+    start`) is dispatched that item: the handle here sends nothing beyond a row's own
     move, and the oracle's tests pin who sends it (test_oracle_chart.py). A flag move whose
     guard parts a waiter from any other job has a waiter's twin with its own cell
     (`WAITER_CELLS`). A rule written once at a superstate fires at each of its leaves but those
@@ -1128,7 +1130,7 @@ def test_every_move_from_every_source_ends_in_its_target() -> None:
                 after = _leaf(executor.active("j"), REGION[source])
                 assert after in _targets(row), (ident, source, after)
                 checked += 1
-    assert (checked, elsewhere) == (160, 17)
+    assert (checked, elsewhere) == (160, 18)
 
 
 def _advance(executor: Executor, job: str, event: ChartEvent) -> list[Any]:
@@ -1253,16 +1255,6 @@ def test_a_payload_with_no_handle_on_the_job_s_units_is_a_statechart_error(
     ctx = Context("j", ChartEvent(ADMITTED_START, Admission()), active, JOB_DATA)
     with pytest.raises(StatechartError, match="a payload with no handle on the job's units"):
         job_chart.settle_ended_run(ctx)
-
-
-def test_a_flag_move_with_no_noexec_payload_read_for_one_is_a_statechart_error() -> None:
-    """Only ON_NOEXEC's flag move carries ON_NOEXEC's payload; a guard that
-    reads it from another cause's raises rather than read a missing fact."""
-    ctx = Context(
-        "j", ChartEvent(FLAG_MOVED, FlagMoved("ON_ICE")), configuration("SUCCESS"), BOX_DATA
-    )
-    with pytest.raises(StatechartError, match="a flag move of ON_ICE carries no ON_NOEXEC payload"):
-        job_chart.noexec_ignored(ctx)
 
 
 def test_an_injected_live_status_keeps_the_run_s_units_and_settles_them_at_its_end() -> None:

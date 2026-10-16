@@ -70,8 +70,8 @@ stateDiagram-v2
     s10 --> s4 : job.107 start [start_skips_member] / moved
     s6 --> s0 : job.108 readmit [readmit_admits] / admit
     s6 --> s4 : job.109 readmit [readmit_cancels] / cancelled
-    s6 --> s4 : job.112 flag moved [iced_waiter] / moved
-    s6 --> s4 : job.113 flag moved [noexec_settles_job] / injected
+    s6 --> s4 : job.112 ice moved / moved
+    s6 --> s4 : job.113 noexec moved [noexec_settles_job] / injected
     s5 --> s11 : job.114 KILLJOB / terminated
     s7 --> s11 : job.115 TIMER term_run_time [current_run] / terminated
     s5 --> s11 : job.116 box ends FAILURE or TERMINATED [is_terminator] / terminated
@@ -79,7 +79,7 @@ stateDiagram-v2
     s19 --> s2 : job.118 STATUS [exit_failure] / moved
     s19 --> c0 : job.119 STATUS [injects]
     s19 --> s4 : job.120 STATUS [injects_inactive_job] / injected
-    s1 --> s4 : job.121 flag moved [noexec_settles_job] / injected
+    s1 --> s4 : job.121 noexec moved [noexec_settles_job] / injected
     s10 --> s4 : job.122 box start / batched
     s19 --> s4 : job.445 box set INACTIVE / batched
     s8 --> s7 : job.125 started [started_box] / runs_box
@@ -93,9 +93,7 @@ stateDiagram-v2
     s19 --> s9 : job.448 box recompute [derives_success] / moved
     s19 --> s2 : job.449 box recompute [derives_failure] / moved
     s19 --> s4 : job.135 STATUS [injects_inactive_box] / cascades
-    s3 --> s4 : job.136 flag moved [noexec_settles_box] / cascades
-    s6 --> s4 : job.169 flag moved [noexec_settles_box] / cascades
-    s8 --> s4 : job.170 flag moved [noexec_settles_box] / cascades
+    s19 --> s4 : job.452 noexec moved [noexec_settles_box] / cascades
     s16 --> s17 : job.201 ON_ICE [not_live_or_queued] / iced
     s17 --> s16 : job.202 OFF_ICE
     s17 --> s16 : job.203 FORCE_STARTJOB [force_clears]
@@ -160,8 +158,8 @@ stateDiagram-v2
 | job.107 | TERMINAL | start | start_skips_member | moved | INACTIVE | external | SEM-33, DL-154 |
 | job.108 | QUE_WAIT | readmit | readmit_admits | admit | ADMITTED | external | DL-50, DL-257 |
 | job.109 | QUE_WAIT | readmit | readmit_cancels | cancelled | INACTIVE | external | DL-50, DL-247 |
-| job.112 | QUE_WAIT | flag moved | iced_waiter | moved | INACTIVE | external | DL-50, DL-285 |
-| job.113 | QUE_WAIT | flag moved | noexec_settles_job | injected | INACTIVE | external | DL-254 |
+| job.112 | QUE_WAIT | ice moved |  | moved | INACTIVE | external | DL-50, DL-285 |
+| job.113 | QUE_WAIT | noexec moved | noexec_settles_job | injected | INACTIVE | external | DL-254 |
 | job.114 | LIVE | KILLJOB |  | terminated | TERMINATED | external | SEM-14 |
 | job.115 | RUNNING | TIMER term_run_time | current_run | terminated | TERMINATED | external | autosys-semantics ss5 |
 | job.116 | LIVE | box ends FAILURE or TERMINATED | is_terminator | terminated | TERMINATED | external | SEM-14 |
@@ -169,7 +167,7 @@ stateDiagram-v2
 | job.118 | lifecycle | STATUS | exit_failure | moved | FAILURE | external | SEM-09 |
 | job.119 | lifecycle | STATUS | injects |  | injected status | external | DL-13, DL-264 |
 | job.120 | lifecycle | STATUS | injects_inactive_job | injected | INACTIVE | external | DL-242, DL-235 |
-| job.121 | FAILED | flag moved | noexec_settles_job | injected | INACTIVE | external | SEM-22, DL-243 |
+| job.121 | FAILED | noexec moved | noexec_settles_job | injected | INACTIVE | external | SEM-22, DL-243 |
 | job.122 | TERMINAL | box start |  | batched | INACTIVE | external | SEM-10, DL-242 |
 | job.445 | lifecycle | box set INACTIVE |  | batched | INACTIVE | external | SEM-18, DL-242 |
 | job.124 | IDLE | start | start_admits_box | extent_admit |  | internal | SEM-10, DL-242, DL-364 |
@@ -184,14 +182,12 @@ stateDiagram-v2
 | job.448 | lifecycle | box recompute | derives_success | moved | SUCCESS | external | SEM-15 |
 | job.449 | lifecycle | box recompute | derives_failure | moved | FAILURE | external | SEM-15 |
 | job.135 | lifecycle | STATUS | injects_inactive_box | cascades | INACTIVE | external | SEM-18 |
-| job.136 | IDLE | flag moved | noexec_settles_box | cascades | INACTIVE | external | DL-254 |
 | job.440 | IDLE | KILLJOB |  | EVENT_IGNORED |  | internal | DL-64, DL-81 |
 | job.441 | lifecycle | start | start_refused |  |  | internal | DL-81, DL-246 |
 | job.442 | LIVE | ON_ICE |  | EVENT_IGNORED |  | internal | DL-254 |
 | job.443 | LIVE | ON_HOLD |  | EVENT_IGNORED |  | internal | DL-254 |
 | job.444 | lifecycle | ON_NOEXEC | noexec_ignored |  |  | internal | DL-254 |
-| job.169 | QUE_WAIT | flag moved | noexec_settles_box | cascades | INACTIVE | external | DL-254 |
-| job.170 | STARTING | flag moved | noexec_settles_box | cascades | INACTIVE | external | DL-254 |
+| job.452 | lifecycle | noexec moved | noexec_settles_box | cascades | INACTIVE | external | DL-254 |
 | job.177 | lifecycle | STARTJOB |  | relay_start |  | internal | SEM-10 |
 | job.178 | lifecycle | FORCE_STARTJOB |  | relay_start |  | internal | SEM-23 |
 | job.179 | lifecycle | TIMER run_window |  | relay_start |  | internal | SEM-33 |
@@ -212,8 +208,10 @@ stateDiagram-v2
 | job.195 | lifecycle | box start |  | INACTIVE loses its exit code by a plain write, a live or queued job keeps its run. |  | ignored | SEM-10, DL-242 |
 | job.196 | INACTIVE | box set INACTIVE |  | Already INACTIVE: the cascade leaves it out. |  | ignored | SEM-18 |
 | job.197 | lifecycle | box ends FAILURE or TERMINATED |  | Not live, or no job_terminator: nothing to terminate. |  | ignored | SEM-14 |
-| job.198 | lifecycle | flag moved | flag_moves_nothing | Not queued, or no status move: the member's completion moment and the wakes follow. |  | ignored | SEM-20, DL-254 |
-| job.199 | lifecycle | flag moved | flag_move_unposted | An ice or an applied ON_NOEXEC reports it, an ignored ON_NOEXEC moves no flag. |  | ignored (unreachable) |  |
+| job.451 | lifecycle | ice moved |  | Not queued: the member's completion moment and the wakes follow. |  | ignored | SEM-20 |
+| job.198 | lifecycle | noexec moved | noexec_moves_nothing | Applied, and no box settles: the released jobs' start retries follow. |  | ignored | DL-254 |
+| job.199 | lifecycle | noexec moved | noexec_ignored | An applied ON_NOEXEC reports it, an ignored ON_NOEXEC moves no flag. |  | ignored (unreachable) |  |
+| job.453 | ADMITTED | noexec moved |  | ON_NOEXEC at ADMITTED is itself a marked cell (job.423), so its flag move never pops there. |  | ignored (unreachable) |  |
 | job.201 | ice_off | ON_ICE | not_live_or_queued | iced | ice_on | external | SEM-20, DL-254, DL-285 |
 | job.202 | ice_on | OFF_ICE |  | no re-evaluation | ice_off | external | SEM-20 |
 | job.203 | ice_on | FORCE_STARTJOB | force_clears |  | ice_off | external | SEM-23, DL-243 |
@@ -382,11 +380,9 @@ stateDiagram-v2
 | unarmed | guard | The payload: the job's arm is not latched. |
 | noexec_ignored | guard | ON_NOEXEC is ignored: the configuration has ice on, RUNNING, or STARTING on a job that is not a box (`noexec_own_reason`), or the data says a box and the payload's `tree_busy` holds. The flag move does not change what it reads. |
 | noexec_applies | guard | Not `noexec_ignored`. |
-| iced_waiter | guard | The payload: ON_ICE moved the flag (the configuration has it on). |
-| noexec_settles_job | guard | The payload: ON_NOEXEC, not `noexec_ignored`, the data: a catalog job, not a box. |
-| noexec_settles_box | guard | The payload: ON_NOEXEC, not `noexec_ignored`, the data: a box, the configuration's status is not INACTIVE, or the payload's `change` holds (`NoexecFacts.change`). |
-| flag_moves_nothing | guard | The payload: ON_ICE, or ON_NOEXEC that is not `noexec_ignored`: no status follows the flag here. |
-| flag_move_unposted | guard | Not `flag_moves_nothing`: an ignored ON_NOEXEC moves no flag, so it reports none. |
+| noexec_settles_job | guard | Not `noexec_ignored`, the data: a catalog job, not a box. |
+| noexec_settles_box | guard | Not `noexec_ignored`, the data: a box, the configuration's status is not INACTIVE, or the payload's `change` holds (`NoexecFacts.change`). |
+| noexec_moves_nothing | guard | Not `noexec_ignored`, and not `noexec_settles_box`: no box settles here. A job's settlement is an inner row's (job.113, job.121), which shadows this one (§3). |
 | is_box | guard | The data says the job is a box. |
 | is_job | guard | The data says the job is not a box. |
 | is_terminator | guard | The data: a member with job_terminator (SEM-14). |

@@ -1500,7 +1500,14 @@ def _directed(name: str) -> list[Event | datetime]:
     return [s if isinstance(s, Event) else s.at for s in script if not isinstance(s, SealPoint)]
 
 
-_ITEMS = ("KILLJOB", "flag moved", "TIMER term_run_time", "TIMER run_window", "start")
+_ITEMS = (
+    "KILLJOB",
+    "ice moved",
+    "noexec moved",
+    "TIMER term_run_time",
+    "TIMER run_window",
+    "start",
+)
 #: Per outcome class: the estate, the script (an Event is fed, a datetime
 #: advanced to), the job, the rows its last step fires on the job's
 #: instance for KILLJOB, the flag move, the TIMER events and `start` (the
@@ -1899,7 +1906,8 @@ _FLAG_ITEMS = (
     "ON_NOEXEC",
     "OFF_NOEXEC",
     "DISARM",
-    "flag moved",
+    "ice moved",
+    "noexec moved",
     "start",
 )
 
@@ -1938,8 +1946,9 @@ _DISARMS = "DISARM on an armed job and box"
 _RUNNING_BOX = "OFF_ICE in a running box, ON_NOEXEC on its idle subbox"
 #: Per outcome class: the directed flag script and how many of its inputs to
 #: feed, the job, the rows the last input fires on the job's instance (the
-#: flag row, then the `flag moved` status row where one fires, then the start
-#: a retry posts), and a trace line the oracle writes for the job there.
+#: flag row, then the status row of its `ice moved` or `noexec moved` where one
+#: fires, then the start a retry posts), and a trace line the oracle writes for
+#: the job there.
 _FLAG_OUTCOMES: dict[str, tuple[str, int, str, list[tuple[str, ...]], str]] = {
     "ON_ICE ignored: RUNNING": (_LIVE, 2, "fl_job", [("job.442",)], "EVENT_IGNORED"),
     "ON_HOLD ignored: RUNNING": (_LIVE, 3, "fl_job", [("job.443",)], "EVENT_IGNORED"),
@@ -1947,7 +1956,7 @@ _FLAG_OUTCOMES: dict[str, tuple[str, int, str, list[tuple[str, ...]], str]] = {
     "ON_ICE ignored: STARTING": (_LIVE, 6, "fl_hold", [("job.442",)], "EVENT_IGNORED"),
     "ON_HOLD ignored: STARTING": (_LIVE, 7, "fl_hold", [("job.443",)], "EVENT_IGNORED"),
     "ON_NOEXEC ignored: STARTING": (_LIVE, 8, "fl_hold", [("job.444",)], "EVENT_IGNORED"),
-    "ON_ICE": (_ICED, 1, "fl_job", [("job.201",), ("job.198",)], "ON_ICE"),
+    "ON_ICE": (_ICED, 1, "fl_job", [("job.201",), ("job.451",)], "ON_ICE"),
     "ON_ICE on an iced job": (_ICED, 2, "fl_job", [("job.218",)], "ON_ICE"),
     "ON_NOEXEC ignored: ON_ICE": (_ICED, 3, "fl_job", [("job.444",)], "EVENT_IGNORED"),
     "OFF_ICE": (_ICED, 4, "fl_job", [("job.202",)], "OFF_ICE"),
@@ -2049,14 +2058,14 @@ _FLAG_OUTCOMES: dict[str, tuple[str, int, str, list[tuple[str, ...]], str]] = {
         "ON_NOEXEC on a queued box",
         3,
         "fl_box",
-        [("job.209",), ("job.169",)],
+        [("job.209",), ("job.452",)],
         "QUE_WAIT->INACTIVE",
     ),
     "ON_NOEXEC on a STARTING box": (
         _STARTING_BOX,
         3,
         "fl_q",
-        [("job.209",), ("job.170",)],
+        [("job.209",), ("job.452",)],
         "STARTING->INACTIVE",
     ),
     "OFF_NOEXEC on a box": (_STARTING_BOX, 4, "fl_q", [("job.210",)], "OFF_NOEXEC"),
@@ -2064,7 +2073,7 @@ _FLAG_OUTCOMES: dict[str, tuple[str, int, str, list[tuple[str, ...]], str]] = {
         "ON_NOEXEC on a STARTING box that holds a unit",
         5,
         "fl_box",
-        [("job.209",), ("job.170",)],
+        [("job.209",), ("job.452",)],
         "STARTING->INACTIVE",
     ),
     "ON_NOEXEC on a held idle box": (
@@ -2089,14 +2098,14 @@ _FLAG_OUTCOMES: dict[str, tuple[str, int, str, list[tuple[str, ...]], str]] = {
         _RUNNING_BOX,
         5,
         "fl_sub",
-        [("job.209",), ("job.136",)],
+        [("job.209",), ("job.452",)],
         "INACTIVE->INACTIVE",
     ),
     "ON_ICE on a member a running box waits for": (
         "ON_ICE on the last member a running box waits for",
         4,
         "fl_sub",
-        [("job.201",), ("job.198",)],
+        [("job.201",), ("job.451",)],
         "ON_ICE",
     ),
     "ON_NOEXEC on a job outside the catalog": (
@@ -2134,9 +2143,9 @@ def test_each_flag_outcome_fires_its_rows_and_writes_its_line(
     case: str,
 ) -> None:
     """The flag inputs are dispatched to the job's instance: the flag row
-    fires, then the status row its `flag moved` fires where one does, then the
-    start a retry posts; its line is written, and every instance agrees with
-    its row."""
+    fires, then the status row its `ice moved` or `noexec moved` fires where
+    one does, then the start a retry posts; its line is written, and every
+    instance agrees with its row."""
     name, count, job, rows, line = _FLAG_OUTCOMES[case]
     steps = _flag_steps(name, count)
     paired = Oracle(lower_source(oracle_inputs.FLAG_JIL))
@@ -2144,7 +2153,7 @@ def test_each_flag_outcome_fires_its_rows_and_writes_its_line(
         paired.feed(step)
     if case in _FLAG_STATUS:
         assert paired.store.job[job].status == _FLAG_STATUS[case]
-    if case in _HOLDS_BEFORE:  # job.170 settles a run's units: the box holds FL_R
+    if case in _HOLDS_BEFORE:  # job.452 settles a run's units: the box holds FL_R
         row = paired.store.job[job]
         assert (row.status, [r.bucket for r in row.reservations]) == ("STARTING", ["r:FL_R"])
     seen = _spied(paired)
@@ -2166,7 +2175,7 @@ def _flag_oracle(cls: type[Oracle] = Oracle) -> Oracle:
     [
         (
             [ev("STARTJOB", 1, job="fl_hold"), ev("STARTJOB", 1, job="fl_wait")],
-            "'fl_wait': job.169 fired for a non-box job",
+            "job.452, job.198 are all enabled[^']*'job:fl_wait'",
         ),
         ([ev("STATUS", 1, job="fl_q", exit_code=1)], "'fl_q': job.121 fired for a BOX job"),
     ],
@@ -2175,10 +2184,13 @@ def _flag_oracle(cls: type[Oracle] = Oracle) -> Oracle:
 def test_a_noexec_settlement_for_the_other_job_type_is_a_statechart_error(
     script: list[Event], message: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Mutant: ON_NOEXEC's job and box settlement guards swapped. The row the
-    chart fires decides the path, and a catalog that disagrees with the row's
-    job type is a statechart error before any write. The mutant's hits stay
-    out of the session."""
+    """Mutant: ON_NOEXEC's job and box settlement guards swapped; either way a
+    statechart error before any write. On a FAILED box the job's row job.121
+    fires, and the writer's job-type check refuses it, since the catalog says
+    a box. On a waiter the box's row job.452 is enabled beside job.198, whose
+    guard calls the unswapped `noexec_settles_box`, so the selection raises
+    AmbiguousTransition before any writer runs. The mutant's hits stay out of
+    the session."""
     monkeypatch.setenv(HITS_ENV, str(tmp_path))
 
     class Swapped(Oracle):
@@ -2240,7 +2252,7 @@ def test_an_ice_or_hold_the_chart_ignores_on_an_idle_job_is_a_statechart_error(
 
 def test_sem20_an_ice_on_the_last_member_completes_its_running_box_in_its_cascade() -> None:
     """ON_ICE on a member that a RUNNING box still waits for fires the flag
-    row and job.198; the box's completion moment (DL-285) follows from the
+    row and job.451; the box's completion moment (DL-285) follows from the
     flag row's `holders may leave`, and the box ends SUCCESS."""
     steps = _flag_steps("ON_ICE on the last member a running box waits for", 4)
     paired = _driven(oracle_inputs.FLAG_JIL, steps)
@@ -2254,7 +2266,8 @@ def test_sem20_an_ice_on_the_last_member_completes_its_running_box_in_its_cascad
 _QUEUE_ITEMS = (
     "RELEASE_RESOURCE",
     "readmit",
-    "flag moved",
+    "ice moved",
+    "noexec moved",
     "admitted start",
     "actual start",
     "started",
@@ -2282,7 +2295,7 @@ _ADMITTED = [("job.108",), ("job.301",), ("job.431",), ("job.105",)]
 _LEAVES = [("job.439",)]
 #: Per outcome class: the directed queue script and how many of its inputs
 #: to feed, the job, the rows the last input fires on the job's instance (the
-#: release row; or the readmission's rows, the `flag moved` it reports, the
+#: release row; or the readmission's rows, a flag move's status row, the
 #: admitted start's holding and arm rows and the `started` that follows), and
 #: a trace line the oracle writes for the job there ("" for none).
 _QUEUE_OUTCOMES: dict[str, tuple[str, int, str, list[tuple[str, ...]], str]] = {
@@ -2512,7 +2525,7 @@ def _flag_read_setup(table: str, case: str) -> tuple[Oracle, list[Event | dateti
     [
         ("job.112", "flag", "ON_ICE on a waiter", {"ice_on"}),
         ("job.113", "flag", "ON_NOEXEC on a held waiter", {"noexec_on", "hold_off"}),
-        ("job.136", "flag", "ON_NOEXEC on an idle box in a running box", {"noexec_on"}),
+        ("job.452", "flag", "ON_NOEXEC on an idle box in a running box", {"noexec_on"}),
     ],
 )
 def test_a_status_rule_that_reads_a_flag_sees_the_flag_moved(

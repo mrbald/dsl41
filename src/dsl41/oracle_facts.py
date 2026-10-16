@@ -310,15 +310,16 @@ class NoexecFacts:
 
     @property
     def change(self) -> bool:
-        """The box's parent is RUNNING, or a contained job is not INACTIVE. One guard reads it,
-        once (`noexec_settles_box`); it is kept for the payload's summary."""
-        oracle = self._oracle
-        parent = oracle.catalog.jobs[self._job].box.box_name
-        change = (parent is not None and oracle._status(parent) == "RUNNING") or any(
-            oracle._status(member) != "INACTIVE" for member in self._contained()
-        )
-        self._known["change"] = change
-        return change
+        """The box's parent is RUNNING, or a contained job is not INACTIVE. `noexec_settles_box`
+        reads it, for job.452 and inside job.198's `noexec_moves_nothing`; it is kept on first
+        read, so both read one value."""
+        if "change" not in self._known:
+            oracle = self._oracle
+            parent = oracle.catalog.jobs[self._job].box.box_name
+            self._known["change"] = (
+                parent is not None and oracle._status(parent) == "RUNNING"
+            ) or any(oracle._status(member) != "INACTIVE" for member in self._contained())
+        return cast(bool, self._known["change"])
 
 
 class ReadmitFacts:

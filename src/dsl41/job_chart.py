@@ -40,12 +40,12 @@ not the region order. Two forms declare it:
 
 - a chained item that a row's action reports to the same instance (statechart-engine §8),
   wherever a later step reads an earlier step's write; it reads the configuration at its own
-  time. A flag move reports `flag moved`, and the status rule that reads the flag follows:
-  ON_ICE dequeues a waiter, ON_NOEXEC settles the status. An admitting verdict sends `start
-  admitted` first, and the rest of the start follows from it: an actual start consumes the arm
-  (`actual start`); an admitted start reserves or takes over units first (`admitted start`).
-  STARTJOB, FORCE_STARTJOB and a window-postponed start relay the attempt to `start`, after the
-  forced clears.
+  time. A flag move reports its own event, and the status rule that reads the flag follows:
+  ON_ICE's `ice moved` dequeues a waiter, ON_NOEXEC's `noexec moved` settles the status. An
+  admitting verdict sends `start admitted` first, and the rest of the start follows from it:
+  an actual start consumes the arm (`actual start`); an admitted start reserves or takes over
+  units first (`admitted start`). STARTJOB, FORCE_STARTJOB and a window-postponed start relay
+  the attempt to `start`, after the forced clears.
 - rows of a sibling region on the same event, only where every step reads the configuration
   before the input: a forced start clears ice and hold, an injected live status makes held
   units the run's.
@@ -89,12 +89,12 @@ the contract of all three.
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Final, Literal, cast
+from typing import Final, Literal
 
 from dsl41.job_chart_events import (
     ADMITTED_START,
-    FLAG_MOVED,
     FORCE_STARTJOB,
+    ICE_MOVED,
     LEAVE_LIVE,
     START,
     START_ADMITTED,
@@ -104,11 +104,11 @@ from dsl41.job_chart_events import (
     Arm,
     BoxVerdict,
     Deadline,
-    FlagMoved,
     Injection,
     JobData,
     Moment,
     Noexec,
+    Payload,
     Readmission,
     Release,
     Settlement,
@@ -520,18 +520,6 @@ def unarmed(ctx: Context) -> bool:
     return not arm.armed
 
 
-def _noexec(ctx: Context) -> Noexec:
-    """ON_NOEXEC's payload, on the input or passed on by `flag moved`."""
-    payload = ctx.event.payload
-    if not isinstance(payload, FlagMoved):
-        return cast(Noexec, payload)
-    if payload.noexec is None:
-        raise StatechartError(
-            f"{ctx.event.name}: a flag move of {payload.cause} carries no ON_NOEXEC payload"
-        )
-    return payload.noexec
-
-
 def noexec_own_reason(active: frozenset[str], box: bool) -> str | None:
     """Why the scheduler ignores ON_NOEXEC for the job's own ice and status, or None (DL-254):
     ice on, RUNNING, or STARTING on a job that is not a box. The guard and the oracle's ignored
@@ -552,7 +540,8 @@ def noexec_ignored(ctx: Context) -> bool:
     box = _data(ctx).box
     if noexec_own_reason(ctx.active, box) is not None:
         return True
-    return box and _noexec(ctx).tree_busy
+    noexec: Noexec = ctx.event.payload
+    return box and noexec.tree_busy
 
 
 def noexec_applies(ctx: Context) -> bool:
@@ -560,42 +549,25 @@ def noexec_applies(ctx: Context) -> bool:
     return not noexec_ignored(ctx)
 
 
-def _cause(ctx: Context) -> str:
-    moved: FlagMoved = ctx.event.payload
-    return moved.cause
-
-
-def iced_waiter(ctx: Context) -> bool:
-    """The payload: ON_ICE moved the flag (the configuration has it on)."""
-    return _cause(ctx) == "ON_ICE"
-
-
 def noexec_settles_job(ctx: Context) -> bool:
-    """The payload: ON_NOEXEC; not `noexec_ignored`; the data: a catalog job,
-    not a box."""
+    """Not `noexec_ignored`; the data: a catalog job, not a box."""
     data = _data(ctx)
-    return _cause(ctx) == "ON_NOEXEC" and noexec_applies(ctx) and data.catalog and not data.box
+    return noexec_applies(ctx) and data.catalog and not data.box
 
 
 def noexec_settles_box(ctx: Context) -> bool:
-    """The payload: ON_NOEXEC; not `noexec_ignored`; the data: a box; the
-    configuration's status is not INACTIVE, or the payload's `change` holds
-    (`NoexecFacts.change`)."""
-    if _cause(ctx) != "ON_NOEXEC" or not noexec_applies(ctx) or not _data(ctx).box:
+    """Not `noexec_ignored`; the data: a box; the configuration's status is not INACTIVE, or
+    the payload's `change` holds (`NoexecFacts.change`)."""
+    if not noexec_applies(ctx) or not _data(ctx).box:
         return False
-    return "INACTIVE" not in ctx.active or _noexec(ctx).change
+    noexec: Noexec = ctx.event.payload
+    return "INACTIVE" not in ctx.active or noexec.change
 
 
-def flag_moves_nothing(ctx: Context) -> bool:
-    """The payload: ON_ICE, or ON_NOEXEC that is not `noexec_ignored`: no
-    status follows the flag here."""
-    cause = _cause(ctx)
-    return cause == "ON_ICE" or (cause == "ON_NOEXEC" and noexec_applies(ctx))
-
-
-def flag_move_unposted(ctx: Context) -> bool:
-    """Not `flag_moves_nothing`: an ignored ON_NOEXEC moves no flag, so it reports none."""
-    return not flag_moves_nothing(ctx)
+def noexec_moves_nothing(ctx: Context) -> bool:
+    """Not `noexec_ignored`, and not `noexec_settles_box`: no box settles here. A job's
+    settlement is an inner row's (job.113, job.121), which shadows this one (§3)."""
+    return noexec_applies(ctx) and not noexec_settles_box(ctx)
 
 
 # ---- the job type and the box's rules (SEM-11 to SEM-15)
@@ -822,11 +794,9 @@ GUARDS: Final = {
         unarmed,
         noexec_ignored,
         noexec_applies,
-        iced_waiter,
         noexec_settles_job,
         noexec_settles_box,
-        flag_moves_nothing,
-        flag_move_unposted,
+        noexec_moves_nothing,
         is_box,
         is_job,
         is_terminator,
@@ -1037,8 +1007,8 @@ def skips_in_box(ctx: Context) -> Effects | None:
 def report_ice(ctx: Context) -> Effects:
     """ON_ICE moved a waiter's flag (job.234): the status rule that takes it out of the queue
     follows as its own item (job.112), with the payload's handle on the units (DL-50)."""
-    moved = FlagMoved("ON_ICE", units=_units(ctx))
-    return Effects(send=((ctx.key, Event(FLAG_MOVED, moved)),))
+    moved = Payload(units=_units(ctx))
+    return Effects(send=((ctx.key, Event(ICE_MOVED, moved)),))
 
 
 def iced(ctx: Context) -> Effects | None:

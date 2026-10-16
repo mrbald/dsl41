@@ -379,3 +379,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-365 | A flag that nothing fires on is a fact, not a region: the scheduled tick's arm leaves the job chart's `flags` region and is a fact of the payloads whose rows... | [docs/blocks/job-lifecycle.md](blocks/job-lifecycle.md), [docs/state-machines.md](state-machines.md), [docs/statechart-engine.md](statechart-engine.md) |
 | DL-366 | The status write is the status leaf's entry action: each status leaf of the job chart reports the status it is on entry, the hook writes it with the line the... |  |
 | DL-368 | A rule is written once, at the source the hierarchy gives it: the job chart's per-leaf copies of one rule become one row at the superstate of the statuses it... |  |
+| DL-369 | A chained item names its cause: the job chart's `flag moved` and its `cause` field become two events, `ice moved` and `noexec moved`, each status row that read... |  |
