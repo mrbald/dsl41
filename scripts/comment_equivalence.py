@@ -8,8 +8,8 @@ With no paths, every file under src/, tests/, scripts/ and examples/ that
 `git diff --name-only <base-rev> --` reports, and every untracked one, is
 checked. For each .py file the AST, minus docstrings, must equal the base AST,
 and no citation token present in the base may be missing from the working
-file. A changed docstring on a pydantic model is a finding: pydantic puts it in
-the schema. A changed, added or deleted file that is not .py is a finding. A
+file. In SCHEMA_MODULES, a changed docstring on a pydantic model is a finding:
+pydantic puts it in the hashed schema. A changed, added or deleted file that is not .py is a finding. A
 git failure prints git's message and exits 1.
 """
 
@@ -23,6 +23,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 TREES = ("src", "tests", "scripts", "examples")
+#: These hold the models CatalogIR's JSON schema reaches, which arch_check.py IR_SCHEMA_PIN hashes.
+SCHEMA_MODULES = ("src/dsl41/ir.py", "src/dsl41/conditions.py", "src/dsl41/ast_jil.py")
 CITATION_SHAPES = (
     r"DL-\d{1,3}[a-z]?",
     r"SEM-\d{2}[a-z]?",
@@ -125,9 +127,10 @@ def _python_findings(rel: str, base: str, before: str, after: str) -> list[str]:
     try:
         if code_dump(before) != code_dump(after):
             findings.append(f"{rel}: code differs from {base} (beyond comments and docstrings)")
-        old, new = model_docstrings(before), model_docstrings(after)
-        for name in sorted(n for n in old.keys() | new.keys() if old.get(n) != new.get(n)):
-            findings.append(f"{rel}: schema-bearing docstring changed on class {name}")
+        if rel in SCHEMA_MODULES:
+            old, new = model_docstrings(before), model_docstrings(after)
+            for name in sorted(n for n in old.keys() | new.keys() if old.get(n) != new.get(n)):
+                findings.append(f"{rel}: schema-bearing docstring changed on class {name}")
     except SyntaxError as exc:
         findings.append(f"{rel}: does not parse ({exc.msg})")
     lost = sorted(citation_tokens(before) - citation_tokens(after))
