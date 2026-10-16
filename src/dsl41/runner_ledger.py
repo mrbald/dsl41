@@ -1,8 +1,9 @@
 """Leadership over one run root (concurrency-model ss1/ss7, stage S6a).
 
 Three of ss1's five ledger capabilities live here: monotone epoch allocation, the
-linearizable read of the leader record, and the mutex both rest on. The other two landed with S2: decision lookup by
-`request_id` is the `DecisionIndex`; atomic multi-record commit is the one-line attempt record.
+linearizable read of the leader record, and the mutex both rest on. The other two landed with
+S2: decision lookup by `request_id` is the `DecisionIndex`; atomic multi-record commit is the
+one-line attempt record.
 
 The mutex is an `flock` held for the process lifetime. It is not a lease: the kernel releases
 it when the holder dies, `kill -9` included, so nothing decides whether the previous holder is
@@ -111,9 +112,9 @@ from dsl41.runner_clock import EngineError
 #: 24 (DL-360): a job that enters QUE_WAIT takes a new rank. A box's end kills its
 #: job_terminator members only while the box was not reset since: an ancestor's restart resets
 #: a subbox to INACTIVE without moving its run, and the kill does not reach a live member that
-#: the fold path leaves running. The default fold reads statuses: a member that has not run in the box's
-#: run but holds a terminal status is done and votes with it. The status comes from a member
-#: carried live into the run that then ended; an operator's SUCCESS, FAILURE or TERMINATED on
+#: the fold path leaves running. The default fold reads statuses: a member that has not run in
+#: the box's run but holds a terminal status is done and votes with it. The status comes from a
+#: member carried live into the run that then ended; an operator's SUCCESS, FAILURE or TERMINATED on
 #: a member that waits; a KILLJOB on a member queued in the run, or made live by an injected
 #: STARTING; or the idle recompute of a never-run subbox from statuses given to its members
 #: (SEM-15). A resolution or off-ice mark decides only while the member reads INACTIVE.

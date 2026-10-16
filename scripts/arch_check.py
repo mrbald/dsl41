@@ -1058,7 +1058,6 @@ CHANGELOG_PHRASES = (
     "used to",
     "formerly",
     "previously",
-    "superseded",
     "retired by",
     "was renamed",
     "was removed",

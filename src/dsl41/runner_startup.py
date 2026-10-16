@@ -25,7 +25,7 @@ The two halves share exactly one object, the one this half constructs. The name 
   late real record is dropped and journaled, never silently overwritten.
 
 The whole sequence is concurrency-model ss7's takeover barrier (ACQUIRE, reconcile every
-execution host, retire stale effects, re-drive pending, dispatch). `start_run` is its degenerate
+execution host, retire superseded, re-drive pending, dispatch). `start_run` is its degenerate
 case: an empty log has nothing to replay, reconcile or re-drive, so only the acquire remains.
 """
 
@@ -1243,7 +1243,7 @@ async def _reconcile(
     for (job, run_number), run_dir in sorted(candidates.items()):
         rt = engine.oracle.store.job.get(job)
         if rt is None or rt.run_number != run_number or rt.status in TERMINAL:
-            continue  # an earlier run, or its completion already replayed
+            continue  # superseded run, or its completion already replayed
         job_ir = engine.oracle.catalog.jobs.get(job)
         if job_ir is None:
             continue
@@ -1304,14 +1304,14 @@ async def _reconcile(
 
     _resume_untraced_starts(engine, candidates, last_at)
     await _redrive_recorded_kills(engine, supervised_live)
-    # ss7's barrier ends where it says: ACQUIRE -> reconcile -> retire stale effects,
-    # re-drive pending -> DISPATCH. Otherwise the outbox drains only after the next admitted input (the
+    # ss7's barrier ends where it says: ACQUIRE -> reconcile -> retire superseded, re-drive
+    # pending -> DISPATCH. Otherwise the outbox drains only after the next admitted input (the
     # loop dispatches on the way out of `_admit_and_apply`), so a re-driven start would wait on
     # unrelated traffic: hours on a quiet estate, forever where the only remaining work is the
     # run that was lost. Everything pending here is a SPAWN nothing applied: the kills above are
-    # resolved, and a SPAWN whose run reached the host was reconciled from its trace. Stale
-    # ones retire on the way through, and a drained or quarantined host holds its own, in the one
-    # gate that owns that call.
+    # resolved, and a SPAWN whose run reached the host was reconciled from its trace.
+    # Superseded ones retire on the way through, and a drained or quarantined host holds its
+    # own, in the one gate that owns that call.
     engine._dispatch()
 
 

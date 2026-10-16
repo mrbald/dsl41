@@ -1129,7 +1129,7 @@ def test_changelog_phrase_in_nested_function_docstring_trips(tmp_path: Path) -> 
 def test_changelog_phrase_needs_word_boundaries(tmp_path: Path) -> None:
     path = _write(
         tmp_path / "m.py",
-        "# it refused to open\n# the helper refused too\n# an unused to-do\n# _rescan_superseded\n",
+        "# it refused to open\n# the helper refused too\n# an unused to-do\n# _rescan_previously\n",
     )
     assert arch_check.changelog_phrases([path]) == []
 

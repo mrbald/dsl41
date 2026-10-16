@@ -337,8 +337,8 @@ def adapter_switch(adapters: Mapping[str, JobAdapter], name: str) -> str | None:
     """The value of adapter switch `name` (`ADAPTER_SWITCHES`) that the wired adapter runs, or
     None when no adapter that reads it is wired (DL-258, DL-280).
 
-    A switch this function has no read for raises ValueError, so a new `reader="fw"` entry cannot
-    pass the drift gates unread."""
+    A name in `ADAPTER_SWITCHES` this function has no read for raises ValueError, so a new
+    `reader="fw"` entry cannot pass the drift gates unread."""
     fw = adapters.get("FW")
     if name == "fw-existence":
         return fw.existence if isinstance(fw, FileWatcherAdapter) else None
@@ -1624,7 +1624,8 @@ class Engine:
 
         The fork reaches the result the real apply will: `apply_attempt` reads nothing outside
         the oracle, and steps 5-7 do not yield to another writer. A gate rejection is not a
-        refusal; the real apply decides and logs it. Every fault in either half refuses, unlogged."""
+        refusal; the real apply decides and logs it. Every fault in either half refuses,
+        unlogged."""
         dry = trial_apply(self.oracle, attempt, grace_s=self.cmd_grace_s)
         if isinstance(dry, Exception):
             return AdmissionRefused(

@@ -2346,9 +2346,9 @@ def executing_jobs(outbox: Outbox, rows: Mapping[str, JobRuntime]) -> dict[str, 
     """Which jobs have a live execution, `pending` or `applied`, from the WAL alone (ss10.1's
     executing tier).
 
-    `pending_spawn`, `bound` and `fw_watch` all classify EXECUTING (no ss10 rule separates them), and readiness runs before
-    the sealer waits out an unbound SPAWN (ss8, PR-27), so the classifier needs no spool
-    evidence. The seal artifact does, in `executions_at`."""
+    `pending_spawn`, `bound` and `fw_watch` all classify EXECUTING (no ss10 rule separates
+    them), and readiness runs before the sealer waits out an unbound SPAWN (ss8, PR-27), so the
+    classifier needs no spool evidence. The seal artifact does, in `executions_at`."""
     return {effect.job: state for effect, state in live_spawns(outbox, rows)}
 
 
@@ -2551,7 +2551,7 @@ def _prepare_install(
 
 
 def _quarantine(run_root: Path, target: Path, installed: Candidate) -> None:
-    """Move an outdated installed candidate to a path that survives alternating candidates
+    """Move a superseded installed candidate to a path that survives alternating candidates
     (S1, S2, S1) and is idempotent for the same bytes (ss7, PR-30d)."""
     manifest_bytes = (target / "manifest.json").read_bytes()
     destination = quarantine_dir(run_root, installed.stage_digest, hash_over_bytes(manifest_bytes))

@@ -1,4 +1,5 @@
-"""Runner adapters (ss6/ss6a): the adapter protocol, the CMD wrapper paths and the supervisor client.
+"""Runner adapters (ss6/ss6a): the adapter protocol, the CMD wrapper paths and the supervisor
+client.
 
 This module belongs to the runner split of DL-74.
 
@@ -1590,11 +1591,11 @@ class SupervisorClient:
 
     async def reconnect(self) -> bool:
         """Re-entry after a lost or poisoned connection: connect-only (never spawns a supervisor)
-        plus re-ACQUIRE when a lease was held; the controller_id mints a fresh fencing token, which
-        fences anything the old connection had in flight. False = the supervisor itself is
-        unreachable (callers fall back to the ss7 spool ladder). Everything under the reconnect
-        lock uses _connect=False, because re-entering the lazy path would deadlock on this
-        non-reentrant lock."""
+        plus re-ACQUIRE when a lease was held, presenting the current token (DL-79). The supervisor
+        mints the fresh fencing token, which fences anything the old connection had in flight.
+        False = the supervisor itself is unreachable (callers fall back to the ss7 spool ladder).
+        Everything under the reconnect lock uses _connect=False, because re-entering the lazy
+        path would deadlock on this non-reentrant lock."""
         async with self._reconnect_lock:
             if self._closed:
                 return False

@@ -655,7 +655,6 @@ class ControlServer:
             # that named no code answers the neutral `engine_error`
             answer = _failure(exc.code or "engine_error", str(exc), refused=True)
             if isinstance(exc, SealInFlight):
-                # additive (ss2: consumers ignore unknown fields): the client
                 # additive (ss2: consumers ignore unknown fields): the client tells its own
                 # running boundary from another's
                 answer["in_flight_request_id"] = exc.in_flight_request_id

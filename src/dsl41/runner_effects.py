@@ -29,7 +29,7 @@ layer above:
   the recorded outcome of the supersession rule: "safe to forget" and "must not be
   forgotten" are different facts (ss5's DL-111 amendment).
 
-What is deliberately NOT here:
+Three rules about identity and resume, one of them a split this module leaves out:
 
 - `run_id` is bound before the attempt (DL-118, period-model ss2.3, PR-36a). A SPAWN's
   `run_id` is minted inside the step-7 decision transaction and rides in the durable
@@ -67,8 +67,8 @@ from dsl41.state_machine import Context, Executor, Region, Row, State, Statechar
 from dsl41.state_machine import Event as ChartEvent
 
 #: ss5's effect alphabet. SHUTDOWN is not an effect: the shutdown path speaks to the
-#: supervisor directly and leaves no intent for an outbox to carry; the supervisor allocates the incarnation (DL-80) and
-#: the ledger the epoch (S6a) (ss5).
+#: supervisor directly and leaves no intent for an outbox to carry; the supervisor allocates
+#: the incarnation (DL-80) and the ledger the epoch (S6a) (ss5).
 EffectKind = Literal["SPAWN", "KILL"]
 
 #: what an effect of unknown outcome answers when asked for its result (ss5, CM-06); "we sent

@@ -254,7 +254,8 @@ class RuntimeProfile(BaseModel):
     for the two `>= 0` windows, refused for the `> 0` intervals). Only `deadman_us` is null.
 
     Not here: `artifact_format_version`, which lives on the manifest that carries this profile,
-    and the role->executor route table (the withdrawn HA plan's ss4, DL-189: a remap is not a re-baseline)."""
+    and the role->executor route table (the withdrawn HA plan's ss4, DL-189: a remap is not a
+    re-baseline)."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -835,8 +836,9 @@ def quarantine_dir(run_root: Path, stage_digest: str, manifest_digest: str) -> P
 
 # -------------------------------------------------------- the sentinel and wal
 
-#: ss1.1: the permanent one-line sentinel every periodized root carries. A binary that predates
-#: the period model refuses `run` when a `journal.jsonl` exists, so the file is never absent.
+#: ss1.1: the permanent one-line sentinel every periodized root carries. The name is deliberate:
+#: a binary that predates the period model refuses `run` on a root holding `journal.jsonl`. The
+#: file is never absent, so a root that sealed never reads as unused.
 SENTINEL_NAME: Final[str] = "journal.jsonl"
 
 #: ss1.1: `wal/000001.jsonl` is period 1, `000002` is period 2 (I1: one
