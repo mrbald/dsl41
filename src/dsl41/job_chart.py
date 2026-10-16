@@ -1,100 +1,80 @@
-"""The composite `job` statechart: one job's status, flags and holding in one
-declaration (docs/statechart-engine.md §11, DL-337).
+"""The composite `job` statechart: one job's status, flags and holding in one declaration
+(docs/statechart-engine.md §11, DL-337), registered in `machines.MACHINES`.
 
-The oracle (`oracle`, DL-341) drives it for every input and its whole
-cascade (DL-350), and writes what each fired row reached. The chart is the
-one declaration of a job's moves, registered in `machines.MACHINES`.
+The oracle (`oracle`, DL-341) drives it for every input and its whole cascade (DL-350) and
+writes what each fired row reached.
 
-Shape. The root `job` has three orthogonal regions, in this order: `status`,
-`flags` and `holding`. `status` holds `lifecycle`, the superstate of every
-status, and inside it the status sets the rules name: `IDLE` (INACTIVE and
-`TERMINAL`), `TERMINAL` (SUCCESS and `FAILED`), `FAILED` (FAILURE and
-TERMINATED) and `LIVE` (STARTING and RUNNING), with QUE_WAIT beside them. A row
-that applies to every status of one of those sets has that set as its one
-source. `flags` holds one
-composite state with four orthogonal regions, `ice`, `hold`, `noexec` and
-`arm`, each `off` or `on`. Each starts `off`: a flag seeded `on` (SEM-24) is a
-restore, not a move. `holding` is `none`, `reserved` (a run's units) or `held`
+Shape. The root `job` has three orthogonal regions: `status`, `flags` and `holding`. `status`
+holds `lifecycle`, the superstate of every status, and inside it the sets the rules name:
+`IDLE` (INACTIVE and `TERMINAL`), `TERMINAL` (SUCCESS and `FAILED`), `FAILED` (FAILURE and
+TERMINATED) and `LIVE` (STARTING and RUNNING), with QUE_WAIT beside them. A row for every
+status of one set has that set as its source. `flags` holds one composite state with four
+orthogonal regions, `ice`, `hold`, `noexec` and `arm`, each `off` or `on`; a flag seeded `on`
+(SEM-24) is a restore, not a move. `holding` is `none`, `reserved` (a run's units) or `held`
 (units a renewable kept after the run, DL-256).
 
-The box is not a separate chart. A box is an instance of this chart whose data
-says so (`JobData.box`), and the box rules are rows guarded by it.
+A box is an instance of this chart whose data says so (`JobData.box`); the box rules are rows
+guarded by it.
 
-Ids. Every id carries the chart's name, and its hundred names its region:
-`job.1NN` and `job.4NN` are status rows, `job.2NN` flag rows and `job.3NN`
-holding rows (DL-337, DL-349). A box's ON_NOEXEC on the jobs it contains is
-an event of its own, `ON_NOEXEC on its box`, beside its OFF_NOEXEC twin; its
-rows are job.231 to job.233 (DL-347).
+Ids carry the chart's name, and the hundred names the region: `job.1NN` and `job.4NN` are
+status rows, `job.2NN` flag rows, `job.3NN` holding rows (DL-337, DL-349). A box's ON_NOEXEC on
+the jobs it contains is the event `ON_NOEXEC on its box`, beside its OFF_NOEXEC twin; its rows
+are job.231 to job.233 (DL-347).
 
-Guards read three things: the instance's configuration, its data (`JobData`),
-and the event's payload. The payload carries the facts the rule code reads
-outside the job's own row: its box's run, condition truth, the run window,
-admission, the members' verdicts, the policy of a run's end. Each payload
-class names the oracle predicate behind each field. A payload also carries
-the tier's handle on the job's units (`Payload.units`), from which an action
-builds the settlement it sends, so the policy is read when the settlement
-pops, from the units the row holds then (DL-349).
+Guards read the instance's configuration, its data (`JobData`) and the event's payload. The
+payload carries the facts the rule code reads outside the job's own row: its box's run,
+condition truth, the run window, admission, the members' verdicts and the policy of a run's
+end; each payload class names the oracle predicate behind each field. It also carries the
+tier's handle on the job's units (`Payload.units`), from which an action builds the settlement
+it sends, so the policy is read when the settlement pops (DL-349).
 
-One input can move several regions of one job. The order of those moves
-is the contract, and the region order is not load-bearing. Two forms declare
-it:
+One input can move several regions of one job, and the order of those moves is the contract,
+not the region order. Two forms declare it:
 
-- a chained item that a row's action reports to the same instance
-  (statechart-engine §8). It is the form wherever a later step reads an
-  earlier step's write: the chained item reads the configuration at its own
-  time. A flag move reports `flag moved`, and the status rule that reads the
-  flag follows it: ON_ICE dequeues a waiter, KILLJOB terminates one, a waiter
-  that fails the queued recheck leaves the queue, ON_NOEXEC settles the
-  status. An admitting verdict sends `start admitted` first, and everything
-  the start does after its status move follows from it: an actual start
-  consumes the arm (`actual start`); an admitted start reserves or takes
-  over units first (`admitted start`). STARTJOB, FORCE_STARTJOB and a
-  window-postponed start relay the attempt to `start`, after the forced
+- a chained item that a row's action reports to the same instance (statechart-engine §8),
+  wherever a later step reads an earlier step's write; it reads the configuration at its own
+  time. A flag move reports `flag moved`, and the status rule that reads the flag follows:
+  ON_ICE dequeues a waiter, KILLJOB terminates one, a waiter that fails the queued recheck
+  leaves the queue, ON_NOEXEC settles the status. An admitting verdict sends `start admitted`
+  first, and the rest of the start follows from it: an actual start consumes the arm (`actual
+  start`); an admitted start reserves or takes over units first (`admitted start`). STARTJOB,
+  FORCE_STARTJOB and a window-postponed start relay the attempt to `start`, after the forced
   clears.
-- rows of a sibling region on the same event, only where every step reads
-  the configuration before the input: a forced start clears ice and hold, a
-  scheduled tick arms, an injected live status makes held units the run's.
+- rows of a sibling region on the same event, only where every step reads the configuration
+  before the input: a forced start clears ice and hold, a scheduled tick arms, an injected
+  live status makes held units the run's.
 
-The settlement of a run's units has two orders. A move on its own
-(`OracleCascade._after`) runs the box rules, then the settlement, then the
-wakes: the status row sends the moments `box rules`, `settle` and `wake`, in
-that order, and `settle` sends `leave STARTING or RUNNING`. A move of the
-batch INACTIVE path (`OracleCascade._on_cascades`) settles first: its row
-sends `leave STARTING or RUNNING` ahead of anything else. Either way the
-settlement carries the end the move made, not the status it finds. One case
-reads the status: a box restarted by its own completion can start the member
-again inside the member's box rules, before its `settle` (DL-340). Past the
-bound, that attempt finds its run's settlement owed
-(`StartAttempt.settlement_owed`) and takes the internal row job.401, which moves
-nothing: its action sends the ended run's settlement, by the end it made,
-then the same attempt again, so `StartAttempt.admissible` is read after the
-settlement (DL-349). The member's `settle`, finding it live, moves nothing
-(job.418). No start meets an unsettled run, so job.312 is never reached; it is
-marked unreachable.
+The settlement of a run's units has two orders. A move on its own (`OracleCascade._after`)
+runs the box rules, then the settlement, then the wakes: the status row sends the moments
+`box rules`, `settle` and `wake`, and `settle` sends `leave STARTING or RUNNING`. A move of
+the batch INACTIVE path (`OracleCascade._on_cascades`) settles first: its row sends `leave
+STARTING or RUNNING` ahead of anything else. Either way the settlement carries the end the
+move made, not the status it finds. A box restarted by its own completion can start the member
+again inside the member's box rules, before its `settle` (DL-340). Past the bound, that attempt
+finds its run's settlement owed (`StartAttempt.settlement_owed`) and takes the internal row
+job.401, which moves nothing: its action sends the ended run's settlement, by the end it made,
+then the same attempt again, so `StartAttempt.admissible` is read after the settlement
+(DL-349). The member's `settle`, finding it live, moves nothing (job.418). No start meets an
+unsettled run, so job.312 is never reached and is marked unreachable.
 
-The per-job start bound (DL-304) is the refusal row job.100: an attempt past
-the gates and the window that descends from `MAX_NESTED_STARTS` admitted
-starts of its own job (`start admitted` items on its instance, in its
-ancestry) is refused with a trace line whoever asked.
+The per-job start bound (DL-304) is the refusal row job.100: an attempt past the gates and the
+window that descends from `MAX_NESTED_STARTS` admitted starts of its own job (`start admitted`
+items on its instance, in its ancestry) is refused with a trace line whoever asked.
 
-The cascade between instances is declared too (DL-350): a box's rules on
-its members, a member's moves on its box, the wakes, the queue's scan, and the
-start retries. A row's action sends what its move causes through the tier's
-handle (`Units.consequences`), and each call-then-continue site of the old
-recursion is a moment: a self-event whose payload carries the tier's step
-(`Moment`), run as a lifecycle row that moves nothing. An admitting row
-targets the transient state ADMITTED, which `starting` leaves for STARTING
-after a box's resets. No state defers (§12).
+The cascade between instances is declared too (DL-350): a box's rules on its members, a
+member's moves on its box, the wakes, the queue's scan and the start retries. A row's action
+sends what its move causes through the tier's handle (`Units.consequences`). A call-then-
+continue site is a moment: a self-event whose payload carries the tier's step (`Moment`), run
+as a lifecycle row that moves nothing. An admitting row targets the transient state ADMITTED,
+which `starting` leaves for STARTING after a box's resets. No state defers (§12).
 
-The walks that check this chart carry no run window and no true condition;
-the facts of those paths are checked by synthesized cells and one windowed
-replay, and the old-vs-new harness is their proof.
+The walks that check this chart carry no run window and no true condition; synthesized cells
+and one windowed replay check the facts of those paths.
 
-Modules. The declaration has three parts: the events, the data and the
-payloads (`job_chart_events`); the states, the rows and the configuration a
-row projects to (`job_chart_rows`); and here the guards, the actions and the
-chart `JOB`. Each importer imports a name from the module that defines it
-(DL-74), and this docstring is the contract of all three.
+Modules. The events, data and payloads are in `job_chart_events`; the states, rows and the
+configuration a row projects to in `job_chart_rows`; the guards, actions and the chart `JOB`
+here. Each importer imports a name from the module that defines it (DL-74); this docstring is
+the contract of all three.
 """
 
 from __future__ import annotations
@@ -129,13 +109,11 @@ from dsl41.job_chart_rows import CHOICES, ROOT, ROWS
 from dsl41.oracle_state import LIVE, LIVE_OR_QUEUED
 from dsl41.state_machine import Context, Effects, Event, Statechart, StatechartError
 
-#: DL-304: how many of a job's admitted starts the ancestry of an attempt of
-#: it may hold (job.100). A start's own cascade may start the job again once:
-#: a box start's window pass can skip-complete run one and its wakes start
-#: run two (DL-246). A start nested inside two starts of the same job is a
-#: re-trigger loop that closes in one instant (L010's pattern); it is refused
-#: with a START_REFUSED line. Starts that follow one another, such as a job
-#: that several predecessors start in turn, are never refused.
+#: DL-304: how many admitted starts of a job the ancestry of an attempt of it may hold
+#: (job.100). A start's own cascade may start the job once more: a box start's window pass can
+#: skip-complete run one and its wakes start run two (DL-246). A start nested inside two
+#: starts of the same job is a re-trigger loop (L010's pattern) and gets a START_REFUSED line.
+#: Starts that follow one another are never refused.
 MAX_NESTED_STARTS: Final = 2
 
 
@@ -150,10 +128,9 @@ def _injected(ctx: Context) -> str | None:
 
 
 def _units(ctx: Context) -> Units:
-    """The tier's handle on the job that the item's payload carries
-    (`Payload.units`). A payload with none is a statechart error: every
-    payload a tier sends carries it, and the chart has no consequences of
-    its own (DL-356)."""
+    """The tier's handle on the job that the item's payload carries (`Payload.units`); a
+    payload with none is a statechart error, since the chart has no consequences of its own
+    (DL-356)."""
     units: Units | None = getattr(ctx.event.payload, "units", None)
     if units is None:
         raise StatechartError(
@@ -164,14 +141,13 @@ def _units(ctx: Context) -> Units:
 
 
 def _consequences(ctx: Context, action: str) -> Effects | None:
-    """What the tier's handle says a row whose action is `action` sends and
-    reports beyond its own move (`Units.consequences`)."""
+    """What the tier's handle says `action` sends beyond its own move (`Units.consequences`)."""
     return _units(ctx).consequences(ctx, action)
 
 
 def _nested_starts(ctx: Context) -> int:
-    """The admitted starts of the job the item descends from: its ancestry's
-    `start admitted` items on the job's own instance (DL-304, DL-350)."""
+    """The `start admitted` items on the job's own instance in the item's ancestry (DL-304,
+    DL-350)."""
     return ctx.count((ctx.key, START_ADMITTED))
 
 
@@ -196,12 +172,10 @@ type StartVerdict = Literal[
 def start_verdict(ctx: Context) -> StartVerdict:
     """What a start attempt comes to, in the order the rule code tests it.
 
-    Reads the payload (`StartAttempt`), the data (`box`, `catalog`), the
-    configuration (the status, ice, hold, noexec, the arm and `held`) and the
-    item's ancestry, whose `start admitted` items on the job are its starts in
-    progress (`MAX_NESTED_STARTS`, DL-304). A forced attempt arrives with ice
-    and hold already cleared by FORCE_STARTJOB's own rows, so it reads neither
-    gate. A decided attempt reads the window alone (`_window_side`).
+    Reads the payload (`StartAttempt`), the data (`box`, `catalog`), the configuration and the
+    item's ancestry (`MAX_NESTED_STARTS`, DL-304). A forced attempt arrives with ice and hold
+    cleared by FORCE_STARTJOB's own rows, so it reads neither gate. A decided attempt reads the
+    window alone (`_window_side`).
     """
     attempt: StartAttempt = ctx.event.payload
     data: JobData = ctx.data
@@ -249,18 +223,17 @@ def _gated(attempt: StartAttempt, active: frozenset[str]) -> StartVerdict | None
 
 
 def _latched(attempt: StartAttempt, active: frozenset[str]) -> StartVerdict:
-    """A releasable gate blocks the attempt: a scheduled tick of a dated job
-    arms, unless armed already or its box is not RUNNING (`_w_arm`)."""
+    """A releasable gate blocks the attempt: a scheduled tick of a dated job arms, unless
+    armed already or its box is not RUNNING (`_w_arm`)."""
     if attempt.scheduled and attempt.dated and "arm_off" in active and attempt.box != "idle":
         return "arm"
     return "ignored"
 
 
 def _skipped(attempt: StartAttempt, active: frozenset[str]) -> StartVerdict:
-    """Outside the run window: a postponed start moves nothing; a skip moves a
-    completed job to INACTIVE, and a member only in a RUNNING box it has not
-    run in (job.107); a member of such a box that is INACTIVE
-    already has no move to ride, and its box rules run without one."""
+    """Outside the run window: a postponed start moves nothing; a skip moves a completed job
+    to INACTIVE, and a member only in a RUNNING box it has not run in (job.107); an INACTIVE
+    member of such a box has no move to ride, and its box rules run without one."""
     if attempt.window == "defer":
         return "ignored"
     in_run = attempt.box in ("running", "iced_out")
@@ -349,10 +322,8 @@ type ReadmitVerdict = Literal["admit", "cancel", "leave", "keep", "none"]
 def readmit_verdict(ctx: Context) -> ReadmitVerdict:
     """What one admission attempt does to a waiter, in the rule's order.
 
-    Reads the payload (`Readmission`) and the configuration: QUE_WAIT and
-    hold. `none` for a job that is not queued, which no scan addresses. A
-    waiter is never iced (ON_ICE takes it out of the queue, job.112), so no
-    verdict reads ice.
+    Reads the payload (`Readmission`), QUE_WAIT and hold; `none` for a job that is not
+    queued. No verdict reads ice, since ON_ICE takes a waiter out of the queue (job.112).
     """
     scan: Readmission = ctx.event.payload
     active = ctx.active
@@ -685,8 +656,7 @@ def on_held_units(ctx: Context) -> bool:
 
 
 def _release(ctx: Context) -> Release:
-    """The settlement's release, read from the units the row holds when the
-    settlement pops (DL-349)."""
+    """The settlement's release, read from the units the row holds when it pops (DL-349)."""
     settlement: Settlement = ctx.event.payload
     return settlement.release
 

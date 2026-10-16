@@ -1,7 +1,6 @@
-"""The `job` chart's states and rows, and the configuration a job row
-projects to (DL-337). The contract the rows declare and their ids are stated
-in `job_chart`, which builds the chart from these rows and its own guards and
-actions."""
+"""The `job` chart's states and rows, and the configuration a job row projects to (DL-337).
+
+`job_chart` states the contract and the ids, and builds the chart from these rows."""
 
 from __future__ import annotations
 
@@ -142,11 +141,10 @@ _LIVE: Final = State(
     "LIVE",
     regions=(Region("live", "STARTING", (State("STARTING"), State("RUNNING"))),),
 )
-#: An admitted start between its admission and its STARTING (DL-350):
-#: transient, left by `starting` once its units, its arm and a box's resets
-#: are written. No row projects to it.
+#: An admitted start between its admission and its STARTING (DL-350): transient, left by
+#: `starting` once its units, arm and a box's resets are written. No row projects to it.
 _ADMITTED: Final = State("ADMITTED")
-#: Every status. Its rows are the ones whose old source was every status.
+#: Every status; the source of the rows that apply to all of them.
 _LIFECYCLE: Final = State(
     "lifecycle", regions=(Region("status", "IDLE", (_IDLE, State("QUE_WAIT"), _LIVE, _ADMITTED)),)
 )
@@ -159,9 +157,8 @@ ROOT: Final = State(
     ),
 )
 
-#: The status rows, `job.1NN`. 101 to 158 are the status moves; 159 and above
-#: are a split source's further rows and the cells the rules move nothing in;
-#: 100 is the start bound (DL-304).
+#: The status rows, `job.1NN`: 100 is the start bound (DL-304), 101 to 158 are the status
+#: moves, 159 and above are a split source's further rows and the cells the rules move nothing in.
 _STATUS_ROWS: Final = (
     Row(
         "job.100",
@@ -384,7 +381,7 @@ _STATUS_ROWS: Final = (
             ("INACTIVE", "STARTING", "RUNNING", "SUCCESS", "FAILURE", "TERMINATED", "QUE_WAIT")
         )
     ),
-    # a split source: job.123's, job.131 to job.134's and job.136's other sources
+    # a split source: the other sources of job.123, job.131 to job.134 and job.136
     Row("job.159", "LIVE", BOX_SET_INACTIVE, "INACTIVE", action="batched", cite="SEM-18, DL-242"),
     Row("job.160", "TERMINAL", BOX_SET_INACTIVE, "INACTIVE", action="batched", cite="SEM-18"),
     Row("job.161", "QUE_WAIT", BOX_RECOMPUTE, "SUCCESS", "overrides_success", "moved", cite=_SEM15),
@@ -556,9 +553,8 @@ _STATUS_ROWS: Final = (
     ),
 )
 
-#: The further status rows once 159 to 199 were taken, `job.4NN`:
-#: an attempt's owed settlement (DL-340), the extent of an admitted start, its
-#: move to STARTING, a window skip of an inactive member, the cascade's
+#: The further status rows, `job.4NN`: an attempt's owed settlement (DL-340), the extent of an
+#: admitted start, its move to STARTING, a window skip of an inactive member, the cascade's
 #: moments, and the cells no input reaches (DL-350).
 _MOMENT_ROWS: Final = (
     Row(
@@ -701,10 +697,9 @@ _FLAG_ROWS: Final = (
         cite="DL-257",
         note="No arm to drop: the status move follows.",
     ),
-    # a box's ON_NOEXEC on each job it contains, which job.209 and job.207
-    # fold into the job's own: the flag on, from either value as job.209 and
-    # job.222, and the hold it supersedes off; the hold region of a job not
-    # held takes no part (statechart-engine §3)
+    # a box's ON_NOEXEC on each job it contains: the flag on, from either value as job.209 and
+    # job.222, and the hold it supersedes off (job.207); the hold region of a job not held
+    # takes no part (statechart-engine §3)
     Row("job.231", "noexec_off", BOX_ON_NOEXEC, "noexec_on", cite=_BOX_NOEXEC, note="as job.209"),
     Row(
         "job.232",
