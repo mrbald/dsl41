@@ -23423,3 +23423,52 @@ relitigate an entry; append a new one.
   REVIEW. Behaviour-keeping multi-file change: one Opus reviewer, two rounds; R1 (a seventh
   open-coded `_in_run` in `_ice_resolves`) and three nits fixed and confirmed; R2 is the recorded
   gap above.
+- DL-362 The comment and docstring diet: a comment states the rule and cites its entry, never
+  what changed; two deterministic gates hold the line
+  (2026-10-16; src/dsl41/*.py, scripts/comment_equivalence.py, scripts/arch_check.py,
+  scripts/arch_baseline.json, CLAUDE.md)
+  THE RULE. A comment or docstring states the present rule and cites the entry that binds it,
+  as "rule (DL-NNN)"; it never records what changed, when, or what the code used to do. A
+  docstring is one line stating the contract (what the function takes, returns or refuses),
+  with a second paragraph only where a caller needs it. A module docstring names the module's
+  job and the contracts it keeps. A "why" comment for a non-obvious choice stays, as one
+  present-tense sentence. A settled "not built" choice stays as a present-tense rule with its
+  citation. Citation tokens never leave a file: the token's rule is what the reader follows, and
+  the citation index resolves it. `PENDING: <label>` markers stay in place; the simulation
+  register claims each site by function and position. CLAUDE.md carries the rule in one line.
+  THE PASS. Twelve Sonnet passes over disjoint module groups, each in its own worktree, each
+  gated and then integrated by cherry-pick. Comment lines fell from 7,158 to 4,969 and docstring
+  lines from 15,780 to 10,827 across src/dsl41 (75,272 to 68,139 source lines); the changelog
+  phrases arch_check counts fell from 209 in 46 modules to zero. Held deliberately: the
+  docstrings of the registered chart guards and actions in job_chart.py, which
+  scripts/render_state_machines.py writes into docs/state-machines.md as the row prose; the
+  pydantic model docstrings in ir.py, conditions.py and ast_jil.py, which CatalogIR's hashed
+  JSON schema carries as `description` (the IR_SCHEMA_PIN check); the command docstrings in
+  the CLI modules, which are the `--help` text and had voice edits only; and every comment a
+  test matches by text (the OpenedRuntime docstring words test_seal_artifact.py pins, the
+  pragma and noqa markers).
+  THE GATES. `scripts/comment_equivalence.py <base-rev> [paths...]` proves a diff changed no
+  code: for every changed Python file under src/, tests/, scripts/ and examples/ the AST with
+  docstrings removed must equal the base's, no citation token or PENDING marker present in the
+  base may be missing, a pydantic model docstring in the three schema modules may not change,
+  and an added, deleted or non-Python changed file is a finding. The check is a set, not a
+  multiset: three citations of one entry may fold into one. `scripts/arch_check.py` gains an
+  advisory over comments and docstrings in src/dsl41 for the changelog phrases ("no longer",
+  "used to", "formerly", "previously", "since DL-", "before DL-", "after DL-", "superseded",
+  "retired by", "was renamed", "was removed", "moved from", "replaced by"; whole words, never
+  string literals), ratcheted per module against scripts/arch_baseline.json, which pins zero;
+  `--changelog-phrases` lists every hit. A comment-only change needs gate 1 and one full suite
+  run, no logic review. Stage labels (`S5c`, `H`) are an index namespace and keep the same
+  "rule (token)" form as DL tokens; they are not phase labels to cut.
+  NOT BUILT. The citation shapes are a hand-kept list mirroring docs/citation-index.md, not read
+  from it; an evidence tier (`[V]`) or a mapping-class label (`A-row`) is not a protected
+  token. The arch-review and spec-review triggers count changed lines without regard to
+  content, so this comment-only diff re-arms both; whether a comment-only diff should count
+  is the owner's call.
+  REVIEW. Stage 0 (the gates): one Opus reviewer, two rounds; nine findings fixed and
+  confirmed (the citation regex widened to the index's shapes, untracked files listed, a bad
+  revision exits 1, the baseline rewrite limited to the new key, the pydantic docstring rule
+  added then narrowed to the schema modules, word boundaries on the phrases, non-Python files
+  compared, the hits listed), one new minor (the PENDING shape) fixed inline. The passes:
+  gate 1 proves the code equal, so no semantic review; one Opus reviewer over the integrated
+  diff hunting a cut comment that carried a rule stated nowhere else.
