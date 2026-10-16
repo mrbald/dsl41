@@ -23662,7 +23662,8 @@ relitigate an entry; append a new one.
   action `left_queue`), on QUE_WAIT. Each kill row's writer dequeues the waiter, clears the arm,
   then writes the TERMINATED line; job.438's writes the SCHED_DISARM line before the INACTIVE line,
   in DL-54's order. `start_moves_nothing` (job.180) now holds for `ignored` alone, since job.429
-  takes the latch. Guards added: `armed`, `unarmed`, `readmit_leaves_armed`,
+  takes the latch. `readmit_verdict` loses its `none` label: every row that reads it is
+  QUE_WAIT's. Guards added: `armed`, `unarmed`, `readmit_leaves_armed`,
   `readmit_leaves_unarmed`; removed: `readmit_leaves`, `killed_waiter`, `left_waiter`. Actions
   removed: `report_flag_move`, `waiter_left`, and its handler. `flag moved` loses its causes
   KILLJOB and `readmit`, and `FlagFacts` leaves. `left_queue` reports the scan's `Readmitted` as

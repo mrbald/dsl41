@@ -326,19 +326,17 @@ def start_skips_inactive_member(ctx: Context) -> bool:
 
 # ---- the queue scan (DL-50, DL-247, DL-257)
 
-type ReadmitVerdict = Literal["admit", "cancel", "leave", "keep", "none"]
+type ReadmitVerdict = Literal["admit", "cancel", "leave", "keep"]
 
 
 def readmit_verdict(ctx: Context) -> ReadmitVerdict:
     """What one admission attempt does to a waiter, in the rule's order.
 
-    Reads the payload (`Readmission`), QUE_WAIT and hold; `none` for a job that is not
-    queued. No verdict reads ice, since ON_ICE takes a waiter out of the queue (job.112).
+    Reads the payload (`Readmission`) and hold; the rows that read it are QUE_WAIT's. No
+    verdict reads ice, since ON_ICE takes a waiter out of the queue (job.112).
     """
     scan: Readmission = ctx.event.payload
     active = ctx.active
-    if "QUE_WAIT" not in active:
-        return "none"
     if scan.box == "idle":
         return "keep" if scan.keep_stopped else "cancel"
     if "hold_on" in active or not scan.admissible:
