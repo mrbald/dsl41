@@ -1,67 +1,33 @@
-"""DSL surface + decompiler (phase 10, CLAUDE.md / DL-03 -- deliberately LAST).
+"""DSL surface and decompiler.
 
-The surface is EXTRACTED from patterns the corpus shows, not designed up
-front (DL-03: "do not design combinators speculatively"). The corpus shows:
-plain CMD jobs with exec/schedule/condition attributes, boxes with members
-(one level of the tree exercised; nesting supported because the IR does),
-string conditions in the existing condition language, globals, machines,
-resources (opaque records, DL-18), external instances, pure-s() chains, and
-a same-producer parallel pair. That yields exactly the four builders
-ir-design D2 names -- job(), box(), sequence(), parallel() -- plus the
-record declarations. Nothing else. Definition-time `status:` (SEM-24)
-round-trips as a plain job kwarg -- attribute, not combinator.
+The surface is extracted from corpus patterns, not designed ahead (DL-03). It has four builders
+(ir-design D2): job(), box(), sequence(), parallel(), plus record declarations and the fold
+sugars mutex() and contend(). Definition-time `status:` (SEM-24) is a plain job kwarg.
 
-Design decisions (each with a test; recorded as DL-17):
-- The builder GENERATES JIL and reuses the tested pipeline (to_jil() ->
-  parse -> lower). There is no second lowering path: what the DSL builds is
-  exactly what the compiler front end accepts, byte for byte. Values are
-  validated against JIL's line discipline (no newlines/control chars; keys
-  identifier-shaped) and refused loudly otherwise.
-- Conditions are STRINGS in the existing condition language -- the corpus
-  shows no combinator condition syntax, and inventing one would be
-  speculative. cond_to_source() renders a Cond tree back to that language
-  such that parse_condition(cond_to_source(c)) equals c modulo spans
-  (structure preserved by parenthesizing every nested group; lookback
-  emitted from the preserved raw token, reconstructed from kind/minutes
-  for hand-built trees).
-- sequence(*names) wires already-declared jobs into an s()-chain: each
-  follower must have been declared WITHOUT a condition (loud error
-  otherwise -- silently merging conditions would be silent loss).
-  parallel(names, after=..., then=...) fans out members from a common
-  producer (each member gets s(after)) and optionally fans back in (the
-  `then` job gets the conjunction of member successes). Both are sugar
-  over the same condition strings the corpus shows.
-- The decompiler emits sequence() only where the derived chain's followers
-  each carry EXACTLY the single atom s(prev) (no lookback, no instance, no
-  extra conjuncts -- derive's chains are adjacency-based and the corpus's
-  mutex_b chain shows adjacency alone is not enough); parallel() (DL-37)
-  where >= 2 jobs' conditions are each exactly s(p) for one in-catalog
-  producer p (fan-out), plus the UNIQUE join whose condition is exactly the
-  conjunction of the members' plain successes (fan-in; zero or ambiguous
-  joins stay explicit). The two sugars are naturally disjoint: a fan-out
-  member has >= 2 sibling successors of p, so derive's single-successor
-  chain linkage can never claim it. Everything else stays an explicit
-  job(condition=...) call. Decompile output is a runnable Python module:
-  executing it rebuilds a catalog whose canonical form equals the
-  original's (the round-trip property, tested corpus-wide); run as a
-  script it prints the rebuilt JIL for diff loops.
-- FW jobs round-trip through job(watch_file=...) kwargs -- mirroring the
-  existing IR model is mechanical, not combinator design.
-- Fold registry (DL-38): every decompiler transform beyond verbatim emission
-  is a CLOSED, coded set (FOLDS: T-001..T-007), each derivable from graph
-  shape / typed lanes alone (no naming or domain knowledge) and each
-  guaranteed by construction: detection is exact-shape (stricter than
-  derive's classifiers), reconstruction is canonical-hash-neutral (canonical
-  form sorts/dedups conjuncts, so mutex() conjoin order cannot matter), and
-  `decompile --check` is the backstop. Callers opt out per code via
-  decompile(disable=...) / CLI --no-fold. Detection runs on RESIDUAL
-  conditions (T-005 mutex atoms stripped first), so folds compose: a link
-  `n(m) & s(prev)` folds as sequence + mutex, and the emitted module's
-  wiring order (sequences/parallels, then mutex) re-conjoins them. Standing
-  exclusions, never folded: lookback-qualified atoms (Q2), cross-instance
-  refs (M33), exit-code atoms, box_success/box_failure overrides (SEM-12),
-  one-way or nested n(), run_window (M27). Estate-specific idioms are NOT
-  built-ins; they go through the custom-pattern door when it lands.
+Contracts (DL-17):
+- The builder generates JIL and runs the real pipeline (to_jil() -> parse -> lower); there is
+  no second lowering path. Values are checked against JIL's line discipline (no newlines or
+  control characters, identifier-shaped keys) and refused loudly otherwise.
+- Conditions are strings in the condition language. cond_to_source() renders a Cond tree so
+  that parse_condition(cond_to_source(c)) equals c modulo spans: every nested group is
+  parenthesized, and a lookback comes from the preserved raw token or, for hand-built trees,
+  from kind/minutes.
+- sequence() and parallel() refuse a follower or member that already has a condition; merging
+  would be silent loss.
+- The decompiler emits sequence() only where each follower carries exactly s(prev); it emits
+  parallel() (DL-37) where at least two jobs each carry exactly s(p) for one in-catalog
+  producer p, plus the unique join whose condition is the conjunction of the members'
+  successes. Zero or ambiguous joins stay explicit. Everything else is an explicit
+  job(condition=...) call. The output is a runnable module whose rebuilt catalog has the
+  original's canonical form; run as a script it prints the rebuilt JIL.
+- FW jobs round-trip through job(watch_file=...) kwargs.
+- Folds (DL-38) are the closed set FOLDS (T-001..T-007). Each is derived from graph shape or
+  typed lanes alone, detected by exact shape, reconstructed canonical-hash-neutral, and backed
+  by `decompile --check`. Callers opt out per code with decompile(disable=...) or --no-fold.
+  Detection runs on residual conditions (T-005 mutex atoms stripped first), so folds compose.
+  Never folded: lookback-qualified atoms (Q2), cross-instance refs (M33), exit-code atoms,
+  box_success/box_failure overrides (SEM-12), one-way or nested n(), run_window (M27).
+  Estate-specific idioms are not built-ins.
 """
 
 from __future__ import annotations
@@ -99,13 +65,13 @@ from dsl41.ir import (
 )
 
 _KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
-#: The scanner's rule-1 attribute-line shape (key prefix + unescaped colon);
-#: a calendar date row matching it would re-parse as an attribute (DL-36).
+#: The scanner's rule-1 attribute-line shape; a date row matching it re-parses as an attribute
+#: (DL-36).
 _ATTR_LINE_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*:")
 _CTRL_RE = re.compile(r"[\r\n\x00]")
 
-#: Statuses a chain link / fan-out member may fold through. Bare NOTRUNNING
-#: is mutex-classified (M07, T-005), lookback-n() stays an explicit edge.
+#: Statuses a chain link or fan-out member may fold through. Bare NOTRUNNING is
+#: mutex-classified (M07, T-005); lookback n() stays an explicit edge.
 _FOLDABLE_STATUS: dict[Status, str] = {k: v for k, v in STATUS_LETTER.items() if k != "NOTRUNNING"}
 
 _BARE_GLOBAL_VALUE_RE = re.compile(r"[A-Za-z0-9_.\-]+\Z")
@@ -115,11 +81,9 @@ class DslError(ValueError):
     pass
 
 
-#: The closed fold registry (DL-38; module docstring). Codes are stable API:
-#: `decompile(disable=...)` and the CLI --no-fold validate against this set.
-#: Dependencies: disabling T-001 also stops T-002 s-runs, T-003, and ALL
-#: fan-in joins (then=/then_any= both refine the sequence/parallel
-#: machinery); T-004 alone still folds f/d/t fan-outs, join-less.
+#: The closed fold registry (DL-38). `decompile(disable=...)` and --no-fold validate against it.
+#: Disabling T-001 also stops T-002 s-runs, T-003 and all fan-in joins; T-004 alone still folds
+#: f/d/t fan-outs, join-less.
 FOLDS: dict[str, str] = {
     "T-001": "plain s() chains -> sequence(); same-producer fan-out/fan-in -> parallel()",
     "T-002": "sub-chain splitting: fold maximal qualifying runs inside disqualified chains",
@@ -154,9 +118,7 @@ def _job_ref_source(atom: StatusAtom | ExitCodeAtom) -> str:
 
 
 def cond_to_source(cond: Cond) -> str:
-    """Render a Cond tree back to condition-language source; nested groups
-    are parenthesized so the flat (equal-precedence) parse preserves the
-    tree exactly (see module docstring)."""
+    """Render a Cond tree as condition-language source; nested groups are parenthesized."""
     if isinstance(cond, Paren):
         return f"({cond_to_source(cond.inner)})"
     if isinstance(cond, (And, Or)):
@@ -189,9 +151,8 @@ def cond_to_source(cond: Cond) -> str:
 
 
 def _check_ctrl(kind: str, value: str) -> str:
-    """Line-injection gate alone: calendar DATE ROWS take this and not the
-    comment gate below -- rule 11 says a date row is not value position, so
-    a `/*` there opens nothing (DL-161)."""
+    """Line-injection gate alone; a date row is not value position (rule 11), so `/*` opens
+    nothing there (DL-161)."""
     if _CTRL_RE.search(value):
         raise DslError(f"{kind} value {value!r} carries newline/control characters")
     return value
@@ -200,12 +161,9 @@ def _check_ctrl(kind: str, value: str) -> str:
 def _check_value(kind: str, value: str) -> str:
     _check_ctrl(kind, value)
     if value_opens_comment(value):
-        # Rule 5 (DL-161): rendered bare, this value OPENS a block comment
-        # and swallows the lines after it. Every JIL-emitting path
-        # re-escapes (the rule-2 principle). _render_value auto-quotes the
-        # UNQUOTED_AT_LOWERING lanes before this gate; every other lane is
-        # verbatim, where a quote-wrap would change the stored bytes, so the
-        # only safe answer is this refusal.
+        # Rule 5 (DL-161): rendered bare, this value opens a block comment. _render_value
+        # quotes the UNQUOTED_AT_LOWERING lanes before this gate; other lanes are verbatim,
+        # where a quote-wrap would change the stored bytes, so they are refused here.
         raise DslError(
             f"{kind} value {value!r} would open a rule-5 block comment when"
             " rendered as JIL; quote the value or drop the bare '/*' (DL-161)"
@@ -221,12 +179,10 @@ def _check_name(kind: str, name: str) -> str:
 
 
 def _check_wirable(fn: str, name: str) -> str:
-    """Names the wiring builders interpolate into GENERATED condition atoms
-    must be carryable by the grammar's JOB_NAME token: colon is the only
-    escapable metachar (DL-39); whitespace, `( ) , ^ & |`, and backslash
-    cannot be referenced from condition syntax at all -- emitting them
-    would silently re-target the atom (e.g. `^` reads as an instance
-    qualifier, M33)."""
+    """Refuse names JOB_NAME cannot carry into a generated condition atom.
+
+    Colon is the only escapable metachar (DL-39); whitespace, `( ) , ^ & |` and backslash
+    would re-target the atom (`^` reads as an instance qualifier, M33)."""
     if any(ch in "(),^&|\\" or ch.isspace() for ch in name):
         raise DslError(
             f"{fn}() cannot wire job {name!r}: the name cannot be carried by"
@@ -254,8 +210,7 @@ class _BoxScope:
 
 
 class CatalogBuilder:
-    """Builds JIL text through the four corpus-extracted combinators plus
-    record declarations; build() runs it through the real pipeline."""
+    """Builds JIL text through the corpus-extracted combinators; build() runs the real pipeline."""
 
     def __init__(self) -> None:
         self._statements: list[str] = []
@@ -281,8 +236,8 @@ class CatalogBuilder:
         type: str | None = None,
         **attrs: str,
     ) -> CatalogBuilder:
-        # `members` is positional-only so an opaque machine attr literally named
-        # `members` routes to **attrs instead of colliding (DL-49, review).
+        # `members` is positional-only so an opaque attr named `members` routes to **attrs
+        # (DL-49).
         _check_name("machine", name)
         lines = [f"insert_machine: {name}"]
         if type is not None:
@@ -291,9 +246,8 @@ class CatalogBuilder:
             if not _KEY_RE.match(key):
                 raise DslError(f"machine attribute key {key!r} is not JIL-key-shaped")
             lines.append(f"{key}: {_check_value('machine attribute', value)}")
-        # Virtual pool / real pool members: each `machine:` line plus its own
-        # factor/max_load, in order (DL-49). Emitted after machine-level attrs
-        # so re-lowering re-attaches per-member attrs to their member.
+        # Pool members follow the machine-level attrs so re-lowering re-attaches per-member
+        # attrs to their member (DL-49).
         for member_name, member_attrs in members or []:
             lines.append(f"machine: {_check_value('machine member', member_name)}")
             for key, value in member_attrs.items():
@@ -328,8 +282,7 @@ class CatalogBuilder:
         return self
 
     def calendar(self, name: str, /, *, dates: Sequence[str] = (), **attrs: str) -> CatalogBuilder:
-        """Standard-calendar record (autocal_asc export shape, DL-36):
-        attributes first, then bare date rows."""
+        """Standard-calendar record: attributes, then bare date rows (DL-36)."""
         lines = self._calendar_lines("calendar", name, attrs)
         for row in dates:
             row = _check_ctrl("calendar date row", row).strip()
@@ -342,9 +295,7 @@ class CatalogBuilder:
     def cycle(
         self, name: str, /, *, periods: Sequence[tuple[str, str]] = (), **attrs: str
     ) -> CatalogBuilder:
-        """Cycle record (autocal_asc export shape, DL-36). Multi-period
-        cycles pass `periods` -- repeated start_date/end_date pairs
-        (SEM-39, DL-57); a single pair may stay in plain kwargs."""
+        """Cycle record (DL-36); `periods` repeats start_date/end_date pairs (SEM-39, DL-57)."""
         if periods and ("start_date" in attrs or "end_date" in attrs):
             raise DslError("cycle: pass periods= or start_date/end_date kwargs, not both")
         lines = self._calendar_lines("cycle", name, attrs)
@@ -357,9 +308,7 @@ class CatalogBuilder:
     def extended_calendar(
         self, name: str, /, *, conditions: Sequence[str] = (), **attrs: str
     ) -> CatalogBuilder:
-        """Extended-calendar record (autocal_asc export shape, DL-36).
-        Multiple rules pass `conditions` -- repeated `condition:` lines
-        (SEM-36, DL-57); a single rule may stay a plain kwarg."""
+        """Extended-calendar record (DL-36); `conditions` repeats `condition:` (SEM-36, DL-57)."""
         if conditions and "condition" in attrs:
             raise DslError("extended_calendar: pass conditions= or condition=, not both")
         lines = self._calendar_lines("extended_calendar", name, attrs)
@@ -369,10 +318,8 @@ class CatalogBuilder:
         return self
 
     def _calendar_lines(self, verb: str, name: str, attrs: dict[str, str]) -> list[str]:
-        # Calendar names may carry spaces (TechDocs' own example is
-        # "shopping days") -- quoted on emission, unquoted at lowering.
-        # Tabs, quotes, and outer whitespace would not survive that
-        # quote--unquote round trip and are refused.
+        # Names with spaces are quoted on emission and unquoted at lowering; tabs, quotes and
+        # outer whitespace would not survive that round trip and are refused.
         _check_value(f"{verb} name", name)
         if not name or name != name.strip() or "\t" in name or '"' in name:
             raise DslError(f"{verb} name {name!r} is not calendar-name-shaped")
@@ -384,7 +331,7 @@ class CatalogBuilder:
             lines.append(f"{key}: {_check_value(f'{verb} attribute', value)}")
         return lines
 
-    # ----------------------------------------------------------------- the four
+    # ----------------------------------------------------------------- combinators
 
     def job(
         self,
@@ -394,14 +341,12 @@ class CatalogBuilder:
         condition: str | None = None,
         **attrs: object,
     ) -> CatalogBuilder:
-        """One insert_job statement. Keyword names are JIL attribute names;
-        list values join with ', '; bools become 1/0; annotations= and
-        passthrough= dicts inline verbatim attribute lines."""
+        """One insert_job statement. Keywords are JIL attribute names; lists join with ', ';
+        bools become 1/0; annotations= and passthrough= dicts inline verbatim lines."""
         _check_name("job", name)
         if name in self._declared:
             raise DslError(f"job {name!r} declared twice")
-        # DL-39: builder API names are SEMANTIC; `:` is escaped at JIL
-        # generation and unescaped again at lowering (vendor rule 4b spelling).
+        # Builder names are semantic; `:` is escaped in JIL and unescaped at lowering (DL-39).
         lines = [f"insert_job: {escape_job_name(name)}", f"job_type: {job_type}"]
         if self._box_stack:
             lines.append(f"box_name: {escape_job_name(self._box_stack[-1])}")
@@ -413,8 +358,7 @@ class CatalogBuilder:
                     if not _KEY_RE.match(attr_key):
                         raise DslError(f"attribute key {attr_key!r} is not JIL-key-shaped")
                     if attr_key in ("condition", "resources"):
-                        # a verbatim line would bypass the _declared/_resourced
-                        # registries the wiring builders' no-merge guards read
+                        # a verbatim line would bypass the no-merge registries
                         raise DslError(
                             f"{key}= cannot smuggle {attr_key!r}; use the {attr_key}= kwarg"
                         )
@@ -439,17 +383,13 @@ class CatalogBuilder:
         condition: str | None = None,
         **attrs: object,
     ) -> _BoxScope:
-        """A box job; use as a context manager -- jobs declared inside become
-        members (nesting supported)."""
+        """A box job; as a context manager, jobs declared inside become members."""
         self.job(name, job_type="b", condition=condition, **attrs)
         return _BoxScope(self, name)
 
     def sequence(self, *names: str, link: str = "s") -> CatalogBuilder:
-        """Wire already-declared jobs into a status-chain: each follower gets
-        condition link(previous) -- s() by default, f()/d()/t() for
-        escalation / always-advance / kill-cleanup chains (T-004). Followers
-        must have been declared without a condition -- merging would be
-        silent loss (DL-17)."""
+        """Wire declared jobs into a chain: each follower gets link(previous), s() by default
+        or f()/d()/t() (T-004). A follower with a condition is refused (DL-17)."""
         if len(names) < 2:
             raise DslError("sequence() needs at least two job names")
         if link not in ("s", "f", "d", "t"):
@@ -478,11 +418,9 @@ class CatalogBuilder:
         then: str | None = None,
         then_any: str | None = None,
     ) -> CatalogBuilder:
-        """Fan already-declared jobs out from a common producer (each member
-        gets on(after) -- s() by default, f()/d()/t() per T-004) and
-        optionally back in: `then` gets the conjunction of member successes,
-        `then_any` the disjunction (T-003). Same no-merge rule as
-        sequence()."""
+        """Fan declared jobs out from a producer (each member gets on(after), T-004) and
+        optionally back in: `then` gets the conjunction of member successes, `then_any` the
+        disjunction (T-003). Same no-merge rule as sequence()."""
         if len(names) < 2:
             raise DslError("parallel() needs at least two member names")
         if on not in ("s", "f", "d", "t"):
@@ -518,15 +456,10 @@ class CatalogBuilder:
         return self
 
     def mutex(self, *names: str) -> CatalogBuilder:
-        """Pairwise mutual exclusion (T-005): every pair gets each other's
-        bare n() CONJOINED onto whatever condition each job already carries.
-        Unlike sequence()/parallel() this composes with existing conditions
-        by design -- conjoining is the declared operation, not a silent
-        merge. The existing condition is parenthesized so both grammar modes
-        (Q1) preserve the tree; canonical form sorts conjuncts, so conjoin
-        order cannot affect equivalence. Call AFTER sequence()/parallel()
-        wiring: mutex() marks its jobs conditioned, and the chain builders
-        refuse conditioned followers."""
+        """Pairwise mutual exclusion (T-005): each pair gets the other's bare n() conjoined
+        onto its existing condition, parenthesized so both grammar modes (Q1) keep the tree.
+        Call after sequence()/parallel(): mutex() marks its jobs conditioned and the chain
+        builders refuse conditioned followers."""
         if len(names) < 2:
             raise DslError("mutex() needs at least two job names")
         if len(set(names)) != len(names):
@@ -551,9 +484,8 @@ class CatalogBuilder:
         quantity: int = 1,
         free: str | None = None,
     ) -> CatalogBuilder:
-        """One shared `resources:` requirement declared across several jobs
-        (T-006): the scattered per-job attribute made visible as contention.
-        Refuses jobs that already carry a resources attribute (no-merge)."""
+        """One shared `resources:` requirement across several jobs (T-006); a job that already
+        carries resources is refused."""
         if len(jobs) < 2:
             raise DslError("contend() needs at least two job names")
         _check_name("resource", resource)
@@ -584,9 +516,8 @@ class CatalogBuilder:
 
     def _conjoin_condition(self, job: str, atom: str) -> None:
         index = self._stmt_index[job]
-        # split on \n ONLY: the statement lane may carry \x0b/\x0c/\x85/U+2028
-        # inside values (the scanner delimits on \n alone), and splitlines()
-        # would rewrite them into real newlines -- silent statement corruption
+        # split on \n only: values may carry \x0b/\x0c/\x85/U+2028, which splitlines() would
+        # turn into newlines
         lines = self._statements[index][:-1].split("\n")
         for j, line in enumerate(lines):
             if line.startswith("condition: "):
@@ -602,9 +533,8 @@ class CatalogBuilder:
     def _render_value(self, key: str, value: object) -> str:
         if isinstance(value, bool):
             return "1" if value else "0"
-        # Join FIRST: the joined string is what lands on the JIL line, so it
-        # runs the same gate as a scalar -- the early return here let a list
-        # item open a comment or inject a line, fully silently (DL-161).
+        # Join first: the joined string lands on the JIL line, so it runs the same gate as a
+        # scalar (DL-161).
         rendered = (
             ", ".join(str(item) for item in value)
             if isinstance(value, (list, tuple))
@@ -615,18 +545,10 @@ class CatalogBuilder:
             and '"' not in rendered
             and key.lower() in UNQUOTED_AT_LOWERING
         ):
-            # Rule 5 (DL-161): bare, this value would open a block comment;
-            # quoting is the documented escape, and EXACTLY the
-            # UNQUOTED_AT_LOWERING lanes strip it back at lowering (rule 7),
-            # so the round trip is exact -- the corpus witness is
-            # torture_colon's std_err_file glob lookalike. Any other lane is
-            # verbatim: a quote-wrap there would silently change the stored
-            # value, so it falls through to _check_value's loud refusal, and
-            # so does a value that embeds a quote (cannot be wrapped). The
-            # wrapped form still runs _check_value (control characters). Not
-            # job-only: `type`/`res_type`/`xtype` are real `unquote_jil_value`
-            # lanes for machine/resource/xinst too, so `machine()`, `resource()`
-            # and `xinst()` call this same method for those three keys.
+            # Rule 5 (DL-161): quoting is the escape, and exactly the UNQUOTED_AT_LOWERING
+            # lanes strip it at lowering (rule 7). Other lanes, and values embedding a quote,
+            # fall through to _check_value's refusal. `type`, `res_type` and `xtype` are
+            # unquote lanes for machine, resource and xinst too.
             return _check_value(key, f'"{rendered}"')
         return _check_value(key, rendered)
 
@@ -683,10 +605,8 @@ def _sla(spec: SlaSpec) -> str:
 
 
 def _record_kwargs(attrs: dict[str, str]) -> list[str]:
-    """Opaque record attrs as builder kwargs. Keys are JIL-key-shaped
-    (scanner rule 1) but may collide with Python keywords or the builders'
-    positional-only `name`; those route through a **{} splat so the emitted
-    module always compiles."""
+    """Opaque record attrs as kwargs; keys that collide with a keyword or `name` use a **{}
+    splat so the module compiles."""
     plain = [f"{k}={_py(v)}" for k, v in attrs.items() if not _needs_splat(k)]
     splat = {k: v for k, v in attrs.items() if _needs_splat(k)}
     if splat:
@@ -699,9 +619,8 @@ def _needs_splat(key: str) -> bool:
 
 
 def _schedule_var_name(schedule: ScheduleBlock, used: set[str]) -> str:
-    """Deterministic, content-derived name for a shared schedule (T-007):
-    readable where the block has times/calendar, numeric suffix on
-    collision (first-seen order, so regeneration is stable)."""
+    """Content-derived name for a shared schedule (T-007); numeric suffix on collision in
+    first-seen order."""
     parts: list[str] = []
     if schedule.start_times:
         parts.append("_".join(f"{t.hour:02d}{t.minute:02d}" for t in schedule.start_times))
@@ -731,7 +650,7 @@ def _job_kwargs(
     out: list[str] = []
     exec_ = job.exec_
     if exec_ is not None:
-        # std_in_file/envvars are the DL-32 CMD-only pair; absent on FwSpec.
+        # std_in_file and envvars are CMD-only (DL-32).
         for field in ("command", "watch_file", "std_in_file", "envvars"):
             value = getattr(exec_, field, None)
             if value is not None:
@@ -787,8 +706,7 @@ def _job_kwargs(
 
 
 def _plain_status_atom(cond: Cond | None) -> tuple[str, str] | None:
-    """(producer, letter) iff cond is exactly ONE plain foldable status atom
-    (no lookback, no instance, no conjuncts)."""
+    """(producer, letter) iff cond is exactly one plain foldable status atom."""
     if (
         isinstance(cond, StatusAtom)
         and cond.lookback is None
@@ -800,9 +718,7 @@ def _plain_status_atom(cond: Cond | None) -> tuple[str, str] | None:
 
 
 def _link_verdict(cond: Cond | None, prev: str) -> tuple[str | None, str]:
-    """(letter, '') when a chain link folds; (None, reason) otherwise. The
-    reasons feed the decompile fold report -- the estate's explicit-link
-    worklist."""
+    """(letter, '') when a chain link folds; (None, reason) otherwise, for the fold report."""
     if cond is None:
         return None, "no condition"
     if isinstance(cond, (And, Or, Paren)):
@@ -824,12 +740,9 @@ def _link_verdict(cond: Cond | None, prev: str) -> tuple[str | None, str]:
 
 
 def _success_combo_shape(cond: Cond | None) -> tuple[frozenset[str], bool] | None:
-    """(member names, is_and) iff cond is exactly And/Or over plain distinct
-    successes (no lookback, no instance, no nesting, no duplicate atoms).
-    And = the DL-37 fan-in; Or = the T-003 any-of join; anything looser
-    stays an explicit job(condition=...). One O(N) pass classifies every
-    candidate join; fan-out groups then look their member set up directly
-    (was: a full catalog scan per group)."""
+    """(member names, is_and) iff cond is And/Or over plain distinct successes.
+
+    And is the DL-37 fan-in; Or is the T-003 any-of join; anything looser stays explicit."""
     if not isinstance(cond, (And, Or)):
         return None
     names: set[str] = set()
@@ -858,12 +771,10 @@ def _is_bare_local_n(op: Cond, targets: set[str]) -> bool:
 
 
 def _top_level_bare_n_targets(cond: Cond | None, self_name: str, jobs: set[str]) -> set[str]:
-    """In-catalog jobs referenced by bare n() atoms sitting as top-level
-    conjuncts (or as the whole condition). STRICTER than derive's M07 pass
-    (which counts any bare n() occurrence): an n() nested under an Or or a
-    group cannot be reconstructed by mutex()'s conjoin, so it never folds.
-    `jobs` is the prebuilt catalog name set -- callers pass it once, this
-    runs per job."""
+    """In-catalog jobs named by bare n() atoms that are top-level conjuncts.
+
+    Stricter than derive's M07 pass: an n() under an Or or a group cannot be rebuilt by
+    mutex(), so it never folds."""
     if cond is None:
         return set()
     ops = cond.operands if isinstance(cond, And) else [cond]
@@ -877,9 +788,7 @@ def _top_level_bare_n_targets(cond: Cond | None, self_name: str, jobs: set[str])
 
 
 def _without_mutex_atoms(cond: Cond, partners: set[str]) -> Cond | None:
-    """The residual condition after removing the folded pairs' bare n()
-    conjuncts; None when nothing else remains. Only ever called with
-    partners that _top_level_bare_n_targets confirmed, so removal is exact."""
+    """The condition minus the folded pairs' bare n() conjuncts; None when nothing remains."""
     if isinstance(cond, And):
         kept = [op for op in cond.operands if not _is_bare_local_n(op, partners)]
         if len(kept) == len(cond.operands):
@@ -892,16 +801,12 @@ def _without_mutex_atoms(cond: Cond, partners: set[str]) -> Cond | None:
     return None if _is_bare_local_n(cond, partners) else cond
 
 
-# Analysis passes (CLAUDE.md style: small pure functions), one per fold lane;
-# decompile() orchestrates them over the shared residual-condition map.
+# One analysis pass per fold lane; decompile() runs them over the residual-condition map.
 
 
 def _buildable_job_name(name: str) -> bool:
-    """True iff CatalogBuilder.job() accepts `name` -- the decompile-side
-    gate mirroring T-006's resource-name gate: the lowerer accepts subjects
-    (embedded whitespace) the builder's statement discipline refuses, and
-    emitting them would produce a module that can never rebuild the
-    catalog."""
+    """True iff CatalogBuilder.job() accepts `name`; the lowerer accepts names the builder
+    refuses, and emitting one would give a module that cannot rebuild the catalog."""
     try:
         _check_name("job", name)
     except DslError:
@@ -912,9 +817,8 @@ def _buildable_job_name(name: str) -> bool:
 def _fold_mutex(
     catalog: CatalogIR, residual: dict[str, Cond | None], disabled: set[str]
 ) -> tuple[list[tuple[str, str]], dict[str, Cond | None]]:
-    """T-005: symmetric top-level bare n() pairs -> mutex() (DL-38 decision
-    4: stricter than derive's M07). Returns the pairs and a residual map
-    with the folded atoms stripped, so the downstream folds compose."""
+    """T-005: symmetric top-level bare n() pairs -> mutex() (DL-38). Returns the pairs and a
+    residual map with the folded atoms stripped."""
     if "T-005" in disabled:
         return [], residual
     job_names = set(catalog.jobs)
@@ -962,12 +866,10 @@ class _Par(NamedTuple):
 def _fold_chains(
     graph: DerivedGraph, residual: dict[str, Cond | None], disabled: set[str]
 ) -> tuple[list[_Seq], set[str], int, set[str], list[str]]:
-    """sequence() candidates: derived chains whose links each carry EXACTLY
-    one plain status atom on the predecessor -- adjacency alone is not
-    enough (module docstring). T-001 admits s-links, T-004 f/d/t-links;
-    T-002 folds maximal same-letter runs inside chains that mix or break.
-    Returns (sequences, folded followers, split-chain count, jobs whose
-    stays-explicit note is already written, notes)."""
+    """sequence() candidates: derived chains whose links each carry exactly one plain status
+    atom on the predecessor. T-001 admits s-links, T-004 f/d/t-links; T-002 folds maximal
+    same-letter runs inside mixed or broken chains. Returns (sequences, folded followers,
+    split-chain count, jobs already noted, notes)."""
     notes: list[str] = []
     noted: set[str] = set()
     sequences: list[_Seq] = []
@@ -1019,16 +921,12 @@ def _fold_chains(
 def _fold_fanout(
     catalog: CatalogIR, residual: dict[str, Cond | None], disabled: set[str]
 ) -> tuple[list[_Par], set[str]]:
-    """parallel() candidates (DL-37): fan-out groups -- >= 2 jobs whose
-    entire (residual) condition is exactly letter(p) for one in-catalog
-    producer p -- plus the unique fan-in joins. Grouping is by exact
-    condition shape, not derive's (preds, succs) signatures: a member with
-    extra OUTGOING edges still fans out from p, while any looser incoming
-    shape must stay explicit. Disjointness with sequence() is structural:
-    a fan-out member gives p >= 2 successors, so no chain link through p
-    exists. Fan-in joins (then= and, via T-003, then_any=) refine the
-    T-001 parallel machinery, so disabling T-001 keeps EVERY join explicit
-    even on T-004 f/d/t groups (the FOLDS dependency contract)."""
+    """parallel() candidates (DL-37): groups of at least two jobs whose whole residual
+    condition is exactly letter(p) for one in-catalog producer p, plus the unique fan-in joins.
+
+    Grouping is by exact condition shape, so a member with extra outgoing edges still fans
+    out. A fan-out member gives p two or more successors, so no chain link through p exists.
+    Disabling T-001 keeps every join explicit, even on T-004 groups (FOLDS)."""
     fanout: dict[tuple[str, str], list[str]] = {}
     for name in catalog.jobs:
         plain = _plain_status_atom(residual[name])
@@ -1071,11 +969,8 @@ def _fold_fanout(
 def _fold_schedules(
     catalog: CatalogIR, disabled: set[str]
 ) -> tuple[dict[str, str], list[tuple[str, tuple[str, ...]]]]:
-    """T-007: identical schedule blocks factored into shared module-level
-    dicts -- grouping is by EMISSION equality (the rendered kwargs), the
-    exact thing being deduplicated. Pure Python factoring, no new surface.
-    Returns (job -> variable name, [(variable, kwargs)] in first-seen
-    order)."""
+    """T-007: identical schedule blocks become shared module-level dicts, grouped by rendered
+    kwargs. Returns (job -> variable, [(variable, kwargs)] in first-seen order)."""
     if "T-007" in disabled:
         return {}, []
     sched_vars: dict[str, str] = {}
@@ -1100,12 +995,9 @@ def _fold_schedules(
 def _fold_contends(
     catalog: CatalogIR, disabled: set[str]
 ) -> tuple[list[tuple[list[str], str, int, str | None]], set[str], list[str]]:
-    """T-006: identical single-group resources: attrs across >= 2 jobs fold
-    into one contend() declaration. Whole-lane equality only (name,
-    quantity, free); multi-group jobs stay explicit -- reconstructing a
-    partial list would have to reproduce group order, which is exactly the
-    merge ambiguity contend() refuses. Returns (contends, folded jobs,
-    notes)."""
+    """T-006: identical single-group resources: attrs across two or more jobs fold into one
+    contend(). Multi-group jobs stay explicit: a partial list would need group order, the
+    merge ambiguity contend() refuses. Returns (contends, folded jobs, notes)."""
     if "T-006" in disabled:
         return [], set(), []
     contends: list[tuple[list[str], str, int, str | None]] = []
@@ -1131,8 +1023,7 @@ def _fold_contends(
 
 
 def _explicit_reason(cond: Cond, jobs: Collection[str]) -> str:
-    """Reason class for a residual condition no fold claimed, in DL-38's
-    vocabulary (lookback/Q2, cross-instance/M33, exit-code, compound)."""
+    """Reason class (DL-38) for a residual condition no fold claimed."""
     if isinstance(cond, (And, Or, Paren)):
         return "compound condition"
     if isinstance(cond, ExitCodeAtom):
@@ -1156,12 +1047,8 @@ def _explicit_notes(
     suppressed: set[str],
     noted: set[str],
 ) -> list[str]:
-    """DL-38 audit-trail completion: chain-link verdicts only cover links
-    INSIDE derived chains, but disqualified links also hang off fan-out and
-    fan-in nodes (singleton groups, ambiguous joins, lookback members,
-    disabled lanes, chain heads). Every job whose residual condition stays
-    explicit and has no note yet gets one here -- the explicit-links
-    worklist is the migration audit trail, so it must be complete."""
+    """One note for every job whose residual condition stays explicit and has none yet
+    (DL-38); the explicit-link worklist must be complete."""
     notes: list[str] = []
     for name in catalog.jobs:
         cond = residual[name]
@@ -1175,11 +1062,8 @@ def _explicit_notes(
 
 
 def _decompile_records(catalog: CatalogIR) -> list[str]:
-    """Record-namespace emission: globals, machines, resources, external
-    instances, calendars, cycles. Reads only `catalog`; writes only the
-    returned lines. Split from the fold/wiring phase below because the two
-    share no state -- one is the record catalog, the other is job/box
-    emission over the derived graph (DL-178s)."""
+    """Record emission: globals, machines, resources, external instances, calendars, cycles.
+    Shares no state with _decompile_fold_wiring (DL-178s)."""
     lines: list[str] = []
     has_records = any(
         (
@@ -1198,8 +1082,7 @@ def _decompile_records(catalog: CatalogIR) -> list[str]:
     for name, machine in catalog.machines.items():
         kwargs = [f"type={_py(machine.machine_type)}"] if machine.machine_type is not None else []
         kwargs += _record_kwargs(machine.attrs)
-        # Pool members (DL-49) pass as the positional-only 2nd arg -- so an
-        # opaque attr named `members` (routed above as a kwarg) never collides.
+        # Pool members pass as the positional-only second arg (DL-49).
         pos = ""
         if machine.members:
             member_lits = ", ".join(
@@ -1225,18 +1108,15 @@ def _decompile_records(catalog: CatalogIR) -> list[str]:
         if calendar.dates:
             kwargs.append(f"dates=[{', '.join(_py(row) for row in calendar.dates)}]")
         if calendar.kind == "standard" and "dates" in calendar.attrs:
-            # would bind the builder's dates= parameter; loud beats a
-            # silently mangled module (no such attr exists in the vendor
-            # export format)
+            # would bind the builder's dates= parameter
             raise DslError(f"calendar {name!r} carries an attribute named 'dates'")
         if calendar.conditions and calendar.kind == "standard":
-            # lowering never produces this shape (the lane is extended-only,
-            # DL-57); a hand-built IR must not silently drop it
+            # the lane is extended-only (DL-57); a hand-built IR must not drop it silently
             raise DslError(f"standard calendar {name!r} carries condition lines")
         if calendar.conditions and (
             "condition" in calendar.attrs or "conditions" in calendar.attrs
         ):
-            # would collide with the lane's kwarg at rebuild (the `dates` guard's argument)
+            # would collide with the lane's kwarg at rebuild
             raise DslError(f"calendar {name!r} carries both condition lines and a like-named attr")
         kwargs += _record_kwargs(calendar.attrs)
         if len(calendar.conditions) == 1:
@@ -1264,16 +1144,10 @@ def _decompile_fold_wiring(
     disabled: set[str],
     report: list[str] | None,
 ) -> list[str]:
-    """Fold-composed job/box emission, wiring, and the fold-inventory
-    report. Reads `catalog`/`graph`/`disabled`, writes only the returned
-    lines (plus `report`, an explicit out-param); shares no state with
-    `_decompile_records` (DL-178s).
+    """Job and box emission, wiring, and the fold report (the `report` out-param).
 
-    T-005 first: fold detection runs on RESIDUAL conditions (mutex atoms
-    stripped), so folds compose -- the emitted module re-conjoins via
-    mutex() AFTER sequence()/parallel() wiring. Stripping can never
-    invalidate derive's chains: bare n() atoms are mutex-classified and
-    contribute no edges (M07)."""
+    T-005 runs first and detection uses residual conditions; the module re-conjoins mutex()
+    after sequence()/parallel(). Stripping bare n() cannot invalidate derive's chains (M07)."""
     lines: list[str] = []
     residual: dict[str, Cond | None] = {
         n: j.sem.condition.cond if j.sem.condition is not None else None
@@ -1396,14 +1270,11 @@ def decompile(
     disable: Collection[str] = (),
     report: list[str] | None = None,
 ) -> str:
-    """Emit a runnable Python module of builder calls; executing it rebuilds
-    a catalog canonically equal to this one (the round-trip property).
+    """Emit a runnable Python module whose rebuilt catalog is canonically equal to this one.
 
-    `disable` opts out of individual folds by code (FOLDS registry, DL-38);
-    a bare string means that ONE code; unknown codes are refused loudly.
-    `report`, when given, collects the fold inventory and the per-link
-    explicit-stays diagnostics."""
-    if isinstance(disable, str):  # satisfies Collection[str] but iterates chars
+    `disable` opts out of folds by code (FOLDS, DL-38); a bare string is one code and unknown
+    codes are refused. `report` collects the fold inventory and the explicit-link diagnostics."""
+    if isinstance(disable, str):  # a str is a Collection[str] of characters
         disable = (disable,)
     disabled = {code.strip().upper() for code in disable if code.strip()}
     unknown = disabled - FOLDS.keys()

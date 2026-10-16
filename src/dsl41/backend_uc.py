@@ -1,62 +1,34 @@
-"""UC backend: edge classification + migration report + base record emission.
+"""UC backend: edge classification, migration report and base record emission (DL-03).
 
-Phase 9 of the implementation order (CLAUDE.md / DL-03). U3 is SPLIT
-(DL-55, the U6/Q2 pattern): U3a -- the CREATE-ONLY whole-record shape for
-workflows whose edges carry the three base condition tokens (Success /
-Failure / Success/Failure) -- is doc-frozen in docs/uc-edge-schema.md, and
-compile_to_uc() emits exactly that subset. U3b stays open (# PENDING: U3b
-below): rich condition forms (Exit Code / Step Condition / Variable +
-variableCondition, vertex conditionExpression), the live OpenAPI pull, and
-write-path verification. DL-08 still stands: the API *client* is generated
-from OpenAPI, never hand-written -- this module emits records, not calls.
+U3 is split on the U6/Q2 pattern (DL-55): U3a, the create-only whole-record shape for workflows whose edges carry
+the base tokens Success / Failure / Success/Failure, is frozen in docs/uc-edge-schema.md, and
+compile_to_uc() emits exactly that subset. U3b stays open (# PENDING: U3b below): rich
+condition forms, the live OpenAPI pull and write-path verification. The API client is
+generated from OpenAPI, never hand-written; this module emits records, not calls (DL-08).
 
-Mapping-driven compiler requirements (stonebranch-semantics Part II):
-1. Every Layer-G edge carries its M-row (derive supplies it).
-2. The UC backend refuses to compile R rows -- they become migration-report
-   items; A rows compile WITH an assumption record; only E rows compile
-   silently. This is DL-04's "failed translation is a loud, classified
-   error" made granular.
-3. The migration report is a first-class output artifact (per-catalog
-   markdown): all A assumptions, all R redesigns, all [?]-dependent
-   mappings.
-
-Decisions pinned here (each with a test; recorded as DL-15 + DL-55):
-- compile_to_uc() serializes the TWIN model (DL-16: UcModel is "the
-  structure the backend serializes post-U3") into a self-describing
-  UcBundle: wire records + quarantine ledger + apply-time notes + the
-  catalog hash, so a pipeline cannot apply the records while missing what
-  they exclude.
-- QUARANTINE, never partial-emit (the safe-freeze rule, DL-55): a workflow
-  is withheld WHOLE for either of two causes -- an edge the base schema
-  cannot express (the twin's `cancelled`, M06 t(); or any var_condition,
-  U3b rich forms), or a record name a second workflow also serializes to
-  (UC folds case when it addresses a name, UCS-12/L014). Every cause is
-  listed. No silent drop (DL-04).
-- CREATE-ONLY hygiene (uc-edge-schema.md): records pin retainSysIds=false
-  and omit sysId/version/exportTable/exportReleaseLevel; vertexIds are
-  explicit strings; layout coordinates are deterministic.
-- The report pins catalog_hash (ir-design ss8: the migration report "uses
-  it to pin the verified content") and the tool version; it is
-  deterministic for identical input -- no timestamps (callers stamp their
-  own).
-- Beyond R/A edges, the report carries every construct Part II routes to a
-  human: M27 run_window flags (pass 6), M07 mutex groups (edge-less
-  constructs), M12 OR shapes with their suggested lowering, M33 external
-  boundary refs, and the open-question ledger (each U-question whose
-  resolution changes a mapping the catalog actually uses). U3b is NOT in
-  that ledger: it gates emission, not a mapping row -- it surfaces through
-  the quarantine section and the footer instead (DL-55).
-- Report generation never fails on R rows -- the report IS the loud error
-  channel; the `dsl41 report` CLI always exits 0 on a generated report
-  (the linter is the gate; documented in the command help).
-- Per-job non-edge constructs (M17 terminators, M19/M20/M21 definition-time
-  status, M34 resources) have ONE channel: `_per_job_exclusions` feeds
-  `UcModel.excluded_entries`, whose text ships in the `dsl41 uc` bundle. The
-  report renders the same ledger; it does not keep a report-only copy
-  (DL-164, paying the second DL-152 deferred slice). Each entry carries a
-  construction-time kind tag (`ExclusionKind`, part of `ExclusionEntry`,
-  never on `UcBundle`) so the report can show a construct in exactly one
-  section without parsing ledger text.
+Contracts (stonebranch-semantics Part II; DL-15, DL-55):
+1. Every Layer-G edge carries its M-row, supplied by derive.
+2. The backend refuses R rows (they become migration-report items), compiles A rows with an
+   assumption record, and compiles E rows silently (DL-04).
+3. The migration report is a first-class artifact: all A assumptions, all R redesigns, all
+   [?]-dependent mappings. It never fails on R rows; it is the loud error channel, and
+   `dsl41 report` exits 0 on a generated report.
+- compile_to_uc() serializes the twin model (DL-16) into a self-describing UcBundle: wire
+  records, quarantine ledger, apply-time notes and the catalog hash.
+- A workflow is quarantined whole, never partly emitted (safe-freeze, DL-55), for an edge the
+  base schema cannot express (the twin's `cancelled`, M06 t(); any var_condition, U3b) or a
+  record name another workflow also serializes to (UC folds case, UCS-12/L014). Every cause
+  is listed (DL-04).
+- Records pin retainSysIds=false, omit sysId/version/exportTable/exportReleaseLevel, use
+  explicit string vertexIds and deterministic layout (uc-edge-schema.md).
+- The report pins catalog_hash (ir-design ss8) and the tool version, and carries no timestamps.
+- Beyond R/A edges the report carries M27 run_window flags, M07 mutex groups, M12 OR shapes
+  with suggested lowering, M33 boundary refs, and the open-question ledger (each U-question
+  whose resolution changes a mapping the catalog uses). U3b gates emission, not a mapping row,
+  so it surfaces through the quarantine section and the footer (DL-55).
+- Per-job non-edge constructs (M17, M19/M20/M21, M34) have one channel: `_per_job_exclusions`
+  feeds `UcModel.excluded_entries`, shipped in the bundle; the report renders the same ledger
+  (DL-164). `ExclusionKind` tags each entry so a construct shows in one report section.
 """
 
 from __future__ import annotations
@@ -73,9 +45,7 @@ from dsl41.ir import CatalogIR, InitialStatus, JobIR, render_code_ranges, tool_v
 
 
 class CompilePlan(BaseModel):
-    """Edge partition per the Part II requirement: what would compile
-    silently (E), what compiles with an assumption record (A), and what the
-    backend refuses (R)."""
+    """Edge partition (Part II): compiles silently (E), with an assumption record (A), refused (R)."""
 
     exact: list[DerivedEdge] = []
     assumed: list[DerivedEdge] = []
@@ -101,12 +71,9 @@ def classify_edges(graph: DerivedGraph) -> CompilePlan:
     return plan
 
 
-#: Open questions whose resolution changes a mapping, keyed by the M-rows
-#: that depend on them (stonebranch-semantics Part III). The report lists a
-#: question iff the catalog uses one of its rows. DL-53 (2026-07-28) closed
-#: U2/U4/U5/U7/U8 (and split U6 -- per-trigger timezone U6a resolved, calendar
-#: parity U6b stays open): resolved questions leave this ledger and their
-#: content lives in the per-edge assumption strings instead (derive.py).
+#: Open questions keyed by the M-rows that depend on them (stonebranch-semantics Part III). The
+#: report lists a question iff the catalog uses one of its rows. U2, U4, U5, U6a, U7 and U8 are
+#: resolved (DL-53); their content lives in the per-edge assumption strings (derive.py).
 _U_QUESTIONS: tuple[tuple[str, tuple[str, ...], str], ...] = (
     ("U1", ("M12",), "native OR-join / 'Any' completion criteria decide the M12 lowering"),
     (
@@ -131,15 +98,11 @@ def _edge_line(edge: DerivedEdge) -> str:
 
 
 def _bundle_ledger_lines(other_exclusions: list[str], notes: list[str]) -> list[str]:
-    """The bundle's remaining ledger content, rendered into the report:
-    what the twin lowering recorded that no other section already shows,
-    and what a workflow record cannot carry. Both travel IN the bundle
-    (DL-55).
+    """The bundle ledger content no other report section shows: the twin's other exclusions
+    and the apply notes (DL-55).
 
-    `other_exclusions` excludes the three kinds the report renders under
-    their own heading -- R-class edges (`refused_edge`), redesign flags
-    (`redesign_flag`), and per-job non-edge constructs (`per_job`) -- so
-    nothing here prints twice (DL-164)."""
+    `other_exclusions` omits the kinds with their own heading (`refused_edge`, `redesign_flag`,
+    `per_job`), so nothing prints twice (DL-164)."""
     lines: list[str] = []
     if other_exclusions:
         lines += [
@@ -173,8 +136,7 @@ def _has_terminators(job: JobIR) -> bool:
 def render_migration_report(catalog: CatalogIR, graph: DerivedGraph | None = None) -> str:
     """Per-catalog markdown migration report (Part II requirement 3).
 
-    Deterministic for identical input; sections appear only when non-empty
-    (except the summary, which always states the totals)."""
+    Deterministic; sections appear only when non-empty, except the summary."""
     if graph is None:
         graph = derive_graph(catalog)
     plan = classify_edges(graph)
@@ -185,11 +147,9 @@ def render_migration_report(catalog: CatalogIR, graph: DerivedGraph | None = Non
         used_rows.add("M07")
     if graph.or_shapes:
         used_rows.add("M12")
-    # DL-25: calendars are external named dependencies -- autocal territory,
-    # not definable in JIL, so "unknown calendar" is undecidable for the
-    # linter. The report inventories them instead (and surfaces U6b via the
-    # M24 row; per-trigger timezone U6a is resolved, DL-53). Only LIVE
-    # schedules count; dead-config calendars are L005's business.
+    # Calendars are external autocal objects, so the linter cannot decide "unknown calendar";
+    # the report inventories them (DL-25) and surfaces U6b via M24. Only live schedules count;
+    # dead-config calendars are L005's.
     calendars: dict[str, list[str]] = {}
     for name, job in catalog.jobs.items():
         schedule = job.schedule
@@ -345,12 +305,10 @@ def render_migration_report(catalog: CatalogIR, graph: DerivedGraph | None = Non
 
 # ------------------------------------------------ UC twin model (compile target)
 
-# The in-memory UC workflow model. compile_to_uc serializes it to the U3a
-# base record bundle (DL-55), and the minimal UC interpreter
-# (tests/uc_oracle.py) interprets it for the P-Mxx expected-divergence pairs
-# (stonebranch Part IV). Semantics sources are all public [V] entries:
-# UCS-01 edge conditions, UCS-02 skip propagation, UCS-03 joins, UCS-09
-# mutual exclusion, UCS-13 within-run evaluation.
+# The in-memory UC workflow model. compile_to_uc serializes it (DL-55) and tests/uc_oracle.py
+# interprets it for the P-Mxx expected-divergence pairs (stonebranch Part IV). Sources: UCS-01
+# edge conditions, UCS-02 skip propagation, UCS-03 joins, UCS-09 mutual exclusion, UCS-13
+# within-run evaluation.
 
 #: UCS-01/M06: UC separates Cancelled from Failed -- a `failure` edge must
 #: NOT fire on Cancelled; `cancelled` carries the t() mapping.
@@ -372,10 +330,8 @@ class UcEdge(BaseModel):
     condition: UcEdgeCondition
     var_condition: UcVarCondition | None = None
     mapping_row: str  # provenance: the M-row that produced this edge
-    #: M03 provenance: the AutoSys lookback token this edge dropped. UC has
-    #: no window on an edge, so the base record spells the plain condition
-    #: and the bundle carries the window as an apply note (never silently
-    #: lost, DL-04). Not a record field -- U3a is frozen.
+    #: M03: the lookback token this edge dropped. UC has no window on an edge, so the bundle
+    #: carries it as an apply note (DL-04). Not a record field; U3a is frozen.
     lookback: str | None = None
 
 
@@ -383,29 +339,21 @@ class UcWorkflow(BaseModel):
     name: str
     tasks: list[str]  # task names, catalog order
     edges: list[UcEdge] = []
-    #: names that ALSO launch this workflow (UCS-0 "workflows are themselves
-    #: tasks"): the box name is the workflow name; nested box names alias to
-    #: the flattened top workflow
+    #: names that also launch this workflow (UCS-0: workflows are tasks); nested box names
+    #: alias to the flattened top workflow
     aliases: list[str] = []
 
 
-#: Report-only classification of one `ExclusionEntry`, tagged at
-#: construction time in `compile_twin` (DL-164). The report reads the tag
-#: instead of parsing ledger text, so a construct prints in exactly one
-#: section: `refused_edge` and `redesign_flag` already have their own rich
-#: section (Refused constructs, Redesign flags); `per_job` gets the new
-#: per-job section; `other` is everything Twin exclusions still shows.
+#: Report section of one `ExclusionEntry`, tagged in `compile_twin` (DL-164), so a construct
+#: prints in exactly one section: `refused_edge` and `redesign_flag` have their own sections,
+#: `per_job` the per-job section, `other` the Twin exclusions section.
 ExclusionKind = Literal["refused_edge", "redesign_flag", "per_job", "other"]
 
 
 class ExclusionEntry(BaseModel):
-    """One ledger line: the human-readable text and its report-rendering
-    kind, together -- text and kind used to be two same-length lists with a
-    validator holding them in step (DL-164); one entry per line removes the
-    invariant instead of guarding it.
+    """One ledger line: its text and report kind (DL-164).
 
-    `extra="forbid"` is the DL-82 typo guard (oracle_state.py:142): a
-    keyword typo now raises at construction instead of being ignored."""
+    `extra="forbid"` is the DL-82 typo guard."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -416,23 +364,19 @@ class ExclusionEntry(BaseModel):
 class UcModel(BaseModel):
     """One catalog compiled to UC shapes (E/A rows only).
 
-    `extra="forbid"` is the DL-82 typo guard (oracle_state.py:142): a
-    keyword typo now raises at construction instead of being ignored -- the
-    residual guarantee `_kinds_cover_the_ledger` used to provide alongside
-    the invariant it held (DL-164), now that the invariant itself is gone."""
+    `extra="forbid"` is the DL-82 typo guard."""
 
     model_config = ConfigDict(extra="forbid")
 
     workflows: list[UcWorkflow] = []
     mutex_groups: list[list[str]] = []  # UCS-09 Mutually Exclusive Tasks
     max_exit_success: dict[str, int] = {}  # M31 assumed: same boundary as AutoSys
-    #: M31/DL-33: explicit exit-code sets ride the same same-boundary
-    #: assumption (U4); verdict shared via ir.exit_is_success.
+    #: explicit exit-code sets ride the same-boundary assumption (M31, DL-33, U4); the verdict
+    #: is ir.exit_is_success
     success_codes: dict[str, list[tuple[int, int]]] = {}
     fail_codes: dict[str, list[tuple[int, int]]] = {}
-    #: Ledger of everything NOT compiled, one entry per construct (DL-164).
-    #: `UcBundle.excluded` copies each entry's `text` alone -- the bundle
-    #: file never carries `kind` (U3a stays frozen).
+    #: Ledger of everything not compiled (DL-164). `UcBundle.excluded` copies each `text`; the
+    #: bundle never carries `kind` (U3a is frozen).
     excluded_entries: list[ExclusionEntry] = []
 
 
@@ -446,21 +390,16 @@ class InitialStatusRow(NamedTuple):
 
     mapping_row: str  # "" for the default, which no mapping row governs
     control: UcInitialControl
-    cutover: str  # how the migration report words the manual step
+    cutover: str  # the report's wording of the manual step
 
 
-#: SEM-24 definition-time status -> the UC control it maps to at cutover.
-#: Each status has its OWN row: ON_HOLD is M20 Hold, ON_ICE is M19 Skip,
-#: ON_NOEXEC is M21 path-level Skip.
+#: SEM-24 definition-time status -> the UC control it maps to at cutover. ON_HOLD is M20 Hold,
+#: ON_ICE is M19 Skip, ON_NOEXEC is M21 path-level Skip.
 #:
-#: TOTAL over `ir.InitialStatus`, and the ONE place the fact is written
-#: (DL-152): the twin's exclusions read it, `lint.rule_l020` keys its
-#: trigger on the skip set derived from `control` (its atom value reads
-#: AutoSys truth, one row per status, DL-281), and
-#: `tests/uc_oracle.py`'s module prose points here instead of restating it. A new
-#: `InitialStatus` member with no row here fails
-#: `test_every_initial_status_names_a_uc_control`, where it used to be a
-#: KeyError in the middle of a compile.
+#: Total over `ir.InitialStatus` and the one place the fact is written (DL-152): the twin's
+#: exclusions read it and `lint.rule_l020` keys its trigger on the skip set derived from
+#: `control` (DL-281). A member with no row fails
+#: `test_every_initial_status_names_a_uc_control`.
 INITIAL_STATUS_CONTROL: dict[InitialStatus, InitialStatusRow] = {
     "INACTIVE": InitialStatusRow("", "none", ""),
     "ON_HOLD": InitialStatusRow("M20", "hold", "map via UC Hold on Start at cutover"),
@@ -488,55 +427,37 @@ _VIA_TO_UC: dict[str, UcEdgeCondition] = {
 
 def _edge_lookback_token(edge: DerivedEdge) -> str | None:
     """The lookback token an edge carries, for the twin's provenance field.
-    Every compiled edge sets it, exitcode edges included: those quarantine
-    their workflow today, but the day U3b unfreezes the rich forms an unset
-    field would be a silent window loss.
 
-    Named for the EDGE: `dsl._lookback_token` is a different rule over a
-    different type -- it renders a JIL-valid token and never answers None."""
+    Every compiled edge sets it, exitcode edges included, so unfreezing U3b loses no window."""
     return None if edge.lookback is None else edge.lookback.token
 
 
 def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcModel:
     """Lower the derived graph to the in-memory UC model (E/A rows only).
 
-    Lowering choices (DL-16, each with a test):
-    - R-classified edges and redesign flags are EXCLUDED and recorded in
-      `excluded_entries` -- the twin interprets what the backend would compile, and
-      the backend refuses R rows (Part II requirement 1). run_window (M27)
-      is likewise absent from the model: the P-M27 pair shows the
-      divergence that absence causes.
-    - M09 global edges become var-condition edges from the consumer's OTHER
-      predecessors? No -- a global atom has no producer task; it becomes a
-      var_condition attached to EVERY compiled edge into that consumer, or,
-      when the consumer has no compiled predecessor edges, it is excluded
-      (recorded): a UC edge cannot exist without a predecessor vertex
-      (UCS-01), which is exactly why async global gates are M09/R-adjacent.
-    - M12 Or: the NAIVE lowering -- each Or branch's edges attach to the
-      consumer, and UC's conjunctive-over-non-skipped join (UCS-02/03)
-      applies. That reproduces AutoSys `|` only for common-ancestor
-      diamonds (skip drops the untaken branch); for independent branches it
-      is an AND -- exactly the divergence P-M12 exists to document. The
-      restructure / Task-Monitor / duplicate-successor lowerings are
-      U1-gated per-case decisions (recorded in `excluded_entries` as a note when an
-      or_shape is present).
-    - exitcode atoms (M08) become var-condition edges on the producer edge
-      reading the twin's per-task last-exit-code pseudo-variable
-      "exit:<task>" (U4 default).
-    - Boxes -> workflows (M13/M18: nested boxes flatten into the top-level
-      workflow's task set v1 -- ACTIVATED-style nesting is out of scope);
-      standalone tasks group into workflows by weakly-connected components
-      over compiled edges; isolated tasks become singleton workflows.
+    Lowering choices (DL-16):
+    - R-classified edges and redesign flags are excluded and recorded in `excluded_entries`
+      (Part II requirement 1). run_window (M27) is absent; the P-M27 pair shows the divergence.
+    - An M09 global atom has no producer task: it becomes a var_condition on every compiled
+      edge into the consumer, or is recorded as excluded when there is none (UCS-01).
+    - M12 Or lowers naively: each branch's edges attach to the consumer and UC's conjunctive
+      join over non-skipped edges applies (UCS-02/03). That matches `|` only for
+      common-ancestor diamonds; independent branches read as an AND (P-M12). The U1-gated
+      restructure lowerings are not emitted and a note is recorded.
+    - An exitcode atom (M08) is a var-condition edge reading "exit:<task>" (U4).
+    - Boxes become workflows (M13/M18); nested boxes flatten into the top-level task set.
+      Standalone tasks group by weakly-connected components over compiled edges; isolated
+      tasks become singleton workflows.
     - Mutex groups pass through (M07 -> UCS-09).
-    - n()-via edges (lookback-qualified notrunning, M03) are excluded: no
-      UC edge condition reads "not running" (recorded).
+    - n()-via edges (lookback-qualified notrunning, M03) are excluded and recorded: no UC edge
+      condition reads "not running".
     """
     if graph is None:
         graph = derive_graph(catalog)
     excluded_entries: list[ExclusionEntry] = []
 
     def _exclude(text: str, kind: ExclusionKind) -> None:
-        """Append one ledger entry: text and kind together (DL-164)."""
+        """Append one ledger entry (DL-164)."""
         excluded_entries.append(ExclusionEntry(text=text, kind=kind))
 
     compiled: list[UcEdge] = []
@@ -546,9 +467,8 @@ def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcMod
             _exclude(f"{edge.mapping_row} edge {edge.src} -> {edge.dst} (R-class)", "refused_edge")
             continue
         if edge.via == "global":
-            # via=="global" iff the edge's atom IS the GlobalAtom (derive's
-            # first pinned decision, enforced by DerivedEdge._via_matches_atom),
-            # so op/value come off the edge (DL-73)
+            # via=="global" iff the atom is a GlobalAtom (DerivedEdge._via_matches_atom), so
+            # op/value come off the edge (DL-73)
             assert isinstance(edge.atom, GlobalAtom)  # narrowing only
             global_gates.setdefault(edge.dst, []).append(
                 UcVarCondition(name=edge.src, op=edge.atom.op, value=edge.atom.value)
@@ -562,8 +482,7 @@ def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcMod
             )
             continue
         if edge.via == "exitcode":
-            # via=="exitcode" iff ExitCodeAtom (_via_matches_atom); this edge's
-            # OWN op/value, not the first atom naming the producer (DL-73)
+            # via=="exitcode" iff ExitCodeAtom; this edge's own op/value (DL-73)
             assert isinstance(edge.atom, ExitCodeAtom)  # narrowing only
             compiled.append(
                 UcEdge(
@@ -589,8 +508,7 @@ def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcMod
                 lookback=_edge_lookback_token(edge),
             )
         )
-    # attach global gates to the consumer's edges; anything that cannot be
-    # carried is RECORDED -- never silently dropped (DL-04)
+    # attach global gates to the consumer's edges; what cannot be carried is recorded (DL-04)
     for consumer, conditions in sorted(global_gates.items()):
         edges_in = [e for e in compiled if e.dst == consumer]
         if not edges_in:
@@ -643,13 +561,9 @@ def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcMod
             " lowerings are U1-gated and NOT emitted",
             "other",
         )
-    # workflows: boxes first (nested flatten to top), then edge components.
-    # Every `e.src`/`e.dst` membership test below (here and at the loose-task
-    # `components()` call) is sound: `compiled` never carries a redesign
-    # (M33/M16 cross-instance) edge -- excluded above, before `compiled` is
-    # built -- so a caret-spelled `e.src` in `compiled` can only be a
-    # genuine local job (DL-175, the S-EDGE class; DL-162a). Verified, not
-    # fixed here: this site predates DL-162 and was never unsound.
+    # workflows: boxes first (nested flatten to top), then edge components. The `e.src`/`e.dst`
+    # membership tests below are sound: `compiled` carries no redesign edge (M33/M16), so a
+    # caret-spelled `e.src` cannot occur (DL-175, DL-162, DL-162a).
     workflows: list[UcWorkflow] = []
     in_box: set[str] = set()
     for root in graph.box_tree.roots:
@@ -668,10 +582,8 @@ def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcMod
                 aliases=[b for b in nested_boxes if _top_of(graph, b) == root],
             )
         )
-    # box co-membership is deliberately NOT bound in (derive.components,
-    # DL-72): boxes already became workflows above, so only the loose tasks
-    # group by edges. components' own order -- groups by first member, in
-    # `nodes` order -- is exactly the wanted workflow order, so no re-sort.
+    # box co-membership is not bound in (DL-72): boxes are workflows already, so only loose
+    # tasks group by edges, in components' own order
     component = components(
         [t for t in graph.nodes if t not in in_box and catalog.jobs[t].job_type != "BOX"],
         [e for e in compiled if e.src not in in_box and e.dst not in in_box],
@@ -693,9 +605,8 @@ def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcMod
     ]
     for e in cross:
         if e.mapping_row == "M15":
-            # the box IS the workflow, never a task vertex, so a member ->
-            # box override edge has no wire form. It is M15 restructuring,
-            # not the cross-workflow Task Monitor case below.
+            # the box is the workflow, not a task vertex, so a member -> box override edge has
+            # no wire form; this is M15 restructuring, not the Task Monitor case below
             _exclude(
                 f"M15 edge {e.src} -> {e.dst}: box completion override on a"
                 " transitive member; the box is the workflow itself, not a task"
@@ -734,16 +645,11 @@ def compile_twin(catalog: CatalogIR, graph: DerivedGraph | None = None) -> UcMod
 
 
 def _per_job_exclusions(catalog: CatalogIR) -> list[str]:
-    """Per-JOB constructs the twin does not model, in catalog order.
+    """Per-job constructs the twin does not model, in catalog order, recorded not dropped.
 
-    SEM-24/DL-18 definition-time state: recorded, never silently dropped --
-    the AutoSys-vs-twin comparator diverging on such catalogs is the correct
-    polarity. Each status keeps its OWN row and its own cutover control
-    (INITIAL_STATUS_CONTROL). M34 resources ride here too (DL-21), and so
-    does M17 (box_terminator/job_terminator, SEM-14) since DL-164: it used
-    to be a report-only section (`_terminator_lines`, deleted) that never
-    reached the `dsl41 uc` bundle, so a bundle consumer had no way to learn
-    a catalog carried terminators. One channel now: this ledger."""
+    Covers SEM-24/DL-18 definition-time status (one row and cutover control per status,
+    INITIAL_STATUS_CONTROL), M34 resources (DL-21) and M17 terminators (SEM-14). This ledger is
+    the only channel to the bundle (DL-164)."""
     out: list[str] = []
     for name, job in catalog.jobs.items():
         initial = job.sem.initial_status
@@ -801,39 +707,32 @@ def _transitive_members(graph: DerivedGraph, box: str) -> list[str]:
 
 # ------------------------------------------- U3a base record emission (DL-55)
 
-#: UcEdgeCondition -> wire token, base subset only (uc-edge-schema.md).
-#: `cancelled` is deliberately absent: UC documents no Cancelled edge
-#: condition, so M06 t() edges quarantine their workflow.
+#: UcEdgeCondition -> wire token, base subset only (uc-edge-schema.md). `cancelled` is absent:
+#: UC documents no Cancelled edge condition, so M06 t() edges quarantine their workflow.
 _BASE_WIRE_TOKENS: dict[UcEdgeCondition, str] = {
     "success": "Success",
     "failure": "Failure",
     "done": "Success/Failure",
 }
 
-# PENDING: U3b -- rich condition forms (Exit Code / Step Condition /
-# Variable + variableCondition, vertex conditionExpression), the live
-# /resources/openapi.json pull, and one live POST + GET readback. Until
-# then every edge outside _BASE_WIRE_TOKENS quarantines its workflow.
+# PENDING: U3b -- rich condition forms (Exit Code / Step Condition / Variable +
+# variableCondition, vertex conditionExpression), the live /resources/openapi.json pull and
+# one live POST + GET readback. Until then an edge outside _BASE_WIRE_TOKENS quarantines its
+# workflow.
 
 
 class QuarantinedWorkflow(BaseModel):
-    """One workflow withheld WHOLE from the bundle, with every cause listed
-    -- an edge the base schema cannot express, or a record name another
-    workflow also serializes to (no silent drop, DL-04; safe-freeze rule,
-    DL-55)."""
+    """One workflow withheld whole from the bundle, every cause listed (DL-04, DL-55)."""
 
     name: str
     reasons: list[str]
 
 
 class UcBundle(BaseModel):
-    """Self-describing serialization artifact: the records AND their own
-    exclusion ledgers, so applying the records without reading what they
-    exclude is impossible by construction (everything travels in one file).
-    `excluded` is the twin lowering's ledger verbatim (R-class edges, M27
-    windows, resources, ...); `notes` are serialization-time facts (M07
-    mutex groups, M31 exit-code boundaries, synthesized names, the apply
-    worklist) -- DL-55 review amendment."""
+    """Self-describing artifact: the records and their exclusion ledgers in one file (DL-55).
+
+    `excluded` is the twin's ledger verbatim; `notes` are serialization-time facts (M07 mutex
+    groups, M31 exit-code boundaries, synthesized names, the apply worklist)."""
 
     catalog_hash: str
     tool_version: str
@@ -844,13 +743,11 @@ class UcBundle(BaseModel):
 
 
 def _vertex_layout(workflow: UcWorkflow) -> dict[str, tuple[int, int]]:
-    """Deterministic layered layout: y grows with longest-path depth over
-    the DFS-forward subgraph -- an edge whose source is on the DFS stack is
-    a back edge and contributes nothing (cycles are legal AutoSys, L010;
-    any layering of a cycle necessarily leaves one edge pointing up, which
-    break is cosmetic, review-accepted in DL-55) -- x by arrival order
-    within a layer. Iterative DFS: a chain's depth is bounded by catalog
-    size, not the interpreter's recursion limit."""
+    """Deterministic layered layout: y is longest-path depth over the DFS-forward subgraph, x
+    is arrival order within a layer.
+
+    A back edge on a cycle contributes nothing (cycles are legal, L010; the upward edge is
+    cosmetic, DL-55). The DFS is iterative, so depth is not bounded by the recursion limit."""
     preds: dict[str, list[str]] = {t: [] for t in workflow.tasks}
     for edge in workflow.edges:
         preds[edge.dst].append(edge.src)
@@ -889,9 +786,7 @@ def _vertex_layout(workflow: UcWorkflow) -> dict[str, tuple[int, int]]:
 
 
 def _workflow_record(workflow: UcWorkflow) -> dict[str, object]:
-    """One CREATE-ONLY taskWorkflow record, exactly the uc-edge-schema.md
-    shape: explicit string vertexIds, value-wrapper references,
-    retainSysIds=false, no sysId/version/export attributes."""
+    """One create-only taskWorkflow record in the uc-edge-schema.md shape."""
     vertex_ids = {task: str(i + 1) for i, task in enumerate(workflow.tasks)}
     layout = _vertex_layout(workflow)
     return {
@@ -938,8 +833,8 @@ def _quarantine_reasons(workflow: UcWorkflow) -> list[str]:
 
 
 def _exit_boundary(twin: UcModel, task: str) -> str:
-    """The M31 values a workflow record cannot carry, for one task (DL-33;
-    Q7 cited-resolved DL-58: a present fail_codes decides alone)."""
+    """The M31 values a workflow record cannot carry, for one task (DL-33; a present fail_codes
+    decides alone, Q7, DL-58)."""
     bits: list[str] = []
     if task in twin.max_exit_success:
         bits.append(f"max_exit_success={twin.max_exit_success[task]}")
@@ -953,10 +848,8 @@ def _exit_boundary(twin: UcModel, task: str) -> str:
 def _lookback_notes(workflows: list[UcWorkflow]) -> list[str]:
     """One note per emitted edge that carries a lookback window (M03).
 
-    The base record has no field for a window -- the frozen schema spells
-    three condition tokens and nothing else (U3b gates the rich forms) -- so
-    the edge serializes as a plain wire edge. Without this note a pipeline
-    applying the records alone would silently lose the window (DL-04)."""
+    The frozen schema has no window field (U3b), so the edge serializes plain; the note keeps
+    the window from being lost silently (DL-04)."""
     notes: list[str] = []
     for workflow in workflows:
         for edge in workflow.edges:
@@ -979,17 +872,12 @@ def compile_to_uc(
 ) -> UcBundle:
     """Serialize the twin model to the U3a base record bundle (DL-55).
 
-    Deterministic for identical input -- no timestamps (callers stamp their
-    own). A workflow is quarantined WHOLE for either cause -- an edge the
-    base schema cannot express, or a record name that collides with another
-    workflow's -- with a reason per cause; everything else becomes one
-    CREATE-ONLY taskWorkflow record per docs/uc-edge-schema.md.
+    Deterministic, no timestamps. A workflow is quarantined whole, with a reason per cause,
+    for an edge the base schema cannot express or a colliding record name; the rest become
+    create-only taskWorkflow records (docs/uc-edge-schema.md).
 
-    `twin` lets a caller that already holds a `UcModel` (the report path)
-    pass it down instead of triggering a second `compile_twin` over the same
-    catalog -- one twin per report run. It is trusted, not re-checked against
-    `catalog`: a mismatched pair is the caller's bug (this file's usual
-    caller-trust style), not something this function verifies."""
+    `twin` is a `UcModel` the caller already holds (the report path); it is trusted, not
+    checked against `catalog`."""
     if twin is None:
         if graph is None:
             graph = derive_graph(catalog)
@@ -1002,10 +890,9 @@ def compile_to_uc(
             quarantined.append(QuarantinedWorkflow(name=workflow.name, reasons=reasons))
         else:
             emitted.append(workflow)
-    # duplicate record names silently clobber under any upsert wrapper --
-    # every collision party quarantines (DL-55 review amendment). The
-    # comparison folds case: UC addresses names case-insensitively, so WF_x
-    # and wf_x are ONE record on the controller (UCS-12, the L014 reading).
+    # duplicate record names clobber under an upsert wrapper, so every collision party
+    # quarantines (DL-55); the comparison folds case because UC addresses names
+    # case-insensitively (UCS-12, L014)
     name_counts = Counter(workflow.name.lower() for workflow in emitted)
     collided = {folded for folded, n in name_counts.items() if n > 1}
     if collided:
@@ -1058,9 +945,8 @@ def compile_to_uc(
             "synthesized workflow record name(s), not estate names (component"
             f" workflows are named wf_<first task>): {', '.join(synthesized)}"
         )
-    # constraints the twin models but a workflow record cannot carry: named
-    # here so a mutex-only catalog cannot produce a clean-looking bundle
-    # (review MAJOR 2 -- no silent loss, DL-04)
+    # constraints a workflow record cannot carry are named so a mutex-only catalog does not
+    # give a clean-looking bundle (DL-04)
     if twin.mutex_groups:
         rendered = "; ".join(
             "+".join(group) if len(group) > 1 else f"{group[0]} (self)"

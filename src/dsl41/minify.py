@@ -1,120 +1,70 @@
 """Estate minifier: a de-identified JIL estate that still exercises the compiler.
 
-The job this module exists for: an owner holds a real AutoSys estate and wants
-to hand over a test case. What may leave is the STRUCTURE dsl41 models -- job
-graph, conditions, schedules, exit-code policy, resource gates. What may not
-leave is anything naming the estate: job names, hosts, commands, paths, owners,
-descriptions, comments. One leaked identifier is the failure that matters, so
-every rule here fails CLOSED in both directions.
+What may leave is the structure dsl41 models: job graph, conditions, schedules, exit-code
+policy, resource gates. What may not leave is anything naming the estate: job names, hosts,
+commands, paths, owners, descriptions, comments. Every rule fails closed in both directions.
 
-Layering (deliberate, not incidental): parse with `ast_jil.parse`, transform the
-statement AST, render with `render_preserve` over an AST whose trivia has been
-EMPTIED -- comments, blank lines, indents and separator runs are free text, so
-the transform clears them rather than trusting the renderer to.
+Layering: parse with `ast_jil.parse`, transform the statement AST, render with
+`render_preserve` over an AST whose trivia is emptied (comments, blank lines, indents and
+separator runs are free text).
 
-Preserve, not canonical. Canonical mode sorts a statement's attributes into a
-fixed key order, which is lossless for every statement whose lowering reads
-attributes as a map and lossy for the two kinds that read them in SOURCE order:
-an insert_machine pool binds `factor`/`max_load` to the `machine:` line above
-them (DL-49), and a cycle pairs `start_date`/`end_date` positionally (SEM-39).
-Preserve mode keeps `stmt.attrs` in source order, so both survive with no
-refusal and no change to the scanner spec.
+Preserve mode, not canonical: canonical mode sorts attributes, which is lossy for the two kinds
+whose lowering reads source order. An insert_machine pool binds `factor`/`max_load` to the
+`machine:` line above (DL-49) and a cycle pairs `start_date`/`end_date` positionally (SEM-39).
+A `#` tail is value text, not a comment (DL-31), so it stays inside `stmt.subject` and
+vanishes only because every subject becomes a minted name. `_transform_statement`
+asserts that: an unminted subject reaching the renderer is a refusal.
 
-The price of preserve mode is that trivia is reproduced byte for byte, which
-makes one channel load-bearing: a `#` tail is VALUE text, not a comment (DL-31
--- `#` is a legal name character and the vendor defines `#` comments in column
-one only), so the scanner leaves it INSIDE `stmt.subject` and creates no
-`Comment` object for it. It vanishes only because every subject is replaced by
-a minted name, so `_transform_statement` ASSERTS that -- an unminted subject
-reaching the renderer is a refusal. The token guard is not trusted for it.
+Every attribute key and statement subcommand resolves to exactly one class:
 
-Classification is the core rule. Every attribute key, and every statement
-subcommand, resolves to exactly one class:
+  KEEP     the value goes out verbatim after `validate_keep` proves it lies in the closed space
+           its key claims (a vendor enum, number, clock time, day token, IANA zone, date, SEM-37
+           calendar keyword). A value outside the space is a refusal, not a passthrough.
+  RENAME   the value is an identifier, mapped into a synthetic namespace.
+  REPLACE  free text whose presence is semantic, swapped for a fixed inert constant. `command`
+           is the only member: lowering refuses a CMD job without one.
+  DROP     not emitted. For attributes dsl41 only carries verbatim whose values are free text
+           or site-chosen names (`job_class`, `machine_method`, `application`, `group`,
+           `permission`, `chk_files`, the xinst connection plumbing).
 
-  KEEP     the value goes out verbatim, AFTER `validate_keep` proves it lies
-           in the closed space its key claims -- a vendor enum, a number, a
-           clock time, a day token, an IANA zone, a date, a SEM-37 calendar
-           keyword. None of those can name an estate. The check is the class:
-           lowering polices only about half these keys and carries the rest
-           opaquely, so "KEEP" meaning "assumed to be in that space" shipped a
-           client string written into `timezone` or `job_load` verbatim. A
-           value outside the space is a refusal, not a passthrough.
-  RENAME   the value is an identifier; it is mapped into a synthetic namespace.
-  REPLACE  the value is free text whose PRESENCE is semantic; it is swapped for
-           a fixed inert constant. `command` is the only member: lowering
-           refuses a CMD job without one (so it cannot be dropped) and its text
-           is the single richest source of client identity in an estate.
-           Nothing else qualifies -- every other free-text attribute either
-           carries an identifier (RENAME) or has no dsl41 semantics (DROP).
-  DROP     the attribute is not emitted. Reserved for attributes dsl41 does not
-           model beyond carrying them verbatim, whose values are free text or
-           site-chosen names.
+A key that matches none is a refusal listing every such key with file:line (DL-07 stance, one
+layer earlier). The table follows what the IR models: `ANNOTATION_ATTRS`,
+`PASSTHROUGH_ALLOWED`, `TIME_CLUSTER`, `EXEC_BASE_ATTRS` and `_BOX_INERT_ATTRS` in `ir.py`,
+plus the keys `_Lowerer` pops by name per statement kind.
 
-A key that matches none of them is a REFUSAL, listing every such key with
-file:line and changing nothing. An unknown key must neither leak (KEEP by
-default) nor silently vanish (DROP by default); DL-07 already takes that stance
-at lowering and this module takes it one layer earlier.
+Naming is positional and deterministic: boxes `b<N>`, a member of box `b<N>` `b<N>j<M>`, an
+unboxed job `j<N>`, machines `m<N>`, resources and locks `l<N>`, calendars and cycles `c<N>`,
+globals `g<N>`, external instances `x<N>`, non-numeric global values `v<N>`, watched files
+`/f/<N>`. `<N>` is base36 lowercase from 1, allocated at an identifier's first appearance in
+the input, references included. Box membership is resolved in a pre-pass, so a job that moves
+box across statements gets one stable name.
 
-The table is derived from what the IR actually models: `ANNOTATION_ATTRS`,
-`PASSTHROUGH_ALLOWED`, `TIME_CLUSTER`, `EXEC_BASE_ATTRS` and `_BOX_INERT_ATTRS`
-in `ir.py`, plus the keys `_Lowerer` pops by name on each statement kind. Where
-the IR carries an attribute opaquely AND its value is a site-chosen string
-(`job_class`, `machine_method`, `application`, `group`, `permission`,
-`chk_files`, the xinst connection plumbing), this module drops it: an opaque
-carry is not a semantic the test case needs, and the string may name the estate.
-
-Naming is positional and deterministic: boxes `b<N>`, a member of box `b<N>`
-`b<N>j<M>`, an unboxed job `j<N>`, machines `m<N>`, resources and locks `l<N>`,
-calendars and cycles `c<N>`, globals `g<N>`, external instances `x<N>`,
-non-numeric global values `v<N>`, watched files `/f/<N>`. `<N>` is base36
-lowercase from 1, allocated at an identifier's FIRST appearance anywhere in the
-input -- a reference counts, so an estate that names a box before defining it
-still numbers deterministically. Box membership is resolved in a pre-pass, so a
-job that moves box across statements gets one stable name.
-
-Conditions are rewritten through `conditions.parse_condition` + `iter_atoms`:
-only the identifier text inside each atom's `CondSpan` changes, right-to-left so
-earlier spans stay valid. Operators, whitespace, parentheses and lookback tokens
-(SEM-04, `s(X, 0)` included) come out byte-identical. A condition that will not
-parse is a refusal, never a passthrough.
-
-A RENAME value is rewritten WHOLE, never substituted into. `resources:` used to
-be patched by regex, which left the text outside the parentheses, the tail of a
-group after its first comma, and a paren-less value untouched -- free estate
-text behind nothing but the guard's floor. Every RENAME lane now parses its
-value and re-emits it from the parsed parts, and anything the grammar does not
-cover is a refusal.
+Conditions go through `conditions.parse_condition` and `iter_atoms`: only the identifier text
+inside each atom's `CondSpan` changes, right to left. Operators, whitespace, parentheses and
+lookback tokens (SEM-04, `s(X, 0)` included) stay byte-identical. A condition that will not
+parse is a refusal. A RENAME value is parsed and re-emitted whole from its parts, never
+substituted into; anything the grammar does not cover is a refusal.
 
 Two checks stand behind the transform:
 
-  Structural verify (`--no-verify` skips it) lowers both estates and asserts
-  they are isomorphic under the mapping -- job set, job types, box membership,
-  condition atom structure, resource demands, mutex groups (M07), and the
-  SEM-30 time cluster. This is what proves the artifact still exercises what it
-  is supposed to.
+  Structural verify (`--no-verify` skips it) lowers both estates and asserts they are
+  isomorphic under the mapping: job set, job types, box membership, condition atom structure,
+  resource demands, mutex groups (M07) and the SEM-30 time cluster.
 
-  The leak guard is not skippable. Every identifier, path and free-text value in
-  the input becomes a needle; if any appears in the rendered output the run
-  refuses. Three things account for an output token and so are not needles: the
-  JIL/dsl41 vocabulary, the synthetic names this run allocated, and the emitted
-  KEEP values -- the last only because `validate_keep` proved each of them
-  closed-space first. Its honest limits: a needle token must be at least 4
-  characters and carry a letter, because shorter and all-digit tokens collide
-  with kept clock times and timing hints and a guard that fires on every estate
-  gets switched off; and a client name that happens to BE a legal closed-space
-  value is invisible to it. The classification table plus its predicates are
-  the defence there, not this guard -- which is why `_v_timezone` enumerates
-  instead of asking a resolver whether a string can be interpreted. The guard
-  is a backstop, never a total check, and no user-facing text may call it one.
+  The leak guard is not skippable. Every identifier, path and free-text value in the input is a
+  needle; a needle appearing in the rendered output is a refusal. Not needles: the JIL/dsl41
+  vocabulary, the synthetic names this run allocated, and the emitted KEEP values, which
+  `validate_keep` proved closed-space. Limits: a needle token is at least 4 characters and
+  carries a letter, since shorter or all-digit tokens collide with kept clock times and timing
+  hints; and a client name that is a legal closed-space value is invisible to it. The
+  classification table and its predicates are the defence there, which is why `_v_timezone`
+  enumerates. The guard is a backstop, never a total check, and no user-facing text may call it
+  one.
 
-The rendered bytes are re-scanned and checked to say what the transform meant:
-the same statements, keys and values, and no comment anywhere. That catches a
-rewritten value that would re-read as something else -- a rule-5 comment opener
-above all.
-
-Rule-11 calendar date rows are validated too, by `autocal.standard_rows` -- the
-scanner carries ANY non-attribute line under a `calendar:` statement verbatim,
-so an export's label column would otherwise ship unchanged.
+The rendered bytes are re-scanned and must give the same statements, keys and values and no
+comment, which catches a rewritten value that re-reads as a rule-5 comment opener. Rule-11
+calendar date rows are validated by `autocal.standard_rows`, because the scanner carries any
+non-attribute line under a `calendar:` statement verbatim.
 """
 
 from __future__ import annotations
@@ -168,10 +118,8 @@ from dsl41.minify_rules import (
     vocabulary_words,
 )
 
-#: The mechanism half's own surface. The policy names this module imports are
-#: NOT re-exported: the policy/mechanism cut is the point of the split
-#: (DL-207), and a second import path to `classify` or `validate_keep` loses it
-#: (DL-75 review 2026-09-19). Policy is imported from `minify_rules`.
+#: The mechanism half's own surface. Policy names are not re-exported; import them from
+#: `minify_rules` (DL-207, DL-75).
 __all__ = [
     "MinifyRefusal",
     "MinifyResult",
@@ -186,12 +134,7 @@ _B36_DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
 
 
 class MinifyRefusal(Exception):
-    """A loud refusal carrying every reason at once (never a partial answer).
-
-    The CLI prints `messages` one per line and exits 3. Collecting all of them
-    matters most for the unclassified-key case: an owner extending the table
-    wants the whole list, not the first key.
-    """
+    """A refusal carrying every reason at once; the CLI prints `messages` and exits 3."""
 
     def __init__(self, messages: list[str]) -> None:
         super().__init__("; ".join(messages))
@@ -199,12 +142,7 @@ class MinifyRefusal(Exception):
 
 
 class ValueRewriteError(ValueError):
-    """A RENAME value that does not parse, so minify cannot rewrite all of it.
-
-    Partial rewriting is the defect this exists to prevent: a `resources:`
-    value whose tail minify did not understand used to ship verbatim behind
-    nothing but the guard's 4-character floor.
-    """
+    """A RENAME value that does not parse; minify never rewrites part of a value."""
 
 
 # ------------------------------------------------------------ the mapping
@@ -222,10 +160,8 @@ def _b36(n: int) -> str:
 class _Series:
     """One synthetic namespace: a template and a monotone base36 counter.
 
-    `taken` is shared across every series that mints a JOB name, because the
-    shapes alias: a box at index 1981 spells `b1j1`, which is also the first
-    member of box `b1` (base36 digits include `j`). Skipping an already-minted
-    name keeps the scheme and closes the alias.
+    `taken` is shared by every series that mints a job name: a box at index 1981 spells
+    `b1j1`, also the first member of box `b1`. Skipping a minted name closes the alias.
     """
 
     template: str
@@ -243,10 +179,9 @@ class _Series:
 
 @dataclass
 class NameMap:
-    """old -> new for every namespace. Serialized by `--mapping`.
+    """old -> new for every namespace, serialized by `--mapping`.
 
-    Re-identifies the estate on its own; it is never written unless asked for
-    and never printed to stdout.
+    It re-identifies the estate: never written unless asked for, never printed to stdout.
     """
 
     jobs: dict[str, str] = field(default_factory=dict)
@@ -257,8 +192,7 @@ class NameMap:
     instances: dict[str, str] = field(default_factory=dict)
     watch_files: dict[str, str] = field(default_factory=dict)
     global_values: dict[str, str] = field(default_factory=dict)
-    #: SEM-35 zones. Empty unless --scrub-timezones asked for it, in which case
-    #: every zone maps to UTC; verify reads it so the scrub stays isomorphic.
+    #: SEM-35 zones; empty unless --scrub-timezones maps every zone to UTC. Verify reads it.
     timezones: dict[str, str] = field(default_factory=dict)
 
     def to_json(self) -> str:
@@ -285,9 +219,8 @@ class NameMap:
 class _Allocator:
     """Allocates a synthetic name at an identifier's first appearance.
 
-    Box membership comes from a pre-pass because it decides the SHAPE of a job
-    name (`b1j2` vs `j7`) and a job may state its box in a later statement than
-    the one that first names it.
+    Box membership comes from a pre-pass: it decides a job name's shape (`b1j2` vs `j7`) and
+    a job may state its box in a later statement than the one that first names it.
     """
 
     def __init__(
@@ -299,10 +232,8 @@ class _Allocator:
         self._resolving: set[str] = set()
         self._members: dict[str, _Series] = {}
         self.names = NameMap()
-        #: every synthetic name this run has minted, in any namespace. The
-        #: leak guard treats them as vocabulary: a token that IS an allocated
-        #: name was authored here, not by the estate (an estate job literally
-        #: named `b1j1` still renames, and its own name stays a needle).
+        #: every synthetic name minted, in any namespace; the leak guard treats them as
+        #: vocabulary (an estate job named `b1j1` still renames and stays a needle)
         self.allocated: set[str] = set()
         self._job_names: set[str] = set()
         self._box_series = _Series("b#", self._job_names)
@@ -327,7 +258,7 @@ class _Allocator:
         }
 
     def simple(self, namespace: str, name: str) -> str:
-        """Map a name in any namespace except `job` (whose shape is derived)."""
+        """Map a name in any namespace except `job`, whose shape is derived."""
         table = self._tables[namespace]
         existing = table.get(name)
         if existing is not None:
@@ -338,22 +269,18 @@ class _Allocator:
         return allocated
 
     def timezone(self, zone: str) -> str:
-        """SEM-35 zone: itself, or UTC when --scrub-timezones asked.
+        """SEM-35 zone: itself, or UTC under --scrub-timezones.
 
-        A zone name is public vocabulary, not an identifier, so the default
-        keeps it -- the estate stops exercising SEM-35 otherwise. It still
-        discloses a REGION, which is why the choice is explicit in both
-        directions and the CLI names the surviving zones out loud.
+        A zone is public vocabulary, so the default keeps it to keep exercising SEM-35. It
+        discloses a region, so the CLI names the surviving zones.
         """
         mapped = "UTC" if self.scrubbing_timezones else zone
         self.names.timezones[zone] = mapped
         return mapped
 
     def gvalue(self, value: str) -> str:
-        """A global's value. A purely numeric one maps to ITSELF: a number
-        names nobody, and `compare_value` compares two integers numerically --
-        mapping `100` to a `v#` token would turn `v(X) > 100` into a string
-        comparison and change the semantics the test case exists to exercise.
+        """A global's value. A numeric one maps to itself: `compare_value` compares integers
+        numerically, and a `v#` token would turn `v(X) > 100` into a string comparison.
         """
         if not value.strip() or _is_number(value.strip()):
             return value
@@ -366,10 +293,8 @@ class _Allocator:
             return existing
         parent = self._job_boxes.get(name)
         if name in self._boxes or parent is None or name in self._resolving:
-            # A box is `b#` at every nesting depth; an unboxed job is `j#`. A
-            # box cycle (A in B, B in A) would recurse forever, so a name
-            # already being resolved falls back to the unboxed shape -- the
-            # cycle itself is lowering's refusal to make, in its own words.
+            # A box is `b#` at every depth; an unboxed job is `j#`. A name already being
+            # resolved (a box cycle) takes the unboxed shape; lowering refuses the cycle.
             series = self._box_series if name in self._boxes else self._free_series
             allocated = series.take()
             self.names.jobs[name] = allocated
@@ -396,10 +321,8 @@ def _is_number(text: str) -> bool:
 def _box_membership(files: Iterable[JilFile]) -> tuple[set[str], dict[str, str]]:
     """Pre-pass: which names are boxes, and which box each job sits in.
 
-    First statement wins for both. A job that MOVES box across statements
-    therefore keeps one stable name; which of the two boxes it is filed under
-    is arbitrary but deterministic, and the box linkage itself is carried by
-    `box_name` in the output, not by the name.
+    The first statement wins, so a job that moves box keeps one stable name; the box linkage
+    itself is carried by `box_name`.
     """
     boxes: set[str] = set()
     job_boxes: dict[str, str] = {}
@@ -421,7 +344,7 @@ def _box_membership(files: Iterable[JilFile]) -> tuple[set[str], dict[str, str]]
 
 
 def _job_type_of(stmt: JilStatement) -> str | None:
-    """The job_type this statement states, lowercased, inline form included."""
+    """The statement's job_type, lowercased, inline form included."""
     if stmt.job_type_inline is not None:
         return stmt.job_type_inline.strip().lower()
     for attr in stmt.attrs:
@@ -432,9 +355,8 @@ def _job_type_of(stmt: JilStatement) -> str | None:
 
 # ------------------------------------------------------------ conditions
 
-#: condition.lark's own terminals: JOB_NAME, INSTANCE_NAME, GLOBAL_NAME, and the
-#: comparand tail from CMP_OP, QUOTED and BARE_VALUE. Matching the grammar's own
-#: character classes is what keeps the rewrite byte-exact outside the identifier.
+#: condition.lark's terminals JOB_NAME, INSTANCE_NAME, GLOBAL_NAME and the comparand tail
+#: (CMP_OP, QUOTED, BARE_VALUE); the grammar's own classes keep the rewrite byte-exact.
 _JOB_NAME_RE = re.compile(terminal_pattern("JOB_NAME"))
 _INSTANCE_RE = re.compile(terminal_pattern("INSTANCE_NAME"))
 _GLOBAL_NAME_RE = re.compile(terminal_pattern("GLOBAL_NAME"))
@@ -450,9 +372,8 @@ def _splice(text: str, start: int, end: int, replacement: str) -> str:
 def _rewrite_job_atom(body: str, alloc: _Allocator) -> str:
     """Rename the job reference inside one status/exitcode atom's text.
 
-    Names are ALLOCATED left to right (first appearance is what fixes a
-    number) and SPLICED right to left (an earlier edit would move a later
-    offset). Both halves of the rule, one pass.
+    Names are allocated left to right (first appearance fixes the number) and spliced right
+    to left (an earlier edit would move a later offset).
     """
     open_paren = body.index("(")
     name_match = _JOB_NAME_RE.search(body, open_paren + 1)
@@ -485,13 +406,10 @@ def _rewrite_global_atom(body: str, alloc: _Allocator) -> str:
 
 
 def rewrite_condition(text: str, alloc: _Allocator) -> str:
-    """Rename every identifier in one condition expression, nothing else.
+    """Rename every identifier in one condition expression and nothing else.
 
-    Atoms are rewritten in source order, so names are numbered by first
-    appearance, and the rewritten bodies are spliced back right-to-left, so
-    each atom's `CondSpan` offsets are still valid when its turn comes.
-    Operators, whitespace, parentheses and SEM-04 lookback tokens are never
-    touched -- they are outside every identifier's span.
+    Atoms are rewritten in source order and spliced back right to left, so each `CondSpan`
+    stays valid. Operators, whitespace, parentheses and SEM-04 lookback tokens are untouched.
     """
     cond = parse_condition(text)
     edits: list[tuple[int, int, str]] = []
@@ -512,26 +430,21 @@ def rewrite_condition(text: str, alloc: _Allocator) -> str:
 # ------------------------------------------------------------ value rewrites
 
 _RESOURCE_GROUP_RE = re.compile(r"\(([^()]*)\)")
-#: SEM-08 global substitution sites. Same shape as ir._VAR_RE: single-`$` is
-#: shell and must stay distinct.
+#: SEM-08 global substitution sites, shaped like ir._VAR_RE; single-`$` is shell.
 _VAR_SITE_RE = re.compile(r"\$\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
 _VAR_SITE_ONLY_RE = re.compile(r"\$\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)")
 
-#: A reference list separator: a comma, or the newline a rule-6 continuation
-#: folded into the value. `run_calendar`/`exclude_calendar` are continuation
-#: attributes, so a multi-line value is one list, not one name.
+#: A reference list separator: a comma, or the newline a rule-6 continuation folds into the
+#: value (`run_calendar` and `exclude_calendar` are continuation attributes).
 _REF_SEPARATOR_RE = re.compile(r"[,\n]")
 
 
 def _rewrite_ref_list(value: str, alloc: _Allocator, namespace: str) -> str:
-    """Every member of a reference list renames; separators stay put.
+    """Every member of a reference list renames.
 
-    One rule for four lanes. An insert_machine repeats `machine:` per pool
-    member and may list several on one line (DL-49); a job's `machine:` is a
-    comma list that L017 splits the same way; `run_calendar`/`exclude_calendar`
-    fold their continuation lines into one value (rule 6). Mapping a whole raw
-    value as ONE name turned a clean multi-machine estate into an L017-dirty
-    one, and left a second calendar name unrenamed behind the guard's floor.
+    One rule for four lanes: an insert_machine's `machine:` per pool member (DL-49), a job's
+    `machine:` comma list (L017 splits it alike), and `run_calendar`/`exclude_calendar`
+    (rule 6).
     """
     members = [part.strip() for part in _REF_SEPARATOR_RE.split(unquote_jil_value(value))]
     mapped = [alloc.simple(namespace, name) for name in members if name]
@@ -546,15 +459,10 @@ _FREE_VALUES = frozenset({"Y", "N", "A"})
 
 
 def _rewrite_resources(value: str, alloc: _Allocator) -> str:
-    """`(name, QUANTITY=n[, FREE=Y|N|A]) AND (...)` (DL-21), REBUILT.
+    """`(name, QUANTITY=n[, FREE=Y|N|A]) AND (...)` (DL-21), rebuilt from its parsed parts.
 
-    Substituting into the source text left three things unrewritten: anything
-    outside the parentheses, the tail of a group after its first comma, and a
-    value with no parentheses at all -- each of them free estate text with only
-    the guard's 4-character floor behind it. This parses the whole value and
-    emits it from the parsed parts, so every byte out is either a mapped name
-    or a fixed keyword. Anything the DL-21 grammar does not cover is a refusal,
-    which is what lowering does with it too.
+    Every byte out is a mapped name or a fixed keyword; anything the DL-21 grammar does not
+    cover is a refusal, as in lowering.
     """
     raw = unquote_jil_value(value).strip()
     groups = _RESOURCE_GROUP_RE.findall(raw)
@@ -592,9 +500,8 @@ def _resource_field(part: str, group: str) -> str:
 def rewrite_var_sites(value: str, alloc: _Allocator) -> str:
     """`$$NAME` / `$${NAME}` in any emitted value (SEM-08).
 
-    A substitution site is a global REFERENCE wherever it appears, so it renames
-    even inside a KEEP value: leaving it would both leak the global's name and
-    break the var_sites the IR indexes.
+    A site is a global reference wherever it appears, so it renames even inside a KEEP value;
+    leaving it would leak the name and break the IR's var_sites.
     """
 
     def one(match: re.Match[str]) -> str:
@@ -616,12 +523,9 @@ def _rewrite_value(rule: str, value: str, alloc: _Allocator) -> str:
     if not bare:
         return value.strip()
     if _VAR_SITE_ONLY_RE.fullmatch(bare):
-        # The whole value is one SEM-08 substitution site (a templated estate
-        # writes `watch_file: $$INBOX`). Renaming it wholesale would mint a
-        # synthetic name for a reference and destroy the var site the IR
-        # indexes; renaming the GLOBAL keeps both. A value that only CONTAINS a
-        # site (`/data/$$REGION/in`) still renames whole -- it is a path, and
-        # the path is the thing that names the estate.
+        # A value that is one SEM-08 site (`watch_file: $$INBOX`) renames the global, which
+        # keeps the var site. A value that only contains a site (`/data/$$REGION/in`) is a
+        # path and renames whole.
         return rewrite_var_sites(bare, alloc)
     if rule == "job":
         return alloc.job(unescape_job_name(bare))
@@ -635,7 +539,7 @@ def _rewrite_value(rule: str, value: str, alloc: _Allocator) -> str:
 
 @dataclass
 class _Transformed:
-    """One minified file plus the raw material the leak guard needs."""
+    """One minified file plus the leak guard's raw material."""
 
     jil: JilFile
     needles: set[str]
@@ -666,12 +570,9 @@ def _transform_statement(
     else:
         new_subject = alloc.simple(namespace, unquote_jil_value(subject))
     if new_subject not in alloc.allocated:
-        # The one invariant the token guard must NOT be trusted for. A rule-5
-        # trailing comment can ride INSIDE `stmt.subject` rather than as a
-        # `Comment` object, and preserve mode emits the subject byte for byte.
-        # It only ever vanishes because the subject is replaced by a minted
-        # name, so an unminted subject reaching the renderer is a leak, not a
-        # cosmetic slip. Checked, never assumed.
+        # A rule-5 trailing comment can ride inside `stmt.subject`, which preserve mode emits
+        # byte for byte; it vanishes only because the subject is replaced, so an unminted
+        # subject is a leak. The token guard is not trusted for this.
         refusals.append(
             f"{stmt.span.at}: subject {subject!r} did not resolve to a minted name;"
             " minify refuses to emit a subject it did not rename"
@@ -698,10 +599,8 @@ def _transform_statement(
             "attrs": attrs,
             "date_lines": [row.strip() for row in stmt.date_lines],
             "comments": [],
-            # layout trivia, all of it free text (DL-161: a comment can ride a
-            # value, a gap or the subject). Preserve mode reproduces trivia
-            # byte for byte, which is exactly why it must be emptied HERE
-            # rather than left to the renderer.
+            # layout trivia is free text (DL-161: a comment can ride a value, a gap or the
+            # subject); preserve mode reproduces it, so it is emptied here
             "pre_blank_lines": [""],
             "indent": "",
             "sep": " ",
@@ -741,16 +640,13 @@ def _transform_attr(
             refusals.append(f"{attr.span.at}: {attr.key}: {exc}")
             return None
     elif _VAR_SITE_ONLY_RE.fullmatch(unquote_jil_value(attr.raw_value)):
-        # The whole value is one SEM-08 substitution site. No predicate can
-        # check a value the scheduler fills in at run time, and refusing would
-        # reject a legal estate; renaming the GLOBAL keeps the var site and
-        # leaks nothing, because the site name is all that is left.
+        # One SEM-08 site is filled in at run time, so no predicate can check it and refusing
+        # would reject a legal estate; renaming the global keeps the site and leaks nothing.
         value = rewrite_var_sites(unquote_jil_value(attr.raw_value), alloc)
         out.kept.add(value)
     elif attr.key.lower() == "timezone":
-        # SEM-35, handled before the general KEEP branch because --scrub-timezones
-        # is the ANSWER to a refused zone: validating a value that is about to be
-        # replaced by UTC would block the owner's own remedy.
+        # SEM-35, before the general KEEP branch: --scrub-timezones is the remedy for a
+        # refused zone, so a zone about to become UTC is not validated.
         original = unquote_jil_value(attr.raw_value).strip()
         out.needles.add(original)  # a scrubbed zone must not survive anywhere
         if not alloc.scrubbing_timezones and not validate_keep("timezone", original):
@@ -786,16 +682,13 @@ def _transform_attr(
 
 
 def _scrub_value_lines(value: str) -> str:
-    """A rule-6 continuation line's own indentation is layout, not value."""
+    """A rule-6 continuation line's indentation is layout, not value."""
     return "\n".join(line.strip() for line in value.split("\n"))
 
 
 def _rename_needles(rule: str, value: str) -> set[str]:
-    """What a RENAME attribute contributes to the leak guard.
-
-    A condition's operators and lookbacks survive verbatim, so only its
-    identifier text is a needle; everything else renames whole.
-    """
+    """What a RENAME attribute contributes to the leak guard: a condition's identifier text
+    only, since its operators and lookbacks survive; any other value whole."""
     if rule != "cond":
         return {value.strip(), unquote_jil_value(value)}
     try:
@@ -827,8 +720,7 @@ def transform_file(jf: JilFile, alloc: _Allocator, refusals: list[str]) -> _Tran
             statements.append(emitted)
     out.needles.update(_comment_text(jf.trailing_comments))
     if statements:
-        # the first statement opens the file; its blank-line separator would be
-        # a leading empty line
+        # the first statement opens the file, so it takes no blank-line separator
         statements[0] = statements[0].model_copy(update={"pre_blank_lines": []})
     out.jil = jf.model_copy(
         update={
@@ -836,8 +728,7 @@ def transform_file(jf: JilFile, alloc: _Allocator, refusals: list[str]) -> _Tran
             "trailing_comments": [],
             "eof_blank_lines": [],
             "final_newline": True,
-            # CRLF is layout too, and a mixed-ending estate would otherwise
-            # emit whichever style it happened to carry (rule 10)
+            # CRLF is layout too (rule 10)
             "newline_style": "\n",
         }
     )
@@ -855,11 +746,10 @@ _HAS_LETTER_RE = re.compile(r"[A-Za-z]")
 
 
 def _tokens(values: Iterable[str]) -> set[str]:
-    """Letter-bearing tokens of 4+ characters -- the guard's needle grain.
+    """Letter-bearing tokens of 4+ characters, the guard's needle grain.
 
-    Shorter tokens and all-digit tokens are excluded on purpose: `mo`, `03`,
-    `1500` collide with kept day tokens, clock times and timing hints, and a
-    guard that fires on those fires on every estate and gets switched off.
+    Shorter and all-digit tokens (`mo`, `03`, `1500`) collide with kept day tokens, clock
+    times and timing hints, and a guard that fires on every estate gets switched off.
     """
     found: set[str] = set()
     for value in values:
@@ -871,7 +761,7 @@ def _tokens(values: Iterable[str]) -> set[str]:
 
 
 def _vocabulary() -> set[str]:
-    """Every token the output may carry that the estate did not author."""
+    """Every token the output may carry that the estate did not write."""
     return _tokens(vocabulary_words())
 
 
@@ -880,20 +770,13 @@ def leak_findings(
 ) -> list[str]:
     """Every input token that survived into the rendered output.
 
-    The comparison is token-to-token, not needle-against-raw-text: `name` is a
-    substring of the attribute key `box_name`, so a raw substring search
-    refuses on every estate that writes `(name, QUANTITY=...)` in a comment.
-    An output token is SUSPECT when nothing accounts for it; a needle that
-    appears inside a suspect token is a leak.
+    The comparison is token to token: `name` is a substring of `box_name`, so a raw substring
+    search would refuse on every estate. An output token is suspect when nothing accounts for
+    it, and a needle inside a suspect token is a leak.
 
-    Three things account for an output token. The JIL/dsl41 VOCABULARY, which
-    the estate did not author. The synthetic names this run ALLOCATED, which it
-    authored itself. And the emitted KEEP values -- but only because every one
-    of them passed `validate_keep` first, so its tokens are proven to lie in a
-    closed space (an IANA zone, a day token, a SEM-37 keyword, a number). An
-    unvalidated KEEP value used to land in this pool and silence real hits
-    elsewhere in the output; it cannot any more, because it no longer reaches
-    the output at all.
+    Accounted for: the JIL/dsl41 vocabulary, the synthetic names this run allocated, and the
+    emitted KEEP values, each proven closed-space by `validate_keep` (an IANA zone, a day
+    token, a SEM-37 keyword, a number).
     """
     safe = _vocabulary() | _tokens(kept) | _tokens(allocated)
     suspect = _tokens([rendered]) - safe
@@ -940,9 +823,8 @@ def _cond_props(cond: Cond, names: NameMap) -> object:
 def _mapped_refs(value: str | None, table: dict[str, str]) -> str | None:
     """A reference list as lowering stored it, each member mapped.
 
-    The same split `_rewrite_ref_list` uses, so both sides of the structural
-    verify normalize identically -- a multi-line `run_calendar` on the original
-    side and a comma list on the minified side must compare equal.
+    It splits like `_rewrite_ref_list`, so a multi-line `run_calendar` and a comma list
+    compare equal in the structural verify.
     """
     if value is None:
         return None
@@ -951,7 +833,7 @@ def _mapped_refs(value: str | None, table: dict[str, str]) -> str | None:
 
 
 def _schedule_props(job: JobIR, names: NameMap) -> object:
-    """The SEM-30 time cluster, with the two calendar references mapped."""
+    """The SEM-30 time cluster with the calendar references mapped."""
     schedule = job.schedule
     if schedule is None:
         return None
@@ -967,11 +849,10 @@ def _schedule_props(job: JobIR, names: NameMap) -> object:
 
 
 def _exec_props(job: JobIR, names: NameMap) -> object:
-    """The exec cluster minify still carries: placement, and the FW lane.
+    """The exec cluster minify carries: placement and the FW lane.
 
-    `command` compares as PRESENCE only -- REPLACE swaps its text by design --
-    and the DROP'd exec attributes (owner, profile, std_*) are absent from the
-    minified side by design, so comparing them would fail on every estate.
+    `command` compares as presence only (REPLACE swaps its text), and the DROPped exec
+    attributes (owner, profile, std_*) are absent from the minified side.
     """
     spec = job.exec_
     if spec is None:
@@ -1008,11 +889,8 @@ def _mapped_names(original: Iterable[str], table: dict[str, str]) -> list[str]:
 
 
 def verify_findings(before: CatalogIR, after: CatalogIR, names: NameMap) -> list[str]:
-    """Every way the minified estate is not isomorphic to the original.
-
-    Each finding names the job (or the entity class) and the property, so the
-    answer says what broke rather than that something did.
-    """
+    """Every way the minified estate is not isomorphic to the original, each naming the job or
+    entity class and the property."""
     from dsl41.derive import derive_graph
 
     findings: list[str] = []
@@ -1073,23 +951,17 @@ class MinifyResult:
     names: NameMap
 
     def kept_timezones(self) -> list[str]:
-        """The distinct SEM-35 zones the output still carries, if any.
-
-        A zone discloses a region. The CLI says which ones out loud so the
-        owner sees it before handing the file over, rather than finding it.
-        """
+        """The distinct SEM-35 zones the output still carries; the CLI names them."""
         return sorted({mapped for mapped in self.names.timezones.values()})
 
 
 def minify_files(
     files: list[JilFile], *, verify: bool = True, scrub_timezones: bool = False
 ) -> MinifyResult:
-    """Minify one parsed estate. Raises `MinifyRefusal` on any refusal.
+    """Minify one parsed estate; raises `MinifyRefusal` on any refusal.
 
-    The order of the checks is the order in which a failure is cheapest to
-    explain: classification first (it changes nothing), then the round trip,
-    then the structural verify, then the leak guard last -- the guard reads the
-    final bytes, so it has to.
+    Checks run in order: classification, round trip, structural verify, then the leak guard,
+    which reads the final bytes.
     """
     boxes, job_boxes = _box_membership(files)
     alloc = _Allocator(boxes, job_boxes, scrub_timezones=scrub_timezones)
@@ -1113,10 +985,7 @@ def minify_files(
 
 
 def _shape(jf: JilFile) -> list[tuple[str, str, tuple[tuple[str, str], ...], tuple[str, ...]]]:
-    """A file's statements as (subcommand, subject, attrs, date rows).
-
-    Everything that carries estate text and nothing that carries layout.
-    """
+    """A file's statements as (subcommand, subject, attrs, date rows): text, no layout."""
     return [
         (
             stmt.subcommand,
@@ -1137,14 +1006,12 @@ def _comment_count(jf: JilFile) -> int:
 
 
 def _check_roundtrip(bodies: list[str], emitted: list[JilFile]) -> None:
-    """Re-scan the bytes and check they say what the transform meant.
+    """Re-scan the bytes: they must parse back to the same statements, keys and values and
+    carry no comment.
 
-    Preserve mode reproduces an AST byte for byte, so F1 alone proves nothing
-    here -- a value that re-scans as a comment round-trips happily. What must
-    hold is that the EMITTED bytes parse back to the same statements, keys and
-    values, and that they carry no comment at all. That is the check that
-    catches a rewritten value which re-opens a rule-5 block comment, or an
-    inline `job_type` pair that re-scans into the subject.
+    F1 alone proves nothing here, since a value that re-scans as a comment round-trips. This
+    catches a rewritten value that re-opens a rule-5 block comment, or an inline `job_type`
+    pair that re-scans into the subject.
     """
     for body, jf in zip(bodies, emitted, strict=True):
         try:
@@ -1181,8 +1048,7 @@ def _check_structure(files: list[JilFile], bodies: list[str], names: NameMap) ->
 
 
 def output_paths(inputs: list[Path], out_dir: Path) -> list[Path]:
-    """One output path per input, by basename. A collision is a refusal: two
-    inputs would otherwise silently overwrite one another."""
+    """One output path per input, by basename; a shared basename is a refusal."""
     seen: dict[str, Path] = {}
     targets: list[Path] = []
     for path in inputs:

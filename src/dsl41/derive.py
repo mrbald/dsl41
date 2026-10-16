@@ -1,73 +1,41 @@
 """IR-G derivation: pure analysis passes IR-F -> DerivedGraph (ir-design ss5).
 
-Phase 5 of the implementation order (CLAUDE.md / DL-03). IR-G is derived,
-never authoritative: regenerate from IR-F, never edit or persist as truth
-(ir-design ss1). Explicitly lossy -- but every loss is materialized as an
-annotation. Every A-classified edge records its assumption; R-classified
-edges are what the UC backend will refuse to compile (stonebranch Part II
-requirement 1); mapping rows come from the M01-M36 table.
+IR-G is derived, never authoritative: regenerate it from IR-F (ir-design ss1, DL-03). Every loss is
+materialized as an annotation. Every A-classified edge records its assumption; R-classified
+edges are what the UC backend refuses to compile; mapping rows come from the M01-M36 table.
 
-Decisions pinned here (each with a test):
-- Global atoms become edges with src = the global variable name and
-  via="global" (the ss5 sketch's via Literal includes it). Globals are NOT
-  listed in `nodes`; consumers must treat via=="global" srcs as pseudo-nodes.
-- Cross-instance refs yield BOTH an external_boundary entry and a redesign
-  edge (M33 from `condition`, M16 from box overrides), so the migration
-  report can be generated uniformly by iterating edges.
-- Edges to jobs missing from the catalog are kept (src not in `nodes`),
-  classified REDESIGN on row M02 with the brokenness named in the
-  assumption field (DL-12: compiling an A-row edge to a nonexistent vertex
-  would be silent loss); the L001 linter rule owns the loud finding.
-- Local UNQUALIFIED n() atoms in `condition` become mutex candidate PAIRS
-  (M07), sorted and deduped, never merged into connected components: mutual
-  exclusion is not transitive, and pairs are exactly what the JIL states.
-  n(self) becomes a single-element group (self-serialization; UC Instance
-  Wait, UCS-09). n() with a lookback stays an edge (M03; mutex_groups
-  cannot carry the qualifier -- DL-12); n() under box_success/box_failure
-  or with a cross-instance ref stays an edge (it is a completion predicate
-  there, not a start gate).
-- Same-cycle detector: a job's trigger cadence is its own schedule
-  signature (trigger fields only -- run_window is a gate per SEM-33 and
-  must_* are alarms per SEM-34, both excluded), else the nearest box
-  ancestor's, else the unanimous cadence of its condition predecessors
-  (fixpoint); FW jobs with no schedule are their own source cadence. Same
-  cycle == same top-level box, or equal cadence with BOTH jobs unboxed
-  (DL-12: two identically scheduled boxes are two UC workflows -- a
-  signature collision is not a stream). Unknown-vs-anything -> NOT same
-  cycle (M02, conservative). The detector splits M01 from M02, and since
-  DL-153 it picks the M04/M05 assumption flavor the same way: f()/d()
-  latch like s() does, so a same-stream edge carries the staleness
-  assumption and a cross-stream one the Task-Monitor assumption -- never
-  a silent plain edge (UCS-13).
-- Box-override refs derive edges too (ir-design D1): ref TRANSITIVELY
-  inside the box (SEM-12 "inside") ->
-  M15 assumed; non-member, global, or cross-instance ref -> M16 redesign
-  (SEM-12 hung-RUNNING).
-- DerivedEdge.source_atom is Optional (spans are Optional codebase-wide;
-  the ss5 sketch's bare SourceSpan is read as "populated whenever lowering
-  supplied one" -- derive always populates it for parsed catalogs).
-- DerivedEdge.atom carries the condition node itself (DL-73), so a consumer
-  that needs more than src/via/lookback -- the UC backend's op/value for
-  M08 exit codes and M09 globals -- reads it off the edge instead of
-  re-scanning the consumer's condition for a matching atom. It is a COPY:
-  IR-G must not alias IR-F's mutable AST nodes (the same pin
-  external_boundary carries), and `lookback` takes its copy the same way.
-- `via` and the atom's kind are two views of one derivation step, so the
-  model validates that they agree (global iff GlobalAtom, exitcode iff
-  ExitCodeAtom): the UC backend narrows on it to read op/value off the
-  edge (DL-73), and an invariant a reader depends on is enforced where it
-  is established, not assumed downstream.
-- assumption field: required for assumed, forbidden for exact, optional for
-  redesign (ss5's "mandatory iff assumed" read as one-directional so R rows
-  may carry context notes).
-- Structural passes (chains, parallel groups, cycles) run over local
-  job->job edges of `condition` origin only: box-override edges describe
-  completion folding, not flow, and would fabricate cycles out of normal
-  box behavior.
-- `components` is the one connectivity implementation every consumer uses
-  (viz's workflow charts, the UC backend's workflow split). Whether box
-  co-membership connects is its named argument, not a second function
-  (DL-72); ordering beyond "nodes order" belongs to the caller.
+Contracts:
+- A global atom is an edge with src = the variable name and via="global". Globals are not in
+  `nodes`; a consumer treats via=="global" srcs as pseudo-nodes.
+- A cross-instance ref yields an external_boundary entry and a redesign edge (M33 from
+  `condition`, M16 from box overrides).
+- An edge to a job missing from the catalog is kept (src not in `nodes`) as REDESIGN on M02,
+  with the brokenness in the assumption (DL-12); L001 owns the loud finding.
+- Local unqualified n() atoms in `condition` are mutex candidate pairs (M07), sorted and
+  deduped, never merged into components: mutual exclusion is not transitive. n(self) is a
+  single-element group (UCS-09). n() with a lookback stays an edge (M03; DL-12). n() under
+  box_success/box_failure or with a cross-instance ref stays an edge: it is a completion
+  predicate there.
+- The same-cycle detector uses a job's own schedule trigger signature (run_window is a gate,
+  SEM-33; must_* are alarms, SEM-34; both excluded), else the nearest box ancestor's, else the
+  unanimous cadence of its condition predecessors (fixpoint); an unscheduled FW job is its own
+  cadence. Same cycle means the same top-level box, or equal cadence with both jobs unboxed
+  (DL-12). Unknown cadence is not the same cycle (M02). The detector splits M01 from M02 and
+  picks the M04/M05 assumption flavor (DL-153): f()/d() latch like s(), so a same-stream edge
+  carries the staleness assumption and a cross-stream one the Task-Monitor assumption (UCS-13).
+- Box-override refs derive edges (ir-design D1): a ref transitively inside the box (SEM-12) is
+  M15 assumed; a non-member, global or cross-instance ref is M16 redesign (SEM-12 hung-RUNNING).
+- DerivedEdge.source_atom is Optional; derive populates it for parsed catalogs.
+- DerivedEdge.atom is a copy of the condition node (DL-73), so a consumer reads op/value for
+  M08 exit codes and M09 globals off the edge. IR-G never aliases IR-F's mutable AST nodes;
+  `lookback` is copied the same way.
+- `via` and the atom kind agree (global iff GlobalAtom, exitcode iff ExitCodeAtom); the model
+  validates it because the UC backend narrows on it (DL-73).
+- `assumption` is required for assumed, forbidden for exact, optional for redesign (ss5).
+- Structural passes (chains, parallel groups, cycles) read local job->job `condition` edges
+  only; box-override edges describe completion folding, not flow.
+- `components` is the one connectivity implementation (viz and the UC workflow split); box
+  co-membership is its named argument (DL-72).
 """
 
 from __future__ import annotations
@@ -100,9 +68,7 @@ Via = Literal["success", "failure", "done", "terminated", "notrunning", "exitcod
 
 
 def _status_via(status: Status) -> Via:
-    """A status atom's Via is simply its own name lowercased -- the Via
-    vocabulary is the status vocabulary plus exitcode/global (DL-72). The
-    cast keeps the Literal checked at every call site."""
+    """A status atom's Via is its lowercased status; Via adds exitcode and global (DL-72)."""
     return cast(Via, status.lower())
 
 
@@ -110,10 +76,8 @@ class DerivedEdge(BaseModel):
     src: str  # producer job name, global name (via=="global"), or "name^INST"
     dst: str  # consumer: the job whose condition/box override references src
     via: Via
-    #: the IR-F condition node this edge was derived from; src/via/lookback
-    #: are read off it, and consumers needing what those three drop (an
-    #: exit-code or global comparison's op/value) read it instead of
-    #: re-scanning the consumer's condition (DL-73).
+    #: the IR-F condition node this edge came from; carries an exit-code or global
+    #: comparison's op/value (DL-73)
     atom: StatusAtom | ExitCodeAtom | GlobalAtom
     lookback: Lookback | None = None
     cls: EdgeClass
@@ -124,15 +88,12 @@ class DerivedEdge(BaseModel):
     @field_validator("atom", "lookback", mode="after")
     @classmethod
     def _detach_from_ir_f(cls, node: BaseModel | None) -> BaseModel | None:
-        """IR-G must not alias IR-F's mutable condition AST nodes -- the pin
-        external_boundary carries; the edge takes its own copy."""
+        """The edge copies the node; IR-G never aliases IR-F's condition AST."""
         return node if node is None else node.model_copy(deep=True)
 
     @model_validator(mode="after")
     def _via_matches_atom(self) -> DerivedEdge:
-        """global iff GlobalAtom, exitcode iff ExitCodeAtom (every other via
-        is a StatusAtom's own status). The UC backend narrows on this to read
-        op/value off the edge (DL-73)."""
+        """global iff GlobalAtom, exitcode iff ExitCodeAtom (DL-73)."""
         special = ("global", "exitcode")
         if (self.via in special or self.atom.kind in special) and self.via != self.atom.kind:
             raise ValueError(f"via {self.via!r} does not match atom kind {self.atom.kind!r}")
@@ -148,35 +109,19 @@ class DerivedEdge(BaseModel):
 
     @property
     def is_start_gate(self) -> bool:
-        """True when this edge names a producer JOB that gates the consumer's
-        START -- the one partition four readers were spelling by hand (DL-162).
+        """True when the edge names a producer job that gates the consumer's start (DL-162).
 
-        Two kinds of edge are not start gates. A box-override edge (M15/M16,
-        from `box_success`/`box_failure`) is a COMPLETION predicate on a box,
-        evaluated to fold a box that is already running (SEM-12); it orders
-        nothing. A global edge (via=="global") names no job at all -- derive
-        keeps globals as pseudo-nodes outside `nodes` (module docstring), so
-        an edge from one has no producer to reason about.
-
-        What it does NOT decide is whether the producer is a job THIS catalog
-        defines: an undefined producer (M02-R) and a cross-instance one (M33)
-        are start gates that name a job the caller cannot look up. A reader
-        that needs a local producer asks `local_producer` below -- NOT
-        `src in catalog.jobs`, which is unsound (DL-162a).
-
-        L011 is deliberately wider and does not read this: it asks whether a
-        job has ANY wiring, for which a box override and a global gate both
-        count. L008 is deliberately narrower: it tests the single row M16."""
+        A box-override edge (M15/M16) is a completion predicate (SEM-12) and a global edge
+        names no job; neither is a start gate. An undefined (M02-R) or cross-instance (M33)
+        producer is a start gate whose job the caller cannot look up; use `local_producer`,
+        not `src in catalog.jobs` (DL-162a). L011 is wider (any wiring) and L008 narrower
+        (row M16); neither reads this."""
         return self.via != "global" and self.mapping_row not in ("M15", "M16")
 
 
 def start_gates(graph: DerivedGraph) -> dict[str, list[DerivedEdge]]:
-    """The start-gate edges indexed by CONSUMER -- the one index L021, L022
-    and the cadence check's wake walk each read. L020 reads the condition
-    tree instead (DL-243, DL-281). DL-162 homed the
-    predicate (`is_start_gate`), arch-review 2026-08-28 homed the index,
-    and DL-185 moved it HERE: its inputs are all IR-G, and lint was only
-    hosting it."""
+    """The start-gate edges indexed by consumer, for L021, L022 and the cadence wake walk
+    (DL-185). L020 reads the condition tree instead (DL-243, DL-281)."""
     gates: dict[str, list[DerivedEdge]] = {}
     for edge in graph.edges:
         if edge.is_start_gate:
@@ -185,27 +130,16 @@ def start_gates(graph: DerivedGraph) -> dict[str, list[DerivedEdge]]:
 
 
 def local_producer(edge: DerivedEdge, catalog: CatalogIR) -> str | None:
-    """The catalog job this edge's producer names, or None when there is no
-    such job -- the sound spelling of "the producer is defined HERE".
+    """The catalog job this edge's producer names, or None.
 
-    Read off the ATOM, never off `src`. For a cross-instance ref `src` is the
-    composite display form `name^INST`, and `src in catalog.jobs` answers a
-    different question than it looks like: a catalog whose own job is named
-    `foo^PRD` (lowering constrains job-name characters nowhere) collides with
-    the M33 edge for `s(foo^PRD)` and the lookup says yes about a producer
-    derive has just placed on another instance. The atom carries `instance`,
-    which is the fact (DL-162a).
-
-    None for a global (no job), for a cross-instance producer, and for a job
-    the catalog does not define -- three different reasons, one answer,
-    because every caller wants the same thing: a name it can look up."""
+    Read off the atom, not `src`: a cross-instance `src` is the display form `name^INST`, which
+    can collide with a local job named `foo^PRD` (DL-162a). None for a global, a cross-instance
+    producer, and a job the catalog does not define."""
     return local_job(edge.atom, catalog)
 
 
 def local_job(atom: Atom, catalog: CatalogIR) -> str | None:
-    """`local_producer`'s test on a bare atom, for the readers that hold an
-    atom and no edge: the catalog job it names, or None for a global, a
-    cross-instance ref, or a job the catalog does not define (DL-162a)."""
+    """`local_producer` on a bare atom (DL-162a)."""
     if isinstance(atom, GlobalAtom) or atom.job.instance is not None:
         return None
     return atom.job.name if atom.job.name in catalog.jobs else None
@@ -215,8 +149,7 @@ class OrShape(BaseModel):
     """M12 classifier output for one Or node (UCS-03 lowering patterns).
 
     Lowering suggestions assume UC has no native OR-join.
-    PENDING: U1 -- if 7.x native "Any" completion criteria exist, the
-    suggestion texts (and possibly the whole M12 lowering) change.
+    PENDING: U1 -- native "Any" completion criteria would change the suggestion texts.
     """
 
     job: str  # the consumer whose condition/box override contains the Or
@@ -228,16 +161,14 @@ class OrShape(BaseModel):
 
 
 class BoxTree(BaseModel):
-    """Materialized from JobIR.box.box_name; soundness is guaranteed by the
-    CatalogIR validator (exists / is-box / acyclic), so no re-checking here."""
+    """Built from JobIR.box.box_name; the CatalogIR validator guarantees it is sound."""
 
     roots: list[str] = []  # top-level boxes, catalog order
     children: dict[str, list[str]] = {}  # box -> members, catalog order
     parent: dict[str, str] = {}  # member -> immediate box
 
     def top(self, name: str) -> str | None:
-        """Root box of `name`'s containment chain; the box itself if it is a
-        top-level box; None for jobs outside any box."""
+        """Root box of `name`'s chain; the box itself if top-level; None outside any box."""
         current = name
         seen_box = current in self.children and current not in self.parent
         while (up := self.parent.get(current)) is not None:
@@ -247,7 +178,7 @@ class BoxTree(BaseModel):
 
 
 class RedesignFlag(BaseModel):
-    """Pass-6 output: per-job R-classified constructs that are not edges."""
+    """Per-job R-classified construct that is not an edge."""
 
     job: str
     mapping_row: str  # e.g. "M27"
@@ -259,16 +190,12 @@ class DerivedGraph(BaseModel):
     nodes: list[str] = []  # catalog job names, source order
     edges: list[DerivedEdge] = []
     mutex_groups: list[list[str]] = []  # n() detector pairs (M07)
-    #: consumer -> the bare local n() targets in ITS OWN condition, self
-    #: included. mutex_groups sorts each pair and loses who references whom;
-    #: L021 needs the direction (the referencing job is the one every target
-    #: completion WAKES), and re-deriving it there would restate
-    #: is_mutex_atom the way DL-162 forbids for is_start_gate.
+    #: consumer -> the bare local n() targets in its own condition, self included; keeps the
+    #: direction mutex_groups loses (L021 needs it)
     bare_notrunning: dict[str, list[str]] = {}
     or_shapes: list[OrShape] = []  # M12 classifier output
     box_tree: BoxTree = BoxTree()
     external_boundary: list[JobRef] = []  # cross-instance refs (M33)
-    # ss5 pass-6/7 outputs (sketch completion, documented):
     redesign_flags: list[RedesignFlag] = []  # M27 run_window v1
     chains: list[list[str]] = []  # maximal linear chains (feeds DSL decompiler)
     parallel_groups: list[list[str]] = []  # same-(preds,succs) sibling groups
@@ -279,7 +206,7 @@ class DerivedGraph(BaseModel):
 
 
 class _RawRef(NamedTuple):
-    """One atom occurrence, pre-classification (pass 1)."""
+    """One atom occurrence before classification."""
 
     dst: str
     origin: Literal["condition", "box_success", "box_failure"]
@@ -300,19 +227,10 @@ def is_mutex_atom(
     origin: Literal["condition", "box_success", "box_failure"],
     atom: StatusAtom | ExitCodeAtom | GlobalAtom,
 ) -> bool:
-    """Pass 2 predicate: local UNQUALIFIED n() in `condition` is a mutex
-    candidate, not an edge (M07 / dossier R6: translating them as edges
-    creates false ordering). A lookback-qualified n() stays an edge (M03):
-    the instantaneous mutual-exclusion reading applies only to the bare
-    form, and mutex_groups cannot carry the qualifier -- dropping it would
-    be silent loss (DL-12).
+    """True when a local unqualified n() in `condition` is a mutex candidate, not an edge.
 
-    PUBLIC because it answers "does this atom become an edge?", which a
-    reader that walks a condition tree BESIDE the edges has to ask too: the
-    explore page maps every edge back to the atom it came from and needs to
-    know which atoms deliberately have none (DL-191). Re-deriving it there
-    would restate this predicate the way DL-162 forbids for is_start_gate.
-    Takes the two facts it reads, not the pass-1 `_RawRef` around them."""
+    Edges would create false ordering (M07, dossier R6). A lookback-qualified n() stays an
+    edge (M03, DL-12). Public for readers that walk a condition tree beside the edges (DL-191)."""
     return (
         origin == "condition"
         and isinstance(atom, StatusAtom)
@@ -323,10 +241,8 @@ def is_mutex_atom(
 
 
 def _bare_notrunning(refs: list[_RawRef]) -> dict[str, list[str]]:
-    """Pass 2, the ONE scan of the mutex predicate: which jobs each
-    consumer's own condition names in bare local n() form (self included).
-    `_mutex_groups` is its undirected projection -- one fact, two views,
-    agreement by construction (arch-review 2026-08-28)."""
+    """The one scan of the mutex predicate: the jobs each consumer names in bare local n()
+    form, self included. `_mutex_groups` is its undirected projection."""
     out: dict[str, set[str]] = {}
     for ref in refs:
         if is_mutex_atom(ref.origin, ref.atom):
@@ -356,15 +272,14 @@ _TRIGGER_FIELDS = (
 
 
 def _trigger_signature(schedule: ScheduleBlock) -> str:
-    """Comparable trigger-cadence key: trigger fields only (run_window is a
-    gate per SEM-33; must_* are alarms per SEM-34; both excluded)."""
+    """Cadence key over trigger fields only (run_window is a gate, SEM-33; must_* are alarms,
+    SEM-34)."""
     dump = schedule.model_dump(mode="json")
     return "sched:" + json.dumps({k: dump[k] for k in _TRIGGER_FIELDS}, sort_keys=True)
 
 
 def _condition_pred_map(catalog: CatalogIR, refs: list[_RawRef]) -> dict[str, set[str]]:
-    """dst -> local job srcs of its `condition` (mutex refs excluded; global
-    atoms excluded -- SET_GLOBAL events carry no cadence)."""
+    """dst -> local job srcs of its `condition`; mutex and global atoms carry no cadence."""
     preds: dict[str, set[str]] = {name: set() for name in catalog.jobs}
     for ref in refs:
         if (
@@ -410,19 +325,14 @@ def _cadences(catalog: CatalogIR, cond_preds: dict[str, set[str]]) -> dict[str, 
 def _same_cycle(
     src: str, dst: str, tree: BoxTree, cadence: dict[str, str | None]
 ) -> Literal["box", "cadence"] | None:
-    """WHY the two jobs are one stream (M01), or None for cross-stream (M02).
+    """Why the two jobs are one stream (M01), or None for cross-stream (M02).
 
-    The detector has two halves (DL-12) and they license different
-    sentences: "box" is co-membership of one top-level box, which needs no
-    cadence at all, and "cadence" is two unboxed jobs under one derived
-    trigger signature. An edge's assumption record must not claim a shared
-    cadence that a same-box pair may not have."""
+    "box" is co-membership of one top-level box and needs no cadence; "cadence" is two unboxed
+    jobs under one trigger signature (DL-12)."""
     top_src, top_dst = tree.top(src), tree.top(dst)
     if top_src is not None or top_dst is not None:
-        # Boxes are streams: same top-level box == one cycle; different (or
-        # only one) box == different UC workflows even under identical
-        # schedules -- a trigger-signature collision is not a stream (M14
-        # note: member conditions referencing jobs outside the box -> M02).
+        # Boxes are streams: a different or single box means different UC workflows even
+        # under identical schedules (M14: member conditions on outside jobs -> M02).
         return "box" if (top_src == top_dst and top_src is not None) else None
     if cadence.get(src) is not None and cadence.get(src) == cadence.get(dst):
         return "cadence"
@@ -430,7 +340,7 @@ def _same_cycle(
 
 
 def _is_inside(tree: BoxTree, job: str, box: str) -> bool:
-    """SEM-12 'inside the box' is transitive: any ancestor container counts."""
+    """SEM-12 'inside the box' is transitive: any ancestor box counts."""
     current = job
     while (up := tree.parent.get(current)) is not None:
         if up == box:
@@ -441,9 +351,8 @@ def _is_inside(tree: BoxTree, job: str, box: str) -> bool:
 
 # --------------------------------------------------------- edge classification (pass 3)
 
-#: The same-stream staleness assumption, shared by M01 and (since DL-153)
-#: the same-cycle halves of M04/M05: f()/d() latch exactly as s() does
-#: (SEM-01/02), so one wording covers all three rows.
+#: The same-stream staleness assumption for M01 and the same-cycle halves of M04/M05: f()/d()
+#: latch as s() does (SEM-01/02, DL-153).
 _BOX_STREAM_STALENESS = (
     "producer and consumer are members of one top-level box, so one"
     " box run is one cycle (neither job needs a cadence of its own);"
@@ -481,8 +390,8 @@ def _classify_condition_edge(
         )
 
     if src not in catalog.jobs:
-        # redesign, not assumed: compiling an A-row edge to a nonexistent
-        # vertex would be silent loss; L001 carries the error (DL-12).
+        # redesign, not assumed: an A-row edge to a nonexistent vertex would be silent loss
+        # (DL-12); L001 carries the error.
         return edge(
             "redesign",
             "M02",
@@ -495,9 +404,8 @@ def _classify_condition_edge(
             " max -- U5 resolved, DL-53); window anchoring differs per case (SEM-04)"
         )
         if lookback.kind == "zero":
-            # Q2b resolved (DL-58): the since-last-end anchor (Q2a, DL-54)
-            # is relational -- no fixed-window Time Scope expresses it;
-            # flag every use (a never-run consumer is satisfied outright).
+            # the since-last-end anchor (Q2a, DL-54) is relational, so no fixed-window Time
+            # Scope expresses it (Q2b, DL-58); every use is flagged.
             assumption += (
                 "; zero-lookback anchors to the consumer's own last end"
                 " (Q2a/Q2b, DL-54/DL-58) -- no fixed Time Scope expresses it"
@@ -516,10 +424,9 @@ def _classify_condition_edge(
             " Time Scope bounds differ from an indefinite latch (UCS-06)",
         )
     if via in ("failure", "done"):
-        # f()/d() latch like s() does (SEM-01/02), so the class follows M01:
-        # every edge is A, and the detector picks the assumption flavor --
-        # a stale FAILURE from a previous cycle satisfies f() in AutoSys and
-        # no UC edge does (UCS-13, DL-153)
+        # f()/d() latch like s() (SEM-01/02), so every edge is A and the detector picks the
+        # flavor: a stale FAILURE satisfies f() in AutoSys and no UC edge does (UCS-13,
+        # DL-153)
         row = "M04" if via == "failure" else "M05"
         stream = _same_cycle(src, ref.dst, tree, cadence)
         if stream == "box":
@@ -542,9 +449,7 @@ def _classify_condition_edge(
             "inclusive reading -- document the choice per estate",
         )
     if via == "exitcode":
-        # U4 resolved (DL-53): per-task Exit Code Processing field, default
-        # Success Exitcode Range; the configured range is estate data the
-        # report records.
+        # per-task Exit Code Processing, default Success Exitcode Range (U4, DL-53)
         return edge(
             "assumed",
             "M08",
@@ -554,9 +459,7 @@ def _classify_condition_edge(
             " from JIL alone",
         )
     if via == "notrunning":
-        # Reachable only with a lookback (bare local n() is mutex-classified
-        # and never enters here), and the lookback branch above returns M03
-        # first -- keep a loud guard rather than dead fall-through.
+        # bare local n() is mutex-classified and a lookback returns M03 above
         raise AssertionError("unqualified notrunning atom escaped mutex classification")
     raise AssertionError(f"unclassified local condition atom via={via!r}")
 
@@ -584,8 +487,7 @@ def _edge_for_ref(
                 ),
                 source_atom=ref.span,
             )
-        # U8 resolved (DL-53): uc.perform_actions.before_wf_dependency_evaluation
-        # defaults true; the assumption string records it.
+        # before_wf_dependency_evaluation defaults true (U8, DL-53)
         return DerivedEdge(
             src=atom.name,
             dst=ref.dst,
@@ -632,8 +534,8 @@ def _edge_for_ref(
         via = "exitcode" if isinstance(atom, ExitCodeAtom) else _status_via(atom.status)
         src = atom.job.name
         if _is_inside(tree, src, ref.dst):
-            # U2 resolved (DL-53): Running/Problems on member failure; Success
-            # iff all members Success/Finished/Skipped; never Failed (UCS-04).
+            # a workflow is Running/Problems on member failure, never Failed (U2, DL-53,
+            # UCS-04)
             return DerivedEdge(
                 src=src,
                 dst=ref.dst,
@@ -696,15 +598,10 @@ def _branch_local_srcs(operand: Cond, catalog: CatalogIR) -> list[str]:
 
 
 def _ancestor_sets(roots: Iterable[str], preds: dict[str, set[str]]) -> dict[str, set[str]]:
-    """root -> {root} + everything reachable backwards over condition edges.
+    """root -> {root} plus everything reachable backwards over condition edges.
 
-    Computed ONLY for the requested roots (the Or-branch producers _or_shapes
-    compares) and iteratively -- the previous version walked every catalog
-    job recursively, which was Theta(n^2) memory on chain-shaped estates
-    (the `dsl41 lint` OOM kill) and blew the Python stack when a long chain
-    was declared consumer-first (DL-20). Cycles are fine: each BFS visits a
-    node once, and unlike the old memoized recursion the closures it returns
-    are complete on cyclic graphs regardless of visit order."""
+    Computed iteratively for the requested roots only, to avoid quadratic memory and deep
+    recursion on long chains (DL-20). Closures are complete on cyclic graphs."""
     out: dict[str, set[str]] = {}
     for root in roots:
         seen = {root}
@@ -720,9 +617,8 @@ def _ancestor_sets(roots: Iterable[str], preds: dict[str, set[str]]) -> dict[str
 
 def _or_shapes(catalog: CatalogIR, preds: dict[str, set[str]]) -> list[OrShape]:
     # PENDING: U1 -- lowering texts assume no native OR-join (see OrShape).
-    # Two passes: collect every Or node's branches first, so ancestor sets
-    # are computed only for the branch producers that need them (DL-20 --
-    # a catalog with no `|` pays nothing here).
+    # collect every Or node's branches first so ancestor sets cover only the producers that
+    # need them (DL-20)
     found: list[
         tuple[
             str,
@@ -750,8 +646,7 @@ def _or_shapes(catalog: CatalogIR, preds: dict[str, set[str]]) -> list[OrShape]:
             )
         else:
             branch_ancestors = [set().union(*(ancestors.get(s, {s}) for s in b)) for b in branches]
-            # undefined names cannot anchor a restructure (L001 owns
-            # the finding); a diamond over one is independent here
+            # undefined names cannot anchor a restructure (L001 owns the finding)
             common = set.intersection(*branch_ancestors) & set(catalog.jobs)
             if common:
                 kind = "common_ancestor"
@@ -784,8 +679,7 @@ def _or_shapes(catalog: CatalogIR, preds: dict[str, set[str]]) -> list[OrShape]:
 def _local_condition_adjacency(
     catalog: CatalogIR, edges: list[DerivedEdge]
 ) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
-    """(preds, succs) over deduped local job->job `condition` edges only
-    (module docstring: box-override edges describe completion folding)."""
+    """(preds, succs) over deduped local job->job `condition` start-gate edges."""
     preds: dict[str, set[str]] = {n: set() for n in catalog.jobs}
     succs: dict[str, set[str]] = {n: set() for n in catalog.jobs}
     for e in edges:
@@ -800,11 +694,10 @@ def _local_condition_adjacency(
 
 
 def cycles(nodes: list[str], succs: dict[str, set[str]]) -> list[list[str]]:
-    """Tarjan SCCs (iterative); SCCs of size >1 plus self-loops, as sorted
-    node lists, list sorted for determinism. Legal AutoSys, L010 warns.
-    Public since DL-184: the cadence check runs it over its own wake
-    adjacency (start gates plus bare n(), which mutex classification keeps
-    out of the edge set) to find the loops with no finite bound."""
+    """Tarjan SCCs (iterative): SCCs of size >1 plus self-loops, as sorted lists, sorted.
+
+    Legal AutoSys; L010 warns. Public for the cadence check, which runs it over its own wake
+    adjacency, start gates plus bare n() (DL-184)."""
     index: dict[str, int] = {}
     low: dict[str, int] = {}
     on_stack: set[str] = set()
@@ -856,10 +749,8 @@ def _chains(
     succs: dict[str, set[str]],
     cycle_members: set[str],
 ) -> list[list[str]]:
-    """Maximal linear chains: consecutive (a, b) where b is a's only successor
-    and a is b's only predecessor. Length >= 2 reported, source order. Cycle
-    members are excluded -- a chain inside an SCC would double-represent
-    those nodes to the DSL decompiler (the cycle report owns them)."""
+    """Maximal linear chains of length >= 2 in source order: b is a's only successor and a is
+    b's only predecessor. Cycle members are excluded; the cycle report owns them."""
 
     def linked(a: str, b: str) -> bool:
         return succs[a] == {b} and preds[b] == {a}
@@ -892,9 +783,7 @@ def _chains(
 def _parallel_groups(
     nodes: list[str], preds: dict[str, set[str]], succs: dict[str, set[str]]
 ) -> list[list[str]]:
-    """Sibling groups with identical (preds, succs) signatures, at least one
-    side nonempty -- antichains sharing the same fan-out and/or fan-in point
-    (source-only groups share a sink; sink-only groups share a source)."""
+    """Sibling groups with identical (preds, succs) signatures, at least one side nonempty."""
     by_signature: dict[tuple[tuple[str, ...], tuple[str, ...]], list[str]] = {}
     for node in nodes:
         if not preds[node] and not succs[node]:
@@ -908,8 +797,7 @@ def _parallel_groups(
 
 
 class EdgeEnds(Protocol):
-    """The connectivity view of an edge: named endpoints, nothing else. Both
-    DerivedEdge and the UC backend's UcEdge satisfy it."""
+    """The connectivity view of an edge; DerivedEdge and the UC backend's UcEdge satisfy it."""
 
     src: str
     dst: str
@@ -921,18 +809,11 @@ def components(
     *,
     bind_box_members: BoxTree | None = None,
 ) -> list[list[str]]:
-    """Connected components (union-find) over the edges with BOTH ends in
-    `nodes`. Mutex groups never connect anything -- a shared lock would glue
-    unrelated streams together (DL-35).
+    """Connected components over the edges with both ends in `nodes`.
 
-    `bind_box_members` is the one policy difference between this function's
-    callers, named instead of duplicated (DL-72): pass a BoxTree to union
-    each box with its members (viz, where a box and its members are one
-    workflow chart), pass None to leave box membership out (the UC backend,
-    where boxes are already their own workflows).
-
-    Members come back in `nodes` order, groups in first-member order;
-    callers wanting another order sort at the call site.
+    Mutex groups connect nothing (DL-35). `bind_box_members` (DL-72): pass a BoxTree to union
+    each box with its members (viz), None to leave membership out (the UC backend). Members
+    come back in `nodes` order, groups in first-member order.
     """
     parent: dict[str, str] = {name: name for name in nodes}
 
@@ -1010,7 +891,7 @@ def derive_graph(catalog: CatalogIR) -> DerivedGraph:
     deduped_boundary: list[JobRef] = []
     for ref_ in boundary:
         if ref_ not in deduped_boundary:
-            # copy: IR-G must not alias IR-F's mutable condition AST nodes
+            # copy: IR-G never aliases IR-F's AST nodes
             deduped_boundary.append(ref_.model_copy())
     sccs = cycles(nodes, succs)  # pass 7
     return DerivedGraph(
