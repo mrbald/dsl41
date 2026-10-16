@@ -762,14 +762,14 @@ _OUTCOMES: dict[str, tuple[list[Event], str, tuple[str, ...], list[tuple[str, ..
         [ev("STARTJOB", 1, job="plain"), ev("STARTJOB", 2, job="plain")],
         "plain",
         ("job.177",),
-        [("job.144",)],
+        [("job.441",)],
         "START_REFUSED",
     ),
     "refused: the box is not running": (
         [ev("STARTJOB", 1, job="m")],
         "m",
         ("job.177",),
-        [("job.141",)],
+        [("job.441",)],
         "START_REFUSED",
     ),
     "refused: ran in this box run": (
@@ -780,7 +780,7 @@ _OUTCOMES: dict[str, tuple[list[Event], str, tuple[str, ...], list[tuple[str, ..
         ],
         "m",
         ("job.177",),
-        [("job.145",)],
+        [("job.441",)],
         "START_REFUSED",
     ),
     "refused: taken off ice in this box run": (
@@ -792,7 +792,7 @@ _OUTCOMES: dict[str, tuple[list[Event], str, tuple[str, ...], list[tuple[str, ..
         ],
         "m",
         ("job.177",),
-        [("job.141",)],
+        [("job.441",)],
         "START_REFUSED",
     ),
     "nothing": ([ev("STARTJOB", 1, job="cond")], "cond", ("job.177",), [("job.180",)], ""),
@@ -864,6 +864,16 @@ _OUTCOMES: dict[str, tuple[list[Event], str, tuple[str, ...], list[tuple[str, ..
 }
 
 
+#: The status a case's last attempt meets, where its row is one row for every status of a set
+#: (DL-368): the status its name claims, read before the last input.
+_OUTCOME_STATUS = {
+    "refused: live": "RUNNING",
+    "refused: the box is not running": "INACTIVE",
+    "refused: ran in this box run": "SUCCESS",
+    "refused: taken off ice in this box run": "INACTIVE",
+}
+
+
 def _spied(oracle: Oracle) -> list[Outcome]:
     """Every outcome the oracle's hook writes from now on, in order."""
     seen: list[Outcome] = []
@@ -888,6 +898,8 @@ def test_sem10_each_start_outcome_fires_its_row_and_writes_its_line(
     paired = Oracle(lower_source(_START_JIL))
     for event in script[:-1]:
         paired.feed(event)
+    if case in _OUTCOME_STATUS:
+        assert paired.store.job[job].status == _OUTCOME_STATUS[case]
     seen = _spied(paired)
     traced = len(paired.trace())
     paired.feed(script[-1])
@@ -1533,7 +1545,7 @@ _KT_OUTCOMES: dict[str, tuple[str, list[Event | datetime], str, list[tuple[str, 
         _KT_JIL,
         [ev("KILLJOB", 1, job="t")],
         "t",
-        [("job.137",)],
+        [("job.440",)],
         "EVENT_IGNORED",
     ),
     "kill ignored: SUCCESS": (
@@ -1544,7 +1556,7 @@ _KT_OUTCOMES: dict[str, tuple[str, list[Event | datetime], str, list[tuple[str, 
             ev("KILLJOB", 3, job="t"),
         ],
         "t",
-        [("job.138",)],
+        [("job.440",)],
         "EVENT_IGNORED",
     ),
     "kill ignored: FAILURE": (
@@ -1555,14 +1567,14 @@ _KT_OUTCOMES: dict[str, tuple[str, list[Event | datetime], str, list[tuple[str, 
             ev("KILLJOB", 3, job="t"),
         ],
         "t",
-        [("job.139",)],
+        [("job.440",)],
         "EVENT_IGNORED",
     ),
     "kill ignored: TERMINATED": (
         _KT_JIL,
         [ev("STARTJOB", 1, job="t"), ev("KILLJOB", 2, job="t"), ev("KILLJOB", 3, job="t")],
         "t",
-        [("job.140",)],
+        [("job.440",)],
         "EVENT_IGNORED",
     ),
     "term_run_time on its run": (
@@ -1611,7 +1623,7 @@ _KT_OUTCOMES: dict[str, tuple[str, list[Event | datetime], str, list[tuple[str, 
             T0 + timedelta(hours=2, minutes=1),
         ],
         "d",
-        [("job.179",), ("job.141",), ("job.179",), ("job.102",)],
+        [("job.179",), ("job.441",), ("job.179",), ("job.102",)],
         "START_REFUSED",
     ),
     "a scan continuation resumes": (
@@ -1630,14 +1642,14 @@ _KT_OUTCOMES: dict[str, tuple[str, list[Event | datetime], str, list[tuple[str, 
             _SCAN_BOUND,
         ],
         "kt_scan",
-        [("job.179",), ("job.145",)],
+        [("job.179",), ("job.441",)],
         "START_REFUSED",
     ),
     "a scan continuation after the job moved on": (
         oracle_inputs.KILL_TIMER_JIL,
         [*_SCAN_SETUP, _scan_ev(2, "STATUS", job="kt_scan", status="FAILURE"), _SCAN_BOUND],
         "kt_scan",
-        [("job.179",), ("job.146",)],
+        [("job.179",), ("job.441",)],
         "START_REFUSED",
     ),
     "kill a queued box": (
@@ -1672,23 +1684,38 @@ _KT_OUTCOMES: dict[str, tuple[str, list[Event | datetime], str, list[tuple[str, 
         oracle_inputs.KILL_TIMER_JIL,
         _directed("rescan after a run, INACTIVE again"),
         "kt_scan",
-        [("job.179",), ("job.141",)],
+        [("job.179",), ("job.441",)],
         "START_REFUSED",
     ),
     "a member's continuation after its box restarted and it ran": (
         oracle_inputs.KILL_TIMER_JIL,
         _directed("member rescan, box restarted and member ran"),
         "kt_mem",
-        [("job.179",), ("job.145",)],
+        [("job.179",), ("job.441",)],
         "START_REFUSED",
     ),
     "a member's continuation after its box restarted": (
         oracle_inputs.KILL_TIMER_JIL,
         _directed("member rescan, box restarted"),
         "kt_mem",
-        [("job.179",), ("job.141",)],
+        [("job.179",), ("job.441",)],
         "START_REFUSED",
     ),
+}
+
+
+#: As `_OUTCOME_STATUS`, for the kill and timer cases.
+_KT_STATUS = {
+    "kill ignored: INACTIVE": "INACTIVE",
+    "kill ignored: SUCCESS": "SUCCESS",
+    "kill ignored: FAILURE": "FAILURE",
+    "kill ignored: TERMINATED": "TERMINATED",
+    "a deferral that no longer belongs to its box run": "INACTIVE",
+    "a scan continuation after the job started": "SUCCESS",
+    "a scan continuation after the job moved on": "FAILURE",
+    "a scan continuation after the job ran and is INACTIVE again": "INACTIVE",
+    "a member's continuation after its box restarted and it ran": "SUCCESS",
+    "a member's continuation after its box restarted": "INACTIVE",
 }
 
 
@@ -1713,6 +1740,8 @@ def test_each_kill_and_timer_outcome_fires_its_row_and_writes_its_line(
 
     for item in script[:-1]:
         step(item)
+    if case in _KT_STATUS:
+        assert paired.store.job[job].status == _KT_STATUS[case]
     seen = _spied(paired)
     traced = len(paired.trace())
     step(script[-1])
@@ -1787,7 +1816,7 @@ def _rows_changed(**changes: dict[str, str]) -> type[Oracle]:
     return Changed
 
 
-_SWAPPED = {"job_114": {"source": "INACTIVE"}, "job_137": {"source": "LIVE"}}
+_SWAPPED = {"job_114": {"source": "IDLE"}, "job_440": {"source": "LIVE"}}
 
 
 @pytest.mark.parametrize(
@@ -1829,7 +1858,7 @@ def test_a_live_kill_row_narrowed_to_one_job_type_fails(
 def test_a_live_kill_row_with_its_state_swapped_differs_from_the_goldens(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A mutant of job.114 with its state dimension swapped with job.137's: a
+    """A mutant of job.114 with its state dimension swapped with job.440's: a
     live kill ignored, an idle kill terminating. The chart is the one
     declaration of a job's moves, so the oracle writes what the mutant
     reached; the goldens catch it at the first kill their corpus makes. The
@@ -1912,36 +1941,36 @@ _RUNNING_BOX = "OFF_ICE in a running box, ON_NOEXEC on its idle subbox"
 #: flag row, then the `flag moved` status row where one fires, then the start
 #: a retry posts), and a trace line the oracle writes for the job there.
 _FLAG_OUTCOMES: dict[str, tuple[str, int, str, list[tuple[str, ...]], str]] = {
-    "ON_ICE ignored: RUNNING": (_LIVE, 2, "fl_job", [("job.149",)], "EVENT_IGNORED"),
-    "ON_HOLD ignored: RUNNING": (_LIVE, 3, "fl_job", [("job.151",)], "EVENT_IGNORED"),
-    "ON_NOEXEC ignored: RUNNING": (_LIVE, 4, "fl_job", [("job.154",)], "EVENT_IGNORED"),
-    "ON_ICE ignored: STARTING": (_LIVE, 6, "fl_hold", [("job.148",)], "EVENT_IGNORED"),
-    "ON_HOLD ignored: STARTING": (_LIVE, 7, "fl_hold", [("job.150",)], "EVENT_IGNORED"),
-    "ON_NOEXEC ignored: STARTING": (_LIVE, 8, "fl_hold", [("job.153",)], "EVENT_IGNORED"),
+    "ON_ICE ignored: RUNNING": (_LIVE, 2, "fl_job", [("job.442",)], "EVENT_IGNORED"),
+    "ON_HOLD ignored: RUNNING": (_LIVE, 3, "fl_job", [("job.443",)], "EVENT_IGNORED"),
+    "ON_NOEXEC ignored: RUNNING": (_LIVE, 4, "fl_job", [("job.444",)], "EVENT_IGNORED"),
+    "ON_ICE ignored: STARTING": (_LIVE, 6, "fl_hold", [("job.442",)], "EVENT_IGNORED"),
+    "ON_HOLD ignored: STARTING": (_LIVE, 7, "fl_hold", [("job.443",)], "EVENT_IGNORED"),
+    "ON_NOEXEC ignored: STARTING": (_LIVE, 8, "fl_hold", [("job.444",)], "EVENT_IGNORED"),
     "ON_ICE": (_ICED, 1, "fl_job", [("job.201",), ("job.198",)], "ON_ICE"),
     "ON_ICE on an iced job": (_ICED, 2, "fl_job", [("job.218",)], "ON_ICE"),
-    "ON_NOEXEC ignored: ON_ICE": (_ICED, 3, "fl_job", [("job.152",)], "EVENT_IGNORED"),
+    "ON_NOEXEC ignored: ON_ICE": (_ICED, 3, "fl_job", [("job.444",)], "EVENT_IGNORED"),
     "OFF_ICE": (_ICED, 4, "fl_job", [("job.202",)], "OFF_ICE"),
     "OFF_ICE on a job not iced": (_ICED, 5, "fl_job", [("job.219",)], "OFF_ICE"),
     "ON_NOEXEC ignored: a box with a queued member": (
         _BUSY,
         3,
         "fl_q",
-        [("job.152",)],
+        [("job.444",)],
         "EVENT_IGNORED",
     ),
     "ON_NOEXEC ignored: a queued box with a running member": (
         _BUSY,
         6,
         "fl_box",
-        [("job.158",)],
+        [("job.444",)],
         "EVENT_IGNORED",
     ),
     "ON_NOEXEC ignored: a box with a STARTING member": (
         "ON_NOEXEC on a box with a STARTING member ignored",
         2,
         "fl_q",
-        [("job.152",)],
+        [("job.444",)],
         "EVENT_IGNORED",
     ),
     "ON_HOLD on a job that is not a waiter": (_DISARMS, 1, "fl_dated", [("job.204",)], "ON_HOLD"),
@@ -2085,6 +2114,21 @@ _FLAG_OUTCOMES: dict[str, tuple[str, int, str, list[tuple[str, ...]], str]] = {
 _HOLDS_BEFORE: Final = frozenset({"ON_NOEXEC on a STARTING box that holds a unit"})
 
 
+#: As `_OUTCOME_STATUS`, for the flag cases.
+_FLAG_STATUS = {
+    "ON_ICE ignored: RUNNING": "RUNNING",
+    "ON_HOLD ignored: RUNNING": "RUNNING",
+    "ON_NOEXEC ignored: RUNNING": "RUNNING",
+    "ON_ICE ignored: STARTING": "STARTING",
+    "ON_HOLD ignored: STARTING": "STARTING",
+    "ON_NOEXEC ignored: STARTING": "STARTING",
+    "ON_NOEXEC ignored: ON_ICE": "INACTIVE",
+    "ON_NOEXEC ignored: a box with a queued member": "INACTIVE",
+    "ON_NOEXEC ignored: a queued box with a running member": "QUE_WAIT",
+    "ON_NOEXEC ignored: a box with a STARTING member": "INACTIVE",
+}
+
+
 @pytest.mark.parametrize("case", sorted(_FLAG_OUTCOMES))
 def test_each_flag_outcome_fires_its_rows_and_writes_its_line(
     case: str,
@@ -2098,6 +2142,8 @@ def test_each_flag_outcome_fires_its_rows_and_writes_its_line(
     paired = Oracle(lower_source(oracle_inputs.FLAG_JIL))
     for step in steps[:-1]:
         paired.feed(step)
+    if case in _FLAG_STATUS:
+        assert paired.store.job[job].status == _FLAG_STATUS[case]
     if case in _HOLDS_BEFORE:  # job.170 settles a run's units: the box holds FL_R
         row = paired.store.job[job]
         assert (row.status, [r.bucket for r in row.reservations]) == ("STARTING", ["r:FL_R"])
@@ -2171,13 +2217,13 @@ def test_an_input_the_chart_ignores_and_the_rules_apply_is_a_statechart_error(
             return _swapped(chart, "noexec_ignored", "noexec_applies"), active, data
 
     oracle = _flag_oracle(Swapped)
-    with pytest.raises(StatechartError, match=f"'{job}': ON_NOEXEC fired job.152, and no ignored"):
+    with pytest.raises(StatechartError, match=f"'{job}': ON_NOEXEC fired job.444, and no ignored"):
         oracle.feed(ev("ON_NOEXEC", 1, job=job))
     assert oracle.store.job[job].status == "INACTIVE"
     assert oracle.trace() == []
 
 
-@pytest.mark.parametrize(("kind", "row"), [("ON_ICE", "job_148"), ("ON_HOLD", "job_150")])
+@pytest.mark.parametrize(("kind", "row"), [("ON_ICE", "job_442"), ("ON_HOLD", "job_443")])
 def test_an_ice_or_hold_the_chart_ignores_on_an_idle_job_is_a_statechart_error(
     kind: str, row: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -2821,28 +2867,28 @@ _BOX_OUTCOMES: dict[str, tuple[str, list[Event], str, list[tuple[str, ...]], str
         _BOX_JIL,
         [_box_ev(0, "STATUS", "r1m", status="SUCCESS")],
         "rb1",
-        [("job.131",)],
+        [("job.446",)],
         "INACTIVE->SUCCESS",
     ),
     "an idle box's box_failure": (
         _BOX_JIL,
         [_box_ev(0, "STATUS", "r2m", status="FAILURE")],
         "rb2",
-        [("job.189",), ("job.132",)],
+        [("job.189",), ("job.447",)],
         "INACTIVE->FAILURE",
     ),
     "an idle box derives SUCCESS": (
         _BOX_JIL,
         [_box_ev(0, "STATUS", "r3m", status="SUCCESS")],
         "rb3",
-        [("job.133",)],
+        [("job.448",)],
         "INACTIVE->SUCCESS",
     ),
     "an idle box derives FAILURE": (
         _BOX_JIL,
         [_box_ev(0, "STATUS", "r4m", status="FAILURE")],
         "rb4",
-        [("job.189",), ("job.134",)],
+        [("job.189",), ("job.449",)],
         "INACTIVE->FAILURE",
     ),
     "a FAILURE box's box_success": (
@@ -2852,7 +2898,7 @@ _BOX_OUTCOMES: dict[str, tuple[str, list[Event], str, list[tuple[str, ...]], str
             _box_ev(1, "STATUS", "r1m", status="SUCCESS"),
         ],
         "rb1",
-        [("job.162",)],
+        [("job.446",)],
         "FAILURE->SUCCESS",
     ),
     "a SUCCESS box's box_failure": (
@@ -2862,7 +2908,7 @@ _BOX_OUTCOMES: dict[str, tuple[str, list[Event], str, list[tuple[str, ...]], str
             _box_ev(1, "STATUS", "r2m", status="FAILURE"),
         ],
         "rb2",
-        [("job.189",), ("job.164",)],
+        [("job.189",), ("job.447",)],
         "SUCCESS->FAILURE",
     ),
     "a FAILURE box derives SUCCESS": (
@@ -2872,7 +2918,7 @@ _BOX_OUTCOMES: dict[str, tuple[str, list[Event], str, list[tuple[str, ...]], str
             _box_ev(1, "STATUS", "r4m", status="SUCCESS"),
         ],
         "rb4",
-        [("job.166",)],
+        [("job.448",)],
         "FAILURE->SUCCESS",
     ),
     "a SUCCESS box derives FAILURE": (
@@ -2882,35 +2928,35 @@ _BOX_OUTCOMES: dict[str, tuple[str, list[Event], str, list[tuple[str, ...]], str
             _box_ev(1, "STATUS", "r3m", status="FAILURE"),
         ],
         "rb3",
-        [("job.189",), ("job.168",)],
+        [("job.189",), ("job.449",)],
         "SUCCESS->FAILURE",
     ),
     "a queued box's box_success": (
         oracle_inputs.BOX_JIL,
         _queued_box_steps(5),
         "bx_q1",
-        [("job.161",)],
+        [("job.446",)],
         "QUE_WAIT->SUCCESS",
     ),
     "a queued box's box_failure": (
         oracle_inputs.BOX_JIL,
         _queued_box_steps(6),
         "bx_q2",
-        [("job.189",), ("job.163",)],
+        [("job.189",), ("job.447",)],
         "QUE_WAIT->FAILURE",
     ),
     "a queued box derives FAILURE": (
         oracle_inputs.BOX_JIL,
         _queued_box_steps(7),
         "bx_q3",
-        [("job.189",), ("job.167",)],
+        [("job.189",), ("job.449",)],
         "QUE_WAIT->FAILURE",
     ),
     "a queued box derives SUCCESS": (
         oracle_inputs.QUEUE_JIL,
         _queue_steps("a queued box's member ends it, and its parent's release meets it", 4),
         "qu_q",
-        [("job.165",), ("job.435",)],
+        [("job.448",), ("job.435",)],
         "QUE_WAIT->SUCCESS",
     ),
     "an idle box with a member still running derives nothing": (
@@ -2983,14 +3029,14 @@ _BOX_OUTCOMES: dict[str, tuple[str, list[Event], str, list[tuple[str, ...]], str
         _BOX_JIL,
         _CASCADE,
         "im",
-        [("job.159",), ("job.435",)],
+        [("job.445",), ("job.435",)],
         "RUNNING->INACTIVE",
     ),
     "a box set INACTIVE takes its ended member along": (
         _BOX_JIL,
         _CASCADE,
         "in",
-        [("job.160",), ("job.435",)],
+        [("job.445",), ("job.435",)],
         "SUCCESS->INACTIVE",
     ),
     "a box set INACTIVE leaves its INACTIVE member": (
@@ -3004,7 +3050,7 @@ _BOX_OUTCOMES: dict[str, tuple[str, list[Event], str, list[tuple[str, ...]], str
         oracle_inputs.BOX_JIL,
         _box_steps("a queued member goes INACTIVE with its box", 3),
         "bx_qm",
-        [("job.123",), ("job.435",)],
+        [("job.445",), ("job.435",)],
         "QUE_WAIT->INACTIVE",
     ),
     "a box taken OFF_NOEXEC clears its ON_NOEXEC member": (

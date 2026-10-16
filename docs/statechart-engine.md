@@ -392,7 +392,7 @@ first, and its line, where it has one, before the status line (DL-54). The arm i
 the projection check cannot see it. After each microstep's writes, before the next item, the row
 is armed if `job.429` fired, not armed if any of `job.430` to `job.439` fired, and otherwise as
 it was before the writes; any other value is a statechart error. An input the job ignores
-takes one of the status region's internal rows `job.148` to `job.158` and writes the
+takes one of the status region's internal rows `job.442` to `job.444` and writes the
 EVENT_IGNORED line with the rule's reason (`_oob_ignored`); a row the chart ignores where no
 rule gives a reason is a statechart error. A flag row is written by the flag
 move, with its marker and line. A status that the `flag moved` fires is a status move: an iced

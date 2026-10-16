@@ -23776,3 +23776,73 @@ relitigate an entry; append a new one.
   difference; four nits fixed and confirmed by it (two wrapped lines, a plural in the check's
   message, this entry's file list). Both named the seam for the next step: the line's cause
   moves beside the row, the destination stays the leaf's.
+- DL-368 A rule is written once, at the source the hierarchy gives it: the job chart's per-leaf
+  copies of one rule become one row at the superstate of the statuses it holds for, and an idle
+  box's recompute is one row per verdict at `lifecycle`, guarded on the statuses it moves from
+  (2026-10-16; src/dsl41/job_chart.py, src/dsl41/job_chart_rows.py, src/dsl41/oracle_writers.py,
+  src/dsl41/oracle_reads.py; tests/test_job_chart.py, tests/test_oracle_chart.py,
+  tests/test_oracle_chart_cascade.py, tests/test_oracle.py, tests/test_exhaustive_engine.py;
+  docs/statechart-engine.md §11; docs/state-machines.md)
+  THE AIM. Step 5 of the job chart simplification. Hierarchy exists so one rule is written once.
+  No outcome of the oracle changes: no golden, no trace line.
+  THE RULE. A rule that holds for every status of a set is one row whose source is the set's
+  superstate. A row at a superstate beside an inner row of the same event is shadowed by the inner
+  row where that row is enabled (§3); a row beside another row of the same source and event must
+  exclude it by guard (§3).
+  THE ROWS. job.137 to job.140 (KILLJOB ignored at each IDLE leaf) become job.440 at IDLE. job.141
+  to job.147 (`start_refused`, seven statuses) become job.441 at `lifecycle`, beside job.180; the
+  verdicts exclude each other, and ADMITTED keeps job.421. job.148 and job.149 (ON_ICE ignored)
+  become job.442 at LIVE; job.150 and job.151 (ON_HOLD) job.443. job.152 to job.158
+  (`noexec_ignored`) become job.444 at `lifecycle`; the RUNNING copy's `false_unreachable` goes,
+  since the one row's false outcome is reached at other statuses. job.123, job.159 and job.160
+  (`box set INACTIVE`, `batched`) become job.445 at `lifecycle`; job.196 still takes INACTIVE.
+  job.131 to job.134 and job.161 to job.168 become job.446 (`overrides_success`), job.447
+  (`overrides_failure`), job.448 (`derives_success`) and job.449 (`derives_failure`) at
+  `lifecycle`. The marked rows job.193 (LIVE) and job.194 (TERMINATED) retire into one marked row
+  at `lifecycle`, job.450, guarded `live_or_terminated_box`. Ids are not reused (DL-364); the new
+  rows continue the status rows after job.439, since job.199 is taken. Writers are rebound by id;
+  each copy had the same writer, and none reads the source.
+  THE RECOMPUTE. The four guards read `_recomputes`: a box, a status in INACTIVE, QUE_WAIT,
+  SUCCESS or FAILURE, and a verdict that is not that status. The last clause keeps SUCCESS to
+  SUCCESS and FAILURE to FAILURE from firing where no row fired before. job.191 sits at the same
+  source, so its guard `is_box` becomes `recomputes_nothing`: a box, not `_recomputes`, and not
+  `live_or_terminated_box`; its `false_unreachable` goes. job.192 (`is_job`, marked) stays. A box
+  at ADMITTED took job.191 at HEAD too, since no row of ADMITTED reads the recompute, and still
+  does. The tripwire stays: a box's recompute at STARTING, RUNNING or TERMINATED takes job.450, a
+  marked row guarded `live_or_terminated_box` with no writer, so the hook raises a statechart
+  error and the gate fails on a hit, as job.193 and job.194 did; a job's takes the marked job.192.
+  No input posts it there.
+  NOT DONE. job.136, job.169 and job.170 (`noexec_settles_box`) stay three rows. Their writer and
+  line are the same, but the one common source is `lifecycle`, where job.198
+  (`flag_moves_nothing`) is enabled wherever `noexec_settles_box` is: two enabled rows of one
+  state raise AmbiguousTransition (§3). The region-as-source rows (job.218 to job.223, job.231 to
+  job.233) need an engine change and stay. job.180's `false_unreachable` goes: job.441 beside it
+  makes its false outcome reachable.
+  CHECKS. The job chart has 147 rows, 175 before; 75 guards, 73 before. The transition gate holds
+  322 of 322 required items of `job`, 386 before; it forbids 29, 32 before. The completeness table
+  over the test's abstraction (4,710 cells) equals HEAD's under the id mapping, except the 60
+  cells of the retired job.193 and job.194, now the marked job.450 or job.192. A new test pins
+  each rule's one row and its source; the cell test checks each collapsed row from every leaf, and
+  at a leaf where another row takes the cell, that row (17 cells: job.196, job.191 or job.450).
+  The golden replay: 4,060 runs, 152,213 entries, 0 differing. Line and branch coverage 100.
+  THE VERSION. STATE_MACHINE_VERSION stays 24 (DL-235): no accepted input derives differently, and
+  the goldens replay equal.
+  THE PROJECT. Two steps of the review's table did not land: ordered row selection in place of
+  the start rule's label guards (declined: reproducing the tree takes about twenty-five rows with
+  compound guards, group order conflicts with §3's depth rule across the START rows' five sources,
+  and the tree's lazy reads are observable; the tree in one function is the declared precedence),
+  and the status line's cause in the declaration (abandoned: only 5 of the 48 rows that enter a
+  status have a literal cause and no extras, so a second table keyed by row id is one more place
+  to look; after DL-366 the writer, one per row, is the row's effect column).
+  REVIEW. Semantic class (chart rows; §13's coverage items change). One Codex Astra pass
+  (gpt-6-astra, xhigh): one P3, a box recompute at STARTING, RUNNING or TERMINATED passed silently
+  through job.191 where the retired job.193 and job.194 had raised; fixed by job.450 and confirmed
+  by it at high, with job.191 and job.450 mutually exclusive on every cell; none found on the
+  collapsed cells (114,432 resolver cells compared), the depth rule, `_recomputes`, and the
+  coverage items. One Opus reviewer: no blocker; the same finding as its medium, confirmed in the
+  job.450 form; a low, 24 cases in tests/test_oracle_chart.py named for a status asserted it only
+  through the per-leaf row id, each now asserts the status, confirmed; two notes in this entry.
+  Its differential run of HEAD against the tree: 3,780 runs and 411,648 steps over the fixtures,
+  the test JILs and 60 corpus files under three switch sets, no run differing, every retired row's
+  count equal to its new row's; its own completeness table over 4,710 cells identical under the id
+  mapping except the 60 cells of job.193 and job.194, which end on a marked row as before.

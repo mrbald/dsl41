@@ -81,29 +81,19 @@ stateDiagram-v2
     s19 --> s4 : job.120 STATUS [injects_inactive_job] / injected
     s1 --> s4 : job.121 flag moved [noexec_settles_job] / injected
     s10 --> s4 : job.122 box start / batched
-    s6 --> s4 : job.123 box set INACTIVE / batched
+    s19 --> s4 : job.445 box set INACTIVE / batched
     s8 --> s7 : job.125 started [started_box] / runs_box
     s7 --> s9 : job.126 member moves [verdict_success] / completed
     s7 --> s2 : job.127 member moves [verdict_failure] / completed
     s7 --> s9 : job.128 completion moment [verdict_success] / completed
     s7 --> s2 : job.129 completion moment [verdict_failure] / completed
     s7 --> s11 : job.130 member ends FAILURE or TERMINATED [terminator_fires] / terminated
-    s4 --> s9 : job.131 box recompute [overrides_success] / moved
-    s4 --> s2 : job.132 box recompute [overrides_failure] / moved
-    s4 --> s9 : job.133 box recompute [derives_success] / moved
-    s4 --> s2 : job.134 box recompute [derives_failure] / moved
+    s19 --> s9 : job.446 box recompute [overrides_success] / moved
+    s19 --> s2 : job.447 box recompute [overrides_failure] / moved
+    s19 --> s9 : job.448 box recompute [derives_success] / moved
+    s19 --> s2 : job.449 box recompute [derives_failure] / moved
     s19 --> s4 : job.135 STATUS [injects_inactive_box] / cascades
     s3 --> s4 : job.136 flag moved [noexec_settles_box] / cascades
-    s5 --> s4 : job.159 box set INACTIVE / batched
-    s10 --> s4 : job.160 box set INACTIVE / batched
-    s6 --> s9 : job.161 box recompute [overrides_success] / moved
-    s2 --> s9 : job.162 box recompute [overrides_success] / moved
-    s6 --> s2 : job.163 box recompute [overrides_failure] / moved
-    s9 --> s2 : job.164 box recompute [overrides_failure] / moved
-    s6 --> s9 : job.165 box recompute [derives_success] / moved
-    s2 --> s9 : job.166 box recompute [derives_success] / moved
-    s6 --> s2 : job.167 box recompute [derives_failure] / moved
-    s9 --> s2 : job.168 box recompute [derives_failure] / moved
     s6 --> s4 : job.169 flag moved [noexec_settles_box] / cascades
     s8 --> s4 : job.170 flag moved [noexec_settles_box] / cascades
     s16 --> s17 : job.201 ON_ICE [not_live_or_queued] / iced
@@ -181,7 +171,7 @@ stateDiagram-v2
 | job.120 | lifecycle | STATUS | injects_inactive_job | injected | INACTIVE | external | DL-242, DL-235 |
 | job.121 | FAILED | flag moved | noexec_settles_job | injected | INACTIVE | external | SEM-22, DL-243 |
 | job.122 | TERMINAL | box start |  | batched | INACTIVE | external | SEM-10, DL-242 |
-| job.123 | QUE_WAIT | box set INACTIVE |  | batched | INACTIVE | external | SEM-18, DL-242 |
+| job.445 | lifecycle | box set INACTIVE |  | batched | INACTIVE | external | SEM-18, DL-242 |
 | job.124 | IDLE | start | start_admits_box | extent_admit |  | internal | SEM-10, DL-242, DL-364 |
 | job.125 | STARTING | started | started_box | runs_box | RUNNING | external | SEM-10, SEM-33, DL-246 |
 | job.126 | RUNNING | member moves | verdict_success | completed | SUCCESS | external | SEM-12 |
@@ -189,44 +179,17 @@ stateDiagram-v2
 | job.128 | RUNNING | completion moment | verdict_success | completed | SUCCESS | external | SEM-11 |
 | job.129 | RUNNING | completion moment | verdict_failure | completed | FAILURE | external | SEM-11, SEM-14 |
 | job.130 | RUNNING | member ends FAILURE or TERMINATED | terminator_fires | terminated | TERMINATED | external | SEM-14 |
-| job.131 | INACTIVE | box recompute | overrides_success | moved | SUCCESS | external | SEM-15 |
-| job.132 | INACTIVE | box recompute | overrides_failure | moved | FAILURE | external | SEM-15 |
-| job.133 | INACTIVE | box recompute | derives_success | moved | SUCCESS | external | SEM-15 |
-| job.134 | INACTIVE | box recompute | derives_failure | moved | FAILURE | external | SEM-15 |
+| job.446 | lifecycle | box recompute | overrides_success | moved | SUCCESS | external | SEM-15 |
+| job.447 | lifecycle | box recompute | overrides_failure | moved | FAILURE | external | SEM-15 |
+| job.448 | lifecycle | box recompute | derives_success | moved | SUCCESS | external | SEM-15 |
+| job.449 | lifecycle | box recompute | derives_failure | moved | FAILURE | external | SEM-15 |
 | job.135 | lifecycle | STATUS | injects_inactive_box | cascades | INACTIVE | external | SEM-18 |
 | job.136 | IDLE | flag moved | noexec_settles_box | cascades | INACTIVE | external | DL-254 |
-| job.137 | INACTIVE | KILLJOB |  | EVENT_IGNORED |  | internal | DL-64, DL-81 |
-| job.138 | SUCCESS | KILLJOB |  | EVENT_IGNORED |  | internal | DL-64, DL-81 |
-| job.139 | FAILURE | KILLJOB |  | EVENT_IGNORED |  | internal | DL-64, DL-81 |
-| job.140 | TERMINATED | KILLJOB |  | EVENT_IGNORED |  | internal | DL-64, DL-81 |
-| job.141 | INACTIVE | start | start_refused |  |  | internal | DL-81, DL-246 |
-| job.142 | QUE_WAIT | start | start_refused |  |  | internal | DL-81, DL-246 |
-| job.143 | STARTING | start | start_refused |  |  | internal | DL-81, DL-246 |
-| job.144 | RUNNING | start | start_refused |  |  | internal | DL-81, DL-246 |
-| job.145 | SUCCESS | start | start_refused |  |  | internal | DL-81, DL-246 |
-| job.146 | FAILURE | start | start_refused |  |  | internal | DL-81, DL-246 |
-| job.147 | TERMINATED | start | start_refused |  |  | internal | DL-81, DL-246 |
-| job.148 | STARTING | ON_ICE |  | EVENT_IGNORED |  | internal | DL-254 |
-| job.149 | RUNNING | ON_ICE |  | EVENT_IGNORED |  | internal | DL-254 |
-| job.150 | STARTING | ON_HOLD |  | EVENT_IGNORED |  | internal | DL-254 |
-| job.151 | RUNNING | ON_HOLD |  | EVENT_IGNORED |  | internal | DL-254 |
-| job.152 | INACTIVE | ON_NOEXEC | noexec_ignored |  |  | internal | DL-254 |
-| job.153 | STARTING | ON_NOEXEC | noexec_ignored |  |  | internal | DL-254 |
-| job.154 | RUNNING | ON_NOEXEC | noexec_ignored |  |  | internal | DL-254 |
-| job.155 | SUCCESS | ON_NOEXEC | noexec_ignored |  |  | internal | DL-254 |
-| job.156 | FAILURE | ON_NOEXEC | noexec_ignored |  |  | internal | DL-254 |
-| job.157 | TERMINATED | ON_NOEXEC | noexec_ignored |  |  | internal | DL-254 |
-| job.158 | QUE_WAIT | ON_NOEXEC | noexec_ignored |  |  | internal | DL-254 |
-| job.159 | LIVE | box set INACTIVE |  | batched | INACTIVE | external | SEM-18, DL-242 |
-| job.160 | TERMINAL | box set INACTIVE |  | batched | INACTIVE | external | SEM-18 |
-| job.161 | QUE_WAIT | box recompute | overrides_success | moved | SUCCESS | external | SEM-15 |
-| job.162 | FAILURE | box recompute | overrides_success | moved | SUCCESS | external | SEM-15 |
-| job.163 | QUE_WAIT | box recompute | overrides_failure | moved | FAILURE | external | SEM-15 |
-| job.164 | SUCCESS | box recompute | overrides_failure | moved | FAILURE | external | SEM-15 |
-| job.165 | QUE_WAIT | box recompute | derives_success | moved | SUCCESS | external | SEM-15 |
-| job.166 | FAILURE | box recompute | derives_success | moved | SUCCESS | external | SEM-15 |
-| job.167 | QUE_WAIT | box recompute | derives_failure | moved | FAILURE | external | SEM-15 |
-| job.168 | SUCCESS | box recompute | derives_failure | moved | FAILURE | external | SEM-15 |
+| job.440 | IDLE | KILLJOB |  | EVENT_IGNORED |  | internal | DL-64, DL-81 |
+| job.441 | lifecycle | start | start_refused |  |  | internal | DL-81, DL-246 |
+| job.442 | LIVE | ON_ICE |  | EVENT_IGNORED |  | internal | DL-254 |
+| job.443 | LIVE | ON_HOLD |  | EVENT_IGNORED |  | internal | DL-254 |
+| job.444 | lifecycle | ON_NOEXEC | noexec_ignored |  |  | internal | DL-254 |
 | job.169 | QUE_WAIT | flag moved | noexec_settles_box | cascades | INACTIVE | external | DL-254 |
 | job.170 | STARTING | flag moved | noexec_settles_box | cascades | INACTIVE | external | DL-254 |
 | job.177 | lifecycle | STARTJOB |  | relay_start |  | internal | SEM-10 |
@@ -243,10 +206,9 @@ stateDiagram-v2
 | job.188 | lifecycle | completion moment |  | Only a RUNNING box folds. |  | ignored (unreachable) |  |
 | job.189 | lifecycle | member ends FAILURE or TERMINATED | is_box | A terminator ends only a RUNNING box, the door or the recompute follows. |  | ignored | SEM-13, SEM-14 |
 | job.190 | lifecycle | member ends FAILURE or TERMINATED | is_job | Only a box has members. |  | ignored (unreachable) |  |
-| job.191 | lifecycle | box recompute | is_box | No verdict, or the box already has it. |  | ignored | SEM-15 |
+| job.191 | lifecycle | box recompute | recomputes_nothing | No verdict, the box already has it, or it is ADMITTED. |  | ignored | SEM-13, SEM-15 |
 | job.192 | lifecycle | box recompute | is_job | Only a box has members. |  | ignored (unreachable) |  |
-| job.193 | LIVE | box recompute |  | A live box is not idle, its own end decides it. |  | ignored (unreachable) |  |
-| job.194 | TERMINATED | box recompute |  | TERMINATED is sticky until the next box start (SEM-13). |  | ignored (unreachable) |  |
+| job.450 | lifecycle | box recompute | live_or_terminated_box | A live box's own end decides it, TERMINATED is sticky until the next box start (SEM-13). |  | ignored (unreachable) |  |
 | job.195 | lifecycle | box start |  | INACTIVE loses its exit code by a plain write, a live or queued job keeps its run. |  | ignored | SEM-10, DL-242 |
 | job.196 | INACTIVE | box set INACTIVE |  | Already INACTIVE: the cascade leaves it out. |  | ignored | SEM-18 |
 | job.197 | lifecycle | box ends FAILURE or TERMINATED |  | Not live, or no job_terminator: nothing to terminate. |  | ignored | SEM-14 |
@@ -437,10 +399,12 @@ stateDiagram-v2
 | verdict_success | guard | The data: a box, the payload's step decides SUCCESS: box_success holds (SEM-12), or the default fold with no box_success (SEM-11). |
 | verdict_failure | guard | The data: a box, the payload's step decides FAILURE: box_failure holds (SEM-12), or the default fold over a failed vote with no box_failure. |
 | decides_nothing | guard | The data: a box, the payload's step decides nothing. |
-| overrides_success | guard | The data: a box, the payload: box_success decides SUCCESS (SEM-15). |
-| overrides_failure | guard | The data: a box, the payload: box_failure decides FAILURE (SEM-15). |
-| derives_success | guard | The data: a box, the payload: no member failed, and no box_success suppresses the default SUCCESS (SEM-15). |
-| derives_failure | guard | The data: a box, the payload: a member failed, and no box_failure suppresses the default FAILURE (SEM-15). |
+| overrides_success | guard | `_recomputes`, the payload: box_success decides SUCCESS (SEM-15). |
+| overrides_failure | guard | `_recomputes`, the payload: box_failure decides FAILURE (SEM-15). |
+| recomputes_nothing | guard | The data: a box, not `_recomputes` and not `live_or_terminated_box`: the payload names no verdict, the box already has it, or its status is the transient ADMITTED (SEM-15). |
+| live_or_terminated_box | guard | The data: a box, the configuration's status is STARTING, RUNNING or TERMINATED. |
+| derives_success | guard | `_recomputes`, the payload: no member failed, and no box_success suppresses the default SUCCESS (SEM-15). |
+| derives_failure | guard | `_recomputes`, the payload: a member failed, and no box_failure suppresses the default FAILURE (SEM-15). |
 | terminator_fires | guard | The data: a box, the payload's `fires` (SEM-14). |
 | has_demand | guard | The payload's demand vector reserves units. |
 | no_demand | guard | The payload's demand vector reserves nothing: reserving nothing is no move. |
