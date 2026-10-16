@@ -271,7 +271,7 @@ class OracleReads:
 
         "Change the Executable Status of a Job" (AutoSys 24.2): ON_HOLD and ON_ICE have "no
         effect on jobs with a status of STARTING or RUNNING", box or not; the chart ignores them
-        there only (job.148 to job.151). ON_NOEXEC is ignored for a non-box job that is
+        there only (job.442, job.443). ON_NOEXEC is ignored for a non-box job that is
         STARTING, RUNNING or ON_ICE, for a box that is ON_ICE or RUNNING, and for "A box job with
         jobs (including the jobs contained in lower level boxes) in a status other than the
         following status: ON_HOLD, ON_NOEXEC, INACTIVE, SUCCESS, FAILURE, ACTIVATED, or

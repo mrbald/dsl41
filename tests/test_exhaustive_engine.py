@@ -311,7 +311,7 @@ def test_every_job_event_in_every_built_flag_and_holding_state_takes_a_declared_
     one given SUCCESS. `idle-box-iced-member` adds no state or move: it
     decides whether an idle box re-derives through an iced member. Under
     `ignore`, the default these builds run, the moves that follow,
-    job.131 to job.134, are taken through a member that is not iced, or
+    job.446 to job.449, are taken through a member that is not iced, or
     the end of an iced member whose live status had blocked the re-derive.
     Under `vote` an iced member's own end can take them too, by design."""
     catalog = lower_source(_JOB_JIL)

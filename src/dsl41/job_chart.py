@@ -647,19 +647,44 @@ def started_box(ctx: Context) -> bool:
     return is_box(ctx) and current_run(ctx)
 
 
-def _box_verdict(ctx: Context, target: str | None, override: bool) -> bool:
+#: The statuses an idle box's recompute moves from (SEM-15). A live box's own end decides it,
+#: and TERMINATED is sticky until the next box start (SEM-13).
+_RECOMPUTED: Final = frozenset({"INACTIVE", "QUE_WAIT", "SUCCESS", "FAILURE"})
+
+
+def _recomputes(ctx: Context) -> bool:
+    """The data: a box; the configuration's status is one the recompute moves from
+    (`_RECOMPUTED`); the payload names a verdict that is not that status."""
+    if not (_data(ctx).box and ctx.active & _RECOMPUTED):
+        return False
     verdict: BoxVerdict = ctx.event.payload
-    return _data(ctx).box and verdict.target == target and verdict.override == override
+    return verdict.target is not None and verdict.target not in ctx.active
+
+
+def _box_verdict(ctx: Context, target: str, override: bool) -> bool:
+    verdict: BoxVerdict = ctx.event.payload
+    return _recomputes(ctx) and verdict.target == target and verdict.override == override
 
 
 def overrides_success(ctx: Context) -> bool:
-    """The data: a box; the payload: box_success decides SUCCESS (SEM-15)."""
+    """`_recomputes`; the payload: box_success decides SUCCESS (SEM-15)."""
     return _box_verdict(ctx, "SUCCESS", True)
 
 
 def overrides_failure(ctx: Context) -> bool:
-    """The data: a box; the payload: box_failure decides FAILURE (SEM-15)."""
+    """`_recomputes`; the payload: box_failure decides FAILURE (SEM-15)."""
     return _box_verdict(ctx, "FAILURE", True)
+
+
+def recomputes_nothing(ctx: Context) -> bool:
+    """The data: a box; not `_recomputes` and not `live_or_terminated_box`: the payload names
+    no verdict, the box already has it, or its status is the transient ADMITTED (SEM-15)."""
+    return _data(ctx).box and not _recomputes(ctx) and not live_or_terminated_box(ctx)
+
+
+def live_or_terminated_box(ctx: Context) -> bool:
+    """The data: a box; the configuration's status is STARTING, RUNNING or TERMINATED."""
+    return _data(ctx).box and bool(ctx.active & {"LIVE", "TERMINATED"})
 
 
 def _door(ctx: Context, target: str | None) -> bool:
@@ -685,14 +710,14 @@ def decides_nothing(ctx: Context) -> bool:
 
 
 def derives_success(ctx: Context) -> bool:
-    """The data: a box; the payload: no member failed, and no box_success
-    suppresses the default SUCCESS (SEM-15)."""
+    """`_recomputes`; the payload: no member failed, and no box_success suppresses the default
+    SUCCESS (SEM-15)."""
     return _box_verdict(ctx, "SUCCESS", False)
 
 
 def derives_failure(ctx: Context) -> bool:
-    """The data: a box; the payload: a member failed, and no box_failure
-    suppresses the default FAILURE (SEM-15)."""
+    """`_recomputes`; the payload: a member failed, and no box_failure suppresses the default
+    FAILURE (SEM-15)."""
     return _box_verdict(ctx, "FAILURE", False)
 
 
@@ -816,6 +841,8 @@ GUARDS: Final = {
         decides_nothing,
         overrides_success,
         overrides_failure,
+        recomputes_nothing,
+        live_or_terminated_box,
         derives_success,
         derives_failure,
         terminator_fires,

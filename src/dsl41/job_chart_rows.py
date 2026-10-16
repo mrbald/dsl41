@@ -168,8 +168,11 @@ ROOT: Final = State(
     ),
 )
 
-#: The status rows, `job.1NN`: 100 is the start bound (DL-304), 101 to 158 are the status
-#: moves, 159 and above are a split source's further rows and the cells the rules move nothing in.
+#: The status rows, `job.1NN`: 100 is the start bound (DL-304), 101 to 136 are the status
+#: moves, 169 and 170 a split source's further rows, 177 and above the relays and the cells the
+#: rules move nothing in. job.440 to job.449 are status rules each written once, at the source
+#: the hierarchy gives it, and job.450 the cell beside the recompute's rows no input reaches
+#: (DL-368). Ids are stable: a retired id is never reused (DL-364).
 _STATUS_ROWS: Final = (
     Row(
         "job.100",
@@ -275,7 +278,13 @@ _STATUS_ROWS: Final = (
     ),
     Row("job.122", "TERMINAL", BOX_START, "INACTIVE", action="batched", cite="SEM-10, DL-242"),
     Row(
-        "job.123", "QUE_WAIT", BOX_SET_INACTIVE, "INACTIVE", action="batched", cite="SEM-18, DL-242"
+        "job.445",
+        "lifecycle",
+        BOX_SET_INACTIVE,
+        "INACTIVE",
+        action="batched",
+        cite="SEM-18, DL-242",
+        note="An INACTIVE job takes job.196: the cascade leaves it out.",
     ),
     Row(
         "job.124",
@@ -340,10 +349,15 @@ _STATUS_ROWS: Final = (
         "terminated",
         cite="SEM-14",
     ),
-    Row("job.131", "INACTIVE", BOX_RECOMPUTE, "SUCCESS", "overrides_success", "moved", cite=_SEM15),
-    Row("job.132", "INACTIVE", BOX_RECOMPUTE, "FAILURE", "overrides_failure", "moved", cite=_SEM15),
-    Row("job.133", "INACTIVE", BOX_RECOMPUTE, "SUCCESS", "derives_success", "moved", cite=_SEM15),
-    Row("job.134", "INACTIVE", BOX_RECOMPUTE, "FAILURE", "derives_failure", "moved", cite=_SEM15),
+    # an idle box's recompute, from each status its verdict moves (`job_chart._recomputes`)
+    Row(
+        "job.446", "lifecycle", BOX_RECOMPUTE, "SUCCESS", "overrides_success", "moved", cite=_SEM15
+    ),
+    Row(
+        "job.447", "lifecycle", BOX_RECOMPUTE, "FAILURE", "overrides_failure", "moved", cite=_SEM15
+    ),
+    Row("job.448", "lifecycle", BOX_RECOMPUTE, "SUCCESS", "derives_success", "moved", cite=_SEM15),
+    Row("job.449", "lifecycle", BOX_RECOMPUTE, "FAILURE", "derives_failure", "moved", cite=_SEM15),
     Row(
         "job.135",
         "lifecycle",
@@ -354,53 +368,15 @@ _STATUS_ROWS: Final = (
         cite="SEM-18",
     ),
     Row("job.136", "IDLE", FLAG_MOVED, "INACTIVE", "noexec_settles_box", "cascades", cite=_DL254),
-    *(
-        Row(
-            f"job.{137 + i}", s, KILLJOB, kind="internal", cite="DL-64, DL-81", note="EVENT_IGNORED"
-        )
-        for i, s in enumerate(("INACTIVE", "SUCCESS", "FAILURE", "TERMINATED"))
+    Row("job.440", "IDLE", KILLJOB, kind="internal", cite="DL-64, DL-81", note="EVENT_IGNORED"),
+    Row(
+        "job.441", "lifecycle", START, guard="start_refused", kind="internal", cite="DL-81, DL-246"
     ),
-    *(
-        Row(
-            f"job.{141 + i}", s, START, guard="start_refused", kind="internal", cite="DL-81, DL-246"
-        )
-        for i, s in enumerate(
-            ("INACTIVE", "QUE_WAIT", "STARTING", "RUNNING", "SUCCESS", "FAILURE", "TERMINATED")
-        )
-    ),
-    Row("job.148", "STARTING", ON_ICE, kind="internal", cite=_DL254, note="EVENT_IGNORED"),
-    Row("job.149", "RUNNING", ON_ICE, kind="internal", cite=_DL254, note="EVENT_IGNORED"),
-    Row("job.150", "STARTING", ON_HOLD, kind="internal", cite=_DL254, note="EVENT_IGNORED"),
-    Row("job.151", "RUNNING", ON_HOLD, kind="internal", cite=_DL254, note="EVENT_IGNORED"),
-    *(
-        Row(
-            f"job.{152 + i}",
-            s,
-            ON_NOEXEC,
-            guard="noexec_ignored",
-            kind="internal",
-            cite=_DL254,
-            false_unreachable=(
-                "the vendor ignores ON_NOEXEC on every RUNNING job and box"
-                if s == "RUNNING"
-                else ""
-            ),
-        )
-        for i, s in enumerate(
-            ("INACTIVE", "STARTING", "RUNNING", "SUCCESS", "FAILURE", "TERMINATED", "QUE_WAIT")
-        )
-    ),
-    # a split source: the other sources of job.123, job.131 to job.134 and job.136
-    Row("job.159", "LIVE", BOX_SET_INACTIVE, "INACTIVE", action="batched", cite="SEM-18, DL-242"),
-    Row("job.160", "TERMINAL", BOX_SET_INACTIVE, "INACTIVE", action="batched", cite="SEM-18"),
-    Row("job.161", "QUE_WAIT", BOX_RECOMPUTE, "SUCCESS", "overrides_success", "moved", cite=_SEM15),
-    Row("job.162", "FAILURE", BOX_RECOMPUTE, "SUCCESS", "overrides_success", "moved", cite=_SEM15),
-    Row("job.163", "QUE_WAIT", BOX_RECOMPUTE, "FAILURE", "overrides_failure", "moved", cite=_SEM15),
-    Row("job.164", "SUCCESS", BOX_RECOMPUTE, "FAILURE", "overrides_failure", "moved", cite=_SEM15),
-    Row("job.165", "QUE_WAIT", BOX_RECOMPUTE, "SUCCESS", "derives_success", "moved", cite=_SEM15),
-    Row("job.166", "FAILURE", BOX_RECOMPUTE, "SUCCESS", "derives_success", "moved", cite=_SEM15),
-    Row("job.167", "QUE_WAIT", BOX_RECOMPUTE, "FAILURE", "derives_failure", "moved", cite=_SEM15),
-    Row("job.168", "SUCCESS", BOX_RECOMPUTE, "FAILURE", "derives_failure", "moved", cite=_SEM15),
+    Row("job.442", "LIVE", ON_ICE, kind="internal", cite=_DL254, note="EVENT_IGNORED"),
+    Row("job.443", "LIVE", ON_HOLD, kind="internal", cite=_DL254, note="EVENT_IGNORED"),
+    Row("job.444", "lifecycle", ON_NOEXEC, guard="noexec_ignored", kind="internal", cite=_DL254),
+    # a split source: the other sources of job.136. `flag moved` has no row at `lifecycle` beside
+    # job.198, which is enabled wherever `noexec_settles_box` is (statechart-engine §3).
     Row(
         "job.169", "QUE_WAIT", FLAG_MOVED, "INACTIVE", "noexec_settles_box", "cascades", cite=_DL254
     ),
@@ -433,8 +409,6 @@ _STATUS_ROWS: Final = (
         kind="ignored",
         cite="SEM-20, SEM-21, SEM-33",
         note="A gate holds the attempt silently, or a postponed start waits.",
-        false_unreachable="the catch-all of `start`: an attempt that moves the status takes an"
-        " inner row, and no row is a gap (§10)",
     ),
     Row(
         "job.181",
@@ -505,19 +479,18 @@ _STATUS_ROWS: Final = (
         "job.191",
         "lifecycle",
         BOX_RECOMPUTE,
-        guard="is_box",
+        guard="recomputes_nothing",
         kind="ignored",
-        cite=_SEM15,
-        note="No verdict, or the box already has it.",
-        false_unreachable="its complement is job.192's, a marked row: only a box has members",
+        cite="SEM-13, SEM-15",
+        note="No verdict, the box already has it, or it is ADMITTED.",
     ),
     _never("job.192", "lifecycle", BOX_RECOMPUTE, "Only a box has members.", guard="is_job"),
-    _never("job.193", "LIVE", BOX_RECOMPUTE, "A live box is not idle; its own end decides it."),
     _never(
-        "job.194",
-        "TERMINATED",
+        "job.450",
+        "lifecycle",
         BOX_RECOMPUTE,
-        "TERMINATED is sticky until the next box start (SEM-13).",
+        "A live box's own end decides it; TERMINATED is sticky until the next box start (SEM-13).",
+        "live_or_terminated_box",
     ),
     Row(
         "job.195",

@@ -1141,7 +1141,7 @@ def _no_run_compare(self: Oracle, box: str, status: str, run: int) -> bool:
 def test_a_parent_recompute_that_reads_no_run_diverges() -> None:
     """Gate 5's mutant: without the run compare, m's INACTIVE recomputes P in
     the run its wakes began; box_failure s(ext) is true by then, so the chart
-    writes P SUCCESS->FAILURE (job.164), where the oracle writes nothing."""
+    writes P SUCCESS->FAILURE (job.447), where the oracle writes nothing."""
     last = ev("STATUS", 4, job="m", status="INACTIVE")
     paired = _paired(_MOVED_OVERRIDE, _MOVED_OVERRIDE_SETUP)
     paired.feed(last)

@@ -124,11 +124,6 @@ ROWS = {row.id: row for row in CHART.rows}
 #: A move with several sources: the row of its first source, and the rows of
 #: its other sources, which take the same cell.
 SIBLINGS: dict[str, tuple[str, ...]] = {
-    "job.123": ("job.159", "job.160"),
-    "job.131": ("job.161", "job.162"),
-    "job.132": ("job.163", "job.164"),
-    "job.133": ("job.165", "job.166"),
-    "job.134": ("job.167", "job.168"),
     "job.136": ("job.169", "job.170"),
     "job.201": ("job.218",),
     "job.202": ("job.219",),
@@ -138,6 +133,16 @@ SIBLINGS: dict[str, tuple[str, ...]] = {
     "job.210": ("job.223",),
     "job.235": ("job.236",),
     "job.237": ("job.238",),
+}
+#: A rule written once at a superstate, and the leaves where another row takes its cell: an
+#: inner row, or the row of the guard's false side (DL-368).
+_NOT_RECOMPUTED = ("STARTING", "RUNNING", "TERMINATED")
+ELSEWHERE: dict[str, dict[str, str]] = {
+    "job.445": {"INACTIVE": "job.196"},
+    "job.446": {"SUCCESS": "job.191", **dict.fromkeys(_NOT_RECOMPUTED, "job.450")},
+    "job.447": {"FAILURE": "job.191", **dict.fromkeys(_NOT_RECOMPUTED, "job.450")},
+    "job.448": {"SUCCESS": "job.191", **dict.fromkeys(_NOT_RECOMPUTED, "job.450")},
+    "job.449": {"FAILURE": "job.191", **dict.fromkeys(_NOT_RECOMPUTED, "job.450")},
 }
 #: The rows the cascade and the admission add, by why they exist.
 RELAYS = ("job.177", "job.178", "job.179")
@@ -343,7 +348,7 @@ def test_the_chart_is_well_formed_draws_no_warning_and_is_registered() -> None:
     assert chart_warnings(CHART) == []
     assert CHART.clock == "logical"
     assert CHART in MACHINES
-    assert len(CHART.rows) == 175
+    assert len(CHART.rows) == 147
     assert [b.id for c in CHART.choices for b in c.branches] == [
         *(f"job.{n}" for n in range(171, 177)),
         "job.309",
@@ -404,8 +409,8 @@ def test_every_marked_row_is_unreachable_with_its_reason() -> None:
     previous end, since job.401 settles first."""
     marked = [row for row in CHART.rows if row.mark]
     assert [row.id for row in marked] == [
-        "job.182", "job.186", "job.188", "job.190", "job.192", "job.193",
-        "job.194", "job.199", "job.312", "job.314", "job.317", "job.318", "job.320", "job.321",
+        "job.182", "job.186", "job.188", "job.190", "job.192", "job.450", "job.199", "job.312",
+        "job.314", "job.317", "job.318", "job.320", "job.321",
         "job.420", "job.421", "job.422", "job.423",
     ]  # fmt: skip
     cells = [row for row in marked if row.id != LATE_SETTLEMENT]
@@ -413,6 +418,35 @@ def test_every_marked_row_is_unreachable_with_its_reason() -> None:
     late = ROWS[LATE_SETTLEMENT]
     assert (late.mark, late.kind, late.action) == ("unreachable", "internal", "settle_ended_run")
     assert "carries no previous end" in late.note
+
+
+#: The rules each written once, at the source the hierarchy gives the statuses it holds for
+#: (DL-368): the source and the event.
+ONCE = {
+    "job.440": ("IDLE", KILLJOB),
+    "job.441": ("lifecycle", START),
+    "job.442": ("LIVE", ON_ICE),
+    "job.443": ("LIVE", ON_HOLD),
+    "job.444": ("lifecycle", ON_NOEXEC),
+    "job.445": ("lifecycle", BOX_SET_INACTIVE),
+    "job.446": ("lifecycle", BOX_RECOMPUTE),
+    "job.447": ("lifecycle", BOX_RECOMPUTE),
+    "job.448": ("lifecycle", BOX_RECOMPUTE),
+    "job.449": ("lifecycle", BOX_RECOMPUTE),
+}
+
+
+def test_a_rule_for_a_set_of_statuses_is_one_row_at_their_superstate() -> None:
+    """Each rule of `ONCE` has one row, at the superstate of the statuses it holds for: no
+    other row has its event, guard, kind, target and action (DL-368)."""
+
+    def rule(row: Row) -> tuple[str, ...]:
+        return (row.event, row.guard, row.kind, row.target, row.action)
+
+    for ident, (source, event) in ONCE.items():
+        row = ROWS[ident]
+        assert (row.source, row.event) == (source, event), ident
+        assert [r.id for r in CHART.rows if rule(r) == rule(row)] == [ident]
 
 
 def test_the_arm_s_rows_are_its_latch_and_its_clears() -> None:
@@ -437,7 +471,7 @@ def _moves() -> set[str]:
 def test_every_other_row_moves_nothing_relays_an_attempt_or_settles_held_units() -> None:
     moves = _moves()
     others = [row for row in CHART.rows if row.id not in moves]
-    assert len(moves) == 79 + 18 + 5 and len(others) == 73
+    assert len(moves) == 62 + 8 + 5 and len(others) == 72
     moments = {f"job.{405 + i}": event for i, event in enumerate(MOMENTS)}
     for row in others:
         if row.id in RELAYS:
@@ -848,7 +882,7 @@ def test_the_completeness_table_matches_the_declaration_in_every_cell() -> None:
     # the arm is a fact of the payload, and a waiter's kill is one row for each value (DL-365)
     assert table[("job QUE_WAIT", KILLJOB, unarmed)] == "job.437"
     assert table[("job QUE_WAIT", KILLJOB, armed)] == "job.436"
-    assert table[("job INACTIVE", KILLJOB, armed)] == "job.137"
+    assert table[("job INACTIVE", KILLJOB, armed)] == "job.440"
     assert table[("job ADMITTED", ACTUAL_START, armed)] == "job.430"
     assert table[("job ADMITTED", ACTUAL_START, unarmed)] == "job.431"
     assert table[("job SUCCESS", ACTUAL_START, armed)] == "job.430"
@@ -862,7 +896,7 @@ def test_the_completeness_table_matches_the_declaration_in_every_cell() -> None:
     assert table[("job INACTIVE", START, repr(replace(tick, armed=True)))] == "ignored job.180"
     assert table[("job INACTIVE", START, repr(Attempt(dated=True)))] == "ignored job.180"
     assert table[("job INACTIVE", START, repr(Attempt(dated=True, armed=True)))] == "job.102"
-    assert table[("job STARTING", ON_ICE, sc.ANY)] == "job.148"
+    assert table[("job STARTING", ON_ICE, sc.ANY)] == "job.442"
     assert table[("job QUE_WAIT hold", ON_ICE, sc.ANY)] == "job.234"
     assert table[("job INACTIVE ice", FORCE_STARTJOB, repr(Attempt()))] == "job.178 + job.203"
     assert table[("job INACTIVE", START, repr(Attempt(window="defer")))] == "ignored job.180"
@@ -889,7 +923,7 @@ def test_the_completeness_table_matches_the_declaration_in_every_cell() -> None:
     # ON_NOEXEC bypasses before held units are read (SEM-22, `start_verdict`)
     assert table[("job FAILURE every flag held", START, repr(Attempt(force=True)))] == "job.101"
     assert table[("job FAILURE every flag held", START, repr(Attempt()))] == "ignored job.180"
-    assert table[("job FAILURE every flag held", ON_NOEXEC, repr(Noexec()))] == "job.156"
+    assert table[("job FAILURE every flag held", ON_NOEXEC, repr(Noexec()))] == "job.444"
     # `started` moves only the run the admission began (`Started.current`)
     assert table[("box RUNNING", STARTED, repr(Still(True)))] == "ignored job.183"
     assert table[("box STARTING", STARTED, repr(Still(True)))] == "job.125"
@@ -1004,7 +1038,7 @@ CELLS: dict[str, Cell] = {
     "job.120": _status(ChartEvent(STATUS, Injection("INACTIVE"))),
     "job.121": _status(_noexec_moved(), noexec=True),
     "job.122": _status(ChartEvent(BOX_START)),
-    "job.123": _status(ChartEvent(BOX_SET_INACTIVE)),
+    "job.445": _status(ChartEvent(BOX_SET_INACTIVE)),
     "job.124": _status(_start(), BOX_DATA),
     "job.125": _status(ChartEvent(STARTED, Still()), BOX_DATA),
     "job.126": _status(ChartEvent(MEMBER_MOVES, _step("SUCCESS")), BOX_DATA),
@@ -1012,22 +1046,17 @@ CELLS: dict[str, Cell] = {
     "job.128": _status(ChartEvent(COMPLETION_MOMENT, _step("SUCCESS")), BOX_DATA),
     "job.129": _status(ChartEvent(COMPLETION_MOMENT, _step("FAILURE")), BOX_DATA),
     "job.130": _status(ChartEvent(MEMBER_ENDS, Terminator()), BOX_DATA),
-    "job.131": _status(ChartEvent(BOX_RECOMPUTE, _box("SUCCESS", True)), BOX_DATA),
-    "job.132": _status(ChartEvent(BOX_RECOMPUTE, _box("FAILURE", True)), BOX_DATA),
-    "job.133": _status(ChartEvent(BOX_RECOMPUTE, _box("SUCCESS", False)), BOX_DATA),
-    "job.134": _status(ChartEvent(BOX_RECOMPUTE, _box("FAILURE", False)), BOX_DATA),
+    "job.446": _status(ChartEvent(BOX_RECOMPUTE, _box("SUCCESS", True)), BOX_DATA),
+    "job.447": _status(ChartEvent(BOX_RECOMPUTE, _box("FAILURE", True)), BOX_DATA),
+    "job.448": _status(ChartEvent(BOX_RECOMPUTE, _box("SUCCESS", False)), BOX_DATA),
+    "job.449": _status(ChartEvent(BOX_RECOMPUTE, _box("FAILURE", False)), BOX_DATA),
     "job.135": _status(ChartEvent(STATUS, Injection("INACTIVE")), BOX_DATA),
     "job.136": _status(_noexec_moved(), BOX_DATA, noexec=True),
-    **{f"job.{100 + n}": _status(ChartEvent(KILLJOB)) for n in range(37, 41)},
-    **{f"job.{100 + n}": _status(_start(stale=True)) for n in range(41, 48)},
-    "job.148": _status(ChartEvent(ON_ICE)),
-    "job.149": _status(ChartEvent(ON_ICE)),
-    "job.150": _status(ChartEvent(ON_HOLD)),
-    "job.151": _status(ChartEvent(ON_HOLD)),
-    **{
-        f"job.{100 + n}": _status(ChartEvent(ON_NOEXEC, Noexec(tree_busy=True)), BOX_DATA)
-        for n in range(52, 59)
-    },
+    "job.440": _status(ChartEvent(KILLJOB)),
+    "job.441": _status(_start(stale=True)),
+    "job.442": _status(ChartEvent(ON_ICE)),
+    "job.443": _status(ChartEvent(ON_HOLD)),
+    "job.444": _status(ChartEvent(ON_NOEXEC, Noexec(tree_busy=True)), BOX_DATA),
     "job.201": _flag(ChartEvent(ON_ICE)),
     "job.202": _flag(ChartEvent(OFF_ICE)),
     "job.203": _flag(ChartEvent(FORCE_STARTJOB, Attempt())),
@@ -1076,9 +1105,10 @@ def test_every_move_from_every_source_ends_in_its_target() -> None:
     dispatched that item: the handle here sends nothing beyond a row's own
     move, and the oracle's tests pin who sends it (test_oracle_chart.py). A flag move whose
     guard parts a waiter from any other job has a waiter's twin with its own cell
-    (`WAITER_CELLS`)."""
-    assert len(CELLS) == 79
-    checked = 0
+    (`WAITER_CELLS`). A rule written once at a superstate fires at each of its leaves but those
+    where another row takes its cell (`ELSEWHERE`), and that row fires there."""
+    assert len(CELLS) == 62
+    checked = elsewhere = 0
     for primary, cell in (*CELLS.items(), *WAITER_CELLS.items()):
         for ident in (primary, *SIBLINGS.get(primary, ())):
             row = ROWS[ident]
@@ -1089,11 +1119,16 @@ def test_every_move_from_every_source_ends_in_its_target() -> None:
                 executor.restore("j", CHART, active, data)
                 outcomes = _advance(executor, "j", event)
                 fired = [fired for outcome in outcomes for fired in outcome.rows]
+                other = ELSEWHERE.get(ident, {}).get(source)
+                if other is not None:
+                    assert other in fired and ident not in fired, (ident, source, fired)
+                    elsewhere += 1
+                    continue
                 assert ident in fired, (ident, source, fired)
                 after = _leaf(executor.active("j"), REGION[source])
                 assert after in _targets(row), (ident, source, after)
                 checked += 1
-    assert checked == 160
+    assert (checked, elsewhere) == (160, 17)
 
 
 def _advance(executor: Executor, job: str, event: ChartEvent) -> list[Any]:
@@ -1320,14 +1355,14 @@ def test_a_move_on_its_own_settles_after_the_box_rules_and_before_its_wakes(
 
 def test_the_batch_inactive_path_settles_first(monkeypatch: pytest.MonkeyPatch) -> None:
     """A box set INACTIVE releases its own units before its members' rows
-    move: its rows (`job.135`, `job.159`) send the settlement first."""
+    move: its rows (`job.135`, `job.445`) send the settlement first."""
     event = {"kind": "STATUS", "payload": {"job": "ob", "status": "INACTIVE"}}
     rows = _chart_rows(monkeypatch)
     _input(_BATCH_JIL, _START_OB, event, rows)
     moves = [row for row in rows if row[1] in _moves()]
-    assert moves == [("ob", "job.135"), ("ob", "job.305"), ("om", "job.159"), ("om", "job.305")]
-    written = [row for row in rows if row[1] in ("job.135", "job.159", "job.305")]
-    assert written == [("ob", "job.135"), ("ob", "job.305"), ("om", "job.159"), ("om", "job.305")]
+    assert moves == [("ob", "job.135"), ("ob", "job.305"), ("om", "job.445"), ("om", "job.305")]
+    written = [row for row in rows if row[1] in ("job.135", "job.445", "job.305")]
+    assert written == [("ob", "job.135"), ("ob", "job.305"), ("om", "job.445"), ("om", "job.305")]
 
 
 #: A box `ob` whose condition reads its own SUCCESS, so its completion

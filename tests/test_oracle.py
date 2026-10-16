@@ -7555,8 +7555,8 @@ def test_sem15_idle_box_ignores_inactive_members() -> None:
 
 def test_sem15_an_idle_box_takes_its_override_when_one_holds() -> None:
     """SEM-15 [C]: an idle box re-derives from its members, and a box
-    override that holds decides the verdict (job.131, job.132); with none
-    holding, the default verdict stands (job.133, job.134)."""
+    override that holds decides the verdict (job.446, job.447); with none
+    holding, the default verdict stands (job.448, job.449)."""
     text = (
         "insert_job: box15o\njob_type: b\nbox_failure: f(o15_a)\n\n"
         "insert_job: o15_a\njob_type: c\ncommand: x\nmachine: m1\nbox_name: box15o\n\n"
@@ -8891,7 +8891,7 @@ def test_dl256_killjob_on_a_holder_that_is_not_running_changes_nothing() -> None
 
 def test_killjob_on_a_job_that_is_not_running_or_queued_is_ignored_with_a_trace_line() -> None:
     """KILLJOB on a job that is not running or queued kills nothing. It is
-    an internal transition, one row per idle status (job.137 to job.140): at
+    an internal transition, one row on every idle status (job.440): at
     every one of them the row and its revision stay, and one EVENT_IGNORED
     line says so, as START_REFUSED does for a start with no effect (DL-81).
     A kill that lands writes no such line."""
@@ -8972,7 +8972,7 @@ def test_an_event_with_no_effect_is_an_internal_transition_of_the_job(
 ) -> None:
     """KILLJOB on an idle job, a refused explicit start, and the ON_ICE,
     ON_HOLD and ON_NOEXEC the vendor ignores (DL-254) each take one internal
-    transition per status they meet (job.137 to job.158). The row and its
+    transition at every status they meet (job.440 to job.444). The row and its
     revision stay, and one trace line names the event. An idle job meets
     ON_NOEXEC ignored only while iced, and a queued box only while a job
     inside it is iced, live or queued; a member's start is refused while its

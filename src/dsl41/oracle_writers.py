@@ -543,7 +543,7 @@ _LATCHES: Final = frozenset(ARM_LATCHES)
 _CLEARS: Final = frozenset(ARM_CLEARS)
 
 #: The rows whose idle recompute an override decided (SEM-15).
-_OVERRIDE_RECOMPUTES: Final = frozenset(f"job.{n}" for n in (131, 132, 161, 162, 163, 164))
+_OVERRIDE_RECOMPUTES: Final = frozenset({"job.446", "job.447"})
 
 #: The hook's write for each row the chart can fire, by its method's name, so a subclass's
 #: method is the one called: the row's own writes, and the line of its status write for a row
@@ -572,7 +572,7 @@ _WRITERS: Final[dict[str, str]] = {
     "job.120": "_w_injected_inactive",
     "job.121": "_w_noexec_failed",
     "job.122": "_w_reset",
-    "job.123": "_w_cascaded",
+    "job.445": "_w_cascaded",
     "job.124": "_w_nothing",
     "job.125": "_w_running",
     "job.126": "_w_override",
@@ -580,14 +580,12 @@ _WRITERS: Final[dict[str, str]] = {
     "job.128": "_w_fold",
     "job.129": "_w_fold",
     "job.130": "_w_box_terminator",
-    **{f"job.{n}": "_w_recompute" for n in (*range(131, 135), *range(161, 169))},
+    **{f"job.{n}": "_w_recompute" for n in range(446, 450)},
     "job.135": "_w_injected_box",
     "job.136": "_w_noexec_box",
-    **{f"job.{n}": "_w_kill_ignored" for n in range(137, 141)},
-    **{f"job.{n}": "_w_refused" for n in range(141, 148)},
-    **{f"job.{n}": "_w_flag_ignored" for n in range(148, 159)},
-    "job.159": "_w_cascaded",
-    "job.160": "_w_cascaded",
+    "job.440": "_w_kill_ignored",
+    "job.441": "_w_refused",
+    **{f"job.{n}": "_w_flag_ignored" for n in (442, 443, 444)},
     "job.169": "_w_noexec_box",
     "job.170": "_w_noexec_box",
     **{f"job.{n}": "_w_nothing" for n in (177, 178, 179, 181, 183, 184, 185, 187)},
