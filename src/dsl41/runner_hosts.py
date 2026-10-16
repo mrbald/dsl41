@@ -1,55 +1,35 @@
 """Execution hosts: the routing table, its four states, and eviction's gate.
 
-Normative spec: docs/concurrency-model.md ss8 (host lifecycle: active,
-passive, quarantined, evicted), ss7 (quarantine and the takeover barrier),
-ss2 (identity). Stage S5a. `ssN` in this module always names
-concurrency-model; bare `ssN` elsewhere in the runner means
-docs/runner-design.md, and both are normative here.
+Normative spec: docs/concurrency-model.md ss8 (host lifecycle: active, passive, quarantined,
+evicted), ss7 (quarantine and the takeover barrier), ss2 (identity). `ssN` in this module names
+concurrency-model; bare `ssN` elsewhere in the runner means docs/runner-design.md.
 
-ss8 exists because ss7's quarantine is safe and is not sufficient on its
-own: one dead host would hold its jobs forever. The answer is an explicit
-per-host routing state the operator owns, durable so that a failover does
-not undo a drain -- which is what putting it under the ss3 state owner buys
-(DL-93), rather than a side table with a revision counter of its own.
+The routing state is operator-owned and durable, held under the ss3 state owner so a failover
+does not undo a drain (DL-93).
 
-Three things live here and the fourth deliberately does not:
+- `HostCommand` is an admitted input that carries no oracle event. It is not an `EventKind`: a
+  job's condition truth cannot depend on where its machine routes.
+- `HOST` is ss8's routing table as a statechart, one instance per host on the store's executor,
+  declared beside the row it projects into (`oracle_state`). The chart decides every move; a cell
+  with no move is a refusal row with its code. The gate (`host_rejection_reason`) reads it on a
+  scratch executor (`host_move`) and adds the rules that read the input's own facts: the
+  eviction bound and the attribution of a force. `apply_host_command` dispatches an applied
+  command and writes the row from the leaf. Both halves are pure functions of the row and the
+  input's own facts, because replay has no live host to probe.
+- `routes_new_effects` is ss8's "new effects routed" column as one predicate.
+- What a host is running is the outbox's (S5c), keyed by `effect_id` bound to `executor_id`; a
+  second record of "did this run start" would be the parallel model DL-91 exists to catch.
 
-- **The command.** `HostCommand` is an admitted input that carries no
-  oracle event. It is not an `EventKind` and never will be: a job's
-  condition truth cannot depend on where its machine routes.
-- **The gate and the apply.** `HOST` is ss8's routing table as a
-  statechart, declared beside the row it projects into (`oracle_state`),
-  one instance per host on the store's own executor. The chart decides
-  every move and every cell with no move (a refusal row, with its code).
-  The gate (`host_rejection_reason`) reads it on a scratch executor
-  (`host_move`) and adds only the rules that read the input's own facts:
-  the eviction bound and the attribution of a force. The apply
-  (`apply_host_command`) dispatches an applied command and writes the row
-  from the leaf. Both halves are a PURE function of the row and the
-  input's own facts. Pure is not tidiness: replay has no live host to
-  probe, and a gate that consulted one would decide differently the second
-  time and make the log a record of nothing.
-- **The routing predicate.** `routes_new_effects` is ss8's table's second
-  column, as one line, so no caller re-derives which states dispatch.
-- NOT the outbox. What a host is RUNNING is S5c's, keyed by `effect_id`
-  bound to `executor_id`; a second durable record of "did this run start"
-  would be the parallel model DL-91 exists to catch.
+One host: this engine's own executor is seeded into the table at genesis and every job routes to
+it. Machine names resolve to a relay through this table (ss5) and there is no relay (DL-97), so
+a resolution step would have one possible answer. Draining that host (S5a) holds new work and
+lets running work finish (CM-13).
 
-**One host, for now.** This engine's own executor is seeded into the table
-at genesis and every job routes to it: machine names resolve to a relay
-through this table (ss5), and there is no relay (DL-97 records why, and its
-trigger), so a resolution step here would be an indirection with one
-possible answer. What S5a made real is the STATE -- draining that one host
-holds new work and lets running work finish, which is CM-13 and is the
-operation an operator actually performs before maintenance.
-
-**Every input to the ss8 bound is now produced, not assumed.** `deadman_s`
-is what the supervisor reports it runs and `last_contact` is stamped by the
-lease exchange (S5b); `quarantined` is set when the leader's lease renewal
-fails five times in a row (DL-291) and cleared when it answers again (S5d),
-remembering the state it interrupted so a blip cannot undo a drain. What is
-still refused rather than automated is the return of an EVICTED host: it
-must re-register at its new generation and self-fence first, and
+Every input to the ss8 bound is produced: `deadman_s` is what the supervisor reports it runs and
+`last_contact` is stamped by the lease exchange (S5b); `quarantined` is set when the leader's
+lease renewal fails five times in a row (DL-291) and cleared when it answers again (S5d),
+remembering the state it interrupted so a blip cannot undo a drain. The return of an evicted
+host is refused: it must re-register at its new generation and self-fence first, and
 self-fencing is the relay's act.
 """
 
@@ -65,66 +45,40 @@ from dsl41.runner_codes import Rejection
 from dsl41.state_machine import Event as ChartEvent
 from dsl41.state_machine import Outcome, StatechartError
 
-#: The id of the executor an engine runs on its own machine. One engine per
-#: run root owns exactly one local executor (control-protocol ss2's socket
-#: probe is what enforces the "one"), so this is a constant rather than a
-#: configured name until S5d gives remote relays ids of their own.
+#: The id of the engine's own executor. One engine per run root owns one local executor
+#: (control-protocol ss2's socket probe enforces it), so the id is a constant.
 LOCAL_EXECUTOR_ID = "local"
 
-#: ss8's verbs, in two sets that are deliberately not one.
-#:
-#: `HOST_VERBS` is the OPERATOR's, and it is what the wire accepts: an
-#: operator asserts intent about routing. `quarantine` and `reinstate` are
-#: the LEADER's, set automatically from what it can and cannot reach, and
-#: they arrive through the engine's own door (`Engine.inject_host`) with no
-#: `expect` -- ss0's mandate is on externally requested mutations, and an
-#: observation the leader makes about reachability is not one. Giving an
-#: operator a verb for quarantine would blur it with `drain`, which asserts
-#: nothing about whether the host is answering.
+#: ss8's verbs, in two sets. `HOST_VERBS` is the operator's and what the wire accepts.
+#: `quarantine` and `reinstate` are the leader's, set from what it can reach; they arrive through
+#: `Engine.inject_host` with no `expect`, because ss0's mandate covers externally requested
+#: mutations and the leader's reachability observation is not one. `drain` asserts nothing about
+#: whether the host answers, so an operator has no quarantine verb.
 HostVerb = Literal["activate", "drain", "evict", "quarantine", "reinstate"]
 HOST_VERBS: frozenset[str] = frozenset(("activate", "drain", "evict"))
-#: DERIVED, not listed again (DL-98): the two sets partition the verb type,
-#: and three hand-kept spellings of one vocabulary is three places for a new
-#: verb to be forgotten. Deriving also fails SAFE -- a verb added to the type
-#: and not to `HOST_VERBS` is a leader verb, so it is not reachable from the
-#: wire until someone says it should be.
+#: Derived from the verb type (DL-98): a verb added to the type and not to `HOST_VERBS` is a
+#: leader verb, unreachable from the wire until it is listed.
 LEADER_VERBS: frozenset[str] = frozenset(get_args(HostVerb)) - HOST_VERBS
 #: ss8's four routing states: the leaves of a host instance's configuration.
 HOST_STATES: Final[tuple[HostState, ...]] = get_args(HostState)
 
-#: What `kill_allowance` adds on top of the two graces: the supervisor's own
-#: exit, after its last wrapper is gone. Deliberately generous -- it is added
-#: to a wait an operator can always skip with `--force`, so erring long costs
-#: patience and erring short costs a double run.
+#: What `kill_allowance` adds to the two graces: the supervisor's own exit after its last wrapper.
+#: Generous on purpose: the wait can be skipped with `--force`, and a short one costs a double run.
 KILL_MARGIN_S = 10.0
 
 
 def kill_allowance(grace_s: float) -> float:
-    """ss8's `T_kill` over the command grace the PERIOD runs: how long after
-    a deadman fires until the host's wrappers are certainly gone.
+    """ss8's `T_kill` over the period's command grace: two graces (the wrapper's TERM wait and
+    the supervisor's wait for its wrappers) plus `KILL_MARGIN_S`.
 
-    The supervisor's exit EOFs every lifeline; each wrapper then sends TERM
-    to its command pgid, waits the run's `grace_seconds`, sends KILL,
-    records and exits (supervisor-protocol ss4 step 5). Two graces -- the
-    wrapper's own TERM wait and the supervisor's wait for its wrappers --
-    plus the margin above.
-
-    DERIVED, not fixed (DL-151). `RuntimeProfile.cmd_grace_us` is per period
-    and unbounded above, and the wrapper waits the real value: a constant
-    30 s left eviction permitted while a 60 s-grace command was still inside
-    its TERM window, which is the double run this bound exists to prevent.
-    At the 10 s default this is 30 s, so a default estate's bound is
-    unchanged."""
+    It is derived from the period's `cmd_grace_us`, not fixed (DL-151): the wrapper waits the
+    real value, and a constant would permit eviction inside a long grace."""
     return 2.0 * grace_s + KILL_MARGIN_S
 
 
-#: ss8's `T_skew`, which covers monotonic-clock DRIFT between hosts, not
-#: clock synchronization -- the standard lease argument, which depends only
-#: on the drift being bounded. Expressed as a fraction of the interval
-#: because that is what drift is; 200 ppm is loose for any real oscillator
-#: (a cheap uncompensated crystal is ~50 ppm) and still vanishing next to
-#: the floor, which is what actually absorbs scheduling jitter on a busy
-#: leader.
+#: ss8's `T_skew` covers monotonic-clock drift between hosts, not clock synchronization. Drift is
+#: a fraction of the interval; 200 ppm is loose for any real oscillator, and the floor absorbs
+#: scheduling jitter on a busy leader.
 SKEW_PPM = 200.0
 SKEW_FLOOR_S = 1.0
 
@@ -148,22 +102,18 @@ class HostCommand(BaseModel):
 
     verb: HostVerb
     host_id: str
-    #: ss8: skips the eviction preconditions. Attributed, durable, and the
-    #: one path in the whole concurrency model that can produce a double
-    #: run. Meaningless on the other two verbs, which assert nothing.
+    #: ss8: skips the eviction preconditions. Attributed and durable; the one path that can
+    #: produce a double run. Meaningless on the other verbs.
     force: bool = False
 
     @property
     def key(self) -> str:
-        """The ss6 entity this command addresses -- the only key its
-        `expect` may name."""
+        """The ss6 entity this command addresses; the only key its `expect` may name."""
         return RuntimeState.host_key(self.host_id)
 
     def wire(self) -> dict[str, Any]:
-        """The command as it goes on the wire and into the log. `id` rather
-        than `host_id` because the request's `payload` says `id`, and one
-        spelling across the transport and the WAL is one fewer place for the
-        two to disagree."""
+        """The command as it goes on the wire and into the log, with `id` as the request's
+        `payload` spells it."""
         return {"verb": self.verb, "id": self.host_id, "force": self.force}
 
     @classmethod
@@ -172,12 +122,8 @@ class HostCommand(BaseModel):
 
 
 def routes_new_effects(row: HostRuntime | None) -> bool:
-    """ss8's "new effects routed" column, as one predicate.
-
-    `active` alone routes. A host with NO row routes nothing either: a host
-    the table does not know is a host the ss7 takeover barrier would never
-    reconcile, and dispatching to one would put work somewhere no failover
-    could find it."""
+    """ss8's "new effects routed" column: only `active` routes, and a host with no row routes
+    nothing, because the ss7 takeover barrier would never reconcile it."""
     return row is not None and row.state == "active"
 
 
@@ -186,17 +132,10 @@ def seed_local_executor(
 ) -> None:
     """Put this engine's own executor in the routing table, at genesis.
 
-    Registration rather than an admitted input, for the reason the catalog
-    seed is not one either (`Oracle.__init__`): the row's EXISTENCE is a
-    fact about how this engine was launched, identical on every replay of
-    the same run root, so admitting it would spend a log index per start
-    recording something every reader of that log already knows -- and would
-    renumber every index in every existing journal.
-
-    What ss8 requires to survive a failover is the STATE, and that is
-    admitted input: this seed only ever creates the row at its default
-    `active`, and a replayed drain lands on top of it. `register_host` keeps
-    an existing row's state for exactly that reason."""
+    This is registration, not an admitted input, as the catalog seed is (`Oracle.__init__`): the
+    row's existence is identical on every replay of the run root. The seed creates the row at
+    `active`; a replayed drain lands on top of it, and `register_host` keeps an existing row's
+    state."""
     store.begin_input()
     try:
         store.register_host(host_id, deadman_s=deadman_s, at=at)
@@ -206,11 +145,9 @@ def seed_local_executor(
 
 # ------------------------------------------------------- the routing table
 
-#: The two rows whose firing still needs the input's own facts (ss8): the
-#: gated eviction's bound and the forced one's attribution. No chart guard
-#: reads those facts: a rejection is a decision replayed as stored, and
-#: `last_contact` is re-seeded fresher at resume, so the gate decides them
-#: once and the log keeps the decision (DL-94).
+#: The rows whose firing needs the input's own facts (ss8): the gated eviction's bound and the
+#: forced one's attribution. No chart guard reads them: a rejection replays as stored and
+#: `last_contact` is re-seeded fresher at resume, so the gate decides once (DL-94).
 GATED_EVICTION: Final = "host.10"
 FORCED_EVICTION: Final = "host.11"
 
@@ -222,16 +159,11 @@ def host_event(cmd: HostCommand) -> ChartEvent:
 
 
 def host_move(store: RuntimeState, cmd: HostCommand) -> Outcome:
-    """The gate's reading of the chart: what `cmd` would do to its host's
-    instance, and nothing moves.
+    """What `cmd` would do to its host's instance, with nothing moved. The host must have a row.
 
-    It dispatches on a scratch executor that `rebuild_machines` rebuilds from
-    the rows, the way an install rebuilds one. The gate must answer before the
-    configuration moves, and the gate also runs where no dry apply precedes
-    it (the real apply, the leader's inputs, a recovered attempt at replay),
-    so it cannot borrow a dry apply's outcome. The host must have a row. The
-    scratch executor holds no job instance (DL-341), so the read's cost does
-    not grow with the job count."""
+    It dispatches on a scratch executor rebuilt from the rows, because the gate also runs where
+    no dry apply precedes it. The scratch executor holds no job instance (DL-341), so the cost
+    does not grow with the job count."""
     (outcome,) = store.rebuild_machines(jobs=False).dispatch(cmd.key, host_event(cmd))
     return outcome
 
@@ -260,9 +192,8 @@ def _refused(code: str, row: HostRuntime, cmd: HostCommand) -> Rejection:
                 f"host {cmd.host_id!r} is already evicted, at generation {row.generation}",
             )
         case "host_evicted" if cmd.verb in LEADER_VERBS:
-            # the leader's own observation: a leader that quietly un-evicted a
-            # host by reaching it again would undo the one state an operator
-            # took deliberately
+            # reaching an evicted host must not un-evict it: eviction is the one state an
+            # operator takes deliberately
             return Rejection(
                 code,
                 f"host {cmd.host_id!r} was evicted at generation {row.generation}:"
@@ -276,18 +207,14 @@ def _refused(code: str, row: HostRuntime, cmd: HostCommand) -> Rejection:
                 " by re-registering at that generation and self-fencing first, not by an"
                 " operator state change (ss8)",
             )
-    # the chart and the gate disagree on the code set: a bug, never a rejection
+    # a code the chart emits and the gate lacks is a bug, never a rejection
     raise StatechartError(f"host: the refusal code {code!r} has no sentence in the gate")
 
 
 def _forced(cmd: HostCommand, actor: str | None) -> Rejection | None:
-    """`host.11`'s attribution. ss8: attributed, not forbidden -- and
-    "attributed" is the WHOLE of force's safety story, so a force that names
-    nobody has none. The row's `forced_by` is non-null iff the state was
-    reached by force, and an unattributed one reads exactly like a
-    proof-gated eviction. Checked in the batch rather than at the door so the
-    perimeter has already had its chance to stamp an authenticated principal
-    (DL-146)."""
+    """`host.11`'s attribution: a force that names nobody is refused (ss8). `forced_by` is
+    non-null iff the state was reached by force. It is checked in the batch, after the perimeter
+    may have stamped an authenticated principal (DL-146)."""
     if actor is not None and actor.strip():
         return None
     return Rejection(
@@ -299,10 +226,8 @@ def _forced(cmd: HostCommand, actor: str | None) -> Rejection | None:
 
 
 def _bound(row: HostRuntime, cmd: HostCommand, at: datetime, grace_s: float) -> Rejection | None:
-    """`host.10`'s proof: ss8's preconditions 2 and 3 (precondition 1 is the
-    `quarantined` state the chart takes it from), in the order that costs
-    least to explain. A rejection reports the remaining wait, so the operator
-    waits rather than guesses."""
+    """`host.10`'s proof: ss8's preconditions 2 and 3 (precondition 1 is the `quarantined` state
+    the chart takes it from). A rejection reports the remaining wait."""
     if row.deadman_s is None:
         return Rejection(
             "host_no_deadman",
@@ -338,24 +263,15 @@ def host_rejection_reason(
     grace_s: float,
     actor: str | None = None,
 ) -> Rejection | None:
-    """ss8's preconditions: why this command must not apply, or None. The
-    chart's answer (`host_move`) first: a refusal row's code, in the order
-    the check reads the state. Then, on host.10 and host.11 only, the checks
-    that read the input's own facts.
+    """ss8's preconditions: why this command must not apply, or None.
 
-    A REJECTION, not a refusal (control-protocol ss3). Every check reads
-    mutable state, so it can only be made where `expect` is made -- inside
-    the input's own batch, in log order. Deciding at the door would answer
-    against a table that had moved by the time the command applied, and
-    would leave the log holding a verdict replay could not reproduce.
+    The chart's refusal code comes first; then, on host.10 and host.11 only, the checks that read
+    the input's own facts. This is a rejection, not a refusal (control-protocol ss3): it is made
+    inside the input's batch, in log order, where `expect` is made.
 
-    `grace_s` is the command grace the PERIOD runs, which is what the kill
-    half of the bound is made of, and it is REQUIRED (DL-152): a default
-    here was the period-model ss2.1 number, so a caller that forgot to pass the period's
-    grace got a bound for a different estate and nothing said so. `actor` is
-    the attempt's `claimed_actor`, which force needs and the other verbs do
-    not. Both are the input's own facts -- journaled with it -- so replay
-    reaches this verdict from the same values."""
+    `grace_s` is the period's command grace (period-model ss2.1) and is required (DL-152), so a
+    caller cannot get a bound for a different estate. `actor` is the attempt's `claimed_actor`,
+    which force needs. Both are journaled with the input, so replay reaches the same verdict."""
     row = store.host(cmd.host_id)
     if row is None:
         return Rejection(
@@ -375,17 +291,12 @@ def host_rejection_reason(
 
 
 def apply_host_command(store: RuntimeState, cmd: HostCommand, *, actor: str | None) -> None:
-    """Apply one decided host command: dispatch its event to the host's
-    instance on the store's executor, then write the row from the active
-    leaf through the store's verbs (DL-86). Called inside the input's batch,
-    so the row takes that input's single revision like any other entity
-    (ss3). An internal row leaves the leaf where it was, and nothing is
-    written.
+    """Apply one decided host command: dispatch its event, then write the row from the active
+    leaf through the store's verbs (DL-86), inside the input's batch (ss3).
 
-    The decision is made: the gate passed, or a replayed durable decision
-    says so. A refusal here, or a host with no instance, means this build is
-    not the chart that decided it: a `StatechartError`, which stops the
-    tier, and on replay names the input (statechart-engine ss5)."""
+    A refusal here or a host with no instance means this build is not the chart that decided it:
+    a `StatechartError` that stops the tier and names the input on replay (statechart-engine ss5).
+    """
     key = cmd.key
     row = store.host(cmd.host_id)
     if row is None:
@@ -413,9 +324,7 @@ def apply_host_command(store: RuntimeState, cmd: HostCommand, *, actor: str | No
     if leaf == "quarantined":
         store.quarantine_host(cmd.host_id)
     elif leaf == "evicted":
-        # only a FORCED eviction records an actor: on the gated path the
-        # preconditions are the justification, and naming a principal beside
-        # them would suggest the eviction rested on who asked for it
+        # only a forced eviction records an actor; the gated path rests on its preconditions
         store.evict_host(cmd.host_id, forced_by=actor if cmd.force else None)
     else:
         store.set_host_state(cmd.host_id, leaf)

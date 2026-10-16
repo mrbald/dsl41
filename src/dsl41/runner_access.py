@@ -1,17 +1,14 @@
 """The access perimeter (docs/access-model.md, DL-146).
 
-Three tiers at the perimeter; the engine, oracle and journal stay
-authz-free. This module owns the pieces the gate is made of: the tier
-enum, the principal, the role-map loader (access-model ss4), the closed
-verb table (ss10), the perimeter journal (ss6) and the swappable policy
-holder (ss7). `runner_control.ControlServer` calls it; nothing below the
-control plane imports it.
+Three tiers at the perimeter; the engine, oracle and journal stay authz-free. The module holds
+the tier enum, the principal, the role-map loader (ss4), the closed verb table (ss10), the
+perimeter journal (ss6) and the swappable policy holder (ss7). `runner_control.ControlServer`
+calls it; nothing below the control plane imports it.
 
-Everything here fails closed: a configured map that is missing or
-invalid refuses at load, an unmapped principal is denied, a `cmd`
-outside the closed table is denied (the verb inside a listed cmd is
-the dispatcher's to validate, ss10), a peer without a resolvable
-credential is refused at accept (ss3).
+Everything fails closed: a configured map that is missing or invalid refuses at load, an
+unmapped principal is denied, a `cmd` outside the closed table is denied (the verb inside a
+listed cmd is the dispatcher's, ss10), and a peer without a resolvable credential is refused at
+accept (ss3).
 """
 
 from __future__ import annotations
@@ -46,14 +43,13 @@ __all__ = [
 
 
 class AccessError(Exception):
-    """A role map that cannot be loaded, or a perimeter that cannot be
-    armed. Startup answers it with a refusal (access-model ss4: a
-    configured path never falls back to owner-wide authority)."""
+    """A role map that cannot be loaded, or a perimeter that cannot be armed. Startup refuses;
+    a configured path never falls back to owner-wide authority (access-model ss4)."""
 
 
 class Tier(IntEnum):
-    """read < ops < adm, strictly nested (access-model ss1). IntEnum so
-    `granted >= required` IS the authorization check."""
+    """read < ops < adm, strictly nested (access-model ss1); `granted >= required` is the
+    authorization check."""
 
     READ = 0
     OPS = 1
@@ -65,9 +61,8 @@ _TIER_BY_NAME = {"read": Tier.READ, "ops": Tier.OPS, "adm": Tier.ADM}
 
 @dataclass(frozen=True)
 class Principal:
-    """(realm, name, groups) — fixed at connection accept, immutable for
-    the connection's life (ss3). The realm keeps a web `root` from ever
-    matching the OS `root` (ss1)."""
+    """(realm, name, groups), fixed at connection accept (ss3). The realm keeps a web `root`
+    from matching the OS `root` (ss1)."""
 
     realm: str
     name: str
@@ -75,30 +70,26 @@ class Principal:
 
     @property
     def spelling(self) -> str:
-        """The canonical actor spelling that replaces `claimed_actor` in
-        journaled records when access is configured (ss3)."""
+        """The actor spelling that replaces `claimed_actor` in journaled records (ss3)."""
         return f"{self.realm}/{self.name}"
 
 
 @dataclass(frozen=True)
 class Policy:
-    """One immutable role-map snapshot (ss7). A request decides under
-    exactly one of these; reload swaps the holder, never the snapshot."""
+    """One immutable role-map snapshot (ss7); a request decides under exactly one."""
 
     bindings: dict[str, Tier]
     unmapped: Tier | None  # None = deny
     socket_group: str | None
-    #: `socket_group` resolved against this host, at LOAD (DL-152). One
-    #: resolution, one refusal: the group was looked up three times -- CLI
-    #: preflight, arming, socket bind -- and an unknown group was a
-    #: different sentence at each. None exactly when `socket_group` is.
+    #: `socket_group` resolved against this host once, at load (DL-152), with one refusal for an
+    #: unknown group. None exactly when `socket_group` is.
     socket_gid: int | None
     generation: int
     digest: str
 
     def resolve(self, principal: Principal) -> Tier | None:
-        """access-model ss4 resolution order: exact user row, else the
-        highest matching group row, else `unmapped`. None = denied."""
+        """access-model ss4 order: exact user row, else the highest matching group row, else
+        `unmapped`. None is denied."""
         user_row = self.bindings.get(f"user:{principal.realm}/{principal.name}")
         if user_row is not None:
             return user_row
@@ -120,21 +111,16 @@ def _subject_valid(subject: str) -> bool:
     return bool(sep) and bool(realm) and bool(name) and "*" not in subject
 
 
-#: ss4/DL-149: a role map is tiny; past this the loader refuses rather
-#: than reading on (the reload handler runs on the event loop)
+#: ss4/DL-149: past this the loader refuses rather than reading on; the reload handler runs on
+#: the event loop.
 _MAP_BYTES_CEILING = 1 << 20
 
 
 def _resolve_socket_group(path: Path, socket_group: str | None) -> int | None:
     """The map's `socket_group` as a gid, or None when it names none.
 
-    Resolved ONCE, at load (DL-152). The two appliers -- the arming grant
-    on the run root and the control socket's bind -- take the gid, and a
-    group this host does not know is a load refusal like every other
-    unusable field. It was looked up three times before (CLI preflight,
-    arming, bind) and each said something different about the same
-    failure; the preflight existed only so that failure arrived before the
-    run root was claimed."""
+    It resolves once, at load (DL-152); the arming grant and the socket bind take the gid. A
+    group this host does not know is a load refusal."""
     if socket_group is None:
         return None
     try:
@@ -148,20 +134,17 @@ def _resolve_socket_group(path: Path, socket_group: str | None) -> int | None:
 def load_policy(path: Path, *, generation: int) -> Policy:
     """Load and validate the strict-TOML role map (access-model ss4).
 
-    Refuses: a missing/unreadable file, a symlink, a group- or
-    other-writable file or one owned by someone else, a descriptor I/O
-    failure mid-read, a file over the 1 MiB ceiling, an unknown key, an
-    unknown tier, a duplicate subject, a wildcard, a subject without a
-    realm, and a `socket_group` this host does not know. Refusal is
-    `AccessError` — the caller turns it into a startup refusal or a
-    kept-old-policy reload receipt (ss7)."""
+    Refuses with `AccessError`: a missing or unreadable file, a symlink, a group- or
+    other-writable file or one owned by someone else, a descriptor I/O failure mid-read, a file
+    over the 1 MiB ceiling, an unknown key, an unknown tier, a duplicate subject, a wildcard, a
+    subject without a realm, and a `socket_group` this host does not know. The caller turns it
+    into a startup refusal or a kept-old-policy reload receipt (ss7)."""
     try:
         parent = os.lstat(path.parent)
     except OSError as exc:
         raise AccessError(f"access map {path}: cannot stat parent: {exc}") from exc
     if stat_lib.S_ISLNK(parent.st_mode):
-        # O_NOFOLLOW guards only the FINAL component; a symlinked parent
-        # would let a rename redirect the whole path between check and open
+        # O_NOFOLLOW guards only the final component; a symlinked parent could be redirected
         raise AccessError(f"access map {path}: parent directory is a symlink")
     if parent.st_uid not in (os.geteuid(), 0):
         raise AccessError(
@@ -193,10 +176,7 @@ def load_policy(path: Path, *, generation: int) -> Policy:
                     f"access map {path}: mode {oct(stat.st_mode & 0o777)} is group- or"
                     " other-writable; policy must be owner-writable only"
                 )
-            # read to EOF (DL-149): one os.read may return a prefix, and a
-            # prefix that ends at valid TOML must never install. The ceiling
-            # keeps a growing or mistaken file from parking the reload
-            # handler, which runs on the event loop
+            # read to EOF (DL-149): a prefix that ends at valid TOML must never install
             chunks: list[bytes] = []
             total = 0
             while chunk := os.read(fd, 1 << 16):
@@ -208,17 +188,13 @@ def load_policy(path: Path, *, generation: int) -> Policy:
         finally:
             os.close(fd)
     except OSError as exc:
-        # descriptor I/O joins the refusal path (DL-149): reload turns
-        # AccessError into a policy_reload_failed receipt; a raw OSError
-        # would escape into the handler-exception log with no receipt
+        # descriptor I/O is a refusal (DL-149), so reload writes a policy_reload_failed receipt
         raise AccessError(f"access map {path}: descriptor I/O failed: {exc}") from exc
     try:
         table = tomllib.loads(raw.decode("utf-8"))
     except (ValueError, RecursionError) as exc:
-        # ValueError covers TOMLDecodeError and UnicodeDecodeError, and the
-        # BARE ValueError a several-thousand-digit integer literal raises;
-        # RecursionError is deep nesting. Both escaped reload before DL-149,
-        # and reload must refuse, never raise (ss7)
+        # ValueError covers TOMLDecodeError, UnicodeDecodeError and a huge integer literal;
+        # RecursionError is deep nesting. Reload refuses and never raises (ss7, DL-149)
         raise AccessError(f"access map {path}: not valid TOML: {exc}") from exc
 
     known_top = {"format_version", "unmapped", "socket_group", "binding"}
@@ -227,7 +203,7 @@ def load_policy(path: Path, *, generation: int) -> Policy:
         raise AccessError(f"access map {path}: unknown keys {sorted(unknown)}")
     version = table.get("format_version")
     if not is_wire_int(version) or version != 1:
-        # bool and 1.0 both compare == 1; strict TOML means strict TYPES
+        # bool and 1.0 both compare == 1; strict TOML means strict types
         raise AccessError(f"access map {path}: format_version must be the integer 1")
     unmapped_raw = table.get("unmapped", "deny")
     if unmapped_raw not in ("deny", "read"):
@@ -255,9 +231,7 @@ def load_policy(path: Path, *, generation: int) -> Policy:
             raise AccessError(f"access map {path}: duplicate subject {subject!r}")
         bindings[subject] = _TIER_BY_NAME[tier_name]
 
-    # LAST, after the map itself is whole: this is the only check that
-    # leaves the file and asks the HOST, so a syntactically broken map is
-    # refused on its own terms and never costs an NSS lookup (DL-152)
+    # last: the only check that asks the host, so a broken map never costs an NSS lookup (DL-152)
     socket_gid = _resolve_socket_group(path, socket_group)
     return Policy(
         bindings=bindings,
@@ -270,10 +244,9 @@ def load_policy(path: Path, *, generation: int) -> Policy:
 
 
 def peer_principal(sock: socket_mod.socket) -> Principal | None:
-    """The kernel-authenticated peer as a Principal, or None where the
-    credential is absent or resolves to no passwd entry — the caller
-    refuses the connection on None (ss3; the supervisor's permissive
-    fallback is deliberately not copied)."""
+    """The kernel-authenticated peer as a Principal, or None where the credential is absent or
+    has no passwd entry; the caller refuses the connection on None (ss3). The supervisor's
+    permissive fallback is not copied."""
     try:
         uid = peer_uid(sock)
     except OSError:
@@ -296,10 +269,8 @@ def peer_principal(sock: socket_mod.socket) -> Principal | None:
 
 # --------------------------------------------------------------- verb table
 
-#: access-model ss10: the closed table, cmd -> required tier. `sendevent`,
-#: `host` and `seal` are OPS whatever their verb — the verb split inside
-#: them is the dispatcher's business, not the perimeter's. A cmd absent
-#: here is DENIED at runtime and a test failure at the completeness gate.
+#: access-model ss10: the closed table, cmd -> required tier. `sendevent`, `host` and `seal` are
+#: OPS whatever their verb; the dispatcher splits the verbs. A cmd absent here is denied.
 REQUIRED_TIER: dict[str, Tier] = {
     "status": Tier.READ,
     "trace": Tier.READ,
@@ -319,8 +290,7 @@ REQUIRED_TIER: dict[str, Tier] = {
 
 
 def required_tier(cmd: object) -> Tier | None:
-    """The tier `cmd` needs, or None for a cmd outside the closed table
-    (denied — default deny, ss10)."""
+    """The tier `cmd` needs, or None for a cmd outside the closed table (default deny, ss10)."""
     if not isinstance(cmd, str):
         return None
     return REQUIRED_TIER.get(cmd)
@@ -330,44 +300,34 @@ def required_tier(cmd: object) -> Tier | None:
 
 
 class PerimeterJournal:
-    """Append-only `<run_root>/perimeter.jsonl` (access-model ss6). Its
-    own `access_seq`, never the engine index — a denial is not an engine
-    input and replay must not see policy. Denials are synced before they
-    are answered; a storage failure still denies (the caller already has
-    the refusal in hand when write() runs)."""
+    """Append-only `<run_root>/perimeter.jsonl` (access-model ss6) with its own `access_seq`,
+    not the engine index: a denial is not an engine input and replay must not see policy.
+    Denials are synced before they are answered; a storage failure still denies."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
         self._seq = self._recover_seq(path)
-        #: a write that failed MID-LINE left a torn fragment; the next
-        #: write starts with a newline so it never glues to the wreck
+        #: a write that failed mid-line left a torn fragment; the next write starts a new line
         self._dirty = False
-        #: no directory fsync by this writer has made the name durable yet.
-        #: Set at open when the file already exists (an earlier process may
-        #: have created it unsynced and died), by an unsynced create, and by a
-        #: synced one whose directory fsync failed; cleared by the next
-        #: successful directory fsync
+        #: no directory fsync has made the name durable yet. Set at open when the file exists,
+        #: by an unsynced create, and by a synced one whose directory fsync failed; cleared by
+        #: the next successful directory fsync
         self._name_pending = path.exists()
 
     @staticmethod
     def _recover_seq(path: Path) -> int:
-        """The last complete record's access_seq, so a resumed engine
-        continues the series instead of reissuing 1 (a repeated audit key
-        is a duplicate record by identity). A torn tail is skipped. A missing
-        file starts at 0. A file that exists and cannot be read raises
-        `AccessError`: the series is not restarted from a journal that was
-        not read."""
+        """The last complete record's access_seq, so a resumed engine continues the series (a
+        repeated audit key is a duplicate record). A torn tail is skipped, a missing file starts
+        at 0, and an unreadable file raises `AccessError`."""
         try:
             raw = path.read_bytes()
         except FileNotFoundError:
             return 0
         except OSError as exc:
-            # an existing journal this process cannot read must not be
-            # silently restarted at 1 -- a repeated key is a forged identity
+            # an unreadable journal must not restart at 1: a repeated key is a forged identity
             raise AccessError(f"perimeter journal {path}: cannot recover seq: {exc}") from exc
         if raw and not raw.endswith(b"\n"):
-            # heal a torn tail with a newline so the next append starts a
-            # fresh line instead of gluing to the wreck
+            # heal a torn tail so the next append starts a fresh line
             try:
                 with open(path, "ab") as handle:
                     handle.write(b"\n")
@@ -382,16 +342,14 @@ class PerimeterJournal:
             if not isinstance(record, dict):
                 continue  # valid JSON, but no record: ss6 reads records only
             seq = record.get("access_seq")
-            # bool is an int in Python and `true` is not a sequence number;
-            # neither is a non-positive one -- the series starts at 1 (DL-151)
+            # `true` is not a sequence number and the series starts at 1 (DL-151)
             if is_wire_int(seq) and seq > 0:
                 return seq
         return 0
 
     def write(self, rec: str, *, sync: bool, **fields: Any) -> bool:
-        """True when the record landed (and, for sync, reached the disk).
-        The reload path is receipt-gated on this answer (ss7); denial
-        callers ignore it -- a storage failure still denies."""
+        """True when the record landed (and, for sync, reached the disk). Reload is gated on this
+        answer (ss7); denial callers ignore it."""
         self._seq += 1
         record = {
             "rec": rec,
@@ -421,12 +379,9 @@ class PerimeterJournal:
             finally:
                 os.close(fd)
             if sync and self._name_pending:
-                # a create is a directory-entry write, and without this the
-                # NAME can vanish on power loss after arm() accepted the
-                # receipt as synced -- access_seq would then restart and forge
-                # duplicate audit keys (DL-137's one spelling; DL-151). An
-                # unsynced create leaves the name pending, so the first synced
-                # append after it pays the fsync
+                # without a directory fsync the name can vanish on power loss and access_seq
+                # would restart (DL-137's one spelling; DL-151); the first synced append after
+                # an unsynced create pays it
                 fsync_dir(self.path.parent)
                 self._name_pending = False
         except OSError:
@@ -434,10 +389,9 @@ class PerimeterJournal:
         return True
 
     def _open_append(self) -> tuple[int, bool]:
-        """(fd, created). O_EXCL first, so the create is known without a
-        second stat: only a created journal owes its parent an fsync. 0600
-        from birth -- the run root is group-traversable when access is armed
-        (ss8) and receipts are owner-only like the WAL."""
+        """(fd, created). O_EXCL tells a create without a stat; only a created journal owes its
+        parent an fsync. Mode 0600 from birth, since the armed run root is group-traversable
+        (ss8)."""
         flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_EXCL
         try:
             return os.open(self.path, flags, 0o600), True
@@ -450,23 +404,20 @@ class PerimeterJournal:
 
 @dataclass
 class AccessControl:
-    """The armed perimeter: the map path, the current policy snapshot and
-    the receipt journal. `ControlServer` holds one (or None = today's
-    owner-only model, byte-compatible). Reload (ss7) swaps `policy` for a
-    freshly validated snapshot and keeps the old one on any failure."""
+    """The armed perimeter: the map path, the current policy snapshot and the receipt journal.
+    `ControlServer` holds one, or None for the owner-only model. Reload (ss7) swaps `policy` for
+    a validated snapshot and keeps the old one on any failure."""
 
     map_path: Path
     policy: Policy
     journal: PerimeterJournal
-    #: live subscribe streams, writer -> (principal, handler task), so
-    #: reload can close exactly the streams that lost read AND wake the
-    #: handler parked on queue.get() (ss7). The server maintains it.
+    #: live subscribe streams, writer -> (principal, handler task), so reload closes the streams
+    #: that lost read and wakes the handler parked on queue.get() (ss7)
     streams: dict[Any, tuple[Principal, Any]] = field(default_factory=dict)
 
     @classmethod
     def arm(cls, map_path: Path, run_root: Path) -> AccessControl:
-        """Load generation 1 and open the journal, or raise AccessError
-        (startup refusal — ss4)."""
+        """Load generation 1 and open the journal, or raise AccessError (ss4)."""
         policy = load_policy(map_path, generation=1)
         journal = PerimeterJournal(run_root / "perimeter.jsonl")
         control = cls(map_path=map_path, policy=policy, journal=journal)
@@ -477,18 +428,13 @@ class AccessControl:
             digest=policy.digest,
             bindings=len(policy.bindings),
         ):
-            # ss7: a policy change that cannot be receipted does not happen --
-            # at startup that means refusing to serve at all
+            # ss7: a policy change that cannot be receipted does not happen
             raise AccessError(f"cannot sync the arming receipt to {journal.path}")
         if policy.socket_gid is not None:
-            # access-model ss8: the run root is 0700, so the socket alone is
-            # unreachable -- grant execute-only traversal to the socket group
-            # here, at arming. The 0700 root was the fence for its children
-            # (logs/ and runs/ are born 0755), so opening it TIGHTENS every
-            # direct child to owner-only first; later artifacts land inside
-            # those directories. Log visibility for a group is an explicit
-            # operator grant afterwards (ss9), never the perimeter's act.
-            # The gid was resolved by the loader (DL-152); this applies it.
+            # access-model ss8: grant execute-only traversal on the 0700 run root to the socket
+            # group. The root fenced its children (logs/ and runs/ are born 0755), so every
+            # direct child is first tightened to owner-only. Log visibility for a group is an
+            # operator grant (ss9), never the perimeter's. The loader resolved the gid (DL-152).
             try:
                 for child in run_root.iterdir():
                     os.chmod(child, 0o700 if child.is_dir() else 0o600)
@@ -501,14 +447,12 @@ class AccessControl:
         return control
 
     def decide(self, principal: Principal, cmd: object, verb: object) -> tuple[bool, str]:
-        """One authorization decision under one policy snapshot (ss5).
-        Returns (allowed, refusal-prose); writes the receipt either way
-        for privileged verbs, denial receipts synced."""
+        """One authorization decision under one policy snapshot (ss5): (allowed, refusal prose).
+        Privileged verbs and denials write a receipt; denial receipts are synced."""
         policy = self.policy  # one snapshot for the whole decision
         required = required_tier(cmd)
         granted = policy.resolve(principal)
-        # the receipt carries a bounded LABEL, never request data (ss6): a
-        # non-string cmd would stringify the caller's own JSON into the log
+        # the receipt carries a bounded label, never request data (ss6)
         action = cmd[:64] if isinstance(cmd, str) else "<non-string-cmd>"
         if isinstance(verb, str):
             action = f"{action}:{verb[:64]}"
@@ -542,10 +486,9 @@ class AccessControl:
         return True, ""
 
     def reload(self) -> None:
-        """SIGHUP handler body (ss7): validate the complete candidate;
-        success installs it atomically and revokes exactly the live
-        subscribe streams that lost read; failure keeps the old policy.
-        Never raises — a reload defect must not kill the engine."""
+        """SIGHUP handler body (ss7): validate the candidate, install it atomically and revoke
+        the live subscribe streams that lost read; on failure keep the old policy. Never
+        raises."""
         try:
             fresh = load_policy(self.map_path, generation=self.policy.generation + 1)
         except AccessError as exc:
@@ -560,13 +503,9 @@ class AccessControl:
             self.policy.socket_group,
             self.policy.socket_gid,
         ):
-            # ss7: the group and the modes are applied at arming; a reload
-            # that named a different group would change the map and not the
-            # kernel -- refuse it whole rather than half-apply it. The GID
-            # is part of "the group" (DL-152): the name resolves at load, so
-            # a host that re-numbered the group between arming and a reload
-            # would otherwise leave a policy naming a gid nothing was
-            # chowned to
+            # ss7: the group and modes are applied at arming, so a reload naming another group
+            # is refused whole. The gid is part of the group (DL-152): a re-numbered group
+            # would leave a policy naming a gid nothing was chowned to
             self.journal.write(
                 "policy_reload_failed",
                 sync=True,
@@ -582,14 +521,12 @@ class AccessControl:
             digest=fresh.digest,
             bindings=len(fresh.bindings),
         ):
-            # ss7: install is receipt-gated -- a policy change that cannot be
-            # receipted does not happen, and the old snapshot stays active
+            # ss7: install is receipt-gated; the old snapshot stays active
             self.journal.write(
                 "policy_reload_failed",
                 sync=True,
                 generation=self.policy.generation,
-                # the policy_loaded line may have LANDED before its fsync
-                # failed; this names the generation it must not stand for
+                # the policy_loaded line may have landed before its fsync failed
                 orphaned_generation=fresh.generation,
                 error="cannot sync the policy_loaded receipt",
             )
@@ -615,7 +552,5 @@ class AccessControl:
                 except Exception:  # noqa: BLE001 -- a dead transport is already revoked
                     pass
                 if task is not None:
-                    # the handler is parked on queue.get(); on a quiet
-                    # estate nothing else would ever wake it (its finally
-                    # does the connection cleanup)
+                    # the handler is parked on queue.get(); only this wakes it
                     task.cancel()

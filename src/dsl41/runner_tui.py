@@ -1,137 +1,97 @@
-"""ss11 Textual TUI (phase 11d): one thin app, terminal today, web via
-textual-serve in 11e.
+"""ss11 Textual TUI: one thin app, terminal today and web via textual-serve (11e).
 
-The app is a client of the control socket ONLY -- never in-process with the
-engine (DL-41 item 8: textual-serve spawns one app instance per browser
-session, so an in-process engine would hand every viewer a private
-universe). Terminal attachment is `dsl41 ui --socket <run_root>/control.sock`
-against any running engine, or `dsl41 run --ui`, which starts the engine and
-runs this app in the same terminal (quitting the app stops that run -- the
-engine is tethered to the process; a detached engine takes viewers via
-`dsl41 ui` instead).
+The app is a client of the control socket only, never in-process with the engine (DL-41 item 8:
+textual-serve spawns one app per browser session, so an in-process engine would give every viewer
+a private universe). `dsl41 ui --socket <run_root>/control.sock` attaches to a running engine.
+`dsl41 run --ui` starts the engine and this app in one terminal; quitting stops that run, since
+the engine is tethered to the process. A detached engine takes viewers via `dsl41 ui`.
 
-Normative detail for DL-46, within DL-41's frame:
+Contract detail for DL-46, within DL-41's frame:
 
-- CHANGE FEED, CONSUMED IDEMPOTENTLY (DL-45 item 5): a `subscribe`
-  connection is used purely as a wake-up signal -- every record, seq'd or
-  not, schedules a state refresh and is never rendered directly, so the
-  at-least-once dispatch/drop race window costs a redundant refresh, not a
-  duplicated row. What the user SEES always comes from the idempotent
-  queries: the jobs table from `status`, the running commentary from
-  `trace --since` (trace seqs are stable positions), the explain pane from
-  `explain`. A 2s polling interval backstops a lost subscription; the
-  subscription itself reconnects with backoff while the socket is down.
-- JOBS TABLE = the ss10 status response verbatim: status, status_at,
-  run_number, exit_code, ice/hold/noexec flags, plus the DL-46 additions --
-  `pending_timers` (the oracle's own liveness filter; display truth is the
-  dispatch truth) and per-run `log_out`/`log_err`. Alarm counts are counted
-  off MUST_START_ALARM / MUST_COMPLETE_ALARM trace transitions -- the
-  oracle's trace is the only alarm authority, the TUI just tallies it.
-- LOG TAIL is a byte tail of the CURRENT run's resolved runner-design ss6 append target
-  (`log_out`/`log_err` from status; `o` toggles the stream), read from the
-  local filesystem: the TUI runs on the engine host in both postures
-  (terminal; textual-serve serves FROM the host, E3), so file reads need no
-  protocol verb. It starts near the tail (last 8 KiB), follows appends, and
-  resets on truncation -- smoke-grade, not line-perfect. std_* paths carry
-  verbatim (DL-39): a RELATIVE std file resolves against the viewer's cwd,
-  guaranteed to match the wrapper's only under `run --ui` (shared cwd). A
-  missing file is the ordinary silent wait; any other read fault (a
-  permission error, a directory where the file should be) writes one red
-  console line per distinct (path, error) and keeps polling (DL-187 item 10).
-- LOG PAGER (DL-67): whenever the log tail has FOCUS -- which `m` grants --
-  it is a less-style pager. Focus is the mode switch: textual consults the
-  focused widget's bindings before the app's, so one mechanism provides the
-  pager verbs AND shadows the operator verbs (`k` scrolls up, never
-  KILLJOB; `f`/space page forward, never FORCE; `q`/escape leave the pager,
-  never the app; verbs with no pager meaning ring the bell, as less does).
-  Paging never mutates the estate. `/` and `?` search (regex, smartcase,
-  all matches reverse-video, `n`/`N` wrap in the less directions), `&`
-  shows only matching lines -- a view of the buffer, never a loss; an empty
-  submit clears, escape cancels the prompt only (ESCAPE_TO_MINIMIZE is off
-  so textual cannot swallow it first). Follow is pinned-at-bottom:
-  scrolling up pauses ([paused] in the title), `F`/`G`/End resume. Buffer,
-  filter view, and widget cap at _PAGER_BUFFER_LINES in lockstep; `m`
-  maximizes the log PANE (tail + prompt line) so the prompt stays visible
-  while zoomed. `m`/`o`/`r`, `F1`, and the resize keys pass through by
-  design.
-- EVENT CONSOLE (`:`) accepts exactly the ss10 sendevent verbs (job verbs;
-  SET_GLOBAL NAME=value; CHANGE_STATUS [job] STATUS [exit_code]); an
-  omitted job means the selected row. Escape clears the typed line and
-  returns focus to the table -- a half-written verb never survives out of
-  sight. Every request and its response is echoed to the console; refusals
-  render red and change nothing -- the server already validates against the
-  catalog (vendor parity), the TUI never pre-judges. The echo names the
-  WHOLE request -- a global's value, a status, an exit code -- not just the
-  verb (DL-187 item 9). CHANGE_STATUS's status-first shorthand applies only
-  when the next token is not itself a status; otherwise the line is the
-  explicit `<job> STATUS [exit_code]` form (item 8).
-- SAFETY (DL-187): the verb keys live on the JOBS TABLE, not on the app, so
-  they fire only while the table has focus and the Footer offers them only
-  there -- `k` in the console log or the explain pane is dead, not a kill.
-  KILLJOB and FORCE_STARTJOB from a KEY open a confirm first (a typed
-  KILLJOB is already an act of intent; `k` is one key from every navigation
-  key), naming the target's status, the revision, and -- for a box -- the
-  members it reaches. That revision is FROZEN before the modal opens: a job
-  that moved while the operator read is refused by DL-90, never re-read
-  behind their back. Quit follows POSTURE: a detached viewer leaves the
-  engine running and exits at once ("detach"); `run --ui` owns the engine,
-  so quitting stops the run and is confirmed first ("stop run").
-- HELP (`F1`, and `?` outside the pager) toggles Textual's own context help
-  panel. Every pane and popup WITH KEYS OF ITS OWN carries a short `HELP`
-  string, read off the focused widget's ancestors (the event console's
-  RichLog has none to explain and gets none); the console's own HELP lists
-  every sendevent verb, and an unknown one typed at `:` is answered with
-  the same sorted list (DL-187 item 7).
-- TRIGGERS VIEW (`t`, DL-68): "what fires next" -- the ss10 `timers` verb
-  (pending oracle timers merged with each scheduled job's next calendar
-  tick, due-ordered by the server) re-queried on a 2s interval while open,
-  each row with an absolute UTC due and a countdown against now. Armed jobs
-  (the SEM-32 latch from `status`) append below every dated row: no due --
-  the next condition edge starts them. Due-less rows (a filewatch, once a
-  later unit serves one) render generically. READ-ONLY: every operator verb
-  is shadowed to the bell (DL-67 discipline); `t`/`q`/escape close. The
-  jobs table's flags column carries `A` for the same latch. An ok:false
-  `timers` answer leaves the rows as they were, names the refusal on the
-  border title, and marks the app subtitle exactly like a status or trace
-  refusal does (DL-187 item 6).
-- JOB DETAILS POPUP (`d` / Enter on a row): the ss10 `spec` verb's
-  preserve-rendered JIL block -- the post-placeholder source THIS engine
-  loaded -- topped with the status facts, the `deps` verb's needs/blocks
-  lines (the blast radius, DL-65), and a short local log tail. HEADER
-  CLOCK is UTC, matching the engine's naive-UTC time basis (ss9): every
-  timestamp on screen is one time base, deliberately not the viewer's
-  local wall (DL-64).
-- NAVIGATION AT ESTATE SCALE (DL-65): the jobs table renders the BOX TREE
-  (indent from the status response's box_name; space folds the selected
-  box, `z` folds/unfolds all; a folded box shows its hidden descendant
-  count and a red problem tally -- a fold must never swallow a FAILURE
-  silently). `/` opens an incremental name filter (space-separated
-  substrings AND'd; Enter keeps it, Esc clears; with the log pager focused
-  `/` searches the LOG instead -- find-in-what-fills-the-screen), `v`
-  cycles the view
-  all -> problems -> active. Filtered and non-'all' views are FLAT:
-  a match inside a folded box must never be invisible. The console
-  moved to `:` (vim command-line muscle memory). The status response's
-  spec_drift flag renders in the subtitle: files changed on disk, the
-  running catalog is the truth.
-- PANE GEOMETRY, keyboard only: `m` toggles maximizing the log pane and
-  hands focus to the pager (`q`/escape also restore); `]`/`[` grow/shrink
-  the log against explain, `}`/`{` the jobs table against the side column.
-  No mouse splitters. While anything is maximized the tree filter and the
-  console never take focus -- an input the operator cannot see must never
-  swallow keystrokes (DL-67).
-- ONE REQUEST CONNECTION, lock-serialized (the server answers one line per
-  line); `subscribe` owns its own connection until hangup (ss10). A dead
-  socket flips the header subtitle to "disconnected", is reported once to
-  the console, and every path retries quietly -- the TUI outlives engine
-  restarts. A cancelled exchange drops the connection (a superseded worker
-  must not leave its unread response to desync the next request). NO
-  client-side timeouts, deliberately: a live-but-wedged engine parks the
-  data plane while quit stays responsive; liveness recovery of a stuck
-  engine is the operator's call, not a viewer heuristic.
+- Change feed, consumed idempotently (DL-45 item 5): a `subscribe` connection is only a wake-up
+  signal. Every record schedules a state refresh and is never rendered, so the at-least-once
+  dispatch/drop race costs a redundant refresh, not a duplicated row. The screen comes from
+  idempotent queries: the jobs table from `status`, the commentary from `trace --since`, the
+  explain pane from `explain`. A 2s poll backstops a lost subscription, which reconnects with
+  backoff.
+- The jobs table is the ss10 status response verbatim: status, status_at, run_number, exit_code,
+  ice/hold/noexec flags, plus `pending_timers` (the oracle's own liveness filter, so display truth
+  is dispatch truth) and per-run `log_out`/`log_err`. Alarm counts tally MUST_START_ALARM and
+  MUST_COMPLETE_ALARM trace transitions; the oracle's trace is the only alarm authority.
+- The log tail is a byte tail of the current run's resolved runner-design ss6 append target
+  (`log_out`/`log_err` from status; `o` toggles the stream), read from the local filesystem. The
+  TUI runs on the engine host in both postures (textual-serve serves from the host, E3), so file
+  reads need no protocol verb. It starts near the end (last 8 KiB), follows appends and resets on
+  truncation. std_* paths carry verbatim (DL-39): a relative path resolves against the viewer's
+  cwd, which matches the wrapper's only under `run --ui`. A missing file is a silent wait; any
+  other read fault writes one red console line per distinct (path, error) and keeps polling
+  (DL-187 item 10).
+- Log pager (DL-67): whenever the log tail has focus, which `m` grants, it is a less-style pager.
+  Focus is the mode switch: textual consults the focused widget's bindings before the app's, so
+  one mechanism provides the pager verbs and shadows the operator verbs (`k` scrolls up, never
+  KILLJOB; `f` and space page forward, never FORCE; `q` and escape leave the pager, never the
+  app; verbs with no pager meaning ring the bell). Paging never mutates the estate. `/` and `?`
+  search (regex, smartcase, all matches reverse-video, `n`/`N` wrap in the less directions); `&`
+  shows only matching lines, a view of the buffer; an empty submit clears and escape cancels the
+  prompt only (ESCAPE_TO_MINIMIZE is off so textual cannot swallow it). Follow is
+  pinned-at-bottom: scrolling up pauses ([paused] in the title) and `F`/`G`/End resume. Buffer,
+  filter view and widget cap at _PAGER_BUFFER_LINES in lockstep. `m` maximizes the log pane (tail
+  plus prompt line) so the prompt stays visible. `m`/`o`/`r`, `F1` and the resize keys pass
+  through to the app.
+- The event console (`:`) accepts exactly the ss10 sendevent verbs (job verbs; SET_GLOBAL
+  NAME=value; CHANGE_STATUS [job] STATUS [exit_code]); an omitted job means the selected row.
+  Escape clears the typed line and returns focus to the table. Every request and response is
+  echoed; refusals render red and change nothing. The server validates against the catalog and
+  the TUI never pre-judges. The echo names the whole request, including a global's value, a
+  status and an exit code (DL-187 item 9). CHANGE_STATUS's status-first shorthand applies only
+  when the next token is not itself a status; otherwise the line is the explicit
+  `<job> STATUS [exit_code]` form (item 8).
+- Safety (DL-187): the verb keys live on the jobs table, not the app, so they fire and the Footer
+  offers them only while the table has focus; `k` in the console log or explain pane is dead.
+  KILLJOB and FORCE_STARTJOB from a key open a confirm first (a typed KILLJOB is already intent),
+  naming the target's status, the revision and, for a box, the members it reaches. The revision
+  is frozen before the modal opens, so a job that moved meanwhile is refused by DL-90. Quit
+  follows posture: a detached viewer exits at once ("detach"); `run --ui` owns the engine, so
+  quitting stops the run and is confirmed first ("stop run").
+- Help (`F1`, and `?` outside the pager) toggles Textual's context help panel. Every pane and
+  popup with keys of its own carries a short `HELP` string, read off the focused widget's
+  ancestors. The console's HELP lists every sendevent verb, and an unknown verb typed at `:` is
+  answered with the same sorted list (DL-187 item 7).
+- Triggers view (`t`, DL-68): "what fires next". It re-queries the ss10 `timers` verb (pending
+  oracle timers merged with each scheduled job's next calendar tick, due-ordered by the server)
+  every 2s while open, each row with an absolute UTC due and a countdown. Armed jobs (the SEM-32
+  latch from `status`) append below every dated row with no due: the next condition edge starts
+  them. Due-less rows render generically. It is read-only: every operator verb is shadowed to the
+  bell (DL-67) and `t`/`q`/escape close. The jobs table's flags column carries `A` for the same
+  latch. An ok:false `timers` answer leaves the rows as they were, names the refusal on the
+  border title and marks the app subtitle as a status or trace refusal does (DL-187 item 6).
+- Job details popup (`d` or Enter on a row): the ss10 `spec` verb's preserve-rendered JIL block
+  (the post-placeholder source this engine loaded), topped with the status facts, the `deps`
+  verb's needs/blocks lines (the blast radius, DL-65) and a short local log tail. The header
+  clock is UTC, matching the engine's naive-UTC basis (ss9): every timestamp on screen is one
+  time base, not the viewer's local wall (DL-64).
+- Navigation at estate scale (DL-65): the jobs table renders the box tree (indent from the status
+  response's box_name; space folds the selected box, `z` folds or unfolds all; a folded box shows
+  its hidden descendant count and a red problem tally, so a fold never hides a FAILURE). `/` opens
+  an incremental name filter (space-separated substrings AND'd; Enter keeps it, Esc clears; with
+  the log pager focused `/` searches the log instead). `v` cycles the view all, problems, active.
+  Filtered and non-'all' views are flat, so a match inside a folded box is never invisible. The
+  console is on `:`. The status response's spec_drift flag renders in the subtitle: files changed
+  on disk, the running catalog is the truth.
+- Pane geometry is keyboard only: `m` toggles maximizing the log pane and hands focus to the
+  pager (`q`/escape also restore); `]`/`[` grow and shrink the log against explain, `}`/`{` the
+  jobs table against the side column. While anything is maximized the tree filter and the console
+  never take focus, so an input the operator cannot see never swallows keystrokes (DL-67).
+- One request connection, lock-serialized (the server answers one line per line); `subscribe`
+  owns its connection until hangup (ss10). A dead socket flips the header subtitle to
+  "disconnected", is reported once to the console, and every path retries quietly, so the TUI
+  outlives engine restarts. A cancelled exchange drops the connection so a replaced worker
+  cannot leave an unread response to desync the next request. There are no client-side timeouts:
+  a live-but-wedged engine parks the data plane while quit stays responsive, and recovering a
+  stuck engine is the operator's call.
 
-The textual import is guarded (runner-design ss14): the core package keeps
-its three runtime deps; this module needs `pip install 'dsl41[ui]'`.
+The textual import is guarded (runner-design ss14): the core package keeps its three runtime
+deps; this module needs `pip install 'dsl41[ui]'`.
 """
 
 from __future__ import annotations
@@ -188,9 +148,8 @@ from dsl41.runner_control import (
 
 
 _ALARM_TRANSITIONS = frozenset({"MUST_START_ALARM", "MUST_COMPLETE_ALARM"})
-#: The trace marker of a move that broke a declared transition table. No
-#: build writes it since DL-353, but an engine of an older build this console
-#: attaches to may still send it, and its lines still show as alerts.
+#: The trace marker of a move that broke a declared transition table (DL-353). An engine of an
+#: older build may still send it, and its lines show as alerts.
 VIOLATION_MARKER = "TRANSITION_VIOLATION"
 _STATUS_STYLE = {
     "INACTIVE": "dim",
@@ -201,60 +160,44 @@ _STATUS_STYLE = {
     "TERMINATED": "magenta",
 }
 _TAIL_SEED_BYTES = 8192  # start a fresh tail this close to EOF
-#: the details popup's one-shot log preview: read this many trailing bytes,
-#: then keep the last `_DETAILS_TAIL_LINES` of them (DL-178h). Deliberately
-#: NOT `_TAIL_SEED_BYTES`: that one seeds a LIVE, continuously polled tail
-#: and wants enough history to read while it is running; this is a single
-#: read for a ten-line snapshot in a popup, and 8192 bytes for ten lines
-#: would be wasted work on every `_show_details` call.
+#: the details popup's one-shot log preview: read this many trailing bytes, keep the last
+#: `_DETAILS_TAIL_LINES` of them (DL-178h). It is smaller than `_TAIL_SEED_BYTES`, which seeds a
+#: live polled tail, because a ten-line snapshot needs less.
 _DETAILS_TAIL_BYTES = 4096
 _DETAILS_TAIL_LINES = 10
-#: pager memory bound: buffer, widget, and display list all cap here in
-#: lockstep. Paging serves triage; the file on disk is the forensic truth.
+#: pager memory bound: buffer, widget and display list cap here in lockstep.
 _PAGER_BUFFER_LINES = 10_000
 _COLUMNS = ("job", "status", "at", "run", "exit", "flags", "timers", "alarms")
-#: fixed render widths for the bounded columns (max of content and header
-#: label: TERMINATED, HH:MM:SS, IHN, ...). Auto-width stays only where content
-#: genuinely varies -- job (indent, fold markers, rollup tallies) and timers.
-#: The point is to keep update_cell's update_width off these columns: textual's
-#: width recompute re-measures a WHOLE column per updated-and-shrunk cell, and
-#: with every cell of every row queued each refresh that is O(cells x rows) --
-#: ~2M rich measures, ~25s of blocked loop, at a 519-job estate.
+#: fixed render widths for the bounded columns (the wider of content and header label).
+#: Auto-width stays on job and timers, whose content varies. Fixed widths keep update_cell's
+#: update_width off these columns: textual's width recompute re-measures a whole column per
+#: updated cell, which is O(cells x rows) at estate scale (~25s of blocked loop at 519 jobs).
 _COLUMN_WIDTHS = {"status": 10, "at": 8, "run": 4, "exit": 4, "flags": 5, "alarms": 6}
-#: every first token `:` accepts, sorted -- what an unknown verb's error
-#: enumerates, and what the console's own HELP lists (DL-187 item 7). Above
-#: the widget classes so `_ConsoleInput.HELP` can build its verb list from
-#: this ONE source instead of hand-copying it out of step.
+#: every first token `:` accepts, sorted: what an unknown verb's error lists and what the
+#: console's HELP lists (DL-187 item 7), from this one source
 _CONSOLE_VERBS = sorted(JOB_EVENT_VERBS | {"SET_GLOBAL", "CHANGE_STATUS"})
-#: the job-verb half of that list, for the console's HELP prose (the other
-#: two tokens get their own sentence, naming their argument shape instead)
+#: the job-verb half of that list, for the console's HELP prose
 _JOB_VERB_PROSE = ", ".join(v for v in _CONSOLE_VERBS if v not in ("SET_GLOBAL", "CHANGE_STATUS"))
 
 
 def _cell_sig(value: Any) -> tuple[str, str]:
-    """Comparable identity of a rendered cell: (plain text, style). Text.__eq__
-    ignores the style attribute, so diffing the cell objects directly would
-    call a restyled-but-same-text cell unchanged."""
+    """Comparable identity of a rendered cell: (plain text, style); Text.__eq__ ignores style."""
     if isinstance(value, Text):
         return value.plain, str(value.style)
     return str(value), ""
 
 
 class _TableSync:
-    """One DataTable refresh engine (DL-178v), shared by TriggersScreen and
-    RunnerApp. Both need the same three-way call: identity (row order +
-    membership) unchanged is a steady state -- diff cell signatures and push
-    only the cells that actually changed, so a countdown ticking over doesn't
-    queue every cell of every row for textual's width recompute (O(cells x
-    rows) at estate scale); identity changed means clear() and rebuild every
-    row, restoring the cursor to whichever identity survived. `_COLUMN_WIDTHS`
-    is applied here, so every caller gets that policy -- not just the one
-    that remembered to ask.
+    """One DataTable refresh engine (DL-178v), shared by TriggersScreen and RunnerApp.
 
-    `identity` is what decides rebuild-vs-steady-state and indexes `sigs`;
-    `keys` is the DataTable row key per row, same order -- the two differ for
-    TriggersScreen, whose rows are keyed by position but identified by
-    (job, kind, detail)."""
+    Unchanged identity (row order and membership) is a steady state: it diffs cell signatures
+    and pushes only changed cells, so a ticking countdown does not queue every cell for textual's
+    width recompute. Changed identity clears and rebuilds every row, restoring the cursor to
+    whichever identity survived. `_COLUMN_WIDTHS` is applied here for every caller.
+
+    `identity` decides rebuild versus steady state and indexes `sigs`; `keys` is the DataTable
+    row key per row in the same order. They differ for TriggersScreen, whose rows are keyed by
+    position but identified by (job, kind, detail)."""
 
     def __init__(self) -> None:
         self.identity: list[Any] = []
@@ -271,17 +214,12 @@ class _TableSync:
         on_rebuild: Callable[[Sequence[Any], Any], Any | None] | None = None,
         default_to_first_row: bool = False,
     ) -> None:
-        """On a membership/order change, `on_rebuild` runs once, right after
-        clear() and before any add_row -- so a caller can arm its own bounce
-        guard first. It gets `(new_identity, old_selected)`: the identity
-        about to be shown, and the identity value the cursor sat on before
-        this call -- read HERE, before clear() bounces `table.cursor_row`
-        back to 0, so no caller needs its own pre-refresh read of the
-        cursor or of `self.identity` (DL-178v: the engine owns every stale
-        read). It names the identity value to restore the cursor to, or
-        None. `default_to_first_row` covers the caller that wants row 0
-        when nothing survived; the caller that doesn't leaves the cursor
-        wherever clear()/add_row left it."""
+        """On a membership or order change, `on_rebuild` runs once, after clear() and before any
+        add_row, so a caller can arm its bounce guard first. It gets `(new_identity,
+        old_selected)`: the identity about to be shown and the identity the cursor sat on, read
+        before clear() resets `table.cursor_row` (DL-178v). It returns the identity to restore
+        the cursor to, or None. `default_to_first_row` selects row 0 when nothing survived;
+        otherwise the cursor stays where clear()/add_row left it."""
         if list(identity) != self.identity:
             cursor = table.cursor_row
             old_selected = self.identity[cursor] if 0 <= cursor < len(self.identity) else None
@@ -305,25 +243,22 @@ class _TableSync:
             for col_i, (column, cell, sig) in enumerate(zip(columns, cells, sigs)):
                 if old[col_i] == sig:
                     continue
-                # update_width only where it can matter: an auto-width
-                # column whose rendered width changed with the text
+                # update_width only for an auto-width column whose width changed
                 widen = column not in _COLUMN_WIDTHS and cell_len(old[col_i][0]) != cell_len(sig[0])
                 table.update_cell(key, column, cell, update_width=widen)
             self.sigs[i] = sigs
 
 
 class _UTCHeaderClock(HeaderClock):
-    """The engine's time basis is naive UTC (runner ss9); every timestamp
-    this app renders -- status_at, trace, timers -- is UTC. The stock header
-    clock renders LOCAL wall time, which reads as a constant skew against
-    every other number on screen; this one matches the data (DL-64)."""
+    """The engine's time basis is naive UTC (runner ss9) and every timestamp on screen is UTC, so
+    the header clock is UTC, not the stock local wall time (DL-64)."""
 
     def render(self) -> RenderResult:
         return Text(datetime.now(UTC).strftime("%H:%M:%S") + " UTC")
 
 
 class _UTCHeader(Header):
-    """Stock Header with the clock swapped for the UTC one (always shown)."""
+    """Stock Header with the UTC clock."""
 
     def compose(self) -> ComposeResult:
         yield HeaderIcon().data_bind(Header.icon)
@@ -331,10 +266,8 @@ class _UTCHeader(Header):
         yield _UTCHeaderClock()
 
 
-#: spliced with `*_HELP_BINDINGS` into every modal's BINDINGS (DL-187 item
-#: 7): a modal chain blocks app bindings (screen.py:449), so help needs to
-#: stay reachable from each modal on its own -- one shared pair instead of
-#: three copies of the same two lines and comment.
+#: spliced into every modal's BINDINGS (DL-187 item 7): a modal chain blocks app bindings
+#: (screen.py:449), so help must be reachable from each modal.
 _HELP_BINDINGS = (
     Binding("f1", "app.toggle_help_panel", "help", show=False),
     Binding("question_mark", "app.toggle_help_panel", "help", show=False),
@@ -342,11 +275,9 @@ _HELP_BINDINGS = (
 
 
 class SpecScreen(ModalScreen[None]):
-    """Job-details popup: runtime facts + the `spec` verb's JIL block --
-    the post-placeholder source the RUNNING engine loaded, not whatever
-    the file on disk says now. Escape/enter/d/q closes -- `q` because a
-    reader who came here to look reaches for the pager's leave key, and it
-    must never fall through to the app's quit (DL-187)."""
+    """Job-details popup: runtime facts and the `spec` verb's JIL block, the source the running
+    engine loaded, not the file on disk. Escape, enter, d or q closes; `q` is the pager's leave
+    key and must not fall through to the app's quit (DL-187)."""
 
     HELP = """
     The running engine's own facts for one job: status, dependencies,
@@ -385,17 +316,15 @@ class SpecScreen(ModalScreen[None]):
         box.focus()
 
 
-#: names listed in a box confirm before the tail is summed; a blast radius
-#: that fills the screen is not read, and the count carries the rest
+#: names listed in a box confirm before the rest is summed as a count
 _CONFIRM_MEMBER_CAP = 8
 
 
 def confirm_body(
     verb: str, target: str, status: str, revision: int | None, members: Sequence[str]
 ) -> str:
-    """The ConfirmScreen text for one job verb: what is about to be sent,
-    the state it is being sent AGAINST, and -- for a box -- who else it
-    reaches. Pure so the blast radius is testable without a terminal."""
+    """The ConfirmScreen text for one job verb: what is sent, the state it is sent against and,
+    for a box, who else it reaches. Pure, so the blast radius is testable."""
     lines = [
         f"{verb} {target}",
         f"now {status or '?'} at revision {revision if revision is not None else '?'}",
@@ -411,12 +340,10 @@ def confirm_body(
 
 
 class ConfirmScreen(ModalScreen[bool]):
-    """A yes/no gate in front of a destructive KEY (DL-187).
+    """A yes/no gate in front of a destructive key (DL-187).
 
-    Typed console commands are NOT gated: writing out KILLJOB is already an
-    act of intent, while `k` sits one keystroke from every navigation key.
-    Enter or `y` confirms; escape, `n` and `q` cancel -- `q` because the key
-    that leaves every other view must not be the key that agrees here."""
+    Typed console commands are not gated; `k` sits one keystroke from every navigation key.
+    Enter or `y` confirms; escape, `n` and `q` cancel, since `q` leaves every other view."""
 
     HELP = """
     Enter or y confirms; escape, n, or q cancels. Nothing is sent until
@@ -461,17 +388,14 @@ class ConfirmScreen(ModalScreen[bool]):
 
 
 def format_due(due: datetime, now: datetime) -> str:
-    """Absolute UTC due: HH:MM:SS today, date + time otherwise. Pure
-    function (naive-UTC datetimes, the engine's time basis)."""
+    """Absolute UTC due: HH:MM:SS today, date and time otherwise (naive-UTC datetimes)."""
     if due.date() == now.date():
         return due.strftime("%H:%M:%S")
     return due.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def format_countdown(due: datetime, now: datetime) -> str:
-    """Humanized time-to-due ("42s", "3m12s", "2h05m", "1d03h"); "-" once
-    due/overdue -- a negative countdown reads as a bug, not a fact. Pure
-    function so the rendering rule is testable without a terminal."""
+    """Humanized time-to-due ("42s", "3m12s", "2h05m", "1d03h"); "-" once due or overdue."""
     total = int((due - now).total_seconds())
     if total <= 0:
         return "-"
@@ -488,10 +412,7 @@ def format_countdown(due: datetime, now: datetime) -> str:
 
 
 def clock_of(iso: str) -> str:
-    """HH:MM:SS out of an ISO datetime string, or the string itself when it
-    is too short to hold one. A pure function beside `format_due`/
-    `format_countdown` (same shape: testable without a terminal); this rule
-    stayed inline three times before it existed (DL-178h)."""
+    """HH:MM:SS out of an ISO datetime string, or the string itself when too short (DL-178h)."""
     return iso[11:19] if len(iso) >= 19 else iso
 
 
@@ -500,11 +421,9 @@ def assemble_trigger_rows(
     jobs: dict[str, dict[str, Any]],
     now: datetime,
 ) -> list[tuple[str, str, str, str, str]]:
-    """(due, in, job, kind, detail) rows for the triggers view: the server's
-    due-ordered `timers` entries kept stable, due-less rows (filewatch shows
-    "watching") below them, then one row per armed job (the SEM-32 latch --
-    no due, the next condition edge starts it), name-sorted. Pure function
-    so the assembly needs no live socket."""
+    """(due, in, job, kind, detail) rows for the triggers view: the server's due-ordered `timers`
+    entries, due-less rows (filewatch shows "watching") below them, then one name-sorted row per
+    armed job (the SEM-32 latch: no due, the next condition edge starts it)."""
     dated: list[tuple[str, str, str, str, str]] = []
     undated: list[tuple[str, str, str, str, str]] = []
     for entry in timers:
@@ -534,9 +453,8 @@ def assemble_detail_trigger_lines(
     row: dict[str, Any],
     timers: list[dict[str, Any]],
 ) -> list[str]:
-    """The details popup's trigger story (DL-68): started by, the armed
-    latch, a live filewatch, the earliest dated timer for this job, then
-    every pending timer. Pure so the assembly needs no live socket."""
+    """The details popup's trigger lines (DL-68): started by, the armed latch, a live filewatch,
+    the earliest dated timer for this job, then every pending timer."""
     lines: list[str] = []
     if row.get("started_by"):
         lines.append(f"started by: {row['started_by']}")
@@ -570,10 +488,9 @@ def assemble_detail_trigger_lines(
 
 
 class TriggersScreen(ModalScreen[None]):
-    """DL-68 triggers view: the `timers` verb live (2s re-query while open)
-    plus the armed latches from the last status snapshot. Read-only -- every
-    operator verb is shadowed to the bell (DL-67: keys must never mutate the
-    estate from a view that exists to look); t/q/escape close, r re-queries."""
+    """DL-68 triggers view: the `timers` verb live (2s re-query while open) plus the armed
+    latches from the last status snapshot. Read-only: every operator verb is shadowed to the
+    bell (DL-67). t, q and escape close; r re-queries."""
 
     HELP = """
     Read-only (DL-68): every operator verb rings the bell here and
@@ -589,9 +506,8 @@ class TriggersScreen(ModalScreen[None]):
         Binding("t", "dismiss", "close", show=False),
         Binding("r", "refresh_now", "refresh", show=False),
         *_HELP_BINDINGS,
-        # operator verbs and pane/navigation keys: bell, exactly like the
-        # log pager -- NOT check_action=False, which would let the key fall
-        # through to the app binding it exists to shadow (DL-67)
+        # operator verbs and pane keys ring the bell as the log pager does; check_action=False
+        # would let the key fall through to the app binding it shadows (DL-67)
         Binding("s", "app.bell", "", show=False),
         Binding("f", "app.bell", "", show=False),
         Binding("k", "app.bell", "", show=False),
@@ -638,9 +554,8 @@ class TriggersScreen(ModalScreen[None]):
         self.set_interval(2.0, self.action_refresh_now)
 
     def action_refresh_now(self) -> None:
-        # the bound METHOD, not a coroutine (the RunnerApp explain-worker
-        # pattern: a superseded exclusive worker must not leave a
-        # created-never-awaited coroutine)
+        # the bound method, not a coroutine: a replaced exclusive worker must not leave a
+        # never-awaited coroutine (the RunnerApp explain-worker pattern)
         self.run_worker(self._refresh, group="triggers", exclusive=True)  # type: ignore[arg-type]
 
     async def _refresh(self) -> None:
@@ -657,16 +572,11 @@ class TriggersScreen(ModalScreen[None]):
         except NoMatches:
             return  # a worker resuming after the await can outlive the screen
         if not response.get("ok"):
-            # DL-187 item 6 (P1-1): the last good rows stay; the refusal is
-            # named on the border AND, through the app's keyed memo, the
-            # subtitle -- `timers` is one channel of the same dict as
-            # status/trace, so it gets the identical console line and
-            # subtitle marking without a screen-local memo of its own
+            # DL-187 item 6 (P1-1): the last good rows stay; the refusal is named on the border
+            # and, through the app's keyed memo, the subtitle, as for status and trace
             error = str(response.get("error", "")).strip()
-            # P1-3: a Text title -- border_title strings parse as rich
-            # markup (runner_tui.py's own precedent, the jobs table's
-            # title), and this error string is the SERVER's, not this
-            # module's, so it may carry brackets or other markup by accident
+            # P1-3: a Text title, because border_title strings parse as rich markup and this
+            # error is the server's
             table.border_title = Text(f"triggers (refused: {error})")
             app._set_query_fault("timers", error)
             return
@@ -675,11 +585,8 @@ class TriggersScreen(ModalScreen[None]):
         rows = assemble_trigger_rows(
             timers, app._jobs_snapshot, datetime.now(UTC).replace(tzinfo=None)
         )
-        # membership/order changed: rebuild, then put the cursor back on the
-        # same trigger if it survived. `_TableSync.refresh` reads the
-        # cursor's current row itself, before clear() resets it -- clear()
-        # every 2s would otherwise bounce the row cursor and scroll first
-        # (the jobs-table pathology, DL-67; review MAJOR).
+        # a membership or order change rebuilds and restores the cursor to the same trigger if it
+        # survived; a clear() every 2s would bounce the cursor and scroll (DL-67)
         ids = [(job, kind, detail) for _, _, job, kind, detail in rows]
         self._table_sync.refresh(
             table,
@@ -693,15 +600,11 @@ class TriggersScreen(ModalScreen[None]):
 
 
 class _JobsTable(DataTable[Any]):
-    """The jobs table, and the ONLY place the operator verbs are bound
-    (DL-187).
+    """The jobs table, the only place the operator verbs are bound (DL-187).
 
-    They were app bindings, which meant `k` killed the selected job from
-    anywhere the app's chain was reachable -- the console log and the
-    explain scroll are both focusable, and neither shadows a thing. A widget
-    binding fires only while this table has focus, and the Footer (which
-    renders screen.active_bindings, walking the focus chain) offers the
-    verbs only there. Same discipline as the pager: focus is the mode."""
+    A widget binding fires only while this table has focus, and the Footer (which renders
+    screen.active_bindings along the focus chain) offers the verbs only there. As in the pager,
+    focus is the mode."""
 
     HELP = """
     Verb keys fire only while this table has focus (DL-187): s start,
@@ -713,8 +616,8 @@ class _JobsTable(DataTable[Any]):
     """
     BINDINGS = [
         Binding("s", "app.send('STARTJOB')", "start"),
-        # visible: FORCE is the rerun verb -- plain STARTJOB is SEM-10-gated
-        # on box members and its refusal used to be silent (DL-64)
+        # visible: FORCE is the rerun verb; plain STARTJOB is SEM-10-gated on box members
+        # (DL-64)
         Binding("f", "app.send('FORCE_STARTJOB')", "force"),
         Binding("k", "app.send('KILLJOB')", "kill"),
         Binding("i", "app.send('ON_ICE')", "ice", show=False),
@@ -727,8 +630,8 @@ class _JobsTable(DataTable[Any]):
 
 
 class _FilterInput(Input):
-    """The `/` filter line. Escape clears and hides it; Enter (Input.Submitted,
-    handled by the app) keeps the filter applied and returns to the table."""
+    """The `/` filter line. Escape clears and hides it; Enter (Input.Submitted, handled by the
+    app) keeps the filter and returns to the table."""
 
     BINDINGS = [Binding("escape", "clear_filter", "clear")]
 
@@ -739,10 +642,8 @@ class _FilterInput(Input):
 
 
 class _ConsoleInput(Input):
-    """The `:` console line. Escape clears the half-typed command and hands
-    focus back to the jobs table -- mirroring _FilterInput, and for the same
-    reason: a line the operator abandoned must not sit there waiting for a
-    stray Enter (DL-187)."""
+    """The `:` console line. Escape clears the half-typed command and returns focus to the jobs
+    table, as _FilterInput does, so an abandoned line cannot wait for a stray Enter (DL-187)."""
 
     HELP = f"""
     Type a sendevent verb; an omitted job means the selected row:
@@ -760,10 +661,8 @@ class _ConsoleInput(Input):
 
 
 def compile_search(pattern: str) -> re.Pattern[str] | str:
-    """Compile a pager search/filter pattern: regex, smartcase (insensitive
-    unless the pattern itself carries an uppercase letter -- the rg/vim
-    default). Returns an error string instead of raising so the prompt can
-    render it; pure function so the rule is testable without a terminal."""
+    """Compile a pager search or filter pattern: regex, smartcase (insensitive unless the pattern
+    has an uppercase letter). Returns an error string instead of raising, for the prompt."""
     flags = 0 if any(ch.isupper() for ch in pattern) else re.IGNORECASE
     try:
         return re.compile(pattern, flags)
@@ -772,11 +671,10 @@ def compile_search(pattern: str) -> re.Pattern[str] | str:
 
 
 class _LogSearchInput(Input):
-    """The pager prompt line (`/`, `?`, `&`). Escape cancels the PROMPT and
-    hands focus back to the log -- it must not leave the pager, which is why
-    RunnerApp disables textual's escape-to-minimize special case (it swallows
-    escape BEFORE any binding runs while a widget is maximized) and owns
-    escape through explicit bindings instead."""
+    """The pager prompt line (`/`, `?`, `&`). Escape cancels the prompt and returns focus to the
+    log without leaving the pager. RunnerApp disables textual's escape-to-minimize, which
+    swallows escape before any binding runs while a widget is maximized, and binds escape
+    itself."""
 
     BINDINGS = [Binding("escape", "cancel_prompt", "cancel")]
 
@@ -787,22 +685,18 @@ class _LogSearchInput(Input):
 
 
 class _LogTail(RichLog):
-    """The log tail, and -- whenever it has focus -- a less-style pager.
+    """The log tail, and a less-style pager whenever it has focus.
 
-    Focus IS the mode: textual consults the focused widget's bindings before
-    the app's, so the keymap below both provides the pager verbs and shadows
-    the operator verbs (`k` aimed at scroll-up must never KILLJOB, `f` aimed
-    at page-forward must never FORCE_STARTJOB, `q` leaves the pager, not the
-    app). Estate-mutating keys with no pager meaning ring the bell exactly
-    like less does on an unknown key; `m`/`o`/`r` and the pane-resize keys
-    deliberately fall through to the app (allowlist in tests). Paging must
-    never mutate the estate.
+    Focus is the mode: textual consults the focused widget's bindings before the app's, so the
+    keymap provides the pager verbs and shadows the operator verbs (`k` scrolls up, never
+    KILLJOB; `f` pages down, never FORCE_STARTJOB; `q` leaves the pager, not the app).
+    Estate-mutating keys with no pager meaning ring the bell. `m`/`o`/`r` and the pane-resize
+    keys fall through to the app (allowlist in tests). Paging never mutates the estate.
 
-    Search is regex with smartcase, all matches reverse-video, `n`/`N`
-    wrap; `&` shows only matching lines (less's own filter key) as a VIEW of
-    the buffer, never a loss. Follow is pinned-at-bottom: scrolling up
-    pauses it ([paused] in the title), `F`/`G`/End resume. The buffer, the
-    display list, and the widget all cap at _PAGER_BUFFER_LINES in lockstep.
+    Search is regex with smartcase, all matches reverse-video, `n`/`N` wrap. `&` shows only
+    matching lines, a view of the buffer. Follow is pinned-at-bottom: scrolling up pauses it
+    ([paused] in the title) and `F`/`G`/End resume. Buffer, display list and widget cap at
+    _PAGER_BUFFER_LINES in lockstep.
     """
 
     HELP = """
@@ -820,8 +714,7 @@ class _LogTail(RichLog):
         Binding("ampersand", "prompt('filter')", "filter lines"),
         Binding("n", "match_step(1)", "next"),
         Binding("N", "match_step(-1)", "prev"),
-        # motion (less/vim), shadowing k=KILLJOB / f=FORCE / d=details /
-        # space=fold / z=fold-all with their pager meanings
+        # motion (less/vim); shadows k=KILLJOB, f=FORCE, d=details, space=fold, z=fold-all
         Binding("j", "scroll_down", "down", show=False),
         Binding("k", "scroll_up", "up", show=False),
         Binding("d", "half_page(1)", "half down", show=False),
@@ -836,9 +729,8 @@ class _LogTail(RichLog):
         # leaving the pager (q must not quit the app from muscle memory)
         Binding("q", "leave", "close"),
         Binding("escape", "leave", "close", show=False),
-        # estate-mutating operator verbs with no pager meaning: bell, like
-        # less on an unknown key -- NOT check_action=False, which would let
-        # the key fall through to the app binding it exists to shadow
+        # estate-mutating verbs with no pager meaning ring the bell; check_action=False would
+        # let the key fall through to the app binding it shadows
         Binding("s", "app.bell", "", show=False),
         Binding("i", "app.bell", "", show=False),
         Binding("I", "app.bell", "", show=False),
@@ -873,9 +765,8 @@ class _LogTail(RichLog):
     # ------------------------------------------------------------- data plane
 
     def set_source(self, stream: str, path: str | None) -> None:
-        """New tail target (job switch, o toggle, truncation): drop the
-        buffer, keep the search/filter patterns -- less keeps the pattern
-        across files, and `n` after a job switch is a feature."""
+        """New tail target (job switch, o toggle, truncation): drop the buffer, keep the
+        search and filter patterns, as less does across files."""
         self._stream, self._path = stream, path
         self._buffer.clear()
         self._display = []
@@ -923,8 +814,7 @@ class _LogTail(RichLog):
         self.write(text, scroll_end=False)
 
     def _rebuild(self) -> None:
-        """Re-render the whole view from the buffer (search or filter
-        changed): restyles every line and recomputes the match rows."""
+        """Re-render the view from the buffer after a search or filter change."""
         self.clear()
         self._display = []
         self._matches = []
@@ -937,15 +827,14 @@ class _LogTail(RichLog):
     # ------------------------------------------------------------ search model
 
     def apply_search(self, pattern: str, backward: bool) -> str | None:
-        """Set (or with '' clear) the needle; returns an error string for the
-        prompt to render, None on success. On success jumps less-style: the
-        first match after (before, for `?`) the current top row, wrapping."""
+        """Set the needle ('' clears it); returns an error string for the prompt, None on
+        success. It jumps to the first match after (for `?`, before) the top row, wrapping."""
         top = int(self.scroll_y)  # clear() inside _rebuild resets the scroll
         if not pattern:
             self._needle = None
             self._needle_text = ""
             self._rebuild()
-            # de-highlight in place: clearing a search must not move the view
+            # clearing a search keeps the view in place
             self.scroll_to(y=min(top, self.max_scroll_y), animate=False)
             self._refresh_title()
             return None
@@ -1004,12 +893,8 @@ class _LogTail(RichLog):
         assert isinstance(pane, _LogPane)
         pane.open_prompt(kind)
 
-    # the widget-inherited motion actions animate by default and move
-    # RELATIVE TO scroll_target_y, which goes stale when the viewport
-    # changes size (the small pane's scroll_end leaves a target beyond the
-    # maximized pane's max, and every scroll_up after that only shaves the
-    # phantom overshoot). A pager SNAPS (less has no smooth scrolling), and
-    # snapping from the real offset sidesteps the stale target entirely.
+    # the inherited motion actions animate and move relative to scroll_target_y, which goes
+    # stale when the viewport resizes; a pager snaps from the real offset instead
 
     def _snap(self, y: float) -> None:
         self.scroll_to(y=y, animate=False)
@@ -1048,8 +933,7 @@ class _LogTail(RichLog):
 
     def on_mount(self) -> None:
         self._refresh_title()
-        # scroll state feeds the title ([paused]); arrows/wheel bypass our
-        # actions, so a light tick keeps it honest between feeds
+        # arrows and wheel bypass our actions, so a tick keeps the [paused] title current
         self.set_interval(0.5, self._refresh_title)
 
     def _refresh_title(self) -> None:
@@ -1067,10 +951,9 @@ class _LogTail(RichLog):
 
 
 class _LogPane(Vertical):
-    """The log column cell: the pager plus its prompt line. Maximizing THIS
-    (not the bare RichLog) is what keeps the prompt visible while zoomed --
-    maximize hides every widget outside the maximized subtree, which is
-    exactly how the old tree-filter-under-zoom bug happened."""
+    """The log column cell: the pager plus its prompt line. Maximizing this, not the bare
+    RichLog, keeps the prompt visible, because maximize hides every widget outside the
+    maximized subtree."""
 
     ALLOW_MAXIMIZE = True  # containers default to False
 
@@ -1113,35 +996,27 @@ class _LogPane(Vertical):
         self.close_prompt()
 
 
-#: what the console says about each ss3 outcome, and why each says it:
+#: what the console says about each ss3 outcome:
 #: applied  -- the index, so the operator can find it in the journal.
-#: refused  -- "not sent" is the operator-facing truth: no index, no log
-#:             entry, nothing to look up later. Sending it again is safe.
-#:             The console mints a fresh id per command, so its refusal is
-#:             never a retry's; a collision, which only a reused id meets,
-#:             says instead what the id decided earlier (DL-217).
-#: rejected -- the table they typed against had already moved. It IS in the
-#:             log, and the refresh below the line is the re-read.
-#: unknown  -- yellow, not red: this is the one that has not failed. The
-#:             engine may be applying it right now, so the instruction is to
-#:             look, never to press the key again.
+#: refused  -- "not sent": no index, no log entry; sending again is safe. The console mints a
+#:             fresh id per command, so a refusal is never a retry's; a collision, which only a
+#:             reused id meets, says what the id decided earlier (DL-217).
+#: rejected -- the table they typed against had moved. It is in the log, and the refresh below
+#:             the line is the re-read.
+#: unknown  -- yellow, not red: the engine may be applying it now, so look, never resend.
 _OUTCOME_STYLE = {APPLIED: "green", REFUSED: "red", REJECTED: "red"}
 
 
 def _outcome_line(label: str, response: Mapping[str, Any]) -> Text:
-    """One console line for one command answer, by ss3 outcome (DL-92).
-
-    The TUI is where the distinction is cheapest to act on and easiest to
-    lose: three different failures rendered as one red `error` string teach
-    an operator that red means "press it again", which is right for a
-    refusal, wasted for a rejection and wrong for an unknown."""
+    """One console line for one command answer, by ss3 outcome (DL-92): red means "send
+    again" only for a refusal, so refusal, rejection and unknown render differently."""
     outcome = outcome_of(response)
     error = str(response.get("error", "")).strip()
     if outcome == APPLIED:
         body = f"applied @ #{response.get('index', '?')}"
     elif outcome == REFUSED and (original := original_decision_text(response)) is not None:
-        # a collision: THIS request was refused, but its id is logged under
-        # an earlier decision, so "nothing logged" would be false (DL-217)
+        # a collision: this request was refused but its id is logged under an earlier decision
+        # (DL-217)
         body = f"refused: {error or 'request_id collision'}; {original}"
     elif outcome == REFUSED:
         body = f"not sent, nothing logged: {error or 'refused'}"
@@ -1153,15 +1028,9 @@ def _outcome_line(label: str, response: Mapping[str, Any]) -> Text:
 
 
 def _transport_line(label: str, exc: ControlClientError) -> Text:
-    """One console line for a command that never got an ANSWER.
-
-    `_outcome_line` above reads four outcomes out of a response; this reads
-    the two out of a response that never arrived, and the split is the same
-    one for the same reason. A request that never left the app is the
-    refusal case exactly -- nothing logged, send it again. A request that
-    left and got nothing back is the unknown case exactly, and telling an
-    operator watching a terminal that it was "not sent" is how they resend a
-    command that is already admitted."""
+    """One console line for a command that got no answer. A request that never left the app is
+    the refusal case: nothing logged, send again. One that left and got nothing back is the
+    unknown case: "not sent" would make the operator resend an admitted command."""
     if not exc.delivered:
         return Text(f"{label}: not sent ({exc})", style="red")
     return Text(
@@ -1171,16 +1040,12 @@ def _transport_line(label: str, exc: ControlClientError) -> Text:
 
 
 def parse_console_command(text: str, selected: str | None) -> dict[str, Any] | str:
-    """Parse an event-console line into the VERB HALF of a sendevent request,
-    or return an error string. Grammar (ss11): `<JOB_VERB> [job]`,
-    `SET_GLOBAL NAME=value`, `CHANGE_STATUS [job] STATUS [exit_code]`; an
-    omitted job targets the selected row. Pure function so the parser is
-    testable without a terminal.
+    """Parse an event-console line into the verb half of a sendevent request, or return an
+    error string. Grammar (ss11): `<JOB_VERB> [job]`, `SET_GLOBAL NAME=value`,
+    `CHANGE_STATUS [job] STATUS [exit_code]`; an omitted job targets the selected row.
 
-    The concurrency-model ss6 envelope is NOT built here (DL-90). `expect` names the revision
-    the operator was looking at when they typed, which is a fact about the
-    app's last refresh, not about the line; a pure parser cannot know it and
-    should not pretend to."""
+    The concurrency-model ss6 envelope is not built here (DL-90): `expect` is the revision of the
+    app's last refresh, which a pure parser cannot know."""
     tokens = text.split()
     if not tokens:
         return "empty command"
@@ -1205,10 +1070,8 @@ def parse_console_command(text: str, selected: str | None) -> dict[str, Any] | s
             return 'SET_GLOBAL expects "NAME=value"'
         return {"cmd": "sendevent", "verb": verb, "payload": {"name": name, "value": value}}
     if verb == "CHANGE_STATUS":
-        # the status-first shorthand only applies when the SECOND token is
-        # not itself a status -- "CHANGE_STATUS SUCCESS FAILURE" is a job
-        # named SUCCESS, not the selected job set to SUCCESS then FAILURE
-        # (DL-187 item 8)
+        # the status-first shorthand applies only when the second token is not a status:
+        # "CHANGE_STATUS SUCCESS FAILURE" names a job SUCCESS (DL-187 item 8)
         shorthand = (
             bool(args)
             and args[0].upper() in STATUSES
@@ -1235,10 +1098,8 @@ def parse_console_command(text: str, selected: str | None) -> dict[str, Any] | s
 
 
 def echo_label(request: dict[str, Any]) -> str:
-    """The console's echo of a sendevent request BEFORE it is sent (DL-187
-    item 9): the whole request, not just the verb -- a global's value, a
-    status, an exit code -- so the line names what was actually asked for.
-    Pure so the three shapes are testable without a terminal."""
+    """The console's echo of a sendevent request before it is sent (DL-187 item 9): the whole
+    request, including a global's value, a status and an exit code."""
     verb = str(request.get("verb"))
     payload = request.get("payload") or {}
     if verb == "SET_GLOBAL":
@@ -1252,8 +1113,8 @@ def echo_label(request: dict[str, Any]) -> str:
 
 
 class _ExplainPane(VerticalScroll):
-    """The condition/atoms explain view for the selected job -- a HELP home
-    (DL-187 item 7) for a pane that was otherwise a bare container."""
+    """The condition and atoms explain view for the selected job, with its HELP (DL-187 item
+    7)."""
 
     HELP = """
     Why the selected job is, or is not, runnable right now.
@@ -1267,10 +1128,9 @@ class RunnerApp(App[None]):
     """The ss11 app: jobs table, explain pane, log tail, event console."""
 
     TITLE = "dsl41 runner"
-    #: textual's default swallows escape BEFORE any binding runs while a
-    #: widget is maximized -- escape in the pager's search prompt would exit
-    #: the pager instead of cancelling the prompt. Escape is owned by
-    #: explicit bindings instead (_LogTail leave, _LogSearchInput cancel).
+    #: textual's default swallows escape before any binding runs while a widget is maximized, so
+    #: escape would exit the pager instead of cancelling its prompt. Explicit bindings own it
+    #: (_LogTail leave, _LogSearchInput cancel).
     ESCAPE_TO_MINIMIZE = False
     CSS = """
     #main { height: 1fr; }
@@ -1286,9 +1146,8 @@ class RunnerApp(App[None]):
     #console { height: 1fr; border: round $secondary; }
     """
 
-    #: NO `send(...)` action belongs here: the operator verbs live on
-    #: _JobsTable, where focus gates them (DL-187). A verb bound at app
-    #: level fires from every focusable widget in the app.
+    #: No `send(...)` action belongs here: the operator verbs live on _JobsTable, where focus
+    #: gates them (DL-187).
     BINDINGS = [
         # the label is posture-dependent and set per instance in __init__
         Binding("q", "quit", "quit"),
@@ -1298,19 +1157,16 @@ class RunnerApp(App[None]):
         Binding("o", "toggle_stream", "out/err"),
         Binding("r", "refresh", "refresh"),
         Binding("f1", "toggle_help_panel", "help"),
-        # `?` is the pager's reverse-search key; its widget binding shadows
-        # this one whenever the log has focus (DL-187 item 7)
+        # the pager's `?` binding shadows this one while the log has focus (DL-187 item 7)
         Binding("question_mark", "toggle_help_panel", "help", show=False),
-        # navigation at estate scale (DL-65): / filters by name, v cycles
-        # all -> problems -> active, space folds the selected box, z all
+        # navigation at estate scale (DL-65)
         Binding("slash", "focus_filter", "filter"),
         Binding("v", "cycle_view", "view"),
         Binding("space", "toggle_box", "fold", show=False),
         Binding("z", "toggle_all", "fold-all", show=False),
         Binding("colon", "focus_console", "console"),
-        # pane sizing (no mouse splitters in a keyboard-first TUI):
-        # ]/[ grow/shrink the log tail against explain; }/{ the jobs table
-        # against the whole side column
+        # pane sizing: ]/[ grow and shrink the log against explain; }/{ the jobs table against
+        # the side column
         Binding("]", "resize('log', 1)", "log+", show=False),
         Binding("[", "resize('log', -1)", "log-", show=False),
         Binding("}", "resize('table', 1)", "table+", show=False),
@@ -1320,15 +1176,11 @@ class RunnerApp(App[None]):
     def __init__(self, socket_path: Path, owns_run: bool = False) -> None:
         super().__init__()
         self.socket_path = Path(socket_path)
-        #: True under `dsl41 run --ui`, where quitting the app STOPS the run;
-        #: False for `dsl41 ui`, where quitting detaches a viewer and the
-        #: engine keeps running (DL-187)
+        #: True under `dsl41 run --ui`, where quitting stops the run; False for `dsl41 ui`, where
+        #: quitting detaches a viewer (DL-187)
         self.owns_run = bool(owns_run)
-        # replace the whole per-key list rather than BindingsMap.bind: bind
-        # appends, and active_bindings keeps the FIRST binding for a key, so
-        # the appended label would never show. copy() shares the lists with
-        # the class-level merge, so appending would also leak into every
-        # other instance; assigning touches only this app's dict copy.
+        # assign the per-key list: BindingsMap.bind appends, active_bindings keeps the first
+        # binding for a key, and appending would leak into every other instance
         self._bindings.key_to_bindings["q"] = [
             Binding("q", "quit", "stop run" if self.owns_run else "detach")
         ]
@@ -1341,18 +1193,17 @@ class RunnerApp(App[None]):
         self._alarms: dict[str, int] = {}
         self._log_paths: dict[str, tuple[str | None, str | None]] = {}
         self._tail_stream: int = 0  # 0 = out, 1 = err
-        # (stream, path) rather than the bare path: out and err may legally
-        # resolve to the SAME file, and an `o` toggle must still retitle
+        # (stream, path), since out and err may resolve to the same file and `o` must retitle
         self._tail_key: tuple[str, str | None] | None = None
         self._tail_pos: int | None = None
-        # pane shares, resized by ]/[ and }/{ -- fr weights out of _SHARE_TOTAL
+        # pane shares, resized by ]/[ and }/{: fr weights out of _SHARE_TOTAL
         self._log_share = 3  # log vs explain (CSS default 3fr : 2fr)
         self._table_share = 3  # jobs table vs side column (CSS default 3fr : 2fr)
         # DL-65 navigation state
         self._jobs_snapshot: dict[str, dict[str, Any]] = {}  # last status response
-        #: the concurrency-model ss6 read header from the last answer: which log the revisions in
-        #: `_jobs_snapshot` were read from, so an `expect` composed off the
-        #: table cannot silently name a number from a re-baselined run root
+        #: the concurrency-model ss6 read header from the last answer: the log the revisions in
+        #: `_jobs_snapshot` were read from, so an `expect` cannot name a re-baselined run root's
+        #: number
         self._baseline = ""
         self._epoch = 0
         self._claimed_actor = claimed_actor()
@@ -1360,26 +1211,20 @@ class RunnerApp(App[None]):
         self._view_mode = 0  # index into _VIEW_MODES
         self._collapsed: set[str] = set()  # box rows folded shut
         self._table_sync = _TableSync()  # DL-178v: shared with TriggersScreen
-        #: set across a table rebuild that restores the selection: the first
-        #: add_row fires a spurious row-0 highlight BEFORE move_cursor lands,
-        #: and each such bounce would wipe the log tail (review MAJOR). The
+        #: set across a table rebuild that restores the selection: the first add_row fires a
+        #: spurious row-0 highlight before move_cursor lands, which would wipe the log tail. The
         #: highlight handler ignores events until the restore target arrives.
         self._restore_selected: str | None = None
         self._spec_drift = False
         self._connected: bool | None = None  # None = never yet reported
         self._refreshing = False
         self._dirty = False
-        #: DL-187 item 6 (P1-1): verb -> error for each of status/trace/
-        #: timers currently answering ok:false; empty while queries are
-        #: clean. Keyed so one verb's recovery cannot erase another's still-
-        #: live refusal (review MAJOR) -- a single shared slot did exactly
-        #: that when TriggersScreen's `timers` poll and this app's own
-        #: status/trace poll disagreed.
+        #: DL-187 item 6 (P1-1): verb -> error for each of status, trace and timers answering
+        #: ok:false; empty while queries are clean. Keyed so one verb's recovery cannot erase
+        #: another's live refusal.
         self._query_faults: dict[str, str] = {}
-        #: DL-187 item 10: (path, error string) of the last log-tail read
-        #: fault reported, so a repeat of the SAME fault stays quiet. A
-        #: local filesystem read, not a protocol answer, so it keeps its
-        #: own shape and clear rule rather than joining `_query_faults`.
+        #: DL-187 item 10: (path, error) of the last log-tail read fault reported, so a repeat
+        #: stays quiet. A local read is not a protocol answer, so it is not in `_query_faults`.
         self._tail_fault: tuple[str, str] | None = None
 
     # ------------------------------------------------------------- layout
@@ -1429,17 +1274,15 @@ class RunnerApp(App[None]):
         self._poll()
 
     def _reset_trace_cursor(self) -> None:
-        """Read the trace from the start again, and forget what the old cursor
-        indexed. Two triggers reach this -- a baseline change and the shorter-
-        trace fallback -- and the two bodies had to be kept equal by hand
-        (DL-75 review 2026-09-19). The alarms go WITH the cursor: they are
-        keyed by the sequence numbers that are about to be re-read."""
+        """Read the trace from the start again and forget what the old cursor indexed (DL-75).
+        The alarms go with the cursor: they are keyed by the sequence numbers about to be
+        re-read."""
         self._trace_seq = 0
         self._alarms.clear()
 
     async def _refresh(self) -> None:
-        """Re-query status/trace/explain. Coalescing guard: refreshes
-        triggered while one is in flight fold into a single trailing pass."""
+        """Re-query status, trace and explain. Refreshes triggered while one is in flight fold
+        into a single trailing pass."""
         if self._refreshing:
             self._dirty = True
             return
@@ -1454,12 +1297,9 @@ class RunnerApp(App[None]):
                     self._set_connected(False, str(exc))
                     return
                 self._set_connected(True)
-                # DL-187 item 6 (P1-1): an ok:false status or trace answer is
-                # a query refusal, distinct from a dead socket -- the last
-                # good table stays, but the operator is told the read
-                # failed. Each verb is set independently: status recovering
-                # must not silence a trace that is still refusing, or the
-                # reverse.
+                # DL-187 item 6 (P1-1): an ok:false status or trace answer is a query refusal,
+                # not a dead socket: the last good table stays and the operator is told. Each
+                # verb is set independently.
                 self._set_query_fault(
                     "status", None if status.get("ok") else str(status.get("error", "")).strip()
                 )
@@ -1487,10 +1327,9 @@ class RunnerApp(App[None]):
                 if trace.get("ok"):
                     last_seq = trace.get("last_seq")
                     if isinstance(last_seq, int) and last_seq < self._trace_seq:
-                        # Defensive fallback for a shorter trace. A baseline
-                        # change above resets even when the new trace is longer;
-                        # a same-period resume replays the existing prefix, so
-                        # an epoch change alone does not invalidate the cursor.
+                        # a shorter trace resets the cursor; a baseline change above resets even
+                        # a longer one, and an epoch change alone does not (a same-period resume
+                        # replays the existing prefix)
                         self._reset_trace_cursor()
                         self._dirty = True
                     self._consume_trace(trace.get("entries", []))
@@ -1529,18 +1368,13 @@ class RunnerApp(App[None]):
             self._console_write(Text(f"control socket unreachable: {detail}", style="red"))
 
     def _set_query_fault(self, verb: str, error: str | None) -> None:
-        """DL-187 item 6 (P1-1): an ok:false answer from `status`, `trace`,
-        or `timers` -- distinct from a dead socket, and distinct enough
-        from "nothing fires next" that it needs its own line. Keyed by
-        verb, so one verb's recovery cannot erase another's still-live
-        refusal (review MAJOR: a single shared slot let a good `timers`
-        answer erase a live `status` refusal, or the reverse) -- the
-        subtitle only cares whether the map holds ANYTHING, which gives
-        every caller, including TriggersScreen, one shared predicate for
-        free.
+        """DL-187 item 6 (P1-1): an ok:false answer from `status`, `trace` or `timers`, distinct
+        from a dead socket and from "nothing fires next". It is keyed by verb, so one verb's
+        recovery cannot erase another's live refusal; the subtitle reads whether the map holds
+        anything.
 
-        On change this writes the red refusal for `verb`, or, when `verb`
-        clears, its own green recovery line."""
+        On change it writes the red refusal for `verb`, or a green recovery line when `verb`
+        clears."""
         if error == self._query_faults.get(verb):
             return
         if error is None:
@@ -1552,8 +1386,8 @@ class RunnerApp(App[None]):
         self._refresh_subtitle()
 
     def _set_drift(self, drift: bool) -> None:
-        """DL-65 daemon-reload-hint analog, inverted: there is no reload --
-        the subtitle says the running catalog no longer matches the files."""
+        """DL-65: the subtitle says the running catalog differs from the files; there is no
+        reload."""
         if drift == self._spec_drift:
             return
         self._spec_drift = drift
@@ -1575,9 +1409,8 @@ class RunnerApp(App[None]):
                     continue  # idempotent consumption: never render twice
                 self._trace_seq = seq
             transition = str(entry.get("transition", ""))
-            # the entry's subject: a job, or for an older build's
-            # TRANSITION_VIOLATION a namespaced key such as `host:local`.
-            # Only an alarm counts against a job, so such a key never
+            # the subject is a job, or for an older build's TRANSITION_VIOLATION a namespaced key
+            # such as `host:local`; only an alarm counts against a job, so such a key never
             # reaches the jobs table or the problems view
             job = str(entry.get("job", ""))
             if transition in _ALARM_TRANSITIONS:
@@ -1585,12 +1418,10 @@ class RunnerApp(App[None]):
             at = str(entry.get("at", ""))
             clock = clock_of(at)
             if transition in _ALARM_TRANSITIONS or transition == VIOLATION_MARKER:
-                # an older build's broken declared transition is an alert
-                # like an alarm, whatever its subject
+                # an older build's broken declared transition alerts like an alarm
                 style = "bold red"
             elif transition == "START_REFUSED":
-                # DL-64: a refused operator start must not blend into the
-                # dim commentary -- it IS the answer to "why did nothing happen"
+                # DL-64: a refused operator start answers "why did nothing happen"
                 style = "yellow"
             else:
                 style = "dim"
@@ -1607,10 +1438,8 @@ class RunnerApp(App[None]):
         self._render_table()
 
     def _is_problem(self, name: str, row: dict[str, Any]) -> bool:
-        """ONE definition of 'problem', shared by the `v` problems view and
-        the folded-box rollup (review MAJOR: two definitions one keystroke
-        apart hid a QUE_WAIT under a quiet fold). QUE_WAIT counts: on a
-        contended estate it can park a region indefinitely."""
+        """The one definition of 'problem', shared by the `v` problems view and the folded-box
+        rollup. QUE_WAIT counts: on a contended estate it can park a region indefinitely."""
         status = str(row.get("status", ""))
         return status in ("FAILURE", "TERMINATED", "QUE_WAIT") or bool(self._alarms.get(name))
 
@@ -1628,8 +1457,8 @@ class RunnerApp(App[None]):
         return all(term in hay for term in self._filter.lower().split())
 
     def _children(self) -> dict[str | None, list[str]]:
-        """box name -> member names (None -> top-level), from the status
-        snapshot's box_name field (DL-65) -- alpha within each level."""
+        """box name -> member names (None for top level), from the status snapshot's box_name
+        (DL-65), alphabetical within each level."""
         kids: dict[str | None, list[str]] = {}
         for name in sorted(self._jobs_snapshot):
             box = self._jobs_snapshot[name].get("box_name")
@@ -1637,10 +1466,9 @@ class RunnerApp(App[None]):
         return kids
 
     def _visible(self) -> list[tuple[str, int]]:
-        """(job, depth) rows in display order: the box tree with collapsed
-        subtrees omitted -- or a FLAT filtered list while a name filter or a
-        non-'all' view mode is active (predictability over cleverness: a
-        filter match inside a collapsed box must never be invisible)."""
+        """(job, depth) rows in display order: the box tree with collapsed subtrees omitted, or a
+        flat filtered list while a name filter or a non-'all' view is active, so a match inside a
+        collapsed box is never invisible."""
         jobs = self._jobs_snapshot
         if self._filter or self._view_mode:
             return [(n, 0) for n in sorted(jobs) if self._match(n, jobs[n])]
@@ -1666,9 +1494,8 @@ class RunnerApp(App[None]):
         return out
 
     def _rollup(self, name: str, kids: dict[str | None, list[str]]) -> tuple[int, int]:
-        """(descendants, problems) hidden beneath a collapsed box: a folded
-        subtree must never hide a problem silently -- and 'problem' is
-        _is_problem, the same set the `v` problems view shows."""
+        """(descendants, problems) hidden beneath a collapsed box; 'problem' is `_is_problem`,
+        the set the `v` view shows."""
         total = problems = 0
         stack = list(kids.get(name, []))
         while stack:
@@ -1684,9 +1511,7 @@ class RunnerApp(App[None]):
     ) -> list[Any]:
         cells = self._row_cells(name, self._jobs_snapshot.get(name, {}))
         if flat:
-            # filtered / non-'all' views: no fold markers, no rollup -- the
-            # "hidden beneath" claim would be false with the members listed
-            # right below (review MINOR)
+            # filtered and non-'all' views have no fold markers or rollup: the members are listed
             return cells
         marker = ""
         if kids.get(name):
@@ -1702,16 +1527,13 @@ class RunnerApp(App[None]):
         return cells
 
     def _on_table_rebuild(self, order: Sequence[Any], _old_selected: Any) -> str | None:
-        # arm the bounce guard BEFORE _TableSync.refresh's add_row loop: the
-        # first row fires a spurious row-0 highlight ahead of the cursor
-        # restore. This app tracks selection in `_selected`, not the
-        # pre-clear cursor _TableSync.refresh now reads for us, so the
-        # second argument goes unused here (DL-178v).
+        # arm the bounce guard before the add_row loop: the first row fires a spurious row-0
+        # highlight ahead of the cursor restore. The app tracks selection in `_selected`, so the
+        # second argument is unused (DL-178v).
         self._rows = set(order)
         self._restore_selected = self._selected if self._selected in self._rows else None
         if not order:
-            # nothing visible: keyed verbs must not fire at a job the
-            # operator cannot see (review MAJOR)
+            # nothing visible: keyed verbs must not fire at a job the operator cannot see
             self._selected = None
         return self._restore_selected
 
@@ -1734,8 +1556,7 @@ class RunnerApp(App[None]):
             on_rebuild=self._on_table_rebuild,
             default_to_first_row=True,  # highlight event resyncs _selected
         )
-        # a Text title: border_title strings parse as rich markup, so a
-        # user-typed filter (or a bracketed mode tag) would vanish into it
+        # a Text title, since border_title strings parse as rich markup
         title = Text(f"jobs {len(order)}/{len(self._jobs_snapshot)}")
         if self._filter:
             title.append(f" /{self._filter}/", style="italic")
@@ -1749,10 +1570,8 @@ class RunnerApp(App[None]):
     def _row_cells(self, name: str, row: dict[str, Any]) -> list[Any]:
         status = str(row.get("status", ""))
         at = str(row.get("status_at") or "")
-        # A last: the operator flags are set states, the armed latch is a
-        # promise -- IHNA order keeps the cell diffable by eye. The alphabet
-        # belongs to the payload's owner (DL-145), so `--brief` and this
-        # cell cannot come to spell one estate two ways
+        # IHNA order: operator flags are set states and the armed latch comes last. The payload's
+        # owner holds the alphabet (DL-145), so `--brief` and this cell agree
         flags = "".join(mark for mark, flag in STATUS_FLAG_MARKS if row.get(flag))
         timers = row.get("pending_timers") or []
         timer_text = ""
@@ -1815,9 +1634,8 @@ class RunnerApp(App[None]):
     # -------------------------------------------------------- change feed
 
     async def _follow_journal(self) -> None:
-        """Wake-up signal only: any record means the estate may have moved.
-        Rendering always comes from the idempotent queries (module
-        docstring), so at-least-once delivery is harmless here."""
+        """Wake-up signal only: any record means the estate may have moved; rendering comes from
+        the idempotent queries, so at-least-once delivery is harmless."""
         while True:
             try:
                 async for _record in self._client.subscribe():
@@ -1850,11 +1668,9 @@ class RunnerApp(App[None]):
         except OSError as exc:
             self._report_tail_fault(path, exc)
             return
-        # NOT cleared here: a fault that lives in the OPEN/READ below (stat
-        # keeps succeeding, open keeps denying) would have its memo wiped
-        # this line and re-set two lines later EVERY tick -- exactly the
-        # once-per-distinct-error contract broken (review MAJOR). The clear
-        # waits for a pass that had nothing left to fail.
+        # the fault memo is not cleared here: a fault in the open or read below would be wiped
+        # and re-set every tick, breaking once-per-distinct-error. The clear waits for a pass
+        # with nothing left to fail.
         if self._tail_pos is None:
             self._tail_pos = max(0, size - _TAIL_SEED_BYTES)
         elif size < self._tail_pos:  # truncated underneath us: start over
@@ -1877,11 +1693,8 @@ class RunnerApp(App[None]):
         pager.feed(data.decode("utf-8", errors="replace").splitlines())
 
     def _report_tail_fault(self, path: str, exc: OSError) -> None:
-        """DL-187 item 10: a read fault that is NOT the ordinary
-        missing-file wait -- a permission error, a directory where the file
-        should be. One red line per distinct (path, error string); the
-        memo is what keeps a fault that persists across polls from
-        spamming the console once per tick."""
+        """DL-187 item 10: a read fault that is not the ordinary missing-file wait, such as a
+        permission error or a directory. One red line per distinct (path, error)."""
         memo = (path, str(exc))
         if memo == self._tail_fault:
             return
@@ -1898,11 +1711,8 @@ class RunnerApp(App[None]):
     # ------------------------------------------------------------------ help
 
     def action_toggle_help_panel(self) -> None:
-        """F1, and `?` outside the pager (DL-187 item 7): show
-        Textual's own context-help panel if it is not already up, hide it
-        if it is (App.action_show_help_panel / action_hide_help_panel,
-        textual/app.py:4562, split apart there and merged into one toggle
-        here)."""
+        """F1, and `?` outside the pager (DL-187 item 7): toggle Textual's context-help panel
+        (App.action_show_help_panel and action_hide_help_panel, textual/app.py:4562)."""
         try:
             self.screen.query_one(HelpPanel)
         except NoMatches:
@@ -1920,17 +1730,14 @@ class RunnerApp(App[None]):
         if self._restore_selected is not None:
             if selected != self._restore_selected:
                 return  # the rebuild's spurious row-0 bounce, not the operator
-            # the restore landed; it equals _selected, so the guard below
-            # keeps the log tail and explain pane untouched
+            # the restore landed and equals _selected, so the guard below leaves the tail alone
             self._restore_selected = None
         if selected == self._selected:
             return
         self._selected = selected
-        # the bound METHOD, not a coroutine: an exclusive worker superseded
-        # before it starts would leave a created-never-awaited coroutine
-        # (rebuild-driven highlight bursts made that warning real)
-        # (arg-type: run_worker's ResultType inference chokes on the bound
-        # async method; textual accepts it -- iscoroutinefunction dispatch)
+        # the bound method, not a coroutine: a replaced exclusive worker would leave a
+        # never-awaited coroutine (arg-type: run_worker's ResultType inference rejects the bound
+        # async method that textual accepts)
         self.run_worker(self._update_explain, group="explain", exclusive=True)  # type: ignore[arg-type]
         self._tail_step()
 
@@ -1942,8 +1749,7 @@ class RunnerApp(App[None]):
 
     def action_details(self) -> None:
         if self._selected is not None:
-            # partial, not a bare coroutine: an exclusive worker superseded
-            # before starting must not leave a created-never-awaited coroutine
+            # partial, not a bare coroutine: a replaced worker must not leave it unawaited
             work = functools.partial(self._show_details, self._selected)
             self.run_worker(work, group="details", exclusive=True)  # type: ignore[arg-type]
 
@@ -1951,9 +1757,8 @@ class RunnerApp(App[None]):
         self.push_screen(TriggersScreen())
 
     async def _show_details(self, job: str) -> None:
-        """The spec popup: runtime facts from `status`, dependency lines from
-        `deps` (needs/blocks -- the blast radius, DL-65), source from `spec`,
-        and a short local log tail (the `systemctl status` composite)."""
+        """The spec popup: runtime facts from `status`, dependency lines from `deps` (the blast
+        radius, DL-65), source from `spec`, and a short local log tail."""
         try:
             spec = await self._client.request({"cmd": "spec", "job": job})
             status = await self._client.request({"cmd": "status", "job": job})
@@ -1974,8 +1779,7 @@ class RunnerApp(App[None]):
                 f"  exit {'-' if exit_code is None else exit_code}"
                 f"  at {row.get('status_at') or '-'} UTC\n"
             )
-            # DL-68 trigger story: started by, armed latch, live filewatch,
-            # next tick from the timers verb, pending timers
+            # DL-68 trigger lines
             timer_entries = timers.get("timers", []) if timers.get("ok") else []
             for line in assemble_detail_trigger_lines(job, row, timer_entries):
                 label, sep, rest = line.partition(": ")
@@ -2003,7 +1807,7 @@ class RunnerApp(App[None]):
                 body.append(", ".join(downstream) + "\n")
             members = deps.get("members", [])
             if members:
-                # containment IS blast radius: a KILLJOB here reaches these
+                # containment is blast radius: a KILLJOB here reaches these
                 body.append("members: ", style="bold")
                 body.append(", ".join(members) + "\n")
         body.append("\n")
@@ -2041,29 +1845,24 @@ class RunnerApp(App[None]):
             self.screen.minimize()
             self.query_one("#jobs", DataTable).focus()
         else:
-            # the PANE, not the bare log: maximize hides everything outside
-            # the maximized subtree, and the search prompt must stay visible
+            # the pane, not the bare log: the search prompt must stay visible
             self.screen.maximize(pane)
-            # focus the log EXPLICITLY: focus is the pager mode switch, and
-            # textual otherwise lands focus on the console Input, which
-            # consumes every letter key as text -- the restore keystroke
-            # included
+            # focus the log explicitly: focus is the pager mode switch, and textual would
+            # focus the console Input, which consumes every letter key
             self.query_one("#logtail", _LogTail).focus()
 
     def action_resize(self, pane: str, delta: int) -> None:
         span = range(1, self._SHARE_TOTAL)  # 1..4: neither side collapses
         if pane == "log":
             self._log_share = min(max(self._log_share + delta, span.start), span[-1])
-            # logbox, not #logtail: the pane (log + prompt) is what
-            # participates in the vertical split against explain
+            # logbox, not #logtail: the pane takes part in the vertical split
             self.query_one("#logbox", _LogPane).styles.height = f"{self._log_share}fr"
             self.query_one(
                 "#explain-box"
             ).styles.height = f"{self._SHARE_TOTAL - self._log_share}fr"
         else:
             self._table_share = min(max(self._table_share + delta, span.start), span[-1])
-            # tablecol, not #jobs: the table sits inside the filter column,
-            # which is what participates in the horizontal split (review)
+            # tablecol, not #jobs: the filter column takes part in the horizontal split
             self.query_one("#tablecol").styles.width = f"{self._table_share}fr"
             self.query_one("#side").styles.width = f"{self._SHARE_TOTAL - self._table_share}fr"
 
@@ -2072,33 +1871,20 @@ class RunnerApp(App[None]):
     _QUIT_BODY = "stop the run?\n\nlive jobs are cancelled; wrappers record the kills"
 
     async def _confirm(self, title: str, body: str) -> bool:
-        """The one confirm idiom: every destructive action shares this
-        instead of each hand-rolling its own push/callback/re-entry-guard
-        triple. A confirm already open wins -- a ctrl+q or key that reaches
-        through it is ignored rather than stacking a second dialog, which
-        replaces the quit-only `_quit_pending` flag with a check any caller
-        can share (and one with no stuck-on-teardown path: it reads screen
-        state instead of a flag nothing else clears)."""
+        """The one confirm idiom for every destructive action. A confirm already open wins: a
+        ctrl+q or key that reaches through it is ignored, not stacked, read from screen state."""
         if isinstance(self.screen, ConfirmScreen):
             return False
-        # the plain assignment lets mypy bind push_screen_wait's type var
-        # from the argument (ConfirmScreen is a ModalScreen[bool]) instead
-        # of from the surrounding bool(...), which it would otherwise widen
-        # to Screen[object] and reject ConfirmScreen against
+        # the plain assignment lets mypy bind push_screen_wait's type variable from the argument
+        # instead of widening it through bool(...)
         confirmed = await self.push_screen_wait(ConfirmScreen(title, body))
         return bool(confirmed)
 
     async def action_quit(self) -> None:
-        """Quit means two different things by posture.
-
-        A detached viewer (`dsl41 ui`) leaves the engine running, so `q`
-        exits at once -- confirming a detach would train the operator to
-        press through the dialog that matters. `run --ui` OWNS the engine,
-        so the same key stops the run, and that is confirmed. Ctrl+Q and the
-        command palette's Quit both route here, so one override covers all
-        three doors. Async only to match textual's own signature; the
-        confirm itself runs in a worker, because `push_screen_wait` needs
-        one."""
+        """Quit by posture. A detached viewer (`dsl41 ui`) exits at once, since confirming a
+        detach would train operators to press through the dialog that matters. `run --ui` owns
+        the engine, so quit stops the run and is confirmed. Ctrl+Q and the command palette's
+        Quit route here. The confirm runs in a worker because `push_screen_wait` needs one."""
         if not self.owns_run:
             self.exit()
             return
@@ -2108,8 +1894,7 @@ class RunnerApp(App[None]):
         if await self._confirm("stop run", self._QUIT_BODY):
             self.exit()
 
-    #: verbs a KEY press confirms first (DL-187): the two that destroy work
-    #: in flight. Everything else is a flag flip a second key press undoes.
+    #: verbs a key press confirms first (DL-187): the two that destroy work in flight
     _CONFIRM_VERBS = frozenset({"KILLJOB", "FORCE_STARTJOB"})
 
     def action_send(self, verb: str) -> None:
@@ -2123,25 +1908,21 @@ class RunnerApp(App[None]):
         self.run_worker(self._do_sendevent(request), group="send", exclusive=False)
 
     async def _confirm_send(self, request: dict[str, Any]) -> None:
-        """Gate a destructive key press behind ConfirmScreen (DL-187).
-
-        The precondition is read BEFORE the modal opens and carried through
-        the confirm, so the operator agrees to the revision they were shown:
-        a job that moved while they read is refused by DL-90, never killed
-        at whatever revision it had reached by the time they said yes."""
+        """Gate a destructive key press behind ConfirmScreen (DL-187). The precondition is read
+        before the modal opens and carried through, so the operator agrees to the revision shown
+        and a job that moved is refused by DL-90."""
         payload = dict(request.get("payload") or {})
         verb = str(request.get("verb"))
         target = str(payload.get("job") or payload.get("name") or "")
         label = echo_label(request)  # the one place a request is spelled (DL-187 item 9)
-        # snapshot facts first, BEFORE any await: status, blast radius and the
-        # revision must describe one instant, not straddle a refresh
+        # snapshot before any await: status, blast radius and revision describe one instant
         row = self._jobs_snapshot.get(target) or {}
         members = self._descendants(target)
         frozen: tuple[str, int, int] | None = None
         try:
             frozen = await self._precondition(addressed_key(verb, payload))
         except (EngineError, ControlClientError):
-            frozen = None  # _do_sendevent re-reads and reports the fault in one place
+            frozen = None  # _do_sendevent re-reads and reports the fault
         body = confirm_body(
             verb,
             target,
@@ -2155,8 +1936,7 @@ class RunnerApp(App[None]):
         await self._do_sendevent(request, frozen=frozen)
 
     def _descendants(self, name: str) -> list[str]:
-        """Every job beneath a box, depth-first in tree order -- the blast
-        radius a box verb reaches (DL-65), not just its direct members."""
+        """Every job beneath a box, depth-first: the blast radius a box verb reaches (DL-65)."""
         kids = self._children()
         out: list[str] = []
 
@@ -2176,9 +1956,8 @@ class RunnerApp(App[None]):
     # -------------------------------------------- filter / view / fold (DL-65)
 
     def action_focus_filter(self) -> None:
-        # defense in depth: the pager's bindings shadow `/` while the log is
-        # focused, but a focus hole must never reopen the type-into-an-
-        # invisible-filter bug that motivated the pager (DL-67)
+        # defense in depth: the pager shadows `/`, but a focus hole must not reopen the
+        # invisible-filter bug (DL-67)
         if self.screen.maximized is not None:
             return
         line = self.query_one("#filterline", Input)
@@ -2246,19 +2025,14 @@ class RunnerApp(App[None]):
     ) -> None:
         """Complete the concurrency-model ss6 envelope and send it (DL-90).
 
-        `expect` comes from `_jobs_snapshot` -- the revision this table was
-        SHOWING when the operator acted. That is the honest reading of ss0
-        and it is what a terminal can do that a shell script cannot: if the
-        job moved between the refresh they read and the key they pressed,
-        their command is refused and they are told, instead of acting on a
-        picture that had already gone stale. Anything the table does not
-        hold (a global, a `JOB^INST` ghost) is read first.
+        `expect` is the revision `_jobs_snapshot` showed when the operator acted (ss0): a job
+        that moved since is refused and the operator is told. Anything the table does not hold
+        (a global, a `JOB^INST` ghost) is read first.
 
-        `frozen` is that same tuple read EARLIER, before a confirm modal
-        opened (DL-187): the revision the operator agreed to, not the one
-        the estate reached while they read."""
+        `frozen` is that tuple read before a confirm modal opened (DL-187): the revision the
+        operator agreed to."""
         payload = dict(request.get("payload") or {})
-        label = echo_label(request)  # DL-187 item 9: the whole request, not just the verb
+        label = echo_label(request)  # DL-187 item 9: the whole request
         try:
             key = addressed_key(str(request.get("verb")), payload)
         except EngineError as exc:
@@ -2288,12 +2062,8 @@ class RunnerApp(App[None]):
         await self._refresh()
 
     async def _precondition(self, key: str) -> tuple[str, int, int]:
-        """The concurrency-model ss6 read header and the revision to name for `key`.
-
-        For a job the table is already showing, that revision is the one the
-        OPERATOR was looking at -- which is the honest reading of ss0 and the
-        thing a terminal can do that a shell script cannot. Anything the
-        table does not hold (a global, a `JOB^INST` ghost) is read first."""
+        """The concurrency-model ss6 read header and the revision to name for `key`: for a job
+        the table shows, the revision the operator saw (ss0); otherwise a fresh read."""
         namespace, _, name = key.partition(":")
         row = self._jobs_snapshot.get(name) if namespace == "job" else None
         if row is not None and isinstance(row.get("state_rev"), int):
