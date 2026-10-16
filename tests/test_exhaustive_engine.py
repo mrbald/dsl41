@@ -293,8 +293,8 @@ def test_every_job_event_in_every_built_flag_and_holding_state_takes_a_declared_
     Left out: TIMER firings (term_run_time, must_start alarms) and the
     run_window deferrals, whose flag and holding moves are the start's and
     the end's, met here through STARTJOB and the injected statuses; the
-    `queued-recheck` switch's path out of the queue (job.216; the
-    default re-checks nothing); a queued box or member, which DL-293's
+    `queued-recheck` switch's path out of the queue (job.438 and
+    job.439; the default re-checks nothing); a queued box or member, which DL-293's
     test builds; a nested box; the period opening, which has its own test
     below; and events addressed to another job that move the target: the
     condition predecessor's status or a SET_GLOBAL waking an armed target
@@ -336,12 +336,15 @@ def test_every_job_event_in_every_built_flag_and_holding_state_takes_a_declared_
     # not vacuous: two states hold a member taken off ice in its running box
     # (the box started by a force, so the member is auto-held, or by a status)
     assert sum(1 for state in reached if state[0][-1]) == 2
-    # not vacuous: the events took every flag and holding row but the
-    # queued-recheck disarm and its report (job.216, job.230) and the opening
-    # release (job.308, see above)
+    # not vacuous: the events took every flag, arm and holding row but the
+    # queued-recheck leaves (job.438, job.439) and the opening release
+    # (job.308, see above); the arm's rows are job.429 to job.439 (DL-365)
     taken = _hits(recorded)
-    flags_and_holding = {row.id for row in JOB.rows if row.id[4] in "23" and not row.mark}
-    assert flags_and_holding - taken == {"job.216", "job.230", "job.308"}
+    arm = {f"job.{n}" for n in range(429, 440)}
+    flags_and_holding = {
+        row.id for row in JOB.rows if (row.id[4] in "23" or row.id in arm) and not row.mark
+    }
+    assert flags_and_holding - taken == {"job.438", "job.439", "job.308"}
 
 
 @pytest.mark.parametrize("holds", [True, False])

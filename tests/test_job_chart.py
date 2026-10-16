@@ -89,7 +89,13 @@ from dsl41.job_chart_events import (
     Terminator,
     WindowSide,
 )
-from dsl41.job_chart_rows import configuration, projection, row_configuration
+from dsl41.job_chart_rows import (
+    ARM_CLEARS,
+    ARM_LATCHES,
+    configuration,
+    projection,
+    row_configuration,
+)
 from dsl41.machines import MACHINES
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import (
@@ -130,9 +136,6 @@ SIBLINGS: dict[str, tuple[str, ...]] = {
     "job.205": ("job.221",),
     "job.209": ("job.222",),
     "job.210": ("job.223",),
-    "job.213": ("job.224",),
-    "job.214": ("job.225",),
-    "job.217": ("job.226",),
     "job.235": ("job.236",),
     "job.237": ("job.238",),
 }
@@ -141,8 +144,16 @@ RELAYS = ("job.177", "job.178", "job.179")
 RELABEL = "job.319"
 #: The start of a member that its box restarted before the member's late settlement.
 LATE_SETTLEMENT = "job.312"
-#: An arm the queued recheck finds already off reports the status move all the same.
-FLAG_REPORT = "job.230"
+#: The rows that set, clear or keep the arm and move no status: the arm is a fact of their
+#: payloads (DL-365), so each is guarded on it, or on the verdict that latches it.
+ARM_ROWS = {
+    "job.429": ("IDLE", START, "start_arms"),
+    "job.430": ("lifecycle", ACTUAL_START, "armed"),
+    "job.431": ("lifecycle", ACTUAL_START, "unarmed"),
+    "job.432": ("lifecycle", DISARM, "armed"),
+    "job.433": ("lifecycle", DISARM, "unarmed"),
+    "job.434": ("lifecycle", BOX_RUN_ENDS, "armed"),
+}
 #: The per-job start bound (DL-304).
 START_BOUND = "job.100"
 #: A box's ON_NOEXEC on each job it contains (DL-347), and the flag row of
@@ -183,6 +194,7 @@ class Attempt(Payload):
     stale: bool = False
     rescan: bool = False
     dated: bool = False
+    armed: bool = False
     box: BoxGate = "none"
     condition: bool = True
     window: WindowSide = "inside"
@@ -205,6 +217,14 @@ class Readmission(Payload):
     admissible: bool = True
     recheck_fails: bool = False
     demand: bool = True
+    armed: bool = False
+
+
+@dataclass(frozen=True)
+class Arm(Payload):
+    """The payload of an event whose rows read the job's arm (`job_chart_events.Arm`)."""
+
+    armed: bool = False
 
 
 @dataclass(frozen=True)
@@ -323,7 +343,7 @@ def test_the_chart_is_well_formed_draws_no_warning_and_is_registered() -> None:
     assert chart_warnings(CHART) == []
     assert CHART.clock == "logical"
     assert CHART in MACHINES
-    assert len(CHART.rows) == 177
+    assert len(CHART.rows) == 175
     assert [b.id for c in CHART.choices for b in c.branches] == [
         *(f"job.{n}" for n in range(171, 177)),
         "job.309",
@@ -383,6 +403,16 @@ def test_every_marked_row_is_unreachable_with_its_reason() -> None:
     assert "carries no previous end" in late.note
 
 
+def test_the_arm_s_rows_are_its_latch_and_its_clears() -> None:
+    """Every row guarded on the arm, or on the verdict that latches it, is in exactly one of the
+    sets the hook checks the arm against (DL-365): the latch, or a row after which the arm is
+    off. A new row that reads the arm and is in neither fails here."""
+    reading = {row.id for row in CHART.rows if row.guard == "start_arms" or "armed" in row.guard}
+    assert set(ARM_LATCHES).isdisjoint(ARM_CLEARS)
+    assert set(ARM_LATCHES) | set(ARM_CLEARS) == reading
+    assert [ROWS[ident].guard for ident in ARM_LATCHES] == ["start_arms"]
+
+
 # ---- the rows beside the moves
 
 
@@ -395,13 +425,14 @@ def _moves() -> set[str]:
 def test_every_other_row_moves_nothing_relays_an_attempt_or_settles_held_units() -> None:
     moves = _moves()
     others = [row for row in CHART.rows if row.id not in moves]
-    assert len(moves) == 83 + 21 + 5 and len(others) == 68
+    assert len(moves) == 79 + 18 + 5 and len(others) == 73
     moments = {f"job.{405 + i}": event for i, event in enumerate(MOMENTS)}
     for row in others:
         if row.id in RELAYS:
             assert row.kind == "internal" and row.action == "relay_start"
-        elif row.id == FLAG_REPORT:
-            assert row.kind == "internal" and row.action == "waiter_left"
+        elif row.id in ARM_ROWS:
+            assert (row.source, row.event, row.guard) == ARM_ROWS[row.id]
+            assert row.kind == "internal" and not (row.target or row.action), row.id
         elif row.id in STARTINGS:
             assert (row.source, row.event, row.target) == ("ADMITTED", COMPLETION, "STARTING")
             assert (row.guard, row.action) == STARTINGS[row.id]
@@ -490,21 +521,20 @@ _HOLDINGS = {
 def _buildable() -> Iterator[frozenset[str]]:
     """Every configuration the rules can build, and the run's end before its
     settlement. A waiter is never iced: ON_ICE takes a job out of the queue,
-    and an iced job never queues."""
+    and an iced job never queues. The arm is no region: the payloads carry it
+    (DL-365)."""
     for status in STATUSES:
         for holding in _HOLDINGS[status]:
-            for ice, hold, noexec, armed in itertools.product((False, True), repeat=4):
+            for ice, hold, noexec in itertools.product((False, True), repeat=3):
                 if status == "QUE_WAIT" and ice:
                     continue
-                yield configuration(
-                    status, ice=ice, hold=hold, noexec=noexec, armed=armed, holding=holding
-                )
+                yield configuration(status, ice=ice, hold=hold, noexec=noexec, holding=holding)
 
 
-def _admitted(holding: str = "none", *, armed: bool = False) -> frozenset[str]:
+def _admitted(holding: str = "none") -> frozenset[str]:
     """An admitted start's transient configuration, between its admission and
     its STARTING (DL-350); no row projects to it."""
-    flags = {"ice_off", "hold_off", "noexec_off", "arm_on" if armed else "arm_off"}
+    flags = {"ice_off", "hold_off", "noexec_off"}
     return frozenset({"job", "lifecycle", "ADMITTED", "flags", *flags, holding})
 
 
@@ -527,9 +557,17 @@ _WHO = (
 
 def _attempts() -> list[Attempt]:
     found = [
-        replace(who, dated=dated, box=box, condition=condition, window=window, admissible=fits)
+        replace(
+            who,
+            dated=dated,
+            armed=armed,
+            box=box,
+            condition=condition,
+            window=window,
+            admissible=fits,
+        )
         for who in _WHO
-        for dated in (False, True)
+        for dated, armed in ((False, False), (True, False), (True, True))
         for box in ("none", "running", "idle", "ran", "iced_out")
         for condition in (True, False)
         for window in ("inside", "defer", "skip")
@@ -566,15 +604,16 @@ PARTITIONS: dict[str, list[Any]] = {
     FORCE_STARTJOB: [Attempt()],
     RUN_WINDOW: [Attempt(), Attempt(stale=True)],
     READMIT: [
-        Readmission(box=box, keep_stopped=keep, admissible=fits, recheck_fails=fails)
+        Readmission(box=box, keep_stopped=keep, admissible=fits, recheck_fails=fails, armed=armed)
         for box in ("none", "running", "idle")
         for keep in (False, True)
         for fits in (True, False)
         for fails in (False, True)
+        for armed in (False, True)
     ],
     ON_NOEXEC: _NOEXECS,
-    FLAG_MOVED: [FlagMoved("ON_ICE"), FlagMoved("KILLJOB"), FlagMoved("readmit")]
-    + [FlagMoved("ON_NOEXEC", noexec) for noexec in _NOEXECS],
+    FLAG_MOVED: [FlagMoved("ON_ICE")] + [FlagMoved("ON_NOEXEC", noexec) for noexec in _NOEXECS],
+    **{event: [Arm(False), Arm(True)] for event in (ACTUAL_START, DISARM, BOX_RUN_ENDS, KILLJOB)},
     TERM_RUN_TIME: [Deadline(True), Deadline(False)],
     MEMBER_MOVES: _STEPS,
     COMPLETION_MOMENT: _STEPS,
@@ -613,11 +652,7 @@ def test_the_sweep_of_every_buildable_cell_raises_no_selection_error_and_selects
 
     cells = 0
     kinds = (("job", JOB_DATA), ("box", BOX_DATA), ("member", MEMBER_DATA), ("none", NO_CATALOG))
-    admitted = [
-        _admitted(holding, armed=armed)
-        for holding in _HOLDINGS["INACTIVE"]
-        for armed in (False, True)
-    ]
+    admitted = [_admitted(holding) for holding in _HOLDINGS["INACTIVE"]]
     for index, active in enumerate([*_buildable(), *admitted]):
         for kind, data in kinds:
             key = (index, kind)
@@ -690,12 +725,12 @@ def _witnesses() -> dict[str, sc.Builder]:
     for status in STATUSES:
         found[f"job {status}"] = _witness(configuration(status), JOB_DATA)
         found[f"box {status}"] = _witness(configuration(status), BOX_DATA)
-    for flag in ("ice", "hold", "noexec", "armed"):
+    for flag in ("ice", "hold", "noexec"):
         found[f"job INACTIVE {flag}"] = _witness(
             configuration("INACTIVE", **{flag: True}), JOB_DATA
         )
     found["job QUE_WAIT hold"] = _witness(configuration("QUE_WAIT", hold=True), JOB_DATA)
-    every = {"ice": True, "hold": True, "noexec": True, "armed": True}
+    every = {"ice": True, "hold": True, "noexec": True}
     found["job FAILURE every flag held"] = _witness(
         configuration("FAILURE", **every, holding="held"), JOB_DATA
     )
@@ -755,7 +790,9 @@ ABSTRACTION = sc.Abstraction(
                 Attempt(box="idle"),
                 Attempt(explicit=True, box="ran"),
                 Attempt(scheduled=True, dated=True, condition=False),
+                Attempt(scheduled=True, dated=True, condition=False, armed=True),
                 Attempt(dated=True),
+                Attempt(dated=True, armed=True),
                 Attempt(window="defer"),
                 Attempt(window="skip"),
                 Attempt(window="skip", box="running"),
@@ -776,13 +813,26 @@ ABSTRACTION = sc.Abstraction(
 def test_the_completeness_table_matches_the_declaration_in_every_cell() -> None:
     table = sc.completeness_table(CHART, ABSTRACTION)
     assert len(table) > 3000
-    # pinned from the rule code, not from the rows; a
-    # status move that reads a flag follows it as its own item, so a cell's
-    # first outcome shows the flag move alone
-    assert table[("job RUNNING reserved", KILLJOB, sc.ANY)] == "job.114"
-    assert table[("job QUE_WAIT", KILLJOB, sc.ANY)] == "job.226"
-    assert table[("job QUE_WAIT", FLAG_MOVED, repr(FlagMoved("KILLJOB")))] == "job.111"
-    assert table[("job INACTIVE armed", KILLJOB, sc.ANY)] == "job.137"
+    # pinned from the rule code, not from the rows
+    unarmed, armed = repr(Arm(False)), repr(Arm(True))
+    assert table[("job RUNNING reserved", KILLJOB, armed)] == "job.114"
+    # the arm is a fact of the payload, and a waiter's kill is one row for each value (DL-365)
+    assert table[("job QUE_WAIT", KILLJOB, unarmed)] == "job.437"
+    assert table[("job QUE_WAIT", KILLJOB, armed)] == "job.436"
+    assert table[("job INACTIVE", KILLJOB, armed)] == "job.137"
+    assert table[("job ADMITTED", ACTUAL_START, armed)] == "job.430"
+    assert table[("job ADMITTED", ACTUAL_START, unarmed)] == "job.431"
+    assert table[("job SUCCESS", ACTUAL_START, armed)] == "job.430"
+    assert table[("job INACTIVE", DISARM, armed)] == "job.432"
+    assert table[("job QUE_WAIT hold", DISARM, unarmed)] == "job.433"
+    assert table[("member INACTIVE", BOX_RUN_ENDS, armed)] == "job.434"
+    assert table[("member INACTIVE", BOX_RUN_ENDS, unarmed)] == "ignored job.435"
+    tick = Attempt(scheduled=True, dated=True, condition=False)
+    assert table[("job INACTIVE", START, repr(tick))] == "job.429"
+    assert table[("job INACTIVE hold", START, repr(tick))] == "job.429"
+    assert table[("job INACTIVE", START, repr(replace(tick, armed=True)))] == "ignored job.180"
+    assert table[("job INACTIVE", START, repr(Attempt(dated=True)))] == "ignored job.180"
+    assert table[("job INACTIVE", START, repr(Attempt(dated=True, armed=True)))] == "job.102"
     assert table[("job STARTING", ON_ICE, sc.ANY)] == "job.148"
     assert table[("job QUE_WAIT hold", ON_ICE, sc.ANY)] == "job.234"
     assert table[("job INACTIVE ice", FORCE_STARTJOB, repr(Attempt()))] == "job.178 + job.203"
@@ -872,8 +922,7 @@ def _flag(event: ChartEvent, status: str = "INACTIVE", data: JobData = JOB_DATA)
 
     def cell(source: str) -> tuple[frozenset[str], JobData, ChartEvent]:
         name, value = source.split("_")
-        flag = "armed" if name == "arm" else name
-        return configuration(status, **{flag: value == "on"}), data, event  # type: ignore[arg-type]
+        return configuration(status, **{name: value == "on"}), data, event  # type: ignore[arg-type]
 
     return cell
 
@@ -915,8 +964,6 @@ CELLS: dict[str, Cell] = {
     "job.107": _status(_start(window="skip", box="running")),
     "job.108": _status(ChartEvent(READMIT, Readmission())),
     "job.109": _status(ChartEvent(READMIT, Readmission(box="idle"))),
-    "job.110": _status(ChartEvent(FLAG_MOVED, FlagMoved("readmit"))),
-    "job.111": _status(ChartEvent(KILLJOB)),
     "job.112": _status(ChartEvent(FLAG_MOVED, FlagMoved("ON_ICE")), ice=True),
     "job.113": _status(_noexec_moved(), noexec=True),
     "job.114": _status(ChartEvent(KILLJOB)),
@@ -963,12 +1010,6 @@ CELLS: dict[str, Cell] = {
     "job.209": _flag(ChartEvent(ON_NOEXEC, Noexec())),
     "job.210": _flag(ChartEvent(OFF_NOEXEC)),
     "job.211": _flag(ChartEvent(BOX_OFF_NOEXEC)),
-    "job.212": _flag(_start(dated=True, condition=False)),
-    "job.213": _flag(ChartEvent(ACTUAL_START)),
-    "job.214": _flag(ChartEvent(DISARM)),
-    "job.215": _flag(ChartEvent(BOX_RUN_ENDS)),
-    "job.216": _flag(ChartEvent(READMIT, Readmission(recheck_fails=True)), "QUE_WAIT"),
-    "job.217": _flag(ChartEvent(KILLJOB), "QUE_WAIT"),
     "job.301": _holding(ChartEvent(ADMITTED_START, Admission()), "INACTIVE"),
     "job.302": _holding(ChartEvent(ADMITTED_START, Admission()), "FAILURE"),
     "job.303": _holding(ChartEvent(ADMITTED_START, Admission(on_held=True)), "FAILURE"),
@@ -982,6 +1023,11 @@ CELLS: dict[str, Cell] = {
     ),
     "job.307": _holding(ChartEvent(RELEASE_RESOURCE), "FAILURE"),
     "job.308": _holding(ChartEvent(PERIOD_OPENING), "FAILURE", NO_CATALOG),
+    # a waiter's kill and its failed recheck, one row for each value of the arm (DL-365)
+    "job.436": _status(ChartEvent(KILLJOB, Arm(True))),
+    "job.437": _status(ChartEvent(KILLJOB, Arm(False))),
+    "job.438": _status(ChartEvent(READMIT, Readmission(recheck_fails=True, armed=True))),
+    "job.439": _status(ChartEvent(READMIT, Readmission(recheck_fails=True))),
 }
 #: The waiter's twins of the ON_ICE, ON_HOLD and OFF_HOLD moves (job.201, job.204, job.220,
 #: job.205, job.221): the same flag move, a guard on QUE_WAIT, and the waiter's own action.
@@ -1002,7 +1048,7 @@ def test_every_move_from_every_source_ends_in_its_target() -> None:
     move, and the oracle's tests pin who sends it (test_oracle_chart.py). A flag move whose
     guard parts a waiter from any other job has a waiter's twin with its own cell
     (`WAITER_CELLS`)."""
-    assert len(CELLS) == 83
+    assert len(CELLS) == 79
     checked = 0
     for primary, cell in (*CELLS.items(), *WAITER_CELLS.items()):
         for ident in (primary, *SIBLINGS.get(primary, ())):
@@ -1018,7 +1064,7 @@ def test_every_move_from_every_source_ends_in_its_target() -> None:
                 after = _leaf(executor.active("j"), REGION[source])
                 assert after in _targets(row), (ident, source, after)
                 checked += 1
-    assert checked == 167
+    assert checked == 160
 
 
 def _advance(executor: Executor, job: str, event: ChartEvent) -> list[Any]:
@@ -1037,25 +1083,27 @@ def _advance(executor: Executor, job: str, event: ChartEvent) -> list[Any]:
 
 def test_a_configuration_projects_to_the_row_it_stands_for() -> None:
     for active in _buildable():
-        status, ice, hold, noexec, armed, holding = projection(active)
+        status, ice, hold, noexec, holding = projection(active)
         assert (
             configuration(
                 status,  # type: ignore[arg-type]
                 ice=ice,
                 hold=hold,
                 noexec=noexec,
-                armed=armed,
                 holding=holding,  # type: ignore[arg-type]
             )
             == active
         )
     unit = CapacityReservation(bucket="r:X", units=1, release_policy="never")
     assert projection(row_configuration(JobRuntime(status="RUNNING", reservations=(unit,)))) == (
-        "RUNNING", False, False, False, False, "reserved",
+        "RUNNING", False, False, False, "reserved",
     )  # fmt: skip
     assert projection(row_configuration(JobRuntime(status="FAILURE", reservations=(unit,)))) == (
-        "FAILURE", False, False, False, False, "held",
+        "FAILURE", False, False, False, "held",
     )  # fmt: skip
+    # the arm is the row's, and no state of the chart (DL-365)
+    armed = row_configuration(JobRuntime(status="INACTIVE", armed=True))
+    assert armed == row_configuration(JobRuntime(status="INACTIVE"))
 
 
 def _rows(outcomes: list[Any]) -> list[tuple[str, str]]:
@@ -1170,7 +1218,7 @@ def test_an_injected_live_status_keeps_the_run_s_units_and_settles_them_at_its_e
     # the settlement is the tier's, after the move's box rules (DL-350)
     outcomes += executor.dispatch("k", ChartEvent(LEAVE_LIVE, Settlement(False, units=keep)))
     assert _rows(outcomes) == [("k", "job.118"), ("k", "job.305")]
-    assert projection(executor.active("k"))[::5] == ("FAILURE", "held")
+    assert projection(executor.active("k"))[::4] == ("FAILURE", "held")
 
 
 # ---- the two settlement orders (a move on its own, the batch INACTIVE path)
@@ -1294,14 +1342,14 @@ def test_a_box_restarted_by_its_own_completion_meets_the_member_before_its_late_
     assert [(r.bucket, r.units) for r in row.reservations] == [("r:Q", 1)]
     assert dict(oracle.store.consumed) == ({"r:Q": 1} if release == "spend" else {})
     om = [ident for job, ident in rows if job == "om"]
-    assert [ident for ident in om if ident in _moves() or ident == SETTLE_FIRST] == [
+    assert [ident for ident in om if ident in {*_moves(), SETTLE_FIRST, *ARM_ROWS}] == [
         "job.117",
         "job.122",
         SETTLE_FIRST,
         settling,
         "job.102",
         reserving,
-        "job.224",
+        "job.431",
         "job.105",
     ]
     # the SUCCESS move's own settlement pops last and finds om live again

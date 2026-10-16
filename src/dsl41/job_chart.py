@@ -8,10 +8,16 @@ Shape. The root `job` has three orthogonal regions: `status`, `flags` and `holdi
 holds `lifecycle`, the superstate of every status, and inside it the sets the rules name:
 `IDLE` (INACTIVE and `TERMINAL`), `TERMINAL` (SUCCESS and `FAILED`), `FAILED` (FAILURE and
 TERMINATED) and `LIVE` (STARTING and RUNNING), with QUE_WAIT beside them. A row for every
-status of one set has that set as its source. `flags` holds one composite state with four
-orthogonal regions, `ice`, `hold`, `noexec` and `arm`, each `off` or `on`; a flag seeded `on`
-(SEM-24) is a restore, not a move. `holding` is `none`, `reserved` (a run's units) or `held`
-(units a renewable kept after the run, DL-256).
+status of one set has that set as its source. `flags` holds one composite state with three
+orthogonal regions, `ice`, `hold` and `noexec`, each `off` or `on`; a flag seeded `on` (SEM-24)
+is a restore, not a move. `holding` is `none`, `reserved` (a run's units) or `held` (units a
+renewable kept after the run, DL-256).
+
+The scheduled tick's arm (SEM-32, DL-54) is no region, since no row fires on it: it is a fact
+of the payloads whose rows read it (`armed`), read from the job's row (DL-365). A start's gates
+read it; the rows of `actual start`, DISARM, `box run ends`, KILLJOB on a waiter and a
+waiter's failed recheck are guarded on it where its value parts two effects, and the hook
+writes the arm they set or clear.
 
 A box is an instance of this chart whose data says so (`JobData.box`); the box rules are rows
 guarded by it.
@@ -34,15 +40,14 @@ not the region order. Two forms declare it:
 - a chained item that a row's action reports to the same instance (statechart-engine §8),
   wherever a later step reads an earlier step's write; it reads the configuration at its own
   time. A flag move reports `flag moved`, and the status rule that reads the flag follows:
-  ON_ICE dequeues a waiter, KILLJOB terminates one, a waiter that fails the queued recheck
-  leaves the queue, ON_NOEXEC settles the status. An admitting verdict sends `start admitted`
-  first, and the rest of the start follows from it: an actual start consumes the arm (`actual
-  start`); an admitted start reserves or takes over units first (`admitted start`). STARTJOB,
-  FORCE_STARTJOB and a window-postponed start relay the attempt to `start`, after the forced
-  clears.
+  ON_ICE dequeues a waiter, ON_NOEXEC settles the status. An admitting verdict sends `start
+  admitted` first, and the rest of the start follows from it: an actual start consumes the arm
+  (`actual start`); an admitted start reserves or takes over units first (`admitted start`).
+  STARTJOB, FORCE_STARTJOB and a window-postponed start relay the attempt to `start`, after the
+  forced clears.
 - rows of a sibling region on the same event, only where every step reads the configuration
-  before the input: a forced start clears ice and hold, a scheduled tick arms, an injected
-  live status makes held units the run's.
+  before the input: a forced start clears ice and hold, an injected live status makes held
+  units the run's.
 
 The settlement of a run's units has two orders. A move on its own (`OracleCascade._after`)
 runs the box rules, then the settlement, then the wakes: the status row sends the moments
@@ -95,6 +100,7 @@ from dsl41.job_chart_events import (
     Admission,
     Admitted,
     StartAttempt,
+    Arm,
     BoxVerdict,
     Deadline,
     FlagMoved,
@@ -216,20 +222,20 @@ def _gated(attempt: StartAttempt, active: frozenset[str]) -> StartVerdict | None
     if "ice_on" in active:
         return "ignored"
     if "hold_on" in active:
-        return _latched(attempt, active)
-    if attempt.dated and not attempt.scheduled and "arm_off" in active:
+        return _latched(attempt)
+    if attempt.dated and not attempt.scheduled and not attempt.armed:
         return "ignored"
     if attempt.box in ("idle", "ran", "iced_out"):
         return "refused" if attempt.explicit else "ignored"
     if not attempt.condition:
-        return _latched(attempt, active)
+        return _latched(attempt)
     return None
 
 
-def _latched(attempt: StartAttempt, active: frozenset[str]) -> StartVerdict:
+def _latched(attempt: StartAttempt) -> StartVerdict:
     """A releasable gate blocks the attempt: a scheduled tick of a dated job arms, unless
     armed already or its box is not RUNNING (`_w_arm`)."""
-    if attempt.scheduled and attempt.dated and "arm_off" in active and attempt.box != "idle":
+    if attempt.scheduled and attempt.dated and not attempt.armed and attempt.box != "idle":
         return "arm"
     return "ignored"
 
@@ -254,8 +260,8 @@ def start_refused(ctx: Context) -> bool:
 
 
 def start_moves_nothing(ctx: Context) -> bool:
-    """`start_verdict` is `ignored` or `arm`: the status does not move."""
-    return start_verdict(ctx) in ("ignored", "arm")
+    """`start_verdict` is `ignored`: the status does not move, and nothing latches."""
+    return start_verdict(ctx) == "ignored"
 
 
 def start_arms(ctx: Context) -> bool:
@@ -350,9 +356,17 @@ def readmit_cancels(ctx: Context) -> bool:
     return readmit_verdict(ctx) == "cancel"
 
 
-def readmit_leaves(ctx: Context) -> bool:
-    """`readmit_verdict` is `leave`: the queued recheck failed (DL-257)."""
-    return readmit_verdict(ctx) == "leave"
+def readmit_leaves_armed(ctx: Context) -> bool:
+    """`readmit_verdict` is `leave`: the queued recheck failed (DL-257); the payload: the
+    waiter is armed."""
+    scan: Readmission = ctx.event.payload
+    return readmit_verdict(ctx) == "leave" and scan.armed
+
+
+def readmit_leaves_unarmed(ctx: Context) -> bool:
+    """`readmit_verdict` is `leave`; the payload: the waiter is not armed."""
+    scan: Readmission = ctx.event.payload
+    return readmit_verdict(ctx) == "leave" and not scan.armed
 
 
 def readmit_keeps(ctx: Context) -> bool:
@@ -495,6 +509,18 @@ def not_queued(ctx: Context) -> bool:
     return "QUE_WAIT" not in ctx.active
 
 
+def armed(ctx: Context) -> bool:
+    """The payload: the job's arm is latched (`Arm`, SEM-32, DL-54)."""
+    arm: Arm = ctx.event.payload
+    return arm.armed
+
+
+def unarmed(ctx: Context) -> bool:
+    """The payload: the job's arm is not latched."""
+    arm: Arm = ctx.event.payload
+    return not arm.armed
+
+
 def _noexec(ctx: Context) -> Noexec:
     """ON_NOEXEC's payload, on the input or passed on by `flag moved`."""
     payload = ctx.event.payload
@@ -545,16 +571,6 @@ def iced_waiter(ctx: Context) -> bool:
     return _cause(ctx) == "ON_ICE"
 
 
-def killed_waiter(ctx: Context) -> bool:
-    """The payload: KILLJOB disarmed a waiter."""
-    return _cause(ctx) == "KILLJOB"
-
-
-def left_waiter(ctx: Context) -> bool:
-    """The payload: the queued recheck failed, and the arm is gone (DL-257)."""
-    return _cause(ctx) == "readmit"
-
-
 def noexec_settles_job(ctx: Context) -> bool:
     """The payload: ON_NOEXEC; not `noexec_ignored`; the data: a catalog job,
     not a box."""
@@ -579,8 +595,7 @@ def flag_moves_nothing(ctx: Context) -> bool:
 
 
 def flag_move_unposted(ctx: Context) -> bool:
-    """Not `flag_moves_nothing`: only a waiter's kill or recheck reports it,
-    and an ignored ON_NOEXEC moves no flag."""
+    """Not `flag_moves_nothing`: an ignored ON_NOEXEC moves no flag, so it reports none."""
     return not flag_moves_nothing(ctx)
 
 
@@ -754,7 +769,8 @@ GUARDS: Final = {
         start_skips_inactive_member,
         readmit_admits,
         readmit_cancels,
-        readmit_leaves,
+        readmit_leaves_armed,
+        readmit_leaves_unarmed,
         readmit_keeps,
         admitted_bypass,
         admitted_queue,
@@ -778,11 +794,11 @@ GUARDS: Final = {
         queued,
         not_live_or_queued,
         not_queued,
+        armed,
+        unarmed,
         noexec_ignored,
         noexec_applies,
         iced_waiter,
-        killed_waiter,
-        left_waiter,
         noexec_settles_job,
         noexec_settles_box,
         flag_moves_nothing,
@@ -965,8 +981,8 @@ def cancelled(ctx: Context) -> Effects | None:
 
 
 def left_queue(ctx: Context) -> Effects | None:
-    """A waiter that left the queue unstarted (job.110, DL-257): as `moved`,
-    then its window or day disposition."""
+    """A waiter that left the queue unstarted (job.438, job.439, DL-257): as `moved`, then its
+    window or day disposition, and the scan's pass hears that the waiter moved."""
     return _consequences(ctx, "left_queue")
 
 
@@ -981,14 +997,6 @@ def skips_in_box(ctx: Context) -> Effects | None:
     """A window skip of an INACTIVE member (job.404, DL-154): no move to
     ride, so its box rules run for it, as an INACTIVE move's would."""
     return _consequences(ctx, "skips_in_box")
-
-
-def report_flag_move(ctx: Context) -> Effects:
-    """KILLJOB moved a waiter's arm (job.217, job.226), and the status rule
-    that reads it follows as its own item, with the payload's handle on the
-    units."""
-    moved = FlagMoved("KILLJOB", units=_units(ctx))
-    return Effects(send=((ctx.key, Event(FLAG_MOVED, moved)),))
 
 
 def report_ice(ctx: Context) -> Effects:
@@ -1039,12 +1047,6 @@ def cleared_noexec(ctx: Context) -> Effects | None:
     return _consequences(ctx, "cleared_noexec")
 
 
-def waiter_left(ctx: Context) -> Effects | None:
-    """The queued recheck failed (DL-257): the status move follows the arm,
-    and the scan's pass hears that the waiter moved."""
-    return _consequences(ctx, "waiter_left")
-
-
 def released_held(ctx: Context) -> Effects | None:
     """RELEASE_RESOURCE gave held units back: the queue is scanned (DL-256)."""
     return _consequences(ctx, "released_held")
@@ -1085,7 +1087,6 @@ ACTIONS: Final = {
         left_queue,
         runs_box,
         skips_in_box,
-        report_flag_move,
         report_ice,
         iced,
         iced_again,
@@ -1094,7 +1095,6 @@ ACTIONS: Final = {
         released_hold,
         noexec,
         cleared_noexec,
-        waiter_left,
         released_held,
         moment,
     )

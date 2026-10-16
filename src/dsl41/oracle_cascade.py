@@ -112,7 +112,6 @@ from dsl41.oracle_intents import (
     ClearCodes,
     ClosePass,
     DeferToOpening,
-    FlagFacts,
     Intent,
     MemberEnd,
     Move,
@@ -165,7 +164,6 @@ _HANDLERS: Final[Mapping[str, str]] = {
     "released_waiter": "_on_released_waiter",
     "released_hold": "_on_released_hold",
     "released_held": "_on_released_held",
-    "waiter_left": "_on_waiter_left",
     "iced": "_on_iced",
     "iced_again": "_on_iced_again",
     "noexec": "_on_noexec",
@@ -287,7 +285,8 @@ class OracleCascade(OracleSchedule):
         elif action == "cancelled":
             intents.append(Readmitted())
         elif action == "left_queue":
-            tail.append(self._after_leave(job, cast(FlagFacts, ctx.event.payload)))
+            intents.append(Readmitted())
+            tail.append(self._after_leave(job, cast(ReadmitFacts, ctx.event.payload)))
         elif action == "runs_box":
             tail += self._box_running(job, move.run, intents)
         return Effects(send=(*self._move_sends(move), *tail), intents=tuple(intents))
@@ -313,9 +312,8 @@ class OracleCascade(OracleSchedule):
             )
         ]
 
-    def _after_leave(self, job: str, moved: FlagFacts) -> Send:
+    def _after_leave(self, job: str, facts: ReadmitFacts) -> Send:
         """A waiter's disposition after it left the queue, with the runs read before the move."""
-        facts = cast(ReadmitFacts, moved.facts)
         check, why = facts.known("recheck")
         mode = self.semantics.queued_recheck
         cause = f"QUE_WAIT left unstarted: {why} (queued-recheck={mode}, DL-257)"
@@ -882,13 +880,6 @@ class OracleCascade(OracleSchedule):
     def _on_released_held(self, job: str, ctx: Context) -> Effects:
         """RELEASE_RESOURCE gave held units back: the waiters wake (DL-256)."""
         return Effects(send=(self._program(job, SCAN, self._scan(keep_stopped=False)),))
-
-    def _on_waiter_left(self, job: str, ctx: Context) -> Effects:
-        """A waiter that fails the queued recheck: its `flag moved`, with the
-        scan's facts, and the pass hears that it moved (DL-257)."""
-        facts = cast(ReadmitFacts, ctx.event.payload)
-        moved = FlagFacts("readmit", facts=facts, units=self._units(job))
-        return Effects(send=(self._to(job, FLAG_MOVED, moved),), intents=(Readmitted(),))
 
     # ---- the flags
 

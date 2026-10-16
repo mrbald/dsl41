@@ -248,7 +248,7 @@ from dsl41.job_chart_events import (
 )
 from dsl41.job_chart_rows import row_configuration
 from dsl41.oracle_facts import NoexecFacts, RowUnits, StartFacts, job_data
-from dsl41.oracle_intents import Intent, Program, StatusInput
+from dsl41.oracle_intents import Armed, Intent, Program, StatusInput
 from dsl41.oracle_schedule import DEFERRED_RESCAN_KEY, DEFERRED_TIMER_KEY
 from dsl41.oracle_state import (
     INJECTABLE_STATUSES,
@@ -507,16 +507,21 @@ class Oracle(OracleWriters):
         kind = ev.kind
         if kind == STATUS:
             self._handle_status(ev)
-        elif kind in (KILLJOB, RELEASE_RESOURCE):
+        elif kind == KILLJOB:
+            job = self._required_job(ev)
+            self._root(job, ChartEvent(kind, Armed(units=RowUnits(self, job))))
+        elif kind == RELEASE_RESOURCE:
             job = self._required_job(ev)
             self._root(job, ChartEvent(kind, Payload(units=RowUnits(self, job))))
         elif kind == "TIMER" and self._handle_timer(ev):
             return
         elif kind in _FLAG_INPUTS:
             job = self._required_job(ev)
-            payload = (
-                NoexecFacts(self, job) if kind == ON_NOEXEC else Payload(units=RowUnits(self, job))
-            )
+            payload: Payload | NoexecFacts = Payload(units=RowUnits(self, job))
+            if kind == ON_NOEXEC:
+                payload = NoexecFacts(self, job)
+            elif kind == DISARM:
+                payload = Armed(units=RowUnits(self, job))
             self._root(job, ChartEvent(kind, payload))
         elif kind in (STARTJOB, FORCE_STARTJOB, "TIMER"):
             job = self._required_job(ev)

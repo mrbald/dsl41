@@ -8,11 +8,11 @@ Clock: logical.
 
 ```mermaid
 stateDiagram-v2
-    state "job" as s20
-    state s20 {
-        [*] --> s21
-        state "lifecycle" as s21
-        state s21 {
+    state "job" as s18
+    state s18 {
+        [*] --> s19
+        state "lifecycle" as s19
+        state s19 {
             [*] --> s3
             state "IDLE" as s3
             state s3 {
@@ -40,30 +40,26 @@ stateDiagram-v2
             state "ADMITTED" as s0
         }
         --
-        [*] --> s14
-        state "flags" as s14
-        state s14 {
-            [*] --> s18
-            state "ice_off" as s18
-            state "ice_on" as s19
-            --
+        [*] --> s12
+        state "flags" as s12
+        state s12 {
             [*] --> s16
-            state "hold_off" as s16
-            state "hold_on" as s17
+            state "ice_off" as s16
+            state "ice_on" as s17
             --
-            [*] --> s22
-            state "noexec_off" as s22
-            state "noexec_on" as s23
+            [*] --> s14
+            state "hold_off" as s14
+            state "hold_on" as s15
             --
-            [*] --> s12
-            state "arm_off" as s12
-            state "arm_on" as s13
+            [*] --> s20
+            state "noexec_off" as s20
+            state "noexec_on" as s21
         }
         --
-        [*] --> s24
-        state "none" as s24
-        state "reserved" as s25
-        state "held" as s15
+        [*] --> s22
+        state "none" as s22
+        state "reserved" as s23
+        state "held" as s13
     }
     state c0 <<choice>>
     state c1 <<choice>>
@@ -74,17 +70,15 @@ stateDiagram-v2
     s10 --> s4 : job.107 start [start_skips_member] / moved
     s6 --> s0 : job.108 readmit [readmit_admits] / admit
     s6 --> s4 : job.109 readmit [readmit_cancels] / cancelled
-    s6 --> s4 : job.110 flag moved [left_waiter] / left_queue
-    s6 --> s11 : job.111 flag moved [killed_waiter] / moved
     s6 --> s4 : job.112 flag moved [iced_waiter] / moved
     s6 --> s4 : job.113 flag moved [noexec_settles_job] / injected
     s5 --> s11 : job.114 KILLJOB / terminated
     s7 --> s11 : job.115 TIMER term_run_time [current_run] / terminated
     s5 --> s11 : job.116 box ends FAILURE or TERMINATED [is_terminator] / terminated
-    s21 --> s9 : job.117 STATUS [exit_success] / moved
-    s21 --> s2 : job.118 STATUS [exit_failure] / moved
-    s21 --> c0 : job.119 STATUS [injects]
-    s21 --> s4 : job.120 STATUS [injects_inactive_job] / injected
+    s19 --> s9 : job.117 STATUS [exit_success] / moved
+    s19 --> s2 : job.118 STATUS [exit_failure] / moved
+    s19 --> c0 : job.119 STATUS [injects]
+    s19 --> s4 : job.120 STATUS [injects_inactive_job] / injected
     s1 --> s4 : job.121 flag moved [noexec_settles_job] / injected
     s10 --> s4 : job.122 box start / batched
     s6 --> s4 : job.123 box set INACTIVE / batched
@@ -98,7 +92,7 @@ stateDiagram-v2
     s4 --> s2 : job.132 box recompute [overrides_failure] / moved
     s4 --> s9 : job.133 box recompute [derives_success] / moved
     s4 --> s2 : job.134 box recompute [derives_failure] / moved
-    s21 --> s4 : job.135 STATUS [injects_inactive_box] / cascades
+    s19 --> s4 : job.135 STATUS [injects_inactive_box] / cascades
     s3 --> s4 : job.136 flag moved [noexec_settles_box] / cascades
     s5 --> s4 : job.159 box set INACTIVE / batched
     s10 --> s4 : job.160 box set INACTIVE / batched
@@ -112,61 +106,56 @@ stateDiagram-v2
     s9 --> s2 : job.168 box recompute [derives_failure] / moved
     s6 --> s4 : job.169 flag moved [noexec_settles_box] / cascades
     s8 --> s4 : job.170 flag moved [noexec_settles_box] / cascades
-    s18 --> s19 : job.201 ON_ICE [not_live_or_queued] / iced
-    s19 --> s18 : job.202 OFF_ICE
-    s19 --> s18 : job.203 FORCE_STARTJOB [force_clears]
-    s16 --> s17 : job.204 ON_HOLD [not_live_or_queued]
-    s17 --> s16 : job.205 OFF_HOLD [not_queued] / released_hold
-    s17 --> s16 : job.206 FORCE_STARTJOB [force_clears]
-    s17 --> s16 : job.207 ON_NOEXEC [noexec_applies]
-    s16 --> s17 : job.208 box running [has_auto_hold]
-    s22 --> s23 : job.209 ON_NOEXEC [noexec_applies] / noexec
-    s23 --> s22 : job.210 OFF_NOEXEC / cleared_noexec
-    s23 --> s22 : job.211 OFF_NOEXEC on its box
-    s12 --> s13 : job.212 start [start_arms]
-    s13 --> s12 : job.213 actual start
-    s13 --> s12 : job.214 DISARM
-    s13 --> s12 : job.215 box run ends
-    s13 --> s12 : job.216 readmit [readmit_leaves] / waiter_left
-    s13 --> s12 : job.217 KILLJOB [queued] / report_flag_move
-    s19 --> s19 : job.218 ON_ICE [not_live] / iced_again
-    s18 --> s18 : job.219 OFF_ICE
-    s17 --> s17 : job.220 ON_HOLD [not_live_or_queued]
-    s16 --> s16 : job.221 OFF_HOLD [not_queued] / released_hold
-    s23 --> s23 : job.222 ON_NOEXEC [noexec_applies] / noexec
-    s22 --> s22 : job.223 OFF_NOEXEC / cleared_noexec
-    s12 --> s12 : job.224 actual start
-    s12 --> s12 : job.225 DISARM
-    s12 --> s12 : job.226 KILLJOB [queued] / report_flag_move
-    s22 --> s23 : job.231 ON_NOEXEC on its box
-    s17 --> s16 : job.232 ON_NOEXEC on its box
-    s23 --> s23 : job.233 ON_NOEXEC on its box
-    s18 --> s19 : job.234 ON_ICE [queued] / report_ice
-    s16 --> s17 : job.235 ON_HOLD [queued] / held
-    s17 --> s17 : job.236 ON_HOLD [queued] / held
-    s17 --> s16 : job.237 OFF_HOLD [queued] / released_waiter
-    s16 --> s16 : job.238 OFF_HOLD [queued] / released_waiter
-    s24 --> s25 : job.301 admitted start [has_demand]
-    s15 --> c1 : job.302 admitted start [takes_over]
-    s15 --> s25 : job.303 admitted start [on_held_units]
-    s25 --> s24 : job.304 leave STARTING or RUNNING [frees_all]
-    s25 --> s15 : job.305 leave STARTING or RUNNING [keeps_held]
-    s25 --> s24 : job.306 leave STARTING or RUNNING [spends]
-    s15 --> s24 : job.307 RELEASE_RESOURCE / released_held
-    s15 --> s24 : job.308 first input of a period [left_catalog]
-    s15 --> s25 : job.319 STATUS [injects_live]
-    s21 --> s0 : job.402 start admitted [admitted_admit]
-    s21 --> s0 : job.426 start admitted [admitted_on_held]
+    s16 --> s17 : job.201 ON_ICE [not_live_or_queued] / iced
+    s17 --> s16 : job.202 OFF_ICE
+    s17 --> s16 : job.203 FORCE_STARTJOB [force_clears]
+    s14 --> s15 : job.204 ON_HOLD [not_live_or_queued]
+    s15 --> s14 : job.205 OFF_HOLD [not_queued] / released_hold
+    s15 --> s14 : job.206 FORCE_STARTJOB [force_clears]
+    s15 --> s14 : job.207 ON_NOEXEC [noexec_applies]
+    s14 --> s15 : job.208 box running [has_auto_hold]
+    s20 --> s21 : job.209 ON_NOEXEC [noexec_applies] / noexec
+    s21 --> s20 : job.210 OFF_NOEXEC / cleared_noexec
+    s21 --> s20 : job.211 OFF_NOEXEC on its box
+    s17 --> s17 : job.218 ON_ICE [not_live] / iced_again
+    s16 --> s16 : job.219 OFF_ICE
+    s15 --> s15 : job.220 ON_HOLD [not_live_or_queued]
+    s14 --> s14 : job.221 OFF_HOLD [not_queued] / released_hold
+    s21 --> s21 : job.222 ON_NOEXEC [noexec_applies] / noexec
+    s20 --> s20 : job.223 OFF_NOEXEC / cleared_noexec
+    s20 --> s21 : job.231 ON_NOEXEC on its box
+    s15 --> s14 : job.232 ON_NOEXEC on its box
+    s21 --> s21 : job.233 ON_NOEXEC on its box
+    s16 --> s17 : job.234 ON_ICE [queued] / report_ice
+    s14 --> s15 : job.235 ON_HOLD [queued] / held
+    s15 --> s15 : job.236 ON_HOLD [queued] / held
+    s15 --> s14 : job.237 OFF_HOLD [queued] / released_waiter
+    s14 --> s14 : job.238 OFF_HOLD [queued] / released_waiter
+    s22 --> s23 : job.301 admitted start [has_demand]
+    s13 --> c1 : job.302 admitted start [takes_over]
+    s13 --> s23 : job.303 admitted start [on_held_units]
+    s23 --> s22 : job.304 leave STARTING or RUNNING [frees_all]
+    s23 --> s13 : job.305 leave STARTING or RUNNING [keeps_held]
+    s23 --> s22 : job.306 leave STARTING or RUNNING [spends]
+    s13 --> s22 : job.307 RELEASE_RESOURCE / released_held
+    s13 --> s22 : job.308 first input of a period [left_catalog]
+    s13 --> s23 : job.319 STATUS [injects_live]
+    s19 --> s0 : job.402 start admitted [admitted_admit]
+    s19 --> s0 : job.426 start admitted [admitted_on_held]
     s0 --> s8 : job.427 [admitted_by_start] / starting_admitted
     s0 --> s8 : job.428 [admitted_by_readmit] / starting_readmitted
+    s6 --> s11 : job.436 KILLJOB [armed] / moved
+    s6 --> s11 : job.437 KILLJOB [unarmed] / moved
+    s6 --> s4 : job.438 readmit [readmit_leaves_armed] / left_queue
+    s6 --> s4 : job.439 readmit [readmit_leaves_unarmed] / left_queue
     c0 --> s4 : job.171 [injected_inactive] / moved
     c0 --> s8 : job.172 [injected_starting] / moved
     c0 --> s7 : job.173 [injected_running] / moved
     c0 --> s9 : job.174 [injected_success] / moved
     c0 --> s2 : job.175 [injected_failure] / moved
     c0 --> s11 : job.176 [else] / moved
-    c1 --> s25 : job.309 [has_demand]
-    c1 --> s24 : job.310 [else]
+    c1 --> s23 : job.309 [has_demand]
+    c1 --> s22 : job.310 [else]
 ```
 
 | Id | Source | Event | Guard | Action | Target | Kind | Cite |
@@ -181,8 +170,6 @@ stateDiagram-v2
 | job.107 | TERMINAL | start | start_skips_member | moved | INACTIVE | external | SEM-33, DL-154 |
 | job.108 | QUE_WAIT | readmit | readmit_admits | admit | ADMITTED | external | DL-50, DL-257 |
 | job.109 | QUE_WAIT | readmit | readmit_cancels | cancelled | INACTIVE | external | DL-50, DL-247 |
-| job.110 | QUE_WAIT | flag moved | left_waiter | left_queue | INACTIVE | external | DL-257 |
-| job.111 | QUE_WAIT | flag moved | killed_waiter | moved | TERMINATED | external | DL-50, DL-54 |
 | job.112 | QUE_WAIT | flag moved | iced_waiter | moved | INACTIVE | external | DL-50, DL-285 |
 | job.113 | QUE_WAIT | flag moved | noexec_settles_job | injected | INACTIVE | external | DL-254 |
 | job.114 | LIVE | KILLJOB |  | terminated | TERMINATED | external | SEM-14 |
@@ -245,7 +232,7 @@ stateDiagram-v2
 | job.177 | lifecycle | STARTJOB |  | relay_start |  | internal | SEM-10 |
 | job.178 | lifecycle | FORCE_STARTJOB |  | relay_start |  | internal | SEM-23 |
 | job.179 | lifecycle | TIMER run_window |  | relay_start |  | internal | SEM-33 |
-| job.180 | lifecycle | start | start_moves_nothing | A gate holds the attempt silently, a tick arms, or a postponed start waits. |  | ignored | SEM-20, SEM-21, SEM-32, SEM-33 |
+| job.180 | lifecycle | start | start_moves_nothing | A gate holds the attempt silently, or a postponed start waits. |  | ignored | SEM-20, SEM-21, SEM-33 |
 | job.181 | QUE_WAIT | readmit | readmit_keeps | The waiter stays queued. |  | ignored | DL-50, DL-247 |
 | job.182 | lifecycle | readmit | not_queued | A queue scan addresses a waiter. |  | ignored (unreachable) |  |
 | job.183 | lifecycle | started |  | The admitted run is no longer STARTING: a wake of its STARTING ended it, or started the job again (`Started.current`). |  | ignored | SEM-10, DL-350 |
@@ -264,7 +251,7 @@ stateDiagram-v2
 | job.196 | INACTIVE | box set INACTIVE |  | Already INACTIVE: the cascade leaves it out. |  | ignored | SEM-18 |
 | job.197 | lifecycle | box ends FAILURE or TERMINATED |  | Not live, or no job_terminator: nothing to terminate. |  | ignored | SEM-14 |
 | job.198 | lifecycle | flag moved | flag_moves_nothing | Not queued, or no status move: the member's completion moment and the wakes follow. |  | ignored | SEM-20, DL-254 |
-| job.199 | lifecycle | flag moved | flag_move_unposted | Only a waiter's kill or failed recheck reports it, an ignored ON_NOEXEC moves no flag. |  | ignored (unreachable) |  |
+| job.199 | lifecycle | flag moved | flag_move_unposted | An ice or an applied ON_NOEXEC reports it, an ignored ON_NOEXEC moves no flag. |  | ignored (unreachable) |  |
 | job.201 | ice_off | ON_ICE | not_live_or_queued | iced | ice_on | external | SEM-20, DL-254, DL-285 |
 | job.202 | ice_on | OFF_ICE |  | no re-evaluation | ice_off | external | SEM-20 |
 | job.203 | ice_on | FORCE_STARTJOB | force_clears |  | ice_off | external | SEM-23, DL-243 |
@@ -276,25 +263,14 @@ stateDiagram-v2
 | job.209 | noexec_off | ON_NOEXEC | noexec_applies | noexec | noexec_on | external | SEM-22, DL-254 |
 | job.210 | noexec_on | OFF_NOEXEC |  | cleared_noexec | noexec_off | external | DL-243 |
 | job.211 | noexec_on | OFF_NOEXEC on its box |  |  | noexec_off | external | DL-254 |
-| job.212 | arm_off | start | start_arms |  | arm_on | external | SEM-32, DL-54 |
-| job.213 | arm_on | actual start |  |  | arm_off | external | DL-54 |
-| job.214 | arm_on | DISARM |  |  | arm_off | external | DL-158 |
-| job.215 | arm_on | box run ends |  | SCHED_DISARM | arm_off | external | DL-54 |
-| job.216 | arm_on | readmit | readmit_leaves | waiter_left | arm_off | external | DL-257 |
-| job.217 | arm_on | KILLJOB | queued | report_flag_move | arm_off | external | DL-54 |
 | job.218 | ice_on | ON_ICE | not_live | iced_again | ice_on | external | SEM-20 |
 | job.219 | ice_off | OFF_ICE |  | as job.202 | ice_off | external | SEM-20 |
 | job.220 | hold_on | ON_HOLD | not_live_or_queued |  | hold_on | external | SEM-21 |
 | job.221 | hold_off | OFF_HOLD | not_queued | released_hold | hold_off | external | SEM-21 |
 | job.222 | noexec_on | ON_NOEXEC | noexec_applies | noexec | noexec_on | external | SEM-22, DL-254 |
 | job.223 | noexec_off | OFF_NOEXEC |  | cleared_noexec | noexec_off | external | DL-243 |
-| job.224 | arm_off | actual start |  | as job.213 | arm_off | external | DL-54 |
-| job.225 | arm_off | DISARM |  | as job.214 | arm_off | external | DL-158 |
-| job.226 | arm_off | KILLJOB | queued | report_flag_move | arm_off | external | DL-54 |
 | job.227 | flags | box running |  | Not auto_hold, or already held. |  | ignored |  |
-| job.228 | arm_off | box run ends |  | Only an armed member disarms. |  | ignored |  |
 | job.229 | noexec_off | OFF_NOEXEC on its box |  | Only a flagged job clears. |  | ignored |  |
-| job.230 | arm_off | readmit | readmit_leaves | waiter_left |  | internal | DL-257 |
 | job.231 | noexec_off | ON_NOEXEC on its box |  | as job.209 | noexec_on | external | SEM-22, DL-254, DL-347 |
 | job.232 | hold_on | ON_NOEXEC on its box |  | As job.207: ON_NOEXEC supersedes ON_HOLD, and the job retries its start. | hold_off | external | SEM-22, DL-254, DL-347 |
 | job.233 | noexec_on | ON_NOEXEC on its box |  | as job.231 | noexec_on | external | SEM-22, DL-254, DL-347 |
@@ -348,6 +324,17 @@ stateDiagram-v2
 | job.426 | lifecycle | start admitted | admitted_on_held | A forced start on held units enters ADMITTED, whose entry sends its extent. | ADMITTED | external | DL-256, DL-349, DL-364 |
 | job.427 | ADMITTED | (completion) | admitted_by_start | starting_admitted | STARTING | external | SEM-10, DL-242, DL-364 |
 | job.428 | ADMITTED | (completion) | admitted_by_readmit | starting_readmitted | STARTING | external | DL-50, DL-242, DL-364 |
+| job.429 | IDLE | start | start_arms |  |  | internal | SEM-32, DL-54, DL-365 |
+| job.430 | lifecycle | actual start | armed |  |  | internal | DL-54 |
+| job.431 | lifecycle | actual start | unarmed | as job.430 |  | internal | DL-54 |
+| job.432 | lifecycle | DISARM | armed |  |  | internal | DL-158 |
+| job.433 | lifecycle | DISARM | unarmed | As job.432, its line says there was no latch. |  | internal | DL-158 |
+| job.434 | lifecycle | box run ends | armed | SCHED_DISARM |  | internal | DL-54 |
+| job.435 | lifecycle | box run ends | unarmed | Only an armed member disarms. |  | ignored | DL-54 |
+| job.436 | QUE_WAIT | KILLJOB | armed | moved | TERMINATED | external | DL-50, DL-54 |
+| job.437 | QUE_WAIT | KILLJOB | unarmed | moved | TERMINATED | external | DL-50, DL-54 |
+| job.438 | QUE_WAIT | readmit | readmit_leaves_armed | left_queue | INACTIVE | external | DL-257 |
+| job.439 | QUE_WAIT | readmit | readmit_leaves_unarmed | left_queue | INACTIVE | external | DL-257 |
 
 | Id | Choice | Guard | Action | Target |
 | --- | --- | --- | --- | --- |
@@ -383,8 +370,6 @@ stateDiagram-v2
 | hold_on | flags/hold |  |  |  |  |
 | noexec_off | flags/noexec |  |  |  |  |
 | noexec_on | flags/noexec |  |  |  |  |
-| arm_off | flags/arm |  |  |  |  |
-| arm_on | flags/arm |  |  |  |  |
 | none | job/holding |  |  |  |  |
 | reserved | job/holding |  |  |  |  |
 | held | job/holding |  |  |  |  |
@@ -392,7 +377,7 @@ stateDiagram-v2
 | Name | Kind | Prose |
 | --- | --- | --- |
 | start_refused | guard | `start_verdict` is `refused`: a START_REFUSED line, no move. |
-| start_moves_nothing | guard | `start_verdict` is `ignored` or `arm`: the status does not move. |
+| start_moves_nothing | guard | `start_verdict` is `ignored`: the status does not move, and nothing latches. |
 | start_arms | guard | `start_verdict` is `arm`: the tick latches (SEM-32, DL-54). |
 | start_bounded | guard | `start_verdict` is `bounded`: the item descends from `MAX_NESTED_STARTS` admitted starts of the job (DL-304), so a START_REFUSED line, whoever asked, and no move. |
 | start_settles_first | guard | `start_verdict` is `settle_first`: past the bound, a run of the job ended and its settlement still waits behind the box rules (DL-340). The tier settles it, and the same attempt is made again. |
@@ -406,7 +391,8 @@ stateDiagram-v2
 | start_skips_inactive_member | guard | `start_verdict` is `skip_inactive_member`: an INACTIVE member of a RUNNING box it has not run in (DL-154): resolved with no move. |
 | readmit_admits | guard | `readmit_verdict` is `admit`. |
 | readmit_cancels | guard | `readmit_verdict` is `cancel`: the member's box stopped running. |
-| readmit_leaves | guard | `readmit_verdict` is `leave`: the queued recheck failed (DL-257). |
+| readmit_leaves_armed | guard | `readmit_verdict` is `leave`: the queued recheck failed (DL-257), the payload: the waiter is armed. |
+| readmit_leaves_unarmed | guard | `readmit_verdict` is `leave`, the payload: the waiter is not armed. |
 | readmit_keeps | guard | `readmit_verdict` is `keep`: held, not admissible, or kept by an admit-only scan. |
 | admitted_bypass | guard | The payload: the admitting row was the bypass (job.101). |
 | admitted_queue | guard | The payload: the admitting row was the queue (job.103). |
@@ -430,15 +416,15 @@ stateDiagram-v2
 | queued | guard | The configuration's status is QUE_WAIT. |
 | not_live_or_queued | guard | The configuration's status is neither live nor QUE_WAIT: an IDLE status, or the transient ADMITTED, which no operator's input meets. |
 | not_queued | guard | The configuration's status is not QUE_WAIT. |
+| armed | guard | The payload: the job's arm is latched (`Arm`, SEM-32, DL-54). |
+| unarmed | guard | The payload: the job's arm is not latched. |
 | noexec_ignored | guard | ON_NOEXEC is ignored: the configuration has ice on, RUNNING, or STARTING on a job that is not a box (`noexec_own_reason`), or the data says a box and the payload's `tree_busy` holds. The flag move does not change what it reads. |
 | noexec_applies | guard | Not `noexec_ignored`. |
 | iced_waiter | guard | The payload: ON_ICE moved the flag (the configuration has it on). |
-| killed_waiter | guard | The payload: KILLJOB disarmed a waiter. |
-| left_waiter | guard | The payload: the queued recheck failed, and the arm is gone (DL-257). |
 | noexec_settles_job | guard | The payload: ON_NOEXEC, not `noexec_ignored`, the data: a catalog job, not a box. |
 | noexec_settles_box | guard | The payload: ON_NOEXEC, not `noexec_ignored`, the data: a box, the configuration's status is not INACTIVE, or the payload's `change` holds (`NoexecFacts.change`). |
 | flag_moves_nothing | guard | The payload: ON_ICE, or ON_NOEXEC that is not `noexec_ignored`: no status follows the flag here. |
-| flag_move_unposted | guard | Not `flag_moves_nothing`: only a waiter's kill or recheck reports it, and an ignored ON_NOEXEC moves no flag. |
+| flag_move_unposted | guard | Not `flag_moves_nothing`: an ignored ON_NOEXEC moves no flag, so it reports none. |
 | is_box | guard | The data says the job is a box. |
 | is_job | guard | The data says the job is not a box. |
 | is_terminator | guard | The data: a member with job_terminator (SEM-14). |
@@ -483,10 +469,9 @@ stateDiagram-v2
 | cascades | action | An operator's INACTIVE on a box (SEM-18, DL-242): the batch INACTIVE path, its own settlement first, every job it contains, the disarms, then each row's box rules and wakes, then the idle parent's recompute. |
 | batched | action | A row of the batch INACTIVE path (a box start's reset, a box's cascade): it settles first, its box rules and wakes are the batch's second phase (`OracleCascade._notify`). |
 | cancelled | action | A waiter of a stopped box cancelled by the scan (job.109): as `moved`, and the scan's pass hears that the waiter moved. |
-| left_queue | action | A waiter that left the queue unstarted (job.110, DL-257): as `moved`, then its window or day disposition. |
+| left_queue | action | A waiter that left the queue unstarted (job.438, job.439, DL-257): as `moved`, then its window or day disposition, and the scan's pass hears that the waiter moved. |
 | runs_box | action | A box's RUNNING (job.125): as `moved`, then its members' auto_hold and their starts, then the window decisions of the box starts in progress (`OracleCascade._box_running`, DL-246). |
 | skips_in_box | action | A window skip of an INACTIVE member (job.404, DL-154): no move to ride, so its box rules run for it, as an INACTIVE move's would. |
-| report_flag_move | action | KILLJOB moved a waiter's arm (job.217, job.226), and the status rule that reads it follows as its own item, with the payload's handle on the units. |
 | report_ice | action | ON_ICE moved a waiter's flag (job.234): the status rule that takes it out of the queue follows as its own item (job.112), with the payload's handle on the units (DL-50). |
 | iced | action | ON_ICE moved the flag of a job that is not a waiter (job.201): the status rule that reads it follows, then the box rules its ice may run and its referencers' wakes (SEM-20, DL-285), as the tier's handle says. |
 | iced_again | action | ON_ICE on a job already on ice: its referencers wake again (SEM-20). |
@@ -495,7 +480,6 @@ stateDiagram-v2
 | released_hold | action | OFF_HOLD on a job that is not a waiter (job.205, job.221): it attempts its start (SEM-21). |
 | noexec | action | ON_NOEXEC moved the flag: on a box, every job it contains takes it first (DL-347), the status rule that reads it follows, then the jobs it released retry their start (DL-254), as the tier's handle says. |
 | cleared_noexec | action | OFF_NOEXEC on a box clears every job it contains (DL-254). |
-| waiter_left | action | The queued recheck failed (DL-257): the status move follows the arm, and the scan's pass hears that the waiter moved. |
 | released_held | action | RELEASE_RESOURCE gave held units back: the queue is scanned (DL-256). |
 | moment | action | A moment of a cascade (DL-350): the tier's step its payload carries (`Moment`), run now. |
 

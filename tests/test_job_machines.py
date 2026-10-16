@@ -73,12 +73,12 @@ def test_the_job_chart_and_the_assembly_are_registered() -> None:
 
 
 def test_the_flag_states_are_the_chart_s_and_name_the_row_s_fields() -> None:
-    """Each flag state is a state of the chart's `flags` region and names one
-    boolean field of the row and its value; each status is a state of the
-    chart's `status` region."""
+    """Each flag state names one boolean field of the row and its value; each but the arm's is
+    a state of the chart's `flags` region, and the arm is a fact of the payloads that read it
+    (DL-365). Each status is a state of the chart's `status` region."""
     assert set(get_args(FlagState.__value__)) == set(FLAG_FIELDS)
-    every_flag_on = configuration("INACTIVE", ice=True, hold=True, noexec=True, armed=True)
-    assert set(FLAG_FIELDS) == {
+    every_flag_on = configuration("INACTIVE", ice=True, hold=True, noexec=True)
+    assert set(FLAG_FIELDS) - {"arm_off", "arm_on"} == {
         state for state in configuration("INACTIVE") | every_flag_on if "_" in state
     }
     fields = {field for field, _ in FLAG_FIELDS.values()}

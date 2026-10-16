@@ -235,7 +235,7 @@ def test_every_action_that_asks_the_tier_names_itself_and_has_a_handler() -> Non
         def consequences(self, ctx: Context, action: str) -> None:
             asked.append(action)
 
-    own = {"relay_start", "settle_ended_run", "report_flag_move", "report_ice", "moment"}
+    own = {"relay_start", "settle_ended_run", "report_ice", "moment"}
     for name, action in JOB.actions.items():
         if name in own:
             continue
@@ -255,16 +255,52 @@ def test_a_macrostep_checks_each_instance_it_reached_against_its_row() -> None:
     project to its instance's configuration: a hook that skipped a write is
     caught there, though the input touched no row of the job (DL-350)."""
 
+    class Unheld(Oracle):
+        def _w_hold_on(self, job: str, outcome: Outcome) -> None:
+            """Planted: the hold the chart reached is never written."""
+
+    oracle = Unheld(lower_source(_cmd("j")))
+    with pytest.raises(StatechartError, match="'j': at the macrostep's end its instance") as e:
+        oracle.feed(ev("ON_HOLD", 1, job="j"))
+    assert "hold_on" in str(e.value) and "hold_off" in str(e.value)
+
+
+_DATED = _cmd("dated", 'date_conditions: 1\ndays_of_week: all\nstart_times: "09:00"\n')
+
+
+def test_a_microstep_that_omits_the_arm_its_row_latches_is_a_statechart_error() -> None:
+    """The arm is no state of the chart, so the hook checks it after each microstep's writes
+    (DL-365): a tick that latches (job.429) and leaves the row unarmed raises before the next
+    item."""
+
     class Unarmed(Oracle):
         def _w_arm(self, job: str, outcome: Outcome) -> None:
-            """Planted: the arm the chart reached is never written."""
+            """Planted: the arm the row latches is never written."""
 
-    jil = _cmd("dated", 'date_conditions: 1\ndays_of_week: all\nstart_times: "09:00"\n')
-    oracle = Unarmed(lower_source(jil))
+    oracle = Unarmed(lower_source(_DATED))
     oracle.feed(ev("ON_HOLD", 1, job="dated"))
-    with pytest.raises(StatechartError, match="'dated': at the macrostep's end its instance") as e:
+    with pytest.raises(StatechartError, match="'dated': start fired job.429") as e:
         oracle.feed(ev("STARTJOB", 2, job="dated"))
-    assert "arm_on" in str(e.value) and "arm_off" in str(e.value)
+    assert "arm is False, where the rows declare True" in str(e.value)
+
+
+def test_a_microstep_that_moves_the_arm_with_no_arm_row_is_a_statechart_error() -> None:
+    """A microstep that fires no arm row leaves the arm as it was (DL-365): a hold's release
+    that also clears a latched arm raises before the release's start attempt pops."""
+
+    class SpuriousClear(Oracle):
+        def _w_hold_off(self, job: str, outcome: Outcome) -> None:
+            """Planted: OFF_HOLD's write also clears the arm."""
+            super()._w_hold_off(job, outcome)
+            self.store.move_flag(job, "arm_off")
+
+    oracle = SpuriousClear(lower_source(_DATED))
+    oracle.feed(ev("ON_HOLD", 1, job="dated"))
+    oracle.feed(ev("STARTJOB", 2, job="dated"))
+    assert oracle.store.job["dated"].armed
+    with pytest.raises(StatechartError, match="'dated': OFF_HOLD fired job.205") as e:
+        oracle.feed(ev("OFF_HOLD", 3, job="dated"))
+    assert "arm is False, where the rows declare True" in str(e.value)
 
 
 def test_the_commit_checks_each_touched_row_against_its_instance() -> None:

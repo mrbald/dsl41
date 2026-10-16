@@ -2,8 +2,8 @@
 (DL-337). The chart, its contract and its guards are in `job_chart`.
 
 A payload whose facts the oracle computes on a guard's first read is a `Protocol`
-(`StartAttempt`, `Readmission`, `Noexec`, `Verdict`, `BoxVerdict`) implemented by
-`oracle_facts`; a payload the tier builds whole is a dataclass (DL-356)."""
+(`StartAttempt`, `Readmission`, `Noexec`, `Verdict`, `BoxVerdict`, `Arm`) implemented by
+`oracle_facts` and `oracle_intents`; a payload the tier builds whole is a dataclass (DL-356)."""
 
 from __future__ import annotations
 
@@ -168,8 +168,9 @@ class StartAttempt(Protocol):
     a retry makes leaves them false, and its refusals go untraced (DL-81). `stale`: a
     postponed start whose box run has moved on (`_deferral_is_stale`), or a scan continuation
     that a newer one replaced (`_rescan_superseded`). `rescan`: the timer resumes a scan and
-    attempts nothing. `dated`: the job has date conditions (`schedule`). `box`: the member's
-    gate on its box's run (SEM-10, SEM-20). `condition`: the job's condition holds, or it has
+    attempts nothing. `dated`: the job has date conditions (`schedule`). `armed`: a scheduled
+    tick latched the job at a releasable gate (SEM-32, DL-54). `box`: the member's gate on its
+    box's run (SEM-10, SEM-20). `condition`: the job's condition holds, or it has
     none. `window`: `_window_side`. `decided`: the window alone decides the attempt, as for a
     box start's pass and a waiter that left the queue for its window (DL-246, DL-257); inside
     the window nothing moves. The start bound is no fact: job.100 counts the item's ancestry
@@ -193,6 +194,8 @@ class StartAttempt(Protocol):
     def rescan(self) -> bool: ...
     @property
     def dated(self) -> bool: ...
+    @property
+    def armed(self) -> bool: ...
     @property
     def box(self) -> BoxGate: ...
     @property
@@ -225,7 +228,7 @@ class Readmission(Protocol):
     `box`: the member's box is RUNNING or not; `none` for a job in no box. `keep_stopped`: an
     admit-only scan keeps a member of a stopped box queued (DL-247, DL-255). `admissible`:
     `_admissible`. `recheck_fails`: `_queued_recheck` names a failed check (DL-257). `demand`
-    as for `StartAttempt`.
+    and `armed` as for `StartAttempt`.
     """
 
     @property
@@ -238,6 +241,8 @@ class Readmission(Protocol):
     def recheck_fails(self) -> bool: ...
     @property
     def demand(self) -> bool: ...
+    @property
+    def armed(self) -> bool: ...
     @property
     def units(self) -> Units: ...
 
@@ -262,6 +267,15 @@ class Noexec(Protocol):
     def change(self) -> bool: ...
     @property
     def units(self) -> Units: ...
+
+
+class Arm(Protocol):
+    """A payload whose rows read the job's arm (DL-365): DISARM's, KILLJOB's, `actual start`'s
+    and `box run ends`'. `armed`: a scheduled tick latched the job (SEM-32, DL-54), read from
+    the job's row when a guard reads it."""
+
+    @property
+    def armed(self) -> bool: ...
 
 
 @dataclass(frozen=True)
@@ -299,7 +313,7 @@ class FlagMoved(Payload):
     """The flag move a status rule follows: `cause` is the input that moved it; `noexec` is
     ON_NOEXEC's payload, passed on with its `units`, and None for any other cause."""
 
-    cause: Literal["ON_ICE", "KILLJOB", "readmit", "ON_NOEXEC"]
+    cause: Literal["ON_ICE", "ON_NOEXEC"]
     noexec: Noexec | None = None
 
 

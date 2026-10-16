@@ -502,7 +502,7 @@ def _owed_scripts() -> dict[str, tuple[Step, ...]]:
 #: A directed estate for the kill and timer cells the seeded sample does
 #: not reach (DL-343). `kt_hold` holds the one unit.
 #: - `kt_wait` is armed on hold, then queued by OFF_HOLD's retry: a kill on a
-#:   waiter whose arm is latched (job.217).
+#:   waiter whose arm is latched (job.436).
 #: - `kt_box` is a box that declares the unit (the generator gives boxes no
 #:   resources): it queues behind `kt_hold` (a kill on a queued box, armed or
 #:   not), or runs holding it with its terminator member `kt_bm` (a kill, a

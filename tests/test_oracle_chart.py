@@ -800,7 +800,7 @@ _OUTCOMES: dict[str, tuple[list[Event], str, tuple[str, ...], list[tuple[str, ..
         [ev("ON_HOLD", 1, job="dated"), ev("STARTJOB", 2, job="dated")],
         "dated",
         ("job.177",),
-        [("job.212",)],
+        [("job.429",)],
         "SCHED_ARM",
     ),
     "defer": (
@@ -1222,19 +1222,19 @@ _MOVED = [("box rules", ("job.405",)), ("settle", ("job.406",)), ("wake", ("job.
 _EXTENTS: dict[str, list[tuple[str, tuple[str, ...]]]] = {
     "admit a job": [
         ("admitted start", ("job.311",)),
-        ("actual start", ("job.224",)),
+        ("actual start", ("job.431",)),
         (COMPLETION, ("job.427",)),
     ],
     "admit a box": [
         ("admitted start", ("job.311",)),
-        ("actual start", ("job.224",)),
+        ("actual start", ("job.431",)),
         (COMPLETION, ("job.427",)),
     ],
     "queue": _MOVED,
-    "bypass": [("actual start", ("job.224",)), *_MOVED],
+    "bypass": [("actual start", ("job.431",)), *_MOVED],
     "forced on held units": [
         ("admitted start", ("job.303",)),
-        ("actual start", ("job.224",)),
+        ("actual start", ("job.431",)),
         (COMPLETION, ("job.427",)),
     ],
 }
@@ -1366,7 +1366,7 @@ def test_a_readmission_enters_admitted_and_its_completion_carries_the_readmit() 
     children = [o for o in mine[at + 1 :] if o.depth == readmit.depth + 1]
     assert [(o.event.name, o.rows) for o in children[:3]] == [
         ("admitted start", ("job.301",)),
-        ("actual start", ("job.224",)),
+        ("actual start", ("job.431",)),
         (COMPLETION, ("job.428",)),
     ]
     completion = children[2]
@@ -1417,7 +1417,7 @@ def test_a_readmitted_box_s_completion_sends_its_reset_notices() -> None:
     readmit = next(o for o in seen if o.event.name == "readmit" and o.rows == ("job.108",))
     assert _below(seen, readmit) == [
         ("W", "admitted start", ("job.301",)),
-        ("W", "actual start", ("job.224",)),
+        ("W", "actual start", ("job.431",)),
         ("m", "box start", ("job.122",)),
         ("W", COMPLETION, ("job.428",)),
     ]
@@ -1513,7 +1513,7 @@ _KT_OUTCOMES: dict[str, tuple[str, list[Event | datetime], str, list[tuple[str, 
         _KT_JIL,
         [ev("STARTJOB", 1, job="h"), ev("STARTJOB", 2, job="w"), ev("KILLJOB", 3, job="w")],
         "w",
-        [("job.226",), ("job.111",)],
+        [("job.437",)],
         "QUE_WAIT->TERMINATED",
     ),
     "kill an armed waiter": (
@@ -1526,7 +1526,7 @@ _KT_OUTCOMES: dict[str, tuple[str, list[Event | datetime], str, list[tuple[str, 
             ev("KILLJOB", 4, job="w"),
         ],
         "w",
-        [("job.217",), ("job.111",)],
+        [("job.436",)],
         "QUE_WAIT->TERMINATED",
     ),
     "kill ignored: INACTIVE": (
@@ -1644,14 +1644,14 @@ _KT_OUTCOMES: dict[str, tuple[str, list[Event | datetime], str, list[tuple[str, 
         oracle_inputs.KILL_TIMER_JIL,
         _directed("queued box killed"),
         "kt_box",
-        [("job.226",), ("job.111",)],
+        [("job.437",)],
         "QUE_WAIT->TERMINATED",
     ),
     "kill an armed queued box": (
         oracle_inputs.KILL_TIMER_JIL,
         _directed("armed queued box killed"),
         "kt_box",
-        [("job.217",), ("job.111",)],
+        [("job.436",)],
         "QUE_WAIT->TERMINATED",
     ),
     "kill a running box that holds units": (
@@ -2001,7 +2001,7 @@ _FLAG_OUTCOMES: dict[str, tuple[str, int, str, list[tuple[str, ...]], str]] = {
     "OFF_NOEXEC on a job not ON_NOEXEC": (_FAILED, 4, "fl_job", [("job.223",)], "OFF_NOEXEC"),
     "ON_HOLD on a queued box": (_QUEUED_BOX, 3, "fl_box", [("job.235",)], "ON_HOLD"),
     "OFF_HOLD on a held queued box": (_QUEUED_BOX, 4, "fl_box", [("job.237",)], "OFF_HOLD"),
-    "DISARM on a queued box": (_QUEUED_BOX, 5, "fl_box", [("job.225",)], "DISARM"),
+    "DISARM on a queued box": (_QUEUED_BOX, 5, "fl_box", [("job.433",)], "DISARM"),
     "ON_ICE on a queued box": (
         _QUEUED_BOX,
         6,
@@ -2045,9 +2045,9 @@ _FLAG_OUTCOMES: dict[str, tuple[str, int, str, list[tuple[str, ...]], str]] = {
         [("job.207", "job.209"), ("job.198",), ("job.124",)],
         "OFF_HOLD",
     ),
-    "DISARM on an armed job": (_DISARMS, 5, "fl_dated", [("job.214",)], "DISARM"),
-    "DISARM with no latch": (_DISARMS, 6, "fl_dated", [("job.225",)], "DISARM"),
-    "DISARM on an armed box": (_DISARMS, 7, "fl_box", [("job.214",)], "DISARM"),
+    "DISARM on an armed job": (_DISARMS, 5, "fl_dated", [("job.432",)], "DISARM"),
+    "DISARM with no latch": (_DISARMS, 6, "fl_dated", [("job.433",)], "DISARM"),
+    "DISARM on an armed box": (_DISARMS, 7, "fl_box", [("job.432",)], "DISARM"),
     "OFF_HOLD retries the start": (
         _DISARMS,
         8,
@@ -2232,8 +2232,8 @@ _WAKES = "a held job's release wakes its waiter"
 _RANKS = "two waiters of different rank"
 _WAITERS_ = "held, iced and noexec waiters"
 _OWED = "a stopped box's owed scan keeps its member and admits what it blocked"
-_ADMITTED = [("job.108",), ("job.301",), ("job.224",), ("job.105",)]
-_LEAVES = [("job.230",), ("job.110",)]
+_ADMITTED = [("job.108",), ("job.301",), ("job.431",), ("job.105",)]
+_LEAVES = [("job.439",)]
 #: Per outcome class: the directed queue script and how many of its inputs
 #: to feed, the job, the rows the last input fires on the job's instance (the
 #: release row; or the readmission's rows, the `flag moved` it reports, the
@@ -2296,14 +2296,14 @@ _QUEUE_OUTCOMES: dict[str, tuple[str, int, str, list[tuple[str, ...]], str]] = {
         "a waiter readmitted on its held units",
         5,
         "qu_take",
-        [("job.108",), ("job.302",), ("job.224",), ("job.105",)],
+        [("job.108",), ("job.302",), ("job.431",), ("job.105",)],
         "QUE_WAIT->STARTING",
     ),
     "an armed waiter is admitted and its arm consumed": (
         "an armed waiter admitted",
         6,
         "qu_arm",
-        [("job.108",), ("job.301",), ("job.213",), ("job.105",)],
+        [("job.108",), ("job.301",), ("job.430",), ("job.105",)],
         "QUE_WAIT->STARTING",
     ),
     "a held waiter stays queued": (_WAITERS_, 5, "qu_w", [("job.181",)], ""),
@@ -2325,7 +2325,7 @@ _QUEUE_OUTCOMES: dict[str, tuple[str, int, str, list[tuple[str, ...]], str]] = {
         "an armed waiter whose condition is now false",
         5,
         "qu_armc",
-        [("job.216",), ("job.110",)],
+        [("job.438",)],
         "SCHED_DISARM",
     ),
     "a waiter whose window shut nearer its close leaves and skips": (
@@ -2346,7 +2346,7 @@ _QUEUE_OUTCOMES: dict[str, tuple[str, int, str, list[tuple[str, ...]], str]] = {
         "a queued box is readmitted and starts its members",
         3,
         "qu_bx",
-        [("job.108",), ("job.301",), ("job.224",), ("job.125",)],
+        [("job.108",), ("job.301",), ("job.431",), ("job.125",)],
         "QUE_WAIT->STARTING",
     ),
     "a member a STATUS took out of the queue is not readmitted": (
@@ -2402,7 +2402,7 @@ _QUEUE_OUTCOMES: dict[str, tuple[str, int, str, list[tuple[str, ...]], str]] = {
         "a job with no load is admitted behind the waiter that blocked it",
         4,
         "qu_nl",
-        [("job.108",), ("job.311",), ("job.224",), ("job.105",)],
+        [("job.108",), ("job.311",), ("job.431",), ("job.105",)],
         "QUE_WAIT->STARTING",
     ),
 }
@@ -2465,13 +2465,6 @@ def _flag_read_setup(table: str, case: str) -> tuple[Oracle, list[Event | dateti
     ("row", "table", "case", "reads"),
     [
         ("job.112", "flag", "ON_ICE on a waiter", {"ice_on"}),
-        ("job.111", "kill", "kill an armed waiter", {"arm_off"}),
-        (
-            "job.110",
-            "queue",
-            "an armed waiter whose condition is now false loses its arm and leaves",
-            {"arm_off"},
-        ),
         ("job.113", "flag", "ON_NOEXEC on a held waiter", {"noexec_on", "hold_off"}),
         ("job.136", "flag", "ON_NOEXEC on an idle box in a running box", {"noexec_on"}),
     ],
@@ -2518,6 +2511,46 @@ def test_a_status_rule_that_reads_a_flag_sees_the_flag_moved(
             oracle.advance(step)
     _agrees(oracle)
     assert len(seen) == 1 and reads <= seen[0]
+
+
+@pytest.mark.parametrize(
+    ("row", "table", "case", "lines"),
+    [
+        ("job.436", "kill", "kill an armed waiter", ["QUE_WAIT->TERMINATED"]),
+        (
+            "job.438",
+            "queue",
+            "an armed waiter whose condition is now false loses its arm and leaves",
+            ["SCHED_DISARM", "QUE_WAIT->INACTIVE"],
+        ),
+    ],
+)
+def test_an_armed_waiter_s_kill_or_leave_drops_the_arm_before_its_status_line(
+    row: str, table: str, case: str, lines: list[str]
+) -> None:
+    """The arm is a fact of the payload, not a region (DL-365): one row drops it and moves the
+    status, and its writer writes the arm before the status, the arm's line first where it has
+    one (DL-54)."""
+    oracle, steps, job = _flag_read_setup(table, case)
+
+    def step(item: Event | datetime) -> None:
+        if isinstance(item, Event):
+            oracle.feed(item)
+        else:
+            oracle.advance(item)
+
+    for item in steps[:-1]:
+        step(item)
+    assert oracle.store.job[job].armed and oracle.store.job[job].status == "QUE_WAIT"
+    seen = _spied(oracle)
+    traced = len(oracle.trace())
+    step(steps[-1])
+    _agrees(oracle)
+    key = RuntimeState.job_key(job)
+    assert [o.rows for o in seen if o.key == key and row in o.rows] == [(row,)]
+    assert not oracle.store.job[job].armed
+    written = [t.transition for t in oracle.trace()[traced:] if t.job == job]
+    assert written[: len(lines)] == lines
 
 
 def test_dl50_the_higher_ranked_waiter_goes_first_and_each_gets_its_own_readmit() -> None:
@@ -2711,14 +2744,14 @@ _BOX_OUTCOMES: dict[str, tuple[str, list[Event], str, list[tuple[str, ...]], str
         _BOX_JIL,
         _TERMINATOR,
         "tn",
-        [("job.228",), ("job.116",)],
+        [("job.435",), ("job.116",)],
         "RUNNING->TERMINATED",
     ),
     "a member that is not live stays as its box ends": (
         _BOX_JIL,
         _TERMINATOR,
         "tm",
-        [("job.228",), ("job.197",)],
+        [("job.435",), ("job.197",)],
         "RUNNING->FAILURE",
     ),
     "a member's FAILURE that fires no terminator, no override and no fold": (
@@ -2781,7 +2814,7 @@ _BOX_OUTCOMES: dict[str, tuple[str, list[Event], str, list[tuple[str, ...]], str
         oracle_inputs.BOX_JIL,
         _box_steps("a grandparent's box_success names a member of its subbox", 2),
         "bx_c",
-        [("job.185",), ("job.187",), ("job.228",)],
+        [("job.185",), ("job.187",), ("job.435",)],
         "",
     ),
     "an idle box's box_success": (
@@ -2877,7 +2910,7 @@ _BOX_OUTCOMES: dict[str, tuple[str, list[Event], str, list[tuple[str, ...]], str
         oracle_inputs.QUEUE_JIL,
         _queue_steps("a queued box's member ends it, and its parent's release meets it", 4),
         "qu_q",
-        [("job.165",), ("job.228",)],
+        [("job.165",), ("job.435",)],
         "QUE_WAIT->SUCCESS",
     ),
     "an idle box with a member still running derives nothing": (
@@ -2943,35 +2976,35 @@ _BOX_OUTCOMES: dict[str, tuple[str, list[Event], str, list[tuple[str, ...]], str
         oracle_inputs.BOX_JIL,
         _box_steps("an auto_hold member armed, and its box's kill drops the arm", 3),
         "bx_ah",
-        [("job.215",), ("job.197",)],
+        [("job.434",), ("job.197",)],
         "SCHED_DISARM",
     ),
     "a box set INACTIVE takes its running member along": (
         _BOX_JIL,
         _CASCADE,
         "im",
-        [("job.159",), ("job.228",)],
+        [("job.159",), ("job.435",)],
         "RUNNING->INACTIVE",
     ),
     "a box set INACTIVE takes its ended member along": (
         _BOX_JIL,
         _CASCADE,
         "in",
-        [("job.160",), ("job.228",)],
+        [("job.160",), ("job.435",)],
         "SUCCESS->INACTIVE",
     ),
     "a box set INACTIVE leaves its INACTIVE member": (
         _BOX_JIL,
         _CASCADE,
         "iz",
-        [("job.196",), ("job.228",)],
+        [("job.196",), ("job.435",)],
         "",
     ),
     "a box set INACTIVE takes its queued member along": (
         oracle_inputs.BOX_JIL,
         _box_steps("a queued member goes INACTIVE with its box", 3),
         "bx_qm",
-        [("job.123",), ("job.228",)],
+        [("job.123",), ("job.435",)],
         "QUE_WAIT->INACTIVE",
     ),
     "a box taken OFF_NOEXEC clears its ON_NOEXEC member": (

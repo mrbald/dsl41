@@ -15,13 +15,12 @@ from typing import Final, cast
 
 from dsl41.capacity import machine_load, to_reservations
 from dsl41.job_chart_events import RELEASE_RESOURCE, Settlement
-from dsl41.job_chart_rows import projection
+from dsl41.job_chart_rows import ARM_CLEARS, ARM_LATCHES, projection
 from dsl41.oracle_cascade import OracleCascade
-from dsl41.oracle_facts import FoldFacts, RecomputeFacts, StartFacts, Started
+from dsl41.oracle_facts import FoldFacts, ReadmitFacts, RecomputeFacts, StartFacts, Started
 from dsl41.oracle_intents import (
     AdmissionFacts,
     Batch,
-    FlagFacts,
     MemberEnd,
     Move,
     Rule,
@@ -65,12 +64,28 @@ class OracleWriters(OracleCascade):
         rows = outcome.rows
         if len(rows) > 1 and any(row in _NOEXEC_HOLDS for row in rows):
             rows = tuple(sorted(rows, key=lambda row: row in _NOEXEC_HOLDS))
+        armed = self._runtime(job).armed
         for row in rows:
             writer = _WRITERS.get(row)
             if writer is None:
                 raise self._unwritten(job, outcome, "row")
             self._check_type(job, row)
             getattr(self, writer)(job, outcome)
+        self._check_arm(job, outcome, armed)
+
+    def _check_arm(self, job: str, outcome: Outcome, before: bool) -> None:
+        """The arm after a microstep's writes is the one its fired rows declare (DL-365): latched
+        after `ARM_LATCHES`, off after `ARM_CLEARS`, else as before. The arm is no state of the
+        chart, so the projection check cannot see a write the hook missed or made wrongly."""
+        fired = set(outcome.rows)
+        want = True if fired & _LATCHES else False if fired & _CLEARS else before
+        after = self._runtime(job).armed
+        if after != want:
+            rows = ", ".join(outcome.rows) or "no row"
+            raise StatechartError(
+                f"job {job!r}: {outcome.event.name} fired {rows}, and the row's arm is"
+                f" {after}, where the rows declare {want} (DL-365)"
+            )
 
     def _unwritten(self, job: str, outcome: Outcome, what: str) -> StatechartError:
         """The chart fired rows the oracle has no write for; the executor gives the hook's raise
@@ -289,6 +304,8 @@ class OracleWriters(OracleCascade):
         self._write(job, f"QUE_WAIT cancelled: box {box!r} no longer RUNNING (DL-50)")
 
     def _w_left_armed(self, job: str, outcome: Outcome) -> None:
+        """job.438: the waiter's arm drops with its line, then it leaves the queue (DL-54's
+        order, DL-257)."""
         mode = self.semantics.queued_recheck
         self._flag(
             job,
@@ -296,10 +313,11 @@ class OracleWriters(OracleCascade):
             "SCHED_DISARM",
             f"left QUE_WAIT unstarted; waits for its next start time (queued-recheck={mode}, DL-257)",
         )
+        self._w_left(job, outcome)
 
     def _w_left(self, job: str, outcome: Outcome) -> None:
-        moved = cast(FlagFacts, outcome.event.payload)
-        _check, why = moved.facts.known("recheck") if moved.facts is not None else ("", "")
+        facts = cast(ReadmitFacts, outcome.event.payload)
+        _check, why = facts.known("recheck")
         mode = self.semantics.queued_recheck
         box = self.catalog.jobs[job].box.box_name
         self.store.dequeue_waiter(job)
@@ -308,12 +326,12 @@ class OracleWriters(OracleCascade):
         cause = f"QUE_WAIT left unstarted: {why} (queued-recheck={mode}, DL-257)"
         self._write(job, cause)
 
-    def _w_killed_waiter(self, job: str, outcome: Outcome) -> None:
-        self._write(job, "KILLJOB (dequeued from QUE_WAIT, DL-50)")
-
     def _w_kill_waiter(self, job: str, outcome: Outcome) -> None:
+        """job.436, job.437: the waiter leaves the queue and its arm, then it is TERMINATED
+        (DL-50, DL-54)."""
         self.store.dequeue_waiter(job)
         self.store.move_flag(job, "arm_off")
+        self._write(job, "KILLJOB (dequeued from QUE_WAIT, DL-50)")
 
     def _w_iced_waiter(self, job: str, outcome: Outcome) -> None:
         self.store.dequeue_waiter(job)
@@ -469,7 +487,7 @@ class OracleWriters(OracleCascade):
 
     def _w_disarm(self, job: str, outcome: Outcome) -> None:
         cause = (
-            "sendevent DISARM" if outcome.rows[0] == "job.214" else "sendevent DISARM (no latch)"
+            "sendevent DISARM" if outcome.rows[0] == "job.432" else "sendevent DISARM (no latch)"
         )
         self._flag(job, "arm_off", "DISARM", cause)
 
@@ -503,6 +521,9 @@ class OracleWriters(OracleCascade):
         )
 
 
+_LATCHES: Final = frozenset(ARM_LATCHES)
+_CLEARS: Final = frozenset(ARM_CLEARS)
+
 #: The rows whose idle recompute an override decided (SEM-15).
 _OVERRIDE_RECOMPUTES: Final = frozenset(f"job.{n}" for n in (131, 132, 161, 162, 163, 164))
 
@@ -521,8 +542,6 @@ _WRITERS: Final[dict[str, str]] = {
     "job.107": "_w_skip_member",
     "job.108": "_w_readmit",
     "job.109": "_w_cancel",
-    "job.110": "_w_left",
-    "job.111": "_w_killed_waiter",
     "job.112": "_w_iced_waiter",
     "job.113": "_w_noexec_waiter",
     "job.114": "_w_kill",
@@ -567,22 +586,13 @@ _WRITERS: Final[dict[str, str]] = {
     "job.209": "_w_noexec_on",
     "job.210": "_w_noexec_off",
     "job.211": "_w_box_noexec_off",
-    "job.212": "_w_arm",
-    "job.213": "_w_actual_start",
-    "job.214": "_w_disarm",
-    "job.215": "_w_box_disarms",
-    "job.216": "_w_left_armed",
-    "job.217": "_w_kill_waiter",
     "job.218": "_w_ice_on",
     "job.219": "_w_ice_off",
     "job.220": "_w_hold_on",
     "job.221": "_w_hold_off",
     "job.222": "_w_noexec_on",
     "job.223": "_w_noexec_off",
-    "job.224": "_w_actual_start",
-    "job.225": "_w_disarm",
-    "job.226": "_w_kill_waiter",
-    **{f"job.{n}": "_w_nothing" for n in (227, 228, 229, 230)},
+    **{f"job.{n}": "_w_nothing" for n in (227, 229)},
     "job.231": "_w_box_noexec_flag",
     "job.232": "_w_noexec_hold",
     "job.233": "_w_box_noexec_flag",
@@ -612,4 +622,15 @@ _WRITERS: Final[dict[str, str]] = {
     **{f"job.{n}": "_w_nothing" for n in (424, 425, 426)},
     "job.427": "_w_starting",
     "job.428": "_w_starting",
+    "job.429": "_w_arm",
+    "job.430": "_w_actual_start",
+    "job.431": "_w_actual_start",
+    "job.432": "_w_disarm",
+    "job.433": "_w_disarm",
+    "job.434": "_w_box_disarms",
+    "job.435": "_w_nothing",
+    "job.436": "_w_kill_waiter",
+    "job.437": "_w_kill_waiter",
+    "job.438": "_w_left_armed",
+    "job.439": "_w_left",
 }
