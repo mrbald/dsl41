@@ -1,4 +1,4 @@
-"""The generated job lifecycle view, scripts/render_job_lifecycle.py."""
+"""The generated lifecycle views, scripts/render_job_lifecycle.py."""
 
 from __future__ import annotations
 
@@ -11,6 +11,9 @@ from types import ModuleType
 import pytest
 
 from dsl41.job_chart import JOB
+from dsl41.machines import MACHINES
+from dsl41.runner_effects import EFFECT
+from dsl41.scan_chart import QUEUE_SCAN
 from dsl41.state_machine import COMPLETION, Branch, Choice, Region, Row, State, Statechart
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -51,9 +54,7 @@ def test_a_changed_declaration_makes_the_doc_stale() -> None:
 
 def test_the_shown_and_folded_rows_are_the_job_chart_rows() -> None:
     view = rjl.sort_rows(JOB)
-    folded = sum(
-        rjl._rows(edges) for edges in (view.ignored, view.unreachable, view.internal, view.selves)
-    )
+    folded = rjl._folded(view)
     assert view.shown_rows() + folded == len(JOB.rows)
     assert view.shown_rows() > 0 and folded > 0
     assert f"Rows in the chart: {len(JOB.rows)}." in rjl.render()
@@ -218,7 +219,8 @@ def test_folded_rows_are_counted_by_kind_and_sum_to_the_chart() -> None:
     view = rjl.sort_rows(DOOR)
     assert rjl._rows(view.ignored) == 1
     assert rjl._rows(view.unreachable) == 1
-    assert rjl._rows(view.internal) == 2
+    assert rjl._rows(view.internal) == 1
+    assert rjl._rows(view.refusals) == 1
     assert rjl._rows(view.selves) == 1
     assert view.shown_rows() == 8
     assert rjl.counts(DOOR)[0] == "- Ignored rows: 1. The event is consumed and nothing moves."
@@ -233,6 +235,9 @@ def test_full_adds_the_folded_rows_and_the_default_does_not() -> None:
     assert "open + wait\n" in full
     assert "open + gone // never posted" in full
     assert "open + tick\n" in full and "open + slam // refusal LOUD" in full
+    assert "## Refusals" not in full
+    internal = full[full.index("## Internal") :]
+    assert internal.index("open + tick") < internal.index("open + slam")
     assert "lock_on = lock_on + lock" in full
 
 
@@ -257,3 +262,216 @@ def test_a_matching_doc_is_current(tmp_path: Path) -> None:
 
 def test_a_missing_doc_is_not_current(tmp_path: Path) -> None:
     assert not rjl.is_current(tmp_path, DOOR)
+
+
+# ---- the other charts' views
+
+
+def test_the_committed_charts_doc_is_the_rendering() -> None:
+    """Breaks when a chart changed and nobody ran
+    `uv run python scripts/render_job_lifecycle.py`."""
+    assert rjl.charts_current(REPO_ROOT), (
+        "docs/chart-lifecycles.md is stale; run `uv run python scripts/render_job_lifecycle.py`"
+    )
+
+
+def test_a_changed_chart_makes_the_charts_doc_stale() -> None:
+    dropped = replace(EFFECT, rows=EFFECT.rows[1:])
+    others = tuple(dropped if chart is EFFECT else chart for chart in rjl.OTHERS)
+    assert not rjl.charts_current(REPO_ROOT, others)
+
+
+def test_the_charts_doc_has_a_section_per_other_chart_in_registry_order() -> None:
+    names = [chart.name for chart in MACHINES if chart.name != "job"]
+    assert len(names) == 12 and "queue_scan" in names
+    sections = [line[3:] for line in rjl.render_charts().splitlines() if line.startswith("## ")]
+    assert sections == names
+
+
+def test_every_chart_row_is_in_exactly_one_place_of_its_view() -> None:
+    """The job chart included: the chart layout covers every registered chart."""
+    for chart in MACHINES:
+        view = rjl.sort_chart(chart)
+        places = [{edge.row for edge in edges} for edges in (*view.shown.values(), *view.folded())]
+        assert sorted(row for place in places for row in place) == sorted(
+            row.id for row in chart.rows
+        ), chart.name
+
+
+def test_no_row_id_reaches_a_view() -> None:
+    """Neither a chart's own ids nor the short `.NN` form, in any chart's full view."""
+    texts = [rjl.render(full=True)] + ["\n".join(rjl.section(c, full=True)) for c in rjl.OTHERS]
+    for text in texts:
+        assert not rjl.ROW_ID.search(text), rjl.ROW_ID.search(text)
+
+
+def test_a_note_naming_any_row_id_is_dropped() -> None:
+    for note in (
+        "see job.196",
+        "the cleanup of .10, then exit",
+        "as host.11 does",
+        "See job.196. Then it ends",
+        "as .10. Then",
+    ):
+        assert rjl._note(Row("effect.99", "pending", "x", note=note)) == ""
+    for note in ("a 0.5 second wait", "version 1.10", "keep going"):
+        assert rjl._note(Row("effect.99", "pending", "x", note=note)) == note
+
+
+def test_the_effect_view_is_pinned() -> None:
+    assert rjl.section(EFFECT) == [
+        "## effect",
+        "",
+        "Shown: 3. Folded: 1 (ignored 1). Rows in the chart: 4.",
+        "",
+        "### outcome",
+        "",
+        "```text",
+        "pending <- initial",
+        "applied = pending + resolve [applied]",
+        "retired = pending + resolve [retired]",
+        "indeterminate = pending + resolve [indeterminate]",
+        "```",
+    ]
+
+
+def test_the_queue_scan_view_is_pinned() -> None:
+    """A composite with two regions: both initials, then the rows that move either."""
+    assert rjl.section(QUEUE_SCAN) == [
+        "## queue_scan",
+        "",
+        "Shown: 8. Folded: 1 (internal 1). Rows in the chart: 9.",
+        "",
+        "### scan",
+        "",
+        "```text",
+        "idle <- initial",
+        "idle = done + (completion) [scan_ends]",
+        "pass = idle + scan // A scan with no pass running begins one",
+        "    || done + (completion) [pass_restarts]",
+        "    || done + (completion) [pass_upgrades]",
+        "```",
+        "",
+        "#### pass",
+        "",
+        "```text",
+        "next_waiter <- initial",
+        "no_request <- initial",
+        "awaiting_readmit = next_waiter + (completion) [waiter_queued] // The pass's first turn",
+        "                || awaiting_readmit + (completion) [waiter_stayed; waiter_queued]",
+        "done = next_waiter + (completion) [else] // The pass's first turn",
+        "    || awaiting_readmit + (completion) [waiter_moved]",
+        "    || awaiting_readmit + (completion) [waiter_stayed; else]",
+        "full_requested = no_request + scan",
+        "```",
+    ]
+
+
+def test_a_composite_with_one_region_stays_in_its_parent_block() -> None:
+    """The door's `flags` composite has one region, so its lock rows are in the `flags`
+    region's block, and the entry rests in `lock_off`."""
+    blocks = rjl.blocks_of(DOOR)
+    assert [(b.title, b.composite) for b in blocks] == [
+        ("status", False),
+        ("flags", False),
+        ("holding", False),
+    ]
+    lines = rjl.section(DOOR)
+    assert lines[lines.index("### flags") + 2 :][:5] == [
+        "```text",
+        "lock_off <- initial",
+        "flags = {lock_off, lock_on}",
+        "lock_off = lock_on + unlock",
+        "lock_on = lock_off + lock",
+    ]
+
+
+def test_grouping_states_never_split_the_ways_into_a_target() -> None:
+    """runtime_assembly with its phases grouped by single-region composites renders as one
+    block with the same lines as the flat chart."""
+    assembly = next(chart for chart in MACHINES if chart.name == "runtime_assembly")
+    phase = assembly.root.regions[0]
+    by = {state.name: state for state in phase.states}
+    groups = {
+        "unbuilt": ("fresh", "installed", "genesis"),
+        "open": ("genesis_input", "input"),
+        "built": ("constructed", "seeded", "live"),
+    }
+    grouped = tuple(
+        State(name, regions=(Region(name, members[0], tuple(by[m] for m in members)),))
+        for name, members in groups.items()
+    )
+    root = replace(assembly.root, regions=(Region(phase.name, "unbuilt", grouped),))
+    lines = rjl.section(replace(assembly, root=root))
+    assert [line for line in lines if line.startswith("#")] == ["## runtime_assembly", "### phase"]
+    flat = rjl.section(assembly)
+    ways = sorted(line for line in flat if " + " in line)
+    assert sorted(line for line in lines if " + " in line) == ways
+    assert lines[lines.index("### phase") + 2 :][:5] == [
+        "```text",
+        "fresh <- initial",
+        "unbuilt = {fresh, installed, genesis}",
+        "open = {genesis_input, input}",
+        "built = {constructed, seeded, live}",
+    ]
+
+
+def test_supervisor_lease_names_its_groups_members() -> None:
+    lease = next(chart for chart in MACHINES if chart.name == "supervisor_lease")
+    lines = rjl.section(lease)
+    assert lines[lines.index("### phase") + 2 :][:4] == [
+        "```text",
+        "free <- initial",
+        "unheld = {free, expired}",
+        "held = {live, orphaned}",
+    ]
+
+
+def test_a_row_from_the_root_is_under_its_target_top_level_region() -> None:
+    """The engine leaves every region and enters each again (statechart-engine.md §4); the
+    view prints the line once, under the target's top-level region."""
+    reset = replace(DOOR, rows=(*DOOR.rows, Row("door.31", "door", "reset", "closed")))
+    view = rjl.sort_chart(reset)
+    assert rjl._blocks(view.shown["0"])[0] == "closed = door + reset"
+    assert all(edge.row != "door.31" for edge in view.shown["1"] + view.shown["2"])
+
+
+def test_a_row_between_two_regions_of_a_composite_is_refused() -> None:
+    crossing = replace(
+        QUEUE_SCAN,
+        rows=(*QUEUE_SCAN.rows, Row("queue_scan.90", "next_waiter", "bang", "full_requested")),
+    )
+    with pytest.raises(ValueError, match="queue_scan.90"):
+        rjl.sort_chart(crossing)
+
+
+def test_a_chart_row_across_top_level_regions_is_refused_not_dropped() -> None:
+    crossing = replace(DOOR, rows=(*DOOR.rows, Row("door.30", "closed", "bang", "lock_on")))
+    with pytest.raises(ValueError, match="door.30"):
+        rjl.sort_chart(crossing)
+
+
+def test_a_spec_only_mark_is_printed_when_the_note_does_not_fit() -> None:
+    marked = replace(
+        DOOR,
+        rows=tuple(
+            replace(r, mark="spec-only", note="y" * 120) if r.id == "door.12" else r
+            for r in DOOR.rows
+        ),
+    )
+    assert rjl._blocks(rjl.sort_chart(marked).shown["2"]) == ["has = none + take // spec-only"]
+    short = replace(
+        marked,
+        rows=tuple(replace(r, note="short") if r.id == "door.12" else r for r in marked.rows),
+    )
+    assert rjl._blocks(rjl.sort_chart(short).shown["2"]) == [
+        "has = none + take // spec-only; short"
+    ]
+
+
+def test_the_chart_option_prints_one_view(capsys: pytest.CaptureFixture[str]) -> None:
+    assert rjl.main(["--chart", "effect"]) == 0
+    assert capsys.readouterr().out == "\n".join(rjl.section(EFFECT)) + "\n"
+    assert rjl.main(["--chart", "effect", "--full"]) == 0
+    full = capsys.readouterr().out
+    assert "### Ignored" in full and "### Refusals" not in full
