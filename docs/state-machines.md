@@ -739,14 +739,14 @@ stateDiagram-v2
 | Name | Kind | Prose |
 | --- | --- | --- |
 | lock_held | guard | supervisor.lock is held: another supervisor owns this root (DL-210). |
-| owner_live | guard | The lock is taken, but the published socket answers PING within one of three attempts across a second, or the pid record does not prove its owner absent (DL-210). |
-| free | guard | The lock is taken and no other owner is proven present: private sockets are swept, the published path is reclaimed, and the private socket is bound (DL-210). |
-| credentials | guard | This incarnation, then the current token of an unexpired lease, an integer on the wire (DL-151). ss5 checks nothing else: any connection may present them. The one fence of RENEW, RELEASE, SPAWN, SIGNAL and SHUTDOWN. |
-| foreign | guard | The request names no incarnation, or another one: the supervisor it knew is gone, so it must re-acquire and reconcile (DL-80). |
-| stale | guard | This incarnation without credentials: the token is not the current one, or the lease is not held. The request is refused stale_token (ss5). With `foreign` and `credentials` this partitions every request. |
-| closed | guard | The process is closed. Nothing posts to it then: `_teardown` returns at once and a dropped connection posts nothing. In any other state a fact posted out of order finds no row and raises `UnhandledEvent`. |
-| refuse | action | Exit 1: another supervisor owns this root. Teardown then releases only what this process took. |
-| drain | action | Run the shutdown's wait: up to 5 s for missing spawn records, TERM each live command group, KILL each after its grace, and KILL every survivor once the longest grace plus 2 s has passed. Lifelines stay open until each wrapper exits (DL-48, DL-150). |
+| owner_live | guard | The lock is taken, and the published socket answers PING within one of three attempts across a second or the pid record does not prove its owner absent (DL-210). |
+| free | guard | The lock is taken and no other owner is proven present: private sockets are swept, the published path is reclaimed and the private socket is bound (DL-210). |
+| credentials | guard | This incarnation and the current token of an unexpired lease, an integer on the wire (DL-151). Any connection may present them. The one fence of RENEW, RELEASE, SPAWN, SIGNAL and SHUTDOWN (ss5). |
+| foreign | guard | The request names no incarnation or another one: the supervisor it knew is gone, so it must re-acquire and reconcile (DL-80). |
+| stale | guard | This incarnation without credentials: the token is stale or the lease is not held, so the request is refused stale_token (ss5). With `foreign` and `credentials` this partitions every request. |
+| closed | guard | The process is closed. Nothing posts then, elsewhere an out-of-order fact finds no row and raises `UnhandledEvent`. |
+| refuse | action | Exit 1: another supervisor owns this root, teardown releases only what this process took. |
+| drain | action | Run the shutdown's wait: up to 5 s for missing spawn records, TERM each live command group, KILL each after its grace, and KILL every survivor after the longest grace plus 2 s. Lifelines stay open until each wrapper exits (DL-48, DL-150). |
 
 ## supervisor_lease
 
@@ -810,21 +810,21 @@ stateDiagram-v2
 
 | Name | Kind | Prose |
 | --- | --- | --- |
-| grantable | guard | controller_id is a non-empty string, and ttl_s gives a representable expiry. A zero or negative ttl_s gives one too: the lease it grants is due at once, and the next sample expires it (ss5). |
-| incumbent | guard | Grantable, with this incarnation and the current token: the incumbent re-keys, and its old token dies (DL-79, DL-80). controller_id is a label, not a credential. The token proves incumbency, not authenticity. Authentication is the same-uid peer-cred gate on accept (supervisor-protocol ss5). |
-| challenger | guard | controller_id is a non-empty string and ttl_s is a number, without this incarnation and the current token: a live lease yields only to its incumbent (DL-79). The expiry is not computed. |
-| unnamed | guard | controller_id is not a non-empty string, checked before ttl_s and before any lease state (DL-150). |
-| untimed | guard | controller_id is a non-empty string, and ttl_s gives no representable expiry (not a number, inf, nan, 1e20). Nothing changes, not even the token counter (DL-300). |
+| grantable | guard | controller_id is a non-empty string and ttl_s gives a representable expiry. A zero or negative ttl_s is grantable: the lease is due at once and the next sample expires it (ss5). |
+| incumbent | guard | Grantable, with this incarnation and the current token: the incumbent re-keys and its old token dies (DL-79, DL-80). controller_id is a label and the token proves incumbency, not authenticity, the same-uid peer-cred gate on accept authenticates (supervisor-protocol ss5). |
+| challenger | guard | controller_id is a non-empty string and ttl_s is a number, without the current token: a live lease yields only to its incumbent (DL-79). The expiry is not computed. |
+| unnamed | guard | controller_id is not a non-empty string, checked before ttl_s and any lease state (DL-150). |
+| untimed | guard | controller_id is a non-empty string and ttl_s gives no representable expiry (not a number, inf, nan, 1e20). Nothing changes, not even the token counter (DL-300). |
 | renewable | guard | This incarnation and the current token, and ttl_s gives a representable expiry (DL-150, DL-300). |
-| renewal_untimed | guard | This incarnation and the current token, and ttl_s gives no representable expiry. Nothing changes (DL-300). |
-| foreign | guard | The request names no incarnation, or another one: the supervisor it knew is gone, so it must re-acquire and reconcile (DL-80). |
+| renewal_untimed | guard | This incarnation and the current token, and ttl_s gives no representable expiry, nothing changes (DL-300). |
+| foreign | guard | The request names no incarnation or another one: the supervisor it knew is gone, so it must re-acquire and reconcile (DL-80). |
 | this_incarnation | guard | The request names this incarnation (DL-80). |
-| credentials | guard | This incarnation, then the current token of an unexpired lease, an integer on the wire (DL-151). ss5 checks nothing else: any connection may present them. The one fence of RENEW, RELEASE, SPAWN, SIGNAL and SHUTDOWN. |
+| credentials | guard | This incarnation and the current token of an unexpired lease, an integer on the wire (DL-151). Any connection may present them. The one fence of RENEW, RELEASE, SPAWN, SIGNAL and SHUTDOWN (ss5). |
 | holder | guard | The dropped connection is the one that holds the lease. |
-| grant | action | Mint the next token and write a new record, held on the claimant's connection, with the request's deadline. A re-grant to the same controller_id keeps the dropped-push notice (DL-210). Answer the token, the expiry and the incarnation (DL-80). |
-| extend | action | Move the deadline and expires_at to the request's. The connection is not adopted, so an orphaned lease stays orphaned and its pushes keep dropping until an ACQUIRE. Answer the expiry. |
-| release | action | Drop the record, and answer ok. |
-| forget | action | Forget the holder's connection: pushes drop until the holder re-ACQUIREs, and any controller may ACQUIRE an orphaned lease. That lets a crashed engine's resume re-acquire without waiting out the TTL. It is sound because the kernel closes this AF_UNIX fd only when the holder process is gone, kill -9 included, or when the holder closes it itself. A non-local transport would break that (ss5). |
+| grant | action | Mint the next token and write a new record held on the claimant's connection with the request's deadline. A re-grant to the same controller_id keeps the dropped-push notice (DL-210). Answer the token, expiry and incarnation (DL-80). |
+| extend | action | Move the deadline and expires_at to the request's. The connection is not adopted, so an orphaned lease stays orphaned and its pushes keep dropping until an ACQUIRE. |
+| release | action | Drop the record and answer ok. |
+| forget | action | Forget the holder's connection: pushes drop until the holder re-ACQUIREs, and any controller may ACQUIRE an orphaned lease, so a crashed engine's resume need not wait out the TTL. This is sound because the kernel closes the AF_UNIX fd only when the holder is gone or closes it, a non-local transport would break that (ss5). |
 
 ## supervisor_client
 
@@ -871,9 +871,9 @@ stateDiagram-v2
 
 | Name | Kind | Prose |
 | --- | --- | --- |
-| down | guard | No connection is live: the client is disconnected, before its first connect, or lost. A connected client takes `supervisor_client.02` instead, and a closed one posts nothing. |
+| down | guard | No connection is live: the client is disconnected, before its first connect, or lost. A connected client takes `supervisor_client.02`, and a closed one posts nothing. |
 | open | guard | The client is not closed yet: from disconnected, connected or lost, close cancels the renewal, reader and LIST tasks, then closes the writer. |
-| over | guard | The client is closed. Nothing posts to it then: a second close posts nothing, a connection that completes after the close is closed unposted, and the EOF and the cancel that the close itself causes do their transport work with no post. Before the first connect, an EOF or a cancel finds no row and raises `UnhandledEvent`. |
+| over | guard | The client is closed. Nothing posts to it: a second close posts nothing, a connection that completes after the close is closed unposted, and the EOF and cancel the close itself causes do their transport work with no post. Before the first connect, an EOF or a cancel finds no row and raises `UnhandledEvent`. |
 
 ## host
 
@@ -946,8 +946,8 @@ stateDiagram-v2
 
 | Name | Kind | Prose |
 | --- | --- | --- |
-| not_evicted | guard | The host is not evicted. `evicted` refuses a forced eviction with its own row, so the walk reaches the root only from a routed or a quarantined host (ss8: force skips the proof, not the state). |
-| remembered_passive | guard | Quarantine interrupted `passive`: the row remembers it, and a drained host that answers again stays drained (DL-97). |
+| not_evicted | guard | The host is not evicted (ss8: force skips the proof, not the state). |
+| remembered_passive | guard | Quarantine interrupted `passive`: a drained host that answers again stays drained (DL-97). |
 
 ## admission
 
@@ -1034,7 +1034,7 @@ stateDiagram-v2
 | applied | guard | The outcome's state is `applied`. |
 | retired | guard | The outcome's state is `retired`. |
 | indeterminate | guard | The outcome's state is `indeterminate`. |
-| over | guard | The effect rests in a final state. Nothing posts to it then: the outbox forgets the instance in the call that made it final, and refuses a second outcome before any post (DL-295). In `pending` an outcome that no row's guard takes raises `UnhandledEvent`. |
+| over | guard | The effect rests in a final state. The outbox forgets the instance in the call that made it final and refuses a second outcome before any post (DL-295). In `pending` an outcome that no row's guard takes raises `UnhandledEvent`. |
 
 ## subscription
 
@@ -1148,7 +1148,7 @@ stateDiagram-v2
 | Name | Kind | Prose |
 | --- | --- | --- |
 | past_ponr | guard | The exception is `BoundaryFailStop`: the `seal` append may have begun, so the outcome is unknown and recovery decides (PR-28d). The engine exits 4. Checked first. |
-| fence_lost | guard | Not `BoundaryFailStop`, and the fence is lost: a leader that cannot prove it leads does not reopen admission (DL-101, PR-28b). Checked before DL-274's flags. |
+| fence_lost | guard | Not `BoundaryFailStop`, and the fence is lost: a leader that cannot prove it leads does not reopen admission (DL-101, PR-28b). It takes precedence over DL-274's flags. |
 | in_doubt | guard | Not `BoundaryFailStop`, the fence intact, and memory or the WAL in doubt: an attempt admitted during the seal is not fully applied, an engine-made input the drain could not admit would be lost, or a WAL append is unfinished (DL-274). |
 | reversible | guard | Not `BoundaryFailStop`, the fence intact, and nothing in doubt: every other exception before the `seal` append. A refusal before the freeze, a phase-2 refusal, the drain's timeout, a late input (`seal_input_after_cutoff`) and a failed sidecar write are among them (PR-28b). |
 | over | guard | The boundary rests in a final state. Nothing posts to it then: an aborted boundary is forgotten at once, a sealed one once the answer has had its turns, and a stop ends the engine. In flight, an event out of order finds no row and raises `UnhandledEvent`. |
