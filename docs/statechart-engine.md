@@ -632,10 +632,11 @@ order on the resuming engine's executor. A statechart error at an attempt, a dec
 readiness lookup stops the engine as one from the loop does, and in replay names the WAL record.
 
 `runtime_assembly` (DL-335) is the state owner's own life. Its one instance lives on the store's
-executor from construction, and the configuration is the assembly phase. An install and a test's
-witness rebuild the executor from the phase and the rows; a fork copies it (DL-339). A verb the
-phase does not allow is a refusal row with a code, read before any work of the verb; the verb raises
-the class and text it raised before its conversion, an `OracleError` or a `ValueError` (DL-335). A
+executor from construction, and the configuration carries the phase's leaf and the group above
+it. An install and a test's witness rebuild the executor from the phase and the rows; a fork
+copies it (DL-339). A verb the phase does not allow is a refusal row with a code, read before any
+work of the verb; the verb raises the class and text it raised before its conversion, an
+`OracleError` or a `ValueError` (DL-335). A
 cell with no row is a statechart error that stops the tier at the verb that meets it; the
 constructor meets the genesis cells.
 

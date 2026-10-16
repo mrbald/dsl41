@@ -4,10 +4,11 @@ The chart is well formed and draws no warning. The generated completeness
 test runs a witness for each of the eight phases, built through the store's
 own verbs, and posts each of the five verbs, against a table written from the
 constructor's order (period-model §7) and DL-132, not from the rows. The state
-owner holds the instance from construction: the configuration is the phase,
-a fork copies it (DL-339) and a rebuild restores it, and a refusal raises the class and text the
-verb always raised. A gap in the chart is a `StatechartError`, met by the
-constructor.
+owner holds the instance from construction: the configuration is the phase
+with its group, a fork copies it (DL-339) and a rebuild restores it, and a refusal raises the
+class and text the verb always raised. A gap in the chart is a `StatechartError`, met by the
+constructor. A rule is one row on the group whose phases all take it (DL-373): every cell
+answers as the flat chart of DL-335 did, and a row deleted leaves a gap.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from dsl41.machines import MACHINES
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import (
     ASSEMBLY_KEY,
+    ASSEMBLY_PHASES,
     RUNTIME_ASSEMBLY,
     AssemblyPhase,
     CarriedRows,
@@ -31,9 +33,11 @@ from dsl41.oracle_state import (
     OracleError,
     RuntimeState,
 )
+from dsl41.state_machine import Event as ChartEvent
 from dsl41.state_machine import (
     Executor,
     Row,
+    State,
     StatechartError,
     UnhandledEvent,
     alphabet,
@@ -67,17 +71,54 @@ def test_the_chart_is_well_formed_and_draws_no_warning() -> None:
         "seed_on_used_state",
     }
     assert [row.id for row in CHART.rows if row.kind != "refusal"] == [
-        f"runtime_assembly.{n:02d}" for n in range(1, 16)
+        f"runtime_assembly.{n:02d}" for n in (1, 3, 4, 5, 7, 12, 13, 41, 42)
     ]
-    assert len(CHART.rows) == 40  # every phase by verb has its own row
+    assert len(CHART.rows) == 25
+    assert {row.id for row in CHART.rows if row.source in GROUPS} == GROUP_ROWS
+    assert {row.id for row in CHART.rows} & RETIRED == set()  # a retired id stays out (DL-364)
     assert [row for row in CHART.rows if row.mark] == []
 
 
-def test_the_phases_are_the_chart_s_leaves() -> None:
-    leaves = {state.name for region in CHART.root.regions for state in region.states}
-    assert leaves == set(PHASES)
+#: the group above each phase (DL-373)
+GROUP: dict[str, str] = {
+    "fresh": "unbuilt",
+    "installed": "unbuilt",
+    "genesis": "unbuilt",
+    "genesis_input": "open",
+    "input": "open",
+    "constructed": "built",
+    "seeded": "built",
+    "live": "built",
+}
+GROUPS = frozenset(GROUP.values())
+#: the rows whose source is a group: a rule every member takes, with no inner row for the verb
+GROUP_ROWS = {f"runtime_assembly.{n:02d}" for n in (4, 41, 42, 43, 44, 45, 46, 47, 48)}
+#: the ids the group rows retired
+RETIRED = {
+    f"runtime_assembly.{n:02d}"
+    for n in (2, 6, 8, 9, 10, 11, 14, 15, 17, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30)
+    + (36, 39)
+}
+
+
+def _parents(state: State) -> dict[str, str]:
+    """Each state below `state` to its parent."""
+    found: dict[str, str] = {}
+    for region in state.regions:
+        for child in region.states:
+            found[child.name] = state.name
+            found |= _parents(child)
+    return found
+
+
+def test_the_phases_are_the_chart_s_leaves_and_each_sits_in_one_group() -> None:
+    parents = _parents(CHART.root)
+    leaves = {name for name in parents if name not in parents.values()}
+    assert leaves == set(PHASES) == ASSEMBLY_PHASES
+    assert {name: parent for name, parent in parents.items() if name in leaves} == GROUP
+    assert {parents[group] for group in GROUPS} == {"runtime_assembly"}
     store = RuntimeState()
-    assert store.machines.active(ASSEMBLY_KEY) == {"runtime_assembly", "fresh"}
+    assert store.machines.active(ASSEMBLY_KEY) == {"runtime_assembly", "unbuilt", "fresh"}
     assert store._phase == "fresh"
     with pytest.raises(AttributeError):
         store._phase = "live"  # type: ignore[misc]
@@ -134,16 +175,16 @@ type Cell = tuple[str, str] | str
 CELLS: dict[str, dict[str, Cell]] = {
     "fresh": {
         "install": ("01", "installed"),
-        "begin_input": ("02", "genesis_input"),
+        "begin_input": ("41", "genesis_input"),
         "commit_input": "no_input_open",
         "finish_genesis": ("04", "constructed"),
         "seed_period": ("05", "seeded"),
     },
     "installed": {
         "install": "install_on_used_state",
-        "begin_input": ("08", "genesis_input"),
+        "begin_input": ("41", "genesis_input"),
         "commit_input": "no_input_open",
-        "finish_genesis": ("10", "constructed"),
+        "finish_genesis": ("04", "constructed"),
         "seed_period": ("12", "seeded"),
     },
     "genesis_input": {
@@ -155,21 +196,21 @@ CELLS: dict[str, dict[str, Cell]] = {
     },
     "genesis": {
         "install": "install_on_used_state",
-        "begin_input": ("09", "genesis_input"),
+        "begin_input": ("41", "genesis_input"),
         "commit_input": "no_input_open",
-        "finish_genesis": ("11", "constructed"),
+        "finish_genesis": ("04", "constructed"),
         "seed_period": "seed_on_used_state",
     },
     "constructed": {
         "install": "install_on_used_state",
-        "begin_input": ("06", "input"),
+        "begin_input": ("42", "input"),
         "commit_input": "no_input_open",
         "finish_genesis": "construction_finished",
         "seed_period": ("13", "seeded"),
     },
     "seeded": {
         "install": "install_on_used_state",
-        "begin_input": ("14", "input"),
+        "begin_input": ("42", "input"),
         "commit_input": "no_input_open",
         "finish_genesis": "construction_after_seed",
         "seed_period": "seed_on_used_state",
@@ -183,7 +224,7 @@ CELLS: dict[str, dict[str, Cell]] = {
     },
     "live": {
         "install": "install_on_used_state",
-        "begin_input": ("15", "input"),
+        "begin_input": ("42", "input"),
         "commit_input": "no_input_open",
         "finish_genesis": "construction_finished",
         "seed_period": "seed_on_used_state",
@@ -205,6 +246,126 @@ def test_the_completeness_table_is_the_constructor_s_order() -> None:
     assert len(table) == 40
 
 
+#: Each cell as the flat chart of DL-335 answered it, one fired row per cell (kind `fired`):
+#: that row's id and the phase reached or the refusal code. Generated once from that declaration's executor; the
+#: grouping (DL-373) must answer every cell the same, under `MERGED`.
+FLAT: dict[tuple[str, str], tuple[str, str]] = {
+    ("fresh", "install"): ("01", "installed"),
+    ("fresh", "begin_input"): ("02", "genesis_input"),
+    ("fresh", "commit_input"): ("23", "refused no_input_open"),
+    ("fresh", "finish_genesis"): ("04", "constructed"),
+    ("fresh", "seed_period"): ("05", "seeded"),
+    ("installed", "install"): ("16", "refused install_on_used_state"),
+    ("installed", "begin_input"): ("08", "genesis_input"),
+    ("installed", "commit_input"): ("24", "refused no_input_open"),
+    ("installed", "finish_genesis"): ("10", "constructed"),
+    ("installed", "seed_period"): ("12", "seeded"),
+    ("genesis_input", "install"): ("17", "refused install_on_used_state"),
+    ("genesis_input", "begin_input"): ("29", "refused input_already_open"),
+    ("genesis_input", "commit_input"): ("03", "genesis"),
+    ("genesis_input", "finish_genesis"): ("33", "refused inside_genesis_input"),
+    ("genesis_input", "seed_period"): ("36", "refused seed_inside_input"),
+    ("genesis", "install"): ("18", "refused install_on_used_state"),
+    ("genesis", "begin_input"): ("09", "genesis_input"),
+    ("genesis", "commit_input"): ("25", "refused no_input_open"),
+    ("genesis", "finish_genesis"): ("11", "constructed"),
+    ("genesis", "seed_period"): ("37", "refused seed_on_used_state"),
+    ("constructed", "install"): ("19", "refused install_on_used_state"),
+    ("constructed", "begin_input"): ("06", "input"),
+    ("constructed", "commit_input"): ("26", "refused no_input_open"),
+    ("constructed", "finish_genesis"): ("31", "refused construction_finished"),
+    ("constructed", "seed_period"): ("13", "seeded"),
+    ("seeded", "install"): ("20", "refused install_on_used_state"),
+    ("seeded", "begin_input"): ("14", "input"),
+    ("seeded", "commit_input"): ("27", "refused no_input_open"),
+    ("seeded", "finish_genesis"): ("32", "refused construction_after_seed"),
+    ("seeded", "seed_period"): ("38", "refused seed_on_used_state"),
+    ("input", "install"): ("21", "refused install_on_used_state"),
+    ("input", "begin_input"): ("30", "refused input_already_open"),
+    ("input", "commit_input"): ("07", "live"),
+    ("input", "finish_genesis"): ("34", "refused construction_finished"),
+    ("input", "seed_period"): ("39", "refused seed_inside_input"),
+    ("live", "install"): ("22", "refused install_on_used_state"),
+    ("live", "begin_input"): ("15", "input"),
+    ("live", "commit_input"): ("28", "refused no_input_open"),
+    ("live", "finish_genesis"): ("35", "refused construction_finished"),
+    ("live", "seed_period"): ("40", "refused seed_on_used_state"),
+}
+#: Each group row and the flat rows whose cells it takes; every other flat row kept its id.
+MERGED: dict[str, tuple[str, ...]] = {
+    "04": ("04", "10", "11"),
+    "41": ("02", "08", "09"),
+    "42": ("06", "14", "15"),
+    "43": ("17", "21"),
+    "44": ("19", "20", "22"),
+    "45": ("23", "24", "25"),
+    "46": ("26", "27", "28"),
+    "47": ("29", "30"),
+    "48": ("36", "39"),
+}
+
+
+def _restored(phase: str, chart: Any = CHART) -> Executor:
+    executor = Executor()
+    executor.restore(ASSEMBLY_KEY, chart, {"runtime_assembly", GROUP[phase], phase})
+    return executor
+
+
+def test_every_cell_answers_as_the_flat_chart_did() -> None:
+    """40 of 40 cells: the same outcome and the same phase, the configuration is the phase
+    with its group, and the row is the flat one's or the group row that took its cell."""
+    renamed = {old: new for new, olds in MERGED.items() for old in olds}
+    assert set(renamed.values()) == {row.removeprefix("runtime_assembly.") for row in GROUP_ROWS}
+    assert {f"runtime_assembly.{old}" for old in renamed} - {"runtime_assembly.04"} == RETIRED
+    for (phase, verb), (flat_row, answer) in FLAT.items():
+        executor = _restored(phase)
+        (outcome,) = executor.dispatch(ASSEMBLY_KEY, ChartEvent(verb))
+        assert outcome.kind == "fired"  # every flat cell fired its one row
+        assert outcome.rows == (f"runtime_assembly.{renamed.get(flat_row, flat_row)}",)
+        reached = phase if outcome.refusals else answer
+        assert outcome.refusals == ((answer.removeprefix("refused "),) if outcome.refusals else ())
+        assert answer.startswith("refused ") is bool(outcome.refusals), (phase, verb)
+        assert executor.active(ASSEMBLY_KEY) == {"runtime_assembly", GROUP[reached], reached}
+    assert len(FLAT) == 40
+
+
+@pytest.mark.parametrize("row", sorted(GROUP_ROWS))
+def test_a_group_row_deleted_leaves_a_gap_at_every_member(
+    monkeypatch: pytest.MonkeyPatch, row: str
+) -> None:
+    """No group row has an inner row beside it for its verb, so a chart copy without it
+    raises the executor's own error at each phase it covers, through the store's verb,
+    and never falls into another rule's refusal (DL-335)."""
+    (rule,) = (r for r in CHART.rows if r.id == row)
+    members = [phase for phase in PHASES if GROUP[phase] == rule.source]
+    assert len(members) >= 2
+    gapped = replace(CHART, rows=tuple(r for r in CHART.rows if r.id != row))
+    for phase in members:
+        store = _built(phase)
+        monkeypatch.setattr("dsl41.oracle_state.RUNTIME_ASSEMBLY", gapped)
+        store.machines = store.rebuild_machines()
+        with pytest.raises(UnhandledEvent, match=f"no row and no deferral for {rule.event}"):
+            _verb(store, rule.event)
+        assert store._phase == phase
+        monkeypatch.undo()
+
+
+def test_no_row_deleted_falls_into_another_row() -> None:
+    """Every row of the chart: without it, each cell it took is a gap and every other cell
+    answers as before."""
+    for row in CHART.rows:
+        gapped = replace(CHART, rows=tuple(r for r in CHART.rows if r.id != row.id))
+        for phase in PHASES:
+            for verb in VERBS:
+                (outcome,) = _restored(phase).dispatch(ASSEMBLY_KEY, ChartEvent(verb))
+                if outcome.rows != (row.id,):
+                    (other,) = _restored(phase, gapped).dispatch(ASSEMBLY_KEY, ChartEvent(verb))
+                    assert other.rows == outcome.rows
+                    continue
+                with pytest.raises(UnhandledEvent):
+                    _restored(phase, gapped).dispatch(ASSEMBLY_KEY, ChartEvent(verb))
+
+
 @pytest.mark.parametrize("phase", PHASES)
 def test_a_verb_moves_the_phase_as_the_table_says_or_refuses_it(phase: str) -> None:
     """The store's own verbs on each witness: a fired cell reaches the phase
@@ -217,7 +378,11 @@ def test_a_verb_moves_the_phase_as_the_table_says_or_refuses_it(phase: str) -> N
         if isinstance(cell, tuple):
             _verb(store, verb)
             assert store._phase == cell[1], (phase, verb)
-            assert store.machines.active(ASSEMBLY_KEY) == {"runtime_assembly", cell[1]}
+            assert store.machines.active(ASSEMBLY_KEY) == {
+                "runtime_assembly",
+                GROUP[cell[1]],
+                cell[1],
+            }
             continue
         with pytest.raises(ValueError) as raised:
             _verb(store, verb)
@@ -282,17 +447,14 @@ def test_a_period_below_one_is_the_verb_s_own_check_after_the_chart() -> None:
 # ---- the store's executor (statechart-engine §11)
 
 
-@pytest.mark.parametrize(
-    ("row", "carried"),
-    [("runtime_assembly.02", None), ("runtime_assembly.08", CarriedRows(period_id=2))],
-)
+@pytest.mark.parametrize("carried", [None, CarriedRows(period_id=2)])
 def test_a_gap_in_the_chart_is_a_statechart_error_through_the_constructor(
-    monkeypatch: pytest.MonkeyPatch, row: str, carried: CarriedRows | None
+    monkeypatch: pytest.MonkeyPatch, carried: CarriedRows | None
 ) -> None:
     """A chart copy without the row that opens the genesis seed (from `fresh`,
     or from `installed` when rows are carried): the constructor raises the
     executor's own error, not an `OracleError`."""
-    rows = tuple(r for r in CHART.rows if r.id != row)
+    rows = tuple(r for r in CHART.rows if r.id != "runtime_assembly.41")
     monkeypatch.setattr("dsl41.oracle_state.RUNTIME_ASSEMBLY", replace(CHART, rows=rows))
     with pytest.raises(UnhandledEvent, match="no row and no deferral for begin_input"):
         Oracle(lower_source(_JIL), carried=carried)
@@ -314,19 +476,19 @@ def test_a_refusal_code_the_state_owner_has_no_sentence_for_raises(
     """The tier names every code; a chart refusal with another code is a
     disagreement between the two, never a refusal under a borrowed text."""
     refusal = Row(
-        "runtime_assembly.23",
-        "fresh",
+        "runtime_assembly.45",
+        "unbuilt",
         "commit_input",
         kind="refusal",
         code="input_not_open",
     )
-    rows = tuple(refusal if row.id == "runtime_assembly.23" else row for row in CHART.rows)
+    rows = tuple(refusal if row.id == "runtime_assembly.45" else row for row in CHART.rows)
     monkeypatch.setattr("dsl41.oracle_state.RUNTIME_ASSEMBLY", replace(CHART, rows=rows))
     store = RuntimeState()
     with pytest.raises(StatechartError, match="the refusal code 'input_not_open' has no") as raised:
         store.commit_input()
     assert ("machine", "runtime_assembly") in raised.value.facts
-    assert ("active", "fresh, runtime_assembly") in raised.value.facts
+    assert ("active", "fresh, runtime_assembly, unbuilt") in raised.value.facts
     assert store._phase == "fresh"
 
 
@@ -358,7 +520,7 @@ def test_an_install_rebuilds_the_executor_from_the_phase_and_the_carried_rows() 
     store.install(CarriedRows(hosts={"h": HostRuntime(state="passive")}, period_id=2))
     assert store.machines is not machines
     assert store._phase == "installed"
-    assert store.machines.active(ASSEMBLY_KEY) == {"runtime_assembly", "installed"}
+    assert store.machines.active(ASSEMBLY_KEY) == {"runtime_assembly", "unbuilt", "installed"}
     assert store.machines.active(store.host_key("h")) == {"host", "routed", "passive"}
 
 
@@ -371,6 +533,19 @@ def test_a_witness_rebuild_keeps_the_phase(phase: str) -> None:
     assert store.machines is not machines
     assert store._phase == phase
     assert store.machines.active(store.host_key("h")) == {"host", "quarantined"}
+    assert store.machines.active(ASSEMBLY_KEY) == {"runtime_assembly", GROUP[phase], phase}
+
+
+@pytest.mark.parametrize("phase", PHASES)
+def test_a_fork_and_a_rebuild_carry_the_phase_with_its_group(phase: str) -> None:
+    """The configuration carries the group; a fork, a rebuild and one without the job
+    instances restore the same configuration, and the phase is its leaf."""
+    store = _built(phase)
+    configuration = store.machines.active(ASSEMBLY_KEY)
+    assert configuration == {"runtime_assembly", GROUP[phase], phase}
+    assert store.fork().machines.active(ASSEMBLY_KEY) == configuration
+    assert store.rebuild_machines().active(ASSEMBLY_KEY) == configuration
+    assert store.rebuild_machines(jobs=False).active(ASSEMBLY_KEY) == configuration
 
 
 # ---- the alphabet: every verb the state owner dispatches is in the chart

@@ -24199,3 +24199,78 @@ relitigate an entry; append a new one.
   (the shape at 200 and 800 jobs re-measured, a 200-run differential with 0 differing) and found
   nothing new in the choice under R4 or the cached index; Codex at high found nothing on the
   choice, the cached index, the idle check and the restart and upgrade sequences.
+- DL-373 A rule of `runtime_assembly` is written once at the source the hierarchy gives it: the
+  phases group as `unbuilt`, `open` and `built`, a rule every member of a group takes is one row
+  on the group, and `_OPEN` becomes the state `open`; 40 rows become 25
+  (2026-10-17; src/dsl41/oracle_state.py; tests/test_assembly_chart.py,
+  tests/test_job_machines.py; docs/statechart-engine.md §16; docs/blocks/job-lifecycle.md;
+  docs/state-machines.md (generated))
+  THE AIM. Step 5 of the chart simplification on the eleven other charts (charts ruling, slice
+  S2; explorer 2 F1). The flat chart of DL-335 copied four moves across leaves (.08 to .15, "As
+  runtime_assembly.02") and repeated five refusal codes leaf by leaf. The tier held one group of
+  states as data: `_OPEN`, read by `_touch` to decide whether to snapshot. No outcome of the
+  oracle changes: no golden, no trace line, no refusal class or text.
+  THE RULE. A rule every member of a group takes is one row on the group, and only where no
+  member has its own row for the verb (§3: the inner row wins). A group row with an inner row
+  beside it would catch that inner row's deletion as the wrong answer instead of a gap; DL-335
+  dropped the root default refusal for that reason, and the rule keeps its reason. So a
+  deleted row is always an unhandled event.
+  THE CHART. The region `phase` holds three composite states, each with one region:
+  `unbuilt` {fresh, installed, genesis} in `construction`, where construction can still happen
+  and no input is open; `open` {genesis_input, input} in `inputs`, an input open; `built`
+  {constructed, seeded, live} in `service`, where construction can no longer happen, ended by
+  finish_genesis or overtaken by the seed (.05 and .12 reach seeded with no finish), and no
+  input is open. The leaves are the phases (`AssemblyPhase`, `ASSEMBLY_PHASES`);
+  `_phase` reads `active & ASSEMBLY_PHASES`, since the configuration now carries the group.
+  `_touch` snapshots while `open` is active; `_OPEN` is gone. Region names are stored
+  nowhere: the engine names them only in error texts and the generated tables.
+  THE ROWS. Nine rows have a group source. .04 (`unbuilt`, finish_genesis to constructed) keeps
+  its id: the frozen text of `inside_genesis_input` names it ("genesis_input is not a source of
+  runtime_assembly.04"), and that sentence stays true, since genesis_input is not in `unbuilt`.
+  It takes the cells of .10 and .11. The new rows, in the flat order of their events: .41
+  (`unbuilt`, begin_input to genesis_input; .02, .08, .09), .42 (`built`, begin_input to input;
+  .06, .14, .15), .43 (`open`, install refused, install_on_used_state; .17, .21), .44 (`built`,
+  the same; .19, .20, .22), .45 (`unbuilt`, commit_input refused, no_input_open; .23 to .25),
+  .46 (`built`, the same; .26 to .28), .47 (`open`, begin_input refused, input_already_open;
+  .29, .30), .48 (`open`, seed_period refused, seed_inside_input; .36, .39). .07 is unchanged:
+  its target differs from .03's, and the text of `no_input_open` names it. Twenty-three ids
+  retire and stay out of use (DL-364). Kept per leaf: install at fresh, installed and genesis
+  (.01, .16, .18), since fresh moves; finish_genesis on `open` and `built` (.31 to .35), since
+  genesis_input and seeded have their own codes; the seed moves from fresh, installed and
+  constructed (.05, .12, .13), which are no one subtree; and the seed_on_used_state refusals
+  (.37, .38, .40), since a row on `built` would catch a deleted .13 as the wrong refusal.
+  Moves go from 15 rows to 9 and refusals from 25 to 16.
+  CHECKS. `well_formed` and `chart_warnings` pass. A pinned table of the flat chart's 40 cells,
+  generated once from DL-335's declaration on its executor, is checked cell by cell: 40 of 40
+  fire (kind `fired`, as all 40 did), with the same refusal code or the same phase reached, and
+  the row is the flat one or the group row that took its cell (`MERGED`); the configuration
+  after is the phase with its group. Each of the nine group rows, deleted from a chart copy, raises
+  `UnhandledEvent` through the store's verb at every member, with the phase unmoved; every one
+  of the 25 rows, deleted, leaves each cell it took a gap and every other cell's row unchanged.
+  A fork, `rebuild_machines()` and `rebuild_machines(jobs=False)` restore the same
+  configuration in all eight phases. The completeness test and the store's verbs in each phase
+  keep their expected classes and texts, with the new ids. The constructor's gap tests delete
+  .41. The resolve agreement still compares 40 cells. The transition gate holds 25 of 25
+  required items of `runtime_assembly`, 40 before; every other chart's count is unchanged. The
+  golden replay: 4,060 runs, 152,213 entries, 0 differing.
+  THE CONTRACTS. statechart-engine §16 and the job-lifecycle card said the configuration is the
+  assembly phase; each now says it carries the phase's leaf and the group above it. The leaf
+  determines the group, so nothing they rule changes. §3 and §10 are applied, not changed.
+  concurrency-model §4 is unchanged: every refusal keeps its class and text.
+  THE VERSION. STATE_MACHINE_VERSION stays 24 (DL-235): no accepted input derives differently.
+  The phase is not stored: a fork and a rebuild copy the live configuration, which carries the
+  group, and nothing persisted, sent or restored from a stored value names a retired id or a
+  group (DL-335's "no persisted shape moves").
+  REVIEW. Semantic class (rows change in a §16 machine): one Opus reviewer and one Codex Astra
+  pass, after a Codex probe of the construction before the brief (the group rows only where no
+  member has its own row; the seed refusals kept per leaf; .04 keeps its id). Codex found
+  nothing on five probes: the cells against DL-335's declaration, the deletion hazard, every
+  reader of the configuration with the fork and both rebuilds, the tests' tables and the
+  retired ids, the refusal texts. Opus found no blocker or major and four small items: O1
+  (`built` described as "construction finished", wrong for a seed from fresh: reworded), O2 (the
+  cell test claimed the outcome kind without asserting it: the assert added), O3 (§16 and the
+  job-lifecycle card said the configuration is the phase: both say it carries the leaf and its
+  group), O4 (`_touch` reads the executor directly: kept). Opus confirmed O1 to O3 and the
+  region names, re-ran its own equivalence (40 of 40, 0 hazards), and left two nits fixed at
+  landing: a line of §16 reflowed, and the `open` group's region named `inputs` so no error
+  text names a region and a leaf by one word.

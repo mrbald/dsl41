@@ -387,26 +387,12 @@ def test_a_composite_with_one_region_stays_in_its_parent_block() -> None:
 
 
 def test_grouping_states_never_split_the_ways_into_a_target() -> None:
-    """runtime_assembly with its phases grouped by single-region composites renders as one
-    block with the same lines as the flat chart."""
+    """runtime_assembly's phases are grouped by single-region composites (DL-373): the view is
+    one block, the groups are listed after the initial line, and each target heads one entry,
+    so a group never splits the ways into a target across blocks."""
     assembly = next(chart for chart in MACHINES if chart.name == "runtime_assembly")
-    phase = assembly.root.regions[0]
-    by = {state.name: state for state in phase.states}
-    groups = {
-        "unbuilt": ("fresh", "installed", "genesis"),
-        "open": ("genesis_input", "input"),
-        "built": ("constructed", "seeded", "live"),
-    }
-    grouped = tuple(
-        State(name, regions=(Region(name, members[0], tuple(by[m] for m in members)),))
-        for name, members in groups.items()
-    )
-    root = replace(assembly.root, regions=(Region(phase.name, "unbuilt", grouped),))
-    lines = rjl.section(replace(assembly, root=root))
+    lines = rjl.section(assembly)
     assert [line for line in lines if line.startswith("#")] == ["## runtime_assembly", "### phase"]
-    flat = rjl.section(assembly)
-    ways = sorted(line for line in flat if " + " in line)
-    assert sorted(line for line in lines if " + " in line) == ways
     assert lines[lines.index("### phase") + 2 :][:5] == [
         "```text",
         "fresh <- initial",
@@ -414,6 +400,11 @@ def test_grouping_states_never_split_the_ways_into_a_target() -> None:
         "open = {genesis_input, input}",
         "built = {constructed, seeded, live}",
     ]
+    heads = [
+        line.partition(" = ")[0] for line in lines if " + " in line and not line.startswith(" ")
+    ]
+    assert len(heads) == len(set(heads))
+    assert "constructed = unbuilt + finish_genesis" in lines
 
 
 def test_supervisor_lease_names_its_groups_members() -> None:

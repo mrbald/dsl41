@@ -550,89 +550,83 @@ Clock: logical.
 
 ```mermaid
 stateDiagram-v2
-    state "runtime_assembly" as s7
-    state s7 {
-        [*] --> s1
-        state "fresh" as s1
-        state "installed" as s5
-        state "genesis_input" as s3
-        state "genesis" as s2
-        state "constructed" as s0
-        state "seeded" as s8
-        state "input" as s4
-        state "live" as s6
+    state "runtime_assembly" as s9
+    state s9 {
+        [*] --> s11
+        state "unbuilt" as s11
+        state s11 {
+            [*] --> s2
+            state "fresh" as s2
+            state "installed" as s6
+            state "genesis" as s3
+        }
+        state "open" as s8
+        state s8 {
+            [*] --> s4
+            state "genesis_input" as s4
+            state "input" as s5
+        }
+        state "built" as s0
+        state s0 {
+            [*] --> s1
+            state "constructed" as s1
+            state "seeded" as s10
+            state "live" as s7
+        }
     }
-    s1 --> s5 : runtime_assembly.01 install
-    s1 --> s3 : runtime_assembly.02 begin_input
-    s3 --> s2 : runtime_assembly.03 commit_input
-    s1 --> s0 : runtime_assembly.04 finish_genesis
-    s1 --> s8 : runtime_assembly.05 seed_period
-    s0 --> s4 : runtime_assembly.06 begin_input
-    s4 --> s6 : runtime_assembly.07 commit_input
-    s5 --> s3 : runtime_assembly.08 begin_input
-    s2 --> s3 : runtime_assembly.09 begin_input
-    s5 --> s0 : runtime_assembly.10 finish_genesis
-    s2 --> s0 : runtime_assembly.11 finish_genesis
-    s5 --> s8 : runtime_assembly.12 seed_period
-    s0 --> s8 : runtime_assembly.13 seed_period
-    s8 --> s4 : runtime_assembly.14 begin_input
-    s6 --> s4 : runtime_assembly.15 begin_input
+    s2 --> s6 : runtime_assembly.01 install
+    s4 --> s3 : runtime_assembly.03 commit_input
+    s11 --> s1 : runtime_assembly.04 finish_genesis
+    s2 --> s10 : runtime_assembly.05 seed_period
+    s5 --> s7 : runtime_assembly.07 commit_input
+    s6 --> s10 : runtime_assembly.12 seed_period
+    s1 --> s10 : runtime_assembly.13 seed_period
+    s11 --> s4 : runtime_assembly.41 begin_input
+    s0 --> s5 : runtime_assembly.42 begin_input
 ```
 
 | Id | Source | Event | Guard | Action | Target | Kind | Cite |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | runtime_assembly.01 | fresh | install |  | Nothing is installed, committed or seeded. Carried rows land verbatim, revisions included. | installed | external | period-model ss7 |
-| runtime_assembly.02 | fresh | begin_input |  | Construction is not finished. Open the genesis seed's input. | genesis_input | external | DL-87 |
 | runtime_assembly.03 | genesis_input | commit_input |  | One revision per changed entity. | genesis | external | DL-87 |
-| runtime_assembly.04 | fresh | finish_genesis |  | Construction ends. The genesis seed is not an input to the seed latch. | constructed | external | DL-132 |
+| runtime_assembly.04 | unbuilt | finish_genesis |  | Construction ends. The genesis seed is not an input to the seed latch. | constructed | external | DL-132 |
 | runtime_assembly.05 | fresh | seed_period |  | Set the period id. A period below one is the verb's own check. | seeded | external | period-model ss3.5, DL-132 |
-| runtime_assembly.06 | constructed | begin_input |  | Snapshot on first touch. | input | external | DL-87, concurrency-model ss3 |
 | runtime_assembly.07 | input | commit_input |  | Check capacity. One revision per changed entity. | live | external | DL-87, DL-120 |
-| runtime_assembly.08 | installed | begin_input |  | As runtime_assembly.02. | genesis_input | external | DL-87 |
-| runtime_assembly.09 | genesis | begin_input |  | As runtime_assembly.02. | genesis_input | external | DL-87 |
-| runtime_assembly.10 | installed | finish_genesis |  | As runtime_assembly.04. | constructed | external | DL-132 |
-| runtime_assembly.11 | genesis | finish_genesis |  | As runtime_assembly.04. | constructed | external | DL-132 |
 | runtime_assembly.12 | installed | seed_period |  | As runtime_assembly.05. | seeded | external | period-model ss3.5, DL-132 |
 | runtime_assembly.13 | constructed | seed_period |  | As runtime_assembly.05. | seeded | external | period-model ss3.5, DL-132 |
-| runtime_assembly.14 | seeded | begin_input |  | As runtime_assembly.06. | input | external | DL-87, concurrency-model ss3 |
-| runtime_assembly.15 | live | begin_input |  | As runtime_assembly.06. | input | external | DL-87, concurrency-model ss3 |
+| runtime_assembly.41 | unbuilt | begin_input |  | Construction is not finished. Open the genesis seed's input. | genesis_input | external | DL-87 |
+| runtime_assembly.42 | built | begin_input |  | Snapshot on first touch. | input | external | DL-87, concurrency-model ss3 |
 | runtime_assembly.16 | installed | install |  | Carried rows are assembly's first act: only a fresh state installs them. |  | refusal install_on_used_state | period-model ss7 |
-| runtime_assembly.17 | genesis_input | install |  | Carried rows are assembly's first act: only a fresh state installs them. |  | refusal install_on_used_state | period-model ss7 |
 | runtime_assembly.18 | genesis | install |  | Carried rows are assembly's first act: only a fresh state installs them. |  | refusal install_on_used_state | period-model ss7 |
-| runtime_assembly.19 | constructed | install |  | Carried rows are assembly's first act: only a fresh state installs them. |  | refusal install_on_used_state | period-model ss7 |
-| runtime_assembly.20 | seeded | install |  | Carried rows are assembly's first act: only a fresh state installs them. |  | refusal install_on_used_state | period-model ss7 |
-| runtime_assembly.21 | input | install |  | Carried rows are assembly's first act: only a fresh state installs them. |  | refusal install_on_used_state | period-model ss7 |
-| runtime_assembly.22 | live | install |  | Carried rows are assembly's first act: only a fresh state installs them. |  | refusal install_on_used_state | period-model ss7 |
-| runtime_assembly.23 | fresh | commit_input |  | A commit needs an input open. |  | refusal no_input_open | DL-87, DL-293 |
-| runtime_assembly.24 | installed | commit_input |  | A commit needs an input open. |  | refusal no_input_open | DL-87, DL-293 |
-| runtime_assembly.25 | genesis | commit_input |  | A commit needs an input open. |  | refusal no_input_open | DL-87, DL-293 |
-| runtime_assembly.26 | constructed | commit_input |  | A commit needs an input open. |  | refusal no_input_open | DL-87, DL-293 |
-| runtime_assembly.27 | seeded | commit_input |  | A commit needs an input open. |  | refusal no_input_open | DL-87, DL-293 |
-| runtime_assembly.28 | live | commit_input |  | A commit needs an input open. |  | refusal no_input_open | DL-87, DL-293 |
-| runtime_assembly.29 | genesis_input | begin_input |  | Inputs do not nest. |  | refusal input_already_open | DL-87 |
-| runtime_assembly.30 | input | begin_input |  | Inputs do not nest. |  | refusal input_already_open | DL-87 |
 | runtime_assembly.31 | constructed | finish_genesis |  | Construction ends once: a second call would launder a used state back to fresh. |  | refusal construction_finished | DL-132 |
 | runtime_assembly.32 | seeded | finish_genesis |  | Construction comes before the seed. |  | refusal construction_after_seed | DL-132 |
 | runtime_assembly.33 | genesis_input | finish_genesis |  | Construction ends after the genesis input commits. |  | refusal inside_genesis_input | DL-87, DL-293 |
 | runtime_assembly.34 | input | finish_genesis |  | Construction ends once: a second call would launder a used state back to fresh. |  | refusal construction_finished | DL-132 |
 | runtime_assembly.35 | live | finish_genesis |  | Construction ends once: a second call would launder a used state back to fresh. |  | refusal construction_finished | DL-132 |
-| runtime_assembly.36 | genesis_input | seed_period |  | Assembly precedes inputs. |  | refusal seed_inside_input | DL-132 |
 | runtime_assembly.37 | genesis | seed_period |  | Seeding is assembly's first act: a live state never moves its period. |  | refusal seed_on_used_state | period-model ss3.5, DL-132 |
 | runtime_assembly.38 | seeded | seed_period |  | Seeding is assembly's first act: a live state never moves its period. |  | refusal seed_on_used_state | period-model ss3.5, DL-132 |
-| runtime_assembly.39 | input | seed_period |  | Assembly precedes inputs. |  | refusal seed_inside_input | DL-132 |
 | runtime_assembly.40 | live | seed_period |  | Seeding is assembly's first act: a live state never moves its period. |  | refusal seed_on_used_state | period-model ss3.5, DL-132 |
+| runtime_assembly.43 | open | install |  | Carried rows are assembly's first act: only a fresh state installs them. |  | refusal install_on_used_state | period-model ss7 |
+| runtime_assembly.44 | built | install |  | Carried rows are assembly's first act: only a fresh state installs them. |  | refusal install_on_used_state | period-model ss7 |
+| runtime_assembly.45 | unbuilt | commit_input |  | A commit needs an input open. |  | refusal no_input_open | DL-87, DL-293 |
+| runtime_assembly.46 | built | commit_input |  | A commit needs an input open. |  | refusal no_input_open | DL-87, DL-293 |
+| runtime_assembly.47 | open | begin_input |  | Inputs do not nest. |  | refusal input_already_open | DL-87 |
+| runtime_assembly.48 | open | seed_period |  | Assembly precedes inputs. |  | refusal seed_inside_input | DL-132 |
 
 | State | In | Entry | Exit | Defers | Waits |
 | --- | --- | --- | --- | --- | --- |
 | runtime_assembly |  |  |  |  |  |
-| fresh | runtime_assembly/phase |  |  |  |  |
-| installed | runtime_assembly/phase |  |  |  |  |
-| genesis_input | runtime_assembly/phase |  |  |  |  |
-| genesis | runtime_assembly/phase |  |  |  |  |
-| constructed | runtime_assembly/phase |  |  |  |  |
-| seeded | runtime_assembly/phase |  |  |  |  |
-| input | runtime_assembly/phase |  |  |  |  |
-| live | runtime_assembly/phase |  |  |  |  |
+| unbuilt | runtime_assembly/phase |  |  |  |  |
+| fresh | unbuilt/construction |  |  |  |  |
+| installed | unbuilt/construction |  |  |  |  |
+| genesis | unbuilt/construction |  |  |  |  |
+| open | runtime_assembly/phase |  |  |  |  |
+| genesis_input | open/inputs |  |  |  |  |
+| input | open/inputs |  |  |  |  |
+| built | runtime_assembly/phase |  |  |  |  |
+| constructed | built/service |  |  |  |  |
+| seeded | built/service |  |  |  |  |
+| live | built/service |  |  |  |  |
 
 ## anchor_head
 
