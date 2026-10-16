@@ -54,6 +54,11 @@ uv run python scripts/transition_coverage.py
 uv run python tests/oracle_goldens.py replay
 ```
 
+A comment-only or docstring-only change adds one gate before the suite:
+`uv run python scripts/comment_equivalence.py <base-rev>` proves the diff
+changed no code and lost no citation token (DL-362). It replaces the logic
+review for that change, not the suite run.
+
 The mypy line names `tests/uc_oracle.py` beside `src`: it is a fully
 annotated executable spec under `tests/`, and nothing else holds it to the
 type gate (DL-193).

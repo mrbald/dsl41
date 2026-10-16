@@ -24,6 +24,8 @@ Do not re-derive settled decisions.
   Do not infer an answer or reopen a settled decision.
   Scheduler composition defaults must keep ordinary estates schedulable
   (DL-59); reserve calendar errors for uninterpretable input.
+- A comment states the rule and cites its entry; it never states what changed
+  (DL-362). `scripts/comment_equivalence.py <base>` proves a comment-only diff.
 - Append material decisions to `docs/decision-log.md`; never edit or renumber
   old entries. Before adding a citation namespace, add its row to
   `docs/citation-index.md`.
