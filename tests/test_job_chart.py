@@ -133,6 +133,8 @@ SIBLINGS: dict[str, tuple[str, ...]] = {
     "job.213": ("job.224",),
     "job.214": ("job.225",),
     "job.217": ("job.226",),
+    "job.235": ("job.236",),
+    "job.237": ("job.238",),
 }
 #: The rows the cascade and the admission add, by why they exist.
 RELAYS = ("job.177", "job.178", "job.179")
@@ -148,7 +150,13 @@ START_BOUND = "job.100"
 BOX_NOEXEC = {"job.231": "job.209", "job.232": "job.207", "job.233": "job.209"}
 #: An attempt whose run's settlement is owed, and an admitted start's moves (DL-349).
 SETTLE_FIRST = "job.401"
-EXTENT = "job.402"
+#: The rows of `start admitted`, one per admitting verdict: its guard and its action.
+EXTENTS = {
+    "job.402": ("admitted_admit", "admit_extent"),
+    "job.424": ("admitted_bypass", "bypass_extent"),
+    "job.425": ("admitted_queue", "queue_extent"),
+    "job.426": ("admitted_on_held", "on_held_extent"),
+}
 STARTING_ROW = "job.403"
 SKIP_IN_BOX = "job.404"
 SETTLE_LIVE = "job.418"
@@ -309,7 +317,7 @@ def test_the_chart_is_well_formed_draws_no_warning_and_is_registered() -> None:
     assert chart_warnings(CHART) == []
     assert CHART.clock == "logical"
     assert CHART in MACHINES
-    assert len(CHART.rows) == 169
+    assert len(CHART.rows) == 177
     assert [b.id for c in CHART.choices for b in c.branches] == [
         *(f"job.{n}" for n in range(171, 177)),
         "job.309",
@@ -372,13 +380,14 @@ def test_every_marked_row_is_unreachable_with_its_reason() -> None:
 
 def _moves() -> set[str]:
     """The status, flag and holding moves: each cell's row and its siblings."""
-    return {ident for primary in CELLS for ident in (primary, *SIBLINGS.get(primary, ()))}
+    primaries = (*CELLS, *WAITER_CELLS)
+    return {ident for primary in primaries for ident in (primary, *SIBLINGS.get(primary, ()))}
 
 
 def test_every_other_row_moves_nothing_relays_an_attempt_or_settles_held_units() -> None:
     moves = _moves()
     others = [row for row in CHART.rows if row.id not in moves]
-    assert len(moves) == 83 + 21 and len(others) == 65
+    assert len(moves) == 83 + 21 + 5 and len(others) == 68
     moments = {f"job.{405 + i}": event for i, event in enumerate(MOMENTS)}
     for row in others:
         if row.id in RELAYS:
@@ -408,9 +417,9 @@ def test_every_other_row_moves_nothing_relays_an_attempt_or_settles_held_units()
         elif row.id == SETTLE_FIRST:
             assert (row.source, row.event, row.kind) == ("IDLE", START, "internal")
             assert row.guard == "start_settles_first" and row.action == "settles_first"
-        elif row.id == EXTENT:
+        elif row.id in EXTENTS:
             assert (row.source, row.event, row.kind) == ("lifecycle", START_ADMITTED, "internal")
-            assert row.action == "start_extent" and not row.guard
+            assert (row.guard, row.action) == EXTENTS[row.id]
         elif row.id in BOX_NOEXEC:
             own = [ROWS[i] for i in (BOX_NOEXEC[row.id], *SIBLINGS.get(BOX_NOEXEC[row.id], ()))]
             assert (row.event, row.kind) == (BOX_ON_NOEXEC, "external")
@@ -452,7 +461,7 @@ def test_only_the_status_rows_of_a_start_report_items() -> None:
         SETTLE_FIRST: "settles_first",
         SKIP_IN_BOX: "skips_in_box",
     }
-    assert [row.id for row in CHART.rows if row.event == START_ADMITTED] == [EXTENT]
+    assert [row.id for row in CHART.rows if row.event == START_ADMITTED] == list(EXTENTS)
 
 
 # ---- configurations, data and partitions
@@ -762,7 +771,7 @@ def test_the_completeness_table_matches_the_declaration_in_every_cell() -> None:
     assert table[("job QUE_WAIT", FLAG_MOVED, repr(FlagMoved("KILLJOB")))] == "job.111"
     assert table[("job INACTIVE armed", KILLJOB, sc.ANY)] == "job.137"
     assert table[("job STARTING", ON_ICE, sc.ANY)] == "job.148"
-    assert table[("job QUE_WAIT hold", ON_ICE, sc.ANY)] == "job.201"
+    assert table[("job QUE_WAIT hold", ON_ICE, sc.ANY)] == "job.234"
     assert table[("job INACTIVE ice", FORCE_STARTJOB, repr(Attempt()))] == "job.178 + job.203"
     assert table[("job INACTIVE", START, repr(Attempt(window="defer")))] == "ignored job.180"
     # a skip of an INACTIVE member of a running box has no move to ride (DL-154)
@@ -783,7 +792,8 @@ def test_the_completeness_table_matches_the_declaration_in_every_cell() -> None:
     assert table[("job RUNNING", START, repr(Attempt(settlement_owed=True)))] == "ignored job.180"
     assert table[("job INACTIVE noexec", START, repr(Attempt(settlement_owed=True)))] == ("job.401")
     assert table[("job INACTIVE", START, repr(Attempt()))] == "job.102"
-    assert table[("job SUCCESS", START_ADMITTED, repr(Admitted("bypass")))] == "job.402"
+    assert table[("job SUCCESS", START_ADMITTED, repr(Admitted("bypass")))] == "job.424"
+    assert table[("job ADMITTED", START_ADMITTED, repr(Admitted("admit")))] == "job.402"
     # ON_NOEXEC bypasses before held units are read (SEM-22, `start_verdict`)
     assert table[("job FAILURE every flag held", START, repr(Attempt(force=True)))] == "job.101"
     assert table[("job FAILURE every flag held", START, repr(Attempt()))] == "ignored job.180"
@@ -962,6 +972,13 @@ CELLS: dict[str, Cell] = {
     "job.307": _holding(ChartEvent(RELEASE_RESOURCE), "FAILURE"),
     "job.308": _holding(ChartEvent(PERIOD_OPENING), "FAILURE", NO_CATALOG),
 }
+#: The waiter's twins of the ON_ICE, ON_HOLD and OFF_HOLD moves (job.201, job.204, job.220,
+#: job.205, job.221): the same flag move, a guard on QUE_WAIT, and the waiter's own action.
+WAITER_CELLS: dict[str, Cell] = {
+    "job.234": _flag(ChartEvent(ON_ICE), "QUE_WAIT"),
+    "job.235": _flag(ChartEvent(ON_HOLD), "QUE_WAIT"),
+    "job.237": _flag(ChartEvent(OFF_HOLD), "QUE_WAIT"),
+}
 
 
 def test_every_move_from_every_source_ends_in_its_target() -> None:
@@ -971,10 +988,12 @@ def test_every_move_from_every_source_ends_in_its_target() -> None:
     has a row per source, which take the same cell. A row whose event is an
     item the tier sends (`flag moved`, `actual start`, `admitted start`) is
     dispatched that item: the handle here sends nothing beyond a row's own
-    move, and the oracle's tests pin who sends it (test_oracle_chart.py)."""
+    move, and the oracle's tests pin who sends it (test_oracle_chart.py). A flag move whose
+    guard parts a waiter from any other job has a waiter's twin with its own cell
+    (`WAITER_CELLS`)."""
     assert len(CELLS) == 83
     checked = 0
-    for primary, cell in CELLS.items():
+    for primary, cell in (*CELLS.items(), *WAITER_CELLS.items()):
         for ident in (primary, *SIBLINGS.get(primary, ())):
             row = ROWS[ident]
             for source in sorted(leaf for leaf in LEAVES[row.source] if leaf != "ADMITTED"):
@@ -988,7 +1007,7 @@ def test_every_move_from_every_source_ends_in_its_target() -> None:
                 after = _leaf(executor.active("j"), REGION[source])
                 assert after in _targets(row), (ident, source, after)
                 checked += 1
-    assert checked == 162
+    assert checked == 167
 
 
 def _advance(executor: Executor, job: str, event: ChartEvent) -> list[Any]:

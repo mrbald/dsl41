@@ -1239,6 +1239,8 @@ _VERDICTS = {
     "job.104": "on_held",
     "job.124": "admit",
 }
+#: The row of `start admitted` for each admitting verdict.
+_EXTENT_ROWS = {"admit": "job.402", "bypass": "job.424", "queue": "job.425", "on_held": "job.426"}
 
 
 @pytest.mark.parametrize("case", sorted(_EXTENTS))
@@ -1246,11 +1248,12 @@ def test_dl304_start_admitted_precedes_the_admissions_moves_for_every_admitting_
     case: str,
 ) -> None:
     """DL-349, DL-350: each admitting row (job.101 to job.104,
-    job.124) sends `start admitted` first; its row (job.402) sends what the
-    admission does, so the admission's moves are its descendants and pop
-    after it: the units, the arm, the move to STARTING and `started`; a
-    bypass's and a queue's status move, written at the attempt, has its box
-    rules, its settlement and its wakes sent from there."""
+    job.124) sends `start admitted` first; its verdict's row (job.402,
+    job.424 to job.426) sends what the admission does, so the admission's
+    moves are its descendants and pop after it: the units, the arm, the move
+    to STARTING and `started`; a bypass's and a queue's status move, written
+    at the attempt, has its box rules, its settlement and its wakes sent from
+    there."""
     script, job, _relay, starts, _line = _OUTCOMES[case]
     paired = Oracle(lower_source(_START_JIL))
     for event in script[:-1]:
@@ -1261,8 +1264,9 @@ def test_dl304_start_admitted_precedes_the_admissions_moves_for_every_admitting_
     at = next(i for i, o in enumerate(mine) if o.event.name == "start")
     assert mine[at].rows == starts[-1]
     admitted = mine[at + 1]
-    assert (admitted.event.name, admitted.rows) == ("start admitted", ("job.402",))
-    assert admitted.event.payload.verdict == _VERDICTS[starts[-1][0]]
+    verdict = _VERDICTS[starts[-1][0]]
+    assert (admitted.event.name, admitted.rows) == ("start admitted", (_EXTENT_ROWS[verdict],))
+    assert admitted.event.payload.verdict == verdict
     children = [o for o in mine[at + 2 :] if o.depth == admitted.depth + 1]
     assert [(o.event.name, o.rows) for o in children] == _EXTENTS[case]
 
@@ -1745,10 +1749,25 @@ _FLAG_ITEMS = (
 )
 
 
+#: Scripts on the directed flag estate for cells the harness's flag scripts do not reach,
+#: kept here so the goldens' sample stays as recorded.
+_LOCAL_FLAG_SCRIPTS: Final[dict[str, tuple[Event, ...]]] = {
+    "ON_HOLD twice on a job that is not a waiter": (
+        ev("ON_HOLD", 0, job="fl_dated"),
+        ev("ON_HOLD", 1, job="fl_dated"),
+    ),
+    "OFF_HOLD on a waiter not on hold": (
+        ev("STARTJOB", 0, job="fl_hold"),
+        ev("STARTJOB", 0, job="fl_wait"),
+        ev("OFF_HOLD", 1, job="fl_wait"),
+    ),
+}
+
+
 def _flag_steps(name: str, count: int) -> list[Event]:
     """The first `count` inputs of a script of the harness's directed flag
-    estate, its seal points left out."""
-    script = oracle_inputs._flag_scripts()[name]
+    estate, or of a local one, its seal points left out."""
+    script = _LOCAL_FLAG_SCRIPTS.get(name) or oracle_inputs._flag_scripts()[name]
     return [s for s in script if isinstance(s, Event)][:count]
 
 
@@ -1799,14 +1818,36 @@ _FLAG_OUTCOMES: dict[str, tuple[str, int, str, list[tuple[str, ...]], str]] = {
         [("job.152",)],
         "EVENT_IGNORED",
     ),
-    "ON_HOLD on a waiter": (_WAITERS, 3, "fl_wait", [("job.204",)], "ON_HOLD"),
-    "ON_HOLD on a held waiter": (_WAITERS, 4, "fl_wait", [("job.220",)], "ON_HOLD"),
-    "OFF_HOLD on a held waiter": (_WAITERS, 6, "fl_wait", [("job.205",)], "QUE_WAIT->STARTING"),
+    "ON_HOLD on a job that is not a waiter": (_DISARMS, 1, "fl_dated", [("job.204",)], "ON_HOLD"),
+    "ON_HOLD on a held job that is not a waiter": (
+        "ON_HOLD twice on a job that is not a waiter",
+        2,
+        "fl_dated",
+        [("job.220",)],
+        "ON_HOLD",
+    ),
+    "OFF_HOLD on a job not on hold": (
+        "ON_NOEXEC on a STARTING box that holds a unit",
+        6,
+        "fl_bm",
+        [("job.221",), ("job.180",)],
+        "OFF_HOLD",
+    ),
+    "OFF_HOLD on a waiter not on hold": (
+        "OFF_HOLD on a waiter not on hold",
+        3,
+        "fl_wait",
+        [("job.238",)],
+        "OFF_HOLD",
+    ),
+    "ON_HOLD on a waiter": (_WAITERS, 3, "fl_wait", [("job.235",)], "ON_HOLD"),
+    "ON_HOLD on a held waiter": (_WAITERS, 4, "fl_wait", [("job.236",)], "ON_HOLD"),
+    "OFF_HOLD on a held waiter": (_WAITERS, 6, "fl_wait", [("job.237",)], "QUE_WAIT->STARTING"),
     "ON_ICE on a waiter": (
         _WAITERS,
         8,
         "fl_hold",
-        [("job.201",), ("job.112",)],
+        [("job.234",), ("job.112",)],
         "QUE_WAIT->INACTIVE",
     ),
     "ON_NOEXEC on a held waiter": (
@@ -1832,14 +1873,14 @@ _FLAG_OUTCOMES: dict[str, tuple[str, int, str, list[tuple[str, ...]], str]] = {
         "FAILURE->INACTIVE",
     ),
     "OFF_NOEXEC on a job not ON_NOEXEC": (_FAILED, 4, "fl_job", [("job.223",)], "OFF_NOEXEC"),
-    "ON_HOLD on a queued box": (_QUEUED_BOX, 3, "fl_box", [("job.204",)], "ON_HOLD"),
-    "OFF_HOLD on a held queued box": (_QUEUED_BOX, 4, "fl_box", [("job.205",)], "OFF_HOLD"),
+    "ON_HOLD on a queued box": (_QUEUED_BOX, 3, "fl_box", [("job.235",)], "ON_HOLD"),
+    "OFF_HOLD on a held queued box": (_QUEUED_BOX, 4, "fl_box", [("job.237",)], "OFF_HOLD"),
     "DISARM on a queued box": (_QUEUED_BOX, 5, "fl_box", [("job.225",)], "DISARM"),
     "ON_ICE on a queued box": (
         _QUEUED_BOX,
         6,
         "fl_box",
-        [("job.201",), ("job.112",)],
+        [("job.234",), ("job.112",)],
         "QUE_WAIT->INACTIVE",
     ),
     "OFF_NOEXEC on a box whose members are not ON_NOEXEC": (

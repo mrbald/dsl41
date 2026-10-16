@@ -90,6 +90,7 @@ from dsl41.job_chart_events import (
     START,
     START_ADMITTED,
     Admission,
+    Admitted,
     StartAttempt,
     BoxVerdict,
     Deadline,
@@ -356,6 +357,34 @@ def readmit_keeps(ctx: Context) -> bool:
     return readmit_verdict(ctx) == "keep"
 
 
+# ---- the admitted start's extent (DL-349, DL-350)
+
+
+def _admitted_verdict(ctx: Context) -> str:
+    admitted: Admitted = ctx.event.payload
+    return admitted.verdict
+
+
+def admitted_bypass(ctx: Context) -> bool:
+    """The payload: the admitting row was the bypass (job.101)."""
+    return _admitted_verdict(ctx) == "bypass"
+
+
+def admitted_queue(ctx: Context) -> bool:
+    """The payload: the admitting row was the queue (job.103)."""
+    return _admitted_verdict(ctx) == "queue"
+
+
+def admitted_on_held(ctx: Context) -> bool:
+    """The payload: the admitting row was the forced start on held units (job.104)."""
+    return _admitted_verdict(ctx) == "on_held"
+
+
+def admitted_admit(ctx: Context) -> bool:
+    """The payload: the admitting row was an admission (job.102, job.124)."""
+    return _admitted_verdict(ctx) == "admit"
+
+
 # ---- STATUS (SEM-09, DL-13, DL-242, DL-264)
 
 _INJECTABLE: Final = frozenset(
@@ -441,6 +470,12 @@ def queued(ctx: Context) -> bool:
     return "QUE_WAIT" in ctx.active
 
 
+def not_live_or_queued(ctx: Context) -> bool:
+    """The configuration's status is neither live nor QUE_WAIT: an IDLE status, or the
+    transient ADMITTED, which no operator's input meets."""
+    return not (ctx.active & LIVE_OR_QUEUED)
+
+
 def not_queued(ctx: Context) -> bool:
     """The configuration's status is not QUE_WAIT."""
     return "QUE_WAIT" not in ctx.active
@@ -458,16 +493,27 @@ def _noexec(ctx: Context) -> Noexec:
     return payload.noexec
 
 
+def noexec_own_reason(active: frozenset[str], box: bool) -> str | None:
+    """Why the scheduler ignores ON_NOEXEC for the job's own ice and status, or None (DL-254):
+    ice on, RUNNING, or STARTING on a job that is not a box. The guard and the oracle's ignored
+    line (`_oob_ignored`) both read it."""
+    if "ice_on" in active:
+        return "the job is ON_ICE"
+    if "RUNNING" in active:
+        return "the job is RUNNING"
+    if not box and "STARTING" in active:
+        return "the job is STARTING"
+    return None
+
+
 def noexec_ignored(ctx: Context) -> bool:
-    """`_oob_ignored` for ON_NOEXEC: the configuration has ice on, RUNNING, or
-    STARTING on a job that is not a box; or the data says a box and the
-    payload's `tree_busy` holds. The flag move does not change what it reads."""
-    active = ctx.active
-    if "ice_on" in active or "RUNNING" in active:
+    """ON_NOEXEC is ignored: the configuration has ice on, RUNNING, or STARTING on a job that
+    is not a box (`noexec_own_reason`); or the data says a box and the payload's `tree_busy`
+    holds. The flag move does not change what it reads."""
+    box = _data(ctx).box
+    if noexec_own_reason(ctx.active, box) is not None:
         return True
-    if not _data(ctx).box:
-        return "STARTING" in active
-    return _noexec(ctx).tree_busy
+    return box and _noexec(ctx).tree_busy
 
 
 def noexec_applies(ctx: Context) -> bool:
@@ -696,6 +742,10 @@ GUARDS: Final = {
         readmit_cancels,
         readmit_leaves,
         readmit_keeps,
+        admitted_bypass,
+        admitted_queue,
+        admitted_on_held,
+        admitted_admit,
         exit_success,
         exit_failure,
         injects,
@@ -710,6 +760,7 @@ GUARDS: Final = {
         not_live,
         force_clears,
         queued,
+        not_live_or_queued,
         not_queued,
         noexec_ignored,
         noexec_applies,
@@ -786,13 +837,31 @@ def extent_on_held(ctx: Context) -> Effects | None:
     return _consequences(ctx, "extent_on_held")
 
 
-def start_extent(ctx: Context) -> Effects | None:
-    """`start admitted`: what the admitted start does, as the tier's handle
-    says (DL-350): a bypass consumes the arm, then its move's box rules and
-    wakes; a queue its move's box rules and wakes; an admission or a start
-    on held units reserves or takes over its units, consumes the arm, resets
-    a box's jobs, moves to STARTING and on to RUNNING."""
-    return _consequences(ctx, "start_extent")
+def bypass_extent(ctx: Context) -> Effects | None:
+    """A bypass's `start admitted` (job.424): the run's start, which consumes the arm, then
+    its move's box rules, settlement and wakes, as the tier's handle says (DL-350)."""
+    return _consequences(ctx, "bypass_extent")
+
+
+def queue_extent(ctx: Context) -> Effects | None:
+    """A queue's `start admitted` (job.425): its move's box rules, settlement and wakes, then
+    the load mark of a machine's load it takes (DL-255), as the tier's handle says."""
+    return _consequences(ctx, "queue_extent")
+
+
+def on_held_extent(ctx: Context) -> Effects | None:
+    """A forced start's `start admitted` on held units (job.426): it takes over the held
+    units, consumes the arm, resets a box's jobs, moves to STARTING and on to RUNNING, then
+    the load mark, as the tier's handle says (DL-256, DL-350)."""
+    return _consequences(ctx, "on_held_extent")
+
+
+def admit_extent(ctx: Context) -> Effects | None:
+    """An admission's `start admitted` (job.402): it reserves or takes over its units,
+    consumes the arm, resets a box's jobs, moves to STARTING and on to RUNNING, then the
+    queue's scan when the held units it took over exceed its demand, and the load mark, as the
+    tier's handle says (DL-256, DL-350)."""
+    return _consequences(ctx, "admit_extent")
 
 
 def admit(ctx: Context) -> Effects | None:
@@ -900,10 +969,17 @@ def report_flag_move(ctx: Context) -> Effects:
     return Effects(send=((ctx.key, Event(FLAG_MOVED, moved)),))
 
 
+def report_ice(ctx: Context) -> Effects:
+    """ON_ICE moved a waiter's flag (job.234): the status rule that takes it out of the queue
+    follows as its own item (job.112), with the payload's handle on the units (DL-50)."""
+    moved = FlagMoved("ON_ICE", units=_units(ctx))
+    return Effects(send=((ctx.key, Event(FLAG_MOVED, moved)),))
+
+
 def iced(ctx: Context) -> Effects | None:
-    """ON_ICE moved the flag: the status rule that reads it follows; then,
-    unless the job is a waiter, the box rules its ice may run and its
-    referencers' wakes (SEM-20, DL-285), as the tier's handle says."""
+    """ON_ICE moved the flag of a job that is not a waiter (job.201): the status rule that
+    reads it follows, then the box rules its ice may run and its referencers' wakes (SEM-20,
+    DL-285), as the tier's handle says."""
     return _consequences(ctx, "iced")
 
 
@@ -913,13 +989,19 @@ def iced_again(ctx: Context) -> Effects | None:
 
 
 def held(ctx: Context) -> Effects | None:
-    """ON_HOLD: a held waiter blocks no one, so the queue is scanned (DL-247)."""
+    """ON_HOLD on a waiter (job.235, job.236): a held waiter blocks no one, so the queue is
+    scanned (DL-247)."""
     return _consequences(ctx, "held")
 
 
+def released_waiter(ctx: Context) -> Effects | None:
+    """OFF_HOLD on a waiter (job.237, job.238): its queue is scanned (DL-50)."""
+    return _consequences(ctx, "released_waiter")
+
+
 def released_hold(ctx: Context) -> Effects | None:
-    """OFF_HOLD: a waiter's queue is scanned (DL-50); any other job attempts
-    its start (SEM-21)."""
+    """OFF_HOLD on a job that is not a waiter (job.205, job.221): it attempts its start
+    (SEM-21)."""
     return _consequences(ctx, "released_hold")
 
 
@@ -963,7 +1045,10 @@ ACTIONS: Final = {
         extent_queue,
         extent_admit,
         extent_on_held,
-        start_extent,
+        bypass_extent,
+        queue_extent,
+        on_held_extent,
+        admit_extent,
         admit,
         settle_ended_run,
         settles_first,
@@ -978,9 +1063,11 @@ ACTIONS: Final = {
         runs_box,
         skips_in_box,
         report_flag_move,
+        report_ice,
         iced,
         iced_again,
         held,
+        released_waiter,
         released_hold,
         noexec,
         cleared_noexec,

@@ -575,14 +575,10 @@ _MOMENT_ROWS: Final = (
         "job.402",
         "lifecycle",
         START_ADMITTED,
-        action="start_extent",
+        guard="admitted_admit",
+        action="admit_extent",
         kind="internal",
         cite="DL-304, DL-349",
-        note=(
-            "Everything an admitted start does follows from this item: the units it reserves"
-            " or takes over, the arm it consumes, the run's start, a box's resets, its move"
-            " to STARTING and its RUNNING."
-        ),
     ),
     Row(
         "job.403",
@@ -632,17 +628,51 @@ _MOMENT_ROWS: Final = (
         )
         for i, event in enumerate((BOX_SET_INACTIVE, START, KILLJOB, ON_NOEXEC))
     ),
+    # the other admitting verdicts' `start admitted`, beside job.402's admission
+    Row(
+        "job.424",
+        "lifecycle",
+        START_ADMITTED,
+        guard="admitted_bypass",
+        action="bypass_extent",
+        kind="internal",
+        cite="SEM-22, DL-349",
+    ),
+    Row(
+        "job.425",
+        "lifecycle",
+        START_ADMITTED,
+        guard="admitted_queue",
+        action="queue_extent",
+        kind="internal",
+        cite="DL-50, DL-349",
+    ),
+    Row(
+        "job.426",
+        "lifecycle",
+        START_ADMITTED,
+        guard="admitted_on_held",
+        action="on_held_extent",
+        kind="internal",
+        cite="DL-256, DL-349",
+    ),
 )
 
 #: The flag rows, `job.2NN`: 201 to 217 are the flag moves.
 _FLAG_ROWS: Final = (
-    Row("job.201", "ice_off", ON_ICE, "ice_on", "not_live", "iced", cite="SEM-20, DL-254, DL-285"),
+    Row(
+        "job.201",
+        "ice_off",
+        ON_ICE,
+        "ice_on",
+        "not_live_or_queued",
+        "iced",
+        cite="SEM-20, DL-254, DL-285",
+    ),
     Row("job.202", "ice_on", OFF_ICE, "ice_off", cite="SEM-20", note="no re-evaluation"),
     Row("job.203", "ice_on", FORCE_STARTJOB, "ice_off", "force_clears", cite="SEM-23, DL-243"),
-    Row(
-        "job.204", "hold_off", ON_HOLD, "hold_on", "not_live", "held", cite="SEM-21, DL-254, DL-247"
-    ),
-    Row("job.205", "hold_on", OFF_HOLD, "hold_off", action="released_hold", cite="SEM-21, DL-50"),
+    Row("job.204", "hold_off", ON_HOLD, "hold_on", "not_live_or_queued", cite="SEM-21, DL-254"),
+    Row("job.205", "hold_on", OFF_HOLD, "hold_off", "not_queued", "released_hold", cite="SEM-21"),
     Row("job.206", "hold_on", FORCE_STARTJOB, "hold_off", "force_clears", cite="SEM-23, DL-243"),
     Row("job.207", "hold_on", ON_NOEXEC, "hold_off", "noexec_applies", cite=_DL254),
     Row(
@@ -668,8 +698,8 @@ _FLAG_ROWS: Final = (
     # a split source: the second source of job.201, .202, .204, .205, .209, .210, .213, .214, .217
     Row("job.218", "ice_on", ON_ICE, "ice_on", "not_live", "iced_again", cite="SEM-20"),
     Row("job.219", "ice_off", OFF_ICE, "ice_off", cite="SEM-20", note="as job.202"),
-    Row("job.220", "hold_on", ON_HOLD, "hold_on", "not_live", "held", cite="SEM-21"),
-    Row("job.221", "hold_off", OFF_HOLD, "hold_off", action="released_hold", cite="SEM-21"),
+    Row("job.220", "hold_on", ON_HOLD, "hold_on", "not_live_or_queued", cite="SEM-21"),
+    Row("job.221", "hold_off", OFF_HOLD, "hold_off", "not_queued", "released_hold", cite="SEM-21"),
     Row(
         "job.222",
         "noexec_on",
@@ -710,6 +740,13 @@ _FLAG_ROWS: Final = (
         note="As job.207: ON_NOEXEC supersedes ON_HOLD, and the job retries its start.",
     ),
     Row("job.233", "noexec_on", BOX_ON_NOEXEC, "noexec_on", cite=_BOX_NOEXEC, note="as job.231"),
+    # a waiter's twin of job.201, job.204, job.220, job.205 and job.221: the guard splits the
+    # status, and the waiter's action is its own
+    Row("job.234", "ice_off", ON_ICE, "ice_on", "queued", "report_ice", cite="DL-50, DL-285"),
+    Row("job.235", "hold_off", ON_HOLD, "hold_on", "queued", "held", cite="DL-247"),
+    Row("job.236", "hold_on", ON_HOLD, "hold_on", "queued", "held", cite="DL-247"),
+    Row("job.237", "hold_on", OFF_HOLD, "hold_off", "queued", "released_waiter", cite="DL-50"),
+    Row("job.238", "hold_off", OFF_HOLD, "hold_off", "queued", "released_waiter", cite="DL-50"),
 )
 
 #: The holding rows, `job.3NN`: 301 to 308 are the holding moves.

@@ -229,7 +229,7 @@ def test_every_action_that_asks_the_tier_names_itself_and_has_a_handler() -> Non
         def consequences(self, ctx: Context, action: str) -> None:
             asked.append(action)
 
-    own = {"relay_start", "settle_ended_run", "report_flag_move", "moment"}
+    own = {"relay_start", "settle_ended_run", "report_flag_move", "report_ice", "moment"}
     for name, action in JOB.actions.items():
         if name in own:
             continue

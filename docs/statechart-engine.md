@@ -331,15 +331,17 @@ because the box rules held it back, takes the internal row `job.401` past the bo
 action sends the ended run's `leave STARTING or RUNNING`, then the same attempt again, which reads
 the admission the settlement left (DL-349). An attempt whose window or leave already decided it
 carries that decision, and is not decided again. Each admitting row (`job.102`, `job.104`,
-`job.124`) targets the transient state `ADMITTED` and sends `start admitted`. Its row, `job.402`,
-sends the start's extent: the units it reserves or takes over, the arm it consumes, the run's
-start, a box's resets, then `starting`, which moves the job to STARTING (`job.403`), and `started`,
-the RUNNING move, guarded on the run it carries. The bypass (`job.101`) and the queue (`job.103`)
-send `start admitted` too, their extents the bypass's start and move and the queue's move. Those
-moves are the bound's descendants. A readmission (`job.108`) sends the same extent itself, without
-`start admitted`: it is not a start the bound counts. An input that raises commits none of its
-attempt half's writes: a control input that raises is refused and commits nothing, and an
-engine-made one is quarantined with its rejection logged and its time half committed; the engine
+`job.124`) targets the transient state `ADMITTED` and sends `start admitted`. Each row of
+`start admitted` is guarded on one verdict its payload carries. The rows for an admission
+(`job.402`) and for a start on held units (`job.426`) send the start's extent: the units it
+reserves or takes over, the arm it consumes, the run's start, a box's resets, then `starting`,
+which moves the job to STARTING (`job.403`), and `started`, the RUNNING move, guarded on the run it
+carries. The bypass (`job.101`) and the queue (`job.103`) send `start admitted` too; the rows of
+`start admitted` for them (`job.424`, `job.425`) send the bypass's start and move and the queue's
+move. Those moves are the bound's descendants. A readmission (`job.108`) sends the same extent
+itself, without `start admitted`: it is not a start the bound counts. An input that raises commits
+none of its attempt half's writes: a control input that raises is refused and commits nothing, and
+an engine-made one is quarantined with its rejection logged and its time half committed; the engine
 stops only when the time half itself raises. The golden digests replay such an input the same way:
 put back, then its time half applied alone (`tests/oracle_goldens.py`). No input of the goldens'
 sample raises (DL-348).
@@ -599,9 +601,10 @@ writes) and `oracle.py` (the inputs, the hook and the checks), with the payloads
 `tests/oracle_inputs.py`) hold the answers of the decision code the chart replaced, over the sample
 of the old-versus-new harness (DL-338). The code and the harness are deleted (DL-352). The oracle
 reproduces the digests; a golden that changes is a DL-235 decision. The job has no transition table,
-the store checks no write against one, and the chart is registered (DL-353). Two rows carry the
-`unreachable` mark (§13): job.312, since the admission the oracle builds carries no previous end,
-and job.314, since a live status never stands on held units (DL-353).
+the store checks no write against one, and the chart is registered (DL-353). Each row that carries
+the `unreachable` mark (§13) states its reason, and `docs/state-machines.md` lists them all. Among
+them are job.312, since the admission the oracle builds carries no previous end, and job.314, since
+a live status never stands on held units (DL-353).
 
 ## 17. Names
 
