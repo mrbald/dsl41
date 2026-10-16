@@ -1,53 +1,32 @@
-"""Markdown/Mermaid rendering of the derived graph (phase 6, CLAUDE.md / DL-03).
+"""Markdown/Mermaid rendering of the derived graph (DL-03, DL-35, DL-73, ir-design ss1).
 
-Spec (ir-design ss1 pipeline, amended DL-35/DL-73): IR-G -> a Markdown
-report of per-component Mermaid charts, plus appendices that materialize
-everything the charts thin out or drop. Pure function of (catalog, graph) --
-IR-G for the analysis, IR-F for the per-node display facts (DL-73);
-deterministic output for identical input.
+IR-G becomes a Markdown report of per-component Mermaid charts plus appendices that list
+everything the charts thin out or drop. The output is a pure function of (catalog, graph):
+IR-G for the analysis, IR-F for the per-node display facts (DL-73).
 
-Rendering decisions (each with a test):
-- Node ids are generated (n0, n1, ...) in first-need order; real names live
-  in labels. JIL names may contain '.', '#', ':', '^' -- none Mermaid-id-safe.
-- Visual grammar (DL-35): shape/line-style is the primary channel, color is
-  redundant reinforcement, Unicode symbols not FontAwesome (hosts don't ship
-  FA CSS). Command job = plain rect (unmarked default). File watcher =
-  stadium + U+1F4C4 prefix (a source/trigger). Scheduled node = second label
-  line with U+23F0 + trigger digest (_schedule_digest, trigger fields only:
-  run_window is a gate per SEM-33 and must_* are alarms per SEM-34, both
-  excluded). Cross-instance producer = hexagon (frees [[..]] for
-  collapsed boxes exclusively). Undefined producer = U+26A0 prefix + red
-  dash (two channels). Global variable = parallelogram. Every classDef
-  carries an explicit color for dark-mode hosts.
-- Edge arrow encodes the E/A/R class: exact -->, assumed -.->, redesign ==>
-  plus a red linkStyle (edge emission order is deterministic, so indices are
-  safe). Labels are thinned (DL-35): via letter only when via != success,
-  lookback raw token always (semantically load-bearing), mapping row only on
-  redesign edges -- assumed rows/assumptions live in Appendix B instead.
-- Boxes render as subgraphs, nested boxes as nested subgraphs (SEM-17);
-  subgraph TITLES stay one-line (middle-dot separators -- hosts render
-  <br/> in titles inconsistently, DL-35a). A box whose DIRECT member count
-  exceeds the collapse threshold renders as a single [[..]] node whose
-  label counts hidden scheduled/watcher members (DL-35a); members anchor to
-  it, edges re-anchor (deduped), and intra-box edges vanish.
-- Mutex (DL-35): pairs render x-. lock .-x (pairs are what the JIL states,
-  M07, non-transitive). A complete clique of >=3 pairwise-mutexed jobs
-  renders as one shared lock node with dotted links -- k(k-1)/2 undirected
-  links wreck dagre ranking; completeness is checked, so the hub never
-  claims an exclusion the JIL doesn't state. Self-mutex renders as a label
-  badge, not a self-loop. A member missing from the catalog (dangling n(),
-  L001's finding) renders as an undefined pseudo-node in its partner's
-  chart (DL-35a). The report's "Locks" section enumerates EVERY group with
-  its charts, so no exclusion hides in a collapsed box or between
-  workflows.
-- Components (DL-35): connectivity is dependency edges between catalog jobs
-  plus box co-membership. Mutex links do NOT connect components (a shared
-  lock would glue unrelated streams). Pseudo-sources replicate per
-  component.
-- Standalone jobs (size-1 component, no edges, no mutex membership) are
-  dropped from charts and enumerated in Appendix A with kind/schedule/detail
-  -- the drop is loud and reversible (include_singletons), per the no-silent-
-  loss discipline.
+- Node ids are generated (n0, n1, ...) in first-need order; real names live in labels,
+  because JIL names may contain '.', '#', ':', '^'.
+- Shape and line style are the primary channel, colour is reinforcement, symbols are Unicode
+  (DL-35). Command job: plain rect. File watcher: stadium with U+1F4C4. Scheduled node: a
+  second label line with U+23F0 and the trigger digest (trigger fields only: run_window is a
+  gate, SEM-33; must_* are alarms, SEM-34). Cross-instance producer: hexagon. Undefined
+  producer: U+26A0 and a red dash. Global variable: parallelogram. Every classDef sets an
+  explicit colour for dark-mode hosts.
+- The arrow encodes the E/A/R class: exact -->, assumed -.->, redesign ==> with a red
+  linkStyle. Labels are thinned (DL-35): the via letter only when via != success, the
+  lookback always, the mapping row only on redesign edges; assumed rows live in Appendix B.
+- Boxes are subgraphs, nested boxes nested subgraphs (SEM-17); titles stay one line (DL-35a).
+  A box whose direct member count exceeds the collapse threshold is one [[..]] node whose
+  label counts hidden scheduled and watcher members (DL-35a); edges re-anchor, deduped, and
+  intra-box edges vanish.
+- Mutex pairs render x-. lock .-x (M07, non-transitive). A complete clique of >=3 renders as
+  one shared lock node; completeness is checked, so the hub never claims an exclusion the
+  JIL does not state (DL-35). Self-mutex is a label badge. A member missing from the catalog
+  (L001) renders as an undefined pseudo-node (DL-35a). The "Locks" section lists every group.
+- Components are dependency edges between catalog jobs plus box co-membership. Mutex links
+  do not connect components; pseudo-sources replicate per component (DL-35).
+- Standalone jobs (size-1 component, no edges, no mutex) are dropped from charts and listed
+  in Appendix A; `include_singletons` restores them (no silent loss).
 - Quotes in names escape to #quot; inside Mermaid string labels.
 """
 
@@ -66,9 +45,8 @@ from dsl41.derive import (
 )
 from dsl41.ir import CatalogIR, FwSpec, JobIR, ScheduleBlock
 
-#: Via -> chart letter. The status half IS conditions.STATUS_LETTER under the
-#: lowercase Via spelling (one status vocabulary, DL-72); only the two vias
-#: that are not statuses are spelled out here.
+#: Via -> chart letter. The status half is conditions.STATUS_LETTER under the lowercase Via
+#: spelling (DL-72); only the two non-status vias are spelled out here.
 _VIA_LETTER = {
     **{status.lower(): letter for status, letter in STATUS_LETTER.items()},
     "exitcode": "e",
@@ -94,9 +72,7 @@ _CLASS_DEFS = {
 
 
 def _frontmatter(*, elk: bool, fixed_scale: bool) -> str:
-    """One merged per-chart YAML frontmatter block. `layout:` precedes
-    `flowchart:` so elk-only output stays byte-identical to the historical
-    constant (renderer-facing bytes are pinned by tests)."""
+    """One merged per-chart YAML frontmatter block; `layout:` precedes `flowchart:`."""
     if not (elk or fixed_scale):
         return ""
     lines = ["---", "config:"]
@@ -114,14 +90,9 @@ def _esc(name: str) -> str:
     return name.replace('"', "#quot;")
 
 
-#: `_Ids` key: a real catalog job's own name (a plain `str`), or a pseudo-
-#: source's namespaced key (a `(str, str)` tuple, `_pseudo_key` below). A
-#: `str` can never equal a 2-tuple, so the two key spaces cannot collide
-#: regardless of what characters a job name contains -- unlike a string
-#: prefix, which would need an assumption about the JIL name alphabet
-#: (DL-175, found unsound by its own adversarial review: a NUL-prefixed
-#: string is not provably distinct from a job name the scanner never
-#: promised to reject).
+#: `_Ids` key: a catalog job's own name (`str`) or a pseudo-source's namespaced key (a
+#: `(str, str)` tuple, `_pseudo_key`). A `str` never equals a 2-tuple, so the key spaces
+#: cannot collide whatever characters a job name holds (DL-175).
 IdKey = str | tuple[str, str]
 
 
@@ -136,11 +107,9 @@ class _Ids:
 
 
 def _pseudo_key(name: str) -> IdKey:
-    """`_Ids` lookup key for a pseudo-source node, namespaced apart from a
-    real catalog job's own key (a plain `str`) by TYPE, not by content. A
-    cross-instance producer's display form (`name^INST`) can be spelled
-    exactly like a local job (DL-162a); without this, the two would fold
-    onto ONE Mermaid vertex id (DL-175, the S-EDGE class)."""
+    """`_Ids` key for a pseudo-source, namespaced by type from a job's own key (DL-175).
+
+    A cross-instance display form (`name^INST`) can spell like a local job (DL-162a)."""
     return ("pseudo", name)
 
 
@@ -160,16 +129,11 @@ def edge_label(edge: DerivedEdge) -> str:
 
 # ------------------------------------------------------------ node display facts
 #
-# Per-node display facts (DL-35), read straight off IR-F by whichever emitter
-# needs them: IR-G used to carry a verbatim copy (DerivedGraph.node_meta),
-# which made the analysis layer own display needs it derives nothing for
-# (DL-73). Kind is JobIR.job_type verbatim; detail is the command for CMD
-# jobs and the watched path for FW jobs; the schedule digest covers the
-# TRIGGER fields only -- derive._TRIGGER_FIELDS, i.e. run_window excluded as
-# a gate (SEM-33) and must_* excluded as alarms (SEM-34).
-#
-# job_kind/job_schedule/job_detail are PUBLIC like report_content and
-# edge_label (DL-72): the three emitters share them.
+# Display facts (DL-35) are read straight off IR-F by whichever emitter needs them (DL-73).
+# Kind is JobIR.job_type; detail is the command for CMD jobs and the watched path for FW
+# jobs; the schedule digest covers derive._TRIGGER_FIELDS only (SEM-33, SEM-34).
+# job_kind, job_schedule and job_detail are public like report_content and edge_label
+# (DL-72): the three emitters share them.
 
 
 def _schedule_digest(schedule: ScheduleBlock) -> str:
@@ -191,8 +155,7 @@ def _schedule_digest(schedule: ScheduleBlock) -> str:
 
 
 def job_kind(job: JobIR | None) -> str | None:
-    """'CMD' | 'BOX' | 'FW' + extensible, as JobIR.job_type. None = the name
-    is not a catalog job (a pseudo-source: global, external, undefined)."""
+    """The job type, or None when the name is not a catalog job (a pseudo-source)."""
     return job.job_type if job is not None else None
 
 
@@ -211,8 +174,7 @@ def job_detail(job: JobIR | None) -> str | None:
 
 
 def _anchors(tree: BoxTree, threshold: int) -> tuple[dict[str, str], set[str]]:
-    """(anchor map, collapsed boxes). anchor[name] == name for everything
-    rendered; members (transitive) of a collapsed box anchor to that box."""
+    """(anchor map, collapsed boxes); members of a collapsed box anchor to that box."""
     anchor: dict[str, str] = {}
     collapsed: set[str] = set()
 
@@ -246,33 +208,14 @@ def _box_members(tree: BoxTree, box: str) -> set[str]:
 
 
 def _local_graph(catalog: CatalogIR, graph: DerivedGraph) -> DerivedGraph:
-    """`graph` with every edge's `src` resolved to its real local producer,
-    or -- when there is none -- REWRITTEN to a namespaced sentinel that can
-    never equal a catalog job's own name. `derive.components` is generic
-    (DL-162a) and its union reads `edge.src in nodes`, sound only when `src`
-    is known to be a real catalog job; `split_components`, `_incident_nodes`,
-    `_auto_direction` and `_component_title` all ask "does this catalog job
-    reach another", never "does this display string reach another", so they
-    take this resolved copy from their one caller (`report_content`) instead
-    of each re-deriving locality. `derive.local_producer` is the sound test
-    (DL-162a); a cross-instance producer's display form (`name^INST`) can be
-    spelled exactly like a local job.
+    """`graph` with each edge `src` resolved to its real local producer, else a sentinel.
 
-    REWRITE, not drop: `dst` stays whatever it already was (always a real
-    catalog job), so a job with only a foreign/global/undefined predecessor
-    stays correctly "touched" in `_incident_nodes` -- it is not wired to
-    another LOCAL job, but it is not unwired either. Only the SRC identity
-    is what must never collide (DL-175, the S-EDGE class). `_render_chart`
-    keeps the REAL graph: it still has to draw the foreign producer as its
-    own pseudo-source.
-
-    `DerivedEdge.src` is a `str` field, so this cannot use `_pseudo_key`'s
-    tuple trick (that one is for `_Ids`, an internal lookup structure with
-    no such constraint). Instead the sentinel is checked against THIS
-    catalog's actual, finite job-name set before use -- proven, not
-    assumed, distinct (DL-175, found unsound by its own adversarial review:
-    a string prefix is only as safe as an unstated assumption about the
-    JIL name alphabet)."""
+    `derive.components` reads `edge.src in nodes` and is sound only for a real catalog job
+    (DL-162a), and a cross-instance display form (`name^INST`) can spell like a local job.
+    `report_content` passes this copy to the helpers that ask whether a catalog job reaches
+    another. `dst` is untouched, so a job with only a foreign predecessor stays touched.
+    The sentinel is checked against this catalog's finite job-name set (DL-175).
+    `_render_chart` keeps the real graph to draw the foreign producer."""
     sentinel = "\x00pseudo"
     while sentinel in catalog.jobs:
         sentinel += "\x00"
@@ -284,19 +227,12 @@ def _local_graph(catalog: CatalogIR, graph: DerivedGraph) -> DerivedGraph:
 
 
 def split_components(graph: DerivedGraph) -> list[list[str]]:
-    """Connected components over dependency edges between catalog jobs plus
-    box co-membership; mutex and pseudo-sources do NOT connect (DL-35).
-    Members in graph.nodes (catalog) order; components ordered by descending
-    size, ties by first member's catalog position.
+    """Connected components over dependency edges plus box co-membership (DL-35).
 
-    Generic over `graph.edges` -- no catalog, no locality resolution (DL-
-    162a): a caller wanting IN-CATALOG-ONLY connectivity (its one production
-    caller, `report_content`) passes a `_local_graph`-resolved copy, else a
-    foreign display form colliding with a local job's own spelling would
-    union two unrelated jobs (DL-175). Not a precondition this function
-    enforces or can check -- callers testing raw union mechanics over a
-    plain graph (this module's own tests) are exercising a different,
-    equally legitimate question."""
+    Mutex and pseudo-sources do not connect. Members follow graph.nodes order; components
+    sort by descending size, then first member's catalog position. Generic over
+    `graph.edges` (DL-162a): the production caller passes a `_local_graph` copy, else a
+    foreign display form spelling a local job would union unrelated jobs (DL-175)."""
     index = {name: i for i, name in enumerate(graph.nodes)}
     grouped = components(graph.nodes, graph.edges, bind_box_members=graph.box_tree)
     return sorted(grouped, key=lambda comp: (-len(comp), index[comp[0]]))
@@ -305,10 +241,7 @@ def split_components(graph: DerivedGraph) -> list[list[str]]:
 def _incident_nodes(graph: DerivedGraph) -> set[str]:
     """Catalog jobs touching any edge (either end) or any mutex group.
 
-    Same genericity as `split_components` (DL-175): `report_content` is the
-    caller that needs `edge.src` to never be a foreign display form
-    spelling a local job's own name, and it is the one that passes a
-    `_local_graph`-resolved graph to get that."""
+    Takes a `_local_graph` copy from `report_content` (DL-175)."""
     touched: set[str] = set()
     for edge in graph.edges:
         touched.add(edge.src)
@@ -323,13 +256,10 @@ def _is_standalone(comp: list[str], touched: set[str]) -> bool:
 
 
 def _component_title(comp: list[str], graph: DerivedGraph) -> str:
-    """Top-level box name if the component has one, else the first source
-    node; '(+n more)' when the name covers only part of the component.
+    """Top-level box name if the component has one, else the first source node.
 
-    Same genericity as `split_components` (DL-175): `e.src in comp_set`
-    below reads whatever `graph` it is given; `report_content` is the
-    caller that needs it locally-resolved and passes a `_local_graph`
-    copy."""
+    '(+n more)' marks a name that covers only part of the component. Takes a `_local_graph`
+    copy (DL-175)."""
     comp_set = set(comp)
     roots_in = [r for r in graph.box_tree.roots if r in comp_set]
     if roots_in:
@@ -363,13 +293,9 @@ def _common_prefix(comp: list[str]) -> str:
 
 
 def _auto_direction(comp: list[str], graph: DerivedGraph) -> Direction:
-    """TD when the component is wider than deep (BFS levels over local
-    job->job edges), else LR. Deterministic.
+    """TD when the component is wider than deep (BFS levels over local edges), else LR.
 
-    Same genericity as `split_components` (DL-175): `report_content` passes
-    a `_local_graph`-resolved graph so a foreign display form in `comp_set`
-    cannot manufacture a false succ edge; this function itself does not
-    enforce that."""
+    Takes a `_local_graph` copy so a foreign display form cannot add a false edge (DL-175)."""
     comp_set = set(comp)
     succs: dict[str, list[str]] = {n: [] for n in comp}
     has_in: set[str] = set()
@@ -399,14 +325,12 @@ def _auto_direction(comp: list[str], graph: DerivedGraph) -> Direction:
 def mutex_plan(
     graph: DerivedGraph, members: set[str] | None
 ) -> tuple[set[str], list[list[str]], list[tuple[str, str]]]:
-    """(self-locked nodes, complete cliques >=3, remaining pairs), filtered
-    to `members` when given. Cliques must be COMPLETE (all k(k-1)/2 pairs
-    stated) -- the hub encoding never claims an exclusion the JIL doesn't.
-    PUBLIC since DL-192: the explore page draws the same three shapes and
-    must decide completeness the same way, not with a second rule.
-    A member missing from the catalog (dangling n(), L001's finding) counts
-    as in scope wherever its partner is, like edge pseudo-sources (DL-35a).
-    Assumes derive's invariants: each pair sorted, groups deduped."""
+    """(self-locked nodes, complete cliques >=3, remaining pairs), filtered to `members`.
+
+    A clique must be complete (all k(k-1)/2 pairs stated), so the hub never claims an
+    exclusion the JIL does not (DL-35). Public so the explore page decides completeness
+    the same way (DL-192). A member missing from the catalog (L001) is in scope wherever its
+    partner is (DL-35a). Assumes each pair sorted and groups deduped, as derive gives them."""
     catalog = set(graph.nodes)
 
     def in_scope(name: str) -> bool:
@@ -455,19 +379,17 @@ def mutex_plan(
 # ---------------------------------------------------------------- chart render
 
 
-#: deliberate label-line budget: Mermaid auto-wraps HTML labels at ~200px and
-#: the wrapped text overflows stadium/trigger shapes (GitHub renderer), so the
-#: label owns its line breaks and forbids all others via no-break spaces
+#: Label-line budget: Mermaid wraps HTML labels at ~200px and the wrapped text overflows
+#: stadium shapes (GitHub renderer), so the label owns its breaks via no-break spaces.
 _SCHEDULE_LINE_BUDGET = 28
 
 _NBSP = "\N{NO-BREAK SPACE}"  # survives htmlLabels; degrades to a space in SVG text
 
 
 def _schedule_label_lines(digest: str) -> list[str]:
-    """Non-breaking label lines from a schedule digest: parts (times, days,
-    calendars, timezone) pack left-to-right under the budget, breaking only
-    at part boundaries. A single oversized part stays whole -- a wide node
-    beats a mid-token wrap."""
+    """Non-breaking label lines from a schedule digest, packed under the budget.
+
+    Lines break only at part boundaries; an oversized part stays whole."""
     fused = _esc(digest).replace("cal ", f"cal{_NBSP}").replace("excl ", f"excl{_NBSP}")
     lines: list[str] = []
     for part in fused.split(" "):
@@ -487,8 +409,7 @@ def _node_label(
     *,
     multiline: bool = True,
 ) -> str:
-    """multiline=False for subgraph titles: hosts render <br/> in titles
-    inconsistently (GitHub), so expanded boxes get a one-line separator."""
+    """The node label; multiline=False gives a one-line separator for subgraph titles."""
     sep = "<br/>" if multiline else " \N{MIDDLE DOT} "
     job = catalog.jobs.get(name)
     display = name[len(strip) :] if strip and name.startswith(strip) else name
@@ -514,9 +435,7 @@ def _render_chart(
     direction: Direction,
     strip_prefix: str = "",
 ) -> str:
-    """One Mermaid flowchart body: the whole graph (members=None) or one
-    component. Pseudo-sources and mutex render only where their consumers/
-    holders are."""
+    """One Mermaid flowchart body: the whole graph (members=None) or one component."""
     ids = _Ids()
     anchor, collapsed = _anchors(graph.box_tree, collapse_threshold)
     self_locked, cliques, mutex_pairs = mutex_plan(graph, members)
@@ -534,24 +453,16 @@ def _render_chart(
         return _node_label(name, catalog, strip_prefix, self_locked)
 
     def src_key(edge: DerivedEdge) -> IdKey:
-        """`_Ids` lookup key for this edge's SOURCE. A resolved local
-        producer keys off its own (target-resolved) name, matching its own
-        node's declaration; any other edge -- global, cross-instance,
-        undefined -- keys off the namespaced pseudo-source id instead, so a
-        foreign display form can never alias a local job spelled the same
-        way (DL-175, the S-EDGE class; DL-162a)."""
+        """`_Ids` key for this edge's source: a local producer's own name, else a pseudo key.
+
+        A foreign display form never aliases a local job spelled the same (DL-175, DL-162a)."""
         local = local_producer(edge, catalog)
         return target(local) if local is not None else _pseudo_key(edge.src)
 
     def node_key(name: str) -> IdKey:
-        """`_Ids` lookup key for a mutex pair/clique member: a real catalog
-        job (target-resolved, same as any other node) or a dangling n()
-        reference (L001's finding), which is declared as a pseudo-source
-        below and must be looked up with the SAME namespaced key it was
-        declared with -- `target(name)` alone would mint a second, never-
-        declared id for it (DL-175, found by adversarial review of this
-        entry: a dangling lock member rendered its link to a phantom
-        vertex)."""
+        """`_Ids` key for a mutex member: a catalog job, or a dangling n() (L001) as a pseudo.
+
+        It must match the key the declaration used (DL-175)."""
         return target(name) if name in graph.nodes else _pseudo_key(name)
 
     lines: list[str] = [f"flowchart {direction}"]
@@ -593,13 +504,8 @@ def _render_chart(
         if name not in box_nodes and graph.box_tree.parent.get(name) is None and in_scope(name):
             emit_node(name, "    ")
 
-    # pseudo-sources: globals, cross-instance producers, undefined locals.
-    # Classified off the edge's ATOM facts, never off `edge.src`'s shape
-    # (DL-175, the S-EDGE class): `local_producer` resolving means this is
-    # already a real node above, and a cross-instance atom means external
-    # regardless of whether its display form happens to spell a local job's
-    # name (DL-162a) -- the "^" shape stays rendering TEXT only, never the
-    # decider.
+    # pseudo-sources: globals, cross-instance producers, undefined locals. They are classified
+    # off the edge's atom, never off the shape of `edge.src` (DL-175, DL-162a).
     global_srcs: list[str] = []
     external_srcs: list[str] = []
     undefined_srcs: list[str] = []
@@ -618,10 +524,8 @@ def _render_chart(
             bucket.append(edge.src)
             lines.append(shape)
 
-    # dangling n() members (L001's finding) render like undefined producers.
-    # Always local vocabulary (the condition grammar bans "^" in n()), so no
-    # collision is possible here -- prefixed anyway, for one consistent id
-    # scheme across the whole "undefined" bucket (DL-175).
+    # dangling n() members (L001) render like undefined producers; the pseudo prefix keeps one
+    # id scheme across the bucket (DL-175).
     lock_members = [n for pair in mutex_pairs for n in pair]
     lock_members += [n for clique in cliques for n in clique]
     for name in lock_members:
@@ -672,17 +576,13 @@ def _render_chart(
         lines.append(f"    linkStyle {joined} {_REDESIGN_LINKSTYLE}")
 
     def class_line(cls: str, names: list[IdKey]) -> str | None:
-        # a pseudo-source key (a tuple) is never a box member, so it is
-        # always kept -- matching the plain-string check's own effect on a
-        # name that was never in `anchor` either.
+        # a pseudo-source key (a tuple) is never a box member, so it is always kept
         rendered = [ids(n) for n in names if isinstance(n, tuple) or visible(n) or n not in anchor]
         return f"    class {','.join(rendered)} {cls}" if rendered else None
 
-    # (class name, node names) -- one row per node kind; collapsed's names
-    # are sorted (deterministic order over a set), the others keep
-    # first-seen order from the loops above. The three pseudo-source rows
-    # carry raw display names, mapped through the SAME `_pseudo_key` the
-    # declaration loops above keyed their `ids()` calls with (DL-175).
+    # (class name, node names), one row per node kind; collapsed names are sorted, the others
+    # keep first-seen order. Pseudo-source rows map through the `_pseudo_key` the declarations
+    # used (DL-175).
     style_rows: list[tuple[str, list[IdKey]]] = [
         ("trigger", [n for n in trigger_nodes if visible(n)]),
         ("globalvar", [_pseudo_key(n) for n in global_srcs]),
@@ -725,14 +625,11 @@ def to_mermaid(
 
 # ------------------------------------------------------------- report content
 #
-# The legend/prose/rows split exists so the Markdown report and the HTML page
-# (viz_html) format the SAME content -- parity drift between emitters is the
-# no-silent-loss failure mode. to_markdown owns every Markdown literal;
-# report_content owns every decision about what the report says.
-#
-# These names are PUBLIC on purpose (DL-72): report_content, ReportContent,
-# ChartSection, edge_label and the legend/locks prose are the contract the
-# three emitters (viz, viz_html, viz_explore) share, not private borrowings.
+# The legend/prose/rows split keeps the Markdown report and the HTML page on the same
+# content. to_markdown owns every Markdown literal; report_content owns every decision about
+# what the report says. These names are public (DL-72): report_content, ReportContent,
+# ChartSection, edge_label and the legend/locks prose are what the three emitters (viz,
+# viz_html, viz_explore) share.
 
 LEGEND_CHART = """\
 flowchart LR
@@ -792,8 +689,7 @@ class ChartSection(NamedTuple):
     chart: str  # _render_chart body, no frontmatter
 
 
-# Appendix A/B/C headers: one spelling, shared by to_markdown (joined into a
-# pipe row) and viz_html.to_html (passed straight to _table). DL-178u.
+# Appendix A/B/C headers: one spelling for to_markdown and viz_html.to_html (DL-178u).
 APPENDIX_A_HEADERS = ("job", "kind", "schedule", "command / watched file")
 APPENDIX_B_HEADERS = ("producer", "consumer", "via", "lookback", "class", "row", "assumption")
 REDESIGN_FLAG_HEADERS = ("job", "row", "reason")
@@ -801,7 +697,7 @@ OR_SHAPE_HEADERS = ("job", "attr", "kind", "suggested lowering")
 
 
 class LockRow(NamedTuple):
-    """One Locks-table row: a mutex group and where it's charted."""
+    """One Locks-table row: a mutex group and where it is charted."""
 
     members: str  # joined with x
     kind: str
@@ -847,10 +743,10 @@ class OrShapeRow(NamedTuple):
 
 
 class ReportContent(NamedTuple):
-    """Everything the report says, before either emitter formats it. Rows
-    carry RAW strings; each emitter applies its own escaping. Appendix A/B/C
-    row tuples are computed once here (DL-178u), from the catalog/graph, so
-    both emitters render the same data instead of each re-deriving it."""
+    """Everything the report says, before either emitter formats it.
+
+    Rows carry raw strings; each emitter escapes its own. Appendix A/B/C rows are computed
+    once here so both emitters render the same data (DL-178u)."""
 
     summary: str
     sections: list[ChartSection]
@@ -871,9 +767,9 @@ def report_content(
     direction: Direction | Literal["auto"],
     include_singletons: bool,
 ) -> ReportContent:
-    local_graph = _local_graph(catalog, graph)  # DL-175: connectivity/title
-    # passes below ask "does this catalog job reach another"; _render_chart
-    # keeps the REAL `graph` -- it still draws a foreign producer's node.
+    # connectivity and titles ask whether a catalog job reaches another (DL-175);
+    # _render_chart keeps the real graph to draw a foreign producer's node
+    local_graph = _local_graph(catalog, graph)
     comps = split_components(local_graph)
     touched = _incident_nodes(local_graph)
     standalone = [comp[0] for comp in comps if _is_standalone(comp, touched)]
@@ -973,26 +869,22 @@ def report_content(
 
 
 def _cell(text: str | None) -> str:
-    """Markdown table cell: escape pipes and newlines (never truncate --
-    assumptions/reasons appear nowhere else in the report)."""
+    """Markdown table cell: escape pipes and newlines; never truncates, since assumptions
+    and reasons appear nowhere else."""
     if text is None:
         return ""
     return text.replace("|", "\\|").replace("\n", " ")
 
 
 def truncate_cell(text: str) -> str:
-    """60-char ellipsis for a command/path cell: full text is IR-F's, not
-    the report's, responsibility. Shared by `_code_cell` (markdown) and
-    `viz_html._code` (HTML), so the two emitters cut at the same place
-    (DL-178h)."""
+    """60-char ellipsis for a command/path cell; shared with `viz_html._code` (DL-178h)."""
     if len(text) > 60:
         return text[:59] + "\N{HORIZONTAL ELLIPSIS}"
     return text
 
 
 def _code_cell(text: str | None) -> str:
-    """Command/path cell: code span, truncated -- full text is IR-F's, not
-    the report's, responsibility."""
+    """Command/path cell: a truncated code span."""
     if not text:
         return ""
     flat = truncate_cell(_cell(text.replace("`", "'")))
@@ -1020,9 +912,7 @@ def to_markdown(
     elk: bool = False,
     fixed_scale: bool = False,
 ) -> str:
-    """Full Markdown report: summary, legend, one chart per component,
-    shared-locks section, appendices A (standalone jobs) / B (non-exact
-    edges) / C (redesign flags, OR shapes, cycles)."""
+    """Full Markdown report: summary, legend, charts, locks, appendices A, B and C."""
     if graph is None:
         graph = derive_graph(catalog)
     content = report_content(

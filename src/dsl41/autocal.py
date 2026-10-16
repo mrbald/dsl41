@@ -1,22 +1,18 @@
 """Extended-calendar rule interpreter (DL-57).
 
-Pure functions from the opaque CalendarIR/CycleIR carry (DL-36) to day
-sets, implementing the SEM-36..39 doc-freeze: candidate generation from
-the date-condition keyword grammar (SEM-37), then the disposition
-pipeline (SEM-38: category filters, N one-shot / W-P iterating
-replacements, uniform blind `adjust`; a specified holiday action governs
-holcal dates outright -- Q8a resolved, DL-58). The compiler still never
-expands rules -- the runner's Scheduler and preflight are the consumers,
-and autocal remains the reference implementation this one is diffed
-against once a live instance exists (Q8c/Q8d residue).
+Pure functions from the opaque CalendarIR/CycleIR carry (DL-36) to day sets, implementing
+the SEM-36..39 doc-freeze: candidate generation from the date-condition keyword grammar
+(SEM-37), then the disposition pipeline (SEM-38: category filters, N one-shot and W/P
+iterating replacements, uniform blind `adjust`; a specified holiday action governs holcal
+dates outright, Q8a, DL-58). The compiler never expands rules; the runner's Scheduler and
+preflight consume this module, which is the reference implementation to diff against a live
+instance (Q8c/Q8d).
 
-Every undocumented COMPOSITION corner is a pinned deterministic default
-carrying a `# PENDING: Q8x` marker (DL-59: the scheduler must schedule an
-ordinary estate; refusing open corners blocked whole runs). CalendarRuleError
-is reserved for what genuinely cannot be interpreted: unknown tokens,
-doc-defective tokens (vendor's own text is garbled -- no sane default
-exists), missing holcal/cyccal dependencies, and degenerate shapes (a
-walk with nowhere to land). Never a silent guess either way.
+Every undocumented composition corner is a pinned deterministic default carrying a
+`# PENDING: Q8x` marker (DL-59: the scheduler must schedule an ordinary estate).
+CalendarRuleError is reserved for what cannot be interpreted: unknown tokens, doc-defective
+tokens (the vendor text is garbled, so no default exists), missing holcal/cyccal
+dependencies, and degenerate shapes (a walk with nowhere to land).
 """
 
 from __future__ import annotations
@@ -43,51 +39,44 @@ __all__ = [
 
 
 class CalendarRuleError(ValueError):
-    """A calendar definition the interpreter refuses: unknown or
-    doc-defective tokens, missing holcal/cyccal dependencies, or a
-    degenerate shape (a walk with nowhere to land). The message names
-    the calendar. Open COMPOSITION corners never refuse -- they run on
-    pinned defaults (DL-59)."""
+    """A calendar definition the interpreter refuses; the message names the calendar.
+
+    Causes: unknown or doc-defective tokens, missing holcal/cyccal dependencies, a degenerate
+    shape. Open composition corners never refuse; they run on pinned defaults (DL-59)."""
 
 
-#: W/P walks and windowed generation share this reach: a year of walking
-#: (366) plus the maximum |adjust| (9) plus slack. A walk that travels
-#: further has no valid day within a year -- degenerate, refused.
+#: W/P walks and windowed generation share this reach: a year of walking (366) plus the
+#: maximum |adjust| (9) plus slack. A walk that goes further has no valid day: refused.
 _WALK_CAP = 366
 _MARGIN = 400
 
-#: Dormancy scan ceiling for unbounded rule calendars: beyond this the
-#: calendar is treated as generating nothing (a leap-day-plus-weekday
-#: conjunction can legally gap ~40 years; 60 covers it with slack).
+#: Dormancy scan ceiling for unbounded rule calendars: beyond it the calendar generates
+#: nothing (a leap-day-plus-weekday conjunction can gap ~40 years).
 _SCAN_YEARS = 60
 
 _DAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 _DAY_CODES2 = ("mo", "tu", "we", "th", "fr", "sa", "su")
 _MONTH_NAMES = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
 
-#: `compile_calendar`'s attribute allow-list (SEM-36), lifted from a local
-#: so the simulation coverage register derives its calendar surface from the
-#: code object rather than from a second copy of the list (DL-209).
+#: `compile_calendar`'s attribute allow-list (SEM-36); the simulation coverage register
+#: derives its calendar surface from it (DL-209).
 CALENDAR_ATTRS = frozenset(
     {"description", "workday", "non_workday", "holiday", "holcal", "cyccal", "adjust"}
 )
 
-#: Doc-defective tokens (SEM-37): WORKDXnn's text contradicts its
-#: month-scoped siblings; the CWEK family's definitions are garbled in
-#: the vendor's own render. Refused outright, no default, no switch.
-#: Named per family (DL-209) so the register can carry a refusal row for each,
-#: and read directly by BOTH `_parse_token` and `classify_token`: a derived
-#: alternation beside the table was a second spelling of one rule.
+#: Doc-defective tokens (SEM-37): WORKDXnn contradicts its month-scoped siblings and the CWEK
+#: family is garbled in the vendor's own text. Refused outright, no default, no switch.
+#: Named per family so the register carries a refusal row for each; `_parse_token` and
+#: `classify_token` both read the table (DL-209).
 _DEFECTIVE_FAMILIES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("workdx", re.compile(r"workdx\d+", re.ASCII)),
     ("cwek", re.compile(r"cwek(#(\d|l)|m\d|x\d)", re.ASCII)),
 )
 
 
-#: The shapes a standard-calendar date row can take (SEM-36, Q9/DL-60):
-#: the date alone, or the date plus a time tail in one of two spellings.
-#: (field count, colon count in the tail) -> (form name, strptime format).
-#: Lifted so the register derives the row-shape space (DL-209).
+#: The shapes a standard-calendar date row can take (SEM-36, Q9, DL-60): the date alone, or
+#: the date plus a time tail in one of two spellings. (field count, colon count in the tail)
+#: -> (form name, strptime format). The register derives the row-shape space from it (DL-209).
 _ROW_TIME_FORMS: tuple[tuple[str, int, int, str | None], ...] = (
     ("date", 1, 0, None),
     ("hh:mm", 2, 1, "%H:%M"),
@@ -96,7 +85,7 @@ _ROW_TIME_FORMS: tuple[tuple[str, int, int, str | None], ...] = (
 
 
 def _row_format(fields: int, colons: int) -> str | None:
-    """The strptime format for a row of this shape, or None for no shape."""
+    """The strptime format for a row of this shape, or None."""
     for _name, form_fields, form_colons, fmt in _ROW_TIME_FORMS:
         if form_fields == fields and form_colons == colons:
             return fmt
@@ -104,8 +93,7 @@ def _row_format(fields: int, colons: int) -> str | None:
 
 
 def classify_row(row: str) -> str | None:
-    """Which `_ROW_TIME_FORMS` shape this date row is written in, or None
-    when it is none of them (`standard_rows` refuses those)."""
+    """Which `_ROW_TIME_FORMS` shape this date row is written in, or None (refused)."""
     parts = row.split()
     tail_colons = parts[1].count(":") if len(parts) == 2 else 0
     for name, fields, colons, _fmt in _ROW_TIME_FORMS:
@@ -115,13 +103,11 @@ def classify_row(row: str) -> str | None:
 
 
 def standard_rows(cal: CalendarIR) -> dict[date, frozenset[tuple[int, int]]]:
-    """A standard calendar's date rows as day -> row (hour, minute) ticks.
-    Rows are `mm/dd/yyyy` with an optional HH:MM or HH:MM:SS tail -- the
-    observed export sample stamps `00:00:00` (Q9, DL-60); seconds beyond the
-    minute truncate (ticks are minute-grained). A bare row's tick is 00:00
-    (E11 resolved, DL-58: CA support worked examples -- the row time is the
-    vendor's firing time for a job with no start_times/start_mins of its
-    own). Raises CalendarRuleError naming the first bad row."""
+    """A standard calendar's date rows as day -> (hour, minute) ticks.
+
+    Rows are `mm/dd/yyyy` with an optional HH:MM or HH:MM:SS tail (Q9, DL-60); seconds
+    truncate. A bare row's tick is 00:00, the vendor's firing time for a job with no
+    start_times/start_mins (E11, DL-58). Raises CalendarRuleError naming the first bad row."""
     rows: dict[date, set[tuple[int, int]]] = {}
     for row in cal.dates:
         parts = row.split()
@@ -147,8 +133,7 @@ def standard_rows(cal: CalendarIR) -> dict[date, frozenset[tuple[int, int]]]:
 
 
 def standard_days(cal: CalendarIR) -> frozenset[date]:
-    """A standard calendar's date rows as a day set -- the membership view
-    of standard_rows() for exclusion and day-eligibility checks."""
+    """A standard calendar's date rows as a day set, for exclusion and eligibility checks."""
     return frozenset(standard_rows(cal))
 
 
@@ -162,8 +147,7 @@ class _Ctx:
     workdays: frozenset[int]  # date.weekday() values
     holidays: frozenset[date]
     periods: tuple[tuple[date, date], ...]
-    #: the `wekr-first-week` semantic switch (DL-259): where week 1 of a
-    #: WEKR token's year starts
+    #: the `wekr-first-week` switch (DL-259): where week 1 of a WEKR token's year starts
     wekr_first_week: WekrFirstWeek
 
 
@@ -196,7 +180,7 @@ def _ord_in(cal: str, tok: str, text: str, lo: int, hi: int) -> int:
 
 
 def _nth_of(seq: list[date], n: int, *, back: bool) -> date | None:
-    """1-based nth (back: 1 = last, per the vendor's 'M' convention)."""
+    """1-based nth (back: 1 = last, the vendor's 'M' convention)."""
     idx = len(seq) - n if back else n - 1
     return seq[idx] if 0 <= idx < len(seq) else None
 
@@ -226,13 +210,12 @@ def _week_number(day: date, anchor_wd: int | None = None) -> int:
 
 
 def _wekr_week(day: date, anchor_wd: int, first_week: WekrFirstWeek) -> int:
-    """`day`'s week of its own year for a WEKR token anchored on weekday
-    `anchor_wd` (SEM-37), or 0 for a day before week 1. Every week starts on
-    the anchor day. `first-full`: week 1 starts on the first anchor day on
-    or after January 1, and the days before it are in no week. `partial`:
-    week 1 runs from January 1 to the day before that anchor day. When
-    January 1 is the anchor day the two agree. A week that runs past
-    December 31 ends there: its January days count in the next year."""
+    """`day`'s week of its own year for a WEKR token anchored on weekday `anchor_wd` (SEM-37).
+
+    0 is a day before week 1. `first-full`: week 1 starts on the first anchor day on or after
+    January 1 and earlier days are in no week. `partial`: week 1 runs from January 1 to the
+    day before that anchor day. A week past December 31 ends there; its January days count
+    in the next year."""
     jan1 = date(day.year, 1, 1)
     number = (day - _week_start(jan1, anchor_wd)).days // 7 + 1
     if first_week == "first-full" and jan1.weekday() != anchor_wd:
@@ -252,12 +235,11 @@ def _period_of(day: date, ctx: _Ctx) -> tuple[int, date, date] | None:
 
 
 def _period_chunk(day: date, ctx: _Ctx) -> tuple[int, int] | None:
-    """(week-of-period, last-week-of-period): consecutive 7-day chunks from
-    each period's first day, the last chunk possibly partial. Q8e RESOLVED
-    (DL-58): a Broadcom worked example reads CWEEK#01|CWEEK#02 over a
-    quarterly cycle as "the first 14 days in every quarter" -- chunks
-    anchor to the period start, not to calendar weeks. ([?] the ragged
-    last chunk is the arithmetic consequence, not separately worked.)"""
+    """(week-of-period, last-week-of-period): 7-day chunks from each period's first day.
+
+    The last chunk may be partial. Chunks anchor to the period start, not to calendar weeks:
+    a Broadcom example reads CWEEK#01|CWEEK#02 over a quarterly cycle as "the first 14 days
+    in every quarter" (Q8e, DL-58)."""
     hit = _period_of(day, ctx)
     if hit is None:
         return None
@@ -276,24 +258,20 @@ def _period_matching(day: date, ctx: _Ctx, keep: Callable[[date], bool]) -> list
 
 
 def _ordinal(cal: str, raw: str, letter: str, digits: str, *, lo: int, hi: int) -> tuple[int, bool]:
-    """Decode one `(#|m|x)(\\d+|l)`-shaped ordinal suffix (SEM-37): `letter`
-    is the family's back/exclusion marker character, `digits` its
-    ordinal-or-`l` body. `l` ("last", extended uniformly across families by
-    Q9/DL-60) maps to n=1 with back forced True -- the ONE encoding this
-    collapses two into. `_nth_of(seq, n, back=back)` then reads the last
-    element the same way an ordinary from-end count would, so no family
-    needs its own `seq[-1]` special case. `m` also forces back (the
-    vendor's own from-end marker)."""
+    """Decode one `(#|m|x)(\\d+|l)` ordinal suffix (SEM-37) to (n, back).
+
+    `letter` is the family's back/exclusion marker, `digits` the ordinal or `l`. `l` ("last",
+    extended to all families, Q9, DL-60) maps to n=1 with back True, so `_nth_of` reads it
+    like any from-end count. `m` also forces back."""
     last = digits == "l"
     n = 1 if last else _ord_in(cal, raw, digits, lo, hi)
     back = letter == "m" or last
     return n, back
 
 
-#: The rule-expression alphabet, lifted so the coverage register can derive
-#: the operator surface from it (DL-209). `{}` group exactly like `()` -- the
-#: observed export sample writes braces ({MNTHD#7} | {MNTHD#21}) where
-#: TechDocs shows parens; accepted as synonyms (Q9, DL-60).
+#: The rule-expression alphabet; the coverage register derives the operator surface from it
+#: (DL-209). `{}` group like `()`: the observed export writes braces where TechDocs shows
+#: parens (Q9, DL-60).
 _GROUP_CHARS: dict[str, str] = {"(": "(", ")": ")", "{": "(", "}": ")"}
 #: `&`/`|` and their word synonyms (PENDING: Q8d), to the AST node kind.
 _BINARY_OPS: dict[str, Literal["and", "or"]] = {"&": "and", "|": "or", "and": "and", "or": "or"}
@@ -316,17 +294,13 @@ def _weekday_keyword(weekday: int) -> _Pred:
     return lambda d, c: d.weekday() == weekday
 
 
-#: SEM-37's bare keywords: body -> (day predicate, cycle_scoped). Lifted from
-#: `_parse_token`'s branch chain so the token inventory is a code object the
-#: coverage register derives its calendar surface from (DL-209). The month and
-#: day names are built from the tuples above; a keyword and a family pattern
-#: never match the same body, so testing the whole table before the family
-#: loop reads exactly as the interleaved branch chain did.
+#: SEM-37's bare keywords: body -> (day predicate, cycle_scoped). The coverage register
+#: derives its calendar surface from the table (DL-209). A keyword and a family pattern never
+#: match the same body.
 _KEYWORDS: dict[str, tuple[_Pred, bool]] = {
     "daily": (lambda d, c: True, False),
-    # [V] auto-subtracts the holiday calendar when one is named (SEM-37
-    # quote, DL-244): c.holidays is empty with no holcal, so this is a
-    # no-op in that case.
+    # [V] auto-subtracts the holiday calendar (SEM-37 quote, DL-244); no holcal means an
+    # empty set
     "workdays": (lambda d, c: d.weekday() in c.workdays and d not in c.holidays, False),
     # [V] auto-subtracts the holiday calendar (SEM-37 quote)
     "weekdays": (lambda d, c: d.weekday() < 5 and d not in c.holidays, False),
@@ -348,18 +322,14 @@ _KEYWORDS: dict[str, tuple[_Pred, bool]] = {
 }
 
 
-#: One family builder: (calendar name, raw token, the family match, the
-#: X-prefix flag) -> the token. Ordinal families accept a literal L count =
-#: "last" (from-end 1): the observed export sample uses WORKD#L, and the
-#: CWRK/Cddd families already documented the form -- extended uniformly
-#: (Q9, DL-60).
+#: One family builder: (calendar name, raw token, the family match, the X-prefix flag) -> the
+#: token. Ordinal families accept a literal L as "last" (from-end 1), as the observed export
+#: uses WORKD#L (Q9, DL-60).
 _Builder = Callable[[str, str, "re.Match[str]", bool], _Token]
 
 
 def _mk(base: _Pred, *, excl: bool, cycle: bool = False) -> _Token:
-    """`excl` has NO default on purpose: the pre-table code closed over the
-    X-prefix flag, so a builder could not forget it. Required here restores
-    that -- a defaulted False would silently drop the exclusion."""
+    """`excl` has no default so a builder cannot forget the X-prefix flag."""
     return _Token(base=base, exclusive=excl, cycle_scoped=cycle)
 
 
@@ -379,8 +349,8 @@ def _b_weekd(cal: str, raw: str, m: re.Match[str], exclusive: bool) -> _Token:
 
 
 def _wekr_anchor(cal: str, raw: str, text: str) -> int:
-    """A WEKR anchor as a `date.weekday()` value. 12.x spells it as a day
-    name; 24.2 as a digit, 1 = Monday through 7 = Sunday (SEM-37)."""
+    """A WEKR anchor as a `date.weekday()` value: a day name in 12.x, a digit 1-7 in 24.2
+    (SEM-37)."""
     if text in _DAY_NAMES:
         return _DAY_NAMES.index(text)
     number = int(text)
@@ -390,9 +360,10 @@ def _wekr_anchor(cal: str, raw: str, text: str) -> int:
 
 
 def _b_wekr(cal: str, raw: str, m: re.Match[str], exclusive: bool) -> _Token:
-    """The nnth week of the year, weeks starting on the anchor day (SEM-37):
-    `#` counts from week 1, `M` back from the week holding December 31, and
-    `X` excludes the week. Week 1 follows the `wekr-first-week` switch."""
+    """The nth week of the year, weeks starting on the anchor day (SEM-37).
+
+    `#` counts from week 1, `M` back from the week holding December 31, `X` excludes. Week 1
+    follows the `wekr-first-week` switch."""
     anchor = _wekr_anchor(cal, raw, m.group(1))
     n, back = _ordinal(cal, raw, m.group(2), m.group(3), lo=1, hi=53)
 
@@ -489,8 +460,7 @@ def _b_cweek_parity(cal: str, raw: str, m: re.Match[str], exclusive: bool) -> _T
 
 
 def _b_cweek(cal: str, raw: str, m: re.Match[str], exclusive: bool) -> _Token:
-    # no literal 'l' here -- `cweek#([eol])` above owns that spelling for
-    # this family; _ordinal's `last` branch is simply never taken
+    # no literal 'l' here: `cweek#([eol])` owns that spelling for this family
     n, back = _ordinal(cal, raw, m.group(1), m.group(2), lo=1, hi=53)
 
     def cweek(d: date, c: _Ctx) -> bool:
@@ -530,9 +500,8 @@ def _b_cddd(cal: str, raw: str, m: re.Match[str], exclusive: bool) -> _Token:
     return _mk(cddd, cycle=True, excl=exclusive)
 
 
-#: SEM-37's regex token families, in the branch order `_parse_token` tested
-#: them in: name, pattern (matched against the X-stripped body), builder.
-#: Lifted for the same reason as `_KEYWORDS` (DL-209).
+#: SEM-37's regex token families as (name, pattern matched against the X-stripped body,
+#: builder); the register derives its surface from the table (DL-209).
 _FAMILIES: tuple[tuple[str, re.Pattern[str], _Builder], ...] = (
     ("workd", re.compile(r"workd([#m])(\d+|l)"), _b_workd),
     ("weekd", re.compile(r"weekd([#mx])(\d+|l)"), _b_weekd),
@@ -556,11 +525,11 @@ _FAMILIES: tuple[tuple[str, re.Pattern[str], _Builder], ...] = (
 
 
 def classify_token(raw: str) -> tuple[str, str] | None:
-    """Which table `_parse_token` would read this token from, without
-    building a predicate: ("keyword"|"family"|"defective", name), or None for
-    a token the inventory does not hold. The coverage register's calendar
-    detectors and its SEM-37 domain test read this (DL-209); the parser
-    itself stays the authority on what a token MEANS."""
+    """Which table `_parse_token` reads this token from, without building a predicate.
+
+    Returns ("keyword"|"family"|"defective", name), or None for a token outside the
+    inventory. The register's calendar detectors read it (DL-209); the parser stays the
+    authority on meaning."""
     tok = raw.lower()
     for name, pattern in _DEFECTIVE_FAMILIES:
         if pattern.fullmatch(tok):
@@ -575,9 +544,9 @@ def classify_token(raw: str) -> tuple[str, str] | None:
 
 
 def reads_family(cal: CalendarIR, family: str) -> bool:
-    """Whether any rule of `cal` holds a token of the SEM-37 family named
-    `family`, as `classify_token` reads it. Every word of the rules is
-    tested, so a rule the parser would refuse still answers."""
+    """Whether any word of `cal`'s rules is a token of the SEM-37 family `family`.
+
+    A rule the parser would refuse still answers."""
     return any(
         classify_token(word) == ("family", family)
         for line in cal.conditions
@@ -586,14 +555,14 @@ def reads_family(cal: CalendarIR, family: str) -> bool:
 
 
 def _parse_token(cal: str, raw: str) -> _Token:
-    """One keyword to its day predicate. Case-insensitive (SEM-37 [V]);
-    unknown and doc-defective tokens refuse loudly."""
+    """One keyword to its day predicate; case-insensitive (SEM-37 [V]). Unknown and
+    doc-defective tokens refuse."""
     tok = raw.lower()
     if any(pattern.fullmatch(tok) for _, pattern in _DEFECTIVE_FAMILIES):
         raise _err(cal, f"token {raw!r} is doc-defective (SEM-37); refused pending Q8/live")
 
-    # the X- prefix exclusion convention; infix X-forms match per family.
-    # No documented token starts with a non-exclusion 'x'.
+    # the X- prefix exclusion; infix X-forms match per family. No documented token starts
+    # with a non-exclusion 'x'.
     exclusive = tok.startswith(_EXCLUSION_PREFIX)
     body = tok[1:] if exclusive else tok
 
@@ -620,8 +589,7 @@ def _tokenize(cal: str, rule: str) -> list[str]:
         if ch.isspace():
             i += 1
         elif ch in _GROUP_CHARS or ch in _BINARY_OPS:
-            # braces normalize to parens here (see `_GROUP_CHARS`); `&`/`|`
-            # carry through as themselves
+            # braces normalize to parens (`_GROUP_CHARS`); `&` and `|` carry through
             out.append(_GROUP_CHARS.get(ch, ch))
             i += 1
         elif m := _TOKEN_RE.match(rule, i):
@@ -703,9 +671,8 @@ def _walk_tokens(node: _Node) -> list[_Token]:
 
 
 def _exclusion_base(node: _Node) -> _Node | None:
-    """A top-level rule that is nothing but an exclusion subtracts its
-    base set from the union of inclusive rules (PENDING: Q8d). Returns
-    the node whose *inclusive* reading is the set to subtract."""
+    """A top-level rule that is only an exclusion subtracts its base set from the union of
+    inclusive rules (PENDING: Q8d). Returns the node whose inclusive reading is that set."""
     if node[0] == "tok":
         tok: _Token = node[1]
         if tok.exclusive:
@@ -724,10 +691,9 @@ def _exclusion_base(node: _Node) -> _Node | None:
 _ACTIONS = frozenset("osnwp")
 _REPLACE = frozenset("nwp")  # the replacing action codes; O/S never move a date
 
-#: The two categories an action code can be stated for (SEM-36/38). Lifted
-#: so the register can carry a row per (category, code): N walks for a
-#: non-workday and advances exactly one day for a holiday, so the pair is
-#: the behaviour, not the letter (DL-209).
+#: The two categories an action code can be stated for (SEM-36, SEM-38). The register carries
+#: a row per (category, code): N walks for a non-workday and advances one day for a holiday
+#: (DL-209).
 ActionCategory = Literal["non_workday", "holiday"]
 _ACTION_CATEGORIES: tuple[ActionCategory, ...] = ("non_workday", "holiday")
 _HOLIDAY_CATEGORY: ActionCategory = "holiday"
@@ -735,9 +701,9 @@ _HOLIDAY_CATEGORY: ActionCategory = "holiday"
 
 @dataclass(frozen=True)
 class CompiledCalendar:
-    """An extended calendar ready to generate days. Pure and immutable;
-    `bound` is the last day the calendar can possibly produce (None =
-    unbounded rules)."""
+    """An extended calendar ready to generate days; pure and immutable.
+
+    `bound` is the last day it can produce (None = unbounded rules)."""
 
     name: str
     ctx: _Ctx
@@ -750,8 +716,8 @@ class CompiledCalendar:
 
     def days_between(self, lo: date, hi: date) -> frozenset[date]:
         """Final (post-disposition, post-adjust) days within [lo, hi].
-        Generation windows over [lo-margin, hi+margin] so replacements
-        that cross the edge are seen from both sides."""
+
+        Generation windows over [lo-margin, hi+margin] so edge-crossing replacements show."""
         if hi < lo:
             return frozenset()
         win_lo, win_hi = lo - timedelta(days=_MARGIN), hi + timedelta(days=_MARGIN)
@@ -766,8 +732,8 @@ class CompiledCalendar:
         return frozenset(d for d in final if lo <= d <= hi)
 
     def first_on_or_after(self, day: date) -> date | None:
-        """Earliest generated day at or after `day`, scanning to `bound`
-        or the dormancy ceiling. None = the calendar is exhausted/empty."""
+        """Earliest generated day at or after `day`, scanning to `bound` or the dormancy
+        ceiling; None when the calendar is exhausted or empty."""
         cap = self.bound or day + timedelta(days=_SCAN_YEARS * 366)
         cur = day
         while cur <= cap:
@@ -787,22 +753,16 @@ class CompiledCalendar:
 
     def _dispose(self, candidates: list[date]) -> set[date]:
         """SEM-38 pipeline: filter first, then single-shot replacement.
-        O-codes are category-restrictive filters; N/W/P replace category
-        members with a target day, and a replacement result is FINAL --
-        never re-processed by the other category (the holiday-N wording:
-        'applies even if the next day is a holiday or non-workday').
-        Q8a RESOLVED (DL-58): a specified holiday action governs every
-        holcal date OUTRIGHT -- the vendor treats holcal dates per the
-        non-workday action only 'when you do not specify an action at the
-        Holiday Action prompt', so the non_workday code (filter or
-        replacement) never sees a holiday once a holiday action exists.
-        ([?] Q8a residue: whether a replacement target re-enters the other
-        stage stays unverified -- kept single-shot per the holiday-N
-        wording.) DL-244: with NO holiday action, a holcal date is a
-        non-workday for the non_workday code's purposes regardless of its
-        weekday (Define Extended Calendars 12.1's either/or dispatch,
-        SEM-38): the effective predicate is weekday-non-workday OR holcal
-        member."""
+
+        O-codes are category filters; N/W/P replace category members with a target day, and a
+        replacement result is final, never re-processed by the other category ("applies even
+        if the next day is a holiday or non-workday"). A specified holiday action governs
+        every holcal date outright: the vendor applies the non-workday action to holcal dates
+        only "when you do not specify an action at the Holiday Action prompt" (Q8a, DL-58).
+        Whether a replacement target re-enters the other stage is unverified; it stays
+        single-shot. With no holiday action, a holcal date is a non-workday for the
+        non_workday code whatever its weekday (DL-244, SEM-38): the predicate is
+        weekday-non-workday OR holcal member."""
         out: set[date] = set()
         for day in candidates:
             if self.holiday is not None and day in self.ctx.holidays:
@@ -828,18 +788,17 @@ class CompiledCalendar:
         if code is None or code not in _REPLACE:  # pragma: no cover -- both callers test it first
             raise _err(self.name, f"internal: {category} code {code!r} is not a replacement")
         if code == "n" and category == _HOLIDAY_CATEGORY:
-            # [V] one-shot: 'Excludes the holiday and includes the next
-            # day. This applies even if the next day is a holiday or
-            # non-workday.'
+            # [V] one-shot: 'Excludes the holiday and includes the next day. This applies
+            # even if the next day is a holiday or non-workday.'
             return day + timedelta(days=1)
         if code == "n":
-            # [V] 'include the next workday that also meets all other
-            # criteria' -- pinned as the next non-holiday workday.
+            # [V] 'include the next workday that also meets all other criteria', pinned as
+            # the next non-holiday workday.
             # PENDING: Q8c -- the date-conditions are NOT re-checked
             return self._walk(day, 1, holiday_free=True, code=code, category=category)
         step = 1 if code == "w" else -1
-        # holiday W/P demand a NON-HOLIDAY workday ([V] worked examples);
-        # non_workday W/P say only 'work day'.
+        # holiday W/P demand a non-holiday workday ([V] worked examples); non_workday W/P
+        # say only 'work day'.
         # PENDING: Q8c -- no worked example; holiday-ness of the target
         # deliberately not re-checked
         return self._walk(
@@ -879,12 +838,10 @@ def _workday_codes(cal: str, text: str) -> frozenset[int]:
     return frozenset(days)
 
 
-#: The `workday:` serializations (SEM-36), in the order `_parse_workday`
-#: tested them: positional `{X|.}` x7 (Monday-first), the comma list of two-
-#: or three-letter day codes, and the observed `all` (Q9, DL-60). Lifted so
-#: the register derives the form space rather than naming three facets
-#: (DL-209). `codes` matches anything the first two did not: it is the
-#: fallthrough, and its own parse is what refuses an unknown day.
+#: The `workday:` serializations (SEM-36): positional `{X|.}` x7 (Monday-first), the comma
+#: list of two- or three-letter day codes, and the observed `all` (Q9, DL-60). The register
+#: derives the form space from it (DL-209). `codes` is the fallthrough; its parse refuses an
+#: unknown day.
 _WORKDAY_FORMS: tuple[
     tuple[str, Callable[[str], bool], Callable[[str, str], frozenset[int]]], ...
 ] = (
@@ -895,9 +852,7 @@ _WORKDAY_FORMS: tuple[
 
 
 def classify_workday(value: str) -> str:
-    """Which `_WORKDAY_FORMS` entry this `workday:` value is written in.
-    The register's detector reads this; `_parse_workday` reads the same
-    table for the value itself."""
+    """Which `_WORKDAY_FORMS` entry this `workday:` value is written in."""
     text = value.strip().lower()
     return next(name for name, matches, _build in _WORKDAY_FORMS if matches(text))
 
@@ -946,11 +901,11 @@ def compile_calendar(
     cal: CalendarIR, catalog: CatalogIR, semantics: SemanticSwitches | None = None
 ) -> CompiledCalendar:
     """Parse and validate one extended calendar against the loaded set.
-    Raises CalendarRuleError on anything the SEM-36..39 freeze genuinely
-    cannot interpret -- unknown tokens, defective tokens, missing
-    dependencies, degenerate walks. Open composition corners compile on
-    pinned defaults instead (Q8b/Q8d, DL-59). `semantics` are the period's
-    switches (DL-252); None reads the registry defaults."""
+
+    Raises CalendarRuleError on what the SEM-36..39 freeze cannot interpret: unknown or
+    defective tokens, missing dependencies, degenerate walks. Open composition corners
+    compile on pinned defaults (Q8b, Q8d, DL-59). `semantics` are the period's switches
+    (DL-252); None reads the registry defaults."""
     if cal.kind != "extended":
         raise CalendarRuleError(f"calendar {cal.name!r} is standard; use standard_days()")
     if "condition" in cal.attrs:  # pragma: no cover -- lowering never puts it in attrs
@@ -985,10 +940,8 @@ def compile_calendar(
             )
         holidays = standard_days(hol)
     if holiday is not None and holiday != "s" and not holcal_name:
-        # holiday S is a pass-through consuming no holiday set -- the
-        # observed export sample carries `holiday: S` with holcal empty
-        # (Q9, DL-60), against the 12.1 prompt-flow wording; O/N/W/P
-        # genuinely need the set (SEM-36)
+        # holiday S is a pass-through that consumes no holiday set (the observed export
+        # carries `holiday: S` with holcal empty, Q9, DL-60); O/N/W/P need the set (SEM-36)
         raise _err(cal.name, "a holiday action (other than S) requires holcal (SEM-36)")
 
     adjust_raw = cal.attrs.get("adjust", "").strip()
@@ -1001,10 +954,10 @@ def compile_calendar(
         if abs(adjust) > 9:
             raise _err(cal.name, f"adjust: {adjust} outside the documented -9..+9 (SEM-36)")
     # PENDING: Q8b -- nonzero adjust combined with an N/W/P replacement is
-    # undocumented. Pinned default (DL-59, deterministic over fail-closed):
-    # the SEM-38 pipeline order as-is -- disposition replaces first, then
-    # the uniform blind adjust shifts every survivor (replace-then-shift).
-    # The runbook's probe pair discriminates vendor truth if access appears.
+    # undocumented. Pinned default (DL-59, deterministic over fail-closed): the SEM-38
+    # pipeline order as-is, so disposition replaces first and the uniform blind adjust then
+    # shifts every survivor (replace-then-shift). The runbook's probe pair discriminates
+    # vendor truth if access appears.
 
     rules: list[str] = []
     for line in cal.conditions:
@@ -1019,17 +972,16 @@ def compile_calendar(
             exclude.append(base)
             continue
         # PENDING: Q8d -- a compound rule with NO inclusive leaf (e.g.
-        # `xtue|xwed`) is neither a recognized exclusion form nor a likely
-        # authorial intent. Pinned default (DL-59, deterministic over
-        # fail-closed): literal boolean evaluation as an include -- the
-        # same complement-in-AND algebra mixed rules already use -- even
-        # though that makes `xtue|xwed` near-universal.
+        # `xtue|xwed`) is neither a recognized exclusion form nor a likely authorial intent.
+        # Pinned default (DL-59, deterministic over fail-closed): literal boolean evaluation
+        # as an include, the same complement-in-AND algebra mixed rules use, even though that
+        # makes `xtue|xwed` near-universal.
         include.append(node)
         if not all(t.cycle_scoped for t in _walk_tokens(node)):
             cycle_scoped_only = False
     if not include:
-        # DAILY is the documented default; exclusion-only rule lists
-        # subtract from it rather than from nothing (PENDING: Q8d)
+        # DAILY is the documented default; exclusion-only rule lists subtract from it
+        # rather than from nothing (PENDING: Q8d)
         include.append(("tok", _Token(base=lambda d, c: True, exclusive=False, cycle_scoped=False)))
         cycle_scoped_only = False
 
@@ -1041,10 +993,8 @@ def compile_calendar(
             raise _err(cal.name, "cycle-scoped conditions require cyccal (SEM-36)")
         periods = _parse_periods(cal.name, unquote_jil_value(cyccal_name), catalog)
     elif cyccal_name:
-        # a named but unused cycle must still resolve, same as L018's own
-        # check (rule_l018, lint.py) -- both now key the lookup through
-        # ir.unquote_jil_value, so a quoted name resolves identically here
-        # and there (DL-178q; this was the divergent lenient _unquote before)
+        # a named but unused cycle must still resolve, as in L018 (rule_l018, lint.py); both
+        # key the lookup through ir.unquote_jil_value (DL-178q)
         periods = _parse_periods(cal.name, unquote_jil_value(cyccal_name), catalog)
 
     if (non_workday in ("w", "p") or holiday in ("w", "p")) and not workdays:
@@ -1071,18 +1021,18 @@ def compile_calendar(
     )
 
 
-#: An ordinal's leading zeros, after its `#`/`M`/`X` marker: `MNTHD#05` is
-#: `MNTHD#5` (SEM-37: zero padding is a spelling width).
+#: An ordinal's leading zeros after its `#`/`M`/`X` marker: `MNTHD#05` is `MNTHD#5` (SEM-37,
+#: zero padding is a spelling width).
 _ORDINAL_ZEROS = re.compile(r"([#mx])0+(\d)")
 #: A 24.2 numeric WEKR anchor, which `_wekr_anchor` reads as a day name.
 _WEKR_DIGIT = re.compile(r"wekr([1-7])(?=[#mx])")
 
 
 def _canonical_keyword(cal: str, lowered: str) -> str:
-    """One spelling per meaning for a keyword the parser accepts: ordinals
-    without padding, and a numeric WEKR anchor as its day name, so the
-    digit 1 and `mon`, and `#02` and `#2`, are one key. A token the parser refuses
-    keeps its spelling; `compile_calendar` refuses it loudly."""
+    """One spelling per meaning for a keyword the parser accepts.
+
+    Ordinals lose padding and a numeric WEKR anchor becomes its day name, so `#02` and `#2`
+    are one key. A refused token keeps its spelling; `compile_calendar` refuses it."""
     try:
         _parse_token(cal, lowered)
     except CalendarRuleError:
@@ -1096,22 +1046,15 @@ def semantic_key(
     catalog: CatalogIR | None = None,
     semantics: SemanticSwitches | None = None,
 ) -> tuple[Any, ...]:
-    """The extended-calendar surface this rule engine READS, canonicalized
-    with the SAME parsers that evaluate it -- for the DL-131 classifier,
-    whose calendar node must call two spellings of one rule set one value.
+    """The extended-calendar surface this engine reads, canonicalized with the same parsers.
 
-    One authority, exported: the classifier comparing raw attribute text
-    would refuse a live boundary over `MON|TUE` respelled `MON | TUE`, a
-    reordered day list, a re-cased action, or `adjust: 00` -- all of which
-    this engine derives identical dates from. Tolerant on purpose: a piece
-    these parsers refuse keeps its raw (collapsed, lowered) spelling as its
-    key -- the LOUD refusal is `compile_calendar`'s, at preflight, and a
-    classifier must not crash where the gate is elsewhere. Rules compare as
-    a SET of canonical token tuples (the fold is any-of and tokens
-    case-fold); `{}` reads as `()` and the word operators as their symbols,
-    exactly as `_tokenize`/`_parse_rule` do. `semantics` are the switches
-    the holiday-shielding reach below compiles under; a switch itself is a
-    classifier node of its own (DL-259)."""
+    The DL-131 classifier calls two spellings of one rule set one value; comparing raw
+    attribute text would refuse a live boundary over `MON | TUE`, a reordered day list, a
+    re-cased action or `adjust: 00`. Tolerant on purpose: a piece the parsers refuse keeps
+    its raw collapsed lowered spelling; `compile_calendar` refuses it at preflight. Rules
+    compare as a set of canonical token tuples; `{}` reads as `()` and word operators as
+    symbols. `semantics` are the switches the holiday-shielding reach compiles under; a
+    switch is a classifier node of its own (DL-259)."""
 
     def canonical_token(token: str) -> str:
         if token in "&|()":
@@ -1131,15 +1074,13 @@ def semantic_key(
                 except CalendarRuleError:
                     rules.add((" ".join(part.split()).lower(),))
         if not rules:
-            # `compile_calendar`'s own fallback: no rules means the DAILY
-            # include, so an omitted rule list and an explicit
-            # `condition: daily` are one calendar
+            # `compile_calendar`'s fallback: no rules means DAILY, so an omitted rule list
+            # and `condition: daily` are one calendar
             rules.add(("daily",))
         return tuple(sorted(rules))
 
     workday_raw = cal.attrs.get("workday", "").strip()
-    # `compile_calendar`'s own default: an omitted workday IS Monday-Friday,
-    # so spelling the default out is not a change
+    # an omitted workday is Monday-Friday, as in `compile_calendar`
     workday: Any = frozenset(range(5))
     if workday_raw:
         try:
@@ -1147,13 +1088,10 @@ def semantic_key(
         except CalendarRuleError:
             workday = workday_raw.lower()
 
-    # shielding REACH resolves through the holiday set itself, not the
-    # spelling of the reference: a holcal naming an empty calendar gives
-    # `holiday: S` nothing to keep, and the compiled dates are identical
-    # with or without it. An unresolvable reference (no catalog handed in,
-    # a missing or extended holcal) keeps the syntactic presence -- the
-    # refusal-safe direction; the loud verdict on the reference itself is
-    # `compile_calendar`'s.
+    # shielding reach resolves through the holiday set, not the spelling of the reference: a
+    # holcal naming an empty calendar gives `holiday: S` nothing to keep. An unresolvable
+    # reference (no catalog, a missing or extended holcal) keeps the syntactic presence, the
+    # refusal-safe direction; `compile_calendar` gives the verdict on the reference.
     holcal_raw = cal.attrs.get("holcal", "").strip()
     has_holcal = bool(holcal_raw)
     holidays: frozenset[date] | None = None  # None = unresolvable, be conservative
@@ -1177,39 +1115,27 @@ def semantic_key(
             return raw.lower()
         if parsed != "s":
             return parsed
-        # "s" is the keep-as-is pass-through, but the two keys differ in
-        # REACH. `non_workday: S` is always `_dispose`'s else-branch --
-        # identical to no action. `holiday: S` on a holiday KEEPS the day
-        # and `continue`s PAST the non_workday branch, so it is distinct
-        # exactly when there is something to shield FROM: a holcal to hit
-        # AND a non_workday action that would alter the day (o filters,
-        # n/w/p walk -- DL-58's shielding family). With either absent, the
-        # skipped branch was a no-op and S is no action at all.
+        # "s" is the keep-as-is pass-through, but the keys differ in reach.
+        # `non_workday: S` is `_dispose`'s else-branch, identical to no action. `holiday: S`
+        # on a holiday keeps the day and skips the non_workday branch, so it is distinct only
+        # with a holcal to hit and a non_workday action that would alter the day (o filters,
+        # n/w/p walk; DL-58). Otherwise the skipped branch was a no-op.
         return parsed if shields_something else None
 
     non_workday_action = action("non_workday")
 
     def action_touches_a_holiday() -> bool:
-        """Whether the non_workday action would ALTER any resolved holiday
-        that the rule set ADMITS -- the exact domain `holiday: S`'s skip
-        shields (`_dispose`). DL-244: with no holiday action, a holcal date
-        the rules admit is ALWAYS a non-workday for the non_workday code's
-        purposes, regardless of weekday -- `candidates` below is already
-        restricted to resolved holcal members, so that effective predicate
-        is unconditionally true for every one of them. "o" (restrict-to-
-        non-workday) therefore never drops a candidate -- it is always
-        indistinguishable from S-on-a-holiday, which also keeps the day
-        as-is -- and n/w/p (replace) always fires on one, so reach is just
-        whether the rule admits any candidate at all. The holiday set is
-        finite, so candidacy evaluates exactly, through the engine's own
-        compile. Unresolvable pieces (raw workday, unreadable holcal, an
-        uncompilable calendar, an unknown action spelling) answer True --
-        the refusal-safe direction. Conservative, not exact: a REPLACE
-        candidate's walk can land back on an already-included day (another
-        candidate's own replacement, or its own unmolested generation), so
-        this can call two calendars with equal compiled day sets
-        'different' -- a false carry never happens, only an accepted
-        false-refusal corner."""
+        """Whether the non_workday action would alter any resolved holiday the rules admit.
+
+        That is the domain `holiday: S` shields (`_dispose`). With no holiday action, an
+        admitted holcal date is always a non-workday for the non_workday code (DL-244), so
+        "o" never drops a candidate and n/w/p always fires on one: reach is whether the rules
+        admit any candidate. The holiday set is finite, so candidacy evaluates through the
+        engine's own compile. Unresolvable pieces (raw workday, unreadable holcal, an
+        uncompilable calendar, an unknown action spelling) answer True, the refusal-safe
+        direction. Conservative, not exact: a replacement walk can land on an already-included
+        day, so two calendars with equal day sets can read as different (an accepted
+        false-refusal corner, never a false carry)."""
         if holidays is None or not isinstance(workday, frozenset) or catalog is None:
             return True
         try:

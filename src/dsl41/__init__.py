@@ -1,8 +1,7 @@
 """dsl41: AutoSys->Stonebranch migration compiler.
 
-Module map (implementation order per CLAUDE.md; all ten compiler phases
-built, and all six phase-11 runner tiers 11a-11f with them -- the runner is
-twenty sibling modules, docs/runner-design.md ss14):
+Module map (implementation order per CLAUDE.md; the runner is twenty sibling modules,
+docs/runner-design.md ss14):
   ast_jil    - JIL statement scanner + AST + preserve/canonical renderers (docs/jil-statement-syntax.md)
   conditions - condition-expression parsing via grammars/condition.lark -> Cond models
   ir         - IR-F Pydantic models + AST->IR-F lowering (docs/ir-design.md ss3-4)
@@ -15,11 +14,9 @@ twenty sibling modules, docs/runner-design.md ss14):
                whole-graph chart alone as another (DL-70, DL-76)
   viz_explore - IR-G -> cytoscape.js elements for the interactive navigation
                page (DL-71)
-  oracle_state - the oracle's state and the vocabulary that moves it:
-               JobStatus/EventKind/Event/TraceEntry, the frozen JobRuntime
-               and GlobalRuntime rows, RuntimeState (the owner, its timer
-               heap and the input transaction) and OracleError. Depends on
-               nothing in the interpreter, which is the point (DL-91)
+  oracle_state - the oracle's state and the vocabulary that moves it: JobStatus, EventKind,
+               Event, TraceEntry, the frozen JobRuntime and GlobalRuntime rows, RuntimeState
+               and OracleError. It imports nothing from the interpreter (DL-91)
   oracle     - discrete-event AutoSys semantics interpreter (docs/ir-design.md ss7)
   equiv      - canonical form + equivalence tiers a/b/c (docs/ir-design.md ss6)
   backend_uc - UC twin model + edge classification + migration report +

@@ -1,5 +1,4 @@
-"""`python -m dsl41` (needed by `dsl41 serve`, ss11: textual-serve spawns
-`sys.executable -m dsl41 ui --socket <path>` as its per-session command)."""
+"""`python -m dsl41`; `dsl41 serve` (ss11) spawns each session as `-m dsl41 ui --socket <path>`."""
 
 from dsl41.cli import app
 
