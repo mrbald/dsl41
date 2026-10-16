@@ -107,6 +107,11 @@ active, or active again by a later entry, when it pops is discarded without erro
 belongs to its state. A chained event is an ordinary item and resolves by §3 and §10 like any
 event.
 
+A completion item carries the payload of the microstep that completed its state: for a simple
+state, the event that entered it, so its data is the data of the event that put it there; for a
+composite, the event that put its last region at rest. The completion's guards and actions read
+that payload. The item and its context (`Context.completing`) name the completing state.
+
 Completion events and chained items precede every pool event.
 
 ## 5. The step and the worklist
@@ -127,8 +132,8 @@ A macrostep is iterative on one executor worklist and never recursive.
    (depth-first). The target's completion transition is itself a chained item. It is placed
    behind the items this microstep reported, so a continuation runs only after the whole
    cascade it caused. Every chained item carries the ancestry of the microstep that produced
-   it; a completion item too. When the worklist is empty, the deferred release runs (§6);
-   then the next root item from the pool.
+   it; a completion item too, with the payload of that microstep's event (§4). When the
+   worklist is empty, the deferred release runs (§6); then the next root item from the pool.
 4. A dispatch while a macrostep is in flight raises `ReentrantDispatch`, in production too.
    Tests assert that the chain works and that the re-entrant call raises.
 5. Guards are pure. Actions change machine state and report intents. Each tier's durable
@@ -234,11 +239,14 @@ a moment, whose payload carries the step the oracle runs when it pops: `box rule
 `window pass`, `after inject`, `after leave` and `retry step`. Each is an internal row of the
 lifecycle that moves nothing. A loop whose gate reads state that an earlier step's cascade can
 change is a moment that sends its next item and then itself again; the gate is re-read at each pop.
-A row whose own write must follow its chained items targets a transient state: an admitting row
-targets `ADMITTED`, and the `starting` self-event moves it to STARTING, after a box's resets. The
-per-job start bound (DL-304) is `job.100`, guarded on the count of the job's own `start admitted`
-items in the item's ancestry. A readmission sends its extent without `start admitted`, so the bound
-does not count it. The cascade takes no Python frame per nested start, so it fits no recursion
+A row whose own write must follow its chained items targets a transient state. An admitted start
+enters `ADMITTED` from its `start admitted`, and a readmission from its own row. The state's entry
+action sends the units, the run's start and a box's resets; its completion moves the job to
+STARTING after their cascades and sends the rest of the start (DL-364). The per-job start bound
+(DL-304) is `job.100`, guarded on the count of the job's own `start admitted` items in the item's
+ancestry. The completion descends from `start admitted`, so every later step of the start counts
+it. A readmission enters `ADMITTED` without `start admitted`, so the bound does not count it. The
+cascade takes no Python frame per nested start, so it fits no recursion
 limit to the job count: only a fact's own recursion, such as a deep condition, needs the stack, and
 each construction raises the process's limit to a fixed 3,000, so the deepest condition the
 lowering accepts evaluates. A cascade that does not end takes items instead. The oracle's hook
@@ -330,16 +338,20 @@ START_REFUSED line. An attempt whose run's settlement is owed,
 because the box rules held it back, takes the internal row `job.401` past the bound (DL-340): its
 action sends the ended run's `leave STARTING or RUNNING`, then the same attempt again, which reads
 the admission the settlement left (DL-349). An attempt whose window or leave already decided it
-carries that decision, and is not decided again. Each admitting row (`job.102`, `job.104`,
-`job.124`) targets the transient state `ADMITTED` and sends `start admitted`. Each row of
-`start admitted` is guarded on one verdict its payload carries. The rows for an admission
-(`job.402`) and for a start on held units (`job.426`) send the start's extent: the units it
-reserves or takes over, the arm it consumes, the run's start, a box's resets, then `starting`,
-which moves the job to STARTING (`job.403`), and `started`, the RUNNING move, guarded on the run it
-carries. The bypass (`job.101`) and the queue (`job.103`) send `start admitted` too; the rows of
+carries that decision, and is not decided again. Each admitting row (`job.101` to `job.104`,
+`job.124`) sends `start admitted`; the admission's and the start on held units' rows (`job.102`,
+`job.104`, `job.124`) are internal. Each row of `start admitted` is guarded on one verdict its
+payload carries. The rows for an admission (`job.402`) and for a start on held units (`job.426`)
+enter the transient state `ADMITTED`. Its entry action sends the units the start reserves or
+takes over, the run's start, which consumes the arm, and a box's resets. Its completion carries
+the payload of `start admitted` (§4) and is guarded on its kind: `job.427` moves the job to
+STARTING and sends the move's box rules, settlement and wakes, a box's reset notices, then
+`started`, the RUNNING move, guarded on the run it carries, a freed excess's scan and the load
+mark. The bypass (`job.101`) and the queue (`job.103`) are status moves of their own; the rows of
 `start admitted` for them (`job.424`, `job.425`) send the bypass's start and move and the queue's
-move. Those moves are the bound's descendants. A readmission (`job.108`) sends the same extent
-itself, without `start admitted`: it is not a start the bound counts. An input that raises commits
+move. Those moves are the bound's descendants. A readmission (`job.108`) enters `ADMITTED` itself,
+without `start admitted`: it is not a start the bound counts. Its completion (`job.428`) carries
+the readmission's payload and sends the same move and `started`. An input that raises commits
 none of its attempt half's writes: a control input that raises is refused and commits nothing, and
 an engine-made one is quarantined with its rejection logged and its time half committed; the engine
 stops only when the time half itself raises. The golden digests replay such an input the same way:
@@ -609,8 +621,8 @@ a live status never stands on held units (DL-353).
 ## 17. Names
 
 - "Deferred event" is the UML term, used for the executor.
-- A transient state is left by a completion transition, or by a self-event the row sends after its
-  chained items (§8).
+- A transient state is left by its completion transition, whose payload is the completing
+  microstep's (§4, §8).
 - A wait state awaits a reply or a time event (§9). Deferral is optional.
 - SEM-33's `run_window` deferral is a "window-postponed start" in new prose. Its identifiers,
   its cause strings and the `RUN_WINDOW_DEFER` trace line stay, because they are the trace

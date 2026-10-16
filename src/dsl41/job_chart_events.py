@@ -55,9 +55,6 @@ BOX_ENDS: Final = "box ends FAILURE or TERMINATED"
 BOX_OFF_NOEXEC: Final = "OFF_NOEXEC on its box"
 BOX_ON_NOEXEC: Final = "ON_NOEXEC on its box"
 PERIOD_OPENING: Final = "first input of a period"
-#: An admitted start leaves the transient `ADMITTED` for STARTING once its units, arm and a
-#: box's resets are written (DL-350).
-STARTING: Final = "starting"
 
 #: The moments of a cascade (DL-350): self-events whose payload is the tier's step
 #: (`Moment`). A move's box rules, its settlement and its wakes.
@@ -387,7 +384,8 @@ class Admitted(Payload):
     (`verdict`), and the units an admission or a start on held units reserves or takes over
     (`admission`); a bypass and a queue reserve nothing. `move` is the tier's record of a
     bypass's or a queue's status move, whose box rules and wakes the extent sends; `attempt`
-    is the start's facts, which the extent's writes name (DL-350)."""
+    is the start's facts, which the extent's writes name (DL-350). It is ADMITTED's data: the
+    state's entry and its completion read it (DL-364)."""
 
     verdict: Admitting
     admission: Admission = Admission()

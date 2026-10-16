@@ -68,9 +68,7 @@ stateDiagram-v2
     state c0 <<choice>>
     state c1 <<choice>>
     s3 --> s9 : job.101 start [start_bypasses] / extent_bypass
-    s3 --> s0 : job.102 start [start_admits_job] / extent_admit
     s3 --> s6 : job.103 start [start_queues] / extent_queue
-    s1 --> s0 : job.104 start [start_on_held] / extent_on_held
     s8 --> s7 : job.105 started [started_job] / moved
     s10 --> s4 : job.106 start [start_skips] / moved
     s10 --> s4 : job.107 start [start_skips_member] / moved
@@ -90,7 +88,6 @@ stateDiagram-v2
     s1 --> s4 : job.121 flag moved [noexec_settles_job] / injected
     s10 --> s4 : job.122 box start / batched
     s6 --> s4 : job.123 box set INACTIVE / batched
-    s3 --> s0 : job.124 start [start_admits_box] / extent_admit
     s8 --> s7 : job.125 started [started_box] / runs_box
     s7 --> s9 : job.126 member moves [verdict_success] / completed
     s7 --> s2 : job.127 member moves [verdict_failure] / completed
@@ -158,7 +155,10 @@ stateDiagram-v2
     s15 --> s24 : job.307 RELEASE_RESOURCE / released_held
     s15 --> s24 : job.308 first input of a period [left_catalog]
     s15 --> s25 : job.319 STATUS [injects_live]
-    s0 --> s8 : job.403 starting / moved
+    s21 --> s0 : job.402 start admitted [admitted_admit]
+    s21 --> s0 : job.426 start admitted [admitted_on_held]
+    s0 --> s8 : job.427 [admitted_by_start] / starting_admitted
+    s0 --> s8 : job.428 [admitted_by_readmit] / starting_readmitted
     c0 --> s4 : job.171 [injected_inactive] / moved
     c0 --> s8 : job.172 [injected_starting] / moved
     c0 --> s7 : job.173 [injected_running] / moved
@@ -173,9 +173,9 @@ stateDiagram-v2
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | job.100 | IDLE | start | start_bounded | L010: a re-trigger loop inside one instant. A start that descends from MAX_NESTED_STARTS admitted starts of the same job, its `start admitted` items in the attempt's ancestry, is refused with a START_REFUSED line. |  | internal | DL-304 |
 | job.101 | IDLE | start | start_bypasses | extent_bypass | SUCCESS | external | SEM-22, DL-54 |
-| job.102 | IDLE | start | start_admits_job | extent_admit | ADMITTED | external | SEM-10, DL-120 |
+| job.102 | IDLE | start | start_admits_job | extent_admit |  | internal | SEM-10, DL-120, DL-364 |
 | job.103 | IDLE | start | start_queues | extent_queue | QUE_WAIT | external | DL-50, DL-247, DL-255 |
-| job.104 | FAILED | start | start_on_held | extent_on_held | ADMITTED | external | DL-256 |
+| job.104 | FAILED | start | start_on_held | extent_on_held |  | internal | DL-256, DL-364 |
 | job.105 | STARTING | started | started_job | moved | RUNNING | external | SEM-10 |
 | job.106 | TERMINAL | start | start_skips | moved | INACTIVE | external | SEM-33, DL-246 |
 | job.107 | TERMINAL | start | start_skips_member | moved | INACTIVE | external | SEM-33, DL-154 |
@@ -195,7 +195,7 @@ stateDiagram-v2
 | job.121 | FAILED | flag moved | noexec_settles_job | injected | INACTIVE | external | SEM-22, DL-243 |
 | job.122 | TERMINAL | box start |  | batched | INACTIVE | external | SEM-10, DL-242 |
 | job.123 | QUE_WAIT | box set INACTIVE |  | batched | INACTIVE | external | SEM-18, DL-242 |
-| job.124 | IDLE | start | start_admits_box | extent_admit | ADMITTED | external | SEM-10, DL-242 |
+| job.124 | IDLE | start | start_admits_box | extent_admit |  | internal | SEM-10, DL-242, DL-364 |
 | job.125 | STARTING | started | started_box | runs_box | RUNNING | external | SEM-10, SEM-33, DL-246 |
 | job.126 | RUNNING | member moves | verdict_success | completed | SUCCESS | external | SEM-12 |
 | job.127 | RUNNING | member moves | verdict_failure | completed | FAILURE | external | SEM-12, SEM-14 |
@@ -323,8 +323,7 @@ stateDiagram-v2
 | job.320 | reserved | admitted start | on_held_units | A forced start on held units starts from FAILED, never mid-cascade. |  | ignored (unreachable) |  |
 | job.321 | held | first input of a period | in_catalog | The opening addresses only a job the catalog no longer defines. |  | ignored (unreachable) |  |
 | job.401 | IDLE | start | start_settles_first | settles_first |  | internal | DL-340, DL-349 |
-| job.402 | lifecycle | start admitted | admitted_admit | admit_extent |  | internal | DL-304, DL-349 |
-| job.403 | ADMITTED | starting |  | moved | STARTING | external | SEM-10, DL-242, DL-350 |
+| job.402 | lifecycle | start admitted | admitted_admit | An admission enters ADMITTED, whose entry sends its extent. | ADMITTED | external | DL-304, DL-349, DL-364 |
 | job.404 | INACTIVE | start | start_skips_inactive_member | skips_in_box |  | internal | SEM-33, DL-154 |
 | job.405 | lifecycle | box rules |  | moment |  | internal |  |
 | job.406 | lifecycle | settle |  | moment |  | internal |  |
@@ -340,14 +339,15 @@ stateDiagram-v2
 | job.416 | lifecycle | after leave |  | moment |  | internal |  |
 | job.417 | lifecycle | retry step |  | moment |  | internal |  |
 | job.418 | LIVE | settle |  | The job is live when its move's settlement pops: the move entered STARTING or RUNNING, or the job started again inside its move's cascade (DL-340). Nothing settles, a rank the move left still drops. |  | internal | DL-340, DL-350 |
-| job.419 | lifecycle | starting |  | Only an admitted start sends it, to its own job, which is ADMITTED until it pops. |  | ignored (unreachable) |  |
 | job.420 | ADMITTED | box set INACTIVE |  | An admitted start leaves ADMITTED inside its own extent, before any cascade reaches it. |  | ignored (unreachable) |  |
 | job.421 | ADMITTED | start |  | An admitted start leaves ADMITTED inside its own extent, before any cascade reaches it. |  | ignored (unreachable) |  |
 | job.422 | ADMITTED | KILLJOB |  | An admitted start leaves ADMITTED inside its own extent, before any cascade reaches it. |  | ignored (unreachable) |  |
 | job.423 | ADMITTED | ON_NOEXEC |  | An admitted start leaves ADMITTED inside its own extent, before any cascade reaches it. |  | ignored (unreachable) |  |
 | job.424 | lifecycle | start admitted | admitted_bypass | bypass_extent |  | internal | SEM-22, DL-349 |
 | job.425 | lifecycle | start admitted | admitted_queue | queue_extent |  | internal | DL-50, DL-349 |
-| job.426 | lifecycle | start admitted | admitted_on_held | on_held_extent |  | internal | DL-256, DL-349 |
+| job.426 | lifecycle | start admitted | admitted_on_held | A forced start on held units enters ADMITTED, whose entry sends its extent. | ADMITTED | external | DL-256, DL-349, DL-364 |
+| job.427 | ADMITTED | (completion) | admitted_by_start | starting_admitted | STARTING | external | SEM-10, DL-242, DL-364 |
+| job.428 | ADMITTED | (completion) | admitted_by_readmit | starting_readmitted | STARTING | external | DL-50, DL-242, DL-364 |
 
 | Id | Choice | Guard | Action | Target |
 | --- | --- | --- | --- | --- |
@@ -375,7 +375,7 @@ stateDiagram-v2
 | LIVE | lifecycle/status |  |  |  |  |
 | STARTING | LIVE/live |  |  |  |  |
 | RUNNING | LIVE/live |  |  |  |  |
-| ADMITTED | lifecycle/status |  |  |  |  |
+| ADMITTED | lifecycle/status | starts_run |  |  |  |
 | flags | job/flags |  |  |  |  |
 | ice_off | flags/ice |  |  |  |  |
 | ice_on | flags/ice |  |  |  |  |
@@ -412,6 +412,8 @@ stateDiagram-v2
 | admitted_queue | guard | The payload: the admitting row was the queue (job.103). |
 | admitted_on_held | guard | The payload: the admitting row was the forced start on held units (job.104). |
 | admitted_admit | guard | The payload: the admitting row was an admission (job.102, job.124). |
+| admitted_by_start | guard | The payload that entered ADMITTED is a start's `start admitted` (job.402, job.426). |
+| admitted_by_readmit | guard | The payload that entered ADMITTED is a waiter's `readmit` (job.108), the one other row that enters it. |
 | exit_success | guard | The payload has no status, and its exit code is a success. |
 | exit_failure | guard | The payload has no status, and its exit code is not a success. |
 | injects | guard | The payload's status is injectable and not INACTIVE, or the data says the job has no catalog entry. |
@@ -468,9 +470,10 @@ stateDiagram-v2
 | extent_on_held | action | A forced start on held units (job.104) sends `start admitted` first, with the held units it takes over. |
 | bypass_extent | action | A bypass's `start admitted` (job.424): the run's start, which consumes the arm, then its move's box rules, settlement and wakes, as the tier's handle says (DL-350). |
 | queue_extent | action | A queue's `start admitted` (job.425): its move's box rules, settlement and wakes, then the load mark of a machine's load it takes (DL-255), as the tier's handle says. |
-| on_held_extent | action | A forced start's `start admitted` on held units (job.426): it takes over the held units, consumes the arm, resets a box's jobs, moves to STARTING and on to RUNNING, then the load mark, as the tier's handle says (DL-256, DL-350). |
-| admit_extent | action | An admission's `start admitted` (job.402): it reserves or takes over its units, consumes the arm, resets a box's jobs, moves to STARTING and on to RUNNING, then the queue's scan when the held units it took over exceed its demand, and the load mark, as the tier's handle says (DL-256, DL-350). |
-| admit | action | A readmitted waiter (job.108) reserves its units, then consumes the arm, and the rest of its extent follows, as the tier's handle says: no `start admitted`, since a readmission is no start the bound counts (DL-350). |
+| starts_run | action | ADMITTED's entry: what precedes STARTING, from the payload that entered it. The units it reserves or takes over, the run's start, which consumes the arm, then a box's resets of its jobs, as the tier's handle says (DL-256, DL-350, DL-364). |
+| starting_admitted | action | ADMITTED's completion after a start (job.427): the move to STARTING, its box rules, settlement and wakes, a box's reset notices, `started`, then the queue's scan when the held units an admission took over exceed its demand, and the load mark, as the tier's handle says (DL-256, DL-350, DL-364). |
+| starting_readmitted | action | ADMITTED's completion after a readmission (job.428): the move to STARTING, its box rules, settlement and wakes, a box's reset notices, then `started`, as the tier's handle says (DL-350, DL-364). |
+| admit | action | A readmitted waiter (job.108) enters ADMITTED with its `readmit`, whose entry sends its extent: no `start admitted`, since a readmission is no start the bound counts (DL-350). The scan's pass hears that the waiter moved, as the tier's handle says. |
 | settle_ended_run | action | A start meets the units of a run whose settlement is still owed (`OracleCascade._on_settles_first`): that run settles first, by the end it made, then the start is admitted again against what the settlement left. The settlement's policy is read from the admission's handle (DL-349). Its row, job.312, is marked unreachable: job.401 settles the run before the start is admitted, so the oracle's admission carries no previous end. |
 | settles_first | action | An attempt whose run's settlement is owed (job.401, DL-340): that run settles by the end it made, and the same attempt is made again, so it reads the admission the settlement leaves, as the tier's handle says. |
 | moved | action | A status move on its own (`OracleCascade._after`): the move's box rules, then its settlement, then its wakes, as the tier's handle says (DL-350). |

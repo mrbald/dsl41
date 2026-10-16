@@ -27,7 +27,6 @@ from dsl41.oracle_intents import (
     Rule,
     RunStart,
     Settle,
-    Starting,
     StatusInput,
 )
 from dsl41.oracle_state import LIVE, LIVE_OR_QUEUED, EventKind, FlagState, JobStatus
@@ -226,8 +225,10 @@ class OracleWriters(OracleCascade):
         )
 
     def _w_starting(self, job: str, outcome: Outcome) -> None:
-        starting = cast(Starting, outcome.event.payload)
-        self._write(job, starting.cause)
+        """ADMITTED's completion: STARTING, with the cause of the run the payload that entered
+        ADMITTED carries (DL-364)."""
+        admission = cast(AdmissionFacts, outcome.event.payload.admission)
+        self._write(job, admission.cause)
 
     def _w_running(self, job: str, outcome: Outcome) -> None:
         started = cast(Started, outcome.event.payload)
@@ -604,10 +605,11 @@ _WRITERS: Final[dict[str, str]] = {
     "job.316": "_w_release_ignored",
     "job.401": "_w_nothing",
     "job.402": "_w_nothing",
-    "job.403": "_w_starting",
     "job.404": "_w_skip_inactive_member",
     **{f"job.{n}": "_w_nothing" for n in range(405, 418)},
     "job.406": "_w_settle",
     "job.418": "_w_settle",
     **{f"job.{n}": "_w_nothing" for n in (424, 425, 426)},
+    "job.427": "_w_starting",
+    "job.428": "_w_starting",
 }

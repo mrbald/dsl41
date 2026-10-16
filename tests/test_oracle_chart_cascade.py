@@ -34,7 +34,13 @@ from dsl41.oracle import Oracle
 from dsl41.oracle_cascade import OracleCascade
 from dsl41.oracle_facts import RowUnits
 from dsl41.oracle_state import CascadeDepthError, Event, EventKind, OracleError
-from dsl41.state_machine import Executor, Outcome, ReentrantDispatch, StatechartError
+from dsl41.state_machine import (
+    COMPLETION,
+    Executor,
+    Outcome,
+    ReentrantDispatch,
+    StatechartError,
+)
 from dsl41.semantics import resolve
 
 T0 = datetime(2026, 7, 1, 8, 0)
@@ -191,7 +197,7 @@ def test_job_312_is_no_row_the_oracle_writes() -> None:
 
     assert next(row for row in JOB.rows if row.id == "job.312").mark == "unreachable"
     assert "job.312" not in oracle_writers._WRITERS
-    unmarked = {"job.419", "job.420", "job.421", "job.422", "job.423"}
+    unmarked = {"job.420", "job.421", "job.422", "job.423"}
     assert unmarked.isdisjoint(oracle_writers._WRITERS)
 
 
@@ -567,12 +573,11 @@ def test_the_batch_s_second_phase_skips_a_row_a_wake_started_again() -> None:
     paired = _paired(jil, [ev("FORCE_STARTJOB", 1, job="B")])
     seen = _spied(paired)
     paired.feed(ev("STATUS", 2, job="B", status="INACTIVE"))
-    # B's own wake starts B, whose reset's second phase sends B's STARTING
+    # B's own wake starts B; B's STARTING is its completion's move (DL-364)
     assert _children(seen, "notify step", "B") == [
         ("m1", "box run ends"),
         ("B", "box rules"),
         ("B", "wake"),
-        ("B", "starting"),
         ("B", "scan"),
     ]
     rows = paired.store.job
@@ -675,7 +680,9 @@ def test_a_freed_excess_s_scan_comes_before_the_load_mark_and_the_owed_scan_runs
     """An admitted start's extent: an admission on held units the catalog no longer
     asks for frees the excess, whose scan admits the waiter, and only then is
     the input's admit-only scan owed for the load the start takes (DL-255):
-    the input ends with that scan as a root item of its own."""
+    the input ends with that scan as a root item of its own. The scan and the
+    load mark follow `started` from ADMITTED's completion, the extent's last
+    item (DL-364)."""
     jil = (
         "insert_machine: box1\ntype: a\nnode_name: box1\nmax_load: 2\n\n"
         "insert_resource: OLD\nres_type: R\namount: 1\n\n"
@@ -700,8 +707,9 @@ def test_a_freed_excess_s_scan_comes_before_the_load_mark_and_the_owed_scan_runs
         side._pool = CapacityPool(moved)
     seen = _spied(paired)
     paired.feed(ev("STARTJOB", 4, job="ha"))
-    extent = _children(seen, "start admitted", "ha")
-    assert extent[-2:] == [("ha", "scan"), ("ha", "load taken")]
+    assert _children(seen, "start admitted", "ha")[-1] == ("ha", COMPLETION)
+    starting = _children(seen, COMPLETION, "ha")
+    assert starting[-3:] == [("ha", "started"), ("ha", "scan"), ("ha", "load taken")]
     roots = [(str(o.key)[4:], o.event.name) for o in seen if o.depth == 0]
     assert roots[-1] == ("wl", "scan")
     rows = paired.store.job

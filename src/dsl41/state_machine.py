@@ -49,7 +49,9 @@ ID_DIGITS = re.compile(r"[0-9]{2,3}")
 
 # ---- the statechart executor (docs/statechart-engine.md)
 
-#: The event of a completion transition (§4); its payload is the completing state.
+#: The event of a completion transition (§4). Its payload is that of the microstep that
+#: completed the state: the event that entered a simple state, or the event that put a
+#: composite's last region at rest. `Context.completing` names the state.
 COMPLETION = ""
 #: The event an initial entry's actions see; `well_formed` refuses it in a declaration.
 INITIAL = "<initial>"
@@ -218,6 +220,8 @@ class Context:
     quiet: bool = False
     #: the executor's count of a step in the ancestry (`count`)
     counter: Callable[[Step], int] | None = field(default=None, compare=False, repr=False)
+    #: the completing state, for a completion item (§4); empty for any other item
+    completing: str = ""
 
     @property
     def depth(self) -> int:
@@ -876,7 +880,10 @@ def _completions(ix: _Index, inst: _Instance, step: _Microstep) -> list[_Item]:
     """The completion items of what this microstep entered, in entry order (§4).
 
     A simple state completes when entered; a composite when every region rests in a final
-    state. Only a state with a completion row queues one, with its entry serial.
+    state. Only a state with a completion row queues one, with its entry serial. Each carries
+    the payload of this microstep's event, the microstep that completed the state: for a
+    simple state the event that entered it, for a composite the event that put its last
+    region at rest.
     """
     states: list[str] = []
     for state in step.entered:
@@ -894,7 +901,7 @@ def _completions(ix: _Index, inst: _Instance, step: _Microstep) -> list[_Item]:
         _Item(
             step.item.key,
             "completion",
-            Event(COMPLETION, state),
+            Event(COMPLETION, step.item.event.payload),
             step.chained(),
             state,
             serial=inst.entered.get(state, 0),
@@ -1173,7 +1180,10 @@ class Executor:
 
     def _context(self, inst: _Instance, item: _Item, quiet: bool = False) -> Context:
         counter = functools.partial(self._count, item.ancestry)
-        return Context(item.key, item.event, inst.active, inst.data, item.ancestry, quiet, counter)
+        completing = item.name if item.kind == "completion" else ""
+        return Context(
+            item.key, item.event, inst.active, inst.data, item.ancestry, quiet, counter, completing
+        )
 
     def _align(self, ancestry: Sequence[Step]) -> None:
         """Make the path the item's ancestry: drop the links past the shared part, add its own."""

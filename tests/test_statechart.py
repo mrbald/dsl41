@@ -684,6 +684,68 @@ def test_s4_a_completion_with_no_enabled_row_raises() -> None:
         executor.dispatch("src", Event("go"))
 
 
+def test_s4_a_completion_carries_the_payload_of_the_event_that_entered_its_state() -> None:
+    """A state's data is the data of the event that put it there: the completion's guard and
+    action read that payload, and the context names the completing state (§4)."""
+    seen: list[tuple[str, Any, str]] = []
+
+    def completed(ctx: Context) -> None:
+        seen.append((ctx.event.name, ctx.event.payload, ctx.completing))
+
+    def ready(ctx: Context) -> bool:
+        return bool(ctx.event.payload == "data")
+
+    executor = _relay(actions={"go": _log("go"), "completed": completed}, guards={"ready": ready})
+    outcomes = executor.dispatch("src", Event("go", "data"))
+    assert seen == [(COMPLETION, "data", "t")]
+    assert [(o.event.name, o.event.payload, o.kind) for o in outcomes] == [
+        ("go", "data", "fired"),
+        (COMPLETION, "data", "fired"),
+    ]
+    assert executor.active("src") == {"relay", "done"}
+
+
+def test_s4_a_composite_completion_carries_the_payload_that_put_its_last_region_at_rest() -> None:
+    """A composite completes when its last region rests in a final state: its completion
+    carries the payload of that microstep's event, not of the event that entered the
+    composite, and the context names the composite (§4)."""
+    seen: list[tuple[str, Any, str]] = []
+
+    def completed(ctx: Context) -> None:
+        seen.append((ctx.event.name, ctx.event.payload, ctx.completing))
+
+    machine = chart(
+        "comp",
+        composite(
+            "comp",
+            region(
+                "main",
+                "idle",
+                leaf("idle"),
+                composite("c", region("r1", "a", leaf("a"), leaf("af", final=True))),
+                leaf("d"),
+            ),
+        ),
+        [
+            Row("comp.01", "idle", "go", "c"),
+            Row("comp.02", "a", "fin", "af"),
+            Row("comp.03", "c", COMPLETION, "d", action="completed"),
+        ],
+        actions={"completed": completed},
+    )
+    executor = Executor()
+    executor.restore("x", machine, {"comp", "idle"})
+    executor.dispatch("x", Event("go", "A"))
+    assert seen == [] and executor.active("x") == {"comp", "c", "a"}
+    outcomes = executor.dispatch("x", Event("fin", "B"))
+    assert seen == [(COMPLETION, "B", "c")]
+    assert [(o.event.name, o.event.payload, o.kind) for o in outcomes] == [
+        ("fin", "B", "fired"),
+        (COMPLETION, "B", "fired"),
+    ]
+    assert executor.active("x") == {"comp", "d"}
+
+
 def test_s4_completion_and_chained_items_precede_pool_events() -> None:
     def go(ctx: Context) -> Effects:
         return Effects(send=(("dst", Event("ping")),))
@@ -750,7 +812,7 @@ def test_s5_a_continuation_reads_the_state_after_the_cascade() -> None:
         return Effects(send=(("dst", Event("ping")),), then="check")
 
     def completed(ctx: Context) -> None:
-        ctx.data["store"][ctx.key] = ctx.event.payload  # a completion's payload is its state
+        ctx.data["store"][ctx.key] = ctx.completing
 
     def check(ctx: Context) -> Effects:
         seen.append(dict(ctx.data["store"]))

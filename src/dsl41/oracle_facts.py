@@ -31,6 +31,7 @@ from dsl41.state_machine import Context, Effects
 
 if TYPE_CHECKING:
     from dsl41.oracle_cascade import OracleCascade
+    from dsl41.oracle_intents import AdmissionFacts
 
 #: A box rule's verdict: the status it decides, or none.
 type Target = Literal["SUCCESS", "FAILURE"] | None
@@ -316,10 +317,12 @@ class ReadmitFacts:
     whose box runs, `_queued_recheck` only for one that fits, and the reservations only for one
     admitted. Every fact is a read (`_queued_recheck` fills the calendar and zone caches). The
     order of the waiters is not a fact: the scan reads it off the rows
-    (`CapacityPool.sorted_waiters`), and each waiter gets its own `readmit`.
+    (`CapacityPool.sorted_waiters`), and each waiter gets its own `readmit`. `admission` is the
+    readmission's units and its run's facts, built on its first read and kept, so ADMITTED's
+    entry and its completion read one record (DL-364).
     """
 
-    __slots__ = ("keep_stopped", "units", "_oracle", "_job", "_job_ir", "_known")
+    __slots__ = ("keep_stopped", "units", "_oracle", "_job", "_job_ir", "_known", "_admission")
 
     def __init__(
         self, oracle: OracleCascade, job: str, job_ir: JobIR, *, keep_stopped: bool
@@ -330,6 +333,7 @@ class ReadmitFacts:
         self._job = job
         self._job_ir = job_ir
         self._known: dict[str, Any] = {}
+        self._admission: AdmissionFacts | None = None
 
     def __repr__(self) -> str:
         known = (f"{name}={value!r}" for name, value in self._known.items())
@@ -375,6 +379,13 @@ class ReadmitFacts:
         if "vector" not in self._known:
             self._known["vector"] = self._oracle._pool.demand_vector(self._job_ir)
         return cast(list[DemandEntry], self._known["vector"])
+
+    @property
+    def admission(self) -> AdmissionFacts:
+        """The readmission's `AdmissionFacts` (`OracleCascade._readmission`)."""
+        if self._admission is None:
+            self._admission = self._oracle._readmission(self._job, self)
+        return self._admission
 
 
 def _named_jobs(cond: Cond) -> set[str]:

@@ -30,8 +30,9 @@ moments:
 - `load taken` (DL-255): the owed scan's mark, behind a freed excess's scan;
 - `box ends step` (`_box_ends`): one member at a time, while the run that ended is the box's
   run (DL-348);
-- `notify step` (`_notify`, the batch INACTIVE path's second phase): the runs read after the
-  batch's first phase, the box's STARTING or its disarms, then each row's box rules and wakes;
+- `notify step` (`_notify` and `_notices`, the batch INACTIVE path's second phase): the runs
+  read after the batch's first phase, a box set INACTIVE's disarms, then each row's box rules
+  and wakes; a box start's second phase follows its STARTING (`_starting`);
 - `window pass` (`_window_pass`): the pass of the box start that found no pass pending, over
   every box run registered with it;
 - `after inject` and `after leave`: an idle parent's recompute after an operator's INACTIVE
@@ -39,10 +40,12 @@ moments:
 - `retry step` (`_retries`): ON_NOEXEC's start retries, after a box's contained jobs took the
   flag and its own status settled.
 
-An admitted start's extent descends from its `start admitted`, which job.100 counts (DL-304):
-the units, the arm, a box's resets, the move to STARTING (`starting`, out of the transient
-`ADMITTED`), `started`, a freed excess's scan and the load mark. A readmission sends the same
-extent from its own row; the bound does not count it as a start.
+An admitted start's extent descends from its `start admitted`, which job.100 counts (DL-304).
+The row of `start admitted` enters the transient `ADMITTED`: its entry sends the units, the arm
+and a box's resets (`_on_starts_run`), and its completion, which carries the payload that
+entered it, moves to STARTING and sends a box's reset notices, `started`, a freed excess's scan
+and the load mark (`_on_starting_admitted`, DL-364). A readmission enters `ADMITTED` from its
+own row, so the bound does not count it as a start (`_on_starting_readmitted`).
 
 Audiences are the sender's (DL-346): each gate is read in the action or the moment that sends
 the item, never on the recipient's row.
@@ -85,7 +88,6 @@ from dsl41.job_chart_events import (
     START,
     START_ADMITTED,
     STARTED,
-    STARTING,
     WAKE,
     WALK_UP,
     WINDOW_PASS,
@@ -127,7 +129,6 @@ from dsl41.oracle_intents import (
     Send,
     Settle,
     SettledEarly,
-    Starting,
     StatusInput,
     Step,
     WatchReadmit,
@@ -152,8 +153,9 @@ _HANDLERS: Final[Mapping[str, str]] = {
     "extent_on_held": "_on_extent_on_held",
     "bypass_extent": "_on_bypass_extent",
     "queue_extent": "_on_queue_extent",
-    "on_held_extent": "_on_on_held_extent",
-    "admit_extent": "_on_admit_extent",
+    "starts_run": "_on_starts_run",
+    "starting_admitted": "_on_starting_admitted",
+    "starting_readmitted": "_on_starting_readmitted",
     "admit": "_on_admit",
     "settles_first": "_on_settles_first",
     "skips_in_box": "_on_skips_in_box",
@@ -360,19 +362,55 @@ class OracleCascade(OracleSchedule):
         return self._admitted(job, ctx, "queue", Admission())
 
     def _on_extent_admit(self, job: str, ctx: Context) -> Effects:
+        """An admission's units and the facts its extent reads before they are written: whether
+        the held units it takes over exceed its demand (DL-256), and a box's batch."""
         attempt = cast(StartFacts, ctx.event.payload)
         vector = tuple(attempt.vector())
-        admission = AdmissionFacts(demand=attempt.demand, vector=vector, units=self._units(job))
+        admission = AdmissionFacts(
+            demand=attempt.demand,
+            vector=vector,
+            units=self._units(job),
+            cause=attempt.cause,
+            had_demand=bool(vector),
+            frees=self._frees_excess(job, list(vector)),
+            batch=self._start_batch(job),
+        )
         return self._admitted(job, ctx, "admit", admission)
 
     def _on_extent_on_held(self, job: str, ctx: Context) -> Effects:
         attempt = cast(StartFacts, ctx.event.payload)
         vector = tuple(attempt.vector())
-        admission = AdmissionFacts(on_held=True, vector=vector, units=self._units(job))
+        cause = (
+            f"{attempt.cause}; starts on its held units, other resources not re-evaluated (DL-256)"
+        )
+        admission = AdmissionFacts(
+            on_held=True,
+            vector=vector,
+            units=self._units(job),
+            cause=cause,
+            had_demand=True,
+            batch=self._start_batch(job),
+        )
         return self._admitted(job, ctx, "on_held", admission)
 
-    # an admitted start's extent, one handler per admitting verdict: each step is an item and a
-    # descendant of the `start admitted` its row (job.402, job.424 to job.426) runs (DL-350)
+    def _readmission(self, job: str, facts: ReadmitFacts) -> AdmissionFacts:
+        """A readmitted waiter's units and the facts of its run (`ReadmitFacts.admission`)."""
+        return AdmissionFacts(
+            demand=facts.demand,
+            vector=tuple(facts.vector()),
+            units=self._units(job),
+            cause="resources freed (QUE_WAIT admitted, DL-50)",
+            had_demand=True,
+            batch=self._start_batch(job),
+        )
+
+    def _start_batch(self, job: str) -> Batch | None:
+        """A box start's reset batch (DL-242); none for a job that is not a box."""
+        return Batch(job) if self._is_box(job) else None
+
+    # an admitted start's extent: each step is an item and a descendant of the `start admitted`
+    # its row (job.402, job.424 to job.426) runs; an admission's and a start on held units' are
+    # sent by ADMITTED's entry and its completion (DL-350, DL-364)
 
     def _on_bypass_extent(self, job: str, ctx: Context) -> Effects:
         """job.424: a bypass's run starts, then its move's box rules, settlement and wakes."""
@@ -389,30 +427,51 @@ class OracleCascade(OracleSchedule):
         load = self._load_mark(job, attempt.vector())
         return Effects(send=(*self._move_sends(cast(Move, admitted.move)), *load))
 
-    def _on_on_held_extent(self, job: str, ctx: Context) -> Effects:
-        """job.426: a forced start's extent on its held units, then the load mark (DL-256)."""
-        admitted = cast(Admitted, ctx.event.payload)
-        attempt = cast(StartFacts, admitted.attempt)
-        load = self._load_mark(job, attempt.vector())
-        cause = (
-            f"{attempt.cause}; starts on its held units, other resources not re-evaluated (DL-256)"
-        )
-        admission = cast(AdmissionFacts, admitted.admission)
-        sends = self._extent(job, admission, cause, had_demand=True)
-        return Effects(send=(*sends, *load))
+    def _on_starts_run(self, job: str, ctx: Context) -> Effects:
+        """ADMITTED's entry (DL-364): from the payload that entered it, the units, the run's
+        start, then a box's reset of every job it contains but a live one's subtree."""
+        admission = cast(AdmissionFacts, ctx.event.payload.admission)
+        run = RunStart(cause=admission.cause, units=self._units(job))
+        sends: list[Send] = [
+            self._to(job, ADMITTED_START, admission),
+            self._to(job, ACTUAL_START, run),
+        ]
+        batch = admission.batch
+        if batch is not None:
+            sends += [
+                self._to(member, BOX_START, Rule(box=job, batch=batch, units=self._units(member)))
+                for member in self._reset_audience(job)
+            ]
+        return Effects(send=tuple(sends))
 
-    def _on_admit_extent(self, job: str, ctx: Context) -> Effects:
-        """job.402: an admission's extent, then the queue's scan when the held units it took
-        over exceed its demand, then the load mark."""
+    def _on_starting_admitted(self, job: str, ctx: Context) -> Effects:
+        """job.427: an admitted start's STARTING, then the queue's scan when the held units it
+        took over exceed its demand, then the load mark."""
         admitted = cast(Admitted, ctx.event.payload)
         attempt = cast(StartFacts, admitted.attempt)
-        vector = attempt.vector()
-        load = self._load_mark(job, vector)
         admission = cast(AdmissionFacts, admitted.admission)
-        sends = self._extent(job, admission, attempt.cause, bool(vector))
-        freed = self._frees_excess(job, list(vector))
+        freed = admission.frees
         scan = (self._program(job, SCAN, self._scan(keep_stopped=False)),) if freed else ()
-        return Effects(send=(*sends, *scan, *load))
+        return self._starting(job, admission, (*scan, *self._load_mark(job, attempt.vector())))
+
+    def _on_starting_readmitted(self, job: str, ctx: Context) -> Effects:
+        """job.428: a readmitted waiter's STARTING."""
+        facts = cast(ReadmitFacts, ctx.event.payload)
+        return self._starting(job, facts.admission, ())
+
+    def _starting(self, job: str, admission: AdmissionFacts, tail: tuple[Send, ...]) -> Effects:
+        """The move to STARTING after ADMITTED's entry: its box rules, settlement and wakes; a
+        box's reset notices, with each reset row's ancestors' runs read before the move;
+        `started`, with the run the entry's start began; then `tail`."""
+        move = self._move(job)
+        sends = list(self._move_sends(move))
+        batch = admission.batch
+        if batch is not None:
+            runs = {m.job: self._ancestor_runs(m.job) for m in batch.rows}
+            sends.append(self._program(job, NOTIFY_STEP, self._notices(batch, runs)))
+        started = Started(self, job, move.run, had_demand=admission.had_demand)
+        sends.append(self._to(job, STARTED, started))
+        return Effects(send=(*sends, *tail), intents=(move,))
 
     def _load_mark(self, job: str, vector: list[DemandEntry]) -> tuple[Send, ...]:
         """DL-255: an admitted start that takes a machine's load marks the input's owed scan."""
@@ -432,43 +491,9 @@ class OracleCascade(OracleSchedule):
         return any(h.units > demand.get(h.bucket, 0) for h in held)
 
     def _on_admit(self, job: str, ctx: Context) -> Effects:
-        """job.108: a readmission, its extent sent from its own row."""
-        facts = cast(ReadmitFacts, ctx.event.payload)
-        vector = tuple(facts.vector())
-        admission = AdmissionFacts(demand=facts.demand, vector=vector, units=self._units(job))
-        cause = "resources freed (QUE_WAIT admitted, DL-50)"
-        sends = self._extent(job, admission, cause, had_demand=True)
-        return Effects(send=sends, intents=(Readmitted(),))
-
-    def _extent(
-        self,
-        job: str,
-        admission: Admission,
-        cause: str,
-        had_demand: bool,
-    ) -> tuple[Send, ...]:
-        """An admitted start's steps: the units, the arm and the run, a box's resets around its
-        STARTING or a job's STARTING, then `started`."""
-        run = self._runtime(job).run_number
-        starting = Starting(cause=cause, units=self._units(job))
-        sends: list[Send] = [
-            self._to(job, ADMITTED_START, admission),
-            self._to(job, ACTUAL_START, RunStart(cause=cause, units=self._units(job))),
-        ]
-        if self._is_box(job):
-            batch = Batch(job, starting=starting)
-            for member in self._reset_audience(job):
-                sends.append(
-                    self._to(
-                        member, BOX_START, Rule(box=job, batch=batch, units=self._units(member))
-                    )
-                )
-            sends.append(self._program(job, NOTIFY_STEP, self._notify(batch)))
-        else:
-            sends.append(self._to(job, STARTING, starting))
-        started = Started(self, job, run + 1, had_demand=had_demand)
-        sends.append(self._to(job, STARTED, started))
-        return tuple(sends)
+        """job.108: a readmission enters ADMITTED, whose entry sends its extent; the scan's pass
+        hears that the waiter moved."""
+        return Effects(intents=(Readmitted(),))
 
     def _on_settles_first(self, job: str, ctx: Context) -> Effects:
         """job.401 (DL-340): the ended run settles by the end it made, and the
@@ -528,22 +553,23 @@ class OracleCascade(OracleSchedule):
         return Effects(send=settle, intents=(move,))
 
     def _notify(self, batch: Batch) -> Iterator[Step]:
-        """The batch INACTIVE path after its first phase: each row's ancestors'
-        runs, read once now; the box's STARTING, or the disarms of every box run
-        the cascade ends; then each row still INACTIVE in its run gets its box
-        rules and its wakes, and a row a wake moved on owes the queue its wake."""
+        """A box set INACTIVE after its first phase: each row's ancestors' runs, read once now;
+        the disarms of every box run the cascade ends; then the rows' notices (`_notices`)."""
         runs = {m.job: self._ancestor_runs(m.job) for m in batch.rows}
-        if batch.starting is not None:
-            yield Step(send=(self._to(batch.box, STARTING, batch.starting),))
-        else:
-            boxes = [batch.box] + [m.job for m in batch.rows[1:] if self._is_box(m.job)]
-            disarms = tuple(
-                self._to(member, BOX_RUN_ENDS, Rule(box=each, units=self._units(member)))
-                for each in boxes
-                for member in self._members(each)
-            )
-            if disarms:
-                yield Step(send=disarms)
+        boxes = [batch.box] + [m.job for m in batch.rows[1:] if self._is_box(m.job)]
+        disarms = tuple(
+            self._to(member, BOX_RUN_ENDS, Rule(box=each, units=self._units(member)))
+            for each in boxes
+            for member in self._members(each)
+        )
+        if disarms:
+            yield Step(send=disarms)
+        yield from self._notices(batch, runs)
+
+    def _notices(self, batch: Batch, runs: Mapping[str, Mapping[str, int]]) -> Iterator[Step]:
+        """The batch INACTIVE path's notices: each row still INACTIVE in its run gets its box
+        rules and its wakes, with `runs` its ancestors' runs, and a row a wake moved on owes
+        the queue its wake."""
         owed = False
         for move in batch.rows:
             row = self._runtime(move.job)

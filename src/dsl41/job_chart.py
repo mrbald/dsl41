@@ -65,8 +65,11 @@ The cascade between instances is declared too (DL-350): a box's rules on its mem
 member's moves on its box, the wakes, the queue's scan and the start retries. A row's action
 sends what its move causes through the tier's handle (`Units.consequences`). A call-then-
 continue site is a moment: a self-event whose payload carries the tier's step (`Moment`), run
-as a lifecycle row that moves nothing. An admitting row targets the transient state ADMITTED,
-which `starting` leaves for STARTING after a box's resets. No state defers (§12).
+as a lifecycle row that moves nothing. An admitted start enters the transient state ADMITTED
+from its `start admitted` (job.402, job.426), or a waiter from its readmission (job.108). The
+entry action sends the units, the run's start and a box's resets; ADMITTED's completion, which
+carries the payload that entered it, moves to STARTING after their cascades (DL-364). No state
+defers (§12).
 
 The walks that check this chart carry no run window and no true condition; synthesized cells
 and one windowed replay check the facts of those paths.
@@ -383,6 +386,17 @@ def admitted_on_held(ctx: Context) -> bool:
 def admitted_admit(ctx: Context) -> bool:
     """The payload: the admitting row was an admission (job.102, job.124)."""
     return _admitted_verdict(ctx) == "admit"
+
+
+def admitted_by_start(ctx: Context) -> bool:
+    """The payload that entered ADMITTED is a start's `start admitted` (job.402, job.426)."""
+    return isinstance(ctx.event.payload, Admitted)
+
+
+def admitted_by_readmit(ctx: Context) -> bool:
+    """The payload that entered ADMITTED is a waiter's `readmit` (job.108), the one other row
+    that enters it."""
+    return not isinstance(ctx.event.payload, Admitted)
 
 
 # ---- STATUS (SEM-09, DL-13, DL-242, DL-264)
@@ -746,6 +760,8 @@ GUARDS: Final = {
         admitted_queue,
         admitted_on_held,
         admitted_admit,
+        admitted_by_start,
+        admitted_by_readmit,
         exit_success,
         exit_failure,
         injects,
@@ -849,26 +865,32 @@ def queue_extent(ctx: Context) -> Effects | None:
     return _consequences(ctx, "queue_extent")
 
 
-def on_held_extent(ctx: Context) -> Effects | None:
-    """A forced start's `start admitted` on held units (job.426): it takes over the held
-    units, consumes the arm, resets a box's jobs, moves to STARTING and on to RUNNING, then
-    the load mark, as the tier's handle says (DL-256, DL-350)."""
-    return _consequences(ctx, "on_held_extent")
+def starts_run(ctx: Context) -> Effects | None:
+    """ADMITTED's entry: what precedes STARTING, from the payload that entered it. The units
+    it reserves or takes over, the run's start, which consumes the arm, then a box's resets of
+    its jobs, as the tier's handle says (DL-256, DL-350, DL-364)."""
+    return _consequences(ctx, "starts_run")
 
 
-def admit_extent(ctx: Context) -> Effects | None:
-    """An admission's `start admitted` (job.402): it reserves or takes over its units,
-    consumes the arm, resets a box's jobs, moves to STARTING and on to RUNNING, then the
-    queue's scan when the held units it took over exceed its demand, and the load mark, as the
-    tier's handle says (DL-256, DL-350)."""
-    return _consequences(ctx, "admit_extent")
+def starting_admitted(ctx: Context) -> Effects | None:
+    """ADMITTED's completion after a start (job.427): the move to STARTING, its box rules,
+    settlement and wakes, a box's reset notices, `started`, then the queue's scan when the held
+    units an admission took over exceed its demand, and the load mark, as the tier's handle
+    says (DL-256, DL-350, DL-364)."""
+    return _consequences(ctx, "starting_admitted")
+
+
+def starting_readmitted(ctx: Context) -> Effects | None:
+    """ADMITTED's completion after a readmission (job.428): the move to STARTING, its box
+    rules, settlement and wakes, a box's reset notices, then `started`, as the tier's handle
+    says (DL-350, DL-364)."""
+    return _consequences(ctx, "starting_readmitted")
 
 
 def admit(ctx: Context) -> Effects | None:
-    """A readmitted waiter (job.108) reserves its units, then consumes the
-    arm, and the rest of its extent follows, as the tier's handle says: no
-    `start admitted`, since a readmission is no start the bound counts
-    (DL-350)."""
+    """A readmitted waiter (job.108) enters ADMITTED with its `readmit`, whose entry sends its
+    extent: no `start admitted`, since a readmission is no start the bound counts (DL-350).
+    The scan's pass hears that the waiter moved, as the tier's handle says."""
     return _consequences(ctx, "admit")
 
 
@@ -1047,8 +1069,9 @@ ACTIONS: Final = {
         extent_on_held,
         bypass_extent,
         queue_extent,
-        on_held_extent,
-        admit_extent,
+        starts_run,
+        starting_admitted,
+        starting_readmitted,
         admit,
         settle_ended_run,
         settles_first,
