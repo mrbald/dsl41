@@ -79,6 +79,11 @@ All ten compiler phases in DL-03 are implemented; their order remains normative.
   `spec-review` with the document path (DL-225). Its shared body is
   `.claude/skills/spec-review/SKILL.md`; Codex discovers it through
   `.agents/skills/spec-review`.
+- When the user asks for a chart review or simplification, or a slice finds
+  hidden control flow, copied rows or guard families in a declared chart, use
+  `chart-simplify` (DL-363 to DL-372). Its shared body is
+  `.claude/skills/chart-simplify/SKILL.md`; Codex discovers it through
+  `.agents/skills/chart-simplify`.
 
 ## Boss and peer work
 
