@@ -1,26 +1,22 @@
-"""Self-contained HTML pages of the derived graph (DL-70): to_html is the
-whole report, to_html_chart the whole graph as one chart (DL-76).
+"""Self-contained HTML pages of the derived graph (DL-70).
 
-Same content as viz.to_markdown -- both emitters format one ReportContent,
-so nothing the Markdown report says can go missing here (no-silent-loss).
-The page renders its Mermaid charts in the browser with vendored mermaid +
-ELK (src/dsl41/_vendor/), fully offline: file:// works, no network is
-touched. Uniform scale (flowchart.useMaxWidth=false) and ELK layout are page
-defaults set via mermaid.initialize, which is also the only place the
-secure-listed maxEdges/maxTextSize limits can be raised past bank-estate
-size (per-chart frontmatter cannot -- mermaid drops secure keys there).
+`to_html` is the whole report and `to_html_chart` the whole graph as one chart (DL-76). Both
+format viz's ReportContent, so nothing the Markdown report says goes missing here. The page
+renders its Mermaid charts in the browser with vendored mermaid and ELK (src/dsl41/_vendor/),
+offline. Uniform scale and ELK layout are set in mermaid.initialize, the only place the
+secure-listed maxEdges and maxTextSize limits can be raised; per-chart frontmatter drops
+secure keys.
 
-Rendering decisions (each with a test):
-- Chart sources are embedded as one JSON <script> with every "<" escaped to
-  \\u003c (valid JSON, neutralizes </script and <!-- in one rule); the page
-  drives mermaid.render() itself for progress + per-chart error isolation.
-- Vendor payloads are inlined verbatim; their integrity invariants (no
-  </script substring, attribution banner) are pinned in tests.
-- Template substitution is unique-marker single-pass (substitute), not
-  str.format or string.Template: the template is {}-heavy JS/CSS and the
-  vendor JS is full of "$". Single-pass, not chained .replace(): replaced
-  content is never re-scanned, so marker-shaped user input (a job or file
-  named __DSL41_..._JS__) cannot trigger a second substitution.
+- Chart sources embed as one JSON <script> with every "<" escaped to \\u003c; the page
+  drives mermaid.render() itself for progress and per-chart error isolation.
+- Vendor payloads are inlined verbatim; tests pin their integrity (no </script substring,
+  attribution banner).
+- Template substitution is single-pass with unique markers (`substitute`), not str.format
+  or string.Template, because the template is {}-heavy and the vendor JS is full of "$".
+  Replaced content is never re-scanned, so a job or file named like a marker cannot trigger
+  a second substitution.
+- Table cells follow viz's content policy: full text for assumptions, a 60-char ellipsis
+  for command/path cells (viz.truncate_cell); html.escape here, pipe-escaping there.
 - Table cells mirror viz's content policy: full text for assumptions,
   60-char ellipsis for command/path cells (viz.truncate_cell, shared with
   _code_cell); escaping is html.escape here, pipe-escaping there.
@@ -54,9 +50,9 @@ from dsl41.viz import (
 
 def substitute(template: str, mapping: dict[str, str]) -> str:
     """Replace every __DSL41_*__ marker in one pass over the template.
-    Replacement text is never re-scanned, so data that happens to contain a
-    marker (job names and file names allow the marker charset) cannot splice
-    a later payload into itself (review finding on DL-70/71)."""
+
+    Replacement text is never re-scanned, so data containing a marker cannot splice a later
+    payload into itself (DL-70, DL-71)."""
     pattern = re.compile("|".join(re.escape(marker) for marker in mapping))
     return pattern.sub(lambda m: mapping[m.group(0)], template)
 
@@ -69,8 +65,7 @@ def _text(raw: str | None) -> str:
 
 
 def _code(raw: str | None) -> str:
-    """Command/path cell: <code> span, 60-char ellipsis (viz.truncate_cell:
-    full text is IR-F's responsibility, not the report's)."""
+    """Command/path cell: a <code> span cut by viz.truncate_cell."""
     if not raw:
         return ""
     flat = truncate_cell(raw.replace("\n", " "))
@@ -85,8 +80,7 @@ def _table(headers: list[str], rows: list[list[str]]) -> str:
 
 
 def _viewport(chart_id: str) -> str:
-    # chartbox anchors the zoom toolbar: the viewport scrolls, so anything
-    # positioned inside it would pan away with the chart
+    # chartbox anchors the zoom toolbar: the viewport scrolls, so a child would pan away
     return (
         '<div class="chartbox">'
         '<div class="zoombar" hidden>'
@@ -109,10 +103,9 @@ def _page(
     sections: list[str],
     tables: list[str],
 ) -> str:
-    """The shell both pages share (DL-76): header, legend chart, chart JSON,
-    vendor payloads. Splitting it out is what lets the two emitters below be
-    two functions rather than one with a mode flag -- the shape DL-75 is
-    about."""
+    """The shell both pages share (DL-76): header, legend chart, chart JSON, vendor payloads.
+
+    It keeps the two emitters two functions, not one with a mode flag (DL-75)."""
     toc_html = '<nav class="toc"><ol>\n' + "\n".join(toc) + "\n</ol></nav>" if toc else ""
     payload = json.dumps({"charts": charts}).replace("<", "\\u003c")
 
@@ -146,10 +139,9 @@ def to_html_chart(
     collapse_threshold: int = DEFAULT_COLLAPSE_THRESHOLD,
     direction: Direction | Literal["auto"] = "auto",
 ) -> str:
-    """The whole graph as ONE chart in the same offline page (DL-70(4),
-    restored by DL-76 as --format html-chart). No toc and no appendices --
-    a single chart has nothing to index -- but the legend stays: an HTML
-    page is a terminal artifact, unlike the pipeable bare chart."""
+    """The whole graph as one chart in the offline page (DL-70, DL-76).
+
+    No toc and no appendices, but the legend stays: an HTML page is a terminal artifact."""
     if graph is None:
         graph = derive_graph(catalog)
     body = to_mermaid(
@@ -180,8 +172,7 @@ def to_html(
     direction: Direction | Literal["auto"] = "auto",
     include_singletons: bool = False,
 ) -> str:
-    """One self-contained HTML page with report parity: summary, legend,
-    charts, locks, appendices."""
+    """One self-contained HTML page with report parity (summary, legend, charts, appendices)."""
     if graph is None:
         graph = derive_graph(catalog)
     charts: list[dict[str, str]] = [{"el": "c0", "src": LEGEND_CHART.rstrip("\n")}]
