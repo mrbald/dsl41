@@ -502,7 +502,7 @@ def test_a_macrostep_that_raises_sets_every_cascade_field_back_to_between_inputs
     catalog = lower_source(_JIL)
     fresh = OracleCascade(catalog)
     fields = set(vars(fresh)) - set(vars(OracleSchedule(catalog)))
-    assert "_scan_owed" in fields and len(fields) == 6
+    assert "_scan_owed" in fields and len(fields) == 4
 
     class Faulting(Oracle):
         def _perform(self, outcome: Outcome) -> None:

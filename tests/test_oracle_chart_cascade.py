@@ -36,6 +36,8 @@ from dsl41.oracle_cascade import OracleCascade
 from dsl41.oracle_facts import DoorFacts, RowUnits
 from dsl41.oracle_intents import StatusLine
 from dsl41.oracle_state import CascadeDepthError, Event, EventKind, OracleError
+from dsl41.scan_chart import IDLE as SCAN_IDLE
+from dsl41.scan_chart import SCAN_KEY
 from dsl41.state_machine import (
     COMPLETION,
     HITS_ENV,
@@ -75,12 +77,16 @@ def _spied(oracle: Oracle) -> list[Outcome]:
     return seen
 
 
+def _name(key: object) -> str:
+    """A job instance's job, or the queue scan's coordinator by its key."""
+    text = str(key)
+    return text.partition(":")[2] if text.startswith("job:") else text
+
+
 def _items(seen: list[Outcome], *names: str) -> list[tuple[str, str, tuple[str, ...]]]:
     """(job, event, rows) of the outcomes whose event is named, in order."""
     return [
-        (str(o.key).partition(":")[2], o.event.name, o.rows)
-        for o in seen
-        if not names or o.event.name in names
+        (_name(o.key), o.event.name, o.rows) for o in seen if not names or o.event.name in names
     ]
 
 
@@ -412,7 +418,8 @@ def test_an_exception_out_of_a_macrostep_leaves_the_instances_the_rows(
         with pytest.raises(OracleError, match="planted"):
             oracle.feed(ev("STARTJOB", 1, job="j"))
     assert oracle.store.machines.active("job:j") == configuration("INACTIVE")
-    assert (oracle._in_wake, oracle._window_starts, oracle._late_settlements) == (False, None, {})
+    assert oracle.store.machines.active(SCAN_KEY) == SCAN_IDLE
+    assert (oracle._window_starts, oracle._late_settlements) == (None, {})
     oracle.feed(ev("STARTJOB", 2, job="j"))
     assert oracle.store.job["j"].status == "RUNNING"
 
@@ -441,7 +448,8 @@ def test_a_status_move_sends_its_box_rules_then_its_settlement_then_its_wakes() 
     """STATUS on the job's instance: the status row, then the move's `box
     rules`, its `settle`, whose `leave STARTING or RUNNING` frees the run's
     units by policy, and its `wake`, each a moment on the job's own instance;
-    the release wakes the queue, whose scan finds no waiter and ends."""
+    the release wakes the queue: the coordinator's pass finds no waiter and the
+    scan ends."""
     jil = "insert_resource: R\nres_type: R\namount: 1\n\n" + _cmd(
         "j", "resources: (R, QUANTITY=1, FREE=Y)\n"
     )
@@ -454,7 +462,9 @@ def test_a_status_move_sends_its_box_rules_then_its_settlement_then_its_wakes() 
         ("j", "settle", ("job.406",)),
         ("j", "leave STARTING or RUNNING", ("job.304",)),
         ("j", "wake", ("job.407",)),
-        *[("j", "scan", ("job.410",))] * 3,
+        (SCAN_KEY, "scan", ("queue_scan.01",)),
+        (SCAN_KEY, COMPLETION, ("queue_scan.04",)),
+        (SCAN_KEY, COMPLETION, ("queue_scan.09",)),
     ]
     assert paired.store.machines.active("job:j") == configuration("SUCCESS")
 
@@ -648,7 +658,7 @@ def _sent(seen: list[Outcome], at: int) -> list[tuple[str, str]]:
         if later.depth <= step.depth:
             break
         if later.depth == step.depth + 1 and later.event.name != step.event.name:
-            found.append((str(later.key).partition(":")[2], later.event.name))
+            found.append((_name(later.key), later.event.name))
     return found
 
 
@@ -682,7 +692,7 @@ def test_the_batch_s_second_phase_skips_a_row_a_wake_started_again() -> None:
         ("m1", "box run ends"),
         ("B", "box rules"),
         ("B", "wake"),
-        ("B", "scan"),
+        (SCAN_KEY, "scan"),
     ]
     rows = paired.store.job
     assert (rows["B"].run_number, rows["m1"].status, rows["m1"].run_number) == (2, "RUNNING", 2)
@@ -690,9 +700,10 @@ def test_the_batch_s_second_phase_skips_a_row_a_wake_started_again() -> None:
 
 def test_a_scan_requested_inside_a_pass_asks_nothing_and_the_pass_goes_on() -> None:
     """The queue's scan: W1's readmission completes the empty box at its start,
-    and its release wakes the queue inside the running pass. That scan sends
-    no readmission; W1 moved, so the outer pass starts again and admits W2
-    with the unit W1 gave back."""
+    and its release asks a scan inside the running pass. That scan latches a
+    full pass (queue_scan.02) and sends nothing, and the completion that waits
+    for W1's cascade is still queued: W1 moved, so the pass ends and the next
+    admits W2 with the unit W1 gave back; the third finds no waiter."""
     jil = (
         "insert_resource: R\nres_type: R\namount: 1\n\n"
         + _cmd("h", "resources: (R, QUANTITY=1, FREE=N)\n")
@@ -708,8 +719,27 @@ def test_a_scan_requested_inside_a_pass_asks_nothing_and_the_pass_goes_on() -> N
     paired = _paired(jil, setup)
     seen = _spied(paired)
     paired.feed(ev("RELEASE_RESOURCE", 5, job="h"))
-    assert _children(seen, "scan", "W1") == []
-    assert [job for job, name in _children(seen, "scan", "h") if name == "readmit"] == ["W1", "W2"]
+    scan = [
+        (_name(o.key), *o.rows, *o.branches)
+        for o in seen
+        if _name(o.key) == SCAN_KEY or o.rows == ("job.108",)
+    ]
+    assert scan == [
+        (SCAN_KEY, "queue_scan.01"),
+        (SCAN_KEY, "queue_scan.04", "queue_scan.10"),
+        ("W1", "job.108"),
+        (SCAN_KEY, "queue_scan.02"),
+        (SCAN_KEY, "queue_scan.05"),
+        (SCAN_KEY, "queue_scan.08"),
+        (SCAN_KEY, "queue_scan.04", "queue_scan.10"),
+        ("W2", "job.108"),
+        (SCAN_KEY, "queue_scan.05"),
+        (SCAN_KEY, "queue_scan.08"),
+        (SCAN_KEY, "queue_scan.04", "queue_scan.11"),
+        (SCAN_KEY, "queue_scan.09"),
+    ]
+    latch = next(at for at, o in enumerate(seen) if o.rows == ("queue_scan.02",))
+    assert _sent(seen, latch) == []
     rows = paired.store.job
     assert (rows["W1"].status, rows["W2"].status) == ("SUCCESS", "RUNNING")
 
@@ -813,9 +843,13 @@ def test_a_freed_excess_s_scan_comes_before_the_load_mark_and_the_owed_scan_runs
     paired.feed(ev("STARTJOB", 4, job="ha"))
     assert _children(seen, "start admitted", "ha")[-1] == ("ha", COMPLETION)
     starting = _children(seen, COMPLETION, "ha")
-    assert starting[-3:] == [("ha", "started"), ("ha", "scan"), ("ha", "load taken")]
-    roots = [(str(o.key)[4:], o.event.name) for o in seen if o.depth == 0]
-    assert roots[-1] == ("wl", "scan")
+    assert starting[-3:] == [("ha", "started"), (SCAN_KEY, "scan"), ("ha", "load taken")]
+    roots = [at for at, o in enumerate(seen) if o.depth == 0]
+    owed = seen[roots[-1]]
+    assert (_name(owed.key), owed.event.name) == (SCAN_KEY, "scan")
+    # the mode the root sent: each readmission of its first pass carries it
+    first = next(o for o in seen[roots[-1] :] if o.event.name == "readmit")
+    assert first.event.payload.keep_stopped
     rows = paired.store.job
     assert (rows["wa"].status, rows["wl"].status) == ("RUNNING", "QUE_WAIT")
 

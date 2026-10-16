@@ -237,10 +237,12 @@ chain is.
 The oracle's cascade maps onto these rules as follows (DL-350). Each input is a root item on its
 job's instance. Each step that runs after an earlier step's whole cascade is a chained self-event,
 a moment, whose payload carries the step the oracle runs when it pops: `box rules`, `settle`,
-`wake`, `walk up`, `holders may leave`, `scan`, `load taken`, `box ends step`, `notify step`,
+`wake`, `walk up`, `holders may leave`, `load taken`, `box ends step`, `notify step`,
 `window pass`, `after inject`, `after leave` and `retry step`. Each is an internal row of the
-lifecycle that moves nothing. A loop whose gate reads state that an earlier step's cascade can
-change is a moment that sends its next item and then itself again; the gate is re-read at each pop.
+lifecycle that moves nothing. The queue's scan is no moment: it is the `queue_scan` chart, whose
+turn waits for each readmission's cascade in a transient state (§11, DL-372). A loop whose gate
+reads state that an earlier step's cascade can change is a moment that sends its next item and
+then itself again; the gate is re-read at each pop.
 A row whose own write must follow its chained items targets a transient state. An admitted start
 enters `ADMITTED` from its `start admitted`, and a readmission from its own row. The state's entry
 action sends the units, the run's start and a box's resets; its completion moves the job to
@@ -412,18 +414,37 @@ OFF_NOEXEC on the jobs it contains are box rules (below).
 RELEASE_RESOURCE and each waiter's readmission are dispatched to the job's instance too (DL-345).
 Held units go back with their line and the queue is scanned (`job.307`); a job that holds nothing
 (`job.315`), or a live run whose units go back when it ends (`job.316`), takes the no-effect line.
-Whether the job holds units it can give back is the row's. The queue's scan is the `scan` moment.
-Its pass bookkeeping and its order stay oracle code: the chart has one instance per job, and the
-waiters' order (rank, then the queue's order) is the store's. A pass reads its waiters when it
-starts and each waiter's status at its turn; it ends at the first `readmit` whose row reports that
-it admitted or cancelled its waiter, which starts the next pass. A scan asked inside a pass sends
-nothing; an admit-only one asks the pass for a full pass next. The scan an admission owes the input
-(DL-255) is a root item after the input's macrosteps, marked by `load taken` behind a freed
-excess's scan. Each waiter the scan reaches gets one `readmit`, whose payload computes each fact
-where the scan's rule reads it. An admission (`job.108`) sends the start's extent; a member of a
-box that stopped running is cancelled (`job.109`); a waiter that fails the queued recheck drops its
-arm and leaves the queue, one row for each value of the arm (`job.438`, `job.439`), with the
-window or day disposition after it in `after leave`; any other waiter stays queued (`job.181`).
+Whether the job holds units it can give back is the row's.
+
+The queue's scan is the `queue_scan` chart (DL-372), declared in `src/dsl41/scan_chart.py` and
+registered in `machines.MACHINES`. It has one instance per oracle, on the state owner's executor
+beside the job instances. The instance rests in `idle` between inputs, and the owner rebuilds it
+idle where it rebuilds the job instances. Each sender of a scan sends it one `scan`. The payload is
+the scan's record: its mode, the waiters' order a pass reads when it begins, and the turn the pass
+reached. The order is the store's: rank, then the queue's order, read off the rows. Each
+completion of the chart's transient states carries the record (§4). A scan at `idle` enters
+`pass`, whose entry reads the order and clears the owed scan's mark and the latch of a moved
+waiter. A state of the chart waits for a cascade; a decision that waits for nothing is a choice,
+resolved inside the microstep (§4). In `pass`, `next_waiter` starts the first turn. The choice
+`turn_choice` gives the turn to the next waiter of the list still queued, its status read at its
+turn, or ends the pass at `done`. `awaiting_readmit`'s entry sends that waiter's `readmit`. Its
+completion follows the readmission's whole cascade (§5) and reads the latch, which the job's
+readmit rows set when they admit, cancel or dequeue the waiter (`Readmitted`): a moved waiter ends
+the pass at `done`, and a waiter that stayed passes the turn through `turn_choice`. `done` begins
+the next pass after a move, begins a full pass when a scan was asked inside an admit-only one, and
+otherwise returns to `idle`.
+A scan asked inside a pass sends nothing and never leaves `awaiting_readmit`, whose completion is
+still queued: the `request` region latches it, from `no_request` to `full_requested`, and each
+pass begins with no request. The chart's microsteps move no job row: the hook counts them against
+the root dispatch's item cap and applies their intents, and each root dispatch must leave the
+instance in `idle`. The scan an admission owes the input
+(DL-255) is a root item on the coordinator after the input's macrosteps, marked by `load taken`
+behind a freed excess's scan, so it never meets a pass. Each waiter the scan reaches gets one
+`readmit`, whose payload computes each fact where the scan's rule reads it. An admission
+(`job.108`) sends the start's extent; a member of a box that stopped running is cancelled
+(`job.109`); a waiter that fails the queued recheck drops its arm and leaves the queue, one row for
+each value of the arm (`job.438`, `job.439`), with the window or day disposition after it in
+`after leave`; any other waiter stays queued (`job.181`).
 
 The box rules are dispatched to the instance each one moves (DL-346). A status move's row sends, in
 order, its `box rules` (the moment that reaches the job's box and the boxes above), its `settle`
@@ -576,7 +597,7 @@ only.
 Each machine has its decision-log entry: `supervisor_lease` (DL-326), `seal_boundary` (DL-327),
 `supervisor_process` (DL-328), `subscription` (DL-329), `supervisor_client` (DL-330), `effect`
 (DL-331), `host` (DL-333), `admission` (DL-334), `runtime_assembly` (DL-335), `anchor_head` and
-`period_row` (DL-336), and the oracle's `job` (DL-337).
+`period_row` (DL-336), the oracle's `job` (DL-337), and its queue scan's `queue_scan` (DL-372).
 
 `supervisor_lease` has token guards, a monotonic clock and time events.
 

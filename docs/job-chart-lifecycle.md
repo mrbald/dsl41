@@ -121,7 +121,7 @@ held = reserved + leave STARTING or RUNNING [keeps_held]
 
 - Ignored rows: 18. The event is consumed and nothing moves.
 - Rows marked unreachable: 19. No input reaches the cell.
-- Internal rows: 36. The configuration does not move: relays, moments and the arm's writes.
+- Internal rows: 35. The configuration does not move: relays, moments and the arm's writes.
 - Self-transitions: 9. A state is left and entered again.
 
-Shown: 69. Folded: 82. Rows in the chart: 151.
+Shown: 69. Folded: 81. Rows in the chart: 150.

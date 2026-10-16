@@ -33,6 +33,8 @@ from typing import Final, Literal, cast, get_args
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from dsl41.scan_chart import IDLE as SCAN_IDLE
+from dsl41.scan_chart import QUEUE_SCAN, SCAN_KEY
 from dsl41.state_machine import (
     Branch,
     Choice,
@@ -1684,7 +1686,8 @@ class RuntimeState:
     def rebuild_machines(self, *, jobs: bool = True) -> Executor:
         """A new executor holding the assembly instance in the store's phase, one `HOST` instance
         per host row in the configuration its state projects (statechart-engine ss11), and, with
-        `job_instance` set, one `job` instance per job row (DL-341).
+        `job_instance` set, one `job` instance per job row (DL-341) and the queue scan's
+        coordinator, idle between inputs (DL-372).
 
         An install, a test's witness and the gate's scratch read build theirs here; no action
         runs. `jobs=False` leaves the job instances out, for a read of the other charts whose
@@ -1696,6 +1699,7 @@ class RuntimeState:
             data = HostData(self, host_id)
             machines.restore(self.host_key(host_id), HOST, host_configuration(row.state), data)
         if jobs and self.job_instance is not None:
+            machines.restore(SCAN_KEY, QUEUE_SCAN, SCAN_IDLE)
             for job, jrow in self._jobs.items():
                 _restore_job(machines, self.job_instance, job, jrow)
         return machines

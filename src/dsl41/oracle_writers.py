@@ -18,7 +18,7 @@ from typing import Final, cast
 
 from dsl41.capacity import machine_load, to_reservations
 from dsl41.job_chart_events import RELEASE_RESOURCE, Settlement
-from dsl41.job_chart_rows import ARM_CLEARS, ARM_LATCHES, status_of
+from dsl41.job_chart_rows import ARM_CLEARS, ARM_LATCHES, MOMENT_IDS, status_of
 from dsl41.oracle_cascade import OracleCascade
 from dsl41.oracle_facts import DoorFacts, ReadmitFacts, RecomputeFacts, StartFacts, Started
 from dsl41.oracle_intents import (
@@ -630,7 +630,7 @@ _WRITERS: Final[dict[str, str]] = {
     "job.401": "_w_nothing",
     "job.402": "_w_nothing",
     "job.404": "_w_skip_inactive_member",
-    **{f"job.{n}": "_w_nothing" for n in range(405, 418)},
+    **{f"job.{n}": "_w_nothing" for n in MOMENT_IDS},
     "job.406": "_w_settle",
     "job.418": "_w_settle",
     **{f"job.{n}": "_w_nothing" for n in (424, 425, 426)},

@@ -28,6 +28,7 @@ from datetime import datetime
 from dsl41.canon import canonical_bytes
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event
+from dsl41.scan_chart import SCAN_KEY
 
 #: Oracle attributes the fork copies, so a dry apply cannot reach them.
 ORACLE_COPIED = frozenset(
@@ -36,8 +37,6 @@ ORACLE_COPIED = frozenset(
         "_queue",
         "_now",
         "_opening_release",
-        "_in_wake",
-        "_full_scan_requested",
         "_scan_owed",
         "_tz_cache",
         "_calendars",
@@ -128,6 +127,9 @@ def state_bytes(oracle: Oracle, since: tuple[int, int] = (0, 0)) -> bytes:
             ]
             for name in store.hosts
         },
+        # the queue scan's coordinator's configuration: a dispatch on a fork must not reach
+        # the original's (DL-372); `Oracle._check_scan_idle` checks that it is idle
+        "queue_scan": sorted(store.machines.active(SCAN_KEY)),
         # the heap's array layout, not only its firing order: a fork that
         # shared the list would reorder it here first
         "timers": [[_when(due), token, _event(ev)] for due, token, ev in store._timers],
@@ -141,7 +143,7 @@ def state_bytes(oracle: Oracle, since: tuple[int, int] = (0, 0)) -> bytes:
         "queue": [_event(ev) for ev in oracle._queue],
         "now": _when(oracle._now),
         "opening_release": list(oracle._opening_release),
-        "flags": [oracle._in_wake, oracle._full_scan_requested, oracle._scan_owed],
+        "flags": [oracle._scan_owed],
         "tz_cache": sorted(oracle._tz_cache),
         "calendars": sorted(oracle._calendars),
         "window_starts": (

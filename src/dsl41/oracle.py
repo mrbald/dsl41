@@ -192,12 +192,17 @@ payloads are in `oracle_facts` and `oracle_intents`.
 Every input that moves a job row is a root item on the job's instance of the `job` statechart:
 STATUS, STARTJOB, FORCE_STARTJOB, a window timer's replay, KILLJOB, the TIMER input, the flag
 inputs and RELEASE_RESOURCE. SET_GLOBAL's referencers and the period opening's removed holders
-are one root item each, and the input's owed scan is a root item of its own after them
-(DL-255). The deadline alarms move no state. Each job row has one `job` instance on the state
-owner's executor (`RuntimeState.machines`) under the row's `job_key`, with `JobData` from the
-catalog (`job_data`). The owner restores them from the rows
+are one root item each. The deadline alarms move no state. Each job row has one `job` instance
+on the state owner's executor (`RuntimeState.machines`) under the row's `job_key`, with
+`JobData` from the catalog (`job_data`). The owner restores them from the rows
 (`RuntimeState.keep_job_instances`), a fork copies them (`Executor.fork`, DL-339), and a row
 read into existence gets its instance as it is created, outside any macrostep.
+
+The queue's scan is the `queue_scan` chart's one instance on the same executor, under
+`SCAN_KEY` (`scan_chart`, DL-372). The owner restores it idle beside the job instances, and
+each root dispatch must leave it idle. Every sender inside a cascade sends it a full scan. The
+input's owed admit-only scan (DL-255) and the period opening's scan are root items on it after
+the input's other macrosteps.
 
 A macrostep runs the whole cascade on the executor's worklist, depth first (`oracle_cascade`).
 The rows' actions are pure. The executor calls the hook (`_perform`) with each outcome, before
@@ -219,7 +224,7 @@ from __future__ import annotations
 
 import sys
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Hashable, Mapping
 from datetime import datetime
 from typing import Final, cast
 
@@ -238,7 +243,6 @@ from dsl41.job_chart_events import (
     PERIOD_OPENING,
     RELEASE_RESOURCE,
     RUN_WINDOW,
-    SCAN,
     START,
     STARTJOB,
     STATUS,
@@ -248,7 +252,7 @@ from dsl41.job_chart_events import (
 )
 from dsl41.job_chart_rows import row_configuration
 from dsl41.oracle_facts import NoexecFacts, RowUnits, StartFacts, job_data
-from dsl41.oracle_intents import Armed, Entered, Intent, Program, StatusInput
+from dsl41.oracle_intents import Armed, Entered, Intent, ScanFacts, StatusInput
 from dsl41.oracle_schedule import DEFERRED_RESCAN_KEY, DEFERRED_TIMER_KEY
 from dsl41.oracle_state import (
     INJECTABLE_STATUSES,
@@ -261,6 +265,8 @@ from dsl41.oracle_state import (
     TraceEntry,
 )
 from dsl41.oracle_writers import OracleWriters
+from dsl41.scan_chart import IDLE as SCAN_IDLE
+from dsl41.scan_chart import SCAN, SCAN_KEY
 from dsl41.semantics import SemanticSwitches
 from dsl41.state_machine import Event as ChartEvent
 from dsl41.state_machine import Outcome, Statechart, StatechartError
@@ -553,11 +559,21 @@ class Oracle(OracleWriters):
         """One root item on the job's instance, its row read into existence first, and its whole
         cascade; the hook writes as each item ends and counts it against the item cap."""
         self._runtime(job)
+        self._dispatch_root(self.store.job_key(job), job, event, cause)
+
+    def _root_scan(self, job: str, *, keep_stopped: bool) -> None:
+        """The queue's scan as a root item of its own, on the coordinator's instance, in the
+        mode the root asks (DL-372); `job` names the root in a cascade error."""
+        event = ChartEvent(SCAN, ScanFacts(self, keep_stopped=keep_stopped))
+        self._dispatch_root(SCAN_KEY, job, event, "")
+
+    def _dispatch_root(self, key: Hashable, job: str, event: ChartEvent, cause: str) -> None:
         self._items = 0
         self._rooted = (job, f"{event.name} ({cause})" if cause else event.name)
         try:
-            self.store.machines.dispatch(self.store.job_key(job), event, self._perform)
+            self.store.machines.dispatch(key, event, self._perform)
             self._check_reached()
+            self._check_scan_idle()
         except BaseException as exc:
             self._recover()
             if isinstance(exc, RecursionError) and not isinstance(exc, CascadeDepthError):
@@ -581,6 +597,15 @@ class Oracle(OracleWriters):
                     f"job {job!r}: at the macrostep's end its instance is in {listed(active)},"
                     f" and its row projects to {listed(row_configuration(rows[job]))}"
                 )
+
+    def _check_scan_idle(self) -> None:
+        """At a root dispatch's end, the scan's coordinator rests in `idle` (DL-372): a pass
+        left open would latch every later scan and scan nothing."""
+        active = self.store.machines.active(SCAN_KEY)
+        if active != SCAN_IDLE:
+            raise StatechartError(
+                f"queue_scan: at the macrostep's end its instance is in {listed(active)}"
+            )
 
     def _recover(self) -> None:
         """After a macrostep that raised, rebuild the instances from the rows (no write is
@@ -658,14 +683,13 @@ class Oracle(OracleWriters):
 
     def _run_owed_scan(self) -> None:
         """DL-247, DL-255: the input's owed admit-only scan, a root item of its own after the
-        input's macrosteps."""
-        while self._scan_owed and not self._in_wake:
+        input's macrosteps, named by the first waiter."""
+        while self._scan_owed:
             self._scan_owed = False
             if self._pool.has_priority_waiters(self.store.job):
                 waiters = self._pool.sorted_waiters(self.store.job)
                 job = waiters[0] if waiters else next(iter(self.store.job))
-                program = Program(f"{SCAN} owed by the input", self._scan(keep_stopped=True))
-                self._root(job, ChartEvent(SCAN, program))
+                self._root_scan(job, keep_stopped=True)
 
     def _release_removed_holders(self) -> None:
         """DL-256: at the period's opening, each carried row whose job the catalog does not
@@ -675,8 +699,7 @@ class Oracle(OracleWriters):
         for job in owed:
             self._root(job, ChartEvent(PERIOD_OPENING))
         if owed:
-            program = Program(f"{SCAN} after the opening", self._scan(keep_stopped=False))
-            self._root(owed[0], ChartEvent(SCAN, program))
+            self._root_scan(owed[0], keep_stopped=False)
 
     def _perform(self, outcome: Outcome) -> None:
         """The executor's hook (statechart-engine section 5): each fired row's writes in firing
@@ -690,8 +713,11 @@ class Oracle(OracleWriters):
             jobs = len(self.catalog.jobs)
             raise CascadeDepthError(*self._rooted, self._cap, jobs=jobs)
         key = str(outcome.key)
-        self._reached.add(key)
-        self._write_rows(key.partition(":")[2], outcome)
+        if key != SCAN_KEY:
+            # the scan's coordinator moves no job row: its microsteps report intents only
+            # (DL-372)
+            self._reached.add(key)
+            self._write_rows(key.partition(":")[2], outcome)
         for intent in outcome.intents:
             if not isinstance(intent, Entered):
                 cast(Intent, intent).apply(self)

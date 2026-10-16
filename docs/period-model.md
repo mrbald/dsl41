@@ -1159,7 +1159,7 @@ host row. A→B→A moves the revision twice, and the seal carries it (PR-16b).
 | `deadman_us` on a host row | DL-95's other half. See the note below |
 | the decision index | `_by_index` is local to the log; §9 handles retries |
 | whether a run's outcome is unresolved | a projection. It derives from the bound executor's quarantine (`hosts`) plus the absence of evidence (`executions`), and both are carried |
-| `_trace`, `_emitted`, `_queue`, `_in_wake` | transient or derived |
+| `_trace`, `_emitted`, `_queue`, the `queue_scan` instance | transient or derived |
 | `_dispatched` | **derived, and its reconstruction is normative.** See the note below |
 | `_referencers`, `_bucket_cap` | derived from the catalog |
 | `Scheduler._next`, `_CalCache` | replaced by the §6 watermark |

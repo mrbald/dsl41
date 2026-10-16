@@ -66,8 +66,7 @@ WAKE: Final = "wake"
 #: The ancestors' overrides after a member's move, and the boxes an iced holder leaves.
 WALK_UP: Final = "walk up"
 HOLDERS: Final = "holders may leave"
-#: The queue's scan, and the load an admitted start takes (DL-255).
-SCAN: Final = "scan"
+#: The load an admitted start takes, which owes the input the queue's scan (DL-255).
 LOAD_TAKEN: Final = "load taken"
 #: A box's end reaches its job_terminators, one member at a time (DL-348).
 BOX_ENDS_STEP: Final = "box ends step"
@@ -88,7 +87,6 @@ MOMENTS: Final = (
     WAKE,
     WALK_UP,
     HOLDERS,
-    SCAN,
     LOAD_TAKEN,
     BOX_ENDS_STEP,
     NOTIFY_STEP,

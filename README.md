@@ -582,6 +582,10 @@ Semantics:
   `src/dsl41/job_chart_events.py` (the events, the data and the payloads) and
   `src/dsl41/job_chart_rows.py` (the states, the rows and a row's
   configuration), and each name is imported from the module that defines it.
+- `src/dsl41/scan_chart.py`: the `queue_scan` statechart, the queue scan's
+  one coordinator per oracle: its passes, each waiter's turn behind its
+  readmission's cascade, a scan asked inside a pass, and the upgrade of an
+  admit-only scan to a full one.
 - `src/dsl41/oracle.py`: the AutoSys discrete-event interpreter, `Oracle`:
   script-driven completion, edge-triggered re-evaluation, and `InputBatch`,
   one admitted input as one store transaction. Every job row moves through
@@ -605,7 +609,8 @@ Semantics:
   chart, each oracle fact computed on its first read, and a job instance's
   data.
 - `src/dsl41/oracle_intents.py`: the cascade's payloads, the moments'
-  steps, and the intents a row's action reports for the hook.
+  steps, the queue scan's record, and the intents a row's action reports
+  for the hook.
 - `src/dsl41/capacity.py`: sized buckets (machine `max_load`, resource
   amounts) and the QUE_WAIT queue with its admission order.
 - `src/dsl41/semantics.py`: the closed registry of semantic switches
