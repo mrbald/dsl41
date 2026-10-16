@@ -72,7 +72,8 @@ window that descends from `MAX_NESTED_STARTS` admitted starts of its own job (`s
 items on its instance, in its ancestry) is refused with a trace line whoever asked.
 
 The cascade between instances is declared too (DL-350): a box's rules on its members, a
-member's moves on its box, the wakes, the queue's scan and the start retries. A row's action
+member's moves on its box, the wakes, the queue's scan, sent to the `queue_scan` coordinator
+(`scan_chart`, DL-372), and the start retries. A row's action
 sends what its move causes through the tier's handle (`Units.consequences`). A call-then-
 continue site is a moment: a self-event whose payload carries the tier's step (`Moment`), run
 as a lifecycle row that moves nothing. An admitted start enters the transient state ADMITTED

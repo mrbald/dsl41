@@ -91,6 +91,7 @@ from dsl41.job_chart_events import (
 from dsl41.job_chart_rows import (
     ARM_CLEARS,
     ARM_LATCHES,
+    MOMENT_IDS,
     configuration,
     projection,
     row_configuration,
@@ -370,7 +371,7 @@ def test_the_chart_is_well_formed_draws_no_warning_and_is_registered() -> None:
     assert chart_warnings(CHART) == []
     assert CHART.clock == "logical"
     assert CHART in MACHINES
-    assert len(CHART.rows) == 151
+    assert len(CHART.rows) == 150
     assert [b.id for c in CHART.choices for b in c.branches] == [
         *(f"job.{n}" for n in range(171, 177)),
         "job.309",
@@ -503,8 +504,8 @@ def _moves() -> set[str]:
 def test_every_other_row_moves_nothing_relays_an_attempt_or_settles_held_units() -> None:
     moves = _moves()
     others = [row for row in CHART.rows if row.id not in moves]
-    assert len(moves) == 58 + 6 + 5 + 9 and len(others) == 73
-    moments = {f"job.{405 + i}": event for i, event in enumerate(MOMENTS)}
+    assert len(moves) == 58 + 6 + 5 + 9 and len(others) == 72
+    moments = {f"job.{n}": event for n, event in zip(MOMENT_IDS, MOMENTS, strict=True)}
     for row in others:
         if row.id in RELAYS:
             assert row.kind == "internal" and row.action == "relay_start"

@@ -281,7 +281,6 @@ stateDiagram-v2
 | job.407 | lifecycle | wake |  | moment |  | internal |  |
 | job.408 | lifecycle | walk up |  | moment |  | internal |  |
 | job.409 | lifecycle | holders may leave |  | moment |  | internal |  |
-| job.410 | lifecycle | scan |  | moment |  | internal |  |
 | job.411 | lifecycle | load taken |  | moment |  | internal |  |
 | job.412 | lifecycle | box ends step |  | moment |  | internal |  |
 | job.413 | lifecycle | notify step |  | moment |  | internal |  |
@@ -469,6 +468,81 @@ stateDiagram-v2
 | cleared_noexec | action | OFF_NOEXEC on a box clears every job it contains (DL-254). |
 | released_held | action | RELEASE_RESOURCE gave held units back: the queue is scanned (DL-256). |
 | moment | action | A moment of a cascade (DL-350): the tier's step its payload carries (`Moment`), run now. |
+
+## queue_scan
+
+Clock: logical.
+
+```mermaid
+stateDiagram-v2
+    state "queue_scan" as s7
+    state s7 {
+        [*] --> s3
+        state "idle" as s3
+        state "pass" as s6
+        state s6 {
+            [*] --> s4
+            state "next_waiter" as s4
+            state "awaiting_readmit" as s0
+            state "done" as s1
+            --
+            [*] --> s5
+            state "no_request" as s5
+            state "full_requested" as s2
+        }
+    }
+    state c0 <<choice>>
+    s3 --> s6 : queue_scan.01 scan
+    s5 --> s2 : queue_scan.02 scan
+    s4 --> c0 : queue_scan.04
+    s0 --> s1 : queue_scan.05 [waiter_moved]
+    s0 --> c0 : queue_scan.06 [waiter_stayed]
+    s1 --> s6 : queue_scan.07 [pass_upgrades] / upgrades
+    s1 --> s6 : queue_scan.08 [pass_restarts]
+    s1 --> s3 : queue_scan.09 [scan_ends]
+    c0 --> s0 : queue_scan.10 [waiter_queued]
+    c0 --> s1 : queue_scan.11 [else]
+```
+
+| Id | Source | Event | Guard | Action | Target | Kind | Cite |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| queue_scan.01 | idle | scan |  | A scan with no pass running begins one. | pass | external | DL-50, DL-247, DL-372 |
+| queue_scan.02 | no_request | scan |  | A scan asked inside a pass sends nothing and asks a full pass of an admit-only one. | full_requested | external | DL-50, DL-247, DL-372 |
+| queue_scan.03 | full_requested | scan |  | A full pass is asked already. |  | internal | DL-50, DL-247, DL-372 |
+| queue_scan.04 | next_waiter | (completion) |  | The pass's first turn. | turn_choice | external | DL-50, DL-247, DL-372 |
+| queue_scan.05 | awaiting_readmit | (completion) | waiter_moved |  | done | external | DL-50, DL-247, DL-372 |
+| queue_scan.06 | awaiting_readmit | (completion) | waiter_stayed |  | turn_choice | external | DL-50, DL-247, DL-372 |
+| queue_scan.07 | done | (completion) | pass_upgrades | upgrades | pass | external | DL-50, DL-247, DL-372 |
+| queue_scan.08 | done | (completion) | pass_restarts |  | pass | external | DL-50, DL-247, DL-372 |
+| queue_scan.09 | done | (completion) | scan_ends |  | idle | external | DL-50, DL-247, DL-372 |
+
+| Id | Choice | Guard | Action | Target |
+| --- | --- | --- | --- | --- |
+| queue_scan.10 | turn_choice | waiter_queued |  | awaiting_readmit |
+| queue_scan.11 | turn_choice | else |  | done |
+
+| State | In | Entry | Exit | Defers | Waits |
+| --- | --- | --- | --- | --- | --- |
+| queue_scan |  |  |  |  |  |
+| idle | queue_scan/scan |  |  |  |  |
+| pass | queue_scan/scan | begins_pass |  |  |  |
+| next_waiter | pass/turn |  |  |  |  |
+| awaiting_readmit | pass/turn | readmits |  |  |  |
+| done | pass/turn |  |  |  |  |
+| no_request | pass/request |  |  |  |  |
+| full_requested | pass/request |  |  |  |  |
+
+| Name | Kind | Prose |
+| --- | --- | --- |
+| waiter_queued | guard | A waiter of the pass's list from its turn on is QUE_WAIT now: it takes the next turn. |
+| waiter_moved | guard | The turn's readmission reported that it admitted, cancelled or dequeued its waiter. |
+| waiter_stayed | guard | The turn's readmission left its waiter queued. |
+| pass_upgrades | guard | An admit-only scan was asked for a full one inside the pass: a full pass follows, whether or not the pass ended at a move (DL-247). |
+| pass_restarts | guard | The pass ended at a moved waiter and no upgrade is owed: a pass of the same mode follows. |
+| scan_ends | guard | The pass ended with no waiter moved and no upgrade owed: the scan ends. |
+| begins_pass | action | `pass`'s entry: the pass reads the waiters' order, from the first turn, and reports the bookkeeping the record gives (the owed scan's mark cleared, the latch cleared). |
+| readmits | action | `awaiting_readmit`'s entry: the turn `turn_choice` found, its waiter's `readmit` sent. |
+| upgrades | action | The admit-only scan becomes a full one before its next pass begins (DL-247). |
 
 ## runtime_assembly
 

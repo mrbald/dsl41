@@ -23,10 +23,6 @@ moments:
   released units or the move lifted a block;
 - `walk up` (`_walk_up`) and `holders may leave` (`_holders`, and an ice's own completion
   moment, `_ice_resolves`);
-- `scan` (`_scan`): one `readmit` per waiter of a pass, the list read when the pass starts and
-  each waiter's status at its turn; a pass ends at the first waiter that moved, which its
-  `readmit` row reports as an intent; the pass bookkeeping (`_in_wake`, `_scan_owed`,
-  `_full_scan_requested`) is the oracle's, written by intents;
 - `load taken` (DL-255): the owed scan's mark, behind a freed excess's scan;
 - `box ends step` (`_box_ends`): one member at a time, while the run that ended is the box's
   run (DL-348);
@@ -46,6 +42,11 @@ and a box's resets (`_on_starts_run`), and its completion, which carries the pay
 entered it, moves to STARTING and sends a box's reset notices, `started`, a freed excess's scan
 and the load mark (`_on_starting_admitted`, DL-364). A readmission enters `ADMITTED` from its
 own row, so the bound does not count it as a start (`_on_starting_readmitted`).
+
+The queue's scan is no moment: each sender sends one `scan` to the coordinator, the
+`queue_scan` chart's one instance (`scan_chart`, DL-372), whose states run the passes. Its
+record is the payload (`ScanFacts`); the latch of a moved waiter (`Readmitted`) and the owed
+scan's mark (`ScanState`) are the oracle's, written by intents.
 
 Audiences are the sender's (DL-346): each gate is read in the action or the moment that sends
 the item, never on the recipient's row.
@@ -81,9 +82,7 @@ from dsl41.job_chart_events import (
     MEMBER_MOVES,
     NOEXEC_MOVED,
     NOTIFY_STEP,
-    READMIT,
     RETRY_STEP,
-    SCAN,
     SETTLE,
     START,
     START_ADMITTED,
@@ -125,16 +124,17 @@ from dsl41.oracle_intents import (
     Register,
     Rule,
     RunStart,
+    ScanFacts,
     ScanState,
     Send,
     Settle,
     SettledEarly,
     StatusInput,
     Step,
-    WatchReadmit,
 )
 from dsl41.oracle_schedule import OracleSchedule
 from dsl41.oracle_state import FAILED, LIVE, LIVE_OR_QUEUED, TERMINAL, CarriedRows
+from dsl41.scan_chart import SCAN, SCAN_KEY
 from dsl41.semantics import SemanticSwitches
 from dsl41.state_machine import Context, Effects, StatechartError
 from dsl41.state_machine import Event as ChartEvent
@@ -197,11 +197,6 @@ class OracleCascade(OracleSchedule):
 
     def _cascade_idle(self) -> None:
         """The cascade's bookkeeping between inputs; construction and `Oracle._recover` share it."""
-        #: DL-247: the queue scan is in a pass (`_scan`).
-        self._in_wake = False
-        #: DL-247: a full scan requested while a scan runs; the running loop takes it as its next
-        #: pass, so an admit-only scan cannot swallow a release's cancellations.
-        self._full_scan_requested = False
         #: DL-247: a block may have lifted with no capacity freed, so the admit-only scan is
         #: owed: a box left RUNNING, or (DL-255) a start or a queued job took a machine's load
         #: and may have sent a resource waiter back to its load check. It runs at the waiter
@@ -216,7 +211,7 @@ class OracleCascade(OracleSchedule):
         #: DL-340: per job, the moves that ended a run whose settlement waits behind the move's
         #: box rules (`Move.apply`, `_w_settle`). Empty between inputs.
         self._late_settlements: dict[str, list[Move]] = {}
-        #: Whether the last `readmit` the scan sent moved its waiter (`Readmitted`).
+        #: Whether a readmission of the scan's pass moved its waiter (`Readmitted`).
         self._readmitted = False
 
     def fork(self) -> OracleCascade:
@@ -451,7 +446,7 @@ class OracleCascade(OracleSchedule):
         attempt = cast(StartFacts, admitted.attempt)
         admission = cast(AdmissionFacts, admitted.admission)
         freed = admission.frees
-        scan = (self._program(job, SCAN, self._scan(keep_stopped=False)),) if freed else ()
+        scan = (self._scan(),) if freed else ()
         return self._starting(job, admission, (*scan, *self._load_mark(job, attempt.vector())))
 
     def _on_starting_readmitted(self, job: str, ctx: Context) -> Effects:
@@ -589,7 +584,7 @@ class OracleCascade(OracleSchedule):
                 )
             )
         if owed:
-            yield Step(send=(self._program(batch.box, SCAN, self._scan(keep_stopped=False)),))
+            yield Step(send=(self._scan(),))
 
     # ---- the audiences: each gate the sender reads (DL-346, DL-348)
 
@@ -789,7 +784,7 @@ class OracleCascade(OracleSchedule):
             for name in self._referencers.get(job, ())
         ]
         if queue:
-            sends.append(self._program(job, SCAN, self._scan(keep_stopped=False)))
+            sends.append(self._scan())
         if sends:
             yield Step(send=tuple(sends))
 
@@ -844,49 +839,18 @@ class OracleCascade(OracleSchedule):
 
     # ---- the queue
 
-    def _scan(self, *, keep_stopped: bool) -> Iterator[Step]:
-        """The queue's scan, to a fixpoint: a scan inside a pass asks a full pass
-        of an admit-only one and does nothing more; a pass reads the waiters'
-        order when it starts and each waiter's status at its turn, and ends at
-        the first `readmit` that moved its waiter, which starts the next pass."""
-        if self._in_wake:
-            if not keep_stopped:  # pragma: no branch -- see below
-                # The arm with keep_stopped True is unreachable: the owed scan
-                # is a root item of its own, after the input's macrosteps, so
-                # it never meets a pass in progress (`_run_owed_scan`).
-                yield Step(intents=(ScanState(full=True),))
-            return
-        begin: tuple[Intent, ...] = (ScanState(in_wake=True),)
-        while True:
-            waiters = self._pool.sorted_waiters(self.store.job)
-            begin += (ScanState(owed=False, full=False),)
-            moved = False
-            for job in waiters:
-                if self.store.job[job].status != "QUE_WAIT":
-                    continue
-                facts = ReadmitFacts(self, job, self.catalog.jobs[job], keep_stopped=keep_stopped)
-                yield Step(send=(self._to(job, READMIT, facts),), intents=(*begin, WatchReadmit()))
-                begin = ()
-                if self._readmitted:
-                    moved = True
-                    break
-            if begin:
-                yield Step(intents=begin)
-                begin = ()
-            if self._full_scan_requested and keep_stopped:
-                keep_stopped = False
-                continue
-            if not moved:
-                break
-        yield Step(intents=(ScanState(in_wake=False),))
+    def _scan(self) -> Send:
+        """The queue's scan: one `scan` to the coordinator (`scan_chart`), whose record reads
+        the waiters when a pass begins. Every sender inside a cascade asks a full scan."""
+        return SCAN_KEY, ChartEvent(SCAN, ScanFacts(self, keep_stopped=False))
 
     def _on_held(self, job: str, ctx: Context) -> Effects:
         """ON_HOLD on a waiter: a held waiter blocks no one (DL-247)."""
-        return Effects(send=(self._program(job, SCAN, self._scan(keep_stopped=False)),))
+        return Effects(send=(self._scan(),))
 
     def _on_released_waiter(self, job: str, ctx: Context) -> Effects:
         """OFF_HOLD on a waiter: its queue is scanned (DL-50)."""
-        return Effects(send=(self._program(job, SCAN, self._scan(keep_stopped=False)),))
+        return Effects(send=(self._scan(),))
 
     def _on_released_hold(self, job: str, ctx: Context) -> Effects:
         """OFF_HOLD on a job that is not a waiter: it attempts its start (SEM-21)."""
@@ -894,7 +858,7 @@ class OracleCascade(OracleSchedule):
 
     def _on_released_held(self, job: str, ctx: Context) -> Effects:
         """RELEASE_RESOURCE gave held units back: the waiters wake (DL-256)."""
-        return Effects(send=(self._program(job, SCAN, self._scan(keep_stopped=False)),))
+        return Effects(send=(self._scan(),))
 
     # ---- the flags
 

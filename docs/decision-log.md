@@ -24063,3 +24063,139 @@ relitigate an entry; append a new one.
   rows' counts equal to their new rows'; three minors and three nits fixed and confirmed by it
   (the rule narrowed to decisions that are chart rows; the item margin stated; a doc block; two
   wordings; a stale count; a wrapped line).
+- DL-372 The queue's scan is one declared coordinator: the `queue_scan` chart, one instance per
+  oracle on the jobs' executor, whose states wait for each readmission's cascade and whose
+  choice gives each turn; the generator `_scan`, the moment `scan` (job.410) and the flags
+  `_in_wake` and `_full_scan_requested` leave
+  (2026-10-17; src/dsl41/scan_chart.py, src/dsl41/oracle_cascade.py, src/dsl41/oracle.py,
+  src/dsl41/oracle_intents.py, src/dsl41/oracle_state.py, src/dsl41/machines.py,
+  src/dsl41/job_chart_events.py, src/dsl41/job_chart_rows.py, src/dsl41/oracle_writers.py,
+  src/dsl41/job_chart.py; tests/test_queue_scan.py, tests/test_scan_chart.py,
+  tests/test_oracle_chart_cascade.py, tests/test_oracle_chart.py, tests/test_job_chart.py,
+  tests/fork_harness.py; docs/statechart-engine.md §8, §11, §16; docs/period-model.md §3.3;
+  docs/state-machines.md; docs/job-chart-lifecycle.md; docs/blocks/README.md,
+  docs/blocks/capacity.md; README.md)
+  THE AIM. Step 6b of the job chart simplification, the last (review 1.1 and 2.3, ruling R11
+  item 6b). The scan's phases were the suspended positions of a generator threaded through
+  `scan` self-events on a job instance: start or join a pass, the next waiter, wait for the
+  readmission's cascade, restart on a move, upgrade an admit-only pass, finish. Four flags held
+  its control state. They are declared now. No outcome of the oracle changes: no golden, no
+  trace line.
+  THE FORM. R11's form A: a chart on the jobs' executor (`state_machine.Statechart`). The
+  owner's in-process DSL (form B) runs outside the executor's worklist. A scan run there runs
+  after the dispatch returns, and that changes resource winners: R has one unit; H, the empty
+  box E, the waiter W and C each need it; E and C depend on `s(H)`. H's end wakes E, which
+  starts, completes at its start and frees R, and its scan admits W before H's wake reaches C.
+  A scan after the dispatch lets C take R. A separate dispatch also resets the item budget and
+  the ancestry (R11 §3). A new test pins W's start and C's wait.
+  THE RULE. Orchestration across instances is its own coordinator (R11). A phase whose decision
+  follows another instance's cascade is a transient state: its entry sends, and its completion
+  decides behind the cascade (§8, DL-364, DL-371). A decision that waits for nothing is a choice,
+  resolved inside the microstep (§4), as job.171 to job.176 and job.309 decide (R13). The scan's
+  record is its payload, which every completion carries.
+  THE CHART. `queue_scan`, registered in `machines.MACHINES`. The instance lives under
+  `SCAN_KEY` on the state owner's executor; the owner restores it idle where it restores the
+  job instances (`rebuild_machines`), so a fork, an install and a macrostep that raised each
+  leave it idle. States: `idle`; `pass` (entry `begins_pass`) with two regions, `turn`
+  (`next_waiter`, `awaiting_readmit` with entry `readmits`, `done`) and `request`
+  (`no_request`, `full_requested`); the choice `turn_choice`. `awaiting_readmit` waits for the
+  readmission's cascade. `next_waiter` is the region's initial state, which starts the first
+  turn, since a region cannot start at a choice. `done` decides the pass's end on its
+  completion, since a branch cannot target a choice, and its rows read `full_requested` while
+  `pass` is active. The pass bookkeeping is the chart's: `_in_wake` is `pass` being active,
+  `_full_scan_requested` is `full_requested`, and a pass begins by entering `pass`, so its
+  request is reset. The latch `_readmitted` stays the oracle's: the `job` chart's readmit rows
+  report it (`Readmitted`), and a pass's entry clears it (`ClearReadmitted`), so `moved` is the
+  reported outcome, not state. The owed scan's mark (`_scan_owed`, `ScanState(owed)`) stays
+  the oracle's.
+  THE ROWS. queue_scan.01: a scan at `idle` begins a pass. queue_scan.02: a scan inside a pass
+  latches `full_requested`. queue_scan.03: a scan finds it latched (internal). queue_scan.04:
+  `next_waiter`'s completion enters `turn_choice`. `awaiting_readmit`'s completion:
+  queue_scan.05 (`waiter_moved`) ends the pass at `done`, queue_scan.06 (`waiter_stayed`)
+  enters `turn_choice`. `turn_choice`: queue_scan.10 (`waiter_queued`) gives the turn to
+  `awaiting_readmit`, queue_scan.11 (else) ends the pass at `done`. `done`'s completion:
+  queue_scan.07 (`pass_upgrades`, action `upgrades`) begins a full pass, queue_scan.08
+  (`pass_restarts`) begins a pass of the same mode, queue_scan.09 (`scan_ends`) returns to
+  `idle`. The guards of each state's rows are exclusive, and the choice's else is the
+  complement of its branch. The branch's guard reads the record alone, so it sees nothing the
+  exit of `awaiting_readmit` or `next_waiter` changes (R4); `pass_upgrades` reads
+  `full_requested` on `done`'s completion, before any exit. A scan asked inside a pass takes a
+  row of the `request` region and never leaves `awaiting_readmit`, whose completion is still
+  queued.
+  THE RECORD. `ScanFacts` (protocol `ScanPass`, checked by `isinstance`): the mode
+  (`keep_stopped`), the waiters' order read when a pass begins (`CapacityPool.sorted_waiters`),
+  and the turn. `queued` reads each waiter's status from the turn on and keeps the waiter it
+  found; `readmit` takes that turn and builds the waiter's `ReadmitFacts`, and a turn with no
+  waiter found is a statechart error; `upgrade` makes the scan a full one. A record with no
+  `ScanPass` shape is a statechart error. The record is the scan's bookkeeping in flight, as
+  a moment's generator was: only the coordinator's entries and actions change it, and the
+  coordinator holds none between inputs, so no fork shares one in use. This is a stated limit
+  on §5's immutable payloads (R13 F6): an outcome kept after the dispatch shows the record as
+  the scan left it.
+  THE SENDERS. The six senders inside a cascade (a freed excess at STARTING, the batch's
+  second phase, a wake, ON_HOLD and OFF_HOLD on a waiter, RELEASE_RESOURCE) each send one
+  full `scan` (`_scan()`, which takes no mode). The owed admit-only scan and the period
+  opening's scan are root items on the coordinator (`_root_scan`, which builds its record in
+  the mode it asks), named in a cascade error by the job they named before.
+  THE HOOK. A microstep of the coordinator moves no job row: the hook counts it against the
+  root dispatch's item cap, applies its intents, and leaves it out of the macrostep's check.
+  At each root dispatch's end the coordinator rests in `idle`, or the dispatch raises a
+  `StatechartError` (`_check_scan_idle`): a pass left open would latch every later scan and
+  scan nothing.
+  THE SEQUENCES (built before the change, passing before and after). The restart: A waits on
+  S, B and C on R; a pass keeps A, admits B and ends; the next reads the list again: A, B, A,
+  C, A. The upgrade (R11's counter-example, tests/test_oracle_chart_cascade.py's fixture): the
+  owed admit-only scan keeps M, admits X, X's start fails Q, whose terminator releases X's
+  load and asks a full scan inside the pass; the next pass is full and cancels M: (M, admit
+  only), (X, admit only), (M, full). The nested request: W1's readmission completes the
+  empty box and asks a scan inside the pass, which sends nothing; W1 moved, the next pass
+  admits W2. The join in a wake: R11 §3's sequence above.
+  ITEMS. A turn pops two items, as the moment did: the readmission and `awaiting_readmit`'s
+  completion, which resolves `turn_choice` and sends the next readmission. A pass pops two more
+  than the moment did: `next_waiter`'s completion and `done`'s. A scan asked inside a pass pops
+  one item where the moment popped two. The job instances' items keep their order. The cascade
+  cap counts items (DL-351). Over the golden sample, 4,060 runs: 812,889 items before, 814,587
+  after; the scan's own 10,711 before, 12,409 after; at most 32 more and 1.08 times a run's
+  items. The queue-scan shape at 200 jobs rises from 20,991 to 21,190 items, against a cap of
+  160,000: cap over peak 7.6 to 7.55, above the gate's 4.5 (`MARGIN`); at 800 jobs it rises
+  from 323,991 to 324,790, under the 400,000 ceiling. The fan-in at 200 jobs (4.7) is still the
+  least margin. No golden and no measured shape crosses the cap. A decision is one link deeper
+  in the ancestry; no guard reads depth, and the job.100 bound counts `start admitted` links,
+  which the coordinator never adds.
+  CHECKS. The job chart has 150 rows, 151 before; the moments' ids are listed (`MOMENT_IDS`)
+  and 410 is not among them. 79 guards and 36 actions, as before. `queue_scan` has 9 rows, one
+  choice with 2 branches, 6 guards and 3 actions; 13 machines are registered, 12 before. The
+  transition gate holds 325 of 325 required items of `job`, 326 before, and 23 of 23 of
+  `queue_scan`, hit by the oracle's own tests; 19 marked rows, as before. The completeness test
+  runs `scan` in each of the seven configurations. A test per phase drives the chart on a bare
+  executor; tests pin that the hook counts the coordinator's microsteps and writes no row for
+  them, that a fault inside a pass leaves the coordinator idle, and that a pass left open at a
+  dispatch's end raises. The fork harness compares the coordinator's configuration on every
+  feed. A differential run of HEAD against the tree over the golden sample: in all 4,060 runs
+  the job instances' outcomes (instance, event, rows, intents, a readmission's mode) are equal
+  in order, with 2,199 readmissions and 3,258 scans asked on each side. The golden replay:
+  4,060 runs, 152,213 entries, 0 differing. Line and branch coverage 100.
+  THE CONTRACTS. statechart-engine §8 lists the moments without `scan`; §11 states the scan's
+  ownership: the coordinator, its record, its passes, its choice, the request and the idle
+  check; §16 names the machine's entry. period-model §3.3's not-carried table names the
+  coordinator's instance where it named `_in_wake`; nothing it carries changes.
+  THE VERSION. STATE_MACHINE_VERSION stays 24 (DL-235): no accepted input derives
+  differently. The goldens replay equal, and the added items, a constant per pass, move no
+  input of the sample or of the measured shapes across the cap. No oracle machine defers
+  (§12), and the instances are rebuilt from the rows with the coordinator idle, so no stored
+  configuration or queue names the retired moment or the new chart's states.
+  REVIEW. Semantic class (the scan moves from a generator to a declared chart; §8, §11, a frozen
+  rule of period-model): one Opus reviewer and one Codex Astra pass, two rounds. Round 1: Codex
+  found nothing on five probes (the completion's entry serial under a nested scan, the record on
+  completions, recovery and the fork, the latch, the hook and the guards' reads) and qualified
+  the cap; Opus raised F1 to F8. F1 (major, Opus; Codex measured the same): three items per turn
+  moved the queue-scan shape's first refusal from about 890 to about 730 jobs, and the draft's
+  version paragraph denied it. Ruled (R13): a decision that waits for nothing is a choice; the
+  turn's decision became `turn_choice`, two items per turn again. F2 (Opus): the idle check at
+  each root dispatch's end. F3 (Opus): `_scan()` takes no mode. F4, F5, F7 (Opus): the Structure
+  section, two comments restated as rules, the runtime-checkable record, the raise in `readmit`,
+  the waiter found once, `ClearReadmitted`. F6 (Opus): the mutable record, a stated limit above.
+  F8 (Opus): the decision index regenerated at landing. Round 2: Opus confirmed F1 to F7 fixed
+  (the shape at 200 and 800 jobs re-measured, a 200-run differential with 0 differing) and found
+  nothing new in the choice under R4 or the cached index; Codex at high found nothing on the
+  choice, the cached index, the idle check and the restart and upgrade sequences.

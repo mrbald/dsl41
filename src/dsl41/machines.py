@@ -11,11 +11,13 @@ from dsl41.runner_admission import ADMISSION
 from dsl41.runner_effects import EFFECT
 from dsl41.runner_journal import SUBSCRIPTION
 from dsl41.runner_supervisor import SUPERVISOR_LEASE, SUPERVISOR_PROCESS
+from dsl41.scan_chart import QUEUE_SCAN
 from dsl41.state_machine import Statechart
 
 #: Every declared machine, each a `Statechart`.
 MACHINES: tuple[Statechart, ...] = (
     JOB,
+    QUEUE_SCAN,
     RUNTIME_ASSEMBLY,
     ANCHOR_HEAD,
     PERIOD_ROW,

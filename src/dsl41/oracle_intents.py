@@ -6,7 +6,8 @@ applies after the row's writes (`oracle.Oracle._perform`). A status state's entr
 `Entered`, which the hook writes with its row's `StatusLine` before the other intents. `Move`
 is one status move's record, shared by its box rules, its settlement and its wakes. `Program`,
 `Once` and `Settle` are a moment's payload: a self-event whose next step the oracle reads when
-it pops (`oracle_cascade`).
+it pops (`oracle_cascade`). `ScanFacts` is a `scan`'s payload, the record of one queue scan
+that the `queue_scan` coordinator's states read (`scan_chart`).
 """
 
 from __future__ import annotations
@@ -17,10 +18,10 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 from dsl41.capacity import DemandEntry
 from dsl41.ir import JobIR
-from dsl41.job_chart_events import SETTLE, Admission, Injection, Payload, Terminator
-from dsl41.oracle_facts import RowUnits
+from dsl41.job_chart_events import READMIT, SETTLE, Admission, Injection, Payload, Terminator
+from dsl41.oracle_facts import ReadmitFacts, RowUnits
 from dsl41.oracle_state import LIVE, JobStatus
-from dsl41.state_machine import Context, Effects
+from dsl41.state_machine import Context, Effects, StatechartError
 from dsl41.state_machine import Event as ChartEvent
 
 if TYPE_CHECKING:
@@ -111,16 +112,17 @@ class Batch:
 
 @dataclass(frozen=True)
 class Readmitted:
-    """A waiter's `readmit` moved it (admitted, cancelled, left): the scan's
-    pass ends there and starts again (`OracleCascade._scan`)."""
+    """A waiter's `readmit` moved it (admitted, cancelled, left): the scan's pass ends there
+    (`queue_scan`'s `waiter_moved`)."""
 
     def apply(self, oracle: OracleCascade) -> None:
         oracle._readmitted = True
 
 
 @dataclass(frozen=True)
-class WatchReadmit:
-    """The scan sends a `readmit`: whether it moves is read after its cascade."""
+class ClearReadmitted:
+    """The latch cleared as a pass of the scan begins: no readmission of it has moved its
+    waiter yet."""
 
     def apply(self, oracle: OracleCascade) -> None:
         oracle._readmitted = False
@@ -128,19 +130,81 @@ class WatchReadmit:
 
 @dataclass(frozen=True)
 class ScanState:
-    """The scan's bookkeeping (DL-247, DL-255): the fields given, set."""
+    """The mark of the admit-only scan the input owes (DL-247, DL-255), set or cleared."""
 
-    in_wake: bool | None = None
-    owed: bool | None = None
-    full: bool | None = None
+    owed: bool
 
     def apply(self, oracle: OracleCascade) -> None:
-        if self.in_wake is not None:
-            oracle._in_wake = self.in_wake
-        if self.owed is not None:
-            oracle._scan_owed = self.owed
-        if self.full is not None:
-            oracle._full_scan_requested = self.full
+        oracle._scan_owed = self.owed
+
+
+class ScanFacts:
+    """A `scan` payload (`scan_chart.ScanPass`): one queue scan's record (DL-50, DL-247,
+    DL-372), which every completion of the coordinator's transient states carries (DL-364).
+
+    `keep_stopped` is the scan's mode: an admit-only scan keeps a waiter of a stopped box
+    queued. A pass reads the waiters' order when it begins (`CapacityPool.sorted_waiters`), and
+    each waiter's status at its turn: `queued` finds the turn's waiter, and `readmit` takes
+    that turn and builds the waiter's `readmit` (`ReadmitFacts`). `moved` is the oracle's latch
+    (`Readmitted`). A scan asked inside a pass carries a record that no pass reads.
+
+    The record is the scan's bookkeeping in flight, as a moment's generator is: only the
+    coordinator's own entries and actions change it (`begin`, `readmit`, `upgrade`), and the
+    coordinator holds none between inputs, so no fork shares one in use."""
+
+    __slots__ = ("keep_stopped", "_oracle", "_waiters", "_turn", "_found")
+
+    def __init__(self, oracle: OracleCascade, *, keep_stopped: bool) -> None:
+        self.keep_stopped = keep_stopped
+        self._oracle = oracle
+        self._waiters: list[str] = []
+        self._turn = 0
+        #: the waiter `queued` found for the turn, which `readmit` takes
+        self._found: int | None = None
+
+    def __repr__(self) -> str:
+        return f"ScanFacts(keep_stopped={self.keep_stopped}, turn={self._turn})"
+
+    @property
+    def queued(self) -> bool:
+        """A waiter of the pass's list from its turn on is QUE_WAIT now; the first is kept."""
+        rows = self._oracle.store.job
+        self._found = next(
+            (
+                at
+                for at in range(self._turn, len(self._waiters))
+                if rows[self._waiters[at]].status == "QUE_WAIT"
+            ),
+            None,
+        )
+        return self._found is not None
+
+    @property
+    def moved(self) -> bool:
+        return self._oracle._readmitted
+
+    def begin(self) -> Effects:
+        """A new pass: the waiters' order read now, from the first turn; the owed scan's mark
+        and the latch cleared."""
+        oracle = self._oracle
+        self._waiters = oracle._pool.sorted_waiters(oracle.store.job)
+        self._turn, self._found = 0, None
+        return Effects(intents=(ScanState(owed=False), ClearReadmitted()))
+
+    def readmit(self) -> Effects:
+        """The turn `queued` found: the waiter's `readmit`, whose payload computes each fact
+        where the rule reads it."""
+        at, self._found = self._found, None
+        if at is None:
+            raise StatechartError("a scan's turn with no waiter found queued")
+        oracle = self._oracle
+        job = self._waiters[at]
+        self._turn = at + 1
+        facts = ReadmitFacts(oracle, job, oracle.catalog.jobs[job], keep_stopped=self.keep_stopped)
+        return Effects(send=(oracle._to(job, READMIT, facts),))
+
+    def upgrade(self) -> None:
+        self.keep_stopped = False
 
 
 @dataclass(frozen=True)

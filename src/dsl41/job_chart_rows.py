@@ -580,6 +580,10 @@ _STATUS_ROWS: Final = (
     ),
 )
 
+#: Each moment's row id, in the order of `MOMENTS`. The ids are listed because an id once used
+#: is never reused (DL-364), and 410 is not among them (DL-372).
+MOMENT_IDS: Final = (405, 406, 407, 408, 409, 411, 412, 413, 414, 415, 416, 417)
+
 #: The further status rows, `job.4NN`: an attempt's owed settlement (DL-340), the extent of an
 #: admitted start, its move to STARTING, a window skip of an inactive member, the cascade's
 #: moments, the cells no input reaches (DL-350), and the rows that read or move the arm
@@ -618,11 +622,11 @@ _MOMENT_ROWS: Final = (
         cite="SEM-33, DL-154",
     ),
     *(
-        Row(f"job.{405 + i}", "lifecycle", event, action="moment", kind="internal")
-        for i, event in enumerate(MOMENTS)
+        Row(f"job.{n}", "lifecycle", event, action="moment", kind="internal")
+        for n, event in zip(MOMENT_IDS, MOMENTS, strict=True)
     ),
     Row(
-        f"job.{405 + len(MOMENTS)}",
+        "job.418",
         "LIVE",
         SETTLE,
         kind="internal",
@@ -635,7 +639,7 @@ _MOMENT_ROWS: Final = (
     ),
     *(
         _never(
-            f"job.{407 + len(MOMENTS) + i}",
+            f"job.{420 + i}",
             "ADMITTED",
             event,
             "An admitted start leaves ADMITTED inside its own extent, before any cascade reaches it.",
