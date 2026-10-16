@@ -54,26 +54,23 @@ full_requested = no_request + scan
 
 ## runtime_assembly
 
-Shown: 15. Folded: 25 (refusals 25). Rows in the chart: 40.
+Shown: 9. Folded: 16 (refusals 16). Rows in the chart: 25.
 
 ### phase
 
 ```text
 fresh <- initial
+unbuilt = {fresh, installed, genesis}
+open = {genesis_input, input}
+built = {constructed, seeded, live}
 installed = fresh + install
-genesis_input = fresh + begin_input // Construction is not finished. Open the genesis seed's input
-             || installed + begin_input
-             || genesis + begin_input
 genesis = genesis_input + commit_input // One revision per changed entity
-constructed = fresh + finish_genesis
-           || installed + finish_genesis
-           || genesis + finish_genesis
+genesis_input = unbuilt + begin_input // Construction is not finished. Open the genesis seed's input
+input = built + begin_input // Snapshot on first touch
+constructed = unbuilt + finish_genesis
 seeded = fresh + seed_period // Set the period id. A period below one is the verb's own check
       || installed + seed_period
       || constructed + seed_period
-input = constructed + begin_input // Snapshot on first touch
-     || seeded + begin_input
-     || live + begin_input
 live = input + commit_input // Check capacity. One revision per changed entity
 ```
 

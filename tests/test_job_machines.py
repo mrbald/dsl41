@@ -199,7 +199,7 @@ def test_assembly_walks_its_table(recording: Path) -> None:
         "live",
     ]
     assert _hits(recording) == {
-        ("runtime_assembly", f"runtime_assembly.{n:02d}") for n in (1, 3, 7, 8, 11, 13, 14, 15)
+        ("runtime_assembly", f"runtime_assembly.{n:02d}") for n in (1, 3, 4, 7, 13, 41, 42)
     }
 
 

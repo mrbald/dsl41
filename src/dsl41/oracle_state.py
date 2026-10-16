@@ -413,6 +413,11 @@ FLAG_FIELDS: Final[Mapping[FlagState, tuple[str, bool]]] = MappingProxyType(
 # instance, `ASSEMBLY_KEY`, on `RuntimeState.machines`; its configuration is the assembly phase
 # and `_phase` reads its leaf. The rows have no actions: the tier's work follows the microstep.
 #
+# The phases group by what the verbs read (DL-373): `unbuilt` (construction can still happen,
+# no input open), `open` (an input open) and `built` (construction can no longer happen, ended
+# by finish_genesis or overtaken by the seed, and no input open). `_touch` snapshots while
+# `open` is active.
+#
 # A verb the phase does not allow is a refusal row naming why. These moves are not inputs, so
 # the verb raises (`_ASSEMBLY_REFUSALS`), as an anchor move does (DL-224). A phase-dependent
 # refusal is read before any tier work; the one rule that reads a fact of the call, a period
@@ -422,8 +427,8 @@ FLAG_FIELDS: Final[Mapping[FlagState, tuple[str, bool]]] = MappingProxyType(
 type AssemblyPhase = Literal[
     "fresh", "installed", "genesis_input", "genesis", "constructed", "seeded", "input", "live"
 ]
-#: the phases with an input open
-_OPEN: Final[frozenset[AssemblyPhase]] = frozenset({"genesis_input", "input"})
+#: The phases: the chart's leaves. The configuration also carries the group above the leaf.
+ASSEMBLY_PHASES: Final[frozenset[AssemblyPhase]] = frozenset(get_args(AssemblyPhase.__value__))
 #: The key of the assembly instance on the state owner's executor.
 ASSEMBLY_KEY: Final = "assembly"
 
@@ -464,8 +469,10 @@ _ASSEMBLY_REFUSALS: Final[dict[str, tuple[type[ValueError], str]]] = {
     ),
 }
 
-#: A row has one source, so a move from several phases is one row per phase (.08-.15). Every
-#: phase by verb has a row; the rest are refusals (.16-.40), so a missing row is a gap.
+#: A rule every phase of a group takes is one row on the group (.04, .41-.48), written only
+#: where no phase in the group has its own row for the verb. A deleted row then leaves a gap
+#: and never falls into another rule's refusal (DL-335, DL-373). Every phase by verb resolves
+#: to a move or a refusal row, so a missing row is a gap.
 RUNTIME_ASSEMBLY: Final = Statechart(
     name="runtime_assembly",
     root=State(
@@ -473,16 +480,36 @@ RUNTIME_ASSEMBLY: Final = Statechart(
         regions=(
             Region(
                 "phase",
-                "fresh",
+                "unbuilt",
                 (
-                    State("fresh"),
-                    State("installed"),
-                    State("genesis_input"),
-                    State("genesis"),
-                    State("constructed"),
-                    State("seeded"),
-                    State("input"),
-                    State("live"),
+                    State(
+                        "unbuilt",
+                        regions=(
+                            Region(
+                                "construction",
+                                "fresh",
+                                (State("fresh"), State("installed"), State("genesis")),
+                            ),
+                        ),
+                    ),
+                    State(
+                        "open",
+                        regions=(
+                            Region(
+                                "inputs", "genesis_input", (State("genesis_input"), State("input"))
+                            ),
+                        ),
+                    ),
+                    State(
+                        "built",
+                        regions=(
+                            Region(
+                                "service",
+                                "constructed",
+                                (State("constructed"), State("seeded"), State("live")),
+                            ),
+                        ),
+                    ),
                 ),
             ),
         ),
@@ -497,14 +524,6 @@ RUNTIME_ASSEMBLY: Final = Statechart(
             note="Nothing is installed, committed or seeded. Carried rows land verbatim, revisions included.",
         ),
         Row(
-            "runtime_assembly.02",
-            "fresh",
-            BEGIN_INPUT,
-            "genesis_input",
-            cite="DL-87",
-            note="Construction is not finished. Open the genesis seed's input.",
-        ),
-        Row(
             "runtime_assembly.03",
             "genesis_input",
             COMMIT_INPUT,
@@ -514,7 +533,7 @@ RUNTIME_ASSEMBLY: Final = Statechart(
         ),
         Row(
             "runtime_assembly.04",
-            "fresh",
+            "unbuilt",
             FINISH_GENESIS,
             "constructed",
             cite="DL-132",
@@ -529,52 +548,12 @@ RUNTIME_ASSEMBLY: Final = Statechart(
             note="Set the period id. A period below one is the verb's own check.",
         ),
         Row(
-            "runtime_assembly.06",
-            "constructed",
-            BEGIN_INPUT,
-            "input",
-            cite="DL-87, concurrency-model ss3",
-            note="Snapshot on first touch.",
-        ),
-        Row(
             "runtime_assembly.07",
             "input",
             COMMIT_INPUT,
             "live",
             cite="DL-87, DL-120",
             note="Check capacity. One revision per changed entity.",
-        ),
-        Row(
-            "runtime_assembly.08",
-            "installed",
-            BEGIN_INPUT,
-            "genesis_input",
-            cite="DL-87",
-            note="As runtime_assembly.02.",
-        ),
-        Row(
-            "runtime_assembly.09",
-            "genesis",
-            BEGIN_INPUT,
-            "genesis_input",
-            cite="DL-87",
-            note="As runtime_assembly.02.",
-        ),
-        Row(
-            "runtime_assembly.10",
-            "installed",
-            FINISH_GENESIS,
-            "constructed",
-            cite="DL-132",
-            note="As runtime_assembly.04.",
-        ),
-        Row(
-            "runtime_assembly.11",
-            "genesis",
-            FINISH_GENESIS,
-            "constructed",
-            cite="DL-132",
-            note="As runtime_assembly.04.",
         ),
         Row(
             "runtime_assembly.12",
@@ -593,33 +572,24 @@ RUNTIME_ASSEMBLY: Final = Statechart(
             note="As runtime_assembly.05.",
         ),
         Row(
-            "runtime_assembly.14",
-            "seeded",
+            "runtime_assembly.41",
+            "unbuilt",
             BEGIN_INPUT,
-            "input",
-            cite="DL-87, concurrency-model ss3",
-            note="As runtime_assembly.06.",
+            "genesis_input",
+            cite="DL-87",
+            note="Construction is not finished. Open the genesis seed's input.",
         ),
         Row(
-            "runtime_assembly.15",
-            "live",
+            "runtime_assembly.42",
+            "built",
             BEGIN_INPUT,
             "input",
             cite="DL-87, concurrency-model ss3",
-            note="As runtime_assembly.06.",
+            note="Snapshot on first touch.",
         ),
         Row(
             "runtime_assembly.16",
             "installed",
-            INSTALL,
-            kind="refusal",
-            code="install_on_used_state",
-            cite="period-model ss7",
-            note="Carried rows are assembly's first act: only a fresh state installs them.",
-        ),
-        Row(
-            "runtime_assembly.17",
-            "genesis_input",
             INSTALL,
             kind="refusal",
             code="install_on_used_state",
@@ -634,114 +604,6 @@ RUNTIME_ASSEMBLY: Final = Statechart(
             code="install_on_used_state",
             cite="period-model ss7",
             note="Carried rows are assembly's first act: only a fresh state installs them.",
-        ),
-        Row(
-            "runtime_assembly.19",
-            "constructed",
-            INSTALL,
-            kind="refusal",
-            code="install_on_used_state",
-            cite="period-model ss7",
-            note="Carried rows are assembly's first act: only a fresh state installs them.",
-        ),
-        Row(
-            "runtime_assembly.20",
-            "seeded",
-            INSTALL,
-            kind="refusal",
-            code="install_on_used_state",
-            cite="period-model ss7",
-            note="Carried rows are assembly's first act: only a fresh state installs them.",
-        ),
-        Row(
-            "runtime_assembly.21",
-            "input",
-            INSTALL,
-            kind="refusal",
-            code="install_on_used_state",
-            cite="period-model ss7",
-            note="Carried rows are assembly's first act: only a fresh state installs them.",
-        ),
-        Row(
-            "runtime_assembly.22",
-            "live",
-            INSTALL,
-            kind="refusal",
-            code="install_on_used_state",
-            cite="period-model ss7",
-            note="Carried rows are assembly's first act: only a fresh state installs them.",
-        ),
-        Row(
-            "runtime_assembly.23",
-            "fresh",
-            COMMIT_INPUT,
-            kind="refusal",
-            code="no_input_open",
-            cite="DL-87, DL-293",
-            note="A commit needs an input open.",
-        ),
-        Row(
-            "runtime_assembly.24",
-            "installed",
-            COMMIT_INPUT,
-            kind="refusal",
-            code="no_input_open",
-            cite="DL-87, DL-293",
-            note="A commit needs an input open.",
-        ),
-        Row(
-            "runtime_assembly.25",
-            "genesis",
-            COMMIT_INPUT,
-            kind="refusal",
-            code="no_input_open",
-            cite="DL-87, DL-293",
-            note="A commit needs an input open.",
-        ),
-        Row(
-            "runtime_assembly.26",
-            "constructed",
-            COMMIT_INPUT,
-            kind="refusal",
-            code="no_input_open",
-            cite="DL-87, DL-293",
-            note="A commit needs an input open.",
-        ),
-        Row(
-            "runtime_assembly.27",
-            "seeded",
-            COMMIT_INPUT,
-            kind="refusal",
-            code="no_input_open",
-            cite="DL-87, DL-293",
-            note="A commit needs an input open.",
-        ),
-        Row(
-            "runtime_assembly.28",
-            "live",
-            COMMIT_INPUT,
-            kind="refusal",
-            code="no_input_open",
-            cite="DL-87, DL-293",
-            note="A commit needs an input open.",
-        ),
-        Row(
-            "runtime_assembly.29",
-            "genesis_input",
-            BEGIN_INPUT,
-            kind="refusal",
-            code="input_already_open",
-            cite="DL-87",
-            note="Inputs do not nest.",
-        ),
-        Row(
-            "runtime_assembly.30",
-            "input",
-            BEGIN_INPUT,
-            kind="refusal",
-            code="input_already_open",
-            cite="DL-87",
-            note="Inputs do not nest.",
         ),
         Row(
             "runtime_assembly.31",
@@ -789,15 +651,6 @@ RUNTIME_ASSEMBLY: Final = Statechart(
             note="Construction ends once: a second call would launder a used state back to fresh.",
         ),
         Row(
-            "runtime_assembly.36",
-            "genesis_input",
-            SEED_PERIOD,
-            kind="refusal",
-            code="seed_inside_input",
-            cite="DL-132",
-            note="Assembly precedes inputs.",
-        ),
-        Row(
             "runtime_assembly.37",
             "genesis",
             SEED_PERIOD,
@@ -816,15 +669,6 @@ RUNTIME_ASSEMBLY: Final = Statechart(
             note="Seeding is assembly's first act: a live state never moves its period.",
         ),
         Row(
-            "runtime_assembly.39",
-            "input",
-            SEED_PERIOD,
-            kind="refusal",
-            code="seed_inside_input",
-            cite="DL-132",
-            note="Assembly precedes inputs.",
-        ),
-        Row(
             "runtime_assembly.40",
             "live",
             SEED_PERIOD,
@@ -832,6 +676,60 @@ RUNTIME_ASSEMBLY: Final = Statechart(
             code="seed_on_used_state",
             cite="period-model ss3.5, DL-132",
             note="Seeding is assembly's first act: a live state never moves its period.",
+        ),
+        Row(
+            "runtime_assembly.43",
+            "open",
+            INSTALL,
+            kind="refusal",
+            code="install_on_used_state",
+            cite="period-model ss7",
+            note="Carried rows are assembly's first act: only a fresh state installs them.",
+        ),
+        Row(
+            "runtime_assembly.44",
+            "built",
+            INSTALL,
+            kind="refusal",
+            code="install_on_used_state",
+            cite="period-model ss7",
+            note="Carried rows are assembly's first act: only a fresh state installs them.",
+        ),
+        Row(
+            "runtime_assembly.45",
+            "unbuilt",
+            COMMIT_INPUT,
+            kind="refusal",
+            code="no_input_open",
+            cite="DL-87, DL-293",
+            note="A commit needs an input open.",
+        ),
+        Row(
+            "runtime_assembly.46",
+            "built",
+            COMMIT_INPUT,
+            kind="refusal",
+            code="no_input_open",
+            cite="DL-87, DL-293",
+            note="A commit needs an input open.",
+        ),
+        Row(
+            "runtime_assembly.47",
+            "open",
+            BEGIN_INPUT,
+            kind="refusal",
+            code="input_already_open",
+            cite="DL-87",
+            note="Inputs do not nest.",
+        ),
+        Row(
+            "runtime_assembly.48",
+            "open",
+            SEED_PERIOD,
+            kind="refusal",
+            code="seed_inside_input",
+            cite="DL-132",
+            note="Assembly precedes inputs.",
         ),
     ),
     clock="logical",
@@ -1210,7 +1108,7 @@ class RuntimeState:
 
         Seed-versus-advance is explicit: `seed_period` is legal once, before any committed input.
         """
-        (leaf,) = self.machines.active(ASSEMBLY_KEY) - {RUNTIME_ASSEMBLY.root.name}
+        (leaf,) = self.machines.active(ASSEMBLY_KEY) & ASSEMBLY_PHASES
         return cast(AssemblyPhase, leaf)
 
     def fork(self) -> RuntimeState:
@@ -1346,7 +1244,7 @@ class RuntimeState:
         The projection is a function of the rows and the heap, which only move through the
         mutators below, so the touched set is never under-approximated (ss3).
         """
-        if self._phase in _OPEN and key not in self._snapshots:
+        if "open" in self.machines.active(ASSEMBLY_KEY) and key not in self._snapshots:
             self._snapshots[key] = self._projection(key)
 
     def begin_input(self) -> None:
