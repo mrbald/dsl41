@@ -1,64 +1,43 @@
-"""JIL statement-level AST: hand scanner + preserve/canonical renderers.
+"""JIL statement-level AST: hand scanner and preserve/canonical renderers.
 
-Normative spec: docs/jil-statement-syntax.md (tokenization rules 0-12, 4b
-included, and fidelity tests F1-F4) and docs/ir-design.md ss2 (model sketches,
-loss policy). No interpretation happens at this layer: `condition` is a RawAttr
-like any other; expression parsing is lowering's job.
+Normative spec: docs/jil-statement-syntax.md (rules 0-12, 4b included, fidelity tests F1-F4)
+and docs/ir-design.md ss2 (model sketches, loss policy). Nothing is interpreted here:
+`condition` is a RawAttr like any other, and expression parsing is lowering's job.
 
-Fidelity contract: `render(parse(text)) == text` byte-exact in preserve mode;
-canonical mode is a fixpoint. The ir-design ss2 sketch fields are the semantic
-API; the extra fields here (pre_blank_lines, indent, sep, post, inline_*,
-eof_blank_lines, final_newline) are layout trivia that exist solely to make
-preserve-mode rendering byte-exact -- zero loss, ever.
+Fidelity: `render(parse(text)) == text` byte for byte in preserve mode; canonical mode is a
+fixpoint. The ir-design ss2 fields are the semantic API. The extra fields (pre_blank_lines,
+indent, sep, post, inline_*, eof_blank_lines, final_newline) are layout trivia that make
+preserve-mode rendering exact.
 
-Scanner decisions, spec'd via the 2026-07-03 amendments to
-jil-statement-syntax.md (each pinned by a fixture or unit test):
-- Mixed line endings are a parse error (rule 10; JilFile.newline_style is
-  file-wide by the ir-design ss2 model).
-- One-line form (rule 4): only `job_type` is accepted as the inline key; any
-  other second `key:` pair on a subcommand line is a loud error, never silently
-  folded into the subject.
-- Trailing block comments: the leftmost whitespace-preceded (or value-start),
-  unquoted `/*` starts the comment. If its first following `*/` ends the line,
-  the comment is closed on the line. If NO `*/` follows on the line, the
-  marker OPENS a block comment that spans lines (rule 5, DL-161: /*-comment
-  formats open closure-independently; the whitespace-preceded predicate is
-  dsl41's retained glob boundary, not part of that analogy). The body lines
-  are consumed atomically -- they never reach the scan loop -- and a comment
-  still open at EOF is a loud `unterminated block comment` error at the
-  opener line. A wrongly terminated comment is NOT loud: a stray later `*/`
-  silently captures the lines up to it; quoting is the only complete escape,
-  and quoted markers stay value text (rule 7). A closed `/*...*/` with value
-  text after it is kept in the value as opaque text, and a marker glued to
-  the text before it opens nothing. A rule-6 continuation line can open a
-  comment too (seeded quote state); the comment closes the continuation.
-- A full-line block comment must close at end of line; non-whitespace content
-  after `*/` on the closing line is an error. The same close rule governs a
-  multi-line trailing comment.
-- Subcommand-shaped unknown keys (rule 3, amended 2026-07-09 / DL-18): an
-  attribute-position key matching (insert|update|delete|override)_* that is
-  not a recognized subcommand is a loud error, never an attribute -- a missed
-  statement boundary folding into the previous statement is structural loss.
-- Calendar exports (rule 11, 2026-07-10 / DL-36): the autocal_asc export
-  statements (`calendar`, `cycle`, `extended_calendar`) are recognized
-  boundaries; a standard `calendar:` body may carry bare date rows, kept
-  verbatim after the attrs. An attribute after a date row is a loud error
-  (re-rendering would reorder it).
-- Literal blob region (our rule 12, 2026-10-02 / DL-245; cites the vendor's
-  own "JIL Syntax Rules" page, its rule 8, a different document from this
-  one's numbering): a `blob_input:` value that STARTS with `<auto_blobt>`
-  opens a region that runs through the line holding `</auto_blobt>`; no
-  comment/rule-4b detector runs on that span, and none of its lines reach
-  the scan loop as a boundary, attribute, or continuation. Anchored at the
-  value start on purpose: a `/* <auto_blobt> */` inside an ordinary closed
-  comment, or a quoted `"<auto_blobt>"`, must not open the region. Text
-  after the closer, still on the closer's line, goes through the ordinary
-  value-tail pipeline (trailing-comment split, then the rule-4b pair
-  check) exactly as any attribute value does. Canonical mode must not
-  `rstrip()` the lines strictly inside the region (the vendor's own "every
-  character... literally"); only the merged last line, where the tail (if
-  any) lives, gets the ordinary per-line trim. Open at EOF is a loud error
-  naming the opener's line.
+Scanner rules, each pinned by a fixture or unit test:
+- Mixed line endings are a parse error (rule 10; JilFile.newline_style is file-wide).
+- One-line form (rule 4): only `job_type` is accepted as the inline key; any other second
+  `key:` pair on a subcommand line is an error.
+- Trailing block comments (rule 5, DL-161): the leftmost unquoted `/*` at the value start or
+  after whitespace starts the comment. If a `*/` follows on the line the comment is closed
+  there. If none does, the marker opens a block comment spanning lines; its body lines are
+  consumed atomically and never reach the scan loop, and a comment still open at EOF is an
+  `unterminated block comment` error at the opener line. A stray later `*/` silently closes
+  the comment, so quoting is the only complete escape; quoted markers stay value text (rule 7).
+  A closed `/*...*/` with value text after it stays in the value as opaque text, and a marker
+  glued to the text before it opens nothing. A rule-6 continuation line can open a comment
+  (seeded quote state); the comment closes the continuation.
+- A full-line block comment must close at end of line, and so must a multi-line trailing
+  comment: text after `*/` on the closing line is an error.
+- Subcommand-shaped unknown keys (rule 3, DL-18): an attribute-position key matching
+  (insert|update|delete|override)_* that is not a recognized subcommand is an error, because a
+  missed statement boundary folding into the previous statement is structural loss.
+- Calendar exports (rule 11, DL-36): the autocal_asc statements (`calendar`, `cycle`,
+  `extended_calendar`) are recognized boundaries. A standard `calendar:` body may carry bare
+  date rows, kept verbatim after the attrs; an attribute after a date row is an error.
+- Literal blob region (our rule 12, DL-245; the vendor's "JIL Syntax Rules" page, its rule 8,
+  numbers differently): a `blob_input:` value that starts with `<auto_blobt>` opens a region
+  through the line holding `</auto_blobt>`. No comment or rule-4b detector runs on the span, and
+  none of its lines reach the scan loop. A `/* <auto_blobt> */` inside a closed comment or a
+  quoted `"<auto_blobt>"` opens nothing. Text after the closer on its line goes through the
+  ordinary value-tail pipeline. Canonical mode does not `rstrip()` lines strictly inside the
+  region; the merged last line, which holds any tail, gets the ordinary trim. A region open at
+  EOF is an error naming the opener's line.
 """
 
 from __future__ import annotations
@@ -71,9 +50,8 @@ from pydantic import BaseModel
 
 from dsl41.canon import is_scalar_string
 
-#: Statement boundaries per jil-statement-syntax.md rule 3, recognized
-#: case-insensitively. Unknown keys are attributes, never boundaries
-#: (forward compatibility).
+#: Statement boundaries (rule 3), recognized case-insensitively. Unknown keys are attributes,
+#: never boundaries.
 SUBCOMMANDS = frozenset(
     {
         "insert_job",
@@ -91,9 +69,7 @@ SUBCOMMANDS = frozenset(
         "update_xinst",
         "delete_xinst",
         "insert_blob",
-        # DL-245: update_blob and update_glob are documented subcommands
-        # (TechDocs "update_blob Subcommand" / "update_glob Subcommand");
-        # DL-29's "complete inventory" claim had omitted both of them.
+        # DL-245: update_blob and update_glob are documented subcommands (TechDocs)
         "update_blob",
         "delete_blob",
         "insert_glob",
@@ -102,9 +78,8 @@ SUBCOMMANDS = frozenset(
         "insert_resource",
         "update_resource",
         "delete_resource",
-        # DL-29: the full TechDocs 12.1 subcommand inventory scans (F1 holds
-        # over any valid file); lowering refuses the out-of-scope object
-        # classes loudly.
+        # DL-29: the full TechDocs 12.1 subcommand inventory scans (F1 holds over any valid
+        # file); lowering refuses the out-of-scope object classes
         "insert_monbro",
         "update_monbro",
         "delete_monbro",
@@ -114,48 +89,33 @@ SUBCOMMANDS = frozenset(
         "insert_connectionprofile",
         "update_connectionprofile",
         "delete_connectionprofile",
-        # DL-36: the autocal_asc -E/-I calendar-export statements (TechDocs
-        # 12.1 "autocal_asc Command") -- NOT jil subcommands; the vendor
-        # processes them with a different binary. Accepted here because
-        # migration estates ship calendar exports alongside JIL and the
-        # format is JIL-shaped except standard-calendar date rows (rule 11).
-        # No documented JIL attribute shares these names, so boundary
-        # recognition costs nothing on valid input (the DL-18 argument).
+        # DL-36: the autocal_asc -E/-I calendar-export statements, not jil subcommands. Estates
+        # ship exports alongside JIL, and no documented JIL attribute shares these names
+        # (the DL-18 argument)
         "calendar",
         "cycle",
         "extended_calendar",
-        # Q9 RESOLVED (DL-60): an observed export sample writes
-        # `extended_calendar:`; `ext_calendar:` is the Manage Calendars
-        # syntax-block spelling, kept accepted as input leniency --
-        # rendering preserves what appeared (SEM-36, DL-57)
+        # Q9 (DL-60): exports write `extended_calendar:`; `ext_calendar:` is the Manage Calendars
+        # spelling, accepted as input, and rendering preserves what appeared (SEM-36, DL-57)
         "ext_calendar",
     }
 )
 
-#: Rule 11 (DL-36): statements whose body may carry bare date rows (the
-#: autocal_asc standard-calendar export). Extended calendars and cycles are
-#: pure `key: value` and stay out. The scan loop tests rule 6 before this
-#: branch and needs no exclusion for it: no calendar-export attribute is in
-#: CONTINUATION_ATTRS, so a well-formed export never holds a continuation open
-#: over its date rows. Unknown keys stay attributes (rule 3), so a hand-made
-#: `run_calendar:` inside a calendar body does swallow the rows that follow.
-#: The rule-4b continuation guard (DL-160) does not reach date rows either:
-#: rule 11 carries a row verbatim and does not validate its shape; a
-#: key-shaped tail on a row is autocal's to refuse at consumption.
+#: Rule 11 (DL-36): statements whose body may carry bare date rows (the standard-calendar
+#: export). Extended calendars and cycles are pure `key: value`. No calendar-export attribute is in
+#: CONTINUATION_ATTRS, so a continuation never swallows date rows; a hand-made `run_calendar:`
+#: inside a calendar body does swallow the rows after it (rule 3). The rule-4b guard (DL-160)
+#: does not reach date rows: rule 11 carries a row verbatim, and autocal refuses a key-shaped tail.
 _DATE_BODY_SUBCOMMANDS = frozenset({"calendar"})
 
-#: Rule 3 guard (amended 2026-07-09, DL-18; rename_ added 2026-07-10, DL-27):
-#: an attribute-position key shaped like a subcommand but not in SUBCOMMANDS
-#: is a scanner error -- folding a missed statement boundary into the previous
-#: statement is silent structural loss. No documented JIL attribute has this
-#: shape. `rename_job` (TechDocs 12.x) proved the guard's verb list is part of
-#: the inventory it protects: before DL-27 it matched nothing and folded.
+#: Rule 3 guard (DL-18, DL-27): an attribute-position key shaped like a subcommand but not in
+#: SUBCOMMANDS is a scanner error, because folding a missed boundary into the previous statement
+#: is structural loss. No documented JIL attribute has this shape. The verb list is part of the
+#: inventory it protects (`rename_job`).
 _SUBCOMMAND_SHAPE_RE = re.compile(r"(?:insert|update|delete|override|rename)_\w+", re.IGNORECASE)
 
-#: Continuation trigger set per jil-statement-syntax.md rule 6: a non-key-shaped
-#: line following one of these attributes continues that attribute's value.
-#: [?] Verify the exact trigger set against `autorep -q` output from a real
-#: estate (rule 6's own open question); encode findings as corpus fixtures.
+#: Continuation trigger set (rule 6): a non-key-shaped line after one of these attributes continues
+#: its value. [?] The exact set is rule 6's open question, to verify against `autorep -q`.
 CONTINUATION_ATTRS = frozenset(
     {
         "start_times",
@@ -178,10 +138,11 @@ class JilParseError(ValueError):
 
 
 def render_location(file: str, line: int) -> str:
-    """`file:line` -- the citation shorthand every diagnostic renderer
-    composes (DL-178, finding 11). `SourceSpan.at` is the usual caller;
-    this loose-pair form is for one that carries the file/line apart from
-    a span (placeholders._Entry, which predates SourceSpan in that lane)."""
+    """`file:line`, the citation shorthand diagnostics use (DL-178).
+
+    `SourceSpan.at` is the usual caller; this form serves callers that hold file and line apart
+    from a span (placeholders._Entry).
+    """
     return f"{file}:{line}"
 
 
@@ -194,9 +155,7 @@ class SourceSpan(BaseModel):
 
     @property
     def at(self) -> str:
-        """`file:line_start`: LoweringFinding.render, Violation.render, and
-        backend_uc's edge/redesign-flag lines all read this instead of
-        re-spelling the f-string."""
+        """`file:line_start`, shared by the diagnostic renderers."""
         return render_location(self.file, self.line_start)
 
 
@@ -204,11 +163,8 @@ class Comment(BaseModel):
     text: str  # raw, including '/*...*/' or '#...' marker; '\n'-joined if multiline
     span: SourceSpan
     attachment: Literal["leading", "trailing", "floating"]
-    # True when this is the rule-5 opener that carries a value's multi-line
-    # trailing comment (DL-161): the scanner knows this at scan time
-    # (`_scan_block_comment` + the `attachment = "trailing"` stamp), so the
-    # fact is carried here instead of re-derived from `"\n" in text` -- only
-    # meaningful when attachment == "trailing".
+    # True for the rule-5 opener of a value's multi-line trailing comment (DL-161); meaningful
+    # only when attachment == "trailing"
     trailing_block: bool = False
     # layout trivia (preserve-mode fidelity only)
     pre_blank_lines: list[str] = []  # verbatim blank/ws-only lines before the comment
@@ -225,14 +181,9 @@ class RawAttr(BaseModel):
     pre_blank_lines: list[str] = []
     indent: str = ""
     sep: str = " "  # verbatim ws between ':' and the value
-    # Rule 12 (DL-245): the number of `raw_value.split("\n")` lines, counted
-    # from the start, that a rule-12 literal blob region owns verbatim. 0
-    # for every ordinary and rule-6 continuation attribute (no change to
-    # their canonical trim). Canonical rendering must not `rstrip()` these
-    # lines -- the vendor's own "every character... literally" -- while the
-    # remaining (merged last / tail) line still gets the ordinary trim, so
-    # this only ever needs to protect the lines STRICTLY inside the region,
-    # never the one carrying any post-closer tail.
+    # Rule 12 (DL-245): the number of leading `raw_value.split("\n")` lines that a literal blob
+    # region owns verbatim, 0 for any other attribute. Canonical rendering does not `rstrip()`
+    # them; the merged last line, which carries any tail, gets the ordinary trim.
     literal_prefix_lines: int = 0
 
 
@@ -240,7 +191,7 @@ class JilStatement(BaseModel):
     subcommand: str  # e.g. "insert_job", as written
     subject: str  # the value after the subcommand key (job name, etc.)
     job_type_inline: str | None = None  # 'insert_job: X job_type: c' one-line form
-    attrs: list[RawAttr]  # ORDER PRESERVED -- this is the fidelity guarantee
+    attrs: list[RawAttr]  # in source order: the fidelity guarantee
     date_lines: list[str] = []  # verbatim autocal date rows; `calendar:` only (rule 11)
     comments: list[Comment] = []
     span: SourceSpan
@@ -266,17 +217,12 @@ class JilFile(BaseModel):
 # --------------------------------------------------------------------------- scanner
 
 _KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-#: One-line form (rule 4): a second `key:` pair on the subcommand line, split on
-#: the whitespace run before it. The char before ':' is an identifier char, so
-#: the colon can never be the escaped form `\:`.
+#: One-line form (rule 4): a second `key:` pair on the subcommand line, split on the whitespace
+#: before it. The char before ':' is an identifier char, so the colon is never the escaped `\:`.
 _INLINE_RE = re.compile(r"([ \t]+)([A-Za-z_][A-Za-z0-9_]*):")
 
-#: Rule 12 literal blob region (DL-245): the exact meta-tag spelling from the
-#: vendor's "JIL Syntax Rules" page, its own rule 8 ("Use the auto_blobt
-#: meta-tags to indicate the beginning and end of multiline text. JIL
-#: interprets every character input between the auto_blobt meta-tags
-#: literally."). Case-sensitive, as written in every vendor example
-#: (`blob_input: <auto_blobt>...`).
+#: Rule 12 literal blob region (DL-245): the vendor's meta-tag spelling ("JIL Syntax Rules",
+#: its rule 8), case-sensitive as in every vendor example (`blob_input: <auto_blobt>...`).
 _BLOB_OPEN = "<auto_blobt>"
 _BLOB_CLOSE = "</auto_blobt>"
 
@@ -293,19 +239,16 @@ def parse_file(path: str | Path) -> JilFile:
 
 
 class _TrailingSplit(NamedTuple):
-    """One value body split at its rule-5 trailing comment (or not split at
-    all -- `comment_text == ""` means no trailing comment)."""
+    """One value body split at its rule-5 trailing comment; `comment_text == ""` means none."""
 
-    #: value text before the comment (or the whole body, if none)
+    #: the whole body when there is no comment
     value: str
-    #: whitespace between `value` and the comment opener
     gap: str
-    #: the comment's own text, opener through close (or opener tail if open)
+    #: opener through close, or the opener tail if the comment is open
     comment_text: str
-    #: text after a CLOSED comment's `*/`; "" when the comment is open
+    #: text after a closed comment's `*/`; "" when the comment is open
     post: str
-    #: True when the comment has no `*/` on this line and opens a
-    #: multi-line block comment (rule 5, DL-161)
+    #: no `*/` on this line: the marker opens a multi-line block comment (rule 5, DL-161)
     opens_comment: bool
 
 
@@ -314,33 +257,17 @@ def _split_trailing_comment(
 ) -> _TrailingSplit:
     """Split a value body into (value, gap, comment_text, post, open).
 
-    comment_text == "" means no trailing comment. Only `/* ... */` block
-    comments can trail a value; a mid-line `#` is VALUE text (amended
-    2026-07-10, DL-31: Broadcom's syntax rules define `#` comments in the
-    first column only, and `#` is a legal name/value character -- stripping
-    a whitespace-preceded `#`-tail silently changed the value vs. the
-    engine's parse). Hash comments are full-line only (scan loop). Markers
-    are recognized only outside double quotes and only at the value start
-    or after whitespace (rule 5 + the block-comment decisions in the module
-    docstring).
+    comment_text == "" means no trailing comment. Only `/* ... */` block comments trail a
+    value; a mid-line `#` is value text, because `#` comments are first-column only (DL-31).
+    Markers count only outside double quotes, at the value start or after whitespace (rule 5).
 
-    A marker whose first `*/` ends the line is a closed trailing comment
-    (open=False; post holds the run after `*/`). A marker with NO `*/` after
-    it on the line OPENS a multi-line comment (rule 5, DL-161): comment_text
-    holds the opener tail and open=True -- the caller consumes the body lines
-    and the close atomically, so no body line ever reaches the scan loop. A
-    closed `/*...*/` with value text after it stays in the value as opaque
-    text, and a quoted or glued marker opens nothing. `in_quote` seeds the
-    quote walk for a rule-6 continuation line (DL-160 seeding, DL-161): a
-    quote opened on an earlier line of the joined value still shadows here.
-    This one quote-aware walk hands the caller both the open state and the
-    pre-opener value prefix, so the rule-4/4b mask only ever sees value
-    bytes, never an open comment tail. `at_start` is False when `body[0]`
-    is NOT really the value's own start -- a rule-12 literal blob region's
-    tail starts right after the closer's `>` (DL-245): that `>` is a real,
-    glued, non-whitespace character the caller does not pass in, so without
-    this flag offset 0 of the tail was wrongly treated as a legitimate
-    comment-opening position (a glued `/*` "opens nothing," rule 5).
+    A marker whose first `*/` ends the line is a closed comment (open=False; post holds the
+    run after `*/`). A marker with no `*/` on the line opens a multi-line comment (rule 5,
+    DL-161): comment_text holds the opener tail and open=True, and the caller consumes the body
+    lines. A closed `/*...*/` with value text after it stays in the value, and a quoted or glued
+    marker opens nothing. `in_quote` seeds the quote walk for a rule-6 continuation line
+    (DL-160, DL-161). `at_start` is False when `body[0]` is glued to the closer's `>` of a
+    rule-12 blob region (DL-245), where a `/*` opens nothing.
     """
     in_q = in_quote
     i = 0
@@ -359,10 +286,8 @@ def _split_trailing_comment(
             value = value_ws.rstrip(" \t")
             gap = value_ws[len(value) :]
             if close == -1:
-                # Rule 5 (DL-161, majority rule): no `*/` on the line -- the
-                # marker opens a block comment that spans lines. Before this
-                # amendment the marker stayed value text and the body lines
-                # scanned as attributes: silent corruption.
+                # Rule 5 (DL-161): no `*/` on the line, so the marker opens a block comment that
+                # spans lines
                 return _TrailingSplit(value, gap, body[i:], "", True)
             after = body[close + 2 :]
             if after.strip() == "":
@@ -374,18 +299,18 @@ def _split_trailing_comment(
 
 
 def value_opens_comment(value: str) -> bool:
-    """True when the bare spelling of `value` would OPEN a rule-5 block
-    comment (a whitespace-preceded or value-start unquoted `/*` with no `*/`
-    after it on the line, DL-161). JIL-emitting paths call this to re-escape:
-    such a value must be quoted or it swallows the lines that follow it."""
+    """True when the bare spelling of `value` would open a rule-5 block comment (DL-161).
+
+    JIL-emitting paths call this to re-escape: such a value must be quoted or it swallows the
+    lines after it.
+    """
     return _split_trailing_comment(value).opens_comment
 
 
 def _find_inline_pair(value: str, *, in_quote: bool = False) -> re.Match[str] | None:
     """First quote-unshadowed `key:` pair after whitespace (one-line form).
 
-    `in_quote` seeds the parity walk for a rule-6 continuation line: a quote
-    opened earlier in the joined value still shadows here (rule 4b, DL-160).
+    `in_quote` seeds the parity walk for a rule-6 continuation line (rule 4b, DL-160).
     """
     parity = 1 if in_quote else 0
     for m in _INLINE_RE.finditer(value):
@@ -394,35 +319,22 @@ def _find_inline_pair(value: str, *, in_quote: bool = False) -> re.Match[str] | 
     return None
 
 
-#: Mask filler for `_mask_closed_blocks`. NOT a space: the fill must not be a
-#: key character, a quote, or whitespace, because rule 4b reads a pair only
-#: where the `key:` token is whitespace-preceded. A space fill invented that
-#: whitespace for a token glued to the closing `*/` (`command: a /* c */b: x`
-#: was refused as a second pair, against rule 4b's own wording).
+#: Mask filler for `_mask_closed_blocks`. It is not a key character, a quote or whitespace, because
+#: rule 4b reads a pair only where the `key:` token follows whitespace (`command: a /* c */b: x`
+#: has no second pair).
 _MASK_FILL = "*"
 
 
 def _mask_closed_blocks(value: str, *, in_quote: bool = False, at_start: bool = True) -> str:
-    """Mask closed `/*...*/` spans (char-for-char, offsets preserved)
-    before the rule-4/4b pair scan: rule 5 keeps a closed inline block comment
-    with trailing text as opaque VALUE text, so a `key:` shape inside one is
-    comment prose, not a second attribute pair.
+    """Mask closed `/*...*/` spans (char for char, offsets kept) before the rule-4/4b pair scan.
 
-    A span opens exactly where rule 5 opens a comment, and the walk is the one
-    `_split_trailing_comment` makes: the marker is unquoted and sits at the
-    value start or after whitespace. A quote-blind mask blanked the span of
-    `"/* " */ key: value` over the CLOSING quote, `_find_inline_pair` then read
-    the parity as odd, the rule-4b guard never fired, and the second pair folded
-    into `raw_value` -- the DL-30 silent-loss class the guard exists to stop
-    (DL-151). A quote inside a masked span toggles nothing, again as in
-    `_split_trailing_comment`: it is comment prose, not value text.
-    `in_quote` seeds the walk for a rule-6 continuation line whose joined
-    value holds an open quote (rule 4b, DL-160). `at_start` mirrors
-    `_split_trailing_comment`'s flag of the same name: False when `value[0]`
-    is glued to a real, non-whitespace character the caller does not pass in
-    (a rule-12 blob region's tail, right after the closer's `>`, DL-245) --
-    without it a glued `/*` at that offset was wrongly masked as a closed
-    comment, hiding a real second attribute pair from the rule-4b scan below.
+    Rule 5 keeps a closed inline comment with trailing text as value text, so a `key:` shape
+    inside one is not a second pair. A span opens where `_split_trailing_comment` opens a
+    comment: an unquoted marker at the value start or after whitespace. A quote inside a masked
+    span toggles nothing, so `"/* " */ key: value` still trips the rule-4b guard against the
+    DL-30 silent-loss class (DL-151). `in_quote` seeds the walk for a rule-6 continuation line
+    (rule 4b, DL-160). `at_start` mirrors `_split_trailing_comment`: False when `value[0]` is
+    glued to a rule-12 blob closer's `>` (DL-245).
     """
     out = list(value)
     in_q = in_quote
@@ -439,11 +351,8 @@ def _mask_closed_blocks(value: str, *, in_quote: bool = False, at_start: bool = 
         ):
             close = value.find("*/", i + 2)
             if close == -1:
-                # Reachable only on a rule-6 continuation line: an attribute
-                # or subcommand value cannot keep an unclosed whitespace-
-                # preceded marker (rule 5 opens a comment there, DL-161), but
-                # rule 6 carries a continuation line verbatim, where the
-                # marker stays value text.
+                # reachable only on a rule-6 continuation line, which is carried verbatim; an
+                # attribute value cannot keep an unclosed marker (rule 5, DL-161)
                 break
             out[i : close + 2] = [_MASK_FILL] * (close + 2 - i)
             i = close + 2
@@ -454,11 +363,8 @@ def _mask_closed_blocks(value: str, *, in_quote: bool = False, at_start: bool = 
 
 class _Scanner:
     def __init__(self, text: str, file: str) -> None:
-        # PR-10a: an unpaired surrogate is a legal Python str and never a
-        # Unicode scalar string, so it has no UTF-8 spelling -- the span
-        # arithmetic below would raise UnicodeEncodeError on it, and an estate
-        # holding one could never be sealed (period-model ss3.2). Refused here,
-        # where the text enters, with the line it is on.
+        # PR-10a: an unpaired surrogate has no UTF-8 spelling, so span arithmetic would raise
+        # and the estate could never be sealed (period-model ss3.2); refused here with its line
         if not is_scalar_string(text):
             bad = next(i for i, ch in enumerate(text) if not is_scalar_string(ch))
             raise JilParseError(
@@ -553,51 +459,30 @@ class _Scanner:
                 sep = rest[: len(rest) - len(rest.lstrip(" \t"))]
                 candidate = rest[len(sep) :]
                 span = self._span(i, i)
-                # Rule 12 (DL-245): the vendor's "JIL Syntax Rules" rule 8
-                # scopes the literal <auto_blobt> meta-tag to the blob_input
-                # attribute, anchored at the value's own start ("blob_input:
-                # <auto_blobt>..."), never merely present somewhere in the
-                # value: a `/* <auto_blobt> */` inside an ordinary closed
-                # comment, or a quoted `"<auto_blobt>"`, must still go
-                # through the normal rule-4b/rule-5 handling below.
+                # Rule 12 (DL-245): the literal <auto_blobt> meta-tag belongs to blob_input and
+                # anchors at the value start; elsewhere (`/* <auto_blobt> */`, a quoted tag) the
+                # value takes the normal rule-4b and rule-5 handling
                 blob_open = key.lower() == "blob_input" and candidate.startswith(_BLOB_OPEN)
                 literal, tail, k = "", candidate, i
                 if blob_open:
-                    # Rule 12: an open <auto_blobt> meta-tag makes every
-                    # character up to its closer literal -- "JIL does not
-                    # enforce any of the previously discussed rules" in
-                    # there, so this span never reaches the comment splitter
-                    # or the rule-4b detector (both would misread a literal
-                    # '/*' or a literal 'key:' shape), and its lines never
-                    # reach the scan loop as statement boundaries,
-                    # attributes, or continuations -- otherwise a complete
-                    # `insert_job:` fragment inside blob text is promoted to
-                    # a phantom real statement. Open at EOF is the loud
-                    # error at the opener line. Text AFTER the closer, still
-                    # on the closer's own line, is not part of the region:
-                    # it runs through the ordinary value-tail pipeline below,
-                    # exactly like any attribute's value.
+                    # Rule 12: every character up to the closer is literal, so the span never
+                    # reaches the comment splitter or the rule-4b detector, and its lines never
+                    # reach the scan loop (an `insert_job:` fragment in blob text is not a
+                    # statement). Open at EOF is an error at the opener line. Text after the
+                    # closer on its line runs through the ordinary value-tail pipeline below.
                     literal, tail, k = self._scan_blob_literal(i, candidate)
                 literal_prefix_lines = literal.count("\n")
-                # `at_start=not blob_open`: after a blob closer, offset 0 of
-                # `tail` is glued to the closer's own `>` (DL-245), a real
-                # non-whitespace character the split/mask walks never see --
-                # a `/*` glued there opens nothing (rule 5), so it must not be
-                # read as a legitimate comment opener just because it sits at
-                # `tail`'s own offset 0.
+                # `at_start=not blob_open`: after a blob closer, offset 0 of `tail` is glued to the
+                # closer's `>` (DL-245), so a `/*` there opens nothing (rule 5)
                 tail_value, gap, ctext, cpost, copen = _split_trailing_comment(
                     tail, at_start=not blob_open
                 )
                 value = literal + tail_value
                 if copen:
-                    # Rule 5 (DL-161): the trailing marker opens a multi-line
-                    # comment. Its body lines are consumed HERE, by the same
-                    # walk a full-line comment uses, so the scan loop never
-                    # sees them: the rule-6 continuation branch and its
-                    # seeded 4b detector (DL-160) run only on true value
-                    # lines. Open at EOF is the loud `unterminated block
-                    # comment` error at the opener line (the closer's line
-                    # after a blob region).
+                    # Rule 5 (DL-161): the trailing marker opens a multi-line comment. Its body
+                    # lines are consumed here, by the walk a full-line comment uses, so the rule-6
+                    # branch and its 4b detector (DL-160) see only value lines. Open at EOF is an
+                    # `unterminated block comment` error at the opener line
                     tc, k = self._scan_block_comment(k, gap, ctext, [])
                     tc.attachment = "trailing"
                     tc.trailing_block = True
@@ -610,11 +495,8 @@ class _Scanner:
                             attachment="trailing",
                             indent=gap,
                             post=cpost,
-                            # A blob region can span many lines, so a closed
-                            # (single-line) tail comment rides the LAST value
-                            # line, not the first -- the same placement
-                            # `trailing_block` gives a rule-5 multi-line
-                            # opener (DL-161).
+                            # a closed tail comment rides the last value line of a multi-line blob,
+                            # as `trailing_block` places a rule-5 opener (DL-161)
                             trailing_block=blob_open,
                         )
                         if ctext
@@ -643,32 +525,22 @@ class _Scanner:
                             f"attribute line {key!r} before any statement", self.file, i + 1
                         )
                     if cur.date_lines:
-                        # Rule 11 (DL-36): the export format puts every
-                        # attribute before the date rows; re-rendering an
-                        # interleaved shape would silently reorder it.
+                        # Rule 11 (DL-36): attributes precede date rows; re-rendering an interleaved
+                        # shape would reorder it
                         raise JilParseError(
                             f"attribute line {key!r} after the date rows of"
                             f" {cur.subcommand}: {cur.subject.strip()!r} (rule 11, DL-36)",
                             self.file,
                             i + 1,
                         )
-                    # `tail_value` is the whole value for an ordinary
-                    # attribute, and just the tail after the closer for a
-                    # rule-12 literal region (DL-245): the region itself is
-                    # exempt from rule 4b by the vendor's own words, but text
-                    # after the closer, still on its line, is an ordinary
-                    # value tail and gets the ordinary check -- with
-                    # `at_start=False` there too (the tail's own offset 0 is
-                    # glued to the closer's `>`, so a glued `/*` there must
-                    # not be masked as a closed comment, hiding a real pair).
+                    # `tail_value` is the whole value, or for a rule-12 region (DL-245) the text
+                    # after the closer: the region is exempt from rule 4b, its tail gets the
+                    # ordinary check with `at_start=False`
                     masked = _mask_closed_blocks(tail_value, at_start=not blob_open)
                     if (pair := _find_inline_pair(masked)) is not None:
-                        # Rule 4b (DL-30): JIL permits several `attr: value`
-                        # statements on one line; swallowing the second pair
-                        # into the first value would be silent loss the
-                        # DL-07 firewall can never see. Valid JIL escapes or
-                        # quotes value colons, so this costs nothing on
-                        # valid input (the DL-18 argument).
+                        # Rule 4b (DL-30): JIL permits several `attr: value` statements on one line;
+                        # folding the second into the first value is silent loss the DL-07 firewall
+                        # cannot see. Valid JIL escapes or quotes value colons (the DL-18 argument)
                         raise JilParseError(
                             f"value of {key!r} carries a second {pair.group(2)!r}:-shaped"
                             " pair; JIL allows multiple attribute statements per line, so"
@@ -692,39 +564,23 @@ class _Scanner:
                     )
                     cur.attrs.append(attr)
                     if k > i:
-                        # The attr owns its multi-line trailing comment's
-                        # source lines (DL-161).
+                        # the attr owns its multi-line trailing comment's lines (DL-161)
                         self._extend_span(attr.span, k)
                     self._extend_span(cur.span, k)
-                    # A multi-line trailing comment CLOSES the continuation
-                    # (rule 6: a comment line closes it; the body lines are
-                    # comment lines). A closed single-line trailing comment
-                    # leaves it armed, as before (DL-161). A literal blob
-                    # region is never a continuation trigger (CONTINUATION_
-                    # ATTRS holds no blob key), so `blob_open` True always
-                    # takes the `cont = None` branch here.
+                    # a multi-line trailing comment closes the continuation (rule 6, DL-161); a
+                    # closed single-line one leaves it armed. A blob region is never a continuation
+                    # trigger (CONTINUATION_ATTRS holds no blob key)
                     cont = attr if key.lower() in CONTINUATION_ATTRS and not copen else None
                     if cont is not None:
                         cont_quote = masked.count('"') % 2 == 1
                 i = k + 1
                 continue
             if cont is not None and not pend_c and not pend_b:
-                # Rule 6: non-key-shaped line continues the open list-valued
-                # attr. Rule 4b covers the joined value (DL-160), with the
-                # quote parity seeded from the lines above: a quote opened on
-                # the attribute line and closed here is one quoted span, not a
-                # bare pair. A hit is the DL-30 loss class -- a run_calendar
-                # continuation in a calendar-free set reached the backend with
-                # no downstream check at all. Rule 11 date rows stay out: rule
-                # 11 does not validate the row shape (the DL-36 comment above
-                # _DATE_BODY_SUBCOMMANDS).
-                # Rule 6 amended (DL-161): the line CAN open a block comment,
-                # with the same seeded quote state -- otherwise the rule-5
-                # opener would leave the continuation door open to the same
-                # silent corruption. Only the pre-opener prefix is value: the
-                # 4b detector reads it alone, the comment body is consumed
-                # atomically, and the comment closes the continuation (rule
-                # 6: a comment line closes it).
+                # Rule 6: a non-key-shaped line continues the open list-valued attr. Rule 4b covers
+                # the joined value (DL-160), with quote parity seeded from the lines above; a hit
+                # is the DL-30 loss class. Rule 11 date rows stay out (DL-36). The line can open
+                # a block comment under the same seeded quote state (DL-161); only the
+                # pre-opener prefix is value, and the comment closes the continuation
                 cvalue, cgap, ctext, _cp, copen = _split_trailing_comment(line, in_quote=cont_quote)
                 scan_text = cvalue + cgap if copen else line
                 masked = _mask_closed_blocks(scan_text, in_quote=cont_quote)
@@ -762,9 +618,8 @@ class _Scanner:
                 and not pend_c
                 and not pend_b
             ):
-                # Rule 11 (DL-36): a bare date row of a standard-calendar
-                # export. Verbatim carry, no comment extraction, must be
-                # contiguous with its statement.
+                # Rule 11 (DL-36): a bare date row of a standard-calendar export, carried
+                # verbatim, contiguous with its statement
                 cur.date_lines.append(line)
                 self._extend_span(cur.span, i)
                 i += 1
@@ -817,27 +672,18 @@ class _Scanner:
         return comment, k
 
     def _scan_blob_literal(self, i: int, candidate: str) -> tuple[str, str, int]:
-        """Rule 12 literal blob region (DL-245; vendor "JIL Syntax Rules",
-        its own rule 8). `candidate` already STARTS with `<auto_blobt>` --
-        the caller anchors that, so this never fires on a `/* <auto_blobt>
-        */` inside an ordinary comment or a quoted `"<auto_blobt>"`. The
-        closer is searched strictly AFTER the opener's own text (explicit
-        start offset, not a bare substring search), so a glued
-        `</auto_blobt><auto_blobt>` on the opening line never self-closes
-        against the opener that follows it -- that shape fails the
-        `startswith` anchor on the NEXT line anyway and is simply not a
-        region.
+        """Rule 12 literal blob region (DL-245).
 
-        Returns `(literal, tail, k)`: `literal` is every character from the
-        opener through the closer, verbatim, `\\n`-joined across every line
-        it spans; `tail` is whatever follows the closer on its own line --
-        ordinary, non-literal text the caller still runs through the usual
-        trailing-comment/rule-4b pipeline, the same as any attribute value;
-        `k` is the index of the last line consumed. A closer on the opening
-        line needs no further lines. An opener with no closer by EOF is a
-        loud error naming the opener's line -- the vendor states a
-        beginning AND an end ("to indicate the beginning and end of
-        multiline text"), so EOF is refused, never silently closed."""
+        `candidate` already starts with `<auto_blobt>`; the caller anchors that. The closer is
+        searched after the opener's own text, so a glued `</auto_blobt><auto_blobt>` never
+        self-closes.
+
+        Returns `(literal, tail, k)`: `literal` runs from the opener through the closer,
+        verbatim and `\\n`-joined across lines; `tail` is the ordinary text after the closer on
+        its line, which the caller runs through the usual trailing-comment and rule-4b pipeline;
+        `k` is the index of the last line consumed. An opener with no closer by EOF is an error
+        naming the opener's line.
+        """
         close = candidate.find(_BLOB_CLOSE, len(_BLOB_OPEN))
         if close != -1:
             end = close + len(_BLOB_CLOSE)
@@ -877,12 +723,9 @@ class _Scanner:
         inline_key = "job_type"
         inline_gap = ""
         inline_sep = " "
-        # Rule 4 runs the rule-4b detector, so it masks closed blocks the same
-        # way (DL-151): `insert_job: j /* see owner: bob */ tail` is opaque
-        # value text per rule 5, not an inline `owner` pair. The fill is
-        # char-for-char and never whitespace, so the offsets still index
-        # `value` and `m.group(1)` is real whitespace -- a space fill made
-        # `insert_job: j /* c */ job_type: c` render the comment as blanks.
+        # Rule 4 runs the rule-4b detector, so it masks closed blocks the same way (DL-151):
+        # `insert_job: j /* see owner: bob */ tail` has no inline `owner` pair (rule 5). The fill
+        # keeps offsets, and `m.group(1)` is real whitespace
         masked = _mask_closed_blocks(value)
         m = _find_inline_pair(masked)
         if m is not None:
@@ -898,10 +741,8 @@ class _Scanner:
             tail = value[m.end() :]
             inline_sep = tail[: len(tail) - len(tail.lstrip(" \t"))]
             jt = tail[len(inline_sep) :]
-            # Reuse the line mask instead of re-masking `jt`: a fresh mask
-            # would re-anchor rule 5's "value start" to the inline value and
-            # open a span the line-level walk refuses, quietly swallowing the
-            # pair in `job_type:/* key: y */ z`.
+            # reuse the line mask: re-masking `jt` would re-anchor rule 5's value start and
+            # swallow the pair in `job_type:/* key: y */ z`
             if _find_inline_pair(masked[m.end() + len(inline_sep) :]) is not None:
                 raise JilParseError(
                     "multiple inline attributes on subcommand line", self.file, i + 1
@@ -934,11 +775,11 @@ def render(jf: JilFile, mode: Literal["preserve", "canonical"] = "preserve") -> 
 
 
 def _trailing_pair(comments: list[Comment]) -> tuple[Comment | None, Comment | None]:
-    """The rule-5 trailing pair riding one value: (inline rider, block
-    rider). A closed (single-line) trailing comment rides the first value
-    line; a multi-line trailing comment (rule 5 opener, DL-161) rides the
-    last. Read straight off `Comment.trailing_block`, which the scanner
-    stamped at scan time -- not re-derived from `"\\n" in c.text` (F4)."""
+    """The rule-5 trailing pair on one value: (inline rider, block rider).
+
+    A closed trailing comment rides the first value line; a multi-line one (DL-161) rides the
+    last. Read off `Comment.trailing_block`, not re-derived from `"\\n" in c.text` (F4).
+    """
     inline_tc: Comment | None = None
     block_tc: Comment | None = None
     for c in comments:
@@ -962,13 +803,9 @@ def render_preserve(jf: JilFile) -> str:
         out.extend(parts)
 
     def emit_with_trailing(first: str, rest: list[str], comments: list[Comment]) -> None:
-        # A closed (single-line) trailing comment rides its own line: the
-        # first value line. A multi-line trailing comment (rule 5 opener,
-        # DL-161) rides the LAST value line -- it either opened on the
-        # attribute line (then the continuation closed, so first == last) or
-        # on the continuation line that opened it. Its body lines are emitted
-        # as their own `out` entries so the `nl.join` below never sees an
-        # embedded '\n' (CRLF fidelity).
+        # a closed trailing comment rides the first value line; a multi-line one (DL-161) rides
+        # the last, with body lines emitted as their own entries so `nl.join` sees no embedded
+        # '\n' (CRLF fidelity)
         inline_tc, block_tc = _trailing_pair(comments)
         if inline_tc is not None:
             first = first + inline_tc.indent + inline_tc.text + inline_tc.post
@@ -1008,19 +845,18 @@ def render_preserve(jf: JilFile) -> str:
 
 
 def render_statement(stmt: JilStatement) -> str:
-    """Preserve-render one statement as a standalone block: the statement's
-    own bytes (comments, layout trivia, date rows) minus the blank lines that
-    separated it from its neighbours. The ss10 `spec` query serves this --
-    operators read the block that was actually loaded, post-placeholder."""
+    """Preserve-render one statement as a block: its own bytes minus the separating blank lines.
+
+    The ss10 `spec` query serves this, so operators read the block that was loaded.
+    """
     solo = stmt.model_copy(update={"pre_blank_lines": []})
     # lstrip: a leading comment carries its own pre_blank_lines trivia
     return render_preserve(JilFile(statements=[solo], file=stmt.span.file)).lstrip("\n")
 
 
-#: Fixed canonical attribute order (ir-design ss2: "subcommand first, then a
-#: fixed key order, unknown keys alphabetically last"). The exact order within
-#: the known set is implementation-defined; keep it stable -- canonical output
-#: is a diff/storage format. Duplicate keys keep their source order.
+#: Canonical attribute order (ir-design ss2): subcommand first, then a fixed key order, unknown
+#: keys alphabetically last. The order within the known set is stable because canonical output is
+#: a diff and storage format. Duplicate keys keep their source order.
 _CANONICAL_KEY_ORDER: tuple[str, ...] = (
     "job_type",
     "box_name",
@@ -1077,11 +913,9 @@ _UNKNOWN_RANK = len(_CANONICAL_KEY_ORDER)
 
 
 def render_canonical(jf: JilFile) -> str:
-    """Purely lexical canonical form (F2 fixpoint): stable attribute order,
-    single space after ':', one-line form split into a regular job_type attr,
-    trivia (indents, blank lines, trailing whitespace) dropped, statements
-    separated by one blank line, '\\n' endings. Abbreviation expansion is NOT
-    done here -- that is IR-level (ir-design ss2)."""
+    """Lexical canonical form (F2 fixpoint): stable attribute order, one space after ':', the
+    one-line form split into a job_type attr, trivia dropped, one blank line between
+    statements, '\\n' endings. Abbreviation expansion is IR-level (ir-design ss2)."""
     blocks: list[str] = []
     for stmt in jf.statements:
         lines: list[str] = []
@@ -1089,22 +923,14 @@ def render_canonical(jf: JilFile) -> str:
         subject = stmt.subject.rstrip()
         has_trailing = any(c.attachment == "trailing" for c in stmt.comments)
         if stmt.job_type_inline is not None and not has_trailing:
-            # The inline `job_type` pair was split off the subject at parse
-            # time (rule 4), so a closed block comment that sat between the
-            # subject and `job_type:` rides inside `stmt.subject` verbatim,
-            # not as a separate trailing Comment. Once `job_type` moves to
-            # its own attr line below, that comment is line-final here -- a
-            # second parse re-extracts it as a real trailing comment and
-            # normalizes its gap to one space (`_canonical_trailing`). A
-            # verbatim dump of `subject` keeps the original gap, so the
-            # fixpoint breaks (F2, DL-159). Re-split here the same way the
-            # second parse would, so the first canonical pass already
-            # matches it.
+            # a closed block comment between the subject and the inline `job_type:` rides inside
+            # `stmt.subject`. Once `job_type` moves to its own line it is line-final, and a second
+            # parse would normalize its gap (`_canonical_trailing`), breaking the fixpoint (F2,
+            # DL-159); re-split here as that parse would
             value, _gap, ctext, _post, copen = _split_trailing_comment(stmt.subject)
             if ctext and not copen:
-                # A parsed subject can no longer hold an OPEN marker (rule 5
-                # takes it as a comment opener at scan time, DL-161); the
-                # guard keeps a hand-built AST verbatim.
+                # a parsed subject holds no open marker (DL-161); the guard keeps a hand-built AST
+                # verbatim
                 subject = f"{value} {ctext}"
         header = f"{stmt.subcommand}: {subject}" if subject else f"{stmt.subcommand}:"
         lines.extend(_canonical_with_trailing(header, [], stmt.comments))
@@ -1115,11 +941,9 @@ def render_canonical(jf: JilFile) -> str:
             )
         for a in _canonical_sort(attrs):
             _emit_canonical_comments(lines, a.comments)
-            # Rule 12 (DL-245): the lines strictly inside a literal blob
-            # region (`literal_prefix_lines`, 0 for every other attribute)
-            # keep their trailing whitespace byte for byte -- the vendor's
-            # own "every character... literally" -- while the merged
-            # last/tail line still gets the ordinary per-line trim.
+            # Rule 12 (DL-245): lines strictly inside a literal blob region
+            # (`literal_prefix_lines`) keep their trailing whitespace; the merged last line is
+            # trimmed
             raw_lines = a.raw_value.split("\n")
             vlines = [
                 ln if idx < a.literal_prefix_lines else ln.rstrip()
@@ -1143,11 +967,11 @@ def _emit_canonical_comments(lines: list[str], comments: list[Comment]) -> None:
 
 
 def _canonical_with_trailing(first: str, rest: list[str], comments: list[Comment]) -> list[str]:
-    """The value lines plus their trailing comments: the gap normalizes to
-    one space and every comment line is right-stripped. A closed trailing
-    comment rides the first value line; a multi-line trailing comment (rule 5
-    opener, DL-161) rides the last, its body lines emitted as their own lines
-    -- the same placement the preserve renderer uses."""
+    """The value lines plus trailing comments: gap one space, comment lines right-stripped.
+
+    Placement matches the preserve renderer: a closed comment on the first value line, a
+    multi-line one (DL-161) on the last with its body lines as their own lines.
+    """
     inline_tc, block_tc = _trailing_pair(comments)
     if inline_tc is not None:
         first = f"{first} {inline_tc.text.rstrip()}"

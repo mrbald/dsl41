@@ -1,25 +1,19 @@
-"""The physical roll: opening a lineage's next period in a FRESH root.
+"""The physical roll: opening a lineage's next period in a fresh root.
 
-Normative spec: `docs/period-model.md` ss1.1 (the sentinel and the one
-ownership rule), ss1.3 (the successor fence, the physical roll's
-attestation gate) and ss7 (the two openers). Built by DL-134 as U7.
-Obligations PR-01c, PR-02a, PR-02d in ss13.
+Normative spec: `docs/period-model.md` ss1.1 (the sentinel and the one ownership rule), ss1.3
+(the successor fence, the physical roll's attestation gate) and ss7 (the two openers). Built by
+DL-134 as U7. Obligations PR-01c, PR-02a, PR-02d in ss13.
 
-The roll takes possession of a root that is not yet this estate's period,
-fences it, and hands the ordinary machinery a root it can resume. It is
-not a second semantic path: **the seal and opening format are identical
-whether the next period continues in place or opens a fresh root** (PR-07).
+The roll takes possession of a root that is not yet this estate's period, fences it, and hands
+the ordinary machinery a root it can resume. It is not a second semantic path: the seal and
+opening format are identical whether the next period continues in place or opens a fresh root
+(PR-07). There is no adoption from a legacy estate (DL-138).
 
-DL-138 retired the module's other operation, adoption from a legacy estate,
-along with every read dialect it existed to translate.
-
-**The order is the whole argument** (ss7): new-root `leader.lock`,
-sentinel durable, `anchor.lock` and the claim, the import, the segment, the
-head. The sentinel goes BEFORE the claim: draft 11 said claim-first, which
-let B move the head to `claimed(B)`, die before its sentinel, and leave a
-root an old binary treats as unused and geneses into -- and after a
-`reclaim` that is a fork. No state may exist in which the head is
-`claimed(target_root)` while `target_root` lacks a valid sentinel (PR-01a).
+**The order is the whole argument** (ss7): new-root `leader.lock`, sentinel durable,
+`anchor.lock` and the claim, the import, the segment, the head. The sentinel goes before the
+claim. Claim-first would let B move the head to `claimed(B)`, die before its sentinel, and leave
+a root an old binary treats as unused and geneses into, which after a `reclaim` is a fork. The
+head is never `claimed(target_root)` while `target_root` lacks a valid sentinel (PR-01a).
 """
 
 from __future__ import annotations
@@ -67,18 +61,17 @@ from dsl41.seal import OpenedRuntime, Seal
 
 @dataclass(frozen=True)
 class Rolled:
-    """A physical roll, done: the new root now holds period N+1.
+    """A physical roll, done: the new root holds period N+1.
 
-    Deliberately no `Journal`: the roll writes the opening `segment` and
-    hands the ROOT to the ordinary resume path, which opens its own. What
-    comes back is what the caller can SAY about the roll."""
+    It carries no `Journal`: the roll writes the opening `segment` and hands the root to the
+    ordinary resume path, which opens its own.
+    """
 
     #: the seal that was imported and opened from
     seal: Seal
     #: where it came from, so the caller can say so
     closing_root: Path
-    #: ss7 phase 3's load over that seal -- the identity the new period
-    #: opened under
+    #: ss7 phase 3's load over that seal: the identity the new period opened under
     opened: OpenedRuntime
 
 
@@ -93,52 +86,41 @@ def roll_into_root(
 ) -> Rolled:
     """ss7's second opener: open `next_period` into a fresh root.
 
-    Reads the lineage head, requires it `closed`, requires the closing
-    period fully quiescent (ss8: no live executions at all) **and
-    attested** (ss1.3), imports the four artifacts the new root needs, and
-    then runs the SAME opening the in-place path runs.
+    Reads the lineage head, requires it `closed`, requires the closing period fully quiescent
+    (ss8: no live executions) and attested (ss1.3), imports the four artifacts the new root
+    needs, then runs the opening the in-place path runs.
 
-    **Attested, not merely audited-somewhere.** `run --open-from` refuses
-    unless `seals/<N>.audit.json` exists in `closing_root` and passes
-    `verify` -- a file that merely exists is not enough (PR-02d). Draft 5
-    let B import a seal it could never verify and then required it to audit
-    C1 with none of C1's inputs.
+    Attested means `run --open-from` finds `seals/<N>.audit.json` in `closing_root` and it
+    passes `verify`; a file that merely exists is not enough (PR-02d).
 
-    The caller holds `leader.lock` on `new_root` already, because starting
-    a supervisor or staging bytes into a root is an act on an estate this
-    process may turn out not to lead.
+    The caller already holds `leader.lock` on `new_root`, because starting a supervisor or
+    staging bytes into a root is an act on an estate this process may not lead.
 
-    `admit` is the caller's gate on the manifest this roll opens under. It
-    runs on the seal this call selected, before the first write, and
-    refuses by raising `EngineError`. The claim below holds that selection:
-    it refuses a head that no longer names this seal. So a gate that
-    passed here judged the period that opens, and a refusal leaves no
-    segment and an unmoved head (PR-22b)."""
-    # read BEFORE the lock: the claim below is a compare-and-swap that
-    # re-reads under it and refuses a head that moved, so this read only
-    # has to be good enough to compute a claim_id -- and the sentinel must
-    # be durable before that claim exists at all (PR-01a)
+    `admit` is the caller's gate on the manifest this roll opens under. It runs on the selected
+    seal before the first write and refuses by raising `EngineError`. The claim refuses a head
+    that does not name this seal, so a passing gate judged the period that opens, and a
+    refusal leaves no segment and an unmoved head (PR-22b).
+    """
+    # read before the lock: the claim is a compare-and-swap that re-reads under it and refuses a
+    # head that moved, so this read only has to yield a claim_id; the sentinel is durable before
+    # the claim exists (PR-01a)
     anchor, closing_root, seal = _roll_source_or_refuse(anchor_dir, new_root)
     opening = seal.next_period
     manifest = _successor_manifest(closing_root, seal)
     if admit is not None:
-        # The gate may PING a supervisor at the target. One started after
-        # that PING and before the writes below is not seen here: the run's
-        # post-wiring gate still refuses it, but with the period already
-        # open. The window is a few local writes long, and closing it would
-        # need a lock that a starting supervisor does not take, so it is
-        # accepted.
+        # The gate may PING a supervisor at the target. One started after the PING and before the
+        # writes is not seen here; the run's post-wiring gate refuses it, with the period already
+        # open. Closing the window needs a lock a starting supervisor does not take, so the
+        # few-write window is accepted.
         admit(manifest)
     claim_id = claim_id_for(
         prev_seal_digest=seal.digest,
         next_period=opening.period_id,
         target_root=new_root,
     )
-    # the target may not exist yet, and the sentinel is the first thing
-    # written INTO it, so every created component is made durable here --
-    # unconditionally, so a retry after a failed fsync repairs it rather
-    # than skipping it. `acquire_run_root` does the same for the caller
-    # that took the lock; both paths reach the same helper
+    # the target may not exist yet and the sentinel is the first thing written into it, so every
+    # created component is made durable here, unconditionally, so a retry after a failed fsync
+    # repairs it. `acquire_run_root` does the same for the caller that took the lock
     mkdir_durable(str(new_root))
     os.chmod(new_root, 0o700)
     claim_root(new_root, estate_id=seal.estate_id, claim_id=claim_id)
@@ -147,9 +129,8 @@ def roll_into_root(
     committed = CommittedBoundary(seal=seal, manifest=manifest)
 
     def imported() -> CatalogIR:
-        # ss7 puts the import BETWEEN the claim and the segment, and it is
-        # idempotent by content address: re-importing after a crash writes
-        # the same bytes to the same names
+        # ss7 puts the import between the claim and the segment; it is idempotent by content
+        # address, so a re-import after a crash writes the same bytes to the same names
         import_boundary(closing_root, new_root, seal=seal, manifest=manifest)
         crash_point("after_import")
         return catalog_of(new_root, manifest)
@@ -164,29 +145,24 @@ def roll_into_root(
             crash_point=crash_point,
         )
     finally:
-        # the roll is a TRANSACTION and it ends here: the head is
-        # `open(N+1, new_root)`, the segment that justifies it is durable,
-        # and the engine that resumes this root takes the lineage lock for
-        # its own process lifetime. Holding on would exclude that engine --
-        # `flock` is per open file description, so a second acquire in this
-        # same process is refused like anyone else's. Nothing can act in
-        # the gap: an `open` head refuses genesis, a claim, a second roll
-        # and a reclaim alike, and `leader.lock` on `new_root` is held
-        # throughout.
+        # the roll is a transaction and ends here: the head is `open(N+1, new_root)` and its
+        # segment is durable. The engine that resumes this root takes the lineage lock for its
+        # lifetime; `flock` is per open file description, so holding on would exclude it. Nothing
+        # acts in the gap: an `open` head refuses genesis, a claim, a second roll and a reclaim,
+        # and `leader.lock` on `new_root` stays held
         anchor.release()
     period.journal.detach()  # the descriptor, not the term: the resume opens its own
     return Rolled(seal=seal, closing_root=closing_root, opened=period.opened)
 
 
 def _roll_source_or_refuse(anchor_dir: Path, new_root: Path) -> tuple[EstateAnchor, Path, Seal]:
-    """The READ-ONLY half of a physical roll: the lineage anchor, the root
-    that holds the closing seal, and the seal itself -- read and checked,
-    or a refusal naming what is wrong.
+    """The read-only half of a physical roll: the lineage anchor, the root holding the closing
+    seal, and the seal, checked, or a refusal naming what is wrong.
 
-    `check_roll_ready` is this pass and the successor's manifest read -- it
-    exists so a refusal writes nothing, not even the target directory -- and
-    `roll_into_root` runs it again authoritatively under the locks. Two
-    copies of it meant two wordings of one refusal (DL-152)."""
+    `check_roll_ready` runs this pass and the successor's manifest read, so a refusal writes
+    nothing; `roll_into_root` runs it again under the locks. One copy keeps one wording of each
+    refusal (DL-152).
+    """
     anchor = EstateAnchor(anchor_dir)
     stored = anchor.read()
     if stored is None:
@@ -197,8 +173,7 @@ def _roll_source_or_refuse(anchor_dir: Path, new_root: Path) -> tuple[EstateAnch
         )
     closing_root, period_id, seal_digest = _roll_source(stored, anchor, new_root)
     seal = read_seal(closing_root, period_id)
-    # the version FIRST: this half runs before the roll writes anything
-    # (DL-253), and an older build's boundary must say so
+    # the version first: this half runs before the roll writes anything (DL-253)
     check_opening_version(seal.next_period, where=str(closing_root))
     if seal.digest != seal_digest:
         raise EngineError(
@@ -207,10 +182,9 @@ def _roll_source_or_refuse(anchor_dir: Path, new_root: Path) -> tuple[EstateAnch
             " this lineage closed with (period-model ss11)"
         )
     if seal.executions:
-        # ss8's mode table: a physical roll while jobs are live is REFUSED.
-        # The supervisor is one per run root and a new-root engine cannot
-        # reach the old root's work; the bridge that lifts this is a
-        # non-goal (ss12)
+        # ss8's mode table: a physical roll while jobs are live is refused. The supervisor is one
+        # per run root and a new-root engine cannot reach the old root's work; the bridge that
+        # would lift this is a non-goal (ss12)
         live = ", ".join(f"{entry.job}.{entry.run_number}" for entry in seal.executions)
         raise EngineError(
             f"seal {seal.digest} carries live execution(s) ({live}): a physical roll"
@@ -223,10 +197,11 @@ def _roll_source_or_refuse(anchor_dir: Path, new_root: Path) -> tuple[EstateAnch
 
 
 def _successor_manifest(closing_root: Path, seal: Seal) -> Manifest:
-    """The committed manifest of the period `seal` opens, read from the
-    root that closed it. The roll opens under it, and its read-only
-    preflight hands it to the caller so the launch options are held to the
-    pin before anything is written (PR-22b)."""
+    """The committed manifest of the period `seal` opens, read from the root that closed it.
+
+    The roll opens under it, and the read-only preflight hands it to the caller so the launch
+    options are held to the pin before anything is written (PR-22b).
+    """
     opening = seal.next_period
     manifest = read_period_manifest(closing_root, opening.period_id)
     if manifest is None:
@@ -240,17 +215,13 @@ def _successor_manifest(closing_root: Path, seal: Seal) -> Manifest:
 
 
 def _roll_source(stored: Anchor, anchor: EstateAnchor, new_root: Path) -> tuple[Path, int, str]:
-    """Which seal this roll opens, and where it lives: `(closing_root,
-    closing period, seal digest)`.
+    """Which seal this roll opens, and where it lives: `(closing_root, closing period, digest)`.
 
-    Two heads answer it, because a roll is a transaction that can be
-    interrupted. `closed` is the ordinary start. `claimed` BY THIS ROOT is
-    our own claim resumed -- ss1.3 makes the claim idempotent on
-    `claim_id`, so a crash after the claim and before the segment re-runs
-    here rather than needing break-glass -- and the claim FILE carries the
-    seal it was taken against, which is why the head does not have to.
-    Everything else refuses, and the completed case refuses by naming the
-    verb that continues it."""
+    Two heads answer it. `closed` is the ordinary start. `claimed` by this root is our own claim
+    resumed: ss1.3 makes the claim idempotent on `claim_id`, so a crash between the claim and
+    the segment re-runs here, and the claim file carries the seal it was taken against.
+    Everything else refuses; the completed case names the verb that continues it.
+    """
     head = stored.head
     if isinstance(head, ClosedHead):
         return Path(head.closing_root), head.period_id, head.seal_digest
@@ -287,21 +258,17 @@ def _roll_source(stored: Anchor, anchor: EstateAnchor, new_root: Path) -> tuple[
 
 
 def import_boundary(source: Path, target: Path, *, seal: Seal, manifest: Manifest) -> None:
-    """ss1.3's import: the four artifacts a rolled root needs to be
-    resumable on its own.
+    """ss1.3's import: the four artifacts a rolled root needs to be resumable on its own.
 
-    `seals/<N>.json`, `seals/<N>.audit.json`, `catalogs/<C2 bundle>/` and
-    `periods/<N+1>/`. Idempotent by content address -- the bundle is
-    re-materialized from its own recorded bytes and the three files are
-    written by the liturgy over whatever a crashed import left -- so a
-    re-import after a crash is a no-op with the same bytes (ss11's matrix
-    row).
+    These are `seals/<N>.json`, `seals/<N>.audit.json`, `catalogs/<C2 bundle>/` and
+    `periods/<N+1>/`. The import is idempotent by content address: the bundle is
+    re-materialized from its recorded bytes and the three files are rewritten over whatever a
+    crashed import left, so a re-import writes the same bytes (ss11's matrix row).
 
-    C1's WAL and C1's own bundle are deliberately NOT imported. Re-deriving
-    C1 in the new root would need C1's whole proof set, and importing that
-    on every roll is retention policy, not a boundary mechanism -- the
-    attestation is what carries the proof, and the anchor registry is how a
-    caller who retained C1 finds it (ss1.3)."""
+    C1's WAL and C1's bundle are not imported: importing C1's proof set on every roll is
+    retention policy, not a boundary mechanism. The attestation carries the proof, and the
+    anchor registry is how a caller who retained C1 finds it (ss1.3).
+    """
     period_id, opening = seal.period_id, seal.next_period
     write_bundle(target, bundle_sources(source, opening.source_bundle_hash))
     mkdir_durable(str(seal_dir(target)))
@@ -319,17 +286,15 @@ def import_boundary(source: Path, target: Path, *, seal: Seal, manifest: Manifes
             durable_write(str(destination / entry.name), entry.read_bytes())
     installed = read_period_manifest(target, opening.period_id)
     if installed is None or installed != manifest:
-        # the import is what the new period opens under, so an import that
-        # produced something other than the boundary's own manifest is a
-        # copy nobody validated -- refused before a segment names it
+        # the new period opens under the import, so one that differs from the boundary's own
+        # manifest is refused before a segment names it
         raise EngineError(
             f"{destination}: the imported manifest is not the one the boundary"
             " committed -- a rolled root opens under the closing boundary's own"
             " artifacts (period-model ss7, PR-22)"
         )
-    # the COPY is checked, not the original: what this root will resume
-    # from, audit against and hand to a second roll is the bytes that
-    # landed here, and a copy nobody read is a copy nobody validated
+    # the copy is checked, not the original: this root resumes from, audits against and hands
+    # to a second roll the bytes that landed here
     if read_seal(target, period_id).digest != seal.digest:
         raise EngineError(
             f"{seal_path(target, period_id)}: the imported sidecar digests to"
@@ -340,35 +305,31 @@ def import_boundary(source: Path, target: Path, *, seal: Seal, manifest: Manifes
 
 
 def check_roll_ready(new_root: Path, anchor_dir: Path) -> Manifest:
-    """`run --open-from`'s READ-ONLY preflight, run by the CLI BEFORE it
-    creates the new root or takes its lock: the lineage exists, the head
-    is a closed one this roll can succeed, the closing seal is the head's
-    and carries nothing live, and the closing period is ATTESTED.
+    """`run --open-from`'s read-only preflight, run by the CLI before it creates the new root or
+    takes its lock.
 
-    Returns the committed manifest of the period the roll would open. The
-    caller holds its launch options to that pin here, because a refusal
-    after the roll would leave the successor open (period-model ss7,
-    PR-22b).
+    The lineage exists, the head is a closed one this roll can succeed, the closing seal is the
+    head's and carries nothing live, and the closing period is attested. Returns the committed
+    manifest of the period the roll would open; the caller holds its launch options to that pin,
+    because a refusal after the roll would leave the successor open (period-model ss7, PR-22b).
 
-    Every check re-runs authoritatively inside `roll_into_root` under the
-    locks; this pass exists so a refusal -- the unattested-roll refusal
-    the runbook teaches first of all -- writes NOTHING, not even the
-    target directory and its `leader.lock`. Sound to run early because
-    each gate is monotone in the direction that matters: attestation is
-    never revoked, and a head that moves between this read and the locked
-    one is refused there."""
+    Every check re-runs under the locks in `roll_into_root`. This pass makes a refusal, such as
+    the unattested-roll refusal, write nothing, not even the target directory. Running early is
+    sound because attestation is never revoked and a head that moves meanwhile is refused under
+    the lock.
+    """
     check_roll_target(new_root, anchor_dir)
     _, closing_root, seal = _roll_source_or_refuse(anchor_dir, new_root)
     return _successor_manifest(closing_root, seal)
 
 
 def check_roll_target(new_root: Path, anchor_dir: Path) -> None:
-    """What `run --open-from` refuses BEFORE it acts, in the caller's own
-    words: a target that is the root this lineage just closed in.
+    """What `run --open-from` refuses before it acts: a target that is the root this lineage just
+    closed in.
 
-    Rolling a root into itself is not a roll; it is `--resume` spelled
-    dangerously, and the ownership rule would refuse it later with a
-    sentence about claims that does not name the mistake."""
+    Rolling a root into itself is `--resume` spelled dangerously; the ownership rule would
+    refuse it later in words about claims that do not name the mistake.
+    """
     stored = EstateAnchor(anchor_dir).read()
     if stored is None or not isinstance(stored.head, ClosedHead):
         return

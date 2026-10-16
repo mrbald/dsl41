@@ -1,53 +1,40 @@
 """Boundary classification: what a period change does to live work.
 
-Normative spec: `docs/period-model.md` ss10 (ss10.1 the three tiers, ss10.2
-the classification graph, ss10.3 the named cases, ss10.4 the armed latch).
-Built by DL-131. Obligations PR-37, PR-37a, PR-38, PR-39, PR-39a and
-PR-40 through PR-44. PR-39b is readiness's, not the classifier's -- a
-`next_period` with a foreign `state_machine_version` is refused before
-anything here runs (ss2.1, `test_period_identity.py`).
+Normative spec: `docs/period-model.md` ss10 (ss10.1 the three tiers, ss10.2 the classification
+graph, ss10.3 the named cases, ss10.4 the armed latch). Built by DL-131. Obligations: PR-37,
+PR-37a, PR-38, PR-39, PR-39a, PR-40 through PR-44. PR-39b is readiness's: a `next_period` with
+a foreign `state_machine_version` is refused before anything here runs (ss2.1,
+`test_period_identity.py`).
 
-The question this module answers is asked once per boundary: **C1 is open
-and holds live work; C2 is staged; may the boundary commit, and what must
-the seal record about what it carried?** Three answers per job.
+The question, asked once per boundary: C1 is open and holds live work, C2 is staged; may the
+boundary commit, and what must the seal record about what it carried? Three answers per job:
 
-- **R** -- refuse. Something the job is EXECUTING against changed. The seal
-  does not commit until the run is done or killed.
-- **A** -- assumed, with a named sentence. The job holds latent intent (an
-  armed latch, a QUE_WAIT rank, a live timer) and something it depends on
-  changed. The intent survives the boundary deliberately (ss10.4), and the
-  assumption rides in the seal so that a reader knows what was assumed.
-- **carry** -- nothing live. The row crosses unchanged, and if its closure
-  moved it is listed in the report so the change is visible.
+- **R**: refuse. Something the job is executing against changed. The seal does not commit
+  until the run is done or killed.
+- **A**: assumed, with a named sentence. The job holds latent intent (an armed latch, a
+  QUE_WAIT rank, a live timer) and something it depends on changed. The intent survives the
+  boundary (ss10.4) and the assumption rides in the seal.
+- **carry**: nothing live. The row crosses unchanged; if its closure moved it is listed in
+  the report.
 
-**Pure analysis.** Nothing here reads a disk, a socket or a clock: the
-inputs are two `(catalog, profile)` pairs and one carried snapshot, and the
-same inputs always give the same verdicts byte for byte -- which is what
-lets phase 2 recompute the map the sidecar commits (spec ss7). The seal
-operation that calls this, the snapshot model it builds `CarriedState`
-from, and ss10.4's runtime obligation are not here.
+**Pure analysis.** Nothing here reads a disk, a socket or a clock. The inputs are two
+`(catalog, profile)` pairs and one carried snapshot, and the same inputs give the same verdicts
+byte for byte, so phase 2 can recompute the map the sidecar commits (spec ss7). The seal
+operation, the snapshot model and ss10.4's runtime obligation are not here.
 
-**Two directions, both computed** (ss10.2). The R gate asks "is anything
-live job J depends on changed?" and reads J's FORWARD closure. The
-boundary-truth diff asks "whose readiness flips because X changed?" and
-reads X's REVERSE closure, then evaluates condition truth under C1 and C2
-at the carried state. Neither substitutes for the other, and this module
-returns both.
+**Two directions, both computed** (ss10.2). The R gate reads a job's forward closure: is
+anything a live job depends on changed? The boundary-truth diff reads a node's reverse closure,
+then evaluates condition truth under C1 and C2 at the carried state: whose readiness flips?
 
-**The edges run from a job to what it depends on** -- the profile fields
-included. A live CMD's forward closure reaches `profile:cmd_grace_us`, so a
-C2 that changes only the kill ladder's grace cannot commit over a live run
-and then kill it under a ladder the run never agreed to. The reversed
-spelling ("field -> job") passes every other obligation and reaches no
-profile field from any job (PR-37a), which is why the direction is stated
-here and tested directly.
+**Edges run from a job to what it depends on**, profile fields included. A live CMD's forward
+closure reaches `profile:cmd_grace_us`, so a C2 that changes only the kill ladder's grace
+cannot commit over a live run (PR-37a). The reversed spelling reaches no profile field from
+any job; a test pins the direction.
 
-**One authority for condition truth.** The readiness diff evaluates
-conditions through the interpreter itself (`_TruthOracle`, a throwaway
-`OracleReads` seeded with the carried rows), never through a second evaluator
-written here: SEM-05's iced-predecessor rule, SEM-06's undefined-is-false
-rule and the lookback ladder are semantics, and a classifier that
-re-implemented them would answer a question the engine does not ask.
+**One authority for condition truth.** The readiness diff evaluates conditions through the
+interpreter (`_TruthOracle`, a throwaway `OracleReads` seeded with the carried rows), never a
+second evaluator: SEM-05's iced-predecessor rule, SEM-06's undefined-is-false rule and the
+lookback ladder are semantics.
 """
 
 from __future__ import annotations
@@ -77,10 +64,8 @@ from dsl41.semantics import REGISTRY as SWITCH_REGISTRY
 
 # ------------------------------------------------------------------- nodes
 #
-# ss10.2's node table, one prefix per kind. The prefix is not decoration: a
-# verdict names the nodes that moved in a job's closure and an operator has
-# to read that list, so `resource:FUEL` and a job called `FUEL` must not be
-# the same string.
+# ss10.2's node table, one prefix per kind, so `resource:FUEL` and a job called `FUEL` differ in
+# the list an operator reads.
 
 JOB: Final = "job:"
 BOX: Final = "box:"  # a box's containment, at every nesting depth
@@ -91,20 +76,13 @@ MACHINE: Final = "machine:"
 CALENDAR: Final = "calendar:"
 CYCLE: Final = "cycle:"
 PROFILE: Final = "profile:"
-#: the timezone basis is one node for the whole estate: `default_tz` plus
-#: the alias table, the pair every scheduled tick resolves through
+#: the timezone basis is one node for the estate: `default_tz` plus the alias table
 TZ_BASIS: Final = "tz:basis"
 
-#: ss10.2's profile mapping, EXACTLY -- which jobs each field reaches.
-#: `retry_horizon_us` is boundary policy and reaches no job: a field that
-#: reached every job would turn a horizon tweak into a full live-work drain.
-#: `semantics` is placed per SWITCH, not per field (DL-252): each switch
-#: is a node of its own (`SWITCH` + name, valued at its effective value),
-#: and a job depends on it exactly when the registry entry's `affects`
-#: says so, or through a calendar its `affects_calendar` names (DL-259).
-#: A flip can change a run in flight -- a running box whose `box_success`
-#: reads a lookback atom on an iced job completes under one reading and not
-#: the other -- so it reaches those jobs and no others.
+#: ss10.2's profile mapping: which jobs each field reaches. `retry_horizon_us` is boundary
+#: policy and reaches no job. `semantics` is placed per switch (DL-252): each switch is a node
+#: (`SWITCH` + name, at its effective value), and a job depends on it when the registry entry's
+#: `affects` says so, or through a calendar its `affects_calendar` names (DL-259).
 PROFILE_SCHEDULED: Final = ("default_tz", "tz_aliases")
 PROFILE_CMD: Final = (
     "as_machine",
@@ -123,23 +101,19 @@ SWITCH: Final = "profile:semantics."
 
 
 def _switches_of(job_ir: JobIR, catalog: CatalogIR) -> tuple[str, ...]:
-    """The semantic switches a flip of which can change this job in
-    `catalog` (DL-252): each registry entry's own `affects`, never a list
-    kept here."""
+    """The semantic switches whose flip can change this job in `catalog` (DL-252)."""
     return tuple(
         name for name, switch in SWITCH_REGISTRY.items() if switch.affects(job_ir, catalog)
     )
 
 
 def is_scheduled(job_ir: JobIR) -> bool:
-    """ss10.2's "every job with `start_times`, `start_mins` or a calendar" --
-    the jobs whose ticks resolve through the timezone basis.
+    """ss10.2's "every job with `start_times`, `start_mins` or a calendar": ticks that resolve
+    through the timezone basis.
 
-    "A calendar" includes `exclude_calendar`: exclusion membership is a
-    LOCAL-day question, so the timezone decides which tick a date row
-    blocks. A job with only an exclusion and no trigger never ticks at all
-    -- the edge then over-approximates in the safe direction, which is the
-    union rule this graph already follows."""
+    A calendar includes `exclude_calendar`, because exclusion is a local-day question. A job
+    with only an exclusion over-approximates, in the safe direction.
+    """
     schedule = job_ir.schedule
     if schedule is None:
         return False
@@ -152,25 +126,24 @@ def is_scheduled(job_ir: JobIR) -> bool:
 
 
 def reads_zone(job_ir: JobIR) -> bool:
-    """ss10.2 as amended by DL-253: the jobs whose interpretation reads the
-    timezone basis. The scheduled jobs (`is_scheduled`), and every job with a
-    `run_window`: the oracle reads the window's endpoints in the job's zone
-    (SEM-33, SEM-35), and since DL-253 that is the run's base zone for a job
-    with no `timezone:` of its own. Absolute must times need start_times, so
-    they ride `is_scheduled`. A job with its own `timezone:` keeps the edge
-    as the scheduled rule does: the alias table resolves its name."""
+    """ss10.2 with DL-253: the jobs whose interpretation reads the timezone basis.
+
+    These are the scheduled jobs (`is_scheduled`) and every job with a `run_window`, whose
+    endpoints are read in the job's zone (SEM-33, SEM-35), or the run's base zone when it has
+    no `timezone:`. Absolute must times need start_times, so they ride `is_scheduled`. A job
+    with its own `timezone:` keeps the edge, because the alias table resolves its name.
+    """
     if is_scheduled(job_ir):
         return True
     return job_ir.schedule is not None and job_ir.schedule.run_window is not None
 
 
 class Baseline(BaseModel):
-    """One period's definition: the catalog it interprets and the launch
-    options it interprets under -- C1 and C2 in ss10's language.
+    """One period's definition, C1 or C2 in ss10: the catalog and the launch options.
 
-    Both halves, because half of them is not a period: identical JIL under
-    two timezones is one `catalog_hash` and two sets of ticks (ss1.1), and a
-    classifier given only the catalog would report nothing changed."""
+    Both halves, because identical JIL under two timezones is one `catalog_hash` and two sets
+    of ticks (ss1.1).
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -184,11 +157,10 @@ class Baseline(BaseModel):
 class CarriedJob(BaseModel):
     """One job's liveness at T, as ss10.1 keys on it.
 
-    `row` is the authoritative `JobRuntime` the seal carries -- not a copy of
-    three of its fields, because a second spelling of a carried row is a
-    second authority for what the state IS. The four flags beside it are
-    what the row cannot say: an execution's lifecycle lives in the seal's
-    `executions` (ss3.5) and a timer lives in the timer heap."""
+    `row` is the authoritative `JobRuntime` the seal carries. The four flags beside it are what
+    the row cannot say: execution lifecycle lives in the seal's `executions` (ss3.5) and a
+    timer lives in the timer heap.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -197,22 +169,17 @@ class CarriedJob(BaseModel):
     pending_spawn: bool = False
     bound: bool = False
     fw_watch: bool = False
-    #: a NON-STALE authoritative timer is pending for this job. Staleness is
-    #: the interpreter's rule, not this module's: `Oracle.pending_timers`
-    #: already discards a heap entry a fire would drop, and
-    #: `carried_from_oracle` reads that list rather than the raw heap.
+    #: a non-stale authoritative timer is pending; `Oracle.pending_timers` discards stale entries
     timer: bool = False
 
     @property
     def executes(self) -> bool:
-        """The executing tier's job-local half (the box half needs the tree).
+        """The executing tier's job-local half; the box half needs the tree.
 
-        `pending_spawn` counts (PR-39a). The oracle reaches RUNNING before
-        the shell plans the SPAWN, so the row is already RUNNING and the two
-        sets overlap anyway; and the effect carries no frozen command --
-        `_apply_spawn` reads the CURRENT catalog at dispatch, so a pending
-        SPAWN classified latent would execute C2's command under C1's run
-        number and reservations."""
+        `pending_spawn` counts (PR-39a): `_apply_spawn` reads the current catalog at dispatch,
+        so a pending SPAWN classified latent would run C2's command under C1's run number and
+        reservations.
+        """
         return (
             self.row.status in ("RUNNING", "STARTING")
             or self.pending_spawn
@@ -222,25 +189,21 @@ class CarriedJob(BaseModel):
 
     @property
     def latent(self) -> bool:
-        """Latent intent: an armed latch (ss10.4), a QUE_WAIT rank, or a live
-        timer. Read only where `executes` is false -- R beats A."""
+        """Latent intent: an armed latch (ss10.4), a QUE_WAIT rank or a live timer; R beats A."""
         return self.row.armed or self.row.status == "QUE_WAIT" or self.timer
 
 
 class CarriedState(BaseModel):
-    """The snapshot the classifier reads: rows, globals, spent units and the
-    instant the state is observed at.
+    """The snapshot the classifier reads: rows, globals, spent units and the observation instant.
 
-    U6 builds this from a seal (`state.jobs`, `state.globals`,
-    `state.consumed`, `state.now` plus `executions` and the timer heap);
-    `carried_from_oracle` builds it from a live engine."""
+    U6 builds it from a seal; `carried_from_oracle` builds it from a live engine.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     jobs: dict[str, CarriedJob] = {}
     globals_: dict[str, str] = {}
-    #: SEM-16's irreversible depletion, per bucket key (`r:NAME`, `m:NAME`).
-    #: Held units are on the rows; the two are added only where ss5 adds them.
+    #: SEM-16's irreversible depletion per bucket key (`r:NAME`, `m:NAME`)
     consumed: dict[str, int] = {}
     #: T. `None` falls back to the newest carried `status_at` -- the latest
     #: instant the state itself knows about -- so a window lookback in a
@@ -261,17 +224,13 @@ def carried_from_oracle(
     fw_watch: Iterable[str] = (),
     timers: Iterable[str] | None = None,
 ) -> CarriedState:
-    """Build a `CarriedState` from a live interpreter -- the convenience the
-    tests and the live sealer use.
+    """Build a `CarriedState` from a live interpreter.
 
-    The three execution sets are passed in rather than discovered, because
-    the evidence for them is not the oracle's: a pending SPAWN is an outbox
-    entry, a bound run is the supervisor's spool binding, and an FW watch is
-    `runs/<job>.<n>/watch.jsonl` (ss3.5). Keeping them parameters is what
-    lets this module stay a pure analysis pass -- it imports no runner.
-
-    `timers` defaults to the jobs `Oracle.pending_timers` reports, which is
-    the interpreter's own liveness rule for a heap entry."""
+    The three execution sets are parameters, because their evidence is not the oracle's: a
+    pending SPAWN is an outbox entry, a bound run is the supervisor's spool binding, an FW
+    watch is `runs/<job>.<n>/watch.jsonl` (ss3.5). `timers` defaults to the jobs
+    `Oracle.pending_timers` reports.
+    """
     if timers is None:
         timers = [job for _, job, _ in oracle.pending_timers()]
     spawning, binding, watching = set(pending_spawn), set(bound), set(fw_watch)
@@ -301,49 +260,43 @@ def _box_tree(catalog: CatalogIR) -> BoxTree:
 
 
 def _containment(tree: BoxTree, box: str) -> tuple[tuple[str, str], ...]:
-    """The containment RELATION under `box`: every (member, its box) pair at
-    any nesting depth, sorted. This is the box node's value.
+    """Every (member, its box) pair under `box` at any nesting depth, sorted: the box node's value.
 
-    The pairs, not the member set: ss10.2 says containment moves when
-    `box_name` moves "at any nesting depth", and moving a leaf from an inner
-    box up to the outer one leaves the outer box's member set identical
-    while changing exactly what the rule is about. The set alone would call
-    that no change at all."""
+    Pairs, not the member set: moving a leaf from an inner box to the outer one leaves the outer
+    member set identical, but ss10.2 counts it as a containment move.
+    """
     out: set[tuple[str, str]] = set()
     stack = [(member, box) for member in tree.children.get(box, ())]
     while stack:
         pair = stack.pop()
         if pair in out:
-            continue  # the catalog validator rules out cycles; be safe anyway
+            continue  # the catalog validator rules out cycles
         out.add(pair)
         stack.extend((member, pair[0]) for member in tree.children.get(pair[0], ()))
     return tuple(sorted(out))
 
 
 def _trimmed(value: str | None) -> str | None:
-    """An attribute as the node value reads it: surrounding whitespace is
-    not a change."""
+    """An attribute as the node value reads it; surrounding whitespace is not a change."""
     return None if value is None else value.strip()
 
 
 def _named_ref(attrs: Mapping[str, str], key: str) -> str | None:
-    """The record `attrs[key]` NAMES, or None.
+    """The record `attrs[key]` names, or None.
 
-    Attribute values are verbatim JIL and a calendar reference is often
-    quoted (`cyccal: "q1"`), so the quotes come off here through
-    `ir.unquote_jil_value` (jil-statement-syntax rule 7) -- the same
-    function that produced the calendar catalog key this name is looked up
-    against, and that `autocal`'s holcal/cyccal resolution and lint's L018
-    also call (DL-178q)."""
+    Quotes come off through `ir.unquote_jil_value` (jil-statement-syntax rule 7), the function
+    that produced the calendar catalog key, and that autocal's holcal/cyccal resolution and
+    L018 call (DL-178q).
+    """
     return unquote_jil_value(attrs.get(key, "")) or None
 
 
 def _cycle_periods(periods: Iterable[Any]) -> tuple[Any, ...]:
-    """Cycle periods as autocal PARSES them (`%m/%d/%Y`, which accepts an
-    unpadded month or day) -- `1/1/2026` and `01/01/2026` are one date.
-    Order is PRESERVED: period position numbers the chunks cycle-scoped
-    tokens count. An unparseable pair keeps its raw spelling -- the loud
-    refusal is autocal's."""
+    """Cycle periods as autocal parses them (`%m/%d/%Y`): `1/1/2026` and `01/01/2026` are one date.
+
+    Order is kept, because period position numbers the chunks. An unparseable pair keeps its
+    raw spelling; autocal refuses it.
+    """
     from datetime import datetime as _dt
 
     out: list[Any] = []
@@ -362,10 +315,10 @@ def _cycle_periods(periods: Iterable[Any]) -> tuple[Any, ...]:
 
 
 def _calendar_dates(calendar: Any) -> tuple[Any, ...]:
-    """The calendar's rows, normalized as `autocal.standard_rows` resolves
-    them: day -> tick set, sorted -- reordering and duplicating rows is
-    spelling. A row set the resolver refuses falls back to the sorted raw
-    rows: the classifier must not crash where preflight is the loud gate."""
+    """The calendar's rows as `autocal.standard_rows` resolves them: day -> tick set, sorted.
+
+    A row set the resolver refuses falls back to the sorted raw rows; preflight is the gate.
+    """
     try:
         rows = standard_rows(calendar)
     except (ValueError, CalendarRuleError):
@@ -375,11 +328,11 @@ def _calendar_dates(calendar: Any) -> tuple[Any, ...]:
 
 def _capacity(units: Callable[[], int | None]) -> int | None:
     """`ResourceIR.capacity_units` with a malformed `amount` read as absent.
-    A malformed value is preflight's loud refusal (DL-50), not a crash in
-    the classifier -- and "unsized" is the same node value either way.
 
-    Typed rather than asserted: an `assert` vanishes under `-O`, so a check
-    that carries a guarantee must not be one (`oracle._schedule_timer`)."""
+    A malformed value is preflight's refusal (DL-50), and "unsized" is the same node value.
+    The check is typed rather than asserted, because `assert` vanishes under `-O`
+    (`oracle._schedule_timer`).
+    """
     try:
         return units()
     except ValueError:
@@ -387,9 +340,10 @@ def _capacity(units: Callable[[], int | None]) -> int | None:
 
 
 def _node_values(side: Baseline) -> dict[str, Any]:
-    """Every node's value under one baseline, as ss10.2's "changed when"
-    column defines it. A node absent from a side has no entry, so a job,
-    resource or box that C2 removes changes by comparing against `None`."""
+    """Every node's value under one baseline, per ss10.2's "changed when" column.
+
+    A node absent from a side has no entry, so a removal compares against `None`.
+    """
     catalog, profile = side.catalog, side.profile
     values: dict[str, Any] = {}
     for name, digest in job_fingerprints(catalog).items():
@@ -403,55 +357,40 @@ def _node_values(side: Baseline) -> dict[str, Any]:
         values[XINST + name] = (xinst.xtype, tuple(sorted(xinst.attrs.items())))
     for name, resource in catalog.resources.items():
         # amount and res_type. res_type decides the release-policy default
-        # (`capacity.release_policy`: D never frees; a renewable reads the
-        # `renewable-free` switch, a node of its own, DL-256) and whether a
-        # run's unfreed units are spent or stay held (`keeps_held`), so the
-        # pair says everything ss10.2 names
+        # (`capacity.release_policy`: D never frees; a renewable reads the `renewable-free`
+        # switch, a node of its own, DL-256) and whether unfreed units are spent or held
+        # (`keeps_held`)
         values[RESOURCE + name] = (
             _capacity(resource.capacity_units),
-            # `capacity.resource_type`: stripped and upper-cased, so `r` and
-            # `R` are one renewable policy
+            # `capacity.resource_type` strips and upper-cases, so `r` and `R` are one policy
             resource_type(resource) or None,
         )
     for name, machine in catalog.machines.items():
-        # "the fields resolution actually reads": the load bucket's size,
-        # the type that decides whether there is one, the node the runner
-        # dispatches to, and the membership
+        # the fields resolution reads: the load bucket's size, its type, the dispatch node
+        # and the membership
         values[MACHINE + name] = (
-            # each field as RESOLUTION reads it, so a respelling that
-            # resolves identically is not a change: type case-folds
-            # (preflight compares `.lower()`), node_name unquotes (a
-            # hostname never carries quotes), max_load parses (08 is 8; a
-            # malformed value is preflight's loud refusal and one node
-            # value here)
+            # each field as resolution reads it, so a respelling is not a change: type
+            # case-folds, node_name unquotes, max_load parses (08 is 8; a malformed value is
+            # preflight's refusal and one node value)
             (machine.machine_type or "").lower() or None,
             _capacity(machine.max_load_units),
             _named_ref(machine.attrs, "node_name"),
-            # SORTED: resolution folds the pool any-of (`runner_preflight`),
-            # so member order is spelling, not semantics
+            # sorted: resolution folds the pool any-of (`runner_preflight`)
             tuple(sorted({member.name for member in machine.members})),
         )
     for name, calendar in catalog.calendars.items():
-        # the referenced DATE SET, as the RESOLVER reads it. A standard
-        # calendar compares as `autocal.standard_rows` -- so a reordered or
-        # duplicated row is spelling, not schedule. An extended one compares
-        # as what the rule engine derives dates from: its conditions and the
-        # six attributes autocal reads; descriptive keys are not a change.
-        # the whole extended surface canonicalizes through the rule
-        # engine's OWN parsers (`autocal.semantic_key`) -- one authority, so
-        # two spellings this engine derives identical dates from are one
-        # node value; standard rows normalize the same way through
-        # `standard_rows`
+        # the referenced date set, as the resolver reads it. A standard calendar compares as
+        # `autocal.standard_rows`. An extended one compares as what the rule engine derives dates
+        # from: its conditions and the six attributes autocal reads, canonicalized through
+        # `autocal.semantic_key`; descriptive keys are not a change
         values[CALENDAR + name] = (
             calendar.kind,
             _calendar_dates(calendar),
             semantic_key(calendar, catalog, switches_of(profile)),
         )
     for name, cycle in catalog.cycles.items():
-        # autocal's `_period_of` walks the PERIODS and nothing else: the
-        # attrs map is descriptive, and a description edit on a cycle must
-        # not refuse a live schedule. The dates compare PARSED (see
-        # `_cycle_periods`), in order -- position numbers the chunks.
+        # autocal's `_period_of` walks the periods only, so a description edit on a cycle is not a
+        # change; dates compare parsed (`_cycle_periods`), in order
         values[CYCLE + name] = _cycle_periods(cycle.periods)
     values[TZ_BASIS] = (profile.default_tz, tuple(sorted(profile.tz_aliases.items())))
     for field in RuntimeProfile.model_fields:
@@ -464,19 +403,15 @@ def _node_values(side: Baseline) -> dict[str, Any]:
 
 
 class ClassificationGraph:
-    """ss10.2's graph over both baselines: the edges of C1 and C2 together,
-    and the set of nodes that moved between them.
+    """ss10.2's graph over both baselines: the edges of C1 and C2 together, and the moved nodes.
 
-    Both edge sets, because a job's dependencies are not the same on the two
-    sides and the closure must see either: a job whose C2 `machine:` is new
-    depends on the new machine, and a job C2 removes still depended on what
-    C1 gave it. A union over-approximates in the safe direction -- it can
-    only add a changed node to a closure, never hide one.
+    The union over-approximates in the safe direction: a job whose C2 `machine:` is new depends
+    on the new machine, and a job C2 removes still depended on what C1 gave it.
 
-    A carried row's held units are edges too (DL-256): a job holding units
-    of a resource depends on that resource whether or not it still declares
-    it, so a dependent box's forward closure reaches a resource change
-    through the holder."""
+    A carried row's held units are edges too (DL-256): a job holding units of a resource depends
+    on it whether or not it still declares it, so a dependent box's forward closure reaches a
+    resource change through the holder.
+    """
 
     def __init__(
         self, closing: Baseline, opening: Baseline, *, carried: CarriedState | None = None
@@ -503,20 +438,13 @@ class ClassificationGraph:
     def _add_side(self, side: Baseline) -> None:
         catalog = side.catalog
         graph = derive_graph(catalog)
-        # (1) condition atoms, walked DIRECTLY off each job's condition --
-        # not off IR-G's edge list, deliberately: IR-G diverts a local
-        # unqualified n() atom into `mutex_groups` (M07) and keeps no edge
-        # for it, so a classifier reading its edges would carry a boundary
-        # over `b: condition: n(a)` while `b` executes and C2 changes `a`.
-        # The spec's "(IR-G, reversed)" names the ATOMS; the walk is the
-        # atoms, every one of them. A `name^INST` atom depends on the
-        # boundary declaration -- the node whose change this catalog can
-        # see; the foreign job's own definition is not in this estate.
+        # (1) condition atoms, walked off each job's condition, not IR-G's edge list: IR-G diverts
+        # a local unqualified n() atom into `mutex_groups` (M07) and keeps no edge, so edges would
+        # carry a boundary over `b: condition: n(a)` while `b` executes and C2 changes `a`. A
+        # `name^INST` atom depends on the boundary declaration, the node this catalog can see
         for name, job_ir in catalog.jobs.items():
-            # EVERY condition the job carries -- `condition`, and a box's
-            # `box_success`/`box_failure` (SEM-12) -- through the canonical
-            # walker the linter shares. A box gated by s(a) depends on `a`
-            # exactly as a start condition would.
+            # every condition the job carries, `condition` and a box's `box_success` and
+            # `box_failure` (SEM-12), through the walker the linter shares
             for _kind, cond, _span in job_ir.iter_conditions():
                 for atom in iter_atoms(cond):
                     if isinstance(atom, GlobalAtom):
@@ -529,13 +457,11 @@ class ClassificationGraph:
                         self._edge(JOB + name, XINST + ref.instance)
                     else:
                         self._edge(JOB + name, JOB + ref.name)
-        # (2) box containment, both directions and nested. A member depends
-        # on TWO facts about its box -- the containment set (`box:B`, which
-        # moves when any `box_name` at any depth moves) and the box's own
-        # definition (`job:B`, whose condition and schedule gate the member)
-        # -- and the box depends on every member. That is what makes a box's
-        # forward closure reach its members (PR-42) and a member's reach its
-        # siblings -- no box run may observe two versions of anything in it.
+        # (2) box containment, both directions and nested. A member depends on the containment
+        # (`box:B`, which moves when any `box_name` at any depth moves) and on the box's own
+        # definition (`job:B`, whose condition and schedule gate the member); the box depends on
+        # every member. So a box's forward closure reaches its members (PR-42) and a member's
+        # reaches its siblings
         tree = graph.box_tree
         for box, members in tree.children.items():
             self._edge(JOB + box, BOX + box)
@@ -609,13 +535,11 @@ class ClassificationGraph:
         return frozenset(seen)
 
     def forward(self, node: str) -> frozenset[str]:
-        """What `node` depends on, transitively, `node` included -- the R
-        gate's question."""
+        """What `node` depends on, transitively, `node` included: the R gate's question."""
         return self._walk(node, self._deps)
 
     def reverse(self, node: str) -> frozenset[str]:
-        """What depends on `node`, transitively, `node` included -- the
-        boundary-truth diff's question."""
+        """What depends on `node`, transitively, `node` included: the boundary-truth question."""
         return self._walk(node, self._rdeps)
 
     def moved(self, node: str) -> tuple[str, ...]:
@@ -635,17 +559,17 @@ RESOURCE_ASSUMPTION: Final = "admission refuses until releases catch up"
 INITIAL_STATUS_ASSUMPTION: Final = (
     "genesis seeding applies to new rows only: the carried row keeps its C1 flags"
 )
-#: DL-256: a job holds units of a resource C2 changes. The units stay on
-#: its row as frozen at acquisition until RELEASE_RESOURCE or its next run.
+#: DL-256: a job holds units of a resource C2 changes; they stay on its row, frozen at
+#: acquisition, until RELEASE_RESOURCE or its next run.
 HELD_ASSUMPTION: Final = "the units it holds stay held under C2's resource definition"
 
 
 def _held_resources(row: JobRuntime) -> frozenset[str]:
     """The resource nodes whose units `row` holds, live or held (DL-256).
-    A job's resource dependencies are its declared resources AND these: a
-    FORCE_STARTJOB re-uses held units the job may no longer declare, and a
-    held unit's fate at the run's end reads the resource's type, so a change
-    to the resource must reach the holder whatever its definition says."""
+
+    A job depends on these as well as its declared resources: FORCE_STARTJOB re-uses held
+    units the job may not declare, and their fate at run end reads the resource's type.
+    """
     return frozenset(
         RESOURCE + reservation.bucket.removeprefix(RESOURCE_BUCKET)
         for reservation in row.reservations
@@ -654,9 +578,8 @@ def _held_resources(row: JobRuntime) -> frozenset[str]:
 
 
 class JobVerdict(BaseModel):
-    """One job's answer. `verdict` and `assumption` are the two fields the
-    seal's `classification` map carries per job (ss3.1); `tier` and
-    `changed` are why, and they stay in the report."""
+    """One job's answer. `verdict` and `assumption` go in the seal's `classification` map
+    (ss3.1); `tier` and `changed` stay in the report."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -670,8 +593,8 @@ class JobVerdict(BaseModel):
 
 
 class ReadinessFlip(BaseModel):
-    """One job whose start condition evaluates differently under C2 than
-    under C1 at the SAME carried state -- the boundary-truth diff (PR-44)."""
+    """One job whose start condition evaluates differently under C2 than C1 at the same carried
+    state: the boundary-truth diff (PR-44)."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -681,20 +604,16 @@ class ReadinessFlip(BaseModel):
 
 
 class Classification(BaseModel):
-    """The whole answer: a verdict per job, the two report lists ss10.1
-    requires, the changed node set, and the readiness diff."""
+    """A verdict per job, the two ss10.1 report lists, the changed nodes and the readiness diff."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     verdicts: tuple[JobVerdict, ...] = ()
-    #: removed AND not live: retained, listed, and referenced by no
-    #: condition (L001 refuses that separately)
+    #: removed and not live: retained, listed, and referenced by no condition (L001 refuses that)
     ghosts: tuple[str, ...] = ()
-    #: not live, and something in its closure moved -- named so that
-    #: "nothing was live" is not read as "nothing changed". Holds a job C2
-    #: ADDS too: its own node moved from absent, and a new job is exactly
-    #: what an operator reading this list wants told. Disjoint from
-    #: `ghosts`, which is the same statement about a job C2 dropped.
+    #: not live, and something in its closure moved, so "nothing was live" is not read as
+    #: "nothing changed". Includes a job C2 adds. Disjoint from `ghosts`, the same statement
+    #: about a job C2 dropped
     changed_not_live: tuple[str, ...] = ()
     changed_nodes: tuple[str, ...] = ()
     readiness_flips: tuple[ReadinessFlip, ...] = ()
@@ -705,14 +624,12 @@ class Classification(BaseModel):
 
     @property
     def refused(self) -> tuple[str, ...]:
-        """The jobs that make the boundary refuse -- the R gate's output."""
+        """The jobs that make the boundary refuse: the R gate's output."""
         return tuple(v.job for v in self.verdicts if v.verdict == "R")
 
 
 def _tiers(catalog: CatalogIR, carried: CarriedState, names: Iterable[str]) -> dict[str, Tier]:
-    """Each job's tier, with the box half of the executing rule resolved
-    against C1's tree: a member of an executing box is executing whatever
-    its own row says, at any nesting depth (E19)."""
+    """Each job's tier. A member of an executing box executes at any depth (E19), by C1's tree."""
     tree = _box_tree(catalog)
     empty = CarriedJob()
     tiers: dict[str, Tier] = {}
@@ -733,9 +650,7 @@ def _tiers(catalog: CatalogIR, carried: CarriedState, names: Iterable[str]) -> d
 
 
 def _oversubscribed(opening: Baseline, carried: CarriedState) -> set[str]:
-    """The resource nodes C2 lowers below the carried `consumed + held`
-    (ss10.3). `CapacityPool.used` is the one place those two facts are added
-    (ss5), so it is asked rather than re-derived here."""
+    """The resource nodes C2 lowers below the carried `consumed + held` (ss10.3, ss5)."""
     pool = CapacityPool(opening.catalog, switches_of(opening.profile))
     used = pool.used(carried.rows, carried.consumed)
     short: set[str] = set()
@@ -755,11 +670,10 @@ def _assumption(
     carried: CarriedState,
     short: set[str],
 ) -> str:
-    """The A sentence for one latent job: ss10.3's named cases in order,
-    then the general one. Order is by what an operator most needs told --
-    the latch that will fire first, then the admission it will wait on, then
-    the flags it will keep. Each case is NARROW, so two of them rarely both
-    fire and the order rarely decides anything."""
+    """The A sentence for one latent job: ss10.3's named cases in order, then the general one.
+
+    The order is the latch that fires first, the admission it waits on, then the flags it keeps.
+    """
     row = carried.jobs.get(name, CarriedJob()).row
     before = closing.catalog.jobs.get(name)
     after = opening.catalog.jobs.get(name)
@@ -783,13 +697,10 @@ def _assumption(
 
 
 def _trigger_moved(before: JobIR, after: JobIR) -> bool:
-    """Whether an armed latch's own trigger moved -- ss10.3 names exactly two
-    things: the schedule and the condition.
+    """Whether an armed latch's trigger moved: the schedule or the condition (ss10.3).
 
-    The condition is compared through `equiv.canonical_cond`, which is the
-    project's answer to "is this the same condition": it erases spans and
-    parentheses and sorts operands, so a reordered `a & b` is not reported to
-    an operator as a changed gate."""
+    Conditions compare through `equiv.canonical_cond`, so a reordered `a & b` is no change.
+    """
     if before.schedule != after.schedule:
         return True
     return _cond_key(before.sem.condition) != _cond_key(after.sem.condition)
@@ -800,13 +711,11 @@ def _cond_key(attr: CondAttr | None) -> Cond | None:
 
 
 def _row_agrees(row: JobRuntime, initial: str | None) -> bool:
-    """Whether the carried row already holds what C2's `initial_status`
-    would seed. Genesis seeding writes NEW rows only, so a disagreement is
-    an assumption and never a silent rewrite.
+    """Whether the carried row already holds what C2's `initial_status` would seed.
 
-    The WHOLE three-flag vector is compared, not the one flag C2 names: a
-    row carrying HOLD+ICE against a seed of ICE alone still disagrees --
-    the retained HOLD is exactly what the operator is being told about."""
+    Genesis seeding writes new rows only, so a disagreement is an assumption. The whole
+    three-flag vector is compared: HOLD+ICE against a seed of ICE alone disagrees.
+    """
     seeded = {
         "ON_HOLD": (True, False, False),
         "ON_ICE": (False, True, False),
@@ -821,15 +730,12 @@ def classify(
     opening: Baseline,
     carried: CarriedState,
 ) -> Classification:
-    """ss10's verdict over one boundary: C1 (`closing`) against C2
-    (`opening`) at the carried state.
+    """ss10's verdict over one boundary: C1 (`closing`) against C2 (`opening`) at the carried state.
 
-    Deterministic and total: every job of either catalog AND every carried
-    row gets exactly one verdict, in name order, so the map phase 2 commits
-    into the seal is reproducible byte for byte by audit. The carried rows
-    are in that union because a ghost is retained: at the next boundary it
-    is in neither catalog, and a classifier reading the catalogs alone would
-    stop listing it while it was still there."""
+    Deterministic and total: every job of either catalog and every carried row gets one verdict,
+    in name order, so audit can reproduce the sealed map byte for byte. Carried rows are in the
+    union because a retained ghost is in neither catalog at the next boundary.
+    """
     graph = ClassificationGraph(closing, opening, carried=carried)
     names = sorted(set(closing.catalog.jobs) | set(opening.catalog.jobs) | set(carried.jobs))
     tiers = _tiers(closing.catalog, carried, names)
@@ -839,20 +745,16 @@ def classify(
     changed_not_live: list[str] = []
     for name in names:
         tier = tiers[name]
-        # DL-256: the resources the row holds are dependencies too; the graph
-        # carries them as edges, so `changed` already holds them
+        # DL-256: the resources the row holds are dependencies; the graph carries them as edges
         held_moved = _held_resources(carried.jobs.get(name, CarriedJob()).row) & graph.changed
         changed = graph.moved(JOB + name)
-        #: "removed" is about what C2 can dispatch, so it reads the OPENING
-        #: catalog alone: a job C1 dropped and a job dropped two periods ago
-        #: are the same fact to a row that is still live under it
+        #: "removed" is about what C2 can dispatch, so it reads the opening catalog alone
         removed = name not in opening.catalog.jobs
         verdict: Verdict = "carry"
         assumption: str | None = None
         if tier == "executing" and (removed or changed):
-            # a removed job is not in `dispatchable`, so a KILL for it plans
-            # no effect and KILLJOB would stop nothing -- there is no way to
-            # end the run C1 started, and the boundary must not open over it
+            # a removed job is not in `dispatchable`, so a KILL plans no effect and the run C1
+            # started cannot end; the boundary must not open over it
             verdict = "R"
         elif tier == "latent" and removed:
             verdict = "R"  # PR-40: the latch has nothing left to start
@@ -887,15 +789,13 @@ def classify(
 
 
 class _TruthOracle(OracleReads):
-    """A throwaway interpreter's reads, used for one question: does this
-    job's `condition:` hold at the carried state?
+    """A throwaway interpreter's reads for one question: does this job's `condition:` hold at
+    the carried state?
 
-    A subclass of the oracle's reads rather than a second evaluator, and
-    rather than a public query on the interpreter itself: the classifier is
-    the only caller that ever asks about a state it did not produce, and
-    condition truth is interpreter semantics (SEM-05's iced predecessor,
-    SEM-06's undefined atom, the lookback ladder). One authority, borrowed.
-    It applies no input, so it builds no job instance."""
+    Condition truth is interpreter semantics (SEM-05, SEM-06, the lookback ladder), so this
+    subclasses the oracle's reads instead of adding an evaluator. It applies no input and builds
+    no job instance.
+    """
 
     def at(self, now: datetime) -> None:
         """Read the conditions at `now`, as a time observation would."""
@@ -919,20 +819,13 @@ def _seeded(
 ) -> _TruthOracle:
     """An interpreter over `catalog` holding the carried rows.
 
-    Seeded through `RuntimeState.seed_job`, an install: rebuilding a row is
-    not a move of the job's machines, so it names no transition (DL-86 keeps
-    the store the only write path). A terminal row's last end is its status
-    time, as the terminal edge latched it; a row that ended and started
-    again keeps its earlier end, or an n() lookback loses its anchor. A
-    carried waiter gets a rank, since the input refuses to close without one.
-
-    Every carried row is seeded, including a ghost's -- the row is retained
-    across the boundary (ss10.1), so an atom naming it must read what the
-    row says. L001 refuses a condition naming a job the catalog does not
-    have, so a valid estate never asks."""
-    # the period's own SEM-35 alias table (DL-151): a condition read under a
-    # `timezone:` only that table resolves must not raise here; and its own
-    # semantic switches (DL-252), so each side's truth is that side's reading
+    Rows are installed through `RuntimeState.seed_job`, which names no transition (DL-86). A
+    terminal row's last end is its status time; a row that ended and started again keeps its
+    earlier end, so an n() lookback keeps its anchor. A carried waiter gets a rank. Every
+    carried row is seeded, a ghost's included (ss10.1), so an atom naming it reads the row.
+    """
+    # the period's own SEM-35 alias table (DL-151), so a `timezone:` only it resolves does not
+    # raise, and its own semantic switches (DL-252), so each side's truth is its own reading
     oracle = _TruthOracle(catalog, **oracle_reading(profile))
     store = oracle.store
     store.begin_input()
@@ -964,10 +857,9 @@ def readiness_flips(
 ) -> tuple[ReadinessFlip, ...]:
     """Whose readiness flips because something changed (ss10.2, PR-44).
 
-    The candidates come from the REVERSE closure of every changed node --
-    "who depends on X" -- and each is then evaluated under both catalogs at
-    the one carried state. A job only C2 has is not here: it has no C1 truth
-    to differ from, and genesis seeding gives it its row when C2 opens."""
+    Candidates come from the reverse closure of every changed node and are evaluated under both
+    catalogs at the one carried state. A job only C2 has is not here: it has no C1 truth.
+    """
     candidates: set[str] = set()
     for node in graph.changed:
         candidates |= {n for n in graph.reverse(node) if n.startswith(JOB)}

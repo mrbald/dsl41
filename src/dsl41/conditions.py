@@ -1,34 +1,28 @@
-"""Condition-expression parsing: lark loader + Tree -> Cond transformer.
+"""Condition-expression parsing: lark loader and Tree -> Cond transformer.
 
-Phase 2 of the implementation order (CLAUDE.md / DL-03). Normative spec:
-docs/ir-design.md ss3 (condition algebra models) and docs/autosys-semantics.md
-SEM-02..08 (atom semantics), SEM-04 (lookback). Grammar:
-grammars/condition.lark; statement-level JIL is ast_jil's hand scanner (DL-05).
+Phase 2 of the DL-03 order. Normative spec: docs/ir-design.md ss3 (condition algebra models) and
+docs/autosys-semantics.md SEM-02..08 (atom semantics), SEM-04 (lookback). Grammar:
+grammars/condition.lark. Statement-level JIL is ast_jil's hand scanner (DL-05).
 
-The ss3 sketch fields are the semantic API. Extra `span` fields (char offsets
-into the condition source string) implement ir-design ss4's "every Cond retains
-a pointer to its AST SourceSpan": lowering (phase 3) composes these offsets
-with the owning RawAttr's file-level SourceSpan.
+The ss3 sketch fields are the semantic API. The extra `span` fields (char offsets into the
+condition source string) implement ir-design ss4's pointer to the AST SourceSpan; lowering
+composes them with the owning RawAttr's file-level SourceSpan.
 
-Decisions pinned here (each with a test):
-- GlobalAtom.value is semantic: quotes are stripped from QUOTED comparands; the
-  verbatim expression text survives in the owning RawAttr.
-- JobRef.name is semantic: the `\\:` escape is unescaped to `:` via
-  unescape_job_name -- the ONE owner of job-name surface<->semantic
-  transcoding (DL-39). Colon is a metachar only in condition syntax, so refs
-  are always written escaped; insert_job subjects and box_name values are
-  raw-to-EOL and may carry either spelling -- lowering funnels them through
-  the same function, so the catalog key and every reference agree.
-- Lookback.raw keeps the token verbatim (incl. the `\\:` form) for Q2 auditing.
-- Bare all-zero token ("0") -> kind="zero"; bare "9999" -> kind="indefinite"
-  (legacy explicit form, SEM-04); every dotted/colon form is a window,
-  including "0.00" (a zero-minute window, distinct from zero-lookback) and
-  "9999.00".
-- Lookback minutes part must be 00-59: hard error. A 9999 hours part with
-  minutes is accepted as a window, though the vendor's largest finite form
-  is 9998.59 (SEM-04).
-- Node spans cover the node's full lexical extent including punctuation
-  (lark propagates positions before token filtering).
+Rules, each pinned by a test:
+- GlobalAtom.value is semantic: quotes are stripped from quoted comparands, and the verbatim
+  text survives in the owning RawAttr.
+- JobRef.name is semantic: the `\\:` escape is unescaped to `:` by unescape_job_name, the one
+  owner of job-name surface and semantic transcoding (DL-39). Colon is a metachar only in
+  condition syntax, so refs are written escaped. insert_job subjects and box_name values are
+  raw-to-EOL and may carry either spelling; lowering funnels them through the same function,
+  so the catalog key and every reference agree.
+- Lookback.raw keeps the token verbatim, the `\\:` form included, for Q2 auditing.
+- A bare all-zero token ("0") is kind="zero"; bare "9999" is kind="indefinite" (legacy explicit
+  form, SEM-04). Every dotted or colon form is a window, including "0.00" (a zero-minute
+  window, distinct from zero-lookback) and "9999.00".
+- The lookback minutes part must be 00-59, else an error. A 9999 hours part with minutes is
+  accepted as a window, though the vendor's largest finite form is 9998.59 (SEM-04).
+- Node spans cover the node's full lexical extent, punctuation included.
 """
 
 from __future__ import annotations
@@ -63,11 +57,11 @@ def compare_int(left: int, op: CmpOp, right: int) -> bool:
 
 
 def compare_value(left: str, op: CmpOp, right: str) -> bool:
-    """Compare two comparand strings: numeric comparison if both sides parse
-    as int, else string comparison (= and != always available; ordering
-    falls back to lexicographic). Shared by oracle, equiv, and the UC oracle
-    twin -- see each call site's SEM/UCS-adjacent comment for why identical
-    behavior is required there."""
+    """Compare two comparand strings: numerically if both parse as int, else as strings.
+
+    Ordering falls back to lexicographic. Shared by the oracle, equiv and the UC oracle twin,
+    which must agree.
+    """
     try:
         return compare_int(int(left), op, int(right))
     except ValueError:
@@ -92,12 +86,11 @@ class Lookback(BaseModel):
 
     @property
     def token(self) -> str:
-        """How this lookback NAMES itself: the source token when one was
-        parsed, the kind when it was not. Canonicalization drops `raw`
-        (equiv), so a reader that REPORTS the lookback needs a fallback;
-        the report writers share this one (DL-152). `dsl._lookback_token`
-        does not use it -- it renders a JIL-VALID token, so its fallback
-        must be a number the scanner accepts, not a kind name."""
+        """The source token when one was parsed, else the kind (DL-152).
+
+        Canonicalization drops `raw` (equiv), so report writers share this fallback.
+        `dsl._lookback_token` renders a JIL-valid token and does not use it.
+        """
         return self.raw or self.kind
 
 
@@ -107,8 +100,7 @@ class JobRef(BaseModel):
 
     @property
     def key(self) -> str:
-        """The job's identity: `name` when local, `name^INST` when
-        cross-instance (DL-162a). Runtime rows and edges are keyed by it."""
+        """The job's identity: `name` when local, `name^INST` when cross-instance (DL-162a)."""
         return self.name if self.instance is None else f"{self.name}^{self.instance}"
 
 
@@ -169,10 +161,9 @@ Atom = StatusAtom | ExitCodeAtom | GlobalAtom
 
 
 def iter_atoms(cond: Cond) -> Iterator[Atom]:
-    """Yield every atom of a Cond tree in source (left-to-right) order.
+    """Yield every atom of a Cond tree in source order; Paren and And/Or nesting is transparent.
 
-    Pure structural walk shared by analysis passes (linter rules L001/L015,
-    derive's atom extraction); Paren and And/Or nesting is transparent.
+    Shared by L001, L015 and derive's atom extraction.
     """
     stack: list[Cond] = [cond]
     while stack:
@@ -186,7 +177,7 @@ def iter_atoms(cond: Cond) -> Iterator[Atom]:
 
 
 class ConditionParseError(ValueError):
-    """Loud condition failure: lexical/syntactic, or SEM-04 token validation."""
+    """A lexical or syntactic condition failure, or a SEM-04 token failure."""
 
     def __init__(self, message: str, *, text: str | None = None, pos: int | None = None) -> None:
         loc = f" at position {pos}" if pos is not None else ""
@@ -197,16 +188,15 @@ class ConditionParseError(ValueError):
 
 # ------------------------------------------------------- lookback tokens (SEM-04)
 
-#: Lexical shape mirrors LOOKBACK_TOKEN in condition.lark; semantic range
-#: checks (mm 00-59) happen here, not in the grammar.
+#: Lexical shape mirrors LOOKBACK_TOKEN in condition.lark; the range check (mm 00-59) is here.
 _LOOKBACK_RE = re.compile(r"(\d{1,4})(?:\.(\d{1,2})|\\:(\d{1,2}))?\Z")
 
 
 def parse_lookback(raw: str, *, pos: int | None = None) -> Lookback:
-    """Validate + classify a lookback token per SEM-04.
+    """Validate and classify a lookback token (SEM-04).
 
-    hhhh.mm / hhhh\\:mm -> window; bare N -> N-hour window; bare 0 -> zero
-    lookback; bare 9999 -> explicit indefinite (legacy 4.5.1 default form).
+    hhhh.mm and hhhh\\:mm are windows; bare N is an N-hour window; bare 0 is zero lookback; bare
+    9999 is the explicit indefinite (legacy 4.5.1 default form).
     """
     m = _LOOKBACK_RE.match(raw)
     if m is None:
@@ -220,8 +210,7 @@ def parse_lookback(raw: str, *, pos: int | None = None) -> Lookback:
     if mm_s is None:
         hours = int(hours_s)
         if hours == 0:
-            # Q2a (DL-54): zero-lookback anchors to the evaluating job's own
-            # last end; the kind carries it to the oracle.
+            # Q2a (DL-54): zero-lookback anchors to the evaluating job's own last end
             return Lookback(kind="zero", minutes=None, raw=raw)
         if raw == "9999":
             return Lookback(kind="indefinite", minutes=None, raw=raw)
@@ -236,10 +225,9 @@ def parse_lookback(raw: str, *, pos: int | None = None) -> Lookback:
 
 
 def lookback_pitfalls(lb: Lookback) -> list[str]:
-    """L015 raw-shape pitfalls, computed at parse time (ir-design ss9).
+    """L015 raw-shape pitfalls (ir-design ss9): facts about suspicious but valid shapes.
 
-    Returns human-readable facts about suspicious-but-valid shapes; the linter
-    (phase 4) maps them to Violations with codes/severity. Empty list == clean.
+    The linter maps them to Violations. An empty list means clean.
     """
     m = _LOOKBACK_RE.match(lb.raw)
     if m is None:  # hand-built Lookback with a raw the parser would reject
@@ -260,7 +248,7 @@ def lookback_pitfalls(lb: Lookback) -> list[str]:
     return pitfalls
 
 
-# --------------------------------------------- grammar loader (Q1 resolved: DL-53)
+# --------------------------------------------------------------- grammar loader (Q1, DL-53)
 
 
 def _grammar_text() -> str:
@@ -282,17 +270,18 @@ def _parser() -> Lark:
 
 
 def terminal_pattern(name: str) -> str:
-    """The regex condition.lark gives terminal `name`, as the parser
-    compiled it. A reader that re-lexes inside a parsed atom matches with
-    the grammar's own pattern, never a copy (minify)."""
+    """The regex condition.lark gives terminal `name`, as the parser compiled it.
+
+    A reader that re-lexes inside a parsed atom uses this pattern, not a copy (minify).
+    """
     return {terminal.name: terminal.pattern.to_regexp() for terminal in _parser().terminals}[name]
 
 
 def parse_condition(text: str) -> Cond:
-    """Parse a condition/box_success/box_failure expression into a Cond tree.
+    """Parse a condition, box_success or box_failure expression into a Cond tree.
 
-    Operator precedence is flat left-to-right -- & and | at equal precedence,
-    parentheses force grouping (SEM-03 [V], DL-53).
+    Precedence is flat left to right: & and | are equal and parentheses group (SEM-03 [V],
+    DL-53).
     """
     try:
         tree = _parser().parse(text)
@@ -305,11 +294,8 @@ def parse_condition(text: str) -> Cond:
             pos=getattr(exc, "pos_in_stream", None),
         ) from exc
     except RecursionError as exc:
-        # DL-20: operator chains build iteratively (any realistic length is
-        # fine); only pathological grouping depth lands here. Refuse loudly
-        # (exit-2 class) instead of leaking a traceback masquerading as
-        # exit-1 lint findings -- downstream Cond walkers recurse per
-        # nesting level, so admitting the parse would only move the crash.
+        # DL-20: operator chains build iteratively; only pathological grouping depth lands here.
+        # Refused as an exit-2 error, because Cond walkers recurse per nesting level
         raise ConditionParseError(
             "condition grouping is nested deeper than the v1 walker budget"
             " (~1000 levels); flatten the grouping or split the condition",
@@ -333,10 +319,9 @@ _STATUS_BY_KW: dict[str, Status] = {
     "n": "NOTRUNNING",
 }
 
-#: Status -> its one-letter condition keyword, DERIVED from the keyword table
-#: above (the single-character keys are exactly the letters). The one source
-#: of truth for every emitter that spells a status as a letter: the phase-10
-#: DSL's s()/f()/d()/t()/n() forms and viz's DL-35 edge labels (DL-72).
+#: Status -> its one-letter condition keyword, from the keyword table above. The one source for
+#: every emitter that spells a status as a letter: the DSL's s()/f()/d()/t()/n() and viz's DL-35
+#: edge labels (DL-72).
 STATUS_LETTER: dict[Status, str] = {
     status: kw for kw, status in _STATUS_BY_KW.items() if len(kw) == 1
 }
@@ -350,10 +335,7 @@ def _span(node: Tree[Token]) -> CondSpan | None:
 
 
 def _combine(is_and: bool, left: Cond, right: Cond, span: CondSpan | None) -> Cond:
-    """Left-associative combine; flattens same-op runs into one n-ary node.
-
-    A Paren operand is never flattened -- grouping survives for fidelity.
-    """
+    """Left-associative combine; same-op runs flatten into one n-ary node, a Paren never does."""
     if is_and:
         operands = [*left.operands, right] if isinstance(left, And) else [left, right]
         return And(operands=operands, span=span)
@@ -362,12 +344,11 @@ def _combine(is_and: bool, left: Cond, right: Cond, span: CondSpan | None) -> Co
 
 
 def unescape_job_name(text: str) -> str:
-    """JIL's `\\:` escape -> literal `:` -- the SEMANTIC job name (DL-39).
-    Colon is a metachar in condition syntax (JOB_NAME token), so refs are
-    always written escaped; statement subjects and box_name values are
-    raw-to-EOL and may carry either spelling. Every lowering path funnels
-    job names through this ONE function so the catalog key, the box
-    linkage, and every condition reference agree."""
+    """JIL's `\\:` escape to a literal `:`: the semantic job name (DL-39).
+
+    Every lowering path funnels job names through this function, so the catalog key, the box
+    linkage and every condition reference agree.
+    """
     return text.replace("\\:", ":")
 
 
@@ -391,13 +372,10 @@ def _build(node: Tree[Token]) -> Cond:
     data = node.data
     children = node.children
     if data == "binop":
-        # The LALR tree is left-leaning: one nesting level per operator. Walk
-        # the left spine iteratively (DL-20: a 1000+-atom flat chain must not
-        # blow the Python stack), then fold back left-to-right so the result
-        # is identical to the old recursive descent -- _combine flattens
-        # same-op runs into one n-ary node either way. Right-hand operands
-        # and paren interiors still recurse: their depth is grouping depth,
-        # bounded by the parse_condition RecursionError guard.
+        # The LALR tree is left-leaning, one level per operator. Walk the left spine iteratively
+        # (DL-20: a flat chain of 1000 atoms must not blow the stack), then fold left to right;
+        # _combine flattens same-op runs. Right-hand operands and paren interiors recurse, bounded
+        # by the parse_condition RecursionError guard
         spine: list[tuple[bool, Tree[Token], CondSpan | None]] = []
         current = node
         while current.data == "binop":  # expr op operand
@@ -432,7 +410,7 @@ def _build(node: Tree[Token]) -> Cond:
         value_tok = cast(Token, cast("Tree[Token]", children[3]).children[0])
         value = str(value_tok)
         if value_tok.type == "QUOTED":
-            value = value[1:-1]  # semantic unquoting; verbatim text lives in the RawAttr
+            value = value[1:-1]  # semantic unquoting; the RawAttr keeps the verbatim text
         return GlobalAtom(
             name=str(cast("Tree[Token]", children[1]).children[0]),
             op=cast(CmpOp, str(children[2])),

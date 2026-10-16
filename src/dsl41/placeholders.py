@@ -1,38 +1,28 @@
 """Estate templating preprocessor: `~{$NAME}~` placeholder resolution (DL-19).
 
-NON-CORE helper. Estate JIL is templated with `~{$NAME}~` tokens that an
-external properties mechanism substitutes BEFORE `jil` ever sees the text.
-This module reproduces that step so the compiler core never has to model
-templating: the scanner/lowering treat unresolved tokens as opaque name
-characters (DL-18 fixtures pin that), and resolved estates flow through the
-ordinary pipeline. Nothing in the core imports this module.
+Non-core helper. Estate JIL is templated with `~{$NAME}~` tokens that an external properties
+mechanism substitutes before `jil` sees the text. This module reproduces that step so the
+compiler core never models templating: the scanner and lowering treat unresolved tokens as
+opaque name characters (DL-18 fixtures), and resolved estates flow through the ordinary
+pipeline. Nothing in the core imports this module.
 
-Format decisions pinned here (each with a test):
-- Placeholder token: `~{$NAME}~`, NAME matching `[A-Za-z_][A-Za-z0-9_]*`.
-  `$$VAR` (SEM-08 globals) and `${VAR}` (machine-side runtime vars) never
-  match -- the `~{$...}~` bracketing is what makes the estate token.
-- Properties lines: blank and `#`/`!`-led lines are comments; otherwise
-  `KEY=VALUE` split on the FIRST `=` (values may contain `=`); key and
-  value are whitespace-stripped; a line with no `=` is an error.
-- References are legal in BOTH the key and the value of a property:
-  `HOST_~{$ENVID}~=~{$ENVID}~.example.com` defines HOST_DEV1 once ENVID
-  resolves. Resolution is an order-independent fixpoint over all entries
-  (use-before-define across lines and files is fine); nested tokens
-  (`~{$HOST_~{$ENVID}~}~`) resolve inner-out across passes.
-- Layering: later properties files override earlier ones by RAW key --
-  that is the point of accepting 1+ files (base + environment overlay).
-  A duplicate raw key WITHIN one file is an error (never intentional).
-  Two entries whose KEYS resolve to the same name is an error (collision,
-  not layering). A resolved key must be identifier-shaped, else nothing
-  could reference it.
-- Loud by default (no silent loss): entries still carrying references at
-  fixpoint (undefined name or reference cycle) fail with every stuck entry
-  listed; substitution leaves no `~{...}~`-shaped residue -- an undefined
-  name or a malformed lookalike (`~{ENVID}~`, `~{$}~`) is an error with
-  file:line unless `permit_unresolved` carries it verbatim (reported,
-  mirroring the DL-07 escape-hatch convention).
-- Substitution iterates to a fixpoint for nesting; passes are bounded and
-  non-convergence (pathological values re-forming tokens) is an error.
+Format rules, each pinned by a test:
+- Token: `~{$NAME}~`, NAME matching `[A-Za-z_][A-Za-z0-9_]*`. `$$VAR` (SEM-08 globals) and
+  `${VAR}` (machine-side runtime vars) never match.
+- Properties lines: blank lines and `#` or `!` lines are comments; otherwise `KEY=VALUE` split
+  on the first `=`, key and value whitespace-stripped. A line with no `=` is an error.
+- References are legal in both key and value: `HOST_~{$ENVID}~=~{$ENVID}~.example.com` defines
+  HOST_DEV1 once ENVID resolves. Resolution is an order-independent fixpoint over all entries;
+  nested tokens (`~{$HOST_~{$ENVID}~}~`) resolve inner-out across passes.
+- Layering: later properties files override earlier ones by raw key (base plus environment
+  overlay). A duplicate raw key within one file is an error. Two entries whose keys resolve to
+  the same name collide, which is an error. A resolved key must be identifier-shaped.
+- No silent loss: entries still carrying references at the fixpoint (an undefined name or a
+  cycle) fail with every stuck entry listed. Substitution leaves no `~{...}~`-shaped residue:
+  an undefined name or a malformed lookalike (`~{ENVID}~`, `~{$}~`) is an error with file:line
+  unless `permit_unresolved` carries it verbatim and reports it (the DL-07 escape-hatch
+  convention).
+- Passes are bounded; non-convergence (values re-forming tokens) is an error.
 """
 
 from __future__ import annotations
@@ -113,11 +103,10 @@ def _parse_properties(path: Path) -> list[_Entry]:
 
 
 def load_properties(paths: Iterable[str | Path]) -> dict[str, str]:
-    """Parse + layer + resolve properties files into a placeholder-free map.
+    """Parse, layer and resolve properties files into a placeholder-free map.
 
-    Later files override earlier ones by raw key (documented layering).
-    Raises PlaceholderError listing every parse error, stuck entry (cycle or
-    undefined reference), key collision, or non-identifier resolved key.
+    Later files override earlier ones by raw key. Raises PlaceholderError listing every parse
+    error, stuck entry (cycle or undefined reference), key collision and non-identifier key.
     """
     layered: dict[str, _Entry] = {}
     for path in paths:
@@ -179,11 +168,10 @@ def substitute(
 ) -> tuple[str, list[str]]:
     """Replace every `~{$NAME}~` in `text`; returns (resolved text, reports).
 
-    Iterates so nested tokens resolve inner-out. After the fixpoint, any
-    remaining `~{...}~`-shaped span (undefined name or malformed lookalike)
-    raises PlaceholderError with its line -- or, with `permit_unresolved`,
-    stays verbatim and is returned in the report list. Everything else is
-    byte-preserved (pure text substitution; line endings untouched)."""
+    Nested tokens resolve inner-out. A `~{...}~`-shaped span left at the fixpoint (undefined
+    name or malformed lookalike) raises PlaceholderError with its line, or with
+    `permit_unresolved` stays verbatim and is reported. All other bytes are preserved.
+    """
     for _ in range(_MAX_PASSES):
         replaced = _substitute_known(text, bindings)
         if replaced == text:
@@ -213,7 +201,7 @@ def resolve_text(
     file: str = "<memory>",
     permit_unresolved: bool = False,
 ) -> tuple[str, list[str]]:
-    """load_properties + substitute in one call (test/tooling convenience)."""
+    """load_properties then substitute, in one call."""
     return substitute(
         text, load_properties(properties), file=file, permit_unresolved=permit_unresolved
     )

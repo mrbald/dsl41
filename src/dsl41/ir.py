@@ -1,61 +1,43 @@
-"""IR-F: faithful semantic layer -- entity models + AST -> IR-F lowering.
+"""IR-F: faithful semantic layer, entity models and AST -> IR-F lowering.
 
-Phase 3 of the implementation order (CLAUDE.md / DL-03). Normative spec:
-docs/ir-design.md ss3-4 (models are the API; lowering rules of note) and
-docs/autosys-semantics.md (SEM entries cited per field). Condition algebra
-models live in conditions.py (ss3); this module supplies the entity models
-(ss4), the lowering with the DL-07 passthrough firewall, and deterministic
-serialization (ss8).
+Phase 3 of the DL-03 order. Normative spec: docs/ir-design.md ss3-4 (models are the API;
+lowering rules) and docs/autosys-semantics.md (SEM entries cited per field). Condition models
+live in conditions.py (ss3); this module holds the entity models (ss4), the lowering with the
+DL-07 passthrough firewall, and deterministic serialization (ss8).
 
-Loss policy (ir-design ss1): lowering may normalize syntax (abbreviations,
-quoting, list formats) but never semantics; an unknown attribute not on the
-inert allow-list is a lowering error unless `permit_unknown` is set (DL-07).
+Loss policy (ir-design ss1): lowering may normalize syntax (abbreviations, quoting, list
+formats) but never semantics. An unknown attribute not on the inert allow-list is a lowering
+error unless `permit_unknown` is set (DL-07).
 
-Decisions pinned here (each with a test; spec-sketch gaps resolved, not
-relitigated -- see the docstrings of the individual models/handlers):
-- SEM-30: time attributes with falsy/absent `date_conditions` are dead config;
-  they are NOT modeled as schedule -- they go to `passthrough` verbatim so the
-  L005 linter can see them and nothing is lost.
-- SEM-34: must_*_times count must match start_times, EXCEPT a single relative
-  offset which broadcasts to every start time. [?] The dossier says strict
-  count-match, but its own doc-derived corpus fixture (sem30_schedule.jil)
-  uses one `+3` against three start_times -- TechDocs' own example. Pin the
-  exact rule on a live instance; broadcast is the reading that accepts the
-  documented example.
-- Subcommand support v1: insert_job / insert_global / insert_machine /
-  insert_xinst / insert_resource (DL-18), plus the autocal_asc calendar-export
-  statements calendar / cycle / extended_calendar carried opaquely (DL-36).
-  update_/delete_/override_ forms are loud lowering errors -- merging update
-  semantics is real semantics, not syntax, and guessing it would be silent loss.
-- SEM-24 [A] (DL-18): `status:` on insert_job lowers to
-  Semantics.initial_status, restricted to INACTIVE/ON_HOLD/ON_ICE/ON_NOEXEC;
-  run states would interact with the SEM-01 latch and are refused loudly.
-- DL-21: the `resources:` job attribute (11.3+ resource objects, TechDocs
-  12.x) lowers to typed JobIR.resources (name/QUANTITY/FREE per group, AND
-  separator); malformed groups are loud errors. QUANTITY is required (every
-  documented and estate example carries it); FREE absent stays None (the
-  engine default is not guessed). No oracle gate semantics v1.
-- job_type is required (no defaulting to CMD, the vendor default): an
-  exported definition is expected to carry it, though that export shape is
-  not measured; a missing one in hand-written JIL is more likely an error
-  than an intentional default. [?] Relax if a real-estate fixture shape
-  needs it (dossier ss5).
-- Type-inapplicable exec attributes: command on BOX/FW, watch_* on CMD/BOX,
-  and std_in_file/envvars on FW are lowering errors (control-flow-shaped
-  attrs on the wrong type = estate smell); machine/owner/profile/std_*/
-  envvars on a BOX are inert (boxes do not execute, SEM-10) and go to
-  passthrough verbatim.
-- Duplicate attribute keys within a statement and duplicate job names within
-  a catalog are lowering errors (real autorep output produces neither; last-
-  wins would be silent loss). L014 (linter) additionally covers UC-side name
-  collision rules.
-- Semantic unquoting (statement-syntax rule 7) applies to the TYPED lane only
-  (command/exec strings, box_name, calendars, timezone, global values, machine
-  type, xtype): exactly one wrapping quote pair, no interior quotes. The
-  annotations/passthrough dicts are verbatim lanes per the ss4 sketch, and
-  MachineIR.attrs / ResourceIR.attrs are the documented opaque-v1 stance for
-  resource/placement records (dossier ss5, DL-18) -- the DL-07 firewall
-  guards job semantics, not machine/resource records.
+Rules, each pinned by a test:
+- SEM-30: time attributes with falsy or absent `date_conditions` are dead config. They go to
+  `passthrough` verbatim, not into the schedule, so L005 can see them.
+- SEM-34: the must_*_times count matches start_times, except a single relative offset, which
+  broadcasts to every start time. [?] The dossier says strict count-match, but its doc-derived
+  fixture (sem30_schedule.jil) uses one `+3` against three start_times, TechDocs' own example.
+  Pin the exact rule on a live instance.
+- Subcommands: insert_job, insert_global, insert_machine, insert_xinst, insert_resource
+  (DL-18), and the autocal_asc statements calendar, cycle and extended_calendar, carried
+  opaquely (DL-36). update_, delete_ and override_ forms are lowering errors: merging them is
+  semantics, and guessing it would be silent loss.
+- SEM-24 [A] (DL-18): `status:` on insert_job lowers to Semantics.initial_status, limited to
+  INACTIVE, ON_HOLD, ON_ICE and ON_NOEXEC. Run states would interact with the SEM-01 latch and
+  are refused.
+- DL-21: the `resources:` attribute lowers to typed JobIR.resources (name, QUANTITY, FREE per
+  group, AND separator); malformed groups are errors. QUANTITY is required. An absent FREE
+  stays None, because the engine default is not guessed.
+- job_type is required, with no defaulting to CMD. A missing one in hand-written JIL is more
+  likely an error than a default. [?] Relax if a real-estate fixture needs it (dossier ss5).
+- Type-inapplicable exec attributes are lowering errors: command on BOX or FW, watch_* on CMD or
+  BOX, std_in_file and envvars on FW. Machine, owner, profile, std_* and envvars on a BOX are
+  inert (SEM-10) and go to passthrough verbatim.
+- Duplicate attribute keys in a statement and duplicate job names in a catalog are lowering
+  errors, because last-wins would be silent loss. L014 covers UC-side name collision.
+- Semantic unquoting (statement-syntax rule 7) applies to the typed lane only (command and
+  exec strings, box_name, calendars, timezone, global values, machine type, xtype): exactly one
+  wrapping quote pair, no interior quotes. annotations and passthrough are verbatim lanes (ss4).
+  MachineIR.attrs and ResourceIR.attrs are opaque (dossier ss5, DL-18); the DL-07 firewall
+  guards job semantics, not machine or resource records.
 """
 
 from __future__ import annotations
@@ -86,8 +68,7 @@ ANNOTATION_ATTRS = frozenset(
         "send_notification",
         "notification_msg",
         "notification_emailaddress",
-        # 12.x sweep (DL-32): MISSING_HEARTBEAT alarm + the notification-
-        # services family -- alarms/emails only, no control flow.
+        # DL-32: MISSING_HEARTBEAT alarm and the notification-services family, no control flow
         "heartbeat_interval",
         "notification_alarm_types",
         "notification_template",
@@ -99,11 +80,10 @@ ANNOTATION_ATTRS = frozenset(
 )
 
 #: Known-inert / carried-opaquely-v1 attributes (dossier ss5) -> JobIR.passthrough.
-#: auto_delete: definition lifecycle. job_load/priority/machine_method:
-#: resource/placement (M34). ulimit/elevated/interactive/job_class: OS/agent-
-#: side exec tuning. avg_runtime: statistics seed. chk_files: pre-start
-#: disk-space gate -- teeth, but Resource-Wait class (dossier ss5 row), no
-#: oracle semantics v1. All added by the 12.x doc sweep (DL-32).
+#: auto_delete: definition lifecycle. job_load, priority, machine_method: resource and placement
+#: (M34). ulimit, elevated, interactive, job_class: OS and agent exec tuning. avg_runtime:
+#: statistics seed. chk_files: a pre-start disk-space gate of the Resource-Wait class (dossier
+#: ss5), with no oracle semantics (DL-32).
 PASSTHROUGH_ALLOWED = frozenset(
     {
         "auto_delete",
@@ -157,31 +137,28 @@ _DAY_FULL = {
     "saturday": "sa",
 }
 
-#: SEM-08: `$$NAME` / `$${NAME}` are AutoSys globals; single-`$` is shell and
-#: must stay distinct (never matched here).
+#: SEM-08: `$$NAME` and `$${NAME}` are AutoSys globals; a single `$` is shell and never matches.
 _VAR_RE = re.compile(r"\$\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
 
-#: SEM-34 relative must_*_times token: a plus sign and DECIMAL digits. `\d`
-#: would take non-ASCII digits int() then rejects, so the class is explicit.
+#: SEM-34 relative must_*_times token: a plus sign and decimal digits. `\d` would take non-ASCII
+#: digits, so the class is explicit.
 _REL_OFFSET_RE = re.compile(r"\+[0-9]+")
 
-#: Lexical HH:MM shape, shared by Time.parse and MustTime.parse. Each type's
-#: own Field bound then decides the range (DL-251, DL-253).
+#: Lexical HH:MM shape shared by Time.parse and MustTime.parse; each type's Field bound decides
+#: the range (DL-251, DL-253).
 _HHMM_RE = re.compile(r"(\d{1,2}):(\d{2})")
 
-#: 0.3 since DL-253: SlaSpec.times holds MustTime, whose hour runs to 71.
+#: SlaSpec.times holds MustTime, whose hour runs to 71 (DL-253).
 IR_VERSION: Literal["0.3"] = "0.3"
 
 
 def _parse_hhmm(text: str) -> tuple[int, int]:
-    """Lexical HH:MM. jil-statement-syntax rule 2 (the vendor's JIL syntax
-    rule 6): a colon inside an unquoted value may be escaped (`10\\:00`)
-    instead of quoting the whole value; dsl41 applies that general rule to
-    every `hh:mm` lane (DL-251), so `\\:`
-    unescapes here regardless of lane. Per-token quoting of a single list
-    item (`"10:00", "14:00"`) is not a documented spelling and is not
-    unwrapped -- only a whole-value quote (handled upstream by
-    `unquote_jil_value`/`_split_list` before this is called) is."""
+    """Lexical HH:MM. A colon in an unquoted value may be escaped (`10\\:00`) instead of quoting
+    the value (jil-statement-syntax rule 2); every `hh:mm` lane unescapes it (DL-251).
+
+    Per-token quoting of one list item (`"10:00", "14:00"`) is not documented and is not
+    unwrapped; only a whole-value quote is, upstream, by `unquote_jil_value` and `_split_list`.
+    """
     m = _HHMM_RE.fullmatch(text.strip().replace("\\:", ":"))
     if m is None:
         raise ValueError(f"invalid time {text!r} (expected HH:MM)")
@@ -189,17 +166,14 @@ def _parse_hhmm(text: str) -> tuple[int, int]:
 
 
 def _must_time_order(starts: list[Time], musts: list[MustTime]) -> str | None:
-    """SEM-34 (DL-253): the vendor's two ordering rules for absolute must
-    times, paired with start_times by position, or None when both hold.
+    """SEM-34 (DL-253): the vendor's two ordering rules for absolute must times, paired with
+    start_times by position. Returns the refusal message, or None when both hold.
 
-    A must time below its own start time is refused: "If 10:00 a.m. is
-    specified, the job issues an error message"; the next day's 10:00 is
-    written 34:00. A must time not earlier than the next run's start time
-    is refused: "The must start time for a run must be earlier than the
-    start times for the next run", with 11:10 against an 11:00 run as the
-    invalid example. The next run is the next later start time of the day;
-    the latest start time's next run depends on the calendar, so it is not
-    checked."""
+    A must time below its own start time is refused; the next day's 10:00 is written 34:00. A
+    must time not earlier than the next run's start time is refused (11:10 against an 11:00
+    run). The next run is the next later start time of the day; the latest start time's next run
+    depends on the calendar and is not checked.
+    """
     walls = sorted({start.hour * 60 + start.minute for start in starts})
     for start, must in zip(starts, musts, strict=True):
         wall = start.hour * 60 + start.minute
@@ -337,10 +311,8 @@ class FwSpec(ExecSpecBase):
 ExecUnion = Annotated[ExecSpec | FwSpec, Field(discriminator="kind")]
 
 
-# Q7 RESOLVED (DL-58): KB 408778 documents the full composition -- a present
-# fail_codes is the ONLY verdict source ("Any other exit code ... will be
-# interpreted as a success"), so success_codes and the threshold are ignored
-# alongside it; without fail_codes a present success_codes alone decides.
+# Q7 (DL-58): KB 408778 makes a present fail_codes the only verdict source, so success_codes and
+# the threshold are ignored beside it; without fail_codes a present success_codes alone decides.
 def exit_is_success(
     exit_code: int,
     *,
@@ -348,19 +320,13 @@ def exit_is_success(
     success_codes: Sequence[tuple[int, int]] | None = None,
     fail_codes: Sequence[tuple[int, int]] | None = None,
 ) -> bool:
-    """SEM-09 (amended 2026-07-30, DL-58): the SUCCESS/FAILURE verdict for a
-    completion exit code -- the single source shared by the oracle and the
-    UC twin (M31: same boundary on both sides).
+    """SEM-09 (DL-58): the SUCCESS or FAILURE verdict for a completion exit code.
 
-    Cited precedence (KB 408778, closing Q7): a present fail_codes decides
-    alone -- listed codes are FAILURE, every other code is SUCCESS, and
-    success_codes/max_exit_success are ignored (so a code in both lists is
-    FAILURE, the old fail-wins pin, now for the cited reason). Absent
-    fail_codes, a present success_codes REPLACES the default success rule --
-    unlisted codes (0 included) are FAILURE, the threshold is ignored. With
-    neither list, the max_exit_success threshold decides (original SEM-09).
-    The superseded DL-33 pin routed fail_codes-unmatched codes to the
-    threshold, inventing FAILUREs the vendor records as SUCCESS.
+    Shared by the oracle and the UC twin (M31). A present fail_codes decides alone: listed codes
+    are FAILURE, every other code is SUCCESS, and success_codes and max_exit_success are ignored
+    (KB 408778, Q7). Without fail_codes, a present success_codes replaces the default success
+    rule: unlisted codes, 0 included, are FAILURE. With neither list, the max_exit_success
+    threshold decides.
     """
 
     def _in(ranges: Sequence[tuple[int, int]]) -> bool:
@@ -414,9 +380,7 @@ class Semantics(BaseModel):
 
 
 def _lookup_ci(mapping: dict[str, str], key: str) -> str | None:
-    """Case-insensitive lookup: job passthrough is keyed by the raw attribute
-    case (`attr.key`), so `job_load`/`Job_Load` must both resolve (DL-49's
-    machine lowering settled on lowercased keys; job passthrough did not)."""
+    """Case-insensitive lookup; job passthrough keeps the raw attribute case (`Job_Load`)."""
     if key in mapping:
         return mapping[key]
     lowered = key.lower()
@@ -427,11 +391,11 @@ def _lookup_ci(mapping: dict[str, str], key: str) -> str | None:
 
 
 def _int_attr(mapping: dict[str, str], key: str, *, label: str) -> int | None:
-    """Typed read of an opaque-carry integer attribute (job_load, priority,
-    max_load, amount). None when absent; ValueError (with the offending text)
-    when present-but-not-an-integer. Enforcement of that error is the runner's
-    preflight (DL-50): the oracle models only what parses, and preflight is the
-    execution gate -- a malformed value refuses the run, never runs it wrong."""
+    """Typed read of an opaque-carry integer attribute (job_load, priority, max_load, amount).
+
+    None when absent; ValueError naming the text when present but not an integer. The runner's
+    preflight enforces that error (DL-50): a malformed value refuses the run.
+    """
     raw = _lookup_ci(mapping, key)
     if raw is None:
         return None
@@ -511,10 +475,10 @@ class JobIR(BaseModel):
     ) -> Iterator[
         tuple[Literal["condition", "box_success", "box_failure"], Cond, SourceSpan | None]
     ]:
-        """(attr_name, cond, attr_span) for every condition-bearing attr set on
-        this job (condition/box_success/box_failure). Canonical walker shared
-        by lint's L001-family rules and derive's pass-1 extraction -- both
-        used to carry their own copy of this loop."""
+        """(attr_name, cond, attr_span) for each condition, box_success and box_failure set.
+
+        The walker shared by lint's L001-family rules and derive's pass-1 extraction.
+        """
         if self.sem.condition is not None:
             yield "condition", self.sem.condition.cond, self.sem.condition.span
         if self.sem.box_success is not None:
@@ -523,15 +487,17 @@ class JobIR(BaseModel):
             yield "box_failure", self.sem.box_failure.cond, self.sem.box_failure.span
 
     def job_load_units(self) -> int | None:
-        """DL-50: `job_load` as the machine-load demand this job places on its
-        machine bucket. None = attribute absent (demand 0; # PENDING: Qr4)."""
+        """DL-50: `job_load` as the demand on the machine bucket; None is absent (demand 0;
+        # PENDING: Qr4)."""
         return _int_attr(self.passthrough, "job_load", label="job_load")
 
     def priority_value(self) -> int | None:
-        """DL-50: `priority` for deterministic QUE_WAIT waiter ordering, lower
-        number first; only a positive value makes a start check machine load
-        (DL-247). None = unset (# PENDING: Qr2 -- where an unset priority
-        sorts among resource waiters). Load queueing reads unset as 0."""
+        """DL-50: `priority` for QUE_WAIT waiter ordering, lower number first.
+
+        Only a positive value makes a start check machine load (DL-247). None is unset
+        (# PENDING: Qr2: where an unset priority sorts among resource waiters); load queueing
+        reads unset as 0.
+        """
         return _int_attr(self.passthrough, "priority", label="priority")
 
 
@@ -559,11 +525,12 @@ class MachineIR(BaseModel):
     span: SourceSpan | None = None
 
     def max_load_units(self) -> int | None:
-        """DL-50: machine-level `max_load` = the machine-load bucket capacity.
-        None = unset (no throttle -- unlimited concurrency, AutoSys default) OR
-        a pool (type v / real pool): per-member load placement is unmodelled v1
-        (DL-49), so pools carry NO machine-load throttle (# PENDING: Qr3);
-        resource semaphores still apply to jobs pinned to them."""
+        """DL-50: machine-level `max_load`, the machine-load bucket capacity.
+
+        None is unset (no throttle) or a pool (type v or real pool): per-member load placement is
+        unmodelled (DL-49), so pools carry no machine-load throttle (# PENDING: Qr3). Resource
+        semaphores still apply to jobs pinned to them.
+        """
         if self.members:
             return None
         return _int_attr(self.attrs, "max_load", label="max_load")
@@ -575,22 +542,20 @@ class ResourceIR(BaseModel):
     backend lands, and typing amount/res_type before a consumer exists would
     be speculation."""
 
-    # The docstring above is in the pinned IR-F schema (arch_check.IR_SCHEMA_PIN),
-    # so it keeps its v1 wording. The current reason for the opaque fields:
-    # `res_type` is carried verbatim. The runtime readers (classify, capacity and
-    # preflight) normalise it through `capacity.resource_type`; equiv compares it
-    # as written. A malformed `amount` or an unknown `res_type` is refused
-    # at preflight, not at lowering (DL-50).
+    # The class docstring is in the pinned IR-F schema (arch_check.IR_SCHEMA_PIN) and stays as is.
+    # `res_type` is carried verbatim. classify, capacity and preflight normalise it through
+    # `capacity.resource_type`; equiv compares it as written. A malformed `amount` or an unknown
+    # `res_type` is refused at preflight, not at lowering (DL-50).
     name: str
     res_type: str | None = None  # JIL `res_type:` -- verbatim
     attrs: dict[str, str] = {}
     span: SourceSpan | None = None
 
     def capacity_units(self) -> int | None:
-        """DL-50: `amount` = the resource bucket's total capacity (units a
-        `resources:` requirement draws QUANTITY from). None = no `amount`
-        declared -- preflight refuses a job that requests such a resource (an
-        unsized semaphore cannot be honored; fail-closed, stricter than L016)."""
+        """DL-50: `amount`, the resource bucket's total capacity; None when not declared.
+
+        Preflight refuses a job that requests an unsized resource, which is stricter than L016.
+        """
         return _int_attr(self.attrs, "amount", label="amount")
 
 
@@ -646,11 +611,11 @@ _BOX_DEPTH_SANITY = 64  # ir-design ss4: depth at most 64; SEM-17: nesting is le
 
 
 def _box_tree_problems(jobs: dict[str, JobIR]) -> list[tuple[str, str]]:
-    """(member_name, message) pairs; shared by the CatalogIR validator (ground
-    truth on every construction) and lowering (which adds source spans).
-    Membership problems and cycles are reported together (LoweringError
-    carries every finding); a chase link already reported as missing/non-box
-    is skipped rather than re-reported."""
+    """(member_name, message) pairs for the CatalogIR validator and for lowering, which adds spans.
+
+    Membership problems and cycles are reported together; a link already reported as missing or
+    non-box is not reported again.
+    """
     problems: list[tuple[str, str]] = []
     for name, job in jobs.items():
         target_name = job.box.box_name
@@ -716,8 +681,7 @@ class CatalogIR(BaseModel):
 
 
 def dump_catalog(catalog: CatalogIR) -> str:
-    """Deterministic JSON: sorted keys, stable indent, trailing newline --
-    one catalog = one file, diff-able in git (ir-design ss8)."""
+    """Deterministic JSON: sorted keys, stable indent, trailing newline (ir-design ss8)."""
     return json.dumps(catalog.model_dump(mode="json"), sort_keys=True, indent=2) + "\n"
 
 
@@ -762,9 +726,8 @@ _SUPPORTED_SUBCOMMANDS = {
     "insert_machine",
     "insert_xinst",
     "insert_resource",
-    # DL-36: autocal_asc calendar-export statements; ext_calendar is the
-    # Manage Calendars syntax-block spelling of the same record (SEM-36,
-    # Q9 default: accept both, DL-57)
+    # DL-36: autocal_asc calendar-export statements; ext_calendar is the Manage Calendars
+    # spelling of the same record (SEM-36, Q9 default: accept both, DL-57)
     "calendar",
     "cycle",
     "extended_calendar",
@@ -772,13 +735,11 @@ _SUPPORTED_SUBCOMMANDS = {
 }
 
 #: Exec-cluster attributes valid on both CMD and FW jobs (ExecSpecBase).
-#: Public: dsl.py's decompiler emits this same five-name cluster and
-#: imports it rather than hand-copying (DL-178).
+#: Public: dsl.py's decompiler imports this five-name cluster (DL-178).
 EXEC_BASE_ATTRS = ("machine", "owner", "profile", "std_out_file", "std_err_file")
 
 #: Exec-shaped attributes that are inert on a BOX (boxes do not execute,
-#: SEM-10) and route to passthrough verbatim; the CMD-only pair joins the
-#: base cluster here (DL-32).
+#: SEM-10) and route to passthrough verbatim; the CMD-only pair joins the base cluster (DL-32).
 _BOX_INERT_ATTRS = frozenset(EXEC_BASE_ATTRS) | {"std_in_file", "envvars"}
 
 
@@ -786,46 +747,39 @@ _WRAPPED_QUOTES_RE = re.compile(r'"[^"]*"')
 
 
 def unquote_jil_value(value: str) -> str:
-    """Semantic unquoting (jil-statement-syntax rule 7) for the typed lane:
-    exactly one wrapping quote pair with no interior quotes. Anything else --
-    partial quoting, multiple pairs -- belongs to the value (e.g. shell syntax
-    inside command) and is returned stripped-but-verbatim.
+    """Semantic unquoting for the typed lane (jil-statement-syntax rule 7).
 
-    The one public owner of the rule (DL-178q): this function produces the
-    calendar catalog key (`_lower_calendar`/`_lower_cycle` below), and every
-    site that later looks a name up against that key -- autocal's holcal/
-    cyccal resolution, classify's `_named_ref`, lint's L018 -- imports and
-    calls this, so the lookup uses the same predicate as the production."""
+    Exactly one wrapping quote pair with no interior quotes comes off. Anything else, such as
+    partial quoting or shell syntax inside a command, is returned stripped but verbatim.
+
+    The one public owner of the rule (DL-178q). It produces the calendar catalog key
+    (`_lower_calendar`, `_lower_cycle`), and autocal's holcal/cyccal resolution, classify's
+    `_named_ref` and L018 call it, so lookup and production use one predicate.
+    """
     v = value.strip()
     if _WRAPPED_QUOTES_RE.fullmatch(v):
         return v[1:-1]
     return v
 
 
-#: An exit code or lo-hi range with a negative end: `-1`, `-5-3`, `-5--1`,
-#: `1--3`. A bare `-` and other malformed tokens do not match and get the
-#: ordinary malformed-token message.
+#: An exit code or lo-hi range with a negative end: `-1`, `-5-3`, `-5--1`, `1--3`. Other
+#: malformed tokens do not match and get the ordinary malformed-token message.
 _NEGATIVE_CODE_RE = re.compile(r"-\d+(?:--?\d+)?|\d+--\d+")
 
 
 def _split_list(value: str) -> list[str]:
-    """Comma-separated JIL list; tolerates newlines (rule-6 continuations) and
-    empty segments (trailing commas) -- lexical normalization only."""
+    """Comma-separated JIL list; tolerates rule-6 newlines and empty segments."""
     return [t for t in (part.strip() for part in unquote_jil_value(value).split(",")) if t]
 
 
-#: Attribute names whose values lowering funnels through `unquote_jil_value` (directly,
-#: or via `_split_list`), across every statement kind that has such a lane --
-#: insert_job, and insert_machine/insert_resource/insert_xinst's own `type`/
-#: `res_type`/`xtype`. The DSL builder auto-quotes ONLY these lanes
-#: when a value's bare spelling would open a rule-5 block comment (DL-161):
-#: the quote is stripped right back here, so the round trip is exact. Every
-#: other lane stores bytes verbatim and refuses instead -- quoting there
-#: would silently change the stored value. Named for the mechanism (what
-#: lowering unquotes), not for statement kind: `_BOX_INERT_ATTRS` and
-#: `TIME_CLUSTER` are exec-cluster and SEM-30 job attrs that happen to route
-#: through `unquote_jil_value` too, plus nine names that route through no other named
-#: cluster, three of them not job attrs at all.
+#: Attribute names whose values lowering funnels through `unquote_jil_value` (directly or via
+#: `_split_list`), across every statement kind: insert_job, and the `type`, `res_type` and `xtype`
+#: of insert_machine, insert_resource and insert_xinst. The DSL builder auto-quotes only these
+#: lanes when a bare value would open a rule-5 block comment (DL-161), and lowering strips the
+#: quote, so the round trip is exact. Every other lane stores bytes verbatim and refuses instead.
+#: The name follows the mechanism, not the statement kind: `_BOX_INERT_ATTRS` and `TIME_CLUSTER`
+#: also route through `unquote_jil_value`, plus nine names in no other named cluster, three of
+#: them not job attrs.
 UNQUOTED_AT_LOWERING = (
     _BOX_INERT_ATTRS
     | TIME_CLUSTER
@@ -846,9 +800,8 @@ UNQUOTED_AT_LOWERING = (
 
 
 def render_code_ranges(ranges: list[tuple[int, int]], *, sep: str = ", ") -> str:
-    """SEM-09/DL-33 exit-code sets back to their surface form, beside their
-    parser (_code_set_attr below): lowering keeps the author's partition
-    sorted-not-merged, so render(parse(x)) is stable."""
+    """SEM-09/DL-33 exit-code sets in surface form; lowering keeps the author's partition sorted
+    and unmerged, so render(parse(x)) is stable."""
     return sep.join(str(lo) if lo == hi else f"{lo}-{hi}" for lo, hi in ranges)
 
 
@@ -886,13 +839,12 @@ class _Lowerer:
         self.findings.append(LoweringFinding(message=message, span=span))
 
     def _check_scalar_strings(self, stmt: JilStatement) -> None:
-        """PR-10a: a JIL statement carrying an unpaired surrogate anywhere
-        cannot be canonicalized, so an estate holding one could never be
-        sealed (period-model ss3.2). Refused where it enters, not where it
-        breaks -- and checked over the statement's WHOLE dump rather than an
-        enumerated field list, so a field added to the AST later is covered by
-        default (DL-83): subject, subcommand, attrs, date lines, comments, every
-        span's file, the layout trivia."""
+        """PR-10a: refuse a statement that carries an unpaired surrogate anywhere.
+
+        Such a statement cannot be canonicalized, so the estate could never be sealed
+        (period-model ss3.2). The check covers the statement's whole dump, so a new AST field is
+        covered by default (DL-83).
+        """
         if not is_scalar_json(stmt.model_dump(mode="json")):
             self.err(
                 f"statement {stmt.subject!r} carries an unpaired surrogate;"
@@ -905,8 +857,7 @@ class _Lowerer:
     def run(self, files: Iterable[JilFile]) -> CatalogIR:
         for jf in files:
             if not is_scalar_string(jf.file):
-                # PR-10a: the path rides in SourceSpan.file and so in the
-                # catalog hash; a surrogate-escaped path is not canonicalizable
+                # PR-10a: the path rides in SourceSpan.file, so in the catalog hash
                 self.err(f"source path {jf.file!r} carries an unpaired surrogate (PR-10a)", None)
             self.source_files.append(jf.file)
             for stmt in jf.statements:
@@ -955,18 +906,17 @@ class _Lowerer:
     # ------------------------------------------------------------- shared helpers
 
     def _fresh_attr(self, seen: Container[str], attr: RawAttr) -> bool:
-        """Fresh key: True. Repeat: emits the duplicate-attribute lowering
-        error and returns False (module docstring: last-wins would be
-        silent loss). One owner for the four source-order lowerers that
-        each re-walk `stmt.attrs` by hand (DL-178)."""
+        """True for a fresh key. A repeat emits the duplicate-attribute error and returns False.
+
+        One owner for the four source-order lowerers that walk `stmt.attrs` (DL-178).
+        """
         if attr.key.lower() in seen:
             self.err(f"duplicate attribute {attr.key!r} in one statement", attr.span)
             return False
         return True
 
     def _collect_attrs(self, stmt: JilStatement) -> dict[str, RawAttr] | None:
-        """Key-lowered attr map; duplicate keys are lowering errors (module
-        docstring: last-wins would be silent loss)."""
+        """Key-lowered attr map; a duplicate key is a lowering error."""
         attrs: dict[str, RawAttr] = {}
         ok = True
         for attr in stmt.attrs:
@@ -1002,16 +952,14 @@ class _Lowerer:
         return None
 
     def _code_set_attr(self, attr: RawAttr) -> list[tuple[int, int]] | None:
-        """SEM-09/DL-33 exit-code sets: a comma list of single codes and
-        lo-hi ranges (TechDocs: '4', '0-9999', '1,3,20-30'). Sorted, never
-        merged -- the surface partition is the author's, only membership
-        is semantics."""
+        """SEM-09/DL-33 exit-code sets: a comma list of codes and lo-hi ranges ('1,3,20-30').
+
+        Sorted, never merged: the partition is the author's, and only membership is semantics.
+        """
         ranges: list[tuple[int, int]] = []
         for token in _split_list(attr.raw_value):
             if _NEGATIVE_CODE_RE.fullmatch(token):
-                # a well-formed code or range with a negative end is not a
-                # malformed range: say why it is refused instead of
-                # "expected lo-hi"
+                # a well-formed code or range with a negative end gets its own message
                 self.err(
                     f"{attr.key}: negative exit code in {token!r} is not supported: on"
                     " POSIX an exit status is 0-255, and a job killed by a signal is"
@@ -1052,10 +1000,10 @@ class _Lowerer:
     _RESOURCE_GROUP_RE = re.compile(r"\(([^()]*)\)")
 
     def _parse_resources(self, attr: RawAttr) -> list[ResourceRef]:
-        """`(name, QUANTITY=n[, FREE=Y|N|A]) AND (...)` (DL-21; TechDocs 12.x
-        keywords, case-insensitive; estates also write lowercase `and`).
-        Anything else is a loud lowering error -- guessing a resource gate
-        would be silent loss."""
+        """`(name, QUANTITY=n[, FREE=Y|N|A]) AND (...)` (DL-21); keywords are case-insensitive.
+
+        Anything else is a lowering error, because guessing a resource gate would be silent loss.
+        """
 
         def bad(why: str) -> None:
             self.err(
@@ -1104,9 +1052,7 @@ class _Lowerer:
                     bad(f"unknown keyword {key!r} in group {group!r}")
                     ok = False
             if quantity is None:
-                # Broadcom's and the estate's examples always carry QUANTITY;
-                # defaulting would be a guess -- extend deliberately if a bare
-                # group ever shows up in a real export.
+                # every example carries QUANTITY; defaulting would be a guess
                 bad(f"group {group!r} is missing QUANTITY")
                 ok = False
             elif quantity < 1:
@@ -1120,8 +1066,7 @@ class _Lowerer:
     def _lower_job(self, stmt: JilStatement) -> None:
         name = self._subject(stmt, "job")
         if name is not None:
-            # DL-39: the catalog key is the SEMANTIC name -- `\:` unescaped,
-            # same function the condition transformer applies to references.
+            # DL-39: the catalog key is the semantic name, `\:` unescaped as in condition refs
             name = unescape_job_name(name)
         if name is not None and name in self.jobs:
             self.err(f"duplicate job name {name!r} in compilation set", stmt.span)
@@ -1142,9 +1087,8 @@ class _Lowerer:
         annotations: dict[str, str] = {}
         passthrough: dict[str, str] = {}
         if schedule is None:
-            # SEM-30: time attrs without truthy date_conditions are dead config;
-            # carried verbatim (incl. the falsy switch itself) for L005
-            # visibility, no schedule semantics.
+            # SEM-30: time attrs without truthy date_conditions are dead config, carried verbatim
+            # (the falsy switch included) for L005
             for key in sorted((TIME_CLUSTER | {"date_conditions"}) & attrs.keys()):
                 attr = attrs.pop(key)
                 passthrough[attr.key] = attr.raw_value.strip()
@@ -1218,8 +1162,7 @@ class _Lowerer:
     def _box_linkage(self, attrs: dict[str, RawAttr]) -> BoxLinkage:
         box_name = None
         if (attr := attrs.pop("box_name", None)) is not None:
-            # DL-39: same semantic-name funnel as the job subject and the
-            # condition transformer, so the linkage joins the catalog key.
+            # DL-39: the same semantic-name funnel as the job subject, so the linkage joins the key
             box_name = unescape_job_name(unquote_jil_value(attr.raw_value))
             if not box_name:
                 self.err("box_name: empty value", attr.span)
@@ -1274,10 +1217,10 @@ class _Lowerer:
             return None
         truthy = self._bool_attr(dc)
         if truthy is None:
-            attrs.pop("date_conditions")  # finding recorded; keep it out of passthrough
+            attrs.pop("date_conditions")  # finding recorded; not passthrough
             return None
         if not truthy:
-            return None  # falsy stays in attrs -> passthrough (SEM-30 dead config)
+            return None  # falsy stays in attrs, then passthrough (SEM-30)
         attrs.pop("date_conditions")
         fields: dict[str, object] = {}
         spans: dict[str, SourceSpan] = {}
@@ -1309,8 +1252,8 @@ class _Lowerer:
             fields["must_start"] = self._sla_attr(attr, starts, by_mins=by_mins)
         if (attr := take("must_complete_times")) is not None:
             fields["must_complete"] = self._sla_attr(attr, starts, by_mins=by_mins)
-        # SEM-31 pre-check so findings point at the conflicting attribute line
-        # (presence-based; the model validator below stays the ground truth).
+        # SEM-31 pre-check, by presence, so findings point at the attribute line; the model
+        # validator stays the ground truth
         ok = True
         if "start_times" in fields and "start_mins" in fields:
             self.err(
@@ -1388,16 +1331,13 @@ class _Lowerer:
     def _sla_attr(
         self, attr: RawAttr, starts: list[Time] | None, *, by_mins: bool = False
     ) -> SlaSpec | None:
-        """SEM-34 must_*_times: absolute or relative, never mixed; count must
-        match start_times, except a single relative offset broadcasts (the
-        vendor's relative syntax, DL-248). Against start_mins only the
-        documented form lowers: one relative offset, broadcast to every
-        start_mins tick ("The must complete times are calculated relative to
-        the start_mins or start_times attributes", DL-248). The vendor
-        refuses an absolute form there ("You will get an error if you define
-        absolute times with start_mins", DL-253). A list of relative offsets
-        there is not specified by the vendor pages and stays open, so it is
-        refused too."""
+        """SEM-34 must_*_times: absolute or relative, never mixed.
+
+        The count matches start_times, except a single relative offset broadcasts (DL-248).
+        Against start_mins only one relative offset lowers, broadcast to every tick (DL-248). The
+        vendor refuses an absolute form there (DL-253). A list of relative offsets there is
+        unspecified and refused too.
+        """
         n_start_times = None if starts is None else len(starts)
         tokens = _split_list(attr.raw_value)
         if not tokens:
@@ -1430,11 +1370,8 @@ class _Lowerer:
         if all(relative):
             offsets: list[int] = []
             for t in tokens:
-                # int() alone accepted "+-1" as -1 and "+1_0" as 10: a sign,
-                # underscores and non-ASCII digits all pass it. SEM-34's
-                # relative form is a plus and decimal digits, nothing else
-                # (DL-151). Vendor RANGE limits are deliberately not checked
-                # here -- the doc records them as vendor constraints.
+                # SEM-34's relative form is a plus and decimal digits; int() alone also takes signs,
+                # underscores and non-ASCII digits (DL-151). Vendor range limits are not checked
                 if _REL_OFFSET_RE.fullmatch(t) is None:
                     self.err(
                         f"{attr.key}: invalid relative offset {t!r}"
@@ -1453,10 +1390,8 @@ class _Lowerer:
             return SlaSpec(kind="relative", offsets_min=offsets)
         times: list[MustTime] = []
         for t in tokens:
-            # SEM-34: the vendor's Limits are 00:00-71:59, "2 calendar days
-            # ahead of the current calendar day" (DL-253). The hour is
-            # checked here, before MustTime's own bound, so the message
-            # names the limit rather than a pydantic constraint.
+            # SEM-34: the vendor's limits are 00:00-71:59 (DL-253). The hour is checked before
+            # MustTime's own bound, so the message names the limit
             try:
                 hour, minute = _parse_hhmm(t)
                 if hour > 71:
@@ -1492,10 +1427,9 @@ class _Lowerer:
         watch_interval = attrs.pop("watch_interval", None)
         watch_min_size = attrs.pop("watch_file_min_size", None)
         if job_type == "BOX":
-            # Boxes do not execute (SEM-10): command/watch_* are control-flow-
-            # shaped on the wrong type -> error. The base cluster (machine,
-            # owner, ...) is inert on a box: it stays in `attrs` and the
-            # classifier routes it to passthrough with its real spans.
+            # Boxes do not execute (SEM-10): command and watch_* on a box are errors. The base
+            # cluster (machine, owner, ...) is inert on a box: it stays in `attrs` and the
+            # classifier routes it to passthrough with its spans
             for wrong in (command, watch_file, watch_interval, watch_min_size):
                 if wrong is not None:
                     self.err(f"{wrong.key}: not valid on a BOX job", wrong.span)
@@ -1563,9 +1497,8 @@ class _Lowerer:
         # unquoted so it compares equal to unquoted value() condition comparands
         self.globals_declared[name] = unquote_jil_value(value.raw_value)
 
-    #: Per-member pool attributes that legitimately repeat inside one
-    #: insert_machine (once per component machine, DL-49). Every other
-    #: attribute key stays single -- a duplicate is a lowering error.
+    #: Per-member pool attributes that repeat inside one insert_machine, once per component
+    #: machine (DL-49). Any other duplicate key is a lowering error.
     _MACHINE_MEMBER_ATTRS = frozenset({"factor", "max_load"})
 
     def _lower_machine(self, stmt: JilStatement) -> None:
@@ -1575,12 +1508,10 @@ class _Lowerer:
         if name in self.machines:
             self.err(f"duplicate insert_machine {name!r}", stmt.span)
             return
-        # Walk attributes in source order (NOT _collect_attrs -- a virtual
-        # machine / real pool repeats `machine:` and its per-member
-        # factor/max_load, DL-49). `type` is singular; each `machine:` line
-        # opens a component; factor/max_load bind to the most recent
-        # component, or are machine-level when no component has opened yet
-        # (a single agent's own factor/max_load).
+        # Walk attributes in source order, not _collect_attrs: a virtual machine or real pool
+        # repeats `machine:` and its per-member factor and max_load (DL-49). Each `machine:`
+        # line opens a component; factor and max_load bind to the latest component, or are
+        # machine-level before any opens
         machine_type: str | None = None
         members: list[MachineMember] = []
         level_attrs: dict[str, str] = {}
@@ -1600,7 +1531,7 @@ class _Lowerer:
                 for member in (m.strip() for m in value.split(",")):
                     if member:
                         members.append(MachineMember(name=member))
-                if len(members) == opened:  # empty `machine:` line -- no member, no silent loss
+                if len(members) == opened:  # empty `machine:` line: no member, no silent loss
                     self.err("empty 'machine:' pool-member line", attr.span)
                     ok = False
                     continue
@@ -1612,10 +1543,8 @@ class _Lowerer:
                     continue
                 current.attrs[key] = value
             else:
-                # Key stored lowercased (like _collect_attrs) so the duplicate
-                # guard is case-insensitive and the resolver's node_name lookup
-                # cannot miss an upper/mixed-case spelling (review: no silent
-                # dup, no false accept).
+                # key stored lowercased, as in _collect_attrs, so the duplicate guard is
+                # case-insensitive and the resolver's node_name lookup finds any spelling
                 if not self._fresh_attr(level_attrs, attr):
                     ok = False
                     continue
@@ -1660,10 +1589,8 @@ class _Lowerer:
         if xtype is None:
             self.err(f"insert_xinst {name!r}: missing xtype attribute (SEM-07)", stmt.span)
             return
-        # TechDocs 12.x also documents xmachine (required), xport, xmanager,
-        # xcrypt_type, xkey_to_manager -- connection plumbing, carried
-        # verbatim (DL-28); required-ness is the engine's to enforce, not
-        # this per-file-tolerant lowering's.
+        # xmachine (required), xport, xmanager, xcrypt_type and xkey_to_manager are connection
+        # plumbing, carried verbatim (DL-28); the engine enforces required-ness
         self.external_instances[name] = XinstIR(
             name=name,
             xtype=unquote_jil_value(xtype.raw_value),
@@ -1675,10 +1602,8 @@ class _Lowerer:
         name = self._subject(stmt, "calendar")
         if name is None:
             return
-        # `condition:` is the one legally repeatable calendar key, and only
-        # extended calendars have it (SEM-36) -- on a standard calendar it
-        # stays an opaque attr like any other; everything else keeps the
-        # duplicate-is-error rule (_collect_attrs)
+        # `condition:` is the one repeatable calendar key, on extended calendars only (SEM-36);
+        # every other key keeps the duplicate-is-error rule (_collect_attrs)
         attrs: dict[str, str] = {}
         conditions: list[str] = []
         ok = True
@@ -1714,8 +1639,7 @@ class _Lowerer:
         name = self._subject(stmt, "cycle")
         if name is None:
             return
-        # start_date/end_date alternate to form periods (SEM-39); pairing is
-        # positional, so collect them by walking the statement in order
+        # start_date and end_date alternate into periods (SEM-39), paired by position
         attrs: dict[str, str] = {}
         periods: list[tuple[str, str]] = []
         open_start: str | None = None
@@ -1751,8 +1675,10 @@ class _Lowerer:
 
 
 def lower_catalog(files: Iterable[JilFile], *, permit_unknown: bool = False) -> CatalogIR:
-    """Lower parsed JIL files into one CatalogIR; raises LoweringError with
-    every finding (never a partial catalog -- no silent loss, DL-04)."""
+    """Lower parsed JIL files into one CatalogIR, or raise LoweringError with every finding.
+
+    No partial catalog is returned (DL-04).
+    """
     return _Lowerer(permit_unknown).run(files)
 
 
