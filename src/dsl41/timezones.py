@@ -1,31 +1,19 @@
 """SEM-35 name resolution and the naive-UTC <-> local conversion, once.
 
-A phase-free module: it imports nothing from `dsl41` and nothing imports it
-for anything but zones, so every layer that reads a `timezone:` reaches the
-SAME ladder without reaching THROUGH another layer to get it. That was the
-DL-152 finding -- the oracle (phase 7) resolved names through a deferred
-import of `runner_scheduler` (phase 11c), which hid the dependency rather
-than removing it, and re-stated the two conversions beside it (DL-163).
+The module imports nothing from `dsl41`, so every layer that reads a `timezone:` reaches the
+same ladder (DL-152) and the same two conversions (DL-163).
 
-SEM-35 name resolution (TechDocs 12.1, `timezone` attribute + the
-autotimezone command): a JIL `timezone:` value is matched against the OS
-zone database FIRST; only if that misses is the instance's ujo_timezones
-table read -- a vendor-shipped, admin-editable map whose City/Alias entries
-chain ("up to five times") down to a Zone the OS recognizes. Values are not
-case-sensitive. dsl41's port: zoneinfo is the OS database; `--timezone-map`
-(the `autotimezone -l` listing, or bare `name zone` pairs) is the table.
-Without a map, a city name resolves through a documented deterministic
-default (DL-62): the UNIQUE zoneinfo zone whose final path component matches
-(Zurich -> Europe/Zurich), surfaced as a preflight WARN -- a supplied listing
-is complete estate truth, so the default is off when a map is given. A POSIX
-fixed-offset form (`GMT+5`, `IST-5:30`) resolves per the POSIX sign
-convention (positive = WEST of GMT); POSIX strings WITH dst rules stay
-unresolvable -- modelling vendor DST rules approximately would silently
-shift ticks.
+SEM-35 ladder: a JIL `timezone:` value is matched against the OS zone database first, then
+against the ujo_timezones table, whose City/Alias entries chain up to five hops to a Zone the OS
+recognizes. Names are case-insensitive. zoneinfo is the OS database; `--timezone-map` (the
+`autotimezone -l` listing, or bare `name zone` pairs) is the table. With no map, a city name
+resolves to the unique zoneinfo zone whose final path component matches (DL-62), surfaced as a
+preflight WARN; a supplied map is complete estate truth, so the default is off. A POSIX
+fixed-offset form (`GMT+5`, `IST-5:30`) follows the POSIX sign (positive = west of GMT). POSIX
+strings with DST rules are unresolvable, because approximating vendor DST rules would shift ticks.
 
-Refusals belong to the CALLER, not here: `resolve_timezone` answers None and
-each layer says what an unresolvable name means in its own words (the
-scheduler an EngineError, the oracle an OracleError, preflight a finding).
+Refusals belong to the caller: `resolve_timezone` answers None and each layer states what an
+unresolvable name means (scheduler EngineError, oracle OracleError, preflight finding).
 """
 
 from __future__ import annotations
@@ -50,15 +38,13 @@ class ResolvedTz(NamedTuple):
 
 
 def _tz_fold(name: str) -> str:
-    """Vendor names are case-insensitive; fold -/_ too (both are valid JIL
-    characters, zoneinfo uses each: Port-au-Prince vs New_York)."""
+    """Case-fold and map `-` to `_`; zoneinfo uses both (Port-au-Prince, New_York)."""
     return name.casefold().replace("-", "_")
 
 
 @functools.lru_cache(maxsize=1)
 def _zone_tables() -> tuple[dict[str, str], dict[str, tuple[str, ...]]]:
-    """(folded full name -> canonical key, folded final path component ->
-    candidate keys) over the zoneinfo database, built once."""
+    """Folded full name -> canonical key, and folded final component -> candidate keys."""
     full: dict[str, str] = {}
     leaf: dict[str, list[str]] = {}
     for zone in sorted(available_timezones()):
@@ -70,15 +56,12 @@ def _zone_tables() -> tuple[dict[str, str], dict[str, tuple[str, ...]]]:
 def city_candidates(name: str) -> tuple[str, ...]:
     """Zoneinfo keys whose final path component is `name` (folded).
 
-    Public because preflight reads it to tell an AMBIGUOUS city apart from
-    an unknown name -- it used to reach for the private spelling across the
-    module line, which `arch_baseline.json` carried as a finding (DL-163)."""
+    Preflight reads it to tell an ambiguous city from an unknown name (DL-163)."""
     return _zone_tables()[1].get(_tz_fold(name), ())
 
 
 def _os_zone(token: str) -> ResolvedTz | None:
-    """One vendor "recognized by the operating system" lookup: zoneinfo
-    exact, zoneinfo case/-/_-insensitive, then a POSIX fixed offset."""
+    """The OS lookup: zoneinfo exact, zoneinfo folded, then a POSIX fixed offset."""
     with contextlib.suppress(KeyError, ValueError, OSError):
         return ResolvedTz(ZoneInfo(token), token, "os")
     canonical = _zone_tables()[0].get(_tz_fold(token))
@@ -96,9 +79,9 @@ def _os_zone(token: str) -> ResolvedTz | None:
 
 
 def parse_timezone_map(text: str) -> dict[str, str]:
-    """An `autotimezone -l`/-q listing (`Entry Type Zone` rows) or bare
-    `name zone` pairs -> folded alias map. Header, ruler, and blank lines
-    skip; any other unparseable line raises ValueError (no silent loss)."""
+    """An `autotimezone -l`/-q listing or bare `name zone` pairs as a folded alias map.
+
+    Header, ruler and blank lines skip; any other line raises ValueError."""
     aliases: dict[str, str] = {}
     for lineno, raw in enumerate(text.splitlines(), start=1):
         line = raw.strip()
@@ -121,13 +104,10 @@ def parse_timezone_map(text: str) -> dict[str, str]:
 
 
 def resolve_timezone(name: str, aliases: Mapping[str, str] | None = None) -> ResolvedTz | None:
-    """The SEM-35 ladder (module docstring): OS lookup, then the alias map
-    chained <=5 hops with an OS lookup per hop, then -- only with NO map --
-    the unique-city default. None = genuinely unresolvable.
+    """The SEM-35 ladder: OS lookup, the alias map chained at most five hops, then the
+    unique-city default only when `aliases` is None. None means unresolvable.
 
-    `aliases` None and `aliases` empty are DIFFERENT resolutions: the
-    city default applies only when the estate supplied no table at all, so
-    a run WITH a map gets the map's answer and nothing else."""
+    An empty `aliases` is not None: a run with a map gets the map's answer and nothing else."""
     current = name
     seen: set[str] = set()
     for hop in range(_TZ_CHAIN_LIMIT + 1):
@@ -147,49 +127,39 @@ def resolve_timezone(name: str, aliases: Mapping[str, str] | None = None) -> Res
 
 # ------------------------------------------------------------- the conversion
 #
-# Instants inside the engine and the oracle are NAIVE UTC (runner-design
-# ss5). A time attribute is read in the job's own zone (SEM-35 re-bases every
-# one of them), so every comparison crosses this line exactly twice: in to
-# compare, out to schedule. The conversion honours the caller's PEP 495
-# fold and defaults to fold=0 -- a fall-back ambiguous local time is its
-# FIRST occurrence and a spring-forward nonexistent one maps past the gap.
-# Callers that follow the vendor's DST rules pass fold=1 or move the time
-# themselves: run_window (DL-249), absolute must times (DL-253) and start
-# times (`start_time_instants`, DL-260). One definition of each direction,
-# because the scheduler and the oracle both cross it and a second spelling
-# is a second DST pin (DL-163).
+# Engine and oracle instants are naive UTC (runner-design ss5). A time attribute is read in the
+# job's own zone (SEM-35). The conversion honours the caller's PEP 495 fold and defaults to
+# fold=0: an ambiguous fall-back time is its first occurrence and a nonexistent spring-forward
+# time maps past the gap. Callers that follow the vendor's DST rules pass fold=1 or move the
+# time themselves: run_window (DL-249), absolute must times (DL-253), start times (DL-260).
+# Each direction has one definition because a second spelling is a second DST pin (DL-163).
 
 
 def to_local(when: datetime, tz: tzinfo | None) -> datetime:
-    """A naive-UTC instant as naive wall time in `tz`. `tz` None: unchanged,
-    which is the "engine clock IS the comparison basis" case."""
+    """A naive-UTC instant as naive wall time in `tz`; `tz` None leaves it unchanged."""
     if tz is None:
         return when
     return when.replace(tzinfo=UTC).astimezone(tz).replace(tzinfo=None)
 
 
 def to_utc(local: datetime, tz: tzinfo | None) -> datetime:
-    """The inverse of `to_local`: naive wall time in `tz` as a naive-UTC
-    instant."""
+    """The inverse of `to_local`."""
     if tz is None:
         return local
     return local.replace(tzinfo=tz).astimezone(UTC).replace(tzinfo=None)
 
 
-#: The two wall hours a documented DST change touches (DL-249): spring
-#: forward skips 02:00-02:59, fall back repeats 01:00-01:59. Both changes
-#: happen at 02:00 local, as in America/New_York.
+#: The wall hours a documented DST change touches (DL-249): spring forward skips 02:00-02:59,
+#: fall back repeats 01:00-01:59.
 MISSING_HOUR = 2
 REPEATED_HOUR = 1
 
-#: The `dst-start-times` switch's values (DL-260). Defined here, where the
-#: value is read, so this module still imports nothing from `dsl41`;
-#: `semantics` registers the switch from this alias.
+#: The `dst-start-times` switch's values (DL-260); `semantics` registers the switch from this.
 DstStartTimes = Literal["vendor", "fold0"]
 
 
 def _offsets(local: datetime, tz: tzinfo) -> tuple[timedelta | None, timedelta | None]:
-    """The UTC offset of wall time `local` at fold=0 and at fold=1 (PEP 495)."""
+    """The UTC offset of `local` at fold=0 and fold=1 (PEP 495)."""
     return (
         local.replace(tzinfo=tz, fold=0).utcoffset(),
         local.replace(tzinfo=tz, fold=1).utcoffset(),
@@ -199,9 +169,8 @@ def _offsets(local: datetime, tz: tzinfo) -> tuple[timedelta | None, timedelta |
 def dst_change(day: date, tz: tzinfo | None) -> Literal["spring", "fall"] | None:
     """The documented one-hour DST change on local `day`, or None (DL-249).
 
-    "spring": wall 02:00-02:59 does not exist. "fall": wall 01:00-01:59
-    happens twice. Any other shape answers None: a half-hour change, a
-    change at another hour, a zone without DST, a fixed offset."""
+    "spring": wall 02:00-02:59 does not exist. "fall": wall 01:00-01:59 happens twice.
+    Any other shape answers None."""
     if tz is None:
         return None
     hour = timedelta(hours=1)
@@ -226,9 +195,9 @@ def dst_change(day: date, tz: tzinfo | None) -> Literal["spring", "fall"] | None
 
 
 def dst_change_near(day: date, tz: tzinfo | None, days: int = 2) -> bool:
-    """Whether a documented DST change (`dst_change`) falls on a local date
-    within `days` of `day` (DL-249). No zone is never near one, and a date
-    outside the calendar's range counts as no change."""
+    """Whether a documented DST change falls within `days` of local `day` (DL-249).
+
+    No zone is never near one; a date outside the calendar's range counts as no change."""
     if tz is None:
         return False
     for k in range(-days, days + 1):
@@ -242,10 +211,8 @@ def dst_change_near(day: date, tz: tzinfo | None, days: int = 2) -> bool:
 
 
 def vendor_gap_instant(day: date, hour: int, minute: int, tz: tzinfo | None) -> datetime:
-    """A wall time in a spring change's missing hour, as the vendor moves
-    it: into the first minute of the next hour, its minute read as seconds.
-    "Daylight Time Changes": "a job that is scheduled to run on Sundays at
-    2:05 runs at 3:00:05"."""
+    """A missing-hour wall time as the vendor moves it: the next hour's first minute, its
+    minute read as seconds (2:05 runs at 3:00:05, "Daylight Time Changes")."""
     first = to_utc(datetime.combine(day, time(hour + 1, 0)), tz)
     return first + timedelta(seconds=minute)
 
@@ -253,24 +220,15 @@ def vendor_gap_instant(day: date, hour: int, minute: int, tz: tzinfo | None) -> 
 def start_time_instants(
     day: date, times: Sequence[tuple[int, int]], tz: tzinfo | None, *, dst: DstStartTimes
 ) -> list[tuple[int, datetime]]:
-    """The start_times entries `times`, as (hour, minute), on local `day` as
-    engine instants, each paired with its index in `times` and listed in
-    wall-time order. An entry that does not fire that day is left out.
+    """The start_times entries `times` on local `day` as (index in `times`, engine instant),
+    in wall-time order. An entry that does not fire that day is left out.
 
-    `dst` "fold0" is the fold=0 conversion of every entry (the
-    `dst-start-times` switch): a repeated wall time is its first
-    occurrence, and a missing one maps past the gap. `dst` "vendor" applies
-    the documented rules on a change of the shape `dst_change` names
-    (DL-260). TechDocs 12.1 and 24.2, "Standard Time Changes": jobs whose
-    start_time is "between 1:00 and 1:59" run "during the second (standard
-    time) hour". "Daylight Time Changes": a missing-hour start runs "during
-    the first minute of the next hour" (2:05 runs at 3:00:05), and "If you
-    schedule a job to run more than once during the missing hour (for
-    example, at 2:05 and 2:25), only the first scheduled job run occurs."
-    Other shapes keep the fold=0 conversion.
-
-    Under fold=0 a missing wall time can land on a later entry's instant;
-    the earlier wall time is listed first."""
+    `dst` "fold0" is the fold=0 conversion of every entry (the `dst-start-times` switch).
+    `dst` "vendor" applies the documented rules on a change of the shape `dst_change` names
+    (DL-260; TechDocs 12.1 and 24.2): a start in the repeated hour runs in the second
+    (standard-time) hour; a start in the missing hour runs in the next hour's first minute, and
+    only the first such entry runs. Other shapes keep the fold=0 conversion, where a missing
+    wall time can land on a later entry's instant."""
     change = dst_change(day, tz) if dst == "vendor" else None
     instants: list[tuple[int, datetime]] = []
     gap_taken = False
@@ -290,16 +248,11 @@ def start_time_instants(
 def start_mins_instants(
     day: date, ticks: Sequence[tuple[int, int]], tz: tzinfo | None, *, dst: DstStartTimes
 ) -> list[datetime]:
-    """start_mins ticks, as (hour, minute), on local `day` as engine
-    instants, in wall-time order.
+    """The start_mins ticks on local `day` as engine instants, in wall-time order.
 
-    `dst` "fold0" is the fold=0 conversion, as in `start_time_instants`.
-    `dst` "vendor" applies the documented rules on a change of the shape
-    `dst_change` names (DL-260). "Standard Time Changes": "Jobs for which
-    the start_mins attribute is set run in both hours." "Daylight Time
-    Changes": "Jobs with relative time dependencies run as expected", so a
-    tick in the missing hour does not exist: 0, 20 and 40 run at "1:00 ST,
-    1:20 ST, 1:40 ST, 3:00 DT, 3:20 DT, and 3:40 DT"."""
+    `dst` "fold0" is the fold=0 conversion. `dst` "vendor" applies the documented rules
+    (DL-260): a tick in the repeated hour runs in both hours, and a tick in the missing hour
+    does not exist (0, 20 and 40 run at 1:00 ST, 1:20 ST, 1:40 ST, 3:00 DT, 3:20 DT, 3:40 DT)."""
     change = dst_change(day, tz) if dst == "vendor" else None
     instants: list[datetime] = []
     for hour, minute in ticks:
@@ -315,28 +268,18 @@ def start_mins_instants(
 def must_instant(
     day: date, start: tuple[int, int], must: tuple[int, int], tz: tzinfo | None
 ) -> datetime:
-    """An absolute must time, (hour, minute) with hour 0-71, as an engine
-    instant (SEM-34, DL-253). `day` is the local calendar day of the start
-    it pairs with, `start` that start time. Hours 24-71 land on the next
-    days. TechDocs 24.2, "Daylight Time Changes" and "Standard Time
-    Changes".
+    """An absolute must time, (hour, minute) with hour 0-71, as an engine instant (SEM-34,
+    DL-253). `day` is the local day of the start it pairs with; hours 24-71 land on later days.
 
-    Spring, a must time in the missing hour moves to the first minute of
-    the next hour: "a job that must start by 2:05 and must complete by 2:45
-    generates an alarm if the job does not start by 3:00:05 or if it does
-    not complete by 3:00:45". A start in the missing hour runs in that
-    minute too; when it would run after its must time, the must time moves
-    "to the final second of the first minute of the hour following the
-    missing hour", 3:00:59.
+    Spring (TechDocs 24.2, "Daylight Time Changes"): a must time in the missing hour moves to
+    the next hour's first minute (2:05 becomes 3:00:05). A start in the missing hour runs in
+    that minute too; if it would run after its must time, the must time moves to 3:00:59.
 
-    Fall, a must time in the repeated hour takes the first, daylight pass
-    when the start is before the change: "must complete at 1:30 generates
-    an alarm if the job has not completed by 1:30 DT". When the start is in
-    the repeated hour too, it takes the second, standard pass. A start on
-    an earlier day is before the change.
+    Fall: a must time in the repeated hour takes the first (daylight) pass when the start is
+    before the change, and the second (standard) pass when the start is in the repeated hour
+    too. A start on an earlier day is before the change.
 
-    Other change shapes keep the plain fold=0 conversion, as run_window's
-    do (DL-249)."""
+    Other change shapes keep the fold=0 conversion, as run_window's do (DL-249)."""
     start_hour, start_minute = start
     days, hour = divmod(must[0], 24)
     local = datetime.combine(day + timedelta(days=days), time(hour, must[1]))
@@ -356,22 +299,16 @@ def must_instant(
 
 
 def window_span(day: date, lo: time, hi: time, tz: tzinfo | None) -> tuple[datetime, datetime]:
-    """The run_window that opens on local `day`, as two engine instants,
-    with the vendor's endpoint rules on a documented DST change (DL-249).
-    TechDocs 12.1 and 24.2, "Daylight Time Changes" and "Standard Time
-    Changes".
+    """The run_window that opens on local `day`, as two engine instants, with the vendor's
+    endpoint rules on a documented DST change (DL-249; TechDocs 12.1 and 24.2).
 
-    Spring, an opening in the missing hour moves to 03:00: "a run window of
-    2:45 - 3:45 becomes 3:00 - 3:45". A close in the missing hour keeps the
-    window's length: "a run window of 1:00 - 2:30 ... ends at 3:30". Both in
-    it: "a run window of 2:15 - 2:45 becomes 3:00 - 3:45". Fall, an opening
-    in the repeated hour takes the second, standard-time pass: "a run
-    window of 1:45 - 2:45 becomes 1:45 ST - 2:45 ST". A close in it takes
-    the first pass: "a run window of 11:30 - 1:30 ends at 1:30 DT". When
-    both fall in it, "the run window opens during the second, standard time
-    hour", and the close follows it there. The vendor's text describes two
-    distinct endpoints, so an equal-endpoint window keeps the SEM-33
-    zero-width pin: the single instant its opening maps to."""
+    Spring: an opening in the missing hour moves to 03:00 (2:45-3:45 becomes 3:00-3:45); a
+    close in it keeps the window's length (1:00-2:30 ends at 3:30); with both in it, 2:15-2:45
+    becomes 3:00-3:45. Fall: an opening in the repeated hour takes the second (standard) pass
+    (1:45 to 2:45 opens at 1:45 standard time); a close in it takes the first (11:30-1:30 ends at
+    1:30 DT); with both in it, the close follows the opening into the second pass. An
+    equal-endpoint window keeps the SEM-33 zero-width pin: the single instant its opening
+    maps to."""
     start = datetime.combine(day, lo)
     end = datetime.combine(day if lo <= hi else day + timedelta(days=1), hi)
     change = dst_change(day, tz)
@@ -382,9 +319,8 @@ def window_span(day: date, lo: time, hi: time, tz: tzinfo | None) -> tuple[datet
         opens = to_utc(start.replace(fold=1 if opens_repeated else 0), tz)
     if lo == hi:
         return opens, opens
-    # fold=0 is the vendor's close in both seasons: past the gap by the
-    # missing hour in spring, the daylight-time pass in fall. Only a close
-    # on the same day as an opening in the repeated hour takes fold=1.
+    # fold=0 is the vendor's close in both seasons; only a close on the same day as an opening
+    # in the repeated hour takes fold=1.
     closes_second = opens_repeated and end.date() == day and end.hour == REPEATED_HOUR
     closes = to_utc(end.replace(fold=1 if closes_second else 0), tz)
     return opens, closes
@@ -393,30 +329,24 @@ def window_span(day: date, lo: time, hi: time, tz: tzinfo | None) -> tuple[datet
 def window_spans_near(
     today: date, lo: time, hi: time, tz: tzinfo | None
 ) -> list[tuple[datetime, datetime]] | None:
-    """The run_window as concrete engine-instant intervals around local day
-    `today`, or None when no documented DST change (`dst_change`) is within
-    two days of it and the window is compared by wall time instead
-    (`wall_window_contains`). DL-249: near a documented change the window is
-    a set of intervals whose endpoints follow the vendor's rules. No zone has
-    such a change within days of the calendar's ends, so the four opening
-    days stay inside the date range."""
+    """The run_window as engine-instant intervals around local day `today` (DL-249), or None
+    when no documented DST change is within two days and the window is compared by wall time
+    (`wall_window_contains`). The four opening days stay inside the calendar's range."""
     if not dst_change_near(today, tz):
         return None
     return [window_span(today + timedelta(days=k), lo, hi, tz) for k in range(-2, 2)]
 
 
 def wall_window_contains(now: time, lo: time, hi: time) -> bool:
-    """SEM-33 on local wall time: whether `now` is inside the run_window
-    `lo`-`hi`, both ends inclusive; a window with `lo` after `hi` crosses
-    midnight."""
+    """SEM-33: whether `now` is inside the run_window `lo`-`hi`, ends inclusive; `lo` after
+    `hi` crosses midnight."""
     if lo <= hi:
         return lo <= now <= hi
     return now >= lo or now <= hi
 
 
 class DstWindow(NamedTuple):
-    """One run of wall minutes a DST change makes a gap (they do not exist)
-    or an overlap (they occur twice), as minutes of the local day."""
+    """A run of wall minutes that a DST change makes a gap (absent) or an overlap (twice)."""
 
     kind: str  # "gap" or "overlap"
     start: int
@@ -432,8 +362,7 @@ class DstWindow(NamedTuple):
 
 
 def _dst_day_windows(day: date, tz: tzinfo) -> list[DstWindow]:
-    """The gap and overlap minute runs of one local day with a UTC-offset
-    change, read from the zone's own rules (PEP 495 fold 0 against fold 1)."""
+    """The gap and overlap minute runs of one local day, from PEP 495 fold 0 against fold 1."""
     change = dst_change(day, tz)
     documented = {"gap": change == "spring", "overlap": change == "fall"}
     runs: list[DstWindow] = []
@@ -455,8 +384,7 @@ def _dst_day_windows(day: date, tz: tzinfo) -> list[DstWindow]:
 
 @functools.lru_cache(maxsize=256)
 def _dst_year_windows(tz: tzinfo, year: int) -> tuple[DstWindow, ...]:
-    """Every DST gap and overlap of `year` in `tz`: the days whose local
-    midnight offsets differ are scanned minute by minute."""
+    """Every DST gap and overlap of `year` in `tz`."""
     found: list[DstWindow] = []
     day = date(year, 1, 1)
     while day.year == year:
@@ -470,10 +398,8 @@ def _dst_year_windows(tz: tzinfo, year: int) -> tuple[DstWindow, ...]:
 
 
 def dst_windows(tz: tzinfo, reference: date) -> tuple[DstWindow, ...]:
-    """The gaps and overlaps of the reference year and the next in `tz`, one
-    per distinct (kind, minutes, shape) and in wall order, each with the
-    first local day it occurs on. A zone whose rules repeat each year gives
-    the same shape on every such day, so that day stands for them all."""
+    """The gaps and overlaps of the reference year and the next in `tz`, one per distinct
+    (kind, minutes, shape) in wall order, each with the first local day it occurs on."""
     seen: dict[tuple[str, int, int, bool], DstWindow] = {}
     for year in (reference.year, reference.year + 1):
         for window in _dst_year_windows(tz, year):
@@ -485,10 +411,10 @@ def dst_windows(tz: tzinfo, reference: date) -> tuple[DstWindow, ...]:
 def wall_window_intervals(
     first: date, last: date, lo: time, hi: time, tz: tzinfo
 ) -> tuple[tuple[datetime, datetime], ...]:
-    """The run_window as the wall-time comparison opens it (`wall_window_contains`)
-    over the local days `first` to `last`: for each interval of elapsed time
-    inside it, the local wall time it opens at and the local wall time of its
-    last minute. An interval cut by either end of the range is left out."""
+    """The run_window as `wall_window_contains` opens it over local days `first` to `last`.
+
+    Each interval is (local wall time it opens, local wall time of its last minute); an
+    interval cut by either end of the range is left out."""
     start = to_utc(datetime.combine(first, time()), tz)
     stop = to_utc(datetime.combine(last + timedelta(days=1), time()), tz)
     intervals: list[tuple[datetime, datetime]] = []
@@ -512,14 +438,8 @@ def wall_window_intervals(
 
 
 def alias_table(aliases: Mapping[str, str] | None) -> dict[str, str] | None:
-    """A ujo_timezones table as `resolve_timezone` takes it: a private copy,
-    and EMPTY normalised to None.
+    """A ujo_timezones table as `resolve_timezone` takes it: a private copy, empty as None.
 
-    The rule lives here because it is a fact about the ladder, not about any
-    one source of a table: the unique-city default is conditioned on the
-    ABSENCE of a table, so a caller that passes `{}` where it meant "no map"
-    silently retires that default for every per-job zone. Three callers each
-    stated this in their own words -- a live scheduler's table, a period
-    profile's pin, and the resume path's re-read of that pin -- and DL-151
-    was the bug that came of one of them not stating it at all (DL-163)."""
+    The unique-city default needs the absence of a table, so a caller passing `{}` for "no
+    map" would retire it for every per-job zone (DL-151, DL-163)."""
     return dict(aliases) if aliases else None

@@ -1,54 +1,36 @@
-"""The boundary: the lineage anchor, the genesis transaction, and the seal
-operation.
+"""The boundary: the lineage anchor, the genesis transaction, and the seal operation.
 
-Normative spec: `docs/period-model.md` ss1.1 (the sentinel and the genesis
-transaction), ss1.2/ss1.3 (estate identity and the successor fence), ss6
-(the cutoff barrier), ss7 (the seal operation and its three pure phases),
-ss8 (preconditions), ss9 (retries across a boundary) and ss11 steps 1-4
-(resume). Built by DL-133 as U6b. Obligations PR-01a/b/c, PR-02, PR-03,
-PR-04, PR-25 through PR-33 in ss13.
+Normative spec: `docs/period-model.md` ss1.1 (sentinel, genesis), ss1.2/ss1.3 (estate identity,
+successor fence), ss6 (cutoff barrier), ss7 (seal operation, three pure phases), ss8
+(preconditions), ss9 (retries across a boundary), ss11 steps 1-4 (resume). DL-133 (U6b). Obligations
+PR-01a/b/c, PR-02, PR-03, PR-04, PR-25 through PR-33 in ss13.
 
-`seal.py` is the ARTIFACT and the two pure functions over it. This module
-is the OPERATION: what has to be true before a period may close, in what
-order the bytes hit the disk, which single writer performs the cutoff, and
-who is allowed to open next. It is the unit above `seal.py` and calls
-`close_runtime` and `open_from_seal` unchanged.
+`seal.py` holds the artifact and two pure functions over it. This module is the operation: what
+must hold before a period closes, the order bytes hit disk, which writer performs the cutoff,
+and who may open next. It calls `close_runtime` and `open_from_seal` unchanged.
 
-**The anchor is the fence, not a one-time claim.** A run root is a path and
-identifies nothing (ss1). Two roots that both hold a committed seal with no
-following segment would both open the next period, allocate the same
-indices and run the same `(job, run_number)` twice -- `concurrency-model.md`
-ss0's safety property, violated. Exactly one root may succeed a seal, and
-the anchor is where that is decided: a four-state head under a lock, moved
-by compare-and-swap, with a durable claim file so a crashed claimant's
-replacement can prove it is the same claim rather than a second one.
-`LeaderLock`'s pattern rather than a bare `O_EXCL`, because that pattern
-already solves what `O_EXCL` does not -- replacement and lifetime.
+The anchor is the fence. A run root is a path and identifies nothing (ss1); two roots holding a
+committed seal with no following segment would both open the next period and run the same
+`(job, run_number)` twice, violating `concurrency-model.md` ss0. Exactly one root may succeed a
+seal. The anchor decides it: a four-state head under a lock, moved by compare-and-swap, with a
+durable claim file so a crashed claimant's replacement proves it is the same claim.
+`LeaderLock`'s pattern is used, not a bare `O_EXCL`, because it solves replacement and lifetime.
 
-**The head moves after the fact it records, never before.** Genesis writes
-its registry row before any segment exists and marks it provisional; a
-successor's row is written in the same anchor write as `claimed -> open`,
-after its first segment is durable. Nothing registers a successor before
-its segment, or a crash leaves an authoritative row for a period that has
-no segment (PR-02c).
+The head moves after the fact it records. Genesis writes its registry row before any segment
+exists, marked provisional; a successor's row is written in the same anchor write as
+`claimed -> open`, after its first segment is durable (PR-02c).
 
-**The three writes of a seal are an order, and the order is the whole
-durability argument** (ss3): the sidecar, then the `seal` record, then the
-anchor CAS. Crash between the first two and the sidecar is an orphan that
-recovery ignores; crash between the last two and resume performs the CAS.
-The record landing means the sidecar is already durable; the head moving
-means the record is. **The `seal` append is the point of no return**: once
-any of its bytes may have been written the engine fail-stops rather than
-reopening a period that would then append records after a seal line.
+A seal is three writes in order (ss3): the sidecar, the `seal` record, the anchor CAS. A crash
+between the first two leaves an orphan sidecar that recovery ignores; between the last two,
+resume performs the CAS. The `seal` append is the point of no return: once any of its bytes may
+have been written the engine fail-stops rather than append records after a seal line.
 
-**`abort_boundary` runs on every non-commit exit before that append**, not
-only on a validation failure: an `ENOSPC` on the sidecar left draft 21's
-engine frozen behind a freeze it would never lift (PR-28b). A fence loss
-inside the interval fail-stops instead, on DL-101's rule.
+`abort_boundary` runs on every non-commit exit before that append (PR-28b). A fence loss inside
+the interval fail-stops instead, on DL-101's rule.
 
-A pre-PONR refusal raised here carries the control code `seal_refused`,
-or `seal_retry_horizon` for the ss9 gate (control-protocol ss2). Some of
-these checks also serve audit and retention, where the code is unread.
+A pre-PONR refusal carries the control code `seal_refused`, or `seal_retry_horizon` for the ss9
+gate (control-protocol ss2). Some of these checks also serve audit and retention, where the
+code is unread.
 """
 
 from __future__ import annotations
@@ -158,15 +140,12 @@ from dsl41.seal import (
 from dsl41.state_machine import Event as ChartEvent
 from dsl41.state_machine import Executor, Region, Row, State, Statechart, StatechartError
 
-#: ss1.1's anchor directory, which is NOT inside any archivable root.
+#: ss1.1's anchor directory, outside any archivable root.
 ANCHOR_NAME: Final[str] = "anchor.json"
 ANCHOR_LOCK_NAME: Final[str] = "anchor.lock"
 CLAIMS_DIR: Final[str] = "claims"
 
-#: ss1.3: "Local filesystem only. `runner_ledger.py` already says the flock
-#: fence is not one on NFS; an NFS anchor is refused at startup" (PR-04). A
-#: lock that does not exclude is worse than no lock, because everything
-#: above it is written as if it did.
+#: ss1.3: local filesystem only; a network-filesystem anchor is refused at startup (PR-04).
 NETWORK_FILESYSTEMS: Final[frozenset[str]] = frozenset(
     {
         "9p",
@@ -185,21 +164,17 @@ NETWORK_FILESYSTEMS: Final[frozenset[str]] = frozenset(
     }
 )
 
-#: The sealer waits an unbound SPAWN and an unresolved KILL ladder out
-#: rather than snapshotting one (ss3.5, ss8, PR-27, PR-33a). Seconds; it is
-#: milliseconds in practice and the bound exists so a wedged tier refuses
-#: instead of hanging.
+#: Seconds the sealer waits out an unbound SPAWN and an unresolved KILL ladder instead of
+#: snapshotting one (ss3.5, ss8, PR-27, PR-33a); a wedged tier refuses after this.
 QUIESCE_WAIT_S: Final[float] = 30.0
 
 
 class PeriodSealed(Exception):
     """ss7: the boundary committed; period N+1 is ready to open.
 
-    Deliberately NOT an `EngineError`: it is a successful, terminal outcome
-    of the engine loop, and every `except EngineError` in this tree is a
-    failure path. `run` turns it into exit code 3 -- distinct from its
-    0/1/2, so an init system does not restart-loop a sealed engine
-    (PR-30b) -- and step 9 is `dsl41 run --resume` on the same root."""
+    Not an `EngineError`: it is a successful terminal outcome and every `except EngineError`
+    is a failure path. `run` exits 3 (PR-30b) so an init system does not restart-loop a sealed
+    engine; step 9 is `dsl41 run --resume` on the same root."""
 
     def __init__(self, boundary: CommittedBoundary) -> None:
         super().__init__(
@@ -212,19 +187,15 @@ class PeriodSealed(Exception):
 class BoundaryFailStop(EngineError):
     """The `seal` append did not complete cleanly (ss7).
 
-    An `fsync` error does not prove the line absent or non-durable, and a
-    partial append may have left a torn final line. Draft 22 told that case
-    to abort and reopen C1, which would append commands, ticks and
-    completions AFTER a seal line that then survives a crash -- records
-    after a seal, which recovery rightly refuses. So once any seal bytes may
-    have been written the engine fail-stops and reports the outcome
-    unknown; recovery decides (PR-28d)."""
+    An `fsync` error does not prove the line absent, and a partial append may leave a torn final
+    line. Reopening C1 would append records after a seal line that survives a crash, which
+    recovery refuses. Once any seal bytes may have been written the engine fail-stops and
+    reports the outcome unknown; recovery decides (PR-28d)."""
 
 
 class BoundaryRefusal(EngineError):
-    """A pre-PONR refusal of the boundary: the control code is `seal_refused`
-    (control-protocol ss2), fixed here as `AdmissionRefused` fixes its codes.
-    Some of the checks that raise it also serve audit and retention, where
+    """A pre-PONR refusal of the boundary, with control code `seal_refused`
+    (control-protocol ss2). Some checks that raise it also serve audit and retention, where
     the code is unread."""
 
     def __init__(self, message: str) -> None:
@@ -234,31 +205,13 @@ class BoundaryRefusal(EngineError):
 class SealRequest(BaseModel):
     """ss2.2's v3 `seal` request, as the engine receives it.
 
-    It names an `expect` on nothing, because it is a boundary and not a row
-    mutation, and it carries `request_id` like every command -- which is
-    what makes a lost response retryable at all.
+    It has no `expect`, because a boundary is not a row mutation, and it carries `request_id`
+    like every command, so a lost response is retryable. `source` has one value (a live and an
+    offline seal are one kind of boundary); audit derives and compares it (DL-138).
 
-    `source` has ONE value: a live seal through the control socket and an
-    offline seal from the CLI are one kind of boundary, a request carrying
-    an id its caller minted. `adopt` was the other and went with the
-    estate-adoption path (DL-138); the field stays because audit DERIVES it
-    and compares, and a derivation over a one-value domain is still the
-    check that catches a rewritten record.
-
-    `strict=True` (DL-170): `bool` is `int`'s subclass, so a lax `epoch=True`
-    would coerce to `1` and let a retry match a committed seal under a type
-    the original request never carried (DL-151). `runner_control._seal_wire_error`
-    already refuses that on the live socket, with pinned wire prose this
-    config cannot reproduce -- so the hand-written gate stays as the
-    message layer for every field but one (its own docstring says which,
-    and why). `cli_estate.py`'s offline retry route builds a `SealRequest`
-    directly, past that gate entirely; every argument it passes is already
-    statically typed today, so this is defence in depth for that site, not
-    the closing of a live hole -- but a future caller need not stay that
-    disciplined for the model to still refuse it. `next_period` needs no
-    help from this flag: `StagedNextPeriod` carries its own `strict=True`
-    (DL-168), because a nested model validates under ITS OWN config
-    regardless of what the outer one sets."""
+    `strict=True` (DL-170) stops `epoch=True` coercing to `1` (DL-151). `cli_estate.py`'s
+    offline retry route builds this model past `runner_control._seal_wire_error`, so the flag
+    is defence in depth there. `StagedNextPeriod` carries its own `strict=True` (DL-168)."""
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
@@ -294,37 +247,27 @@ class SealRequest(BaseModel):
 
 @dataclass
 class EstateHome:
-    """What a live engine needs to know about the lineage it leads.
-
-    One object rather than six constructor parameters, because these six
-    facts are one fact: which estate this process is period N of. An engine
-    with none -- the bisimulation harness, a rehearsal -- has no lineage and
-    a seal request over it has nothing to close."""
+    """The lineage a live engine leads: which estate this process is period N of. An engine
+    without one (the bisimulation harness, a rehearsal) has nothing a seal request can close."""
 
     run_root: Path
     anchor: EstateAnchor
     estate_id: str
-    #: the CLOSING period's committed manifest: its identity, its runtime
-    #: profile, and the `retry_horizon_us` ss9's gate is read from
+    #: the closing period's committed manifest; ss9's gate reads `retry_horizon_us` from it
     manifest: Manifest
-    #: the seal this period opened from -- `prev_seal_digest` on the next
+    #: the seal this period opened from, `prev_seal_digest` on the next
     prev_seal_digest: str | None = None
-    #: ss2.2's retry route: the `seal` record this period opened from, kept
-    #: so an exact retry of the boundary that closed C1 is answered from the
-    #: committed seal BEFORE the current-baseline check. The generic v3
-    #: parser rejects a foreign `baseline_id` before it reads `request_id`,
-    #: and such a retry necessarily carries B1 while C2 answers under B2
+    #: ss2.2's retry route: the `seal` record this period opened from, so an exact retry of the
+    #: boundary that closed C1 is answered before the current-baseline check; the generic v3
+    #: parser would reject its foreign `baseline_id` (B1 against C2's B2) first
     prior_seal_record: dict[str, Any] | None = None
 
 
 def no_crash(_stage: str) -> None:
-    """The crash matrix's seam, and nothing else (`runner_supervisor`'s
-    `_crash_point`, generalized to a parameter).
+    """The crash matrix's seam: a no-op in production.
 
-    A no-op in production. Every durable step of the boundary calls it with
-    a stage name, so ss11a's crash matrix can stop the operation exactly
-    between two writes instead of killing a process and hoping it died in
-    the window it meant."""
+    Every durable step calls it with a stage name, so ss11a's crash matrix stops the operation
+    exactly between two writes."""
 
 
 CrashPoint = Callable[[str], None]
@@ -346,9 +289,8 @@ class OpenHead(BaseModel):
 class ClosedHead(BaseModel):
     """It ended; nobody has opened the next.
 
-    `closing_root` is carried because a physical roll's opener needs to
-    find the sidecar, the C2 bundle and the period manifest; draft 5 lost
-    it the moment the head moved on."""
+    `closing_root` lets a physical roll's opener find the sidecar, the C2 bundle and the
+    period manifest."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -361,10 +303,8 @@ class ClosedHead(BaseModel):
 class ClaimedHead(BaseModel):
     """One root is opening the next.
 
-    Keyed on the CLAIM, never on the claimant: a crashed claimant's
-    replacement necessarily has a different pid, and draft 3's
-    process-identity key made an ordinary crash recoverable only by
-    `--force`, which is the one operation permitted to fork a lineage."""
+    Keyed on the claim, never the claimant: a crashed claimant's replacement has a different
+    pid, and recovery must not need `--force`, which can fork a lineage."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -373,23 +313,19 @@ class ClaimedHead(BaseModel):
     target_root: str
 
 
-#: Retired lineage head states: the state, and the entry that retired it.
-#: APPEND-ONLY (docs/protocol-evolution.md ss6). `adopting` was the estate
-#: adoption path's fourth head, and an anchor carrying one is refused
-#: BEFORE parse -- a discriminated union meets an unknown tag with a
-#: validator error that names none of this.
+#: Retired lineage head states: state -> the entry that retired it. Append-only
+#: (docs/protocol-evolution.md ss6). An anchor carrying one is refused before parse, because the
+#: discriminated union's validator error names none of this.
 RETIRED_HEAD_STATES: Final[dict[str, str]] = {"adopting": "DL-138"}
 
 Head = Annotated[OpenHead | ClosedHead | ClaimedHead, Field(discriminator="state")]
 
 
 class PeriodRow(BaseModel):
-    """ss1.3's archive registry entry: which root holds this period, and
-    what has been proved about it.
+    """ss1.3's archive registry entry: the root that holds this period and what is proved.
 
-    `segment_durable` is what makes a row PROVISIONAL. Genesis inserts its
-    row before any segment exists, so every cross-period reader ignores a
-    row until it reads `true`."""
+    A row is provisional until `segment_durable`; genesis inserts it before any segment
+    exists and cross-period readers ignore it until then."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -400,13 +336,9 @@ class PeriodRow(BaseModel):
 
 
 class Reclaimed(BaseModel):
-    """One break-glass override, as the anchor records it (ss1.3).
-
-    Loud, durable and attributable: the claim that was moved, the root that
-    held it, who said to move it and when. Nothing here is read to DECIDE
-    anything -- the decision was the operator's `--force` -- and everything
-    here is read to REPORT it, in the anchor and again in the opening
-    `segment` of the period that was let through."""
+    """One break-glass override, as the anchor records it (ss1.3): the moved claim, its root,
+    the actor and the time. It is reported in the anchor and in the opening `segment` of the
+    period let through; it decides nothing."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -426,14 +358,10 @@ class Anchor(BaseModel):
     artifact_format_version: int = ARTIFACT_FORMAT_VERSION
     estate_id: str = Field(min_length=1)
     head: Head
-    #: keyed by the period number spelled as a string -- JSON has no
-    #: integer keys and ss3.2 sorts every object's keys by code point
+    #: keyed by the period number as a string (JSON has no integer keys)
     periods: dict[str, PeriodRow] = {}
-    #: ss1.3's break-glass ledger: every claim `estate reclaim --force`
-    #: moved out of a successor's way, in the order it happened. Append-only
-    #: and never consumed -- the next opening `segment` COPIES the entry
-    #: into its own `reclaimed` field, so the fork is recorded in the
-    #: lineage's own log as well as in the fence that permitted it
+    #: ss1.3's break-glass ledger of claims `estate reclaim --force` moved aside, in order.
+    #: Append-only; the next opening `segment` copies the entry into its own `reclaimed` field
     reclaimed: list[Reclaimed] = []
 
     def row(self, period_id: int) -> PeriodRow | None:
@@ -446,10 +374,7 @@ class Anchor(BaseModel):
 class Claim(BaseModel):
     """ss1.3's `claims/<claim_id>.json`: the durable successor claim.
 
-    `diag` is diagnostics and nothing else. A crashed claimant's
-    replacement has a different pid and start time by construction, so
-    identity is the claim -- not the process -- and the fields below exist
-    to tell an operator who was here, never to decide anything."""
+    Identity is the claim, not the process; `diag` only tells an operator who was here."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -459,30 +384,21 @@ class Claim(BaseModel):
     prev_seal_digest: str
     next_period: int = Field(ge=2)
     target_root: str
-    #: ss3.2's spelling: naive UTC with exactly six fractional digits. A
-    #: local-time stamp on a canonicalized artifact is a value two readers
-    #: in two zones disagree about
+    #: ss3.2's spelling: naive UTC with exactly six fractional digits
     claimed_at: str
     diag: dict[str, Any] = {}
 
 
 def normalized_root(root: Path | str) -> str:
-    """ss1.3: `target_root` is the absolute, normalized path, and is
-    persisted that way.
-
-    A claimant started with `--run-root ./r` and restarted with `/abs/r`
-    must compute the same `claim_id`, or an ordinary restart needs
-    break-glass."""
+    """ss1.3: `target_root` is the absolute normalized path, so a claimant restarted under
+    another spelling computes the same `claim_id`."""
     return os.path.realpath(str(root))
 
 
 def claim_id_for(*, prev_seal_digest: str, next_period: int, target_root: Path | str) -> str:
-    """ss1.3: `sha256(canonical{prev_seal_digest, next_period,
-    target_root})`.
+    """ss1.3: `sha256(canonical{prev_seal_digest, next_period, target_root})`.
 
-    `next_period` is the NUMBER, not the opening's identity: the seal
-    digest already binds every field of the opening the claim is for, so a
-    second copy of it here would be a second authority for one fact."""
+    `next_period` is the number only; the seal digest already binds the opening."""
     return hash_over(
         {
             "next_period": next_period,
@@ -493,15 +409,10 @@ def claim_id_for(*, prev_seal_digest: str, next_period: int, target_root: Path |
 
 
 def filesystem_type(path: Path) -> str | None:
-    """The filesystem `path` sits on, or None when this platform will not
-    say.
+    """The filesystem `path` sits on, or None when this platform will not say.
 
-    Read from `/proc/mounts` where it exists and from `mount(8)` otherwise;
-    the longest mount point that prefixes the real path wins, which is how
-    a bind or a nested mount is resolved. None is NOT a refusal: an
-    undetectable filesystem is an unknown, and refusing every unknown would
-    make the anchor unusable on a platform this cannot read rather than on
-    a substrate the fence does not work on."""
+    Read from `/proc/mounts`, else `mount(8)`; the longest mount point prefixing the real path
+    wins. None is an unknown, not a refusal."""
     target = Path(os.path.realpath(str(path)))
     mounts: list[tuple[str, str]] = []
     try:
@@ -532,11 +443,7 @@ def filesystem_type(path: Path) -> str | None:
 
 
 def check_local_filesystem(anchor_dir: Path) -> None:
-    """PR-04: an NFS anchor is refused at startup.
-
-    `flock` on NFS is not a fence, and everything above the anchor is
-    written as if it were one -- so the refusal is at the door, where an
-    operator can move the directory, rather than at the first fork."""
+    """PR-04: an NFS anchor is refused at startup, because `flock` there is not a fence."""
     kind = filesystem_type(anchor_dir)
     if kind is not None and kind.lower() in NETWORK_FILESYSTEMS:
         raise EngineError(
@@ -548,23 +455,17 @@ def check_local_filesystem(anchor_dir: Path) -> None:
 
 # ------------------------------------------------- the anchor's machines
 #
-# `ANCHOR_HEAD` and `PERIOD_ROW` are declarations (docs/statechart-engine.md).
-# Their state lives in `anchor.json`, which no process owns: the head's
-# `state` is the head instance's configuration, and a registry row's flags
-# (`row_tag`) are its row instance's. Every move is a read-compare-write under
-# the anchor lock, and its executor lives for that one move (`_Move`): built
-# from the file read under the lock, posted the method's event, head first and
-# row second, and read and settled before the method's one anchor write (a
-# claim writes its claim file first, then the head). No file or no row means
-# no instance: genesis creates the file, and a successor's opening
-# and a rowless close create the row, in the configuration the write records.
+# `ANCHOR_HEAD` and `PERIOD_ROW` are declarations (docs/statechart-engine.md). Their state lives
+# in `anchor.json`: the head's `state` is the head instance's configuration, a registry row's
+# flags (`row_tag`) its row instance's. Every move is a read-compare-write under the anchor
+# lock; its executor lives for that one move (`_Move`), built from the file read under the lock
+# and posted the method's event, head first and row second, then settled before the method's
+# one anchor write (a claim writes its claim file first). No file or row means no instance.
 #
-# A refusal row is a cell with no move. It carries a code, and the method
-# raises its `EngineError` for that code, with the text the method has always
-# used. The method keeps the checks that read its own facts (the period, the
-# seal digest, the claim file, the roots) and runs them before the post; an
-# idempotent repeat posts nothing. A gap in a chart is a `StatechartError`, and
-# so is a write whose tag is not where the chart rests (DL-336).
+# A refusal row is a cell with no move; the method raises its `EngineError` for the row's code.
+# The method runs the checks that read its own facts before the post, and an idempotent repeat
+# posts nothing. A gap in a chart is a `StatechartError`, and so is a write whose tag is not
+# where the chart rests (DL-336).
 
 #: A registry row's states. `provisional` is a row whose segment is not durable
 #: yet, `durable` one whose segment is, `attested` one `audit` has certified;
@@ -693,9 +594,8 @@ _FROM_ATTESTED: Final = "Only `attested` reaches this row."
 #: What a refusal row of `attested` meets when the method posts to it.
 _FORGED: Final = "It meets a forged row only: attested without its durable flag."
 
-#: One period's registry row, one instance per anchor directory and period id.
-#: A row is born provisional at genesis, or durable when a successor opens;
-#: `unattested` holds the two states the close moves a row from.
+#: One period's registry row, one instance per anchor directory and period id. A row is born
+#: provisional at genesis, or durable when a successor opens.
 PERIOD_ROW: Final = Statechart(
     name="period_row",
     root=State(
@@ -840,12 +740,11 @@ def row_tag(row: PeriodRow | None) -> RowTag:
 
 
 class _Move:
-    """One move's executor (statechart-engine ss11): built from the anchor the
-    method read under the lock, and gone with the method.
+    """One move's executor (statechart-engine ss11), built from the anchor read under the lock.
 
-    It holds the head's instance, keyed by the anchor directory, and the moved
-    period's row instance, keyed by the directory and the period id; no file
-    or no row means no instance. Every post of one move carries its one event."""
+    It holds the head instance (keyed by the anchor directory) and the moved period's row
+    instance (keyed by directory and period id). Every post of one move carries its one
+    event."""
 
     def __init__(
         self, anchor_dir: Path, event: str, anchor: Anchor | None, period_id: int | None = None
@@ -867,9 +766,8 @@ class _Move:
         self.held[key] = chart
 
     def post(self, key: Hashable, refusals: Mapping[str, str]) -> None:
-        """Post the move's event to one instance, when it exists. A refusal
-        raises the method's `EngineError` for its code; a code the method has
-        no text for is a `StatechartError`."""
+        """Post the move's event to one instance, when it exists. A refusal raises the method's
+        `EngineError` for its code; a code without text is a `StatechartError`."""
         if key not in self.held:
             return
         (outcome,) = self.machines.dispatch(key, self.event)
@@ -886,9 +784,9 @@ class _Move:
         raise EngineError(refusals[code])
 
     def settle(self, updated: Anchor) -> None:
-        """Before the write: every instance rests in the tag the write records,
-        and an instance the write creates is restored in it. A tag the chart
-        does not rest in is a `StatechartError`, and nothing is written."""
+        """Before the write: every instance rests in the tag the write records, and a created
+        instance is restored in it. Any other tag is a `StatechartError` and nothing is
+        written."""
         tags: list[tuple[Hashable, Statechart, frozenset[str]]] = [
             (self.head, ANCHOR_HEAD, head_configuration(updated.head.state))
         ]
@@ -909,14 +807,12 @@ class _Move:
 
 
 class EstateAnchor:
-    """ss1.3's lineage authority on this substrate: a directory holding
-    `anchor.json`, `anchor.lock` and `claims/`.
+    """ss1.3's lineage authority: a directory holding `anchor.json`, `anchor.lock` and
+    `claims/`.
 
-    The lock is held for the process lifetime of whoever leads the lineage
-    -- the engine in live mode, the sealer in offline mode -- and every
-    transition below is a read-compare-write UNDER it. The compare is not
-    decoration: the lock excludes another process, and the compare excludes
-    this one acting on a head it did not read."""
+    Whoever leads the lineage (the engine live, the sealer offline) holds the lock for its
+    process lifetime, and every transition is a read-compare-write under it. The lock excludes
+    another process; the compare excludes this one acting on a head it did not read."""
 
     def __init__(self, anchor_dir: Path) -> None:
         self.dir = Path(anchor_dir)
@@ -924,10 +820,8 @@ class EstateAnchor:
         self.lock = LeaderLock(self.dir, ANCHOR_LOCK_NAME, of="estate lineage", held_by="process")
 
     def acquire(self) -> None:
-        # same rule as the run root: every entry down to the anchor
-        # directory must be durable before anything relies on the lineage
-        # half it holds -- and unconditionally, so a retry after a failed
-        # fsync repairs it rather than skipping it
+        # as for the run root: every entry down to the anchor directory is made durable,
+        # unconditionally, so a retry after a failed fsync repairs it
         mkdir_durable(str(self.dir))
         os.chmod(self.dir, 0o700)
         check_local_filesystem(self.dir)
@@ -942,9 +836,7 @@ class EstateAnchor:
     def read(self) -> Anchor | None:
         """The anchor, or None when this directory holds none.
 
-        Absence is a fact; a file that exists and does not parse is not.
-        A present-but-unreadable anchor refuses, because "no anchor" is
-        what genesis is allowed to create over."""
+        A present but unreadable anchor refuses, because genesis may create over "no anchor"."""
         raw = read_or_none(self.path)
         if raw is None:
             return None
@@ -954,10 +846,9 @@ class EstateAnchor:
                 raise EngineError(f"{self.path}: not a JSON object")
             require_artifact_version(payload)  # DL-157
             _check_head_state(self.path, payload)
-            # DL-263: strict in the JSON sense from `raw`, as `_read_artifact`
-            # does (DL-168). `decode` above stays first, so the gates inspect
-            # the same payload pydantic then validates; a laundered
-            # `head.period_id` (`true` clearing its `ge=1` floor) now refuses.
+            # DL-263: strict JSON from `raw`, as `_read_artifact` does (DL-168); `decode` runs
+            # first so the gates inspect the payload pydantic validates. A laundered
+            # `head.period_id` (`true`) refuses.
             return Anchor.model_validate_json(raw, strict=True)
         except (CanonError, ValidationError) as exc:
             raise EngineError(f"{self.path}: not an anchor this binary can read ({exc})") from exc
@@ -965,10 +856,9 @@ class EstateAnchor:
     def write(self, anchor: Anchor) -> None:
         """One head transition, one liturgy write (ss1.3).
 
-        Rename without `fsync(dir)` is not durable: a power loss could keep
-        B's first segment and revert the head, and a second target would
-        then claim the same seal. `durable_write` fsyncs the file and the
-        directory entry both (PR-02c)."""
+        `durable_write` fsyncs the file and the directory entry; a rename alone could revert
+        the head after B's first segment survived, and a second target would claim the same
+        seal (PR-02c)."""
         self.lock.check()
         durable_write(str(self.path), canonical_bytes(anchor.model_dump(mode="json")) + b"\n")
 
@@ -985,9 +875,8 @@ class EstateAnchor:
             if not isinstance(payload, dict):
                 raise EngineError(f"{path}: not a JSON object")
             require_artifact_version(payload)  # DL-157
-            # DL-263: strict in the JSON sense from `raw`, same rule as
-            # `EstateAnchor.read` above -- a laundered `next_period` (a
-            # numeric string clearing its `ge=2` floor) now refuses.
+            # DL-263: strict JSON from `raw`, as in `EstateAnchor.read`; a laundered
+            # `next_period` (a numeric string) refuses.
             return Claim.model_validate_json(raw, strict=True)
         except (CanonError, ValidationError) as exc:
             raise EngineError(f"{path}: not a claim this binary can read ({exc})") from exc
@@ -1007,15 +896,11 @@ class EstateAnchor:
     def create_open(self, *, estate_id: str, root: Path, period_id: int = 1) -> Anchor:
         """`absent -> open(period_id, root)`: genesis's third step (ss1.1).
 
-        Create-only under ss1.1's ownership rule, with ONE resume
-        exception: our own `open(1, this root, this estate_id)` with no
-        committed segment, which is genesis interrupted. Once a segment
-        exists, ordinary `--resume` owns recovery and this refuses. An
-        existing anchor is an existing estate whose detached work may still
-        be alive, whatever its incumbent's liveness says (PR-01b): every
-        head refuses `create_open` (anchor_head.07). No file means no
-        instance, so the write creates both, the head `open` and the row
-        `provisional`."""
+        Create-only under ss1.1's ownership rule, with one resume exception: our own
+        `open(1, this root, this estate_id)` with no committed segment, which is genesis
+        interrupted. Once a segment exists, `--resume` owns recovery and this refuses. Every
+        existing head refuses `create_open` (anchor_head.07, PR-01b). The write creates the
+        head `open` and the row `provisional`."""
         existing = self.read()
         ours = (
             existing is not None
@@ -1036,8 +921,8 @@ class EstateAnchor:
         anchor = Anchor(
             estate_id=estate_id,
             head=OpenHead(period_id=period_id, root=normalized_root(root)),
-            # provisional until the segment lands: every cross-period
-            # reader ignores a row until it reads `segment_durable` (PR-02c)
+            # provisional until the segment lands; readers ignore it until `segment_durable`
+            # (PR-02c)
             periods={str(period_id): PeriodRow(root=normalized_root(root))},
         )
         move.settle(anchor)
@@ -1047,15 +932,11 @@ class EstateAnchor:
     def attest(
         self, period_id: int, *, estate_id: str, root: Path | str, seal_digest: str
     ) -> Anchor:
-        """The `attested` transition, owned by `audit` (ss1.3): one write
-        under the lock, after `audit.json` is durable by the liturgy.
+        """The `attested` transition, owned by `audit` (ss1.3): one write under the lock, after
+        `audit.json` is durable.
 
-        Idempotent, because a re-run of `audit` over a period already
-        attested writes the same file and must not then refuse the flag it
-        already set. BOUND, because the caller holds SOME unlocked anchor
-        and this row is a claim about one estate's one period in one root:
-        flipping it on a stranger's anchor would mark a period attested
-        whose proof lives in another lineage entirely."""
+        Idempotent, so a re-run of `audit` does not refuse the flag it set. Bound to one
+        estate's period in one root, so a stranger's anchor is never marked attested."""
         anchor = self.require(estate_id)
         row = anchor.row(period_id)
         if row is None:
@@ -1071,11 +952,9 @@ class EstateAnchor:
                 " this attestation was produced in another estate's root"
                 " (period-model ss1.3)"
             )
-        # exact, null included, and DURABLE: a `seal` record can land
-        # before the close CAS, and marking that provisional row attested
-        # would certify a boundary the lineage has not committed
-        # (period-model ss1.3). The digest is this method's check; the
-        # durability is the chart's (period_row.11)
+        # exact (null included) and durable: a `seal` record can land before the close CAS, and
+        # attesting that provisional row would certify an uncommitted boundary (period-model
+        # ss1.3). The digest is this method's check; durability is the chart's (period_row.11)
         uncommitted = (
             f"{self.path}: period {period_id} has seal {row.seal_digest!r}"
             f" (segment_durable={row.segment_durable}) and the attestation names"
@@ -1086,8 +965,8 @@ class EstateAnchor:
             raise EngineError(uncommitted)
         if row.attested and row.segment_durable:
             return anchor
-        # a row attested without its durable flag is a forged one, and it
-        # refuses as an uncommitted row does (period_row.12)
+        # a row attested without its durable flag is forged and refuses as uncommitted
+        # (period_row.12)
         move = _Move(self.dir, "attest", anchor, period_id)
         move.post(move.row, {"row_not_durable": uncommitted, "row_attested": uncommitted})
         updated = anchor.model_copy(
@@ -1100,25 +979,17 @@ class EstateAnchor:
         return updated
 
     def reclaim(self, *, estate_id: str, claimed_actor: str) -> tuple[Anchor, Reclaimed]:
-        """ss1.3's break-glass: move a `claimed` head back to `closed` so
-        another root may claim the seal.
+        """ss1.3's break-glass: move a `claimed` head back to `closed` so another root may claim
+        the seal.
 
-        **A stale claim is break-glass, not garbage.** A `claimed` head
-        whose target is unreachable cannot be told from one whose target is
-        merely paused, so nothing here decides that -- an operator does,
-        under `--force`, and this records the decision: the moved claim and
-        the actor who claimed to authorize it come back so the next opening
-        `segment` carries them in `reclaimed`. It is the one path in this
-        module that can fork a lineage.
+        A stale claim is break-glass, not garbage: an unreachable target cannot be told from a
+        paused one, so an operator decides, under `--force`. The moved claim and the claiming
+        actor come back for the next opening `segment`'s `reclaimed`. It is the one path here
+        that can fork a lineage.
 
-        The seal the head goes back to is the claim's own
-        `prev_seal_digest`, and the closing root is the registry's row for
-        the closing period -- both READ, never supplied, so a reclaim
-        cannot invent a lineage the anchor never held.
-
-        The checks read the claim file and the registry, so they run only
-        for a claimed head, before the post; every other head refuses
-        (anchor_head.11)."""
+        The seal the head returns to is the claim's `prev_seal_digest` and the closing root is
+        the registry's row, both read and never supplied. The checks run only for a claimed
+        head, before the post; every other head refuses (anchor_head.11)."""
         anchor = self.require(estate_id)
         head = anchor.head
         reclaimed = None
@@ -1134,8 +1005,8 @@ class EstateAnchor:
             },
         )
         if reclaimed is None:
-            # anchor_head.11 refuses every other head: a chart that moves one
-            # disagrees with this method, which checked no claim
+            # anchor_head.11 refuses every other head; a chart that moves one disagrees with
+            # this method
             error = StatechartError(
                 f"anchor_head {move.head!r}: reclaim moved a head that is"
                 f" {head.state}, and the method checks only a claimed one"
@@ -1149,8 +1020,8 @@ class EstateAnchor:
     def _reclaimed(
         self, anchor: Anchor, head: ClaimedHead, estate_id: str, claimed_actor: str
     ) -> tuple[Anchor, Reclaimed]:
-        """`reclaim`'s checks of the claim file and the registry, and the
-        anchor and the ledger entry it writes."""
+        """`reclaim`'s checks of the claim file and registry, and the anchor and ledger entry
+        it writes."""
         claim = self.read_claim(head.claim_id)
         if claim is None:
             raise EngineError(
@@ -1159,11 +1030,8 @@ class EstateAnchor:
                 " written before the head moves, so this state is unreachable without"
                 " something deleting it (period-model ss1.3)"
             )
-        # the claim's BODY must be what its NAME binds: the id is derived
-        # from {prev_seal_digest, next_period, target_root}, so a swapped
-        # canonical body under the head's filename recomputes to a
-        # different id -- and a reclaim that trusted it would rewrite the
-        # head to a lineage this claim id never bound (ss1.3)
+        # the claim's body must be what its name binds: the id derives from {prev_seal_digest,
+        # next_period, target_root}, so a swapped body recomputes to another id (ss1.3)
         derived = claim_id_for(
             prev_seal_digest=claim.prev_seal_digest,
             next_period=claim.next_period,
@@ -1222,12 +1090,9 @@ class EstateAnchor:
         return updated, moved
 
     def finalize(self, period_id: int) -> Anchor:
-        """Period 1's finalize CAS, performed immediately after its segment
-        lands (ss1.3) -- a sixth genesis step of its own, with a recovery
-        row for the crash between segment and finalize.
+        """Period 1's finalize CAS, performed right after its segment lands (ss1.3).
 
-        Idempotent: a re-run over an already-durable row writes nothing, so
-        resume may perform it without knowing whether genesis did."""
+        Idempotent: an already-durable row writes nothing, so resume may call it."""
         anchor = self.require()
         row = anchor.row(period_id)
         if row is None:
@@ -1260,11 +1125,10 @@ class EstateAnchor:
     def close_period(
         self, *, estate_id: str, period_id: int, root: Path, seal_digest: str
     ) -> Anchor:
-        """`open -> closed`: the THIRD write of the seal sequence (ss3).
+        """`open -> closed`: the third write of the seal sequence (ss3).
 
-        Idempotent on a head already closed at this digest, because
-        recovery performs exactly this CAS when the record landed and the
-        head did not (PR-02b)."""
+        Idempotent on a head already closed at this digest, because recovery performs this CAS
+        when the record landed and the head did not (PR-02b)."""
         anchor = self.require(estate_id)
         head = anchor.head
         if isinstance(head, ClosedHead) and head.period_id == period_id:
@@ -1312,11 +1176,9 @@ class EstateAnchor:
     ) -> Claim:
         """`closed -> claimed(claim_id, target_root)`, as one CAS (ss1.3).
 
-        **Idempotent on `claim_id`**: the same `(seal, next_period, root)`
-        may resume its own claim after a crash, because identity is the
-        claim and not the process. A DIFFERENT `claim_id` against the same
-        seal refuses, naming the holder -- overriding that is `estate
-        reclaim --force`, the one path here that can fork a lineage."""
+        Idempotent on `claim_id`: the same `(seal, next_period, root)` resumes its own claim
+        after a crash. A different `claim_id` against the same seal refuses, naming the holder;
+        `estate reclaim --force` overrides it."""
         anchor = self.require(estate_id)
         claim_id = claim_id_for(
             prev_seal_digest=seal_digest, next_period=next_period, target_root=target_root
@@ -1339,8 +1201,8 @@ class EstateAnchor:
         )
         if isinstance(head, ClosedHead) and head.seal_digest != seal_digest:
             raise EngineError(cannot)
-        # checked before the claim file is written, so a refusal leaves both
-        # as they were: anchor_head.03 from `closed`, .06 from `claimed`
+        # checked before the claim file is written: anchor_head.03 from `closed`, .06 from
+        # `claimed`
         move = _Move(self.dir, "claim_successor", anchor)
         move.post(move.head, {"head_not_closed": cannot})
         claim = Claim(
@@ -1366,13 +1228,9 @@ class EstateAnchor:
         return claim
 
     def open_claimed(self, *, claim_id: str, period_id: int, root: Path) -> Anchor:
-        """`claimed -> open`, performed after the first `segment` record of
-        the new period is durable -- and carrying the successor's registry
-        row in the SAME write (ss1.3, PR-02c).
-
-        Never before: a crash between an authoritative row and the segment
-        it describes leaves estate-wide readers pointed at a period that
-        has none."""
+        """`claimed -> open`, after the new period's first `segment` record is durable, carrying
+        the successor's registry row in the same write (ss1.3, PR-02c). It never runs earlier,
+        or a crash would leave a row for a period with no segment."""
         anchor = self.require()
         head = anchor.head
         if isinstance(head, OpenHead) and head.period_id == period_id:
@@ -1421,8 +1279,7 @@ class EstateAnchor:
 
 
 def spell_head(head: OpenHead | ClosedHead | ClaimedHead) -> str:
-    """A head as a refusal names it: its state and what it carries, so a
-    `claimed` head names the claim and the root that holds it (PR-01)."""
+    """A head as a refusal names it: its state and what it carries (PR-01)."""
     if isinstance(head, OpenHead):
         return f"open(period {head.period_id}, {head.root})"
     if isinstance(head, ClosedHead):
@@ -1431,12 +1288,8 @@ def spell_head(head: OpenHead | ClosedHead | ClaimedHead) -> str:
 
 
 def _check_head_state(path: Path, payload: Mapping[str, Any]) -> None:
-    """A retired head state refuses BEFORE the anchor is parsed (DL-138).
-
-    Pydantic meets an unknown discriminator tag with "input tag 'adopting'
-    found using 'state' does not match any of the expected tags", which
-    tells an operator holding a pre-DL-138 anchor nothing about what they
-    hold or why it stopped being readable."""
+    """A retired head state refuses before the anchor is parsed (DL-138), because pydantic's
+    unknown-tag error names neither what the operator holds nor why it is unreadable."""
     head = payload.get("head")
     state = head.get("state") if isinstance(head, Mapping) else None
     retired = RETIRED_HEAD_STATES.get(state) if isinstance(state, str) else None
@@ -1459,15 +1312,11 @@ def _holder_of(anchor: Anchor | None) -> str:
 
 @dataclass(frozen=True)
 class EstatePeriod:
-    """One resolved registry row: which period, which root holds it, and
-    what the row already says about it.
+    """One resolved registry row: the period, the root that holds it, and the row.
 
-    `archived` is the period's ARCHIVE RECEIPT when it has one (ss12,
-    DL-144): the inputs were deleted under a named retention class and the
-    attestation stands in for them. It is read whether or not the inputs
-    are still on disk, because the receipt is IRREVERSIBLE -- restoring
-    files beside one does not un-archive a period, and every reader here
-    reports the tier the receipt names."""
+    `archived` is the period's archive receipt when it has one (ss12, DL-144). It is read
+    whether or not the inputs are still on disk, because an archive is irreversible and every
+    reader reports the tier the receipt names."""
 
     period_id: int
     root: Path
@@ -1479,11 +1328,8 @@ class EstatePeriod:
 class EstateWalk:
     """One lineage, root by root, in period order.
 
-    `periods` holds an entry per registry row whose segment is durable.
-    `provisional` holds the NUMBERS of the rows that are not: ss1.3 says a
-    row is provisional until its period's first segment lands and that
-    every cross-period reader ignores it until then, so they are named
-    here rather than dropped."""
+    `periods` holds an entry per registry row whose segment is durable. `provisional` holds
+    the numbers of the others, which ss1.3 has readers ignore until the first segment lands."""
 
     anchor_dir: Path
     estate_id: str
@@ -1491,11 +1337,7 @@ class EstateWalk:
     provisional: tuple[int, ...]
 
     def roots(self) -> tuple[Path, ...]:
-        """Every root this lineage names, first appearance first.
-
-        Deduplicated, because a root that opened three periods in place is
-        one directory, and a reader that folded it once per period would
-        report every row three times."""
+        """Every root this lineage names, first appearance first, deduplicated."""
         seen: dict[Path, None] = {}
         for entry in self.periods:
             seen.setdefault(entry.root, None)
@@ -1503,45 +1345,23 @@ class EstateWalk:
 
 
 def is_anchor_dir(path: Path) -> bool:
-    """Whether `path` addresses a LINEAGE ANCHOR rather than a run root.
+    """Whether `path` addresses a lineage anchor rather than a run root.
 
-    The one predicate the estate-wide verbs read their argument with: an
-    anchor directory holds `anchor.json`, a run root holds
-    `journal.jsonl`, and ss1.1 puts the anchor outside every archivable
-    root, so the two are never one directory. A directory holding both is
-    not something this layout can produce, and `walk_estate` refuses it by
-    name rather than guessing which one the caller meant."""
+    An anchor directory holds `anchor.json` and a run root `journal.jsonl`; ss1.1 puts the
+    anchor outside every archivable root. `walk_estate` refuses a directory holding both."""
     return (Path(path) / ANCHOR_NAME).is_file()
 
 
 def registry_rows(anchor: Anchor, *, anchor_dir: Path) -> list[tuple[int, PeriodRow]]:
-    """ss1.3's archive registry as `(period, ROW)`, ascending -- the ONE
-    read of it (DL-145).
+    """ss1.3's archive registry as `(period, row)`, ascending: the one read of it (DL-145).
 
-    Two rules, and both REFUSE rather than drop, because every reader of
-    this registry answers a question about the WHOLE estate and a dropped
-    row makes a smaller estate look complete.
+    Two rules, both refusing rather than dropping, because a dropped row makes a smaller estate
+    look complete. Keys are canonical decimals only (`01` would alias `1`, as in
+    `split_run_dir`). There are no holes: rows are inserted when a root first owns a period and
+    never removed, so a gap is an edited anchor.
 
-    **Canonical decimal keys only**, the same rule `split_run_dir` reads
-    run directories by: `01` aliases `1`, and two keys naming one period
-    would put two roots in one place.
-
-    **No holes.** A row is INSERTED when a root first owns a period and
-    never removed, so the keys of a registry this binary wrote are 1..max
-    with no gap. A gap is an edited anchor.
-
-    Provisional rows are RETURNED, not filtered: whether a row whose
-    segment is not yet durable counts is the caller's question (the walk
-    names them, the retention plan skips them), and a shared reader that
-    answered it would be deciding for both.
-
-    `anchor_dir` names the file in every refusal. It is the caller's
-    because the anchor MODEL does not carry its own path, and a refusal
-    that could not say which anchor is wrong sends nobody anywhere. The
-    lenient second reader this replaced silently dropped a non-canonical
-    key and had no hole rule at all, so an edited anchor made the walk
-    refuse and the retention plan run over a smaller estate -- one
-    registry, two answers, and the deletion side was the lenient one."""
+    Provisional rows are returned; the walk names them and the retention plan skips them.
+    `anchor_dir` names the file in every refusal, because the model carries no path."""
     rows: list[tuple[int, PeriodRow]] = []
     for key, row in anchor.periods.items():
         if not key.isdigit() or str(int(key)) != key:
@@ -1562,42 +1382,23 @@ def registry_rows(anchor: Anchor, *, anchor_dir: Path) -> list[tuple[int, Period
 
 
 def walk_estate(anchor_dir: Path) -> EstateWalk:
-    """ss1.3's archive registry, read as a lineage: every period this
-    estate holds, in period order, with the root that holds it (PR-02f).
+    """ss1.3's archive registry as a lineage: every period this estate holds, in order, with
+    its root (PR-02f). `audit`, `journal`, `runs` and `estate prune` take their roots from
+    here, so none can silently report a smaller estate.
 
-    **One walk, four verbs.** `audit`, `journal`, `runs` and `estate
-    prune` each gained an estate-wide mode and all four take their roots
-    from here. Four private walks would each grow their own idea of what a
-    missing root means, and the one that decided "skip it" would report an
-    estate smaller than the estate -- the silent loss this project refuses
-    everywhere else.
+    A provisional row (genesis's, `segment_durable: false`) is ignored and reported in
+    `provisional`, never refused. Every other row must resolve or the walk refuses by name,
+    naming the period, the root and why: a missing root, no sentinel, an unreadable sentinel,
+    another estate, or a missing segment.
 
-    **A provisional row is ignored and NAMED, never skipped quietly.**
-    ss1.3 inserts genesis's row before any segment exists and marks it
-    `segment_durable: false`; every cross-period reader ignores it until
-    the finalize CAS flips it. That is the spec, so such a row is not a
-    refusal -- it is reported in `provisional`, and the verbs say so.
-
-    **Every other row must resolve, or the walk refuses BY NAME.** A root
-    that is missing, holds no sentinel, holds one this binary cannot read,
-    belongs to another estate, or does not hold the segment of the period
-    it is registered for stops the walk, naming which period, which root
-    and why. An operator who archived a root away still has the
-    single-root verbs; what they may not have is a total that quietly left
-    that root out.
-
-    The anchor is READ and never LOCKED, for the reason `plan_retention`
-    gives: a live engine holds the lineage lock for its whole process
-    lifetime, so a walk that took it could only ever run against a stopped
-    estate. The registry is append-mostly and each row is written before
-    anything relies on it, so a row this read sees is a row that stays."""
+    The anchor is read, never locked, for the reason `plan_retention` gives: a live engine
+    holds the lineage lock for its lifetime. Each row is written before anything relies on it,
+    so a row this read sees stays."""
     anchor_dir = Path(anchor_dir)
     if sentinel_path(anchor_dir).is_file():
         if not is_anchor_dir(anchor_dir):
-            # the likeliest typo of all: the RUN ROOT named where its
-            # lineage's anchor goes. Saying "no anchor here" would be true
-            # and useless; the anchor's default place is a fact this can
-            # state
+            # the likeliest typo: the run root named where the anchor goes; state the anchor's
+            # default place
             raise EngineError(
                 f"{anchor_dir} is a run ROOT, not a lineage anchor: it holds a"
                 f" `{SENTINEL_NAME}` sentinel and no `{ANCHOR_NAME}`. Name the"
@@ -1644,21 +1445,10 @@ def _prove_root(
 ) -> tuple[Path, ArchiveReceipt | None]:
     """The registry's claim about one period, checked against the disk.
 
-    Five ways it can be wrong and one refusal each, because "which root
-    holds period N" is the only thing the registry is FOR: an operator who
-    reads a total has to know it covered every period, and a reader that
-    degraded any of these to a skip would answer with a smaller estate and
-    no way to tell.
-
-    The sixth answer is the ARCHIVE (ss12, DL-144): a registered period
-    whose segment is gone because an archive deleted it, proved by the
-    receipt that licensed the deletion. Without a receipt the same disk is
-    LOSS and refuses, because accidental loss must never read as
-    archiving."""
-    # ONE spelling of "the same root" (DL-145): ss1.3 persists `root`
-    # absolute and normalized, and every reader that compares or
-    # de-duplicates one goes through `normalized_root` -- so `roots()`
-    # cannot answer with two names for one directory
+    Five wrong answers each get one refusal; none degrades to a skip. The sixth answer is the
+    archive (ss12, DL-144): the segment is gone and a receipt licensed the deletion. Without a
+    receipt the same disk is loss and refuses."""
+    # one spelling of "the same root" (DL-145): readers compare through `normalized_root`
     root = Path(normalized_root(row.root))
     where = f"period {period_id}: registry root {root}"
     if not root.is_dir():
@@ -1681,24 +1471,18 @@ def _prove_root(
             f"{where} belongs to estate {sentinel.estate_id}, and this lineage is"
             f" {stored.estate_id}: two geneses are two estates (period-model ss1.2)"
         )
-    # the receipt is proved whether or not the segment survives: DL-144
-    # makes the archive IRREVERSIBLE, so a restored input beside a receipt
-    # does not move the period back to the derivation-verified tier -- and
-    # a receipt this walk cannot prove is not a fact it may report either.
-    # `verify_archive_receipt` is the ONE door (attest.py): the sentinel's
-    # estate, the sidecar, PR-02e's consumer rule over the attestation,
-    # the digest and chain the receipt names, and -- when a file is being
-    # excused -- that the list names THAT path
+    # the receipt is proved whether or not the segment survives: DL-144 makes an archive
+    # irreversible, and an unproved receipt is not reportable. `verify_archive_receipt` is the
+    # one door (attest.py): sentinel estate, sidecar, PR-02e's consumer rule over the
+    # attestation, the digest and chain the receipt names, and that the list names an excused
+    # file
     from dsl41.attest import verify_archive_receipt
 
     segment = wal_path(root, period_id)
     try:
         receipt = verify_archive_receipt(
-            # `licensing` is belt-and-braces here and says so: ss12a's
-            # two shapes both name period N's segment, so a receipt for N
-            # always licenses THIS file. The argument is what keeps the
-            # walk correct on the day that shape rule is relaxed, and the
-            # door's own test is what pins it
+            # `licensing` is redundant while ss12a's two shapes both name period N's segment;
+            # it keeps the walk correct if that rule relaxes
             root,
             period_id,
             licensing=None if segment.is_file() else segment,
@@ -1724,8 +1508,7 @@ def _prove_root(
 
 @dataclass(frozen=True)
 class OpenedRoot:
-    """What taking possession of a root yields: who owns it, and where the
-    records go."""
+    """What taking possession of a root yields: the owner and the sentinel."""
 
     estate_id: str
     sentinel: Sentinel
@@ -1733,31 +1516,23 @@ class OpenedRoot:
 
 
 def default_anchor_dir(run_root: Path) -> Path:
-    """`<run-root>.anchor`, a SIBLING of the root and never inside it.
+    """`<run-root>.anchor`, a sibling of the root and never inside it.
 
-    ss1.1 puts the anchor outside every archivable root and names no path
-    for it, because the path is a deployment choice. This is the choice a
-    caller that made none gets: deterministic from the root, so an operator
-    who restarts with the same `--run-root` reaches the same lineage, and
-    outside the directory they archive, so `tar`ing the root never carries
-    the fence away with it. An explicit `--estate-anchor` overrides it."""
+    ss1.1 names no anchor path. This default is deterministic from the root, so a restart with
+    the same `--run-root` reaches the same lineage, and lies outside the archived directory. An
+    explicit `--estate-anchor` overrides it."""
     return run_root.parent / f"{run_root.name}.anchor"
 
 
 def check_root_unused(run_root: Path) -> None:
-    """ss1.1's UNUSED-root predicate: the whole estate surface, not the
-    sentinel alone. A root that lost only its journal.jsonl but keeps a
-    WAL, a seal, a committed period or a populated runs/ is somebody's
-    work, and claiming it would relabel foreign history or run beside
-    detached processes still writing into it. What the LAUNCHER
-    legitimately pre-stages is excluded: `catalogs/` is content-addressed
-    bundle storage and `periods/.staging/` holds candidates -- both are
-    written before genesis by design (stage_next_period).
+    """ss1.1's unused-root predicate over the whole estate surface, not the sentinel alone.
 
-    Read-only, and public for exactly that reason: the CLI proves the root
-    is claimable BEFORE it stages a bundle into it or starts a supervisor
-    against it -- both are acts on an estate this process may turn out not
-    to lead."""
+    A root keeping a WAL, a seal, a committed period or a populated runs/ is somebody's work
+    even without its journal.jsonl. What the launcher pre-stages is excluded: `catalogs/` and
+    `periods/.staging/` (stage_next_period).
+
+    It is read-only so the CLI can prove a root claimable before staging a bundle into it or
+    starting a supervisor against it."""
     leftovers = [
         directory.name
         for directory in (run_root / WAL_DIR, seal_dir(run_root))
@@ -1783,32 +1558,19 @@ def claim_root(
     estate_id: str | None = None,
     claim_id: str | None = None,
 ) -> OpenedRoot:
-    """ss1.1's SENTINEL step, under ss1.1's ownership rule.
+    """ss1.1's sentinel step, under its ownership rule. The caller holds `leader.lock`, which
+    excludes a concurrent opener.
 
-    Called with `leader.lock` already held -- the lock is what excludes a
-    concurrent opener of the same root, so the check-then-write below has
-    no window. Creating the sentinel refuses a target that already holds a
-    `journal.jsonl` of any kind -- another estate's, an earlier period of
-    this estate's, or a concurrent opener's -- unless it is this estate's
-    sentinel for this very claim, left by our own crash (PR-01c).
-
-    A physical roll passes the `claim_id` that first opened the root, so
-    "this very claim" is a fact the sentinel proves rather than one
-    inferred from `estate_id` alone. An in-place opener passes none and the
-    sentinel proves only that this estate owns this root -- which is what
-    it needs to prove, because an in-place opener takes a new claim every
-    period."""
+    It refuses a target that already holds any `journal.jsonl` unless it is this estate's
+    sentinel for this very claim, left by our own crash (PR-01c). A physical roll passes the
+    `claim_id` that first opened the root; an in-place opener passes none, and the sentinel
+    proves only that this estate owns the root."""
     existing = read_sentinel(run_root)
     occupied = existing is None and sentinel_path(run_root).exists()
     if occupied:
-        # D5, DL-138: this reader does NOT route through `read_journal`, so
-        # it carries its own tombstone. A recognised retired OPENING is told
-        # apart from unknown residue, because one says the root predates a
-        # retirement and the other says the bytes are somebody else's. The
-        # tombstone is header-ONLY: `header` was a legal opening once, and a
-        # file opening with any other kind -- a retired `result` or `effect`
-        # included -- was never a journal, so it falls to the generic
-        # refusal below.
+        # D5, DL-138: this reader does not route through `read_journal`, so it carries its own
+        # tombstone, for `header` only. A retired opening says the root predates a retirement;
+        # any other file opening was never a journal and falls to the generic refusal below.
         if opens_with_rec(sentinel_path(run_root)) == "header":
             raise EngineError(
                 f"{sentinel_path(run_root)}: opens with `header`, a RETIRED record"
@@ -1845,8 +1607,7 @@ def claim_root(
 
 
 def open_wal(run_root: Path, segment_no: int) -> Path:
-    """Make `wal/` and hand back the segment's path, with the directory
-    entry durable before anything is appended to a file inside it."""
+    """Make `wal/` durable and return the segment's path."""
     directory = run_root / WAL_DIR
     directory.mkdir(parents=True, exist_ok=True)
     os.chmod(directory, 0o700)
@@ -1860,16 +1621,12 @@ def open_wal(run_root: Path, segment_no: int) -> Path:
 class Candidate(BaseModel):
     """ss7's `candidate.json`, beside `staged_manifest.json`.
 
-    It exists because the rename to `periods/N+1/` DROPS the digest from
-    the path, and a staged-manifest byte comparison cannot stand in for it:
-    the candidate identity also binds the request's staged fields one by
-    one, and a later retry must be told WHICH differed.
+    The rename to `periods/N+1/` drops the digest from the path; the candidate binds the
+    request's staged fields one by one so a retry is told which differed.
 
-    `strict=True` (DL-168): a future ingress that builds this model from a
-    lax `model_validate` still gets the wire's own types on `stage_digest`
-    and `artifact_format_version` -- the belt beside `_read_artifact`'s
-    braces, not a substitute for them (nested `next_period` validates under
-    `StagedNextPeriod`'s own config, which is why that model is strict too)."""
+    `strict=True` (DL-168) gives the wire's types on a lax `model_validate`, beside
+    `_read_artifact`'s strict parse; nested `next_period` uses `StagedNextPeriod`'s own
+    strictness."""
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
@@ -1884,21 +1641,16 @@ def stage_period(
     catalog: CatalogIR,
     profile: RuntimeProfile,
 ) -> StagedManifest:
-    """Materialize period 1's inputs and pin its identity (period-model
-    ss1.1, DL-130) -- the self-contained artifact DL-66 asked for, now
-    content-addressed.
+    """Materialize period 1's inputs and pin its identity (period-model ss1.1, DL-130; DL-66).
 
-    `catalogs/<source_bundle_hash>/` holds the POST-PLACEHOLDER source this
-    run loaded, byte-exact (render_preserve is F1), beside `sources.json`;
-    the directory is addressed by those very bytes, so a relaunch on
-    unchanged inputs reuses it and never rewrites it. The engine installs
-    the committed `periods/000001/manifest.json` at genesis, because
-    `baseline_id` and `first_index` are its to know, not the launcher's.
+    `catalogs/<source_bundle_hash>/` holds the post-placeholder source, byte-exact (F1),
+    beside `sources.json`, addressed by those bytes, so a relaunch reuses it. The engine
+    installs the committed `periods/000001/manifest.json` at genesis, because `baseline_id`
+    and `first_index` are its to know.
 
-    The original paths are recorded because `catalog_hash` covers
-    `SourceSpan.file`: byte-exact replay against a relocated copy still
-    needs them (relocation-independent hashing is a DELIBERATE defer -- it
-    orphans every existing journal's resume gate)."""
+    Original paths are recorded because `catalog_hash` covers `SourceSpan.file`. Relocation-
+    independent hashing is deliberately not built: it would orphan every journal's resume
+    gate."""
     sources = [SourceFile(path=jf.file, text=render_preserve(jf)) for jf in parsed]
     return stage_manifest(
         catalog,
@@ -1909,11 +1661,8 @@ def stage_period(
 
 
 def staged_next_from(staged_manifest: StagedManifest) -> StagedNextPeriod:
-    """`StagedManifest` -> the client-proposal half, DERIVED from the
-    model's own fields (DL-137): this projection had four spellings --
-    one hand-listed here, one derived in attest, two reflection rebuilds
-    in the CLI -- and which fields cross from launcher-pin
-    to client-proposal is one fact."""
+    """`StagedManifest` -> the client-proposal half, derived from the model's fields
+    (DL-137)."""
     return StagedNextPeriod(
         **{name: getattr(staged_manifest, name) for name in StagedNextPeriod.model_fields}
     )
@@ -1922,18 +1671,14 @@ def staged_next_from(staged_manifest: StagedManifest) -> StagedNextPeriod:
 def stage_next_period(
     run_root: Path, *, staged_manifest: StagedManifest, crash_point: CrashPoint = no_crash
 ) -> StagedNextPeriod:
-    """ss7's staging, second step: `staged_manifest.json` and
-    `candidate.json` under `periods/.staging/<stage_digest>/`.
+    """ss7's staging, second step: `staged_manifest.json` and `candidate.json` under
+    `periods/.staging/<stage_digest>/`.
 
-    The bundle is the FIRST step and is `period.write_bundle`'s -- two
-    sibling destinations cannot be renamed into place at once, and the
-    bundle is content-addressed, so a repeat is idempotent and a concurrent
-    client writing the same bytes is harmless.
-
-    Nothing here is the engine's. `period_id`, `segment_no`, `baseline_id`,
-    `clock_domain` and `first_index` are derived at the boundary and are
-    excluded from `stage_digest` by construction (`StagedNextPeriod`), so a
-    retry that closes at a different index stages the same identity."""
+    The bundle is the first step and is `period.write_bundle`'s: two sibling destinations
+    cannot be renamed in at once, and a repeat is idempotent. `period_id`, `segment_no`,
+    `baseline_id`, `clock_domain` and `first_index` are derived at the boundary and excluded
+    from `stage_digest` (`StagedNextPeriod`), so a retry closing at another index stages the
+    same identity."""
     check_manifest_self_consistent(staged_manifest, STAGED_MANIFEST_NAME)
     staged = staged_next_from(staged_manifest)
     directory = staging_dir(run_root, staged.stage_digest)
@@ -1963,12 +1708,10 @@ def staged_bytes_for(
 ) -> StagedManifest | None:
     """The staged bytes `stage_digest` names, wherever they now live.
 
-    The rename to `periods/N+1/` moves them OUT of `periods/.staging/`, and
-    a retry after an install-before-seal crash must still validate exactly
-    those bytes -- which is why the install keeps `staged_manifest.json`
-    beside `manifest.json` and carries its own `candidate.json` (ss7). The
-    installed directory is consulted only when its candidate NAMES this
-    digest, so a stale install is never read as this request's staging."""
+    The rename to `periods/N+1/` moves them out of `periods/.staging/`; the install keeps
+    `staged_manifest.json` and `candidate.json` so a retry after an install-before-seal crash
+    validates the same bytes (ss7). The installed directory counts only when its candidate
+    names this digest."""
     manifest = read_staged_manifest(staging_dir(run_root, stage_digest))
     if manifest is not None:
         return manifest
@@ -1994,28 +1737,16 @@ _ArtifactModel = TypeVar("_ArtifactModel", bound=BaseModel)
 
 
 def _read_artifact(path: Path, model: type[_ArtifactModel]) -> _ArtifactModel | None:
-    """Read and validate one closed artifact, or None when this path holds
-    none. A field with a construction default (`artifact_format_version`)
-    would otherwise take that default silently on an artifact that never
-    carried it (DL-157), so the read side asks the wire to prove the field
-    before construction runs. Writers still stamp the default; only the
-    read side checks.
+    """Read and validate one closed artifact, or None when this path holds none.
 
-    Construction itself parses `raw` a second time, strict in the JSON
-    sense (DL-168) -- `model_validate(payload)` on the already-decoded dict
-    would coerce a wire `true` into `1` on any int field, and the digest
-    computed afterward hashes the coerced value, so nothing catches it. The
-    double parse is cheap and has `read_period_manifest`'s
-    `Manifest.model_validate_json(raw, strict=True)` as precedent; a
-    call-time `strict=True` cascades into every nested field the way a
-    model's own `strict=True` config does not.
+    The read side requires `artifact_format_version` on the wire, so a construction default
+    never fills it in (DL-157). Construction parses `raw` again, strict JSON (DL-168):
+    `model_validate` on the decoded dict would coerce a wire `true` to `1`, and a call-time
+    `strict=True` cascades into nested fields where a model's config does not.
 
-    `decode(raw)` running FIRST is load-bearing, not incidental ordering:
-    pydantic's own JSON parser accepts a duplicate object key (last value
-    wins) where `decode` refuses one (PR-12), so `require_artifact_version`
-    above always inspects the SAME payload `model_validate_json` goes on to
-    validate. Dropping the first parse as "redundant now that pydantic
-    parses too" would reopen PR-12 silently."""
+    `decode(raw)` runs first because pydantic's JSON parser accepts a duplicate key where
+    `decode` refuses it (PR-12), so the version check and the validation see the same
+    payload."""
     raw = read_or_none(path)
     if raw is None:
         return None
@@ -2025,9 +1756,7 @@ def _read_artifact(path: Path, model: type[_ArtifactModel]) -> _ArtifactModel | 
             raise BoundaryRefusal(f"{path}: not a JSON object")
         require_artifact_version(payload)
         if issubclass(model, StagedManifest):
-            # the committed manifest's completeness rule, at staged ingress
-            # too: a staged pin missing `runtime_profile.semantics` used to
-            # commit with a restored `{}` (DL-252)
+            # the committed manifest's completeness rule applies at staged ingress too (DL-252)
             require_manifest_fields(payload, model, where=str(path))
         return model.model_validate_json(raw, strict=True)
     except (CanonError, ValidationError) as exc:
@@ -2039,11 +1768,9 @@ def _read_artifact(path: Path, model: type[_ArtifactModel]) -> _ArtifactModel | 
 def load_bundle_catalog(
     run_root: Path, source_bundle_hash: str, *, permit_unknown: bool = False
 ) -> CatalogIR:
-    """Any period's catalog, loaded from the immutable bundle this root
-    holds -- the ONE loader (DL-137): staging validation and audit both
-    parse the same way or `catalog_hash` v2 cannot bind them. Parsed under
-    the ORIGINAL paths `sources.json` records, because the hash covers spans
-    and a span names its file."""
+    """Any period's catalog, loaded from the immutable bundle this root holds: the one loader
+    (DL-137), shared by staging validation and audit. It parses under the original paths
+    `sources.json` records, because the hash covers spans."""
     sources: Sequence[SourceFile] = bundle_sources(run_root, source_bundle_hash)
     try:
         return lower_catalog(
@@ -2061,15 +1788,9 @@ def load_bundle_catalog(
 def load_staged_catalog(
     run_root: Path, staged: StagedManifest, *, permit_unknown: bool = False
 ) -> CatalogIR:
-    """C2, loaded from EXACTLY the staged bytes `stage_digest` names (ss7
-    phase 1).
-
-    Parsed under the ORIGINAL paths the bundle's `sources.json` records,
-    not under the stored copies' names: `catalog_hash` v2 covers spans and
-    a span names its file, so parsing the copies would produce a catalog
-    that could never hash back to the pin. That is also what lets an engine
-    validate a candidate on a host where the original files do not
-    exist."""
+    """C2, loaded from exactly the staged bytes `stage_digest` names (ss7 phase 1), under the
+    original paths `sources.json` records, so it hashes back to the pin on a host without the
+    original files."""
     return load_bundle_catalog(run_root, staged.source_bundle_hash, permit_unknown=permit_unknown)
 
 
@@ -2077,25 +1798,19 @@ def load_staged_catalog(
 
 
 def externally_requested_attempts(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Every externally requested ATTEMPT in this segment that reached a
-    durable decision (ss9).
+    """Every externally requested attempt in this segment that reached a durable decision (ss9).
 
-    "Attempt", not "mutation": the frozen exact-retry promise covers a
-    journaled REJECTION and an applied no-op as much as a state change, so
-    a `rejected` CAS loser two seconds ago holds the gate exactly as an
-    applied `STARTJOB` would. External is `expect is not None` -- the ss6
-    mandate is what an external door carries and an engine-side injection
-    never does -- and `host` commands are included by the same test."""
+    An attempt, not a mutation: the exact-retry promise covers a journaled rejection and an
+    applied no-op, so a recent `rejected` CAS loser holds the gate as an applied `STARTJOB`
+    would. External means `expect is not None` (the ss6 mandate an engine-side injection never
+    carries); `host` commands count by the same test."""
     decided = {
         record["index"]
         for record in records
         if record.get("rec") == "decision" and isinstance(record.get("index"), int)
     }
-    # an ATTEMPT carries its number under `seq` and a DECISION under `index`
-    # -- one is the subscribe cursor and the other is the attempt's own
-    # number, and a decision shares its attempt's (DL-89). Reading the wrong
-    # key here is silent: the join is empty, so every gate passes and the
-    # horizon protects nothing.
+    # an attempt carries its number under `seq` and a decision under `index`, which shares the
+    # attempt's (DL-89); the wrong key empties the join and the horizon protects nothing
     return [
         dict(record)
         for record in records
@@ -2110,18 +1825,13 @@ def retry_horizon_gate(
 ) -> ForcedGate | None:
     """ss9's soft gate, and ss3.1's truth table for it.
 
-    Observed age >= horizon, or no externally requested attempt with a
-    durable decision in the period (age = infinity) -> the gate passes and
-    `forced_gate` is null WHATEVER `force_seal` says, so an unnecessary
-    `--force-seal` is recorded in `boundary_request` and engages nothing
-    (PR-30). Below the horizon, `force_seal: false` refuses and
-    `force_seal: true` commits with the gate's output recorded -- so the
-    log alone shows a forced boundary.
+    Observed age >= horizon, or no externally requested attempt with a durable decision (age =
+    infinity): the gate passes and `forced_gate` is null whatever `force_seal` says, so an
+    unnecessary `--force-seal` engages nothing (PR-30). Below the horizon, `force_seal: false`
+    refuses and `force_seal: true` commits with the gate's output recorded.
 
-    The horizon is read from the CLOSING period's committed manifest by the
-    caller, never from an ambient setting: the gate protects retries of
-    requests admitted under C1, and the staged C2 profile has no say
-    (PR-47e)."""
+    The caller reads the horizon from the closing period's committed manifest (PR-47e); the
+    staged C2 profile has no say."""
     attempts = externally_requested_attempts(records)
     if not attempts:
         return None
@@ -2151,11 +1861,10 @@ def seal_fingerprint(
     force_seal: bool,
     claimed_actor: str | None,
 ) -> str:
-    """ss2.2: the request's fingerprint over the COMPLETE envelope.
+    """ss2.2: the request's fingerprint over the complete envelope.
 
-    Two requests with one `request_id` and one `next_period` but different
-    `force_seal` or actor COLLIDE: force is an authorization and the actor
-    is attribution, and neither may be swapped under a retry."""
+    Requests differing only in `force_seal` or actor collide: force is an authorization and the
+    actor is attribution, and neither may be swapped under a retry."""
     return hash_over(
         {
             "baseline_id": baseline_id,
@@ -2173,12 +1882,7 @@ def seal_fingerprint(
 
 @dataclass(frozen=True)
 class StagedContext:
-    """Every fact ss7 phase 1 reads, and nothing else.
-
-    "Pure" means exactly that. Draft 17's signatures named two parameters
-    for a function that had to read seven things, which invited an
-    implementation on filesystem lookups and engine globals that passes
-    every functional case and races."""
+    """Every fact ss7 phase 1 reads, and nothing else; phase 1 is pure over it."""
 
     staged: StagedNextPeriod
     staged_bytes: StagedManifest
@@ -2194,14 +1898,10 @@ class StagedContext:
 
 
 def validate_staged(ctx: StagedContext) -> Classification:
-    """ss7 phase 1, at readiness, BEFORE the barrier. No seal, no T.
+    """ss7 phase 1, at readiness, before the barrier. No seal, no T.
 
-    A failure here refuses while C1 is still open and correct, which is the
-    whole point of running it first: draft 15 let an opener fence a foreign
-    root and commit period 1 without ever running C2's readiness, so an
-    unsupported artifact version or a failing preflight surfaced only when
-    period 2 refused to open -- a committed, unopenable boundary with the
-    old engine already fenced."""
+    A failure refuses while C1 is still open and correct, so no committed boundary is left
+    unopenable."""
     staged, bytes_ = ctx.staged, ctx.staged_bytes
     for name, value in (
         ("the candidate", staged.artifact_format_version),
@@ -2224,9 +1924,8 @@ def validate_staged(ctx: StagedContext) -> Classification:
             f" ({'; '.join(disagree)}): the engine validates exactly the staged"
             " bytes the fingerprint names (period-model ss7)",
         )
-    # the version BEFORE the hash: the catalog hash covers `ir_version`, so a
-    # candidate an older build staged would otherwise read as a tampered
-    # bundle rather than as the version it is (DL-253)
+    # the version before the hash: the catalog hash covers `ir_version`, so an older build's
+    # candidate would read as a tampered bundle (DL-253)
     if staged.state_machine_version != ctx.state_machine_version:
         raise BoundaryRefusal(
             f"the candidate names state_machine_version {staged.state_machine_version} and"
@@ -2270,12 +1969,11 @@ def validate_staged(ctx: StagedContext) -> Classification:
 
 
 def preflight_errors(catalog: CatalogIR, profile: RuntimeProfile, *, at: datetime) -> list[str]:
-    """ERROR-severity preflight codes over `catalog`/`profile` (one string
-    per finding, `code` or `code (job)`): the live boundary check's own
-    read of a SUCCESSOR catalog (`validate_staged`, period-model ss10.1)
-    and the offline sealer's read of the CLOSING one
-    (`cli_estate._offline_seal`, DL-240) share this, so the two gates
-    cannot drift apart over what counts as a refusal."""
+    """ERROR-severity preflight codes over `catalog`/`profile`, one string per finding
+    (`code` or `code (job)`).
+
+    `validate_staged` (period-model ss10.1) and the offline sealer
+    (`cli_estate._offline_seal`, DL-240) share it."""
     from dsl41.runner_preflight import preflight
 
     return [
@@ -2286,10 +1984,8 @@ def preflight_errors(catalog: CatalogIR, profile: RuntimeProfile, *, at: datetim
             as_machine=frozenset(profile.as_machine),
             start=at,
             default_tz=profile.default_tz,
-            # the profile cannot spell "no map" -- an absent --timezone-map is
-            # an EMPTY table on it, and passing that dict on would retire
-            # SEM-35's unique-city rung for the base zone AND for every
-            # per-job zone, refusing a boundary the engine runs (DL-151/DL-163)
+            # the profile cannot spell "no map": an empty table would retire SEM-35's
+            # unique-city rung everywhere (DL-151/DL-163), so `tz_aliases_of` maps it to None
             tz_aliases=tz_aliases_of(profile),
             semantics=switches_of(profile),
         )
@@ -2298,32 +1994,23 @@ def preflight_errors(catalog: CatalogIR, profile: RuntimeProfile, *, at: datetim
 
 
 def _check_request_id(ctx: StagedContext) -> None:
-    """ss2.2: `request_id` collides across the WHOLE period, not only
-    seal-to-seal.
+    """ss2.2: `request_id` collides across the whole period, not only seal to seal.
 
-    One `request_id`, one command (`control-protocol.md` ss3) -- so an
-    ordinary `STARTJOB` R and a `seal` R cannot both name authoritative
-    decisions (PR-30c)."""
+    One `request_id`, one command (`control-protocol.md` ss3, PR-30c)."""
     try:
         prior = ctx.decision_index.lookup(ctx.boundary_request.request_id, ctx.request_fingerprint)
     except RequestCollision as exc:
-        # the ordinary path: an id already spent on a DIFFERENT command, so
-        # the index refuses before it can answer. Re-raised in this rule's
-        # own words, because "reuse an id only for an exact retry" does not
-        # tell a sealer which of its two ids is the problem
+        # an id already spent on a different command; re-raised in this rule's words
         raise BoundaryRefusal(
             f"request_id {ctx.boundary_request.request_id} already names another command"
             f" in this period ({exc}): one request_id, one command -- an ordinary"
             " STARTJOB and a seal cannot both name authoritative decisions"
             " (control-protocol ss3, PR-30c)",
         ) from exc
-    # unreachable: a seal is decided by its `seal` record and never enters the
-    # DecisionIndex (only the ordinary admission path and replay write to it),
-    # and the index stores `runner_admission.fingerprint` values while this
-    # lookup passes `seal_fingerprint`, a different shape. `lookup` returns a
-    # prior only on EQUAL fingerprints, so an id spent on another command
-    # raises `RequestCollision` above and this arm needs a sha256 collision
-    if prior is not None:  # pragma: no cover -- see above
+    # unreachable: a seal never enters the DecisionIndex, which stores
+    # `runner_admission.fingerprint` values, and `lookup` returns a prior only on equal
+    # fingerprints; this arm needs a sha256 collision
+    if prior is not None:  # pragma: no cover
         raise BoundaryRefusal(
             f"request_id {ctx.boundary_request.request_id} already decided at index"
             f" {prior.index} in this period: a seal is a command like any other"
@@ -2333,14 +2020,10 @@ def _check_request_id(ctx: StagedContext) -> None:
 
 @dataclass(frozen=True)
 class BoundaryContext:
-    """ss7 phase 2's context: phase 1's facts plus everything the cutoff
-    produced.
+    """ss7 phase 2's context: phase 1's facts plus what the cutoff produced.
 
-    `candidate_sidecar` and `candidate_record` are absent, deliberately.
-    Phase 2's checks split at the sidecar because its `classification`
-    field IS phase 2's output: the classifier has to run BEFORE there is a
-    sidecar to put it in. `validate_boundary` is the half that runs first
-    and returns the map; `check_candidate` is the half that reads the
+    It holds no candidate sidecar or record: the sidecar's `classification` is phase 2's
+    output, so `validate_boundary` runs first and returns it, and `check_candidate` reads the
     document built from it."""
 
     staged: StagedContext
@@ -2351,18 +2034,12 @@ class BoundaryContext:
 
 
 def validate_boundary(ctx: BoundaryContext) -> Classification:
-    """ss7 phase 2's first half, after ss6 step 6 and before the sidecar it
-    will be written into.
+    """ss7 phase 2's first half, after ss6 step 6 and before the sidecar.
 
-    The classifier runs AGAIN and **its output is the committed
-    classification** -- by construction, because this is where the map the
-    sidecar carries comes from. The barrier's own admissions and any
-    reconciliation injections may have created executions or latent intent
-    phase 1 never saw; an implementation that re-ran only enough to reject
-    R and committed the stale phase-1 map would carry a seal whose A
-    assumptions omit a latent case the barrier created, and fail audit
-    (PR-28a). Deriving it here rather than comparing it afterwards is the
-    difference between an enforced rule and a tautology."""
+    The classifier runs again and its output is the committed classification. The barrier's
+    admissions and reconciliation injections may have created executions or latent intent that
+    phase 1 never saw; committing the stale phase-1 map would omit an A assumption and fail
+    audit (PR-28a)."""
     if not (ctx.at == ctx.post_barrier_state.now):
         raise BoundaryRefusal(
             f"the carried state is not at the cutoff ({ctx.post_barrier_state.now} vs"
@@ -2383,11 +2060,9 @@ def validate_boundary(ctx: BoundaryContext) -> Classification:
 
 
 def check_candidate(ctx: BoundaryContext, *, sidecar: Seal, record: Mapping[str, Any]) -> None:
-    """ss7 phase 2's second half: the checks that read the candidate
-    DOCUMENT, over in-memory models.
-
-    A failure here refuses the commit; C1 has advanced and is still open,
-    and the caller's `abort_boundary` puts admission back."""
+    """ss7 phase 2's second half: the checks that read the candidate document, over in-memory
+    models. A failure refuses the commit and the caller's `abort_boundary` restores
+    admission."""
     if ctx.committed.first_index != sidecar.closes_at_index + 1:
         raise BoundaryRefusal(
             f"the opening's first_index {ctx.committed.first_index} is not"
@@ -2409,34 +2084,23 @@ def check_candidate(ctx: BoundaryContext, *, sidecar: Seal, record: Mapping[str,
             f" T {ctx.at.isoformat()}): C1 owns every tick <= T and C2 every tick after"
             " it (period-model ss6)",
         )
-    # phase 3's load, over the in-memory candidates: an opening that only
-    # validated at resume would commit a boundary nothing can open
+    # phase 3's load over the in-memory candidates, so the boundary is openable before it commits
     open_from_seal(sidecar, expected_digest=sidecar.digest, manifest=ctx.committed_manifest)
 
 
 def carried_outbox(
     opened: OpenedRuntime | None, *, at: datetime, machines: Executor | None = None
 ) -> Outbox:
-    """The intents and applied bindings a period opens HOLDING (ss3.5).
+    """The intents and applied bindings a period opens holding (ss3.5).
 
-    `outbox_pending` alone is not the whole carry: an APPLIED SPAWN for a
-    still-live run is not pending, and an opener that restored only the
-    pending half would meet a bound run with no SPAWN in the outbox and
-    accept whatever identity the LIST or the spool claimed. Every `bound`
-    and `fw_watch` entry reconstructs its effect AND its applied
-    resolution, so the preflight's identity gates hold the world to run_id
-    A rather than B.
+    `outbox_pending` is not the whole carry: an applied SPAWN for a live run is not pending.
+    Every `bound` and `fw_watch` entry reconstructs its effect and its applied resolution, so
+    the preflight identity gates hold the world to the sealed run_id.
 
-    Built BEFORE the segment's own records are read, never patched in
-    afterwards: an `effect_result` in the new segment for an effect born
-    in the old one is an outcome the replay has to attach, and
-    `Outbox.resolve` refuses an outcome for an effect it never saw --
-    which is the right rule and the wrong order.
-
-    `machines` is the executor its effects run on: the resuming engine's,
-    or the outbox's own for an offline reader. A statechart error out of a
-    carried record names that record in its report, as `read_outbox` names
-    a WAL record."""
+    It is built before the segment's own records are read: `Outbox.resolve` refuses an outcome
+    for an effect it never saw. `machines` is the executor its effects run on (the resuming
+    engine's, or the outbox's own offline). A statechart error out of a carried record names
+    that record."""
     outbox = Outbox(machines)
     if opened is None:
         return outbox
@@ -2472,8 +2136,7 @@ def carried_outbox(
 
 @contextlib.contextmanager
 def _carried(what: str) -> Iterator[None]:
-    """Add `what`, a carried record, to a statechart error's report
-    (statechart-engine ss5)."""
+    """Add the carried record `what` to a statechart error's report (statechart-engine ss5)."""
     try:
         yield
     except StatechartError as exc:
@@ -2483,9 +2146,8 @@ def _carried(what: str) -> Iterator[None]:
 
 # ------------------------------------------------------- the seal record
 
-#: ss2.2's `seal` record: every field recovery needs to select the sidecar
-#: and refuse a wrong one, plus the request half that makes a live seal
-#: answerable at all.
+#: ss2.2's `seal` record: the fields recovery selects the sidecar by, plus the request half
+#: that makes a live seal answerable.
 _SEAL_SCHEMA: Final[dict[str, Any]] = {
     "estate_id": lambda v: isinstance(v, str) and bool(v),
     "period_id": lambda v: is_wire_int(v) and v >= 1,
@@ -2494,9 +2156,8 @@ _SEAL_SCHEMA: Final[dict[str, Any]] = {
     "digest": is_hash_address,
     "next_period_id": lambda v: is_wire_int(v) and v >= 2,
     "next_baseline_id": is_hash_address,
-    # the CURRENT recipe, not merely a readable one: the `seal` record is a
-    # closed artifact and holds to its sidecar's rule, which is why this is
-    # not `period.check_catalog_hash_version` (D4, DL-138)
+    # the current recipe, not merely a readable one: the `seal` record is a closed artifact,
+    # so this is not `period.check_catalog_hash_version` (D4, DL-138)
     "catalog_hash_version": lambda v: is_wire_int(v) and v == CATALOG_HASH_VERSION,
     "source": lambda v: v == "request",
     "request_id": lambda v: isinstance(v, str) and bool(v),
@@ -2507,14 +2168,12 @@ _SEAL_SCHEMA: Final[dict[str, Any]] = {
 
 
 def seal_record(seal: Seal) -> dict[str, Any]:
-    """ss2.2's record, verbatim -- the boundary's DECISION.
+    """ss2.2's record, the boundary's decision.
 
-    A `seal` request cannot be decided by an ordinary `decision` record:
-    before the seal, a crash leaves a durable "applied" for a boundary that
-    never happened; after it, records after a seal are forbidden; and not
-    at all leaves a lost response unretryable despite the promised
-    `request_id`. So the record carries the request identity, and an exact
-    retry is answered from the committed seal in the NEW period, ahead of
+    An ordinary `decision` record cannot decide a `seal` request: before the seal a crash
+    leaves a durable "applied" for a boundary that never happened, after it records are
+    forbidden, and none leaves a lost response unretryable. The record carries the request
+    identity, and an exact retry is answered from the committed seal in the new period, ahead of
     the baseline gate."""
     request = seal.boundary_request
     return {
@@ -2536,26 +2195,18 @@ def seal_record(seal: Seal) -> dict[str, Any]:
 
 
 def check_seal_record(record: Mapping[str, Any]) -> None:
-    """A `seal` must BE a ss2.2 seal: every field present with its exact
-    type, and no field this schema does not describe."""
+    """A `seal` is a ss2.2 seal: every field present with its exact type, no unknown field."""
     if record.get("rec") != "seal":
         raise EngineError(f"not a seal record: rec is {record.get('rec')!r}")
     check_record_fields(record, _SEAL_SCHEMA, where="seal record", cite="period-model ss2.2")
 
 
 def _record_disagreements(seal: Seal, record: Mapping[str, Any]) -> list[str]:
-    """Every field the ss2.2 record duplicates, compared against the
-    sidecar it names -- DERIVED (DL-145): the record the seal ITSELF would
-    write, against the record on disk, over `_SEAL_SCHEMA`'s own keys.
+    """The fields the ss2.2 record duplicates, compared against the sidecar it names.
 
-    So a key added to the schema is compared here for free. What this
-    replaced named its fields four ways -- a mirror table, three
-    hand-rolled ifs and a four-row tuple -- and every addition to ss2.2 had
-    to be remembered twice or be duplicated without ever being checked
-    (DL-137's third defect, same class).
-
-    `sidecar X vs record Y` reads off the argument order: the seal's own
-    derivation is the left side."""
+    It is derived (DL-145; DL-137's third defect): the record the seal would write against the
+    record on disk, over `_SEAL_SCHEMA`'s keys, so a new key is compared automatically. The
+    seal's own derivation is the left side of `sidecar X vs record Y`."""
     return [
         f"{key}: sidecar {mine!r} vs record {theirs!r}"
         for key, mine, theirs in disagreements(seal_record(seal), record, _SEAL_SCHEMA)
@@ -2576,17 +2227,13 @@ def executions_at(
 ) -> tuple[Execution, ...]:
     """ss3.5's discriminated lifecycle, read off the outbox and the spool.
 
-    `outbox_pending` holds intents not delivered; an APPLIED SPAWN for a
-    still-live run is not pending, so a seal that carried only the RUNNING
-    row lost `run_id`, `executor_id`, `generation` and the spool binding.
-    The three kinds come from three pieces of evidence, and none of them is
-    memory: the effect for a `pending_spawn`, `spawn.json` for a `bound`
-    run, and the first `watch_seq` lines of `watch.jsonl` for an
-    `fw_watch`.
+    An applied SPAWN for a live run is not pending, so the RUNNING row alone would lose
+    `run_id`, `executor_id`, `generation` and the spool binding. Three kinds come from three
+    pieces of evidence: the effect for a `pending_spawn`, `spawn.json` for a `bound` run, and
+    the first `watch_seq` lines of `watch.jsonl` for an `fw_watch`.
 
-    An applied SPAWN with neither file is the state ss8 forbids -- the
-    sealer waits it out (PR-27) -- and reaching here with one is a
-    refusal, not a fourth kind."""
+    An applied SPAWN with neither file is the state ss8 forbids (the sealer waits it out,
+    PR-27) and refuses here."""
     from dsl41.runner_adapters import WATCH_LOG, load_json, read_watch_log, spool_names_run
 
     out: list[Execution] = []
@@ -2604,22 +2251,16 @@ def executions_at(
                 )
             )
             continue
-        # `live_spawns` yields only `pending` and `applied` SPAWNs (its last
-        # line filters on exactly those two), and `pending` continued above,
-        # so `state` is `applied` here. It differs only if that filter widens
-        if state != "applied":  # pragma: no cover -- see above
+        # `live_spawns` yields only `pending` and `applied`, and `pending` continued above
+        if state != "applied":  # pragma: no cover
             continue
         run_dir = run_root / "runs" / f"{effect.job}.{effect.run_number}"
         run_id = _require_run_id(effect)
         if (run_dir / WATCH_LOG).exists():
-            # audit passes the per-run positional prefix: a later period's
-            # polls in the same file are ITS evidence, and an instant is
-            # not a unique log position (ss3.5), so the cut is a count.
-            # The count's authority is established by the CALLER
-            # (attest.py: the successor segment's `opens_from_seal` pins
-            # the sidecar it is read from) -- here a run that has a log but
-            # no claimed entry refuses rather than folding a stranger's
-            # progress
+            # audit passes the per-run positional prefix: a later period's polls in the same file
+            # are its evidence and an instant is not a unique log position (ss3.5), so the cut
+            # is a count. The caller establishes its authority (attest.py: `opens_from_seal`
+            # pins the sidecar); a log with no claimed entry refuses
             bound = (
                 None if watch_prefix is None else watch_prefix.get((effect.job, effect.run_number))
             )
@@ -2632,10 +2273,7 @@ def executions_at(
             log = read_watch_log(run_dir, prefix=bound)
             assert log is not None  # the file exists and the fold refuses a bad one
             if log.run_id != run_id:
-                # DL-118 at the seal: a valid log that appeared since
-                # reconciliation and names another run is a stranger's, and
-                # a seal that read its progress would relabel that
-                # stranger's state as this run's and commit it
+                # DL-118 at the seal: a log naming another run is a stranger's
                 raise BoundaryRefusal(
                     f"{effect.job}.{effect.run_number}: watch.jsonl names run_id"
                     f" {log.run_id!r} but the bound run is {run_id!r} -- refusing to"
@@ -2666,8 +2304,7 @@ def executions_at(
                 " or terminal before the seal commits, and the sealer waits (PR-27)",
             )
         if not spool_names_run(spawn, run_id=run_id):
-            # same DL-118 rule as the watch log: existence is not identity
-            # (DL-178y: `spool_names_run` is the one owner of this check)
+            # DL-118 as for the watch log: existence is not identity (DL-178y)
             raise BoundaryRefusal(
                 f"{effect.job}.{effect.run_number}: spawn.json reports run_id"
                 f" {spawn.get('run_id')!r} but the bound run is {run_id!r} -- refusing"
@@ -2691,10 +2328,7 @@ def executions_at(
 def live_spawns(outbox: Outbox, rows: Mapping[str, JobRuntime]) -> list[tuple[Effect, str]]:
     """Every SPAWN effect with a live run behind it, and its outbox state.
 
-    The liveness rule, written once: the effect's run is the row's CURRENT
-    run and that row is STARTING or RUNNING. A run that ended has its
-    lifecycle in the row, not in an execution entry; a superseded effect
-    names a run number the row moved past."""
+    Live means the effect's run is the row's current run and the row is STARTING or RUNNING."""
     out: list[tuple[Effect, str]] = []
     for effect in outbox.effects():
         if effect.kind != "SPAWN":
@@ -2709,15 +2343,12 @@ def live_spawns(outbox: Outbox, rows: Mapping[str, JobRuntime]) -> list[tuple[Ef
 
 
 def executing_jobs(outbox: Outbox, rows: Mapping[str, JobRuntime]) -> dict[str, str]:
-    """Which jobs have a live execution behind them, from the WAL ALONE --
-    `pending` or `applied` (ss10.1's executing tier).
+    """Which jobs have a live execution, `pending` or `applied`, from the WAL alone (ss10.1's
+    executing tier).
 
-    The classifier asks only this. `pending_spawn`, `bound` and `fw_watch`
-    all classify EXECUTING and no ss10 rule tells them apart, so the tier
-    needs no spool evidence -- which matters, because readiness runs BEFORE
-    the sealer has waited an unbound SPAWN out (ss8, PR-27) and a
-    classifier that needed `spawn.json` could not run there at all. The
-    SEAL artifact needs more, and `executions_at` reads the spool for it."""
+    `pending_spawn`, `bound` and `fw_watch` all classify EXECUTING (no ss10 rule separates them), and readiness runs before
+    the sealer waits out an unbound SPAWN (ss8, PR-27), so the classifier needs no spool
+    evidence. The seal artifact does, in `executions_at`."""
     return {effect.job: state for effect, state in live_spawns(outbox, rows)}
 
 
@@ -2736,11 +2367,8 @@ def _require_run_id(effect: Effect) -> str:
 
 @dataclass(frozen=True)
 class Snapshot:
-    """What the cutoff barrier hands the boundary: the estate at T.
-
-    Every field is taken AFTER ss6 step 6 and BEFORE any sidecar byte, in
-    the single-writer loop, so nothing here can move while the boundary
-    validates it."""
+    """What the cutoff barrier hands the boundary: the estate at T, taken after ss6 step 6 and
+    before any sidecar byte, in the single-writer loop."""
 
     state: SealedState
     carried: CarriedState
@@ -2753,10 +2381,8 @@ class Snapshot:
 
 @dataclass(frozen=True)
 class CommittedBoundary:
-    """A committed boundary: the three artifacts that now name each
-    other. `record` is DERIVED (DL-137): it is a pure function of the
-    seal, and a stored copy was a field that could go stale plus a
-    parameter three construction sites had to fill correctly."""
+    """A committed boundary: the three artifacts that now name each other. `record` is derived
+    from the seal (DL-137)."""
 
     seal: Seal
     manifest: Manifest
@@ -2780,15 +2406,11 @@ def commit_boundary(
     forced_gate: ForcedGate | None,
     crash_point: CrashPoint = no_crash,
 ) -> CommittedBoundary:
-    """ss6 steps 7-8 and ss3's three writes, in the one order that is the
-    durability argument.
+    """ss6 steps 7-8 and ss3's three writes, in the order that is the durability argument.
 
-    The caller has already frozen admission, drained to T, parked every FW
-    task and settled the outbox; everything here is downstream of that and
-    runs in the single-writer loop. Every non-commit exit before the `seal`
-    append raises, and the CALLER runs `abort_boundary` -- the interval is
-    the caller's to reverse, because it is the caller's flag that closed
-    admission."""
+    The caller has frozen admission, drained to T, parked every FW task and settled the outbox.
+    Every non-commit exit before the `seal` append raises, and the caller runs
+    `abort_boundary`, because its flag closed admission."""
     staged = staged_ctx.staged
     committed = staged.commit(
         estate_id=estate_id,
@@ -2830,19 +2452,15 @@ def commit_boundary(
     )
     record = seal_record(sidecar)
     target = period_dir(run_root, committed.period_id)
-    # the committed manifest is written into the STAGED directory and the
-    # directory is renamed whole, so the artifacts the boundary names are
-    # the ones it validated (ss7)
+    # the committed manifest is written into the staged directory, which is renamed whole, so
+    # the boundary names the artifacts it validated (ss7)
     plan = _prepare_install(
         run_root, staged=staged, committed_manifest=committed_manifest, crash_point=crash_point
     )
     check_candidate(context, sidecar=sidecar, record=record)
     if plan.staging is not None:
-        # the quarantine happens HERE and not while the plan was made: the
-        # interval up to the `seal` append is reversible, and moving a
-        # superseded candidate out of the way is the one destructive act in
-        # it. After this point the only remaining exits are the sidecar
-        # write and the append, and both leave the estate recoverable.
+        # quarantine runs here, not while planning: moving the old candidate is the one
+        # destructive act in the reversible interval before the `seal` append
         if plan.supersedes is not None:
             _quarantine(run_root, target, plan.supersedes)
         os.rename(plan.staging, target)
@@ -2854,11 +2472,8 @@ def commit_boundary(
     fsync_dir(run_root)  # the run root's entry for seals/ is a record too
     durable_write(str(seal_path(run_root, sidecar.period_id)), sidecar.to_bytes())
     crash_point("after_sidecar")
-    # ---- the point of no return. Once any of these bytes may have been
-    # written, reopening C1 would append commands, ticks and completions
-    # AFTER a seal line -- which recovery rightly refuses -- so every
-    # failure from here on is a fail-stop with an unknown outcome, never an
-    # abort (PR-28d).
+    # ---- the point of no return: once any of these bytes may have been written, every failure
+    # is a fail-stop with an unknown outcome, never an abort (PR-28d).
     try:
         journal.seal(record)
         crash_point("after_seal_record")
@@ -2870,10 +2485,9 @@ def commit_boundary(
         )
         crash_point("after_close_cas")
     except StatechartError:
-        # the `seal` record's fan-out runs the subscription chart, and the
-        # anchor's close CAS runs the anchor's charts (DL-336): a gap in
-        # either is an assertion failure, which stops the engine with exit 7
-        # and the record durable; resume reads the lineage (statechart-engine ss5)
+        # a gap in the subscription chart (the `seal` fan-out) or the anchor charts (the close
+        # CAS, DL-336) stops the engine with exit 7 and the record durable; resume reads the
+        # lineage (statechart-engine ss5)
         raise
     except Exception as exc:
         raise BoundaryFailStop(
@@ -2887,9 +2501,8 @@ def commit_boundary(
 
 @dataclass(frozen=True)
 class _Install:
-    """What the install step will do, decided before phase 2 and acted on
-    after it: which directory to rename in (None on the reuse path), and
-    which installed candidate it supersedes."""
+    """The install step, decided before phase 2 and acted on after it: the directory to rename
+    in (None on the reuse path) and the installed candidate it supersedes."""
 
     staging: Path | None
     supersedes: Candidate | None
@@ -2902,22 +2515,18 @@ def _prepare_install(
     committed_manifest: Manifest,
     crash_point: CrashPoint,
 ) -> _Install:
-    """Put the committed manifest where the boundary will name it, and plan
-    the install -- without performing the one destructive act in it (ss7).
+    """Put the committed manifest where the boundary will name it and plan the install,
+    without the destructive act (ss7).
 
-    Three cases, and the third is why `candidate.json` exists. The rename
-    to `periods/N+1/` drops the digest from the path, so an INSTALLED
-    candidate must carry its own identity: a retry whose `stage_digest`
-    equals it reuses the staged identity and regenerates `manifest.json`
-    from its OWN cutoff -- `first_index` is attempt output, and the first
-    attempt's 101 is the retry's 102 -- while a retry with a DIFFERENT one
-    quarantines the installed candidate and installs its own, so a stale
-    candidate is never silently selected (PR-30d)."""
+    The rename to `periods/N+1/` drops the digest from the path, so an installed candidate
+    carries its own identity (`candidate.json`). A retry with an equal `stage_digest` reuses it
+    and regenerates `manifest.json` from its own cutoff (`first_index` is attempt output); one
+    with a different digest quarantines the installed candidate and installs its own (PR-30d)."""
     target = period_dir(run_root, committed_manifest.period_id)
     installed = read_candidate(target)
     if installed is not None and installed.stage_digest == staged.stage_digest:
-        # the reuse path's own liturgy: the fresh path's four fsyncs do not
-        # apply to a directory already in place (PR-30d, PR-30g)
+        # the reuse path has its own liturgy; the fresh path's fsyncs do not apply (PR-30d,
+        # PR-30g)
         write_period_manifest(run_root, committed_manifest)
         crash_point("after_committed_manifest")
         return _Install(staging=None, supersedes=None)
@@ -2928,10 +2537,7 @@ def _prepare_install(
         )
     staging = staging_dir(run_root, staged.stage_digest)
     if read_candidate(staging) is None:
-        # readiness resolved these bytes, so this is the window between it
-        # and the install: a second client, or a retention sweep, removed
-        # the staged directory while the barrier ran. Refused, because the
-        # alternative is renaming a directory that is not there
+        # a second client or a retention sweep removed the staged directory after readiness
         raise BoundaryRefusal(
             f"{staging}: no staged candidate at this digest -- the request names bytes"
             " that were never staged (period-model ss7)",
@@ -2945,9 +2551,8 @@ def _prepare_install(
 
 
 def _quarantine(run_root: Path, target: Path, installed: Candidate) -> None:
-    """Move a superseded installed candidate out of the way, to a path that
-    cannot collide when candidates alternate S1 -> S2 -> S1 and that is
-    idempotent when the same bytes are quarantined twice (ss7, PR-30d)."""
+    """Move an outdated installed candidate to a path that survives alternating candidates
+    (S1, S2, S1) and is idempotent for the same bytes (ss7, PR-30d)."""
     manifest_bytes = (target / "manifest.json").read_bytes()
     destination = quarantine_dir(run_root, installed.stage_digest, hash_over_bytes(manifest_bytes))
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -2961,34 +2566,28 @@ def _quarantine(run_root: Path, target: Path, installed: Candidate) -> None:
 
 
 def hash_over_bytes(data: bytes) -> str:
-    """sha256 over bytes already on disk -- the one place a digest is taken
-    over stored bytes rather than over a model's canonical form."""
+    """sha256 over stored bytes, not over a model's canonical form."""
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
 @dataclass(frozen=True)
 class OpenedPeriod:
-    """The opening half of a boundary: the new segment and what seeds the
-    engine from it."""
+    """The opening half of a boundary: the new segment and what seeds the engine."""
 
     opened: OpenedRuntime
     journal: Journal
-    #: None when this root was RE-opening a period whose head had already
-    #: moved: the claim was consumed by that move and only the segment was
-    #: missing (ss11)
+    #: None when this root re-opens a period whose head already moved: the claim was consumed
+    #: and only the segment was missing (ss11)
     claim: Claim | None
 
 
 def check_opening_version(opening: CommittedNextPeriod, *, where: str) -> None:
-    """A committed boundary opens its period under the state-machine
-    version it names, and only a build that derives that version may open
-    it (period-model ss2.1, PR-17).
+    """A committed boundary opens under the state-machine version it names, and only a build
+    deriving that version may open it (period-model ss2.1, PR-17).
 
-    Every opener asks this FIRST, before it claims, writes or imports
-    anything (DL-253). The catalog hash covers `ir_version`, so a later
-    gate that compared hashes would refuse an older build's boundary as a
-    catalog that does not match, after the claim, the sentinel and the
-    import had already been written."""
+    Every opener asks this first, before it claims, writes or imports anything (DL-253): the
+    catalog hash covers `ir_version`, so a later hash gate would refuse an older build's
+    boundary after the claim and sentinel were written."""
     if opening.state_machine_version != STATE_MACHINE_VERSION:
         raise EngineError(
             f"{where}: the committed boundary opens period {opening.period_id} under"
@@ -3008,32 +2607,25 @@ def open_next_period(
     lock: Proof | None = None,
     crash_point: CrashPoint = no_crash,
 ) -> OpenedPeriod:
-    """ss7's opening half: claim the successor, write the opening segment,
-    move the head, and seed from the seal.
+    """ss7's opening half: claim the successor, write the opening segment, move the head, and
+    seed from the seal.
 
-    `at` on the opening segment IS T -- the seal's cutoff instant, not
-    restart wall time -- and every non-derived opening field comes from the
-    seal's `next_period`, which is what lets two openings of one seal be
-    byte-identical (PR-07).
+    `at` on the opening segment is T, the seal's cutoff instant, and every non-derived field
+    comes from the seal's `next_period`, so two openings of one seal are byte-identical
+    (PR-07).
 
-    `catalog` may be a CALLABLE, and then it is resolved AFTER the claim
-    and before the segment -- which is exactly where ss7 puts a physical
-    roll's import, and the roll cannot load C2 until it has imported the
-    bundle. An in-place opener passes the object it already holds and
-    nothing happens between the two.
+    A callable `catalog` is resolved after the claim and before the segment, where ss7 puts a
+    physical roll's import.
 
-    Idempotent at every step: the claim resumes on its own `claim_id`, an
-    already-written segment is verified rather than appended to, and
-    `claimed -> open` is a no-op once performed."""
+    Idempotent at every step: the claim resumes on its `claim_id`, an existing segment is
+    verified rather than appended to, and `claimed -> open` is a no-op once performed."""
     seal = committed.seal
     opening = seal.next_period
     check_opening_version(opening, where=str(run_root))
     stored = anchor.require(seal.estate_id)
     head = stored.head
-    # ss11's never-opened row: the head already says this root opened this
-    # period, and only the SEGMENT is missing. The claim was consumed when
-    # the head moved, so re-taking it would refuse -- what is left to do is
-    # write the segment the crash cost us, which is byte-identical (PR-07).
+    # ss11's never-opened row: the head says this root opened the period and only the segment
+    # is missing. The claim was consumed, so the byte-identical segment is rewritten (PR-07).
     reopening = (
         isinstance(head, OpenHead)
         and head.period_id == opening.period_id
@@ -3053,16 +2645,14 @@ def open_next_period(
     if callable(catalog):
         catalog = catalog()
     link = {"period_id": seal.period_id, "digest": seal.digest}
-    # ss1.3: a break-glass override is recorded in the anchor AND in the
-    # next `segment`. Copied here rather than consumed, so the fork stays
-    # visible in both places for the life of both artifacts
+    # ss1.3: a break-glass override is recorded in the anchor and copied into the next
+    # `segment`
     forced = pending_reclaim(stored, opening.period_id)
     path = open_wal(run_root, opening.segment_no)
     existing = path.exists()
     if existing:
         _check_existing_segment(path, opening, link, forced)
-        # a previous opener may have died between its write and its fsync:
-        # readable is not durable, and the CAS below relies on this file
+        # a previous opener may have died before its fsync; the CAS below relies on this file
         fsync_file(path)
         journal = Journal(
             path,
@@ -3091,10 +2681,8 @@ def open_next_period(
         crash_point("after_open_cas")
         opened = open_from_seal(seal, expected_digest=seal.digest, manifest=committed.manifest)
     except BaseException:
-        # the opener failed past the point where the caller gets the journal:
-        # close the descriptor, and leave the term where it is (as `detach`
-        # says), so the caller's own cleanup decides about the lock. A failing
-        # flush must not replace the error that got us here
+        # close the descriptor and leave the term (as `detach` does), so the caller's cleanup
+        # decides about the lock; a failing flush must not replace the original error
         with contextlib.suppress(OSError, ValueError):
             journal.detach()
         raise
@@ -3102,11 +2690,8 @@ def open_next_period(
 
 
 def pending_reclaim(anchor: Anchor, next_period: int) -> Reclaimed | None:
-    """The break-glass override that cleared this opening's way, or None.
-
-    The newest entry for this period, because a lineage can be reclaimed
-    more than once and the opener that gets through is the one the LAST
-    reclaim let through."""
+    """The break-glass override that cleared this opening's way, or None: the newest entry for
+    this period, since a lineage can be reclaimed more than once."""
     for entry in reversed(anchor.reclaimed):
         if entry.next_period == next_period:
             return entry
@@ -3119,16 +2704,11 @@ def _check_existing_segment(
     link: Mapping[str, Any],
     forced: Reclaimed | None = None,
 ) -> None:
-    """A segment already written by an interrupted opener is VERIFIED, not
-    appended to: a second `segment` record for one period is exactly the
-    two-candidate state I1 exists to make impossible."""
+    """Verify a segment written by an interrupted opener; a second `segment` record for one
+    period is the two-candidate state I1 forbids."""
     records = read_journal(path)
     segment = records[0]
-    # the DERIVED field set (DL-137): the old hand-written five omitted
-    # the three content hashes, catalog_hash_version and
-    # state_machine_version -- strictly weaker than
-    # `check_manifest_against_segment` for the same question, by accident
-    # rather than argument
+    # the derived field set (DL-137), as strong as `check_manifest_against_segment`
     shared = sorted(set(type(opening).model_fields) & SEGMENT_FIELDS)
     disagree = [
         f"{field}: segment {found!r} vs the boundary's {ours!r}"
@@ -3155,8 +2735,7 @@ def _check_existing_segment(
 def read_seal(run_root: Path, period_id: int) -> Seal:
     """The sidecar for `period_id`, parsed through the versioned schema.
 
-    A committed seal whose sidecar is MISSING refuses: the boundary is
-    unrecoverable, and there is nothing honest to degrade to (ss11)."""
+    A committed seal whose sidecar is missing refuses: the boundary is unrecoverable (ss11)."""
     path = seal_path(run_root, period_id)
     try:
         raw = path.read_bytes()
@@ -3172,30 +2751,24 @@ def read_seal(run_root: Path, period_id: int) -> Seal:
 
 @dataclass(frozen=True)
 class Lineage:
-    """ss11 step 3's answer: which seal this root's replay starts from, and
-    whether that seal still has to be OPENED."""
+    """ss11 step 3's answer: the seal this root's replay starts from, and whether it still has
+    to be opened."""
 
-    #: None only in period 1 before any seal exists -- draft 3 said "never
-    #: from genesis" and left a new-format estate that crashes before its
-    #: first seal with no path back
+    #: None only in period 1 before any seal exists
     seal: Seal | None
-    #: True when the seal is committed and no successor segment exists: the
-    #: boundary is done and the opening is not
+    #: True when the seal is committed and no successor segment exists
     opens_next: bool
 
     def __post_init__(self) -> None:
         if self.opens_next and self.seal is None:
-            # select_seal only sets opens_next True on the committed-seal
-            # branch (below), which always reads a seal first -- opens_next
-            # without a seal to open is a Lineage no caller of select_seal
-            # can construct (DL-171)
+            # `select_seal` sets opens_next only on the committed-seal branch, which reads a
+            # seal first (DL-171)
             raise AssertionError("opens_next requires seal (Lineage invariant, DL-171)")
 
     def target_period(self, fallback: int) -> int:
-        """period-model ss11 step 5: the period a resume of this root opens
-        into -- the newest segment's period (`fallback`, the caller's to
-        compute), unless this root holds a COMMITTED boundary no engine has
-        opened yet, in which case it is the seal's next period."""
+        """period-model ss11 step 5: the period a resume opens into: `fallback`, the newest
+        segment's period, unless a committed boundary is unopened; then the seal's next
+        period."""
         if self.opens_next:
             assert self.seal is not None  # structural: __post_init__ above
             return self.seal.next_period.period_id
@@ -3203,14 +2776,11 @@ class Lineage:
 
 
 def select_seal(run_root: Path, records: Sequence[Mapping[str, Any]]) -> Lineage:
-    """ss11 step 3: select the seal BY LINEAGE, from what this root holds.
+    """ss11 step 3: select the seal by lineage, from what this root holds.
 
-    A rolled root never holds the predecessor's WAL or `seal` record, so a
-    rule that walked to "the newest committed `seal` record" would select
-    evidence it does not have; the local `segment` is the proof. In every
-    case the sidecar's recomputed digest is verified against the digest the
-    NAMING RECORD carries, and every duplicated field with it -- a matching
-    digest proves integrity, never derivation."""
+    A rolled root never holds the predecessor's WAL or `seal` record, so the local `segment`
+    is the proof. The sidecar's recomputed digest and every duplicated field are verified
+    against the naming record; a matching digest proves integrity, never derivation."""
     committed = [record for record in records if record.get("rec") == "seal"]
     if committed:
         record = committed[-1]
@@ -3232,10 +2802,8 @@ def select_seal(run_root: Path, records: Sequence[Mapping[str, Any]]) -> Lineage
 
 
 def check_record_names_sidecar(seal: Seal, record: Mapping[str, Any], run_root: Path) -> None:
-    """Every duplicated field of the `seal` RECORD equals the sidecar's
-    (ss2.2/ss11): recovery selects the sidecar by these fields, audit
-    refuses a rewritten record before re-derivation attests the stored
-    one. One name (DL-137): this was a three-symbol forwarding chain."""
+    """Every duplicated field of the `seal` record equals the sidecar's (ss2.2/ss11): recovery
+    selects the sidecar by them, and audit refuses a rewritten record (DL-137)."""
     disagree = _record_disagreements(seal, record)
     if disagree:
         raise EngineError(
@@ -3252,19 +2820,19 @@ def act_on_head(
     estate_id: str,
     lineage: Lineage,
 ) -> Anchor:
-    """ss11 step 4: act on the head before anything is replayed.
+    """ss11 step 4: act on the head before anything is replayed. Each row repairs one crash
+    window:
 
-    Four rows, each repairing exactly one crash window:
-    `open(N, this root)` with N's `seal` record present performs the CAS
-    the crashed sealer did not; `closed` with no following segment leaves
-    the claim to the opener; `claimed` with our claim and a durable segment
-    that AGREES with the seal it opened from moves the head to `open`;
-    `claimed` with another refuses, naming the holder; and `open(1, this
-    root)` with a provisional row and a durable segment finalizes.
+    - `open(N, this root)` with N's `seal` record present performs the CAS the crashed sealer
+      did not;
+    - `closed` with no following segment leaves the claim to the opener;
+    - `claimed` with our claim and a durable segment that agrees with its seal moves the head
+      to `open`;
+    - `claimed` with another's claim refuses, naming the holder;
+    - `open(1, this root)` with a provisional row and a durable segment finalizes.
 
-    Agreement, not presence, and the check runs BEFORE the CAS -- the same
-    standard `open_next_period` holds an already-written segment to
-    (DL-145)."""
+    The segment must agree with the seal, not merely exist, and the check precedes the CAS, as
+    in `open_next_period` (DL-145)."""
     current = anchor.require(estate_id)
     head = current.head
     if (
@@ -3273,17 +2841,11 @@ def act_on_head(
         and isinstance(head, OpenHead)
         and head.period_id == lineage.seal.period_id
     ):
-        # the seal record landed and the head did not move (PR-02b). The
-        # period check is what keeps this off the neighbouring row: a head
-        # already `open` at the SUCCESSOR has moved past this seal, and its
-        # missing segment is the opener's business, not this CAS's.
-        #
-        # Fsync the CLOSING WAL first: the crashed sealer may have written
-        # the line and died before its fsync completed, so "recovery read
-        # it" proves readable, not durable -- and a CAS over a line a power
-        # cut then removes leaves a successor whose naming seal is gone.
-        # Any failure here stays fail-stopped: recovery mutates nothing it
-        # has not first made durable.
+        # the seal record landed and the head did not move (PR-02b); the period check keeps
+        # this off the neighbouring row, where a head open at the successor is the opener's
+        # business. Fsync the closing WAL first: readable is not durable, and a CAS over a line
+        # a power cut removes leaves a successor whose naming seal is gone. Any failure here
+        # stays fail-stopped.
         fsync_file(wal_path(run_root, lineage.seal.period_id))
         return anchor.close_period(
             estate_id=estate_id,
@@ -3308,15 +2870,9 @@ def act_on_head(
             )
         segment = wal_path(run_root, claim.next_period)
         if segment.exists():
-            # ONE evidence standard for the head move (DL-145). The CAS
-            # used to run on the segment's PRESENCE while `open_next_period`
-            # demands AGREEMENT -- `_check_existing_segment` first, then the
-            # CAS -- and the OPERATOR's route reaches this one: a crash
-            # between `after_opening_segment` and `after_open_cas` is
-            # repaired here, at resume, so a segment whose pins disagree
-            # with the seal moved the head and was caught afterwards.
-            # DL-142's pinned check-before-CAS order now holds on both
-            # routes.
+            # one evidence standard for the head move (DL-145): `_check_existing_segment`
+            # before the CAS, as in `open_next_period`; a crash between `after_opening_segment`
+            # and `after_open_cas` is repaired here (DL-142's check-before-CAS order)
             seal = lineage.seal
             if seal is None or seal.next_period.period_id != claim.next_period:
                 raise EngineError(
@@ -3333,9 +2889,7 @@ def act_on_head(
                 {"period_id": seal.period_id, "digest": seal.digest},
                 pending_reclaim(current, claim.next_period),
             )
-            # same readable-vs-durable rule as the close CAS above: the
-            # segment's existence justifies the head move, so the segment
-            # is made durable before the head names it
+            # readable is not durable: make the segment durable before the head names it
             fsync_file(segment)
             return anchor.open_claimed(
                 claim_id=claim.claim_id, period_id=claim.next_period, root=run_root
@@ -3349,9 +2903,7 @@ def act_on_head(
 
 # ------------------------------------------- whose root this is (DL-224)
 
-#: the causes and the remedies every root-authority refusal states. One
-#: clause for the causes: a copy and an abandoned roll target meet the
-#: same rule, so the refusal does not call the root "a copy"
+#: The causes and remedies every root-authority refusal states.
 _ROOT_REFUSAL_TAIL = (
     " The usual causes are a copy or a restore at another path, a target"
     " whose claim was reclaimed, or a roll that stopped before its claim."
@@ -3364,20 +2916,16 @@ _ROOT_REFUSAL_TAIL = (
 class RootAuthorityError(EngineError):
     """ss1.3's resume rule refused this root (DL-224).
 
-    Its own type so the lock-free pre-check can report this refusal and
-    nothing else: every other error it meets while reading belongs to the
-    locked path, which raises it in its own order and words."""
+    Its own type, so the lock-free pre-check reports this refusal and no other; the locked
+    path raises every other error in its own order and words."""
 
 
 def same_root(recorded: str, here: str) -> bool:
     """Whether a recorded root is the root at `here` (`normalized_root`).
 
-    The same when the normalized strings are equal, or when the recorded
-    path exists and is the same directory (`os.path.samefile`): a symlink,
-    a case-variant spelling or a bind mount of the recorded path is this
-    root. A copy is another directory, and a moved root's recorded path no
-    longer exists. A recorded path that cannot be stat'ed is not this
-    root."""
+    True when the normalized strings are equal or the recorded path is the same directory
+    (`os.path.samefile`): a symlink, case-variant spelling or bind mount is this root; a copy
+    is not. A recorded path that cannot be stat'ed is not this root."""
     if normalized_root(recorded) == here:
         return True
     try:
@@ -3387,14 +2935,12 @@ def same_root(recorded: str, here: str) -> bool:
 
 
 def newest_opened_period(run_root: Path) -> int | None:
-    """The `period_id` of the opening record of this root's newest OPENED
-    segment, read without repairing anything (ss1.3's OWNED half, DL-224).
+    """The `period_id` of the opening record of this root's newest opened segment, read without
+    repair (ss1.3's OWNED half, DL-224).
 
-    A newest segment whose first line is empty or torn never opened.
-    `_drop_never_opened_segment` removes such a file when an earlier
-    segment exists; this reads the same rule without the removal, from the
-    segment before it. None when no opening is readable here: the reader
-    that refuses that root is `read_journal`, later, in its own words."""
+    A newest segment whose first line is empty or torn never opened; this reads the segment
+    before it, as `_drop_never_opened_segment` does when it removes the file. None when no
+    opening is readable; `read_journal` refuses that root later."""
     segments = wal_segments(run_root)
     if not segments:
         return None
@@ -3420,10 +2966,9 @@ def _first_line(path: Path) -> bytes:
 
 
 def _never_opened(first: bytes) -> bool:
-    """Empty, or torn: no newline and not a JSON document. These are the
-    first lines `repair_tail` cuts to nothing. A line nested too deep to
-    parse counts as not a document, as `period._is_period_root_line`
-    treats one."""
+    """Empty, or torn: no newline and not a JSON document, the first lines `repair_tail` cuts
+    to nothing. A line nested too deep to parse is not a document, as in
+    `period._is_period_root_line`."""
     if first.endswith(b"\n"):
         return False
     try:
@@ -3434,8 +2979,7 @@ def _never_opened(first: bytes) -> bool:
 
 
 def _recorded_roots(anchor: Anchor) -> list[str]:
-    """Every root the anchor records: each registry row's `root`, the
-    head's `root` or `closing_root`, and a `claimed` head's
+    """Every root the anchor records: registry rows, and the head's `root`, `closing_root` or
     `target_root`."""
     head = anchor.head
     recorded = [row.root for row in anchor.periods.values()]
@@ -3449,15 +2993,13 @@ def _recorded_roots(anchor: Anchor) -> list[str]:
 
 
 def require_resume_root(anchor: Anchor, *, anchor_path: Path, run_root: Path) -> None:
-    """ss1.3's resume rule (DL-224): the anchor NAMES this root, and this
-    root OWNS the period its newest opened segment holds. Roots compare by
-    `same_root`.
+    """ss1.3's resume rule (DL-224): the anchor names this root, and this root owns the period
+    its newest opened segment holds. Roots compare by `same_root`.
 
-    NAMED is the early filter: a root no row and no head names is refused.
-    OWNED is the authoritative half: the registry row for that period names
-    this root, or, with no row yet, the head is this root's claim. A
-    misplaced restore passes the first through an older row and fails the
-    second. Read-only; the caller runs it before any repair of the root."""
+    NAMED is the early filter: a root no row or head names is refused. OWNED is authoritative:
+    the registry row for that period names this root or, with no row yet, the head is this
+    root's claim. A misplaced restore passes the first and fails the second. Read-only; the
+    caller runs it before any repair."""
     here = normalized_root(run_root)
     recorded = _recorded_roots(anchor)
     if not any(same_root(root, here) for root in recorded):
@@ -3491,24 +3033,18 @@ def require_resume_root(anchor: Anchor, *, anchor_path: Path, run_root: Path) ->
 def resume_root_refusal(
     run_root: Path, anchor_dir: Path | None, *, locked: bool = False
 ) -> EngineError | None:
-    """`require_resume_root` for a CLI route that resumes, before it stages
-    anything or wires a supervisor: the refusal, or None.
+    """`require_resume_root` for a CLI route that resumes, before it stages anything or wires a
+    supervisor: the refusal, or None.
 
-    Unlocked (`locked=False`) it reads the sentinel and `anchor.json`,
-    writes nothing, and reports only this rule's refusal
-    (`RootAuthorityError`). Any other error on the way -- a corrupt
-    sentinel or anchor, a stray `wal/` entry, an unreadable segment --
-    passes silently, as do a missing anchor and another estate's anchor:
-    `resume_run` raises each of those in its own order and words.
+    Unlocked (`locked=False`) it reads the sentinel and `anchor.json`, writes nothing, and
+    reports only `RootAuthorityError`. Any other error (corrupt sentinel or anchor, stray
+    `wal/` entry, unreadable segment, missing anchor, another estate's anchor) passes
+    silently; `resume_run` raises each in its own words.
 
-    A snapshot read without locks can be stale, so a caller that gets a
-    refusal holds the run-root lock and asks again with `locked=True`.
-    That runs `resume_run`'s own steps -- the sentinel, the anchor lock,
-    `require`, this rule -- and releases the anchor lock. Under the locks
-    nothing is swallowed: a busy anchor lock, a missing or corrupt anchor
-    and another estate's anchor are returned as the refusal too, because
-    `resume_run` would raise the same error after the caller had staged
-    and wired. Only an error that is not an `EngineError` propagates."""
+    An unlocked snapshot can be stale, so a caller that gets a refusal holds the run-root lock
+    and asks again with `locked=True`. That runs `resume_run`'s steps (sentinel, anchor lock,
+    `require`, this rule) and releases the anchor lock. Under the locks every `EngineError`,
+    busy lock included, is returned as the refusal; other exceptions propagate."""
     anchor = EstateAnchor(anchor_dir or default_anchor_dir(run_root))
     if locked:
         try:
@@ -3526,8 +3062,7 @@ def resume_root_refusal(
         return None
     try:
         sentinel = read_sentinel(run_root)
-        # read, never acquire: `acquire` creates a missing anchor
-        # directory, and a missing anchor is `require`'s refusal to make
+        # read, never acquire: `acquire` would create a missing anchor directory
         stored = None if sentinel is None else anchor.read()
         if sentinel is not None and stored is not None and stored.estate_id == sentinel.estate_id:
             require_resume_root(stored, anchor_path=anchor.path, run_root=run_root)
