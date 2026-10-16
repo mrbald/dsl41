@@ -1,11 +1,9 @@
-"""The runner verbs: execute an estate, rehearse one, read one back
-(DL-137's split).
+"""The runner verbs (DL-137): execute an estate, rehearse one, read one back.
 
-`run` and `rehearse` drive the engine -- one on the wall clock with real
-processes, one on the virtual clock with scripted adapters, both through
-the same `start_run`/`resume_run` path. `journal` and `runs` are their
-offline readers: a WAL replayed through a fresh oracle, and run history
-folded out of one or more run roots. Registered on the app in `cli.py`.
+`run` and `rehearse` drive the engine through the same `start_run`/`resume_run` path: `run` on
+the wall clock with real processes, `rehearse` on the virtual clock with scripted adapters.
+`journal` and `runs` are their offline readers: a WAL replayed through a fresh oracle, and run
+history folded out of one or more run roots.
 """
 
 from __future__ import annotations
@@ -67,40 +65,32 @@ if TYPE_CHECKING:
     from dsl41.semantics import SemanticSwitches
 
 
-# ------------------------------------------------------------------- runner (phase 11)
+# ------------------------------------------------------------------- runner
 #
-# Exit codes for the runner verbs: 0 clean (run: operator-stopped; rehearse:
-# quiescent), 1 the engine/estate failed while running (EngineError, oracle
-# refusal mid-run), 2 the run never started (preflight ERROR, resume gate,
-# unreadable scenario, unreachable socket). The control-plane verbs read the
-# same 0/1/2 and split 2 three ways on top; that half of the note went with
-# them, to cli_control.py. Exit 3 is per-verb (the house pattern, DL-184):
-# run's 3 is a committed seal boundary; rehearse's 3 is --check-cadence
-# finding deviations after a clean play. 4 is taken by the control verbs'
-# unknown outcome. 5 is retired: it was `--on-transition-violation stop` until
-# DL-353, and deployed units still list it in `RestartPreventExitStatus`,
-# so no new meaning takes it. run's 6
-# is a time-half stop (concurrency-model ss4): an engine-made input's time
-# half raised, and the engine stopped before it was logged. run's and
-# rehearse's 7 is a statechart error (docs/statechart-engine.md ss5): a declared machine hit an
-# assertion failure, and the engine stopped before any durable write of it.
-# EXIT_STATECHART_ERROR lives in state_machine.py, shared with the supervisor;
-# the units list it in `RestartPreventExitStatus`, because a restart would run
-# the same build into the same bug (deployment-runbook ss3).
+# Exit codes for the runner verbs: 0 clean (run: operator-stopped; rehearse: quiescent), 1 the
+# engine/estate failed while running (EngineError, oracle refusal mid-run), 2 the run never
+# started (preflight ERROR, resume gate, unreadable scenario, unreachable socket). The
+# control-plane verbs (cli_control.py) read the same 0/1/2 and split 2 three ways. Exit 3 is
+# per-verb (DL-184): run's 3 is a committed seal boundary; rehearse's 3 is --check-cadence
+# finding deviations after a clean play. 4 is the control verbs' unknown outcome. 5 is reserved:
+# deployed units list it in `RestartPreventExitStatus` (DL-353). run's 6 is a time-half stop
+# (concurrency-model ss4): an engine-made input's time half raised, and the engine stopped before
+# it was logged. run's and rehearse's 7 is a statechart error (docs/statechart-engine.md ss5): a
+# declared machine hit an assertion failure, and the engine stopped before any durable write of
+# it. EXIT_STATECHART_ERROR lives in state_machine.py, shared with the supervisor; the units list
+# it in `RestartPreventExitStatus`, because a restart would run the same build into the same bug
+# (deployment-runbook ss3).
 
 #: The one stderr line `run --on-transition-violation` prints, whatever its value.
 INERT_VIOLATION_OPTION = (
     "dsl41 run: --on-transition-violation is inert and is removed at"
     " the next major release; remove it from the command line"
 )
-#: `run`'s exit code for a time-half stop (`TimeHalfStop`). Listed in the
-#: units' `RestartPreventExitStatus` too: every restart would meet the same
-#: timers and stop the same way, so the engine stays down until a build
-#: that fixes the fault is deployed (deployment-runbook ss3).
+#: `run`'s exit code for a time-half stop (`TimeHalfStop`). The units' `RestartPreventExitStatus`
+#: lists it: a restart would meet the same timers (deployment-runbook ss3).
 EXIT_TIME_HALF_STOP = 6
-#: `run`'s exit code for a committed seal boundary (period-model ss7, PR-30b): a
-#: successful terminal outcome, distinct from 0/1/2 so an init system does not
-#: restart-loop a sealed engine.
+#: `run`'s exit code for a committed seal boundary (period-model ss7, PR-30b): a successful
+#: terminal outcome, distinct from 0/1/2 so an init system does not restart-loop a sealed engine.
 EXIT_SEALED = 3
 
 
@@ -116,15 +106,12 @@ def _preflight_or_exit(
     semantics: "SemanticSwitches | None" = None,
     warns_to_stderr: bool = False,
 ) -> "list[PreflightItem]":
-    """Print ss8 findings; exit 2 on any ERROR; return the WARNs (the caller
-    journals them next to the run -- WARN prints, journals, and runs).
-    `start` anchors the DL-56 calendar probes: run passes wall-now, rehearse
-    its virtual --start, and an omitted one means now (DL-213) -- both verbs
-    pass one. `default_tz` is the --timezone base zone
-    the calendar probes fall back to (DL-212); `check_base_tz` has already
-    refused an unresolvable one. `warns_to_stderr` moves the WARN lines off
-    stdout -- rehearse --format json owns stdout as ONE parseable document,
-    and a WARN printed ahead of it broke every `| jq` (DL-180 review)."""
+    """Print ss8 findings; exit 2 on any ERROR; return the WARNs for the caller to journal.
+
+    `start` anchors the DL-56 calendar probes: run passes wall-now, rehearse its virtual --start,
+    and an omitted one means now (DL-213). `default_tz` is the --timezone base zone the probes
+    fall back to (DL-212). `warns_to_stderr` moves WARN lines off stdout, which rehearse
+    --format json owns as one parseable document (DL-180)."""
     from dsl41.runner_preflight import MachinePolicy, preflight
 
     if machine_policy not in ("strict", "local-eligible"):
@@ -165,9 +152,8 @@ def _naive_utc_arg(text: str, option: str) -> "datetime":
 
 
 def _spec_texts(parsed: "list[JilFile]", catalog: CatalogIR) -> "dict[str, str]":
-    """job -> preserve-rendered block for the ss10 `spec` verb: every
-    statement whose subject is a catalog job, concatenated in file order
-    (insert_job plus any later update_job/delete_job the estate carries)."""
+    """job -> preserve-rendered block for the ss10 `spec` verb: every statement whose subject is
+    a catalog job, in file order (insert_job plus any later update_job/delete_job)."""
     texts: dict[str, str] = {}
     for jf in parsed:
         for stmt in jf.statements:
@@ -178,8 +164,7 @@ def _spec_texts(parsed: "list[JilFile]", catalog: CatalogIR) -> "dict[str, str]"
 
 
 class OnViolation(str, Enum):
-    """The values `run --on-transition-violation` still accepts. The option is
-    inert and is removed at the next major release (DL-353)."""
+    """The values `run --on-transition-violation` accepts. The option is inert (DL-353)."""
 
     refuse = "refuse"
     continue_ = "continue"
@@ -335,17 +320,16 @@ def run(
         semantics=resolve_switches(overrides),
     )
     if deadman is not None and not detached:
-        # loud, not silent: without a supervisor there is nothing to hold the
-        # lifelines, so nothing a deadman could bound (concurrency-model ss8)
+        # loud, not silent: without a supervisor nothing holds the lifelines a deadman could bound
+        # (concurrency-model ss8)
         raise typer.Exit(refuse("--deadman needs --detached: a tethered run has no supervisor"))
     if deadman is not None and deadman <= 0:
         raise typer.Exit(refuse("--deadman must be a positive number of seconds"))
     from dsl41.runner_clock import EngineError
     from dsl41.period import runtime_profile_from_cli
 
-    # ss2.1: the launch options that change interpretation or dispatch, as
-    # one typed value -- `runtime_hash` is what tells a period launched
-    # --timezone UTC from the same JIL launched --timezone Europe/Zurich
+    # ss2.1: the launch options that change interpretation or dispatch, as one typed value;
+    # `runtime_hash` tells a period launched --timezone UTC from one launched Europe/Zurich
     profile = runtime_profile_from_cli(
         timezone=timezone,
         tz_aliases=tz_aliases,
@@ -376,17 +360,14 @@ def run(
             )
         )
     except EngineError as exc:
-        # start/resume gates (existing journal, hash/domain mismatch, live
-        # socket): the run never started
+        # start/resume gates (existing journal, hash/domain mismatch, live socket): never started
         raise typer.Exit(refuse(exc)) from exc
 
 
 def _value_options(params: "Iterable[object]") -> frozenset[str]:
-    """Every spelling of a `run` option that takes a value -- the table
-    `_reattach_line` needs to tell an option's value from an input file.
-    Read from the running command's own parameters (`ctx.command.params`),
-    so a new option cannot be missed. Duck-typed: typer ships its click as
-    a private module, so there is no public class to test against."""
+    """Every spelling of a `run` option that takes a value, so `_reattach_line` can tell an
+    option's value from an input file. Read from the command's own parameters; duck-typed because
+    typer ships its click as a private module."""
     names: set[str] = set()
     for param in params:
         if getattr(param, "param_type_name", None) != "option":
@@ -398,19 +379,15 @@ def _value_options(params: "Iterable[object]") -> frozenset[str]:
 
 
 def _reattach_line(argv: "Sequence[str]", value_options: "Collection[str]") -> str | None:
-    """The command that reattaches this detached run, built from the argv
-    that started it, shell-quoted (DL-218).
+    """The shell-quoted command that reattaches this detached run, from the argv that started it
+    (DL-218); None when `argv` is not a `run` invocation.
 
-    A resume needs the whole original line: the files in their order, every
-    `-p`, the runtime profile and `--access-map` (deployment-runbook ss5).
-    So every word is kept in place, with three edits. `--open-from X`
-    becomes `--estate-anchor X`: the two openers are exclusive and the
-    anchor it named is the lineage's, which every later resume of this root
-    needs (period-model ss7); where `--estate-anchor` is already present it
-    names the same directory, and the `--open-from` words are dropped.
-    `--resume` and `--detached` are each present exactly once, the first
-    spelling kept and a missing one added after `run`. None when `argv` is
-    not a `run` invocation, which only an embedding caller produces."""
+    A resume needs the whole original line (files in order, every `-p`, the runtime profile and
+    `--access-map`; deployment-runbook ss5), so every word stays in place with three edits.
+    `--open-from X` becomes `--estate-anchor X` (the openers are exclusive and the anchor is the
+    lineage's; period-model ss7); where `--estate-anchor` is present, the `--open-from` words are
+    dropped. `--resume` and `--detached` are each present exactly once: the first spelling kept,
+    a missing one added after `run`."""
     if len(argv) < 2 or argv[1] != "run":
         return None
     # `python -m dsl41` leaves the package's __main__.py in argv[0]
@@ -457,13 +434,10 @@ def _reattach_note(
 ) -> str | None:
     """The line a detached run prints on its way out, or None (DL-218).
 
-    Only a detached run that can be resumed gets one: a clean stop (0), a
-    crash (1), a time-half stop (6, whose log is clean; it resumes on a fixed
-    build) or a statechart error (7, which resumes on a fixed build too). A
-    sealed exit (`EXIT_SEALED`) does not -- its period is closed, and
-    `say_next` has already named the opener of the next one. `reattach` is
-    this process's own line; an embedding caller that has none gets the
-    schematic."""
+    Only a detached run that can be resumed gets one: a clean stop (0), a crash (1), a time-half
+    stop (6) or a statechart error (7), the last two resuming on a fixed build. A sealed exit
+    (`EXIT_SEALED`) gets none; `say_next` names the next opener. `reattach` is this process's own
+    line; an embedding caller without one gets the schematic."""
     if not detached or code not in (
         0,
         1,
@@ -480,12 +454,8 @@ def _observed_profile(
 ) -> "StagedManifest | None":
     """Re-pin the runtime profile on the deadman the run REALLY has.
 
-    A reattaching engine meets a supervisor it did not start, and one
-    already up cannot change its interval -- so `--deadman 90` against a
-    supervisor running 60 gets 60, and the engine is started with 60. The
-    manifest has to say 60 too: a profile that recorded the request would
-    pin a number the estate does not have, which is what `_running_deadman`
-    refuses to do for the routing table for the same reason (DL-126)."""
+    A supervisor already up keeps its interval, so `--deadman 90` against one running 60 starts
+    the engine with 60 and the manifest must say 60 (DL-126, as `_running_deadman`)."""
     from dsl41.period import runtime_hash, to_us
 
     if staged is None:
@@ -493,9 +463,8 @@ def _observed_profile(
     observed = None if running_deadman is None else to_us(running_deadman)
     if observed == staged.runtime_profile.deadman_us:
         return staged
-    # the staged manifest carries BOTH the profile and its hash, so a
-    # re-pinned deadman has to move the hash with it -- the two wiring sites
-    # below take the profile alone and hash nothing
+    # the staged manifest carries BOTH the profile and its hash, so a re-pinned deadman moves the
+    # hash with it; the two wiring sites below take the profile alone
     profile = staged.runtime_profile.with_deadman(observed)
     return staged.model_copy(
         update={"runtime_profile": profile, "runtime_hash": runtime_hash(profile)}
@@ -505,23 +474,18 @@ def _observed_profile(
 def _resume_profile_error(
     run_root: Path, profile: "RuntimeProfile", running_deadman: "float | None"
 ) -> "str | None":
-    """PR-22's runtime half (period-model ss2.1): a period's semantics are
-    (catalog_hash, runtime_hash, state_machine_version), and either of the
-    first two moving is a new period. The catalog gate lives in resume;
-    this holds the LAUNCH OPTIONS to the pin -- a resume that quietly
-    rebuilt the adapters and the scheduler under different options would
-    change period semantics with every identity gate green. A root with no
-    manifest predates DL-130 and has no pin to hold. The deadman compares
-    at its OBSERVED value, for the reason `_observed_profile` gives."""
+    """PR-22's runtime half (period-model ss2.1): a period's semantics are (catalog_hash,
+    runtime_hash, state_machine_version), and either of the first two moving is a new period.
+
+    The catalog gate lives in resume; this holds the LAUNCH OPTIONS to the pin. A root with no
+    manifest has no pin to hold (DL-130). The deadman compares at its OBSERVED value."""
     from dsl41.period import read_period_manifest, to_us
     from dsl41.runner_clock import EngineError
 
     try:
-        # the manifest of the period this resume will OPEN INTO, never
-        # period 1's: every artifact under `periods/` is addressed by the
-        # period number, a rolled root holds only the period it was opened
-        # into (DL-134), and a root with a committed boundary is about to
-        # move to the next one (DL-151)
+        # the manifest of the period this resume will OPEN INTO, never period 1's: a rolled root
+        # holds only the period it was opened into (DL-134), and a root with a committed boundary
+        # is about to move to the next one (DL-151)
         manifest = read_period_manifest(run_root, resume_target_period(run_root))
     except EngineError as exc:
         return str(exc)
@@ -532,17 +496,16 @@ def _resume_profile_error(
 
 
 def _profile_mismatch(observed: "RuntimeProfile", manifest: "Manifest") -> "str | None":
-    """The ONE comparison of a launch's options with a period's pin, and its
-    refusal. The resume gate runs it after wiring, at the observed
-    deadman. A physical roll also runs it before it writes, at the pinned
-    deadman, because no supervisor has reported one yet (PR-22b)."""
+    """The ONE comparison of a launch's options with a period's pin, and its refusal.
+
+    The resume gate runs it after wiring, at the observed deadman. A physical roll also runs it
+    before it writes, at the pinned deadman (PR-22b)."""
     from dsl41.period import runtime_hash
     from dsl41.runner_startup import profile_drift
 
     if runtime_hash(observed) == manifest.runtime_hash:
         return None
-    # names only: the caller reports WHICH options moved, by the core's
-    # own drift walk (DL-137)
+    # names only: the caller reports WHICH options moved, by the core's drift walk (DL-137)
     moved = profile_drift(observed, manifest.runtime_profile)
     return (
         "runtime-profile mismatch: this run was launched with different"
@@ -553,15 +516,12 @@ def _profile_mismatch(observed: "RuntimeProfile", manifest: "Manifest") -> "str 
 
 
 def _roll_admission(run_root: Path, profile: "RuntimeProfile") -> "Callable[[Manifest], None]":
-    """The gate a physical roll holds its successor's manifest to before it
-    writes (PR-22b). It raises `EngineError` with `_profile_mismatch`'s
-    refusal.
+    """The gate a physical roll holds its successor's manifest to before it writes (PR-22b);
+    raises `EngineError` with `_profile_mismatch`'s refusal.
 
-    The deadman is compared at the value the run will observe. A tethered
-    run has none. A detached run with no supervisor at the target starts
-    one at the pinned deadman, so the pin stands. One already running keeps
-    its own interval, so the gate asks it, read-only. The local comparison
-    runs first, and the PING only when that passes."""
+    The deadman is compared at the value the run will observe. A tethered run has none. A detached
+    run with no supervisor at the target starts one at the pinned deadman. One already running
+    keeps its own interval, so the gate asks it, read-only, after the local comparison passes."""
     from dsl41.period import to_us
     from dsl41.runner_adapters import running_supervisor_deadman
     from dsl41.runner_clock import EngineError
@@ -572,8 +532,8 @@ def _roll_admission(run_root: Path, profile: "RuntimeProfile") -> "Callable[[Man
         pinned = manifest.runtime_profile.deadman_us if detached else None
         mismatch = _profile_mismatch(profile.with_deadman(pinned), manifest)
         if mismatch is None and detached:
-            # asked on every call, so the roll's own call observes the
-            # supervisor right before its first write
+            # asked on every call, so the roll's own call observes the supervisor right before its
+            # first write
             answered, running = running_supervisor_deadman(run_root)
             if answered:
                 observed = None if running is None else to_us(running)
@@ -585,15 +545,11 @@ def _roll_admission(run_root: Path, profile: "RuntimeProfile") -> "Callable[[Man
 
 
 def _running_deadman(client: object, asked: "float | None", run_root: Path) -> "float | None":
-    """The deadman the LOCAL SUPERVISOR reports it runs (concurrency-model
-    ss8), and a warning when that is not what this invocation asked for.
+    """The deadman the LOCAL SUPERVISOR reports it runs (concurrency-model ss8), and a warning
+    when that is not what this invocation asked for.
 
-    Read back rather than assumed, because the eviction bound has to describe
-    the host: a reattaching engine meets a supervisor it did not start, and a
-    supervisor already up cannot change its interval without being stopped.
-    Silently recording the flag instead would put a number in the routing
-    table that names nothing -- and that number is the length of the wait
-    between an operator and a double run."""
+    It is read back, not assumed: the eviction bound has to describe the host, and a number in
+    the routing table that names nothing is the length of the wait before a double run."""
     running = getattr(client, "supervisor_deadman_s", None) if client is not None else None
     if asked is not None and running != asked:
         typer.echo(
@@ -606,10 +562,8 @@ def _running_deadman(client: object, asked: "float | None", run_root: Path) -> "
 
 
 def _attach_tui(server_path: Path, owns_run: bool) -> tuple[Any, "asyncio.Task[Any]"]:
-    """Construct the `--ui` TUI and start it as a task in this terminal,
-    this loop -- still a client of the control socket ONLY (ss11). The
-    guarded import stays local: the core package's three runtime deps are
-    unaffected when `--ui` is not passed."""
+    """Construct the `--ui` TUI and start it as a task in this loop, a client of the control
+    socket ONLY (ss11). The import stays local so `--ui` is the only path that needs textual."""
     import asyncio
 
     from dsl41.runner_tui import RunnerApp
@@ -621,12 +575,10 @@ def _attach_tui(server_path: Path, owns_run: bool) -> tuple[Any, "asyncio.Task[A
 def _tui_failure(
     tui: Any, ui_task: "asyncio.Task[Any] | None", done: "set[asyncio.Task[Any]]"
 ) -> str | None:
-    """F3 (DL-46 item 10): a raised exception is a crash. Otherwise a
-    nonzero `return_code` is textual's fatal-error path returning normally
-    from `run_async` (app.py's `_handle_exception`) -- a crash too, not a
-    quit; `App.exit()`'s own default is return_code 0, so a nonzero value
-    here is never an operator stop. None when the TUI task never finished,
-    or finished clean."""
+    """F3 (DL-46 item 10): a raised exception is a crash; so is a nonzero `return_code`, which is
+    textual's fatal-error path returning from `run_async` (`App.exit()` defaults to 0, so a
+    nonzero value is never an operator stop). None when the TUI task never finished or ended
+    clean."""
     if ui_task is None or ui_task not in done or ui_task.cancelled():
         return None
     tui_exc = ui_task.exception()
@@ -643,34 +595,28 @@ def _preflight_launch(
     open_from: "Path | None",
     access_map: "Path | None",
 ) -> "Callable[[Manifest], None] | None":
-    """`run`'s read-only checks, before anything is created: the roll's
-    preflight, the access policy's load, and the roll's admission gate. Answers
-    that gate (None when there is no roll). A check that refuses raises the
-    `EngineError` or `AccessError` it met; the caller refuses."""
+    """`run`'s read-only checks, before anything is created: the roll's preflight, the access
+    policy's load, and the roll's admission gate. Returns that gate (None without a roll). A
+    failing check raises the `EngineError` or `AccessError` it met."""
     admit: "Callable[[Manifest], None] | None" = None
     if open_from is not None:
-        # the roll's READ-ONLY preflight runs before anything is created:
-        # a refusal -- the unattested-closing refusal above all -- must
-        # write nothing, not even the target directory and its lock. Every
-        # gate re-runs authoritatively inside the roll under the locks.
+        # the roll's READ-ONLY preflight runs first: a refusal, above all the unattested-closing
+        # one, must write nothing, not even the target directory and its lock. Every gate re-runs
+        # authoritatively inside the roll under the locks.
         from dsl41.estate import check_roll_ready
 
         successor = check_roll_ready(run_root, Path(open_from))
     if access_map is not None:
-        # the access-model ss4 refusal must write NOTHING (the check_roll_ready
-        # precedent above): the same load_policy that arming runs later is
-        # called here read-only, before the root is claimed or the WAL opened.
-        # `socket_group` resolution is the loader's own (DL-152), so an
-        # unknown group refuses here too, and in the loader's words
+        # the access-model ss4 refusal must write NOTHING: the loader arming runs later is called
+        # here read-only, before the root is claimed. `socket_group` resolution is the loader's own
+        # (DL-152), so an unknown group refuses here in the loader's words
         from dsl41.runner_access import load_policy
 
         load_policy(access_map, generation=1)
     if open_from is not None:
-        # PR-22b: the options are held to the successor's pin before the
-        # roll writes. This early pass runs after every local check above,
-        # because it may PING a supervisor. It is the fast refusal that
-        # writes nothing; the roll runs the same gate again on the seal it
-        # selects.
+        # PR-22b: the options are held to the successor's pin before the roll writes. This pass
+        # runs after every local check because it may PING a supervisor; the roll runs the same
+        # gate again on the seal it selects.
         admit = _roll_admission(run_root, profile)
         admit(successor)
     return admit
@@ -686,12 +632,11 @@ def _install_signal_handlers(stop: "asyncio.Event", access: "AccessControl | Non
         try:
             loop.add_signal_handler(sig, stop.set)
         except (NotImplementedError, ValueError, RuntimeError):
-            # non-main-thread embedding (test harnesses): stoppable only by
-            # engine failure; the real CLI always has the main thread
+            # non-main-thread embedding (test harnesses): stoppable only by engine failure
             pass
     if access is not None:
-        # access-model ss7: explicit reload; a failed one keeps the old
-        # policy and writes the receipt, never kills the engine
+        # access-model ss7: explicit reload; a failed one keeps the old policy and writes the
+        # receipt, never kills the engine
         try:
             loop.add_signal_handler(signal_mod.SIGHUP, access.reload)
         except (NotImplementedError, ValueError, RuntimeError):
@@ -699,8 +644,8 @@ def _install_signal_handlers(stop: "asyncio.Event", access: "AccessControl | Non
 
 
 class _RunEnd(NamedTuple):
-    """What `_await_run_end` hands `_stop_and_judge`: the engine loop task, the
-    attached TUI and its task, and the tasks that finished."""
+    """What `_await_run_end` hands `_stop_and_judge`: the loop task, the attached TUI and its
+    task, and the tasks that finished."""
 
     loop_task: "asyncio.Task[Any]"
     tui: Any
@@ -715,21 +660,18 @@ async def _await_run_end(
     stop: "asyncio.Event",
     ui: bool,
 ) -> _RunEnd:
-    """Start the engine loop and wait for the first thing that ends the run:
-    the loop, a stop signal, the server's failure or the attached TUI. Answers
-    the loop task, the TUI and its task, and the tasks that finished."""
+    """Start the engine loop and wait for the first thing that ends the run: the loop, a stop
+    signal, the server's failure or the attached TUI."""
     import asyncio
     from datetime import datetime
 
     loop_task = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
-    # a control handler's StatechartError stops the run as one from the
-    # loop does (statechart-engine ss5): the handler cancels the loop at
-    # once, so it takes no further step, and the run wakes on `failed`
+    # a control handler's StatechartError stops the run as one from the loop does
+    # (statechart-engine ss5): the handler cancels the loop at once and the run wakes on `failed`
     server.on_statechart_error = loop_task.cancel
     if client is not None:
-        # the same stop for one the supervisor client's background tasks
-        # meet: the reader, the renewal and the LIST net. One met before
-        # the loop began is handed over now
+        # the same stop for one the supervisor client's background tasks meet (reader, renewal,
+        # LIST net); one met before the loop began is handed over now
         client.on_statechart_error = server.stop_on
     stop_task = asyncio.ensure_future(stop.wait())
     failed_task = asyncio.ensure_future(server.failed.wait())
@@ -752,8 +694,8 @@ async def _stop_and_judge(
     *,
     detached: bool,
 ) -> int:
-    """How the run ended: tear down the TUI, the server and the engine, and
-    answer the exit code (`EXIT_SEALED` when a seal boundary committed)."""
+    """How the run ended: tear down the TUI, the server and the engine; return the exit code
+    (`EXIT_SEALED` when a seal boundary committed)."""
     import asyncio
     import contextlib
 
@@ -767,44 +709,39 @@ async def _stop_and_judge(
             tui.exit()  # engine crash or signal: detach the viewer first
             with contextlib.suppress(Exception):
                 await ui_task
-        # detach-stop (spec ss3 case b): teardown must NOT kill jobs -- the
-        # flag makes the SupervisedCommandAdapter abandon its await instead
-        # of signaling. Set before any adapter-task cancel; in-run oracle
-        # kills already happened while the loop ran (stopping was False then).
+        # detach-stop (spec ss3 case b): teardown must NOT kill jobs; the flag makes the
+        # SupervisedCommandAdapter abandon its await instead of signaling. Set before any
+        # adapter-task cancel.
         if detached:
             engine.detach.stopping = True
-        # how the loop ended, if it did on its own; a loop the server
-        # cancelled ended for the server's error, read below
+        # how the loop ended, if on its own; a loop the server cancelled ended for the server's
+        # error, read below
         ended = loop_task in done and not loop_task.cancelled()
         outcome = loop_task.exception() if ended else None
         if isinstance(outcome, PeriodSealed):
-            # ss7: a committed boundary is a SUCCESSFUL terminal outcome,
-            # and its code is its own -- distinct from 0/1/2, so an init
-            # system does not restart-loop a sealed engine, and distinct
-            # from the crash branch below, which `hold_open` makes the only
-            # other way this loop can return. Detached work is NOT
-            # signalled: `detach.stopping` is already set above, so the
-            # supervised adapter abandons its await instead of killing a
-            # run the next period will reattach (PR-30b). `say_next` runs
-            # after the teardown, below any report the server adds.
+            # ss7: a committed boundary is a SUCCESSFUL terminal outcome with its own code,
+            # distinct from 0/1/2 (no init-system restart loop) and from the crash branch below,
+            # which `hold_open` makes the only other way this loop returns. Detached work is NOT
+            # signalled: `detach.stopping` is set above, so the supervised adapter abandons its
+            # await and the next period reattaches (PR-30b). `say_next` runs after the teardown.
             typer.echo(str(outcome))
             code = EXIT_SEALED
         elif isinstance(outcome, TimeHalfStop):
-            # not a crash: a restart meets the same timers, so its own code
-            # keeps the unit down until a fixed build runs (concurrency-model ss4)
+            # not a crash: a restart meets the same timers, so its own code keeps the unit down
+            # until a fixed build runs (concurrency-model ss4)
             typer.echo(f"engine stopped: {outcome}", err=True)
             code = EXIT_TIME_HALF_STOP
         elif isinstance(outcome, StatechartError):
-            # an assertion failure, not a crash: every line of its report
-            # goes out under one prefix, and its own code keeps the unit
-            # down until a fixed build runs (docs/statechart-engine.md ss5)
+            # an assertion failure, not a crash: every report line goes out under one prefix, and
+            # its own code keeps the unit down until a fixed build runs
+            # (docs/statechart-engine.md ss5)
             code = statechart_report(outcome)
         elif server.statechart_error is not None:
-            # the same report and exit for one a control handler met; the
-            # handler sent no reply, hung up and cancelled the loop
+            # the same report and exit for one a control handler met; the handler sent no reply,
+            # hung up and cancelled the loop
             code = statechart_report(server.statechart_error)
-            # never a raw await: a loop that crashed in the same instant
-            # must not skip the teardown or the report's precedence
+            # never a raw await: a loop that crashed in the same instant must not skip the
+            # teardown or the report's precedence
             loop_task.cancel()
             await asyncio.wait({loop_task})
             if not loop_task.cancelled() and loop_task.exception() is not None:
@@ -813,9 +750,8 @@ async def _stop_and_judge(
             typer.echo(f"engine failed: {outcome}", err=True)
             code = 1
         else:
-            # operator stop: a signal, or quitting the attached TUI (ss11
-            # --ui tethers the run to this terminal; viewers that must not
-            # stop the run attach with `dsl41 ui` instead)
+            # operator stop: a signal, or quitting the attached TUI (ss11: --ui tethers the run to
+            # this terminal; `dsl41 ui` attaches viewers that must not stop it)
             if tui_failure is not None:
                 typer.echo(f"TUI failed: {tui_failure}", err=True)
                 code = 1
@@ -828,8 +764,7 @@ async def _stop_and_judge(
             with contextlib.suppress(asyncio.CancelledError):
                 await loop_task
     finally:
-        # whatever the branch above met, the server and the engine are
-        # torn down
+        # whatever the branch above met, the server and the engine are torn down
         try:
             await server.close()
         finally:
@@ -846,14 +781,12 @@ def _finish_run(
     *,
     supervised: bool,
 ) -> int:
-    """After the lease went back: judge the server's statechart error against
-    the exit code, name the next step of a sealed run and print the reattach
-    note. Answers the final exit code."""
+    """After the lease went back: judge the server's statechart error against the exit code,
+    name the next step of a sealed run and print the reattach note. Returns the exit code."""
     if server.statechart_error is not None and code != EXIT_STATECHART_ERROR:
-        # recorded while a loop outcome took precedence, met while the
-        # server closed (a feed's last post, at shutdown), or met while
-        # the lease went back. A crash or a clean stop becomes 7; a halt
-        # the engine chose keeps its code
+        # recorded while a loop outcome took precedence, met while the server closed, or met
+        # while the lease went back. A crash or a clean stop becomes 7; a halt the engine chose
+        # keeps its code
         statechart_report(server.statechart_error)
         if code in (0, 1):
             code = EXIT_STATECHART_ERROR
@@ -864,8 +797,7 @@ def _finish_run(
             )
     if code == EXIT_SEALED:
         say_next(run_root, anchor_dir)
-    # a client exists exactly when the profile said detached; `_serve_run` gave
-    # the lease back before calling this
+    # a client exists exactly when the profile said detached; `_serve_run` gave the lease back
     note = _reattach_note(reattach, run_root, detached=supervised, code=code)
     if note is not None:
         typer.echo(note)
@@ -890,11 +822,10 @@ async def _serve_run(
 ) -> int:
     """`dsl41 run`, from the acquire to the last teardown.
 
-    The profile is REQUIRED and is the ONE source of every launch option
-    this function reads: timezone, alias table, tethered-vs-detached, the
-    asked deadman, every adapter window. A `detached` flag beside a profile
-    saying `tethered` would wire a supervised adapter and then tear down as
-    if no supervisor existed -- DL-137's divergence, one level up."""
+    The profile is REQUIRED and is the one source of every launch option read here (timezone,
+    alias table, tethered-vs-detached, the asked deadman, every adapter window); a `detached` flag
+    beside a `tethered` profile would wire a supervised adapter and tear down as if none existed
+    (DL-137)."""
     import asyncio
 
     from datetime import UTC, datetime
@@ -917,52 +848,37 @@ async def _serve_run(
         admit = _preflight_launch(run_root, profile, open_from, access_map)
     except (EngineError, AccessError) as exc:
         return refuse(exc)
-    # ACQUIRE first (S6a, concurrency-model ss7). Earlier than the engine's
-    # own entry points would, because the next thing this function does is
-    # START a supervisor and take its lease -- an act on an estate this
-    # process may turn out not to lead.
+    # ACQUIRE first (S6a, concurrency-model ss7): the next step starts a supervisor and takes
+    # its lease, an act on an estate this process may not lead
     try:
         lock = acquire_run_root(run_root)
     except EngineError as exc:
         return refuse(exc)
-    # ONE teardown, for every way out (DL-145). The supervisor's lease
-    # and the leader lock are taken here and are this function's to give
-    # back: the early refusals below used to return past a started
-    # supervisor, leaving a 60-second lease and a held lock behind for a
-    # retry that then refused for the wrong reason. The ORDER is the one
-    # the normal path always had -- lease, then journal, then lock -- and
-    # `release` is idempotent, so the S6a close inside `journal.close`
-    # stays exactly where the log ends. A lease taken and then abandoned
-    # INSIDE `wire_from_profile` is that function's own to give back; this
-    # one can only close what it was handed.
+    # ONE teardown, for every way out (DL-145). The supervisor's lease and the leader lock are
+    # taken here and given back here, in the order lease, journal, lock; `release` is idempotent,
+    # so the S6a close inside `journal.close` stays where the log ends. A lease abandoned INSIDE
+    # `wire_from_profile` is that function's to give back.
     wiring: "Wiring | None" = None
     engine: "Engine | None" = None
     try:
         if resume:
-            # ss1.3's resume rule (DL-224), before anything is staged and
-            # before the supervisor wiring below creates its log, lock,
-            # socket and pid file: a refused resume would leave that
-            # supervisor running. Exit 2 tells the units never to restart,
-            # so a refusal from a stale snapshot must not stand -- the
-            # helper confirms it under the anchor lock.
+            # ss1.3's resume rule (DL-224), before anything is staged and before the supervisor
+            # wiring creates its log, lock, socket and pid file: a refused resume would leave that
+            # supervisor running. Exit 2 tells the units never to restart, so a refusal from a
+            # stale snapshot must not stand; the helper confirms it under the anchor lock.
             refusal = confirmed_resume_refusal(run_root, anchor_dir)
             if refusal is not None:
                 return refuse(refusal)
-        # stage period 1 UNDER the lock (period-model ss1.1): a used run root is
-        # start_run's refusal to make, and repainting `catalogs/` on the way to
-        # that refusal is how the shipped binary used to write `manifest/` into
-        # a root it turned out not to lead. What is left behind on a refusal is
-        # content-addressed and never read -- residue the spec tolerates.
-        # OWNERSHIP first, the FULL ss1.1 predicate: a sentinelless root that
-        # keeps a WAL, a seal, a committed period or a populated runs/ is
-        # somebody's work, and both the staging below and the supervisor start
-        # after it are acts on an estate this process may turn out not to lead.
+        # stage period 1 UNDER the lock (period-model ss1.1): a used run root is start_run's
+        # refusal to make, and what a refusal leaves behind is content-addressed and never read
+        # (residue the spec tolerates). OWNERSHIP first, the FULL ss1.1 predicate: a sentinelless
+        # root that keeps a WAL, a seal, a committed period or a populated runs/ is somebody's
+        # work, and staging and the supervisor start are acts on an estate this process may not
+        # lead.
         if open_from is not None:
-            # ss7's second opener, and its order is the whole argument:
-            # new-root leader.lock (above), sentinel durable, anchor.lock and
-            # the claim, the import, the segment, the head. What comes back is
-            # an ordinary period-N root, and the ladder below resumes it --
-            # there is no second semantic path (PR-07).
+            # ss7's second opener, in order: new-root leader.lock (above), sentinel durable,
+            # anchor.lock and the claim, the import, the segment, the head. What comes back is an
+            # ordinary period-N root and the ladder below resumes it (PR-07).
             from dsl41.estate import check_roll_target, roll_into_root
 
             try:
@@ -976,9 +892,8 @@ async def _serve_run(
                 )
             except EngineError as exc:
                 return refuse(exc)
-            # stderr: stdout's first line is the `engine up` handshake every
-            # supervisor and test reads, and a roll note ahead of it would move
-            # the line they wait for
+            # stderr: stdout's first line is the `engine up` handshake supervisors and tests wait
+            # for, and a roll note ahead of it would move it
             typer.echo(
                 f"opened period {rolled.seal.next_period.period_id} in {run_root} from seal"
                 f" {rolled.seal.digest} ({rolled.closing_root}). This root's anchor is the"
@@ -1004,13 +919,10 @@ async def _serve_run(
                 staged = stage_period(run_root, parsed, catalog, profile)
         supervisor_deadman = deadman
         if resume:
-            # start a MISSING supervisor with the deadman the period PINNED, not
-            # the one this invocation asked for: asking 90 against a pinned 60
-            # would otherwise start a 90-second supervisor before the profile
-            # gate refuses -- and the next CORRECT 60-second resume then
-            # observes 90 and refuses too. The ask still warns
-            # (_running_deadman) and still refuses below if it differs; it just
-            # never gets to reconfigure the host on the way to that refusal.
+            # start a MISSING supervisor with the deadman the period PINNED, not the one asked:
+            # asking 90 against a pinned 60 would start a 90-second supervisor before the profile
+            # gate refuses, and the next correct 60-second resume would observe 90 and refuse too.
+            # The ask still warns (_running_deadman) and still refuses below if it differs.
             from dsl41.period import read_period_manifest
 
             try:
@@ -1020,10 +932,9 @@ async def _serve_run(
             if pinned is not None:
                 pinned_us = pinned.runtime_profile.deadman_us
                 supervisor_deadman = None if pinned_us is None else pinned_us / 1_000_000
-        # ONE wiring builder (DL-137): genesis, resume and the offline sealer
-        # all build adapters and scheduler from the PROFILE, so a window that
-        # moves on the pin moves in the components that run. The deadman is the
-        # single field re-pinned here, for the reason above.
+        # ONE wiring builder (DL-137): genesis, resume and the offline sealer build adapters and
+        # scheduler from the PROFILE, so a window that moves on the pin moves in the components
+        # that run. The deadman is the single field re-pinned here.
         pinned_deadman_us = None if supervisor_deadman is None else to_us(supervisor_deadman)
         try:
             wiring = await wire_from_profile(
@@ -1056,11 +967,10 @@ async def _serve_run(
                     deadman_s=running_deadman,
                     lock=lock,
                     anchor_dir=anchor_dir,
-                    # the launch options no wired object can report -- the
-                    # machine identity and its policy. Without them the core
-                    # gate inherits them from the pin and can never disagree
-                    # with it, which is how a boundary that staged a new
-                    # identity opened under the old one (DL-151)
+                    # the launch options no wired object can report (machine identity and policy):
+                    # without them the core gate inherits them from the pin and can never
+                    # disagree with it, so a boundary that staged a new identity would open under
+                    # the old one (DL-151)
                     declared=profile,
                     machines=wiring.machines,
                 )
@@ -1080,27 +990,23 @@ async def _serve_run(
                     machines=wiring.machines,
                 )
         except StatechartError as exc:
-            # a replayed input that meets one: the report names the WAL input,
-            # and exit 7 keeps the unit down (docs/statechart-engine.md ss5)
+            # a replayed input that meets one: the report names the WAL input, and exit 7 keeps
+            # the unit down (docs/statechart-engine.md ss5)
             return statechart_report(exc)
         if client is not None:
-            # ss8's supervisor clauses at the seal (PR-27): the boundary needs
-            # the CLIENT to prove the LIST it reconciles came from the leased
-            # incarnation, so the engine holds it, not just the adapter.
+            # ss8's supervisor clauses at the seal (PR-27): the CLIENT must prove the LIST it
+            # reconciles came from the leased incarnation, so the engine holds it, not only the
+            # adapter.
             engine.supervisor = client
-            # ss8's "positive contact with this host": every confirmed lease
-            # exchange from here on stamps the routing row (S5b). Wired after the
-            # engine exists, which is why the first ACQUIRE above does not -- the
-            # genesis seed stamps that same instant anyway.
+            # ss8's "positive contact with this host": every confirmed lease exchange stamps the
+            # routing row (S5b). Wired after the engine exists; the genesis seed stamps the first
+            # ACQUIRE's instant.
             client.on_contact = engine.note_executor_contact
-            # ss8: a host the leader cannot reach is quarantined, so new work is
-            # HELD until it answers rather than failing against a supervisor that
-            # is not there. The reinstate rides on the next confirmed contact.
+            # ss8: a host the leader cannot reach is quarantined, so new work is HELD until it
+            # answers; the reinstate rides on the next confirmed contact.
             client.on_unreachable = engine.note_executor_unreachable
-        # everything resume did not apply: E9's missed scheduler ticks, plus any
-        # reconciliation completion the ss4 gate rejected. Both are on `drops`
-        # (DL-91 finding 4 declined splitting them); the wording no longer claims
-        # they are only the tick sweep.
+        # everything resume did not apply: E9's missed scheduler ticks, plus any reconciliation
+        # completion the ss4 gate rejected; both are on `drops` (DL-91)
         for ev, reason in engine.drops:
             typer.echo(
                 f"dropped {ev.kind} {ev.job() or ''} @ {ev.at.isoformat()}: {reason}", err=True
@@ -1124,12 +1030,9 @@ async def _serve_run(
             estate_fingerprint=estate_fingerprint,
             access=access,
         )
-        # Handlers go in BEFORE the socket is bound, so that a SIGHUP sent
-        # once control.sock has been bound by THIS engine is a reload, not a
-        # kill. A socket file left by a crashed run can exist earlier than
-        # this point; a signal before the handlers exist keeps its default
-        # action. A signal that lands before the loop task exists only sets
-        # `stop` or reloads.
+        # Handlers go in BEFORE the socket is bound, so a SIGHUP after this engine bound
+        # control.sock is a reload, not a kill. A signal before the handlers exist keeps its
+        # default action; one before the loop task exists only sets `stop` or reloads.
         stop = asyncio.Event()
         _install_signal_handlers(stop, access)
         try:
@@ -1140,32 +1043,25 @@ async def _serve_run(
         typer.echo(f"engine up; control socket: {server.path}")
         end = await _await_run_end(engine, server, client, stop, ui)
         code = await _stop_and_judge(engine, server, end, detached=detached)
-        # the lease goes back before the run's error is judged: the client's
-        # reader is still live during RELEASE and close, and a statechart
-        # error it meets there reaches the server like any other. Taken off
-        # `wiring` first, so the teardown below does not give it back twice
+        # the lease goes back before the run's error is judged: the client's reader is live
+        # during RELEASE and close, and a statechart error it meets there reaches the server.
+        # Taken off `wiring` first so the teardown does not give it back twice
         returning, wiring = wiring, None
         try:
             await returning.close()
         finally:
-            # judged, and the next step named, whatever the return raised: a
-            # raise from it still leaves afterwards, and the CLI wrapper reports
-            # a statechart error as exit 7
+            # judged, and the next step named, whatever the return raised; the CLI wrapper
+            # reports a statechart error as exit 7
             code = _finish_run(
                 server, code, run_root, anchor_dir, reattach, supervised=client is not None
             )
         return code
     finally:
-        # EACH step guaranteed, whatever the one before it did (DL-145).
-        # These are three obligations to three different things -- the
-        # supervisor's lease, the log's own fsync, the estate's leader lock
-        # -- and none of them is the others' to skip. A failing fsync inside
-        # `journal.close()` must PROPAGATE, because durability is not
-        # suppressible here any more than it is in the liturgy; what it must
-        # not ALSO do is strand the lock, which would refuse the operator's
-        # own retry with "held by another engine" by a process that is gone.
-        # A chain of statements gave the first raiser the power to skip the
-        # rest; nesting takes it away and still lets it out.
+        # EACH step guaranteed, whatever the one before it did (DL-145): the supervisor's lease,
+        # the log's fsync and the estate's leader lock are three obligations to three things. A
+        # failing fsync inside `journal.close()` must PROPAGATE, but must not also strand the
+        # lock, which would refuse the operator's retry with "held by another engine". Nesting
+        # lets the first raiser out without letting it skip the rest.
         try:
             if wiring is not None:
                 await wiring.close()
@@ -1178,8 +1074,7 @@ async def _serve_run(
 
 
 class RehearseFormat(str, Enum):
-    """`rehearse --format` (arch-review 2026-08-28: one axis for what were
-    two flags with a silently-ignored combination -- the DL-75 shape)."""
+    """`rehearse --format`: one axis for what would otherwise be two flags (the DL-75 shape)."""
 
     text = "text"  # trace lines
     summary = "summary"  # trace lines + the per-job rollup
@@ -1194,18 +1089,15 @@ class SweepKind(str, Enum):
 
 
 def _trace_line(entry: "TraceEntry") -> str:
-    """The one spelling of a printed trace line -- rehearse and the journal
-    replay used to carry a copy each (arch-review 2026-08-28)."""
+    """The one spelling of a printed trace line, shared by rehearse and the journal replay."""
     return f"{entry.at.isoformat()} {entry.job} {entry.transition} [{entry.cause}]"
 
 
 def _scenario_adapter(scenario: Path | None) -> "tuple[FakeAdapter, list[Event]]":
-    """The rehearse scenario file, parsed into what rehearse actually wires:
-    the scripted adapter and the events to inject -- three of the old
-    four-tuple's members were FakeAdapter's own ctor args (arch-review
-    2026-08-28). The docstring on `rehearse` states the accepted shapes.
-    Raises OSError/ValueError/TypeError/KeyError; the caller owns the
-    refusal."""
+    """The rehearse scenario file, parsed into the scripted adapter and the events to inject.
+
+    The docstring on `rehearse` states the accepted shapes. Raises
+    OSError/ValueError/TypeError/KeyError; the caller owns the refusal."""
     import json as json_mod
 
     from dsl41.oracle_state import Event
@@ -1247,12 +1139,10 @@ def _scenario_adapter(scenario: Path | None) -> "tuple[FakeAdapter, list[Event]]
 
 
 def _rollup(trace: "list[TraceEntry]", catalog_jobs: Iterable[str]) -> dict[str, dict[str, Any]]:
-    """The per-job rollup rows -- a run is a transition INTO STARTING; the
-    final status is the last transition's target (out-of-band markers carry
-    no "->" and count for neither). Never-started catalog jobs appear with
-    runs=0. This display count deliberately stays STARTING-based
-    (byte-identical legacy, DL-184); the cadence check reads run_number
-    deltas from the store instead."""
+    """The per-job rollup rows: a run is a transition INTO STARTING and the final status is the
+    last transition's target (out-of-band markers carry no "->" and count for neither).
+    Never-started catalog jobs appear with runs=0. The count stays STARTING-based (DL-184); the
+    cadence check reads run_number deltas from the store."""
     run_counts: dict[str, int] = {}
     final_status: dict[str, str] = {}
     for t in trace:
@@ -1270,9 +1160,8 @@ def _rollup(trace: "list[TraceEntry]", catalog_jobs: Iterable[str]) -> dict[str,
 
 
 def _rehearsal_doc(trace: "list[TraceEntry]", catalog_jobs: Iterable[str]) -> dict[str, Any]:
-    """The --format json document: the full trace plus the rollup rows.
-    Built only on the json path -- text/summary never pay for the trace
-    dump (the review's m6)."""
+    """The --format json document: the full trace plus the rollup rows, built only on the json
+    path."""
     return {
         "trace": [t.model_dump(mode="json") for t in trace],
         "jobs": _rollup(trace, catalog_jobs),
@@ -1282,9 +1171,8 @@ def _rehearsal_doc(trace: "list[TraceEntry]", catalog_jobs: Iterable[str]) -> di
 def _emit_rehearsal(
     trace: list[TraceEntry], catalog_jobs: Iterable[str], *, fmt: RehearseFormat
 ) -> None:
-    """The rehearse report: the trace, and the per-job rollup ("which job
-    fired how often" is the question a rehearsal answers, DL-180 --
-    counting trace lines by hand was most of the reporting harness)."""
+    """The rehearse report: the trace, and the per-job rollup ("which job fired how often",
+    DL-180)."""
     import json as json_mod
 
     if fmt is RehearseFormat.json:
@@ -1318,11 +1206,10 @@ def _emit_cadence_check(
     adapter: "FakeAdapter",
     events: "list[Event]",
 ) -> None:
-    """The --check-cadence report and exit (DL-184): expected bounds from a
-    fresh Scheduler + the wake-source walk, observed counts as run_number
-    deltas, deviations exit 3. text = table; summary = trace + table; json =
-    the legacy document plus one nested cadence_check block. --sweep fail
-    replays per producer through play_once; case progress goes to stderr."""
+    """The --check-cadence report and exit (DL-184): expected bounds from a fresh Scheduler plus
+    the wake-source walk, observed counts as run_number deltas, deviations exit 3. text = table;
+    summary = trace + table; json = the document plus one nested cadence_check block. --sweep
+    fail replays per producer through play_once; case progress goes to stderr."""
     import json as json_mod
 
     from dsl41.derive import derive_graph
@@ -1361,15 +1248,13 @@ def _emit_cadence_check(
     )
     check = compare(catalog, bounds, observed, start=start_dt, horizon=horizon, cycle=cycle)
     if sweeps and cycle is not None:
-        # the aborted happy play left truncated, spin-inflated counts -- a
-        # baseline of fiction, and each case would burn the whole instant
-        # budget again (the fail-sweep review). The cycle finding already
-        # exits 3; the sweeps list honestly omits what did not run.
+        # an aborted happy play leaves truncated, spin-inflated counts, a baseline of fiction
+        # that would burn the whole instant budget per case. The cycle finding already exits 3;
+        # the sweeps list omits what did not run.
         typer.echo("sweeps skipped: the happy path tripped the zero-delay guard", err=True)
     elif sweeps:
         progress = lambda line: typer.echo(line, err=True)  # noqa: E731
-        # every sweep plays to its end; the inputs they lost are reported
-        # together
+        # every sweep plays to its end; the inputs they lost are reported together
         lost: list[LostInput] = []
         if SweepKind.fail in sweeps:
             try:
@@ -1437,12 +1322,9 @@ def _emit_cadence_check(
 
 
 def _scenario_completion(raw: object, where: str) -> tuple[float, int]:
-    """One scenario completion, in BOTH spellings: the list
-    `[duration_s, exit_code]` and the runs-entry object
-    `{"duration_s": S, "exit_code": C}`. The default used to take only the
-    list while runs entries were objects, and the object form died as a
-    leaked `KeyError(0)` -- printed as `scenario file.json: 0` (2026-08-28
-    feedback). Malformed shapes refuse with the two accepted forms named."""
+    """One scenario completion, in BOTH spellings: the list `[duration_s, exit_code]` and the
+    runs-entry object `{"duration_s": S, "exit_code": C}`. Malformed shapes refuse with the two
+    accepted forms named."""
     if isinstance(raw, dict):
         if "duration_s" not in raw or "exit_code" not in raw:
             raise ValueError(f"{where}: object form needs duration_s and exit_code")
@@ -1477,12 +1359,10 @@ def _rehearsal_engine(
 
     try:
         if run_root is not None:
-            # a rehearsal's run root is a self-contained artifact like a
-            # real one: the profile it interpreted the estate under -- its
-            # timezone above all -- belongs in the manifest, or the log
-            # claims a period it did not run (ss2.1). Staged only for a
-            # FRESH root: an existing journal is start_run's refusal to
-            # make, and nothing is written on the way to it.
+            # a rehearsal's run root is a self-contained artifact: the profile it interpreted the
+            # estate under, its timezone above all, belongs in the manifest or the log claims a
+            # period it did not run (ss2.1). Staged only for a FRESH root; an existing journal is
+            # start_run's refusal to make.
             launched = runtime_profile_from_cli(
                 timezone=timezone, tz_aliases=tz_aliases, semantics=overrides
             )
@@ -1498,8 +1378,8 @@ def _rehearsal_engine(
                 adapters=adapters,
                 scheduler=scheduler,
                 staged=staged,
-                # a root holding only the sentinel stages nothing; genesis
-                # then pins the launch options, every switch included
+                # a root holding only the sentinel stages nothing; genesis then pins the launch
+                # options, every switch included
                 launched=launched,
             )
         else:
@@ -1729,10 +1609,9 @@ def rehearse(
 
     lost = lost_inputs(engine)
     if lost:
-        # a scripted event the dry apply refused never reached the trace,
-        # and a quarantined engine-made input applied its time half only:
-        # no silent loss, so each one is named and the play fails
-        # (concurrency-model ss4)
+        # a scripted event the dry apply refused never reached the trace, and a quarantined
+        # engine-made input applied its time half only: no silent loss, so each is named and the
+        # play fails (concurrency-model ss4)
         for line in lost_lines(lost):
             typer.echo(line, err=True)
         raise typer.Exit(1)
@@ -1821,13 +1700,9 @@ def journal(
 def _segments_named(target: Path) -> list[Path]:
     """Which segments the caller meant by one path.
 
-    A ROOT or a sentinel means the whole root -- every period it retains, in
-    order. That is the same correction DL-136 made to `dsl41 runs`: a reader
-    that resolved a root to its ACTIVE segment was right while a root held
-    one journal and became silently wrong the moment a root held one per
-    period, answering about the current night and saying nothing about the
-    nights before it. A `wal/NNNNNN.jsonl` names exactly one period and
-    still replays exactly that one."""
+    A ROOT or a sentinel means the whole root, every period it retains, in order (the DL-136
+    rule, as `dsl41 runs`): resolving a root to its ACTIVE segment answers about the current night
+    only. A `wal/NNNNNN.jsonl` names exactly one period."""
     from dsl41.period import (
         archived_periods,
         estate_segments,
@@ -1842,16 +1717,13 @@ def _segments_named(target: Path) -> list[Path]:
         return [resolved]
     held = estate_segments(target)
     if not all(_periodized(path) for path in held):
-        # a root with no periodized sentinel answers with `journal.jsonl`
-        # itself, whose stem is not a period number. There is no lineage
-        # here to have archived anything, and the reader below refuses it
-        # by name -- which a numeric sort would have turned into a
-        # traceback out of a diagnosis verb
+        # a root with no periodized sentinel answers with `journal.jsonl` itself, whose stem is
+        # not a period number; no lineage can have archived anything, and the reader below
+        # refuses it by name (a numeric sort would raise a traceback instead)
         return list(held)
-    # an ARCHIVED period retains no file and is still a period of this
-    # root. Naming its segment here is what makes the replay ANNOUNCE the
-    # unreplayable gap instead of answering with a shorter lineage that
-    # looks whole (DL-144)
+    # an ARCHIVED period retains no file and is still a period of this root; naming its segment
+    # makes the replay ANNOUNCE the unreplayable gap instead of answering with a shorter lineage
+    # that looks whole (DL-144)
     root = root_of_wal(resolved)
     gone = {wal_path(root, number) for number in archived_periods(root)}
     gone |= {wal_path(root, number) for number in _lost_below(root, held)}
@@ -1859,21 +1731,14 @@ def _segments_named(target: Path) -> list[Path]:
 
 
 def _lost_below(root: Path, held: "Sequence[Path]") -> list[int]:
-    """Period numbers BELOW the oldest segment this root retains for which
-    the root still holds a committed period manifest (DL-144).
+    """Period numbers BELOW the oldest segment this root retains for which the root still holds a
+    committed period manifest (DL-144).
 
-    A root-local read has no registry to ask who owns a period, and this is
-    the one local fact that answers it: genesis and every in-place opening
-    write `periods/<N>/manifest.json` into the root that ran period N,
-    while a ROLLED root imports only the successor's. So a manifest here
-    with no segment and no receipt is THIS root's period, gone -- which
-    `_announce_gap` then refuses as loss rather than replaying a lineage
-    that starts later than it did.
-
-    BELOW the oldest retained segment and nowhere else, because that is
-    where an archive lives (the archived periods are a prefix, ss12a) and
-    because a COMMITTED-NEXT period legitimately has a manifest and no
-    segment yet -- and it is always above."""
+    Genesis and every in-place opening write `periods/<N>/manifest.json` into the root that ran
+    period N, while a ROLLED root imports only the successor's. A manifest here with no segment
+    and no receipt is THIS root's period, gone, which `_announce_gap` refuses as loss. Only BELOW
+    the oldest retained segment: archives are a prefix (ss12a), and a COMMITTED-NEXT period has a
+    manifest and no segment yet, always above."""
     from dsl41.period import wrote_period
 
     if not held:
@@ -1883,35 +1748,26 @@ def _lost_below(root: Path, held: "Sequence[Path]") -> list[int]:
 
 
 def _replay_estate(walk: "EstateWalk", catalog: "CatalogIR | None") -> None:
-    """Every segment the registry names, in period order, replayed as one
-    lineage.
+    """Every segment the registry names, in period order, replayed as one lineage.
 
-    **The enumeration comes first and completes.** It is the estate-wide
-    half: each period, the root that holds it and the segment file, whether
-    or not the replay below reaches it. Replaying inside that loop put the
-    whole listing behind one segment's gate, so a refused replay printed
-    period 1's refusal and nothing else. What is named is exactly what is
-    replayed -- the walk's rows, not the disk's -- so a segment the registry
-    has not finalized cannot appear in one half and be missing from the
-    other."""
+    The enumeration comes first and completes: each period, its root and segment file, whether or
+    not the replay reaches it. Replaying inside that loop put the whole listing behind one
+    segment's gate. What is named is what is replayed, the walk's rows rather than the disk's."""
     from dsl41.period import wal_path
 
     for entry in walk.periods:
         segment = wal_path(entry.root, entry.period_id)
         archived = ""
         if entry.archived is not None:
-            # two different disks, two different words: the receipt says
-            # the period is archived either way, and only the missing file
-            # makes it unreplayable
+            # two different disks, two different words: the receipt says the period is archived
+            # either way, and only the missing file makes it unreplayable
             archived = (
                 "  [inputs archived, still on disk]"
                 if segment.is_file()
                 else "  [inputs archived: unreplayable]"
             )
         typer.echo(f"period {entry.period_id} in {entry.root}: {segment}{archived}")
-    # LABELLED even for a one-period lineage: an estate-wide answer names
-    # the period it is about, and a walk of a lineage that has not rolled
-    # yet is still an estate-wide answer
+    # LABELLED even for a one-period lineage: an estate-wide answer names the period it is about
     _replay_lineage(
         [wal_path(entry.root, entry.period_id) for entry in walk.periods],
         catalog,
@@ -1920,13 +1776,11 @@ def _replay_estate(walk: "EstateWalk", catalog: "CatalogIR | None") -> None:
 
 
 def _label(segment: Path) -> str:
-    """`period N in ROOT` for one segment file, read off the layout alone
-    (I1: segment N is period N).
+    """`period N in ROOT` for one segment file, read off the layout alone (I1: segment N is
+    period N).
 
-    Only a MANY-segment read is labelled, and every many-segment list comes
-    from `estate_segments` or from the walk -- both of which spell
-    `wal/NNNNNN.jsonl` and nothing else. A root with no `wal/` yields ONE
-    file, which this never sees."""
+    Only a MANY-segment read is labelled; its lists come from `estate_segments` or the walk, which
+    spell `wal/NNNNNN.jsonl` only. A root with no `wal/` yields ONE file, never seen here."""
     from dsl41.period import root_of_wal
 
     return f"period {int(segment.stem)} in {root_of_wal(segment)}"
@@ -1937,33 +1791,21 @@ def _replay_lineage(
 ) -> None:
     """One lineage's segments, replayed as ONE run of the state machine.
 
-    A period does not start from nothing and does not keep its predecessor's
-    catalog. So each segment gets a fresh interpreter opened from the seal
-    the segment names -- the same `open_from_seal` fold an engine performs
-    (period-model ss7 phase 3) -- under the catalog its own bundle holds,
-    and the traces concatenate. Crossing a boundary is therefore the spec's
-    own opening, not a second way to do it.
+    Each segment gets a fresh interpreter opened from the seal the segment names (the
+    `open_from_seal` fold an engine performs, period-model ss7 phase 3) under the catalog its own
+    bundle holds, and the traces concatenate.
 
-    Every boundary is PROVED before it is crossed: the segment must sit
-    where it says it does (`check_segment_identity`), the seal record that
-    closes the older segment must be the one the newer opens from, with one
-    estate and a continuous index frontier (`check_segment_adjacency`), and
-    the sidecar on disk must be the seal that opening stands on
-    (`prove_opening`). Refuse-don't-degrade applies to a diagnosis surface
-    as much as to an engine (DL-139): a narrated continuation across a
-    forged seal reads exactly like a true one.
+    Every boundary is PROVED before it is crossed: the segment sits where it says
+    (`check_segment_identity`), the closing seal record is the one the newer segment opens from,
+    with one estate and a continuous index frontier (`check_segment_adjacency`), and the sidecar
+    is the seal that opening stands on (`prove_opening`). Refuse-don't-degrade applies to a
+    diagnosis surface as to an engine (DL-139).
 
-    **The crossing is announced only once it has happened.** The period is
-    OPENED first -- catalog and carry, both of which can refuse -- and the
-    line prints after. Printed before, it stated as fact the very crossing
-    the refusal on the next line denied. It goes to STDOUT with the trace
-    and not to stderr, deliberately: a reader who dropped stderr would be
-    handed two periods' transitions concatenated with no seam, which is the
-    "shorter trace that looks whole" this unit exists to stop.
+    The crossing is announced only once it has happened: the period is OPENED first (catalog and
+    carry can refuse) and the line prints after. It goes to STDOUT with the trace, so a reader
+    who dropped stderr does not get two periods concatenated with no seam.
 
-    `labelled` forces the per-period prefix on a read whose segments happen
-    to number one -- an estate-wide walk of a lineage with a single period
-    is still an estate-wide answer, and its refusals name the period."""
+    `labelled` forces the per-period prefix on a single-period estate-wide walk."""
     from dsl41.period import root_of_wal
     from dsl41.runner_clock import EngineError
     from dsl41.runner_history import RunHistoryError, check_replay_version
@@ -1977,20 +1819,16 @@ def _replay_lineage(
     labelled = labelled or len(segments) > 1
     previous: list[dict[str, Any]] | None = None
     previous_segment: Path | None = None
-    # the caller's catalog gates the first period this read actually
-    # REPLAYS, which is not list slot 0 once a gap can sit in front of it:
-    # gating on the slot handed the first replayed period `None` and
-    # skipped the hash check the argument exists for (DL-144 review)
+    # the caller's catalog gates the first period this read actually REPLAYS, which is not list
+    # slot 0 once a gap can sit in front of it (DL-144)
     first = True
     for position, segment in enumerate(segments):
         where = _label(segment) if labelled else ""
         if _periodized(segment) and not segment.is_file():
-            # an ARCHIVED period, or a lost one. `_announce_gap` refuses
-            # unless a receipt licenses the absence, and otherwise prints
-            # the gap and drops `previous`, which is what makes the NEXT
-            # boundary cross by its predecessor's attestation instead of
-            # by a re-derivation there is no evidence for (DL-142, DL-144).
-            # A path that is NOT `wal/NNNNNN.jsonl` names no period and
+            # an ARCHIVED period, or a lost one. `_announce_gap` refuses unless a receipt licenses
+            # the absence, and otherwise prints the gap and drops `previous`, so the NEXT boundary
+            # crosses by its predecessor's attestation rather than a re-derivation with no
+            # evidence (DL-142, DL-144). A path that is NOT `wal/NNNNNN.jsonl` names no period and
             # falls through to `read_journal`, which refuses it by name
             _announce_gap(segment, where=where)
             previous, previous_segment = None, None
@@ -1998,17 +1836,13 @@ def _replay_lineage(
         try:
             records = read_journal(segment)
             if position < len(segments) - 1:
-                # this reader knows a segment is CLOSED by its place in the
-                # list it was given, which is before it replays the segment
-                # -- so a torn tail refuses ahead of the trace rather than
-                # after it (`check_segment_tail`: positioned per caller)
+                # a segment is CLOSED by its place in the list it was given, which is known before
+                # it replays, so a torn tail refuses ahead of the trace (`check_segment_tail`)
                 check_segment_tail(segment, records)
             check_segment_identity(segment, records[0])
-            # period-model ss2.1: a foreign state machine cannot lead OR
-            # replay, and the resume-side gate never runs here. HERE and not
-            # at the replay: the crossing below is proved, paid for and
-            # announced first, and a refusal after that has already stated
-            # as fact the crossing it then denies
+            # period-model ss2.1: a foreign state machine cannot lead OR replay, and the
+            # resume-side gate never runs here. Checked HERE, before the crossing is proved and
+            # announced, so no refusal follows a stated crossing
             check_replay_version(records[0])
             if previous is not None:
                 check_segment_adjacency(
@@ -2026,9 +1860,8 @@ def _replay_lineage(
             )
         if _periodized(segment):
             _announce_archived(segment, where=where)
-        # ss7 phase 3, offline: what this period opened with. Nothing is
-        # printed between the two, so a boundary that cannot be opened is
-        # never announced as opened.
+        # ss7 phase 3, offline: what this period opened with. Nothing prints between the two, so
+        # a boundary that cannot be opened is never announced as opened.
         supplied = catalog if first else None
         opened = (
             _period_catalog(root, records[0], supplied, where=where),
@@ -2050,16 +1883,10 @@ def _replay_lineage(
 def _periodized(segment: Path) -> bool:
     """Whether this path is a `wal/<six digits>.jsonl` that NAMES a period.
 
-    A root with no periodized sentinel resolves to `journal.jsonl` itself
-    (period-model ss1.1, DL-138), and every archive question below is
-    keyed on a period number that such a path does not have. Asked here so
-    the readers can go on refusing it by name instead of raising out of an
-    `int()` (DL-144 review).
-
-    Answered by ROUND-TRIPPING the layout's own helpers rather than by
-    spelling `wal/` inline (DL-145): a path is period N's segment exactly
-    when the owner, given the root this path belongs to, names this path
-    for N."""
+    A root with no periodized sentinel resolves to `journal.jsonl` itself (period-model ss1.1,
+    DL-138), which has no period number, so the readers refuse it by name instead of raising out
+    of an `int()`. Answered by round-tripping the layout's own helpers (DL-145): a path is period
+    N's segment when the owner, given its root, names this path for N."""
     from dsl41.period import root_of_wal, wal_path
 
     if not segment.stem.isdigit():
@@ -2068,18 +1895,12 @@ def _periodized(segment: Path) -> bool:
 
 
 def _announce_gap(segment: Path, *, where: str) -> None:
-    """One archived period, named on STDOUT as an unreplayable gap
-    (period-model ss12, DL-144).
+    """One archived period, named on STDOUT as an unreplayable gap (period-model ss12, DL-144).
 
-    On stdout with the trace, on DL-142's rule: a reader who dropped
-    stderr would otherwise be handed the periods on either side of the gap
-    concatenated with no seam, which is the "shorter trace that looks
-    whole" this verb exists to stop.
-
-    A segment that is simply GONE is a different fact and refuses. The
-    receipt is what separates the two, and it has to LICENSE this very
-    file: a receipt that archived only a candidate pair does not excuse a
-    WAL that went missing by accident."""
+    On stdout with the trace, on DL-142's rule: a reader who dropped stderr would get the periods
+    on either side concatenated with no seam. A segment that is simply GONE refuses; the receipt
+    must LICENSE this very file, and a receipt that archived only a candidate pair does not excuse
+    a WAL that went missing by accident."""
     from dsl41.attest import verify_archive_receipt
     from dsl41.period import archive_receipt_path, root_of_wal
     from dsl41.runner_clock import EngineError
@@ -2087,9 +1908,7 @@ def _announce_gap(segment: Path, *, where: str) -> None:
     root = root_of_wal(segment)
     period_id = int(segment.stem)
     try:
-        # the ONE door (attest.py): a receipt that does not prove out is
-        # not a licence, and narrating a gap on its word would be this
-        # verb reporting an archive where the estate has a hole
+        # the ONE door (attest.py): a receipt that does not prove out is not a licence
         receipt = verify_archive_receipt(root, period_id, licensing=segment)
     except (OSError, EngineError) as exc:
         raise typer.Exit(refuse(exc, prefix=where)) from exc
@@ -2111,15 +1930,11 @@ def _announce_gap(segment: Path, *, where: str) -> None:
 
 
 def _announce_archived(segment: Path, *, where: str) -> None:
-    """An archived period whose segment is STILL on disk, named before it
-    is replayed (DL-144).
+    """An archived period whose segment is STILL on disk, named before it is replayed (DL-144).
 
-    That state is the crash window between the receipt and the deletions,
-    and it is also what a restored file looks like -- the archive is
-    irreversible, so the period reads at the attestation-verified tier
-    whatever is beside it. The inputs may still be READ, which is why this
-    narrates rather than refuses; but a trace printed with no word about
-    the tier would be the one output that disagrees with `audit`."""
+    That is the crash window between the receipt and the deletions, or a restored file; the
+    archive is irreversible, so the period reads at the attestation-verified tier. The inputs may
+    still be READ, so this narrates rather than refuses, and the trace agrees with `audit`."""
     from dsl41.attest import verify_archive_receipt
     from dsl41.period import archive_receipt_path, root_of_wal
     from dsl41.runner_clock import EngineError
@@ -2144,35 +1959,23 @@ def _announce_archived(segment: Path, *, where: str) -> None:
 def _prove_crossing(
     root: Path, opening: dict[str, Any], *, predecessor: "Path | None", where: str
 ) -> None:
-    """ss11's "verified means RE-DERIVED, not self-consistent", asked of the
-    seal this period opens from -- before the period is opened and before
-    the crossing is announced.
+    """ss11's "verified means RE-DERIVED, not self-consistent", asked of the seal this period
+    opens from, before the period is opened and the crossing announced.
 
-    Every other check on this path proves INTEGRITY and BINDING: the
-    sidecar digests to what the record names, the record is what the
-    opening names, the fields agree. A forger who rewrites the sidecar
-    canonically, recomputes its digest and copies that digest into both the
-    closing `seal` record and the successor's opening passes all of them,
-    and the replay would then narrate state that no run ever produced. Two
-    proofs close that, and which one is available is a fact about what this
-    read is holding:
+    Every other check on this path proves integrity and binding, which a forger who rewrites the
+    sidecar canonically and copies its digest into the closing `seal` record and the opening
+    passes. Which of two proofs applies depends on what this read holds:
 
-    * **the predecessor's evidence is being replayed** (the ordinary
-      lineage walk, in place or across a roll) -- `attest.prove_derived`
-      rebuilds the predecessor seal from the period's own WAL, spool and
-      manifests, in the root that HOLDS them, and refuses when the stored
-      sidecar is not what they produce. `rederive_seal` also runs
-      `check_record_names_sidecar` on the way, so a rewritten `seal` RECORD
-      over an honest sidecar refuses here too, naming the fields.
-    * **a later segment was named ALONE** -- the predecessor's inputs are
-      not being read, so there is nothing to re-derive from and the "the
-      replay reads the inputs" argument that lets this verb cross without
-      an attestation is simply false. What stands for a period whose
-      evidence this read does not hold is the attestation (ss11), so it is
-      required here and its absence is a refusal that names it.
+    * the predecessor's evidence is being replayed (the ordinary lineage walk, in place or
+      across a roll): `attest.prove_derived` rebuilds the predecessor seal from its WAL, spool and
+      manifests in the root that HOLDS them and refuses when the stored sidecar differs.
+      `rederive_seal` also runs `check_record_names_sidecar`, so a rewritten `seal` RECORD over an
+      honest sidecar refuses too, naming the fields.
+    * a later segment was named ALONE: nothing is re-derivable, so the attestation (ss11) is
+      required and its absence is a refusal that names it.
 
-    The cost is stated where it is paid: an unpruned lineage replays each
-    period twice, once to re-derive its seal and once to narrate it."""
+    An unpruned lineage replays each period twice, once to re-derive its seal and once to narrate
+    it."""
     from dsl41.attest import prove_derived, verify_attestation
     from dsl41.runner_clock import EngineError
 
@@ -2188,13 +1991,10 @@ def _prove_crossing(
 
 
 def _period_profile(root: Path, opening: "dict[str, Any]", *, where: str) -> "RuntimeProfile":
-    """This period's runtime profile, from a manifest bound to its segment
-    (period-model ss2.1, PR-22): the SEM-35 alias table and the semantic
-    switches a replay must read the way the engine did.
+    """This period's runtime profile, from a manifest bound to its segment (period-model ss2.1,
+    PR-22): the SEM-35 alias table and the semantic switches a replay must read as the engine did.
 
-    Required, not degraded (DL-252): a replay under default switches
-    narrates a run the engine may never have made, so a missing or foreign
-    manifest refuses."""
+    Required, not degraded (DL-252): a missing or foreign manifest refuses."""
     from dsl41.runner_history import RunHistoryError, pinned_profile
 
     try:
@@ -2210,10 +2010,8 @@ def _run_period(
     where: str,
     profile: "RuntimeProfile | None" = None,
 ) -> None:
-    """ONE period, replayed and printed. ONE implementation: a
-    single-segment read and a lineage that crosses four boundaries differ
-    in which segments they name, never in what replaying one of them
-    means."""
+    """ONE period, replayed and printed; a single-segment read and a lineage differ in which
+    segments they name, never in what replaying one means."""
     from dsl41.oracle import Oracle
     from dsl41.oracle_state import OracleError
     from dsl41.period import oracle_reading
@@ -2222,12 +2020,9 @@ def _run_period(
 
     catalog, carried = opened
     named = f"{where}: " if where else ""
-    # SEM-35: the period's own alias table (DL-151). A narration that
-    # resolved `timezone:` without it refuses the log the engine wrote,
-    # because a `ujo_timezones` name is site-local and lives in the pin.
-    # The semantic switches come from the same pin (DL-252), or the replay
-    # would read a condition differently from the engine that wrote the log.
-    # The base zone comes from it too (DL-253).
+    # SEM-35: the period's own alias table (DL-151), since a `ujo_timezones` name is site-local
+    # and lives in the pin. The semantic switches (DL-252) and the base zone (DL-253) come from
+    # the same pin, so the replay reads a condition as the engine that wrote the log did.
     oracle = Oracle(catalog, carried=carried, **oracle_reading(profile))
     try:
         replay = replay_period(oracle, records)
@@ -2240,16 +2035,13 @@ def _run_period(
 
 
 def _rejection_lines(records: list[dict[str, Any]], decisions: "DecisionIndex") -> list[str]:
-    """The narration beside a period's trace: one line per engine-made
-    input the period rejected -- a stale completion, a refused routing
-    observation, a quarantined input -- and one per quarantine
-    (`engine_apply_faulted`, concurrency-model ss4) whatever its source,
-    since replay quarantines an undecided control input too. The trace
-    shows what an input did, so an input rejected without a move would
-    otherwise leave no line. Read from the decisions replay holds, the
-    recovered ones included, so the journal says what a resume would
-    write. Unprefixed, like the trace lines it sits beside. Narration only:
-    nothing replayed reads it."""
+    """The narration beside a period's trace: one line per engine-made input the period rejected
+    (a stale completion, a refused routing observation, a quarantined input) and one per
+    quarantine (`engine_apply_faulted`, concurrency-model ss4) whatever its source, since replay
+    quarantines an undecided control input too.
+
+    Read from the decisions replay holds, the recovered ones included, so the journal says what a
+    resume would write. Unprefixed, like the trace lines; nothing replayed reads it."""
     from dsl41.runner_admission import describe_input
     from dsl41.runner_journal import read_attempts
 
@@ -2270,24 +2062,18 @@ def _rejection_lines(records: list[dict[str, Any]], decisions: "DecisionIndex") 
 def _period_catalog(
     root: Path, opening: dict[str, Any], supplied: "CatalogIR | None", *, where: str
 ) -> CatalogIR:
-    """This period's catalog: the caller's files when they gave any, else
-    the estate's own bundle -- and in BOTH cases like for like against the
-    hash the `segment` itself pins (period-model ss1.1), never the one this
-    build happens to write.
+    """This period's catalog: the caller's files when given, else the estate's own bundle, in
+    BOTH cases checked against the hash the `segment` itself pins (period-model ss1.1), never the
+    one this build writes.
 
-    The two mismatches keep two texts on purpose. They send a reader to two
-    different artifacts: a supplied catalog that disagrees is a checkout at
-    the wrong revision, and a BUNDLE that disagrees is the estate's own
-    stored bytes failing to rebuild what they ran as -- corruption, or a
-    build whose lowering moved under a pin that did not.
+    The two mismatches keep two texts: a supplied catalog that disagrees is a checkout at the
+    wrong revision, and a BUNDLE that disagrees is the stored bytes failing to rebuild what they
+    ran as (corruption, or a lowering that moved under a pin that did not).
 
-    A bundle is loaded with `permit_unknown`, always, and not from the CLI
-    flag: these are the exact bytes this period RAN, the gate that decided
-    whether an unknown attribute was acceptable ran once at launch, and
-    re-asking it here would make `dsl41 journal` refuse a root that `dsl41
-    runs` answers about (`load_catalog_from_manifest` made the same call).
-    The `catalog_hash` pin below is what proves like for like; the flag
-    still governs the files a caller supplies."""
+    A bundle is loaded with `permit_unknown`, not from the CLI flag: these are the bytes this
+    period RAN, the gate ran once at launch, and re-asking would make `dsl41 journal` refuse a
+    root that `dsl41 runs` answers about (as `load_catalog_from_manifest`). The flag governs only
+    the files a caller supplies."""
     from dsl41.boundary import load_bundle_catalog
     from dsl41.period import catalog_hash_for
     from dsl41.runner_clock import EngineError
@@ -2322,13 +2108,11 @@ def _period_catalog(
 def _period_carry(root: Path, opening: dict[str, Any], *, where: str) -> "CarriedRows | None":
     """The rows this period OPENED with, or None for period 1.
 
-    `attest.carried_from_opening` is the one derivation of that fact and
-    `open_from_seal` is the one opener; this adds only the ss11 proofs a
-    reader owes before it trusts a sidecar it did not write. A period
-    replayed from an EMPTY oracle derives revisions and run numbers the log
-    never recorded and refuses at the first admitted input that touches a
-    carried entity (DL-136) -- so a later segment named ALONE was already
-    unreplayable, and this is what makes the command DL-141 printed work."""
+    `attest.carried_from_opening` derives that fact and `open_from_seal` opens; this adds the ss11
+    proofs a reader owes before trusting a sidecar it did not write. A period replayed from an
+    EMPTY oracle derives revisions and run numbers the log never recorded and refuses at the first
+    input touching a carried entity (DL-136), which is why a later segment named ALONE works
+    (DL-141)."""
     from dsl41.attest import carried_from_opening
     from dsl41.period import check_manifest_against_segment, read_period_manifest
     from dsl41.runner_clock import EngineError
@@ -2361,10 +2145,9 @@ class RunsFormat(str, Enum):
 
 
 def _runs_table(rows: list[RunRow]) -> list[str]:
-    """table format: fixed-width columns, sorted (job, started_at) by the
-    caller already, plus a labelled break wherever the SAME job's rows cross a
-    definition change (`runner_history` decision 4 -- never a hidden line,
-    never a refusal to print)."""
+    """table format: fixed-width columns, sorted (job, started_at) by the caller, plus a labelled
+    break wherever the SAME job's rows cross a definition change (`runner_history` decision 4;
+    never a hidden line, never a refusal to print)."""
     header = (
         f"{'JOB':<32} {'RUN':>4} {'STARTED_AT':<26} {'DURATION_S':>10}"
         f" {'STATUS':<11} {'CLOCK':<7} {'HASH':<10} BOX"
@@ -2455,14 +2238,13 @@ def runs(
         raise typer.Exit(refuse(exc)) from exc
 
     for line in missing:
-        # NAMED, never dropped: an archived period contributes no rows, and
-        # a table that was quietly shorter for it would be exactly the
-        # silent loss this project refuses everywhere else (DL-144)
+        # NAMED, never dropped: an archived period contributes no rows, and a quietly shorter
+        # table would be silent loss (DL-144)
         typer.echo(f"warning: {line}", err=True)
 
     if any(row.fidelity == "records_only" for row in rows):
-        # Loud on stderr as well as on the row, because the one degraded
-        # field that MISLEADS rather than omits is `status`.
+        # Loud on stderr as well as on the row, because the one degraded field that MISLEADS
+        # rather than omits is `status`.
         typer.echo(
             "warning: some run roots have no stored inputs, so their rows are"
             " fidelity=records_only: no box rows, no box_name/started_by/job_hash,"
@@ -2471,9 +2253,8 @@ def runs(
         )
 
     if any(row.undecided for row in rows):
-        # Same posture as the fidelity warning above (DL-156): the flag
-        # rides on every row, and the stderr sentence is emitted for every
-        # format, exactly as the fidelity warning is.
+        # Same posture as the fidelity warning above (DL-156): the flag rides on every row, and
+        # the stderr sentence is emitted for every format.
         typer.echo(
             "warning: some rows are undecided: their newest completion was admitted"
             " and its decision record was never written (the crash window), so the"
@@ -2498,9 +2279,8 @@ def runs(
         fields = list(_RunRow.model_fields.keys())
 
         def cell(value: object) -> object:
-            # csv and json agree on spelling: `--format json` prints
-            # true/false, and csv.writer would print Python True/False --
-            # `undecided` is the first bool column, so it sets the precedent
+            # csv and json agree on spelling: `--format json` prints true/false, and csv.writer
+            # would print Python True/False; `undecided` is the first bool column
             if value is None:
                 return ""
             if isinstance(value, bool):

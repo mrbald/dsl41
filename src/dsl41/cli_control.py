@@ -1,15 +1,11 @@
-"""The control-plane verbs: what an operator says to a RUNNING engine
-(DL-137's split).
+"""The control-plane verbs: what an operator says to a RUNNING engine (DL-137).
 
-`sendevent`, `host` and `query` speak the ss10 control protocol over the
-run root's socket (docs/control-protocol.md); `ui` and `serve` attach the
-ss11 TUI to it; `supervise` speaks the other protocol, the Tier-1
-supervisor's (docs/supervisor-protocol.md). `supervise start` execs that
-supervisor; the other verbs are clients. Nothing here holds engine state.
-Registered on the app in `cli.py`.
+`sendevent`, `host` and `query` speak the ss10 control protocol over the run root's socket
+(docs/control-protocol.md); `ui` and `serve` attach the ss11 TUI to it; `supervise` speaks the
+Tier-1 supervisor's protocol (docs/supervisor-protocol.md). `supervise start` execs that
+supervisor; the other verbs are clients and hold no engine state.
 
-The four mutation exit codes (0/2/3/4) are DL-92's and are read in one
-place, `cli_common.command_outcome`.
+The four mutation exit codes (0/2/3/4) are DL-92's and are read in `cli_common.command_outcome`.
 """
 
 from __future__ import annotations
@@ -26,30 +22,21 @@ from dsl41.runner_access import REQUIRED_TIER, Tier
 
 # ------------------------------------------------------------ the control plane
 #
-# Exit codes: 0 a clean answer (an `ok` response), 2 the command never
-# reached the engine (an unreachable socket, an unreadable answer, a
-# refusal); `run`'s 1 -- the estate failed while running -- belongs to the
-# engine and no single-command client here can see it. `release-held` is
-# the one aggregate: its 1 means "some per-job decision was not applied",
-# with the detail on the per-job lines (DL-181 era, arch-review
-# 2026-08-28).
+# Exit codes: 0 a clean answer (an `ok` response), 2 the command never reached the engine
+# (unreachable socket, unreadable answer, refusal). `run`'s 1 belongs to the engine. `release-held`
+# is the one aggregate: its 1 means "some per-job decision was not applied", with the detail on the
+# per-job lines (DL-181).
 #
-# `sendevent` splits 2 further, because since S3 a command can fail in three
-# ways that call for three different next moves and a script that cannot tell
-# them apart has to guess exactly where guessing costs most (DL-92): 2 stays
-# REFUSED (nothing admitted, nothing logged -- the "never started" reading of
-# 2, unchanged), 3 is REJECTED (a decision, with an index; the world moved)
-# and 4 is UNKNOWN (no decision arrived; it may yet apply). 1 keeps its
-# meaning and no other verb uses 3 or 4.
+# `sendevent` splits 2 further (S3), because a command can fail in three ways that call for three
+# next moves (DL-92): 2 is REFUSED (nothing admitted, nothing logged), 3 is REJECTED (a decision,
+# with an index; the world moved) and 4 is UNKNOWN (no decision arrived; it may yet apply). No
+# other verb uses 3 or 4.
 
 
 def _control_roundtrip(socket_path: Path, request: dict[str, Any]) -> dict[str, Any]:
-    """Exit-code shell around runner_control.roundtrip (DL-78): the protocol
-    client raises, the CLI decides that a failed READ is exit 2.
+    """Exit-code shell around runner_control.roundtrip (DL-78): a failed READ is exit 2.
 
-    Reads only. A read that did not answer changed nothing whether or not it
-    was delivered, so it has one outcome; a MUTATION has four, and takes
-    `cli_common.command_outcome`."""
+    Reads only; a MUTATION takes `cli_common.command_outcome`."""
     from dsl41.runner_control import ControlClientError, roundtrip
 
     try:
@@ -59,13 +46,8 @@ def _control_roundtrip(socket_path: Path, request: dict[str, Any]) -> dict[str, 
 
 
 def _answer_or_exit(response: dict[str, Any]) -> None:
-    """Print one control answer and exit on its `ok` flag: `host list`,
-    `query`'s non-brief read, and `supervise list`/`shutdown` all did this
-    by hand, two of them indented and two not (DL-178h).
-
-    Compact JSON (sort_keys=True, no indent): the split was an even two and
-    two, and the tie breaks toward this file's other JSON idiom --
-    `_stream_subscribe` already reads the wire as one record per line."""
+    """Print one control answer as compact JSON (sort_keys, no indent) and exit on its `ok`
+    flag (DL-178h)."""
     import json as json_mod
 
     typer.echo(json_mod.dumps(response, sort_keys=True))
@@ -73,13 +55,8 @@ def _answer_or_exit(response: dict[str, Any]) -> None:
 
 
 def _mutate(socket_path: Path, request: dict[str, Any]) -> None:
-    """`sendevent`'s and `host`'s exit: one concurrency-model ss6 command envelope, its
-    outcome as this process's status.
-
-    The ladder itself is `cli_common.command_outcome` -- one reading of an
-    answer for every mutating verb, the live seal included (DL-92,
-    DL-137). What is left here is the surface's own half: a verb EXITS on
-    the code, where an async body that owes a teardown returns it."""
+    """`sendevent`'s and `host`'s exit: one concurrency-model ss6 command envelope, its outcome as
+    this process's status. The ladder is `cli_common.command_outcome` (DL-92, DL-137)."""
     raise typer.Exit(command_outcome(socket_path, request))
 
 
@@ -107,16 +84,10 @@ def _pinned_read(
     """The concurrency-model ss6 read header (`baseline_id`, `epoch`) and the current revision
     of `key`, with each pin replacing its own read value (DL-217).
 
-    The fingerprint covers the revision, the epoch and the baseline, and the
-    read returns the CURRENT three. So an id carried back alone, after any of
-    them moved, is a different command under a reused id -- a collision, not
-    a retry. Each pin replaces one value independently; what is not pinned
-    is read as before. The read narrows the race to one round trip; it does
-    not remove it, and it cannot: the value of a precondition is that it
-    names what the DECIDER saw, and a number this process fetched a
-    millisecond ago is only a very recent guess about that. Whoever looked
-    at a status page and then chose to act should pass --expect with the
-    revision they looked at."""
+    The fingerprint covers the revision, the epoch and the baseline, so an id carried back alone
+    after any of them moved is a collision, not a retry. Unpinned values are read as before. The
+    read narrows the race to one round trip and cannot remove it; whoever looked at a status page
+    and then acts should pass --expect with the revision they looked at."""
     from dsl41.runner_control import read_for, revision_in
 
     response = _control_roundtrip(socket_path, read_for(key))
@@ -265,8 +236,8 @@ def release_held(
         raise typer.Exit(2)
     baseline, epoch = header
     rows = response.get("jobs", {})
-    # on_hold is the job-verb latch, NOT DL-94's `held` run-state in the
-    # same row; the name `release-held` stays (declined rename, DL-181)
+    # on_hold is the job-verb latch, NOT DL-94's `held` run-state in the same row; the name
+    # `release-held` stays (DL-181)
     held = sorted(name for name, row in rows.items() if row.get("on_hold"))
     if not held:
         typer.echo("no jobs held")
@@ -391,9 +362,8 @@ def ui(socket_path: Path = _SOCKET_OPT) -> None:
 
 
 def _import_textual_serve_or_exit_2():
-    """Guarded textual-serve import (runner-design ss11/ss14): the [ui]
-    extra's other half -- textual-serve spawns one app subprocess per
-    browser session, so it needs its own dependency, not just textual's."""
+    """Guarded textual-serve import (runner-design ss11/ss14): textual-serve is the [ui] extra's
+    other half and spawns one app subprocess per browser session."""
     try:
         from textual_serve.server import Server
     except ModuleNotFoundError as exc:
@@ -439,28 +409,18 @@ def serve(
 
 
 def _brief_flags(row: dict[str, object]) -> str:
-    """The --brief flags column, I/H/N/A in the TUI's fixed order -- both
-    surfaces render the same alphabet from the same status payload (DL-68),
-    and since DL-145 from the same tuple."""
+    """The --brief flags column, I/H/N/A in the TUI's fixed order, from the same tuple (DL-68,
+    DL-145)."""
     from dsl41.runner_control import STATUS_FLAG_MARKS
 
     return "".join(mark for mark, key in STATUS_FLAG_MARKS if row.get(key))
 
 
-#: a READ verb this surface does NOT forward: `dsl41 control host list`
-#: owns `hosts`, so the query surface would answer it a second time.
+#: a READ verb this surface does NOT forward: `dsl41 control host list` owns `hosts`.
 _QUERY_ELSEWHERE: frozenset[str] = frozenset({"hosts"})
 
-#: the read verbs this surface forwards. Module-level so the argument's
-#: HELP is derived from them (DL-145): the hand-typed help string it
-#: replaced was a second spelling of this set, and a verb added to the gate
-#: below reached the gate and not the help.
-#:
-#: DERIVED from the tier map (DL-152). `runner_access.REQUIRED_TIER` is the
-#: closed table of verb -> tier, so which verbs are READ is already written
-#: there; a hand-kept copy here drifted the moment a verb was added to one
-#: and not the other. The only thing this file still states is the verb it
-#: deliberately does not forward.
+#: the read verbs this surface forwards, derived from `runner_access.REQUIRED_TIER` (DL-152); the
+#: argument's HELP is derived from them (DL-145).
 _QUERY_VERBS: tuple[str, ...] = tuple(
     verb
     for verb, tier in REQUIRED_TIER.items()
@@ -473,23 +433,17 @@ _QUERY_PREDICATES: dict[str, frozenset[str]] = {
 
 
 def _stream_subscribe(socket_path: Path, request: dict[str, Any]) -> None:
-    """`query subscribe`: print the ack, then journal records, until the
-    engine hangs up or the operator interrupts.
+    """`query subscribe`: print the ack, then journal records, until the engine hangs up or the
+    operator interrupts.
 
-    Presentation only (DL-172): `runner_control.subscribe_lines` owns the
-    protocol -- the stamped version, the bounded read, and the DL-151 rule
-    that a refusal ack does NOT close the connection. Its two exception
-    types keep the CLI's exit-code mapping distinguishable the way
-    `_control_roundtrip` already reads `ControlClientError` (DL-78):
-    `ControlClientError` is the engine's own refusal text, printed as-is;
-    `OSError` is a transport failure, prefixed with the socket like every
-    other client here.
+    Presentation only (DL-172): `runner_control.subscribe_lines` owns the protocol, including the
+    DL-151 rule that a refusal ack does NOT close the connection. `ControlClientError` is the
+    engine's own refusal text, printed as-is; `OSError` is a transport failure, prefixed with the
+    socket (DL-78).
 
-    The stream ends at the operator's interrupt, exit 0, or at the engine,
-    exit 2: a hangup, or an answer line such as a backfill refusal
-    (control-protocol ss5, DL-267). Exit 2 names the `--since` to resume
-    from: the last `seq` this command printed, or the ack's cursor when it
-    printed none."""
+    The stream ends at the operator's interrupt (exit 0), or at the engine (exit 2): a hangup, or
+    an answer line such as a backfill refusal (control-protocol ss5, DL-267). Exit 2 names the
+    `--since` to resume from: the last `seq` printed, or the ack's cursor when none was."""
     from dsl41.runner_control import (
         ControlClientError,
         StreamLineTooLong,
@@ -596,9 +550,8 @@ def query(
     if since is not None:
         request["since"] = since
     if name:
-        # one verb per shape, as the server has them: `global` names one and
-        # `globals` a list, and asking for one through the plural would make
-        # a client that wants a single revision unwrap a map to find it
+        # one verb per shape, as the server has them: `global` names one and `globals` a list,
+        # so a client wanting a single revision need not unwrap a map
         request.update({"name": name[0]} if verb == "global" else {"names": list(name)})
     if verb != "subscribe":
         response = _control_roundtrip(socket_path, request)
@@ -612,9 +565,8 @@ def query(
                     f" {(row.get('status_at') or '-'):<26}"
                     f" run {row.get('run_number', 0):<4}"
                     f" exit {'-' if exit_code is None else exit_code:<4}"
-                    # the revision goes on the skim because the skim is what
-                    # an operator reads immediately before acting: --expect
-                    # is only honest when it names what they LOOKED at
+                    # the skim carries the revision because --expect is honest only when it
+                    # names what the operator LOOKED at
                     f" rev {row.get('state_rev', 0):<4} {flags}".rstrip()
                 )
             if response.get("spec_drift"):
@@ -713,11 +665,9 @@ def supervise(
         )
         if not acq.get("ok"):
             raise typer.Exit(refuse(f"cannot acquire lease: {json_mod.dumps(acq, sort_keys=True)}"))
-        # the token alone does not authorize a mutating verb: DL-80 pairs it
-        # with the incarnation the same ACQUIRE reply names, and `conn` has
-        # read that back off this reply and stamps it on every later request
-        # (supervisor-protocol ss5). Sending only the token answers
-        # wrong_incarnation.
+        # the token alone does not authorize a mutating verb: DL-80 pairs it with the
+        # incarnation the ACQUIRE reply names, which `conn` stamps on every later request
+        # (supervisor-protocol ss5); without it the answer is wrong_incarnation
         resp = conn.send({"cmd": "SHUTDOWN", "token": acq["token"]})
         _answer_or_exit(resp)
     except OSError as exc:
