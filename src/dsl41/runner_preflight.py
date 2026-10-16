@@ -1,17 +1,11 @@
-"""Runner preflight (ss8): refuse loudly, run honestly.
+"""Runner preflight (ss8): refuse loudly, run honestly (ss5, ss10; DL-45, DL-74).
 
-Split out of runner.py by DL-74, with the paragraph it owns, verbatim.
-
-Phase 11c (ss5, ss8, ss10; DL-45 pins the decisions):
-
-- Preflight (ss8): ERROR refuses the run (job-type / machine / owner /
-  execution-input / calendar / timezone / oracle construction), WARN prints
-  + journals and runs (n-retrys DL-53 scope, resources, exhausted
-  run_calendar DL-56, AND-success skeleton cycle -- cycles are
-  legal AutoSys, DL-13/L010, so they only disable `plan`). Identity rules
-  (machine/owner) and the execution-input rule (envvars / global
-  substitution / chk_files, DL-240) guard real execution and are skipped for
-  rehearse (execution=False): the FakeAdapter runs nothing.
+ERROR refuses the run (job-type, machine, owner, execution-input, calendar, timezone, oracle
+construction). WARN prints, journals and runs (n-retrys DL-53, resources, exhausted run_calendar
+DL-56, AND-success skeleton cycle). A cycle is legal AutoSys (DL-13/L010) and only disables
+`plan`. The identity rules (machine, owner) and the execution-input rule (envvars, global
+substitution, chk_files; DL-240) guard real execution and are skipped for rehearse
+(`execution=False`), where the FakeAdapter runs nothing.
 """
 
 from __future__ import annotations
@@ -61,15 +55,10 @@ class PreflightItem(BaseModel):
 
 
 def _local_identity(declared: frozenset[str] = frozenset()) -> frozenset[str]:
-    """The machine names this runner answers to (DL-52). `localhost` always
-    counts. When the operator DECLARES identities (`--as-machine greezy_spoon`),
-    THOSE are the identity -- pure and explicit, no hostname/FQDN guessing: the
-    runner knows which estate machine it is, and a job pinned to that name (or
-    resolving to it through insert_machine) runs here. Omitted, we fall back to
-    the forward hostname (short + full) for zero-config, but NEVER reverse-DNS:
-    `getfqdn()` can stall for tens of seconds and, worse, decides placement from
-    what the OS resolver thinks this box is called -- a different namespace from
-    the estate's machine names (DL-52 replaces DL-45's FQDN matching)."""
+    """The machine names this runner answers to (DL-52): `localhost`, plus the declared
+    identities (`--as-machine`) when given. With none declared it uses the forward hostname
+    (short and full) and never reverse DNS, which can stall and names a different namespace from
+    the estate's machines."""
     identity = {"localhost"}
     if declared:
         identity |= {d.strip().lower() for d in declared if d.strip()}
@@ -79,8 +68,7 @@ def _local_identity(declared: frozenset[str] = frozenset()) -> frozenset[str]:
     return frozenset(identity)
 
 
-#: Machine `type:` values the resolver understands (DL-49). Anything else --
-#: including a missing type -- is refused, never guessed.
+#: Machine `type:` values the resolver understands (DL-49); anything else is refused.
 _KNOWN_MACHINE_TYPES = frozenset({"a", "r", "n", "v"})
 
 MachineVerdict = Literal["local", "foreign", "mixed", "error"]
@@ -91,27 +79,23 @@ MachinePolicy = _MachinePolicy
 
 @dataclass(frozen=True)
 class MachineResolution:
-    """Outcome of resolving a job's `machine:` through `insert_machine`
-    (DL-49). `detail` carries the resolved host (local/foreign), a human
-    reason (error), or the pool summary (mixed) -- straight into the
-    preflight message and, later, the run journal / dispatch router."""
+    """Outcome of resolving a job's `machine:` through `insert_machine` (DL-49). `detail` is the
+    resolved host (local, foreign), the reason (error) or the pool summary (mixed)."""
 
     verdict: MachineVerdict
     detail: str
 
 
 def _node_name(machine: MachineIR) -> str | None:
-    """The machine's node_name, semantically unquoted (a hostname never
-    carries quotes) -- node_name feeds host resolution, so it must not be
-    read as the raw opaque carry (review: quoted node_name false-refused)."""
+    """The machine's node_name, unquoted: it feeds host resolution, so it is not the raw
+    opaque carry."""
     raw = machine.attrs.get("node_name")
     return unquote_jil_value(raw) if raw else None
 
 
 def _leaf_host(machine: MachineIR) -> tuple[str | None, str | None]:
-    """Effective host of a NON-virtual machine: (host, error). Agents must
-    carry node_name (no guessing); real machines fall back to the record
-    name. A missing/unknown type is a refusal, not a default."""
+    """Effective host of a non-virtual machine: (host, error). An agent must carry node_name;
+    a real machine falls back to its record name; a missing or unknown type is refused."""
     kind = (machine.machine_type or "").lower()
     if kind == "a":
         node = _node_name(machine)
@@ -128,15 +112,12 @@ def _leaf_host(machine: MachineIR) -> tuple[str | None, str | None]:
 def resolve_machine(
     name: str, machines: Mapping[str, MachineIR], local: frozenset[str]
 ) -> MachineResolution:
-    """Resolve a job's `machine:` name to a placement verdict against this
-    runner's declared identity (DL-52 `local`), honouring `insert_machine`
-    (DL-49). A DIRECT name match wins first: if the job names a machine this
-    runner answers to, run here -- the operator's "this runner IS greezy_spoon"
-    is authoritative over whatever node_name the record carries. Otherwise
-    agents/real machines resolve through node_name; a virtual machine is local
-    iff ALL members resolve local, foreign iff none, else mixed. Undefined and
-    not-our-name is foreign. Bad definitions (missing type, undefined / nested /
-    typeless member, empty pool) are `error`, never guessed."""
+    """Resolve a job's `machine:` name to a placement verdict against the declared identity
+    `local` (DL-52), honouring `insert_machine` (DL-49).
+
+    A direct name match wins over the record's node_name. A virtual machine is local iff all
+    members resolve local, foreign iff none, else mixed. An undefined name is foreign. A bad
+    definition (missing type; undefined, nested or typeless member; empty pool) is `error`."""
     if name.lower() in local:
         return MachineResolution("local", name)  # DL-52: named identity match
     machine = machines.get(name)
@@ -153,7 +134,6 @@ def resolve_machine(
             return MachineResolution("error", err)
         assert host is not None
         return MachineResolution("local" if host.lower() in local else "foreign", host)
-    # virtual machine: resolve every member leaf, then fold (any-of).
     if not machine.members:
         return MachineResolution("error", f"virtual machine {name!r} has no member machines")
     members_local: list[bool] = []
@@ -184,11 +164,9 @@ def resolve_machine(
 
 
 def and_success_skeleton(catalog: CatalogIR) -> dict[str, set[str]]:
-    """job -> success-predecessors reachable through AND/Paren spines only
-    (an s() atom under an OR is an alternative, not a hard dependency).
-    Instance-qualified and undefined references are skipped: pseudo-entries
-    have no run to order. Shared by the ss8 cycle WARN and the ss10 `plan`
-    view, so the two can never disagree about acyclicity."""
+    """job -> success-predecessors reachable through AND/Paren spines only (an s() atom under an
+    OR is an alternative). Instance-qualified and undefined references are skipped. The ss8 cycle
+    WARN and the ss10 `plan` view share it, so they agree on acyclicity."""
 
     def collect(cond: Cond, into: set[str]) -> None:
         if isinstance(cond, And):
@@ -214,30 +192,20 @@ def and_success_skeleton(catalog: CatalogIR) -> dict[str, set[str]]:
 
 
 def _resource_preflight(name: str, job: JobIR, catalog: CatalogIR) -> list[PreflightItem]:
-    """DL-50: resource/load attributes are HONORED by the oracle (capacity
-    buckets, QUE_WAIT, deterministic admission). Preflight refuses -- fail-
-    closed -- only the shapes the oracle cannot model faithfully, in BOTH run
-    and rehearse (resource semantics gate the oracle in either clock domain):
-      * a `resources:` requirement whose resource is unsized (no insert_resource
-        in the set, or no parseable `amount`) -- an unsized semaphore cannot be
-        honored (stricter than L016's warn; a `--resource-capacity` override is
-        a documented future escape hatch, not v1);
-      * an unknown res_type (not R/D/T) -- unknown release semantics;
-      * FREE=Y or FREE=A on a depletable -- FREE is renewable-only (DL-287, Q12);
-      * a QUANTITY above the resource's `amount`, at any priority -- it can
-        never be satisfied, and at a positive priority it would also block
-        every lower priority that names the resource forever (DL-255);
-      * a malformed job_load/priority/max_load -- a non-integer load;
-      * a `job_load` above its machine's `max_load` on a job with a positive
-        priority -- it can never fit, and as a load waiter it would block
-        every lower priority on that machine forever (DL-247). Priority 0 or
-        unset skips the load check, so it is exempt.
-    It WARNs (does not refuse) a job_load on a pool machine, where per-member
-    load placement is unmodelled (# PENDING: Qr3) -- resource semaphores on
-    such a job still apply. Cross-machine shared locks need no separate refusal:
-    the DL-49 foreign-machine ERROR already makes every runnable job local, so
-    every honored resource is contended on this one host (revisit if distributed
-    execution lands, DL-49 future track)."""
+    """DL-50: the oracle honors resource and load attributes; preflight refuses, in run and
+    rehearse alike, the shapes it cannot model:
+      * a `resources:` requirement whose resource is unsized (no insert_resource, or no
+        parseable `amount`), stricter than L016's warn;
+      * an unknown res_type (not R/D/T);
+      * FREE=Y or FREE=A on a depletable; FREE is renewable-only (DL-287, Q12);
+      * a QUANTITY above the resource's `amount`: never satisfiable, and at a positive priority
+        it blocks every lower priority naming the resource (DL-255);
+      * a malformed job_load, priority or max_load;
+      * a `job_load` above its machine's `max_load` at a positive priority: it never fits and
+        blocks every lower priority on that machine (DL-247). Priority 0 or unset is exempt.
+    It WARNs on a job_load on a pool machine, where per-member load placement is unmodelled
+    (# PENDING: Qr3); resource semaphores still apply. Cross-machine locks need no refusal: the
+    DL-49 foreign-machine ERROR makes every runnable job local."""
     items: list[PreflightItem] = []
 
     def err(message: str) -> None:
@@ -335,11 +303,9 @@ def _preflight_local_day(
     aliases: Mapping[str, str] | None = None,
     default_tz: str | None = None,
 ) -> date:
-    """The run anchor as the job's LOCAL day, on the scheduler's ladder
-    (E10 basis; DL-212): the job's zone, else the run's base zone, else the
-    naive basis. An unresolvable zone falls through to the next rung rather
-    than raising as the scheduler does -- it already carries its own ERROR,
-    and the run it would have named a day for is refused."""
+    """The run anchor as the job's local day, on the scheduler's ladder (E10 basis; DL-212): the
+    job's zone, else the run's base zone, else the naive basis. An unresolvable zone falls
+    through, because it carries its own ERROR."""
     tz = None
     for name in (tz_name, default_tz):
         if name and (resolved := resolve_timezone(name, aliases)) is not None:
@@ -353,9 +319,8 @@ def _next_eligible_day(
     exclude: frozenset[date] | CompiledCalendar | None,
     anchor: date,
 ) -> date | None:
-    """Earliest run-source day at or after `anchor` surviving exclusion
-    (DL-57 preflight probe). Two years of consecutive exclusions reads as
-    never-fires -- a probe bound, not a semantics claim."""
+    """Earliest run-source day at or after `anchor` surviving exclusion (DL-57). Two years of
+    exclusions reads as never-fires: a probe bound, not a semantics claim."""
 
     def excluded(day: date) -> bool:
         if exclude is None:
@@ -381,8 +346,7 @@ def _next_eligible_day(
 
 
 def _job_type_preflight(name: str, job: JobIR) -> list[PreflightItem]:
-    """ERROR: job_type is outside the runner's executable universe
-    (CMD/BOX/FW) -- no adapter exists to run it."""
+    """ERROR: job_type is outside the executable universe (CMD/BOX/FW)."""
     items: list[PreflightItem] = []
 
     def err(message: str) -> None:
@@ -400,9 +364,7 @@ def _machine_preflight(
     local: frozenset[str],
     machine_policy: MachinePolicy,
 ) -> list[PreflightItem]:
-    """ERROR/WARN: `machine:` placement (DL-49/DL-52). Caller skips this
-    rule entirely for rehearse (`execution=False`) -- it guards real
-    processes and the FakeAdapter runs none."""
+    """ERROR/WARN: `machine:` placement (DL-49/DL-52). Skipped for rehearse."""
     items: list[PreflightItem] = []
 
     def err(message: str) -> None:
@@ -436,9 +398,8 @@ def _machine_preflight(
 
 
 def _owner_preflight(name: str, job: JobIR, user: str) -> list[PreflightItem]:
-    """ERROR: `exec_.owner` set and not the invoking user (no setuid in MVP,
-    ss6). Caller skips this rule entirely for rehearse, same reason as
-    `_machine_preflight`."""
+    """ERROR: `exec_.owner` set and not the invoking user (no setuid, ss6). Skipped for
+    rehearse."""
     items: list[PreflightItem] = []
 
     def err(message: str) -> None:
@@ -451,12 +412,9 @@ def _owner_preflight(name: str, job: JobIR, user: str) -> list[PreflightItem]:
 
 
 def _execution_input_preflight(name: str, job: JobIR) -> list[PreflightItem]:
-    """ERROR: three execution inputs the JIL carries but real execution never
-    applies -- `envvars` (ExecSpec, CMD), a `$$NAME` global-substitution site
-    on an exec_ field, and `chk_files` (DL-240). BOX jobs are exempt: SEM-10
-    makes all three inert there, and a BOX carries no exec spec. Caller skips
-    this rule entirely for rehearse, same reason as `_owner_preflight` -- the
-    FakeAdapter spawns no process, so nothing misapplies."""
+    """ERROR: three execution inputs real execution never applies: `envvars` (CMD), a `$$NAME`
+    global-substitution site on an exec_ field, and `chk_files` (DL-240). BOX jobs are exempt
+    (SEM-10). Skipped for rehearse."""
     items: list[PreflightItem] = []
     if job.job_type == "BOX":
         return items
@@ -519,8 +477,8 @@ def _calendar_preflight(
     default_tz: str | None,
     semantics: SemanticSwitches | None,
 ) -> list[PreflightItem]:
-    """ERROR/WARN: `run_calendar`/`exclude_calendar` resolution, exhaustion
-    and dormancy (DL-56/DL-57) -- every finding here carries `code="calendar"`."""
+    """ERROR/WARN: `run_calendar`/`exclude_calendar` resolution, exhaustion and dormancy
+    (DL-56/DL-57); every finding carries `code="calendar"`."""
     items: list[PreflightItem] = []
 
     def err(message: str) -> None:
@@ -541,16 +499,14 @@ def _calendar_preflight(
             continue
         calendar = catalog.calendars.get(ref)
         if calendar is None:
-            # L018's lint WARN, fail-closed at run (same strictness split as
-            # L016-vs-DL-50 resources)
+            # L018's lint WARN is an ERROR at run, as L016 is for resources (DL-50)
             err(
                 f"{role} {ref!r} has no calendar definition in the loaded set"
                 " -- a missing autocal export cannot be guessed (DL-56)"
             )
             continue
-        # extended calendars compile through the autocal interpreter
-        # (DL-57); what the SEM-36..39 freeze cannot express refuses here
-        # with the interpreter's reason
+        # extended calendars compile through autocal (DL-57); what SEM-36..39 cannot express
+        # refuses with the interpreter's reason
         try:
             resolved[role] = (
                 compile_calendar(calendar, catalog, semantics)
@@ -579,14 +535,12 @@ def _calendar_preflight(
                         f" the run start -- the job never fires (DL-56)"
                     )
         else:
-            # an extended source probes its generator from the run anchor
-            # (run: wall-now; rehearse: --start; omitted: now -- DL-213)
+            # an extended source probes its generator from the run anchor (DL-213)
             local_day = _preflight_local_day(sched.timezone, start, tz_aliases, default_tz)
             try:
                 nxt = _next_eligible_day(run_src, exclude_src, local_day)
             except CalendarRuleError as exc:
-                # the interpreter's message names the offending calendar
-                # itself (run or exclude)
+                # the message names the offending calendar
                 err(str(exc))
             else:
                 if nxt is None:
@@ -601,9 +555,7 @@ def _calendar_preflight(
         and (sched.start_times or sched.start_mins)
         and isinstance(exclude_only, CompiledCalendar)
     ):
-        # a days_of_week source under an extended exclusion: a standard
-        # exclude set can never cover a weekly source, an extended one can
-        # (DL-57) -- probe two years of it
+        # a standard exclude set cannot cover a weekly source, an extended one can (DL-57)
         local_day = _preflight_local_day(sched.timezone, start, tz_aliases, default_tz)
         tokens = (
             frozenset(_DAY_CODES)
@@ -677,7 +629,7 @@ def _timezone_preflight(
 
 
 def _retry_preflight(name: str, job: JobIR) -> list[PreflightItem]:
-    """WARN: `n_retrys > 0` runs WITHOUT retries (unmodeled v1, DL-53 scope)."""
+    """WARN: `n_retrys > 0` runs without retries (DL-53)."""
     items: list[PreflightItem] = []
 
     def warn(message: str) -> None:
@@ -708,8 +660,7 @@ def _oracle_preflight(
 
 
 def _skeleton_cycle_preflight(catalog: CatalogIR) -> list[PreflightItem]:
-    """WARN: a cycle in the AND-success skeleton disables `plan` (legal
-    AutoSys, edge-triggered re-runs, DL-13/L010)."""
+    """WARN: a cycle in the AND-success skeleton disables `plan` (legal AutoSys, DL-13/L010)."""
     items: list[PreflightItem] = []
 
     def warn(message: str) -> None:
@@ -737,50 +688,24 @@ def preflight(
     tz_aliases: Mapping[str, str] | None = None,
     semantics: SemanticSwitches | None = None,
 ) -> list[PreflightItem]:
-    """ss8: refuse loudly, run honestly. `execution=False` (rehearse) skips
-    the machine/owner identity rules -- they guard real processes, and the
-    FakeAdapter runs none -- while everything the scheduler and oracle
-    depend on (calendars, timezones, construction) still gates.
+    """ss8: refuse loudly, run honestly. `execution=False` (rehearse) skips the machine, owner
+    and execution-input rules; calendars, timezones and construction still gate.
 
-    `start` (DL-56) is the run/rehearse anchor (naive UTC, the engine
-    basis); its consumers are the calendar-exhaustion and dormancy probes
-    -- a run_calendar whose last eligible day lies before it never fires.
-    Omitted, it means now (DL-213), so the probes run on every call; a
-    caller that wants a fixed answer passes a fixed anchor.
+    `start` (DL-56) is the run anchor (naive UTC) for the calendar exhaustion and dormancy
+    probes; omitted, it is now (DL-213). `default_tz` (DL-212) is the run's base zone: the probes
+    read the anchor in the job's zone, else this one, else UTC. `tz_aliases` (DL-62) is the
+    instance's ujo_timezones table (`--timezone-map`): a unique-city resolution WARNs, an
+    unresolvable name ERRORs. `semantics` are the run's switches, applied when compiling extended
+    calendars; None is the registry defaults.
 
-    `default_tz` (DL-212) is the run-level base zone the scheduler is built
-    with (--timezone). The calendar probes read the anchor as the job's
-    zone, else this base zone, else UTC -- the scheduler's own ladder, so
-    the WARN names the day the engine names.
+    `as_machine` (DL-52) is the declared identity: empty means the forward hostname, otherwise
+    exactly those names plus localhost. `machine_policy` (DL-49) settles a virtual pool with
+    some members here: `strict` refuses it, `local-eligible` runs it here with a WARN. The other
+    verdicts ignore it.
 
-    `tz_aliases` (DL-62) is the instance's ujo_timezones table (parsed
-    `autotimezone -l` output, --timezone-map). SEM-35 names resolve through
-    resolve_timezone's ladder; a unique-city default resolution WARNs, an
-    unresolvable name ERRORs with the applicable remedy.
-
-    `semantics` are the run's switches: the calendar checks compile extended
-    calendars under them, as the scheduler and the oracle do, so a
-    `wekr-first-week` reading reaches the dormancy and exhaustion probes.
-    None is the registry defaults, for a caller with no profile.
-
-    `as_machine` (DL-52) is the identity this runner answers to. Empty = the
-    forward hostname (zero-config, no reverse-DNS); non-empty = EXACTLY those
-    names plus localhost (the operator declared it -- no hostname guessing). A
-    job whose `machine:` is (or resolves through insert_machine to) an identity
-    name runs here; anything else is refused foreign.
-
-    `machine_policy` (DL-49) governs the one ambiguous machine verdict: a
-    virtual pool with SOME members on this host and some elsewhere. `strict`
-    (default) refuses it -- placement among members is unmodelled;
-    `local-eligible` runs it here with a WARN that pool placement was
-    ignored. Unambiguous verdicts (all-local, none-local, bad definition)
-    ignore the policy.
-
-    Each rule below is independent (DL-178t): the per-job rules run in the
-    same fixed order every call, one `_*_preflight` helper each, all
-    following `_resource_preflight`'s `err`/`warn` closure precedent."""
+    The per-job rules are independent and run in a fixed order (DL-178t)."""
     if start is None:
-        # DL-213: no anchor means now, the naive-UTC wall clock `run` passes
+        # no anchor means now (DL-213)
         start = datetime.now(UTC).replace(tzinfo=None)
     items: list[PreflightItem] = []
     local = _local_identity(as_machine)
