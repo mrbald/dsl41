@@ -1,56 +1,38 @@
 """The seal artifact, and the two pure functions over it.
 
-Normative spec: `docs/period-model.md` ss3 (ss3.1 shape, ss3.2 canonical
-form, ss3.3 carried and not carried, ss3.4 `next_period`, ss3.5 the
-execution union) and ss4 (`baseline_id` rotates per period). Built by
-DL-132. Obligations PR-05b, PR-05c, PR-07's opening half, PR-08d, PR-10
-through PR-14, PR-22, PR-24a, PR-47d.
+Normative spec: `docs/period-model.md` ss3 (ss3.1 shape, ss3.2 canonical form, ss3.3 carried and
+not carried, ss3.4 `next_period`, ss3.5 the execution union) and ss4 (`baseline_id` rotates per
+period). Obligations PR-05b, PR-05c, PR-07's opening half, PR-08d, PR-10 through PR-14, PR-22,
+PR-24a, PR-47d (DL-132).
 
-A period ends by writing down everything the next one cannot reconstruct.
-This module is the written-down form -- the typed sidecar -- plus CLOSE (a
-runtime snapshot becomes a `Seal`) and OPEN (a sidecar becomes an
-`OpenedRuntime`). Both are pure: no clock, no socket, no filesystem, no
-adapter. The seal OPERATION -- the cutoff barrier (ss6), staging, the three
-write liturgy (ss3), the `seal` record, the anchor CAS and every CLI verb
--- is the unit above this one and calls these two functions unchanged.
+CLOSE turns a runtime snapshot into a `Seal`; OPEN turns a sidecar into an `OpenedRuntime`. Both
+are pure: no clock, no socket, no filesystem, no adapter. The seal operation (cutoff barrier ss6,
+staging, the three write liturgy ss3, the `seal` record, the anchor CAS, every CLI verb) lives
+above this module and calls both unchanged.
 
-**The artifact is the model, and the model is the artifact.** Every section
-of ss3.1 is a frozen `extra="forbid"` model, and the wire keys are the
-field names, so a section this binary does not know is a refusal rather
-than a silent drop (DL-07's rule, at a new ingress). What a reader gets
-back from `open_from_seal` is not a dict.
+**The artifact is the model.** Every section of ss3.1 is a frozen `extra="forbid"` model whose
+wire keys are the field names, so an unknown section refuses instead of dropping (DL-07).
+`open_from_seal` returns models, not dicts.
 
-**The digest is over ss3.2's canonical bytes with only the top-level
-`digest` key removed** (PR-13), so no section here may be called `digest`:
-a recursive strip would collide two documents that differ in a nested
-payload key of that name, and this module's job is to make that
-impossible to write by accident.
+**The digest covers ss3.2's canonical bytes with only the top-level `digest` key removed**
+(PR-13), so no section may be named `digest`: a recursive strip would collide two documents that
+differ in a nested payload key of that name.
 
-**A `Seal` object is always a valid seal.** Every invariant of ss7 phase 3
-step 6 that reads the artifact ALONE is a model validator, not a check in
-one of the two functions: an implementation with the checks in `open`
-alone would let `close` write a sidecar nothing can open, and one with
-them in `close` alone would accept a tampered file. The three checks that
-need something the artifact does not carry -- the naming record's digest,
-the committed manifest, and an execution's CMD-or-FW job type, which needs
-C2's catalog -- are `open_from_seal` parameters, and the catalog half is
-deliberately the loader's.
+**A `Seal` is always valid.** Every ss7 phase 3 step 6 invariant that reads the artifact alone is
+a model validator, so `close` cannot write a sidecar nothing can open and a tampered file cannot
+be accepted. Three checks need something the artifact does not carry: the naming record's digest,
+the committed manifest, and an execution's CMD-or-FW job type (C2's catalog, the loader's half).
+They are `open_from_seal` parameters.
 
-**What is carried is ss3.3's table, and the two exclusions are typed.**
-`SealedHost` has no `last_contact` field at all and its `deadman_us` is
-typed `None`: a leader that carried either could evict a quarantined host
-before the supervisor's real kill bound, which is the one state that
-permits a double run (PR-24a). The exclusions are enforced by the SHAPE,
-so no writer can put them back.
+**Carried rows follow ss3.3's table, with two typed exclusions.** `SealedHost` has no
+`last_contact` and its `deadman_us` is typed `None`: a leader carrying either could evict a
+quarantined host before the supervisor's real kill bound, the one state that permits a double run
+(PR-24a).
 
-**`routes` is carried and has no storage yet.** ss3.3 makes it a row like
-the other three, owned by `RuntimeState` and remapped by the `host` cmd's
-`route` verb; neither exists here. Today every effect is born for the one
-local executor, so the honest projection is `implicit_routes` -- one row,
-whose role IS that executor's id, at revision 0, because no verb that
-could have moved it exists. The row shape is the frozen one, so the unit
-that adds the storage and the wire verb changes the producer and not this
-artifact.
+**`routes` is carried and has no storage.** ss3.3 makes it the fourth row, owned by
+`RuntimeState` and remapped by the `host` cmd's `route` verb, neither of which exists. Every
+effect is born for the one local executor, so `implicit_routes` projects one row: role = that
+executor's id, revision 0. The row shape is the frozen one.
 """
 
 from __future__ import annotations
@@ -108,13 +90,10 @@ from dsl41.runner_effects import Effect, is_valid_run_id
 
 
 def _current_recipe(value: int) -> int:
-    """A seal pins the CURRENT recipe, which is a stricter question than
-    `period.check_catalog_hash_version`'s "may this binary read it" and is
-    deliberately NOT routed through it (D4, DL-138). A seal is a closed
-    estate artifact -- exact-schema on its row of the evolution matrix
-    (`docs/protocol-evolution.md` ss1) -- so a version merely READABLE is
-    still the wrong pin here, and would stay wrong in a future where two
-    recipes are readable at once."""
+    """A seal pins the current recipe, a stricter question than
+    `period.check_catalog_hash_version`'s "may this binary read it", and is not routed through it
+    (D4, DL-138). A seal is a closed estate artifact, exact-schema on its row of the evolution
+    matrix (`docs/protocol-evolution.md` ss1), so a merely readable version is the wrong pin."""
     if value != CATALOG_HASH_VERSION:
         retired = RETIRED_CATALOG_HASH_VERSIONS.get(value)
         retired_clause = f" (retired by name, {retired})" if retired is not None else ""
@@ -132,13 +111,9 @@ _CURRENT_RECIPE = AfterValidator(_current_recipe)
 def _naive_utc(value: datetime) -> datetime:
     """ss3.2: a datetime in this artifact is naive UTC.
 
-    REFUSED rather than converted, which is what `canon` does for a value
-    that reaches it aware. Two reasons the artifact is stricter than the
-    encoder: a timestamp that arrived with an offset came from a clock this
-    engine does not run on, and this model COMPARES instants -- `now`,
-    `scheduler_admitted_through` and T are one value -- so an aware/naive
-    pair would raise `TypeError` out of a validator instead of naming the
-    field."""
+    Refused, not converted (`canon` converts an aware value reaching the encoder): an offset means
+    a foreign clock, and this model compares instants, so an aware/naive pair would raise
+    `TypeError` out of a validator."""
     if value.tzinfo is not None:
         raise ValueError(f"{value.isoformat()} is not naive UTC (ss3.2)")
     return value
@@ -147,37 +122,30 @@ def _naive_utc(value: datetime) -> datetime:
 def _estate_relative(value: str) -> str:
     """ss3.5: a run directory is relative to the estate root.
 
-    Refused rather than normalized: an absolute path is the physical
-    roll's silent failure -- the sidecar imports into a new root and names
-    a directory in the old one -- and `..` escapes the root the same way."""
+    Refused rather than normalized: an absolute path names a directory in the old root after a
+    physical roll, and `..` escapes the root the same way."""
     if not value or value.startswith("/") or ".." in value.split("/"):
         raise ValueError(f"run_dir {value!r} is not relative to the estate root (ss3.5)")
     return value
 
 
-#: A datetime this artifact carries in its own fields. The foreign models a
-#: seal embeds -- `Event`, `Effect`, `JobRuntime` -- are not this module's
-#: to annotate, and `_canon_ready` is the backstop that catches them.
+#: a datetime this artifact carries in its own fields; `_canon_ready` catches the foreign models a
+#: seal embeds (`Event`, `Effect`, `JobRuntime`)
 NaiveUtc = Annotated[datetime, AfterValidator(_naive_utc)]
 
 # ------------------------------------------------------------ the request
 
 
 class BoundaryRequest(BaseModel):
-    """ss3.1's authoritative boundary input: who asked, under what id, and
-    whether they forced it.
+    """ss3.1's authoritative boundary input: who asked, under what id, and whether they forced it.
 
-    Three of the four fields originate in the request and nowhere else, so
-    audit checks them for equality between the sidecar and the `seal`
-    record and carries them. `source` is the exception -- audit DERIVES it
-    and compares. ONE value: a live seal through the control socket and an
-    offline seal from the CLI are one kind of boundary, a request carrying
-    an id its caller minted. `adopt` was the other and went with the
-    estate-adoption path (DL-138).
+    Audit checks three of the four fields for equality between the sidecar and the `seal` record
+    and carries them; it derives `source` and compares. `source` has one value: a live seal
+    through the control socket and an offline seal from the CLI are the same kind of boundary
+    (DL-138).
 
-    "Claimed actor", not "principal": there is no authentication at this
-    tier (`control-protocol.md` ss7 gap 2), and the seal must not spell an
-    unauthenticated claim as if it were one."""
+    "Claimed actor", not "principal": there is no authentication at this tier
+    (`control-protocol.md` ss7 gap 2)."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -189,12 +157,11 @@ class BoundaryRequest(BaseModel):
 
 
 class ForcedGate(BaseModel):
-    """ss3.1's gate OUTPUT: null, or the retry horizon that was overridden.
+    """ss3.1's gate output: null, or the retry horizon that was overridden.
 
-    Audit re-derives all three from the CLOSING period's committed
-    `retry_horizon_us`, the WAL's last externally requested attempt with a
-    durable decision, and T -- so an unnecessary `--force-seal` records
-    `force_seal: true` in the request and leaves this null (PR-30)."""
+    Audit re-derives all three from the closing period's committed `retry_horizon_us`, the WAL's
+    last externally requested attempt with a durable decision, and T. An unnecessary
+    `--force-seal` records `force_seal: true` and leaves this null (PR-30)."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -209,11 +176,9 @@ class ForcedGate(BaseModel):
 class RouteRuntime(BaseModel):
     """ss3.3's fourth row: which executor a logical role resolves to.
 
-    **A route names an executor and nothing else.** It carries no
-    generation -- at effect birth `executor_id` comes from the route and
-    `generation` from the host row's CURRENT value, so a stale route
-    cannot exist and an evicted host's work is the concurrency model's
-    ss8 case, not a route state (the withdrawn HA plan's ss4, DL-189)."""
+    A route names an executor and nothing else. It carries no generation: effect birth takes
+    `generation` from the host row's current value, so a stale route cannot exist, and an evicted
+    host's work is the concurrency model's ss8 case (DL-189)."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -222,35 +187,25 @@ class RouteRuntime(BaseModel):
 
 
 def implicit_routes(executor_id: str) -> dict[str, RouteRuntime]:
-    """Today's route table, projected from what exists.
+    """Today's route table: one route whose role is the engine-wide `executor_id` itself.
 
-    The catalog names no role yet and `plan_effects` takes one engine-wide
-    `executor_id`, so there is exactly one route and its role is that
-    executor's own id -- inventing a second name for one fact would be the
-    parallel model DL-91 exists to catch. `state_rev` is 0 because no verb
-    that could move it exists: the `host{verb: route}` record and the v3
-    `routes` query arrive with the storage, and PR-16b's revision
-    assertions arrive with them."""
+    The catalog names no role yet, and a second name for one fact would be a parallel model
+    (DL-91). `state_rev` is 0 because no verb that moves it exists; the `host{verb: route}` record
+    and the v3 `routes` query arrive with the storage, with PR-16b's revision assertions."""
     return {executor_id: RouteRuntime(executor_id=executor_id)}
 
 
 class SealedHost(BaseModel):
-    """A host row as a seal carries it: ss3.3's row MINUS `last_contact`
-    and with `deadman_us` null.
+    """A host row as a seal carries it: ss3.3's row minus `last_contact`, with `deadman_us` null.
 
-    Both exclusions are in the SHAPE rather than in a writer. A carried
-    `last_contact` lets the new period conclude a quarantined host's
-    deadman already expired -- the one state that permits a double run --
-    and a carried deadman lets C2 restart the supervisor at 120s while the
-    row still says 60s and permit eviction 60s before the real kill bound.
-    The row's deadman is null until the host re-registers in the new
-    period, and a host with a null deadman is not evictable except by
-    force, which is the safe direction (PR-24a).
+    Both exclusions are in the shape. A carried `last_contact` lets the new period conclude a
+    quarantined host's deadman expired, and a carried deadman lets C2 restart the supervisor at
+    120s while the row says 60s, permitting eviction before the real kill bound. A host with a
+    null deadman is not evictable except by force, the safe direction; the deadman stays null
+    until the host re-registers (PR-24a).
 
-    `deadman_us`, not `deadman_s`: ss3.2's grammar has no floats at any
-    depth, and microseconds are what `RuntimeProfile` already stores. The
-    field stays in the schema, always present and always null, because
-    ss3.2 requires a typed field to be present rather than absent."""
+    `deadman_us`, not `deadman_s`: ss3.2 has no floats at any depth. The field is always present
+    and null, since ss3.2 requires a typed field to be present."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -263,9 +218,8 @@ class SealedHost(BaseModel):
 
     @classmethod
     def of(cls, row: HostRuntime | SealedHost) -> SealedHost:
-        """Project a live host row. Every field the seal carries by name,
-        so a field added to `HostRuntime` later lands here or the ss3.3
-        exclusion test reds."""
+        """Project a live host row. Every carried field is named, so a field added to
+        `HostRuntime` lands here or the ss3.3 exclusion test reds."""
         if isinstance(row, SealedHost):
             return row
         return cls(
@@ -277,9 +231,8 @@ class SealedHost(BaseModel):
         )
 
     def to_row(self) -> HostRuntime:
-        """The `HostRuntime` an opening engine seeds: the carried fields,
-        with the two exclusions null until the host re-registers and the
-        new leader has its own contact."""
+        """The `HostRuntime` an opening engine seeds: the carried fields, with the two exclusions
+        null until the host re-registers."""
         return HostRuntime(
             state=self.state,
             generation=self.generation,
@@ -292,13 +245,11 @@ class SealedHost(BaseModel):
 
 
 class SealedVerdict(BaseModel):
-    """One job's ss10 verdict as the seal records it: the class, and the
-    named assumption when there is one (ss3.1).
+    """One job's ss10 verdict as the seal records it: the class and the named assumption, if any
+    (ss3.1).
 
-    The wire key is `class`, which is a Python keyword, so the field is
-    `verdict` under an alias -- the same two fields `JobVerdict` carries,
-    projected. `tier` and `changed` stay in the migration report: they are
-    why, and the seal records what."""
+    The wire key `class` is a Python keyword, so the field is `verdict` under an alias. `tier` and
+    `changed` stay in the migration report."""
 
     model_config = ConfigDict(frozen=True, extra="forbid", populate_by_name=True)
 
@@ -323,10 +274,8 @@ class SealedVerdict(BaseModel):
 class PendingSpawn(BaseModel):
     """ss3.5: a SPAWN recorded and not delivered.
 
-    `run_id` is the EFFECT's (ss2.3), never an adapter's: the id is minted
-    in the decision transaction, so an engine that dies between the durable
-    effect and the spawn resumes knowing which identity the run would have
-    had (PR-36a)."""
+    `run_id` is the effect's (ss2.3), minted in the decision transaction, so an engine that dies
+    between the durable effect and the spawn resumes knowing the run's identity (PR-36a)."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -343,9 +292,8 @@ class PendingSpawn(BaseModel):
 class BoundRun(BaseModel):
     """ss3.5: a SPAWN applied and the spool binding known.
 
-    ss8 requires every applied CMD SPAWN to be bound or terminal before the
-    seal commits, so there is no applied-but-unbound kind: it is
-    milliseconds and the sealer waits (PR-27)."""
+    ss8 requires every applied CMD SPAWN to be bound or terminal before the seal commits, so
+    there is no applied-but-unbound kind (PR-27)."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -357,23 +305,18 @@ class BoundRun(BaseModel):
     run_id: str
     executor_id: str
     generation: int = Field(ge=0)
-    #: RELATIVE to the estate root (ss3.5): an absolute path would not
-    #: survive the physical roll that imports this sidecar into a new root,
-    #: and the rule is enforced rather than stated -- the adapter that
-    #: records a run directory today records an absolute one
-    #: (`runner_adapters.py`), so the sealer must relativize it
+    #: relative to the estate root (ss3.5): an absolute path would not survive the physical roll,
+    #: so the sealer relativizes the absolute path the adapter records (`runner_adapters.py`)
     run_dir: Annotated[str, AfterValidator(_estate_relative)]
 
 
 class FwWatch(BaseModel):
     """ss3.5: a live file-watcher run.
 
-    No process stands behind it, so it carries no executor and no
-    generation -- what it carries is the progress that decides when the
-    watch completes, which a restart would otherwise reset (PR-34). And it
-    is EVIDENCE, not memory: every field here is a pure function of the
-    first `watch_seq` lines of `runs/<job>.<run_number>/watch.jsonl`, which
-    is why the prefix is named by a line COUNT and not by wall time."""
+    No process stands behind it, so it carries no executor and no generation, only the progress
+    that decides when the watch completes (PR-34). It is evidence: every field is a pure function
+    of the first `watch_seq` lines of `runs/<job>.<run_number>/watch.jsonl`, so the prefix is
+    named by a line count, not wall time."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -383,9 +326,8 @@ class FwWatch(BaseModel):
     effect_id: str
     index: int = Field(ge=0)
     run_id: str
-    #: the count of durable `watch.jsonl` lines at T. At least 1: the
-    #: adapter's first durable record on dispatch is a `start` line, and a
-    #: watch not yet dispatched is a `pending_spawn` rather than this
+    #: the count of durable `watch.jsonl` lines at T; at least 1, since the adapter's first
+    #: durable record on dispatch is a `start` line (an undispatched watch is a `pending_spawn`)
     watch_seq: int = Field(ge=1)
     #: the last observed size, or null before the first poll
     previous_size: int | None = None
@@ -395,10 +337,8 @@ class FwWatch(BaseModel):
     next_poll_at: NaiveUtc
 
 
-#: ss3.5's discriminated lifecycle. One row shape does not describe the
-#: states the code has: a seal that carried only the RUNNING row lost
-#: `run_id`, `executor_id`, `generation` and the spool binding, and resume
-#: could not say which executor owned the run.
+#: ss3.5's discriminated lifecycle: one row shape cannot describe the states the code has, and
+#: resume needs `run_id`, `executor_id`, `generation` and the spool binding
 Execution = Annotated[PendingSpawn | BoundRun | FwWatch, Field(discriminator="kind")]
 
 
@@ -406,13 +346,10 @@ Execution = Annotated[PendingSpawn | BoundRun | FwWatch, Field(discriminator="ki
 
 
 class SealedState(BaseModel):
-    """ss3.1's `state`: every authoritative row plus the three scalars no
-    row holds.
+    """ss3.1's `state`: every authoritative row plus the three scalars no row holds.
 
-    The rows are the live models, not copies of three of their fields: a
-    second spelling of a carried row is a second authority for what the
-    state IS. Only `hosts` is projected, because ss3.3 excludes two of its
-    fields by name."""
+    The rows are the live models, since a second spelling of a carried row would be a second
+    authority. Only `hosts` is projected, because ss3.3 excludes two of its fields."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -420,14 +357,13 @@ class SealedState(BaseModel):
     globals: dict[str, GlobalRuntime] = {}
     hosts: dict[str, SealedHost] = {}
     routes: dict[str, RouteRuntime] = {}
-    #: ss3.2's order: `(due, token)`, never heap-array layout. The token
-    #: carries the CROSS-JOB firing order of equal-time timers, which
-    #: decides resource release, box cascades and who starts
+    #: ss3.2's order: `(due, token)`, never heap-array layout. The token carries the cross-job
+    #: firing order of equal-time timers, which decides resource release, box cascades and who
+    #: starts
     timers: tuple[tuple[NaiveUtc, int, Event], ...] = ()
     timer_seq: int = Field(default=0, ge=0)
-    #: SEM-16's irreversible depletion. Keys survive their resource: a
-    #: bucket C2 removes keeps its entry and still counts if a later
-    #: period brings the resource back (PR-19a)
+    #: SEM-16's irreversible depletion. Keys survive their resource: a removed bucket keeps its
+    #: entry and counts if a later period brings the resource back (PR-19a)
     consumed: dict[str, int] = {}
     enqueue_counter: int = Field(default=0, ge=0)
     now: NaiveUtc
@@ -435,9 +371,8 @@ class SealedState(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _project_hosts(cls, data: Any) -> Any:
-        """Accept live `HostRuntime` rows and project them (ss3.3). The
-        caller holds `store.hosts`; making it convert first would be one
-        more place the two exclusions could be forgotten."""
+        """Accept live `HostRuntime` rows and project them (ss3.3), so no caller has to remember
+        the two exclusions."""
         if isinstance(data, Mapping) and isinstance(data.get("hosts"), Mapping):
             hosts = {
                 host_id: SealedHost.of(row) if isinstance(row, (HostRuntime, SealedHost)) else row
@@ -467,13 +402,10 @@ class SealedState(BaseModel):
 
 
 def _check_timers(timers: tuple[tuple[datetime, int, Event], ...], timer_seq: int) -> None:
-    """ss7 phase 3 step 6: tokens unique, positive and <= `timer_seq`, in
-    `(due, token)` order.
+    """ss7 phase 3 step 6: tokens unique, positive and <= `timer_seq`, in `(due, token)` order.
 
-    Uniqueness is not tidiness: two equal `(due, token)` entries force the
-    heap to compare two `Event` objects, which are not orderable, so the
-    first equal-time pair would raise inside `heapq` at an arbitrary later
-    moment."""
+    Two equal `(due, token)` entries would force the heap to compare two unorderable `Event`
+    objects."""
     seen: set[int] = set()
     for due, token, _event in timers:
         if token <= 0:
@@ -522,10 +454,9 @@ def _check_waiters(jobs: Mapping[str, JobRuntime], enqueue_counter: int) -> None
 
 
 def _check_reservations(jobs: Mapping[str, JobRuntime]) -> None:
-    """ss5: a vector is held while STARTING or RUNNING; a row that is not
-    live holds only a renewable's units its run's policy did not free
-    (DL-256, `may_outlive_run`); and one bucket appears at most once in it
-    (ss3.2's "after duplicate-bucket rejection")."""
+    """ss5: a vector is held while STARTING or RUNNING; a non-live row holds only a renewable's
+    units its run's policy did not free (DL-256, `may_outlive_run`); a bucket appears at most once
+    (ss3.2)."""
     for name, row in sorted(jobs.items()):
         if row.status not in LIVE and not all(map(may_outlive_run, row.reservations)):
             raise ValueError(
@@ -546,30 +477,24 @@ def _check_reservations(jobs: Mapping[str, JobRuntime]) -> None:
 
 
 class StagedNextPeriod(BaseModel):
-    """ss3.4: what a CLIENT may propose -- the identity of WHAT opens next,
-    and nothing about WHERE it opens.
+    """ss3.4: what a client may propose -- the identity of what opens next, and nothing about
+    where it opens.
 
-    Draft 17 let the client stage `period_id` and `segment_no`, so period 2
-    could open period 4 and the attestation the induction requires could
-    never exist -- an unauditable lineage by construction (PR-05c). The
-    line between this model and the committed one is who may say it, and
-    `extra="forbid"` is what makes a staged request carrying `period_id` a
-    refusal instead of a field somebody later trusted.
+    The client cannot stage `period_id` and `segment_no`: period 2 could otherwise open period 4,
+    and the attestation the induction requires could never exist (PR-05c). `extra="forbid"` makes
+    a staged request carrying `period_id` a refusal.
 
-    `strict=True` (DL-168): this is the model a `seal` request's
-    `next_period` validates against directly, over the wire
-    (`runner_control.py`'s `_seal`), and every field here is int or str --
-    no nested model to validate under a laxer config of its own -- so the
-    config alone closes that ingress. `CommittedNextPeriod` inherits it,
-    and `commit` below stays safe because `model_dump()` over scalars-only
-    fields never produces anything strict has to refuse."""
+    `strict=True` (DL-168): a `seal` request's `next_period` validates against this model directly
+    over the wire (`runner_control.py`'s `_seal`), and every field is int or str, so the config
+    alone closes that ingress. `CommittedNextPeriod` inherits it; `commit` stays safe because
+    `model_dump()` over scalar fields never produces anything strict refuses."""
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     artifact_format_version: int = ARTIFACT_FORMAT_VERSION
     catalog_hash: str
-    #: pinned to the CURRENT recipe: a seal naming a version this binary
-    #: cannot recompute is one audit cannot audit (ss1.1, DL-130's rule)
+    #: pinned to the current recipe: a seal naming a version this binary cannot recompute cannot
+    #: be audited (ss1.1, DL-130)
     catalog_hash_version: Annotated[int, _CURRENT_RECIPE] = CATALOG_HASH_VERSION
     source_bundle_hash: str
     runtime_hash: str
@@ -577,13 +502,11 @@ class StagedNextPeriod(BaseModel):
 
     @property
     def stage_digest(self) -> str:
-        """sha256 over the canonical form of the STAGED fields (ss7).
+        """sha256 over the canonical form of the staged fields (ss7).
 
-        The engine-derived five are excluded by construction rather than by
-        a filter: `first_index` is attempt output -- a retry after a crash
-        closes at a different index and stages the same identity -- and a
-        digest that moved with it would quarantine a candidate that is the
-        same candidate (PR-05b, PR-30d)."""
+        The engine-derived five are excluded by construction: `first_index` is attempt output, and
+        a retry closing at a different index stages the same identity, so a digest that moved with
+        it would quarantine the same candidate (PR-05b, PR-30d)."""
         return hash_over(self.model_dump())
 
     def commit(
@@ -594,10 +517,8 @@ class StagedNextPeriod(BaseModel):
         closes_at_index: int,
         clock_domain: str,
     ) -> CommittedNextPeriod:
-        """ss3.4's engine half: the five fields only the engine may derive.
-
-        Each is derived here and nowhere else, so no caller can compose a
-        different opinion about which period opens next."""
+        """ss3.4's engine half: the five fields only the engine may derive, each derived here
+        alone."""
         period_id = closing_period_id + 1
         return CommittedNextPeriod(
             **self.model_dump(),
@@ -612,29 +533,25 @@ class StagedNextPeriod(BaseModel):
 
 
 class CommittedNextPeriod(StagedNextPeriod):
-    """ss3.4: the opening this boundary commits -- the staged identity plus
-    the five fields only the engine may derive.
+    """ss3.4: the opening this boundary commits -- the staged identity plus the five fields only
+    the engine may derive.
 
-    Subclassing IS "the staged fields plus", and because both models forbid
-    extras a committed form never validates as a staged one -- which is
-    what keeps a reader from accepting the wrong half. One type would force
-    `first_index` to be omitted (breaking ss3.2's every-field-present
-    rule), null (not what excluded means) or guessed (PR-08e)."""
+    Both models forbid extras, so a committed form never validates as a staged one. One type would
+    force `first_index` to be omitted (breaking ss3.2's every-field-present rule), null, or
+    guessed (PR-08e)."""
 
     period_id: int = Field(ge=1)
     segment_no: int = Field(ge=1)
     baseline_id: str
     clock_domain: str
-    #: `closes_at_index + 1`, and unknown until the cutoff barrier has
-    #: admitted every tick due at T: a client that staged it before the
-    #: barrier ran could name an index a cutoff tick then took (PR-05b)
+    #: `closes_at_index + 1`, unknown until the cutoff barrier has admitted every tick due at T,
+    #: so a client cannot stage it (PR-05b)
     first_index: int = Field(ge=1)
 
     @property
     def stage_digest(self) -> str:
-        """The staged half's digest, computed over the staged fields only
-        -- so a committed form and the staged form it grew from agree, and
-        a retry can tell "the same candidate" from "a different one"."""
+        """The staged half's digest over the staged fields only, so a committed form and the staged
+        form it grew from agree and a retry tells the same candidate from a different one."""
         staged = {name: getattr(self, name) for name in StagedNextPeriod.model_fields}
         return hash_over(staged)
 
@@ -651,14 +568,11 @@ class CommittedNextPeriod(StagedNextPeriod):
 def baseline_id_for(*, estate_id: str, period_id: int, stage_digest: str) -> str:
     """ss3.4/ss4: `sha256(canonical{estate_id, period_id, stage_digest})`.
 
-    **Derived, not minted.** Audit must reproduce every seal field from the
-    opening seal, the WAL, the spool and the manifests, and a random uuid
-    appears in none of them -- a wrong audit could only copy the value out
-    of the seal it is auditing and check its shape, so a mutation applied
-    consistently across the sidecar, the record and the manifests would
-    pass. Derived from pre-boundary evidence it is reproducible and still
-    unique per boundary, because `stage_digest` names the only staged
-    identity that can open there (PR-47d)."""
+    Derived, not minted: audit must reproduce every seal field from the opening seal, the WAL, the
+    spool and the manifests, and a random uuid appears in none of them, so a mutation applied
+    consistently across sidecar, record and manifests would pass. Derived from pre-boundary
+    evidence it is reproducible and unique per boundary, because `stage_digest` names the only
+    staged identity that can open there (PR-47d)."""
     return hash_over({"estate_id": estate_id, "period_id": period_id, "stage_digest": stage_digest})
 
 
@@ -678,12 +592,9 @@ class OpensFromSeal(BaseModel):
 class Seal(BaseModel):
     """ss3.1's sidecar: `seals/<period_id>.json`, in full.
 
-    The `digest` key is NOT a field. It is computed over the canonical
-    bytes of everything else (`digest` below), stamped on the way out
-    (`to_document`) and checked on the way in (`from_payload`) -- a stored
-    digest would be a second authority for a value that is a pure function
-    of the rest, and one an artifact could then disagree with itself
-    about."""
+    The `digest` key is not a field: it is computed over the canonical bytes of everything else
+    (`digest` below), stamped by `to_document` and checked by `from_payload`, since a stored
+    digest would be a second authority for a pure function of the rest."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -692,8 +603,8 @@ class Seal(BaseModel):
     period_id: int = Field(ge=1)
     baseline_id: str
     catalog_hash: str
-    #: pinned to the CURRENT recipe: a seal naming a version this binary
-    #: cannot recompute is one audit cannot audit (ss1.1, DL-130's rule)
+    #: pinned to the current recipe: a seal naming a version this binary cannot recompute cannot
+    #: be audited (ss1.1, DL-130)
     catalog_hash_version: Annotated[int, _CURRENT_RECIPE] = CATALOG_HASH_VERSION
     source_bundle_hash: str
     runtime_hash: str
@@ -783,9 +694,8 @@ class Seal(BaseModel):
         try:
             canonical_bytes(self.to_payload())
         except CanonError as exc:
-            # a value ss3.2 cannot write -- a float smuggled through an
-            # opaque payload -- must refuse at CONSTRUCTION, not at the
-            # first serialization three calls later (PR-11)
+            # a value ss3.2 cannot write (a float smuggled through an opaque payload) refuses at
+            # construction, not at the first serialization (PR-11)
             raise ValueError(f"the seal is not ss3.2-serializable: {exc}") from None
         for job, verdict in sorted(self.classification.items()):
             if verdict.verdict == "R":
@@ -798,13 +708,11 @@ class Seal(BaseModel):
     # ------------------------------------------------------- canonical form
 
     def to_payload(self) -> dict[str, Any]:
-        """The ss3.2-ready document WITHOUT its `digest` key.
+        """The ss3.2-ready document without its `digest` key.
 
-        Two normalizations happen here rather than in the models, because
-        both are serialization rules and not facts about the state: an
-        unordered collection sorts by its stated key (`reservations` by
-        bucket, every set by value), and the row keeps the order it was
-        acquired in."""
+        Unordered collections sort by their stated key here (`reservations` by bucket, every set
+        by value). These are serialization rules, not facts about the state: the live row keeps
+        its acquisition order."""
         payload = self.model_dump(by_alias=True)
         payload["state"]["jobs"] = {
             name: {
@@ -819,24 +727,20 @@ class Seal(BaseModel):
 
     @property
     def digest(self) -> str:
-        """`"sha256:" + hexdigest` over the canonical bytes with only the
-        top-level `digest` key removed (PR-13)."""
+        """`"sha256:" + hexdigest` over the canonical bytes minus the top-level `digest` key
+        (PR-13)."""
         return digest(self.to_payload())
 
     def to_document(self) -> dict[str, Any]:
-        """The payload with its `digest` stamped -- what the sidecar file
-        holds."""
+        """The payload with its `digest` stamped: what the sidecar file holds."""
         return with_digest(self.to_payload())
 
     def to_bytes(self) -> bytes:
         """ss3.2's canonical bytes of the whole sidecar.
 
-        REVALIDATED on the way out: frozen stops attribute assignment, not
-        mutation of a dict or list inside a field, and a writer that
-        stamped a digest over a post-validation mutation would emit a
-        self-consistent artifact only the NEXT reader refuses. The cost is
-        one validation per serialization; serialization happens once per
-        boundary."""
+        Revalidated on the way out: frozen stops attribute assignment, not mutation of a dict or
+        list inside a field, and a digest stamped over such a mutation would be self-consistent
+        and refused only by the next reader."""
         try:
             revalidated = type(self)(**{k: v for k, v in self.to_payload().items()})
         except (ValidationError, ValueError) as exc:
@@ -847,19 +751,15 @@ class Seal(BaseModel):
     def from_payload(cls, payload: object) -> Seal:
         """Validate a decoded document, its digest and its canonical form.
 
-        The digest is recomputed over the DOCUMENT first, before the model
-        is built: a mutation that also breaks the schema -- an added key,
-        a retyped field -- must still be reported as what it is, and a
-        reader that validated first would name the schema and never reach
-        the tamper. The second check is the canonical form: a document
-        whose own digest is right but whose bytes are not ss3.2's is not
-        this artifact either (ss3.2, PR-13).
+        The digest is recomputed over the document before the model is built, so a mutation that
+        also breaks the schema is reported as tamper and not as a schema error. The canonical form
+        is checked second: a document with the right digest but non-ss3.2 bytes is not this
+        artifact (ss3.2, PR-13).
 
-        A seal is a closed estate artifact: an absent `artifact_format_version`
-        refuses by field name here, before the digest is read, as the DL-157
-        readers do (`period.read_sentinel` and `boundary.py`'s four). `check_artifact_version`
-        passes absence by design -- it only checks a version that IS there --
-        so `require_artifact_version` is the one that requires the key (DL-227)."""
+        A seal is a closed estate artifact: an absent `artifact_format_version` refuses by field
+        name before the digest is read, as the DL-157 readers do (`period.read_sentinel` and
+        `boundary.py`'s four). `check_artifact_version` passes absence, so
+        `require_artifact_version` is the one that requires the key (DL-227)."""
         if not isinstance(payload, Mapping):
             raise EngineError(f"seal artifact: expected an object, got {type(payload).__name__}")
         try:
@@ -898,13 +798,11 @@ class Seal(BaseModel):
 
     @classmethod
     def from_bytes(cls, data: bytes | str) -> Seal:
-        """ss3.2's ingress: decode -- refusing duplicate keys, floats,
-        non-scalar strings and an unimplemented `artifact_format_version`
-        -- then validate the shape and the digest, and require the FILE'S
-        OWN BYTES to be the canonical bytes: the digest is computed over
-        the canonical form, so a whitespace-padded or key-reordered copy
-        carries the SAME digest as the real artifact, and accepting it
-        would let two byte-forms of one seal circulate under one name."""
+        """ss3.2's ingress: decode (refusing duplicate keys, floats, non-scalar strings and an
+        unimplemented `artifact_format_version`), validate the shape and digest, and require the
+        file's own bytes to be the canonical bytes. A whitespace-padded or key-reordered copy
+        carries the same digest, and accepting it would let two byte-forms of one seal
+        circulate."""
         raw = data.encode("utf-8") if isinstance(data, str) else data
         try:
             document = decode(raw)
@@ -920,10 +818,10 @@ class Seal(BaseModel):
 
 
 def _check_bounds(seal: Seal) -> None:
-    """I2's artifact-readable half: nothing in the sidecar postdates the
-    cutoff. An index above `closes_at_index` is future intent audit cannot
-    derive from this period's WAL, and a `start_period` above the closing
-    period is a run started in a period that has not happened."""
+    """I2's artifact-readable half: nothing in the sidecar postdates the cutoff.
+
+    An index above `closes_at_index` is future intent audit cannot derive, and a `start_period`
+    above the closing period is a run started in a period that has not happened."""
     for effect in seal.outbox_pending:
         if not 1 <= effect.index <= seal.closes_at_index:
             raise ValueError(
@@ -951,10 +849,9 @@ def _check_bounds(seal: Seal) -> None:
 
 
 def _check_cutoff(seal: Seal) -> None:
-    """ss7 phase 2: `now == scheduler_admitted_through == T`.
+    """ss7 phase 2: `now == scheduler_admitted_through == T`, all three the cutoff instant.
 
-    All three are the cutoff instant. A seal whose `now` ran past T carried
-    a feed the barrier had already closed."""
+    A `now` past T carried a feed the barrier had closed."""
     if seal.state.now != seal.closed_at:
         raise ValueError(
             f"state.now {seal.state.now.isoformat()} != closed_at"
@@ -968,12 +865,10 @@ def _check_cutoff(seal: Seal) -> None:
 
 
 def _check_opening(seal: Seal) -> None:
-    """ss3.4 and ss4: everything the opening commits, re-derived from the
-    seal itself.
+    """ss3.4 and ss4: everything the opening commits, re-derived from the seal itself.
 
-    `baseline_id` is the load-bearing one. Recomputing it here is what
-    makes "derived, not minted" checkable by every reader of the artifact
-    and not only by `audit` (PR-47d)."""
+    Recomputing `baseline_id` makes "derived, not minted" checkable by every reader and not only
+    by `audit` (PR-47d)."""
     opening = seal.next_period
     if opening.artifact_format_version != ARTIFACT_FORMAT_VERSION:
         raise ValueError(
@@ -1017,8 +912,7 @@ def _check_opening(seal: Seal) -> None:
 
 
 def _check_order(seal: Seal) -> None:
-    """ss3.2: `outbox_pending` and `executions` are ordered by
-    `(index, effect_id)` (PR-14)."""
+    """ss3.2: `outbox_pending` and `executions` are ordered by `(index, effect_id)` (PR-14)."""
     for what, keys in (
         ("outbox_pending", [(e.index, e.effect_id) for e in seal.outbox_pending]),
         ("executions", [(x.index, x.effect_id) for x in seal.executions]),
@@ -1027,26 +921,20 @@ def _check_order(seal: Seal) -> None:
             raise ValueError(f"{what} is not in (index, effect_id) order (ss3.2)")
 
 
-# ss3.5's one-way join: an execution entry stands behind a LIVE row. A
-# RUNNING or STARTING row MAY lack an entry -- a `CHANGE_STATUS STARTING`
-# overwrite produces exactly that and is safe to carry (PR-22a) -- but an
-# entry with no live row is an execution nothing owns.
+# ss3.5's one-way join: an execution entry stands behind a live row. A RUNNING or STARTING row may
+# lack an entry (a `CHANGE_STATUS STARTING` overwrite produces that and is safe to carry, PR-22a);
+# an entry with no live row is an execution nothing owns.
 def _check_join(seal: Seal) -> None:
-    """ss3.5's join, ONE WAY, over dispatchable rows.
+    """ss3.5's join, one way, over dispatchable rows.
 
-    Every execution has a live row and agrees with it on `run_number`;
-    every pending SPAWN has a `pending_spawn` counterpart; a shared
-    `run_id` agrees between the effect and the entry (PR-22). The reverse
-    is deliberately not required: a `CHANGE_STATUS STARTING` overwrite
-    leaves a STARTING row with no intent, no spool evidence and no live
-    process, and a two-way join would refuse that legal estate (PR-22a). A
-    RUNNING BOX has no adapter, no effect and no entry either.
+    Every execution has a live row and agrees with it on `run_number`; every pending SPAWN has a
+    `pending_spawn` counterpart; a shared `run_id` agrees between effect and entry (PR-22). The
+    reverse is not required: a `CHANGE_STATUS STARTING` overwrite leaves a STARTING row with no
+    intent, spool evidence or live process, and a two-way join would refuse that legal estate
+    (PR-22a). A RUNNING box has no adapter, effect or entry either.
 
-    The CMD-or-FW half of ss3.5's sentence needs C2's catalog to know a
-    job's type, so it belongs to the loader that holds one -- this
-    function refuses what the artifact alone can refute.
-    `check_executions_dispatchable` is that half, and the resume path is
-    where it runs (DL-151)."""
+    The CMD-or-FW half needs C2's catalog and is `check_executions_dispatchable`, run on the
+    resume path (DL-151)."""
     entries: dict[str, Execution] = {}
     for entry in seal.executions:
         if entry.effect_id in entries:
@@ -1082,9 +970,8 @@ def _check_join(seal: Seal) -> None:
                 " intent, and an Outbox seeded from this would refuse the second"
             )
         effect_ids.add(effect.effect_id)
-        # a sealed effect is NATIVE by definition (the boundary is DL-118's
-        # world): birth identity on every one -- an unpaired KILL included,
-        # which the entry join never sees
+        # a sealed effect is native (the boundary is DL-118's world): birth identity on every
+        # one, an unpaired KILL included, which the entry join never sees
         if effect.run_number < 1:
             raise ValueError(
                 f"pending effect {effect.effect_id!r} names run {effect.run_number}:"
@@ -1114,11 +1001,9 @@ def _check_join(seal: Seal) -> None:
                 )
         if held is None:
             continue
-        # every shared field agrees EXACTLY, nulls included: an entry that
-        # says `relay-2` where the effect says `local` is two owners for
-        # one attempt, and an identity-less effect under an identified
-        # entry is an intent that cannot dispatch under the identity it
-        # claims -- a None-skipping comparison would bless both
+        # every shared field agrees exactly, nulls included: an entry saying `relay-2` where the
+        # effect says `local` is two owners for one attempt, and a None-skipping comparison would
+        # bless an identity-less effect under an identified entry
         for field in ("job", "run_number", "run_id", "executor_id", "generation", "index"):
             if not hasattr(held, field):
                 continue  # an fw entry has no executor half
@@ -1131,9 +1016,8 @@ def _check_join(seal: Seal) -> None:
                     " describe one attempt (PR-22)"
                 )
     for entry in seal.executions:
-        # the join's OTHER direction (ss3.5): an undelivered intent IS its
-        # pending_spawn entry, so an entry with no effect behind it would
-        # open a period holding a run nothing intends to dispatch
+        # the join's other direction (ss3.5): an undelivered intent is its pending_spawn entry,
+        # so an entry without an effect would open a period holding a run nothing dispatches
         if entry.kind == "pending_spawn" and entry.effect_id not in pending_spawns:
             raise ValueError(
                 f"pending_spawn {entry.effect_id!r} has no pending SPAWN effect in"
@@ -1165,21 +1049,18 @@ def _check_join(seal: Seal) -> None:
 
 
 def _why(exc: ValidationError) -> str:
-    """A pydantic failure as one line naming each field and what it said --
-    "the seal is invalid" is not actionable, which field is."""
+    """A pydantic failure as one line naming each field and what it said."""
     return "; ".join(
         f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}" for error in exc.errors()
     )
 
 
 def _canon_ready(value: object, path: str = "$") -> Any:
-    """ss3.2's two shape rules that a pydantic dump does not apply: a set
-    is an unordered collection and sorts by value, and a datetime is naive
-    UTC.
+    """ss3.2's two shape rules a pydantic dump does not apply: a set sorts by value, and a
+    datetime is naive UTC.
 
-    An aware datetime is REFUSED rather than converted, on `_naive_utc`'s
-    reason -- this is that rule's backstop, for the embedded models this
-    module does not own."""
+    An aware datetime is refused on `_naive_utc`'s reason; this is that rule's backstop for the
+    embedded models this module does not own."""
     if isinstance(value, Mapping):
         return {key: _canon_ready(item, f"{path}.{key}") for key, item in value.items()}
     if isinstance(value, (set, frozenset)):
@@ -1218,33 +1099,23 @@ def close_runtime(
 ) -> Seal:
     """One runtime, closed into one sidecar (ss3).
 
-    Pure and deterministic: the same inputs give the same object and the
-    same bytes, which is what lets phase 2 build a candidate, validate it,
-    and write exactly what it validated.
+    Pure and deterministic: the same inputs give the same object and bytes, so phase 2 can build a
+    candidate, validate it, and write exactly what it validated.
 
-    The closing period's identity comes from its COMMITTED MANIFEST rather
-    than from parameters beside it -- `period_id`, `baseline_id`,
-    `clock_domain` and the three hashes are the manifest's, so no caller
-    can compose a seal that describes a period the manifest does not.
-    `next_period` is derived from `staged` here, so the five engine fields
-    have exactly one producer (ss3.4).
+    The closing period's identity (`period_id`, `baseline_id`, `clock_domain` and the three
+    hashes) comes from its committed manifest, so no caller can compose a seal that describes a
+    period the manifest does not. `next_period` is derived from `staged` here, so the five engine
+    fields have one producer (ss3.4).
 
-    Two of ss3.2's three orders are applied here rather than asked of the
-    caller: `Outbox.pending` returns admission order and the canonical
-    order is `(index, effect_id)`, which agrees with it per run and is
-    total across runs. The third is required, not applied -- `timers`
-    arrives from `RuntimeState.timers()`, which is already
-    `(due, token)`-sorted, and sorting a heap array here would hide a
-    caller that handed over the raw layout ss3.2 forbids.
+    Two of ss3.2's three orders are applied here: `Outbox.pending` returns admission order and
+    the canonical order is `(index, effect_id)`. The third is required of the caller: `timers`
+    arrives from `RuntimeState.timers()`, already `(due, token)`-sorted, and sorting a heap array
+    here would hide a caller handing over the raw layout ss3.2 forbids.
 
-    Every refusal here is an `EngineError`, the shell's one refusal type --
-    a caller that had to catch two would eventually catch one. The R gate
-    IS re-stated here, deliberately: the model refuses an R verdict in the
-    projected MAP, but the projection is a dict build -- two verdicts for
-    one job would let a later carry OVERWRITE an R before the model ever
-    saw it. So duplicates refuse, and `Classification.refused` refuses,
-    both on the object the classifier produced rather than on the map
-    projected from it."""
+    Every refusal is an `EngineError`, the shell's one refusal type. The R gate is restated here
+    on purpose: the model refuses an R verdict in the projected map, but two verdicts for one job
+    would let a later carry overwrite an R before the model saw it. So duplicates and
+    `Classification.refused` refuse on the classifier's object, not the projected map."""
     if classification.refused:
         raise EngineError(
             f"the classification refuses the boundary ({', '.join(classification.refused)}):"
@@ -1299,56 +1170,44 @@ def close_runtime(
 
 
 class OpenedRuntime(BaseModel):
-    """What an engine needs to seed itself from a seal, validated (ss7
-    phase 3).
+    """What an engine needs to seed itself from a seal, validated (ss7 phase 3).
 
-    Not an `Engine`, and not a `RuntimeState`: `Engine.__init__` takes a
-    clock and adapters, calls `clock.now()` and seeds a host row, none of
-    which a pure function may do. This holds the SEAL-DERIVED half -- the
-    carried rows, the timer heap, the capacity scalars, the outbox, the
-    executions, the ghost-run gate and the identity the period opens under.
-    The catalog-derived half (referencers, the capacity pool, the scheduler
-    frontier, and genuinely new rows) belongs to the loader that holds C2.
+    Not an `Engine` or a `RuntimeState`: `Engine.__init__` takes a clock and adapters, calls
+    `clock.now()` and seeds a host row, none of which a pure function may do. This holds the
+    seal-derived half: the carried rows, the timer heap, the capacity scalars, the outbox, the
+    executions, the ghost-run gate and the identity the period opens under. The catalog-derived
+    half (referencers, the capacity pool, the scheduler frontier, new rows) belongs to the loader
+    that holds C2.
 
     **The seeding order the spec pins**, for that loader:
 
-    1. carried rows install VERBATIM -- revisions included -- before
-       anything else. A "construct C2 then overwrite" opener seeds carried
-       entities first and moves their revisions, and an operator's `expect`
-       against a revision the seal published would then be unholdable.
-    2. only genuinely new rows are seeded from the catalog afterwards (the
-       SEM-24 initial flags, declared globals). A carried row keeps its C1
-       flags: genesis seeding applies to new rows only.
-    3. `consumed` and `enqueue_counter` are installed, never renormalized:
-       redefining a rank as `1 + max(active)` would buy one integer in
-       exchange for proving that renormalisation equals genesis replay.
-    4. the ghost-run gate `_dispatched` is not carried: it is derived
-       state, and its reconstruction is normative (ss3.3). Resume rebuilds
-       it from every row with `run_number > 0` after the replay
-       (`runner_startup`), which covers the carried rows too.
-    5. `last_contact` and the host deadman are NOT seeded: a new leader
-       over-waits rather than evicting early, and the row's deadman stays
-       null until the host re-registers in the new period.
+    1. carried rows install VERBATIM, revisions included, before anything else; a "construct C2
+       then overwrite" opener would move their revisions and make an operator's `expect` against
+       a published revision unholdable.
+    2. only new rows are seeded from the catalog afterwards (the SEM-24 initial flags, declared
+       globals); a carried row keeps its C1 flags.
+    3. `consumed` and `enqueue_counter` are installed, never renormalized: redefining a rank as
+       `1 + max(active)` would require proving renormalisation equals genesis replay.
+    4. the ghost-run gate `_dispatched` is derived state and not carried (ss3.3); resume rebuilds
+       it from every row with `run_number > 0` after the replay (`runner_startup`).
+    5. `last_contact` and the host deadman are not seeded: a new leader over-waits rather than
+       evicting early, and the deadman stays null until the host re-registers.
 
-    Nothing here touches an adapter, a supervisor, a socket, a clock or a
-    filesystem."""
+    Nothing here touches an adapter, a supervisor, a socket, a clock or a filesystem."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     estate_id: str
-    #: what the closing boundary committed: the identity the opening
-    #: segment and the opening manifest must both agree with (PR-07)
+    #: what the closing boundary committed: the identity the opening segment and manifest must
+    #: both agree with (PR-07)
     next_period: CommittedNextPeriod
-    #: which seal this opening opened from -- the opening `segment`
-    #: carries it verbatim (ss2.1), so the writer above recomputes nothing
+    #: which seal this opening opened from; the opening `segment` carries it verbatim (ss2.1)
     opens_from_seal: OpensFromSeal
-    #: `at` on an opening segment IS T -- the seal's cutoff instant, not
-    #: restart wall time. That, plus `next_period` committing every
-    #: non-derived opening field, is what makes two openings of one seal
+    #: `at` on an opening segment is T, the seal's cutoff instant, not restart wall time. With
+    #: `next_period` committing every non-derived opening field, two openings of one seal are
     #: byte-identical (PR-07)
     opened_at: NaiveUtc
-    #: the closing period's term. The estate-monotone epoch makes the new
-    #: period's first term this + 1 (ss2.4)
+    #: the closing period's term; the new period's first term is this + 1 (ss2.4)
     epoch: int
     state: SealedState
     outbox_pending: tuple[Effect, ...] = ()
@@ -1357,17 +1216,14 @@ class OpenedRuntime(BaseModel):
 
     @property
     def host_rows(self) -> dict[str, HostRuntime]:
-        """The carried hosts as rows an engine can install, with the two
-        ss3.3 exclusions null."""
+        """The carried hosts as rows an engine can install, with the two ss3.3 exclusions null."""
         return {host_id: row.to_row() for host_id, row in self.state.hosts.items()}
 
     @property
     def carried_rows(self) -> "CarriedRows":
-        """The sidecar's carried half in the interpreter's own types --
-        ONE derivation (DL-137), so the engine, the auditor and run
-        history cannot open the same period holding different state. The
-        translation lives here, at the seam, because the interpreter
-        never learns what a sidecar is."""
+        """The sidecar's carried half in the interpreter's own types, one derivation (DL-137), so
+        the engine, the auditor and run history open the same period with the same state. The
+        translation lives at this seam because the interpreter never learns what a sidecar is."""
         state = self.state
         return CarriedRows(
             jobs=dict(state.jobs),
@@ -1383,33 +1239,24 @@ class OpenedRuntime(BaseModel):
 
 
 def check_executions_dispatchable(seal: Seal, catalog: CatalogIR) -> None:
-    """ss3.5's CMD-or-FW half of the join, asked where C2 is held.
+    """ss3.5's CMD-or-FW half of the join, asked where C2 is held (DL-151).
 
-    `_check_join` refuses what the sidecar alone can refute: an entry whose
-    row is missing, not live, or at another run. WHICH JOBS may stand behind
-    one needs the catalog the period opens with, and until DL-151 no loader
-    asked -- the seal's own docstring deferred it to "the loader that holds
-    C2" and neither `open_from_seal` (which takes no catalog) nor the resume
-    ladder did it. A forged or corrupted sidecar naming a live BOX row
-    therefore passed every gate on the way in.
+    `_check_join` refuses what the sidecar alone can refute. Which jobs may stand behind an entry
+    needs the opening catalog, so a forged sidecar naming a live BOX row is refused here.
 
-    A BOX has no adapter, no effect and no entry: it folds from its members
-    and is deliberately outside `dispatchable`. A job C2 does not define is
-    outside it too, and cannot occur on a legal boundary: `classify` refuses
-    one over an executing job the opening catalog dropped (ss10.1's R row).
-    Meeting one means either the sidecar is not this estate's OR this resume
-    was launched with the wrong estate files -- the second is
-    `check_leader_eligibility`'s to name and it runs after this, so the
-    refusal says both rather than accusing the artifact alone.
+    A box has no adapter, effect or entry: it folds from its members and is outside
+    `dispatchable`. A job C2 does not define is outside it too and cannot occur on a legal
+    boundary, since `classify` refuses one over an executing job the opening catalog dropped
+    (ss10.1's R row). Meeting one means the sidecar is not this estate's or the resume was
+    launched with the wrong estate files; `check_leader_eligibility` names the second and runs
+    after this, so the refusal says both.
 
-    Not an allow-list of type names: `job_type` is extensible, an engine
-    dispatches whatever type it wired an adapter for, and `_require_adapters`
-    is the gate that asks about adapters.
+    It is not an allow-list of type names: `job_type` is extensible and `_require_adapters` asks
+    about adapters.
 
-    Over the SEAL rather than over what it opens into, so it can be asked
-    before the successor's segment is written -- the seal's `executions` are
-    what an opening carries, unchanged -- and so one call covers both the
-    resume that opens the period and every resume after it."""
+    It takes the seal rather than what it opens into, so it can run before the successor's
+    segment is written, and one call covers the resume that opens the period and every resume
+    after it."""
     for entry in seal.executions:
         job_ir = catalog.jobs.get(entry.job)
         if job_ir is None:
@@ -1433,34 +1280,25 @@ def open_from_seal(
     expected_digest: str,
     manifest: Manifest,
 ) -> OpenedRuntime:
-    """One sidecar, opened into what an engine seeds itself from (ss7
-    phase 3).
+    """One sidecar, opened into what an engine seeds itself from (ss7 phase 3).
 
-    Pure. `seal` may be the artifact's bytes (the resume path: ss3.2
-    ingress, then the shape, then the digest), a decoded document, or an
-    in-memory `Seal` (phase 2's candidate, already validated by
-    construction).
+    Pure. `seal` may be the artifact's bytes (the resume path: ss3.2 ingress, then shape, then
+    digest), a decoded document, or an in-memory `Seal` (phase 2's candidate).
 
-    `expected_digest` is the digest the NAMING RECORD carries -- the
-    committed `seal` record at resume, or the opening `segment`'s
-    `opens_from_seal` in a rolled root. A sidecar that is self-consistent
-    and is not the one the record names is refused: a matching digest
-    proves integrity, never derivation (ss11).
+    `expected_digest` is the digest the naming record carries: the committed `seal` record at
+    resume, or the opening `segment`'s `opens_from_seal` in a rolled root. A self-consistent
+    sidecar the record does not name is refused, since a matching digest proves integrity, never
+    derivation (ss11).
 
-    `manifest` is the OPENING period's committed manifest. Every field it
-    shares with `next_period` must agree -- the committed manifest is the
-    engine's own output and a disagreement means it is not this
-    boundary's (PR-22).
+    `manifest` is the opening period's committed manifest; every field it shares with
+    `next_period` must agree (PR-22).
 
-    BOTH facts are REQUIRED, not optional: an opening that skipped either
-    would seed an engine from a self-consistent sidecar that is not the
-    one the lineage names, or under a manifest that is not this
-    boundary's. A caller validating a candidate with neither fact wants
-    `Seal.from_bytes`, which is that API."""
+    Both are required: skipping either would seed an engine from a sidecar the lineage does not
+    name, or under a manifest that is not this boundary's. A caller validating a candidate with
+    neither wants `Seal.from_bytes`."""
     if isinstance(seal, Seal):
-        # revalidated even in memory: frozen stops attribute assignment,
-        # not mutation inside a dict field, and this is the LAST gate
-        # before an engine seeds itself from the object
+        # revalidated even in memory: frozen stops attribute assignment, not mutation inside a
+        # dict field, and this is the last gate before an engine seeds from the object
         try:
             opened = Seal(**seal.to_payload())
         except ValidationError as exc:
@@ -1493,11 +1331,9 @@ def _parse(seal: bytes | str | Mapping[str, Any]) -> Seal:
     return Seal.from_payload(seal)
 
 
-#: The fields a committed manifest and the `next_period` that names it
-#: share -- DERIVED from the two models, so a field added to either is
-#: checked by default rather than by somebody remembering to list it
-#: (the DL-83 discipline). `runtime_profile` is the manifest's alone: the
-#: seal names the profile by its hash.
+#: the fields a committed manifest and the `next_period` naming it share, derived from the two
+#: models so a field added to either is checked by default (DL-83); `runtime_profile` is the
+#: manifest's alone, since the seal names the profile by its hash
 _SHARED_WITH_MANIFEST: Final[tuple[str, ...]] = tuple(
     sorted(set(Manifest.model_fields) & set(CommittedNextPeriod.model_fields))
 )

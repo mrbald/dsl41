@@ -1,30 +1,25 @@
 """`rehearse --check-cadence`: the DL-182 dynamic estate check.
 
-Drive the estate through the rehearse engine, compare observed per-job run
-counts against a typed expectation, and report deviations. The rulings are
-DL-184's; the stance that decides every corner here: the expectation is a
-POLICY BOUND -- the DL-182 default, "at most once per own cadence" -- not a
-soundness proof. An estate that legitimately exceeds it (the unqualified OR
-join firing once per wake, the DL-180 shape) is the check's intended true
-positive; `--cadence-policy` is the declared-exception channel. Deviations
-are triage findings.
+Drive the estate through the rehearse engine, compare observed per-job run counts against a typed
+expectation, and report deviations (rulings: DL-184). The expectation is a policy bound, the
+DL-182 default "at most once per own cadence", not a soundness proof. An estate that legitimately
+exceeds it (the unqualified OR join firing once per wake, the DL-180 shape) is the check's
+intended true positive; `--cadence-policy` is the declared-exception channel. Deviations are
+triage findings.
 
-Two counters, deliberately different:
-- EXPECTED comes from a fresh Scheduler anchored at the same start with the
-  same construction arguments the engine fires from, so expectation and
-  observation cannot drift on calendar arithmetic.
-- OBSERVED is a run_number delta read from the oracle store, never a count
-  of STARTING trace transitions: ON_NOEXEC bypasses STARTING yet consumes
-  the tick (Q3/DL-54), and injected events could forge trace lines.
+Two counters:
+- EXPECTED comes from a fresh Scheduler anchored at the same start with the engine's construction
+  arguments, so expectation and observation cannot drift on calendar arithmetic.
+- OBSERVED is a run_number delta read from the oracle store, not a count of STARTING trace
+  transitions: ON_NOEXEC bypasses STARTING yet consumes the tick (Q3/DL-54), and injected events
+  could forge trace lines.
 
-`unchecked` is ABSORBING, but only along paths the bound actually reads: a
-job whose bound cannot be honestly computed (global-gated, cross-instance
-wake, parked file watcher, wake-cycle member, policy null) infects its box
-members and its wake-DEPENDENT consumers -- condition-only unboxed jobs,
-the only ones whose bound reads wakes -- each with the reason chain's first
-link named. Scheduled jobs and box members stay checked whatever their
-wake sources do: an armed tick and the once-per-box-execution gate bound
-them regardless (SEM-30/31, SEM-10). Exit-0 claims are scoped to checked
+`unchecked` is absorbing along the paths the bound reads. A job whose bound cannot be honestly
+computed (global-gated, cross-instance wake, parked file watcher, wake-cycle member, policy null)
+makes its box members and its wake-dependent consumers unchecked (condition-only unboxed jobs,
+the only ones whose bound reads wakes), each naming the first link of the reason chain. Scheduled
+jobs and box members stay checked whatever their wake sources do: an armed tick and the
+once-per-box-execution gate bound them (SEM-30/31, SEM-10). Exit-0 claims are scoped to checked
 jobs and the sweeps actually run (the report says which).
 """
 
@@ -60,12 +55,11 @@ from dsl41.runner_clock import EngineError, VirtualClock, ZeroDelayCycleError
 from dsl41.runner_scheduler import Scheduler
 from dsl41.semantics import DEFAULTS, SemanticSwitches, iced_atom_truth
 
-#: The check-mode scenario event allowlist (DL-184): injected starts carry a
-#: +1 budget on their target; a scripted STATUS forges the counts under test.
+#: the check-mode scenario event allowlist (DL-184): injected starts carry a +1 budget on their
+#: target, and a scripted STATUS would forge the counts under test
 CHECK_EVENT_KINDS = frozenset({"STARTJOB", "FORCE_STARTJOB", "SET_GLOBAL"})
 
-#: Report footer (the backend_uc assumptions precedent): what the oracle's
-#: model -- and therefore this check -- does not see (DL-53).
+#: report footer: what the oracle's model, and so this check, does not see (DL-53)
 UNMODELED_NOTE = (
     "counts assume no retries: n_retrys and the other DL-53 unmodeled"
     " attributes are outside the oracle's model"
@@ -167,18 +161,16 @@ class SweepCase(BaseModel):
 
 
 class FlagCase(BaseModel):
-    """One flag-sweep case: a whole ASSIGNMENT over one co-reference
-    component's globals pinned via SET_GLOBAL at start (the reset variant
-    sets off-values mid-window), the estate replayed, and the consumers
-    gated on those globals checked against bounds whose wake credit is the
-    could-fire evaluation, not a flat per-set +1. One global per case was
-    the slice review's first blocker: a compound multi-global gate never
-    had all its globals scripted, so it never got checked while the report
+    """One flag-sweep case: a whole assignment over one co-reference component's globals pinned
+    via SET_GLOBAL at start (the reset variant sets off-values mid-window), the estate replayed,
+    and the consumers gated on those globals checked against bounds whose wake credit is the
+    could-fire evaluation, not a flat per-set +1. One global per case would never script a
+    compound multi-global gate's globals together, so it would go unchecked while the report
     claimed coverage."""
 
     assignment: dict[str, str]
     reset: bool  # the mid-window reset variant (DL-182 c: with/without)
-    checked: int = 0  # consumers this case moved from unchecked to checked
+    checked: int = 0  # consumers this case made checked
     deviations: int = 0
     cycle: bool = False
 
@@ -186,9 +178,8 @@ class FlagCase(BaseModel):
 def _multi_fire_findings(
     bounds: Mapping[str, Bound], runs: Mapping[str, int], *, case: str | None = None
 ) -> list[CheckFinding]:
-    """The one spelling of "observed > bound becomes a multi_fire finding"
-    -- the happy path and both sweeps carried a copy each, and the copies
-    had begun to drift (DL-185)."""
+    """The one spelling of "observed > bound becomes a multi_fire finding", shared by the happy
+    path and both sweeps (DL-185)."""
     out: list[CheckFinding] = []
     for name in sorted(runs):
         bound = bounds.get(name)
@@ -241,8 +232,8 @@ class CadenceCheck(BaseModel):
 
     @property
     def ran(self) -> int:
-        """Jobs the play actually exercised -- a coverage line claiming
-        "checked" over an estate where nothing ran misled (review find)."""
+        """Jobs the play actually exercised: a coverage line claiming "checked" over an estate
+        where nothing ran would mislead."""
         return sum(1 for j in self.jobs.values() if j.observed > 0)
 
 
@@ -344,15 +335,11 @@ def fail_sweep_producers(catalog: CatalogIR, graph: DerivedGraph) -> list[str]:
 
 
 def case_fail_entry(adapter: FakeAdapter, producer: str, fail_code: int) -> tuple[float, int]:
-    """The script entry a fail-sweep case writes over (producer, 1): the
-    synthesized FAILURE exit with the duration the baseline would have used
-    -- the scenario's own run-1 entry first, then the job default, then the
-    estate default. DL-184 authorizes synthesizing the exit, never the
-    duration (the slice-1 review's blocker); this slice's review found the
-    first draft re-clobbering a scripted run-1 duration the same way. A
-    scripted run-1 PARK falls through to the defaults: the sweep overrides
-    the park (the sweep-entry-over-scenario-entry rule), and a park carries
-    no duration to preserve."""
+    """The script entry a fail-sweep case writes over (producer, 1): the synthesized FAILURE exit
+    with the duration the baseline would have used: the scenario's own run-1 entry first, then
+    the job default, then the estate default. DL-184 authorizes synthesizing the exit, never the
+    duration. A scripted run-1 PARK falls through to the defaults: the sweep entry overrides the
+    park, and a park carries no duration to preserve."""
     scripted = adapter.script.get((producer, 1))
     if scripted is not None:
         return (scripted[0], fail_code)
@@ -374,23 +361,19 @@ def run_fail_sweep(
     parked: Collection[str] = (),
     progress: "Callable[[str], None] | None" = None,
 ) -> tuple[list[SweepCase], list[CheckFinding]]:
-    """The dynamic L022 (DL-182 sweep a, ruled by DL-184): one replay per
-    producer with that producer's FIRST run scripted to an exit its own
-    SEM-09 boundary calls FAILURE (a blanket exit 1 is wrong under
-    success_codes/fail_codes -- Q7's lesson); the sweep entry overrides any
-    scenario entry. Jobs that dropped runs against the baseline are the
-    suppressed-run inventory (info tier, never exit 3 alone); a multi-fire
-    against the same bounds, or a tripped zero-delay guard, is a finding
-    and does. Bounds stay valid across cases: they are path-independent
-    upper bounds, and a failure can only redistribute which gates release.
-    BOX producers have no adapter, parked producers never complete,
-    n_retrys > 0 producers are unmodeled (DL-53), and a producer with ZERO
-    baseline runs is never reached (the case would replay the baseline
-    bit-identically -- its only difference is run 1's script entry) -- each
-    skips with its outcome named rather than pretending coverage. A
-    term_run_time shorter than the failing run's duration turns the FAILURE
-    into TERMINATED (SEM-14): accepted -- still a non-success, though f()
-    gates read FAILURE only, t()/d() read the kill."""
+    """The dynamic L022 (DL-182 sweep a, ruled by DL-184): one replay per producer with that
+    producer's first run scripted to an exit its own SEM-09 boundary calls FAILURE (a blanket
+    exit 1 is wrong under success_codes/fail_codes, Q7). The sweep entry overrides any scenario
+    entry. Jobs that dropped runs against the baseline are the suppressed-run inventory (info
+    tier, never exit 3 alone); a multi-fire against the same bounds, or a tripped zero-delay
+    guard, is a finding and does. Bounds hold across cases: they are path-independent upper
+    bounds, and a failure only redistributes which gates release.
+
+    A BOX producer has no adapter, a parked producer never completes, an n_retrys > 0 producer is
+    unmodeled (DL-53), and a producer with zero baseline runs is never reached (its case would
+    replay the baseline bit-identically); each skips with its outcome named. A term_run_time
+    shorter than the failing run's duration turns the FAILURE into TERMINATED (SEM-14): accepted,
+    still a non-success, though f() gates read FAILURE only and t()/d() read the kill."""
     events = list(events)  # one materialization, replayed per case
     cases: list[SweepCase] = []
     findings: list[CheckFinding] = []
@@ -454,15 +437,14 @@ def run_fail_sweep(
     return cases, findings
 
 
-#: Flag-sweep case ceiling: cases past it are dropped whole-component and
-#: the report names the uncovered globals (DL-184: unchecked past the
-#: ceiling). Components drop in sorted order -- deterministic simplicity;
-#: revisit if a real estate loses its hot global to the ceiling.
+#: flag-sweep case ceiling: cases past it are dropped whole-component and the report names the
+#: uncovered globals (DL-184). Components drop in sorted order; revisit if a real estate loses
+#: its hot global to the ceiling.
 FLAG_CASE_CEILING = 64
 
-#: Bounded whole-condition assignment search per component: region-product
-#: points probed before a consumer's satisfying assignment is declared not
-#: found and its globals reported uncovered (DL-184's ceiling clause).
+#: bounded whole-condition assignment search per component: region-product points probed before
+#: a consumer's satisfying assignment is declared not found and its globals reported uncovered
+#: (DL-184's ceiling clause)
 FLAG_ASSIGNMENT_PROBES = 4096
 
 
@@ -471,10 +453,9 @@ def _cond_could_fire(
     globals_: Mapping[str, str],
     job_truth: Callable[[StatusAtom | ExitCodeAtom], bool],
 ) -> bool:
-    """Whether the condition can evaluate TRUE under these global values
-    (unset -> False for EVERY operator, the oracle's own reading) with
-    job-atom truth supplied by the caller: the genesis truth for at-start
-    wake credit, all-True optimism for mid-window credit."""
+    """Whether the condition can evaluate TRUE under these global values (unset -> False for
+    every operator, the oracle's own reading), with job-atom truth supplied by the caller: the
+    genesis truth for at-start wake credit, all-True optimism for mid-window credit."""
     if isinstance(cond, And):
         return all(_cond_could_fire(op, globals_, job_truth) for op in cond.operands)
     if isinstance(cond, Or):
@@ -491,14 +472,13 @@ def _cond_could_fire(
 
 
 def genesis_truth(catalog: CatalogIR) -> Callable[[StatusAtom | ExitCodeAtom], bool]:
-    """Job-atom truth at a fresh genesis (the at-start wake-credit side of
-    the flag sweep). SEM-24 can seed only INACTIVE/ON_HOLD/ON_ICE/ON_NOEXEC
-    -- never a terminal -- so s/f/d/t and exit-code atoms are FALSE at
-    genesis, with two exceptions the slice review caught the first draft
-    missing: bare or qualified n() is TRUE (a never-run partner is
-    notrunning, oracle's own reading), and an atom naming an ON_ICE seed
-    reads the iced row (`iced_atom_truth`, SEM-05/SEM-20, DL-243) at the
-    default switch, as a static estimate reads it (DL-252)."""
+    """Job-atom truth at a fresh genesis (the at-start wake-credit side of the flag sweep).
+
+    SEM-24 can seed only INACTIVE/ON_HOLD/ON_ICE/ON_NOEXEC, never a terminal, so s/f/d/t and
+    exit-code atoms are FALSE at genesis. Two exceptions: bare or qualified n() is TRUE (a
+    never-run partner is notrunning, the oracle's reading), and an atom naming an ON_ICE seed
+    reads the iced row (`iced_atom_truth`, SEM-05/SEM-20, DL-243) at the default switch, as a
+    static estimate reads it (DL-252)."""
 
     def truth(atom: StatusAtom | ExitCodeAtom) -> bool:
         if atom.job.instance is None:
@@ -513,19 +493,15 @@ def genesis_truth(catalog: CatalogIR) -> Callable[[StatusAtom | ExitCodeAtom], b
 
 
 def _optimistic_truth(_atom: StatusAtom | ExitCodeAtom) -> bool:
-    """Mid-window job-atom truth: latches can be true by then, so the
-    could-fire test leans TRUE -- credit granted, never a manufactured
-    deviation (the safe direction; the review's m4 notes the over-credit
-    for windows where no latch exists yet)."""
+    """Mid-window job-atom truth: latches can be true by then, so the could-fire test leans TRUE:
+    credit granted, never a manufactured deviation (windows with no latch yet can over-credit)."""
     return True
 
 
 def _wake_dep_global_consumers(catalog: CatalogIR, graph: DerivedGraph) -> dict[str, set[str]]:
-    """Wake-dependent (condition-only, unboxed) consumers with global atoms
-    in their START condition, mapped to the referenced global names -- the
-    only jobs whose bound the flag sweep can move, so the only ones whose
-    globals earn cases (the review's m5: nightbank generated 18 cases for
-    globals no such consumer reads)."""
+    """Wake-dependent (condition-only, unboxed) consumers with global atoms in their START
+    condition, mapped to the referenced global names: the only jobs whose bound the flag sweep
+    can move, so the only ones whose globals earn cases."""
     parent_of = graph.box_tree.parent
     out: dict[str, set[str]] = {}
     for name, job in catalog.jobs.items():
@@ -543,22 +519,18 @@ def _wake_dep_global_consumers(catalog: CatalogIR, graph: DerivedGraph) -> dict[
 def flag_cases(
     catalog: CatalogIR, graph: DerivedGraph
 ) -> tuple[list[tuple[dict[str, str], bool]], list[str]]:
-    """The flag sweep's case list, per CO-REFERENCE COMPONENT of globals
-    (globals sharing a consumer merge; scripting one at a time never lifts
-    a compound gate -- the slice review's first blocker):
+    """The flag sweep's case list, per co-reference component of globals (globals sharing a
+    consumer merge; scripting one at a time never lifts a compound gate):
 
-    - a single-global component gets one case per region representative
-      (equiv.global_regions -- numeric and string cutpoints, never
-      literal-by-literal), set-only and set-plus-reset variants (DL-182 c);
-    - a multi-global component gets, per consumer it gates, one
-      whole-condition SATISFYING assignment (every global atom true) and
-      one FALSIFYING assignment, found by a bounded lexicographic search
-      over the region product (DL-184's own sentence), deduplicated, each
-      in both variants.
+    - a single-global component gets one case per region representative (equiv.global_regions --
+      numeric and string cutpoints, never literal-by-literal), set-only and set-plus-reset
+      variants (DL-182 c);
+    - a multi-global component gets, per consumer it gates, one whole-condition SATISFYING
+      assignment (every global atom true) and one FALSIFYING assignment, found by a bounded
+      lexicographic search over the region product (DL-184), deduplicated, each in both variants.
 
-    The unset None representative is excluded (SET_GLOBAL cannot produce
-    it; the happy path already plays it). Whole components past
-    FLAG_CASE_CEILING, and consumers whose bounded search finds no
+    The unset None representative is excluded (SET_GLOBAL cannot produce it; the happy path plays
+    it). Whole components past FLAG_CASE_CEILING, and consumers whose bounded search finds no
     satisfying assignment, land their globals in `uncovered`."""
     from dsl41.equiv import global_regions
 
@@ -676,16 +648,14 @@ def run_flag_sweep(
     no_success_exit: Collection[str] = (),
     progress: Callable[[str], None] | None = None,
 ) -> tuple[list[FlagCase], list[CheckFinding], list[str]]:
-    """The dynamic recovery of L021's globals exclusion (DL-182 sweep c,
-    ruled by DL-184): per case, a whole assignment over one co-reference
-    component pinned via SET_GLOBAL at start (the reset variant sets
-    off-values mid-window -- "" or NUL, themselves values that can satisfy
-    != and ordering atoms), the estate replayed, and the bounds recomputed
-    with `scripted_globals` -- consumers gated only on scripted globals
-    become checked, wake-budgeted by the could-fire evaluation. Base
-    scenario SET_GLOBALs join the scripted set (they play in every case).
-    Deviations and tripped guards are case-tagged findings and exit 3;
-    everything else is report-only."""
+    """The dynamic recovery of L021's globals exclusion (DL-182 sweep c, ruled by DL-184).
+
+    Per case, a whole assignment over one co-reference component is pinned via SET_GLOBAL at
+    start (the reset variant sets off-values mid-window, "" or NUL, themselves values that can
+    satisfy != and ordering atoms), the estate is replayed, and the bounds are recomputed with
+    `scripted_globals`: consumers gated only on scripted globals become checked, wake-budgeted
+    by the could-fire evaluation. Base scenario SET_GLOBALs join the scripted set. Deviations
+    and tripped guards are case-tagged findings and exit 3; everything else is report-only."""
     events = list(events)
     base_globals: list[tuple[str, str, bool]] = []
     for ev in events:
@@ -738,9 +708,8 @@ def run_flag_sweep(
             findings.append(_cycle_finding(result.cycle, case=case_id))
         case_findings = _multi_fire_findings(bounds, result.runs, case=case_id)
         findings.extend(case_findings)
-        # ONE predicate decides who is a global-gated consumer (DL-185: the
-        # third hand copy of this rule counted a scheduled job whose bound
-        # never moved -- the house over-claim class)
+        # one predicate decides who is a global-gated consumer (DL-185); a scheduled job whose
+        # bound never moves would otherwise count
         scripted_names = {n for n, _v, _s in scripted}
         checked = sum(
             1
@@ -766,14 +735,12 @@ def run_flag_sweep(
 def check_adapter(
     catalog: CatalogIR, base: FakeAdapter
 ) -> tuple[FakeAdapter, frozenset[str], frozenset[str]]:
-    """Rebuild the scenario adapter for check mode: auto-park unscripted
-    file watchers (their cadence is unknowable) and synthesize each
-    remaining job's completion from its own SEM-09 boundary. Returns
-    (adapter, parked_fw, no_success) -- both sets feed `unchecked`.
+    """Rebuild the scenario adapter for check mode: auto-park unscripted file watchers (their
+    cadence is unknowable) and synthesize each remaining job's completion from its own SEM-09
+    boundary. Returns (adapter, parked_fw, no_success); both sets feed `unchecked`.
 
-    A scenario `default: null` (the script drives every completion) is
-    honored: no synthesis happens, because a per-job default would complete
-    runs the scenario deliberately parked."""
+    A scenario `default: null` (the script drives every completion) is honored: no synthesis
+    happens, since a per-job default would complete runs the scenario deliberately parked."""
     scripted = {job for (job, _run) in base.script}
     parked_fw = frozenset(
         name
@@ -817,65 +784,51 @@ def expected_bounds(
     """The DL-182 default as a typed bound per job (DL-184 mechanics):
 
     - scheduled, unboxed: own ticks + injected STARTJOBs.
-    - box member: min-composed, never summed -- SEM-10 runs a member at
-      most once per box execution, and a sum would hide exactly the double
-      run the check hunts. Unscheduled member: bound(box). Scheduled:
-      min(bound(box), own ticks + injected STARTJOBs).
-    - condition-only: max over wake sources' bounds, to fixpoint over the
-      SCC-free graph (a DAG plus the box tree, so it converges within one
-      pass per propagation depth). Wake sources are ALL start-gate edges --
-      lookback-qualified producers still wake and bare n() partners are
-      wake sources and never latches (L021's readings). An undefined local
-      producer contributes nothing: no job in this catalog can ever
-      complete it during a rehearsal.
-    - injected FORCE_STARTJOBs add AFTER the member min (force bypasses
-      the gates the min models).
-    - wake cycles -- SCCs over the wake adjacency (start gates plus bare
-      n(), self-loops included; graph.cycles alone misses the n() loops) --
-      have NO finite bound: one kick spins an edge-triggered loop forever,
-      and a fixpoint over it diverges (+1 per trip), so members go
-      unchecked and the runtime owns the story -- an actual spin trips the
-      zero-delay guard and reports as a finding.
-    - the wake-flavored unchecked reasons (global gate, cross-instance
-      wake, wake cycle, unchecked wake source) apply ONLY to jobs whose
-      bound actually reads wakes: condition-only AND unboxed. A scheduled
-      job's condition can only release an armed tick (SEM-30/31,
-      oracle-side), and a member runs at most once per box execution
-      (SEM-10), so their bounds are sound whatever the wake sources do --
-      absorbing through them blanked half an estate for nothing (the
-      slice's adversarial review).
-    - `scripted_globals` (the flag sweep, DL-184; entries are (name,
-      value, at_start)) lifts the global gate: a consumer EVERY one of
-      whose referenced globals is scripted by this play is checked. The
-      wake budget is a COULD-FIRE evaluation per set on a referenced
-      global: the whole condition, with globals at their values so far
-      (unset -> False for every operator, the oracle's reading) and job
-      atoms at their GENESIS truth for at-start sets -- bare/qualified n()
-      is TRUE there; an ON_ICE seed satisfies a LOOKBACK-qualified atom on
-      that job (SEM-05) but an ORDINARY one only for success/done/
-      notrunning, never failure/terminated/exitcode (SEM-20, DL-243); s/f/
-      d/t and exit codes are otherwise false, SEM-24 cannot seed a
-      terminal -- or optimistic-TRUE for mid-window sets (latches
-      can be true by then; over-credit is the safe direction). A set whose
-      whole condition cannot then be true buys no headroom: a flat +1
-      would let the DL-180 stale-latch multi-fire slide under the bound.
-      Accepted corner: a tick at exactly --start completing instantly can
-      interleave with an at-start set and fire a latch once legitimately
-      -- a rare false positive the policy file can declare.
-    - unchecked, absorbing where the bound depends on it: parked file
-      watchers, jobs with no SUCCESS exit, policy nulls; box members
-      absorb an unchecked box; wake-dependent consumers absorb any of the
-      above plus the wake-flavored reasons.
-    - a policy max_runs pins the job's bound (frozen through the fixpoint,
-      so a declared alert bound propagates to its consumers).
+    - box member: min-composed, never summed -- SEM-10 runs a member at most once per box
+      execution, and a sum would hide the double run the check hunts. Unscheduled member:
+      bound(box). Scheduled: min(bound(box), own ticks + injected STARTJOBs).
+    - condition-only: max over wake sources' bounds, to fixpoint over the SCC-free graph (a DAG
+      plus the box tree). Wake sources are all start-gate edges: lookback-qualified producers
+      still wake, and bare n() partners are wake sources, never latches (L021's readings). An
+      undefined local producer contributes nothing, since no job in this catalog can complete it
+      during a rehearsal.
+    - injected FORCE_STARTJOBs add after the member min (force bypasses the gates the min
+      models).
+    - wake cycles -- SCCs over the wake adjacency (start gates plus bare n(), self-loops
+      included; graph.cycles alone misses the n() loops) -- have no finite bound: one kick spins
+      an edge-triggered loop forever, so members go unchecked and the runtime owns the story: an
+      actual spin trips the zero-delay guard and reports as a finding.
+    - the wake-flavored unchecked reasons (global gate, cross-instance wake, wake cycle,
+      unchecked wake source) apply only to jobs whose bound reads wakes: condition-only and
+      unboxed. A scheduled job's condition can only release an armed tick (SEM-30/31,
+      oracle-side), and a member runs at most once per box execution (SEM-10), so their bounds
+      are sound whatever the wake sources do.
+    - `scripted_globals` (the flag sweep, DL-184; entries are (name, value, at_start)) lifts the
+      global gate: a consumer every one of whose referenced globals is scripted by this play is
+      checked. The wake budget is a could-fire evaluation per set on a referenced global: the
+      whole condition, with globals at their values so far (unset -> False for every operator,
+      the oracle's reading) and job atoms at their genesis truth for at-start sets, or
+      optimistic-TRUE for mid-window sets (latches can be true by then; over-credit is the safe
+      direction). At genesis bare/qualified n() is TRUE; an ON_ICE seed satisfies a
+      lookback-qualified atom on that job (SEM-05) but an ordinary one only for
+      success/done/notrunning, never failure/terminated/exitcode (SEM-20, DL-243); s/f/d/t and
+      exit codes are otherwise false, since SEM-24 cannot seed a terminal. A set whose whole
+      condition cannot then be true buys no headroom: a flat +1 would let the DL-180 stale-latch
+      multi-fire slide under the bound. Accepted corner: a tick at exactly --start completing
+      instantly can interleave with an at-start set and fire a latch once legitimately, a rare
+      false positive the policy file can declare.
+    - unchecked, absorbing where the bound depends on it: parked file watchers, jobs with no
+      SUCCESS exit, policy nulls; box members absorb an unchecked box; wake-dependent consumers
+      absorb any of the above plus the wake-flavored reasons.
+    - a policy max_runs pins the job's bound (frozen through the fixpoint, so a declared alert
+      bound propagates to its consumers).
     """
     inj_s = dict(injected_start or {})
     inj_f = dict(injected_force or {})
     gates = start_gates(graph)
     parent_of = graph.box_tree.parent
-    # ONE case analysis of what bounds a job, computed once and read by the
-    # value AND provenance passes (DL-185: the (schedule, parent) pair was
-    # re-derived at four sites): member beats scheduled beats wake-dependent
+    # one case analysis of what bounds a job, read by the value and provenance passes (DL-185):
+    # member beats scheduled beats wake-dependent
     kind = {
         name: (
             "member"
@@ -884,8 +837,8 @@ def expected_bounds(
         )
         for name, job in catalog.jobs.items()
     }
-    # the jobs whose VALUE reads wake sources: every wake-flavored unchecked
-    # reason is scoped to exactly this set
+    # the jobs whose value reads wake sources; every wake-flavored unchecked reason is scoped to
+    # this set
     wake_dep = {name for name, k in kind.items() if k == "wake"}
 
     unchecked: dict[str, str] = {}
@@ -897,9 +850,8 @@ def expected_bounds(
     scripted_names = {gname for gname, _value, _at_start in scripted}
     at_start_truth = genesis_truth(catalog)
     global_wakes: dict[str, int] = {}
-    # ONE predicate decides who is a global-gated consumer (DL-185); the
-    # START condition only -- a v() inside box_success folds a running box
-    # and starts nothing
+    # one predicate decides who is a global-gated consumer (DL-185); the START condition only,
+    # since a v() inside box_success folds a running box and starts nothing
     for name, gnames in _wake_dep_global_consumers(catalog, graph).items():
         if name in unchecked:
             continue
@@ -908,12 +860,10 @@ def expected_bounds(
         if gnames - scripted_names:
             unchecked[name] = "global-gated: wake budget unknowable until the flag sweep"
             continue
-        # could-fire wake credit, in event order with at-start sets first: a
-        # set on a referenced global buys one wake exactly when the WHOLE
-        # condition can then be true -- job atoms at their genesis truth for
-        # at-start sets (bare n() IS true there, an ON_ICE seed satisfies
-        # everything -- the slice review's second blocker), optimistic-true
-        # for mid-window sets (latches can be true by then)
+        # could-fire wake credit, in event order with at-start sets first: a set on a referenced
+        # global buys one wake exactly when the whole condition can then be true. Job atoms read
+        # their genesis truth for at-start sets (bare n() is true there; an ON_ICE seed reads the
+        # iced row) and are optimistic-true for mid-window sets (latches can be true by then)
         values: dict[str, str] = {}
         credit = 0
         for target_at_start in (True, False):
@@ -931,10 +881,9 @@ def expected_bounds(
         if edge.is_start_gate and not isinstance(edge.atom, GlobalAtom):
             if edge.atom.job.instance is not None:
                 unchecked[edge.dst] = f"cross-instance wake {edge.src!r} (DL-162a)"
-    # the wake adjacency: start-gate local producers PLUS bare n() targets --
-    # mutex classification keeps bare n() out of the edge set, and no edge
-    # reader sees that its targets still WAKE the consumer (L021's own
-    # warning; the first draft here proved it by missing them, DL-184)
+    # the wake adjacency: start-gate local producers plus bare n() targets. Mutex classification
+    # keeps bare n() out of the edge set, and no edge reader sees that its targets still wake the
+    # consumer (L021, DL-184)
     wake_srcs: dict[str, set[str]] = {name: set() for name in catalog.jobs}
     for name in catalog.jobs:
         for edge in gates.get(name, ()):
@@ -974,9 +923,8 @@ def expected_bounds(
     while changed:
         passes += 1
         if passes > len(catalog.jobs) + 2:
-            # the SCC-free graph converges within one pass per level; only a
-            # cycle that escaped the guard above can get here -- loud, never
-            # a spin (the bug class this cap was added for)
+            # the SCC-free graph converges within one pass per level; only a cycle that escaped
+            # the guard above gets here, loud rather than a spin
             raise AssertionError(
                 "expected_bounds fixpoint did not converge: a cycle escaped"
                 " the wake-adjacency SCC guard"
@@ -1037,8 +985,8 @@ def expected_bounds(
             prov = f"own ticks ({ticks.get(name, 0)})"
         else:
             prov = "max over wake sources"
-        # a member's bound omits inj_s (SEM-10 caps it inside the min), so
-        # its provenance must not claim the budget (the review's m2)
+        # a member's bound omits inj_s (SEM-10 caps it inside the min), so its provenance must
+        # not claim the budget
         injected = (
             inj_f.get(name, 0)
             if kind[name] == "member"
@@ -1065,11 +1013,12 @@ def compare(
     sweeps: Iterable[str] = ("happy",),
     cycle: ZeroDelayCycleError | None = None,
 ) -> CadenceCheck:
-    """Deviation = observed > bound, checked jobs only. Under-runs never
-    deviate: an f/d/e-gated consumer legitimately observes 0 on the happy
-    path (DL-184); the fail sweep owns the suppressed-run story. A
-    ZeroDelayCycleError -- and only that EngineError subtype -- converts to
-    an unbounded-multi-fire finding: the check FOUND what it hunts."""
+    """Deviation = observed > bound, checked jobs only.
+
+    Under-runs never deviate: an f/d/e-gated consumer legitimately observes 0 on the happy path
+    (DL-184); the fail sweep owns the suppressed-run story. A ZeroDelayCycleError, and only that
+    EngineError subtype, converts to an unbounded-multi-fire finding: the check found what it
+    hunts."""
     jobs: dict[str, JobCheck] = {}
     runs = {name: observed.get(name, 0) for name in catalog.jobs}
     for name in sorted(catalog.jobs):
@@ -1101,8 +1050,8 @@ def render_text(check: CadenceCheck) -> list[str]:
         verdict = "DEVIATION" if job.deviation else ("unchecked" if job.expected is None else "ok")
         provenance = job.provenance
         if "flags" in check.sweeps and provenance.startswith("global-gated"):
-            # the happy row keeps its own play's semantics; the pointer says
-            # where this job DID get checked (review m2)
+            # the happy row keeps its own play's semantics; the pointer says where this job was
+            # checked
             provenance += " -- exercised by the flag sweep below"
         lines.append(
             f"{name:<{width}}  {expected:>8}  {job.observed:>8}  {verdict:<9}  {provenance}"
@@ -1124,8 +1073,8 @@ def render_text(check: CadenceCheck) -> list[str]:
             else:
                 lines.append(f"fail {case.producer}: no suppressed runs")
     if "flags" in check.sweeps:
-        # keyed on the ONE encoding of "which sweeps ran" (DL-185); an empty
-        # block then honestly prints its zero
+        # keyed on the one encoding of "which sweeps ran" (DL-185); an empty block prints its
+        # zero
         lines.append(f"-- flag sweep: {len(check.flag_sweep)} cases --")
         by_component: dict[str, list[FlagCase]] = {}
         for fcase in check.flag_sweep:
@@ -1138,8 +1087,8 @@ def render_text(check: CadenceCheck) -> list[str]:
                 line += f", {spins} tripped the zero-delay guard"
             lines.append(line)
     if check.flag_uncovered:
-        # outside the case guard: when EVERY component fell past the ceiling
-        # there are zero cases yet the omission must still print (review find)
+        # outside the case guard: when every component fell past the ceiling there are zero
+        # cases and the omission must still print
         lines.append("flag sweep uncovered (case ceiling): " + ", ".join(check.flag_uncovered))
     for finding in check.findings:
         where = f" ({finding.case})" if finding.case else ""
@@ -1153,10 +1102,9 @@ def render_text(check: CadenceCheck) -> list[str]:
 
 @dataclass
 class PlayResult:
-    """One play's evidence: run_number deltas (the observed counts) and the
-    cycle refusal if the play tripped the instant budget -- exactly what a
-    sweep case consumes. It carried the case label and the full trace too;
-    nothing read either, and a trace per flag case is real memory (DL-185)."""
+    """One play's evidence: run_number deltas (the observed counts) and the cycle refusal if the
+    play tripped the instant budget, exactly what a sweep case consumes. It carries no trace: a
+    trace per flag case is real memory (DL-185)."""
 
     runs: dict[str, int]
     cycle: ZeroDelayCycleError | None
@@ -1212,10 +1160,10 @@ def lost_lines(lost: Iterable[LostInput]) -> list[str]:
 
 
 class SweepRefused(EngineError):
-    """A sweep's plays refused scripted inputs or quarantined engine-made
-    ones. Raised once the sweep has played every case, carrying each with
-    its case, because neither input ran: its case's counts would report a
-    suppressed run that is only a lost input (no silent loss)."""
+    """A sweep's plays refused scripted inputs or quarantined engine-made ones.
+
+    Raised once every case has played, carrying each with its case, because a lost input would
+    otherwise report as a suppressed run (no silent loss)."""
 
     def __init__(self, lost: list[LostInput]) -> None:
         self.lost = lost
