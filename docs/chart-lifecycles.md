@@ -1,0 +1,236 @@
+# Chart lifecycles
+
+This file is generated from `dsl41.machines`;
+regenerate it with `uv run python scripts/render_job_lifecycle.py`.
+It is a view of every registered chart but `job`, not the charts.
+[job-chart-lifecycle.md](job-chart-lifecycle.md) is the `job` chart's view, and
+[state-machines.md](state-machines.md) lists every row.
+
+One line per transition: `Target = Source + Event [guard] // note`. A line that starts
+with `||` is another way into the same target. A source may be a group of states.
+A source with the chart's own name is the chart's root. Its row leaves every region
+and enters each again, and its line is in the block of its target's top-level region.
+`State <- initial` names the state a region's entry rests in.
+
+A chart's section opens with its counts. Five kinds of row are folded into them.
+An ignored row consumes its event and moves nothing.
+No input reaches a row marked unreachable.
+A refusal row refuses its event and moves nothing.
+An internal row runs its action and moves nothing.
+A self-transition leaves its state and enters it again.
+`--full --chart NAME` prints the folded rows.
+
+A top-level region has a block. A composite with two or more regions has a block of
+its own under its name, after each region's initial state. A composite with one region
+groups states inside its parent's block. The block names its members on one line,
+`group = {member, member}`, after the initial states.
+
+## queue_scan
+
+Shown: 8. Folded: 1 (internal 1). Rows in the chart: 9.
+
+### scan
+
+```text
+idle <- initial
+idle = done + (completion) [scan_ends]
+pass = idle + scan // A scan with no pass running begins one
+    || done + (completion) [pass_restarts]
+    || done + (completion) [pass_upgrades]
+```
+
+#### pass
+
+```text
+next_waiter <- initial
+no_request <- initial
+awaiting_readmit = next_waiter + (completion) [waiter_queued] // The pass's first turn
+                || awaiting_readmit + (completion) [waiter_stayed; waiter_queued]
+done = next_waiter + (completion) [else] // The pass's first turn
+    || awaiting_readmit + (completion) [waiter_moved]
+    || awaiting_readmit + (completion) [waiter_stayed; else]
+full_requested = no_request + scan
+```
+
+## runtime_assembly
+
+Shown: 15. Folded: 25 (refusals 25). Rows in the chart: 40.
+
+### phase
+
+```text
+fresh <- initial
+installed = fresh + install
+genesis_input = fresh + begin_input // Construction is not finished. Open the genesis seed's input
+             || installed + begin_input
+             || genesis + begin_input
+genesis = genesis_input + commit_input // One revision per changed entity
+constructed = fresh + finish_genesis
+           || installed + finish_genesis
+           || genesis + finish_genesis
+seeded = fresh + seed_period // Set the period id. A period below one is the verb's own check
+      || installed + seed_period
+      || constructed + seed_period
+input = constructed + begin_input // Snapshot on first touch
+     || seeded + begin_input
+     || live + begin_input
+live = input + commit_input // Check capacity. One revision per changed entity
+```
+
+## anchor_head
+
+Shown: 4. Folded: 6 (refusals 5, internal 1). Rows in the chart: 10.
+
+### head
+
+```text
+open <- initial
+open = claimed + open_claimed
+closed = open + close_period
+      || claimed + reclaim
+claimed = closed + claim_successor
+```
+
+## period_row
+
+Shown: 3. Folded: 7 (refusals 7). Rows in the chart: 10.
+
+### row
+
+```text
+provisional <- initial
+unattested = {provisional, durable}
+durable = unattested + close_period
+       || provisional + finalize // The segment has landed. Mark it durable
+attested = durable + attest
+```
+
+## supervisor_process
+
+Shown: 10. Folded: 20 (ignored 10, refusals 6, internal 3, self-transitions 1). Rows in the chart: 30.
+
+### phase
+
+```text
+starting <- initial
+open = {starting, bound, up}
+up = {serving, shutting_down}
+ended = {stopped, refused}
+bound = starting + start [free]
+serving = bound + publish
+shutting_down = up + term
+             || serving + SHUTDOWN [credentials]
+stopped = serving + deadman
+       || shutting_down + drained
+refused = starting + start [lock_held]
+       || starting + start [owner_live]
+closed = open + teardown
+      || ended + teardown
+```
+
+## supervisor_lease
+
+Shown: 5. Folded: 13 (ignored 2, refusals 8, internal 3). Rows in the chart: 18.
+
+### phase
+
+```text
+free <- initial
+unheld = {free, expired}
+held = {live, orphaned}
+free = held + RELEASE [credentials]
+expired = held + expire
+live = unheld + ACQUIRE [grantable]
+    || orphaned + ACQUIRE [grantable]
+orphaned = live + disconnect [holder]
+```
+
+## supervisor_client
+
+Shown: 4. Folded: 7 (ignored 5, internal 2). Rows in the chart: 11.
+
+### phase
+
+```text
+disconnected <- initial
+connected = client + connect [down]
+lost = connected + cancel
+    || connected + eof
+closed = client + close [open]
+```
+
+## host
+
+Shown: 7. Folded: 15 (ignored 1, refusals 9, internal 5). Rows in the chart: 22.
+
+### routing
+
+```text
+active <- initial
+routed = {active, passive}
+active = passive + activate // held starts dispatch again
+      || quarantined + reinstate [else]
+      || evicted + register // spec-only
+passive = active + drain // new effects are held; running work continues
+       || quarantined + reinstate [remembered_passive]
+quarantined = routed + quarantine
+evicted = host + force_evict [not_evicted]
+       || quarantined + evict
+```
+
+## admission
+
+Shown: 2. Folded: 4 (ignored 2, refusals 1, internal 1). Rows in the chart: 6.
+
+### window
+
+```text
+admitted <- initial
+applied = admitted + decide [applied] // The decision line, with the outbox entries it implies
+rejected = admitted + decide [rejected] // The decision line, with its stored code
+```
+
+## effect
+
+Shown: 3. Folded: 1 (ignored 1). Rows in the chart: 4.
+
+### outcome
+
+```text
+pending <- initial
+applied = pending + resolve [applied]
+retired = pending + resolve [retired]
+indeterminate = pending + resolve [indeterminate]
+```
+
+## subscription
+
+Shown: 3. Folded: 4 (ignored 3, internal 1). Rows in the chart: 7.
+
+### phase
+
+```text
+backfill <- initial
+open = {backfill, live}
+live = backfill + backfill_sent
+removed = open + append [overflows]
+closed = open + stream_ends
+```
+
+## seal_boundary
+
+Shown: 7. Folded: 4 (ignored 4). Rows in the chart: 11.
+
+### phase
+
+```text
+requested <- initial
+in_flight = {requested, frozen, committing}
+frozen = requested + parked
+committing = frozen + quiesced
+sealed = committing + committed
+aborted = in_flight + exception [reversible]
+stopped = in_flight + exception [fence_lost]
+       || in_flight + exception [in_doubt]
+       || in_flight + exception [past_ponr]
+```

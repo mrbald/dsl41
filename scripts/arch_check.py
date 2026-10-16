@@ -1183,6 +1183,7 @@ SPEC_EXCLUDED = (
     "decision-index.md",
     "state-machines.md",
     "job-chart-lifecycle.md",
+    "chart-lifecycles.md",
     "architecture.md",
     "stonebranch-semantics.md",
     "uc-edge-schema.md",

@@ -783,7 +783,9 @@ CLI and scripts:
   tables, per registered statechart.
 - `scripts/render_job_lifecycle.py`: writes `docs/job-chart-lifecycle.md`, the job
   chart's lifecycle, flags and holding as one line per transition, with the
-  folded rows counted (`--full` prints them too).
+  folded rows counted, and `docs/chart-lifecycles.md`, the same view of every
+  other registered chart (`--chart NAME` prints one chart's view, `--full` the
+  folded rows too).
 - `scripts/transition_coverage.py`: the gate that fails when a statechart's
   unmarked row, branch, guard outcome, deferral or release has no recorded
   hit.
