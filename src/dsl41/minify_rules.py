@@ -1,39 +1,28 @@
 """What `minify` may emit: the classification table and its value predicates.
 
-The POLICY half of the estate minifier (`minify.py` is the mechanism half).
-Splitting them is not cosmetic: this file answers "may this byte leave the
-estate", which is the question the whole tool exists to get right, and it
-answers it from data -- a table and a predicate per key -- with no transform
-state in sight. Everything here is a pure function of one attribute.
+This is the policy half of the estate minifier (`minify.py` is the mechanism half). It answers
+"may this byte leave the estate" from data, a table and a predicate per key, as a pure function
+of one attribute.
 
-Every attribute key, and every statement subcommand, resolves to exactly one
-class:
+Every attribute key and statement subcommand resolves to exactly one class:
 
-  KEEP     the value goes out verbatim, AFTER `validate_keep` proves it lies
-           in the closed space its key claims -- a vendor enum, a number, a
-           clock time, a day token, an IANA zone, a date, a SEM-37 calendar
-           keyword. The CHECK is the class: lowering polices only about half
-           these keys and carries the rest opaquely, so "KEEP" meaning
-           "assumed to be in that space" shipped a client string written into
-           `timezone` or `job_load` verbatim.
-  RENAME   the value is an identifier; `minify` maps it into a synthetic
-           namespace. The rule name here selects which rewrite does it.
-  REPLACE  the value is free text whose PRESENCE is semantic; it is swapped
-           for a fixed inert constant. `command` is the only member: lowering
-           refuses a CMD job without one, so it cannot be dropped, and its
-           text is the richest source of client identity in an estate.
-  DROP     the attribute is not emitted. Reserved for what the IR carries
-           opaquely while the value is free text or a site-chosen name.
+  KEEP     the value goes out verbatim after `validate_keep` proves it lies in the closed space
+           its key claims (a vendor enum, number, clock time, day token, IANA zone, date,
+           SEM-37 calendar keyword). Lowering polices only about half these keys, so the check
+           is the class.
+  RENAME   the value is an identifier mapped into a synthetic namespace; the rule name selects
+           the rewrite.
+  REPLACE  free text whose presence is semantic, swapped for a fixed inert constant. `command`
+           is the only member: lowering refuses a CMD job without one.
+  DROP     not emitted: the IR carries it opaquely and the value is free text or a site name.
 
-A key in none of the four is a REFUSAL -- `classify` answers None and the
-caller stops, naming it. An unknown attribute may neither leak (KEEP by
-default) nor silently vanish (DROP by default); DL-07 takes that stance at
-lowering and this table takes it one layer earlier.
+A key in none of the four is a refusal: `classify` answers None and the caller names it. An
+unknown attribute may neither leak (KEEP by default) nor vanish (DROP by default); DL-07 takes
+that stance at lowering and this table one layer earlier.
 
-The table is derived from what the IR models -- `ANNOTATION_ATTRS`,
-`PASSTHROUGH_ALLOWED`, `TIME_CLUSTER`, `EXEC_BASE_ATTRS` and the box-inert
-cluster in `ir.py`, plus the keys `_Lowerer` pops by name on each statement
-kind -- not from a hand-written inventory.
+The table follows what the IR models: `ANNOTATION_ATTRS`, `PASSTHROUGH_ALLOWED`, `TIME_CLUSTER`,
+`EXEC_BASE_ATTRS` and the box-inert cluster in `ir.py`, plus the keys `_Lowerer` pops by name
+per statement kind.
 """
 
 from __future__ import annotations
@@ -46,8 +35,7 @@ from typing import get_args
 
 from dsl41.ir import InitialStatus, unquote_jil_value
 
-#: What `command` becomes. A CMD job without one is a lowering error, so the
-#: attribute cannot be dropped; the text itself is free-form client script.
+#: What `command` becomes: a CMD job needs one, and its text is free-form client script.
 INERT_COMMAND = "sleep 0"
 
 #: SEM-24 definition-time statuses, the only ones lowering models.
@@ -55,7 +43,7 @@ _DEFINITION_STATUSES = frozenset(get_args(InitialStatus))
 
 
 class Klass(Enum):
-    """The four classes every attribute resolves to (module docstring)."""
+    """The four classes every attribute resolves to."""
 
     KEEP = "keep"
     RENAME = "rename"
@@ -65,11 +53,9 @@ class Klass(Enum):
 
 # ------------------------------------------------------------ the table
 
-#: Values whose space is a vendor enum, a number, a date, a clock time or a
-#: day token. None of them can name an estate; all of them are read by
-#: lowering as semantics (job_type, SEM-09 code sets, the SEM-30 time cluster,
-#: SEM-34 SLAs, SEM-24 initial status), or are the numeric timing hints
-#: downstream duration work needs.
+#: Values whose space is a vendor enum, number, date, clock time or day token, so none can name
+#: an estate: job_type, SEM-09 code sets, the SEM-30 time cluster, SEM-34 SLAs, SEM-24 initial
+#: status, and numeric timing hints.
 _KEEP: frozenset[str] = frozenset(
     {
         # identity and shape of the job
@@ -128,9 +114,8 @@ _KEEP: frozenset[str] = frozenset(
     }
 )
 
-#: Not modeled beyond an opaque carry, and the value is free text or a
-#: site-chosen name. ANNOTATION_ATTRS' observability family, the exec-cluster
-#: paths, and the passthrough entries whose value space is a site's own.
+#: Carried opaquely, with a free-text or site-chosen value: the ANNOTATION_ATTRS observability
+#: family, exec-cluster paths, and passthrough entries in a site's own value space.
 _DROP: frozenset[str] = frozenset(
     {
         "description",
@@ -157,7 +142,7 @@ _DROP: frozenset[str] = frozenset(
         "notification_emailaddress_on_failure",
         "notification_emailaddress_on_success",
         "notification_emailaddress_on_terminated",
-        # insert_xinst connection plumbing (DL-28), one of them a key
+        # insert_xinst connection plumbing (DL-28)
         "xmanager",
         "xcrypt_type",
         "xkey_to_manager",
@@ -182,9 +167,9 @@ _RENAME: dict[str, str] = {
     "box_failure": "cond",
 }
 
-#: subcommand -> the namespace its subject belongs to. A subcommand absent here
-#: is refused: `rename_job`, the blob/glob/monbro/job_type/connectionprofile
-#: classes and anything new carry subjects this module cannot safely map.
+#: subcommand -> the namespace its subject belongs to. An absent subcommand is refused:
+#: `rename_job`, the blob/glob/monbro/job_type/connectionprofile classes and new ones carry
+#: subjects this module cannot map.
 SUBJECT_NAMESPACE: dict[str, str] = {
     "insert_job": "job",
     "update_job": "job",
@@ -211,8 +196,7 @@ SUBJECT_NAMESPACE: dict[str, str] = {
 _MACHINE_SUBCOMMANDS = frozenset({"insert_machine", "update_machine", "delete_machine"})
 _CALENDAR_SUBCOMMANDS = frozenset({"calendar", "extended_calendar", "ext_calendar", "cycle"})
 JOB_SUBCOMMANDS = frozenset({"insert_job", "update_job", "delete_job", "override_job"})
-#: The BOX spellings `ir._JOB_TYPE_MAP` accepts. Re-stated rather than imported:
-#: a private cross-module import is a coupling neither module promised (DL-74).
+#: The BOX spellings `ir._JOB_TYPE_MAP` accepts, re-stated not imported (DL-74).
 BOX_JOB_TYPES = frozenset({"b", "box"})
 _JOB_TYPES = frozenset({"c", "cmd", "f", "fw"}) | BOX_JOB_TYPES
 
@@ -220,14 +204,10 @@ _JOB_TYPES = frozenset({"c", "cmd", "f", "fw"}) | BOX_JOB_TYPES
 def classify(subcommand: str, key: str) -> tuple[Klass, str] | None:
     """The class of one attribute in one statement kind, or None to refuse.
 
-    One key is context-dependent and only one: `condition:` inside an autocal
-    calendar is a SEM-36/37 date-condition expression, not a job-condition
-    expression. It names no job, so it keeps -- validated against the SEM-37
-    inventory rather than trusted (`validate_keep`).
-
-    `machine:` is NOT context-dependent: a pool member line (DL-49) and a job's
-    exec placement are both comma lists that L017 splits the same way, so one
-    list-aware rule serves both.
+    Only `condition:` is context-dependent: inside an autocal calendar it is a SEM-36/37
+    date-condition expression naming no job, so it keeps, validated against the SEM-37
+    inventory (`validate_keep`). `machine:` is not: a pool member line (DL-49) and a job's exec
+    placement are both comma lists that L017 splits alike.
     """
     sub, k = subcommand.lower(), key.lower()
     if sub in _CALENDAR_SUBCOMMANDS and k == "condition":
@@ -244,7 +224,7 @@ def classify(subcommand: str, key: str) -> tuple[Klass, str] | None:
 
 
 def class_counts() -> dict[str, int]:
-    """Table size per class -- what a reader checks the docstring against."""
+    """Table size per class."""
     return {
         Klass.KEEP.value: len(_KEEP),
         Klass.RENAME.value: len(_RENAME),
@@ -254,15 +234,12 @@ def class_counts() -> dict[str, int]:
 
 
 def _v_calendar_condition(value: str) -> bool:
-    """SEM-36/37 date-condition expression, checked against autocal's own
-    inventory rather than trusted. `compile_calendar` is the one owner of the
-    keyword grammar; a site label (`ACMEBANK`) is not in it and refuses.
+    """SEM-36/37 date-condition expression, checked by `compile_calendar`, the one owner of the
+    keyword grammar; a site label (`ACMEBANK`) refuses.
 
-    The stand-in calendar always declares a STUB holcal AND cyccal, whatever
-    the real statement declares. This validates the EXPRESSION's vocabulary and
-    nothing else; whether a cycle-scoped token (`CWRK#L`) has a cyccal to
-    resolve against is autocal's own refusal at consumption, and duplicating it
-    here would reject a legitimate estate.
+    The stand-in calendar always declares stub holcal and cyccal, so only the expression's
+    vocabulary is validated; autocal refuses an unresolved cycle-scoped token (`CWRK#L`) at
+    consumption.
     """
     from dsl41.autocal import compile_calendar
     from dsl41.ir import CalendarIR, CatalogIR, CycleIR
@@ -278,43 +255,34 @@ def _v_calendar_condition(value: str) -> bool:
         conditions=[value.strip()],
     )
     try:
-        # the default switches: this asks whether the text parses, and no
-        # switch changes what the parser accepts (DL-259)
+        # default switches: no switch changes what the parser accepts (DL-259)
         compile_calendar(cal, catalog)
-    except Exception:  # noqa: BLE001 -- see below
-        # Deliberately broad. This is a PREDICATE: its answer is yes or no, and
-        # any escape turns a refusal into an exit-1 traceback on the one code
-        # path whose whole job is to fail closed. A fixed exception tuple only
-        # holds until autocal grows a new one.
+    except Exception:  # noqa: BLE001
+        # broad on purpose: a predicate answers yes or no, and an escape would turn a refusal
+        # into a traceback on the path that must fail closed
         return False
     return True
 
 
 # --------------------------------------------------- the KEEP value predicates
 
-#: KEEP is only safe if it means "CHECKED to be in a closed space", never
-#: "assumed to be". Lowering polices about half of these keys and carries the
-#: rest opaquely, so an estate that writes a client string into `timezone` or
-#: `job_load` lowers clean -- and, without these predicates, shipped it
-#: verbatim. Every KEEP key has one. A value that does not match is a refusal.
+#: KEEP means checked to be in a closed space, never assumed. Lowering carries about half of
+#: these keys opaquely, so a client string in `timezone` or `job_load` lowers clean. Every KEEP
+#: key has a predicate, and a value that does not match is a refusal.
 _INT_RE = re.compile(r"[+-]?\d+")
 _NUM_RE = re.compile(r"[+-]?\d+(?:\.\d+)?")
-#: jil-statement-syntax rule 2 (the vendor's JIL syntax rule 6): a colon
-#: inside an unquoted value may be escaped (`10\:00`) instead of quoting the
-#: whole value; dsl41 applies that rule to
-#: every `hh:mm` lane, so the escaped spelling is in the closed value space
-#: too (DL-251), not just the bare one.
+#: jil-statement-syntax rule 2 (the vendor's rule 6): a colon in an unquoted value may be
+#: escaped (`10\:00`). dsl41 applies it to every `hh:mm` lane, so the escaped spelling is in
+#: the closed space too (DL-251).
 _TIME_RE = re.compile(r"\d{1,2}\\?:\d{2}")
 _REL_RE = re.compile(r"\+\d+")
 _CODE_RE = re.compile(r"\d+(?:-\d+)?")
 _ONE_CHAR_RE = re.compile(r"[A-Za-z0-9]")
 _DATE_RE = re.compile(r"\d{1,2}/\d{1,2}/\d{4}")
-#: `ir._TRUTHY | ir._FALSY`. Re-stated rather than imported: a private
-#: cross-module import is a coupling neither module promised (DL-74). The copy
-#: is pinned to its source by a test (DL-75 review 2026-09-19).
+#: `ir._TRUTHY | ir._FALSY`, re-stated not imported (DL-74) and pinned to its source by a test
+#: (DL-75).
 _BOOLS = frozenset({"0", "1", "y", "n", "yes", "no", "true", "false"})
-#: `ir._DAY_TOKENS | set(ir._DAY_FULL)`, re-stated and pinned on the same
-#: terms as `_BOOLS` above.
+#: `ir._DAY_TOKENS | set(ir._DAY_FULL)`, re-stated and pinned like `_BOOLS`.
 _DAY_TOKENS = frozenset(
     {
         "su",
@@ -409,9 +377,8 @@ def _v_window(value: str) -> bool:
     return len(parts) == 2 and all(_TIME_RE.fullmatch(p.strip()) for p in parts)
 
 
-#: The only non-IANA timezone spellings this table calls closed vocabulary.
-#: Short, fixed, and extended only by a deliberate edit. Every one is a
-#: universally published abbreviation, so none of them can name an estate.
+#: The only non-IANA timezone spellings called closed vocabulary: fixed, published
+#: abbreviations that cannot name an estate. Extend only by a deliberate edit.
 TZ_ABBREVIATIONS = frozenset(
     {
         "UTC",
@@ -441,38 +408,28 @@ TZ_ABBREVIATIONS = frozenset(
     }
 )
 #: POSIX fixed-offset shape (SEM-35): an abbreviation, then the offset.
-#: Deliberately NOT `timezones._POSIX_FIXED`, whose letter run is UNBOUNDED --
-#: that is what let `ACMEBANKLONDONDESK5` resolve and ship verbatim. Here the
-#: letter run must be one of TZ_ABBREVIATIONS, checked separately.
+#: Not `timezones._POSIX_FIXED`, whose letter run is unbounded and would admit
+#: `ACMEBANKLONDONDESK5`; here the letters must be one of TZ_ABBREVIATIONS.
 _POSIX_TZ_RE = re.compile(r"([A-Za-z]{1,4})([+-]?\d{1,2})(?::\d{2}(?::\d{2})?)?")
 
 
 @functools.lru_cache(maxsize=1)
 def _iana_keys() -> frozenset[str]:
-    """The zoneinfo database, read once. `available_timezones()` walks the
-    tzdata directory on every call and this predicate runs per attribute."""
+    """The zoneinfo database, read once; `available_timezones()` walks tzdata on every call."""
     from zoneinfo import available_timezones
 
     return frozenset(available_timezones())
 
 
 def _v_timezone(value: str) -> bool:
-    """SEM-35, and the one predicate that may NOT delegate to a resolver.
+    """SEM-35 zone predicate. It enumerates and never delegates to
+    `timezones.resolve_timezone`, whose permissive POSIX fallback would pass
+    `ACMEBANKLONDONDESK5` as closed vocabulary.
 
-    `timezones.resolve_timezone` answers "can this be interpreted", which is a
-    different question from "is this closed vocabulary". Its POSIX fallback
-    accepts any run of three or more letters followed by one or two digits, so
-    `ACMEBANKLONDONDESK5` resolved, passed as a KEEP value, entered the leak
-    guard's safe pool, and shipped byte for byte at exit 0. A predicate that
-    trusts a permissive parser is not a closed space; this one enumerates.
-
-    Accepted: a value that is EXACTLY a canonical IANA zone key, or a POSIX
-    fixed offset whose abbreviation is in `TZ_ABBREVIATIONS`. Refused: a bare
-    city (`Zurich` -- resolvable, but a city name is a location a site may also
-    have chosen as a label), an alias-table spelling, and every POSIX-shaped
-    string outside the list. Refusing more is right here: the answer to a
-    refused zone is `--scrub-timezones`, and that is strictly better than a
-    silent ship.
+    Accepted: exactly a canonical IANA zone key, or a POSIX fixed offset whose abbreviation is
+    in `TZ_ABBREVIATIONS`. Refused: a bare city (`Zurich`, a possible site label), an alias
+    spelling, and any other POSIX-shaped string. The remedy for a refused zone is
+    `--scrub-timezones`.
     """
     token = unquote_jil_value(value).strip()
     if not token:
@@ -483,8 +440,7 @@ def _v_timezone(value: str) -> bool:
     return match is not None and match.group(1).upper() in TZ_ABBREVIATIONS
 
 
-#: key -> predicate. Every KEEP key appears; `classify` and this table are
-#: checked against each other by `_KEEP == _KEEP_SHAPES.keys()` below.
+#: key -> predicate. Every KEEP key appears; `_KEEP == _KEEP_SHAPES.keys()` is checked.
 _KEEP_SHAPES: dict[str, Callable[[str], bool]] = {
     "job_type": _v_job_type,
     "status": _v_status,
@@ -535,18 +491,16 @@ _KEEP_SHAPES: dict[str, Callable[[str], bool]] = {
 
 
 def validate_keep(key: str, value: str) -> bool:
-    """Is this KEEP value inside the closed space its class claims?"""
+    """Is this KEEP value inside the closed space its key claims?"""
     predicate = _KEEP_SHAPES.get(key.lower())
     return predicate is not None and predicate(value)
 
 
 def validate_date_rows(rows: list[str]) -> str | None:
-    """Rule-11 calendar date rows, or why they are not dates.
+    """None if rule-11 calendar date rows are dates, else why not.
 
-    `ast_jil` carries ANY non-attribute line under a `calendar:` statement
-    verbatim, so a real `autorep -q` export's label column would ship as-is.
-    `autocal.standard_rows` is the one owner of the row grammar (DL-36, Q9);
-    this asks it rather than re-spelling it.
+    `ast_jil` carries any non-attribute line under `calendar:` verbatim, so an export's label
+    column would ship as is. `autocal.standard_rows` owns the row grammar (DL-36, Q9).
     """
     if not rows:
         return None
@@ -560,18 +514,10 @@ def validate_date_rows(rows: list[str]) -> str | None:
     return None
 
 
-#: Words the minified output carries because JIL and dsl41 say so, not because
-#: the estate does: the grammar keywords of the value lanes a RENAME rewrite
-#: preserves verbatim, plus the inert command. Attribute keys and subcommand
-#: names join them in `_vocabulary`. Without this set every estate whose
-#: comments quote its own JIL -- which is every estate -- refuses.
-#:
-#: The statuses and the day tokens are DERIVED from the sets this module
-#: already holds, never spelled again: a second lowercase copy had to be kept
-#: equal to `_DEFINITION_STATUSES` by hand and by case, and the long day names
-#: were `_DAY_TOKENS` re-typed twenty lines later (DL-75 review 2026-09-19).
-#: The short day spellings come along and cost nothing: `_vocabulary` tokenises
-#: this set at the leak guard's 4-character floor, which they are under.
+#: Words the minified output carries because JIL and dsl41 say so: the grammar keywords of the
+#: value lanes a RENAME rewrite preserves, plus the inert command. Attribute keys and
+#: subcommand names join them in `_vocabulary`. Statuses and day tokens derive from the sets
+#: above (DL-75); the short day spellings fall under the leak guard's 4-character floor.
 _VALUE_KEYWORDS = (
     frozenset(
         {
@@ -596,13 +542,8 @@ _VALUE_KEYWORDS = (
 
 
 def vocabulary_words() -> set[str]:
-    """Every word the minified output may carry that the estate did not author.
-
-    The classified keys, the subcommand inventory, and the grammar keywords of
-    the value lanes a RENAME rewrite preserves verbatim. `minify`'s leak guard
-    subtracts these before reporting: without them every estate whose comments
-    quote its own JIL -- which is every estate -- refuses.
-    """
+    """Every word the output may carry that the estate did not write: the classified keys, the
+    subcommand inventory and the preserved grammar keywords. The leak guard subtracts them."""
     from dsl41.ast_jil import SUBCOMMANDS
 
     keys = set(_KEEP) | set(_DROP) | set(_RENAME) | {"command"}

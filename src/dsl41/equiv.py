@@ -1,78 +1,43 @@
-"""Equivalence validator: canonical form + tiers a/b/c (ir-design ss6, ss8).
+"""Equivalence validator: canonical form and tiers a/b/c (ir-design ss6, ss8; DL-03, DL-14).
 
-Phase 8 of the implementation order (CLAUDE.md / DL-03).
+Tier (a): structural equality of canonical IR-F.
+Tier (b): per-job condition equivalence by finite-state enumeration, plus a canonical
+          derived-graph comparison.
+Tier (c): oracle trace comparison on shared event scripts; two catalogs are equivalent when
+          no script tells them apart.
 
-Tier (a): structural equality of canonical IR-F (pydantic model equality).
-Tier (b): per-job condition equivalence by finite-state enumeration, plus a
-          canonical derived-graph comparison.
-Tier (c): oracle trace comparison on shared event scripts (the honest core:
-          two catalogs are equivalent when no script tells them apart).
-
-Decisions pinned here (each with a test; recorded as DL-14 + amendment):
-- Tier b enumerates per-job STATE SPACE, not independent atom booleans. The
-  ss6 sketch says "truth-table over the atom alphabet", but independent
-  atoms cannot detect L006's own flagship contradiction s(x)&f(x). Each
-  referenced job scope contributes (status in NEVER_RAN/RUNNING/SUCCESS/
-  FAILURE/TERMINATED/INACTIVE) x (iced flag -- a LOOKBACK-qualified atom on
-  an iced job is true regardless of kind, SEM-05; an ORDINARY atom
-  (no lookback) instead follows SEM-20's narrower vendor table, DL-243;
-  oracle parity either way) x (age bucket cut by the referenced
-  lookback windows) x (zero-freshness flag when zero-lookbacks appear --
-  "the Q2a since-last-end anchor test passes", DL-54) x (last exit code
-  over comparison cutpoints, None == never completed); each referenced
-  global contributes
-  literal + numeric-cutpoint + string-cutpoint ("", lit+NUL) + UNSET
-  domains, covering BOTH comparison behaviors of conditions.compare_value
-  (int when both sides parse, else string order). Atoms
-  evaluate as functions of the state, so s&f exclusion, d == s|f|t,
-  n == not-running, and window nesting hold by construction.
-- The state model is deliberately DECOUPLED where AutoSys couples weakly:
-  status and last exit code vary independently (TERMINATED keeps an old
-  code; SEM-09 boundaries would couple SUCCESS <-> code <= max_exit_success
-  only for completion-by-code). Extra unreachable states can only produce
-  false INEQUIVALENCE (a human looks) or a missed L006/L007 warn -- never a
-  false claim of equivalence. Conservative direction, documented.
-- NEVER_RAN and INACTIVE are DISTINCT status values, not one collapsed into
-  the other. NEVER_RAN models a job with no status timestamp at all (the
-  oracle's `rt.status_at is None` case): a NOTRUNNING atom is true there
-  with its lookback bypassed, oracle parity ("never-run jobs are notrunning
-  with no timestamp"). INACTIVE models a job WITH a status timestamp whose
-  status is none of RUNNING/SUCCESS/FAILURE/TERMINATED -- an operator
-  CHANGE_STATUS INACTIVE (which needs no prior run: it can set `status_at`
-  on a job that never ran) or DL-243's ON_NOEXEC settling a completed job
-  to INACTIVE. A NOTRUNNING atom is true there too, and d(x) still excludes
-  it (TERMINAL has no INACTIVE member). Only a FINITE lookback tells it
-  apart from NEVER_RAN: a window reads INACTIVE's real `status_at` age
-  (any transition moves `status_at`, INACTIVE's included), while the
-  zero-lookback anchor reads the job's own last REAL end (`last_end_at`,
-  latched only by a terminal transition) -- a later CHANGE_STATUS INACTIVE
-  does not move `last_end_at`, so it cannot make `n(p,0)` fresh for a
-  predecessor that had already ended before its consumer. Bare and
-  indefinite lookbacks read neither timestamp and stay true either way,
-  same as NEVER_RAN, so a job scope with no finite-lookback atom never
-  needs the INACTIVE axis at all (`_distinguishes_inactive` derives this
-  per scope instead of guessing it from atom shape, so a scope that cannot
-  tell the two states apart keeps its pre-INACTIVE enumeration size).
-- Tier b compares CONDITIONS + the derived graph only (ss6 scope);
-  schedules are tier a's to compare, and the calendar-free oracle makes
-  tier c schedule-blind too -- run tier a for schedule differences.
-- Ceiling: state spaces beyond 2^18 report "too_large" (tier-c only). The
-  ss6 BDD fallback (`dd`) is deliberately not taken v1: no new dependency
-  for a path the corpus has never needed (DL-14).
-- Canonicalization drops: spans, Lookback.raw (kind+minutes stay), Paren,
-  annotations (softer tier per ss6), var_sites (regenerable index), meta.
-  It normalizes: nested same-op flattening + operand sort by structural
-  key, schedule list sort+dedup, duplicate-operand dedup. passthrough is
-  KEPT verbatim: it is the semantic firewall's cargo, not decoration.
-- Rename maps apply to job names, box_name links, and job refs inside all
-  three condition attributes; globals and external instances are identity
-  v1 (rename them by hand if an estate renames globals -- documented).
-- case_fold lowercases job names AND job refs for comparison (ir-design
-  ss6 escape hatch); collisions after folding raise loudly.
-- Tier c compares (at, job, transition) sequences with the rename applied
-  to the left trace; `cause` strings are excluded (they embed names and
-  wording, not semantics). Scripts come from the caller; equiv_scripts()
-  offers a deterministic seeded generator so CLI runs are reproducible.
+Contracts:
+- Tier b enumerates a per-job state space, not independent atom booleans, so L006's
+  s(x)&f(x) contradiction is detectable. Each referenced job contributes: status (NEVER_RAN,
+  RUNNING, SUCCESS, FAILURE, TERMINATED, INACTIVE) x iced flag x age bucket (cut by the
+  referenced lookback windows) x zero-freshness flag (Q2a, DL-54) x last exit code over
+  comparison cutpoints (None == never completed). A lookback-qualified atom on an iced job is
+  true whatever its kind (SEM-05); an ordinary atom follows SEM-20's narrower table (DL-243).
+  Each referenced global contributes literal, numeric-cutpoint, string-cutpoint ("", lit+NUL)
+  and UNSET values, covering both behaviors of conditions.compare_value (int when both sides
+  parse, else string order).
+- Status and last exit code vary independently (SEM-09 couples them only for completion by
+  code), so extra unreachable states can only give a false inequivalence or a missed L006/L007
+  warn, never a false claim of equivalence.
+- NEVER_RAN is a job with no status timestamp (a NOTRUNNING atom is true there, lookback
+  bypassed). INACTIVE is a job with a timestamp whose status is none of RUNNING/SUCCESS/
+  FAILURE/TERMINATED (operator CHANGE_STATUS, or ON_NOEXEC settling a job, DL-243). NOTRUNNING
+  is true on both, d(x) excludes INACTIVE, and only a finite lookback tells them apart: a
+  window reads INACTIVE's `status_at` age, the zero-lookback anchor reads `last_end_at`, which
+  CHANGE_STATUS INACTIVE does not move. `_distinguishes_inactive` adds the axis per scope only
+  where an atom can tell the two apart.
+- Tier b compares conditions and the derived graph only (ss6). Schedules are tier a's, and
+  tier c is schedule-blind (no calendar in the oracle).
+- A state space beyond 2^18 reports "too_large" (tier-c only). The ss6 BDD fallback is not
+  built; the corpus does not need it and it would add a dependency (DL-14).
+- Canonicalization drops spans, Lookback.raw (kind and minutes stay), Paren, annotations
+  (ss6), var_sites and meta. It flattens nested same-op groups, sorts operands by structural
+  key, sorts and dedups schedule lists and dedups operands. passthrough is kept verbatim.
+- Rename maps apply to job names, box_name links and job refs in all three condition
+  attributes. Globals and external instances are identity under rename.
+- case_fold lowercases job names and job refs; collisions after folding raise.
+- Tier c compares (at, job, transition) sequences with the rename applied to the left trace;
+  `cause` strings are excluded. equiv_scripts() is a deterministic seeded generator.
 """
 
 from __future__ import annotations
@@ -120,8 +85,8 @@ STATE_CEILING = 2**18
 
 
 def canonical_cond(cond: Cond) -> Cond:
-    """C() for conditions: erase Paren, flatten same-op nests, dedup + sort
-    operands by structural key, drop spans, normalize lookback (raw dropped)."""
+    """C() for conditions: erase Paren, flatten same-op nests, dedup and sort operands, drop
+    spans and Lookback.raw."""
     return _canon(cond)
 
 
@@ -163,16 +128,11 @@ def _canon(cond: Cond) -> Cond:
 
 
 def _canon_lookback(lookback: Lookback | None) -> Lookback | None:
-    # DL-243 (R2): an explicit `9999` (kind="indefinite") and a bare atom
-    # (lookback is None) used to canonicalize identically ("explicit 9999
-    # == no qualifier", SEM-04) because `_lookback_ok`/`_eval_cond` read
-    # them the same way everywhere else. The ON_ICE split changed that: an
-    # atom WITH a lookback qualifier -- indefinite included -- keeps the
-    # blanket-true pin on an iced predecessor (Q10), while a bare atom
-    # follows the narrower vendor table. Collapsing the two here made
-    # f(x)/f(x,9999) hash identically and let the CLI's tier-a short-circuit
-    # (cli_compile.py) report two behaviorally different catalogs
-    # equivalent without ever reaching tier c. Only `raw` is dropped now.
+    # An explicit 9999 (kind="indefinite") and a bare atom stay distinct (SEM-04, DL-243, R2): the
+    # qualified atom keeps the blanket-true pin on an iced predecessor (Q10) and the bare
+    # one follows the narrower table. Collapsing them would let the CLI's tier-a
+    # short-circuit (cli_compile.py) call behaviorally different catalogs equivalent.
+    # Only `raw` is dropped.
     if lookback is None:
         return None
     return Lookback(kind=lookback.kind, minutes=lookback.minutes, raw="")
@@ -209,18 +169,15 @@ def _map_cond(cond: Cond, rename: dict[str, str], case_fold: bool) -> Cond:
 
 
 def _canon_attr(attr: CondAttr | None, rename: dict[str, str], case_fold: bool) -> CondAttr | None:
-    """C() for one condition-bearing attr: renamed + canonicalized Cond, and
-    the attr's own file span dropped (spans are provenance, not semantics)."""
+    """C() for one condition-bearing attr: renamed, canonicalized, span dropped."""
     if attr is None:
         return None
     return CondAttr(cond=_canon(_map_cond(attr.cond, rename, case_fold)))
 
 
 def _sla_column(spec: SlaSpec | None, n_starts: int) -> Sequence[MustTime | int] | None:
-    """The SLA entries that pair one-to-one with start_times, or None when
-    there is no pairing to keep. SEM-34 pairs them BY POSITION; a single
-    relative offset that covers several start times (the broadcast form) has
-    no order to lose, and neither has a one-element schedule."""
+    """The SLA entries that pair by position with start_times (SEM-34), or None when there is
+    no pairing to keep (a broadcast offset or a one-element schedule)."""
     if spec is None or n_starts < 2:
         return None
     values: Sequence[MustTime | int] | None = (
@@ -232,8 +189,8 @@ def _sla_column(spec: SlaSpec | None, n_starts: int) -> Sequence[MustTime | int]
 
 
 def _sla_key(value: MustTime | int | None) -> tuple[int, int]:
-    """Sort key for one SLA entry, one shape for both kinds (a MustTime is its
-    (hour, minute), an offset is its own value). None is the absent column."""
+    """Sort key for one SLA entry: (hour, minute) for a MustTime, the offset otherwise, None
+    for an absent column."""
     if value is None:
         return (0, 0)
     if isinstance(value, MustTime):
@@ -247,14 +204,10 @@ def _reordered(spec: SlaSpec, values: Sequence[MustTime | int]) -> SlaSpec:
 
 
 def _canon_schedule(schedule: ScheduleBlock) -> ScheduleBlock:
-    """C() for one ScheduleBlock: trigger lists sorted and deduped, with the
-    SEM-34 must_start/must_complete entries kept IN STEP with start_times.
+    """C() for one ScheduleBlock: trigger lists sorted and deduped, with the must_start and
+    must_complete entries kept in step with start_times (SEM-34, DL-151).
 
-    Sorting start_times alone loses the positional pairing SEM-34 defines:
-    (10:00,+5),(09:00,+10) and (09:00,+5),(10:00,+10) would canonicalize
-    alike although they alarm at different times (DL-151). The three lists
-    therefore sort as ONE row set, and a duplicate row -- same start time,
-    same alarms -- collapses as before."""
+    The three lists sort as one row set; a duplicate row collapses."""
     update: dict[str, object] = {
         "start_mins": sorted(set(schedule.start_mins)) if schedule.start_mins is not None else None,
         "days_of_week": sorted(set(schedule.days_of_week))
@@ -295,8 +248,7 @@ def canonical_catalog(
     rename: dict[str, str] | None = None,
     case_fold: bool = False,
 ) -> CatalogIR:
-    """C() for catalogs: rename bijection applied first, then per-job
-    canonicalization (module docstring lists exactly what is dropped)."""
+    """C() for catalogs: the rename applies first, then per-job canonicalization."""
     rename = rename or {}
     jobs: dict[str, JobIR] = {}
     for name, job in catalog.jobs.items():
@@ -331,9 +283,7 @@ def canonical_catalog(
                 "span": None,
             }
         )
-    # Five namespaces (jobs handled above, meta reset below) are span-stripped
-    # the same way: one comprehension per field used to re-spell this once
-    # per namespace (DL-178r).
+    # the five record namespaces are span-stripped alike (DL-178r)
     span_free = {
         field: {
             name: model.model_copy(update={"span": None})
@@ -352,8 +302,7 @@ def canonical_catalog(
 
 
 def catalog_hash(catalog: CatalogIR) -> str:
-    """sha256 over canonical IR-F JSON (ir-design ss8): the short-circuit
-    identity for the equivalence CLI and the migration report's pin."""
+    """sha256 over canonical IR-F JSON (ir-design ss8)."""
     canonical = canonical_catalog(catalog)
     payload = json.dumps(canonical.model_dump(mode="json"), sort_keys=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -370,21 +319,13 @@ class TierAResult(BaseModel):
 def _machine_key(
     v: MachineIR,
 ) -> tuple[str | None, dict[str, str], list[tuple[str, dict[str, str]]]]:
-    # members are ordered (DL-49); compare order-sensitively -- a reorder
-    # or a dropped component is a real difference, never false-equal.
+    # members are ordered (DL-49): a reorder or a dropped component is a difference
     return (v.machine_type, v.attrs, [(mm.name, mm.attrs) for mm in v.members])
 
 
-# Six catalog namespaces tier (a) compares whole (field name on CatalogIR,
-# per-item comparison key, detail message). DL-37a found resources and
-# external instances missing from an earlier four-row version of this list:
-# catalog_hash already covered them, so a difference used to be a hash
-# mismatch with no tier-a detail (the ss8 short-circuit and tier (a)
-# disagreed). One table now owns all six, so that drift class is
-# unrepresentable -- a namespace not in the table cannot silently exist
-# (DL-178r). Calendar/cycle definitions drive run-day semantics (M24): the
-# same run_calendar name over different dates is a different schedule
-# (DL-36).
+# The six catalog namespaces tier (a) compares whole: (CatalogIR field, per-item key, detail).
+# catalog_hash covers all six, so this table must too (DL-37a, DL-178r). Calendar and cycle
+# definitions drive run-day semantics (M24, DL-36).
 _NAMESPACE_CHECKS: tuple[tuple[str, str, Callable[[Any], Any], str], ...] = (
     ("<globals>", "globals_declared", lambda v: v, "globals_declared differ"),
     ("<machines>", "machines", _machine_key, "machine definitions differ"),
@@ -412,7 +353,7 @@ def equivalent_tier_a(
     rename: dict[str, str] | None = None,
     case_fold: bool = False,
 ) -> TierAResult:
-    """Tier (a): C(A) == C(B) structural equality, with per-job diffing."""
+    """Tier (a): C(A) == C(B), with per-job diffing."""
     ca = canonical_catalog(a, rename=rename, case_fold=case_fold)
     cb = canonical_catalog(b, case_fold=case_fold)
     left_only = sorted(set(ca.jobs) - set(cb.jobs))
@@ -429,10 +370,7 @@ def equivalent_tier_a(
                 if getattr(ja, field, None) != getattr(jb, field, None)
             ]
             detail[name] = "differs in: " + ", ".join(sorted(fields))
-    # Namespace comparisons run against the RAW catalogs (a, b), not ca/cb:
-    # rename/case_fold apply only to job names and their refs (module
-    # docstring); globals, machines, calendars, cycles, resources, and
-    # external instances are identity v1.
+    # namespaces compare the raw catalogs: rename and case_fold touch job names and refs only
     namespaces_equal = True
     for tag, field, key_fn, message in _NAMESPACE_CHECKS:
         left = {name: key_fn(v) for name, v in getattr(a, field).items()}
@@ -453,14 +391,8 @@ def equivalent_tier_a(
 # ----------------------------------------------------- tier b: condition equivalence
 
 _STATUSES = ("NEVER_RAN", "RUNNING", "SUCCESS", "FAILURE", "TERMINATED")
-#: The extra per-job status (module docstring): a job with a status
-#: timestamp whose status is none of RUNNING/SUCCESS/FAILURE/TERMINATED --
-#: an operator CHANGE_STATUS INACTIVE (no prior run required: it can set
-#: `status_at` on a job that never ran), or DL-243's ON_NOEXEC settling a
-#: FAILURE/TERMINATED job. Not every job scope needs it -- `_JobScope.
-#: needs_inactive` (derived in `_alphabet` by `_distinguishes_inactive`)
-#: adds it only where some atom can actually tell it apart from NEVER_RAN,
-#: so a scope with no such atom keeps its pre-existing enumeration size.
+#: The extra per-job status (module docstring); `_JobScope.needs_inactive` adds it only where
+#: an atom can tell it from NEVER_RAN. DL-243's ON_NOEXEC settles a FAILURE/TERMINATED job here.
 _INACTIVE = "INACTIVE"
 
 
@@ -468,20 +400,15 @@ def _statuses_for(scope: "_JobScope") -> tuple[str, ...]:
     return (*_STATUSES, _INACTIVE) if scope.needs_inactive else _STATUSES
 
 
-# "this global has no value" is spelled `None` -- a value OUTSIDE the string
-# domain. The alphabet writes it out (`_alphabet`); the evaluator gets it
-# from `dict.get`, whose default already IS None, so an absent global and an
-# unset one answer alike. A string sentinel shared the domain with real
-# literals: a JIL global whose literal is exactly the sentinel text read as
-# unset, so `v(G) = <that text>` came back unsatisfiable and L006 called it a
-# contradiction (DL-151). None cannot collide -- JIL carries text, never null.
+# An unset global is None, outside the string domain, so no JIL literal collides with it
+# (DL-151); an absent global and an unset one answer alike.
 
-#: How the unset state is SPELLED in a counterexample. Display only.
+#: How the unset state is spelled in a counterexample.
 _UNSET_LABEL = "<unset>"
 
 
 class _JobScope(BaseModel):
-    """State dimensions contributed by one referenced job (module docstring)."""
+    """State dimensions contributed by one referenced job."""
 
     key: str  # job name or name^INST
     windows: list[int] = []  # sorted distinct window minutes
@@ -497,14 +424,11 @@ class _Alphabet(BaseModel):
 
 
 def global_regions(conds: "list[Cond]") -> dict[str, list[str | None]]:
-    """Per referenced global, the region-representative values covering every
-    comparison the conditions make: numeric cutpoints v-1/v/v+1 for int-able
-    literals, string cutpoints ""/lit/lit+NUL, and the unset None. The public
-    face of the alphabet's globals half (DL-184): the cadence check's flag
-    sweep builds its SET_GLOBAL cases on these instead of literal-by-literal
-    sets, which miss the ordered operators and compound conditions --
-    equiv_scripts cannot be its entry point (it emits STATUS and out-of-band
-    kinds the check-mode allowlist refuses)."""
+    """Per referenced global, representative values covering every comparison the conditions
+    make: v-1/v/v+1 for int-able literals, ""/lit/lit+NUL strings, and unset None.
+
+    The cadence check's flag sweep builds its SET_GLOBAL cases on these (DL-184);
+    equiv_scripts cannot serve, since its STATUS and out-of-band kinds are refused there."""
     return _alphabet(conds).globals_
 
 
@@ -539,24 +463,15 @@ def _alphabet(conds: list[Cond]) -> _Alphabet:
     for scope in jobs.values():
         scope.windows.sort()
         scope.exit_cutpoints.sort()
-    # Derived, not guessed: add INACTIVE to a scope's status axis only where
-    # some atom referencing it can actually read differently on a
-    # timestamped INACTIVE row than on a NEVER_RAN one. `_distinguishes_inactive`
-    # decides this from each atom's own kind/lookback -- no state construction,
-    # no sweep over the scope's (possibly huge) exit-cutpoint/age/zero domains.
+    # INACTIVE joins a scope's status axis only where an atom can read it differently from
+    # NEVER_RAN, decided from the atom alone
     for key, scope in jobs.items():
         scope.needs_inactive = any(_distinguishes_inactive(atom) for atom in atoms_by_job[key])
     globals_: dict[str, list[str | None]] = {}
     for name, values in global_values.items():
-        # Region representatives for BOTH comparison behaviors
-        # conditions.compare_value exhibits (int when both sides parse, else
-        # string order): numeric cutpoints v-1/v/v+1 for int-able literals, string
-        # cutpoints ""/lit/lit+"\\x00" for every literal ("" sits below all
-        # nonempty strings; lit+"\\x00" sits strictly between lit and any
-        # greater string -- JIL text cannot carry NUL, so no literal
-        # collides). The old single OTHER token satisfied only "!=" and
-        # made every string ordering comparison vacuously false (review
-        # BLOCKER, DL-14 amendment).
+        # Region representatives for both compare_value behaviors (DL-14): v-1/v/v+1 for
+        # int-able literals; ""/lit/lit+"\\x00" for every literal. "" sits below all
+        # nonempty strings, lit+NUL sits just above lit, and JIL text carries no NUL.
         points: set[str] = set(values)
         points.add("")
         for literal in values:
@@ -569,13 +484,12 @@ def _alphabet(conds: list[Cond]) -> _Alphabet:
 
 
 class _State(BaseModel):
-    """One point of the enumeration: per-job (status, iced flag, age bucket
-    index, zero-freshness flag, last exit code) + global values."""
+    """One point of the enumeration: per-job state plus global values."""
 
     job_status: dict[str, str]
-    job_iced: dict[str, bool]  # SEM-05/SEM-20: iced satisfies a lookback atom
-    # of any kind, or an ordinary success/done/notrunning atom; an ordinary
-    # failure/terminated/exitcode atom reads false there instead (DL-243)
+    # iced satisfies a lookback atom of any kind or an ordinary success/done/notrunning atom;
+    # an ordinary failure/terminated/exitcode atom reads false (SEM-05, SEM-20, DL-243)
+    job_iced: dict[str, bool]
     job_age_bucket: dict[str, int]  # index into windows; len(windows) == beyond all
     job_zero_fresh: dict[str, bool]  # zero-lookback anchor test passes (Q2, DL-54)
     job_exit: dict[str, int | None]
@@ -643,9 +557,8 @@ def _eval_cond(cond: Cond, state: _State, alphabet: _Alphabet) -> bool:
     key = cond.job.key
     status = state.job_status.get(key, "NEVER_RAN")
     if state.job_iced.get(key, False):
-        # Oracle parity (DL-243, DL-254): the iced reading holds whatever
-        # the status, since ON_ICE on a RUNNING job is ignored. A static
-        # reader takes the default switch (DL-252).
+        # the iced reading holds whatever the status, as in the oracle (DL-243, DL-254); a
+        # static reader takes the default switch (DL-252)
         return iced_atom_truth(cond, DEFAULTS.ice_lookback)
     if isinstance(cond, ExitCodeAtom):
         code = state.job_exit.get(key)
@@ -656,11 +569,8 @@ def _eval_cond(cond: Cond, state: _State, alphabet: _Alphabet) -> bool:
     if wanted == "NOTRUNNING":
         hit = status != "RUNNING"
         if status == "NEVER_RAN":
-            return hit  # no timestamp: lookback trivially holds (oracle parity)
-        # INACTIVE (a timestamped status -- operator CHANGE_STATUS, needing
-        # no prior run, or DL-243's ON_NOEXEC on a FAILURE/TERMINATED job)
-        # also hits here, but falls through to the lookback check below
-        # like any other timestamped status: it is NOT a NEVER_RAN.
+            return hit  # no timestamp: the lookback holds, as in the oracle
+        # INACTIVE also hits but takes the lookback check like any timestamped status
     elif wanted == "DONE":
         hit = status in TERMINAL
     else:
@@ -674,13 +584,9 @@ def _lookback_holds(
     if lookback is None or lookback.kind == "indefinite":
         return True
     if lookback.kind == "zero":
-        # Q2a (DL-54): the per-predecessor freshness bit abstracts the
-        # since-last-end anchor test ("the predecessor ended at-or-after the
-        # evaluator's own last end"). One free bit per predecessor is sound
-        # because both compared conditions share one evaluator, so the
-        # anchor instant is common; it over-approximates conservatively
-        # (e.g. a self-referential s(X, 0) enumerates a False bit the
-        # oracle can never reach -- extra "divergent", never false-equal).
+        # One freshness bit per predecessor abstracts the since-last-end anchor test (Q2a,
+        # DL-54). Both conditions share one evaluator, so the anchor is common; unreachable
+        # bits only add "divergent", never false-equal.
         return state.job_zero_fresh.get(key, True)
     assert lookback.minutes is not None
     scope = alphabet.jobs[key]
@@ -690,31 +596,11 @@ def _lookback_holds(
 
 
 def _distinguishes_inactive(atom: StatusAtom | ExitCodeAtom) -> bool:
-    """Whether THIS atom alone can read differently on a timestamped
-    INACTIVE row than on a NEVER_RAN one. Decided from the atom's own kind
-    and lookback -- no `_State` construction, no sweep over a scope's
-    age/zero/exit domains, so a huge `e()` exit-cutpoint domain never pays
-    for a check that can never apply to it (an all-`e()` scope with a
-    100-way exit domain used to take 12.5s here; this reads the rule off
-    the atom in O(1)).
+    """Whether this atom alone can read differently on an INACTIVE row than on NEVER_RAN.
 
-    The rule, read off `_eval_cond`/`_lookback_holds` directly rather than
-    guessed:
-    - An ExitCodeAtom's truth never consults `job_status` at all -- the
-      state model deliberately DECOUPLES exit code from status (module
-      docstring) -- so it reads the identical `job_exit`/lookback result
-      whether the row is NEVER_RAN or INACTIVE: the SAME answer either way
-      (true or false), never a different one. Never distinguishes.
-    - A StatusAtom wanting SUCCESS/FAILURE/TERMINATED/DONE is False for
-      BOTH rows (neither status matches the wanted one, nor sits in
-      TERMINAL) before `_lookback_holds` is even reached -- the lookback
-      never gets a say. Never distinguishes.
-    - A StatusAtom wanting NOTRUNNING is True for both UNLESS the lookback
-      is finite (window or zero): NEVER_RAN bypasses the lookback check
-      entirely (no timestamp to gate it), while INACTIVE -- which DOES
-      carry a timestamp -- runs the normal window/zero check, which can
-      come back False. A bare (`lookback is None`) or indefinite lookback
-      reads no timestamp on either row, so both stay True there too."""
+    An ExitCodeAtom never reads `job_status`. A StatusAtom wanting SUCCESS/FAILURE/TERMINATED/
+    DONE is false on both rows. A NOTRUNNING atom is true on both unless its lookback is
+    finite: NEVER_RAN bypasses the check and INACTIVE runs the window or zero check."""
     if isinstance(atom, ExitCodeAtom):
         return False
     return (
@@ -752,8 +638,7 @@ def _describe(state: _State) -> dict[str, str]:
 
 
 def conds_equivalent(a: Cond | None, b: Cond | None) -> TierBResult:
-    """Tier (b) per-condition equivalence over the shared state space. A
-    None condition is the constant TRUE (no gate)."""
+    """Tier (b) per-condition equivalence over the shared state space; None is constant TRUE."""
     conds = [c for c in (a, b) if c is not None]
     alphabet = _alphabet(conds)
     count = _state_count(alphabet)
@@ -775,16 +660,12 @@ def cond_truth_profile(
     fixed_status: dict[str, set[str] | str] | None = None,
     include_ice: bool = False,
 ) -> tuple[bool, bool] | None:
-    """(satisfiable, falsifiable) over the state space; None == too large.
-    The L006/L007 engine: contradiction == not satisfiable; tautology ==
-    not falsifiable. `fixed_status` restricts job scopes to a status (or a
-    set of allowed statuses; their age/day/exit axes still vary) -- L007
-    uses it to model the box-start moment. `include_ice` defaults to False:
-    the lint rules ask the ice-free question ("can this ever fire without
-    operator intervention?"), while conds_equivalent always enumerates ice
-    states for soundness (DL-14 amendment). In the ice-free model every
-    condition is falsifiable (the all-RUNNING/unset-globals state), so
-    unpinned tautology is vacuous by construction."""
+    """(satisfiable, falsifiable) over the state space; None when too large.
+
+    The L006/L007 engine: a contradiction is not satisfiable, a tautology not falsifiable.
+    `fixed_status` pins job scopes to a status or set of statuses (L007's box-start moment).
+    `include_ice` defaults to False, the ice-free question the lint rules ask;
+    conds_equivalent always enumerates ice states (DL-14)."""
     fixed_status = fixed_status or {}
     alphabet = _alphabet([cond])
     if _state_count(alphabet) > STATE_CEILING:
@@ -797,12 +678,7 @@ def cond_truth_profile(
         skip = False
         for key, allowed in fixed_status.items():
             if key not in state.job_status:
-                # DL-26: a pin on a job the condition never references is
-                # vacuous -- it cannot affect this condition's truth. The old
-                # `.get(key) not in allowed` treated it as unsatisfiable and
-                # skipped EVERY state, turning any box member whose condition
-                # ignores at least one sibling into a false L007 tautology
-                # (e.g. every vanilla s(prev) chain in a 3+-member box).
+                # a pin on a job the condition never references is vacuous (DL-26)
                 continue
             allowed_set = {allowed} if isinstance(allowed, str) else allowed
             if state.job_status[key] not in allowed_set:
@@ -834,10 +710,9 @@ def equivalent_tier_b(
     rename: dict[str, str] | None = None,
     case_fold: bool = False,
 ) -> TierBCatalogResult:
-    """Tier (b) catalog-level: per-common-job condition equivalence on all
-    three condition attributes, plus canonical derived-graph comparison
-    (edge multisets, mutex groups, box tree -- the v1 stand-in for the ss6
-    bisimulation check, DL-14)."""
+    """Tier (b) catalog-level: condition equivalence per common job on all three condition
+    attributes, plus the derived-graph comparison (edges, mutex groups, box tree), the v1
+    stand-in for the ss6 bisimulation check (DL-14)."""
     ca = canonical_catalog(a, rename=rename, case_fold=case_fold)
     cb = canonical_catalog(b, case_fold=case_fold)
     divergent: dict[str, str] = {}
@@ -876,8 +751,7 @@ def equivalent_tier_b(
         if ga.box_tree != gb.box_tree:
             graph_detail += "; box trees differ"
     return TierBCatalogResult(
-        # too_large is inconclusive ("tier-c only", ss6/DL-14), not a
-        # divergence -- it is reported but does not fail the tier
+        # too_large is inconclusive (ss6, DL-14): reported, not a failure
         equivalent=not divergent and graph_equal,
         divergent_jobs=divergent,
         too_large_jobs=too_large,
@@ -924,16 +798,14 @@ def equivalent_tier_c(
     rename: dict[str, str] | None = None,
     case_fold: bool = False,
 ) -> TierCResult:
-    """Tier (c): run both oracles on each script; equivalent iff every trace
-    matches on (at, renamed job, transition). Script events target A's job
-    names; the rename maps them for B."""
+    """Tier (c): equivalent iff every script's traces match on (at, renamed job, transition).
+    Script events name A's jobs; the rename maps them for B."""
     rename = rename or {}
     mapped_names = [_fold(_apply_rename(name, rename), case_fold) for name in a.jobs]
     if len(set(mapped_names)) != len(mapped_names):
         raise RenameError("job name collision after rename/fold (tier c)")
     for index, script in enumerate(scripts):
-        # the default switches: equiv is a static tool with no runtime
-        # profile, and compares both catalogs under one reading
+        # default switches: equiv has no runtime profile and reads both catalogs alike
         oracle_a = Oracle(a)
         oracle_b = Oracle(b)
         mapped_script = [
@@ -971,12 +843,11 @@ def equivalent_tier_c(
 def equiv_scripts(
     catalog: CatalogIR, *, scripts: int = 20, events_per_script: int = 12, seed: int = 41
 ) -> list[list[Event]]:
-    """Deterministic seeded script generator for tier (c). Coverage follows
-    the review findings (DL-14 amendment): every out-of-band kind the
-    oracle distinguishes (ICE/HOLD/NOEXEC/KILLJOB/FORCE) appears with small
-    probability; SET_GLOBAL targets declared globals AND globals referenced
-    only in conditions (runtime-set globals are routine, SEM-08/L002), with
-    values drawn from the compared literals plus off-literal probes."""
+    """Deterministic seeded script generator for tier (c) (DL-14).
+
+    It emits every out-of-band kind (ICE/HOLD/NOEXEC/KILLJOB/FORCE) with small probability.
+    SET_GLOBAL targets declared globals and globals only referenced in conditions (SEM-08,
+    L002), with compared literals plus off-literal probes."""
     from datetime import datetime, timedelta
 
     rng = random.Random(seed)
